@@ -38529,7 +38529,15 @@ class TortoiseSDK:
         conflation the search-hit half was retracted for.
         """
         proj = self._get_proj()
-        from .search_engine import currency_status
+        # `version_operand` is REQUIRED here, not cosmetic: this method re-derives
+        # the (recorded, current) pair itself instead of going through
+        # `search_engine.read_currency_links`, so without it a whitespace-only
+        # operand (`create_source(..., contentHash="   ")`, which
+        # `_anchor_on_create` stamps because it nulls only `''`) compares EQUAL
+        # to itself and reads `current` here while the same link reads `unknown`
+        # through `tools/source_currency.py`. Two readers disagreeing about one
+        # pair is the exact drift §4.6's "a read" rule forbids.
+        from .search_engine import currency_status, version_operand
 
         r = proj.g.query(
             "MATCH (p:Point {id:$pid})-[:extractedFrom]->(src:Source) "
@@ -38600,8 +38608,8 @@ class TortoiseSDK:
             entity_props = bag.get("entity")
             labels = bag.get("labels")
             entity_is_source = bool(bag.get("entity_is_source"))
-            remembered = bag.get("remembered") or ""
-            current = source_props.get("contentHash") or ""
+            remembered = version_operand(bag.get("remembered"))
+            current = version_operand(source_props.get("contentHash"))
             out.append({
                 # #3998 (D30): the bag is filtered to the DECLARED :Source
                 # surface. A graph written before this change can still hold a

@@ -156,8 +156,11 @@ def test_a_link_made_after_the_revision_is_current_not_stale():
         assert sweep["re_inference_targets"] == [old["id"]], (
             "the newer read must not be proposed for re-inference — it is the "
             f"work the sweep exists to avoid; got {sweep['re_inference_targets']!r}")
+        # `withheld` is part of the payload contract (#9784 review B-F4): the
+        # ambiguous class is counted so `current` cannot be read as "every link
+        # was checked". Nothing here is withheld, and saying so is the assertion.
         assert sweep["counts"] == {"stale": 1, "current": 1, "unknown": 0,
-                                   "links": 2}, sweep["counts"]
+                                   "links": 2, "withheld": 0}, sweep["counts"]
     finally:
         sdk.close()
 
@@ -1048,3 +1051,155 @@ def test_the_incomplete_exit_code_is_the_contract_not_a_symbol():
     assert source_currency.CLI_INCOMPLETE == 3, (
         "0 would certify an incomplete sweep silently; 2 is argparse's usage error")
     assert source_currency.CLI_INCOMPLETE != 0
+
+
+# ── review round 1: the shapes that could certify the wrong answer ────────────
+#
+# Each test below names the review finding it pins. They are grouped here rather
+# than folded into the sections above because every one of them fails on the
+# PRE-FIX code, and a reader bisecting a regression should find them together.
+
+def test_a_canonical_spelling_stored_as_the_url_resolves():
+    """Review finding A-F2. Input: the node's `url` IS the canonical form (the
+    common API/connector shape) and it carries no `canonicalUrl`; the caller
+    addresses a tracking-param VARIANT.
+
+    FAILS IF the read-only resolver matches the canonical spelling only against
+    `canonicalUrl`. It then finds nothing and reports an EMPTY, CERTIFIED sweep
+    (`complete: True`, exit 0, `re_inference_targets: []`) for a source that
+    holds a stale derivation — indistinguishable from "this source derived
+    nothing", which is the conflation the docstring refuses. The ONE resolver
+    lists `[url, canonical]` as candidate spellings for exactly this reason.
+    """
+    sdk = TortoiseSDK(_tmp("test.db"))
+    try:
+        proj = sdk._get_proj()
+        proj.g.query(
+            "CREATE (s:Source {url:'https://ex.com/a', sourceKind:'document', "
+            "contentHash:'h2', ingestedAt:'2024-01-01'})")
+        proj.g.query("CREATE (p:Point {id:'pt-v', statement:'x', "
+                     "kind:'statement', createdAt:'2024-01-01'})")
+        proj.g.query(
+            "MATCH (p:Point {id:'pt-v'}), (s:Source {url:'https://ex.com/a'}) "
+            "CREATE (p)-[:extractedFrom {sourceVersion:'h1'}]->(s)")
+
+        sweep = source_staleness(proj.g, "https://ex.com/a?utm_source=x")
+        assert sweep["source"] == "https://ex.com/a", sweep
+        assert sweep["current"] == "h2", sweep
+        assert sweep["complete"] is True, sweep["errors"]
+        assert sweep["re_inference_targets"] == ["pt-v"], (
+            "the variant spelling must reach the same Source; an empty certified "
+            f"sweep hides real drift — got {sweep['re_inference_targets']!r}")
+    finally:
+        sdk.close()
+
+
+def test_a_sibling_sharing_the_resolved_url_refuses_the_sweep():
+    """Review finding B-F2. Input: node B (`url` = a variant, `canonicalUrl` =
+    the canonical form) and node C (`url` = the SAME variant, no `canonicalUrl`),
+    addressed by the canonical form.
+
+    The broad resolve sees ONE node (only B carries `canonicalUrl`), but the link
+    reads are keyed by the RESOLVED url — so C's edges would be swept and judged
+    against B's version. FAILS IF that is not refused as an ambiguity: the
+    duplicate-identity rule (*"ONE IDENTITY, ONE NODE — OR NO VERDICT"*) would be
+    bypassed exactly where it matters.
+    """
+    sdk = TortoiseSDK(_tmp("test.db"))
+    try:
+        proj = sdk._get_proj()
+        proj.g.query(
+            "CREATE (b:Source {url:'https://ex.com/a?utm_source=x', "
+            "canonicalUrl:'https://ex.com/a', sourceKind:'document', "
+            "contentHash:'h2', ingestedAt:'2024-01-01'})")
+        proj.g.query(
+            "CREATE (c:Source {url:'https://ex.com/a?utm_source=x', "
+            "sourceKind:'document', contentHash:'h9', ingestedAt:'2024-01-01'})")
+        sweep = source_staleness(proj.g, "https://ex.com/a")
+        assert sweep["complete"] is False, (
+            "two nodes share the resolved url; the sweep must not certify either "
+            f"— got complete={sweep['complete']!r}")
+        assert any("AMBIGUOUS" in e for e in sweep["errors"]), sweep["errors"]
+        assert sweep["status"] == "unknown", sweep
+    finally:
+        sdk.close()
+
+
+def test_a_multi_label_event_target_is_still_a_derivation():
+    """Review finding B-F3. Input: an UNANCHORED derivation Event whose labels
+    are `['Object','Event']` (a raw-Cypher/legacy shape).
+
+    The old filter was `head(labels(t)) = 'Event'` — a LABEL-ORDER dependency, so
+    this node was dropped and the source read `current` over a link it never read
+    (the false-fresh the module exists to prevent). FAILS IF membership is not
+    tested against the whole label set: the row must appear as `unknown`.
+    """
+    sdk = TortoiseSDK(_tmp("test.db"))
+    try:
+        proj = sdk._get_proj()
+        proj.g.query(
+            "CREATE (s:Source {url:'src.txt', sourceKind:'document', "
+            "contentHash:'h2', ingestedAt:'2024-01-01'})")
+        proj.g.query("CREATE (e:Object:Event {id:'ev-multi', eventId:'ev-multi', "
+                     "name:'M', eventKind:'meeting'})")
+        proj.g.query(
+            "MATCH (s:Source {url:'src.txt'}), (e:Event {id:'ev-multi'}) "
+            "CREATE (s)-[:references]->(e)")
+        sweep = source_staleness(proj.g, "src.txt")
+        rows = {lk["node"]: lk for lk in sweep["links"]}
+        assert "ev-multi" in rows, (
+            "an Event target must be a derivation whatever its label order; "
+            f"dropping it certifies `current` over an unread link — got {sorted(rows)}")
+        assert rows["ev-multi"]["currency"] == "unknown", rows["ev-multi"]
+        assert sweep["status"] == "unknown", sweep
+    finally:
+        sdk.close()
+
+
+def test_a_withheld_link_is_counted_not_silent():
+    """Review finding B-F4. Input: an anchored derivation Event PLUS a
+    property-free `Source`-targeted `references` link (containment or a document
+    derivation — stored identically).
+
+    Withholding the ambiguous one is correct; doing it SILENTLY is not, because
+    `status: current` then reads as "every link was checked". FAILS IF
+    `counts["withheld"]` is absent or zero: a reader could not tell "nothing to
+    report" from "one link refused classification".
+    """
+    sdk = TortoiseSDK(_tmp("test.db"))
+    try:
+        proj = _fixture(sdk, content_hash="h1")
+        sdk.link_source_to_entity("src.txt", "ev-1", "Event")
+        proj.g.query("CREATE (d:Source {url:'doc-1', sourceKind:'document'})")
+        sdk.link_source_to_entity("src.txt", "doc-1", "Source")
+
+        sweep = source_staleness(proj.g, "src.txt")
+        assert sweep["counts"]["withheld"] == 1, sweep["counts"]
+        assert sweep["status"] == "current", sweep
+        assert [lk["node"] for lk in sweep["links"]] == ["ev-1"], sweep["links"]
+    finally:
+        sdk.close()
+
+
+def test_a_normaliser_failure_is_reported_not_swallowed(monkeypatch):
+    """Review finding B-F5. Input: the URL normaliser raises.
+
+    The module promises `errors` is appended to, never swallowed — but the one
+    failure this resolver produces itself was inside `contextlib.suppress`, so a
+    sweep could certify `complete: True` over an identity it never checked.
+    FAILS IF the exception path leaves `complete` true.
+    """
+    def _boom(_url):
+        raise RuntimeError("normaliser exploded")
+
+    monkeypatch.setattr(source_currency, "normalize_source_url", _boom)
+    sdk = TortoiseSDK(_tmp("test.db"))
+    try:
+        proj = _fixture(sdk, content_hash="h1")
+        sweep = source_staleness(proj.g, "src.txt")
+        assert sweep["complete"] is False, sweep
+        assert any("normalisation failed" in e for e in sweep["errors"]), (
+            sweep["errors"])
+        assert sweep["status"] == "unknown", sweep
+    finally:
+        sdk.close()

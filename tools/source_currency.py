@@ -289,7 +289,17 @@ def _resolve_source_read_only(graph, ref: str, errors: list[str]) -> tuple[str, 
     ``errors`` is appended to — never swallowed — when the read itself fails: a
     resolver that cannot answer is not the same fact as "no such source", and the
     caller degrades the whole sweep to ``unknown`` rather than certifying a
-    source it could not read.
+    source it could not read. That includes the one failure this resolver can
+    produce on its own (a normaliser refusal): swallowing it would leave
+    ``complete: True`` over an identity it never checked.
+
+    ⚠️ THE CANONICAL SPELLING IS TRIED ON BOTH STORED FIELDS, because a
+    pre-canonical node may hold it as its ``url`` — the common API/connector case,
+    where the inbound variant never matches it by url. The ONE resolver lists
+    ``[url, canonical]`` as candidate spellings for exactly this reason; matching
+    only ``canonicalUrl`` would miss that node and report an EMPTY, CERTIFIED
+    sweep (``complete: True``, ``re_inference_targets: []``) for a source that
+    really does hold stale derivations.
 
     ⚠️ ONE IDENTITY, ONE NODE — OR NO VERDICT. If the identity resolves to TWO OR
     MORE ``:Source`` nodes (the duplicate-identity state the dedup writers produce
@@ -297,16 +307,20 @@ def _resolve_source_read_only(graph, ref: str, errors: list[str]) -> tuple[str, 
     error instead of quietly certifying the one node it read: the other node's
     derivations are real, stale or not, and a read that cannot see them must not
     answer ``current`` over them. The repair is a dedup backfill, not a guess
-    here.
+    here. The check runs on BOTH the broad match AND the resolved url, because
+    the link reads below are keyed by ``url`` alone — a sibling sharing the
+    resolved spelling would otherwise be swept while the broad match saw one node.
     """
     canonical = ""
-    with contextlib.suppress(Exception):
+    try:
         canonical = normalize_source_url(ref) or ""
+    except Exception as exc:  # REPORTED, never silent — see `complete`
+        errors.append(f"url normalisation failed: {type(exc).__name__}: {exc}")
     params = {"url": ref, "cu": canonical}
     try:
         rows = graph.query(
             "MATCH (s:Source) WHERE s.url = $url "
-            "OR ($cu <> '' AND s.canonicalUrl = $cu) "
+            "OR ($cu <> '' AND (s.url = $cu OR s.canonicalUrl = $cu)) "
             # The caller's OWN spelling wins ties — the docstring's precedence,
             # which an `ORDER BY s.url` alone does not honour ('E' < 'e' would
             # hand back a differently-cased alias node).
@@ -335,6 +349,23 @@ def _resolve_source_read_only(graph, ref: str, errors: list[str]) -> tuple[str, 
             f"source identity is AMBIGUOUS — {len(rows)} :Source nodes carry it "
             f"({', '.join(urls) or 'one url'}); a sweep of one of them cannot "
             "speak for the others (repair with tools/source_dedup_report.py)")
+    else:
+        # The link reads are keyed by the RESOLVED url, so a sibling holding that
+        # spelling without a `canonicalUrl` is invisible to the broad match above.
+        try:
+            shared = graph.query(
+                "MATCH (s:Source {url:$u}) RETURN count(s)",
+                params={"u": rows[0][0] or ref}).result_set
+        except Exception as exc:  # REPORTED, never silent — see `complete`
+            errors.append(
+                f"source identity check failed: {type(exc).__name__}: {exc}")
+            shared = []
+        n_shared = (shared[0][0] if shared and shared[0] else 0) or 0
+        if n_shared > 1:
+            errors.append(
+                f"source identity is AMBIGUOUS — {n_shared} :Source nodes share "
+                f"the url {rows[0][0] or ref!r}; a sweep of one of them cannot "
+                "speak for the others (repair with tools/source_dedup_report.py)")
     url, current = rows[0][0], rows[0][1]
     # `version_operand` — the SAME blank-is-absent rule the Point read applies
     # (`search_engine.read_currency_links`), so the two directions cannot disagree
@@ -360,16 +391,22 @@ def source_staleness(graph, source_ref: str) -> dict:
       reported ``unknown``. That is the checklist's *"pre-model nodes degrade
       explicitly (not silently current)"*.
     * ``(Source)-[:references]->(target)`` — the derivation form carrying the
-      ``#5199`` anchor. The class is read by TARGET LABEL, which is the write-time
-      discriminator (`projection/edges.py`: ``_DERIVATION_REFERENCES_LABELS``),
-      because the anchor's presence alone is not enough:
+      ``#5199`` anchor. The class is decided at read time from the two observable
+      signals — the target's LABEL and the anchor's PRESENCE — because the
+      write-time discriminator (`projection/edges.py`:
+      ``_DERIVATION_REFERENCES_LABELS``) is the *caller's* relation spelling and
+      is stored nowhere:
 
-      - an **``Event``** target is ALWAYS a derivation (no other ``references``
-        writer mints an Event), so it is read whether or not it is anchored — an
-        unanchored one (a pre-``#5214``/``create_edge`` edge; §9.6 records *"no
+      - an **``Event``** target is a derivation (every provenance writer of one
+        is), so it is read whether or not it is anchored — an unanchored one (a
+        pre-``#5214``/``create_edge`` edge; §9.6 records *"no
         backfill, deliberately"*) is reported ``unknown``. Dropping it would let
         a source whose legacy Event derivations were never anchored read
-        ``current``: a false-fresh over an incomplete link set.
+        ``current``: a false-fresh over an incomplete link set. ⚠ The escape
+        hatch can mint an ``Event`` reference that is NOT a derivation; that can
+        only ever add an ``unknown`` row (the hatch cannot set an anchor), so it
+        can downgrade a verdict but can never fabricate a ``current`` or a
+        target.
       - an **anchored** target of any other label (a document ``:Source``) is a
         derivation too — only a derivation writer sets the anchor.
       - an **unanchored ``Source``-targeted** link is genuinely AMBIGUOUS and is
@@ -378,7 +415,9 @@ def source_staleness(graph, source_ref: str) -> dict:
         ... either way"*), so the anchor is the only read-time discriminator. A
         property-free ``Object`` link is excluded for the same class of reason —
         it is identity/mention by design (option A, `#5199`), and there is no
-        version of an identity to be stale.
+        version of an identity to be stale. ⚠️ Excluded, but **COUNTED**
+        (``counts["withheld"]``): a sweep that silently ignored them could
+        certify ``current`` over a link set it knows it did not read.
 
     NOTHING IS WRITTEN. The verdicts are computed by
     :func:`tortoise.search_engine.currency_status` and aggregated by
@@ -403,6 +442,10 @@ def source_staleness(graph, source_ref: str) -> dict:
     ``{"source", "current", "status", "complete", "errors", "counts",
     "links", "re_inference_targets"}`` where
 
+    * ``counts`` is ``{"stale", "current", "unknown", "links", "withheld"}``.
+      ``withheld`` counts the links deliberately NOT judged (the ambiguous
+      property-free ``references`` class above) — it is reported so a reader can
+      tell *"nothing to report"* from *"something I refused to classify"*.
     * ``status`` is the §4.6 aggregate over every link found — ``stale`` if ANY
       is behind, ``current`` only when every one is and there is at least one,
       ``unknown`` otherwise (including a source that derived nothing: an empty
@@ -442,24 +485,55 @@ def source_staleness(graph, source_ref: str) -> dict:
             "recorded": version_operand(remembered),
         })
     try:
+        # EVERY ``references`` link is read and CLASSIFIED HERE, not filtered in
+        # Cypher. Two reasons, both load-bearing:
+        #
+        # * `head(labels(t)) = 'Event'` was a LABEL-ORDER dependency: a target
+        #   carrying `Event` not first (`:Object:Event`) was dropped, so an
+        #   unanchored legacy Event derivation vanished from the sweep and a
+        #   source read `current` over a link it never read — the false-fresh
+        #   this module exists to prevent.
+        # * the class that is deliberately WITHHELD must still be COUNTED, or
+        #   ``status: current`` gets certified over a link set the code knows it
+        #   did not read. Every other incompleteness is reported (`errors`,
+        #   `complete`); this one is reported as ``counts["withheld"]``, which
+        #   keeps the aggregate honest without pretending a guess is a verdict.
         reference_rows = graph.query(
             "MATCH (s:Source {url:$url})-[r:references]->(t) "
-            "WHERE head(labels(t)) = 'Event' "
-            "OR (r.sourceVersion IS NOT NULL AND r.sourceVersion <> '') "
-            "RETURN head(labels(t)), coalesce(t.url, t.eventId, t.id), "
+            "RETURN labels(t), coalesce(t.url, t.eventId, t.id), "
             "r.sourceVersion",
             params={"url": url},
         ).result_set
     except Exception as exc:  # REPORTED, never silent — see `complete`
         errors.append(f"references read failed: {type(exc).__name__}: {exc}")
         reference_rows = []
-    for label, node_id, remembered in reference_rows:
-        links.append({
-            "via": REFERENCES,
-            "kind": (label or "").lower(),
-            "node": node_id or "",
-            "recorded": version_operand(remembered),
-        })
+    withheld = 0
+    for labels, node_id, remembered in reference_rows:
+        labels = list(labels or [])
+        recorded = version_operand(remembered)
+        # The write-time discriminator is "did a DERIVATION writer mint it", and
+        # at read time the two observable signals are the target's label and the
+        # anchor's presence: every provenance writer of an `Event` reference is a
+        # derivation, and only a derivation writer sets the anchor.
+        #
+        # ⚠ The escape hatch (`create_edge`, allowlisted for `references`) can
+        # mint an `Event` reference that is NOT a derivation. That can only ever
+        # add an `unknown` row — the hatch cannot set an anchor — so it can
+        # downgrade a verdict to `unknown` and can never fabricate a `current` or
+        # a re-inference target. Conservative in the direction §4.6 prefers.
+        if "Event" in labels or recorded:
+            links.append({
+                "via": REFERENCES,
+                "kind": ("event" if "Event" in labels
+                         else (labels[0].lower() if labels else "")),
+                "node": node_id or "",
+                "recorded": recorded,
+            })
+        else:
+            # A property-free `Source`-targeted link: containment and a document
+            # derivation are STORED IDENTICALLY, so it is withheld rather than
+            # guessed at (see the docstring). Counted, never silent.
+            withheld += 1
 
     for link in links:
         link["current"] = current
@@ -470,6 +544,7 @@ def source_staleness(graph, source_ref: str) -> dict:
     for link in links:
         counts[link["currency"]] = counts.get(link["currency"], 0) + 1
     counts["links"] = len(links)
+    counts["withheld"] = withheld
 
     return {
         "source": url,
@@ -651,6 +726,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                           f"{link['node']} "
                           f"(recorded {link['recorded'] or '∅'} → "
                           f"current {link['current'] or '∅'})")
+                if counts["withheld"]:
+                    # The ambiguous class is NOT judged, and saying so is what
+                    # keeps `current` from being read as "every link checked".
+                    print(f"  withheld {counts['withheld']} link(s) — an "
+                          f"unanchored Source-targeted `references` link cannot "
+                          f"be told from containment, so it is not judged")
                 if sweep["re_inference_targets"]:
                     print("  re-inference: " + ", ".join(sweep["re_inference_targets"]))
                 if not sweep["complete"]:
