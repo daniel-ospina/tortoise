@@ -794,19 +794,18 @@ class TestTerminalStatusGuard:
         # `_upsert_point_props` RE-DERIVE the hash from the replayed content,
         # so a rebuilt graph keeps its hashes.) With the hash absent, the
         # content-hash MATCH the guard used missed that point and the
-        # cycle-17/18 guard silently stopped matching it; the bundle was then
-        # rejected only at Phase-2 `_check_endpoint_race` — a mid-write raise
-        # AFTER earlier bundle items committed (verified pre-#2971: point count
-        # 1 -> 2, an orphan left behind), the exact partial-mutation class the
-        # Phase-1 guard exists to prevent. The helper's primary content-hash
-        # MATCH is what #2971 fixed.
+        # cycle-17/18 guard silently stopped matching it — the PREDICATE gap
+        # this test pins, via the hash-less content+kind fallback. Simulate
+        # that state directly (clear the terminal point's `content_hash`) and
+        # assert the guard still MATCHES it (measured pre-#2971: the bundle was
+        # then refused only by Phase-2 `_check_endpoint_race`, a mid-write raise
+        # with point count 1 -> 2 and an orphan left behind).
         #
-        # ⛔ #9173: what this test now pins is MATCH + ACCEPTED (operator route),
-        # not MATCH + refused. A bundle-local `points` ref is Point-bearing, so
-        # the endpoint-kind gate (#8499) reifies the connection and
-        # `create_direct_edge` — the primitive the old refusal predicted — is
-        # never reached. The `content_hash = NULL` precondition is still
-        # asserted FIRST so a hash-preserving regression cannot pass vacuously.
+        # ⛔ #9173: the MATCH no longer implies an ingest-level REFUSAL, and this
+        # test no longer asserts one — a bundle-local `points` ref is
+        # Point-bearing, the endpoint-kind gate (#8499) reifies the connection,
+        # and `create_direct_edge` (the primitive the old refusal predicted) is
+        # never reached. See the assertion block below.
         #
         # Scope note: this simulates the TERMINAL-STATUS state (`status=
         # 'superseded'`, `outdated` unset) — the shape a direct status write

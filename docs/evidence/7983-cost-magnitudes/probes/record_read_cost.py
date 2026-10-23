@@ -69,6 +69,10 @@ MIGRATIONS = [
     # #9264's forward migration (the narrowed count column). The row width this
     # probe measures is the SHIPPED schema's, so the list must match.
     "20261022000001_record_session_capture_redactions_integer.sql",
+    # FORWARD `CREATE TABLE public.session_narrative` (#9555 / R7): the read this
+    # probe measures walks the record's tables, and the shipped projection now
+    # writes this one. Pinned by `tests/test_7950_capstone_probe.py`.
+    "20261023000001_record_session_narrative.sql",
 ]
 
 #: §17.4.1's published rates, restated so the arithmetic below is auditable and
