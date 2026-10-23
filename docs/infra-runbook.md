@@ -394,7 +394,7 @@ Exit codes (a scheduler's only signal):
 |---|---|
 | `0` | backup published — and in drill mode, the restore **verified** against the source |
 | `1` | the run **could not be completed** (pg_dump/pg_restore non-zero, a transport failure). What that means depends on the **failure class**, not the mode: a failure **after** the artifact was published raises `RecordRestoreFailed` and names the artifact id — the record IS backed up and only the restore is **NOT proven**: retry, and if it keeps failing check preconditions 3-4 (the scratch target's schema and the tenancy rows its foreign keys reference): a missing parent row never clears on a retry. **Any other** exit-1 failure (a dump, encrypt or upload failure, in either mode) means **nothing was published** — the record is NOT backed up |
-| `2` | could not run: no/malformed DSN, R2 unavailable, psycopg2 absent, a **pooler** DSN (the source's or the drill's **scratch** one — both are refused before anything is dumped), a missing/malformed `TORTOISE_BACKUP_KEY`, a populated scratch target, an **empty** record to drill, an artifact whose **integrity, shape pin or decryption does not verify**, or a `--keep` below 1. No verdict was produced — never read as green, and never retry blindly: these are configuration faults |
+| `2` | could not run: no/malformed DSN, R2 unavailable, psycopg2 absent, a **pooler** DSN (the source's or the drill's **scratch** one — both are refused before anything is dumped), a missing/malformed `TORTOISE_BACKUP_KEY`, a populated scratch target, an **empty** record to drill, an artifact whose **integrity, shape pin or decryption does not verify**, or a `--keep` below 1. No verdict was produced — never read as green, and never retry blindly: these are configuration faults. ⚠️ **A permanent fault found AFTER the upload (the likeliest: a stale scratch credential) still exits `2`, but the artifact is already durable** — the drill publishes before it resets and restores, so the verb names the published `backup_id` and says the record IS backed up, instead of claiming nothing was backed up |
 | `3` | the drill **ran** and the restored record disagrees with its source — an incident, with the tables named |
 
 Every configuration fault is `2`, deliberately: a pooler DSN, a missing `psycopg2` and a missing
@@ -407,6 +407,13 @@ artifact *before* it restores, so a failure after that point leaves a complete, 
 in `record-backups/`: the record is backed up, the restore is unproven. The verb says which of the two
 it means on stderr, and the drill's own exit-1 class (`RecordRestoreFailed`) names the published
 `backup_id` — so an alert rule should read the sentence, not assume an outage.
+
+⚠️ **`2` in drill mode is not "the record has no backup" either.** The drill uploads before it
+resets and restores, so a permanent configuration fault found on the scratch side (a rotated
+credential is the usual one) exits `2` with a complete artifact already in `record-backups/`. The
+verb names that artifact's `backup_id` and says the record IS backed up — so, as with `1`, read the
+sentence rather than inferring an outage from the code. Do **not** re-run the dump to "replace" the
+artifact: fix the configuration the message names first.
 
 ⚠️ **A `0` in backup-only mode is not a durability claim.** The verb prints
 `NOT PROVEN RESTORABLE` in that mode on purpose: the posture asks for *"a backup whose artifact is
@@ -494,7 +501,7 @@ be reported as "the record is NOT backed up". It runs on exit `0` only, so a per
 also stops retention; `--reset-scratch` is what keeps the scheduled drill on the `0` path.
 
 ⚠️ **The exit-`2` case is the one to watch, because it is the likeliest.** A drill publishes its
-artifact *before* it restores, so any post-publish refusal — the commonest being a **populated scratch
+artifact *before* it resets and restores, so any post-publish refusal — the commonest being a **populated scratch
 target because `--reset-scratch` was dropped from the cron line** — mints a new artifact and then
 returns without pruning. That grows `record-backups/` by one full encrypted dump per run, without
 bound, while the exit table reads as "no verdict" rather than as "retention has stopped". If the drill

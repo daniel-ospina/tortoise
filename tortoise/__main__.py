@@ -827,7 +827,10 @@ def _cmd_record_backup(args):
           absent or malformed, a populated
           scratch target, an empty record to drill, an artifact whose integrity,
           shape pin or decryption does not verify (no verdict was produced — and
-          NOT a green one), or a ``--keep`` that would delete every artifact
+          NOT a green one), or a ``--keep`` that would delete every artifact.
+          A permanent fault discovered AFTER the upload names the published
+          artifact instead of claiming nothing was backed up: in drill mode the
+          artifact is durable and only the drill did not run.
       ``3`` the drill RAN and the restored record DISAGREES with its source
 
     ``2`` is also the code for every PERMANENT configuration fault, deliberately:
@@ -955,8 +958,26 @@ def _cmd_record_backup(args):
         # A PERMANENT configuration fault (pooler DSN, psycopg2 absent, missing
         # key): `2` = unconfigured. `1` would tell a scheduler to retry a fault
         # only a config edit can clear.
-        print(f"Error: {e} — nothing was backed up, and no verdict was produced.",
-              file=sys.stderr)
+        #
+        # ⛔ THE PUBLISH STATE DECIDES THE SENTENCE, NOT THE CLASS (#9601 review
+        # cycle 10, P2). A drill publishes before it resets and restores, so this
+        # class is ALSO what a stale scratch credential raises — after a complete,
+        # checksummed artifact is already durable in `record-backups/`. The flat
+        # sentence claimed "nothing was backed up" about that run: the false
+        # durability outage this verb spent three cycles removing, re-emitted for a
+        # likelier class. `backup_id` is set only when the fault landed after the
+        # upload, so it is what the wording branches on. Exit stays `2`: this is
+        # still a config fault, and re-running the dump mints another artifact for
+        # one that is already published.
+        if e.backup_id:
+            print(f"Error: the artifact {e.backup_id} WAS published before the "
+                  f"drill could run, so the record IS backed up but this restore "
+                  f"was NOT attempted and no verdict was produced ({e}). Fix the "
+                  f"configuration that message names — do not mint another "
+                  f"artifact for it.", file=sys.stderr)
+        else:
+            print(f"Error: {e} — nothing was backed up, and no verdict was produced.",
+                  file=sys.stderr)
         return 2
     except RecordRestoreFailed as e:
         # #9601 review cycle 3 (P2): the DRILL publishes before it restores, so

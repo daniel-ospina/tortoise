@@ -253,7 +253,28 @@ class RecordBackupUnavailable(RecordBackupError):
     a config. A scheduler that reads both as the same code retries a config fault
     forever, minting a fresh artifact each time — so the verb maps this class to
     its "could not run" code rather than to "the backup failed".
+
+    ⛔ THE CLASS IS NOT THE PUBLISH STATE (#9601 review cycle 10, P2). A drill
+    publishes before it resets and restores, so a PERMANENT fault discovered there
+    (the likeliest: a stale scratch credential) raises this class while a
+    complete, checksummed artifact is already durable in ``record-backups/``. The
+    class still decides the CODE (``2`` — do not retry blindly), but the code does
+    not decide the SENTENCE: ``backup_id``/``backup_key`` are set ONLY when the
+    fault landed after the upload, so a caller can say WHICH artifact is durable
+    instead of claiming nothing was backed up. ``None`` means nothing was
+    published, which is the only case where that claim is true.
     """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        backup_id: str | None = None,
+        backup_key: str | None = None,
+    ):
+        super().__init__(message)
+        self.backup_id = backup_id
+        self.backup_key = backup_key
 
 
 class RecordRestoreRefused(RecordBackupError):
@@ -1048,7 +1069,7 @@ def create_record_backup(
     """Dump, encrypt and upload the record; return the plaintext manifest.
 
     The manifest carries the **ciphertext's** sha256 (what a restore re-checks),
-    the row counts measured at dump time (so an operator can tell a thin
+    the row counts measured immediately BEFORE the dump (so an operator can tell a thin
     artifact from a thin record), the table set, and the non-secret source
     coordinates. It carries no credentials and no row contents.
 
@@ -1775,7 +1796,11 @@ def run_restore_drill(
     not a bare :class:`RecordBackupError` (#9601 review cycle 3, P2): the drill
     publishes before it restores, so at that point the record IS backed up and
     only the restore is unproven. A caller told otherwise reports a durability
-    outage that does not exist.
+    outage that does not exist. A PERMANENT config fault in the same region keeps
+    its :class:`RecordBackupUnavailable` class (exit `2`, so nothing is retried
+    blindly) but is re-raised carrying the published ``backup_id`` — the class
+    says how to react, the identity says what is already durable (#9601 review
+    cycle 10, P2).
 
     ⛔ THE ARTIFACT IS CUT BEFORE ANY RESET, and the identity test is COORDINATES,
     not string equality (#9601 review cycle 1, P0). Both halves of the old shape
@@ -1917,13 +1942,28 @@ def run_restore_drill(
             pg_restore=pg_restore,
             artifact=(manifest, payload),
         )
-    except (RecordRestoreRefused, RecordRestoreVerifyError, RecordBackupUnavailable):
+    except (RecordRestoreRefused, RecordRestoreVerifyError):
+        # Refusals and verdicts keep their own classes untouched: a refusal is not
+        # an artifact-state claim at all.
+        raise
+    except RecordBackupUnavailable as e:
         # `RecordBackupUnavailable` is a PERMANENT config fault and keeps its own
         # class (#9601 review cycle 4, P2): it is not "the drill ran and did not
         # finish", it is "this box cannot run it", and the verb maps it to exit 2.
         # Re-wrapping it as `RecordRestoreFailed` (exit 1) told a scheduler to retry
         # a pooler DSN forever — minting a fresh artifact on every attempt.
-        raise
+        #
+        # ⛔ BUT IT MUST CARRY THE PUBLISHED ARTIFACT (#9601 review cycle 10, P2).
+        # This arm is REACHED FROM THE POST-PUBLISH LEG (a stale scratch credential
+        # on the reset, `pg_restore` absent, a scratch DSN that names no database),
+        # so by construction `create_record_backup` has already returned and the
+        # artifact is durable. Re-raised bare, the verb's exit-2 handler told the
+        # operator "nothing was backed up" — the same false durability outage the
+        # exit-1 fix above exists to remove, for a likelier fault. Same class, same
+        # exit code; the artifact's identity is what the sentence needs.
+        raise RecordBackupUnavailable(
+            str(e), backup_id=manifest["backup_id"], backup_key=backup_key
+        ) from e
     except RecordBackupError as e:
         raise RecordRestoreFailed(
             str(e), backup_id=manifest["backup_id"], backup_key=backup_key

@@ -1988,6 +1988,80 @@ def test_a_drill_exit_1_does_not_claim_the_record_is_unbacked(monkeypatch, capsy
     assert published in err
 
 
+def test_a_drill_exit_2_after_the_upload_does_not_claim_nothing_was_backed_up(
+        monkeypatch, capsys):
+    """#9601 review cycle 10 (P2): exit `2` in DRILL mode is not always "no backup".
+
+    `run_restore_drill` publishes the artifact and only THEN resets and restores,
+    so a PERMANENT scratch-configuration fault discovered there — the one the
+    runbook calls the likeliest, a stale/wrong scratch credential — exits `2`
+    while a complete, checksummed artifact is already durable in
+    `record-backups/`. The old flat sentence, "nothing was backed up", is the
+    false durability outage this verb exists to remove; the exit-1 fix did not
+    cover it because this fault keeps its own class.
+
+    The double raises only on the SCRATCH leg, so the source counts, the dump and
+    the upload all succeed first: the artifact's presence is a fact of the run, not
+    an assumption. Pre-fix the sentence says "nothing was backed up".
+    """
+
+    class ScratchLoginRefused(FakeDB):
+        def connect(self, dsn):
+            if dsn == SCRATCH_DSN:
+                raise _DriverError(
+                    'password authentication failed for user "scratch"', "28P01"
+                )
+            return super().connect(dsn)
+
+    storage = MemoryStorage()
+    rc = _cli(
+        monkeypatch,
+        ["record-backup", "--record-dsn", DSN, "--scratch-dsn", SCRATCH_DSN,
+         "--reset-scratch"],
+        storage=storage,
+        db=ScratchLoginRefused(SOURCE_COUNTS),
+    )
+    assert rc == 2  # still the *config fault* code: nothing is retried blindly
+    err = capsys.readouterr().err
+    assert "nothing was backed up" not in err
+    assert "IS backed up" in err
+    # The claim is supported by the object store, not asserted from the code path:
+    # the artifact really is durable, and the message names it.
+    assert storage.list(rb.RECORD_BACKUP_PREFIX) != []
+    published = next(
+        json.loads(storage.download(k))["backup_id"]
+        for k in storage._objects
+        if k.endswith(rb.MANIFEST_OBJECT)
+    )
+    assert published in err
+
+
+def test_a_permanent_fault_BEFORE_the_upload_still_says_nothing_was_backed_up(
+        monkeypatch, capsys):
+    """The other half of the same contract: the published wording must not go global.
+
+    Without this, a mutant that always names a published artifact would pass the
+    drill arm above while telling an operator whose FIRST count failed that a
+    backup exists — the same false claim, pointed the other way. Here the source
+    leg is what cannot connect, so nothing was dumped and nothing may be claimed.
+    """
+    storage = MemoryStorage()
+    monkeypatch.setattr(
+        rb, "_default_connector", _raising("password authentication failed", "28P01")
+    )
+    rc = _cli(
+        monkeypatch,
+        ["record-backup", "--record-dsn", DSN],
+        storage=storage,
+        patch_connector=False,
+    )
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "nothing was backed up" in err
+    assert "IS backed up" not in err
+    assert storage.list("") == []
+
+
 def test_a_backup_mode_exit_1_still_says_the_record_is_not_backed_up(monkeypatch, capsys):
     """The other half of the same contract: the mode-aware wording must not go global.
 
