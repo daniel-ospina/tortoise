@@ -322,6 +322,62 @@ def test_every_declared_domain_answer_exemption_is_still_needed():
             "DOMAIN_ANSWER_PRODUCERS is stale cover; remove it")
 
 
+def test_the_gate_coverage_claim_is_scoped_to_what_it_actually_sees():
+    """#9609 review (claim-mismatch): the gate's boundary is the SHAPE it matches,
+    never "a refusal the gate cannot see is impossible to write".
+
+    Two facts, both structural, so neither the claim nor the boundary can drift:
+
+    (i)  the gate is BLIND to a refusal that carries NO ``error`` key. The live
+         `tortoise_pack_install` rejected-install branch is the existence proof —
+         it is served, it is a refusal, and it is recorded ``ok`` at the seam;
+    (ii) every description of the gate says so. Before this fix
+         `tests/test_mcp_safe_error_telemetry_8135.py` claimed the gate's walk
+         meant "a refusal the gate cannot see is not possible to write without
+         failing it", which is false at this head: a lane reading it would take
+         a green gate run as coverage of shapes the gate never matches, and
+         re-open #9084 in one of them.
+    """
+    funcs = {n.name: n for n in ast.parse(MCP_SERVER.read_text()).body
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    producers = _plain_dict_refusal_producers(funcs,
+                                             exempt=set(DOMAIN_ANSWER_PRODUCERS))
+
+    assert "tortoise_pack_install" in _served_tool_names()
+    body = funcs["tortoise_pack_install"]
+    keyless_refusals = [sub for sub in ast.walk(body)
+                        if isinstance(sub, ast.Return)
+                        and isinstance(sub.value, ast.Dict)
+                        and not _is_error_dict(sub.value)]
+    assert keyless_refusals, (
+        "tortoise_pack_install no longer returns a dict refusal without an "
+        "`error` key — both this pin and the two docstrings it guards describe "
+        "that shape; re-derive the limit rather than deleting the evidence")
+    assert _returns_plain_dict_refusal(body, producers) == [], (
+        "the gate now SEES a refusal carrying no `error` key, so the limit "
+        "stated here and in test_mcp_safe_error_telemetry_8135.py has moved — "
+        "a widened gate is a corpus change to re-state, never a stale sentence")
+
+    seam = pathlib.Path(__file__).with_name("test_mcp_safe_error_telemetry_8135.py")
+    sibling = ast.parse(seam.read_text())
+    claim = next(n for n in sibling.body
+                 if getattr(n, "name", None)
+                 == "test_a_plain_dict_payload_is_still_recorded_ok_at_the_seam")
+    doc = " ".join((ast.get_docstring(claim) or "").split())
+
+    assert "not possible to write" not in doc, (
+        "the seam docstring is claiming a gate-invisible refusal cannot be "
+        "written again. The gate matches one shape — a dict literal (or a "
+        "helper/name resolving to one) carrying a CONSTANT `error` key — and "
+        "`tortoise_pack_install` is a live refusal it does not classify")
+    assert "WHAT THE GATE STILL DOES NOT SEE" in doc, (
+        "the seam docstring must point at THIS module's named limits: the gate's "
+        "boundary is scoped there, and only there")
+    assert "tortoise_pack_install" in doc, (
+        "the seam docstring must name a concrete shape the gate does not "
+        "classify, not merely gesture at limits")
+
+
 # ── 2. The vocabulary ──────────────────────────────────────────────────────
 
 def _flatten(text: str) -> str:

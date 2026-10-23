@@ -217,9 +217,20 @@ async def test_a_plain_dict_payload_is_still_recorded_ok_at_the_seam(
     ever added that answers a refusal with a plain dict, THIS is the test that
     explains why it reads ``ok`` — and
     ``tests/test_mcp_refusal_telemetry_9084.py::test_no_served_tool_body_returns_a_plain_dict_refusal``
-    is the gate that refuses one (it walks the SERVED surface, live AND retired, and
-    follows `return helper(...)`, so a refusal the gate cannot see is not possible to
-    write without failing it).
+    is the gate that refuses one.
+
+    THE GATE'S SCOPE, STATED AS THE SHAPE IT MATCHES (never as an impossibility).
+    It walks the SERVED surface, live AND retired, and follows `return
+    helper(...)` and a returned name, but what it CLASSIFIES is one shape: a
+    dict LITERAL carrying a CONSTANT ``"error"`` key. It is therefore not a
+    proof that a refusal the gate cannot see cannot be written. The named
+    limits live in ``tests/test_mcp_refusal_telemetry_9084.py`` under
+    "WHAT THE GATE STILL DOES NOT SEE"; one of them is live today —
+    ``tortoise_pack_install`` answers a rejected install with
+    ``{"installed": False, "validation_errors": [...]}``, which carries no
+    ``error`` key, which the gate does not match, and which is recorded ``ok``.
+    A refusal written in an unclassified shape widens the gate; a green run on
+    the gate is coverage of the shape above and of nothing else.
     """
     def plain_dict_tool() -> dict:
         return {"mode": "bogus",
