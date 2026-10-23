@@ -12,7 +12,7 @@ vendor routes elsewhere.
 Each test below is a REFUSAL or a MEASURED OUTCOME that the posture depends on,
 and every one of them is a falsifier away from being vacuous:
 
-* the artifact covers **all nine** record tables (a subset is the #3895 failure:
+* the artifact covers **every** record table (a subset is the #3895 failure:
   an artifact unrestorable *by construction* while every check reads green);
 * the **credential never reaches argv** (argv is world-readable via `ps`, and an
   error that quotes argv quotes the record's password into the logs);
@@ -180,7 +180,16 @@ class FakeDB:
         self.scratch.update(self.source)
 
 
-SOURCE_COUNTS = {
+#: Row counts per table for the fake record.
+#: ⛔ DERIVED from the one declaration, never restated. It WAS a literal dict of
+#: nine tables, and main then added `public.session_narrative` (#9555/R7): the
+#: fixture became a second copy of `THE_RECORD_TABLES` and 40 arms went red on
+#: `KeyError: 'session_narrative'` — the exact "the table set is restated" defect
+#: `record_backup.py` exists not to have (its set comes from
+#: `record_projection.THE_RECORD_TABLES`). A table this dict does not name gets
+#: `_DEFAULT_COUNT`, so a new record table is covered by CONSTRUCTION and only a
+#: count this file's assertions turn on is spelled out.
+_COUNT_VALUES = {
     "node_identity": 41,
     "journal_event": 512,
     "source": 7,
@@ -190,6 +199,13 @@ SOURCE_COUNTS = {
     "subject": 11,
     "point": 24,
     "relation": 63,
+}
+
+_DEFAULT_COUNT = 6
+
+SOURCE_COUNTS = {
+    table: _COUNT_VALUES.get(table, _DEFAULT_COUNT)
+    for table in THE_RECORD_TABLES
 }
 
 
@@ -219,7 +235,12 @@ def test_the_dump_covers_every_record_table():
     argv = runner.argv_for("pg_dump")
     dumped = sorted(a.split(".", 1)[1] for a in argv if a.startswith("--table=public."))
     assert dumped == sorted(THE_RECORD_TABLES)
-    assert len(dumped) == 9
+    # ⛔ `len(THE_RECORD_TABLES)`, not a literal: the numeral 9 was a second copy of
+    # the declaration and main's #9555/R7 table made it wrong. The ABSOLUTE set is
+    # pinned against the MIGRATIONS by `test_the_dumps_table_set_is_the_schema_s_
+    # table_set`; this line only proves the dump took the whole declaration rather
+    # than a prefix of it.
+    assert len(dumped) == len(THE_RECORD_TABLES)
     # Portable into a DIFFERENT project: ownership and role grants do not exist
     # there, and pg_restore would fail on them halfway through.
     assert "--no-owner" in argv
@@ -680,7 +701,7 @@ def test_the_drill_refuses_a_scratch_target_reached_by_another_NAME():
     `localhost` and `127.0.0.1` are ONE server with two names, so a scratch DSN
     spelled with the other name passed the "resolves to the SAME database"
     guard — and with `--reset-scratch` the drill then TRUNCATEed the record's
-    nine tables, restored the artifact over it, and printed `RESTORED`. The
+    every record table, restored the artifact over it, and printed `RESTORED`. The
     guard compares the ADDRESSES both names resolve to now, so an alias cannot
     slip past it. FakeDB records every connection, and the assertion below is
     what proves the refusal happened BEFORE anything touched the source.
@@ -841,7 +862,7 @@ def test_a_NET_DELETION_during_the_dump_is_not_an_impossible_artifact():
     """#9601 review cycle 3 (P1): the record is NOT append-only.
 
     `record_projection` emits `DELETE` for `delete`/`merge` journal ops and the
-    erasure RPC removes all nine tables, so a NET DELETION inside the dump window
+    erasure RPC removes every record table, so a NET DELETION inside the dump window
     leaves the post-dump re-count BELOW the artifact's own count on a healthy
     backup. A ceiling of `after` alone read that as an impossible artifact and
     refused with exit 2 — a false red on the daily drill, and one that also
@@ -1691,7 +1712,11 @@ def test_the_dumps_table_set_is_the_schema_s_table_set():
     declared = set(rb.record_tables())
     assert declared == set(THE_RECORD_TABLES)
     assert declared <= parsed
-    assert len(declared) == 9
+    assert len(declared) >= 9, (
+        "the record has at least the nine tables this guard was written against; "
+        "fewer means `table_columns()` stopped parsing, not that the record shrank "
+        "(the ABSOLUTE set is the equality above, against the migrations)"
+    )
 
 
 # ── the dump's own verdict (#9601 review cycle 1) ──────────────────────────
