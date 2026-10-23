@@ -2098,13 +2098,23 @@ class PackRegistry:
                 # declared predicate or a semantics value — the same split
                 # kindDefs uses (shape per-manifest, resolution here, because a
                 # bare name is not decidable from one manifest alone).
+                # #9663: resolution goes through the SAME #2781 missing-peer
+                # gate as kindDefs `nearMisses`, chain steps and the relation
+                # endpoints above. A pack that names a SIBLING pack's predicate
+                # as its near-miss is naming a pack it has declared in
+                # `depends_on` — so with that pack absent the reference is a
+                # named, survivable gap, never an isolation. Before this, the
+                # gate was applied to every other cross-pack site and not this
+                # one, so installing an overlay without its base pack dropped
+                # the overlay (measured: `packs/investment-portfolio-manager`
+                # without `venture` → 2 errors, pack isolated).
                 for target in rel.get("nearMisses", []) or []:
                     if target not in all_predicates:
-                        self.errors.setdefault(ns, []).append(
-                            f"relation '{pred}': nearMisses target '{target}' does "
-                            f"not resolve to any declared predicate or semantics "
-                            f"value (core or loaded pack)"
-                        )
+                        self._report_unresolved(
+                            ns,
+                            f"relation '{pred}': nearMisses target '{target}'",
+                            target, loaded, missing_deps[ns],
+                            kind="any declared predicate or semantics value")
 
             # Check every equivalentTo target resolves
             for kind, targets in pack.kind_equivalences.items():
@@ -2187,6 +2197,7 @@ class PackRegistry:
     def _report_unresolved(
         self, ns: str, site: str, ref: str,
         loaded: set[str], missing_deps: list[str],
+        kind: str = "any known kind",
     ) -> None:
         """Record an unresolvable ``ref`` as FATAL or as an unresolved peer.
 
@@ -2194,15 +2205,21 @@ class PackRegistry:
         ``"relation 'addresses': toKind 'pm:issue'"``); ``ref`` is the bare
         reference it carries. The FATAL half keeps the pre-#2781 message
         verbatim so existing diagnostics and their assertions are unchanged.
+
+        ``kind`` names the RESOLUTION UNIVERSE the reference was checked
+        against, so a caller resolving something other than a kind (relation
+        ``nearMisses`` resolves against predicates + semantics, #9663) reports
+        what it actually looked for instead of claiming a kind was missing. The
+        default is the pre-#9663 wording, so every existing site is unchanged.
         """
         explanation = self._missing_pack_explanation(ref, loaded, missing_deps)
         if explanation is None:
             self.errors.setdefault(ns, []).append(
-                f"{site} does not resolve to any known kind (core or loaded pack)"
+                f"{site} does not resolve to {kind} (core or loaded pack)"
             )
         else:
             self.unresolved_refs.setdefault(ns, []).append(
-                f"{site} does not resolve to any known kind — {explanation}"
+                f"{site} does not resolve to {kind} — {explanation}"
             )
 
     @staticmethod
