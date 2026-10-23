@@ -36,12 +36,38 @@ export const CANONICAL_MCP_URL = 'https://api.premiselabs.co/mcp'
 // #1701: the name the shipped chatgpt copy still uses — same value.
 const CHATGPT_MCP_URL = CANONICAL_MCP_URL
 
+// #9660: the ORIGIN every SERVED artifact URL in this module is built from.
+// `servedSkillUrl` resolves to the bytes under
+// website/apps/dashboard/public/skills/<name>/SKILL.md, emitted to dist/ by
+// the vite build — the SAME bytes the sha256 pin in
+// `config/served-skills-upstream.yml` covers (tools/served_skills_parity.py).
+// ONE literal, so a second host cannot appear next to it.
+export const SERVED_SKILLS_ORIGIN = 'https://app.premiselabs.co'
+
+// #9660: the URL of one served skill document. A filesystem-less harness has
+// no skills directory and never ran the installer, so a URL is the only way it
+// can reach the REAL skill instead of a prose rendering of one.
+export const servedSkillUrl = (name) => `${SERVED_SKILLS_ORIGIN}/skills/${name}/SKILL.md`
+
 // #1701: the skills-as-prompt body shared by every filesystem-less harness
 // that therefore has no local skills to install — Claude Web, Claude Desktop
 // (#2827) and ChatGPT. ONE constant so the user-facing prompts can never
 // drift. Composed by wizardWorkflowsText in the dashboard.
+//
+// #9660: this was a hand-maintained PROSE SUMMARY of the three served skills —
+// a second rendering of content that already has a sha256-pinned source
+// (`config/served-skills-upstream.yml`), i.e. the #4643 drift class one layer
+// up: the summary could not be re-derived from the pin, so it could only rot.
+// It is now a POINTER to those skills, served at their pinned URLs, so the
+// agent reads the same bytes every other harness installs. Do NOT re-add rule
+// text here (weights, ranges, supersede-don't-edit): that is the summary coming
+// back, and the skill is the source of truth for it.
 export const WORKFLOWS_PROMPT =
-  `You have Tortoise connected (the 'tortoise' MCP tools). Follow these workflows:\n\n1) Writing to the graph — Tortoise stores knowledge as points with edges: IMPL means 'supports', NAND means 'contradicts'. Mitigations reduce confidence (range 0.10–0.50). To change a point, supersede it and clean up its active edges rather than editing in place. Prefer structural claims over labels and always cite provenance.\n\n2) Decisions — to make a decision, first refine it, then research the options, the criteria that matter, and the findings/evidence, then wire IMPL/NAND edges from findings and criteria to options (mitigate an edge, range 0.10–0.50, when it's true but matters less), and rank the options by EP confidence.\n\n3) Research findings — when I share a research finding, ingest it as a point, check for existing related claims first, and surface connections to what we already know.`
+  `You have Tortoise connected (the 'tortoise' MCP tools). Follow these workflows — the Tortoise skills, served as documents:\n\n` +
+  `- Using Tortoise (read this one first): ${servedSkillUrl('how-to-use-tortoise')}\n` +
+  `- Running a decision: ${servedSkillUrl('tortoise-decide')}\n` +
+  `- Filing a research finding: ${servedSkillUrl('tortoise-file-finding')}\n\n` +
+  `Open and follow each one before you use the tools. They are the source of truth for how to write to the graph, run a decision, and file a research finding — do not improvise those workflows from the tool names. If you cannot open a link, say so and I will paste the document instead.`
 
 // #1727 (Task 13): per-harness session-capture support gate — the single
 // source of truth consumed by BOTH the dashboard's per-harness sessions
@@ -550,6 +576,9 @@ cp <path-to-tortoise>/tortoise/openclaw-plugin/package.json ~/.openclaw/extensio
 // website/apps/dashboard/public/install-tortoise-skills.sh, emitted to dist/
 // by the vite build. Installs the 3 core skills into the harness's project-
 // scoped skills dir (personal for Pi). Appended to each harness's copy.
+// #9660: it is a literal (a guard reads it as one) but it must still be on
+// SERVED_SKILLS_ORIGIN — pinned by harnesses.test.js, so the origin cannot
+// fork into two hosts here.
 export const SKILLS_INSTALL_URL =
   'https://app.premiselabs.co/install-tortoise-skills.sh'
 
@@ -573,6 +602,9 @@ export const SKILLS_CLAIM = `Install the Tortoise skills (${SKILLS_LIST})`
 // the agent follows after the connect command (also printed by `tortoise
 // init` as onboarding_prompt_url); it is byte-identical to its repo source
 // (tortoise/onboarding/SKILL.md) under the parity gate.
+// #9660: kept as a literal for the same reason as SKILLS_INSTALL_URL above
+// (a guard reads the single-quoted form); `servedSkillUrl('tortoise-onboarding')`
+// yields this exact string, and harnesses.test.js pins that they agree.
 export const ONBOARDING_INSTRUCTIONS_URL =
   'https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md'
 

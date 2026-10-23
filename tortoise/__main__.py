@@ -5034,6 +5034,10 @@ def _spool_transcript(args) -> dict:
         spool_dir,
         write_spool_entry,
     )
+    # One spelling for "does this value name a session": the spool's wire
+    # normaliser delegates to the same helper, so the local entry key and the
+    # wire cannot disagree (#9599).
+    from tortoise.ids import session_id_or_absent
     from tortoise.session_attribution import derive_machine_id, sanitize_attribution_field
 
     transcript_path = Path(args.file)
@@ -5117,7 +5121,15 @@ def _spool_transcript(args) -> dict:
     # colliding (the server upserts on `session_id`). Capped: 240 + "-" + 12 = 253
     # ≤ the server's `max_length` (256); a longer id is a 422 → a permanent
     # discard of the whole capture.
-    session_id = getattr(args, "session_id", None) or _local_session_id(transcript_path)
+    # ⛔ #9599: a blank `--session-id "   "` is TRUTHY, so `or` never replaced it
+    # and the entry was stored under an id that names nothing. The WIRE is safe
+    # (the spool normalises a blank to None and the server mints), but the LOCAL
+    # entry would be keyed on nothing — so two blank-id captures collide on one
+    # spool key while the server files them as separate sessions. A blank is
+    # therefore ABSENT, exactly as an absent one is, and takes the path-anchored
+    # id: the entry keeps ONE stable key across snapshots.
+    session_id = (session_id_or_absent(getattr(args, "session_id", None))
+                  or _local_session_id(transcript_path))
 
     # #2681: derive machine_id + forward model when provided. Derive-only
     # sha256 of hostname\0username — never-throw, memoized per process.
@@ -6670,6 +6682,7 @@ def _process_saved_backlog(state: dict, *, decided_at: str) -> int:
     import time
 
     from tortoise import capture_backlog
+    from tortoise.ids import session_id_or_absent
 
     # Nothing to do is decided FIRST — before any provider messaging. An empty
     # (or transcript-less) backlog has no re-capture to spend on, so naming a
@@ -6775,7 +6788,12 @@ def _process_saved_backlog(state: dict, *, decided_at: str) -> int:
             # raises `no parser for harness 'claude'` — which is the exact
             # harness path that produces the backlog.
             harness=_backlog_parser_harness(record.get("harness")),
-            session_id=session_id or None,
+            # #9599: the ledger may carry a blank id (written before the
+            # writers refused to store one). `or None` kept it — it is truthy —
+            # so the import POSTed a blank, 422'd at the boundary, and the
+            # record was never retired. Absent takes the import's own digest
+            # fallback instead.
+            session_id=session_id_or_absent(session_id),
             # Inside a run, the per-entry progress line IS the report: letting
             # the import's own offer print too would repeat the whole backlog
             # summary once per entry, which reads as noise and buries the
@@ -6847,6 +6865,7 @@ def _cmd_sessions_import(args) -> int:
     from urllib.error import URLError, HTTPError
     from http.client import HTTPException as _HTTPException
 
+    from tortoise.ids import session_id_or_absent
     from tortoise.session_import import (
         MAX_TURNS, hermes_selected_session_id, parse_transcript,
         window_turns)
@@ -6941,7 +6960,15 @@ def _cmd_sessions_import(args) -> int:
                                       sort_keys=True)).encode("utf-8")
     else:
         key_material = read_path.read_bytes()
-    session_id = args.session_id or (
+    # #9599: a PRESENT-but-BLANK `--session-id` names no session, and this leg
+    # must agree with its three siblings (the SDK doors, the spool's wire
+    # normaliser, the TS hook): those all treat a blank as "named no session"
+    # and let one be minted. Here `args.session_id or …` kept a blank (it is
+    # truthy), which the server now answers with 422 — and this leg classifies a
+    # 422 as PERMANENT, so the import was neither spooled nor filed: a capture
+    # silently lost, plus a raw FastAPI body shown instead of the refusal text.
+    # Absent takes the stable content-addressed fallback below.
+    session_id = session_id_or_absent(args.session_id) or (
         "imp_" + hashlib.sha256(key_material).hexdigest()[:12])
 
     # Local receipt — 2xx-only (a failed POST must never look imported).
@@ -10469,10 +10496,47 @@ def _cmd_decide(args) -> int:
             """Operator kwargs carrying the chosen direction (empty when unset)."""
             return {"direction": chosen_direction} if chosen_direction is not None else {}
 
+        # ── Idempotent operator wiring (#6671 / #9631) ──
+        # The lookup is `tortoise.decide_wiring`, the SAME writer
+        # `graph-scripts/decide.py` calls. This command carried its own
+        # per-run-only `created_ops` cache after #6671 fixed the script, so a
+        # re-run minted a fresh operator per edge and split the mitigations
+        # across copies — the ranking depended on how many times it was run
+        # (#9631, measured on the 2-edge fixture below: 3 → 6 operators,
+        # 1 → 2 mitigations, opt:a 0.6592 → 0.6756).
+        from tortoise.decide_wiring import (
+            damped_factor_ids,
+            may_mint_damped_bridge,
+            resolve_or_create_operator,
+            select_damp_targets,
+        )
+
+        proj = sdk._proj
+        # Keyed on the RESOLVED ids, so a key and a raw id that denote the same
+        # point converge on one operator (the script's cache has always done
+        # this; the name-keyed cache missed it).
+        created_ops: dict[tuple[str, str, str, str], str] = {}
+
+        def _elect(src_key: str, op_type: str, tgt_key: str,
+                   label: str | None) -> tuple[str | None, bool, str | None]:
+            """Resolve-or-create the bridge. Returns (op id, reused, note)."""
+            try:
+                op_id, reused, note = resolve_or_create_operator(
+                    sdk, proj, op_type, _resolve(src_key), _resolve(tgt_key),
+                    label, created_ops, create_kwargs=_direction_kw())
+            except Exception as e:
+                return None, False, str(e)
+            # A factor list must not carry the same operator twice — EP would
+            # count one bridge as two (the script's rule; this loop used to
+            # append blindly).
+            if op_id not in all_operator_ids:
+                all_operator_ids.append(op_id)
+            return op_id, reused, note
+
+        def _suffix(op_id: str, reused: bool) -> str:
+            return f" (reused {op_id})" if reused else ""
+
         # ── Create regular edges (IMPL/NAND) ──
-        # Track created operators so relevance_edges can reuse them instead of
-        # creating duplicates (same src/op_type/tgt in both sections).
-        created_ops: dict[tuple[str, str, str], str] = {}
         for edge in edges:
             if isinstance(edge, list):
                 # Tuple format: [source, op_type, target]
@@ -10487,27 +10551,27 @@ def _cmd_decide(args) -> int:
                 print(f"  ⚠ Unknown edge format: {edge}")
                 continue
 
-            try:
-                op = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)],
-                                         label=label, **_direction_kw())
-                created_ops[(src, op_type, tgt)] = op["id"]
-                all_operator_ids.append(op["id"])
-                print(f"  ✓ {src} --{op_type}--> {tgt}")
-            except Exception as e:
-                print(f"  ⚠ {src} --{op_type}--> {tgt}: {e}")
+            op_id, reused, note = _elect(src, op_type, tgt, label)
+            if op_id is None:
+                print(f"  ⚠ {src} --{op_type}--> {tgt}: {note}")
+                continue
+            print(f"  ✓ {src} --{op_type}--> {tgt}{_suffix(op_id, reused)}")
+            if note:
+                print(f"  ⚠ {src} --{op_type}--> {tgt}: {note}")
 
         # ── Truth edges: NAND the target finding point (it's FALSE) ──
         for te in truth_edges:
             src = te["source"]
             op_type = te.get("op_type", "NAND")
             tgt = te["target"]
-            try:
-                top = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)],
-                                          **_direction_kw())
-                all_operator_ids.append(top["id"])
-                print(f"  ⚡ truth: {src} --{op_type}--> {tgt}")
-            except Exception as e:
-                print(f"  ⚠ truth {src} --{op_type}--> {tgt}: {e}")
+            op_id, reused, note = _elect(src, op_type, tgt, te.get("label"))
+            if op_id is None:
+                print(f"  ⚠ truth {src} --{op_type}--> {tgt}: {note}")
+                continue
+            print(f"  ⚡ truth: {src} --{op_type}--> {tgt}"
+                  f"{_suffix(op_id, reused)}")
+            if note:
+                print(f"  ⚠ truth {src} --{op_type}--> {tgt}: {note}")
 
         # ── Relevance edges: mitigate the OPERATOR (TRUE but matters LESS) ──
         for re in relevance_edges:
@@ -10518,17 +10582,55 @@ def _cmd_decide(args) -> int:
             strength = re.get("strength", 0.30)
             # Clamp to valid mitigation range
             strength = max(0.10, min(0.50, strength))
+            label = re.get("label")
             try:
-                # Reuse the operator if already created in `edges` (prevents
-                # duplicate operators feeding EP twice).
-                op_id = created_ops.get((src, op_type, tgt))
-                if op_id is None:
-                    op = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)],
-                                             **_direction_kw())
-                    op_id = op["id"]
-                    all_operator_ids.append(op_id)
-                sdk.mitigate_operator(op_id, reason, strength)
-                print(f"  ⚖ relevance: {src} --{op_type}--> {tgt} (mitigated {strength:.2f}: {reason})")
+                # The selection rule is the script's (`select_damp_targets`):
+                # damp EVERY single-pair bridge on the triple, and refuse the
+                # ones that also claim other pairs.
+                pick = select_damp_targets(proj, op_type, _resolve(src),
+                                           _resolve(tgt), label)
+                targets = pick["targets"]
+                if not targets:
+                    for note in pick["notes"]:
+                        print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: "
+                              f"{note}")
+                    # This command's documented semantics are to wire the
+                    # operator it damps; WHICH cases licence that is stated once
+                    # in `may_mint_damped_bridge` (the script never mints).
+                    if not may_mint_damped_bridge(pick):
+                        continue
+                    op_id, reused, note = _elect(src, op_type, tgt, label)
+                    if op_id is None:
+                        print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: "
+                              f"{note}")
+                        continue
+                    if note:
+                        print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: "
+                              f"{note}")
+                    # Name the consequence: the notes above describe the
+                    # bridges that were ALREADY there, and this command's answer
+                    # to "nothing to damp" is to wire the bridge it damps.
+                    print(f"  ✓ relevance: {src} --{op_type}--> {tgt} "
+                          f"(wired single-pair bridge {op_id} to damp)")
+                    targets = [op_id]
+                elif pick["notes"]:
+                    for note in pick["notes"]:
+                        print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: "
+                              f"{note}")
+                # Every damped copy belongs in the factor list — a damped bridge
+                # that is missing from it drops out of the ranking, which is the
+                # "ranking depends on the run count" defect in its other
+                # direction (#9631 review). The rule lives in
+                # `damped_factor_ids` so both entry points agree.
+                for target_id in damped_factor_ids(targets):
+                    if target_id not in all_operator_ids:
+                        all_operator_ids.append(target_id)
+                for target_id in targets:
+                    sdk.mitigate_operator(target_id, reason, strength)
+                extra = ("" if len(targets) == 1
+                         else f" on {len(targets)} operators")
+                print(f"  ⚖ relevance: {src} --{op_type}--> {tgt} "
+                      f"(mitigated {strength:.2f}{extra}: {reason})")
             except Exception as e:
                 print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: {e}")
 

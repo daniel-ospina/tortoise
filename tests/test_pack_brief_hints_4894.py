@@ -188,21 +188,41 @@ def test_the_hint_block_is_ordered_by_namespace(tmp_path):
 # ── byte identity on every shipped-pack path ───────────────────────────────
 
 
-def test_the_default_prompt_path_is_byte_identical():
-    """No shipped pack declares either slot, so nothing may move.
+def test_the_default_prompt_path_moves_only_the_declared_values_block():
+    """No shipped pack declares either HINT slot, so the HINTS move nothing.
 
     This is the half that matters in production: a change here would alter
     extraction for every tenant that never used the slots.
+
+    #9663 made ONE shipped pack declare a VALUE field (`portfolio:
+    allocationTarget`), and the #2818 policy block rides this same slot
+    (`_s2s4_rules`'s own docstring: both ride here because both are policy).
+    So the rule is not "identical" any more but "identical plus exactly the
+    one declared block" — the hints half still moves nothing. (The name says
+    what the test now asserts: a name claiming byte identity would be a false
+    claim a future reader would trust.)
     """
     master = v2.build_master_list()
     assert master["pack_hints"] == {}
     assert v2._pack_hints_text(master) == ""
-    assert v2._s2s4_rules(master) == v2._s2s4_rules()
+    assert master["pack_values"] == {
+        "portfolio:allocationTarget": [{
+            "name": "targetPct",
+            "valueKind": "percent",
+            "required": True,
+            "cardinality": "one",
+        }],
+    }
+    values_block = v2._pack_values_text(master)
+    assert values_block
+    assert v2._s2s4_rules(master) == "\n\n".join(
+        [v2._s2s4_rules(), values_block])
     assert v2._granularity_text(master) == v2._granularity_text(None)
 
     brief = ve.compile_value_brief()
     assert brief["pack_hints"] == {}
-    assert v2._s2s4_rules(v2._build_master_from_brief(brief)) == v2._s2s4_rules()
+    assert v2._s2s4_rules(v2._build_master_from_brief(brief)) == "\n\n".join(
+        [v2._s2s4_rules(), values_block])
 
 
 def test_a_reserved_section_is_never_a_pack_kind():

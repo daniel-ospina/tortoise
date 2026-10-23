@@ -1,3 +1,15 @@
+---
+title: "Record tenancy — the connecting role and the tenant GUC (R6, epic #7879)"
+type: plan
+domain: engineering
+doc_status: decided
+created: 2026-10-22
+updated: 2026-10-23
+subjects.team: epistemic-team
+aboutSubjects: Tortoise Postgres record
+aboutObjects: "epic #7879, issue #9554, PR #9600, STORAGE-ARCHITECTURE.md, hosted deployments"
+---
+
 # R6 — the record's tenancy posture: the connecting role, and the boundary
 
 **Decision record for [#9554](https://github.com/daniel-ospina/tortoise/issues/9554)** · epic
@@ -21,8 +33,8 @@ connect as a role that bypasses it.
 
 | Question | Answer | Where it is enforced |
 |---|---|---|
-| **Which role does the record connect as?** | `tortoise_record_app` — `NOBYPASSRLS`, `NOSUPERUSER`, not the table owner. Created by migration, granted `SELECT/INSERT/UPDATE/DELETE` on exactly the 9 record tables. **Not** `postgres` (R1's DSN shape today) and **not** `service_role`. | `supabase/migrations/20261022000001_record_tenancy_role_and_guc.sql` §1–3 |
-| **Is RLS the boundary, or defence-in-depth?** | **The boundary**, for every surface the application path touches (write *and* read). | the 9 `*_app_tenant` policies, `USING` **and** `WITH CHECK`; **and, by code**, `record_projection.scope_connection()` — which refuses a connection whose role can bypass them (superuser, `BYPASSRLS`, membership of either, or owner of a record table) |
+| **Which role does the record connect as?** | `tortoise_record_app` — `NOBYPASSRLS`, `NOSUPERUSER`, not the table owner. Created by migration, granted `SELECT/INSERT/UPDATE/DELETE` on every record table (`THE_RECORD_TABLES`, ten of them since #9555 added `public.session_narrative`). **Not** `postgres` (R1's DSN shape today) and **not** `service_role`. | `supabase/migrations/20261025000001_record_tenancy_role_and_guc.sql` §1–3 |
+| **Is RLS the boundary, or defence-in-depth?** | **The boundary**, for every surface the application path touches (write *and* read). | one `*_app_tenant` policy per record table in `THE_RECORD_TABLES` (ten), `USING` **and** `WITH CHECK`; **and, by code**, `record_projection.scope_connection()` — which refuses a connection whose role can bypass them (superuser, `BYPASSRLS`, membership of either, or owner of a record table) |
 | **What sets the tenant?** | `set_config('app.current_org_id', $1, true)` — **transaction-local**, issued by `record_projection.replay()` as the first statement, from the same `org_id` it projects. | `record_projection.TENANT_GUC_SQL` |
 | **Who sets it on the READ path?** | The SAME helper: `cache_projection.read_record_view()` (the `tortoise record-reconcile` verb) opens its own connection from the same `TORTOISE_RECORD_DSN`, so it installs the same scope before its first `SELECT`. Without it the policies read NULL — zero rows and no error — and a coherent pair is reported divergent (#9600 review cycle 2). | `record_projection.scope_connection()`, called by both doors |
 | **Who may bypass?** | `postgres`/table owner and `service_role`, for three named purposes only: schema, backup/restore (R8/R9), and the org-erasure RPC. They are not the application path. | `purge_org_record` (`20261012000005`) is `SECURITY DEFINER` + `service_role`-only EXECUTE |
@@ -37,7 +49,7 @@ is true.
 
 - **`postgres` (the table owner)** — what R1's DSN shape names today. Owners bypass RLS unless
   `FORCE ROW LEVEL SECURITY` is set, and a superuser bypasses it regardless; the epilogue would then
-  be an `ALTER TABLE … FORCE` on nine tables whose write path must still pass `WITH CHECK`, which is
+  be an `ALTER TABLE … FORCE` on every record table in `THE_RECORD_TABLES` whose write path must still pass `WITH CHECK`, which is
   the same work as choosing a non-bypass role but with the owner's blast radius kept.
 - **`service_role`** — what the record migrations' own comment expected (*"every write goes through
   the single write path (#7951, Interface C), which connects as service_role. RLS is the tenancy
@@ -109,7 +121,8 @@ Operator steps: `docs/infra-runbook.md` → "The record's connecting role".
 
 **Measured at this lane's HEAD (`ec9132efe`, 2026-10-22):**
 
-- 9 record tables, each with `ENABLE ROW LEVEL SECURITY` + a `*_read_org` policy on
+- The nine original record tables (ten since #9555 added `public.session_narrative`;
+  `THE_RECORD_TABLES` is the list, not this sentence), each with `ENABLE ROW LEVEL SECURITY` + a `*_read_org` policy on
   `current_setting('app.current_org_id', true)` + a `service_role` `ALL` policy — unchanged.
 - **The identity sequence has its own ACL.** `public.relation.id` is
   `bigint GENERATED ALWAYS AS IDENTITY`, so the app role needs `USAGE` on

@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
 import sys
 from html import unescape
@@ -1231,6 +1232,238 @@ class TestInvestorsProgressCopy:
             "(PR #9283)")
 
 
+class TestMonospaceStackRendersAsAMonoFace:
+    """Every mono font declaration must resolve to a real mono face on macOS Chrome (#6870).
+
+    The stack this repo used everywhere was
+    `'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace`. None of
+    those named faces is installed on a stock macOS Chrome, so the declaration fell
+    through to the bare `monospace` keyword — and Chrome's macOS default for that
+    keyword is **Courier**.
+
+    ⚠️ **`ui-monospace` does NOT fix this on Chrome.** It is a Safari 13.1+ generic;
+    Chrome never shipped it (crbug.com/40194142) and, measured with CDP
+    `CSS.getPlatformFontsForNode` on this repo's Chromium: `ui-monospace` alone →
+    Times (the declaration is dropped), `ui-monospace, Arial` → Arial, `'SF Mono'` →
+    Times, `SFMono-Regular` → Times, `Menlo` → **Menlo**, old stack → **Courier**.
+    So the thing that makes Chrome render a mono face is **`Menlo`**; `ui-monospace`
+    is carried first only so Safari resolves the platform UI mono. Both are required
+    below, and `Menlo` is required *because* it is the one face Chrome resolves —
+    "tidy up the redundant fallbacks" would resurrect the bug, which is why the
+    guard asks for it by name instead of trusting the generic.
+
+    ⚠️ **Scope:** it checks DECLARATIONS, not usage. A page that replaces
+    `font-family: var(--mono)` with a serif renders a serif and this stays green —
+    that is a layout decision, not the Courier defect, and it stays out of scope.
+
+    Pinned rather than remembered because the stack is hand-copied into ~28 places
+    across the marketing pages, the dashboard, the blog renderer, the blog-admin app,
+    the cookie-consent banner and the served MCP consent page (`tortoise/oauth.py`):
+    re-copying the old one from a neighbouring file is a one-keystroke regression and
+    it is SILENT — the page still renders, just in the wrong face. Six such copies
+    were missed on the first pass, and a 28th (the consent page every MCP client
+    approves a grant on) was found by review.
+
+    The scan keys on **the declaration value**, not on the `SF Mono` name: a stack
+    listing none of the old names (`'Cascadia Code', monospace`) renders in Courier
+    too, and an earlier version that keyed on the name PASSED exactly that mutation.
+    It strips CSS/JS comments (so prose saying "not monospace" is not a stack) and
+    blanks `@font-face` blocks, whose `font-family` is the name being *defined* rather
+    than a fallback list — without that, `font-family:'monospace'` in an inline style
+    was skipped as if it were a webfont name, and two real regressions (a JSX
+    `fontFamily:'monospace'` and a canvas `ctx.font='… monospace'`) went green.
+    """
+
+    SUFFIXES = (".html", ".css", ".js", ".ts", ".jsx", ".tsx", ".mjs", ".py")
+    # `--mono:`, `font-family:`, camelCase `fontFamily:` and JS `ctx.font=` (both
+    # appear in the React surfaces), the `font:` shorthand (which smuggles a mono
+    # family past a font-family-only scan), and tailwind's `mono: [...]`.
+    DECL = re.compile(
+        r"(?:--mono|font-family|fontFamily|font|mono)\s*[:=]\s*"
+        # a JS template literal puts `${…}` in the middle of the value, so allow it
+        r"((?:\$\{[^}]*\}|[^;{}\n]|\n[ \t])*)",
+        re.IGNORECASE)
+    #: `/* */`, `<!-- -->` and `//`-to-end-of-line (but not the `//` in a URL)
+    COMMENT = re.compile(r"/\*.*?\*/|<!--.*?-->|(?<!:)//[^\n]*", re.DOTALL)
+    #: `@font-face { font-family: <name> }` declares a NAME, not a fallback stack.
+    FONT_FACE = re.compile(r"@font-face\s*\{[^}]*\}", re.IGNORECASE)
+
+    #: directories and served python modules that emit CSS for a browser.
+    #: `render.py` carries no mono declaration today; it is listed because it IS
+    #: an HTML emitter, so a declaration added there is scanned rather than found
+    #: by review (the `oauth.py` history) — and
+    #: `test_no_other_python_module_emits_a_mono_declaration` is the ratchet that
+    #: keeps this list honest in both directions.
+    ROOTS = ("website", "apps")
+    MODULES = ("tortoise/oauth.py", "tortoise/render.py")
+    #: build output and vendored trees that no declaration of ours lives in
+    SKIP_DIRS = ("node_modules", "dist")
+    #: everything under here that emits a mono declaration must be in `MODULES`
+    PY_ROOT = "tortoise"
+
+    def _sources(self):
+        """Every file this guard reads — FAIL CLOSED on a declared subject that is gone.
+
+        A `continue`/`is_file()` skip here is a fail-open: renaming or moving
+        `apps/` or `tortoise/oauth.py` left the scan GREEN over the 8 canvas/JSX
+        declarations and the MCP consent page it exists to protect (`#6870`
+        review P2). The floor in `test_no_mono_declaration_omits_a_face_...`
+        does not cover it either — losing `apps/` leaves 28 declarations, still
+        above the 20 floor. So a declared subject that is not there is a
+        FAILURE that names the subject to update, never a silent narrowing.
+        """
+        repo = Path(__file__).resolve().parent.parent
+        for root_name in self.ROOTS:
+            root = repo / root_name
+            assert root.is_dir(), (
+                f"{root_name}/ is gone — update ROOTS in {type(self).__name__}. "
+                "The scan silently narrowed instead, so every declaration under "
+                "it is now unguarded (#6870 review P2).")
+            # os.walk + a pruned `dirnames`, NOT `sorted(root.rglob("*"))`: rglob
+            # materialises the WHOLE tree — node_modules and dist included —
+            # before the filters run, turning a ~0.4 s test into a multi-second
+            # walk on any machine that has built the dashboard or blog-admin.
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames[:] = sorted(d for d in dirnames if d not in self.SKIP_DIRS)
+                for name in sorted(filenames):
+                    path = Path(dirpath) / name
+                    if path.suffix in self.SUFFIXES:
+                        yield path
+        for mod in self.MODULES:
+            path = repo / mod
+            assert path.is_file(), (
+                f"{mod} is gone — update MODULES in {type(self).__name__}. Its "
+                "emitted HTML would otherwise leave the scan GREEN over a served "
+                "surface (#6870 review P2).")
+            yield path
+
+    @classmethod
+    def _blank(cls, m):
+        """Replace a comment/`@font-face` block with spaces, KEEPING newlines.
+
+        Offsets and line numbers therefore stay the ORIGINAL file's: an earlier
+        version collapsed comments to one space, so every failure message below
+        a multi-line `/* … */` comment pointed at the wrong line.
+        """
+        return re.sub(r"[^\n]", " ", m.group(0))
+
+    @classmethod
+    def _strip(cls, text):
+        """Blank comments and `@font-face` blocks, preserving length + newlines."""
+        return cls.FONT_FACE.sub(cls._blank, cls.COMMENT.sub(cls._blank, text))
+
+    @classmethod
+    def _mono_values(cls, text):
+        """Yield `(offset, value)` for every mono declaration value in `text`."""
+        for m in cls.DECL.finditer(text):
+            value = m.group(1)
+            if "monospace" not in value.lower() or "var(--mono" in value:
+                continue
+            yield m.start(), value
+
+    def _declarations(self):
+        """Yield `(path, line, value)` for every mono declaration the guard reads."""
+        for path in self._sources():
+            text = self._strip(path.read_text(errors="replace"))
+            for offset, value in self._mono_values(text):
+                yield path, text.count("\n", 0, offset) + 1, value
+
+    def _mono_declarations(self):
+        repo = Path(__file__).resolve().parent.parent
+        offenders, checked = [], 0
+        for path, line, value in self._declarations():
+            checked += 1
+            low = value.lower()
+            why = []
+            if "menlo" not in low:
+                why.append("no `Menlo` (the only face macOS Chromium resolves)")
+            if "ui-monospace" not in low:
+                why.append("no `ui-monospace` (Safari)")
+            elif "menlo" in low and low.index("ui-monospace") > low.index("menlo"):
+                why.append("`ui-monospace` must come before the named faces")
+            if why:
+                offenders.append(f"{path.relative_to(repo)}:{line}: {value.strip()[:100]} -> {'; '.join(why)}")
+        return checked, offenders
+
+    def test_no_mono_declaration_omits_a_face_chrome_actually_resolves(self):
+        checked, offenders = self._mono_declarations()
+        assert checked >= 20, (
+            f"only {checked} mono font declaration(s) found under {'/'.join(self.ROOTS)} "
+            f"and {', '.join(self.MODULES)}. If the stack was consolidated into one "
+            "place, delete this test rather than letting it pass on nothing — a scan "
+            "that finds nothing proves nothing.")
+        assert not offenders, (
+            "these mono declarations cannot render as a mono face on macOS Chromium "
+            "(issue #6870), so they fall back to Courier:\n  " + "\n  ".join(offenders) +
+            "\nUse: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, 'Cascadia Code', "
+            "'Fira Code', 'JetBrains Mono', monospace")
+
+    def test_every_file_it_scans_selects_this_guard(self):
+        """The REVERSE direction: a file the guard READS must RUN it when changed.
+
+        Registration in `config/ci-surfaces.yml` only makes this file
+        CLASSIFIED; selection is what makes it RUN. Before the `onboarding`
+        `SOURCE_PATTERNS` entries for `apps/graph-viz/src/` and
+        `tortoise/oauth.py`, a diff touching ONLY one of those files selected no
+        surface at all (`apps/` is in `NON_PYTHON_PREFIXES` and matched no
+        pattern → `surfaces=[]`, tier-1 smoke) or selected `api`+`core` with the
+        guard absent — so a re-copy of the old stack into a graph-viz canvas
+        label or into the served MCP consent page merged GREEN.
+
+        Derived from what the scan actually reads, so it cannot rot: a new
+        declaration in an unwired path fails here instead of shipping unguarded
+        (the `#6870` review P1 class, and `#1349/#3332/#3616` before it).
+        """
+        from tools.ci_selection import load_manifest, select
+
+        repo = Path(__file__).resolve().parent.parent
+        manifest = load_manifest()
+        guard = Path(__file__).name
+        missing = []
+        for path in sorted({p for p, _, _ in self._declarations()}):
+            rel = path.relative_to(repo).as_posix()
+            selection = select([rel], "pull_request", manifest)
+            if guard not in selection["test_files"]:
+                missing.append(f"{rel} (selected surfaces: {selection['surfaces'] or 'none'})")
+        assert not missing, (
+            "these files carry a mono declaration this guard checks, but editing "
+            "one selects no leg that runs this guard — so the Courier regression "
+            "(#6870) merges green on exactly the diff that causes it. Add the "
+            "path (or its directory) to SOURCE_PATTERNS['onboarding'] in "
+            "tools/ci_selection.py, naming CONCRETE paths — select() matches with "
+            "startswith and has no glob support:\n  " + "\n  ".join(missing))
+
+    def test_no_other_python_module_emits_a_mono_declaration(self):
+        """A NEW HTML emitter must be declared in `MODULES`, not discovered late.
+
+        `tortoise/oauth.py` — the MCP consent page every client approves a grant
+        on — was found by REVIEW, not by the scan, and its declaration lives in
+        a module no `website/`-rooted pass could see (`#6870` review P2). This is
+        the reverse ratchet for that population: a second emitter (or a move of
+        the consent page's CSS into a new module) fails here, where adding it to
+        `MODULES` is a one-line registration instead of a silent blind spot.
+        """
+        repo = Path(__file__).resolve().parent.parent
+        undeclared = []
+        for path in sorted((repo / self.PY_ROOT).rglob("*.py")):
+            rel = path.relative_to(repo).as_posix()
+            if rel in self.MODULES:
+                continue
+            raw = path.read_bytes()
+            # Cheap byte pre-filter: 244 modules / ~16 MB, and no `.py` file can
+            # carry a declaration without this substring (the value filter below
+            # requires it), so the decode+regex pass only runs on candidates.
+            if b"monospace" not in raw:
+                continue
+            text = self._strip(raw.decode("utf-8", "replace"))
+            if next(self._mono_values(text), None) is not None:
+                undeclared.append(rel)
+        assert not undeclared, (
+            "these modules emit a mono declaration but are NOT in "
+            f"{type(self).__name__}.MODULES, so the scan never reads them and a "
+            "re-copied stack there ships unguarded (#6870):\n  "
+            + "\n  ".join(undeclared))
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Product-root marker contract (PR #9652 review, P1)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1484,5 +1717,3 @@ class TestProductRootMarkerContract:
             f"body` (found: {asserted!r}). It must read the RAW document — "
             "`_clean(body)` strips the attribute off the <html> element, so the "
             "assertion could never match.")
-
-

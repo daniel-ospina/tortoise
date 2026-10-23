@@ -37,12 +37,23 @@ MIGRATIONS = [
     # to it (`UndefinedColumn` on the point INSERT). `tests/
     # test_7950_capstone_probe.py` pins this list to `RECORD_MIGRATIONS`.
     "20261018000001_record_point_money_value_2782.sql",
+    # FORWARD `ALTER TABLE public.session ALTER COLUMN capture_redactions TYPE
+    # integer` (#9264). Same reason as the entry above: the probe drives the
+    # SHIPPED projection, so a schema still declaring `jsonb` keeps refusing the
+    # producer's integer count with `DatatypeMismatch` here too.
+    "20261022000001_record_session_capture_redactions_integer.sql",
+    # FORWARD `CREATE TABLE public.session_narrative` (§9.1 / R7, #9555). The
+    # shipped projection's `SessionRecorded` replay now emits an INSERT into it,
+    # so a list without this migration stands up a database that raises
+    # `UndefinedTable` the moment the probe runs the shipped code.
+    "20261023000001_record_session_narrative.sql",
     # The TENANCY POSTURE (#9554, epic #7879): the app role, its grants (and
-    # `relation_id_seq`'s USAGE), and the nine `*_app_tenant` policies. It adds
+    # `relation_id_seq`'s USAGE), and the `*_app_tenant` policies — one per record
+    # table, ten since #9555's `session_narrative`. It adds
     # no column and is applied anyway — the list is pinned to
     # `RECORD_MIGRATIONS` in EQUALITY, and a probe whose Postgres lacks the
     # policies is not the Postgres the shipped read runs against.
-    "20261022000001_record_tenancy_role_and_guc.sql",
+    "20261025000001_record_tenancy_role_and_guc.sql",
 ]
 DSN = "postgresql://postgres:cap@127.0.0.1:15499/capstone"
 

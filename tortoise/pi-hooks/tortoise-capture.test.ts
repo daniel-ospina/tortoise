@@ -20,6 +20,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
@@ -61,8 +62,10 @@ import {
   extractTurns,
   flushSpool,
   listSpoolEntries,
+  localSessionId,
   modelLabel,
   normaliseLane,
+  normaliseSessionId,
   postInstallProbe,
   pruneSpool,
   quarantineEntry,
@@ -285,6 +288,45 @@ test("buildCapturePayload carries harness + session_id (the idempotency key)", (
   // with 'hook'; dropping this stores no lane and the hook-liveness check
   // reports a WORKING hook as not-live (mutation: delete it — must go red).
   assert.equal(payload.capture_lane, "hook");
+});
+
+test("buildCapturePayload never puts a BLANK session id on the wire (#9599)", () => {
+  // The server refuses a blank id with 422 and `classifyFailure` calls a 422
+  // PERMANENT, so an un-normalised blank strands the capture in the spool
+  // forever. Absent (the key dropped) is the "let the server mint" contract
+  // the Python leg wires. MUTATION: revert `session_id` to `args.sessionId` —
+  // the three blank cases below then carry "   "/"\t"/" " and red.
+  const base = {
+    turns: [{ role: "user" as const, content: "hi" }],
+    source: "s",
+    machineId: "m",
+  };
+  for (const blank of ["   ", "\t", " \t\n ", "",
+    // ⛔ These five are the class Python's `str.strip` blanks and JS `trim`
+    // does NOT — membership here is what makes the rule a twin rather than a
+    // lookalike. Remove them from the regex and these cases red; replace the
+    // regex with `value.trim() === ""` and they red too.
+    "\u001c", "\u001d", "\u001e", "\u001f", "\u0085"]) {
+    const payload = buildCapturePayload({ ...base, sessionId: blank });
+    assert.equal(payload.session_id, undefined, `blank ${JSON.stringify(blank)}`);
+    // ⛔ Assert the SERIALISED form, not just the property: `JSON.stringify`
+    // drops an `undefined` value, and the serialised body is the actual wire
+    // contract (`postJson` sends what `stringify` yields).
+    assert.ok(
+      !("session_id" in JSON.parse(JSON.stringify(payload))),
+      "the key must leave the serialised body, not merely be undefined");
+  }
+  // A padded-but-REAL id is a legitimate identity (#9599) — it must reach the
+  // wire BYTE-IDENTICAL, or the capture is filed under a session the client
+  // never named.
+  for (const real of ["s1", "  s1  ", "\ts2\t",
+    // ⛔ U+FEFF is a BOM: JS `\s` calls it whitespace, Python does NOT. The
+    // twin follows PYTHON (the server's side of the contract), so a
+    // BOM-bearing id is forwarded rather than silently replaced by a minted
+    // one — `[^\S\uFEFF]` is what makes this case pass.
+    "\uFEFF"]) {
+    assert.equal(buildCapturePayload({ ...base, sessionId: real }).session_id, real);
+  }
 });
 
 test("buildCapturePayload forwards the ENTRY's lane, never a hardcoded one", () => {
@@ -2379,6 +2421,44 @@ test("#7708 site 2: the drain never puts an unrecognised lane on the wire", asyn
     "an unrecognised lane reached the wire");
 });
 
+// ── #9599: a blank session id must never reach the wire ───────────────────
+//
+// The Python drain normalises a blank `session_id` to "absent" so the server
+// MINTS one; this leg posts from the SAME spool directory, and the server now
+// refuses a blank with a 422 — which `classifyFailure` reads as PERMANENT, so
+// the entry would be quarantined and the capture never filed. One wire
+// normalisation, both legs.
+
+test("#9599: a blank session id normalises to absent (the server mints one)", () => {
+  for (const blank of ["   ", "\t", "\n", " \t\n "]) {
+    assert.equal(normaliseSessionId(blank), undefined, JSON.stringify(blank));
+  }
+  assert.equal(normaliseSessionId(""), undefined);
+  assert.equal(normaliseSessionId(null), undefined);
+  assert.equal(normaliseSessionId(0), undefined);
+  // Padded-but-REAL stays: refusing/trimming it is an open owner question on
+  // #9599, not a wire decision.
+  assert.equal(normaliseSessionId("  s1  "), "  s1  ");
+  assert.equal(normaliseSessionId("s1"), "s1");
+});
+
+test("#9599: the drain files a LEGACY blank-id entry instead of quarantining it", async () => {
+  const spool = tmpSpool();
+  // A legacy on-disk entry: written before the writers refused to store a blank
+  // (the Python writer now takes its path-anchored fallback instead).
+  // MUTATION THAT REDS THIS: drop `normaliseSessionId` from
+  // `buildCapturePayload` -> the body carries "   ", the real server answers
+  // 422, `classifyFailure` says PERMANENT and the entry is never filed.
+  writeSpoolEntry(spool, snapshot("   "));
+  const server = recordingServer();
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 1 });
+  assert.equal(server.posts(), 1);
+  const body = Array.from(server.sessions.values())[0];
+  assert.ok(!("session_id" in body),
+    `a blank id reached the wire: ${JSON.stringify(body.session_id)}`);
+  assert.deepEqual(readDiscards(spool), [], "the entry must be FILED, not discarded");
+});
+
 test("#7708 site 3: a filed entry with a falsy lane is skipped, not re-POSTed", async () => {
   const spool = tmpSpool();
   const sid = "sess-falsy-skip";
@@ -3173,4 +3253,128 @@ test("#2100: the SHIPPED ceilings are finite and identical on both legs", () => 
   // MUTATION THAT REDS THIS: raise either ceiling here only.
   assert.equal(SPOOL_MAX_ENTRIES, 1000);
   assert.equal(SPOOL_MAX_TOTAL_BYTES, 256 * 1024 * 1024);
+});
+
+test("#9599: a BLANK session id never keys a spool entry on nothing", () => {
+  // The LOCAL key is an identity too. `getSessionId()` returning a
+  // whitespace-only id is TRUTHY, so two different blank-id sessions landed in
+  // ONE entry — keyed sha256("   ")[:32] — and the second REPLACED the first's
+  // turns (measured). A blank must fall through to the path-anchored id, as an
+  // absent one does on the Python leg.
+  //
+  // MUTATIONS THAT RED THIS: revert `sessionId` to
+  // `manager?.getSessionId?.() ?? ""`, or to `normaliseSessionId(...) ?? ""`.
+  const spool = tmpSpool();
+  const pi = mockPi();
+  tortoiseCapture(pi as never, hermeticDeps(async () => {
+    throw new Error("no network in this phase");
+  }, spool));
+
+  // Two DIFFERENT sessions, both reporting a blank id.
+  pi.handlers.turn_end(
+    {},
+    mockCtx({ entries: PI_ENTRIES, sessionId: "   ", sessionFile: "/tmp/sessions/a.jsonl" }),
+  );
+  pi.handlers.turn_end(
+    {},
+    mockCtx({ entries: PI_ENTRIES, sessionId: "\t", sessionFile: "/tmp/sessions/b.jsonl" }),
+  );
+
+  const ids = listSpoolEntries(spool).metas.map((m) => m.session_id);
+  assert.equal(ids.length, 2, `two blank-id sessions must not collide: ${JSON.stringify(ids)}`);
+  for (const id of ids) {
+    assert.ok(typeof id === "string" && id.trim() !== "", `a blank key was stored: ${JSON.stringify(id)}`);
+  }
+  // Path-anchored and readable, exactly like `__main__._local_session_id`: the
+  // stem keeps it legible, the digest disambiguates two same-named files.
+  assert.deepEqual(
+    ids.slice().sort(),
+    [localSessionId("/tmp/sessions/a.jsonl"), localSessionId("/tmp/sessions/b.jsonl")].sort(),
+  );
+});
+
+test("#9599: the local id is the path-anchored twin of the Python leg", () => {
+  // Same derivation as `__main__._local_session_id`: `<stem>-<sha256(path)[:12]>`.
+  // The two legs share one spool directory, so a different spelling would split
+  // one session across two entries (or collide two onto one).
+  const a = localSessionId("/tmp/sessions/2026-01-01_abc.jsonl")!;
+  assert.match(a, /^2026-01-01_abc-[0-9a-f]{12}$/, a);
+  assert.equal(a, localSessionId("/tmp/sessions/2026-01-01_abc.jsonl"), "stable across calls");
+  assert.notEqual(a, localSessionId("/tmp/sessions/other.jsonl"), "two files must not collide");
+  assert.equal(localSessionId(undefined), undefined, "no path => no local id");
+  assert.equal(localSessionId(""), undefined);
+  // ⛔ The two cases a first cut got wrong, both measured against the Python
+  // leg on the same paths (they now agree byte-for-byte):
+  //   * a TRAILING dot: `Path('a.jsonl.').stem` is 'a.jsonl.', not 'a.jsonl'
+  //     (Node's `extname` returns '.' there, so `basename(x, ext)` strips it);
+  //   * a LEADING dot is not a suffix ('.gitignore' stays whole).
+  assert.ok(localSessionId("/tmp/x/a.jsonl.")!.startsWith("a.jsonl.-"), "trailing-dot stem");
+  assert.ok(localSessionId("/tmp/x/.gitignore")!.startsWith(".gitignore-"), "dotfile stem");
+});
+
+test("#9599: a REAL session id is still used verbatim for the spool key", () => {
+  // The narrow rule must not eat a legitimate id — and it must not silently
+  // rewrite it into a path id either.
+  const spool = tmpSpool();
+  const pi = mockPi();
+  tortoiseCapture(pi as never, hermeticDeps(async () => {
+    throw new Error("no network in this phase");
+  }, spool));
+  for (const real of ["sess-A", "  padded-real  "]) {
+    pi.handlers.turn_end(
+      {},
+      mockCtx({ entries: PI_ENTRIES, sessionId: real, sessionFile: "/tmp/sessions/a.jsonl" }),
+    );
+    assert.ok(readSpoolEntry(spool, real), `the real id ${JSON.stringify(real)} was rewritten`);
+  }
+});
+
+test("#9599: the local id resolves SYMLINKS like the Python leg (no split entries)", () => {
+  // ⛔ The case a lexical anchor gets wrong, and the reason the digest is taken
+  // from the REAL path: a harness that reaches its transcript through a
+  // symlinked directory (and on macOS every /tmp path, since /tmp ->
+  // /private/tmp) must produce the SAME key as the Python leg writing the
+  // resolved path — otherwise one session lands in two spool entries.
+  //
+  // MUTATION THAT REDS THIS: anchor on `resolvePath(sessionFile)` only.
+  const root = mkdtempSync(join(tmpdir(), "capture-sym-"));
+  const real = join(root, "real");
+  mkdirSync(real, { recursive: true });
+  const realFile = join(real, "session.jsonl");
+  writeFileSync(realFile, "x");
+  const linkDir = join(root, "link_dir");
+  symlinkSync(real, linkDir);
+  const viaLink = join(linkDir, "session.jsonl");
+
+  const throughLink = localSessionId(viaLink)!;
+  assert.equal(throughLink, localSessionId(realFile), "a symlinked dir split the key");
+  // ...and the STEM still comes from the path the caller gave (Python's
+  // `Path(p).stem`): a symlinked FILE keeps its own basename.
+  const fileLink = join(root, "filelink.jsonl");
+  symlinkSync(realFile, fileLink);
+  assert.match(localSessionId(fileLink)!, /^filelink-[0-9a-f]{12}$/,
+    "the stem must come from the ORIGINAL path, not the resolved one");
+});
+
+test("#9599: a not-yet-created transcript under a symlink still keys like Python", () => {
+  // `realpathSync` throws ENOENT for a missing LEAF, while Python's
+  // `Path.resolve()` (strict=False) resolves the longest EXISTING prefix and
+  // appends the rest. Falling back to the lexical resolve there would key the
+  // pre-creation spool entry differently from the post-creation one — one
+  // session, two entries — on exactly the hook path that spools before its
+  // transcript exists.
+  //
+  // MUTATION THAT REDS THIS: on the catch, fall back to `resolvePath(file)`.
+  const root = mkdtempSync(join(tmpdir(), "capture-missing-"));
+  const real = join(root, "real");
+  mkdirSync(real, { recursive: true });
+  const linkDir = join(root, "link_dir");
+  symlinkSync(real, linkDir);
+  const missing = join(linkDir, "not_created_yet.jsonl");
+  const created = join(real, "not_created_yet.jsonl");
+
+  assert.equal(localSessionId(missing), localSessionId(created),
+    "the not-yet-existent leaf was anchored differently from its real path");
+  // A wholly non-existent path is still anchored (lexically) rather than throwing.
+  assert.match(localSessionId(join(root, "a", "b", "c.jsonl"))!, /^c-[0-9a-f]{12}$/);
 });

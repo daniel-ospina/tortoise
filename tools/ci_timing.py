@@ -51,6 +51,7 @@ import math
 import os
 import re
 import subprocess
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -823,9 +824,120 @@ class DurationsBridgeError(Exception):
     """The bridge refused to render the map (fail-closed)."""
 
 
+def parse_junit(path: Path) -> dict:
+    """Per-file durations from a JUnit XML report — EVERY executed testcase.
+
+    WHY THIS EXISTS, and it is the whole reason the map could not balance.
+    `parse_log` reads pytest's `--durations=15` block, which is a WINDOW, not a
+    census: it lists the 15 slowest (setup+call+teardown) rows of a whole leg.
+    MEASURED on run 39782493641 (2026-10-22, full matrix). Every figure below is
+    keyed the way THIS TOOL keys — by the `file=` attribute, one per executed
+    testcase — and the counts are DISTINCT FILES, not `classname`s (a first
+    draft of this note quoted classname counts, 198 and 157, which measure
+    test MODULES per leg rather than the files the map packs by; corrected
+    under the #9651 review):
+
+    * `test (h)` executed 2,594 testcases over **76** distinct files in 575 s of
+      test time, and the `--durations=15` block of that leg names **8** of them;
+      `test (g)` spans 71 files and its block names 9;
+    * over all legs, the window names **82 of the fast pool's 991 files — 8.3 %**,
+      and the window's own per-leg test time sums to 1,093 s against the census's
+      3,341 s: a **3.06x** under-measurement of the pool whose weights the shard
+      LPT pack is balanced by, while the map it writes claims 1.00x shard
+      balance (624 s per fast shard).
+
+    A stale weight is not a wrong pack: it is a pack of the wrong problem, and
+    the pole leg it produces is the merge ceiling
+    (docs/ci/merge-throughput-measurements.md M2 named this defect and its
+    lever, but the lever's INPUT was still truncated).
+
+    THE SAME STEP ALREADY UPLOADS THE CENSUS. Every `pytest-log-*` artifact
+    carries `/tmp/junit.xml` beside `pytest.log`, and each testcase row carries
+    `file=` and `time=` — so no workflow change is needed to get a complete
+    measurement, only a reader that uses it.
+
+    Shape: `file_paths` matches :func:`parse_log`'s key and totals (`{tests, total_ms,
+    max_ms}`; this reader ADDS a `ran` count, which the log reader has no way to
+    compute) so :func:`_resolve_to_manifest_keys` and
+    :func:`collector_file_weights` treat both sources identically. `ran` counts
+    the testcases that actually EXECUTED. An XFAIL EXECUTED — pytest writes it as
+    `<skipped type="pytest.xfail">` on a testcase that ran and failed as expected
+    — so it is counted, the same predicate `tools/skip-guard.py` already uses
+    (`(skipped.get('type') or '') != "pytest.xfail"`) and pins in
+    `tests/test_ci_expected_manifests.py`. Counting it as a skip under-measures a
+    file by exactly its xfail cost and, when every test in a file xfails, drops a
+    real weight to `DURATIONS_VALUE_FLOOR_S` — the harm this reader exists to
+    prevent. Only a genuinely skipped testcase contributes no time, and a file
+    with no executed testcase is reported with `total_ms == 0.0` and skipped by
+    the caller.
+
+    Never raises: like :func:`parse_log`, a malformed report is an `error`
+    string on the returned dict, so one truncated artifact cannot abort a
+    sweep. A report that parses but is ITSELF truncated (a leg killed by
+    `--maxfail`) is not detectable here by construction — the fix is the
+    `tests` witness this reader returns: a reading that saw fewer testcases
+    than the file declares cannot lower that file's weight
+    (`render_refreshed_manifest`'s `coverage` guard), so truncation can only
+    RAISE a weight, never discount one.
+    """
+    files: dict[str, dict] = {}
+    error: str | None = None
+    try:
+        root = ET.parse(path).getroot()
+    except (OSError, ET.ParseError) as exc:
+        return {"file_paths": {}, "error": f"unreadable: {exc}"}
+    for case in root.iter("testcase"):
+        raw = (case.get("file") or "").replace("\\", "/")
+        if not raw:
+            # xunit1 omits `file` when pytest could not attribute the case; a
+            # basename is the only remaining key and basenames never SELECT a
+            # manifest key downstream (#6092 F3), so it is dropped here rather
+            # than resolved by guess.
+            continue
+        entry = files.setdefault(
+            _tests_relative_path(raw),
+            {"tests": 0, "ran": 0, "total_ms": 0.0, "max_ms": 0.0})
+        entry["tests"] += 1
+        skipped = case.find("skipped")
+        # ⛔ AN XFAIL RAN. pytest writes it as `<skipped type="pytest.xfail">` on a
+        # testcase that executed and failed as expected, WITH a real `time`. The
+        # correct predicate is already codified in this repo (`tools/skip-guard.py`,
+        # cycle-9 finding, pinned by
+        # `tests/test_ci_expected_manifests.py::test_an_xfail_is_not_an_outcome_violation`);
+        # reading only the child's presence here would drop an xfail's cost from its
+        # file and floor an all-xfail file at 0.1 s (PR #9651 review P1).
+        if skipped is not None and (skipped.get("type") or "") != "pytest.xfail":
+            continue
+        try:
+            seconds = float(case.get("time") or 0.0)
+        except ValueError:
+            seconds = 0.0
+        entry["ran"] += 1
+        entry["total_ms"] += seconds * 1000.0
+        entry["max_ms"] = max(entry["max_ms"], seconds * 1000.0)
+    return {"file_paths": files, "error": error}
+
+
 def collector_file_measurements(logs_dir: Path) -> dict[str, dict]:
     """Per-file measurement from the collector's OWN parser: seconds, and how
     many of the file's testcases that reading SAW.
+
+    Two sources, and the JUnit census WINS on every file it covers: a leg's
+    `junit.xml` reports every executed testcase's time, while its `pytest.log`
+    `--durations=15` block reports only that leg's 15 slowest rows — the same
+    file's log-derived total is USUALLY a partial sum of the junit-derived one
+    (see :func:`parse_junit`). "Usually", because the window can also carry a
+    file the census did not attribute (a case with no `file=`): `test_event_store.py`
+    measured 7.02 s from the log against 5.43 s from the census on leg `test-i`,
+    which is why the committed row is 7.0 — the `>` below keeps the larger. The
+    operative guarantee is that one: a larger log value still wins, so no
+    measurement can shrink by adding a source. The log stays as the source for
+    the one lane that uploads `pytest.log` alone (`test-concurrency-falkor`).
+
+    A sweep with NO junit at all is the window-only path this function exists to
+    end, so it says so out loud; and `main` REFUSES to write such a sweep, because
+    the partial sums would re-stamp `durations_captured_at` and look exactly like
+    a census (PR #9651 review, P1).
 
     Keyed by the tests/-relative PATH (`sub/test_x.py`), not the basename: two
     files that share a basename in different directories are distinct
@@ -843,6 +955,17 @@ def collector_file_measurements(logs_dir: Path) -> dict[str, dict]:
     parameter; without it a refresh silently lands a lower bound as a weight
     (measured on #9134: `test_surface_manifest.py` 199.1 -> 36.0, 5.5x, from a
     reading that saw 2 of the file's testcases).
+
+    Every entry also carries `source`: which reading WON it, `census` (a leg's
+    `junit*.xml`) or `top-15` (that leg's `--durations=15` block). It exists
+    because the BASIS LABEL a refresh writes onto the rows it moves is built from
+    the readings the sweep actually took, never from the presence of a
+    `junit*.xml` file (PR #9651 review, P2). The label was hardcoded
+    `ci-timing top-15`, so once the census became the source for most rows every
+    row a refresh re-based or held stated a source its value did not come from.
+    Deriving the label from `source` is also the rule this whole module is about:
+    an artifact that is PRESENT is not an artifact that was READ (the
+    `--allow-window-only` refusal one level up makes the same distinction).
     """
     out: dict[str, dict] = {}
     for log_path in sorted(Path(logs_dir).rglob("*.log")):
@@ -852,9 +975,66 @@ def collector_file_measurements(logs_dir: Path) -> dict[str, dict]:
             # The LARGER reading across jobs wins, and its test count is the one
             # that describes it — pairing a winning `seconds` with a losing
             # job's count would make the coverage witness describe a different
-            # measurement than the weight it accompanies.
+            # measurement than the weight it accompanies. `source` travels with
+            # the same rule, for the same reason: it must describe the reading
+            # that WON, so the basis label never cites a source this file's
+            # value did not come from (PR #9651 review, P2).
             if seconds > out.get(path, {}).get("seconds", 0.0):
-                out[path] = {"seconds": seconds, "tests": int(entry["tests"])}
+                out[path] = {"seconds": seconds, "tests": int(entry["tests"]),
+                             "source": "top-15"}
+
+    # THE CENSUS PASS (`parse_junit`): a leg's `junit.xml` reports EVERY executed
+    # testcase, not its 15 slowest rows, so its `tests` witness is normally the
+    # whole file and the reading may legitimately re-base a stale weight — the
+    # value this PR exists to collect. It also carries a `file=` on every case,
+    # so no basename bridge is involved. `junit*.xml` covers the D14 upload too
+    # (its report is `junit-d14.xml`).
+    junit_sources = sorted(Path(logs_dir).rglob("junit*.xml"))
+    # A SET, not a counter: this figure is compared against `len(out)` (distinct
+    # files), and counting (file, leg) pairs inflated the numerator with every
+    # extra leg until the notice fell silent on a genuinely partial sweep
+    # (PR #9651 review cycle 2, P2).
+    junit_covered: set[str] = set()
+    for junit_path in junit_sources:
+        parsed = parse_junit(junit_path)
+        if parsed["error"]:
+            # A leg that can only be read from the window is a COVERAGE DIP, said
+            # out loud: the row it would have measured keeps the committed value
+            # (the witness above refuses the discount) rather than being silently
+            # re-based on a partial sum (PR #9651 reviews, P1/P2).
+            print(f"::warning::junit census skipped ({junit_path.name}: "
+                  f"{parsed['error']}) — that leg can only be read from the "
+                  "--durations window, so its files may be RAISED but not "
+                  "lowered this sweep", file=sys.stderr)
+            continue
+        for path, entry in parsed["file_paths"].items():
+            if not entry["ran"]:
+                # Every testcase skipped on this leg: the leg did not carry the
+                # file, so it has nothing to say about its cost.
+                continue
+            junit_covered.add(path)
+            seconds = max(float(entry["total_ms"]) / 1000.0, DURATIONS_VALUE_FLOOR_S)
+            # Same rule as the log pass: the LARGER reading wins, and ITS test
+            # count and `source` are what describe it.
+            if seconds > out.get(path, {}).get("seconds", 0.0):
+                out[path] = {"seconds": seconds, "tests": int(entry["tests"]),
+                             "source": "census"}
+    if out and not junit_sources:
+        # The census is the whole point of this sweep: without it the refresh
+        # re-writes the map from the 15-row window and re-stamps
+        # `durations_captured_at` exactly as a census sweep would. The caller
+        # (`main`) REFUSES to write such a sweep; this line is the reason it does.
+        print("::warning::no junit artifact in the logs dir — the durations map "
+              "cannot be refreshed from the --durations WINDOW alone, which "
+              "names the slowest rows of each leg and not its files",
+              file=sys.stderr)
+    elif out and len(junit_covered) < len(out):
+        # The remainder is NOT all window-derived: a key the sweep never sampled is
+        # CARRIED FORWARD by the bridge, so name the three sources, not two.
+        print(f"::notice::junit census supplied {len(junit_covered)} of "
+              f"{len(out)} measured files; the rest came from the "
+              "--durations window or were carried forward from the committed map",
+              file=sys.stderr)
     return out
 
 
@@ -1344,6 +1524,7 @@ def _collectable_statements(
             out.extend(_collectable_statements(handler.body, type_checking))
         for case in getattr(node, "cases", []) or []:
             out.extend(_collectable_statements(case.body, type_checking))
+
     return out
 
 
@@ -1639,8 +1820,16 @@ _CLAUSE_SEPARATORS = (" — ", "; ", ". ", ", ")
 # ADOPTED basis inside this shape (`; was 42.4`) is the exception:
 # `_strip_prior_held_basis` keeps it, because it is the only record of what
 # produced the surviving value.
+#
+# ⛔ BOTH label shapes must be recognised: `junit-census+top-15` is what this
+# render writes now that the census is the reading (PR #9651 review, P2), and
+# `top-15` is what every row ALREADY IN the map carries. Recognizing only the new
+# shape would leave the oldest rows' bases unpinned and let each one grow a second
+# sentence on its next hold — the defect this strip exists to prevent.
+_SAMPLE_LABEL_RE = r"ci-timing (?:junit-census\+top-15|top-15)"
 _PRIOR_BASIS_RE = re.compile(
-    r"(?:^[ \t]*#[ \t]*|[ \t]+—[ \t]+)ci-timing top-15 \d{4}-\d{2}-\d{2} \(run [^)]*\)"
+    rf"(?:^[ \t]*#[ \t]*|[ \t]+—[ \t]+){_SAMPLE_LABEL_RE} \d{{4}}-\d{{2}}-\d{{2}} "
+    r"\(run [^)]*\)"
     r"(?:;[ \t]*was [0-9]+(?:\.[0-9]+)?|:[^—]*)?[ \t]*$")
 
 # …and the shape of an ADOPTED basis inside that match (`; was 42.4`). It records
@@ -1711,15 +1900,17 @@ def _is_stale_provenance(tail: str) -> bool:
 # OUR OWN basis strings — the shapes `render_refreshed_manifest` writes. A note
 # is "pure provenance" only when it is NOTHING BUT these, joined by ` — `:
 # `#9017 CI-junit 2026-10-18 (run 39165691659); was 42.6`,
-# `ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 3 of 4 testcases =
-# 274.5s, a LOWER bound; kept 275.9`. `_PURE_PROVENANCE_RE` is only a PREFIX
+# `ci-timing junit-census+top-15 2026-10-19 (run 39191149586): the reading saw 3
+# of 4 testcases = 274.5s, a LOWER bound; kept 275.9` (and the `top-15` label
+# shape every row already in the map carries — see `_SAMPLE_LABEL_RE`).
+# `_PURE_PROVENANCE_RE` is only a PREFIX
 # match, so using it alone read `#9017 CI-junit 2026-10-18 (run 42); was 180.7 —
 # do not drop this row; required for the #4348 floor` as "nothing survives" and
 # deleted the instruction with it (#9134 review, P2). The remainder after these
 # tokens must be separators only.
 _OUR_BASIS_TOKEN_RE = re.compile(
     r"(?:\d+\s+)?"          # `#9017 ` — `_note_body` strips the `#`
-    r"(?:ci-timing\s+top-15|CI-junit)\s+\d{4}-\d{2}-\d{2}"
+    r"(?:" + _SAMPLE_LABEL_RE.replace(" ", r"\s+") + r"|CI-junit)\s+\d{4}-\d{2}-\d{2}"
     r"(?:\s*\(run [^)]*\))?"
     r"(?::[^—]*|;[ \t]*was[ \t]+[0-9]+(?:\.[0-9]+)?)?"
     r"|\d{4}-\d{2}-\d{2}(?!\S)",
@@ -1869,8 +2060,13 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
     a caller that has no witness must not be reported as having one.
 
     `sample_label` names the basis written onto every row this render RE-BASES
-    (`ci-timing top-15 2026-10-19 (run 39191149586)`), in the shape the map
-    already uses for a re-derived row. It pairs with the stale-provenance rule
+    (`ci-timing junit-census+top-15 2026-10-19 (run 39191149586)`), in the shape
+    the map already uses for a re-derived row. The caller builds it from the
+    readings the sweep actually took — `main` derives it from
+    :func:`collector_file_measurements`' per-file `source`, so the label cites the
+    census only when a census reading exists — and the witness this renderer
+    writes beside it states the COUNT, never the source (`the reading saw 3 of 4
+    testcases`), because `observed` describes whichever reading won. It pairs with the stale-provenance rule
     above: a note that IS the citation is dropped because it no longer applies, a
     rationale that merely DATES the value loses only that clause, and either way
     the replacement says what the basis now is. A HELD row (`kept`) keeps its
@@ -1999,7 +2195,7 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
                           "the reading cannot prove it saw the whole file")
             elif declared == 1:
                 reason = ("a single-test file cannot prove full coverage from a "
-                          "top-15 projection")
+                          "partial reading")
             else:
                 reason = None
             # `# unmeasured` stops being true once a leg collected the file at
@@ -2008,12 +2204,21 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
             # follows it (`test_2296_document_created_journal.py` lost 27.0's
             # whole "WHAT THE NUMBER IS" note that way).
             tail = _restate_unmeasured_marker(tail)
-            # Two shapes: a COUNTED witness states what it saw (`top-15 saw 2 of
-            # 10 testcases = 36.0s`); a witness that cannot count at all
+            # Two shapes: a COUNTED witness states what it saw (`the reading saw
+            # 2 of 10 testcases = 36.0s`); a witness that cannot count at all
             # (single-test file, absent denominator) states why the count cannot
             # decide, then the reading itself.
+            #
+            # ⛔ SOURCE-NEUTRAL wording on purpose (PR #9651 review, P2). It used
+            # to read `top-15 saw …` and to name a "top-15 projection", both of
+            # which became false once this renderer's caller started supplying
+            # CENSUS readings: `observed` is whatever reading won (`census` or the
+            # `--durations` window), so the witness names the count, never the
+            # source. Which sources the sweep took is the LABEL's job
+            # (`sample_label`, built by `main` from
+            # :func:`collector_file_measurements`' `source`).
             basis = (
-                f"{sample_label}: top-15 saw {observed} of {declared} "
+                f"{sample_label}: the reading saw {observed} of {declared} "
                 f"testcases = {measured:.1f}s in the largest single job "
                 f"(not summed across legs), a LOWER bound; kept {previous:.1f}"
                 if reason is None else
@@ -2915,10 +3120,21 @@ def main() -> int:
                     help="#5215 Task 4b — write the collector's per-file durations into "
                          "config/ci-surfaces.yml:durations (text-preserving, fail-closed). "
                          "This is ci-timing.yml's only emit path into that map.")
+    ap.add_argument("--allow-non-push-run", action="store_true",
+                    help="with --refresh-durations, accept a sampled run that is "
+                         "NOT a completed push to main; refused by default since "
+                         "#9651's review, because a PR run executes only the "
+                         "diff-selected legs and can under-measure a slow-pool file")
     ap.add_argument("--manifest", default="config/ci-surfaces.yml",
                     help="the selection manifest whose `durations:` map is refreshed")
     ap.add_argument("--dry-run", action="store_true",
                     help="with --refresh-durations, render + validate but do not write")
+    ap.add_argument("--allow-window-only", action="store_true",
+                    help="with --refresh-durations, accept a sweep that carries NO "
+                         "junit artifact (a --durations WINDOW, i.e. 15 partial rows "
+                         "per leg) — refused by default since #9651's review: a "
+                         "window-only sweep re-stamped `durations_captured_at` "
+                         "exactly as a census sweep would")
     ap.add_argument("--paid-vs-selected", action="store_true",
                     help="#7532 — print what the gate PAID (test* job execution) against what "
                          "the diff SELECTED (ci_selection weight), plus the queue-wait split; "
@@ -2939,10 +3155,91 @@ def main() -> int:
         return 0
 
     if args.refresh_durations:
+        # ⛔ THE SWEEP MUST BE A CENSUS (PR #9651 review, P1).
+        # `collector_file_measurements` warns when no junit artifact is present,
+        # but a warning left the whole 4 %-coverage path intact: the window's
+        # partial sums were written over census values AND
+        # `durations_captured_at` was re-stamped, so one sweep later a
+        # window-only refresh was indistinguishable from a real census one —
+        # every gate green on a map nobody measured. The coverage witness below
+        # stops a PARTIAL reading from DISCOUNTING a weight; this stops a sweep
+        # with no census at all from claiming it measured the map.
+        census_sources = sorted(Path(args.logs_dir).rglob("junit*.xml"))
+        if not census_sources and not args.allow_window_only:
+            print(
+                f"2: no `junit*.xml` under {args.logs_dir} — a --durations WINDOW "
+                "is a partial sum (15 rows per leg, ~8 % of the fast pool), so "
+                "refreshing the durations map from it would re-stamp "
+                "`durations_captured_at` exactly as a census sweep does. "
+                "Download the run's `pytest-log-*` artifacts (each carries "
+                "`junit.xml` beside `pytest.log`), or pass --allow-window-only "
+                "to accept a window-only refresh (the coverage witness still "
+                "forbids any weight from shrinking).",
+                file=sys.stderr)
+            return 2
+        # ⛔ AND ITS SOURCE MUST BE A PUSH TO MAIN (PR #9651 review, P1).
+        # `pick_run` samples `event=push&branch=main` because a PR run executes
+        # only the DIFF-SELECTED legs: a slow-pool file can then be measured
+        # from one whole-tree `-m embedded_only` slice. Measured on #9651: the
+        # census that came from a `pull_request` run put `test_hosted_api.py` at
+        # 6.8 s (6 testcases of 462), against 174.5 s measured on a push run —
+        # a 22x under-weight in the pool the slow shards are LPT-packed by.
+        # Nothing validated `--run-id` before this check.
+        sampled_run_id = args.run_id.strip()
+        if sampled_run_id and not args.allow_non_push_run:
+            try:
+                sampled = fetch_run(args.repo, sampled_run_id)
+            except (subprocess.CalledProcessError, DurationsBridgeError, OSError) as exc:
+                # Cannot verify = cannot certify the basis. Say so loudly and
+                # carry on: the sweep's own census artifacts are still the
+                # quality input this function consumes, and a network hiccup
+                # must not block the weekly refresh.
+                print(
+                    f"::warning::ci_timing: could not verify the provenance of "
+                    f"run {sampled_run_id} ({exc}) — the durations map may only "
+                    "be seeded from a completed push-to-main run; pass "
+                    "--run-id of such a run, or --allow-non-push-run to accept "
+                    "this one knowingly", file=sys.stderr)
+            else:
+                event = sampled.get("event")
+                branch = sampled.get("head_branch")
+                if event != "push" or branch != "main":
+                    print(
+                        f"2: run {sampled_run_id} is event={event!r} "
+                        f"head_branch={branch!r}, not a push to main — a PR run "
+                        "executes only the diff-selected legs, so a slow-pool "
+                        "file can be measured from a partial slice (measured on "
+                        "#9651: 174.5 s -> 6.8 s). Seed the map from a "
+                        "push-to-main run, or pass --allow-non-push-run to "
+                        "override.", file=sys.stderr)
+                    return 2
         captured_at = (os.environ.get("CI_TIMING_NOW")
                        or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))  # noqa: UP017
         manifest_path = Path(args.manifest)
         measurements = collector_file_measurements(Path(args.logs_dir))
+        # ⛔ AND IT MUST BE A CENSUS THAT WAS READ, NOT ONE THAT EXISTS (PR #9651
+        # review, P2). The refusal above keys on `rglob`, i.e. on artifact
+        # PRESENCE: a truncated `junit*.xml` (a leg killed by the in-step timeout
+        # watchdog) — or a partial artifact download — satisfies it while
+        # contributing not one measured file, and the sweep then writes the
+        # window's partial sums and re-stamps `durations_captured_at`. That is the
+        # exact outcome the refusal above exists to prevent, reached one level
+        # down, so the guard asks the question it means to ask: `source` is the
+        # reading's own account of which input WON, which a file listing cannot
+        # answer.
+        if (not any(m["source"] == "census" for m in measurements.values())
+                and not args.allow_window_only):
+            print(
+                f"2: {len(census_sources)} `junit*.xml` file(s) under "
+                f"{args.logs_dir} but NOT ONE of them produced a measured file — "
+                "a truncated or partially downloaded report leaves this sweep to "
+                "the `--durations` WINDOW, a partial sum (15 rows per leg), so "
+                "refreshing the map from it would re-stamp "
+                "`durations_captured_at` exactly as a census sweep does. "
+                "Re-download the run's `pytest-log-*` artifacts, or pass "
+                "--allow-window-only to accept a window-only refresh.",
+                file=sys.stderr)
+            return 2
         weights = {path: m["seconds"] for path, m in measurements.items()}
         # THE LOWER-BOUND WITNESS (#9134 review, P1): what the reading SAW, and
         # what the file declares. Built here, in the production path only, so the
@@ -2979,7 +3276,20 @@ def main() -> int:
             )
         coverage = {path: (m["tests"], declared[path])
                     for path, m in measurements.items() if path in declared}
-        sample_label = (f"ci-timing top-15 {captured_at[:10]} "
+        # ⛔ THE LABEL NAMES THE READING THIS SWEEP ACTUALLY TOOK (PR #9651
+        # review, P2). It was hardcoded `ci-timing top-15`, which was true before
+        # this tool learned to read `junit.xml` and false afterwards: the census is
+        # the source for most rows now, so the label cited a window that produced
+        # a minority of the values — and a `--allow-window-only` sweep would still
+        # have claimed nothing about the census it never read. `source` comes from
+        # the winning reading per file, so a broken/absent census cannot be
+        # mistaken for one that was read (unlike a listing of `junit*.xml`).
+        # A sweep that read NO census (its only justification is
+        # `--allow-window-only`) is labelled `top-15`, which is then the truth.
+        sweep_sources = {m["source"] for m in measurements.values()}
+        reading = ("junit-census+top-15" if "census" in sweep_sources
+                   else "top-15")
+        sample_label = (f"ci-timing {reading} {captured_at[:10]} "
                         f"(run {args.run_id.strip() or 'unknown'})")
         return refresh_durations(
             manifest_path,

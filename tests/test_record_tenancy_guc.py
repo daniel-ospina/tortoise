@@ -77,7 +77,7 @@ from tortoise import record_writer as rw
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MIGRATIONS = REPO_ROOT / "supabase" / "migrations"
-TENANCY_MIGRATION = MIGRATIONS / "20261022000001_record_tenancy_role_and_guc.sql"
+TENANCY_MIGRATION = MIGRATIONS / "20261025000001_record_tenancy_role_and_guc.sql"
 
 ORG, GRAPH = "org-1", "graph-1"
 

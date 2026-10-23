@@ -1095,7 +1095,7 @@ ${opts.head}
 <link rel="icon" href="/blog/favicon.svg" type="image/svg+xml">
 ${opts.extraHead ?? ""}
 <style>
-:root{--bg:#060b14;--bg-soft:#0b1220;--text:#cbd5e1;--text-dim:#94a3b8;--accent:#06b6d4;--border:#1e293b;--serif:Georgia,'Times New Roman',serif;--mono:'SF Mono','Cascadia Code','Fira Code',JetBrains Mono,monospace}
+:root{--bg:#060b14;--bg-soft:#0b1220;--text:#cbd5e1;--text-dim:#94a3b8;--accent:#06b6d4;--border:#1e293b;--serif:Georgia,'Times New Roman',serif;--mono:ui-monospace,SFMono-Regular,'SF Mono',Menlo,'Cascadia Code','Fira Code','JetBrains Mono',monospace}
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:var(--bg);color:var(--text);font-family:var(--mono);font-size:14px;line-height:1.6;-webkit-font-smoothing:antialiased}
 a{color:var(--accent);text-decoration:none}

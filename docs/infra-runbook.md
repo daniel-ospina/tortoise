@@ -2597,7 +2597,7 @@ are decided in
 [`docs/epics/2026-10-10-7879-postgres-record/09-record-tenancy-decision.md`](epics/2026-10-10-7879-postgres-record/09-record-tenancy-decision.md);
 this section is the **operator procedure** that goes with it.
 
-**The split.** Migration `20261022000001_record_tenancy_role_and_guc.sql` creates the role
+**The split.** Migration `20261025000001_record_tenancy_role_and_guc.sql` creates the role
 (`NOLOGIN NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE`) and grants it exactly the record tables'
 `SELECT/INSERT/UPDATE/DELETE`, `USAGE` on `public.relation_id_seq` (the IDENTITY sequence — a table
 `INSERT` grant does **not** confer `nextval`, and without it every `relation` insert raises
@@ -2649,9 +2649,11 @@ app-role DSN and reported every cache key `missing_in_record`, i.e. `exit 3` on 
 **⛔ NEVER GRANT `tortoise_record_app` MEMBERSHIP IN `service_role`, `postgres`, or any role that
 carries a permissive policy.** Policy applicability follows `has_privs_of_role`, so membership makes
 that role's policies apply to this one — including `service_role`'s `*_service_role_all USING (true)`
-— and `NOINHERIT` does **not** prevent it (measured on `postgres:16.15`: after `GRANT svc TO app` the
-app role saw 2 rows across 2 tenants while `rolbypassrls` still read `false`, and `NOINHERIT` changed
-nothing). The boundary is therefore the grants **and** the absence of membership; a role that was
+— measured on `postgres:16.15`: after `GRANT svc TO app` (the default `WITH INHERIT TRUE`) the app
+role saw 2 rows across 2 tenants while `rolbypassrls` still read `false`. Setting `NOINHERIT` on the
+role, or granting `WITH INHERIT FALSE`, does stop that policy from applying — which is exactly why
+the guard asserts `pg_has_role(…, 'USAGE')` rather than `'MEMBER'` — but neither is something to rely
+on, because `INHERIT` is the default on both sides. The boundary is therefore the grants **and** the absence of membership; a role that was
 flipped or granted membership must be corrected as an operator, and the migration fails closed when
 the applying role cannot re-assert the attributes.
 
@@ -2661,10 +2663,13 @@ the applying role cannot re-assert the attributes.
 reads it back, and — on the same statement — refuses the connection when `current_user` is a
 superuser, is `BYPASSRLS`, is a **member** of either, or **owns** a record table. So a DSN naming
 `postgres` or `service_role` (or `tortoise_record_app` after a mistaken `GRANT`) does not silently
-write and read across tenants with the policies unevaluated: the first write or read raises, names
-this runbook section, and the operator fixes the DSN. The same applies to
-`tortoise record-reconcile`, whose record read would otherwise return zero rows and report a
-coherent pair as **divergent**.
+write and read across tenants with the policies unevaluated: the first write or read raises, and
+the operator fixes the DSN.
+The same refusal covers `tortoise record-reconcile`, whose record read would otherwise return zero
+rows and report a coherent pair as **divergent**. It is fail-closed but not self-explaining: the
+verb's CLI reports the error's TYPE only, so a wrong-role DSN surfaces as
+`record is unreadable (RecordProjectionError)` with no role named — if you see that, check the DSN's
+role against this section first, because the same message covers a transient record outage.
 
 ### Runtime Config (non-secret)
 

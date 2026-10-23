@@ -118,6 +118,73 @@ def test_a_record_sourced_rebuild_survives_the_cache_being_destroyed():
     assert [r[0] for r in rels] == ["acme"]
 
 
+def _props(proj: FalkorProjection, label: str, key_prop: str,
+           key: str) -> dict:
+    """`properties(n)` for one node, read back from the cache."""
+    rows = proj.query(
+        f"MATCH (n:{label} {{{key_prop}: $k}}) RETURN properties(n)",
+        k=key).result_set
+    assert rows, f"no :{label} {{{key_prop}: {key!r}}} in the cache"
+    return dict(rows[0][0])
+
+
+def test_a_record_sourced_node_carries_the_discriminator_the_fold_supplies():
+    """LIVE ≠ RECORD closed for the fold's `ON CREATE` discriminator (#9634).
+
+    The residual of #9572 (open, unmerged) — the half that must land WITH it,
+    measured on a real engine: `_upsert_subject` writes `s.subjectKind=$sk` with
+    the parameter defaulting to `"other"`, and `_upsert_object` writes
+    `coalesce($ok, 'other')` / `coalesce($title, '')`. A record row can be
+    silent about the kind (no column value), and a cache built from the RECORD
+    used to materialize the node WITHOUT `subjectKind`, a property ONTOLOGY §4.2
+    (Subject) / §4.3 (Object) lists as required. This test
+    builds each node BOTH ways and compares the properties the fold owns.
+
+    ⚠️ The comparison is restricted to the fold's `ON CREATE` properties: a
+    record-sourced rebuild deliberately does NOT carry the projection-owned
+    `status` cache (§2.6) nor the `$now`-defaulted `createdAt`, both of which
+    the fold writes and the record does not own — that divergence is declared
+    in `cache_projection.FOLD_ON_CREATE_DEFAULTS`'s docstring, not asserted away
+    here.
+    """
+    fold_owned = {"subjectKind", "objectKind", "title"}
+
+    # ── the RECORD side: rows that are SILENT about the kind (NULL columns) ──
+    rec = _projection()
+    view = cp.RecordView(nodes=(
+        cp.node_from_row("Subject", {"name": "Probe", "id": "s-rec",
+                                     "subject_kind": None, "props": {}}),
+        cp.node_from_row("Object", {"name": "AcmeProbe", "id": "o-rec",
+                                    "object_kind": None, "title": None,
+                                    "props": {}}),
+    ))
+    rec.rebuild_from_record(view, confirm_destructive=True)
+    record_subject = _props(rec, "Subject", "name", "Probe")
+    record_object = _props(rec, "Object", "name", "AcmeProbe")
+
+    # ── the FOLD side: the same bare write, through the live/replay clause ──
+    rec._wipe_all_nodes(confirm_destructive=True, operation="test-fold-side")
+    rec._upsert_subject({"id": "s-fold", "name": "Probe"})
+    rec._upsert_object({"id": "o-fold", "name": "AcmeProbe"})
+    fold_subject = _props(rec, "Subject", "name", "Probe")
+    fold_object = _props(rec, "Object", "name", "AcmeProbe")
+
+    # The defect itself: the property must be PRESENT on both sides.
+    assert "subjectKind" in record_subject, (
+        "a record-sourced :Subject was materialized without `subjectKind` — "
+        "the live ≠ record divergence #9634 measured"
+    )
+    assert {k: v for k, v in record_subject.items() if k in fold_owned} == \
+           {k: v for k, v in fold_subject.items() if k in fold_owned}
+    assert {k: v for k, v in record_object.items() if k in fold_owned} == \
+           {k: v for k, v in fold_object.items() if k in fold_owned}
+
+    # And the values are the fold's, not something merely non-empty.
+    assert record_subject["subjectKind"] == fold_subject["subjectKind"] == "other"
+    assert record_object["objectKind"] == fold_object["objectKind"] == "other"
+    assert record_object["title"] == fold_object["title"] == ""
+
+
 def test_no_field_is_written_that_the_record_does_not_claim():
     """S3's contract clause, against the live graph rather than the plan."""
     proj = _projection()

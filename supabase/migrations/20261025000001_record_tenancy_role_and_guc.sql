@@ -1,5 +1,5 @@
 -- ============================================================================
--- Migration 20261022000001: the record's TENANCY POSTURE — the connecting role,
+-- Migration 20261025000001: the record's TENANCY POSTURE — the connecting role,
 -- and the tenant GUC it is scoped by (R6, epic #7879)
 -- ----------------------------------------------------------------------------
 -- THE DECISION THIS MIGRATION ENCODES (recorded in full, with its evidence, in
@@ -71,13 +71,16 @@
 -- role SHELL and grants in migration, credential operationally — is the
 -- documented Supabase guidance for custom roles.
 --
--- ⚠️ `NOINHERIT` is deliberately NOT set, and it would not buy the boundary:
--- policy APPLICABILITY follows `has_privs_of_role`, so membership in any role
--- that carries a permissive policy (`service_role`'s `*_service_role_all USING
--- (true)`, `postgres`) makes that policy apply to this role — measured on
--- `postgres:16.15`: `GRANT svc TO app` made the app role see 2 rows of 2
--- tenants while `rolbypassrls` still read `false`, and `NOINHERIT` did NOT
--- change that (PG16+ role membership applies regardless). The boundary is
+-- ⚠️ Membership is the trap, and `NOINHERIT` is not a substitute for avoiding
+-- it: policy APPLICABILITY follows `has_privs_of_role`, so membership in any
+-- role that carries a permissive policy (`service_role`'s `*_service_role_all
+-- USING (true)`, `postgres`) makes that policy apply to this role — measured on
+-- `postgres:16.15`: `GRANT svc TO app` (the default `WITH INHERIT TRUE`) made
+-- the app role see 2 rows of 2 tenants while `rolbypassrls` still read `false`.
+-- `NOINHERIT` on the role (or `WITH INHERIT FALSE` on the grant) does stop that
+-- — which is why the guard below asserts `pg_has_role(…, 'USAGE')` and not
+-- `'MEMBER'` — but `INHERIT` is the default on both sides, so the posture must
+-- not depend on nobody having chosen it. The boundary is
 -- therefore expressed TWICE: by the grants below, and by the prohibition on
 -- membership (asserted in
 -- `supabase/tests/20261022000001_record_tenancy_posture.sql` and stated for
@@ -147,6 +150,12 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON public.object         TO tortoise_record
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.subject        TO tortoise_record_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.point          TO tortoise_record_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.relation       TO tortoise_record_app;
+-- The tenth table (§9.1 / R7, #9555). Listed here rather than beside its
+-- policy at §4b because the ACL and the policy are the same pair for all ten:
+-- a table grant without a policy reads zero rows, a policy without a grant
+-- raises 42501 before RLS is ever consulted. Its migration is
+-- `20261023000001_record_session_narrative.sql`, which sorts before this one.
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.session_narrative TO tortoise_record_app;
 
 -- ── 2b. `public.relation`'s IDENTITY sequence needs its OWN grant ─────────
 -- A table-level INSERT privilege does NOT confer `nextval` on the sequence that
@@ -245,3 +254,32 @@ CREATE POLICY relation_app_tenant ON public.relation
 -- The posture suite asserts that rather than restating it here: it checks the
 -- role's EFFECTIVE privileges (not the statements that produced them), so a
 -- future PUBLIC grant reddens a test instead of quietly widening the boundary.
+
+-- ── 4b. The TENTH record table: `public.session_narrative` (§9.1 / R7, #9555) ─
+-- The table itself arrives in `20261023000001_record_session_narrative.sql`. This
+-- migration sorts AFTER it (20261025 > 20261023) and that ordering is DELIBERATE,
+-- not incidental:
+--   * the tenancy posture is the LAST thing that widens the app role's surface, so
+--     it covers every record table that exists — the alternative is a posture
+--     migration that must be revisited every time a table is added, and a new
+--     table that silently ships with no tenant policy;
+--   * `20261023000001`'s own app-role block is GUARDED on `tortoise_record_app`
+--     existing, and on a fresh database it does not exist yet at that point, so
+--     without this block NOTHING would grant the role on this table;
+--   * it also vacates the version prefix `20261022000001`, which this file used to
+--     share with `20261022000001_record_session_capture_redactions_integer.sql`
+--     and `20261022000001_blog_indexnow.sql`. `supabase db push` keys migrations
+--     by that version and `.github/scripts/check-migration-append-only prefix`
+--     refuses a duplicate, so three colliders was strictly worse than two.
+--     ⚠️ It does NOT close that gate: the remaining pair is both already on
+--     `main`, so the leg stays RED until the IndexNow file is renumbered
+--     (`e6e91394d` does that on its own lane, to `20261024000001`). This file's
+--     prefix, `20261025000001`, is claimed by no other migration.
+-- Unconditional here, exactly like the nine above: the table is guaranteed to
+-- exist by this migration's own position in the sequence, so a guard would only
+-- hide a reordering mistake instead of failing on it.
+DROP POLICY IF EXISTS session_narrative_app_tenant ON public.session_narrative;
+CREATE POLICY session_narrative_app_tenant ON public.session_narrative
+    FOR ALL TO tortoise_record_app
+    USING (org_id = current_setting('app.current_org_id', true))
+    WITH CHECK (org_id = current_setting('app.current_org_id', true));

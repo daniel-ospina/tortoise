@@ -3,7 +3,7 @@
 --
 -- The recorded decision this file proves (full text and evidence:
 -- `docs/epics/2026-10-10-7879-postgres-record/09-record-tenancy-decision.md`,
--- encoded in `supabase/migrations/20261022000001_record_tenancy_role_and_guc.sql`):
+-- encoded in `supabase/migrations/20261025000001_record_tenancy_role_and_guc.sql`):
 --
 --   · the record's application path connects as `tortoise_record_app`, which is
 --     `NOBYPASSRLS` — so RLS is the boundary, not a decoration;
@@ -115,6 +115,14 @@ INSERT INTO public.session (org_id, graph_id, node_key, id) VALUES
     ('org_r6_a','g_r6_a','sess_r6_a','sess_r6_a'),
     ('org_r6_b','g_r6_b','sess_r6_b','sess_r6_b')
 ON CONFLICT DO NOTHING;
+-- The TENTH record table (§9.1 / R7, #9555). It is not one of the nine the
+-- layer-1 migrations created, and it is seeded here for the same reason they
+-- are: the cross-tenant assertions below must run against a table that HAS a row
+-- per tenant, or "tenant A cannot see B's row" passes on an empty table.
+INSERT INTO public.session_narrative (org_id, graph_id, session_id, narrative, turn_count) VALUES
+    ('org_r6_a','g_r6_a','sess_r6_a','a narrative from A', 2),
+    ('org_r6_b','g_r6_b','sess_r6_b','a narrative from B', 2)
+ON CONFLICT DO NOTHING;
 INSERT INTO public.relation (org_id, graph_id, rel_type, src_label, src_key,
                              tgt_label, tgt_key, confidence) VALUES
     ('org_r6_a','g_r6_a','IMPL','Point','p_r6_a','Object','o_r6_a', 0.85),
@@ -148,11 +156,11 @@ SELECT tests.assert(
   (SELECT count(*) FROM pg_policies
    WHERE schemaname = 'public'
      AND tablename IN ('node_identity','journal_event','source','event','session',
-                       'object','subject','point','relation')
+                       'object','subject','point','relation','session_narrative')
      AND roles = ARRAY['tortoise_record_app']::name[]
      AND cmd = 'ALL'
      AND qual       LIKE '%current_setting%'
-     AND with_check LIKE '%current_setting%') = 9,
+     AND with_check LIKE '%current_setting%') = 10,
   'R6: every record table carries the app role''s tenant policy with USING AND WITH CHECK');
 
 -- The posture is uniform, and that is the claim: 3 policies per table (the
@@ -162,22 +170,24 @@ SELECT tests.assert(
   (SELECT count(*) FROM pg_policies
    WHERE schemaname = 'public'
      AND tablename IN ('node_identity','journal_event','source','event','session',
-                       'object','subject','point','relation')) = 27,
+                       'object','subject','point','relation','session_narrative')) = 30,
   'R6: every record table has exactly the three policies the decision explains');
 
 -- ── 3. The posture: effective privileges, not the statements that made them ─
 SELECT tests.assert(
   (SELECT count(*) FROM unnest(ARRAY['node_identity','journal_event','source','event',
-                                     'session','object','subject','point','relation']) AS t
+                                     'session','object','subject','point','relation',
+                                     'session_narrative']) AS t
    WHERE has_table_privilege('tortoise_record_app', 'public.' || t, 'SELECT')
      AND has_table_privilege('tortoise_record_app', 'public.' || t, 'INSERT')
      AND has_table_privilege('tortoise_record_app', 'public.' || t, 'UPDATE')
-     AND has_table_privilege('tortoise_record_app', 'public.' || t, 'DELETE')) = 9,
+     AND has_table_privilege('tortoise_record_app', 'public.' || t, 'DELETE')) = 10,
   'R6: the app role can read and write every record table (the write path needs all four)');
 
 SELECT tests.assert(
   NOT EXISTS (SELECT 1 FROM unnest(ARRAY['node_identity','journal_event','source','event',
-                                         'session','object','subject','point','relation']) AS t
+                                         'session','object','subject','point','relation',
+                                     'session_narrative']) AS t
               WHERE has_table_privilege('tortoise_record_app', 'public.' || t, 'TRUNCATE')
                  OR has_table_privilege('anon', 'public.' || t, 'SELECT')
                  OR has_table_privilege('anon', 'public.' || t, 'INSERT')
@@ -210,7 +220,7 @@ DECLARE
   n bigint;
 BEGIN
   FOREACH t IN ARRAY ARRAY['node_identity','journal_event','source','event','session',
-                           'object','subject','point','relation'] LOOP
+                           'object','subject','point','relation','session_narrative'] LOOP
     EXECUTE format('SELECT count(*) FROM public.%I', t) INTO n;
     IF n < 2 THEN
       RAISE EXCEPTION 'R6 setup: % holds % row(s) — both tenants must be present or every '
@@ -235,7 +245,7 @@ DECLARE
   cross_tenant bigint;
 BEGIN
   FOREACH t IN ARRAY ARRAY['node_identity','journal_event','source','event','session',
-                           'object','subject','point','relation'] LOOP
+                           'object','subject','point','relation','session_narrative'] LOOP
     EXECUTE format('SELECT count(*) FROM public.%I', t) INTO visible;
     EXECUTE format('SELECT count(*) FROM public.%I WHERE org_id = %L', t, 'org_r6_b')
       INTO cross_tenant;
@@ -332,7 +342,7 @@ DECLARE
   visible bigint;
 BEGIN
   FOREACH t IN ARRAY ARRAY['node_identity','journal_event','source','event','session',
-                           'object','subject','point','relation'] LOOP
+                           'object','subject','point','relation','session_narrative'] LOOP
     EXECUTE format('SELECT count(*) FROM public.%I', t) INTO visible;
     IF visible <> 0 THEN
       RAISE EXCEPTION 'R6: public.% returned % row(s) with NO tenant GUC set — the policies '

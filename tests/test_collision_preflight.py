@@ -503,8 +503,20 @@ def _write_exec(path: Path, body: str) -> Path:
     return path
 
 
+#: The cause `load_registry` records for the real #9392 incident: the roster was
+#: never written in that cell. Module-level so both test classes model the SAME
+#: cause text the tool actually prints.
+ABSENT_ROSTER = (
+    "FileNotFoundError: [Errno 2] No such file or directory: "
+    "'/tmp/cell-home/.pi/agent/state/lane-registry.tsv'"
+)
+
+
 def _fleet_board_state(*, issues=None, lanes=None, registry_measured=True,
-                       github_measured=True, reconciliation=True,
+                       registry_error="", github_measured=True,
+                       reconciliation=True,
+                       registry_rows=None, workspaces_count=None,
+                       workspaces_measured=True,
                        generated_at=None, repo=SLUG,
                        liveness_unmeasured=False,
                        open_issues_truncated=False) -> dict:
@@ -552,12 +564,29 @@ def _fleet_board_state(*, issues=None, lanes=None, registry_measured=True,
     if reconciliation:
         state["reconciliation"] = {
             "registry_measured": bool(registry_measured),
+            # The cause TEXT `load_registry` records, so a test can model the two
+            # shapes #9392 must tell apart (#9392). Passed through UNCHANGED: a
+            # `str()` coercion here made a non-string cause inexpressible, so the
+            # `_board_registry_error` guard that collapses it to "no cause
+            # recorded" could be reverted with every test still green.
+            "registry_error": "" if registry_error is None else registry_error,
             "github_measured": bool(github_measured),
             # #8175: was the OPEN-ISSUE window wide enough to prove a negative?
             "open_issues_truncated": bool(open_issues_truncated),
             "open_issues_read": 989,
             "open_issues_limit": 2000,
         }
+        # The roster SIZE, only when a test asks for it: a board from an older
+        # writer carries no counts, and `None` here models exactly that (#9392).
+        # `workspaces_measured` travels with `workspaces_count` because the count
+        # is only a measurement when that read SUCCEEDED — an unreachable cmux
+        # publishes no workspaces, and `False` + a count is the fail-open shape
+        # that must not print "0 live workspace(s)" (#9392 review P1).
+        for key, value in (("registry_rows", registry_rows),
+                           ("workspaces_count", workspaces_count),
+                           ("workspaces_measured", workspaces_measured)):
+            if value is not None:
+                state["reconciliation"][key] = value
     for number, entries in (issues or {}).items():
         state["index"]["issues"][str(number)] = {
             "lanes": [label for label, _ in entries],
@@ -661,6 +690,10 @@ class CollisionPreflightTest(unittest.TestCase):
         # holder writes its own with `fleet_board`.
         self.home = self.tmp / "home"
         self.fleet_board()
+        # Where a REBUILD's shadowed `gh`/`cmux` stubs record that they were
+        # called, so a test can prove the rebuild ran through THIS path and not
+        # the network (see `failing_rebuild_path`).
+        self.rebuild_stub_log = self.tmp / "rebuild-stub-calls.log"
         # Default: every GitHub surface is queryable and empty.
         self.gh_fixtures(open_prs=[], closed_prs=[], issue=self.issue_payload())
         # #8560: the landed surface's timeline is queryable by default (one empty
@@ -868,6 +901,39 @@ class CollisionPreflightTest(unittest.TestCase):
             _fleet_board_state(**kwargs),
         )
 
+    def failing_rebuild_path(self) -> str:
+        """A `PATH` on which a REBUILD's own reads fail locally (review P2).
+
+        ⛔ A REBUILD RUNS IN THE TOOL SUBPROCESS (`_read_board` →
+        `fleet_state.build_state`), so it cannot be mocked from here, and it
+        deliberately uses BARE `gh`/`cmux` from `PATH` rather than this tool's
+        `--gh`. An unanswerable board therefore reaches the network: bare `gh
+        pr list` / `gh issue list` against a nonexistent repo, plus a bare `cmux
+        list-workspaces`. On an authenticated box that is two real GraphQL calls;
+        on a box where cmux IS reachable the rebuild reads the OPERATOR's real
+        workspace list. Both are the non-hermetic path this harness exists to
+        avoid.
+
+        So the two binaries are shadowed with stubs that FAIL. `_run` degrades a
+        non-zero exit to "", i.e. exactly the production fail-open shape, and the
+        cause under test — the REAL `FileNotFoundError` from `load_registry`,
+        which runs BEFORE either — is untouched.
+
+        The stubs RECORD that they were called (`self.rebuild_stub_log`), so a
+        test can prove the rebuild really ran and really went through THIS path
+        — a test that stopped rebuilding would otherwise still pass.
+        """
+        stub_dir = self.tmp / "rebuild-stubs"
+        stub_dir.mkdir(exist_ok=True)
+        log = self.rebuild_stub_log
+        for name in ("gh", "cmux"):
+            _write_exec(stub_dir / name,
+                        "#!/usr/bin/env bash\n"
+                        f'printf \'%s\\n\' "$0 $*" >> {log}\n'
+                        f'echo "{name}-stub: rebuilds never leave the test" >&2\n'
+                        "exit 127\n")
+        return f"{stub_dir}:{os.environ.get('PATH', '')}"
+
     # ── runner ──────────────────────────────────────────────────────────────
 
     def run_tool(self, issue: int = ISSUE,
@@ -935,6 +1001,48 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotIn("VERDICT: INCOMPLETE", out)
         self.assert_all_surface_rows(out)
         self.assertIn("worktree(s) enumerated (untruncated)", out)
+
+    def test_an_unprovisioned_roster_end_to_end(self):
+        """The reported symptom, on the real tool, end to end (#9392).
+
+        The board is written unanswerable and NO roster exists under the
+        redirected HOME, so the tool rebuilds through the real
+        `fleet_state.build_state`, meets the real `FileNotFoundError`, and must
+        end with the PROVISIONING remedy — not the rebuild that just failed.
+
+        ⛔ THE REBUILD IS KEPT LOCAL (review P2): its bare `gh`/`cmux` reads are
+        shadowed by failing stubs, so the FILE read under test is still the real
+        one while no GraphQL call and no operator cmux read can happen.
+        """
+        self.fleet_board(registry_measured=False,
+                         registry_error=ABSENT_ROSTER)
+        rc, out = self.run_tool(
+            env_extra={"PATH": self.failing_rebuild_path()})
+        self.assertEqual(rc, 2, out)
+        verdict = self._verdict_line(out)
+        self.assertIn("LANE ROSTER is UNKNOWN", verdict)
+        self.assertIn("lane-registry.tsv", verdict)
+        self.assertIn("NEVER PROVISIONED", verdict)
+        self.assertIn("CANNOT create it", verdict)
+        self.assertIn("PROVISIONING", verdict)
+        # Neither dead end is offered for THIS surface's cause…
+        self.assertNotIn("fix gh auth/network", verdict)
+        self.assertNotIn("rebuild the fleet board", verdict.lower())
+        # …and the surface row above the verdict gives the SAME answer (both
+        # take it from `fleet_state.registry_remedy`), so a lane reading either
+        # one is not misled — the loop this issue files.
+        rows = [ln for ln in out.splitlines()
+                if ln.startswith("  [issue assignee/holder]")]
+        self.assertEqual(len(rows), 1, out)
+        self.assertIn("lane-registry.tsv", rows[0])
+        self.assertIn("PROVISIONING", rows[0])
+        # ⛔ AND THE REBUILD REALLY RAN — through the LOCAL stubs (review P2).
+        # Without this a later change that stopped rebuilding would leave the
+        # test green while the reason it exists (the tool meets the REAL
+        # `FileNotFoundError` from `load_registry`) silently disappeared.
+        log = self.rebuild_stub_log.read_text()
+        self.assertIn("/gh ", log)
+        self.assertIn("/cmux ", log)
 
     # ── one stubbed/real hit per hit-capable surface ────────────────────────
 
@@ -2078,6 +2186,201 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("000-w3061-hit", out)
         # 1 main worktree + 1 hit + 8 fillers = 10, all enumerated.
         self.assertIn("10 worktree(s) enumerated (untruncated)", out)
+
+    # ── #9540: a PATH SUBSTRING is a spelling, not a claim ──────────────────
+
+    def test_worktree_path_substring_with_a_foreign_branch_is_not_a_claim(self):
+        # #9540, measured on the real fleet: `/tmp/wt-3718` held lane work for
+        # #9397 (`fix/9397-about-edge-properties`) and matched #3718 only
+        # because the DIRECTORY NAME contains it. The gate has no dismissal
+        # switch by design (#8175), so a stale directory name froze the highest
+        # value un-gated product defect permanently. The branch is the field a
+        # lane deliberately named; the path is a leftover.
+        self.add_worktree(f"wt-{ISSUE}-stale-name",
+                          branch="fix/9397-about-edge-properties")
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertNotIn("do NOT dispatch", out)
+        # Reported, never silent: the reader must see WHAT was demoted and why.
+        self.assertIn(f"wt-{ISSUE}-stale-name", out)
+        self.assertIn(f"its PATH contains {ISSUE} but its BRANCH claims #9397", out)
+        self.assertIn("[local worktrees]", out)
+
+    def test_worktree_path_substring_still_blocks_when_the_branch_names_this_issue(self):
+        # CONTROL for the test above: the demotion must fire ONLY when the branch
+        # names something else. A branch that names THIS issue is the claim, and
+        # the path merely agrees with it.
+        #
+        # ⛔ ROW-SCOPED (review cycle 4): `add_worktree(branch=...)` ALSO creates a
+        # local branch `fix/3061-lane`, and the branch surface blocks it — so a
+        # whole-output assertion was satisfied by the BRANCH row even if the
+        # WORKTREE row had been demoted. The label is unique per row, so this
+        # asserts the row under test.
+        branch = f"fix/{ISSUE}-lane"
+        name = f"wt-{ISSUE}-stale-name"
+        self.add_worktree(name, branch=branch)
+        rc, out = self.run_tool()
+        label = f"{name} [refs/heads/{branch}]"
+        line = next((row for row in out.splitlines() if label in row), "")
+        self.assertTrue(line, f"no row for {label!r}\n{out}")
+        self.assertIn(f"matched issue-number ({ISSUE})", line)
+        self.assertNotIn("its PATH contains", line)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+
+    def test_worktree_path_substring_still_blocks_for_a_non_claim_branch_name(self):
+        # ⛔ THE NARROWNESS IS THE SAFETY PROPERTY. Only the shape a lane uses to
+        # CLAIM an issue (`fix/<n>-<slug>` / `feat/<n>-<slug>`) can contradict
+        # the path. A number that is not a claim — a date, a version, a metric —
+        # must not cancel it, or a reused worktree whose branch says
+        # `chore/bump-2024-10` would read a live lane as free.
+        #
+        # ⛔ EVERY CASE IS ASSERTED ON ITS OWN LINE, because worktrees ACCUMULATE
+        # in this fixture repo: a cumulative `assertNotEqual(rc, 0)` passed off an
+        # EARLIER subtest's blocking hit, so the widening it was supposed to catch
+        # was invisible (found in #9540's review cycle 2). The label line is
+        # unique per case, so this pins the CURRENT one.
+        for i, branch in enumerate(("chore/bump-2024-10", "release-1.2.3",
+                                    "perf/1200-rps-cache", "ci/1800-timeout",
+                                    "chore/5000-graph-cleanup",
+                                    f"feat/{ISSUE}0-lookalike",
+                                    "feat/2048-batch")):
+            with self.subTest(branch=branch):
+                name = f"wt-{ISSUE}-nonclaim-{i}"
+                self.add_worktree(name, branch=branch)
+                rc, out = self.run_tool()
+                label = f"{name} [refs/heads/{branch}]"
+                line = next((row for row in out.splitlines() if label in row), "")
+                self.assertTrue(line, f"no row for {label!r}\n{out}")
+                self.assertIn(f"matched issue-number ({ISSUE})", line)
+                self.assertNotIn("its PATH contains", line)
+                self.assertNotEqual(rc, 0, f"branch={branch!r}\n{out}")
+                self.assertIn("VERDICT: COLLISION", out)
+
+    def test_foreign_claim_branch_that_also_MENTIONS_this_issue_still_blocks(self):
+        # ⛔ THIS PINS THE `not branch_hit` CONJUNCT, which nothing else did
+        # (found in #9540 review cycle 3). A branch can name a foreign issue in
+        # the CLAIM position and still mention this one in its slug —
+        # `fix/9397-depends-on-3061`. The loose `number_present(branch, …)` arm is
+        # what makes that a hit today, and `_branch_names_other_issue` alone
+        # would answer 9397. So if a later reader decides the conjunct is
+        # redundant (it LOOKS redundant: the helper already refuses a branch that
+        # names this issue) and deletes it, this worktree is demoted and the lane
+        # that names 3061 goes free — a FALSE CLEAN, the dangerous direction.
+        branch = f"fix/9397-depends-on-{ISSUE}"
+        name = f"wt-{ISSUE}-mention"
+        self.add_worktree(name, branch=branch)
+        rc, out = self.run_tool()
+        label = f"{name} [refs/heads/{branch}]"
+        line = next((row for row in out.splitlines() if label in row), "")
+        self.assertTrue(line, f"no row for {label!r}\n{out}")
+        self.assertIn(f"matched issue-number ({ISSUE})", line)
+        self.assertNotIn("its PATH contains", line)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+
+    def test_generated_branch_with_a_claim_shaped_tail_still_blocks(self):
+        # ⛔ THE GENERATED EXCLUSION APPLIES TO BOTH HALVES (review cycle 4).
+        # `branch_matchable` gated the HIT test only, so a bot-minted name with a
+        # claim-shaped tail (`mergify/merge-queue/fix/9397-x`) had
+        # `branch_hit = False` by construction and the helper read its raw name
+        # and answered 9397 — demoting the path hit while the docstring promised
+        # the PATH still blocks. `scan_branch_surface` skips the same ref, so
+        # nothing else would have blocked this worktree.
+        branch = "mergify/merge-queue/fix/9397-x"
+        name = f"wt-{ISSUE}-generated-tail"
+        self.add_worktree(name, branch=branch)
+        rc, out = self.run_tool()
+        label = f"{name} [refs/heads/{branch}]"
+        line = next((row for row in out.splitlines() if label in row), "")
+        self.assertTrue(line, f"no row for {label!r}\n{out}")
+        self.assertIn(f"matched issue-number ({ISSUE})", line)
+        self.assertNotIn("its PATH contains", line)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+
+    def test_a_branch_number_that_is_not_the_issue_does_not_cancel_the_path(self):
+        # `fix/3061cafe-mine` NAMES this issue (`number_present` matches 3061 —
+        # the digits LEAD a hex-looking run, #3611), so the branch itself is the
+        # claim and the path hit stands. Same line-scoped assertion as above.
+        branch = f"fix/{ISSUE}cafe-mine"
+        name = f"wt-{ISSUE}-lead-hex"
+        self.add_worktree(name, branch=branch)
+        rc, out = self.run_tool()
+        label = f"{name} [refs/heads/{branch}]"
+        line = next((row for row in out.splitlines() if label in row), "")
+        self.assertTrue(line, f"no row for {label!r}\n{out}")
+        self.assertIn(f"matched issue-number ({ISSUE})", line)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+
+    def test_worktree_path_substring_demotes_for_any_other_issue_claim(self):
+        # The demotion is a POSITIVE rule, not a special case for one example:
+        # any `fix/<n>-<slug>` naming a DIFFERENT issue contradicts the path, even
+        # a LOOKALIKE number (`fix/30611-…` claims 30611, not 3061). Pinned
+        # per-line, plus `rc == 0`, so the strength cannot be flipped silently.
+        for i, branch in enumerate(("fix/9397-about-edge-properties",
+                                    f"fix/{ISSUE}1-lookalike")):
+            with self.subTest(branch=branch):
+                name = f"wt-{ISSUE}-claim-{i}"
+                self.add_worktree(name, branch=branch)
+                rc, out = self.run_tool()
+                label = f"{name} [refs/heads/{branch}]"
+                line = next((row for row in out.splitlines() if label in row), "")
+                self.assertTrue(line, f"no row for {label!r}\n{out}")
+                self.assertIn("its PATH contains", line)
+                self.assertIn("non-blocking", line)
+                # a weak hit CANNOT contribute to the verdict — pin that too, or
+                # flipping the strength to "strong" would keep these subtests
+                # green (review cycle 3, secondary finding).
+                self.assertEqual(rc, 0, out)
+                self.assertIn("VERDICT: CLEAN", out)
+
+    def test_branch_names_other_issue_reads_only_the_claim_shape(self):
+        # Unit pin on the helper, so a later refactor of the worktree scan cannot
+        # widen it unnoticed. Each case is a decision, not a spelling test.
+        mod = _tool_module()
+        cases = [
+            ("fix/9397-about-edge-properties", 9397),
+            ("refs/heads/fix/9397-about-edge-properties", 9397),
+            # `feat/` is NOT a claim namespace (#9540 review cycle 4:
+            # `feat/2048-batch` — a batch size, not an issue). Excluding it costs
+            # a residual over-block, the safe direction.
+            ("feat/9397-x", None),
+            ("feat/2048-batch", None),
+            # `test/` `docs/` `chore/` also carry `<n>-<slug>` names here, but in
+            # those namespaces the number can be a metric or a size, and
+            # EXCLUDING them costs only a residual over-block — the safe
+            # direction — while including them costs a false CLEAN.
+            ("test/9397-x", None),
+            ("docs/9397-x", None),
+            # the branch names THIS issue → no contradiction
+            ("fix/3061-mine", None),
+            # …ANYWHERE in the name, even after a foreign claim: the order the
+            # two are found must not decide the verdict (fail-closed).
+            ("feat/9397-x/fix/3061-y", None),
+            # not a claim shape → a version/date is not an issue reference
+            ("chore/bump-2024-10", None),
+            ("release-1.2.3", None),
+            # `3061cafe` is not the claim SHAPE (`<n>-<slug>`), so it cannot
+            # contradict a path — and it names THIS issue anyway, so the path
+            # keeps blocking either way (the fail-closed outcome).
+            ("fix/3061cafe-mine", None),
+            # generated worktree checkout, detached: nothing to contradict
+            ("mergify/merge-queue/6160bad001", None),
+            ("(detached)", None),
+            ("", None),
+            # this issue inside a hex digest is NOT a reference (#3611/#4935), so
+            # the branch's foreign claim is the only claim present → demotes the
+            # PATH hit, deliberately and documented in the helper's docstring.
+            ("fix/9397-abc3061def", 9397),
+        ]
+        for branch, expected in cases:
+            with self.subTest(branch=branch):
+                self.assertEqual(
+                    mod._branch_names_other_issue(branch, ISSUE), expected
+                )
 
     # ── #6622: a RECORD of work is not a WORKER ─────────────────────────────
 
@@ -6093,6 +6396,150 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assert_all_surface_rows(out)
         self.assertIn("8/8 surfaces queried", out)
 
+    def test_the_exit_2_header_gives_each_roster_cause_its_own_remedy(self):
+        # #9657, raised by the fresh-context review of PR #9571 @ 5a22ed54e. The
+        # exit-2 contract is the spec a lane reads after `exit 2` (the header's
+        # own test above says so), and it answered the PRESENT-BUT-UNREADABLE
+        # roster with "rebuild the board" — the exact sentence the same PR
+        # removed for the ABSENT roster, because `fleet_state.py build` builds
+        # the board FROM that file and fails on the same read. It also called
+        # the cause "unrebuildable" while prescribing a rebuild in the same
+        # breath. Nothing pinned the block, which is why half of it survived
+        # the fix; this is the pin.
+        cp = _tool_module()
+        doc = cp.__doc__ or ""
+        # Flatten the WRAPPED prose so the assertions bind to sentences, not to
+        # where the 80-column wrap happens to fall.
+        flat = " ".join(doc.split())
+        self.assertNotIn(
+            "unrebuildable",
+            flat,
+            "the header must not call a cause unrebuildable while prescribing a rebuild for it",
+        )
+        absent = flat.find("LANE ROSTER is ABSENT")
+        # ⛔ ACCEPT EITHER PHRASING FOR ARM 2 (review, cycle 3, re-raised as a
+        # P3 at cycle 4). The header's cause clause and the sentence the tool
+        # actually PRINTS (`fleet_state.registry_remedy`) differ in wording —
+        # "the roster EXISTS but could not be read" — and so does the REMEDY
+        # ("fix the file itself"). A future lane aligning the header to the
+        # shipped message is a consistency edit, not a regression, so both
+        # halves accept either spelling.
+        present = max(
+            flat.find("roster is PRESENT but unreadable"),
+            flat.find("roster EXISTS but could not be read"),
+        )
+        # ⛔ FOUR ARMS, NOT THREE (review, cycle 4 P2). `registry_remedy` shipped
+        # three roster arms — PROVISION / fix the file / NO CAUSE RECORDED — and
+        # `test_registry_remedy_has_three_arms_and_never_lists_the_rebuild`
+        # pins all three. A header that names only two sends the no-cause reader
+        # to the nearest clause, which is the board rebuild that fails on the
+        # same read: the same dead end #9392 files, one arm narrower.
+        # Every anchor is widened the same way arm 2's is (review, cycle 5):
+        # `registry_remedy` PRINTS its own wording for this arm too ("the cause
+        # of the failed roster read was not recorded"), so a lane aligning the
+        # header to the shipped sentence must not redden the pin.
+        nocause = max(
+            flat.find("recorded NO CAUSE"),
+            flat.find("the cause of the failed roster read was not recorded"),
+        )
+        board = flat.find("the board is unreadable")
+        self.assertNotEqual(absent, -1, "the ABSENT-roster arm must stay stated")
+        self.assertNotEqual(present, -1, "the unreadable-roster arm needs its own clause")
+        self.assertNotEqual(nocause, -1, "the no-cause-recorded arm needs its own clause")
+        self.assertNotEqual(board, -1, "the ambiguous-attribution arm must stay stated")
+        self.assertLess(absent, present)
+        self.assertLess(present, nocause)
+        self.assertLess(nocause, board)
+        # ⛔ ONE TABLE FOR ALL FOUR ARMS (review, cycles 3-7). Every cycle found
+        # the same class of defect "one arm over" — a remedy asserted in one arm
+        # and not the next, a phrase forbidden in one and not the next, a
+        # prohibition that was case-sensitive while its siblings were not. Per-arm
+        # ad-hoc asserts kept leaving a leg out, so the checks are structural
+        # instead: EVERY arm must state its own instruction, and every arm EXCEPT
+        # the board arm must refuse both forms of the dead end #9392 files —
+        # `fleet_state.py build` builds the board FROM the roster and fails on the
+        # same read, so prescribing it is never an answer to a roster cause.
+        # Each requirement is a tuple of accepted SPELLINGS: `registry_remedy`
+        # prints its own wording for these arms, and a lane aligning the header to
+        # it is a consistency edit, not a regression. The bare
+        # `fleet_state.py build` stays allowed — it appears inside the arms' own
+        # negations, so only the `tools/`-prefixed (runnable) form is a dead end.
+        arms = {
+            "ABSENT": (flat[absent:present], [("PROVISION",)]),
+            "unreadable": (
+                flat[present:nocause],
+                [("FIX THE FILE", "fix the file itself")],
+            ),
+            "no-cause": (
+                flat[nocause:board],
+                [
+                    ("start from the FILE", "start from the file"),
+                    ("cannot create or repair", "cannot repair or create"),
+                ],
+            ),
+            "board": (
+                flat[board:],
+                [("rebuild the board",), ("tools/fleet_state.py build",)],
+            ),
+        }
+        # ⛔ THE DEAD END IS BOTH PHRASINGS AND THE COMMAND (review, cycle 8).
+        # #9392's sentence is `_incomplete_remedy`'s "fix gh auth/network (or
+        # rebuild the fleet board) and re-run", and the sibling pin above forbids
+        # it by THAT wording — a list carrying only "rebuild the board" would let
+        # a lane reintroduce the archived sentence into a roster arm and stay
+        # green. The runnable `tools/fleet_state.py build` is the form a lane is
+        # most likely to name explicitly, so it is a dead end too.
+        dead_ends = (
+            "rebuild the fleet board",
+            "rebuild the board",
+            "tools/fleet_state.py build",
+        )
+        # ⛔ PRESCRIPTIVE, NOT MENTIONED — and GOVERNED, not merely present
+        # (review, cycles 8-9). A bare substring test forbids NAMING the dead end,
+        # so the strongest warning a header author has — "never run `tools/
+        # fleet_state.py build`", "do not rebuild the board" — is the one that
+        # fails. A negation anywhere in the SENTENCE is not enough either: these
+        # arms are one long sentence each and already contain "a rebuild cannot
+        # help", so #9392's exact sentence could ride in as a later clause. The
+        # negation must GOVERN the occurrence, i.e. sit immediately before it.
+        # `instead` is deliberately NOT a negation token — it marks an ALTERNATIVE
+        # offer ("rebuild the board instead"), which is the prescription itself.
+        # The NEGATION TOKENS cover the contractions a lane actually writes, and
+        # the filler class excludes the punctuation that starts a NEW object
+        # (`:`, `;`, `.`, `,` and the em/en dash this header uses), so "the fix is
+        # not gh auth — rebuild the board" cannot borrow its negation. A negation
+        # may also FOLLOW the dead end (`tools/fleet_state.py build cannot help`),
+        # which is the construction `registry_remedy` itself ships.
+        neg = r"(?:not|never|cannot|can'?t|do(?:es)?n'?t|won'?t)"
+        governs = re.compile(rf"(?:\b{neg}\s+[^,.;:—–]{{0,30}}|\binstead of\s+[^,.;:—–]{{0,20}})$")
+        # The POST-position window is deliberately looser: it allows a dash,
+        # because "rebuild the board — it is not the answer" is a natural
+        # negation, and the narrow escape it leaves ("rebuild the board — gh auth
+        # is not the fix") still names the phrase inside an arm whose whole job is
+        # to say what to do. A pin that reddens the natural phrasing is the
+        # over-pin this file's own siblings avoid; the PRESCRIPTIVE forms it
+        # exists to catch are all covered below.
+        follows = re.compile(rf"^\s*[^,.;:]{{0,30}}\b{neg}\b")
+        for arm, (region, requirements) in arms.items():
+            low = region.lower()
+            for accepted in requirements:
+                self.assertTrue(
+                    any(k.lower() in low for k in accepted),
+                    f"the {arm} arm's remedy must state {' or '.join(accepted)}",
+                )
+            if arm == "board":
+                continue
+            for dead_end in dead_ends:
+                for hit in re.finditer(re.escape(dead_end), low):
+                    window = low[max(0, hit.start() - 45) : hit.start()]
+                    after = low[hit.end() : hit.end() + 34]
+                    self.assertTrue(
+                        governs.search(window) or follows.search(after),
+                        f"the {arm} arm offers {dead_end!r} un-negated "
+                        f"({low[max(0, hit.start() - 45) : hit.end() + 34]!r}): that "
+                        "rebuild fails on the same read it is prescribed for",
+                    )
+
     def test_the_header_contract_matches_the_surface_set(self):
         # #8629 review (P2, claim mismatch). This tool states its contract in the
         # module header, and that header is what the next lane reads before
@@ -7615,6 +8062,180 @@ class HolderGateTests(unittest.TestCase):
             holders=(self.cp.Holder("L", "e", self.cp.HOLDER_UNMEASURED,
                                     "why"),)))
         self.assertIn("1 liveness unmeasured", note)
+
+    # ── #9392: an unprovisioned lane roster is a PROVISIONING gap ───────────
+
+    def _roster_surface(self, error: str = ABSENT_ROSTER):
+        """The claim-gate surface as the real run builds it, note included."""
+        surface = self.cp.Surface("issue assignee/holder")
+        surface.incomplete(self.cp._board_can_answer(
+            _fleet_board_state(registry_measured=False, registry_error=error)))
+        # …and the CAUSE beside the note, the way `read_holders` carries it
+        # (`None` when the board recorded none — #9392 review P2).
+        surface.registry_error = self.cp._board_registry_error(
+            _fleet_board_state(registry_measured=False, registry_error=error))
+        return surface
+
+    def test_the_roster_marker_is_the_note_the_gate_emits(self):
+        """The remedy partitions on this marker, so the two must be ONE string.
+
+        A remedy keyed on prose that the note no longer contains would silently
+        fall through to the generic arm — the defect itself, restored by a
+        harmless-looking reword (#9392).
+        """
+        self.assertIn(self.cp._LANE_ROSTER_NOTE,
+                      self._roster_surface().note)
+
+    def test_an_unprovisioned_roster_remedy_names_provisioning_not_a_rebuild(self):
+        """#9392: the exit-2 remedy must name the cause's owner.
+
+        Measured pre-fix on the real tool (fresh HOME, no roster): the verdict
+        line read `fix gh auth/network (or rebuild the fleet board) and re-run`
+        — while `gh auth` answered every other surface in the same run and
+        `fleet_state.py build` refused on the SAME read. Both remedies are dead
+        ends for this cause, so the reader looped.
+        """
+        remedy = self.cp._incomplete_remedy([self._roster_surface()])
+        self.assertIn("LANE ROSTER is UNKNOWN", remedy)
+        self.assertIn("lane-registry.tsv", remedy)
+        self.assertIn("NEVER PROVISIONED", remedy)
+        self.assertIn("CANNOT create it", remedy)
+        self.assertIn("PROVISIONING", remedy)
+        self.assertIn("CELL step", remedy)
+        # …and the two dead ends are NOT offered.
+        self.assertNotIn("fix gh auth/network", remedy)
+        self.assertNotIn("rebuild the fleet board", remedy.lower())
+
+    def test_an_unreadable_roster_is_not_called_unprovisioned(self):
+        """The second cause gets its own sentence: the file is there and the
+        READ failed, so the fix is the file, not the cell (#9392)."""
+        remedy = self.cp._incomplete_remedy([self._roster_surface(
+            "PermissionError: [Errno 13] Permission denied: "
+            "'/tmp/cell-home/.pi/agent/state/lane-registry.tsv'")])
+        self.assertIn("EXISTS but could not be read", remedy)
+        self.assertNotIn("NEVER PROVISIONED", remedy)
+        self.assertNotIn("fix gh auth/network", remedy)
+
+    def test_a_roster_with_no_recorded_cause_is_not_called_an_existing_file(self):
+        """Three causes, three sentences — and the third one was unreachable
+        (#9392 review P2).
+
+        `_incomplete_remedy` handed the whole composed NOTE back to
+        `registry_remedy`, and that note always ends with a remedy sentence, so
+        the helper's `if error.strip()` arm always matched: a board that recorded
+        NO cause still produced "the roster EXISTS but could not be read — fix the
+        file itself (permissions/encoding)". That asserts a file that was never
+        observed, and sends the reader to chmod something that may not exist —
+        the same dead end the issue files, one cause over. The cause now travels
+        as DATA (`Surface.registry_error`), so `None` reaches the third arm.
+        """
+        surface = self._roster_surface("")
+        self.assertIsNone(surface.registry_error, (
+            "the helper must say 'no cause recorded' when the board recorded none"))
+        remedy = self.cp._incomplete_remedy([surface])
+        self.assertIn("LANE ROSTER is UNKNOWN", remedy)
+        self.assertIn("was not recorded", remedy)
+        self.assertNotIn("EXISTS but could not be read", remedy)
+        self.assertNotIn("NEVER PROVISIONED", remedy)
+
+    def test_a_non_string_recorded_cause_takes_the_same_arm_everywhere(self):
+        """One value, one answer — including when the value is not a cause.
+
+        `_board_registry_error` collapses anything that is not a non-blank string
+        to "no cause recorded", so a board carrying e.g. a dict must reach the
+        SAME arm as a board carrying nothing. Without this pin the fixture
+        coerced the value with `str()`, no test could construct a non-string
+        cause, and the one-binding fix could be reverted silently (#9392
+        review P3).
+        """
+        surface = self._roster_surface({"weird": 1})
+        self.assertIsNone(surface.registry_error, (
+            "a non-string cause is not a cause, and the exit-2 line and the note "
+            "must agree that none was recorded"))
+        remedy = self.cp._incomplete_remedy([surface])
+        self.assertIn("was not recorded", remedy)
+        self.assertNotIn("EXISTS but could not be read", remedy)
+
+    def test_a_mixed_run_keeps_the_roster_cause_and_the_other_remedy(self):
+        """Partitioned, not replaced: a run whose roster AND a list are
+        unreadable must name BOTH, or the reader fixes one and returns (#9392)."""
+        other = self.cp.Surface("open PRs")
+        other.mark_truncated("the list was capped", widen=True)
+        remedy = self.cp._incomplete_remedy([self._roster_surface(), other])
+        self.assertIn("LANE ROSTER is UNKNOWN", remedy)
+        self.assertIn("TRUNCATED list", remedy)
+
+    def test_the_holder_gate_note_publishes_the_roster_size(self):
+        """#9392's silent half. `board source` is the READ's provenance, never
+        its coverage: a hand-written ONE-ROW roster printed exactly like a full
+        one, so 11 live lanes went invisible and an INCOMPLETE flipped to CLEAN
+        with no code change, silently. Publishing the counts makes a roster of
+        one visibly a roster of one — disclosure, not a dismissal switch: the
+        verdict still keys on `registry_measured`."""
+        note = self.cp._holder_gate_note(self.cp.HolderRead(
+            True, "cache", roster_rows=1, workspaces_count=11,
+            workspaces_measured=True))
+        self.assertIn("lane roster: 1 row(s); live cmux workspaces: 11", note)
+        # An OLDER board publishes no counts. Absent is not zero: saying
+        # "0 row(s)" would report an unmeasured roster as an empty one.
+        self.assertNotIn("lane roster:",
+                         self.cp._holder_gate_note(self.cp.HolderRead(True, "cache")))
+        self.assertIsNone(self.cp._board_count({}, "registry_rows"))
+        for bad in (True, -1, "3", 3.0, None):
+            with self.subTest(value=bad):
+                self.assertIsNone(
+                    self.cp._board_count({"registry_rows": bad}, "registry_rows"))
+
+    def test_an_unmeasured_workspace_read_never_prints_a_live_count(self):
+        """⛔ EVERY failure path of `cmux_workspaces` returns an EMPTY map, so the
+        count beside a FAILED read is `0` — an artefact, not a measurement.
+
+        Printing it said "lane roster: 12 row(s) vs 0 live workspace(s)" in the
+        documented fail-open state (#7738: the launchd beat cannot reach cmux),
+        i.e. it asserted an EMPTY live fleet from a read that never happened and
+        invited the reader to conclude all 12 rows are ghost lanes — the exact
+        class #9392 exists to fix, in the sibling field (review P1).
+        """
+        unmeasured = self.cp.HolderRead(
+            True, "cache", roster_rows=12, workspaces_count=0,
+            workspaces_measured=False)
+        note = self.cp._holder_gate_note(unmeasured)
+        self.assertIn("lane roster: 12 row(s)", note)
+        self.assertNotIn("live cmux workspaces", note)
+        self.assertNotIn("vs 0", note)
+        # The count itself is still threaded (the board MEASURED the roster); the
+        # published NUMBER is what the failed read cannot support.
+        self.assertEqual(unmeasured.workspaces_count, 0)
+
+    def test_read_holders_threads_the_roster_size_from_the_board(self):
+        _write_board(self.board, _fleet_board_state(registry_rows=1,
+                                                    workspaces_count=11))
+        read = self.cp.read_holders(ISSUE, slug=SLUG, repo_root=str(self.tmp))
+        self.assertTrue(read.measured)
+        self.assertEqual((read.roster_rows, read.workspaces_count), (1, 11))
+        self.assertTrue(read.workspaces_measured)
+        # An unmeasured board never carries a count to print.
+        self.assertIsNone(self.cp.HolderRead(False, "unmeasured").roster_rows)
+
+    def test_read_holders_carries_the_workspace_read_provenance(self):
+        """The count is only as good as the read behind it (review P1)."""
+        _write_board(self.board, _fleet_board_state(
+            registry_rows=12, workspaces_count=0, workspaces_measured=False))
+        read = self.cp.read_holders(ISSUE, slug=SLUG, repo_root=str(self.tmp))
+        self.assertTrue(read.measured)
+        self.assertFalse(read.workspaces_measured)
+        self.assertNotIn("live cmux workspaces", self.cp._holder_gate_note(read))
+        # An OLDER board that carries a count but NOT the flag is UNMEASURED:
+        # the strict-true polarity, so the gate prints one fewer number rather
+        # than a fact it cannot support.
+        _write_board(self.board, _fleet_board_state(
+            registry_rows=12, workspaces_count=3,
+            workspaces_measured=None))
+        stale = self.cp.read_holders(ISSUE, slug=SLUG, repo_root=str(self.tmp))
+        self.assertTrue(stale.measured)
+        self.assertFalse(stale.workspaces_measured)
+        self.assertNotIn("live cmux workspaces", self.cp._holder_gate_note(stale))
+
 
     def test_the_claim_gate_never_clobbers_an_existing_incomplete_reason(self):
         # `scan_issue_surface` APPENDS to an existing INCOMPLETE note rather than

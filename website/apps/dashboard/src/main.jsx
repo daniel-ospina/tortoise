@@ -148,6 +148,7 @@ import {
   revisionMovedAfterSave,
   selectorGraphs,
   toggleDraftStatus,
+  unconfiguredConsequence,
 } from './packs.js'
 // #1893: pure source-scope reconcile/serialize/job-body helpers (node --test
 // unit-tested — sourceScope.test.js).
@@ -1000,9 +1001,8 @@ function SettingsTab(props) {
       <section className="settings-home" aria-labelledby={PACK_SETTINGS_SECTION_ID}>
         <h3 id={PACK_SETTINGS_SECTION_ID} tabIndex={-1}>Configured packs</h3>
         <p className="dim small">
-          Each graph draws its vocabulary from the packs configured here. A pack you turn off stops
-          minting its kinds on this graph; memories it already produced stay searchable. Changes apply
-          to one graph only.
+          Each graph draws its vocabulary from the packs configured here.{' '}
+          <strong>Turn off</strong> — {PACK_CONSEQUENCE.disable} Changes apply to one graph only.
         </p>
         {selectorGraphs(graphs).length === 0 ? (
           /* #2728 review P2-1: a FAILED graph read is not "still loading".
@@ -12571,10 +12571,13 @@ function PacksModal(props) {
         {status === 'ok' && body && (
           <>
             {body.configured === false && (
-              // The back-compat contract made visible: an unconfigured graph
-              // still resolves to the whole catalog, so the set below is the
-              // seeded/starter state and saving is what pins the graph.
-              <p className="dim small" style={{ marginTop: '0.4rem' }}>{PACK_CONSEQUENCE.unconfigured}</p>
+              // The back-compat contract made visible — and WHICH one depends on
+              // the records, not on the flag (#9691): only a record-less graph
+              // resolves to the whole catalog; a starter-seeded one (the hosted
+              // default graph) is narrowed to the packs listed below, so it must
+              // not be told the full catalog applies. The sentence is selected
+              // in packs.js by the resolved-set predicate.
+              <p className="dim small" style={{ marginTop: '0.4rem' }}>{unconfiguredConsequence(body)}</p>
             )}
             {rows.length === 0 ? (
               <p className="dim small" style={{ marginTop: '0.4rem' }}>

@@ -2681,12 +2681,39 @@ class _EntityHandlers:
         journal-only rebuild must not restore the Session as though nothing
         was ever redacted. Overwrite semantics, like ``turn_count``.
         """
-        from tortoise.projection import _annotator_value_ok, _writable_id
+        from tortoise.projection import (
+            _annotator_value_ok,
+            _log_identity_skip,
+            _writable_container_id,
+        )
 
         if not isinstance(ev, dict):
             return 0
         sid = ev.get("id")
-        if not _writable_id(sid) or not sid:
+        # #9599: a BLANK id is not an identity, and this is the REPLAY half of
+        # the refusal the capture doors make. The rule is `_writable_container_id`
+        # — the SAME gate `_link_session` applies to `contains_session`, one
+        # owner for both journal carriers. `_writable_id` deliberately still
+        # admits a blank (#9599) because it is shared with entity NAMES, whose
+        # fold must not be widened. Without the extra clause a journal written
+        # before the doors refused resurrects a `:Session {id:'   '}` on
+        # rebuild — an indexed key the engine cannot serve back to an equality
+        # seek, so the container is invisible and every later capture mints a
+        # duplicate on it. An ABSENT id is ordinary here: `_log_identity_skip`
+        # stays silent for it (no identity was named at all).
+        # ⛔ `drops_record=True` (#8840/#8702): this `return` IS the record's
+        # death — the container is not written at all — so the replay accounting
+        # must count it as a DROPPED record, not as an identity refused INSIDE a
+        # record that still replayed (that clause states the record IS in the
+        # graph, which is false here, and it hides a missing `:Session` from the
+        # operator). Same convention as the Point creation anchors
+        # (`FalkorProjection.apply`). The sibling `_link_session` arm
+        # deliberately does NOT pass it: an edge is lost there, not a record.
+        if not _writable_container_id(sid):
+            _log_identity_skip("Session", sid, "id (MERGE key)",
+                               event_id=ev.get("event_id"),
+                               where="FalkorProjection._fold_session_recorded",
+                               drops_record=True)
             return 0
         sets: list[str] = []
         params: dict = {"sid": sid}
@@ -2827,7 +2854,14 @@ class _EntityHandlers:
         # mint a DUPLICATE `:Session` and land no edge (see that predicate's
         # docstring). The record projection refuses the same ids, and the two
         # gates are pinned equal, so a whitespace-only `contains_session` is
-        # dropped by BOTH routes instead of by one.
+        # dropped by BOTH routes instead of by one. ⛔ ONE owner, both carriers
+        # (#9599 review): this is the `contains_session` arm, and
+        # `_fold_session_recorded` above applies the SAME predicate to its
+        # `SessionRecorded` id — a pre-fix journal can name the blank session
+        # through either one. An earlier revision of this branch stacked a
+        # THIRD predicate (`tortoise.ids.session_id_refusal`) here in front of
+        # this gate; it is removed, because two predicates for one identity
+        # rule is how the pins and the code drift apart.
         from tortoise.projection import _log_identity_skip, _writable_container_id
         if not _writable_container_id(session_id):
             _log_identity_skip("Session", session_id, "id (MERGE key)")
