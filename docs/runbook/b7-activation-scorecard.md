@@ -127,8 +127,13 @@ NOT refusals a `status` filter should find: a domain answer that carries an
 operator — a successful fetch reporting that fact, #4576), and a refusal
 buried deeper than the seam reads (`tortoise_overview()` with no `section`
 nests each section's payload one level down, so a failing section is not
-classified). Otherwise: do not read a `status` filter as "the retrieval
-answered".
+classified). The gate's own match is a dict carrying an `error` key (or the
+`_SafeError` a body returns), so a refusal answered with a KEYLESS plain dict
+would be invisible to it and to a `status` filter alike; no served tool
+answers that way at this writing — the last one (`tortoise_pack_install`'s
+rejected manifest, `{"installed": false, "validation_errors": [...]}`) is
+answered as an `_SafeError` too. Otherwise: do not read a `status` filter as
+"the retrieval answered".
 
 **`recall_returned` is a RETURN, not an answer.** Since #3675 the
 `mcp_tool_call` props carry `result_count` — the number of items the call

@@ -69,6 +69,12 @@ RESIDUAL_NESTED_REFUSAL = 'a refusal buried deeper than the seam reads'
 #: What the gate actually scans — pinned so the doc cannot claim a narrower
 #: denominator than the one that holds the class shut.
 GATE_SCOPE_CLAIM = 'a gate on the producers (not a `status` filter) keeps it closed'
+#: The gate's MATCHED SHAPE, pinned PRESENT: "CLOSED" is true of a refusal
+#: carrying an `error` key (or returned as an `_SafeError`). A refusal answered
+#: with a KEYLESS plain dict is invisible to the gate AND to a `status` filter,
+#: so the operator text has to name that boundary — otherwise the next keyless
+#: producer re-opens #9084 under a green pin (#9609 review, 07be54534).
+GATE_MATCHED_SHAPE = 'refusal answered with a KEYLESS plain dict'
 
 
 def _flat_runbook() -> str:
@@ -113,6 +119,12 @@ def test_the_runbook_states_the_meaning_of_ok_the_emitter_has() -> None:
     assert GATE_SCOPE_CLAIM in flat, (
         "the runbook must say WHAT holds the class shut — a gate on the "
         "producers, not a `status` filter (#9084)"
+    )
+    assert GATE_MATCHED_SHAPE in flat, (
+        "the runbook must scope the CLOSED claim to the shape the gate MATCHES "
+        "(a dict carrying an `error` key, or an `_SafeError`): a refusal "
+        "answered with a keyless plain dict is invisible to the gate and to a "
+        "`status` filter alike (#9609 review)"
     )
     for residual, why in (
         (RESIDUAL_DOMAIN_ANSWER,

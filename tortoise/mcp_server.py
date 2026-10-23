@@ -317,9 +317,17 @@ def _emit_mcp_tool_call_telemetry(org_id: str, tool_name: str, status: str,
         plain dicts and read ``ok``.
 
       Do NOT read ``error_kind == "safe_error"`` as "the SDK/backend failed":
-      it covers both, so a query that wants backend failures only must also
-      look at the payload's own ``code``. ``status == "exec_error"`` is the
-      failure column; ``safe_error`` names HOW it was reported.
+      it covers both families, and NOTHING IN THIS ROW separates them — the
+      emitted props are ``tool_name`` / ``status`` / ``latency_ms`` /
+      ``error_kind`` / ``result_count``, so the row carries no payload at all.
+      The payload's ``code`` does not separate them either, in EITHER
+      direction: `_safe`'s generic branch carries no ``code`` and neither do
+      most tool-body argument refusals, and where a code IS present it collides
+      (``ERR_QUOTA`` is emitted by `_safe`'s quota branch AND by a tool body's
+      own tag/option cap). Separating the families needs the call site and its
+      payload, or a new prop carrying the producer. ``status ==
+      "exec_error"`` is the failure column; ``safe_error`` names HOW it was
+      reported.
     - ``timeout`` — the transport wait bound fired at this seam
       (``error_kind = "wait_bound"``).
     - ``cancelled`` — the caller cancelled the dispatch
@@ -2850,7 +2858,13 @@ def tortoise_pack_install(manifest_yaml: str) -> dict:
     try:
         record = upsert_tenant_manifest(_get_org_sdk(), manifest_yaml)
     except ValueError as e:
-        return {"installed": False, "validation_errors": [str(e)]}
+        # A REJECTED manifest is a refusal, even though it carries no `error`
+        # key (`validation_errors` names the reason). Left as a plain dict the
+        # seam recorded the dispatch `ok` (#9609 review): the exact-payload arm
+        # of `_returned_safe_failure` classifies it once it IS an `_SafeError`,
+        # and the wire shape does not move (dict subclass).
+        return _SafeError({"installed": False,
+                           "validation_errors": [str(e)]})
     return {"installed": True, **record}
 
 

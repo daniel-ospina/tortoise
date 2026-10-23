@@ -75,9 +75,17 @@ WHAT THE GATE STILL DOES NOT SEE (named, so a green run is not over-read)
   `section` nests each section's payload one level down (`combined[sec] =
   result`), so a section's refusal is not classified. Pre-existing, and it
   never turned a failure into a DIFFERENT failure — it stays `ok`.
-* **A payload with no ``error`` key at all** (`tortoise_pack_install`'s
-  `{"installed": False, "validation_errors": [...]}`) is outside #9084's
-  defined class by construction — a key-presence check would re-open #3926.
+* **A refusal answered with a KEYLESS plain dict.** The gate matches a dict
+  carrying a CONSTANT ``error`` key, and the seam classifies a keyless refusal
+  only when the body returns an `_SafeError` (the exact-payload arm is
+  type-agnostic; a key-presence check is what #3926 forbids). So a body that
+  answers a refusal with a plain ``{"installed": False, ...}`` is invisible to
+  BOTH — and no served body does it at this head: the last one,
+  `tortoise_pack_install`'s rejected manifest, is converted
+  (`test_pack_install_rejected_manifest_is_recorded_as_a_failure`).
+  `test_the_gate_coverage_claim_is_scoped_to_what_it_actually_sees` keeps
+  that boundary stated instead of letting a green run read as "closed for every
+  shape".
 """
 from __future__ import annotations
 
@@ -231,18 +239,38 @@ def _plain_dict_refusal_producers(funcs: dict[str, ast.AST],
     return producers
 
 
+def _plain_error_payloads(fn: ast.AST) -> list[str]:
+    """The source text of every plain-dict ``error`` value `fn` returns."""
+    texts = []
+    for sub in ast.walk(fn):
+        if isinstance(sub, ast.Return) and _is_error_dict(sub.value):
+            for key, value in zip(sub.value.keys, sub.value.values,
+                                  strict=True):
+                if isinstance(key, ast.Constant) and key.value == "error":
+                    texts.append(ast.unparse(value))
+    return texts
+
+
 def _gate_hits(source: str, served: set[str] | None = None):
     """(tool, lineno) of every plain-dict refusal reachable from a SERVED tool."""
     tree = ast.parse(source)
     funcs = {n.name: n for n in tree.body
              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
     served = _served_tool_names() if served is None else served
+    # A served name whose body is NOT in this module cannot be walked, so it
+    # cannot be cleared either: this layer once SKIPPED such a name silently,
+    # which would let a body defined elsewhere answer a refusal unseen forever.
+    unreadable = sorted(served - set(funcs))
+    assert not unreadable, (
+        "served tool(s) whose body is not a module-level def here, so the gate "
+        f"cannot inspect them: {unreadable} — teach the walk to read that "
+        "module, or name the exclusion in the module docstring")
     producers = _plain_dict_refusal_producers(funcs,
                                              exempt=set(DOMAIN_ANSWER_PRODUCERS))
     hits = []
     for tool in sorted(served - set(DOMAIN_ANSWER_PRODUCERS)):
         fn = funcs.get(tool)
-        if fn is None:                      # served shim, no local def
+        if fn is None:                      # unreachable: asserted above
             continue
         for lineno in _returns_plain_dict_refusal(fn, producers):
             hits.append((tool, lineno))
@@ -315,48 +343,73 @@ def test_every_declared_domain_answer_exemption_is_still_needed():
 
     for name in DOMAIN_ANSWER_PRODUCERS:
         assert name in served, f"{name} is no longer served — drop its exemption"
-        assert any(_is_error_dict(sub.value)
-                   for sub in ast.walk(funcs[name])
-                   if isinstance(sub, ast.Return)), (
-            f"{name} no longer returns a plain error dict — its exemption in "
-            "DOMAIN_ANSWER_PRODUCERS is stale cover; remove it")
+        # NOT a wholesale exemption (a whole-function exemption also covers a
+        # NEW refusal added to it, and covers its forwarders). The ONE pinned
+        # #4576 payload is the exemption; anything else riding on it reds here.
+        texts = _plain_error_payloads(funcs[name])
+        assert len(texts) == 1 and "is not an operator" in texts[0], (
+            f"{name}'s plain `error` returns must be exactly the pinned #4576 "
+            "DOMAIN ANSWER (`Point <id> is not an operator`); a second or "
+            f"different payload is a REFUSAL riding the exemption: {texts}")
 
 
 def test_the_gate_coverage_claim_is_scoped_to_what_it_actually_sees():
     """#9609 review (claim-mismatch): the gate's boundary is the SHAPE it matches,
     never "a refusal the gate cannot see is impossible to write".
 
-    Two facts, both structural, so neither the claim nor the boundary can drift:
+    Three facts, all structural, so neither the claim nor the boundary can
+    drift:
 
-    (i)  the gate is BLIND to a refusal that carries NO ``error`` key. The live
-         `tortoise_pack_install` rejected-install branch is the existence proof —
-         it is served, it is a refusal, and it is recorded ``ok`` at the seam;
-    (ii) every description of the gate says so. Before this fix
-         `tests/test_mcp_safe_error_telemetry_8135.py` claimed the gate's walk
-         meant "a refusal the gate cannot see is not possible to write without
-         failing it", which is false at this head: a lane reading it would take
-         a green gate run as coverage of shapes the gate never matches, and
-         re-open #9084 in one of them.
+    (i)   the gate is BLIND to a refusal that carries NO ``error`` key AND is
+          not an `_SafeError` — demonstrated on a synthetic body below, so the
+          limit is measured rather than described. The seam classifies such a
+          refusal only through the exact-payload arm, i.e. only when the
+          producer returns an `_SafeError`; the last served body that answered
+          one with a plain dict (`tortoise_pack_install`'s rejected manifest)
+          is converted in this change, and
+          `test_pack_install_rejected_manifest_is_recorded_as_a_failure` pins
+          that it now reads a failure;
+    (ii)  every description of the gate says so. Before this fix
+          `tests/test_mcp_safe_error_telemetry_8135.py` claimed the gate's walk
+          meant "a refusal the gate cannot see is not possible to write without
+          failing it", which is false: a lane reading it would take a green
+          gate run as coverage of shapes the gate never matches, and re-open
+          #9084 in one of them;
+    (iii) the OTHER limit that is live today is still there, so a green run
+          cannot be read as "nothing at all is left": `tortoise_overview()`
+          with no `section` nests each section's payload one level down.
     """
     funcs = {n.name: n for n in ast.parse(MCP_SERVER.read_text()).body
              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
-    producers = _plain_dict_refusal_producers(funcs,
-                                             exempt=set(DOMAIN_ANSWER_PRODUCERS))
 
+    # (i) the limit, MEASURED: a keyless refusal return is invisible.
+    synthetic = (
+        "def _9084_served_fake() -> dict:\n"
+        "    return {'installed': False, 'validation_errors': ['bad']}\n")
+    assert _gate_hits(synthetic, served={"_9084_served_fake"}) == [], (
+        "the gate now SEES a keyless refusal — a widened gate is a corpus "
+        "change to re-state here and in test_mcp_safe_error_telemetry_8135.py, "
+        "never a stale sentence")
+
+    # ... and the one served body that had that shape no longer does.
     assert "tortoise_pack_install" in _served_tool_names()
     body = funcs["tortoise_pack_install"]
     keyless_refusals = [sub for sub in ast.walk(body)
                         if isinstance(sub, ast.Return)
                         and isinstance(sub.value, ast.Dict)
-                        and not _is_error_dict(sub.value)]
-    assert keyless_refusals, (
-        "tortoise_pack_install no longer returns a dict refusal without an "
-        "`error` key — both this pin and the two docstrings it guards describe "
-        "that shape; re-derive the limit rather than deleting the evidence")
-    assert _returns_plain_dict_refusal(body, producers) == [], (
-        "the gate now SEES a refusal carrying no `error` key, so the limit "
-        "stated here and in test_mcp_safe_error_telemetry_8135.py has moved — "
-        "a widened gate is a corpus change to re-state, never a stale sentence")
+                        and not _is_error_dict(sub.value)
+                        and any(isinstance(k, ast.Constant)
+                                and k.value == "validation_errors"
+                                for k in sub.value.keys)]
+    assert keyless_refusals == [], (
+        "tortoise_pack_install answers a rejection with a plain dict again — "
+        "the row reads `ok` and this module's stated boundary is a lie")
+
+    # (iii) the nested-refusal limit is still live (not a stale sentence).
+    overview = ast.get_source_segment(MCP_SERVER.read_text(), funcs["tortoise_overview"])
+    assert "combined[sec] = result" in overview, (
+        "the nested-section refusal limit moved — re-derive WHAT THE GATE "
+        "STILL DOES NOT SEE rather than leaving a stale shape in it")
 
     seam = pathlib.Path(__file__).with_name("test_mcp_safe_error_telemetry_8135.py")
     sibling = ast.parse(seam.read_text())
@@ -368,14 +421,18 @@ def test_the_gate_coverage_claim_is_scoped_to_what_it_actually_sees():
     assert "not possible to write" not in doc, (
         "the seam docstring is claiming a gate-invisible refusal cannot be "
         "written again. The gate matches one shape — a dict literal (or a "
-        "helper/name resolving to one) carrying a CONSTANT `error` key — and "
-        "`tortoise_pack_install` is a live refusal it does not classify")
+        "helper/name resolving to one) carrying a CONSTANT `error` key")
     assert "WHAT THE GATE STILL DOES NOT SEE" in doc, (
         "the seam docstring must point at THIS module's named limits: the gate's "
         "boundary is scoped there, and only there")
-    assert "tortoise_pack_install" in doc, (
+    assert "tortoise_overview" in doc, (
         "the seam docstring must name a concrete shape the gate does not "
         "classify, not merely gesture at limits")
+    assert "converted" in doc, (
+        "the seam docstring names the KEYLESS shape (`tortoise_pack_install`), "
+        "so it must also say that shape is CONVERTED — otherwise a reader "
+        "takes a closed hole for a live one, which is the drift this pin exists "
+        "to stop")
 
 
 # ── 2. The vocabulary ──────────────────────────────────────────────────────
@@ -643,6 +700,46 @@ async def test_manage_sources_unreadable_projection_is_recorded_as_a_failure(
     payload = result.structured_content
     assert "could not be read" in payload["error"], payload
     row = events[-1]
+    assert row["status"] == "exec_error", row
+    assert row["error_kind"] == "safe_error", row
+
+
+@pytest.mark.asyncio
+async def test_pack_install_rejected_manifest_is_recorded_as_a_failure(
+        events, hosted, monkeypatch):
+    """A refusal carrying NO ``error`` key at all (`validation_errors`).
+
+    A rejected manifest IS a refusal: the install was refused. The two sibling
+    branches in the same body were converted by the first sweep; this one was
+    left as a plain dict because it has no `error` key, so the dispatch was
+    recorded ``status="ok"`` — the #9084 defect on a live, served tool
+    (#9609 review P2). It is classified by the seam's exact-payload arm (the
+    payload is recorded when the `_SafeError` is CONSTRUCTED), which is why the
+    fix does not need — and must not add — a key-presence heuristic (#3926).
+    """
+    import tortoise.pack_manifest_store as store
+
+    def _reject(*_a, **_kw):
+        raise ValueError("packs: 'bogus' is not a known starter pack")
+
+    # The HOSTED-only gate above the branch is a ``sys.modules`` lookup, so
+    # importing the real module is enough — this test is about the refusal, not
+    # deployment (and a placeholder module would break conftest's probe reset).
+    import tortoise.hosted_api  # noqa: F401  — satisfies the hosted-only gate
+
+    monkeypatch.setattr(store, "upsert_tenant_manifest", _reject)
+    monkeypatch.setattr(ms, "_get_org_sdk", lambda: object())
+
+    result = await ms.mcp.call_tool("tortoise_pack_install",
+                                    {"manifest_yaml": "packs: []"})
+
+    payload = result.structured_content
+    assert payload["installed"] is False, payload
+    assert payload["validation_errors"] == [
+        "packs: 'bogus' is not a known starter pack"], payload
+    assert "error" not in payload, payload
+    row = events[-1]
+    assert row["tool_name"] == "tortoise_pack_install", row
     assert row["status"] == "exec_error", row
     assert row["error_kind"] == "safe_error", row
 

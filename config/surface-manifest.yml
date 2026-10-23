@@ -2330,7 +2330,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_pack_install
-  served_from: tortoise/mcp_server.py:3a91484043b1a6aa
+  served_from: tortoise/mcp_server.py:15c0f0832479a167
   served_attributes: edc1d2043e67e989
   family: admin
   family_rank: 5

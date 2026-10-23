@@ -226,11 +226,16 @@ async def test_a_plain_dict_payload_is_still_recorded_ok_at_the_seam(
     proof that a refusal the gate cannot see cannot be written. The named
     limits live in ``tests/test_mcp_refusal_telemetry_9084.py`` under
     "WHAT THE GATE STILL DOES NOT SEE"; one of them is live today —
-    ``tortoise_pack_install`` answers a rejected install with
-    ``{"installed": False, "validation_errors": [...]}``, which carries no
-    ``error`` key, which the gate does not match, and which is recorded ``ok``.
-    A refusal written in an unclassified shape widens the gate; a green run on
-    the gate is coverage of the shape above and of nothing else.
+    ``tortoise_overview()`` with no ``section`` nests each section's payload one
+    level down (``combined[sec] = result``), which the seam's two-level read
+    does not reach, so a failing section is recorded ``ok``. A KEYLESS refusal
+    is the other boundary: the seam classifies one only when the body returns
+    an `_SafeError` (the exact-payload arm), and the gate cannot match a
+    keyless dict at all — the last served body that answered one with a plain
+    dict (``tortoise_pack_install``'s rejected manifest) is converted, and its
+    behaviour is pinned in the 9084 module. A refusal written in an
+    unclassified shape widens the gate; a green run on the gate is coverage of
+    the shape above and of nothing else.
     """
     def plain_dict_tool() -> dict:
         return {"mode": "bogus",
