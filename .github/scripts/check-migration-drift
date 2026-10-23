@@ -179,6 +179,18 @@ fi
 if [ -n "$WARN_ONLY" ]; then
   echo "  warn-only repo-ahead migrations (index-only, no data-correctness dependency): not order-checked — --include-all still applies them in filename order: $WARN_ONLY"
 fi
+# Say what repo-ahead does NOT establish, before ANY exit prescribes an action.
+# Repo-ahead is a set difference of version STRINGS against
+# `supabase_migrations.schema_migrations`: it proves prod has no ROW, never that
+# prod lacks the objects. One statement for every red exit below (the
+# duplicate-prefix rename, the out-of-order decision, and the ordinary pending
+# set) — the duplicate branch is where a DDL-free repair is most tempting, so
+# scoping the note to one branch is how it got missed (#9613 review finding).
+if [ -n "$REPO_AHEAD" ]; then
+  echo "  note: 'repo-ahead' means prod has no schema_migrations ROW — NOT that prod lacks"
+  echo "        the objects. Bookkeeping drift (DDL applied outside 'supabase db push',"
+  echo "        so the version was never recorded) produces exactly this report (#9613)."
+fi
 
 if [ -n "$DUP_LOCAL_VERSIONS" ]; then
   echo "  BLOCKING duplicate migration version prefixes (abort \`supabase db push\` AND mask drift state — see #1235):"
@@ -207,17 +219,18 @@ if [ -n "$DUP_LOCAL_VERSIONS" ]; then
   exit 1
 fi
 if [ -n "$BLOCKING" ]; then
-  # ⛔ THE HEADING STATES ONLY WHAT WAS MEASURED. Repo-ahead is a `set -diff` of
-  # version STRINGS: it proves prod has no `schema_migrations` row for these
-  # versions, and it proves NOTHING about whether the objects exist. It used to
-  # read "(pending in repo, NOT applied to prod)", and #9613 measured that claim
-  # FALSE in a live instance: prod served `blog_posts.author_image_url` — a column
+  # ⛔ THE HEADING STATES ONLY WHAT WAS MEASURED. Repo-ahead is a set difference
+  # of version STRINGS against `supabase_migrations.schema_migrations`: it proves
+  # prod has no ROW for these versions, and it proves NOTHING about whether the
+  # objects exist. It used to read "(pending in repo, NOT applied to prod)", and
+  # #9613 measured that claim FALSE in a live instance: prod served
+  # `blog_posts.author_image_url` — a column
   # `20261021000001` adds — from the live blog (`/blog/state-of-agentic-memory-2026`,
   # rendered per request, reading project ybetwichurajbfswfeqa) while this gate
   # reported that same version as "NOT applied to prod". A reader who believes the
   # old heading runs DDL that is already in place; a reader who knows better has
   # no remedy here at all, because this branch withheld the DDL-free one.
-  echo "  BLOCKING repo-ahead migrations (repo has them; prod's supabase_migrations has NO row):"
+  echo "  BLOCKING repo-ahead migrations (repo has them; prod's supabase_migrations.schema_migrations has NO row):"
   for v in $BLOCKING; do echo "    - $v"; done
   # Say whether this list is the whole repo-pending set or a filtered subset:
   # the heading alone reads as "the work", but `--include-all` also pushes the
@@ -241,13 +254,6 @@ if [ -n "$BLOCKING" ]; then
     echo "          running DDL — supabase migration repair --linked --status applied <version>"
     echo "    A blanket repair hides real drift (#1001) — verify in prod first."
   fi
-
-  # Say what the list does NOT establish, before the remediation leans on it.
-  # Same distinction the OUT OF ORDER block spells out; it is not specific to
-  # out-of-order versions, and #9613 is the case where it fired in THIS branch.
-  echo "  note: 'repo-ahead' means prod has no schema_migrations ROW — NOT that prod lacks"
-  echo "        the objects. Bookkeeping drift (DDL applied outside 'supabase db push',"
-  echo "        so the version was never recorded) produces exactly this report (#9613)."
 
   if [ -n "$BLOCK_SAFE" ]; then
     if [ -n "$REMOTE_MAX" ]; then

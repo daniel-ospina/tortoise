@@ -349,14 +349,25 @@ def test_in_order_block_still_instructs_apply():
 
 
 def test_in_order_block_does_not_claim_prod_lacks_the_objects():
-    """The heading may state only what was measured: prod has no version row."""
+    """The heading may state only what was measured: prod has no version row.
+
+    Asserts on the heading LINE, not on a substring some sibling note supplies —
+    otherwise rewording the note would silently un-pin the heading (#9613 review
+    finding, so the assertion below is a single heading line).
+    """
     r = _run_fixture(
         {"20260813000004_claim.sql": "CREATE TABLE IF NOT EXISTS public.c (id text);\n"},
         ["0001"],
     )
     assert r.returncode == 1, r.stdout
     assert "NOT applied to prod" not in r.stdout, r.stdout
-    assert "schema_migrations" in r.stdout, r.stdout
+    heading = next(
+        ln for ln in r.stdout.splitlines() if ln.startswith("  BLOCKING repo-ahead")
+    )
+    # The TABLE, not the schema: `supabase_migrations` is the schema and an
+    # operator who queries it lands on a schema-vs-table error.
+    assert "supabase_migrations.schema_migrations" in heading, heading
+    assert "has NO row" in heading, heading
 
 
 def test_in_order_block_offers_the_ddl_free_remedy_for_bookkeeping_drift():
@@ -367,6 +378,12 @@ def test_in_order_block_offers_the_ddl_free_remedy_for_bookkeeping_drift():
     (repair) was not offered. Naming only `repair` would be the #1001 defect —
     a blanket repair hides real drift — so the report must also carry the
     read-only verification that tells the two cases apart.
+
+    The repair assertion is STRUCTURAL on purpose: the pre-#9613 script already
+    contained the string `supabase migration repair --linked --status applied`
+    in a trailing `# rename-repair case:` comment, so a substring check passes
+    against the very report this change replaces (#9613 review finding). The
+    `(b)` outcome marker does not exist in that form.
     """
     r = _run_fixture(
         {"20260813000004_claim.sql": "CREATE TABLE IF NOT EXISTS public.c (id text);\n"},
@@ -374,18 +391,35 @@ def test_in_order_block_offers_the_ddl_free_remedy_for_bookkeeping_drift():
     )
     assert r.returncode == 1, r.stdout
     out = r.stdout
-    # (a) the apply path survives, verbatim.
+    # (a) the apply path survives, verbatim, and comes first.
     assert "apply migrations first" in out, out
     assert "gh workflow run supabase-deploy.yml --ref main" in out, out
-    # (b) the DDL-free path is now a first-class outcome, not a trailing comment.
-    assert "supabase migration repair --linked --status applied" in out, out
+    # (b) the DDL-free path is a first-class outcome, not a trailing comment.
+    marker = "(b) the objects are PRESENT and only the version is unrecorded"
+    assert marker in out, out
+    assert out.index(marker) < out.index("repair --linked"), out
+    assert out.index("apply migrations first") < out.index(marker), out
     # ... and it is not a blanket instruction: the report names the read-only
     # checks that distinguish "absent" from "unrecorded", and the #1001 limit.
     assert "db diff --linked" in out, out
     assert "migration list --linked" in out, out
     assert "#1001" in out, out
-    # (a) before (b): the cheap apply path stays first for the ordinary case.
-    assert out.index("apply migrations first") < out.index("repair --linked")
+
+
+def test_repo_ahead_note_accompanies_the_duplicate_prefix_branch():
+    """The duplicate-prefix exit prescribes a rename + apply, so it must carry
+    the same 'repo-ahead proves no ROW, not missing objects' note — that is the
+    exit where a DDL-free repair is most tempting (#9613 review finding)."""
+    r = _run_fixture(
+        {
+            "20260813000005_a.sql": "CREATE TABLE IF NOT EXISTS public.a (id text);\n",
+            "20260813000005_b.sql": "CREATE TABLE IF NOT EXISTS public.b (id text);\n",
+        },
+        ["0001"],
+    )
+    assert r.returncode == 1, r.stdout
+    assert "duplicate" in r.stdout.lower(), r.stdout
+    assert "schema_migrations ROW" in r.stdout, r.stdout
 
 
 def test_mixed_out_of_order_and_safe_are_partitioned():
@@ -455,6 +489,26 @@ def _run_with_supabase_stub(
         ["bash", str(SCRIPT)], capture_output=True, text=True, env=env, cwd=REPO_ROOT
     )
     return r, marker
+
+
+def test_in_order_report_never_executes_supabase():
+    """The ordinary pending branch prints TWO command-shaped remediations
+    (`supabase db push --linked --include-all` and `supabase migration repair
+    --linked --status applied <version>`); an unescaped backtick on either line
+    would run prod DDL while merely printing it (#4278's defect class).
+    `test_report_never_executes_supabase` only covers the OUT OF ORDER branch,
+    which is the reason this fixture is added rather than widened (#9613 review
+    finding). Mutation-provable: wrap either line in backticks and the marker
+    appears."""
+    r, marker = _run_with_supabase_stub(
+        {"20260813000004_claim.sql": "CREATE TABLE IF NOT EXISTS public.c (id text);\n"},
+        ["0001"],
+    )
+    assert r.returncode == 1, r.stdout
+    assert not marker.exists(), "the report EXECUTED supabase instead of printing it"
+    # Both command lines really are present in this branch, or the guard is vacuous.
+    assert "supabase db push --linked --include-all" in r.stdout, r.stdout
+    assert "migration repair --linked --status applied" in r.stdout, r.stdout
 
 
 def test_report_never_executes_supabase():
