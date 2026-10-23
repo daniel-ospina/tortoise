@@ -1503,6 +1503,35 @@ class TestIssue9631SharedWiringRulesAreStatedOnce:
         assert may_mint_damped_bridge(has_single) is False
         assert may_mint_damped_bridge(other_label) is False
 
+    def test_other_label_single_pair_bridge_blocks_the_mint(self, sdk, capsys):
+        """A triple can carry a SHARED bridge under the named label AND a
+        single-pair bridge under another one. The named scope then has nothing
+        to damp — but minting there would still file a claim next to an existing
+        single-pair bridge, which is exactly what the mint rule forbids. The
+        round-2 gate only populated `other_singles` on the empty-triple branch,
+        so this mixed state slipped through (#9631 review, round 3)."""
+        from tortoise.decide_wiring import may_mint_damped_bridge, select_damp_targets
+
+        crit = sdk.create_point("criterion", f"Criterion {_mk()}")
+        a = sdk.create_point("option", f"Option A {_mk()}")
+        b = sdk.create_point("option", f"Option B {_mk()}")
+        shared = sdk.create_operator("IMPL", crit["id"], [a["id"], b["id"]],
+                                     label="supports")
+        unlabelled = sdk.create_operator("IMPL", crit["id"], [a["id"]])
+
+        pick = select_damp_targets(sdk._get_proj(), "IMPL", crit["id"],
+                                   a["id"], "supports")
+        assert pick["singles"] == [], pick
+        assert pick["targets"] == [], pick
+        assert pick["other_singles"] == [unlabelled["id"]], (
+            "the single-pair bridge under another label was not reported, so "
+            f"the mint gate would license a new claim: {pick}")
+        assert pick["bridges"] == 2, (
+            f"`bridges` must count the whole triple, not the label scope: {pick}")
+        assert may_mint_damped_bridge(pick) is False, (
+            "a new claim would be filed next to an existing single-pair bridge")
+        assert shared["id"] not in pick["targets"]
+
     def test_different_label_bridge_is_named_not_silently_twinned(self, sdk,
                                                                  capsys):
         """The label is part of the operator identity, so a labelled `edges`

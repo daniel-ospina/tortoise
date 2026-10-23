@@ -255,27 +255,33 @@ def select_damp_targets(proj, op_type: str, source_id: str, target_id: str,
     name). Without a label the edge damps the unlabelled bridge when there is
     one, and refuses to guess when the triple carries several distinct labels.
     """
-    found = find_operators(proj, op_type, source_id, target_id, label,
-                           any_label=label is None)
+    # ONE query, then scope it in Python: `bridges` must mean "how many bridges
+    # sit on the triple" (that is what the docstring promises and what the mint
+    # gate needs), and a label-scoped lookup alone cannot answer it. A labelled
+    # edge on a triple that carries other labels is NOT an empty triple.
+    on_triple = find_operators(proj, op_type, source_id, target_id, None,
+                               any_label=True)
+    if label is None:
+        found, other_singles, other_rows = on_triple, [], []
+    else:
+        found = [row for row in on_triple if row["label"] == label]
+        other_rows = [row for row in on_triple if row["label"] != label]
+        other_singles = [row["id"] for row in other_rows
+                         if row["targets"] == 1]
+    bridges = len(on_triple)
+
     if not found:
         named = f"{label} " if label else ""
         notes = [f"no {named}bridge on this triple"]
-        # A labelled edge on a triple that carries other labels is NOT an empty
-        # triple, and the caller must not treat it as licence to mint.
-        others = [row for row in find_operators(
-            proj, op_type, source_id, target_id, None, any_label=True)
-            if row["label"] != label]
-        if others:
+        if other_rows:
             present = ", ".join(
                 f'{row["id"]} ({row["label"] or "unlabelled"})'
-                for row in others)
+                for row in other_rows)
             notes.append(
                 f"the triple carries {present} under a DIFFERENT label — not "
                 "damped (a relevance edge damps only the claim it names)")
-        return {"targets": [], "bridges": len(others), "singles": [],
-                "other_singles": [row["id"] for row in others
-                                  if row["targets"] == 1],
-                "notes": notes}
+        return {"targets": [], "bridges": bridges, "singles": [],
+                "other_singles": other_singles, "notes": notes}
     notes: list[str] = []
     # #6671 review: a bridge with ``targets > 1`` also claims OTHER pairs, so
     # damping it here would weaken claims this edge never named — the exact
@@ -288,12 +294,17 @@ def select_damp_targets(proj, op_type: str, source_id: str, target_id: str,
                           for row in shared)
         notes.append(f"{named} also claim other pairs — not damped (it would "
                      "weaken claims this edge did not name)")
-    found = [row for row in found if row["targets"] == 1]
-    if not found:
-        notes.append("every bridge on this triple is shared with other pairs "
-                     "(no single-pair bridge to damp)")
-        return {"targets": [], "bridges": len(shared), "singles": [],
-                "other_singles": [], "notes": notes}
+    single = [row for row in found if row["targets"] == 1]
+    if not single:
+        scope = f"under {label!r} " if label else ""
+        notes.append(f"no single-pair bridge {scope}on this triple — every "
+                     "bridge in scope is shared with other pairs")
+        # `other_singles` still matters HERE: a single-pair bridge under a
+        # different label is a claim this edge did not name, so the mint gate
+        # must refuse even though the named scope has nothing to damp.
+        return {"targets": [], "bridges": bridges, "singles": [],
+                "other_singles": other_singles, "notes": notes}
+    found = single
     if label is not None:
         targets = [row["id"] for row in found]
     elif any(row["label"] == "" for row in found):
@@ -305,13 +316,9 @@ def select_damp_targets(proj, op_type: str, source_id: str, target_id: str,
         notes.append(f"this triple carries {len(labels)} distinct labels "
                      f"{labels} and the edge names none — nothing damped")
         targets = []
-    # `singles` is what the mint gate reads: a triple whose bridges are ALL
-    # shared with other pairs has no single-pair bridge to damp, which is the
-    # same state the `edges` arm writes its way out of — so the CLI mints there
-    # too, and stays consistent with `resolve_or_create_operator`.
-    return {"targets": targets, "bridges": len(found) + len(shared),
+    return {"targets": targets, "bridges": bridges,
             "singles": [row["id"] for row in found],
-            "other_singles": [], "notes": notes}
+            "other_singles": other_singles, "notes": notes}
 
 
 def may_mint_damped_bridge(pick: dict) -> bool:
