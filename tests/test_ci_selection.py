@@ -2127,6 +2127,20 @@ def test_record_schema_pin_runs_on_migration_or_doc_change():
         # pin (the heading and the row set) live in this file, so it must select
         # `core` on its own.
         "docs/epics/2026-10-10-7879-postgres-record/08-hosted-prerequisites.md",
+        # #9638 review P1 (second round): the THIRD document a record pin reads,
+        # and the one that made this PR's own newest commit (`e92a78099`, "the
+        # routing index's census, and the pin that keeps it true") unpinnable.
+        # `test_the_routing_index_census_matches_the_record_migrations` reads
+        # `docs/00_index.md`'s #7879 row for both its census ("N record tables +
+        # M procedural views") and its negative ("no narrative/raw-text table").
+        # Without its own CORE_ALSO entry an index-only edit filtered to
+        # `changed == []`, took the docs-only early return and selected NO
+        # surface — so the census could go stale again with the pin that guards
+        # it never selected. A `core` registration alone cannot fix that: a
+        # surface's test_files only run when the surface is ALREADY selected.
+        # Measured on the pre-fix head: `_sel(["docs/00_index.md"])` ->
+        # surfaces=[], full=False, test_record_schema_placement.py ABSENT.
+        "docs/00_index.md",
     ):
         r = _sel([changed])
         assert r["full"] is False, (changed, r)

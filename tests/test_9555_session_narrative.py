@@ -106,6 +106,77 @@ def test_the_foreign_key_cascades_so_erasure_reaches_it():
     assert "ON DELETE CASCADE" in sql
 
 
+def test_the_carrier_gap_block_states_only_the_gap_that_is_real():
+    """`#9638` review P2: the ⚠️ CARRIER GAP block must not invent a second gap.
+
+    Before this pin the block described `capture_redactions` as an UNSETTLED
+    gap too — *"NULL because the record's OWN column,
+    `public.session.capture_redactions`, is jsonb while the producer emits an
+    integer, so a `SessionRecorded` carrying one is refused
+    (`DatatypeMismatch`)"* — plus a fragment ("— which is exactly why …") left
+    hanging off it. All of that is false in this tree, and it contradicted the
+    migration's OWN header (which classes the column PRIMARY /
+    journal-carried), `08-hosted-prerequisites.md`'s R7 table, and
+    `docs/00_index.md`'s row ("fixed since (#9264)"). Migrations are
+    append-only, so the false sentence lands permanently.
+
+    The narrowing is derived from the tree, not re-typed: the settling
+    migration is read, so this pin cannot rot into asserting a fact that has
+    moved. The positive half keeps the fix from becoming a deletion — the gap
+    that IS real (no journal carrier for `story_arc`/`summary`) must still be
+    stated.
+
+    RED on the pre-fix text: `DatatypeMismatch` present, and
+    "`capture_redactions` NULL" stated as the live-capture outcome.
+    """
+    sql = _migration_sql()
+    start = sql.index("⚠️ THE CARRIER GAP")
+    block = sql[start:sql.index("\n-- ====", start)]
+
+    # The #9264/R4 settling migration is in THIS tree, and it narrows the
+    # column the block said would refuse the carrier.
+    narrowing = (MIGRATIONS
+                 / "20261022000001_record_session_capture_redactions_integer.sql")
+    assert narrowing.exists(), (
+        "the #9264/R4 narrowing migration is gone — re-derive this pin's premise "
+        "instead of deleting the assertion"
+    )
+    assert re.search(
+        r"ALTER TABLE\s+public\.session\s+ALTER COLUMN\s+capture_redactions\s+TYPE\s+integer",
+        narrowing.read_text(encoding="utf-8"),
+    ), (
+        "the narrowing no longer ALTERs `public.session.capture_redactions` to "
+        "`integer` — the carrier-gap block's premise changed, so this pin must "
+        "be re-derived rather than loosened"
+    )
+
+    # So the refusal the block described cannot occur, and a block that still
+    # claims it mis-states the projection this suite exercises below.
+    assert "DatatypeMismatch" not in block, (
+        "the carrier-gap block claims the `SessionRecorded` carrying "
+        "`capture_redactions` is refused `DatatypeMismatch` — the column is "
+        "`integer` since 20261022000001 (#9264/R4 settled), so the count LANDS"
+    )
+    for claim in ("`capture_redactions` NULL", "`capture_redactions` is NULL"):
+        assert claim not in block, (
+            f"the carrier-gap block still states {claim!r} as the live-capture "
+            "outcome: `capture_redactions` rides a `SessionRecorded` and its "
+            "column is `integer`, so the row lands with BOTH counts filled"
+        )
+
+    # The positive half: the ONE real gap is still stated, in the block that
+    # exists to state it — the fix deletes a false claim, not the disclosure.
+    assert "story_arc" in block and "summary" in block, (
+        "the carrier-gap block no longer names the columns whose journal "
+        "carrier is genuinely absent (`story_arc`/`summary`) — the disclosure "
+        "was deleted instead of corrected"
+    )
+    assert "raw Cypher" in block, (
+        "the block no longer says WHY there is no carrier (the layer-1 commit "
+        "writes `story_arc` by raw Cypher, which is not a journal record)"
+    )
+
+
 def test_the_row_does_not_depend_on_the_session_row_landing_first():
     """⛔ NOT a foreign key into `public.session`, and this is a REGRESSION pin.
 

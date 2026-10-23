@@ -1387,6 +1387,25 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # defect it pins. Pinned by
              # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
              "docs/epics/2026-10-10-7879-postgres-record/08-hosted-prerequisites.md",
+             # #9638 review P1: the THIRD document a record pin now reads, and
+             # the one whose absence made the PR's own newest commit
+             # (`e92a78099`, "the routing index's census, and the pin that keeps
+             # it true") unpinnable. `test_record_schema_placement.py::
+             # test_the_routing_index_census_matches_the_record_migrations`
+             # reads `docs/00_index.md`'s #7879 row for its census
+             # ("N record tables + M procedural views")
+             # AND for its negative ("no narrative/raw-text table"). That path
+             # is under `docs/` (a NON_PYTHON_PREFIXES entry) and matches no
+             # SOURCE_PATTERNS row, so an index-only edit filtered to
+             # `changed == []` and took the docs-only early return: the census
+             # could go stale again — exactly the drift the commit exists to
+             # catch — with the pin that guards it never selected. The
+             # `core` registration cannot fix this on its own: a surface's
+             # test_files only run when that surface is ALREADY selected.
+             # Same #1349/#3332/#3616 silent-drop class as the two entries
+             # above. Pinned by
+             # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
+             "docs/00_index.md",
              # RETIRED 2026-10-19: the orchestrator harness (and therefore
              # tests/test_orchestrator_harness.py) moved to
              # agent-infra/scripts/orchestrator-harness/. This repo keeps only a pointer

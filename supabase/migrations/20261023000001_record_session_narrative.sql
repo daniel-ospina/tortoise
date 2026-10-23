@@ -34,9 +34,11 @@
 -- and the difference is stated rather than glossed:
 --   * `capture_redactions` <- `SessionRecorded.capture_redactions`, the
 --     per-window redaction count (`#4911`) — journal-carried today. INTEGER on
---     purpose: the count IS an integer, and the jsonb sibling on
---     `public.session` is the schema↔producer disagreement `#9264` (R4) exists
---     to remove. A count is not an envelope.
+--     purpose: the count IS an integer. The `jsonb` sibling on `public.session`
+--     WAS the schema↔producer disagreement `#9264` (R4) exists to remove, and
+--     `20261022000001` has since narrowed it to `integer` — so the carrier's
+--     `SessionRecorded` reaches this table instead of being refused by the
+--     column type. A count is not an envelope.
 --   * `turn_count` <- `SessionRecorded.turn_count`, riding a DIFFERENT and
 --     EARLIER `SessionRecorded` than `capture_redactions` above (that one is
 --     emitted by `_write_capture_turns`, this one by `_write_session_and_turns`'
@@ -103,20 +105,18 @@
 -- raw Cypher is **not** a journal record (§17.1's unjournalled-writer ledger):
 -- `grep -rn story_arc tortoise/` finds commit *payloads* and those raw writes,
 -- and no producer journals either. So on a live capture today this row lands
--- with `turn_count` filled, `capture_redactions` NULL and `narrative` NULL: the
--- projection is correct and total, but the narrative carrier does not exist yet.
--- ⚠️ `capture_redactions` is NULL because the record's OWN column,
--- `public.session.capture_redactions`, is jsonb while the producer emits an
--- integer, so a `SessionRecorded` carrying one is refused (`DatatypeMismatch`)
--- and never reaches this table at all — #9264/R4 is that disagreement, and this
--- home states no count until it is settled rather than inventing a shape.
--- — which is exactly why the header above classes the two text columns as
--- PRIMARY-WITHOUT-CARRIER rather than PRIMARY. The producer (journal the derived
--- `:Source`/`:Event` write with `summary`/`story_arc`/`sessionId`) and the wiring
--- of the read arm into R8's restore verb / the ask path are the remainder of
--- #9555 — recorded on the issue, deliberately not faked here by writing a
--- NULL-looking value or by scraping the graph (which would make the record's
--- text depend on the cache it is supposed to survive).
+-- with its two COUNTS filled and its two TEXT columns NULL: `turn_count` and
+-- `capture_redactions` each ride a `SessionRecorded` the capture emits, and
+-- `capture_redactions` reaches this table as an integer because
+-- `20261022000001` narrowed `public.session.capture_redactions` off `jsonb`
+-- (#9264/R4, settled) — the projection is correct and total, but the narrative
+-- carrier does not exist yet. That is exactly why the header above classes the
+-- two text columns as PRIMARY-WITHOUT-CARRIER rather than PRIMARY. The producer
+-- (journal the derived `:Source`/`:Event` write with `summary`/`story_arc`/
+-- `sessionId`) and the wiring of the read arm into R8's restore verb / the ask
+-- path are the remainder of #9555 — recorded on the issue, deliberately not
+-- faked here by writing a NULL-looking value or by scraping the graph (which
+-- would make the record's text depend on the cache it is supposed to survive).
 -- ============================================================================
 
 CREATE TABLE IF NOT EXISTS public.session_narrative (
@@ -158,7 +158,7 @@ COMMENT ON TABLE public.session_narrative IS
 COMMENT ON COLUMN public.session_narrative.narrative IS
     'The commit''s `story_arc` — §9.1''s "connected prose form of a captured session". Not in the graph, not a Point: it has no confidence and takes part in no operator (§9.1).';
 COMMENT ON COLUMN public.session_narrative.capture_redactions IS
-    'The per-window redaction count from `SessionRecorded.capture_redactions` (#4911). INTEGER: the count IS an integer (the jsonb column on public.session is the #9264/R4 disagreement, not the model).';
+    'The per-window redaction count from `SessionRecorded.capture_redactions` (#4911). INTEGER: the count IS an integer (the jsonb column on public.session was the #9264/R4 disagreement, narrowed to integer by 20261022000001, so the carrier reaches this table rather than being refused).';
 
 ALTER TABLE public.session_narrative ENABLE ROW LEVEL SECURITY;
 
