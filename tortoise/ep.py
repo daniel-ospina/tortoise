@@ -17,6 +17,7 @@ import time
 from .exceptions import UnaddressableClaimError
 from .projection import _declares_apply_first_write_lane
 from .quadrature import tilted_moments, moments_to_beta, phi_nand, phi_impl
+from . import claim_class
 from .live import (
     EPISTEMIC_LABELS,
     _live_only,
@@ -1753,12 +1754,13 @@ class TortoiseEP:
         below 2 becomes degenerate and is skipped — the SVBP-path convention.
 
         ``skipped`` (#6105) is an optional SINK: every factor this call drops
-        (degenerate, or a directional operator whose idx-0 source was
-        stripped) appends one structured record to it — ``operator_id``,
-        ``op_type``, ``reason``, ``participating_inputs`` and every input with
-        its status. ``run()`` passes ``self._last_skipped_factors`` so the run
-        carries the diagnostic; the read-only scope callers pass nothing and
-        stay side-effect free.
+        (degenerate, a directional operator whose idx-0 source was stripped, or
+        — #2351 — a DERIVED over ASSERTED factor whose every leg the claim-class
+        override guard blocked) appends one structured record to it —
+        ``operator_id``, ``op_type``, ``reason``, ``participating_inputs`` and
+        every input with its status. ``run()`` passes
+        ``self._last_skipped_factors`` so the run carries the diagnostic; the
+        read-only scope callers pass nothing and stay side-effect free.
         """
         live_o = _live_only("o.status", include_draft)
         live_c = _live_only("c.status", include_draft)
@@ -1873,7 +1875,14 @@ class TortoiseEP:
                 "MATCH (a)-[r:IMPL|NAND]->(b) "
                 "WHERE " + " AND ".join(_conds) + " "
                 "RETURN id(r), a.id, b.id, type(r), "
-                "       coalesce(r.direction, 'bidirectional'), r.weight"
+                "       coalesce(r.direction, 'bidirectional'), r.weight, "
+                # #2351 (epic #2349 E-derived): the endpoints' claim classes
+                # ride the SAME statement, so the override guard below adds no
+                # query (mirrors the #7902 label fan-out: every hop query
+                # carries the columns its consumers need).
+                "       a.status, b.status, "
+                "       coalesce(a.claimClass, 'asserted'), "
+                "       coalesce(b.claimClass, 'asserted')"
             ):
                 for _row in self._hop_query(
                     _q, {"ids": list(affected_claims)}, hop=None,
@@ -1884,11 +1893,42 @@ class TortoiseEP:
                         continue
                     _seen_dir.add(_row[0])
                     dir_rows.append(tuple(_row[1:]))
-        for src_id, tgt_id, rel, direction, weight in dir_rows:
+        for (src_id, tgt_id, rel, direction, weight,
+             src_status, tgt_status, src_cls, tgt_cls) in dir_rows:
             if weight is None:
                 weight = (NAND_BASE_WEIGHT if rel == "NAND" else 1.0)
+            # #2351: the ASSERTED-vs-DERIVED override guard, at the LOAD side.
+            # This is the BACKSTOP, not the gate: the write path refuses to
+            # create such a factor at all, so this arm exists for edges that
+            # PREDATE the guard or were bulk-written. It blocks the leg that
+            # would push the computed claim's belief into the authored one and
+            # keeps the reverse leg, so a derived claim is still corroborated
+            # by the authored belief it sits beside. Both legs blocked ⇒ the
+            # factor is DROPPED and REPORTED (#6105/#689 discipline: a dead arm
+            # contributes nothing, and the run says so rather than reporting
+            # `converged` over a discarding it did silently).
+            effective = claim_class.factor_direction(
+                direction, {src_cls}, {tgt_cls})
+            if effective is None:
+                logger.warning(
+                    "Direct edge %s -[%s]-> %s: DERIVED source over ASSERTED "
+                    "target — factor skipped (#2351)",
+                    src_id, rel, tgt_id,
+                )
+                if skipped is not None:
+                    skipped.append({
+                        "operator_id": src_id,
+                        "op_type": rel,
+                        "reason": "derived_over_asserted",
+                        "participating_inputs": 0,
+                        "inputs": [
+                            {"id": src_id, "status": src_status or "live"},
+                            {"id": tgt_id, "status": tgt_status or "live"},
+                        ],
+                    })
+                continue
             factors.append((src_id, rel, [src_id, tgt_id], float(weight),
-                            None, direction))
+                            None, effective))
 
         if not op_info:
             return factors
@@ -1917,17 +1957,25 @@ class TortoiseEP:
         # is then NOT provably the source, so the directional source-slot
         # guard must not fire (it could check the wrong slot — #943 review).
         op_idx_known: dict[str, bool] = {op_id: True for op_id in op_info}
+        # #2351 (epic #2349 E-derived): each input's claim class, read from the
+        # SAME Batch-2 statement (no extra query) and positionally aligned with
+        # ``op_inputs`` so the override guard below can name the factor's SOURCE
+        # slot (idx 0 — the position ``_update_factor`` reads the forward
+        # message's belief from).
+        op_input_class: dict[str, list[str]] = {op_id: [] for op_id in op_info}
         rows = self._hop_query(
             "MATCH (o:Point)-[r:IMPL|NAND]->(c) "
             "WHERE o.id IN $ids "
             f"AND {epistemic_disjunction('c')} "
-            "RETURN o.id, c.id, r.idx, c.status, coalesce(c.outdated, false) "
+            "RETURN o.id, c.id, r.idx, c.status, coalesce(c.outdated, false), "
+            "       coalesce(c.claimClass, 'asserted') "
             "ORDER BY coalesce(r.idx, 0), c.id",
             {"ids": list(op_info.keys())}, hop=None,
             phase="factor_extraction", frontier_size=len(op_info),
         )
-        for op_id, claim_id, idx, status, outdated in rows:
+        for op_id, claim_id, idx, status, outdated, input_cls in rows:
             op_inputs[op_id].append(claim_id)
+            op_input_class[op_id].append(input_cls)
             # Participation is UNCONDITIONAL on status (#2422): a terminal
             # input (retracted / superseded / outdated / archived /
             # deprecated status — the SAME vocabulary as the Cypher
@@ -2017,6 +2065,47 @@ class TortoiseEP:
                             ],
                         })
                     continue
+            # #2351 (epic #2349 E-derived): the ASSERTED-vs-DERIVED override
+            # guard — the LOAD-side BACKSTOP to the write path's refusal. A
+            # DERIVED claim must not push belief INTO an ASSERTED one: the leg
+            # that would do so is blocked (the reverse leg survives, so a
+            # derived claim is still corroborated by the authored belief beside
+            # it). The factor's SOURCE slot is idx 0 — the position
+            # ``_update_factor`` reads the forward message's belief from — and
+            # the classes are read from the SAME Batch-2 statement, so this
+            # costs no query. Both legs blocked ⇒ the factor is DROPPED and
+            # reported (#6105), never silently discarded while the run reports
+            # `converged`.
+            _input_classes = [
+                cls for cls, live in zip(  # noqa: B905
+                    op_input_class[op_id], op_input_live[op_id], strict=True)
+                if live
+            ]
+            effective = claim_class.factor_direction(
+                direction,
+                {_input_classes[0]} if _input_classes else None,
+                set(_input_classes[1:]),
+            )
+            if effective is None:
+                logger.warning(
+                    "Operator %s: DERIVED source over ASSERTED target — "
+                    "factor skipped (#2351)",
+                    op_id,
+                )
+                if skipped is not None:
+                    skipped.append({
+                        "operator_id": op_id,
+                        "op_type": op_type,
+                        "reason": "derived_over_asserted",
+                        "participating_inputs": 0,
+                        "inputs": [
+                            {"id": cid, "status": st}
+                            for cid, st in zip(
+                                full_inputs, op_input_status[op_id], strict=True)
+                        ],
+                    })
+                continue
+            direction = effective
             weight = compute_operator_weight(self.proj, op_id)
             factors.append((op_id, op_type, input_ids, weight, label, direction))
         return factors

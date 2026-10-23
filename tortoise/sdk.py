@@ -107,6 +107,9 @@ from . import monitoring
 # no tally is armed. Imported at module level because it is stdlib-only at
 # import (its ``metering`` dependency is deferred), so no cycle is introduced.
 from .retrieval_metering import metered_query as _metered_query
+# #2351 (epic #2349 E-derived): the asserted-vs-derived claim class — the ONE
+# home for the vocabulary, the override guard and the read contract.
+from . import claim_class as _claim_class
 from . import file_indexer  # noqa: F401 — binds the classifier/identity module (§4.4); sourceKind registration is registry-owned (source_credibility.SOURCE_KIND_DEFAULTS)
 from .projection import FalkorProjection
 # #7951 §17.1: the single-writer scope the live doors open around their fold.
@@ -8389,6 +8392,7 @@ class TortoiseSDK:
 
     def create_point(self, kind: str, content: str, *, is_episodic: bool | None = None,
                       credibility: str | int | float | None = None,
+                      claim_class: str | None = None,
                       **props) -> dict:
         # #1486 (code-review P1): is_episodic is a SERVER-MANAGED flag — bound
         # to this explicit param (never the props passthrough, which
@@ -8453,6 +8457,21 @@ class TortoiseSDK:
         ``credibility`` word (which #398 rules IS a source). The message names
         the cheap fix — ``extractedFrom='session:<id>'`` for an assertion the
         writer itself originates.
+
+        ``claim_class`` (#2351, epic #2349 E-derived) declares whether this
+        claim is AUTHORED (``asserted`` — the default, and what every claim in
+        every existing graph already is) or COMPUTED from other beliefs
+        (``derived``). ⛔ Only ``derived`` is STORED: the ``claimClass``
+        property is written when — and only when — the claim is derived, so
+        absence IS the asserted class, there is no migration and no re-stamp
+        for existing claims, and passing ``claim_class="asserted"`` explicitly
+        is accepted and stores NOTHING (two spellings of one class would invite
+        a later reader to treat one as a third state). The class is a property
+        of the WRITE THAT MINTS the claim: it rides the CREATE, and a dedup hit
+        folds onto the existing claim WITHOUT re-stamping its provenance. A
+        derived claim is second-class by construction — the write path refuses
+        to wire it above an asserted claim and refuses to let it supersede one
+        (see ``tortoise/claim_class.py``).
         """
         # #9287: a kind is an IDENTIFIER — refuse invisible padding/format
         # characters BEFORE `_validate_kind` would only WARN about them. The
@@ -8700,6 +8719,21 @@ class TortoiseSDK:
                 f"Invalid status {status!r}. Valid statuses: "
                 f"{sorted(POINT_STATUS_VALUES)}"
             )
+        # #2351 (epic #2349 E-derived): the claim class. Validated HERE, before
+        # any graph write — an unknown class fails loud with nothing created
+        # (the same fail-closed posture as the status vocabulary above and the
+        # #2199 credibility word). The nested ``claimClass`` prop form is POPPED
+        # and validated exactly like ``credibility`` (a generic props passthrough
+        # must not be able to persist an unvalidated third class), with the
+        # explicit kwarg winning when both are given.
+        #
+        # It is deliberately kept OUT of ``props``: it is a property of the
+        # write that MINTS the claim, so it rides the CREATE map below and
+        # never the dedup-hit ``update_point`` forward — a re-run must not
+        # re-stamp an existing claim's provenance in either direction.
+        _nested_claim_class = props.pop(_claim_class.PROP, None)
+        _claim_class_value = _claim_class.validate(
+            claim_class if claim_class is not None else _nested_claim_class)
         if dedup:
             # P1 #49: dedup by content_hash + pointKind (NOT context, which is
             # no longer written). The A10 hash-less content+kind fallback now
@@ -9233,6 +9267,13 @@ class TortoiseSDK:
         # The embedding is written LAST (and `embedding` was popped from props
         # above), so the map carries exactly one `embedding` key.
         _create_map["embedding"] = _embedding_expr
+        # #2351: the claim class rides the CREATE map (one graph write, #2952)
+        # and only for `derived` — absence IS `asserted`, which is what makes
+        # the marker migration-free for every claim already in the graph.
+        # "asserted" passed explicitly is validated and stored as NOTHING.
+        if _claim_class_value == _claim_class.DERIVED:
+            _create_params["claimcls"] = _claim_class.DERIVED
+            _create_map[_claim_class.PROP] = "$claimcls"
         # #5004 round-3: a CALLER-owned vector is stored VERBATIM (the recorded
         # PR #3018 decision) and the replay must restore it in that same FORM.
         # The noun that carries that fact has to be the NODE, not the journal
@@ -14212,6 +14253,27 @@ class TortoiseSDK:
         # replacement (phantom PointSuperseded).
         self._assert_lifecycle_guard(new_id, method="supersession",
                                      role="target")
+        # #2351 (epic #2349 E-derived): the ASSERTED-vs-DERIVED override guard.
+        # Supersession IS an override — `supersede_point` terminalises the
+        # predecessor and transfers its edges and standing to the successor —
+        # so a DERIVED successor must never replace an ASSERTED predecessor (a
+        # computed claim out-ranking an authored belief is the failure mode the
+        # marker exists to prevent). The refusal is BEFORE any mutation, so a
+        # refused call leaves the graph untouched (the #329/#4021 ordering).
+        #
+        # The class is read through the same fan-out discipline as the
+        # lifecycle guard (#7822 — Point ids are not unique, and a verdict read
+        # off one row would be row-order dependent): the predecessor counts as
+        # asserted when ANY node carrying its id is asserted, the successor
+        # counts as derived when ANY node carrying the successor's id is. That
+        # is the fail-closed direction for BOTH sides.
+        _supersede_classes = _claim_class.classes_for_ids(
+            proj.g, [old_id, new_id])
+        if _claim_class.blocks_override(
+                _supersede_classes.get(new_id),
+                _supersede_classes.get(old_id)):
+            raise ValueError(_claim_class.supersede_refusal(
+                old_id=old_id, new_id=new_id))
         # 0. #329: collect + validate ALL edge types BEFORE any mutation.
         #    The edge types are interpolated into query structure (no params
         #    possible) — an unvalidated type (e.g. from a crafted edge) is a
@@ -16096,15 +16158,39 @@ class TortoiseSDK:
         # once each to keep the per-(label, property) index rather than
         # full-scanning (live.epistemic_label_queries).
         existing_ids: set[str] = set()
+        # #2351 (epic #2349 E-derived): the same probe carries each endpoint's
+        # claim CLASS, so the override guard below costs NO extra round trip.
+        # The classes are aggregated across every row an id resolves to (the
+        # #7822 fan-out rule — a verdict off one row would be row-order
+        # dependent); "asserted" is the read-side default for an absent marker.
+        endpoint_classes: dict[str, set[str]] = {}
         for _q in epistemic_label_queries(
-            "MATCH (n:{label}) WHERE n.id IN $ids RETURN n.id"
+            "MATCH (n:{label}) WHERE n.id IN $ids "
+            "RETURN n.id, coalesce(n.claimClass, 'asserted')"
         ):
-            existing_ids.update(
-                row[0] for row in
-                proj.g.query(_q, params={"ids": inputs}).result_set)
+            for _row in proj.g.query(
+                    _q, params={"ids": inputs}).result_set:
+                existing_ids.add(_row[0])
+                endpoint_classes.setdefault(_row[0], set()).add(_row[1])
         missing = [i for i in inputs if i not in existing_ids]
         if missing:
             raise ValueError(f"Cannot create operator: Points {missing} do not exist")
+
+        # #2351: the override guard — a DERIVED claim may not IMPL-cascade above
+        # (or NAND-attack) an ASSERTED one. `source_id` is the factor's SOURCE
+        # slot (idx 0 — the position `_update_factor` reads the forward
+        # message's belief from) and `target_ids` are its targets, so this is
+        # exactly the leg EP would push belief along. Part/whole operators are
+        # NOT epistemic cascades (they transfer no belief) and are not guarded.
+        # Raised BEFORE the operator node exists and before any edge is
+        # written, so a refused call leaves the graph untouched.
+        if op_type in ("IMPL", "NAND") and _claim_class.blocks_override(
+                endpoint_classes.get(source_id),
+                set().union(*(endpoint_classes.get(t, set())
+                             for t in target_ids)) if target_ids else None):
+            raise ValueError(_claim_class.override_refusal(
+                source_id=source_id, target_ids=list(target_ids),
+                surface=f"create_operator({op_type})"))
 
         # Build operator node with direction + optional label (context is NOT written — P1 #49).
         # #780: extraction operators (promote_source=False) carry status:'draft' so
@@ -20342,17 +20428,24 @@ class TortoiseSDK:
         # sweep the labels once each (index-preserving) and remember WHICH
         # label resolved each id so the MERGE below can anchor on it.
         found: dict[str, tuple[str, bool, str | None, bool]] = {}
+        # #2351 (epic #2349 E-derived): the same probe carries each endpoint's
+        # claim class, so the override guard costs NO extra round trip. Classes
+        # are aggregated across every row an id resolves to (the #7822 fan-out
+        # rule); an absent marker reads as "asserted".
+        endpoint_classes: dict[str, set[str]] = {}
         for _label in EPISTEMIC_LABELS:
             rows = proj.g.query(
                 f"MATCH (p:{_label}) WHERE p.id IN $ids "
                 "RETURN p.id, coalesce(p.is_operator, false), p.status, "
-                "coalesce(p.outdated, false)",
+                "coalesce(p.outdated, false), "
+                "coalesce(p.claimClass, 'asserted')",
                 params={"ids": [source_id, target_id]},
             ).result_set
             for r in rows:
                 # First label wins for a (hypothetical) multi-labelled node;
                 # the terminal/operator guards below are label-independent.
                 found.setdefault(r[0], (_label, bool(r[1]), r[2], bool(r[3])))
+                endpoint_classes.setdefault(r[0], set()).add(r[4])
         for pid in (source_id, target_id):
             if pid not in found:
                 raise ValueError(
@@ -20385,6 +20478,16 @@ class TortoiseSDK:
         # full-scan. See live.epistemic_label_queries.
         label_src = found[source_id][0]
         label_tgt = found[target_id][0]
+
+        # #2351: the override guard — a DERIVED source claim may not IMPL-cascade
+        # above (or NAND-attack) an ASSERTED target. Raised AFTER the endpoint
+        # guards above and BEFORE the MERGE, so a refused call writes nothing.
+        if _claim_class.blocks_override(
+                endpoint_classes.get(source_id),
+                endpoint_classes.get(target_id)):
+            raise ValueError(_claim_class.override_refusal(
+                source_id=source_id, target_ids=[target_id],
+                surface=f"create_direct_edge({op_type})"))
 
         # BARE-pattern MERGE + attribute SET (last-writer-wins; exactly one
         # edge per (src,tgt,type)). `created` is detected by a pre-count
@@ -27307,6 +27410,15 @@ class TortoiseSDK:
         relationship_filter: str | None = None,
         traversal_path: str | None = None,
         exclude_status: list[str] | None = None,
+        # #2351 (epic #2349 E-derived): filter — and therefore annotate — by the
+        # claim's asserted|derived class. A read-side OPT-IN: ``None`` (the
+        # default) costs no query and emits no key, so every existing caller is
+        # byte-identical. When set, the filter is applied at the SAME
+        # pre-truncation seam as ``exclude_status`` (#898) and every returned
+        # Point carries ``claim_class`` — so a consumer can tell "this was told
+        # to us" from "this was computed from other beliefs" without a new tool
+        # (+0 MCP tools).
+        claim_class: str | None = None,
         # #4509: the OPT-IN pre-truncation turn-echo exclusion. A caller that
         # names the capture session it is extracting for (the S3
         # link-before-create prior lookup) drops that session's own turn
@@ -27461,6 +27573,17 @@ class TortoiseSDK:
             silently shrink the result count — epic #898 recall_state). Default None =
             no filtering (existing behavior unchanged; retracted is already excluded at
             the retrieval layer, #689). Points with no status property are kept.
+        claim_class (#2351, epic #2349 E-derived): 'asserted' or 'derived' — the
+            claim's provenance CLASS, filtered at the SAME pre-truncation seam as
+            ``exclude_status`` and, because the classes are read there anyway,
+            ANNOTATING every returned Point with its ``claim_class`` key (a
+            consumer must be able to tell "this was told to us" from "this was
+            computed from other beliefs"). The read side of the class marker: a
+            claim with no stored ``claimClass`` property IS 'asserted' (every
+            claim authored before the marker existed, and every claim an
+            authoring path writes), so ``claim_class='asserted'`` returns the
+            whole authored graph without a migration. Default None = no filter
+            and no key, i.e. byte-identical to the pre-#2351 read.
         exclude_turn_echo_session (#4509): the OPT-IN turn-echo exclusion — the
             capture session whose OWN transcript echoes (``{session_id}_t{i}`` turn
             Points; ``retrieval.is_turn_echo_row``) must NOT be treated as memory
@@ -27684,6 +27807,12 @@ class TortoiseSDK:
                 f"recency_boost must be 0.0-10.0, got {recency_boost!r}")
         if order_by not in ("relevance", "confidence", "graph"):
             raise ValueError(f"order_by must be 'relevance', 'confidence', or 'graph', got {order_by!r}")
+        # #2351: the claim class is a caller INPUT, so it fails loud BEFORE any
+        # retrieval work — a typo'd class must not silently read as "no filter"
+        # (which would return claims the caller asked to exclude). The validated
+        # value gates the filter + annotation below; ``None`` stays None.
+        if claim_class is not None:
+            claim_class = _claim_class.validate(claim_class)
 
         # B6 (#3892): the status sink and the trace used to classify it. When
         # no status is requested this is exactly today's ``leg_trace`` (None
@@ -28403,6 +28532,34 @@ class TortoiseSDK:
                     result_ids = [pid for pid in result_ids if pid not in status_excluded_ids]
             except Exception:
                 _logger.warning("exclude_status filter failed — pass-through", exc_info=True)
+
+        # 5d-ter (#2351). The claim-class filter, at the SAME pre-truncation
+        #     seam as exclude_status above and for the same reason: a filter
+        #     applied after the limit cut silently shrinks the result set
+        #     whenever the other class dominates the pool.
+        #
+        #     ⛔ The filter is OPT-IN and the classes are read ONCE, here, then
+        #     reused for the annotation below — so an unfiltered call performs
+        #     no extra read and emits no extra key (byte-identical to
+        #     pre-#2351). The read is the shared fan-out-complete
+        #     ``claim_class.classes_for_ids``: an id carrying several nodes is
+        #     kept when ANY of them carries the requested class, and an id with
+        #     no marker AT ALL is 'asserted' — which is what makes filtering
+        #     for the authored class return the whole pre-marker graph.
+        claim_classes: dict[str, frozenset[str]] = {}
+        if claim_class is not None and result_ids and graph_label == "Point":
+            _wanted = claim_class
+            try:
+                claim_classes = _claim_class.classes_for_ids(graph, result_ids)
+                result_ids = [
+                    pid for pid in result_ids
+                    if _wanted in (claim_classes.get(pid)
+                                   or frozenset({_claim_class.DEFAULT}))
+                ]
+            except Exception:
+                _logger.warning(
+                    "claim-class filter failed — pass-through", exc_info=True)
+                claim_classes = {}
 
         # 5d-bis (#4509). Apply the OPT-IN turn-echo exclusion at the SAME
         #     pre-truncation seam as exclude_status (#898): a caller that names
