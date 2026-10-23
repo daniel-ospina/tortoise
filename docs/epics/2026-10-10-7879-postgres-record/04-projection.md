@@ -197,8 +197,59 @@ closed at both layers:
   graph cannot match a whitespace-only key (FalkorDB equality filter, **#9599**),
   so the fold would mint a duplicate `:Session` and land no edge while Postgres
   would have held the row.
-  The three remaining R5 classes are still **not** materialized and are named
-  where the producer lives: point-property edges (`extractedFrom`, `about*`,
+  **Updated by #9553 (R5 class 1, `extractedFrom`):** the first family of the
+  point-PROPERTY set now lands too — one `relation` row per ref
+  (`record_projection._POINT_PROPERTY_RELATIONS`), because that is the fan-out
+  the fold's `_link_source` performs (many-to-many, `#3263`). Three details make
+  it parity rather than a plausible copy: the target resolves to the SAME Source
+  the fold picks — `resolve_source_key`'s canonical identity, matched on `url`
+  **or** `canonical_url`, PREFERRING the canonical match and ordered by
+  `node_key` within it, which is that resolver's own order (it queries
+  `canonicalUrl` first and returns there; the raw spelling is the adopt-on-touch
+  fallback) and its own tiebreak (`ORDER BY s.url LIMIT 1`), and never via the
+  `id` fallback `_ENTITY_MATCH_COLUMNS` supplies for `EntityLinked` — which also
+  required the projection to DERIVE `source.canonical_url`, since no payload may
+  carry it (`projection/entities.py::_EntityHandlers._SOURCE_HANDLED` lists
+  `canonicalUrl` as writer-derived); the ref container and the per-member gate
+  mirror `_link_source`'s (a dict fans out to nothing, `#8171`); and the `#5256`
+  read-version anchor rides `relation.source_version` — a PRIMARY column the
+  cache projection maps back to `r.sourceVersion` — from the Point's own
+  `sourceVersionTransit` carrier, all-or-nothing and raw-ref keyed, exactly as
+  `_point_source_transit` decides. That anchor is written ON CREATE, as
+  `_anchor_on_create` does: the INSERT carries it and the conflict path does not
+  touch the column at all, so a replayed edge neither advances nor fills a
+  recorded `source_version` on either route (every other relation attribute
+  stays latest-record-wins — edge state, not a recorded read version).
+  **Three residuals, none an unmatched-URL case.** (a) The Source's record must
+  precede the Point's (the live order: the capture materialises the session
+  Source first, `sdk.py::_materialize_session_source`), else the insert finds no
+  `source` row and lands nothing — the `absent` verdict every relation gives.
+  (b) A ref naming a Source the record never saw — `_link_source` MINTS an
+  **unjournaled** stub for one (`_mint_source_stub`, **#5024**) — has no
+  `(Source, key)` identity for `relation.tgt_key`'s composite FK at all, so the
+  record lands nothing by design: minting a node from an edge directive would
+  materialise a Source no record created. Same absent verdict, same reason, as
+  the CONTAINS envelope family (**#9594**).
+  (c) **Which RECORDS carry the family, where the fold's own routes disagree.**
+  `apply()` materialises a Point from four arms and three reach
+  `_upsert_point_edges` — `PointAdded`/`OperatorAdded`, `PointPromoted`,
+  `OperatorPromoted` (neither promote payload wrapper drops `extractedFrom`) —
+  while `rebuild_all`'s pass 2 re-derives the family for the two creation types
+  only. `_POINT_PROPERTY_RELATIONS` declares all four and the record follows
+  `apply()`, the chronological engine `rebuild`/`recover_from_log` run: declining
+  the promote rows would make the record POORER than the graph for exactly the
+  #2256 population whose promote IS the operator's only record. A full rebuild
+  that re-derives no promote edge is the divergence that follows, and it sits on
+  the pass-2 side.
+  The other class-1 families are still **not**
+  materialized, each for its own reason: `about*` needs `_create_about_edges`'
+  live name→label cascade (and `EntityLinked` already carries it whenever the
+  capture resolved it); `mitigated_by` is emitted as a PAIR with the operator's
+  `IMPL`/`INPUT` (`edges.py::_create_edges`), so half of it would leave the edge
+  census disagreeing with the journal's; `TAGGED` has no record `tag` node for
+  `relation.tgt_key` to key on.
+  The remaining R5 classes are still **not** materialized and are named
+  where the producer lives: the rest of the point-property set (`about*`,
   `mitigated_by`, `TAGGED`), operator `IMPL`/`NAND`/`INPUT`, and the structural
   predicates whose `DirectEdgeCreated` fold works but has **no producer**.
 * **It does not approve `#7879`'s scope.** Scope and Plan carry human gates.

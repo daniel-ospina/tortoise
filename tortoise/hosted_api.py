@@ -19912,7 +19912,10 @@ def _provision_graph(org: dict, name: str,
     created_by_key_id — P2-6, NEVER a key id in created_by).
 
     ``packs`` (#9667): the optional desired pack set from the create body.
-    ``None`` = no pack decision (the graph stays UNCONFIGURED, catalog union).
+    ``None`` = no pack decision, so the graph is born UNCONFIGURED with no
+    ``:PackInstall`` records — the catalog-union arm until records exist (the
+    first packs read self-heals the starter set, which narrows it; #2714
+    indicator 3, #9691).
     A list — including ``[]`` — configures the graph at birth, in the SAME
     call and against the new graph's own physical namespace; the resolved set
     rides back in the envelope under ``packs``. A refusal rolls the graph back
@@ -20247,8 +20250,9 @@ async def create_graph(body: dict, request: Request,
 
     #9667 — ``packs``: create and configure in ONE call, so an unconfigured
     graph is a CHOICE rather than the only possibility. Absent ⇒ the graph
-    is born unconfigured and keeps the catalog-union default (the owner's
-    decided behaviour — #2714 indicator 3); ``[]`` ⇒ born configured with an
+    is born unconfigured with no ``:PackInstall`` records, i.e. the
+    catalog-union arm until records exist (the first packs read self-heals the
+    starter set, which narrows it — #9691); ``[]`` ⇒ born configured with an
     EMPTY set; a list ⇒ exactly that set, and the 201 envelope carries the
     resolved ``packs`` so the caller never has to re-read. An invalid or
     unauthorised namespace fails the CREATION (rolled back, 422) rather than
@@ -20575,9 +20579,11 @@ def _pack_entries_from_body(raw: object) -> list[dict] | None:
     """#9667 — parse the optional ``packs`` field of a graph-CREATE body.
 
     ``None`` (field absent) means NO pack decision: the graph is created
-    UNCONFIGURED and keeps the catalog-union default (#2714 indicator 3), which
-    is the owner's decided behaviour — creation is not the place to narrow it
-    by accident. ``[]`` is the opposite and deliberate: the graph is born
+    UNCONFIGURED with no ``:PackInstall`` records — the catalog-union arm until
+    records exist (the first packs read self-heals the starter set, which
+    narrows the set; #2714 indicator 3, #9691) — which is the owner's decided
+    behaviour: creation is not the place to narrow it by accident. ``[]`` is the
+    opposite and deliberate: the graph is born
     CONFIGURED with an empty set, so nothing outside core is writable on it.
     That is the whole point of the atomic form — an unconfigured graph becomes
     a choice instead of the only possibility.

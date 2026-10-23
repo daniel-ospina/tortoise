@@ -429,6 +429,119 @@ BEGIN
 END $$;
 RESET ROLE;
 
+-- ── 6b. The §9.1 narrative home (#9555, R7) ───────────────────────────────
+-- The narrative is TEXT in Postgres, not a node (§9.1). This block pins that
+-- the home exists, is a tenancy surface like the other nine, and that the two
+-- things a narrative must not be able to do — dangle off no TENANT GRAPH, or be
+-- read across a tenant boundary — are refused by the DATABASE rather than by a
+-- convention in Python. (It deliberately does NOT require a `public.session` row:
+-- the FK anchors on the graph, and §9.4's own delete path removes the session
+-- row before the narrative, so a session-scoped FK would abort the batch — the
+-- assertion further down pins the survival.)
+SELECT tests.assert(
+  (SELECT count(*) FROM pg_class
+   WHERE relname = 'session_narrative' AND relkind = 'r' AND relrowsecurity) = 1,
+  '9555: the narrative home exists with RLS ENABLED');
+
+SELECT tests.assert(
+  (SELECT count(*) FROM pg_policies
+   WHERE schemaname = 'public' AND tablename = 'session_narrative'
+     AND policyname IN ('session_narrative_read_org',
+                        'session_narrative_service_role_all')) = 2,
+  '9555: the narrative home carries the org-read and service_role policies');
+
+-- R6 (#9554) creates `tortoise_record_app`, and its migration does NOT exist in
+-- this tree yet, so the harness applies ALL migrations with the role absent:
+-- the migration's guarded block is a no-op BY DESIGN here and the assertion is
+-- `0 = 0`. It is written as an equality rather than a hardcoded 0 so the SAME
+-- line becomes meaningful the moment R6 lands (then both sides are 1) — and it
+-- reds if the policy appears without the role, or the role without the policy.
+SELECT tests.assert(
+  (SELECT count(*) FROM pg_policies
+   WHERE schemaname = 'public' AND tablename = 'session_narrative'
+     AND policyname = 'session_narrative_app_tenant')
+  = (SELECT count(*) FROM pg_roles WHERE rolname = 'tortoise_record_app'),
+  '9555: the app-role policy exists iff the role R6 creates exists');
+
+SET ROLE service_role;
+INSERT INTO public.node_identity (org_id, graph_id, node_label, node_key)
+VALUES ('org_7968','g_7968','Session','s_9555') ON CONFLICT DO NOTHING;
+INSERT INTO public.session (org_id, graph_id, node_key, id)
+VALUES ('org_7968','g_7968','s_9555','s_9555') ON CONFLICT DO NOTHING;
+INSERT INTO public.session_narrative
+  (org_id, graph_id, session_id, narrative, summary, capture_redactions, turn_count)
+VALUES ('org_7968','g_7968','s_9555','the arc','a capture', 3, 2);
+RESET ROLE;
+
+-- ⛔ The narrative row does NOT depend on the session row: the `public.session`
+-- row is deleted and the narrative survives. This is the regression pin — a
+-- foreign key into `public.session` made the WHOLE record batch abort on a
+-- capture whose transcript Source names a session row that is not written yet,
+-- so the FK anchors on the GRAPH instead.
+SET ROLE service_role;
+DELETE FROM public.session WHERE org_id = 'org_7968' AND graph_id = 'g_7968'
+   AND node_key = 's_9555';
+SELECT tests.assert(
+  (SELECT count(*) FROM public.session_narrative WHERE session_id = 's_9555') = 1,
+  '9555: the narrative survives its session row going away (the FK anchors on the graph)');
+RESET ROLE;
+
+-- A narrative for a GRAPH the record does not hold is refused (the FK, not a
+-- convention): the tenancy anchor is real, so a row cannot exist outside a
+-- tenant graph.
+SET ROLE service_role;
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO public.session_narrative (org_id, graph_id, session_id, narrative)
+    VALUES ('org_7968','g_missing','s_x','orphan');
+    RAISE EXCEPTION '9555: a narrative was accepted for a graph the record does not hold';
+  EXCEPTION WHEN foreign_key_violation THEN NULL;
+  END;
+END $$;
+RESET ROLE;
+
+-- The redaction count is a COUNT: the schema refuses a negative one.
+SET ROLE service_role;
+DO $$
+BEGIN
+  BEGIN
+    UPDATE public.session_narrative SET capture_redactions = -1
+     WHERE org_id = 'org_7968' AND graph_id = 'g_7968' AND session_id = 's_9555';
+    RAISE EXCEPTION '9555: a negative redaction count was accepted';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+END $$;
+RESET ROLE;
+
+-- Tenancy: the narrative is readable by its own tenant and invisible across the
+-- boundary — the same pair #7968 asserts for `point`.
+SET ROLE authenticated;
+SET app.current_org_id = 'org_7968';
+SELECT tests.assert(
+  (SELECT count(*) FROM public.session_narrative WHERE session_id = 's_9555') = 1,
+  '9555: the owning tenant reads its own narrative');
+SET app.current_org_id = 'org_7968_other';
+SELECT tests.assert(
+  (SELECT count(*) FROM public.session_narrative) = 0,
+  '9555: a cross-tenant read of the narrative returns nothing');
+RESET ROLE;
+
+-- `authenticated` is SELECT-only, like every other record table: the write path
+-- is #7951. A direct write must be refused by privilege, not by convention.
+SET ROLE authenticated;
+SET app.current_org_id = 'org_7968';
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO public.session_narrative (org_id, graph_id, session_id, narrative)
+    VALUES ('org_7968','g_7968','s_sneaky','sneaky');
+    RAISE EXCEPTION '9555: authenticated was able to write the narrative directly';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+END $$;
+RESET ROLE;
+
 -- ── 7. Clean up (the harness spot-checks for leftovers afterwards) ─────────
 -- The journal is append-only; the ONE production path that erases a tenant
 -- is the SECURITY DEFINER RPC `purge_org_record` (migration 20261012000005)
@@ -445,6 +558,9 @@ SELECT tests.assert(
 SELECT tests.assert(
   (SELECT count(*) FROM public.journal_event WHERE org_id = 'org_7968') = 0,
   '7968: purge_org_record cascaded the append-only journal');
+SELECT tests.assert(
+  (SELECT count(*) FROM public.session_narrative WHERE org_id = 'org_7968') = 0,
+  '9555: purge_org_record cascaded the tenant out of session_narrative');
 
 -- The RPC is the ONLY caller allowed to set the purge flag: an
 -- authenticated session must not be able to execute it (nor, therefore, to

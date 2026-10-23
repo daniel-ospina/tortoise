@@ -3619,9 +3619,9 @@ def _hand_built_master() -> dict:
                            "mode', 'coffee not tea'). The CHOICE is the fact; "
                            "retain it verbatim.",
         },
-        # FIXED order (agent-ops, dev, marketing, pm, product-strategy, venture)
-        # — the golden pins THIS order; it is independent of the packs' readdir
-        # order.
+        # FIXED order (agent-ops, dev, marketing, pm, portfolio,
+        # product-strategy, venture) — the golden pins THIS order; it is
+        # independent of the packs' readdir order.
         "memory_granularity": {
             "agent-ops": "Durable: the rule text, the situation that created it, "
                           "and the reasoning that supports or undermines it. "
@@ -3645,6 +3645,17 @@ def _hand_built_master() -> dict:
                    "committed, the reasoning, and milestone outcomes. "
                    "Ephemeral: card/board status, sprint burndown, assignment "
                    "logistics, issue triage.",
+            # #9663 — the portfolio overlay's granularity, verbatim from
+            # packs/investment-portfolio-manager/manifest.yaml.
+            "portfolio": "Durable: the mandate a position or target is bound "
+                         "to and its current status; the weight each class, "
+                         "sector or geography is steered toward and the "
+                         "benchmark it is measured against; when each "
+                         "position was last marked, by whom and as of which "
+                         "date. Ephemeral: market commentary, macro "
+                         "narrative, the arithmetic of a mark, and "
+                         "restatements of a target or mandate already "
+                         "recorded.",
             "product-strategy": "Durable: the productDelivery chain itself — "
                                  "which JTBDs/use-cases/features are being "
                                  "pursued, the chosen vs rejected options at "
@@ -3806,13 +3817,21 @@ class TestClassifyStage:
         """The flag-off S2/S4 prompts are byte-identical to the base
         templates (the core-only variants are separate constants). The
         exact-fragment pins catch template regressions (e.g. a joined
-        newline) that self-referential compares miss."""
+        newline) that self-referential compares miss.
+
+        The rule slot is reconstructed from the SAME master the renderer uses:
+        since #2818 `_s2s4_rules` is master-DEPENDENT (a declared value field
+        adds its policy block), so a bare `_s2s4_rules()` would compare the
+        render against a prompt that omits that block — a mismatch about the
+        catalogue, not the template, which is what this test is for.
+        """
         monkeypatch.delenv("TORTOISE_CLASSIFY_LATER", raising=False)
         assert v2.render_s2_prompt() == v2.render_s2_prompt()
+        master = v2.build_master_list()
         base = (v2.S2_TMPL
-                .replace("{master_list}", v2._render_master(v2.build_master_list()))
-                .replace("{chains_text}", v2._render_chains(v2.build_master_list()))
-                .replace("{anti_routine}", v2._s2s4_rules())
+                .replace("{master_list}", v2._render_master(master))
+                .replace("{chains_text}", v2._render_chains(master))
+                .replace("{anti_routine}", v2._s2s4_rules(master))
                 .replace("{date_anchor}", v2._date_anchor(None, include_emission_rules=True))
                 .replace("{output_contract}", v2.OUTPUT_CONTRACT))
         assert v2.render_s2_prompt() == base

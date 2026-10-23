@@ -7,7 +7,7 @@ created: 2026-10-21
 updated: 2026-10-21
 subjects.team: epistemic-team
 aboutSubjects: Tortoise memory graph
-aboutObjects: "epic #7879, STORAGE-ARCHITECTURE.md §2.0, hosted deployments, Postgres record"
+aboutObjects: "epic #7879, issue #9553, STORAGE-ARCHITECTURE.md §2.0, hosted deployments, Postgres record"
 ---
 
 # Hosted prerequisites — what standing Postgres up as the system of record still needs
@@ -79,7 +79,15 @@ they are excluded as prerequisites and recorded as such:
 Measured on `8767b1c8b` (`origin/main`, 2026-10-21). Every claim below was read in the tree or run;
 the runs and their output are in **§G**.
 
-### A1. The record schema — **EXISTS, 9 tables + 3 views**, and it is the artifact §17.5 pins
+### A1. The record schema — **EXISTS, 10 tables + 3 views**, and it is the artifact §17.5 pins
+
+> **⚖️ Re-derived 2026-10-22 (#9555).** The `Measured on 8767b1c8b` stamp above scopes the
+> measurements; the census in this heading and the row set below were re-read at this head, which is
+> why the count is **10** and the tenth row (`session_narrative`) sits after `relation`. Both halves
+> are now pinned against the migrations on disk — `tests/test_record_schema_placement.py`,
+> `::test_the_prerequisites_a1_census_matches_the_record_migrations` — so neither the count nor a
+> missing row can go stale silently again (the same defect the `docs/00_index.md` pin catches one
+> artefact over).
 
 | table / view | file:line | layer |
 |---|---|---|
@@ -91,7 +99,8 @@ the runs and their output are in **§G**.
 | `object` | `supabase/migrations/20261012000002_record_semantic.sql:21` | 2 — semantic |
 | `subject` | `…02_record_semantic.sql:68` | 2 — semantic |
 | `point` | `supabase/migrations/20261012000003_record_epistemic.sql:50` | 3 — epistemic |
-| `relation` | `…03_record_epistemic.sql:166` | 3 — epistemic (**reified edges**). A row lands when a journaled record carries the edge — an **edge record**: `DirectEdgeCreated` (`IMPL`/`NAND` — nothing else is accepted, `sdk.py:19691`), `EntityLinked` (`about*`), and `DirectEdgeRepoint` on supersede; or, since #9553, a **node record's envelope directive**: `CONTAINS` (`record_projection._ENVELOPE_RELATIONS` emits the `relation` row after the Point's `node_identity`). Everything else is R5's work: the point-property-derived families (`extractedFrom`, `mitigated_by`, and `about*` **when no `EntityLinked` record exists** — the props copy alone lands no row), an operator's own `IMPL`/`NAND`/`INPUT` (an `OperatorAdded` snapshot is a `point`-row upsert), `references` (neither a point property nor journaled), and the structural predicates the edge lane emits no record for (`ownedBy`, `hasPart`, `dependsOn`, `wasDerivedFrom`, … — `projection/edges.py:735-745`) |
+| `relation` | `…03_record_epistemic.sql:166` | 3 — epistemic (**reified edges**). A row lands when a journaled record carries the edge — an **edge record**: `DirectEdgeCreated` (`IMPL`/`NAND` — nothing else is accepted, `sdk.py:19691`), `EntityLinked` (`about*`), and `DirectEdgeRepoint` on supersede; or, since #9553, a **node record's own carrier**: `CONTAINS` (the capture's ENVELOPE directive, `record_projection._ENVELOPE_RELATIONS`) and `extractedFrom` (the Point's PROPERTY, `record_projection._POINT_PROPERTY_RELATIONS` — declared for all four of the fold's point-materialisation types, because `apply()` re-derives it on its promote arms too and the record follows `apply()`, with the #5256 anchor in `relation.source_version`, written ON CREATE only, so the conflict path never touches the column) — both emitted after the Point's `node_identity`, because the endpoints are composite FKs into it. Everything else is R5's work: the rest of the point-property-derived families (`mitigated_by`, and `about*` **when no `EntityLinked` record exists** — the props copy alone lands no row), an operator's own `IMPL`/`NAND`/`INPUT` (an `OperatorAdded` snapshot is a `point`-row upsert), `references` (neither a point property nor journaled), and the structural predicates the edge lane emits no record for (`ownedBy`, `hasPart`, `dependsOn`, `wasDerivedFrom`, … — `projection/edges.py:735-745`) |
+| `session_narrative` | `supabase/migrations/20261023000001_record_session_narrative.sql:122` | — **NOT a node table** (no `node_identity` FK): §9.1's verbatim-narrative home, **#9555**/R7. Keyed `(org_id, graph_id, session_id)`, cascading from **`public.graphs`** — not from `public.session`, see R7's DECIDED block for why, and for what a live capture does and does not carry into it today (no journal carrier for `story_arc` yet ⇒ a `NULL` `narrative`) |
 | `record_event_stream`, `object_current_status`, `subject_current_status` | `supabase/migrations/20261012000004_record_procedural.sql` | 4 — procedural (**views, no table** — `Object.status` is a cache and is computed, never stored) |
 
 **Supersede chains are in.** `point.status` is a PRIMARY column with the lifecycle journaled;
@@ -277,6 +286,55 @@ edge while Postgres held the row. That harness now runs in CI on a projection-on
 **What it blocks:** the epic's own acceptance — *"the graph engine can be destroyed and rebuilt
 without data loss"*. NAND / IMPL / mitigation topology is the thing that would be lost, and §8 makes
 operator topology non-negotiable (a fused claim cannot be `NAND`ed).
+
+✅ **Partially closed by #9553 (R5 class 1) — `extractedFrom`.** The provenance family now lands
+one `relation` row per ref (`record_projection._POINT_PROPERTY_RELATIONS`), because that is the
+fan-out `_link_source` performs (many-to-many, `#3263`), and the `#5256` read-version anchor rides
+`relation.source_version` — the PRIMARY column the cache projection maps back to `r.sourceVersion`
+— from the Point's own `sourceVersionTransit` carrier. Three parity details are load-bearing: the
+target resolves to the SAME Source the fold picks — `resolve_source_key`'s canonical identity,
+matched on `url` **or** `canonical_url`, PREFERRING the canonical match and ordered by `node_key`
+within it — which is that resolver's own order (it queries `canonicalUrl` first and returns there;
+the raw spelling is the adopt-on-touch fallback) and its own tiebreak (`ORDER BY s.url LIMIT 1`),
+never the `EntityLinked` `id` fallback; that parity also required the projection to DERIVE
+`source.canonical_url`, because `projection/entities.py::_EntityHandlers._SOURCE_HANDLED` lists `canonicalUrl` as writer-derived and
+no payload may carry it; the ref
+container and per-member gates mirror `_link_source`'s (a dict fans out to nothing, `#8171`); and
+the blank/NUL rule is the same `_writable_endpoint_id` the CONTAINS gate uses, justified by the
+same `#9599` indexed-key measurement (`:Source(url)` is indexed too).
+
+**Two residuals, stated so a green suite is not read as coverage of them.** (a) The Source's record
+must precede the Point's — the live order, since the capture materialises the session Source first
+(`sdk.py::_materialize_session_source`); replayed the other way the insert finds no `source` row and
+lands nothing, the `absent` verdict every relation already gives (a record-sourced rebuild is fed in
+journal order, `#9190`). (b) A ref naming a Source the record never saw — `_link_source` MINTS an
+**unjournaled** stub for one (`_mint_source_stub`, `#5024`) — has no `(Source, key)` identity for
+`relation.tgt_key`'s composite FK at all, so the record lands nothing by design: minting a node from
+an edge directive would materialise a Source no record created. Same absent verdict, same reason, as
+the CONTAINS envelope family (`#9594`). (c) **The fold's two routes disagree about which RECORDS
+carry the family, and the record follows `apply()`.** `apply()` materialises a Point from four arms
+and three of them reach `_upsert_point_edges` — `PointAdded`/`OperatorAdded` (`_upsert(p)`) and
+`PointPromoted`/`OperatorPromoted` (`_upsert(gated_promote_payload(…))` /
+`_upsert(_promotion_point_with_operator(…))`, neither payload wrapper dropping `extractedFrom`) —
+while `rebuild_all`'s pass 2 re-derives the family for the two CREATION types only. So
+`_POINT_PROPERTY_RELATIONS` declares all four, because declining the promote rows would leave the
+record POORER than the graph on the chronological engine `rebuild` / `recover_from_log` run, for
+exactly the `#2256` population whose promote IS the operator's only record. A full rebuild
+re-deriving no promote edge is the divergence that follows, and it is on the pass-2 side.
+
+**The `#5256` anchor is written ON CREATE ONLY**, as `_anchor_on_create` does: the INSERT carries
+it and the conflict path does not write the column at all, so a replay of the same edge (a
+re-emitted `PointAdded`, a promote snapshot, or a second ref of one Point resolving onto the same
+Source) keeps the first anchor on both routes. Every other relation attribute stays
+latest-record-wins — those are edge state the later record legitimately corrects, not a recorded
+read version.
+
+The other three class-1
+families stay open for reasons that are NOT this fix's to invent: `about*` needs
+`_create_about_edges`' live name→label cascade (`EntityLinked` already carries it when the capture
+resolved it); `mitigated_by` is written as a PAIR with the operator's `IMPL`/`INPUT`, so half of it
+would leave the record's edge census disagreeing with the journal's; `TAGGED` targets a `:Tag` node
+and the record has no `tag` table for `relation.tgt_key`'s composite FK to point at.
 **Decision needed:** none in principle; the `about*` stored-vs-derived ruling is already made (owner,
 2026-09-23: *"keep them for now, we optimise with users"*) and **KEEP** is the instruction — this item
 *implements* that ruling for the record, it does not revisit it.
@@ -303,22 +361,91 @@ boundary. This is the one item whose *answer* is a policy call rather than an im
 
 ### R7 — Raw text and the S1 narrative in Postgres (§9.1) · **L** · schema + code · **BLOCKER**
 
-**What:** **there is no dedicated table for it** — the text is carried as data, in the `point.content`
-column and in the layer-1 `journal_event.payload` mirror of the record that wrote it (see below) —
-`grep -riE 'narrative|raw_turn|raw_text|transcript'` over all
-67 migrations returns **0**; `public.session` carries `turn_count` and **no turns**. §9.1 is explicit
+**What — as filed 2026-10-21, ⛔ superseded by the DECIDED block below (#9555, 2026-10-22):** at the
+`8767b1c8b` measurement **there was no dedicated table for it** — the text was carried as data, in the
+`point.content` column and in the layer-1 `journal_event.payload` mirror of the record that wrote it
+(see below) — `grep -riE 'narrative|raw_turn|raw_text|transcript'` over all
+65 migrations returned **0** (at this head, 69 migrations, the same command matches
+`20261023000001_record_session_narrative.sql` on 36 lines — the table this item's DECIDED block adds);
+`public.session` carries `turn_count` and **no turns**. §9.1 is explicit
 that *"the narrative is not something we're suggesting to store in the graph (same as raw) but store
 in supabase"*, and §9.4 makes the **link** load-bearing (*"at answer time, send the source's VERBATIM
 text, not the extracted claim"* — measured 15.9 / 22.0 pts).
 **What it blocks:** §9.1's placement rule, the verbatim-evidence fetch path, **and the destroy-the-
-graph acceptance itself** — the record has **no narrative-first home**: a captured turn's text
+graph acceptance itself** — the record had **no narrative-first home**: a captured turn's text
 is carried as data — an episodic `point.content` row (`…03_record_epistemic.sql:56`; the §G run wrote
 4) and the `journal_event.payload` that mirrors the record, plus, since `#3947` (CLOSED), the journal
-entry a `rebuild_all` replays — so what a *record*-sourced rebuild cannot reproduce is the §9.1
-narrative and its redaction count, not "the raw text" in the abstract. This item is not in the epic's four scope items; it is a §9.1 requirement, and that gap is
+entry a `rebuild_all` replays — so what a *record*-sourced rebuild could not reproduce was the §9.1
+narrative (its redaction count followed once #9264's `integer` column landed), not "the raw text" in
+the abstract. This item is not in the epic's four scope items; it is a §9.1 requirement, and that gap is
 the finding (see §E).
 **Decision needed:** none — §9.1 and the 2026-09-23 owner quote already place it. Only *which table
 shape* is open, and that is an engineering choice inside the existing schema discipline.
+
+**DECIDED (2026-10-22, #9555) — the shape, and why.** One table, **`public.session_narrative`**
+(migration `20261023000001_record_session_narrative.sql`), keyed `(org_id, graph_id, session_id)` with
+an `ON DELETE CASCADE` foreign key into **`public.graphs`** — ⛔ **not** into `public.session`, and that
+is a regression pin: the narrative's carrier is a `:Source`/`:Event` record that *names* its session,
+and the record's own `source.session_id` column has no such constraint (the live capture writes the
+transcript Source through raw Cypher, so a session id can arrive before, or without, a session row).
+An FK into `public.session` aborted the **whole record batch** on the live door (source row, journal
+position, everything) and wedged a replay of that record. The graph FK keeps the tenancy anchor and
+the erasure cascade (organizations → graphs → this table) without making the row's existence depend on
+write order.
+
+| column | carrier (§3: PRIMARY iff the journal carries it) |
+|---|---|
+| `narrative` | the commit's `story_arc` ⚠️ **— no journal carrier exists yet, see below** |
+| `summary` | the same record's `summary`, projected ONLY alongside the narrative (the capture's own session `:Source` sets `summary` to the transcript's first utterance, which is not the narrative) |
+| `capture_redactions` | `SessionRecorded.capture_redactions` (`#4911`) — **integer**, because a count is not an envelope. It lands: the carrier's `session.capture_redactions` was narrowed to `integer` by `20261022000001` (`#9264`, fixed — see the `session` record row in §A2), so the `SessionRecorded` that carries this count reaches the record instead of being refused; a count this column cannot hold is still written as NO count, never a 0 or a coerced shape |
+| `turn_count` | `SessionRecorded.turn_count` |
+
+⛔ **The transcript is NOT duplicated here.** The raw turns are already first-class record rows
+(episodic `public.point`, `node_key = '<session>_t<i>'`), each with its own identity and journal
+carrier; a second per-turn table would duplicate a carrier that exists — the “double the anchor count
+for the same input” cost §9.1 rejects one level up — and two copies of the same text can only drift.
+`tortoise/record_read.py` SERVES the transcript from those rows (`session_text`), by the same
+suffix-shape rule `sdk._capture_turn_ids` applies (`{session}_t<all digits>`), so D7's “raw turn text
+comes back” is measured against the record's own turn rows.
+
+**Deletion follows the record's own delete path.** `hosted_api._delete_session_sync` journals one
+`EntityMutated` (`op=delete`) per removed turn Point plus one `SessionDeleted`, whose declared
+mutation removes the session row and the `session:` Source stub, so the projection emits the matching
+`DELETE` for `session_narrative` — the table is not a node table
+and carries its own statement rather than a `companion_deletes` template. Tenant erasure is the other
+path (organizations → graphs → this table, `ON DELETE CASCADE`).
+
+**Why the two carriers cannot clobber each other.** One row is built by two records (the narrative
+record owns the text, `SessionRecorded` owns the counts), so each upsert names **only its own columns**
+in the `DO UPDATE SET` — otherwise whichever record arrived second would write NULLs over the first
+one's half, i.e. a replay whose result depends on arrival order. Pinned by applying both arrival orders
+through `replay_plan` to a row model and comparing the resulting row (the PGlite assertion that the
+narrative survives its **session row** being deleted pins the FK dependency separately — a different
+property, and it is stated there for that reason).
+
+**Verification:** `tests/test_9555_session_narrative.py` (DB-free: schema shape, tenancy posture, the
+statement shapes, order-independence, the reader reading the record only) plus the PGlite assertions in
+`supabase/tests/20261012000001_record_schema.sql` §6b (RLS, the graph-FK refusal, the session-row
+independence, the negative count, the `authenticated` write refusal, and a cross-tenant read returning
+nothing). Both were shown to redden under a mutation (RLS disabled; the count CHECK removed).
+
+**⚠️ What does NOT land here, stated so the item is not over-claimed (this is R7's remainder):**
+
+1. **The narrative has NO journal carrier in this tree.** `story_arc` is written to the *graph* by the
+   layer-1 commit's raw Cypher (`hosted_api.py`'s document/event MERGEs) and raw Cypher is not a
+   journal record (§17.1's unjournalled-writer ledger), so a live capture lands
+   `turn_count` and `capture_redactions` (both carriers are `SessionRecorded`, which reaches the record
+   since #9264 — see the column table above) with a
+   **NULL `narrative`**. The projection is correct and total;
+   its narrative carrier does not exist yet. The fix is a producer on the layer-1 commit path (journal
+   the derived `:Source`/`:Event` write with `summary`/`story_arc`/`sessionId`), which is
+   capture-path work and must not be improvised alongside a schema change.
+2. **No caller serves from the record yet.** Wiring the read arm into `rebuild_from_record`'s operator
+   verb (R8, `#9556`) and into the ask/answer verbatim path is where D7's end-to-end measurement runs,
+   and the production record DSN is still unarmed (R1, `#9548`).
+
+So the **home, the projection and the record-only reader** land here; D7's measurement does not close
+with this change, and #9555 stays open on (1) and (2).
 
 ### R8 — A restore path from the record: an operator verb and a drill · **M** · code + ops · **BLOCKER**
 
@@ -548,10 +675,15 @@ cd supabase/tests/pglite && npm install && npm run validate
 grep -rn TORTOISE_RECORD_DSN fly.toml entrypoint.sh .github/workflows/ \
   docs/infra-runbook.md                                                       → (no output)
 grep -riE 'pgvector|vector\(' supabase/migrations/*.sql | wc -l              → 0
-grep -riE 'narrative|raw_turn|raw_text|transcript' supabase/migrations/*.sql → 0
+grep -riE 'narrative|raw_turn|raw_text|transcript' supabase/migrations/*.sql → 0   ⚠️ see below
 grep -rn 'app.current_org_id' --include=*.py tortoise/ tools/                → 0 setters
 grep -rn 'rebuild_from_record' tortoise/__main__.py                          → 0
 grep -rn 'rebuild_from_record(' tortoise/ | grep -v 'def '                  → 0 call sites
 grep -rniE '\bpostgres\b|psycopg|pg_dump' tortoise/backup.py tortoise/hosted_backup.py \
   tortoise/backup_sweep.py tortoise/selfhost_backup.py                            → 0
 ```
+
+⚠️ **Re-measured 2026-10-22 (#9555): the third command is no longer 0.** The block above stands as
+what was run at `8767b1c8b`; at this head the same `narrative|raw_turn|raw_text|transcript` grep
+returns **36 lines, all in `20261023000001_record_session_narrative.sql`** — R7's table, the tenth
+record table (§A1). The other six commands were re-run at this head and are still exactly as stated.

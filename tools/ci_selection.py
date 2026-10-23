@@ -1460,7 +1460,59 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # can drift them. Pinned by
              # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
              "supabase/migrations/20261022000001_record_session_capture_redactions_integer.sql",
+             # #9555/R7: the FORWARD record migration that CREATES
+             # `public.session_narrative`. Same gap as the #8263/#2782 entries
+             # above and it sorts outside the `2026101200000` prefix: a
+             # forward-migration-only diff selects NO surface, so the legs that
+             # read this migration's TEXT (`test_record_projection.py`,
+             # `test_record_schema_placement.py`, `test_9555_session_narrative.py`,
+             # `test_7950_capstone_probe.py`) would not run on the very change
+             # that can drift them — the same #1349/#3332/#3616 silent-drop
+             # class. Pinned by
+             # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
+             "supabase/migrations/20261023000001_record_session_narrative.sql",
+             # Re-stated at the migration pair, NOT replaced by it (#9638 review
+             # P1): the DOC side is an independent member of this set. The
+             # #9555/R7 entry above was inserted over this path, so a
+             # placement-doc-ONLY change — the edit that silently desynchronised
+             # the pin from the table in the first place — fell back to the
+             # docs-only early return and ran neither reader. Both halves must
+             # be present; the pair's #7968 comment above names both paths and is
+             # false without this entry.
              "docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md",
+             # #9555 / #9638 review P3: the SECOND document the same pin now
+             # reads. `test_record_schema_placement.py::
+             # test_the_prerequisites_a1_census_matches_the_record_migrations`
+             # pins `08-hosted-prerequisites.md` §A1 — the epic's own "what
+             # EXISTS" ledger — against the migrations on disk. That path is
+             # under `docs/` (a NON_PYTHON_PREFIXES entry) and matches no
+             # SOURCE_PATTERNS row, so without this entry a §A1-only edit took
+             # the docs-only early return and selected NO surface: the census
+             # could be left claiming nine tables on the PR that creates the
+             # tenth, with the pin that exists to catch it never running — the
+             # #1349/#3332/#3616 silent-drop class, and the exact shape of the
+             # defect it pins. Pinned by
+             # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
+             "docs/epics/2026-10-10-7879-postgres-record/08-hosted-prerequisites.md",
+             # #9638 review P1: the THIRD document a record pin now reads, and
+             # the one whose absence made the PR's own newest commit
+             # (`e92a78099`, "the routing index's census, and the pin that keeps
+             # it true") unpinnable. `test_record_schema_placement.py::
+             # test_the_routing_index_census_matches_the_record_migrations`
+             # reads `docs/00_index.md`'s #7879 row for its census
+             # ("N record tables + M procedural views")
+             # AND for its negative ("no narrative/raw-text table"). That path
+             # is under `docs/` (a NON_PYTHON_PREFIXES entry) and matches no
+             # SOURCE_PATTERNS row, so an index-only edit filtered to
+             # `changed == []` and took the docs-only early return: the census
+             # could go stale again — exactly the drift the commit exists to
+             # catch — with the pin that guards it never selected. The
+             # `core` registration cannot fix this on its own: a surface's
+             # test_files only run when that surface is ALREADY selected.
+             # Same #1349/#3332/#3616 silent-drop class as the two entries
+             # above. Pinned by
+             # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
+             "docs/00_index.md",
              # RETIRED 2026-10-19: the orchestrator harness (and therefore
              # tests/test_orchestrator_harness.py) moved to
              # agent-infra/scripts/orchestrator-harness/. This repo keeps only a pointer

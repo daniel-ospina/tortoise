@@ -25,7 +25,9 @@
 # Exit codes (mirrors verify-cutover convention):
 #   0 — clean, or only warn-class drift (index-only) / remote-ahead
 #   1 — repo-ahead BLOCKING drift (table/column/function/unique-index)
-#   2 — could not determine state (missing token, API error, parse failure)
+#   2 — could not determine state (missing token, API error, parse failure,
+#       or a duplicate prefix whose files could not be enumerated — the report
+#       would otherwise name a remedy with no operand)
 #
 # Fail-closed by contract: any error exits 2 with an actionable message. A
 # missing secret must fail the deploy, not silently skip the gate.
@@ -179,13 +181,151 @@ fi
 if [ -n "$WARN_ONLY" ]; then
   echo "  warn-only repo-ahead migrations (index-only, no data-correctness dependency): not order-checked — --include-all still applies them in filename order: $WARN_ONLY"
 fi
+# Say what repo-ahead does NOT establish, before ANY exit prescribes an action.
+# ⛔ TWO STATEMENTS, TWO DIFFERENT AUDIENCES — do not merge them again.
+# (1) The DIAGNOSIS is about repo-ahead, so it prints only when there IS
+#     repo-ahead. Printing it on a duplicate-prefix exit whose version is
+#     already recorded (#1235 shape, zero repo-ahead) tells the reader
+#     "Bookkeeping drift … produces exactly this report" about a report that
+#     contains no repo-ahead section and whose version IS recorded — the
+#     opposite of bookkeeping drift — inviting the "repair the version" misread
+#     that leaves the duplicate in place and the next `db push` aborting
+#     (review finding, #9613).
+# (2) The OWNER BOUND is about every remedy below that mutates prod, so it
+#     prints on both red exits (`$BLOCKING` and `$DUP_LOCAL_VERSIONS`) and on
+#     neither green one — a warn-only (index-only) repo-ahead run EXITS 0, and
+#     attaching a red-diagnosis note to a green report is the same imprecision
+#     this change removes (measured: the warn-only fixture printed the note
+#     above "OK (no blocking drift)").
+if [ -n "$REPO_AHEAD" ] && { [ -n "$BLOCKING" ] || [ -n "$DUP_LOCAL_VERSIONS" ]; }; then
+  echo "  note: 'repo-ahead' means prod has no schema_migrations ROW — NOT that prod lacks"
+  echo "        the objects."
+fi
+# The SENTENCE BELOW names the report it explains, so it prints only when THAT
+# report is the one on screen: repo-ahead with NO duplicate prefix. `$BLOCKING`
+# alone is not enough — a duplicate prefix whose files are block-class (ALTER
+# TABLE/DO block/…) is a `$BLOCKING` member too, and that branch exits BEFORE any
+# repo-ahead list is printed, so the sentence would claim bookkeeping drift
+# "produces exactly this report" about a report it cannot produce, re-opening the
+# misread this note exists to close: record the version, instead of renaming the
+# colliding file (#9613 review rounds 5 and 6).
+if [ -n "$BLOCKING" ] && [ -z "$DUP_LOCAL_VERSIONS" ]; then
+  echo "        Bookkeeping drift (DDL applied outside 'supabase db push',"
+  echo "        so the version was never recorded) produces exactly this report (#9613)."
+fi
+if [ -n "$BLOCKING" ] || [ -n "$DUP_LOCAL_VERSIONS" ]; then
+  echo "  ⛔ OWNER-ONLY for any remedy below that runs DDL DIRECTLY, or 'migration repair':"
+  echo "     a lane must not run prod DDL or repair, and no auto-dispatch exists (#2240)."
+  # ... and the sanctioned-lane line only where a dispatch line is actually printed.
+  # The all-out-of-order state (BLOCK_SAFE empty) deliberately prints NO apply
+  # command — its whole point is "do NOT apply these as-is" (#4278) — so naming
+  # supabase-deploy there both referenced nothing "(below)" and re-offered the
+  # action the gate refuses (#9613 review round 7).
+  if [ -n "$DUP_LOCAL_VERSIONS" ] || [ -n "$BLOCK_SAFE" ]; then
+    echo "     Dispatching supabase-deploy IS the lane-sanctioned path (runbook §8.6)."
+  fi
+fi
 
 if [ -n "$DUP_LOCAL_VERSIONS" ]; then
   echo "  BLOCKING duplicate migration version prefixes (abort \`supabase db push\` AND mask drift state — see #1235):"
   for v in $DUP_LOCAL_VERSIONS; do
-    files="$(ls "$MIGRATIONS_DIR"/${v}_*.sql 2>/dev/null | xargs -n1 basename | tr '\n' ' ')"
+    files=""
+    n_files=0
+    # ⛔ NUL-SAFE ENUMERATION: a filename may contain a space (accepted by the
+    # CLI pattern ^[0-9]+_(.*)\.sql$) and, pathologically, a newline/quote.
+    # `xargs`, `basename` and unquoted globbing split those into a broken command
+    # (rounds 7-8); a raw echo also rendered a newline name across two lines
+    # (round 9), so every printed name goes through %q.
+    # `find -L`: `DRIFT_MIGRATIONS_DIR` (a test seam) may be a symlink; without
+    # dereferencing, the listing came out EMPTY while detection still saw the
+    # duplicate — a report with no operand and a remedy pointing at nothing
+    # (round-9 finding).
+    while IFS= read -r -d '' p; do
+      n_files=$((n_files + 1))
+      printf -v q '%q' "${p##*/}"
+      files="${files:+$files }$q"
+    done < <(find -L "$MIGRATIONS_DIR" -maxdepth 1 -name "${v}_*.sql" -print0 2>/dev/null | sort -z)
+    # ⛔ FAIL CLOSED: `sort -z` is not POSIX, and a process substitution's failure
+    # does not propagate under `pipefail`. If enumeration yields nothing for a
+    # prefix that WAS detected, the report cannot be trusted (it would print a
+    # remedy with no operand) — refuse rather than print it (round-9 finding).
+    if [ "$n_files" -eq 0 ]; then
+      echo "check-migration-drift: could not enumerate files at duplicate prefix $v — refusing to print a remedy (exit 2)" >&2
+      exit 2
+    fi
     echo "    - $v  [$files]"
   done
+  # ⛔ THE OPERANDS ARE THE ACTUAL FILES, NEVER `${v}_b.sql` (review rounds 5-7).
+  # The printed remedy was `git mv ${v}_a.sql ${v}_b.sql`, which renames one
+  # duplicate ONTO the other — "fatal: destination exists" (rc 128) — and its
+  # replacement `${v}_b.sql → <next-free>_b.sql` was runnable only for filenames
+  # literally shaped `_a`/`_b` (the test fixture's shape). Every duplicate in this
+  # repo's history is DESCRIPTIVELY named (0011, 0012, 0015, 20261022000001 today
+  # — measured across all 149 commits touching supabase/migrations: the max ever
+  # seen at one prefix is TWO files), so a hardcoded `_b` aborts with
+  # "fatal: bad source". Print the real name of every file but the first, per
+  # prefix, with the migrations path so the command runs from the repo root.
+  # ⛔ THE GUIDANCE MUST MATCH THE OPERAND LIST IT DESCRIBES. A prefix holding N
+  # files gets N-1 `(a)` lines, so "run exactly ONE line per prefix" was wrong for
+  # N>=3: following it left a live duplicate, the next `db push` aborted on it and
+  # the gate was red again (#1235) — the failure this block exists to prevent.
+  # `(b)` is an alternative only at two files (the only arity it is printed for).
+  echo "  Rename operand(s) — at each prefix above keep ONE file. A prefix holding N"
+  echo "  files gets N-1 (a) lines: run EVERY (a) line for that prefix. Where the prefix"
+  echo "  holds two files, (b) is the other choice — run (b) INSTEAD of (a) when prod"
+  echo "  already has the second file's DDL ('supabase db diff --linked')."
+  echo "  Operands are shell-quoted; replace NEXTFREE<n> with a free NUMERIC prefix"
+  echo "  (^[0-9]+_) — ONE per operand — and run from the repo root:"
+  dup_n=0
+  for v in $DUP_LOCAL_VERSIONS; do
+    names=()
+    while IFS= read -r -d '' p; do
+      names+=("${p##*/}")
+    done < <(find -L "$MIGRATIONS_DIR" -maxdepth 1 -name "${v}_*.sql" -print0 2>/dev/null | sort -z)
+    n_pref=${#names[@]}
+    [ "$n_pref" -ge 2 ] || continue
+    # (a) the default: keep the FIRST listed file, move the rest.
+    i=1
+    while [ "$i" -lt "$n_pref" ]; do
+      dup_n=$((dup_n + 1))
+      name="${names[$i]}"
+      slug="${name#${v}_}"
+      printf '    (a) git mv %q %q\n' "supabase/migrations/$name" \
+        "supabase/migrations/NEXTFREE${dup_n}_$slug"
+      i=$((i + 1))
+    done
+    # (b) the inverted choice, only when the prefix holds exactly two files: if
+    # prod already has the SECOND file's DDL, the first is the one to move.
+    # Printing only (a) handed the reader a command that performs the outcome the
+    # note above forbids, with no line for the other choice (round-9 finding).
+    if [ "$n_pref" -eq 2 ]; then
+      dup_n=$((dup_n + 1))
+      name="${names[0]}"
+      slug="${name#${v}_}"
+      printf '    (b) git mv %q %q\n' "supabase/migrations/$name" \
+        "supabase/migrations/NEXTFREE${dup_n}_$slug"
+    fi
+  done
+  # ⛔ THE GATE CANNOT SEE WHICH FILE'S DDL PROD ALREADY HAS. When the colliding
+  # version IS recorded, "keep the first listed one" can keep the file that never
+  # applied and move the one that did: the moved file's DDL re-runs (this repo's
+  # migrations are idempotent, so it passes silently), the kept file's DDL is
+  # NEVER applied, and the next run is green because the version is recorded —
+  # the silent #1001 loss this gate exists to prevent. Same limit the OUT OF
+  # ORDER block states; it belongs here too (round-8 review finding).
+  # Gated on prod having ANY applied history, NOT on `-z "$BLOCK_OOO"`: an
+  # unrelated out-of-order version suppressed this warning in exactly the state it
+  # describes (a duplicate whose version IS recorded — round-9 finding), and
+  # `supabase migration list --linked` cannot answer "which file" (it lists
+  # VERSIONS; only a schema diff can tell the two files' DDL apart).
+  if [ -n "$REMOTE_MAX" ]; then
+    echo "  ⚠️ Which file to KEEP is a prod question this gate cannot answer: run"
+    echo "     'supabase db diff --linked' and keep the one whose objects prod already has,"
+    echo "     then run that prefix's operand lines above — every (a) line, or (b) instead"
+    echo "     of (a) when the prefix holds two files."
+  fi
+  echo "    Repeat until ONE file remains at each prefix above — a prefix that still"
+  echo "    collides is re-listed by the next run."
   if [ -n "$BLOCK_OOO" ]; then
     # The same refusal applies here: once the rename is done the deploy still
     # runs `--include-all` over the WHOLE repo-pending set, so a repo-ahead
@@ -195,19 +335,39 @@ if [ -n "$DUP_LOCAL_VERSIONS" ]; then
     echo "  OUT OF ORDER after the rename (older than prod's newest applied version $REMOTE_MAX) — resolve these FIRST:$BLOCK_OOO"
     echo '    The deploy runs `supabase db push --include-all`, which applies the whole repo-pending set.'
     echo "  Remediation (in this order):"
-    echo "    1. rename ONE duplicate file to a free prefix that sorts AFTER $REMOTE_MAX;"
+    echo "    1. rename every operand printed above for each prefix — every (a) line, or"
+    echo "       (b) instead of (a) when the prefix holds two files — to free prefixes that"
+    echo "       sort AFTER $REMOTE_MAX;"
     echo "    2. resolve each OUT OF ORDER version above (never applied -> forward migration;"
     echo "       already applied but unrecorded -> supabase migration repair --linked"
-    echo "       --status applied <version>);"
+    echo "       --status applied <version> — OWNER ACTION, a lane must not run prod DDL"
+    echo "       or repair, #2240);"
     echo "    3. then apply via supabase-deploy dispatch."
   else
-    echo "  Remediation: pure-prefix rename ONE file to the next free prefix (content unchanged) —"
-    echo "    e.g. git mv ${v}_a.sql ${v}_b.sql → <next-free>_a.sql, then apply via supabase-deploy dispatch."
+    echo "  Remediation: pure-prefix rename — move the operand(s) printed above to a free"
+    if [ -n "$REMOTE_MAX" ]; then
+      echo "    prefix that sorts AFTER $REMOTE_MAX (content unchanged: an earlier prefix"
+      echo "    would be applied out of order by --include-all, #4278), then apply via"
+      echo "    supabase-deploy dispatch."
+    else
+      echo "    prefix (content unchanged), then apply via supabase-deploy dispatch."
+    fi
   fi
   exit 1
 fi
 if [ -n "$BLOCKING" ]; then
-  echo "  BLOCKING repo-ahead migrations (pending in repo, NOT applied to prod):"
+  # ⛔ THE HEADING STATES ONLY WHAT WAS MEASURED. Repo-ahead is a set difference
+  # of version STRINGS against `supabase_migrations.schema_migrations`: it proves
+  # prod has no ROW for these versions, and it proves NOTHING about whether the
+  # objects exist. It used to read "(pending in repo, NOT applied to prod)", and
+  # #9613 measured that claim FALSE in a live instance: prod served
+  # `blog_posts.author_image_url` — a column
+  # `20261021000001` adds — from the live blog (`/blog/state-of-agentic-memory-2026`,
+  # rendered per request, reading project ybetwichurajbfswfeqa) while this gate
+  # reported that same version as "NOT applied to prod". A reader who believes the
+  # old heading runs DDL that is already in place; a reader who knows better has
+  # no remedy here at all, because this branch withheld the DDL-free one.
+  echo "  BLOCKING repo-ahead migrations (repo has them; prod's supabase_migrations.schema_migrations has NO row):"
   for v in $BLOCKING; do echo "    - $v"; done
   # Say whether this list is the whole repo-pending set or a filtered subset:
   # the heading alone reads as "the work", but `--include-all` also pushes the
@@ -229,6 +389,7 @@ if [ -n "$BLOCKING" ]; then
     echo "          original file so it is no longer repo-ahead;"
     echo "      (b) already in prod with no schema_migrations row: record it WITHOUT"
     echo "          running DDL — supabase migration repair --linked --status applied <version>"
+    echo "          (OWNER ACTION — a lane must not run prod DDL or repair, #2240)"
     echo "    A blanket repair hides real drift (#1001) — verify in prod first."
   fi
 
@@ -251,13 +412,24 @@ if [ -n "$BLOCKING" ]; then
       echo "    filename order, so step 2 before step 1 would apply the out-of-order"
       echo "    versions too."
     else
-      echo "  Remediation: apply migrations first —"
-      echo "    gh workflow run supabase-deploy.yml --ref main"
-      echo "    # or manually: supabase db push --linked --include-all (whole pending set, filename order)"
+      # ONE decision, per version, made FROM PROD — this gate cannot make it.
+      # Both outcomes are printed as peers: the apply path re-runs DDL, so it is
+      # wrong for the bookkeeping case, and the repair path records a version
+      # without running DDL, so it is wrong (and hides real drift, #1001) for the
+      # ordinary case. Naming only one of them is how a red stays red.
+      echo "  Remediation — decide PER VERSION, from prod (this gate sees versions, not schema):"
+      echo "    (a) the objects are ABSENT — apply migrations first:"
+      echo "        gh workflow run supabase-deploy.yml --ref main"
+      echo "        # or manually: supabase db push --linked --include-all (whole pending set, filename order)"
+      echo "    (b) the objects are PRESENT and only the version is unrecorded (bookkeeping"
+      echo "        drift, #9613): record it WITHOUT running DDL —"
+      echo "        supabase migration repair --linked --status applied <version>"
+      echo "        (OWNER ACTION — a lane must not run prod DDL or repair, #2240)"
+      echo "        Verify in prod first: 'supabase db diff --linked' (the objects) and"
+      echo "        'supabase migration list --linked' — version ROWS only, so it cannot"
+      echo "        tell you whether the objects exist. A blanket repair hides"
+      echo "        real drift (#1001) — repair only a version whose objects you observed."
     fi
-  fi
-  if [ -z "$BLOCK_OOO" ]; then
-    echo "    # rename-repair case: supabase migration repair --linked --status applied <version>"
   fi
   exit 1
 fi
