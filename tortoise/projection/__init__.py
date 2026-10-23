@@ -51,7 +51,10 @@ from tortoise.cypher_guard import (  # #3595 `=~` guard — the ONE seam
     tolerates_altered_numbers,  # #7174/#5011: the replay/apply exemption
 )
 from tortoise.env_truthy import FALSY, env_flag  # #4097: the declared truthy contract
-from tortoise.retry import MEMORY_CEILING_OWNERSHIP_CONSTRAINT  # #9532: ONE ownership authority
+from tortoise.retry import (  # #9532: ONE ownership authority; #7357: ONE "reached" rule
+    MEMORY_CEILING_OWNERSHIP_CONSTRAINT,
+    ceiling_reading_drift,
+)
 from tortoise.index_catalogue import (  # #3154/#522/#3441: the ONE presence check
     index_catalogue_has_field,
     index_row_has_field,
@@ -10926,15 +10929,18 @@ class FalkorProjection(
             # tolerance — a 1-byte or 4 KiB shortfall is the reading, not a
             # different cause — and only a shortfall WIDER than it is treated as
             # evidence that the ceiling is not the explanation.
-            # #7392 cycle 6 — the tolerance's measured half is the ABSOLUTE
-            # floor; the 1% arm is a heuristic that must not scale unbounded,
-            # because at 1 TiB it would swallow 10 GiB of genuine headroom and
-            # print the ceiling sentence for a reading that is far from it —
-            # the over-claim direction, which is the unsafe one (its remedy is
-            # `--maxmemory`). Capped at 1 MiB: the false-negative direction is
-            # safe, because the below branch withholds nothing and asks for a
-            # re-read.
-            drift = max(64 << 10, min(cap // 100, 1 << 20))
+            #
+            # ⚠️ THE TOLERANCE IS NOT THIS MODULE'S (#7357 review P2). The SDK's
+            # hedge note TELLS an operator how to decide the same question from
+            # an `INFO memory` read of their own, so the rule has two readers and
+            # lived in two places — and they had already drifted: the note said
+            # "used_memory has reached", with no tolerance, which withdraws the
+            # remedy at a genuine ceiling reading 40 KiB under the cap. THIS
+            # message calls `retry.ceiling_reading_drift`; the note DESCRIBES the
+            # same rule (it holds an exception, not a reading), so a correction to
+            # these numbers must move the note's prose too — nothing makes that
+            # happen by itself, and the bound/unbound list below says so.
+            drift = ceiling_reading_drift(cap)
             if cap <= 2 * drift:
                 # #7392 cycle 7 — a tolerance larger than the ceiling's own
                 # scale makes the below branch UNREACHABLE and prints "has
@@ -11001,17 +11007,44 @@ class FalkorProjection(
         # the pair is bound by `MEMORY_CEILING_OWNERSHIP_CONSTRAINT` below and
         # must not disagree about the remedy either.
         #
-        # #7392 review P1 — what that binding does NOT yet cover: the pair is
-        # bound on the PROHIBITION and on the ceiling remedy, but NOT on whether
-        # a ceiling exists. `tortoise/retry.py::explain_memory_ceiling` still
-        # asserts "it has reached its configured dataset limit (`maxmemory`)"
-        # for any `redis.exceptions.OutOfMemoryError` (its classifier admits the
-        # CLASS, not just the wording), so on a ceiling-less instance the note
-        # and the `cap <= 0` branch above state opposite facts. Measured and
-        # recorded on #7357 (issuecomment-6341756094) — the note is that
-        # issue's deliverable, so it is fixed there, not here; this comment is
-        # the pointer so the next reader does not read the sentence above as
-        # proof that the two already agree.
+        # #7392 review P1 — the gap that binding did NOT cover, now closed on
+        # #7357: the pair was bound on the PROHIBITION and on the remedy, but
+        # NOT on whether a ceiling exists. `tortoise/retry.py::
+        # explain_memory_ceiling` used to assert "it has reached its configured
+        # dataset limit (`maxmemory`)" for any `redis.exceptions.OutOfMemoryError`
+        # (its classifier admits the CLASS, not just the wording), so on a
+        # ceiling-less instance the note and the `cap <= 0` branch above stated
+        # opposite facts (measured and recorded on #7357,
+        # issuecomment-6341756094). The note now branches on
+        # `_chain_names_the_ceiling`: the ceiling sentence needs the engine's own
+        # sentence in the exception, and a class-only refusal is told what the
+        # message does establish plus how to READ whether a ceiling exists.
+        #
+        # ⚠️ WHAT THIS PAIR ACTUALLY SHARES, enumerated, so this cannot be read
+        # as more than it is (#7357, cycle 4 — an earlier draft of this comment
+        # said more than the code held):
+        #   BOUND: the #2981 PROHIBITION, composed from the one constant in
+        #     `tortoise/retry.py`.
+        #   BOUND: the "ceiling was REACHED" rule, via `ceiling_reading_drift`
+        #     — this message CALLS it, the SDK note DESCRIBES it (it holds an
+        #     exception, not a reading). The note's WORDING is pinned by the
+        #     hedge-arm test, not by the drift-value test.
+        #   NOT BOUND: the knob's HOMES. `_CEILING_REMEDY_HOMES` is composed by
+        #     the note ONLY; this message carries its own wording of the same
+        #     two homes in four places. A third home must be added to all of
+        #     them, and nothing reddens if it is not.
+        #   NOT BOUND: the `cap <= 2 * drift` SCALE GUARD below, which only a
+        #     reader HOLDING a reading can apply. At a cap small enough for it
+        #     to fire (under ~128 KiB) this message says "does not show the
+        #     ceiling being reached" where the note's advice would still say to
+        #     raise it. Unreachable with any instance this repo runs — the
+        #     smallest is the 1 MiB lane container — and left stated rather than
+        #     papered over.
+        #   NOT BOUND: the CLASSIFICATION. `_WRITE_REFUSAL_MARKERS` does not
+        #     match a class-only `OOM …` reply, so such a refusal can still fall
+        #     through to the rebuild advice in `_backend_failure_message` — the
+        #     #2981 direction. A separate seam with its own measurement,
+        #     deliberately not widened here.
         return (
             "DB refused writes on open: the graph is INTACT but "
             f"{lead}. This is NOT "
@@ -16974,16 +17007,32 @@ class FalkorProjection(
           ``tortoise/cache_projection.py``).
         * **The declaration follows the writes.** ``coverage`` is `complete`
           **iff** every record key was materialised; ``limit`` bounds how many
-          nodes are written, and a bounded run therefore declares `partial`,
-          enumerating what it wrote. That is the seam through which the
+          nodes are written, and a bounded run does not declare `partial` merely for
+          being bounded — a bound at or above the record's node count covers every key
+          the plan could write and therefore declares `complete`, so `bounded` is a
+          FLAG, not a state (#9604 review). `coverage` follows the WRITES, so a record
+          row the projection REFUSES (a blank-keyed `:Session`, #9599) makes the
+          declaration `partial` at any bound. That is the seam
+          through which the
           completeness marker (#7952) can FIRE — it is not an eviction policy
           (§2.0 holds the FalkorDB limit high; the trigger for partiality is
-          still §17.3's).
+          still §17.3's). ``limit`` must be >= 1: a 0 bound is empty-slice after
+          an UNCONDITIONAL wipe, i.e. "clear it and put nothing back", so it is
+          refused (#9556 review).
 
         ``limit`` is a bound and nothing more: nodes are taken in a
         deterministic key order, and a relation whose endpoint falls outside
         the bound is a no-op (the same verdict the record projection's own
         endpoint resolution gives an absent endpoint).
+
+        ⚠️ ``declare=False`` leaves the residency marker to the CALLER, and an
+        ABSENT marker reads ``complete`` (``residency.read_declaration``'s
+        documented fail-safe). The wipe above deletes the marker either way, so
+        a caller that passes ``declare=False`` and does not write its own
+        declaration leaves the graph claiming the whole record is hot — which a
+        ``--limit``-bounded run has no right to claim. The FAILURE arm always
+        writes a nothing-proven declaration regardless of this flag (#9604
+        review); only the success arm's marker is the caller's to write.
 
         #9124: declare the REBUILD lane, then project the record. Every write
         this engine issues — ``_wipe_all_nodes``'s ``MATCH (n) DETACH DELETE n``,
@@ -17032,10 +17081,9 @@ class FalkorProjection(
         lane is opened by its only caller.
         """
         from tortoise.cache_projection import (
-            declaration_for,
+            NODE_TABLES,
             project_records,
             record_plan,
-            write_declaration,
         )
 
         nodes = tuple(view.nodes)
@@ -17057,8 +17105,16 @@ class FalkorProjection(
             nodes = tuple(
                 n for n in nodes if (n.label, n.key) not in refused)
         if limit is not None:
-            if limit < 0:
-                raise ValueError(f"limit must be >= 0, got {limit}")
+            if limit < 1:
+                # ⚠️ 0 is the destructive no-op: `nodes[:0]` is empty, but the
+                # WIPE below is unconditional, so a 0 bound clears the cache and
+                # writes nothing — a caller asking for "nothing" gets "gone".
+                # Refused at the SEAM, not only at `record-restore`'s own door
+                # (#9556 review P2), so the next caller cannot reach it by
+                # forgetting a check.
+                raise ValueError(
+                    f"limit must be >= 1, got {limit} — a 0 bound would wipe "
+                    f"the graph and project nothing")
             nodes = tuple(sorted(nodes, key=lambda n: (n.label, n.key))[:limit])
             kept = {(n.label, n.key) for n in nodes}
             relations = tuple(
@@ -17084,22 +17140,93 @@ class FalkorProjection(
             "REFUSING to run bulk DETACH DELETE on non-test graph")
         self._wipe_all_nodes(confirm_destructive=confirm_destructive,
                              operation="rebuild_from_record")
-        self._ensure_indexes()
-        statements = project_records(self.g, plan)
+        # ⛔ Everything from here to the declaration write is POST-WIPE, and a
+        # raise in this window used to leave the graph with NO residency marker
+        # at all (#9604 review). ``residency.read_declaration`` answers
+        # ``complete`` for an ABSENT marker (the documented fail-safe: a missing
+        # declaration is the normal state), so "wiped and then died" read as
+        # "the whole record is hot" — the same §17.3 inversion the
+        # plan-built-marker fix closed, reached through absence instead of
+        # through a stale plan. The marker is therefore made TRUE before the
+        # exception leaves this method: nothing was proven written, so nothing
+        # is claimed hot.
+        try:
+            self._ensure_indexes()
+            statements = project_records(self.g, plan)
+
+            # ⛔ MEASURED AFTER THE WRITE, never the plan's length (#9556 review).
+            # ``len(nodes)`` is the size of the INPUT, computed above — before the
+            # wipe and before ``project_records`` ran — so returning it as
+            # "written" made EVERY caller's count check a tautology: a rebuild that
+            # wiped and materialised nothing still reported
+            # ``nodes_written == len(nodes)``, i.e. a destroyed cache behind an
+            # exit-0-shaped success. That is the false-PASS class, so the counts are
+            # read back off the graph the same way the sibling replay lane does
+            # (``_rebuild_all_replay`` → ``node_count``/``edge_count`` after the
+            # fold). The wipe is unconditional and whole-graph, so everything the
+            # graph holds now was written by THIS run.
+            #
+            # ⚠️ ``relations_written`` can legitimately be lower than the number of
+            # record relations SELECTED: a relation statement MATCHes its endpoints,
+            # so one whose endpoint the projection does not resolve is a no-op (see
+            # this method's module-facing notes). ``relations_selected`` reports the
+            # plan's own size beside it, so the two are told apart rather than
+            # conflated.
+            nodes_written = self._count_projected(
+                "MATCH (n) WHERE any(l IN labels(n) WHERE l IN $labels) "
+                "RETURN count(n)",
+                {"labels": sorted(NODE_TABLES)})
+            relations_written = self._count_projected(
+                "MATCH ()-[r]->() RETURN count(r)", None)
+        except BaseException:
+            # ⛔ UNCONDITIONAL, not `if declare` (#9604 review). The wipe above
+            # already deleted the `:Meta` marker, and `residency.read_declaration`
+            # answers `complete` for an ABSENT marker — so bailing out here with
+            # no marker would leave the graph reporting "the whole record is hot"
+            # for a run that just emptied it. `declare=False` is therefore NOT
+            # allowed to mean "leave the marker missing": the caller may own the
+            # marker, but `missing` is a claim, not a blank. Nothing is proven
+            # written on this path, so nothing is claimed hot.
+            self._declare_materialized(view, (), scope=scope)
+            raise
 
         declaration = None
         if declare:
             materialized = plan.node_keys()
-            declaration = declaration_for(
-                view.record_keys,
-                [(label, key) for label, key in materialized],
-                scope=scope,
-            )
-            write_declaration(self.g, declaration)
+            # ⛔ The declaration claims only what the MEASURED counts proved
+            # (#9556 review). It used to be built from ``plan.node_keys()`` —
+            # the PLAN — so a rebuild whose writes did not land still wrote a
+            # ``complete`` (or plan-sized ``partial``) residency marker into a
+            # cache that held nothing, and its caller then refused the run as
+            # LOST. The graph was left carrying a claim the code had just
+            # disproved: §17.3 says a key the cache does not hold must read
+            # ``not-hot``/``degraded``, and a ``complete`` marker makes it read
+            # ``empty`` (absence) instead — the polarity this marker exists to
+            # prevent.
+            #
+            # The writing lane knows HOW MANY nodes landed (``nodes_written``)
+            # but not WHICH, so the only provable set is the two ends: all of
+            # the plan when the count matches it, and NOTHING otherwise. The
+            # short direction is the safe one — an understated hot set costs a
+            # residency miss, an overstated one reports a missing node as
+            # genuinely absent.
+            proven = (materialized
+                      if nodes_written == len(set(materialized)) else ())
+            declaration = self._declare_materialized(view, proven, scope=scope)
 
         return {
-            "nodes_written": len(nodes),
-            "relations_written": len(relations),
+            "nodes_written": nodes_written,
+            "relations_written": relations_written,
+            # The plan's own size, stated as such: it is what the projection
+            # SELECTED from the record, and it is NOT a write count.
+            "nodes_selected": len(nodes),
+            "relations_selected": len(relations),
+            # #9604 review P2: the rows this projection DECLINED to project, so
+            # the `nodes_selected` denominator is auditable instead of merely
+            # asserted. This is the set behind the "a refused row is not a
+            # restore shortfall" decision — without it an operator comparing
+            # `nodes_written` with `nodes_selected` cannot see WHY they differ.
+            "refused_keys": sorted(refused),
             "statements": statements,
             "record_nodes": len(view.nodes),
             "record_relations": len(view.relations),
@@ -17107,6 +17234,54 @@ class FalkorProjection(
             "declared_keys": len(declaration.hot_keys or ()) if declaration else 0,
             "source": "record",
         }
+
+    def _declare_materialized(self, view, proven, *, scope: str = ""):
+        """Write the residency marker for what this run PROVED it materialised.
+
+        One writer for both arms of :meth:`_project_record_view` — the landed
+        one (:meth:`_count_projected` matched the plan) and the failed one
+        (nothing is provable, so nothing is claimed hot). ``residency
+        .read_declaration`` treats an ABSENT marker as ``complete``, so a
+        post-wipe failure that wrote no marker would report a destroyed cache as
+        fully hot; this is how the failure arm makes the graph's own truth match
+        the run's.
+        """
+        from tortoise.cache_projection import declaration_for, write_declaration
+
+        declaration = declaration_for(view.record_keys, proven, scope=scope)
+        write_declaration(self.g, declaration)
+        return declaration
+
+    def _count_projected(self, cypher: str,
+                         params: dict | None = None) -> int:
+        """Run one post-rebuild COUNT and return it as an ``int``.
+
+        The measurement half of :meth:`_project_record_view`'s report. A read is
+        permitted on every lane (``_raw_query_lane_permit``/§17.1 gate the
+        MUTATING statements only), so this runs inside the rebuild's declared
+        window unchanged.
+
+        ⚠️ BOUNDED, because this read happens AFTER the wipe: a full-graph count
+        that blocks forever would leave an operator with a destroyed cache and
+        no output at all (the ``record-restore`` verb's contract is bounded
+        reads — ``_target_nodes_before`` bounds the same shape with the same
+        constant, imported from the sibling verb so the two cannot drift).
+
+        A count that cannot be READ (a timeout, a driver error, an empty result
+        set) RAISES rather than returning a plausible number: the caller's whole
+        purpose at this point is to say what the cache now holds, and "unknown"
+        reported as ``0`` would be read as the LOST-wipe finding — a number the
+        code did not measure is exactly the false PASS that made ``len(nodes)``
+        wrong in the first place. The caller classifies this as UNKNOWN.
+        """
+        from tortoise.record_reconcile import CACHE_READ_TIMEOUT_MS
+
+        rows = self.g.query(cypher, params=params,
+                            timeout=CACHE_READ_TIMEOUT_MS).result_set
+        if not rows or not rows[0]:
+            raise RuntimeError(
+                f"the post-rebuild count returned no row: {cypher[:80]}")
+        return int(rows[0][0])
 
     def query(self, cypher: str, **params):
         # #7951 §17.1 — the public raw-query lane is closed for a

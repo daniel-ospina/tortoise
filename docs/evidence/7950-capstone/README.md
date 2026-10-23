@@ -36,7 +36,7 @@ property that makes it safe is **`derived = replay(journal)`**. **§17** is the 
 | # | criterion | verdict | deciding artifact | homed |
 |---|---|---|---|---|
 | **S1** | every write goes to the truth store first; the cache is projected from it | ⛔ **NOT-GREEN** | `s1-bypass-probe.log`: an **armed** journal-backed projection refuses `apply` but lets `proj.g.query` write the cache directly (0 journal records) | **`#7951`** (OPEN) |
-| **S2** | truth↔cache divergence is OBSERVED, not assumed | ⛔ **NOT-GREEN** | `s2-wiring-census.log` **re-cut at `#9189`**: `read_record_view` has **1** production call site — the `record-reconcile` verb this change adds — and `record_projection.replay` **1** (`record_writer`, `#9187`). `reconcile` and `rebuild_from_record` are still **0**: nothing in the product composes them, and **no schedule drives the verb yet**, so divergence is observed only when a human runs the sweep. The measured half is clean since `#8615`: `e2e-chain-probe.log`'s clean record-sourced rebuild is `0 divergent of 7 checked (missing_in_cache=0, extra_in_cache=0, field_mismatches=0, form_normalized=1)`, and **both** second-writer signatures still register | **`#9189`** (the trigger, this change) + **`#7951`** + **`#7970`** (OPEN); the comparison rule for vector-valued properties is **CLOSED** on **`#8615`** |
+| **S2** | truth↔cache divergence is OBSERVED, not assumed | ⛔ **NOT-GREEN** | `s2-wiring-census.log` **re-cut at `#9556`** (R8): `read_record_view` has **2** production call sites — the `record-reconcile` verb (`#9189`) and the `record-restore` verb (`#9556`) — `record_projection.replay` **1** (`record_writer`, `#9187`), and `rebuild_from_record` **1** (`record_restore`, `#9556`). `reconcile` is the only **0**, and **no schedule drives either verb yet**, so divergence is observed only when a human runs the sweep. The measured half is clean since `#8615`: `e2e-chain-probe.log`'s clean record-sourced rebuild is `0 divergent of 7 checked (missing_in_cache=0, extra_in_cache=0, field_mismatches=0, form_normalized=1)`, and **both** second-writer signatures still register | **`#9189`** (the trigger) + **`#9276`** (the scheduled sweep) + **`#7951`** + **`#7970`** (OPEN); the comparison rule for vector-valued properties is **CLOSED** on **`#8615`** |
 | **S3** | ⭐ the completeness marker works | ✅ **GREEN** | `s3-s4-named-tests.log` + live bounded rebuild in `e2e-chain-probe.log` (`Point:p1` → `not-hot`) | `#7952` (CLOSED) |
 | **S4** | a residency miss is not an insufficiency | ✅ **GREEN** | `s3-s4-unit-tests.log`: 30 router tests; residency outranks sufficiency | `#7953` (CLOSED) |
 | **S5** | derived/volatile fields are NOT in the system of record | ✅ **GREEN** | `s5-s6-pglite-validate.log` (`20261012000001_record_schema.sql PASSED`, incl. the `subject.props.status` refusal) | `#8263` (CLOSED) |
@@ -157,11 +157,12 @@ and it is measured in both directions: a clean record-sourced rebuild agrees on 
   divergence. `#8615` closed that by comparing a declared vector property at the store's stored
   width (`tortoise/stored_form.py`), one-sided so the accepted set stays the single point
   `f32(record)`.
-- ⛔ It is **not yet observed continuously**. Two of the four call sites now exist in the product —
-  `read_record_view` in the `record-reconcile` verb (`#9189`) and `record_projection.replay` in
-  `record_writer` (`#9187`) — while `reconcile` and `rebuild_from_record` still have **none**, and
+- ⛔ It is **not yet observed continuously**. Three of the four call sites now exist in the product —
+  `read_record_view` in the `record-reconcile` verb (`#9189`) and in the `record-restore` verb
+  (`#9556`), `record_projection.replay` in `record_writer` (`#9187`) — and `rebuild_from_record` has
+  its first production caller there too (`#9556`); `reconcile` is the one still at **0**, and
   **nothing schedules the sweep**: `s2-wiring-census.log` is the deciding artifact, re-cut at this
-  head. The chain is now partly **wired** and still not **running**.
+  head. The chain is now mostly **wired** and still not **running**.
 
 ---
 
@@ -235,10 +236,17 @@ $ uv run python docs/evidence/7950-capstone/probes/s2_wiring_census.py
 production population: ['tortoise', 'tools', 'scripts']/**/*.py
 == reconciliation.reconcile: 0 production call site(s) ==
 == record_projection.replay: 1 production call site(s) ==
-== cache_projection.read_record_view: 1 production call site(s) ==
-== FalkorProjection.rebuild_from_record: 0 production call site(s) ==
+== cache_projection.read_record_view: 2 production call site(s) ==
+== FalkorProjection.rebuild_from_record: 1 production call site(s) ==
                                                         (s2-wiring-census.log)
 ```
+
+**Re-cut at `#9556` (R8), and the numbers moved for a real wiring reason.**
+`FalkorProjection.rebuild_from_record` moves **0 → 1** and `read_record_view`
+**1 → 2**: `python -m tortoise record-restore` is now a production caller of
+both, so a lost cache graph has an operator path that reads the RECORD. The
+`#9189` verdict below is unchanged — `reconciliation.reconcile` still has **0**
+call sites and nothing SCHEDULES the sweep.
 
 **Re-cut at `#9189`, and the numbers moved for two different reasons.** The two halves this change
 and `#9187` wired now read **1** each: `read_record_view` is called by the `record-reconcile` verb
@@ -270,11 +278,13 @@ detectable: the probe's second-writer **property** write reports `field_mismatch
 signature did not go quiet. **This is why S2's remaining blocker is the wiring half only** — the
 comparison rule is no longer one of the reasons S2 cannot go green.
 
-**Missing:** a **scheduled** reconciliation — the composing `reconcile` and `rebuild_from_record`
-callers are still zero, and no timer drives the `record-reconcile` verb this change adds. **Homed:
-`#9189`** (the trigger, OPEN until a schedule runs it), **`#7951`** (the chokepoint the reconciliation
-is evidence for) and **`#7970`** (the record read path, OPEN/deferred by §2.0). The comparison rule
-for vector-valued properties is **CLOSED** on **`#8615`**.
+**Missing:** a **scheduled** reconciliation — the composing `reconcile` caller is still zero, and no
+timer drives the `record-reconcile` verb `#9189` adds (`rebuild_from_record`'s first caller arrived
+with `#9556`'s `record-restore` verb, which is an operator action and not a schedule). **Homed:
+`#9189`** (the trigger, OPEN until a schedule runs it), **`#9276`** (the scheduled sweep),
+**`#7951`** (the chokepoint the reconciliation is evidence for) and **`#7970`** (the record read
+path, OPEN/deferred by §2.0). The comparison rule for vector-valued properties is **CLOSED** on
+**`#8615`**.
 
 ---
 
@@ -449,7 +459,7 @@ Recorded here because the proof touches the affected surface.
 | # | blocker |
 |---|---|
 | **S1** | enforcement on the raw-handle lane (`proj.g.query`) + the atomic write → **`#7951`** (OPEN) |
-| **S2** | a **scheduled** running reconciliation: `reconcile`/`rebuild_from_record` still have no caller and no timer drives the `record-reconcile` verb → **`#9276`** (the scheduled sweep, OPEN) + **`#7951`** + **`#7970`** (OPEN); `read_record_view` (**1** call site, `#9189`) and `record_projection.replay` (**1**, `#9187`) are wired; the comparison rule for vector-valued properties is **CLOSED** on **`#8615`** (a clean rebuild now reports `field_mismatches=0`, a second-writer property write still reports `field_mismatches=1`) |
+| **S2** | a **scheduled** running reconciliation: `reconcile` still has no caller and no timer drives the `record-reconcile` verb → **`#9276`** (the scheduled sweep, OPEN) + **`#7951`** + **`#7970`** (OPEN); `read_record_view` (**2** call sites — `#9189`'s `record-reconcile` and `#9556`'s `record-restore`), `rebuild_from_record` (**1**, `#9556`) and `record_projection.replay` (**1**, `#9187`) are wired; the comparison rule for vector-valued properties is **CLOSED** on **`#8615`** (a clean rebuild now reports `field_mismatches=0`, a second-writer property write still reports `field_mismatches=1`) |
 | **S6 caveat** | live legacy-id normalisation (W1b) → **no issue home** |
 
 Not blocking, recorded: the marker is off by default under a `complete` declaration (§2.0's

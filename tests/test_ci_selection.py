@@ -485,6 +485,44 @@ def test_the_engine_pin_guards_are_selected_on_the_files_they_pin():
         )
 
 
+def test_the_9572_seed_surface_pins_are_selected_on_their_own_modules():
+    """#9572 review P2-2: a seed-surface pin must run on the module it pins.
+
+    `tests/test_9572_discriminator_not_clobbered.py` was registered `core`
+    ONLY, and `core` is the FALLBACK that a `SOURCE_PATTERNS` match REPLACES in
+    `select()`. Two of its cases pin the onboarding seed surfaces —
+    `_OrgSeedSurface` in `tortoise/hosted_api.py` (an EXACT `api` match) and
+    `_SdkSeedSurface` in `tortoise/onboarding/selfhost.py` (an `onboarding`
+    prefix match) — so on a diff touching either module the file was not
+    selected at all (measured before the entries: `surfaces=['api']` /
+    `['onboarding']` with the guard ABSENT from `test_files`).
+
+    That is the #1349/#2938 silent-drop class in its harmful direction: a PR
+    that reintroduces `def create_subject(self, name, subjectKind="other",
+    **props)` — literally the code #9572 removes — would run `api`/`onboarding`
+    and never the guard. `git grep -n "_OrgSeedSurface\|_SdkSeedSurface"` over
+    the tree finds no other test exercising either surface.
+
+    Asserted on the FILE and the SURFACE, not on non-emptiness: BOTH surfaces
+    are selected without the entry, so a `surfaces` check alone can only pass.
+    """
+    guard = "test_9572_discriminator_not_clobbered.py"
+    for changed, surface in (
+            ("tortoise/hosted_api.py", "api"),
+            ("tortoise/onboarding/selfhost.py", "onboarding")):
+        assert (REPO / changed).exists(), f"pinned file is gone: {changed}"
+        r = _sel([changed])
+        assert surface in r["surfaces"], (
+            f"{changed} selects {r['surfaces']}, not {surface} — the premise "
+            "of this pin changed; re-derive it"
+        )
+        assert guard in r["test_files"], (
+            f"{changed} does not select {guard} — the seed-surface pin sleeps "
+            "on the one diff that can re-fabricate the kind it forbids "
+            f"(selected: {r['test_files']})"
+        )
+
+
 def test_the_spa_override_guard_is_selected_on_every_manifest_it_reads():
     """#9524 review I1/I3: a dependency-manifest diff must run the override guard.
 

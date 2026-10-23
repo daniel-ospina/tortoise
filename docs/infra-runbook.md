@@ -2569,6 +2569,190 @@ on the rest; and it is one issue per **failing step** rather than one per run,
 because a key carrying `${{ github.run_id }}` files a new issue on every failing
 run (#2706).
 
+## 9. Restore a lost cache graph from the record (#9556 / R8)
+
+**When to run this.** The FalkorDB (hot) graph for an org is gone, corrupt, or
+wrong, and the **Postgres record is intact** — the record is the truth store and
+the graph is the derived cache (§2.0 of `STORAGE-ARCHITECTURE.md`: *"data goes
+to postgres and it's loaded to hot (falkor)"*). This verb rebuilds the cache
+from the **record**. It is NOT the journal replay (`tortoise rebuild`), and it
+never reads a journal: a destroyed cache's journal may be gone too, which is the
+whole reason this path exists.
+
+```bash
+# 1. Arm and read the record scope FIRST — a restore writes what the record
+#    holds for exactly this (org_id, graph_id), so read it before you wipe:
+#      export TORTOISE_RECORD_DSN='postgresql://…'          # or --record-dsn
+#
+# 2. Restore. --cache-graph is REQUIRED and has no default (see below).
+python -m tortoise record-restore \
+    --db "docker://<user>:<pw>@<falkordb-host>:<port>" \
+    --org <org_id> --graph <graph_id> \
+    --cache-graph <the graph to restore>
+
+# Bounded run (writes at most N nodes, N >= 1). ⛔ `bounded` is set on EVERY bounded
+# run, and `coverage` follows the COUNTS, not the flag: a bound at or above the record's
+# node count is `complete` UNLESS the record carried rows the projection refused (a
+# blank-keyed `:Session`), which is `partial` at any bound (see the "`bounded` vs
+# partial — the flag is not the state" bullet below):
+python -m tortoise record-restore … --limit 500
+# Machine-readable:
+python -m tortoise record-restore … --json
+```
+
+`--limit 0` is REFUSED (exit `2`, before any write): it would wipe the cache and
+write nothing — the destructive no-op this verb exists to prevent — so it is
+refused before the target graph is even opened.
+
+**Exit codes — the next step keys on the code, not on the log:**
+
+| code | meaning | next step |
+|---|---|---|
+| `0` | restored; `nodes_written`/`relations_written` are **measured off the cache after the rebuild** (not the plan's size) | compare `nodes_written` with `nodes_selected` — the projection's own plan size AFTER its refusals (`refused_keys`: a record row the projection declines to project) and AFTER `--limit`. Those refusals are not a restore shortfall, so `nodes_selected` is the denominator the verb itself enforces, and it is reported beside the measured count. `record_nodes` / `min(record_nodes, --limit)` is only the FALLBACK for a projection that reports no `nodes_selected`; `rebuild_from_record` always reports it, so on this verb the fallback never applies. Equality is REQUIRED (a shortfall beyond that is refused as exit `2`), so a `--limit 500` run over a 5,000-node record exits `0` at 500 and is not a fault. `relations_written` is different: it MAY legitimately be lower, because a relation statement MATCHes its endpoints and a record that does not carry them makes it a no-op (R4). Read `relations_not_written` — a shortfall there is the declared-partial state **`relations-not-hot`**, named in `declared_partial`, and it is never a silent part of a `complete` claim: `coverage` is a statement about NODE keys only |
+| `3` | **REFUSED before any write** (empty source, the cache's wipe guard): no row of the record's state was written | read the printed reason — each has a different remedy. ⚠️ The source-side refusals fire BEFORE the target graph is opened, but the L2 refusal is asked of a **projection**, and opening one creates the graph and MERGEs its own `:Meta` bookkeeping marker — so a refused run can leave an empty graph behind. That is the projection, not a restore |
+| `2` | **no verdict** (no/invalid DSN, `psycopg2` absent, unreadable record or cache, **a `--limit` below 1**, usage error, **a failure during the rebuild**, **a rebuild that left the cache holding none of the record's rows** — including a record that carried relations but no nodes, whose relations cannot resolve their endpoints) | fix the input; for the two post-wipe cases the cache has been **wiped** — treat it as **LOST** (and in every case as UNKNOWN), never as it was. The residency declaration written by the run describes only what the measured counts proved (`declared_partial` includes `not-hot`), so a read after a failed restore is `not-hot`/`degraded`, never `empty`; a successful re-run rewrites it |
+
+`2`'s caveat is `record-reconcile`'s, inherited verbatim: argparse's own
+`error()` also exits `2`, so `2` means only *no verdict was produced* — not "the
+record is unreachable".
+
+### The four refusals, and why each exists
+
+1. **An EMPTY record scope is refused** (`--allow-empty` overrides, deliberately
+   verbose). A restore from no rows wipes the cache and writes nothing, and the
+   shipped path RETURNS NORMALLY (`nodes_written: 0`, `coverage: partial`) — an
+   exit-0-shaped success that destroyed the cache. The commonest cause is a
+   mistyped `--org`/`--graph`: a scope that was never written reads exactly like
+   a mistyped one.
+2. **A rebuild that materialised nothing is reported as UNKNOWN (exit `2`),
+   never as the exit-`3` class** — the record HAD rows, the wipe ran, and the
+   cache holds none of them. Exit `3` says "REFUSED, nothing was written",
+   which reads as "your cache is as it was"; after a wipe that is false, so the
+   wording and the code both say the cache is LOST. ⛔ This only means anything
+   because the counts are **measured**: `rebuild_from_record` reads them back
+   off the graph after the write, so a projection that wiped and materialised
+   nothing reports `0` (and the printed `N node(s)` on a healthy run is the
+   number of nodes actually in the cache, not the size of the record slice).
+3. **`--cache-graph` cannot be guessed.** The cache graph's name is not the
+   record's `graph_id` scope column: this tree names it `org_<org_id>` (the org
+   SDK's isolated graph) or `org_<org_id>_<graph_id>` (the registry/ACL
+   namespace). A wrong guess does **not** fail — FalkorDB opens an EMPTY graph —
+   so the run would report a restore into a graph nobody reads while the real
+   graph stayed destroyed. The result prints the target's **pre-wipe count of
+   RESTORABLE nodes** (the labels the record can put back) for the same reason:
+   `target held 0 node(s) before the wipe` beside `wrote 412` is either a
+   correct restore into a freshly-minted graph or a restore into the wrong one,
+   and only the operator can tell which. Read it as "restorable nodes", not as
+   "every node": opening a projection MERGEs a `:Meta` bookkeeping marker into
+   the target, and `:Meta` also carries real state (`calibration_milestone`), so
+   the count is stated over the record's own node population rather than
+   defined as "everything except bookkeeping".
+4. **The cache's wipe guard (L2, #2944) is reported, not swallowed.** A server
+   graph whose name does not start with `test_`/`tortoise_test` is refused as
+   destructive. ⚠️ **Every production graph name is `org_*`, so this fires on a
+   real restore today** (exit `3`, with the guard's own reason). The verb does
+   not paper over it: the production door is blocked on #2944's disposable-graph
+   registry, and what runs **today** is the **drill** (below) against a
+   `test_`-named graph. Do not "make it work" by renaming a production graph into
+   a test-prefixed one to get past the guard — the next real wipe would then have
+   a name that lies about what it is.
+
+### The two declared-partial operator states
+
+A restore can be correct and still leave the cache **not fully hot**. Both
+states have their own reason string, and neither is an absence (§17.3):
+
+- **`not-hot`** — the run left part of the record's NODE set unwritten, or its declaration is `coverage=partial`. Read **`unwritten_keys`** to
+  see that count: it is the not-hot set. ⛔ Do NOT read `declared_keys` for this
+  — a `complete` declaration covers the whole record and enumerates NOTHING, so
+  `declared_keys` is `0` on a perfectly complete restore while
+  `unwritten_keys` is `0` too. A read for an unwritten key is a **residency
+  miss**: it `degraded` on read and is served from the record, and it is
+  **never** reported as `empty`. ⛔ **The remedy depends on WHY the key is
+  unwritten, and the two cases are not the same command.** If the run was
+  `bounded` and the bound cut the set, re-run without `--limit` — that makes the
+  cache fully hot. If instead the record carried a row the CACHE cannot address
+  (a blank-keyed `:Session`, reported as `refused_keys` and named on the human
+  line), **no re-run can write it**: the row is unaddressable by construction,
+  and re-running only wipes and rebuilds the cache into the identical state.
+  That is a record/cache addressability gap (§9's exit-0 row above lists it
+  among the declared-partial states), not a writable shortfall — read
+  `refused_keys` before reaching for `--limit`.
+- **`relations-not-hot`** — every node landed but **N of the record's relations
+  did not**, because a relation statement MATCHes both endpoints and the record
+  does not carry them (R4). Read **`relations_not_written`**; `coverage` says
+  `complete` and is telling the truth about NODES, not about edges — ⛔ do not
+  read it as "every edge is back". This is the #3895 shape (healthy counters,
+  missing edges), so it is printed, carries its own state name in
+  `declared_partial`, and an edge read for one of those relations is a
+  residency miss — never an absence. Fixing it is a change to what the record
+  carries (the `search_keys` refusal), not a re-run.
+- **`bounded` vs partial — the flag is not the state.** `--limit` sets
+  `bounded: true` on EVERY bounded run, and the flag decides nothing: a bound at or above the record's node count covers every key the plan could write and therefore declares `complete`;
+  `coverage` is derived from the COUNTS, so a run whose bound did not cut the plan but
+  whose record carried a row the cache cannot address (a blank-keyed `:Session` —
+  `refused_keys`, exit 0) declares `partial` at ANY bound, with
+  `declared_partial` naming the shortfall. Read the counts, not the flag. (`--limit`
+  below `1` is refused outright: it would wipe and write nothing.)
+- **`--allow-empty` over an empty record** — the one state where the declaration
+  says `partial` and nothing is short: no record keys exist, so the declaration
+  claims none hot (`declared_partial` is empty, `unwritten_keys` is 0) and the
+  run made exactly the write the operator stated. A read after it is `not-hot`,
+  never `empty` — an empty record is not evidence that the cache should be
+  empty. It is logged at WARNING because `partial` is the declaration's honest
+  answer for "covers no key", not because anything went wrong.
+- **`cache-unreachable`** — the cache did not answer **at all**. This is the
+  fourth residency branch: a residency miss with its own reason, never an
+  insufficiency and never an absence. While you see this, *no* read of the
+  cache — including one that returns 0 rows — is evidence that there is nothing
+  there. Fix reachability before drawing any conclusion from a read.
+
+### Quota: a restore is not a billable write (#9556 G5)
+
+The restore door must never be refused by the org's own storage allowance.
+`#9559` lands a fail-closed byte gate on the write path; because `rebuild_from_record`
+WRITES the graph, a gate inherited here would let the **billing** path defeat the
+**durability** path mid-rebuild. Nothing in the verb consults an allowance today;
+when the gate lands it must **exempt this lane** (or account it explicitly), and
+that is a property of the gate, not of the restore.
+
+### The drill — NOT MEASURED yet, and it says so
+
+A restore that has never been run is not a restore (the `#3895` precedent: a
+restore that returned **9,687 / 10,000** edges because its logical dump filtered
+the node export but not the edge export — an artifact unrestorable *by
+construction*, and a count that read as "nearly fine"). The drill is therefore
+part of this section, and its status is stated rather than implied:
+
+| drill step | status |
+|---|---|
+| verb exists, composes the shipped projection, refuses an empty source | **MEASURED** — `tests/test_9556_record_restore_verb.py` (the file's whole collected set — 42 pins / 43 collected cases when this row was written; `--collect-only` is the authority, and this numeral is a measurement, not a promise, live cache graph included) |
+| a restore executed against a **real armed record**, with the restored node/edge counts recorded | **NOT MEASURED** — blocked on an armed record (#9548 hosted arming / #9551 CI `TEST_RECORD_DB_URI`). No number is claimed here for a run that has not happened |
+| the production graph name (`org_*`) restorable | **BLOCKED** — #2944's L2 graph-NAME guard (refusal 4 above) |
+
+When the record is armed, the drill is: capture into the record (scenario A of
+`#9567`), flush the `test_`-named drill graph, run this verb, then compare
+`nodes_written`/`relations_written` (both **measured off the cache**) **and** a
+per-label count against the **RECORD's** counts — not against the flushed
+baseline: a record-sourced rebuild legitimately holds fewer nodes than the
+baseline (the six cache-only classes are dropped by design, §0.5 of
+`docs/epics/2026-10-10-7879-postgres-record/06-cache-projection.md`) and fewer
+relations (the `relations-not-hot` state above), so "equality with the baseline"
+would report a correct restore as a failure. The baseline is context for the
+log; the record is the reference. Record the counts in the run's artifact; do
+not put them in this section, where they would rot.
+
+### What this does not do (so it cannot be cited for it later)
+
+- **It does not migrate the owner's existing graphs** into the record — deferred
+  by owner statement (2026-10-22, #9567). A restore copies record → cache; a
+  graph that never reached the record is not in the record to restore from.
+- **It does not serve reads** — that is #7970. It does not reconcile
+  (`record-reconcile`) and it does not write the record (`record_writer`).
+- **It is not a backup of the record.** Restoring the *record* itself is the
+  backup/restore posture in #9557; this verb restores the **cache** from an
+  already-restored record.
+
 ## Secrets Matrix
 
 | Secret | tortoise-y4mjjq (Fly.io) | FalkorDB Cloud | GitHub Actions |

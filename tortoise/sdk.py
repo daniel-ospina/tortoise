@@ -42,6 +42,10 @@ from time import monotonic as _monotonic
 from typing import Any, ClassVar
 
 from .domain_loader import known_kinds, register_kind
+# #9572: the "nothing was named" predicate for the identity doors, ONE home
+# shared with the hosted REST/commit doors and the eval lane (stdlib-only leaf,
+# no cycle — see the module docstring for why it is not a private in sdk.py).
+from .kind_fallbacks import named_kind
 from .numeric_domain import (  # #7174: the numeric domain lives in ONE place
     reject_unrepresentable_number as _reject_unrepresentable_number,
 )
@@ -3558,6 +3562,77 @@ def _drop_reserved_emit_props(props: dict) -> list[str]:
     for _k in _dropped:
         props.pop(_k)
     return _dropped
+
+
+def _entity_door_props(kind_key: str, name: str, props: dict) -> dict:
+    """The entity door's property bag, with an UNSENT discriminator left out.
+
+    #9572: ``subjectKind`` / ``objectKind`` is the user-authored discriminator
+    and the fold writes it ON MATCH as ``coalesce($k, <stored>)`` — which is
+    correct ONLY if "the caller named no kind" reaches the fold as **absent**.
+    The door used to fabricate ``"other"`` (``props.pop(kind_key, "other")`` /
+    an ``= "other"`` alias default), so "not supplied" and "supplied as the
+    default" were the same string: a bare re-create silently reset a stored
+    ``team`` / ``capability`` to ``other``, and the journal record carried the
+    fabricated value, so replay reproduced the clobber.
+
+    The ``'other'`` default belongs to the fold's ON CREATE arm (the Object arm
+    already worked this way — ``entities.py::_upsert_object`` reads
+    ``ev.get("object_kind")`` with a NULL coalesce). Deciding it HERE would
+    re-create the defect: nothing downstream can tell a fabricated default from
+    a supplied value.
+
+    ``props`` is returned as a NEW dict in the door's established key order
+    (name, kind?, status, *caller props*) so a caller-supplied ``status`` still
+    overrides the ``"live"`` seed, exactly as before.
+    #9572 review P2: BLANK is not a kind either. ``""`` / ``"   "`` is not
+    ``None``, so it survived the ``is not None`` line and reached the fold as a
+    real value — ``coalesce("", stored)`` returns ``""``, so a blank re-create
+    still destroyed a stored ``team`` and a blank FIRST create stored a
+    discriminator no pack declares. The blank rule is the leaf module's
+    ``named_kind``, shared with the aliases, ``EventAPI``, the two hosted REST
+    handlers and the two seed surfaces, so it cannot be drawn differently at
+    the next door.
+    """
+    kind = named_kind(props.pop(kind_key, None))
+    out: dict = {"name": name}
+    if kind is not None:
+        out[kind_key] = kind
+    out["status"] = "live"
+    out.update(props)
+    return out
+
+def _payload_entity_kind(e: dict) -> str | None:
+    """The payload entity's kind to write, or ``None`` when it must NOT be.
+
+    #9572: a v2 capture payload's ``kind`` is a CLASSIFICATION, not the caller's
+    discriminator. The pipeline repairs an unclassifiable/out-of-vocab entity to
+    its family fallback (``extractor_v2._ENTITY_FALLBACK`` = ``core:other``, and
+    ``kind_classifier.KindClassifier._fallback`` does the same upstream), so by
+    the time the door sees the payload a kind is ALWAYS present — an
+    absent-key guard alone never fires on the default capture path, and the
+    repaired sentinel reached the fold's ``ON MATCH … =coalesce($k, stored)`` as
+    a real kind: a conversation that merely mentioned an Object reset its stored
+    ``capability``.
+
+    So the guard is on the VALUE, and it is one predicate shared with the hosted
+    ``/v1/sessions/commit`` door (``tortoise.kind_fallbacks``) — the twin that
+    imports nothing from this private surface is exactly how the fifth
+    fabricator survived four review rounds.
+
+    A payload entity that names a real kind still writes it, so a genuine
+    re-classification is not frozen out.
+
+    ⚠️ One stored VALUE changes, on purpose: a first create from a v2 payload
+    whose kind was repaired used to store the sentinel (``objectKind =
+    'core:other'``) and now stores ``other`` — the FOLD's ``ON CREATE`` spelling
+    (the SDK/REST doors name no kind at all; ``'other'`` is what the fold
+    supplies). Only a consumer that filters the EXACT string ``'core:other'``
+    sees the move.
+    """
+    from .kind_fallbacks import payload_entity_kind
+
+    return payload_entity_kind(e)
 
 #: The canonical record types a live entity door may journal.
 # `DocumentCreated` (#2296) joins the set: the last unjournaled canonical
@@ -11547,20 +11622,23 @@ class TortoiseSDK:
             name = str(e.get("name", "")).strip()
             if not name:
                 continue
-            _ekind = str(e.get("kind", "core:other"))
-            _is_subject = is_subject_kind(_ekind)
+            # #9572: the payload's `kind` is a CLASSIFICATION, not the caller's
+            # discriminator — see `_payload_entity_kind`, which is where the
+            # family-fallback sentinel is dropped.
+            _ekind = _payload_entity_kind(e)
+            _is_subject = is_subject_kind(_ekind or "")
             if _is_subject:
                 subject_entity_names.add(name)
             try:
                 if _is_subject:
                     self.create_entity(
                         "subject", name,
-                        subjectKind=_ekind,
+                        **({"subjectKind": _ekind} if _ekind is not None else {}),
                         is_episodic=False)
                 else:
                     self.create_entity(
                         "object", name,
-                        objectKind=_ekind,
+                        **({"objectKind": _ekind} if _ekind is not None else {}),
                         is_episodic=False)
             except Exception as exc:  # noqa: BLE001, RUF100 — #2164: the
                 # old `except: pass` was indicator-4 hygiene — a swallowed
@@ -22683,6 +22761,22 @@ class TortoiseSDK:
           (`invalidate_point` refuses operators) therefore remains a
           permanently unsweepable root, exactly as it was before #7505; that
           residual is tracked, not silently assumed away.
+          ⛔ ONE CARVE-OUT, and it is the opposite case (#9269): an
+          OPERATOR-SHAPED node that is another operator's INPUT. The
+          exemption above protects a pass that MAY NOT have run the factor;
+          this class is one every arm of ``_affected_claims`` now excludes by
+          construction (``ep._non_operator``), so before #9269 it was swept
+          only because it entered ``affected`` as an op-input. Excluding it
+          from `affected` while retaining it here re-classified a SWEPT
+          population as never-sweepable: measured, after
+          ``create_operator('IMPL', a, [b, <is_operator:true>])`` and a
+          converged ``dream(mode='full')`` the shaped input was the ONLY
+          remaining graph flag, ``stale_backlog`` could not drain, and
+          ``_auto_dream_mode()`` returned 'local' forever — the #7505/#2422
+          failure class, reached through the one shape #9269 is about. So the
+          shaped-input class is SWEPT BY CLASSIFICATION here (below), which is
+          how a root that can never be affected stays clearable. A TOP-LEVEL
+          operator (nobody's input) is untouched and keeps the residual above.
         * A ROOT WITH **NO** ``IMPL|NAND`` EDGE AT ALL (an isolated claim).
           Its pass computes nothing (the #3139 ``no_ep_factors`` legitimate
           no-op), so sweeping its flag would be a no-op sweeping its own
@@ -22723,13 +22817,29 @@ class TortoiseSDK:
         # (1) an operator's INPUT. Direction is load-bearing: a mitigation
         # points AT an operator (``(m)-[:IMPL]->(op)``), so it is the operator
         # that would match here, never ``m``.
-        participants |= {r[0] for r in proj.g.query(
+        #
+        # #9269: the same row answers the SWEEP question, which is the opposite
+        # of the retention question. An OPERATOR-SHAPED input (``is_operator``
+        # absent-or-false is the ADMITTED form, so the shaped class is its
+        # complement) can now never enter ``affected`` — every arm of
+        # ``_affected_claims`` carries ``ep._non_operator`` — so the
+        # ``affected`` subtraction above can never clear its flag, and retaining
+        # it as a PARTICIPANT (it is an operator, so the first query retains it)
+        # strands it forever. It is swept by CLASSIFICATION instead. The
+        # spelling is the complement of ``ep._non_operator`` and was measured on
+        # the engine against every spelling in that docstring: the STRING
+        # ``'false'`` and both numerics (``0``, ``1``) are shaped, and ``0 = false``
+        # is false there — the same verdict as the Python identity test.
+        op_input_rows = proj.g.query(
             "MATCH (o:Point)-[:IMPL|NAND]->(n:Point) "
             "WHERE n.id IN $ids "
             "AND (o.is_operator = true OR o.op_type IS NOT NULL) "
-            "RETURN DISTINCT n.id",
+            "RETURN DISTINCT n.id, "
+            "(n.is_operator IS NOT NULL AND n.is_operator <> false)",
             params={"ids": ids},
-        ).result_set}
+        ).result_set
+        participants |= {r[0] for r in op_input_rows}
+        shaped_inputs = {r[0] for r in op_input_rows if r[1]}
         # (2) the two facts the remaining classes need from the edges, in ONE
         # sweep: does the candidate have an IMPL|NAND edge at all (the class
         # boundary — an isolated claim has none and is retained), and is that
@@ -22756,7 +22866,9 @@ class TortoiseSDK:
         # operator is already in `participants`). The #2205/#3139
         # index-independent form is used for the far endpoint.
         participants |= {r[0] for r in edge_rows if r[1]}
-        return (points & edge_bearing) - participants
+        # #9269: the shaped input is the ONE participant class this sweep may
+        # still clear — see the carve-out in the docstring.
+        return (points & edge_bearing) - (participants - shaped_inputs)
 
     def _reverse_bfs_neighbors(self, proj, point_ids: list[str]
                                ) -> tuple[list[str], list[str]]:
@@ -25354,9 +25466,13 @@ class TortoiseSDK:
         Checks baseline_set flag on non-operator Points. For uncalibrated
         points, traverses extractedFrom→Source to check for inherited credibilityTier.
 
-        #9063: the non-operator predicate is the GATE's — absence-or-false,
-        with NO ``op_type`` conjunct (EP's factor-input arm has no non-operator
-        filter, so an ``op_type``-bearing node IS a participant) — plus the
+        #9063/#9269: the non-operator predicate is the GATE's — absence-or-false,
+        with NO ``op_type`` conjunct (EP's factor-input arm applies this SAME
+        absence-or-false predicate since #9269, and a hybrid
+        ``create_point(op_type=...)`` node is ``is_operator = false`` WITH
+        ``op_type``, so it passes on BOTH sides and IS a participant; the
+        ``op_type IS NULL`` conjunct belongs to the STRICTER operator-less
+        direct-edge arms only) — plus the
         id-less exclusion, so a legacy Point written before ``is_operator`` was
         stamped is LISTED here — this is the guidance the
         calibration gate's error message points at, and it must not be empty
@@ -25385,9 +25501,12 @@ class TortoiseSDK:
         #
         # The predicate is the GATE's, exactly — absence-or-false, with NO
         # ``op_type`` conjunct (see ``_uncalibrated_ep_participants``: EP's
-        # factor-input arm has no non-operator filter, so a hybrid
-        # ``create_point(op_type=...)`` node is a participant and must be
-        # listed here for its remedy to exist) — plus the id-less exclusion the
+        # factor-input arm carries this SAME absence-or-false predicate since
+        # #9269, so a hybrid ``create_point(op_type=...)`` node — ``is_operator
+        # = false`` WITH ``op_type`` — is a participant and must be listed here
+        # for its remedy to exist; the ``op_type IS NULL`` conjunct belongs to
+        # the STRICTER operator-less direct-edge arms, never to this one) — plus
+        # the id-less exclusion the
         # gate makes: ``set_point_baseline(None)`` is not a remedy a caller can
         # run, and such a node is never an EP participant.
         not_operator = "(n.is_operator IS NULL OR n.is_operator = false)"
@@ -25563,8 +25682,20 @@ class TortoiseSDK:
         the two cannot drift: ``_affected_claims`` admits a claim only when it
         forms a factor (#5566), and ``_affected_factors`` names every factor
         INPUT — its operator inputs and BOTH endpoints of an operator-less
-        direct edge (#888 W5). The gate's own evidence-kind / live filters
-        decide what to demand calibration of.
+        direct edge (#888 W5). #9269: the OPERATOR-MEDIATED selections in both
+        of those apply the SAME absence-or-false non-operator predicate this
+        gate's universe does, so an operator-shaped node is in neither — the
+        scope and the run cannot disagree about it. That predicate is spelled
+        in Cypher at the affected-set arms and in PYTHON at
+        ``_affected_factors``' Batch 2 (see ``ep._non_operator``, whose
+        Cypher-helper form must NOT be extended to Batch 2 — a WHERE-clause
+        filter there would hide a stripped idx-0 SOURCE). (The
+        operator-less DIRECT-EDGE arms stay a STRICTER spelling, this predicate
+        AND ``op_type IS NULL``; the one population where the gate deliberately
+        demands a prior the run's direct-edge arms exclude is the HYBRID
+        ``is_operator = false`` + ``op_type`` node — recorded, not a drift.) The
+        gate's own evidence-kind / live filters decide what to demand
+        calibration of.
 
         Deriving this from the SELECTED operators' immediate endpoints alone
         is NOT enough: ``ep.run`` re-expands ``max_hops`` from those seeds, so
@@ -25668,19 +25799,34 @@ class TortoiseSDK:
             bare ``n.is_operator = false`` matched ZERO rows on a legacy point
             whose property is ABSENT — that point was consumed AND stamped
             while the gate saw nothing — which is this issue.
-            NO ``op_type IS NULL`` conjunct here, deliberately: EP's
-            factor-INPUT selection (``ep.py`` Batch 2, the ``(o)->(c)`` arm)
-            carries NO non-operator filter, so a HYBRID node
+            NO ``op_type IS NULL`` conjunct here, deliberately: a HYBRID node
             (``create_point(op_type=...)`` → ``is_operator = false`` WITH
-            ``op_type``) is a participant and lands in ``_ep_run_scope``
+            ``op_type``) is an EP participant and lands in ``_ep_run_scope``
             (measured). Excluding it would REMOVE coverage the audit had before
             #9063 (its bare ``is_operator = false`` matched hybrids) — a
             fail-open, the one direction this gate must never move. A legacy
             ``op_type``-only operator is in that same consumed set and is now
             demanded too, which is fail-closed and satisfiable (it is a
-            ``:Point``). ⚠️ RESIDUAL, pre-existing on both trees (#9269): an
-            ``is_operator = true`` node used as a factor input is also consumed
-            and stamped, and is NOT demanded here.
+            ``:Point``).
+            #9269 (CLOSED): an ``is_operator = true`` node used as a factor
+            input USED to be consumed and stamped while this predicate —
+            correctly — demanded nothing of it (the #7478 class), and so did
+            an out-of-contract spelling (the STRING ``is_operator = 'false'``)
+            that matches neither ``IS NULL`` nor ``= false``. Both were closed
+            on the OTHER side: EP's factor-INPUT selection applies THIS SAME
+            absence-or-false predicate, so the two agree by construction —
+            neither demands nor consumes an operator-shaped node. ⛔ It applies
+            it as a PREDICATE with two spellings, not as one helper: in Cypher
+            at the affected-set arms, and in PYTHON at ``_affected_factors``'
+            Batch 2 — which deliberately does NOT use ``ep._non_operator``'s
+            WHERE-clause form, because hiding a stripped idx-0 SOURCE from that
+            arm renumbers the first surviving target into the source slot and
+            inverts directional messages (see that function's docstring). Do
+            not "unify" the two. Widening THIS predicate to reach them was the
+            rejected
+            route (it would demand a prior of every operator Point that happens
+            to be a factor input, and could not cover the string spelling
+            without also demanding every non-boolean spelling).
             NOTE: ``_dedup_match_clauses`` keeps a DIFFERENT form on purpose
             (#2892/#2949); do not restore parity between the two.
           * ``n.pointKind`` NULL-or-an-evidence-kind — absent kind is
@@ -32649,12 +32795,16 @@ class TortoiseSDK:
         if isinstance(uses, dict):
             uses = [uses]
         elif isinstance(uses, str):
-            uses = []  # a legacy bare-string use writes objectKind='other'
+            # a legacy bare-string use names NO kind — the fold supplies the
+            # `'other'` default ON CREATE and writes nothing ON MATCH (#9572)
+            uses = []
         if isinstance(uses, (list, tuple)):
             for item in uses:
                 if isinstance(item, dict):
-                    # The fold's own default is 'other' (a bare core kind), so
-                    # an absent 'kind' is the same write it will perform.
+                    # #9572: an absent `kind` is not the same WRITE any more —
+                    # the fold supplies `'other'` ON CREATE and writes nothing
+                    # ON MATCH, so a kindless use cannot overwrite a stored
+                    # discriminator. The gate still screens a NAMED kind.
                     self._refuse_unapproved_kind("objectKind", item.get("kind"))
 
 
@@ -34074,14 +34224,12 @@ class TortoiseSDK:
                 )
             node = self._create_entity(
                 "Subject", _entity_name_id("Subject", name),
-                {"name": name, "subjectKind": props.pop("subjectKind", "other"),
-                 "status": "live", **props},
+                _entity_door_props("subjectKind", name, props),
                 "SubjectAdded", is_episodic=is_episodic)
         elif t == "object":
             node = self._create_entity(
                 "Object", _entity_name_id("Object", name),
-                {"name": name, "objectKind": props.pop("objectKind", "other"),
-                 "status": "live", **props},
+                _entity_door_props("objectKind", name, props),
                 "ObjectRegistered", is_episodic=is_episodic)
         elif t == "event":
             # ⛔ #8398 (5th review P2-1): a CALLER PROP named ``event`` is
@@ -34537,27 +34685,49 @@ class TortoiseSDK:
             node["advisories"] = _adv
         return node
 
-    def create_subject(self, name: str, subjectKind: str = "other", **props) -> dict:
-        """Thin alias for create_entity(type='subject') — epic #888 W2."""
-        _coerce_props(props)  # accept MCP-style nested props= dict (#218)
-        _drop_reserved_emit_props(props)  # #2296: strip BEFORE the relay splat
-        if "is_episodic" in props:  # #1486: server-managed (quota discriminator)
-            raise ValueError(
-                "'is_episodic' is a server-managed field and cannot be set via props.")
-        return self._flat_entity_result(
-            self.create_entity("subject", name,
-                               subjectKind=subjectKind, **props))
+    def create_subject(self, name: str, subjectKind: str | None = None,
+                       **props) -> dict:
+        """Thin alias for create_entity(type='subject') — epic #888 W2.
 
-    def create_object(self, name: str, objectKind: str = "other", **props) -> dict:
-        """Thin alias for create_entity(type='object') — epic #888 W2."""
+        ``subjectKind`` defaults to ``None`` (**absent**, not ``"other"**) since
+        #9572: the alias used to fabricate ``"other"``, so a bare re-create
+        shipped ``subject_kind="other"`` on the record and the fold's ON MATCH
+        ``coalesce($sk, s.subjectKind)`` clobbered the stored, user-authored
+        kind. The ``'other'`` default now comes from the fold's ON CREATE arm,
+        which is the only place it belongs — see ``sdk._entity_door_props``.
+        A BLANK ``subjectKind`` (``""`` / ``"   "``) is "not supplied" too
+        (#9572 review P2): ``kind_fallbacks.named_kind`` normalizes it, so it
+        can neither reset a stored kind nor store ``""``.
+        """
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         _drop_reserved_emit_props(props)  # #2296: strip BEFORE the relay splat
         if "is_episodic" in props:  # #1486: server-managed (quota discriminator)
             raise ValueError(
                 "'is_episodic' is a server-managed field and cannot be set via props.")
+        subjectKind = named_kind(subjectKind)
+        if subjectKind is not None:
+            props["subjectKind"] = subjectKind
         return self._flat_entity_result(
-            self.create_entity("object", name,
-                               objectKind=objectKind, **props))
+            self.create_entity("subject", name, **props))
+
+    def create_object(self, name: str, objectKind: str | None = None,
+                      **props) -> dict:
+        """Thin alias for create_entity(type='object') — epic #888 W2.
+
+        ``objectKind`` defaults to ``None`` (**absent**, not ``"other"**) since
+        #9572 — the Object twin of ``create_subject``'s fabricated default.
+        Blank is absent here too (#9572 review P2) — ``named_kind``.
+        """
+        _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        _drop_reserved_emit_props(props)  # #2296: strip BEFORE the relay splat
+        if "is_episodic" in props:  # #1486: server-managed (quota discriminator)
+            raise ValueError(
+                "'is_episodic' is a server-managed field and cannot be set via props.")
+        objectKind = named_kind(objectKind)
+        if objectKind is not None:
+            props["objectKind"] = objectKind
+        return self._flat_entity_result(
+            self.create_entity("object", name, **props))
 
     def create_event(self, name: str, eventKind: str, *, is_episodic: bool | None = None,
                       _server_id: str | None = None, **props) -> dict:
@@ -36983,8 +37153,19 @@ class TortoiseSDK:
                 _reject_unrepresentable_number("oid", oid)
                 _reject_unrepresentable_number("issue_number", issue_number)
                 proj.g.query(
-                    "MERGE (o:Object {id:$oid}) SET o.name=$name, o.objectKind=$okind, "
-                    "o.repo=$repo, o.issue_number=$issue_number, o.url=$url",
+                    # #9572: the kind is this door's OWN synthesis (`"pr"` /
+                    # `"issue"` from the frontmatter key) — the caller named
+                    # none. Writing it on MATCH re-typed a stored Object
+                    # (`pm:issue` → `issue`, `capability` → `issue`) from a
+                    # session file's frontmatter, the same fabrication class as
+                    # the doors above, one layer out. The kind belongs to the
+                    # fold's ON CREATE arm; a re-index refreshes the fields it
+                    # legitimately owns and touches nothing else.
+                    "MERGE (o:Object {id:$oid}) "
+                    "ON CREATE SET o.objectKind=$okind, o.name=$name, o.repo=$repo, "
+                    "o.issue_number=$issue_number, o.url=$url "
+                    "ON MATCH SET o.name=$name, o.repo=$repo, "
+                    "o.issue_number=$issue_number, o.url=$url",
                     params={"oid": oid, "name": name, "okind": okind,
                             "repo": repo, "issue_number": issue_number, "url": url},
                 )
@@ -38914,11 +39095,22 @@ def _summary_to_payload(summary: dict, session_id: str,
     entities, seen = [], set()
     for st in (summary.get("state") or []):
         name = st.get("name", "")
-        key = (name, st.get("objectKind", "core:concept"))
+        # #9572: a summary entry that names no kind must not INVENT one. The
+        # invented string here was `core:concept` — never a §5 object kind, and
+        # never written by product code (it survives only as a HISTORICAL value
+        # in `tools/calibration_harness.py`'s counts and as test payload data) —
+        # so it could only ever be a fabrication, and the commit door wrote it
+        # as a real discriminator over a stored `capability`. The layer-1
+        # payload requires `entities[].kind`, so the honest value is the
+        # DECLARED family fallback (`core:other`), which
+        # `kind_fallbacks.writable_kind` drops at the door — the fold then
+        # supplies `other` ON CREATE and touches nothing ON MATCH.
+        _ekind = st.get("objectKind") or "core:other"
+        key = (name, _ekind)
         if not name or key in seen:
             continue
         seen.add(key)
-        entities.append({"name": name, "kind": st.get("objectKind", "core:concept"),
+        entities.append({"name": name, "kind": _ekind,
                          "passes_frequency_gate": True})
 
     return {

@@ -587,6 +587,32 @@ class TestFourNodeChain:
         assert rows[0][0] == 1, "duplicate entity names must MERGE to one node"
         assert rows[0][1] is False
 
+    def test_entity_commit_does_not_reset_a_stored_discriminator(self, client):
+        """#9572 (review round 4, P1): the PRODUCTION capture door.
+
+        `TortoiseSDK.commit_session` POSTs the v2 payload here, and
+        `extractor_v2` repairs every unclassifiable entity to `core:other`. This
+        door wrote that repair as the entity's `objectKind`, so a bare re-commit
+        of a session that merely MENTIONED an Object reset its stored kind.
+
+        Pinned at the ROUTE on purpose: a helper-level pin is exactly how this
+        twin survived four review rounds.
+        """
+        sdk = _team_sdk()
+        sdk.create_object("ProbeCommitZ", "capability")
+        r = _commit(client, _raw_payload(1, entities=[
+            {"name": "Alpha", "kind": "Project",
+             "passes_frequency_gate": True},
+            {"name": "ProbeCommitZ", "kind": "core:other",
+             "passes_frequency_gate": True},
+        ]))
+        assert r.status_code == 200, r.text
+        rows = _team_sdk()._get_proj().g.query(
+            "MATCH (o:Object {name:'ProbeCommitZ'}) RETURN o.objectKind",
+        ).result_set
+        assert rows and rows[0][0] == "capability", (
+            f"the commit door wrote the classifier's repair as the kind: {rows}")
+
     def test_operators_written_with_merge_key(self, client):
         """IMPL edge exists with the (src,dst,op_type) MERGE key; re-commit of
         the same operator (L2 merge) does not duplicate it."""
