@@ -154,6 +154,38 @@ class CommitRecordStore:
 
     # ── Transitions (re-submission path, PL3) ─────────────────────────
 
+    def discard_attempt(self, client_commit_id: str) -> bool:
+        """Delete a record THIS attempt created, before any write (#4051).
+
+        A refusal that happens after ``acquire`` (the 402 gates, the 429 ingest
+        throttle) leaves a ``status='partial'`` record behind. That is NOT a
+        neutral leftover: ``plan_commit``/``is_first_adjudication`` treat ANY
+        existing record as a previous attempt, so the retry of the very same
+        ``client_commit_id`` is re-adjudicated WITHOUT the first-adjudication
+        hard-25 band and writes the items the original attempt would have HELD
+        (measured: a 26-net-new payload 200s with ``held`` 26 on a clean graph,
+        and WRITES them after a refusal left the record).
+
+        Deleting restores the pre-attempt state exactly, which is what the
+        refusal promised: nothing was written, so the client's documented
+        backoff-then-retry (``docs/INGEST_CONTRACT.md`` §9) is a FIRST
+        adjudication, not a second one.
+
+        Refuses to delete anything carrying write work — ``status`` other than
+        ``partial``, or a non-zero ``write_ops_billed`` — so a genuine
+        mid-write crash (the PL3 re-submission path) is untouched. Returns
+        True when a record was deleted.
+        """
+        rows = self._proj.g.query(
+            "MATCH (r:CommitRecord {client_commit_id:$cid}) "
+            "WHERE r.status = 'partial' "
+            "  AND coalesce(r.write_ops_billed, 0) = 0 "
+            "  AND r.value_nodes_declared IS NULL "
+            "DELETE r RETURN count(*) AS n",
+            params={"cid": client_commit_id},
+        ).result_set
+        return bool(rows and int(rows[0][0] or 0) > 0)
+
     def update(
         self, client_commit_id: str, *, status: str
     ) -> CommitRecordState | None:
