@@ -49,6 +49,13 @@ from tortoise.money import (
     money_props,
     read_money_value,
 )
+
+# #2817 review F2: the capture write seam's report policy is taken FROM the
+# production constant rather than re-declared, so a re-declared copy cannot let
+# the two drift silently in either direction (a widened production set would
+# drown the receipt while these tests stayed green; a narrowed one could mute
+# the design's named abstention — §6/T3 — with no red anywhere).
+from tortoise.sdk import _CAPTURE_MONEY_WARN_ON as _CAPTURE_WARN_ON
 from tortoise.value_normalizer import (
     DROP_REASONS,
     PROSE_FIELDS,
@@ -996,11 +1003,26 @@ def test_a_number_word_anchor_is_never_typed(anchor_sentence):
 
 
 # ── the S5 call pattern's warning channel (route 2, #2817) ─────────────────
-#: The narrowing the capture write seam passes: what a per-point writer must
-#: not report (it fires on ordinary business prose) vs what it must keep
-#: reporting (a number was present and was NOT safely typed — the design's
-#: named abstention, §6/T3).
-_CAPTURE_WARN_ON = DROP_REASONS - {"no_candidate", "not_an_iso4217_code"}
+#: ``_CAPTURE_WARN_ON`` above is the PRODUCTION narrowing the capture write
+#: seam passes: what a per-point writer must not report (it fires on ordinary
+#: business prose) vs what it must keep reporting (a number was present and was
+#: NOT safely typed — the design's named abstention, §6/T3).
+
+
+def test_the_seams_report_policy_is_the_one_the_ruling_records():
+    """#2817 review F2: pin the PRODUCTION partition itself.
+
+    The ruling (comment `6359826543`) silences exactly two reasons —
+    ``no_candidate`` (no number at all) and ``not_an_iso4217_code`` (ordinary
+    prose such as ``"ISO 9001"``) — and keeps every other reason reportable,
+    including ``no_currency_anchor`` (the design's named abstention, §6/T3)
+    and ``refused_by_layer1`` (an amount the store cannot hold). Equality, not
+    a subset, so BOTH directions of drift red here.
+    """
+    expected = DROP_REASONS - {"no_candidate", "not_an_iso4217_code"}
+    assert expected == _CAPTURE_WARN_ON, sorted(_CAPTURE_WARN_ON)
+    assert "no_currency_anchor" in _CAPTURE_WARN_ON
+    assert "refused_by_layer1" in _CAPTURE_WARN_ON
 
 
 def test_warn_on_narrows_the_channel_without_changing_the_derivation():
@@ -1048,6 +1070,43 @@ def test_warn_on_refuses_a_reason_outside_the_closed_set():
     # ...and it raises even when the text would have TYPED, so the typo cannot
     # hide behind a value the caller was happy with.
     assert normalize_money_props("EUR 800") is not None
+
+
+def test_the_drops_sink_counts_by_reason_and_only_what_warn_on_reports():
+    """#2817 review F1: the AGGREGATING sink.
+
+    A per-run caller counts instead of appending, so its receipt is one bounded
+    summary entry however many values it wrote. The sink honours ``warn_on``
+    (an unreported reason is not counted, the same way it is not printed), and
+    it is independent of ``warnings`` — nothing is appended when only ``drops``
+    is passed, so the seam cannot accidentally keep the per-point channel.
+    """
+    drops: dict[str, int] = {}
+    warnings: list[str] = []
+    # Three unanchored bare numbers → three counted abstentions, and NOTHING
+    # appended when only the aggregating sink is passed.
+    for text in ("the tranche released 800 last week",
+                 "800 people were hired",
+                 "the policy covers all 800 accounts"):
+        assert normalize_money_props(
+            text, warn_on=_CAPTURE_WARN_ON, drops=drops) is None
+    assert drops == {"no_currency_anchor": 3}, drops
+    assert warnings == [], warnings
+    # A numberless sentence is NOT counted under the narrowed set ...
+    assert normalize_money_props(
+        "no numbers here", warn_on=_CAPTURE_WARN_ON, drops=drops) is None
+    assert drops == {"no_currency_anchor": 3}, drops
+    # ...a TYPED value contributes nothing to the count ...
+    assert normalize_money_props(
+        "EUR 800", warn_on=_CAPTURE_WARN_ON, drops=drops) is not None
+    assert drops == {"no_currency_anchor": 3}, drops
+    # ...and the two sinks are independent: passing BOTH appends the line AND
+    # counts it, so neither caller shape loses its signal.
+    assert normalize_money_props(
+        "the tranche released 800 last week", warn_on=_CAPTURE_WARN_ON,
+        drops=drops, warnings=warnings) is None
+    assert drops == {"no_currency_anchor": 4}, drops
+    assert len(warnings) == 1 and "no_currency_anchor" in warnings[0], warnings
 
 
 def test_a_long_input_is_not_quadratic():

@@ -514,6 +514,132 @@ def test_capture_never_types_an_ambiguous_amount(sdk, monkeypatch):
     assert stored_content == "R$ 1.234,56 was committed to the tranche."
 
 
+# ── #2817 review F1/F2: the money abstention CHANNEL at the capture seam ───
+#: A point whose claim carries a bare number and no currency anchor. Every one
+#: of these drops as ``no_currency_anchor`` — the design's named abstention
+#: (§6/T3) — which the seam MUST report.
+_UNANCHORED_CLAIMS = (
+    "the tranche released 800 last week",
+    "the policy covers all 800 accounts",
+    "800 people were hired",
+)
+
+
+def _money_channel(*contents: str) -> dict:
+    """The v2 payload for ``contents`` — one point per claim."""
+    return {
+        "entities": [],
+        "events": [],
+        "points": [{
+            "id": f"pt_2817_f1_{i}",
+            "content": content,
+            "pointKind": "statement",
+            "reason": "NEW",
+            "confidence": 0.5,
+            "c_cal": 0.5,
+            "about_entities": [],
+            "source_ref": "session.md",
+            "quote": content[:200],
+            "status": "draft",
+        } for i, content in enumerate(contents)],
+        "operators": [],
+    }
+
+
+def _money_warnings(res: dict) -> list[str]:
+    return [w for w in res.get("warnings") or []
+            if "value-normalizer" in w]
+
+
+def test_capture_reports_money_abstentions_once_per_capture(sdk, monkeypatch):
+    """#2817 review F1: ONE bounded summary entry, never one line per point.
+
+    Three claims each carrying a bare number used to append three separate
+    ``value-normalizer: no typed money value (...)`` lines, so the capture
+    receipt's length was a function of how many points happened to mention a
+    number. It is now one aggregated entry carrying the TRUE count — bounded
+    structurally (one entry per capture, at most one bucket per closed-set
+    reason), which is the #5654 shape used by the supersession channel in the
+    same function.
+
+    RED before the fix: three entries, none of them carrying the total.
+    """
+    _install_fake_extract(monkeypatch,
+                          _money_channel(*_UNANCHORED_CLAIMS))
+
+    res = sdk.capture_session(CONV)
+    assert res["ok"] is True, res
+    assert res["extracted"] == 3, res
+    channel = _money_warnings(res)
+    assert len(channel) == 1, channel
+    assert "3 point(s)" in channel[0], channel
+    assert "no_currency_anchor \u00d73" in channel[0], channel
+
+
+def test_capture_keeps_the_named_abstention_reportable_through_the_seam(
+        sdk, monkeypatch):
+    """#2817 review F2: the seam's ``warn_on`` is pinned FROM THE RECEIPT.
+
+    If the seam passed ``warn_on=frozenset()`` — silencing §6/T3's named
+    abstention, the one reason the design requires be reported — no test would
+    go red. This one does: ``no_currency_anchor`` must reach ``res["warnings"]``
+    for a claim that carries a number it could not type.
+    """
+    _install_fake_extract(monkeypatch, _money_payload(
+        "1.234,56 last quarter"))
+
+    res = sdk.capture_session(CONV)
+    assert res["ok"] is True, res
+    channel = _money_warnings(res)
+    assert len(channel) == 1, channel
+    assert "no_currency_anchor" in channel[0], channel
+
+
+def test_capture_says_nothing_about_a_claim_with_no_number(
+        sdk, monkeypatch):
+    """The OTHER direction of the same pin (#2817 review F1/F2): ``no_candidate``
+    is suppressed at the seam, because it fires on every numberless sentence
+    and would drown a receipt that was previously ``warnings: []``.
+
+    Drives a claim with no digit at all: if the seam ever passed
+    ``warn_on=None`` (report every reason), this reds.
+    """
+    _install_fake_extract(monkeypatch, _money_payload(
+        "we plan to hire engineers and revisit the plan"))
+
+    res = sdk.capture_session(CONV)
+    assert res["ok"] is True, res
+    assert _money_warnings(res) == [], res.get("warnings")
+
+
+def test_capture_money_receipt_is_the_same_on_a_dedup_hit(sdk, monkeypatch):
+    """#2817 review F1: the receipt is not a function of GRAPH STATE.
+
+    The derivation used to sit inside the create branch, so the first session
+    to carry a claim warned and the second (a content-hash hit on the same
+    content) did not — for byte-identical content. The abstention is now
+    counted on every payload point, so both receipts are identical.
+
+    RED before the fix: ``[]`` (or nothing) on the second capture.
+    """
+    content = _UNANCHORED_CLAIMS[0]
+    _install_fake_extract(monkeypatch, _money_payload(content))
+
+    first = sdk.capture_session(CONV)
+    assert first["ok"] is True, first
+    assert first["points"][0]["dedup"] == "new", first["points"]
+
+    second = sdk.capture_session(CONV)
+    assert second["ok"] is True, second
+    # The second capture resolved to the existing canonical — no prop writes.
+    assert second["points"][0]["dedup"] == "content_hash_hit", second["points"]
+    assert second["points"][0]["id"] == first["points"][0]["id"], (
+        first["points"], second["points"])
+
+    assert _money_warnings(first), first.get("warnings")
+    assert _money_warnings(second) == _money_warnings(first), (
+        first.get("warnings"), second.get("warnings"))
+
 
 def _passthrough_payload(content: str) -> dict:
     """The v2 payload shape the #2813/#2949 tests drive — one point carrying

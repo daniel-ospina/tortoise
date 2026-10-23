@@ -1259,6 +1259,32 @@ if not _CAPTURE_MONEY_WARN_SILENT <= DROP_REASONS:
         f"{sorted(_CAPTURE_MONEY_WARN_SILENT - DROP_REASONS)!r}")
 _CAPTURE_MONEY_WARN_ON: frozenset[str] = DROP_REASONS - _CAPTURE_MONEY_WARN_SILENT
 
+#: #2817 (review F1) — the capture seam reports its money abstentions ONCE per
+#: capture, aggregated by reason, never one line per point. The bound is
+#: structural: one entry per call, with at most one bucket per closed-set
+#: reason (``DROP_REASONS``), so no point count can lengthen the receipt. This
+#: is the same shape as the #5654 bounded supersession channel in the same
+#: function — the difference is that this channel needs no withheld count,
+#: because the summary reports the TRUE total it counts.
+_CAPTURE_MONEY_DROP_SUMMARY_PREFIX = (
+    "value-normalizer: {total} point(s) carried an amount that was not "
+    "typed — ")
+
+
+def _capture_money_drop_summary(drops: dict[str, int]) -> str:
+    """ONE bounded receipt entry for a capture's money abstentions.
+
+    Deterministic (reasons sorted) so two captures of byte-identical content
+    produce a byte-identical receipt — including a create and a dedup hit,
+    which is what #2817 review F1's create/dedup asymmetry was about.
+    """
+    reasons = ", ".join(f"{reason} \u00d7{count}"
+                        for reason, count in sorted(drops.items()))
+    return (_CAPTURE_MONEY_DROP_SUMMARY_PREFIX.format(
+                total=sum(drops.values()))
+            + reasons
+            + " (prose only — each value is a drop, never a guess)")
+
 
 def _capture_passthrough_read_fields() -> str:
     """Build the dedup-hit read-back RETURN field list from the ordered
@@ -11726,6 +11752,13 @@ class TortoiseSDK:
         # `_stream_to_payload` already enforces (#1272) — this restores it on
         # the v2 capture path.
         capture_point_id_map: dict[str, str] = {}
+        #: #2817 (review F1): the money abstentions of THIS capture, counted by
+        #: drop reason — the aggregating sink, not the per-line `warnings` one,
+        #: so a receipt gains one summary entry (`_capture_money_drop_summary`)
+        #: however many points mentioned a number. Filled for EVERY payload
+        #: point, created or resolved: a dedup hit writes nothing but must not
+        #: report differently from the create that preceded it.
+        money_drops: dict[str, int] = {}
         for pt in payload.get("points", []) or []:
             pid = str(pt.get("id", "")).strip()
             content = str(pt.get("content", "")).strip()
@@ -11733,6 +11766,34 @@ class TortoiseSDK:
                 skipped += 1
                 continue
             payload_id = pid
+            # #2817 (route 2 of the two the issue records as legal): derive the
+            # money value HERE, at the capture write seam, from the point's own
+            # `content` — the FULL stored claim (bounded by the extractor's
+            # `_MAX_CONTENT`), never the 200-char `quote`. The quote is the
+            # wrong source twice over: a value straddling its cut types the
+            # truncated prefix (a 100x understatement whose `verbatim` is still
+            # a byte-exact substring, so traceability would PASS on a wrong
+            # reading), and a quote is an excerpt OF the claim — the value must
+            # agree with the sentence the graph stores.
+            #
+            # Derived BEFORE the resolution below, i.e. on every payload point
+            # and not only on the create branch (#2817 review F1): derivation
+            # is deterministic and content-addressed, so it writes nothing on a
+            # dedup hit, but counting the abstention there too is what makes
+            # the RECEIPT symmetric — byte-identical content reported one way
+            # on a first capture and another way once a canonical exists was
+            # the asymmetry the review named.
+            #
+            # The derived fields are NOT added to
+            # `_CAPTURE_PASSTHROUGH_PROPS`: that set is the public capture
+            # RESPONSE surface (and `validFrom`'s note below is the standing
+            # reason not to widen it). A money value is a graph structural
+            # field read back with `money.read_money_value` (design §7.1:
+            # server-written, not a client field), so the response shape is
+            # untouched — symmetric between a create (stores, does not
+            # advertise) and a dedup hit (writes nothing).
+            money = normalize_money_props(
+                content, warn_on=_CAPTURE_MONEY_WARN_ON, drops=money_drops)
             try:
                 # 1) in-capture fold: same content minted earlier this seam
                 #    run (extractor payload assembly normally folds these;
@@ -11819,33 +11880,10 @@ class TortoiseSDK:
                     create_props = props
                     if props.get("when"):
                         create_props = {**props, "validFrom": props["when"]}
-                    # #2817 (route 2 of the two the issue records as legal):
-                    # derive the money value HERE, at the capture write seam,
-                    # from the point's own `content` — the FULL stored claim
-                    # (bounded by the extractor's `_MAX_CONTENT`), never the
-                    # 200-char `quote`. The quote is the wrong source twice
-                    # over: a value straddling its cut types the truncated
-                    # prefix (a 100x understatement whose `verbatim` is still a
-                    # byte-exact substring, so traceability would PASS on a
-                    # wrong reading), and a quote is an excerpt OF the claim —
-                    # the value must agree with the sentence the graph stores.
-                    #
-                    # The derived fields are NOT added to
-                    # `_CAPTURE_PASSTHROUGH_PROPS`: that set is the public
-                    # capture RESPONSE surface (and `validFrom`'s note above is
-                    # the standing reason not to widen it). A money value is a
-                    # graph structural field read back with
-                    # `money.read_money_value` (design §7.1: server-written, not
-                    # a client field), so the response shape is untouched —
-                    # symmetric between a create (stores, does not advertise)
-                    # and a dedup hit (writes nothing).
-                    #
-                    # Derivation is deterministic and content-addressed, so a
-                    # re-ingest of the same content derives the same value and
-                    # the dedup hit above never rewrites the canonical.
-                    money = normalize_money_props(
-                        content, warnings=warnings,
-                        warn_on=_CAPTURE_MONEY_WARN_ON)
+                    # #2817: the value derived at the top of this loop rides
+                    # the CREATE only — a dedup hit writes no props at all
+                    # (first-writer), and its abstention has already been
+                    # counted for the receipt.
                     if money:
                         create_props = {**create_props, **money}
                     _created = self.create_point(
@@ -12004,6 +12042,11 @@ class TortoiseSDK:
                     f"{type(e).__name__}: point write failed for {pid}: {e}")
         if skipped:
             warnings.append(f"{skipped} extracted point(s) failed to write")
+        # #2817 (review F1): the money abstentions of this capture, reported
+        # ONCE and bounded — replacing the per-point append that made the
+        # receipt a function of how many claims happened to mention a number.
+        if money_drops:
+            warnings.append(_capture_money_drop_summary(money_drops))
 
         # W5 Phase D (#2104): surface the extractor's consolidation noops —
         # claims the S3/FTS fold resolved to an EXISTING node were

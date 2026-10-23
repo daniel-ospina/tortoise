@@ -109,8 +109,9 @@ this module is additive and never moves a number out of ``content``/``quote``.
   ``drop_reason`` from the closed :data:`DROP_REASONS` set). Deterministic: no
   clock, no network, no process-global locale (design §6/T8).
 * :func:`normalize_money_props` — the S5 call pattern, mirroring
-  ``_valid_iso_date`` in ``extractor_v2.py``: returns ``None`` and *appends a
-  warning* rather than guessing.
+  ``_valid_iso_date`` in ``extractor_v2.py``: returns ``None`` and *reports*
+  the abstention (a per-value ``warnings`` line, or a ``drops`` count for a
+  caller that reports once per run) rather than guessing.
 * Every ``verbatim`` is a **byte-exact substring of the source text**, so the
   value is recoverable from what was stored (design §6/T1) — normalize-then-
   lose-the-source is the silent-corruption path this exists to prevent.
@@ -132,7 +133,11 @@ on every rebuild, design §7.1 — no longer applies.)
 Route (2) of the two `#2817` records as legal is now WIRED, at the capture
 write seam rather than in ``execute_embed``: ``sdk._extract_session_v2`` calls
 :func:`normalize_money_props` on each point's stored ``content`` and hands the
-result to ``create_point``. Deriving in ``pt_entry`` stays illegal because
+result to ``create_point``. Its abstentions ride the ``drops`` sink and are
+reported ONCE per capture (the receipt is not a function of how many points
+mentioned a number), and they are counted on every point — created or
+resolved to an existing canonical — so identical content yields the same
+receipt either way. Deriving in ``pt_entry`` stays illegal because
 ``Payload.points`` is ``list[commit_schema.Point]`` and that model is
 ``extra="forbid"`` — one typed amount would refuse the whole session's commit.
 The seam derives from ``content``, never the 200-char ``quote``: a value
@@ -736,7 +741,8 @@ def normalize_money(text: str) -> Normalization:
 
 def normalize_money_props(text: str, *,
                           warnings: list[str] | None = None,
-                          warn_on: Iterable[str] | None = None) -> dict | None:
+                          warn_on: Iterable[str] | None = None,
+                          drops: dict[str, int] | None = None) -> dict | None:
     """The S5 call pattern: props, or ``None`` + a warning (never a guess).
 
     Mirrors ``_valid_iso_date``'s posture in ``extractor_v2.py``: a caller
@@ -759,6 +765,16 @@ def normalize_money_props(text: str, *,
     refused up front, because a typo in a closed vocabulary would otherwise
     silently disable the warning it was meant to configure (and validate
     BEFORE deriving, so a typo cannot hide behind a typed value).
+
+    ``drops`` is the AGGREGATING sink (#2817 review F1): it counts each
+    reported drop BY REASON (``warn_on`` still decides what counts as
+    reported) instead of naming the point. A caller that writes one value per
+    point passes this rather than ``warnings`` so its receipt carries ONE
+    summary line per call — at most one bucket per closed-set reason, however
+    many points it wrote — instead of one line per point. The two sinks are
+    independent: a caller may pass either or both, ``warn_on`` filters both,
+    and neither changes the derivation (a counted drop is still a drop, never
+    a guess).
     """
     wanted = DROP_REASONS if warn_on is None else frozenset(warn_on)
     unknown = wanted - DROP_REASONS
@@ -769,10 +785,13 @@ def normalize_money_props(text: str, *,
     result = normalize_money(text)
     if result.typed:
         return result.props
-    if warnings is not None and result.drop_reason in wanted:
-        warnings.append(
-            f"value-normalizer: no typed money value ({result.drop_reason}) "
-            f"for {result.detail!r} — prose only")
+    if result.drop_reason in wanted:
+        if drops is not None:
+            drops[result.drop_reason] = drops.get(result.drop_reason, 0) + 1
+        if warnings is not None:
+            warnings.append(
+                f"value-normalizer: no typed money value "
+                f"({result.drop_reason}) for {result.detail!r} — prose only")
     return None
 
 
