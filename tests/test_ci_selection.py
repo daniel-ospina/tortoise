@@ -31,7 +31,7 @@ from tools.ci_selection import (  # noqa: I001
     surface_audit, render_surface_audit, duplicate_entries,
     on_demand_files, leg_coverage_issues, push_legs, fast_pool,
     duration_issues, TESTS_DIR, WATCHDOG_HEADROOM, WATCHDOG_CEILING_MIN,
-    uri_requiring_files,
+    uri_requiring_files, slow_leg_by_surface,
     carve_matrix_include, carve_shard_issues, carve_shard_count,
     MAX_CARVE_SHARDS, DEFAULT_CARVE_SHARDS,
     slow_matrix_include, slow_shard_issues, slow_shard_count,
@@ -294,8 +294,21 @@ def test_public_site_surface_change_selects_onboarding_and_skips_slow():
     they guard.
 
     The #2147/#2148 cost gates are unchanged — only the fast surface tests are
-    added; no slow leg, no carve-out leg.
+    added; no slow leg, no carve-out leg. That is a property of the SURFACE, not
+    of these nine paths: `onboarding` owns none of the slow-leg files
+    (`slow_leg_by_surface()` returns no `onboarding` key), which is why the
+    docs/drafts deferral in `test_every_guard_input_is_selectable_by_ci` cannot
+    cite the slow leg as the cost of pinning them (PR #9623 review P3). The
+    assertion below keeps that docstring claim honest: if a slow file ever lands
+    in `onboarding`, this REDS and the paragraph must be re-measured.
     """
+    assert not slow_leg_by_surface(load_manifest()).get("onboarding"), (
+        "`onboarding` now owns slow-leg files, so an onboarding-pinned docs/drafts "
+        "path DOES flip slow_run. Re-measure and update the 'Known remaining "
+        "hole' paragraph in test_website_docs_consistency.py's "
+        "test_every_guard_input_is_selectable_by_ci, which currently records the "
+        "opposite."
+    )
     for changed in (["website/docs.html"], ["website/faq.html"],
                     ["website/apps/dashboard/public/welcome.html"],
                     ["website/self-hosted.html"],
@@ -471,6 +484,50 @@ def test_the_spa_override_guard_is_selected_on_every_manifest_it_reads():
                 f"lose its floor (or gain one that clears nothing) with every "
                 f"check green"
             )
+
+
+def test_the_monospace_guard_is_selected_on_every_root_it_scans():
+    """#6870 review P1: the mono-stack guard must RUN on `apps/` and `tortoise/oauth.py`.
+
+    `tests/test_website_static.py::TestMonospaceStackRendersAsAMonoFace` widened
+    its scan to `ROOTS = ("website", "apps")` plus `MODULES = ("tortoise/oauth.py",
+    "tortoise/render.py")`, but is registered on the `onboarding` surface ONLY —
+    and neither widened root selected it (measured at the pre-entry head):
+
+    * `apps/` is in `NON_PYTHON_PREFIXES` and matched no `SOURCE_PATTERNS` row,
+      so a graph-viz-only diff filtered to `changed == []` and took the docs-only
+      early return — `surfaces=[]`, tier-1 smoke, the guard absent (the 8
+      canvas/JSX declarations it was widened to reach).
+    * `tortoise/oauth.py` matches the `api` row, so an oauth-only diff selected
+      `['api', 'core']` and NOT `onboarding` — leaving the served MCP consent
+      page, the one place the Courier defect was customer-facing, unguarded.
+
+    Same #1349/#3332/#3616 silent-drop class the sibling pins above document.
+    Asserted on the SURFACE and on the guard FILE: a bare "surfaces is not
+    empty" check passes for the graph-viz path the moment anything else claims
+    it, which is a gate that can only ever pass. Watched RED before the two
+    `SOURCE_PATTERNS["onboarding"]` entries, GREEN after.
+    """
+    guard = "test_website_static.py"
+    for changed, keeps in (("apps/graph-viz/src/index.css", ()),
+                           ("apps/graph-viz/src/components/ForceGraphView.jsx", ()),
+                           ("tortoise/oauth.py", ("api", "core")),
+                           # Declared in the guard's `MODULES`; it carries no
+                           # declaration today, which is why nothing but this
+                           # pin forces its selection wiring.
+                           ("tortoise/render.py", ("core",))):
+        assert (REPO / changed).exists(), f"guarded path is gone: {changed}"
+        r = _sel([changed])
+        assert guard in r["test_files"], (
+            f"{changed} does not select {guard} — the mono declaration it carries "
+            f"(or may carry) is unguarded on the one diff that can revert it "
+            f"(selected surfaces: {r['surfaces'] or 'none'})")
+        # A `SOURCE_PATTERNS` match REPLACES the `core` fallback, so a path whose
+        # own guard lives on `core` must also be in `CORE_ALSO`.
+        assert set(keeps) <= set(r["surfaces"]), (
+            f"{changed} selects {r['surfaces']} — wiring it into `onboarding` "
+            f"dropped {sorted(set(keeps) - set(r['surfaces']))}, whose guards "
+            f"now never run on its own diff")
 
 
 def test_the_onboarding_copy_gate_is_wired_not_left_to_the_tier1_fallback():
@@ -1993,6 +2050,109 @@ def test_e1_e2_evidence_bundle_change_selects_core_not_the_docs_only_return():
         assert "core" in r["surfaces"], (path, r["surfaces"])
         assert r["full"] is False, (path, r)
         assert "test_e1_e2_measurement.py" in r["test_files"], (path, r)
+
+
+def test_quadrature_change_keeps_the_core_pool_and_runs_the_formula_guard():
+    # #9607 review P2: the quadrature fix has TWO halves and only ONE of them was
+    # pinned. `SOURCE_PATTERNS["onboarding"]` admits `tortoise/quadrature.py`, so
+    # the /docs formula guard (`test_website_docs_consistency.py`) runs; the
+    # `CORE_ALSO` entry keeps the `core` pool that a named-surface match REPLACES
+    # (#2938). Dropping the `CORE_ALSO` half is SILENT: the guard still runs, so a
+    # reachability assert alone stays green while the core pool disappears
+    # (measured at `89f780805`: 682 files with the entry, 125 without — the
+    # `onboarding` set alone). No generic ratchet covers it — nothing else iterates
+    # `CORE_ALSO`, and MOST other entries carry their own explicit arm like this
+    # (not all: `tortoise/projection/edges.py` is unpinned and drops 681 -> 147
+    # silently — same class as #9621, filed as #9646).
+    #
+    # Each assert names a file registered ONLY in the surface its half adds
+    # (`load_manifest()`: `test_website_docs_consistency.py` is `onboarding`,
+    # `test_record_schema_placement.py` is `core`), so a lost half cannot be
+    # masked by the other one.
+    #
+    # The descriptive `test_files` assert comes BEFORE the bare `surfaces` assert
+    # in both pairs. That ordering WAS load-bearing and is kept so the more
+    # descriptive message fires first: a failing assert short-circuits the rest of
+    # the test, so with the surface check leading, the only thing a developer saw
+    # was a bare `['core']` with no explanation. Both surface asserts now carry
+    # their own message too, so a lost half is named whichever assert fires.
+    #
+    # Mutation check, both measured: removing "tortoise/quadrature.py" from
+    # `CORE_ALSO` fails the `test_record_schema_placement.py` assert (682 files ->
+    # 125, the `onboarding` set alone); removing it from
+    # `SOURCE_PATTERNS["onboarding"]` fails the `test_website_docs_consistency.py`
+    # assert (682 -> 633, the `core` pool alone) — counts are dated anchors.
+    #
+    # The coverage asserts tolerate the FULL matrix: `test_files` is then the STRING
+    # "ALL", so a bare `in` test reads False. Promoting `tortoise/quadrature.py` to
+    # `SHARED_MODULES` is a strictly WIDER selection, and reding this pin for it
+    # would hand the next developer a red gate for better coverage (#9623 review
+    # P3). `full` is therefore treated as "runs everything", mirroring
+    # `tests/test_website_docs_consistency.py::_guard_reachable_for`'s treatment of
+    # the sentinel; the `surfaces` asserts hold under `full` too, which returns
+    # every surface.
+    r = _sel(["tortoise/quadrature.py"])
+
+    def runs(name: str) -> bool:
+        return r["full"] is True or name in r["test_files"]
+
+    assert runs("test_website_docs_consistency.py"), (
+        "the /docs formula guard is not selected by a change to the module it "
+        "derives its expected factors from (SOURCE_PATTERNS entry missing?)", r)
+    assert "onboarding" in r["surfaces"], (
+        "the guard ran from some other surface — a quadrature-only diff must "
+        "select `onboarding`, which is where the guard is registered",
+        r["surfaces"])
+    assert runs("test_record_schema_placement.py"), (
+        "the core-registered pool is missing from a quadrature-only selection "
+        "(CORE_ALSO entry removed?)", r)
+    assert "core" in r["surfaces"], (
+        "a quadrature-only diff dropped the core pool (CORE_ALSO entry removed?)",
+        r["surfaces"])
+
+
+def test_commit_schema_change_keeps_the_core_pool_and_runs_the_docs_guard():
+    # #9607 review P2 (round 5): the SIBLING of the quadrature arm one test up, and
+    # the reason an enumeration claiming to be exhaustive was wrong. The /docs
+    # guard imports `Point` / `point_content_id` from `tortoise/commit_schema.py`
+    # (`tests/test_website_docs_consistency.py:56`) and derives an asserted
+    # expectation from it — `test_commit_schema_requires_a_source_on_every_extracted_
+    # claim` is the evidence under the FAQ's PUBLISHED traceability sentence — but
+    # a commit_schema-only diff selected `surfaces=['core']`, where that guard is
+    # not registered. So relaxing `Point.source_ref` reds the contract tests, gets
+    # its author to edit them, and never runs the pin on the page that publishes
+    # the claim.
+    #
+    # Same two halves as quadrature, and for the same reason (#2938): the
+    # `SOURCE_PATTERNS["onboarding"]` entry makes the guard run, and the
+    # `CORE_ALSO` entry keeps the `core` pool the match would otherwise REPLACE.
+    # Each half is named by a file registered ONLY in the surface it adds
+    # (`test_website_docs_consistency.py` is `onboarding`-only,
+    # `test_record_schema_placement.py` is `core`-only), so neither can mask the
+    # other.
+    #
+    # Mutation check, both measured: removing "tortoise/commit_schema.py" from
+    # `CORE_ALSO` fails the `test_record_schema_placement.py` assert (the selection
+    # collapses to the `onboarding` set alone); removing it from
+    # `SOURCE_PATTERNS["onboarding"]` fails the `test_website_docs_consistency.py`
+    # assert (the selection is the `core` pool alone).
+    r = _sel(["tortoise/commit_schema.py"])
+    files = r["test_files"]
+    docs_guard_runs = r["full"] is True or "test_website_docs_consistency.py" in files
+    core_pool_runs = r["full"] is True or "test_record_schema_placement.py" in files
+    assert docs_guard_runs, (
+        "the /docs guard is not selected by a change to `tortoise/commit_schema.py`, "
+        "whose `Point` contract it asserts the FAQ sentence against "
+        "(SOURCE_PATTERNS entry missing?)", r)
+    assert "onboarding" in r["surfaces"], (
+        "a commit_schema-only diff must select `onboarding`, where the guard is "
+        "registered", r["surfaces"])
+    assert core_pool_runs, (
+        "the core-registered pool is missing from a commit_schema-only selection "
+        "(CORE_ALSO entry removed?)", r)
+    assert "core" in r["surfaces"], (
+        "a commit_schema-only diff dropped the core pool (CORE_ALSO entry removed?)",
+        r["surfaces"])
 
 
 def test_supabase_control_change_selects_the_org_purge_rpc_guard():
@@ -7386,7 +7546,15 @@ def test_tortoise_oauth_change_selects_api_and_core():
     # retention or token-flow fix must change. CORE_ALSO keeps the core half.
     r = _sel(["tortoise/oauth.py"])
     assert r["full"] is False
-    assert r["surfaces"] == ["api", "core"]
+    # MEMBERSHIP, not equality: `#6870` also wires this file into `onboarding` (it
+    # serves the MCP consent page's CSS, whose mono-stack guard must run here),
+    # and other surfaces may legitimately read it later. What this pin must keep
+    # forbidding is a RE-POINTING that drops either half — equality against a
+    # fixed list would red on every added consumer while still passing a
+    # re-point that moved `api` to a different file.
+    assert {"api", "core"} <= set(r["surfaces"]), (
+        f"an oauth.py-only change selects {r['surfaces']} — it must keep reaching "
+        "BOTH the api-registered pinners and the core one (#3036)")
     selected = set(r["test_files"]) | set(r["slow_selected"])
     assert "test_3036_oauth_retention.py" in selected, "the sweep suite must run"
     assert "test_oauth_mcp.py" in selected, "api-registered pinner must run"

@@ -27,7 +27,7 @@
       --gold: #f59e0b;
       --gold-dim: rgba(245, 158, 11, 0.2);
       --serif: 'Georgia', 'Times New Roman', serif;
-      --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
+      --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
     }
 
     body {
@@ -266,7 +266,7 @@
       background: var(--accent, #06b6d4); color: #04121a;
       padding: 7px 22px; border-radius: 8px;
       text-decoration: none; font-weight: 600; font-size: 14px;
-      font-family: var(--mono, 'SF Mono', monospace);
+      font-family: var(--mono, monospace);
       transition: background 0.2s;
     }
     .floating-topmenu .login-btn:hover { background: var(--accent-hover, #0891b2); }
