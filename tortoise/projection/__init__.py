@@ -10935,8 +10935,11 @@ class FalkorProjection(
             # an `INFO memory` read of their own, so the rule has two readers and
             # lived in two places — and they had already drifted: the note said
             # "used_memory has reached", with no tolerance, which withdraws the
-            # remedy at a genuine ceiling reading 40 KiB under the cap. Both now
-            # call `retry.ceiling_reading_drift`, so a correction lands once.
+            # remedy at a genuine ceiling reading 40 KiB under the cap. THIS
+            # message calls `retry.ceiling_reading_drift`; the note DESCRIBES the
+            # same rule (it holds an exception, not a reading), so a correction to
+            # these numbers must move the note's prose too — nothing makes that
+            # happen by itself, and the bound/unbound list below says so.
             drift = ceiling_reading_drift(cap)
             if cap <= 2 * drift:
                 # #7392 cycle 7 — a tolerance larger than the ceiling's own

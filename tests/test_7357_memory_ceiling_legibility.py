@@ -545,6 +545,10 @@ def test_a_class_only_refusal_is_not_told_it_reached_a_ceiling_it_never_read():
     assert "within a small drift below" in lowered, (
         "a real ceiling reads 3.5-56 KiB under the cap; an exact 'has "
         "reached' withdraws the remedy there")
+    assert "above it" in lowered, (
+        "`used + drift >= cap` admits a reading ABOVE the cap — the ordinary "
+        "shape after the ceiling is lowered on a busy instance — so the note "
+        "must not leave that case with no next action")
     assert "re-read while the refusal is repeating" in lowered
     # The one-authority pin below holds for BOTH arms, not just the measured one.
     assert MEMORY_CEILING_OWNERSHIP_CONSTRAINT in text
