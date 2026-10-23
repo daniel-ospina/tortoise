@@ -179,6 +179,22 @@ TORTISE_HOST_CHECK = os.environ.get("TORTISE_HOST_CHECK") == "1"
 # NameError into a constant `False` (canary silently dead on every local run).
 PRODUCT_ROOT_MARKER = 'data-page="product"'
 
+# ── Company-root marker (PR #9813). ───────────────────────────────────────
+# The company host (`premiselabs.co/`) serves `website/index.html`. The pin
+# here used to be a sentence of the hero copy — "the primary function of memory
+# is not recall, but learning" — which PR #9813's hero rewrite deleted, exactly
+# as it deleted the product host's prose pin twice before (PR #8597, #9652).
+# Same remedy, one page over: page IDENTITY, not marketing copy, so the hero
+# stays owner-editable and `_clean()` can never be involved (attributes are
+# stripped by tag-stripping, so this is asserted on the RAW body).
+#
+# Paired pins for this string:
+#   1. `website/index.html` — the `<html>` element must carry it.
+#   2. `tests/test_website_static.py::TestCompanyRootMarkerContract` — pinned
+#      so the marker occurs in the committed page, stays structural, and does
+#      not collide with the product marker.
+COMPANY_ROOT_MARKER = 'data-page="company"'
+
 # ── Third-party external-link crawl gate (cycle-8 P1, #747 CI) ────────────
 # The crawl fetches unauthenticated third-party hrefs (github.com/LICENSE,
 # etc.). From shared CI runner IPs those hosts rate-limit aggressively (429
@@ -211,6 +227,23 @@ def _assert_serves_product(body: str, where: str) -> None:
         "broken, or website/product.html's identity moved (then move the "
         "marker in PRODUCT_ROOT_MARKER, the deploy-pages.yml preflight and "
         "tests/test_website_static.py::TestProductRootMarkerContract).")
+
+
+def _assert_serves_company(body: str, where: str) -> None:
+    """The served document is `index.html` — asserted on the RAW body.
+
+    Mirror of `_assert_serves_product`, and structural for the same reason:
+    the company root used to be pinned by its hero prose, so every hero rewrite
+    re-staled the pin (PR #9813's "not recall, but reasoning & learning"
+    deleted the previous sentence). `_clean()` strips tags and therefore strips
+    attributes too, which is why this reads `body`.
+    """
+    assert COMPANY_ROOT_MARKER in body, (
+        f"{where}: the root document is not index.html — marker "
+        f"{COMPANY_ROOT_MARKER!r} is absent. Either the middleware rewrite is "
+        "broken, or website/index.html's identity moved (then move the marker "
+        "in COMPANY_ROOT_MARKER and "
+        "tests/test_website_static.py::TestCompanyRootMarkerContract).")
 
 
 def _tortoise_emulated_locally() -> bool:
@@ -967,8 +1000,7 @@ def test_middleware_root_rewrites(page: Page) -> None:
     b_spoof = b_host if b_host.endswith("premiselabs.co") else "premiselabs.co"
     r2 = page.request.get(BASE_URL + "/", headers={"Host": b_spoof}, timeout=15_000)
     assert r2.status == 200
-    assert "the primary function of memory is not recall, but learning" in _clean(r2.text()), \
-        "premiselabs root marker missing"
+    _assert_serves_company(r2.text(), "premiselabs root (middleware rewrite)")
 
 
 def test_product_route_blocked_on_company_host(page: Page) -> None:

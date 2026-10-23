@@ -40,6 +40,23 @@ Repo-local, zero network, stdlib only (the test_waitlist_form.py pattern):
    reads. Both must be structural (not hero prose) and must agree; see
    `TestProductRootMarkerContract`.
 
+8. Company-root marker contract (PR #9813 review, P1): the SAME contract one
+   page over. `premiselabs.co/` is pinned by `COMPANY_ROOT_MARKER`
+   (`data-page="company"` on index.html's `<html>`), because the pin it
+   replaced was the company hero's prose — which PR #9813's hero rewrite
+   deleted, reddening the served-root suite on a correct page; see
+   `TestCompanyRootMarkerContract`.
+
+9. Document outline (PR #9813 review, P2): no page may skip a heading level
+   (h1 -> h3), and the company front page must keep a real `h2` for the
+   Tortoise section; see `TestPageHeadingOutline`.
+
+10. Short-viewport beats (PR #9813 review, P2): the tall beats
+    (`#beat-tortoise` on index.html, `#beat-hero` on product.html) are fixed
+    full-height overlays with centred content, so each must be covered by an
+    `@media (max-height: ...)` rule that lets the stack scroll instead of
+    clipping; see `TestShortViewportBeatsScrollInsteadOfClipping`.
+
 Run:  TORTOISE_TEST_CARVE_OUT=1 python -m pytest tests/test_website_static.py -v
       (a URI-less run fails at session setup by construction — epic #1647 P4;
       this file is static, offline and stdlib-only, so the carve-out lane fits.)
@@ -52,6 +69,7 @@ import os
 import re
 import sys
 from html import unescape
+from itertools import pairwise
 from pathlib import Path
 
 # `pytest` is deliberately not imported (#8066): this file's only use was the
@@ -1506,8 +1524,8 @@ DEPLOY_PAGES_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "deploy-pages.yml"
 INDEX_HTML = REPO_ROOT / "website" / "index.html"
 
 
-def _product_root_marker() -> str:
-    """The marker `tests/e2e/test_legal_pages.py` asserts on the served root.
+def _root_marker(name: str) -> str:
+    """The literal of a module-level `NAME = "..."` in the e2e module.
 
     Parsed with `ast` rather than imported: that module needs playwright and a
     live host, and it calls `_tortoise_emulated_locally()` at import time. `ast`
@@ -1518,16 +1536,32 @@ def _product_root_marker() -> str:
     for node in ast.parse(src).body:
         if not isinstance(node, ast.Assign):
             continue
-        if not any(getattr(target, "id", None) == "PRODUCT_ROOT_MARKER"
+        if not any(getattr(target, "id", None) == name
                    for target in node.targets):
             continue
         value = ast.literal_eval(node.value)
         assert isinstance(value, str) and value, (
-            "PRODUCT_ROOT_MARKER must be a non-empty string literal")
+            f"{name} must be a non-empty string literal")
         return value
     raise AssertionError(
         "tests/e2e/test_legal_pages.py no longer defines a module-level "
-        "PRODUCT_ROOT_MARKER assignment — this gate's subject moved")
+        f"{name} assignment — this gate's subject moved")
+
+
+def _product_root_marker() -> str:
+    """The marker `tests/e2e/test_legal_pages.py` asserts on the served root."""
+    return _root_marker("PRODUCT_ROOT_MARKER")
+
+
+def _company_root_marker() -> str:
+    """The marker `tests/e2e/test_legal_pages.py` asserts on the company root.
+
+    Added by PR #9813: the company root was pinned by its hero PROSE
+    ("the primary function of memory is not recall, but learning"), so the
+    first hero rewrite deleted the pin — the exact defect PR #8597 and PR #9652
+    each hit on the product root before the marker there became structural.
+    """
+    return _root_marker("COMPANY_ROOT_MARKER")
 
 
 def _deploy_preflight_marker() -> str:
@@ -1545,19 +1579,27 @@ def _deploy_preflight_marker() -> str:
     return match.group(2)
 
 
-def _root_element(product_html: str) -> str:
+def _root_element(html: str, where: str = "website/product.html") -> str:
     """The page's `<html ...>` open tag."""
-    match = re.search(r"<html\b[^>]*>", product_html, re.I)
-    assert match, "website/product.html has no <html> open tag"
+    match = re.search(r"<html\b[^>]*>", html, re.I)
+    assert match, f"{where} has no <html> open tag"
     return match.group(0)
 
 
 RAW_BODY_HELPER = "_assert_serves_product"
+RAW_BODY_HELPER_COMPANY = "_assert_serves_company"
 EMULATION_CANARY = "_tortoise_emulated_locally"
 
+#: Every served-root marker the e2e module defines, and the helpers allowed to
+#: read it. Both markers are structural ATTRIBUTES on the page's `<html>`, so
+#: every read must be on the RAW body — `_clean()` strips tags, attributes
+#: included, and an assertion written against cleaned text can never match.
+SERVED_ROOT_MARKERS = ("PRODUCT_ROOT_MARKER", "COMPANY_ROOT_MARKER")
+RAW_BODY_HELPERS = (RAW_BODY_HELPER, RAW_BODY_HELPER_COMPANY, EMULATION_CANARY)
 
-def _marker_read_sites(src: str) -> list[tuple[str, int]]:
-    """Every READ of `PRODUCT_ROOT_MARKER`, as `(enclosing function, line)`.
+
+def _marker_read_sites(src: str) -> list[tuple[str, int, str]]:
+    """Every READ of a served-root marker, as `(enclosing function, line, name)`.
 
     `ast` rather than a regex: the constant's name also appears in the error
     message below itself and in comments, which a text scan cannot tell from a
@@ -1567,7 +1609,7 @@ def _marker_read_sites(src: str) -> list[tuple[str, int]]:
     class _Reads(ast.NodeVisitor):
         def __init__(self) -> None:
             self.stack: list[str] = []
-            self.reads: list[tuple[str, int]] = []
+            self.reads: list[tuple[str, int, str]] = []
 
         def _visit_function(self, node: ast.AST) -> None:
             self.stack.append(getattr(node, "name", "<lambda>"))
@@ -1578,8 +1620,9 @@ def _marker_read_sites(src: str) -> list[tuple[str, int]]:
         visit_AsyncFunctionDef = _visit_function  # type: ignore[assignment]
 
         def visit_Name(self, node: ast.Name) -> None:
-            if node.id == "PRODUCT_ROOT_MARKER" and isinstance(node.ctx, ast.Load):
-                self.reads.append((self.stack[-1] if self.stack else "<module>", node.lineno))
+            if node.id in SERVED_ROOT_MARKERS and isinstance(node.ctx, ast.Load):
+                self.reads.append(
+                    (self.stack[-1] if self.stack else "<module>", node.lineno, node.id))
 
     visitor = _Reads()
     visitor.visit(ast.parse(src))
@@ -1692,21 +1735,23 @@ class TestProductRootMarkerContract:
         src = LEGAL_PAGES_E2E.read_text(encoding="utf-8")
         reads = _marker_read_sites(src)
         assert reads, (
-            "no read of PRODUCT_ROOT_MARKER found in "
+            "no read of PRODUCT_ROOT_MARKER/COMPANY_ROOT_MARKER found in "
             "tests/e2e/test_legal_pages.py — this gate's subject moved")
         offenders = [
-            (fn, line) for fn, line in reads
-            if fn not in (RAW_BODY_HELPER, EMULATION_CANARY)
+            (fn, line, name) for fn, line, name in reads
+            if fn not in RAW_BODY_HELPERS
         ]
         assert not offenders, (
-            "PRODUCT_ROOT_MARKER is read outside "
-            f"{RAW_BODY_HELPER}()/{EMULATION_CANARY}() at "
-            + ", ".join(f"line {line} (in {fn}())" for fn, line in offenders)
-            + ". The marker is a structural attribute on <html>, and `_clean()` "
-            "strips tags, so an assertion that cleans the body first can never "
-            "match — it reds the served-root suite on a correct page and needs "
-            "a rewrite the next time it lands (PR #9652 rewrote two). Read the "
-            "raw document through `_assert_serves_product(body, where)`.")
+            "a served-root marker is read outside "
+            f"{'/'.join(h + '()' for h in RAW_BODY_HELPERS)} at "
+            + ", ".join(f"line {line} ({name} in {fn}())"
+                        for fn, line, name in offenders)
+            + ". These markers are structural attributes on <html>, and "
+            "`_clean()` strips tags, so an assertion that cleans the body first "
+            "can never match — it reds the served-root suite on a correct page "
+            "and needs a rewrite the next time it lands (PR #9652 rewrote two). "
+            "Read the raw document through `_assert_serves_product(body, "
+            "where)` / `_assert_serves_company(body, where)`.")
 
         asserted = _asserted_expressions(src, RAW_BODY_HELPER)
         assert asserted, (
@@ -1717,3 +1762,203 @@ class TestProductRootMarkerContract:
             f"body` (found: {asserted!r}). It must read the RAW document — "
             "`_clean(body)` strips the attribute off the <html> element, so the "
             "assertion could never match.")
+
+        company_asserted = _asserted_expressions(src, RAW_BODY_HELPER_COMPANY)
+        assert company_asserted, (
+            f"`{RAW_BODY_HELPER_COMPANY}` in tests/e2e/test_legal_pages.py "
+            "contains no assert — the company-root half of the middleware "
+            "regression (#6) has no subject left")
+        assert "COMPANY_ROOT_MARKER in body" in company_asserted, (
+            f"`{RAW_BODY_HELPER_COMPANY}` no longer asserts "
+            f"`COMPANY_ROOT_MARKER in body` (found: {company_asserted!r}). It "
+            "must read the RAW document — `_clean(body)` strips the attribute "
+            "off the <html> element, so the assertion could never match. This "
+            "is precisely how the company root came to be pinned by hero prose "
+            "(PR #9813).")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 8. Company-root marker contract (PR #9813 review, P1)
+# ═══════════════════════════════════════════════════════════════════════════
+# The company host (`premiselabs.co/`) serves `website/index.html` and the
+# middleware regression test proves it by asserting a marker on the served
+# document. That marker used to be the hero SENTENCE
+# ("the primary function of memory is not recall, but learning"), so the first
+# company-hero rewrite deleted it and the served-root assertion went red on a
+# correct page — the same defect PR #8597 and PR #9652 each hit on the product
+# root before it moved to `data-page="product"` (see
+# TestProductRootMarkerContract above). This class is the PR-time half of the
+# remedy: the marker must be page IDENTITY, it must live on the `<html>`
+# element of the committed page, and it must not double as the product marker.
+
+HEADING_TAG_RE = re.compile(r"<h([1-6])\b[^>]*>", re.I)
+HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
+STYLE_OR_SCRIPT_RE = re.compile(r"<(style|script)\b.*?</\1>", re.S | re.I)
+MEDIA_BLOCK_RE = re.compile(
+    r"@media\s*\(\s*max-height:\s*(\d+)\s*px\s*\)\s*\{(.*?)\}", re.S)
+
+
+def _heading_levels(html: str) -> list[int]:
+    """Heading levels in document order, ignoring comments and style/script."""
+    stripped = HTML_COMMENT_RE.sub("", html)
+    stripped = STYLE_OR_SCRIPT_RE.sub("", stripped)
+    return [int(m.group(1)) for m in HEADING_TAG_RE.finditer(stripped)]
+
+
+def _max_height_media_blocks(html: str) -> list[tuple[int, str]]:
+    """Every `@media (max-height: Npx) { ... }` block as `(N, body)`."""
+    return [(int(m.group(1)), m.group(2)) for m in MEDIA_BLOCK_RE.finditer(html)]
+
+
+class TestCompanyRootMarkerContract:
+    """The served company-root marker is ONE structural string (PR #9813).
+
+    Scope, stated plainly: this asserts the marker in the COMMITTED page and
+    the SHAPE of the e2e read. It cannot prove what production serves (that is
+    `tests/e2e/test_legal_pages.py`, post-deploy). Its job is to make a hero
+    rewrite that orphans the pin visibly fail at PR time — the pin it replaced
+    (hero prose) was invisible to every pre-merge leg that runs on a website
+    diff, because the whole e2e module self-skips without `RUN_LEGAL_E2E=1`.
+    """
+
+    def test_the_marker_identifies_the_committed_company_page(self):
+        """The pinned marker must exist in `website/index.html`."""
+        marker = _company_root_marker()
+        html = INDEX_HTML.read_text(encoding="utf-8")
+        assert marker in html, (
+            f"COMPANY_ROOT_MARKER {marker!r} does not occur in "
+            "website/index.html. The company host serves that file at `/`, so "
+            "`test_middleware_root_rewrites` can no longer prove the company "
+            "root is index.html — and, because the whole e2e module skips "
+            "without RUN_LEGAL_E2E=1, no pre-merge website leg would see it. "
+            "If you edited the page's identity, move the marker in BOTH places.")
+
+    def test_the_marker_does_not_also_match_the_product_root(self):
+        """The company marker must not double as the product root marker."""
+        marker = _company_root_marker()
+        product = PRODUCT_HTML.read_text(encoding="utf-8")
+        assert marker not in product, (
+            f"COMPANY_ROOT_MARKER {marker!r} also occurs in "
+            "website/product.html, which the tortoise host serves at `/`. The "
+            "two served roots then become indistinguishable, so the middleware "
+            "rewrite assertions would pass on the wrong page.")
+
+    def test_the_marker_is_an_attribute_on_the_root_element(self):
+        """Structural, not prose: a copy edit must not be able to move it."""
+        marker = _company_root_marker()
+        root = _root_element(INDEX_HTML.read_text(encoding="utf-8"),
+                             "website/index.html")
+        assert marker in root, (
+            f"COMPANY_ROOT_MARKER ({marker!r}) is not part of the company "
+            f"page's <html> element ({root!r}). A marker that is a sentence of "
+            "marketing copy is re-broken by every hero rewrite — PR #9813's "
+            "hero rewrite is exactly what deleted the prose pin this replaced. "
+            "Keep the pin on page identity; keep the hero owner-editable.")
+
+    def test_the_hero_copy_is_not_the_pin(self):
+        """The defect itself: the page's hero sentence must not be the marker.
+
+        The old pin was a literal substring of the `<h1>`; a copy edit then
+        turned a correct page red post-deploy. Asserting the hero sentence is
+        ABSENT from the e2e module keeps that shape from coming back (a prose
+        pin has to be spelled out there to be asserted).
+        """
+        html = INDEX_HTML.read_text(encoding="utf-8")
+        h1 = re.search(r"<h1\b[^>]*>(.*?)</h1>", html, re.S | re.I)
+        assert h1, "website/index.html has no <h1> — the hero moved"
+        sentence = " ".join(re.sub(r"<[^>]+>", " ", h1.group(1)).split()).lower()
+        needle = sentence[:40]
+        assert needle, "the company hero <h1> is empty"
+        e2e_src = LEGAL_PAGES_E2E.read_text(encoding="utf-8").lower()
+        assert needle not in e2e_src, (
+            f"tests/e2e/test_legal_pages.py pins the company root by hero copy "
+            f"({needle!r} appears in the module). A copy edit then reds the "
+            "served-root suite on a CORRECT page — that is the PR #9813 "
+            "defect. Pin `COMPANY_ROOT_MARKER` on the `<html>` element "
+            "instead, and read it through `_assert_serves_company()`.")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 9. Document outline: no skipped heading level (PR #9813 review, P2)
+# ═══════════════════════════════════════════════════════════════════════════
+# Replacing the company page's `<h2>` with a `<p>` left the outline stepping
+# h1 -> h3, which is an AT-navigation / WCAG H42 regression: screen-reader
+# heading navigation and Lighthouse's `heading-order` audit both read the
+# committed markup, so the pin belongs here, on the files.
+class TestPageHeadingOutline:
+    def test_the_company_front_page_does_not_skip_a_heading_level(self):
+        levels = _heading_levels(INDEX_HTML.read_text(encoding="utf-8"))
+        assert levels, "website/index.html has no headings"
+        assert levels[0] == 1, (
+            f"website/index.html's first heading is h{levels[0]}, not h1 "
+            f"(levels: {levels})")
+        for prev, cur in pairwise(levels):
+            assert cur <= prev + 1, (
+                f"website/index.html skips a heading level: h{prev} -> h{cur} "
+                f"(levels: {levels}). Do not replace a section heading with a "
+                "paragraph — a level skip is an accessibility regression, and "
+                "the fix costs one tag (`<h2 class=\"tortoise-pitch\">`).")
+
+    def test_the_company_front_page_has_a_level_two_heading(self):
+        """The product section must keep a heading, not just body prose."""
+        levels = _heading_levels(INDEX_HTML.read_text(encoding="utf-8"))
+        assert 2 in levels, (
+            f"website/index.html has no h2 at all (levels: {levels}). The "
+            "Tortoise section on the company front page is the product's only "
+            "heading there; demoting it to a paragraph leaves the page's main "
+            "section unnamed for AT users.")
+
+    def test_the_product_front_page_does_not_skip_a_heading_level(self):
+        levels = _heading_levels(PRODUCT_HTML.read_text(encoding="utf-8"))
+        assert levels and levels[0] == 1, (
+            f"website/product.html's first heading is not h1 (levels: {levels})")
+        for prev, cur in pairwise(levels):
+            assert cur <= prev + 1, (
+                f"website/product.html skips a heading level: h{prev} -> h{cur} "
+                f"(levels: {levels})")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 10. Short-viewport beats must scroll, not clip (PR #9813 review, P2)
+# ═══════════════════════════════════════════════════════════════════════════
+# `.beat` is `position: fixed; height: 100%; justify-content: center` with no
+# overflow rule, so content taller than the viewport is cut at BOTH edges and
+# is unreachable (document scroll is consumed by ScrollTrigger). Both fronts
+# carry a beat whose text is now taller than a landscape phone's viewport:
+# `#beat-tortoise` on index.html (the closing pitch, PR #9813) and
+# `#beat-hero` on product.html (the subtitle PR #9813 enlarged). Each needs the
+# existing `@media (max-height: ...)` escape hatch.
+SHORT_VIEWPORT_BEATS = (
+    (INDEX_HTML, "#beat-tortoise", "the company closing pitch + its CTA"),
+    (PRODUCT_HTML, "#beat-hero", "the product hero + its CTA"),
+)
+
+
+class TestShortViewportBeatsScrollInsteadOfClipping:
+    def test_the_tall_beats_are_covered_by_a_max_height_rule(self):
+        for path, selector, what in SHORT_VIEWPORT_BEATS:
+            blocks = _max_height_media_blocks(path.read_text(encoding="utf-8"))
+            assert blocks, (
+                f"{path.name} declares no `@media (max-height: ...)` rule. "
+                f"{what} is a fixed full-height beat with centred content, so "
+                "a short viewport clips it at both edges.")
+            covering = [
+                (height, body) for height, body in blocks
+                if selector in body
+            ]
+            assert covering, (
+                f"{path.name}: no `@media (max-height: ...)` rule names "
+                f"{selector}. {what} is a fixed full-height beat whose content "
+                "is taller than a landscape phone's viewport, and centred "
+                "overflow is clipped at both ends — the CTA becomes "
+                f"unreachable. Extend the short-viewport rule to {selector}.")
+            assert any(
+                "overflow-y: auto" in body and "justify-content: flex-start" in body
+                for _, body in covering
+            ), (
+                f"{path.name}: the `@media (max-height: ...)` rule naming "
+                f"{selector} does not both switch to `justify-content: "
+                "flex-start` and allow `overflow-y: auto` "
+                f"(found: {[b for _, b in covering]!r}). Centred overflow is "
+                "cut at BOTH edges, so the first line goes above the viewport "
+                "and the CTA below it.")

@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-page="company">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -102,29 +102,24 @@
     .beat p strong { color: var(--text); font-weight: 400; }
     .beat p em { color: var(--accent); font-style: normal; }
 
-    /* Tortoise reveal */
-    #beat-tortoise h2 {
-      font-family: var(--serif);
-      font-size: clamp(1.4rem, 3vw, 2rem);
-      color: var(--text);
-      text-align: center;
-      font-weight: 400;
-      line-height: 1.4;
-    }
-    #beat-tortoise h2 span { color: var(--accent); }
-
-    /* Learn more CTA below the Tortoise reveal */
-    /* the closing pitch: same size/colour as the beat above, prose not a headline */
+    /* Tortoise reveal — the closing pitch is this section's heading (<h2>), so
+       the outline runs h1 -> h2 -> h3 instead of skipping a level. It reads as
+       prose, not a headline: same size/colour/face as the beat above.
+       (`font-family` is stated here, not inherited from a heading rule: an h2
+       would otherwise pick up `var(--serif)` and change the look.) */
     #beat-tortoise .tortoise-pitch {
-      color: var(--text);
+      font-family: var(--mono);
       font-size: clamp(1.15rem, 2.2vw, 1.5rem);
+      font-weight: 400;
       line-height: 1.5;
+      color: var(--text);
       max-width: 760px;
       margin: 0 auto;
       text-align: center;
     }
 
-    /* the button reads as the same control as tortoise.premiselabs.co's CTAs */
+    /* Learn more CTA below the Tortoise reveal. The button reads as the same
+       control as tortoise.premiselabs.co's CTAs */
     #beat-tortoise .cta-start {
       display: inline-block;
       margin-top: 2rem;
@@ -277,10 +272,13 @@
       #scroll-wrapper { height: 800vh; }
     }
 
-    /* Short viewports: #beat-cta is a fixed full-height beat — allow the
-       form stack to scroll instead of clipping the email input / links */
+    /* Short viewports: these are fixed full-height beats with no scroll of
+       their own — allow the stack to scroll instead of clipping it. #beat-cta
+       carries the email form and links; #beat-tortoise carries the closing
+       pitch plus the page's only route to the product front page, and
+       `justify-content: center` would cut it at BOTH viewport edges. */
     @media (max-height: 520px) {
-      #beat-cta { justify-content: flex-start; overflow-y: auto; }
+      #beat-cta, #beat-tortoise { justify-content: flex-start; overflow-y: auto; }
     }
 
     /* Subtle fade at bottom edges */
@@ -319,7 +317,7 @@
       <p style="color: var(--text); font-size: clamp(1.15rem, 2.2vw, 1.5rem); line-height: 1.5;">Humans update their <span style="color: var(--accent);">world models</span> too slowly.<br>Agents forget them halfway through a session.<br><br>We made them persistent — unlocking better decisions, learning, and collaboration.</p>
     </section>
     <section id="beat-tortoise" class="beat">
-      <p class="tortoise-pitch">Tortoise equips your agents with a logical model that maps how your business and projects work. They can reason through trade-offs, understand the context beyond a task, adapt to new evidence, and pursue goals without constant supervision. A full cognitive layer with agent memory, reasoning, and learning.</p>
+      <h2 class="tortoise-pitch">Tortoise equips your agents with a logical model that maps how your business and projects work. They can reason through trade-offs, understand the context beyond a task, adapt to new evidence, and pursue goals without constant supervision. A full cognitive layer with agent memory, reasoning, and learning.</h2>
       <a href="https://tortoise.premiselabs.co" class="cta-start">Learn More →</a>
     </section>
     <section id="beat-lab" class="beat">

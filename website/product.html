@@ -323,6 +323,14 @@
       transition: color 0.2s;
     }
     .legal-footer a:hover { color: var(--accent); }
+
+    /* Short viewports: the hero is a fixed full-height beat with no scroll of
+       its own, and its subtitle runs ~10 lines on a phone. On a landscape
+       window `justify-content: center` cuts the h1 off the top and the CTA off
+       the bottom, so let the stack scroll instead of clipping it. */
+    @media (max-height: 520px) {
+      #beat-hero { justify-content: flex-start; overflow-y: auto; }
+    }
   </style>
 </head>
 <body>
