@@ -157,8 +157,12 @@ a systematic difference — the arms share one process and one route).
   switches explicitly (`tr_session_admission` / `tr_session_completion`), so an
   operator shell carrying `TORTOISE_LME_TR_SESSION_COMPLETION=1` cannot make
   `admission` byte-identical to `admission+completion` and publish the
-  completion number under the `admission` label. A re-run inherits the arm
-  table, not the shell.
+  completion number under the `admission` label. The arm that SPENDS the
+  completion pass also pins its four budgets
+  (`_TOTAL` 60 / `_WINDOW` 40 / `_SESSIONS` 5 / `_PER_SESSION` 12 — the product
+  defaults, so nothing measured changes), because they are env seams too and
+  the run fingerprint keys on them: a re-run inherits the arm table, not the
+  shell.
 - **Committed rows are the measurement columns.** The per-row arm censuses
   (`admission_stats` / `completion_stats`) and `gold_in_pool` were produced by a
   pre-review revision of the driver (a review finding: the completion pass was

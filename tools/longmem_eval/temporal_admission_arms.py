@@ -72,7 +72,13 @@ from . import measure_temporal as mt
 from .ingest import ingest_haystack
 from .judge import build_judge, is_abstention
 from .reader import build_reader
-from .retrieve import retrieve_for_question
+from .retrieve import (
+    DEFAULT_TR_SESSION_COMPLETION_PER_SESSION,
+    DEFAULT_TR_SESSION_COMPLETION_SESSIONS,
+    DEFAULT_TR_SESSION_COMPLETION_TOTAL,
+    DEFAULT_TR_SESSION_COMPLETION_WINDOW,
+    retrieve_for_question,
+)
 from .run import question_graph_namespace
 
 #: The arms. Only the two #2976 switches differ — every other knob is the
@@ -97,7 +103,24 @@ ARMS: tuple[dict[str, Any], ...] = (
      "knobs": {"tr_session_admission": True,
                "tr_session_completion": False}},
     {"id": "admission+completion",
-     "knobs": {"tr_session_admission": True, "tr_session_completion": True}},
+     # The four BUDGETS are pinned too, not just the switches: they are ordinary
+     # `retrieve_for_question` env seams
+     # (TORTOISE_LME_TR_SESSION_COMPLETION_TOTAL/_WINDOW/_SESSIONS/_PER_SESSION),
+     # and they are measurement-relevant configuration — the run's fingerprint
+     # keys on them (`test_fingerprint_stamps_the_arm_and_its_budgets_only_when_on`),
+     # so a shell carrying one of them would produce this arm's published column
+     # through a completion pass the runbook does not describe. The values are
+     # the product defaults, so pinning them changes no measurement.
+     "knobs": {"tr_session_admission": True,
+               "tr_session_completion": True,
+               "tr_session_completion_total":
+                   DEFAULT_TR_SESSION_COMPLETION_TOTAL,
+               "tr_session_completion_window":
+                   DEFAULT_TR_SESSION_COMPLETION_WINDOW,
+               "tr_session_completion_sessions":
+                   DEFAULT_TR_SESSION_COMPLETION_SESSIONS,
+               "tr_session_completion_per_session":
+                   DEFAULT_TR_SESSION_COMPLETION_PER_SESSION}},
 )
 
 #: The pinned knobs every arm shares (the #2578 A-default configuration).

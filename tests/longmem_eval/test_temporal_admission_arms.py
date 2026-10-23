@@ -39,14 +39,32 @@ def test_arms_differ_only_in_the_2976_switches():
     assert adm["knobs"] == {"tr_session_admission": True,
                             "tr_session_completion": False}
     comp = arms.arm_by_id("admission+completion")
-    assert comp["knobs"] == {"tr_session_admission": True,
-                             "tr_session_completion": True}
+    # …and the completion BUDGETS are pinned on the arm that spends them: they
+    # are env seams, and the fingerprint keys on them, so an inherited value
+    # would publish that arm's column through an undeclared pass.
+    assert comp["knobs"] == {
+        "tr_session_admission": True,
+        "tr_session_completion": True,
+        "tr_session_completion_total": 60,
+        "tr_session_completion_window": 40,
+        "tr_session_completion_sessions": 5,
+        "tr_session_completion_per_session": 12,
+    }
     # every arm resolves BOTH switches, so no arm's configuration can depend
     # on the ambient env
     for arm in arms.ARMS:
-        assert set(arm["knobs"]) == {"tr_session_admission",
-                                     "tr_session_completion"}, (
+        assert {"tr_session_admission", "tr_session_completion"} <= set(
+            arm["knobs"]), (
             f"{arm['id']} leaves a #2976 switch to the ambient env")
+    # every completion budget is resolved by the arm table, never by a shell
+    budgets = {"tr_session_completion_total",
+               "tr_session_completion_window",
+               "tr_session_completion_sessions",
+               "tr_session_completion_per_session"}
+    for arm in arms.ARMS:
+        assert set(arm["knobs"]) & budgets in (set(), budgets), (
+            f"{arm['id']} pins only some of the completion budgets — an "
+            "inherited one makes the arm's configuration shell-dependent")
     # …and the three arms are three DIFFERENT configurations, so a delta
     # between any two of them is attributable to exactly the switch that
     # differs
@@ -154,6 +172,66 @@ def test_rows_and_summary_carry_the_declared_grader_identity(tmp_path):
 
 
 # ── the eval wiring (finding: the arms had no wiring test) ─────────────────
+
+
+def test_the_completion_arm_pins_its_budgets_against_the_ambient_env(
+        monkeypatch):
+    """The arm table, not the shell, decides what the arm measured.
+
+    The four completion budgets are ordinary `retrieve_for_question` env seams
+    AND fingerprint keys, so an operator shell carrying one of them would
+    produce this arm's published column through a completion pass the runbook
+    does not describe. Pinned here at the RESOLUTION seam the driver actually
+    uses (`**SHARED_KNOBS, **arm["knobs"]`), with the env deliberately hostile.
+    """
+    import types
+
+    from tools.longmem_eval import retrieve as R
+
+    class _Empty:
+        result_set: list = []
+
+    class _Graph:
+        def query(self, cypher, params=None):
+            del cypher, params
+            return _Empty()
+
+    class _Sdk:
+        def _get_proj(self):
+            return types.SimpleNamespace(g=_Graph())
+
+    captured: dict = {}
+
+    def _stub_completion(sdk, pool, dates, **kwargs):
+        del sdk, dates
+        captured.update(kwargs)
+        return pool, {"ok": True, "injected": 0}
+
+    monkeypatch.setattr(R, "_tr_complete_sessions", _stub_completion)
+    monkeypatch.setattr(
+        R, "hybrid_search",
+        lambda *a, **kw: [{"id": "p1", "content": "x",
+                           "session_id": "s1"}])
+    # the HOSTILE shell: both switches off in the env and two budgets shrunk
+    monkeypatch.setenv("TORTOISE_LME_TR_SESSION_COMPLETION", "0")
+    monkeypatch.setenv("TORTOISE_LME_TR_SESSION_COMPLETION_TOTAL", "1")
+    monkeypatch.setenv("TORTOISE_LME_TR_SESSION_COMPLETION_SESSIONS", "1")
+
+    question = {"question_id": "q1", "question": "how many days?",
+                "question_type": "temporal-reasoning",
+                "question_date": "2023-06-01", "haystack_dates": [],
+                "haystack_sessions": [], "answer": "5"}
+    for arm in arms.ARMS:
+        captured.clear()
+        R.retrieve_for_question(
+            _Sdk(), question, **arms.SHARED_KNOBS, **arm["knobs"])
+        if arm["id"] == "admission+completion":
+            assert captured == {"seed_window": 40, "seed_sessions": 5,
+                                "total_cap": 60, "per_session_cap": 12}, (
+                "the arm must pin its own budgets, not inherit the env")
+        else:
+            assert captured == {}, (
+                f"{arm['id']} must run no completion pass, got {captured}")
 
 
 def test_completion_requires_admission_loudly():
