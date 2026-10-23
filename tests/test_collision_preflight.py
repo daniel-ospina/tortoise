@@ -2222,7 +2222,7 @@ class CollisionPreflightTest(unittest.TestCase):
         self.add_worktree(name, branch=branch)
         rc, out = self.run_tool()
         label = f"{name} [refs/heads/{branch}]"
-        line = next((l for l in out.splitlines() if label in l), "")
+        line = next((row for row in out.splitlines() if label in row), "")
         self.assertTrue(line, f"no row for {label!r}\n{out}")
         self.assertIn(f"matched issue-number ({ISSUE})", line)
         self.assertNotIn("its PATH contains", line)
@@ -2241,7 +2241,7 @@ class CollisionPreflightTest(unittest.TestCase):
         # EARLIER subtest's blocking hit, so the widening it was supposed to catch
         # was invisible (found in #9540's review cycle 2). The label line is
         # unique per case, so this pins the CURRENT one.
-        for i, branch in enumerate((f"chore/bump-2024-10", f"release-1.2.3",
+        for i, branch in enumerate(("chore/bump-2024-10", "release-1.2.3",
                                     "perf/1200-rps-cache", "ci/1800-timeout",
                                     "chore/5000-graph-cleanup",
                                     f"feat/{ISSUE}0-lookalike",
@@ -2251,7 +2251,7 @@ class CollisionPreflightTest(unittest.TestCase):
                 self.add_worktree(name, branch=branch)
                 rc, out = self.run_tool()
                 label = f"{name} [refs/heads/{branch}]"
-                line = next((l for l in out.splitlines() if label in l), "")
+                line = next((row for row in out.splitlines() if label in row), "")
                 self.assertTrue(line, f"no row for {label!r}\n{out}")
                 self.assertIn(f"matched issue-number ({ISSUE})", line)
                 self.assertNotIn("its PATH contains", line)
@@ -2273,7 +2273,7 @@ class CollisionPreflightTest(unittest.TestCase):
         self.add_worktree(name, branch=branch)
         rc, out = self.run_tool()
         label = f"{name} [refs/heads/{branch}]"
-        line = next((l for l in out.splitlines() if label in l), "")
+        line = next((row for row in out.splitlines() if label in row), "")
         self.assertTrue(line, f"no row for {label!r}\n{out}")
         self.assertIn(f"matched issue-number ({ISSUE})", line)
         self.assertNotIn("its PATH contains", line)
@@ -2293,7 +2293,7 @@ class CollisionPreflightTest(unittest.TestCase):
         self.add_worktree(name, branch=branch)
         rc, out = self.run_tool()
         label = f"{name} [refs/heads/{branch}]"
-        line = next((l for l in out.splitlines() if label in l), "")
+        line = next((row for row in out.splitlines() if label in row), "")
         self.assertTrue(line, f"no row for {label!r}\n{out}")
         self.assertIn(f"matched issue-number ({ISSUE})", line)
         self.assertNotIn("its PATH contains", line)
@@ -2309,7 +2309,7 @@ class CollisionPreflightTest(unittest.TestCase):
         self.add_worktree(name, branch=branch)
         rc, out = self.run_tool()
         label = f"{name} [refs/heads/{branch}]"
-        line = next((l for l in out.splitlines() if label in l), "")
+        line = next((row for row in out.splitlines() if label in row), "")
         self.assertTrue(line, f"no row for {label!r}\n{out}")
         self.assertIn(f"matched issue-number ({ISSUE})", line)
         self.assertNotEqual(rc, 0, out)
@@ -2320,14 +2320,14 @@ class CollisionPreflightTest(unittest.TestCase):
         # any `fix/<n>-<slug>` naming a DIFFERENT issue contradicts the path, even
         # a LOOKALIKE number (`fix/30611-…` claims 30611, not 3061). Pinned
         # per-line, plus `rc == 0`, so the strength cannot be flipped silently.
-        for i, branch in enumerate((f"fix/9397-about-edge-properties",
+        for i, branch in enumerate(("fix/9397-about-edge-properties",
                                     f"fix/{ISSUE}1-lookalike")):
             with self.subTest(branch=branch):
                 name = f"wt-{ISSUE}-claim-{i}"
                 self.add_worktree(name, branch=branch)
                 rc, out = self.run_tool()
                 label = f"{name} [refs/heads/{branch}]"
-                line = next((l for l in out.splitlines() if label in l), "")
+                line = next((row for row in out.splitlines() if label in row), "")
                 self.assertTrue(line, f"no row for {label!r}\n{out}")
                 self.assertIn("its PATH contains", line)
                 self.assertIn("non-blocking", line)
