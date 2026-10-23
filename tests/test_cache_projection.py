@@ -16,7 +16,9 @@ Four claims, and each is a test here rather than a sentence in a design doc:
    is what makes the clause non-vacuous: the schema *refuses* those names, and a
    projection that dropped the distinction would carry them.
 3. **REBUILDABLE FROM THE RECORD ALONE.** A rebuild's node key set and per-node
-   field set are a function of the record and of nothing else, and projecting
+   field set are a function of the record — plus the fold's DECLARED `ON CREATE`
+   constants, `cache_projection.FOLD_ON_CREATE_DEFAULTS` (#9634), which fill a
+   field the record row is SILENT about — and of nothing else, and projecting
    the same view twice yields the same statement multiset (idempotent).
 4. **A COLD REGION READS `not-hot`, NEVER `empty`.** The declaration is written
    **after** the writes and is a function of what was materialised, so a record
@@ -340,12 +342,18 @@ def test_the_props_tail_keeps_its_verbatim_property_names():
 # default from every write door — correctly, because the record must not state a
 # kind nobody named. The FOLD supplies one under `ON CREATE` regardless, and
 # `_props_from_row` drops a NULL column, so without the defaults below a
-# record-sourced rebuild materialized a `:Subject` with no `subjectKind` — a
+# record-sourced rebuild materialised a `:Subject` with no `subjectKind` — a
 # property ONTOLOGY §4.2 (Subject) / §4.3 (Object) lists as REQUIRED — while
 # `rebuild_all` (journal replay, which runs the fold) wrote `'other'`. Live ≠
-# record, for that property. ⚠️ On this tree the five write doors still DEFAULT
-# to `"other"`, so the table is the record→cache half that must land WITH or
-# before #9572, not a fix for a live-reachable defect.
+# record, for that property. ⚠️ On this tree the discriminator is still
+# FABRICATED at every write door, so the table is the record→cache half that
+# must land WITH or before #9572, not a fix for a live-reachable defect.
+#
+# ⚠️ `Source.sourceKind` is the SAME construction and is deliberately NOT here:
+# the fold has two defaults for it (`"document"` from `_upsert_source`,
+# `"agentSession"` for a `session:` ref from `_mint_source_stub`), so a NULL
+# row cannot be resolved without the prefix rule — defaulting to `"document"`
+# would fabricate the wrong kind on every session Source. #9710.
 
 
 def test_a_record_row_silent_about_the_kind_gets_the_folds_own_default():
@@ -362,6 +370,29 @@ def test_a_record_row_silent_about_the_kind_gets_the_folds_own_default():
     obj = _node("Object", {"name": "acme", "object_kind": None, "title": None})
     assert obj.props["objectKind"] == "other"
     assert obj.props["title"] == ""
+
+
+def test_the_source_discriminator_is_declared_excluded_not_guessed():
+    """The label whose default is AMBIGUOUS stays out of the table — pinned.
+
+    `_upsert_source` defaults `sourceKind` to `"document"`;
+    `_mint_source_stub` defaults a `session:` ref to `"agentSession"` (its own
+    docstring: minting those as `document` was the wart #5012 removed). A loader
+    default of `"document"` would therefore FABRICATE the wrong kind on every
+    session Source — so a NULL `source_kind` row must stay silent until the
+    prefix rule (or a record column) exists (#9710). This test fails if a future
+    editor "completes" the table by adding it.
+    """
+    assert "Source" not in cp.FOLD_ON_CREATE_DEFAULTS, (
+        "Source.sourceKind has two fold defaults ('document' / 'agentSession' "
+        "for session: refs) — a single constant here fabricates a kind; see "
+        "#9710"
+    )
+    source = _node("Source", {"url": "session:abc", "source_kind": None})
+    assert "sourceKind" not in source.props, (
+        "a session Source whose record row is silent about sourceKind was given "
+        "a kind the fold never wrote"
+    )
 
 
 def test_a_named_kind_and_a_tail_kind_are_never_overwritten_by_the_default():
@@ -437,6 +468,15 @@ def test_the_declared_fold_defaults_are_the_folds_own_constants():
                 "from the fold, do not guess. A NEW constant the fold owns is "
                 "the same finding: this table is the record→cache side of it."
             )
+    # A constant with a SECOND home drifts silently: `_mint_subject_stub`
+    # (`projection/edges.py`) writes the same `subjectKind='other'` literal for a
+    # stub-minted Subject, so a change there would red nothing above.
+    edges = (REPO_ROOT / "tortoise" / "projection" / "edges.py").read_text()
+    assert re.search(r"s\.subjectKind='other'", edges), (
+        "`_mint_subject_stub` in projection/edges.py no longer writes the same "
+        "`subjectKind='other'` literal this table transcribes for Subject — the "
+        "stub-minted half of the constant drifted. Re-derive, do not guess."
+    )
     # The values the patterns above force, asserted so the table cannot drift
     # while the patterns still match (they pin the CONSTRUCTION, not the literal).
     assert declared[("Subject", "subjectKind")] == "other"
@@ -493,6 +533,14 @@ def test_relation_props_ride_the_edge_and_the_predicate_is_the_rel_type():
 
 def test_rebuild_equals_record_no_extra_node_and_no_extra_field():
     """The rebuild's field set is EXACTLY the record's — never a superset.
+
+    ⚠️ ONE DECLARED EXCEPTION (#9634): the properties in
+    `cp.FOLD_ON_CREATE_DEFAULTS` are the FOLD's `ON CREATE` constants, applied
+    where the record row is silent, so the view carries them before this test
+    runs. That is why the comparison below cannot see this class — the bound on
+    the exception is
+    `test_the_declared_fold_defaults_are_the_folds_own_constants`, not this
+    assertion. Everything NOT in that table is still pinned exactly here.
 
     This is S3's contract clause at the STATEMENT level: a superset would be the
     cache carrying state the record does not hold, i.e. the cache becoming a

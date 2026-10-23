@@ -195,8 +195,10 @@ ADDITIONAL_PRIMARY_COLUMNS: dict[str, dict[str, str]] = {
 #: LANDS — that branch (open, unmerged: `fix/9572-discriminator-clobber`)
 #: removes the fabricated `subjectKind`/`objectKind` default from every write
 #: door, which is correct: the record must not state a kind nobody named. ⚠️ On
-#: the tree this table lands in, five doors still DEFAULT to `"other"`, so the
-#: divergence below is not yet reachable through a live write door; it is the
+#: the tree this table lands in the discriminator is still FABRICATED at every
+#: write door (the SDK/EventAPI identity doors, the hosted `POST /v1/subjects`
+#: and `/v1/objects` models, the seed surfaces, the extractor lanes), so the
+#: divergence below is not yet reachable through a live write door; this is the
 #: record→cache half that has to land WITH or BEFORE #9572, and it is reachable
 #: today for any record row written without the column.
 #:
@@ -208,17 +210,16 @@ ADDITIONAL_PRIMARY_COLUMNS: dict[str, dict[str, str]] = {
 #: NULLABLE, and `_props_from_row` drops a NULL column (#7971 property 3 — no
 #: fabricated authority reaches the cache), so a **record-sourced** rebuild
 #: materialised a `:Subject` with NO `subjectKind` at all: a property ONTOLOGY
-#: §4.2 (Subject) / §4.3 (Object) lists as REQUIRED, and the one
-#: `subject_binding.is_subject_kind` keys on. `rebuild_all` (journal replay,
-#: which runs the fold) was never affected — so live ≠ record.
+#: §4.2 (Subject) / §4.3 (Object) lists as REQUIRED. `rebuild_all` (journal
+#: replay, which runs the fold) was never affected — so live ≠ record.
 #:
 #: The fix is NOT to write the default back into the record (that is the
 #: fabrication #9572 deletes) and NOT to invent one here: it is to apply the
 #: FOLD's own `ON CREATE` constant on the way into the cache, so a record-sourced
-#: node is the node the live fold would have built. `subjectKind`/`objectKind`
-#: and `Object.title` are therefore **fold-derived defaults**: the record carries
-#: a kind when one was NAMED (the `EntityMutated` state map does), and this table
-#: supplies the same fallback the fold supplies when none was.
+#: node is the node the live fold would have built. These are therefore
+#: **fold-derived defaults**: the record carries a kind when one was NAMED (the
+#: `EntityMutated` state map does), and this table supplies the same fallback the
+#: fold supplies when none was.
 #:
 #: EXCLUDED, each with its reason — the fold's OTHER `ON CREATE` defaults are
 #: not applied here, and the reasons are not all "it is not a constant":
@@ -229,9 +230,21 @@ ADDITIONAL_PRIMARY_COLUMNS: dict[str, dict[str, str]] = {
 #:   seeds it through the fold.
 #: * `createdAt` (`coalesce($ca, $now)`) — not a constant: the default is the
 #:   REBUILD INSTANT, so there is nothing for a table to pin.
-#: * `Source.title` (`s.title = coalesce($title, $url)`) and its siblings in
-#:   the same clause (`canonicalUrl`, `urlAliases=[$raw_url]`, `ingestedAt`) —
-#:   not CONSTANTS: a copy of another record column, or the write instant.
+#: * `Source.sourceKind` — ONTOLOGY §4.6 REQUIRED, `public.source.source_kind`
+#:   NULLABLE, and `s.sourceKind=$sk` IS the same construction as Subject's…
+#:   but the fold has TWO defaults for it, so there is no single constant to
+#:   transcribe: `_upsert_source` passes `ev.get("sourceKind", "document")`,
+#:   while `_mint_source_stub` (`projection/edges.py`) defaults to
+#:   `"agentSession"` for a `session:` ref and `"document"` otherwise — its own
+#:   docstring records that `session:` stubs minted as `document` were the wart
+#:   #5012 removed. Defaulting a NULL row to `"document"` would therefore
+#:   FABRICATE the wrong kind on every session Source, so the value is not one
+#:   this table can hold; it needs the prefix rule (or a record column that
+#:   states it). Tracked in #9710.
+#: * `Source.title = coalesce($title, $url)` and the other copies in the same
+#:   clauses (`canonicalUrl`, `urlAliases=[$raw_url]`, `ingestedAt`, and
+#:   `id = coalesce($id, $url)`) — not CONSTANTS: a copy of another record
+#:   column, or the write instant.
 #: * `Source`'s `contentHash` (`coalesce($hash, '')`), `externalId` and
 #:   `version` (`CASE WHEN $stub_completion THEN NULL … END`) — constant-VALUED
 #:   for a creator record, and still excluded, because that clause emits the
@@ -242,6 +255,25 @@ ADDITIONAL_PRIMARY_COLUMNS: dict[str, dict[str, str]] = {
 #:   creator-only ordinal the record deliberately never writes). Constant is not
 #:   the only test: the value must be DECIDABLE FROM THE ROW.
 #:   Both residuals are tracked in #9710, not silently absorbed here.
+#:
+#: ⚠️ **THIS DECLARATION IS NOT TOTAL, and the bound is named rather than
+#: implied.** The fold writes further `ON CREATE` values this loader does not
+#: reproduce, and the biggest is `:Event`: `_upsert_event` builds a `props` dict
+#: of DEFAULTS (`eventKind` `''`, `subject`/`object` `''`, `startedAt` `''`,
+#: `participants` `[]`, `classificationLevel` `'internal'`, `format` `'jsonl'`,
+#: and `id`) and writes all of it unconditionally with `e += $props`, so a
+#: record-sourced `:Event` loses every one of them the record row does not carry
+#: (seven, for an event whose optional columns are NULL) — including the
+#: ONTOLOGY §4.5-REQUIRED `eventKind` when a producer omits it. Also undeclared:
+#: the other `:Source` create clauses (`_materialize_connector_source`,
+#: `_document`, `_mint_source_stub`) and the `_stub` adoption marker the fold
+#: clears. Filed as #9721, as its own change, for two shapes this table cannot
+#: express: `participants` is a LIST (a mutable default per node) and `id` is a
+#: key-ish copy of `eventId`.
+#:
+#: So: the table plus the exclusions above are what the pin below covers. It is
+#: not a census of every `ON CREATE` value in the fold, and it must not be read
+#: as one.
 #:
 #: `tests/test_cache_projection.py` pins this table against the fold's own
 #: clauses (source-parsed, as the repo does for other cross-module contracts), so
