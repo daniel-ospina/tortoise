@@ -46,18 +46,23 @@ design declares in prose. So every mechanism the registry knows about carries a
 `<!-- v4-mechanism: <id> -->` marker in EACH `docs/architecture/**/*.md` document
 its row names — the convention is to place it at the declaration site, and that
 placement is a DISCIPLINE, not something this gate can read (see the stated
-limits) — and `membership_errors` fails closed on ALL THREE shapes:
+limits) — and `membership_errors` fails closed on FOUR shapes:
 
   * a marker in `docs/architecture/**/*.md` whose id has NO registry row — the
     declared-and-absent shape this whole issue exists to kill;
   * a registry row whose id NO design document marks — a row whose declaration
     cannot be found, i.e. an *unmarked* row (#5064 refactor direction 1: "there
-    is no third state and no unmarked row"); and
+    is no third state and no unmarked row");
+  * a row's own `declared_in:` document inside the scanned surface that does NOT
+    carry that row's marker — half of a bi-document declaration rotted away
+    (review cycle 1, P2): comparing the two id SETS proved they agreed, never
+    that a row's OWN declaration was the one found, so deleting one of two
+    markers stayed green while the row kept claiming both documents declared it;
+    and
   * a marker sitting in a document the row does NOT declare, or a row that names
-    no document inside the scanned surface at all — the ATTRIBUTION half (#9778
-    review P2): comparing the two id sets proved they agreed, never that a row's
-    OWN declaration was the one found, so a row whose declared document had been
-    left unmarked passed as long as some other document carried its id.
+    no document inside the scanned surface at all — the ATTRIBUTION and coverage
+    half (#9778 review P2): the enumeration could otherwise shrink back to a
+    single document, or read as marked while its declaration site is unreachable.
 
 ⚠️ ITS STATED LIMITS, because overclaiming here is the same defect:
 
