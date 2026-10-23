@@ -1035,7 +1035,7 @@ console.log("the shipped avatar exists, and is the URL the migration backfills (
     "the migration's author default matches the renderer's DEFAULT_AUTHOR",
   );
 
-  // The FORWARD repair (20261023000001) writes both literals a SECOND time, and
+  // The FORWARD repair (20261023000002) writes both literals a SECOND time, and
   // on a database in the damaged state it is its copy — not the frozen
   // migration's — that reaches the rows. Checking only the frozen file left the
   // URL the repair actually writes unverified against DEFAULT_AUTHOR_IMAGE_URL:

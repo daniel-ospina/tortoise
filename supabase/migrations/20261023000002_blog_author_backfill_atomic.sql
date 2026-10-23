@@ -1,5 +1,5 @@
 -- ============================================================================
--- Migration 20261023000001: the blog attribution backfill, as ONE statement
+-- Migration 20261023000002: the blog attribution backfill, as ONE statement
 --
 -- 20261021000001_blog_author_identity.sql (#9578, issue #1383) shipped its
 -- backfill as four TOP-LEVEL statements:

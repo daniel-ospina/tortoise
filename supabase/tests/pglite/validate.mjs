@@ -9,7 +9,7 @@
 // Exit:  0 = all migrations applied + all assertions passed; 1 = any failure.
 import { PGlite } from '@electric-sql/pglite';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -571,6 +571,31 @@ const suites = [
   // whose counts those rows could move.
   '20261015000001_postgres_storage_footprint.sql',  // #4492
 ];
+
+// ── Fail CLOSED on a stale `suites` entry (PR #9707 review ISSUE 1) ─────────
+// The `readFileSync` in the loop below sits INSIDE the loop but OUTSIDE its
+// `try`, so a single entry naming a file that does not exist throws ENOENT
+// UNCAUGHT: the process exits on a node stack trace, every suite listed after
+// the bad entry silently stops running, and the drill blocks further down this
+// file never execute at all.
+//
+// Measured on the pre-fix tree at `c142e3318`: the entry
+// `20261023000002_blog_author_backfill_atomic.sql` was added to this list while
+// the suite FILE on disk was still `…0001_…`, so `schema-drill` died with
+// `ENOENT … supabase/tests/20261023000002_blog_author_backfill_atomic.sql` and
+// 16 existing suites plus both #1383 drills went dark behind that stack trace.
+//
+// A PATH assertion is the only check that can see this class: a content grep
+// for the filename finds every reference EXCEPT the one encoded as a path —
+// which is exactly the one that was wrong.
+const missingSuites = suites.filter((s) => !existsSync(`${TESTS_DIR}/${s}`));
+if (missingSuites.length > 0) {
+  console.error(`✗ the explicit \`suites\` list names files that do not exist under ${TESTS_DIR}:`);
+  for (const s of missingSuites) console.error(`    ${s}`);
+  console.error('  (the list is EXPLICIT, not a glob — one stale name disables this suite AND every later one)');
+  process.exit(1);
+}
+
 for (const suite of suites) {
   const sql = readFileSync(`${TESTS_DIR}/${suite}`, 'utf8');
   console.log(`\nRunning test suite ${suite}...`);

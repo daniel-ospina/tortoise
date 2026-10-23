@@ -1,5 +1,5 @@
 -- ============================================================================
--- SQL-level verification for migration 20261023000001 (the #1383 attribution
+-- SQL-level verification for migration 20261023000002 (the #1383 attribution
 -- backfill, repaired FORWARD as ONE statement).
 --
 -- Run by the PGlite harness, which applies EVERY migration from disk and then
@@ -9,7 +9,7 @@
 -- WHAT THIS COVERS THAT THE 20261021000001 SUITE CANNOT: that suite proves the
 -- ORIGINAL migration's backfill ran. It cannot prove the REPAIR carries it —
 -- on this database 20261021000001 already backfilled everything, so a
--- 20261023000001 whose UPDATEs were deleted would print nothing. The harness
+-- 20261023000002 whose UPDATEs were deleted would print nothing. The harness
 -- therefore seeds the FOUR rows below IMMEDIATELY BEFORE this migration is
 -- applied (validate.mjs, the #4216/#3036/#3027 precedent), so each assertion
 -- here reads what THIS migration did and reddens if the matching statement is
