@@ -724,7 +724,15 @@ window-consuming read path emits the same `valid_from_precision` /
 `valid_to_precision` / `end_state` block through `validity.window_read_fields`,
 and a covering candidate whose end is `unknown` also sets `end_state_unknown` on
 the reply — so an un-datable end is never read as still-true. `unknown` is
-END-only: a window with no datable start is not a window.
+END-only: a window with no datable start is not a window. **A declaration
+annotates a bound; it cannot summon one** (#9244) — so both the declared token
+and the legacy `day` default sit behind the same orderability gate on a PRESENT
+bound, and `supersede_point` inherits the successor's declared START precision
+onto the predecessor's END **only when that end came from the successor's own
+`validFrom`** (or a `valid_from` kwarg naming the same instant — the write guard
+forces equality with the stored start): when the resolution ladder falls through
+to `createdAt`/`now` (the start names no instant), the end is stamped with
+**no** precision property (#9729).
 
 > **Point's `when` is not a second valid-time slot.** `when` (§4.1) is the
 > **occurrence-date input** — the payload-level anchor the hosted commit path
