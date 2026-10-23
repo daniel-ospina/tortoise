@@ -219,6 +219,42 @@ def test_auto_reads_the_pools_state_and_refuses_when_it_cannot(tmp_path: Path):
     assert "REFUSED" in r.stderr and "refusing to guess" in r.stderr, r.stderr
 
 
+def test_repair_dry_run_plans_the_body_the_real_run_puts(tmp_path: Path):
+    """`--repair-labels --dry-run` must show the label body the repair would actually PUT.
+
+    `resolve_labels`' `auto` branch short-circuits on `DRY=1` so an INSTALL plan works without `gh`.
+    `--repair-labels` never installs and prints its resolved set as the concrete request body
+    (`dry-run: would PUT <body> …`), so that short-circuit made the plan LIE: on an engaged pool the
+    dry run showed `{self-hosted-x64}` while the real run sent `{self-hosted-x64,ubuntu-latest}` —
+    and the runbook sells the repair as "sync the fallback label to the gate's state". Repair mode
+    calls `need gh` before `resolve_labels`, so reading the state in a dry run costs nothing.
+
+    Non-vacuity: with the short-circuit still keyed on `DRY` alone, the first assertion reds (no
+    "ENGAGED", and the planned body lacks `ubuntu-latest`).
+    """
+    engaged = _stub_gh(tmp_path / "engaged", "1")
+    # `_env(tmp_path)` makes tmp_path the runner base, so instance 1 lives in it
+    (tmp_path / ".runner").write_text('{"agentName": "pi-runner-x64-1"}\n')
+    env = _env(tmp_path, PATH=f"{engaged}:{os.environ['PATH']}", CI_RUNNER_ARCH="x86_64")
+
+    plan = _run("--repair-labels", "--count", "1", "--dry-run", env=env)
+    assert plan.returncode == 0, plan.stderr
+    assert "ENGAGED" in plan.stderr, (
+        f"a repair plan must read the gate's state, not defer it to an install that never happens: {plan.stderr}"
+    )
+    planned = re.search(r"would PUT (\{.*\}) to runner", plan.stderr)
+    assert planned, plan.stderr
+
+    done = _run("--repair-labels", "--count", "1", env=env)
+    assert done.returncode == 0, done.stderr
+    assert planned.group(1) == '{"labels":["self-hosted-x64","ubuntu-latest"]}', (
+        f"the plan must name the body the repair would PUT on an engaged pool: {planned.group(1)}"
+    )
+    assert "self-hosted-x64,ubuntu-latest" in done.stderr, (
+        f"the real run sends that same set: {done.stderr}"
+    )
+
+
 # ── 4. dry run = plan only ──────────────────────────────────────────────────────────────────
 def test_dry_run_decides_nothing_and_calls_nothing(tmp_path: Path):
     """A plan is the operator's step: no token, no download, no registration, no label read."""
@@ -688,6 +724,12 @@ def test_the_runbooks_installer_line_map_lands_on_what_it_names():
         # no ref: a fixer sent to `:327` edits the capacity guard on the destructive path.
         "uninstall": r'^if \[ "\$MODE" = uninstall \]',
         "install": r'^if \[ "\$MODE" = install \]',
+        # The two MODE blocks that sit between the labelled anchors above. `repair` and
+        # `--print-labels` were cited by NUMBER and drifted +4 the moment an edit landed above them,
+        # while every anchored ref still landed — so nothing caught it (measured by a verifier that
+        # re-checked the map by hand). Anchoring them is what makes that drift red instead.
+        "repair": r'^if \[ "\$MODE" = repair \]',
+        "print-labels": r'^if \[ "\$MODE" = labels \]',
     }
     # ⛔ EVERY anchor must be found by name: a label the map stopped naming is how this pin would
     # silently degrade to checking nothing (the runbook writes some labels bare — `(forks :262` —

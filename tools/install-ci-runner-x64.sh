@@ -188,8 +188,12 @@ resolve_labels() { # sets LABELS; exit 2 when the state cannot be read
     off) LABELS="$ARCH_LABEL" ;;
     auto)
       # A dry run must work on a box with no gh/auth: the read is a planning dependency, not a
-      # decision, so it is skipped and the plan says the fallback label is resolved at install.
-      if [ "$DRY" = 1 ]; then
+      # decision, so it is skipped and the plan says the fallback label is resolved at install —
+      # TRUE FOR INSTALL ONLY. `--repair-labels` never installs and its plan IS the body it would
+      # PUT (`dry-run: would PUT $body …`), so a short-circuit there printed a request the real run
+      # does not send (measured: `{self-hosted-x64}` planned, `{self-hosted-x64,ubuntu-latest}` sent
+      # on an engaged pool). Repair mode calls `need gh` before this, so the read is available.
+      if [ "$DRY" = 1 ] && [ "$MODE" != repair ]; then
         LABELS="$ARCH_LABEL"
         say "fallback: auto — decided at install time from the ARM64 pool's state (not read in a dry run)"
         return 0
@@ -276,13 +280,16 @@ fi
 #
 # ⚠️ BUT DEREGISTRATION IS **NOT** ARCH-FREE, and this line used to say it was. The runner
 # package's own `config.sh` execs the listener for BOTH verbs — `./bin/Runner.Listener "$@"` when
-# `$1 = remove` (pinned package `actions-runner-linux-x64-2.338.1/config.sh:76-81`) — and that
-# binary is an x86-64 ELF. On a foreign arch the exec fails, the failure is swallowed by the
-# `>/dev/null 2>&1` below, and the run cannot deregister: the unit is already gone by then (it is
-# removed first, deliberately), so the box is left half-decommissioned — unit gone, registration
-# alive. The failed-deregistration branch now surfaces the captured stderr and says so. To
-# decommission from a non-x86_64 host: remove the unit here, then deregister from an x86_64 host or
-# delete the runner through the API.
+# `$1 = remove` — and that binary is the x64 ELF the tarball extracts into `$d/bin`. On a foreign
+# arch the exec fails ("Exec format error"); the pre-fix pair discarded it with `>/dev/null 2>&1`,
+# and the run cannot deregister: the unit is already gone by then (it is removed first,
+# deliberately), so the box is left half-decommissioned — unit gone, registration alive. The
+# failed-deregistration branch now CAPTURES that output and appends its last line to the warning.
+# Measured on an unpacked `actions-runner-linux-x64` tarball, whose `config.sh:76-81` is
+# `if [[ "$1" == "remove" ]]; then ./bin/Runner.Listener "$@"` — the version is a measurement
+# detail (this script pins `$RUNNER_VERSION` below and extracts into `$d`, so the installed file is
+# `$d/config.sh`); the exec is not. To decommission from a non-x86_64 host: remove the unit here,
+# then deregister from an x86_64 host or delete the runner through the API.
 if [ "$MODE" = install ]; then
   # `CI_RUNNER_ARCH` is a seam, so the refusal can be exercised on a host of either arch (the
   # guarded box is not always the box reading this code). Nothing here is made safer by it: anyone

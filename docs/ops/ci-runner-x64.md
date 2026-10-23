@@ -124,17 +124,17 @@ within twenty seconds. That is a **state read, not a default**: with GitHub-host
 same command registers `self-hosted-x64` only, and the gate attaches the fallback label when it
 falls back.
 
-- `--count N` → `tools/install-ci-runner-x64.sh:463` (the scale loop) · the two mode blocks the
-  paragraphs below cite: `install` `:286` (arch refusal dies at `:291`) and `uninstall` `:339` ·
-  guards at `:286-335` (forks `:294`, disk `:314`, cpu/memory `:321`) · sha256 pin + registration
-  at `:474-482` (verify `:474`, token `:477`, one argv `:480-481`, `config.sh` `:482`) · systemd
-  install/start at `:492-494` · label resolution at `:169-207` (`fallback_engaged` `:173`,
-  `resolve_labels` `:184`) · label repair at `:229` · `--print-labels` at `:262`.
+- `--count N` → `tools/install-ci-runner-x64.sh:470` (the scale loop) · the two mode blocks the
+  paragraphs below cite: `install` `:293` (arch refusal dies at `:298`) and `uninstall` `:346` ·
+  guards at `:293-342` (forks `:301`, disk `:321`, cpu/memory `:328`) · sha256 pin + registration
+  at `:481-489` (verify `:481`, token `:484`, one argv `:487-488`, `config.sh` `:489`) · systemd
+  install/start at `:499-501` · label resolution at `:169-211` (`fallback_engaged` `:173`,
+  `resolve_labels` `:184`) · `repair` `:233` · `--print-labels` `:266`.
 - `--count` is validated ONCE, before the mode dispatch, for EVERY mode (`:145-149`): a
   `--count 0 --uninstall` is a usage error (exit 1), not a silent no-op that reports success
   having deregistered nothing.
 - **`--uninstall` deletes only what it can PROVE is a runner install, and only after its unit is
-  gone** (`:338-446`; the proof is `is_runner_install` at `:165`): `.runner`, `config.sh` or
+  gone** (`:345-453`; the proof is `is_runner_install` at `:165`): `.runner`, `config.sh` or
   `bin/Runner.Listener` must exist in the directory, every target is validated BEFORE the first
   deletion, and every removal token is minted BEFORE the first deletion — so a refusal in any of
   those phases leaves every directory untouched, never a half-uninstalled set. `CI_RUNNER_BASE` is
@@ -154,19 +154,21 @@ falls back.
   failed, likewise left intact), a tool missing from PATH, or a failed remote read.
 - `--print-labels` answers BEFORE the arch and headroom guards, so the label invariant is
   checkable on any host (including the Apple-Silicon dev box and the ARM64 pool runners); the
-  arch refusal still governs every INSTALL — and only an install (`:286`, the `MODE = install`
-  block; the refusal itself dies at `:291`). `--status`, `--repair-labels` and `--print-labels` are
+  arch refusal still governs every INSTALL — and only an install (`:293`, the `MODE = install`
+  block; the refusal itself dies at `:298`). `--status`, `--repair-labels` and `--print-labels` are
   **not** gated by the host's architecture: they reach only `gh`, download nothing and run no local
   binary, so a runner can be inspected or relabelled from any host.
 
   ⚠️ **`--uninstall` is only HALF arch-free, and that matters when decommissioning.** The arch guard
   does not refuse it, but the deregistration step is `./config.sh remove`, and the runner package's
-  own `config.sh` execs the listener for that verb — `./bin/Runner.Listener "$@"`
-  (`actions-runner-linux-x64-2.338.1/config.sh:76-81`), an **x86-64 ELF**. On a foreign arch the
-  exec fails, the unit has already been removed (deliberately, first), and the runner stays
-  REGISTERED: the box is left half-decommissioned, and the failure is reported as exit 3 with the
-  captured `config.sh` output in the warning. So to remove a runner from a non-x86_64 host: let it
-  remove the unit, then deregister from an x86_64 host or delete the runner through the API. (The
+  own `config.sh` execs the listener for that verb — `./bin/Runner.Listener "$@"` — and that binary
+  is the x64 ELF the tarball extracts into the runner directory. On a foreign arch the exec fails
+  ("Exec format error"), the unit has already been removed (deliberately, first), and the runner
+  stays REGISTERED: the box is left half-decommissioned, and the failure is reported as exit 3 with
+  the captured `config.sh` output in the warning. So to remove a runner from a non-x86_64 host: let
+  it remove the unit, then deregister from an x86_64 host or delete the runner through the API.
+  (Measured on an unpacked `actions-runner-linux-x64` tarball, whose `config.sh:76-81` is that exec;
+  the version is a measurement detail, and the installed file is `$RUNNER_BASE/config.sh`.) (The
   guard used to sit above the uninstall block too, which refused decommissioning on exactly the
   ARM64 hosts the fallback pool runs on; `CI_RUNNER_ARCH` remains the seam if a host's arch must be
   asserted by hand.)
