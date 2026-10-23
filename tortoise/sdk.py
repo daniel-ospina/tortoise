@@ -3881,7 +3881,8 @@ _RESERVED_ACTOR_PROPS = frozenset(
 
 
 def _sanitize_props(props: dict, *, reject_id: bool = False,
-                    reject_belief_props: bool = False) -> dict:
+                    reject_belief_props: bool = False,
+                    reject_claim_class: bool = False) -> dict:
     """#329: reject server-managed fields on tenant write surfaces.
 
     ``sourcePath``/``source_path`` are server-filesystem fields consumed by the
@@ -3912,6 +3913,27 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
     recompute), which write them TOGETHER and keep the #398 label in sync.
     Through a generic bag they bypassed that accounting. #7951 is the
     structural home (ONE write chokepoint instead of per-path patching).
+
+    ``reject_claim_class`` (#2351): the same chokepoint, one class further out.
+    ``claimClass`` is PROVENANCE — the fact that this claim was COMPUTED rather
+    than AUTHORED — and it is written by the write that MINTS the claim
+    (``create_point``'s create map, via its explicit ``claim_class`` kwarg or
+    the nested prop it pops and validates before this boundary runs). Through a
+    generic update bag it was writable three ways, all measured: setting it to
+    ``'asserted'`` on a derived claim RE-STAMPS it out of every guard surface
+    (the EP backstop, ``create_operator``, ``create_direct_edge``,
+    ``supersede_point``) so it can then override authored beliefs; passing
+    ``None`` REMOVES the property outright (``SET n += $props`` with a None
+    deletes it), the same escape without the marker; and a junk token persists
+    an unknown third class the closed vocabulary exists to prevent. On TOP of
+    that, no ``PointRevised`` arm replays the key, so a write through an update
+    door is a LIVE-ONLY marker a rebuild silently drops — a derived claim
+    quietly becomes authored (#9732). There is no legitimate caller intent —
+    provenance is decided once, at birth, and a caller that disagrees mints a
+    new claim — so this is a HARD-REJECT (never strip-and-ignore), matching
+    ``baseline_system_default``/``_stub``. Both spellings are refused, the same
+    way ``sourcePath``/``source_path`` are above: one class under a second name
+    is how a later reader comes to treat one of them as a third state.
     """
     props = dict(props)
     # #2600: reserved actor keys are STRIP-AND-IGNORE (never a 4xx — the
@@ -4180,6 +4202,27 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
             "'outdated' is a server-managed lifecycle flag — use "
             "invalidate_point() or supersede_point() to terminalize a claim."
         )
+    # #2351 (epic #2349 E-derived): the claim CLASS is provenance, not a
+    # property — see `reject_claim_class` in the docstring. Gated exactly like
+    # `reject_belief_props` (the #7951 chokepoint) so that EVERY generic write
+    # bag refuses it by construction instead of one door being patched and the
+    # next forgotten: `update_point` and `update_entity` are the two documented
+    # `:Point` update doors (`commit_schema`), and `update_entity` reaches its
+    # write through this same boundary. `create_point` must keep accepting the
+    # nested form: it POPS `claimClass` and validates it on the way in (it
+    # calls this boundary with no flags), and the MCP `tortoise_create_point`
+    # route reaches the marker through exactly that `props` bag.
+    for _class_key in (_claim_class.PROP, "claim_class"):
+        if reject_claim_class and _class_key in props:
+            raise ValueError(
+                f"{_class_key!r} is provenance, not a generic property — it is "
+                "written by create_point, not by an update door (#2351): no "
+                "`PointRevised` arm replays it, so accepting it here would "
+                "persist a live-only marker that a rebuild silently drops, and "
+                "re-stamping or clearing it would move a derived claim out of "
+                "the #2351 override guard (see #9732). Stamp the class on the "
+                "CREATE."
+            )
     # #5256: the `extractedFrom` READ-VERSION anchor is server-derived (it is
     # read from the :Source node by `resolve_source_versions` on the LIVE path
     # and carried in the Point's journaled snapshot), so a tenant must never be
@@ -12659,7 +12702,8 @@ class TortoiseSDK:
         self._refuse_unapproved_kinds_in_props(props)
         # #329: id mutation + server-managed fields rejected
         props = _sanitize_props(props, reject_id=True,
-                                reject_belief_props=True)
+                                reject_belief_props=True,
+                                reject_claim_class=True)
         # R2 (#1541) D3: search_keys is stored flat (see _flatten_search_keys_prop).
         _flatten_search_keys_prop(props)
         # E4 (#5007): same rule as `create_point` / the `Point` model — an
@@ -12826,26 +12870,14 @@ class TortoiseSDK:
             )
 
         # #2351 (review P0): ``claimClass`` is a CREATE-time marker, NOT a
-        # revision prop. The journal folds it on ``PointAdded`` (it is listed in
-        # ``projection.entities._POINT_DECLARED_PROPS``), but NO ``PointRevised``
-        # arm replays it — ``_apply_one``/``_revise_point`` enumerate the props a
-        # revision may fold and ``claimClass`` is in neither. Writing it through
-        # this generic passthrough therefore produced a LIVE-ONLY marker: a
-        # rebuild silently dropped it (a DERIVED claim becomes AUTHORED and the
-        # override guard stops refusing it — the exact defect class this issue
-        # exists to close) or resurrected it after an explicit clear, and
-        # ``check_consistency`` reds the graph with advice that cannot clear the
-        # divergence. So the door REFUSES the key instead of shipping a marker
-        # replay does not own; widening replay is tracked as #9732.
-        for _class_key in ('claimClass', 'claim_class'):
-            if _class_key in props:
-                raise ValueError(
-                    "claimClass is written by create_point, not by "
-                    "update_point (#2351): a revision does not replay it, so "
-                    "accepting it here would persist a live-only marker that a "
-                    "rebuild silently drops (see #9732). Stamp the class on "
-                    "the CREATE."
-                )
+        # revision prop, and this door refuses it — through the SAME #7951
+        # chokepoint as every other generic write bag, not with a second
+        # per-door copy of the rule (``update_entity`` is the other documented
+        # ``:Point`` update door and takes its refusal from the same place, so
+        # patching one and forgetting the next cannot happen again). The
+        # rejection itself, and why replay makes the marker create-only, are
+        # documented on ``_sanitize_props(reject_claim_class=True)``; widening
+        # replay beyond ``PointAdded`` is tracked as #9732.
 
         # #432 plan-review P1: update_point is non-status except the draft→live
         # promote (matches the create_operator promote). Any other status value
@@ -33375,7 +33407,8 @@ class TortoiseSDK:
         # where that set is built below.
         # #329: id + sourcePath/source_path are server-managed — reject
         props = _sanitize_props(props, reject_id=True,
-                                reject_belief_props=True)
+                                reject_belief_props=True,
+                                reject_claim_class=True)
         # ── #5475 (residual): the UPDATE door onto every label ──
         # ``update_entity`` is the documented tenant route onto Object /
         # Subject / Event / Document / Source nodes, and each of those carries

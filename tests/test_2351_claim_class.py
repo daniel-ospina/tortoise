@@ -283,6 +283,14 @@ def test_ep_backstop_drops_and_reports_a_fully_blocked_factor(lane):
     reasons = [sk["reason"] for sk in ep._last_skipped_factors]
     assert "derived_over_asserted" in reasons, (
         f"the drop must be REPORTED, got {reasons!r}")
+    # #6105: ``participating_inputs`` is the count the record's own ``inputs``
+    # array names — a direct-edge factor has exactly two endpoints, so a
+    # hardcoded 0 both contradicts the record and misreports why the arm was
+    # skipped to every consumer that filters or sums on this field.
+    rec = next(sk for sk in ep._last_skipped_factors
+               if sk["reason"] == "derived_over_asserted")
+    assert rec["participating_inputs"] == 2, rec
+    assert len(rec["inputs"]) == 2, rec
 
 
 def test_ep_backstop_classifies_the_slot_ep_actually_uses(lane):
@@ -431,6 +439,36 @@ def test_update_point_refuses_the_class_outright(lane):
             lane.update_point(pid, **{spelling: "junk"})
     assert _props(lane, pid).get(cc.PROP) == "derived", (
         "a refused update must not change the stored class")
+
+
+def test_update_entity_cannot_restamp_or_clear_the_class(lane):
+    """The SECOND documented ``:Point`` update door refuses it too (#2351).
+
+    ``commit_schema`` lists the pair ``update_point`` / ``_update_entity``, and
+    ``update_entity`` is the generic tenant surface (``tortoise_update_entity``)
+    whose Point branch writes caller props with a live ``SET n += $p``. With the
+    refusal living only in ``update_point``, the same four escapes stayed open
+    one door over: ``'asserted'`` moves a derived claim out of every #2351
+    guard, ``None`` deletes the marker (no marker reads as asserted), a junk
+    token persists a class the closed vocabulary exists to prevent, and all of
+    them are LIVE-ONLY — a rebuild silently drops the write. The refusal is at
+    the shared ``_sanitize_props`` chokepoint, which is what this test pins and
+    which is why it REDS when the ``reject_claim_class`` flag is removed from
+    this door.
+    """
+    pid = lane.create_point("statement", "computed claim",
+                            claim_class="derived")["id"]
+    for spelling in ("claimClass", "claim_class"):
+        for bad in ("asserted", None, "bogus"):
+            with pytest.raises(ValueError, match="written by create_point"):
+                lane.update_entity(pid, **{spelling: bad})
+            # The refusal is BEFORE the write: the marker is untouched.
+            assert _props(lane, pid).get(cc.PROP) == cc.DERIVED
+    # ... and the door still WORKS for an ordinary property, so the refusal is
+    # one name and not a dead surface.
+    lane.update_entity(pid, summary="authored summary")
+    assert _props(lane, pid).get("summary") == "authored summary"
+    assert _props(lane, pid).get(cc.PROP) == cc.DERIVED
 
 
 def test_single_input_factor_is_not_reported_as_an_override(lane):

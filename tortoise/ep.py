@@ -1920,7 +1920,12 @@ class TortoiseEP:
                         "operator_id": src_id,
                         "op_type": rel,
                         "reason": "derived_over_asserted",
-                        "participating_inputs": 0,
+                        # Both endpoints ARE the factor's inputs, so the count
+                        # is 2 — never 0. ``participating_inputs`` is what
+                        # consumers filter and summarise the #6105 report on,
+                        # and a record that claims zero participants while its
+                        # own ``inputs`` array names two contradicts itself.
+                        "participating_inputs": 2,
                         "inputs": [
                             {"id": src_id, "status": src_status or "live"},
                             {"id": tgt_id, "status": tgt_status or "live"},
