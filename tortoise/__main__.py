@@ -874,7 +874,19 @@ def _cmd_record_backup(args):
     # never does. An explicit flag still wins (an injected value keeps the DB-free
     # pin possible).
     if args.scratch_dsn is None:
-        args.scratch_dsn = os.environ.get("TORTOISE_RECORD_SCRATCH_DSN") or None
+        args.scratch_dsn = (os.environ.get("TORTOISE_RECORD_SCRATCH_DSN") or "").strip() or None
+    elif not args.scratch_dsn.strip():
+        # ⛔ A BLANK `--scratch-dsn` IS NOT "backup only" (#9601 review cycle 5, P2).
+        # `--scratch-dsn "$SCRATCH"` with the variable unset is the exact shape a cron
+        # line takes when its environment is gone, and it used to fall into backup mode:
+        # exit 0, `published`, and NO drill — on a schedule whose exit table defines 0 in
+        # drill mode as "the restore verified". A run that said it would drill and then
+        # silently did not is worse than a red. An ABSENT flag still means backup-only.
+        print("Error: --scratch-dsn was passed but names nothing — a drill DSN that "
+              "is empty cannot be run, and backup-only mode is not what this run "
+              "said it would do. Nothing was backed up, and no verdict was "
+              "produced.", file=sys.stderr)
+        return 2
     if not dsn:
         print("Error: no record DSN — pass --record-dsn or set "
               "TORTOISE_RECORD_DSN. Nothing was backed up, and no restore was "

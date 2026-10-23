@@ -443,6 +443,106 @@ def _subprocess_env(dsn: str) -> dict[str, str]:
     return env
 
 
+# ── the identity guard: what must never be TRUNCATEd ────────────────────────
+
+
+def _dsn_identity(dsn_str: str, *, label: str = "the record") -> dict[str, str]:
+    """The coordinates a DSN names — REFUSING one that names no database.
+
+    Coordinates, never the literal string: two spellings of one database are the
+    same database (`postgres://` vs `postgresql://`, an implicit `:5432`, a
+    trailing `/`, an added `?sslmode=require`), and this is the guard whose miss
+    TRUNCATEs the record.
+
+    ⛔ AN UNNAMED DATABASE IS NOT COMPARABLE (#9601 review cycle 5, P1).
+    `postgresql://user:pw@host:5432` — and the same with a trailing `/` — parses to
+    an empty database name, and libpq then fills `dbname` from `PGDATABASE`, else
+    the USER name. Two DSNs that look different, and that a string comparison
+    therefore called different, can reach ONE database; with `--reset-scratch` the
+    drill TRUNCATEs through that connection. The dump leg already refused this
+    shape (`libpq_env`: "the record DSN names no database — refusing to let libpq
+    fall back to a default"); the leg that DELETES had no such check.
+    """
+    parts = _split_dsn(dsn_str)
+    try:
+        port = str(parts.port or 5432)
+    except ValueError as e:
+        raise RecordRestoreRefused(
+            f"a {label} DSN has an unreadable port: {e}"
+        ) from e
+    # Strip BOTH slashes, not just the leading one: `…/postgres/` names the same
+    # database as `…/postgres`, and refusing too much is the safe direction for a
+    # guard whose miss TRUNCATEs the record.
+    database = unquote(parts.path).strip("/")
+    if not database:
+        raise RecordRestoreRefused(
+            f"the {label} DSN names no database — libpq would fill `dbname` from "
+            "PGDATABASE, else the user name, so this target cannot be shown to be "
+            "a DIFFERENT database from the record. Name it explicitly."
+        )
+    return {
+        "host": (parts.hostname or "").lower(),
+        "port": port,
+        "database": database,
+    }
+
+
+def _dsn_addresses(host: str) -> frozenset[str]:
+    """The addresses a name actually reaches (#9601 review cycle 3, P1).
+
+    ``_dsn_identity`` compares the host LEXICALLY, and coordinate equality is not
+    server equality across names: `localhost` and `127.0.0.1`, an IP and its DNS
+    name, a CNAME and its target are ONE server spelled two ways, so a scratch DSN
+    using the other spelling passed this guard — and with `--reset-scratch` the
+    drill then TRUNCATEs the record's own tables and reports `RESTORED`.
+
+    Resolving both sides closes that WITHOUT a database round trip (a connection
+    here would touch the scratch before the guard has decided anything is safe, and
+    the drill's "nothing was connected" assertion is part of the contract). An
+    unresolvable name yields the empty set and the guard falls back to the lexical
+    comparison it has always made: that is fail-open on THIS axis only, and
+    deliberately so — it cannot refuse a real drill whose scratch name does not
+    resolve from the host running it, while every name that DOES resolve is now
+    compared by address.
+    """
+    try:
+        infos = socket.getaddrinfo(host or "localhost", None,
+                                   proto=socket.IPPROTO_TCP)
+    except OSError:
+        return frozenset()
+    return frozenset(str(info[4][0]) for info in infos)
+
+
+def refuse_same_database(
+    source_dsn: str, target_dsn: str, *, target_label: str = "drill's scratch"
+) -> None:
+    """Refuse a target that resolves to the record itself.
+
+    ⛔ THE ONE GUARD, AT MODULE LEVEL (#9601 review cycle 5, P1). It lived as a
+    closure inside :func:`run_restore_drill`, so the operation that actually
+    mutates — :func:`reset_record_tables` — carried no guard of its own: it emptied
+    whatever it was handed, and the safety was a property of ONE caller. A guard a
+    data-loss operation does not own is a guard the next caller does not get.
+    """
+    source_id = _dsn_identity(source_dsn, label="record")
+    target_id = _dsn_identity(target_dsn, label=target_label)
+    same_server = source_id["host"] == target_id["host"]
+    if not same_server:
+        same_server = bool(
+            _dsn_addresses(source_id["host"]) & _dsn_addresses(target_id["host"])
+        )
+    if (
+        same_server
+        and source_id["port"] == target_id["port"]
+        and source_id["database"] == target_id["database"]
+    ):
+        raise RecordRestoreRefused(
+            f"the {target_label} DSN resolves to the SAME database as the "
+            f"source ({source_id!r}) — a drill must not restore over, or "
+            "reset, the record it is protecting"
+        )
+
+
 def _require_table(name: str) -> str:
     """Validate a table name before it is interpolated into SQL/argv.
 
@@ -743,12 +843,27 @@ def create_record_backup(
             "bytes": len(blob),
         }
         base = f"{RECORD_BACKUP_PREFIX}{backup_id}"
-        storage.upload(f"{base}/{DUMP_OBJECT}", blob, "application/octet-stream")
-        storage.upload(
-            f"{base}/{MANIFEST_OBJECT}",
-            json.dumps(manifest, indent=2).encode("utf-8"),
-            "application/json",
-        )
+        # ⛔ THE TRANSPORT IS A DOCUMENTED FAILURE CLASS, NOT A TRACEBACK (#9601 review
+        # cycle 5, P2). `R2Storage.upload` raises a bare `RuntimeError`, which none of
+        # the verb's handlers catch, so a bucket fault escaped `main()` as a traceback
+        # instead of the exit-1 "could not perform" the runbook documents. The dump
+        # object goes first and the manifest second, so a failure between them leaves
+        # a ciphertext no manifest attributes — which `list_record_backups` cannot see
+        # and the prune therefore cannot remove. Naming the fault here is what lets the
+        # operator and the scheduler read it as the transport class it is.
+        try:
+            storage.upload(f"{base}/{DUMP_OBJECT}", blob, "application/octet-stream")
+            storage.upload(
+                f"{base}/{MANIFEST_OBJECT}",
+                json.dumps(manifest, indent=2).encode("utf-8"),
+                "application/json",
+            )
+        except Exception as e:
+            raise RecordBackupError(
+                f"the artifact could not be uploaded to {base} ({e}) — the record "
+                "was dumped and encrypted locally but is NOT backed up. Retry the "
+                "run; any object already written under this key is incomplete."
+            ) from e
     finally:
         # The decrypted dump is the record in plaintext — remove it in every
         # path, including the failure paths above.
@@ -900,13 +1015,19 @@ def prune_record_backups(storage, *, keep: int = RECORD_BACKUP_KEEP) -> list[str
                 "something it did not understand", manifest.get("backup_id"))
             continue
         base = str(manifest_key).rsplit("/", 1)[0]
+        # ⛔ THE MANIFEST IS DELETED LAST, AND ONLY IF THE DUMP WENT (#9601 review
+        # cycle 5, P3). The loop used to `continue` after a failed delete, so a
+        # locked dump object was followed by a SUCCESSFUL manifest delete: the
+        # artifact vanished from `list_record_backups` (which enumerates manifests)
+        # while its ciphertext stayed in the bucket — unreachable, unprunable, and
+        # one copy per failed delete, permanently.
         for obj in (DUMP_OBJECT, MANIFEST_OBJECT):
             key = f"{base}/{obj}"
             try:
                 storage.delete(key)
             except Exception:  # a prune failure must not lose the survivor set
                 log.warning("record-backup prune could not delete %s", key, exc_info=True)
-                continue
+                break
             deleted.append(key)
     return deleted
 
@@ -1054,6 +1175,16 @@ def restore_record_backup(
     is the only exit a drill can be trusted to observe.
     """
     require_direct_dsn(target_dsn)
+    # ⛔ THE TARGET IS NAMED BEFORE IT IS READ (#9601 review cycle 5, P2). The
+    # `names no database` refusal below ran AFTER `record_row_counts`, and in the
+    # `--reset-scratch` path the caller has already TRUNCATEd by then — so a DSN
+    # libpq would resolve to a default was connected to before anything said no.
+    # Same class and same words as the check below, moved to the front.
+    if not unquote(_split_dsn(target_dsn).path).strip("/"):
+        raise RecordBackupUnavailable(
+            "the target DSN names no database — pg_restore would have nothing "
+            "to restore into"
+        )
     # `artifact` is the already-verified (manifest, payload) pair. A caller that
     # had to reset the target first passes it so NO refusal can happen after
     # that reset; the default path verifies here, before touching the target.
@@ -1230,8 +1361,15 @@ def verify_restore(
     return report
 
 
-def reset_record_tables(dsn: str, *, connect: Connector | None = None) -> None:
+def reset_record_tables(
+    dsn: str, *, source_dsn: str, connect: Connector | None = None
+) -> None:
     """EMPTY the record's tables on ``dsn`` — the scratch reset that makes a drill repeatable.
+
+    ``source_dsn`` is REQUIRED and is the record being protected, not a courtesy
+    (#9601 review cycle 5, P1): the identity refusal used to live only in
+    :func:`run_restore_drill`, so this exported operation was safe by CALLER and
+    emptied anything it was handed. See :func:`refuse_same_database`.
 
     A successful drill leaves the scratch target populated, and every restore
     refuses a populated target — so without a reset the documented schedule
@@ -1253,6 +1391,13 @@ def reset_record_tables(dsn: str, *, connect: Connector | None = None) -> None:
     loudly instead.
     """
     require_direct_dsn(dsn)
+    # ⛔ THE RESET OWNS THE GUARD NOW (#9601 review cycle 5, P1). Two holes closed
+    # in one place: a target that RESOLVES to the record (by name or by address) is
+    # refused, and so is a target DSN that names NO database — libpq fills `dbname`
+    # from `PGDATABASE`, else the USER name, so a bare `postgresql://user:pw@host:5432`
+    # can reach the record while looking like a different database. The dump leg
+    # already refused that shape; the leg that DELETES did not.
+    refuse_same_database(source_dsn, dsn, target_label="reset target")
     sql = "TRUNCATE " + ", ".join(f'public."{_require_table(t)}"' for t in record_tables())
     connector = connect or _default_connector
     conn = connector(dsn)
@@ -1347,64 +1492,13 @@ def run_restore_drill(
     zeros against zeros, and printed ``RESTORED`` with exit 0.
     """
     # Coordinates, never the literal string: two spellings of one database are
-    # the same database, and this is the guard whose failure destroys the record.
-    def _identity(dsn_str: str) -> dict[str, str]:
-        parts = _split_dsn(dsn_str)
-        try:
-            port = str(parts.port or 5432)
-        except ValueError as e:
-            raise RecordRestoreRefused(
-                f"a drill DSN has an unreadable port: {e}"
-            ) from e
-        return {
-            "host": (parts.hostname or "").lower(),
-            "port": port,
-            # Strip BOTH slashes, not just the leading one: `…/postgres/` names
-            # the same database as `…/postgres`, and refusing too much is the
-            # safe direction for a guard whose miss TRUNCATEs the record.
-            "database": unquote(parts.path).strip("/"),
-        }
-
-    def _addresses(host: str) -> frozenset[str]:
-        """The addresses a name actually reaches (#9601 review cycle 3, P1).
-
-        `_identity` compares the host LEXICALLY, and coordinate equality is not
-        server equality across names: `localhost` and `127.0.0.1`, an IP and its
-        DNS name, a CNAME and its target are ONE server spelled two ways, so a
-        scratch DSN using the other spelling passed this guard — and with
-        `--reset-scratch` the drill then TRUNCATEs the record's own tables and
-        reports `RESTORED`.
-
-        Resolving both sides closes that WITHOUT a database round trip (a
-        connection here would touch the scratch before the guard has decided
-        anything is safe, and the drill's "nothing was connected" assertion is
-        part of the contract). An unresolvable name yields the empty set and the
-        guard falls back to the lexical comparison it has always made: that is
-        fail-open on THIS axis only, and deliberately so — it cannot refuse a
-        real drill whose scratch name does not resolve from the host running it,
-        while every name that DOES resolve is now compared by address.
-        """
-        try:
-            infos = socket.getaddrinfo(host or "localhost", None,
-                                       proto=socket.IPPROTO_TCP)
-        except OSError:
-            return frozenset()
-        return frozenset(str(info[4][0]) for info in infos)
-
-    source_id, scratch_id = _identity(dsn), _identity(scratch_dsn)
-    same_server = source_id["host"] == scratch_id["host"]
-    if not same_server:
-        same_server = bool(_addresses(source_id["host"]) & _addresses(scratch_id["host"]))
-    if (
-        same_server
-        and source_id["port"] == scratch_id["port"]
-        and source_id["database"] == scratch_id["database"]
-    ):
-        raise RecordRestoreRefused(
-            "the drill's scratch DSN resolves to the SAME database as the "
-            f"source ({source_id!r}) — a drill must not restore over, or "
-            "reset, the record it is protecting"
-        )
+    # ⛔ ONE GUARD, AT MODULE LEVEL, AND THE RESET OWNS IT TOO (#9601 review
+    # cycle 5, P1). The two closures that used to live here are `_dsn_identity` /
+    # `_dsn_addresses`, and the comparison is `refuse_same_database` — because
+    # `reset_record_tables`, the operation that actually TRUNCATEs, could not reach
+    # a closure: it emptied whatever DSN it was handed, and the safety was a
+    # property of THIS caller.
+    refuse_same_database(dsn, scratch_dsn)
     before = record_row_counts(dsn, connect=connect)
     if not any(before.values()):
         # A refusal, NOT `RecordRestoreVerifyError`: exit 3 means "the drill ran
@@ -1512,7 +1606,7 @@ def run_restore_drill(
         # the reset and `pg_restore`.
         manifest, payload = load_verified_artifact(storage, backup_key, key=key)
         if reset_scratch:
-            reset_record_tables(scratch_dsn, connect=connect)
+            reset_record_tables(scratch_dsn, source_dsn=dsn, connect=connect)
         restored = restore_record_backup(
             storage,
             backup_key,

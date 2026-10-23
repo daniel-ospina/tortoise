@@ -485,6 +485,14 @@ delete logs a warning and the run still exits `0` (the backup happened) — a pr
 be reported as "the record is NOT backed up". It runs on exit `0` only, so a persistently red drill
 also stops retention; `--reset-scratch` is what keeps the scheduled drill on the `0` path.
 
+⚠️ **The exit-`2` case is the one to watch, because it is the likeliest.** A drill publishes its
+artifact *before* it restores, so any post-publish refusal — the commonest being a **populated scratch
+target because `--reset-scratch` was dropped from the cron line** — mints a new artifact and then
+returns without pruning. That grows `record-backups/` by one full encrypted dump per run, without
+bound, while the exit table reads as "no verdict" rather than as "retention has stopped". Count the
+artifacts (`record-backup --list`) if the drill has been red for more than `--keep` runs; the reset is
+the repair, and it returns the job to the pruning path.
+
 ### Schedule — NOT YET DEPLOYED, and that is the current loss window
 
 The verb is the caller; no cron currently invokes it, so **the record has no automatic archive yet**

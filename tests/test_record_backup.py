@@ -1096,7 +1096,7 @@ def test_the_scratch_reset_truncates_the_record_tables_and_nothing_else():
     def connect(dsn):
         return RecordingConn(dsn, scratch)
 
-    rb.reset_record_tables(SCRATCH_DSN, connect=connect)
+    rb.reset_record_tables(SCRATCH_DSN, source_dsn=DSN, connect=connect)
     assert len(seen) == 1
     assert "CASCADE" not in seen[0].upper()
     for table in THE_RECORD_TABLES:
@@ -1206,6 +1206,171 @@ def test_the_drill_reds_when_the_restored_record_is_short():
             DSN, MemoryStorage(), SCRATCH_DSN, run=runner, connect=db.connect, key=KEY
         )
     assert "journal_event" in str(excinfo.value)
+
+
+def test_the_reset_REFUSES_the_record_it_is_supposed_to_protect():
+    """#9601 review cycle 5 (P1): the reset OWNS the identity guard.
+
+    The refusal used to be a closure inside `run_restore_drill`, so the exported
+    operation that TRUNCATEs accepted whatever DSN it was handed — safe by CALLER,
+    not by construction. Every spelling of the record below reaches the same
+    database, and NONE of them may connect: the guard decides before the first
+    cursor exists, which is the property that makes a pre-connection check worth
+    having.
+    """
+    attempts: list[str] = []
+
+    def connect(dsn):
+        attempts.append(dsn)
+        raise AssertionError("the reset connected before deciding the target was safe")
+
+    same_spellings = (
+        DSN,
+        DSN.replace("postgresql://", "postgres://"),
+        DSN + "/",
+        DSN.replace(":5432", ""),
+    )
+    for target in same_spellings:
+        with pytest.raises(rb.RecordRestoreRefused, match="SAME database"):
+            rb.reset_record_tables(target, source_dsn=DSN, connect=connect)
+    assert attempts == [], (
+        "the reset connected to a target it had not yet proven different from the "
+        f"record: {attempts}"
+    )
+
+
+def test_the_reset_REFUSES_a_Dsn_that_names_no_database():
+    """#9601 review cycle 5 (P1): libpq fills a missing `dbname`, so it cannot be compared.
+
+    `postgresql://user:pw@host:5432` (and the same with a trailing `/`) parses to an
+    EMPTY database name, and libpq then uses `PGDATABASE`, else the USER name — so a
+    "different" DSN can reach the record, and `--reset-scratch` TRUNCATEs it. The
+    dump leg already refused this shape; the leg that deletes did not.
+    """
+
+    def connect(dsn):
+        raise AssertionError("connected to a DSN that names no database")
+
+    unnamed = (
+        "postgresql://record_user:s3cr3t-pw@db.projectref.supabase.co:5432",
+        "postgresql://record_user:s3cr3t-pw@db.projectref.supabase.co:5432/",
+    )
+    for target in unnamed:
+        with pytest.raises(rb.RecordRestoreRefused, match="names no database"):
+            rb.reset_record_tables(target, source_dsn=DSN, connect=connect)
+
+
+def test_a_failed_dump_delete_does_NOT_orphan_its_manifest():
+    """#9601 review cycle 5 (P3): the manifest is the index — it goes last.
+
+    A `continue` after a failed delete moved on to the MANIFEST, so a locked dump
+    object lost its manifest: the artifact then vanished from `list_record_backups`
+    (which enumerates manifests) while its ciphertext stayed in the bucket forever,
+    unreachable and unprunable, one per failed delete.
+    """
+
+    class LockedDumpStorage(MemoryStorage):
+        def __init__(self, locked: str) -> None:
+            super().__init__()
+            self.locked = locked
+
+        def delete(self, key: str) -> None:
+            if key.endswith(rb.DUMP_OBJECT) and key.startswith(self.locked):
+                raise RuntimeError("object is locked")
+            super().delete(key)
+
+    storage = MemoryStorage()
+    oldest, _, _, _ = _dump_manifest(storage=storage)
+    _dump_manifest(storage=storage)
+    locked_base = f"{rb.RECORD_BACKUP_PREFIX}{oldest['backup_id']}"
+    locked = LockedDumpStorage(locked_base)
+    locked._objects = storage._objects  # same bucket, one object refuses deletion
+
+    rb.prune_record_backups(locked, keep=1)
+
+    assert f"{locked_base}/{rb.MANIFEST_OBJECT}" in locked._objects, (
+        "the prune deleted the manifest of an artifact whose dump it could not "
+        "delete — the remaining ciphertext can no longer be listed or pruned"
+    )
+    assert f"{locked_base}/{rb.DUMP_OBJECT}" in locked._objects
+
+
+def test_the_documented_retention_depth_is_pinned():
+    """#9601 review cycle 5 (P3): `14` is stated in two docs and defended by nothing.
+
+    Every prune arm passes an explicit `keep`, so the CONSTANT could be changed to
+    any number with the whole suite green. A retention depth is a durability
+    promise (how far back a record can be restored), so it is asserted against the
+    figure the docs publish, in both places a default is applied.
+    """
+    import inspect
+
+    assert rb.RECORD_BACKUP_KEEP == 14
+    assert (
+        inspect.signature(rb.prune_record_backups).parameters["keep"].default
+        == rb.RECORD_BACKUP_KEEP
+    ), "the prune's own default drifted from the documented depth"
+
+
+def test_a_BLANK_scratch_dsn_is_a_usage_error_not_backup_only(monkeypatch):
+    """#9601 review cycle 5 (P2): `--scratch-dsn "$UNSET"` must not read as "published".
+
+    An empty flag value used to fall into backup mode — exit 0, `published`, and no
+    drill — on a schedule whose exit table defines `0` in drill mode as "the restore
+    verified". An ABSENT flag still means backup-only, and a blank ENV value still
+    means "not configured"; only a SUPPLIED flag that names nothing is an error.
+    """
+    storage = MemoryStorage()
+    assert _cli(
+        monkeypatch,
+        ["record-backup", "--record-dsn", DSN, "--scratch-dsn", ""],
+        storage=storage,
+    ) == 2
+    assert storage.list(rb.RECORD_BACKUP_PREFIX) == [], (
+        "a blank --scratch-dsn still published an artifact"
+    )
+    # ...and the absent-flag path is unchanged: backup-only, exit 0, one artifact.
+    assert _cli(monkeypatch, ["record-backup", "--record-dsn", DSN], storage=storage) == 0
+    assert len(storage.list(rb.RECORD_BACKUP_PREFIX)) > 0
+
+
+def test_a_failed_upload_is_a_documented_failure_class_not_a_traceback(monkeypatch, capsys):
+    """#9601 review cycle 5 (P2): `R2Storage.upload` raises a bare `RuntimeError`.
+
+    None of the verb's handlers caught it, so a bucket fault escaped `main()` as a
+    traceback instead of the exit-`1` "could not perform" the runbook documents.
+    """
+
+    class FailingUpload(MemoryStorage):
+        def upload(self, key: str, data: bytes, content_type: str | None = None) -> None:
+            raise RuntimeError("R2 upload failed for " + key)
+
+    code = _cli(
+        monkeypatch,
+        ["record-backup", "--record-dsn", DSN],
+        storage=FailingUpload(),
+    )
+    assert code == 1, "an upload failure must arrive as the exit-1 class, not a traceback"
+    err = capsys.readouterr().err
+    assert "NOT backed up" in err and "Traceback" not in err
+
+
+def test_the_prune_keeps_the_documented_depth_by_default(monkeypatch):
+    """#9601 review cycle 5 (P3): the verb's default reaches the documented `14`.
+
+    `test_the_documented_retention_depth_is_pinned` pins the constant and the
+    function default; this pins the WIRING — the verb must forward the constant when
+    `--keep` is absent, or the documented depth is a number nobody applies.
+    """
+    seen: list[int] = []
+
+    def spy(storage, *, keep=rb.RECORD_BACKUP_KEEP):
+        seen.append(keep)
+        return []
+
+    monkeypatch.setattr(rb, "prune_record_backups", spy)
+    assert _cli(monkeypatch, ["record-backup", "--record-dsn", DSN]) == 0
+    assert seen == [14], f"the verb pruned with {seen}, not the documented depth"
 
 
 # ── retention: prune never guesses ─────────────────────────────────────────
