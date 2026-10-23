@@ -391,9 +391,12 @@ kindDefs:
   `- <namespace>:<kind>[ — <description>] [values: <field>(<kind>[, required][, many]), …]` —
   the annotation is exactly what `tortoise/pack_values.py::value_field_annotations` emits: a
   token is present only when it applies (`required` for a required field, `many` for
-  `cardinality: many`; there is no `optional` token — an optional field simply omits it), and
-  the `— <description>` gloss appears only when it disambiguates (`_needs_gloss`). The shape
-  below is ILLUSTRATIVE — a two-field tenant kind, not a shipped one:
+  `cardinality: many`; there is no `optional` token — an optional field simply omits it). The
+  `[ — <description>]` gloss belongs to the RENDER, not to that annotation, and the two render
+  modes differ: the default (verbose) one always prints it, while under
+  `TORTOISE_EXTRACTOR_PROMPT=compact` `tortoise/extractor_v2.py::_needs_gloss` withholds it
+  unless the description disambiguates. The shape below is ILLUSTRATIVE — a two-field tenant
+  kind, not a shipped one, and it is the VERBOSE render's shape:
   `- venture:fundingTranche — A tranche of a financing round [values: committedAmountMinor(money,
   required), trancheLabel(quantity, many)]`. The shared S2/S4 rule slot also states the policy:
   keep a declared value EXACT, use the declared name, and never invent a field or a value kind.

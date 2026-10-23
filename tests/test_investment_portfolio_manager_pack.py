@@ -604,6 +604,16 @@ class TestClashRules:
             assert not [k for k in got if k.startswith(f"{NS}:")], (story, got)
             assert "dev:issue" in got, (story, got)
 
+        # Two of those exclusions could never have matched this namespace
+        # ALONE, and the row's comment states that as the reason they are not
+        # counter-examples to the measurement: `policy statement` and `policy
+        # weight` also carry `agent-ops:`'s bare "policy". Pinned, not a
+        # fail-on — the point is that the RECORD stays checkable rather than
+        # being prose that re-stales the day `agent-ops:`'s row changes.
+        for entry in ("policy statement", "policy weight"):
+            assert entry in self.NON_TRIGGER_SYNONYMS, entry
+            assert any(t in entry for t in _PACK_TRIGGERS["agent-ops:"]), entry
+
         # Bare generic words are the OTHER half of the same trap: an overlay
         # trigger must match the mentions the pack DECLARES, and only those.
         # Each of these is a real-world sentence with no portfolio subject, and
@@ -858,9 +868,11 @@ class TestKindsAreMintable:
         """A CLEAN verdict over ZERO graded rules must not reach the caller
         unqualified.
 
-        Both rules read their whole vocabulary off the pack, so with no
-        readable `portfolio` pack there is nothing to grade and `ok` stays
-        `True` — honestly, since there is no violation to report. But the
+        The UNDECLARED-STATUS rule reads its whole vocabulary off the pack, so
+        with no readable `portfolio` pack it grades ZERO rules and `ok` stays
+        `True` — honestly, since there is no violation to report. (The orphan
+        rule is NOT blind in that state: `_portfolio_mark_contract` falls back
+        to the module constants, so it still grades.) But the
         server-side `logger.warning` is not a channel an MCP/CLI caller of
         `tortoise_validate_domain` can read, so without this the caller gets an
         unqualified green light over an EMPTY rule set — the exact failure

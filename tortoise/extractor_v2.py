@@ -830,8 +830,15 @@ _PACK_TRIGGERS = {
     # mandate…", "resource allocation…", "a visual impairment…".
     #
     # A space or a hyphen is NOT enough. Measured on this row's earlier drafts,
-    # each of these selected `portfolio:*` ALONE on an ordinary non-portfolio
-    # sentence and so stripped every other pack's kinds:
+    # each of these selected `portfolio:*` on an ordinary non-portfolio story
+    # and so suppressed the all-packs fallback, dropping the OTHER packs' kinds
+    # — the overlay the story actually needed. Two of them are exceptions to the
+    # SCOPE of that measurement rather than counter-examples to it:
+    # `policy statement` and `policy weight` also match `agent-ops:`'s bare
+    # "policy", so instead of every sibling they dropped dev/marketing/pm/
+    # venture and left agent-ops standing — and since every story carrying
+    # "policy statement" necessarily carries "policy", no sentence exists on
+    # which those two could have matched alone:
     #   * `valuation mark` — a SUBSTRING of "evaluation mark" and "revaluation
     #     mark", the same trap as bare `valuation` one word longer;
     #   * `write-up` / `write-down` — "the write-up of the release", "a
