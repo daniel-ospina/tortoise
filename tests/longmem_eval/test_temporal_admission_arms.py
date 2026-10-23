@@ -21,6 +21,7 @@ Run: TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/longmem_eval/test_temporal_ad
 from __future__ import annotations
 
 import json
+from typing import ClassVar
 
 from tools.longmem_eval import temporal_admission_arms as arms
 
@@ -189,7 +190,7 @@ def test_the_completion_arm_pins_its_budgets_against_the_ambient_env(
     from tools.longmem_eval import retrieve as R
 
     class _Empty:
-        result_set: list = []
+        result_set: ClassVar[list] = []
 
     class _Graph:
         def query(self, cypher, params=None):
@@ -267,7 +268,7 @@ def test_admission_on_selects_the_session_assembler_without_an_item_cap(
     from tools.longmem_eval import retrieve as R
 
     class _Empty:
-        result_set: list = []
+        result_set: ClassVar[list] = []
 
     class _Graph:
         def query(self, cypher, params=None):
@@ -388,7 +389,7 @@ def test_completion_never_rebinds_the_ranked_pool(monkeypatch):
     from tools.longmem_eval import retrieve as R
 
     class _Empty:
-        result_set: list = []
+        result_set: ClassVar[list] = []
 
     class _Graph:
         def query(self, cypher, params=None):

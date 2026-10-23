@@ -40,7 +40,7 @@ Usage::
         --split s --db 'docker://:pw@localhost:6379/db' \
         --reader-model deepseek:deepseek-v4-flash \
         --judge-model variant-containment \
-        --out docs/runbook/2976-admission-arms.jsonl
+        --out /tmp/2976-admission-arms.jsonl
 
     # a shard of the subset (parallel lanes share no question graph)
     ... --shard 0 --shards 6
@@ -49,8 +49,10 @@ from __future__ import annotations
 
 import sys
 
-# #5128: refuse a <3.12 interpreter before the imports below.
-if sys.version_info < (3, 12):  # noqa: UG036 — intentional RUNTIME guard
+# #5128: refuse a <3.12 interpreter before the imports below — the eval
+# lane is 3.12-only, so a bare ImportError would be the first thing a
+# 3.11 user sees.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
         "tools/longmem_eval.temporal_admission_arms requires Python >= 3.12"
     )
@@ -58,7 +60,6 @@ if sys.version_info < (3, 12):  # noqa: UG036 — intentional RUNTIME guard
 import argparse
 import contextlib
 import json
-import os
 import tempfile
 import time
 from pathlib import Path
@@ -283,7 +284,7 @@ def main(argv: list[str] | None = None) -> int:
           f"reader={reader.model_id} judge={judge.model_id}", file=sys.stderr)
 
     with out_path.open("a", encoding="utf-8") as fh, \
-            tempfile.TemporaryDirectory(dir=args.work_dir) as td:
+            tempfile.TemporaryDirectory(dir=args.work_dir):
         for i, row in enumerate(rows, 1):
             qid = row["qid"]
             if qid in done:

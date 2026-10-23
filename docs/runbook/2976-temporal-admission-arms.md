@@ -94,9 +94,11 @@ below the rank-40 band. The mechanism needed is *more budget spent*, not a
 bigger item count — and with ~180 tok/item, an item cap near the budget ceiling
 would silently re-bind at a different number.
 
-**Why not the reranker?** `applied-rerank` is the one arm with a measured
-admission effect (21/55), but it adds a cross-encoder dependency and 6.6×
-context for 6/52. The change here needs no model.
+**Why not the reranker?** `applied-rerank` is the only committed arm that moves
+CONVERSION (6/52) — its gold-admitted count (21/55) is shared with `cap3-only`
+(21/55), so admission alone does not distinguish them — and it adds a
+cross-encoder dependency plus 6.6× context for those 6. The change here needs no
+model.
 
 ## 4. Granularity: measured, and rejected
 

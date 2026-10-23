@@ -35,9 +35,9 @@ from tools.longmem_eval.judge import (
     VARIANT_CONTAINMENT_SPEC,
     VariantContainmentJudge,
     build_judge,
+    gold_variants,
     grade_label,
     grade_variant_aware,
-    gold_variants,
 )
 from tools.longmem_eval.preflight import check_judge_key
 
@@ -105,7 +105,7 @@ def test_the_committed_oracle_ceiling_is_reproducible():
     from committed artifacts with no reader call and no judge key."""
     try:
         instances = ds.load_dataset(split="s", download=False)
-    except Exception:  # noqa: BLE001 - the split is a 277 MB cache artifact
+    except Exception:
         pytest.skip("LongMemEval split not cached on this host")
     rows = [json.loads(ln) for ln in ROWS.read_text().splitlines() if ln.strip()]
     inst = {i["question_id"]: i for i in instances}
