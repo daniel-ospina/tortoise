@@ -157,14 +157,18 @@ class CommitRecordStore:
     def discard_attempt(self, client_commit_id: str) -> bool:
         """Delete a record THIS attempt created, before any write (#4051).
 
-        A refusal that happens after ``acquire`` (the 402 gates, the 429 ingest
-        throttle) leaves a ``status='partial'`` record behind. That is NOT a
-        neutral leftover: ``plan_commit``/``is_first_adjudication`` treat ANY
-        existing record as a previous attempt, so the retry of the very same
+        A refusal that happens after ``acquire`` leaves a ``status='partial'``
+        record behind unless it cleans up after itself. That is NOT a neutral
+        leftover: ``plan_commit``/``is_first_adjudication`` treat ANY existing
+        record as a previous attempt, so the retry of the very same
         ``client_commit_id`` is re-adjudicated WITHOUT the first-adjudication
         hard-25 band and writes the items the original attempt would have HELD
         (measured: a 26-net-new payload 200s with ``held`` 26 on a clean graph,
         and WRITES them after a refusal left the record).
+
+        The 429 ingest throttle calls this; the 402 org-limit gates still do
+        not, which is #9826 — so a 402-then-retry still writes what a first
+        adjudication would have held.
 
         Deleting restores the pre-attempt state exactly, which is what the
         refusal promised: nothing was written, so the client's documented

@@ -467,14 +467,20 @@ the `{error}`-only shape whose retry action is different.
   refusal is about the instance and not about anything you wrote). This is a
   **throttle, not a cap**: it never refuses your data, the window self-heals
   within 60 s, and the correct action is **backoff-and-retry** — the opposite
-  of the cumulative `ERR_QUOTA` advice above. A refused request writes nothing
-  and leaves no commit record **of its own attempt**: if that attempt was the
-  first for this `client_commit_id`, retrying it after the backoff is a
-  **first** attempt — the same `held[]` adjudication a clean request would have
+  of the cumulative `ERR_QUOTA` advice above. A refused request leaves the graph
+  as it found it — its net effect is nil (the idempotency record it opened is
+  removed when it was that request that created it), so the refusal adds no
+  node a later attempt could be judged against. If that attempt was the first
+  for this `client_commit_id`, retrying it after the backoff is a **first**
+  attempt — the same `held[]` adjudication a clean request would have
   received, not a second one. (If an EARLIER attempt of the same id already left
-  a record — a `held` deferral or a crash mid-write — that record is preserved
-  and the retry is adjudicated against it, which is the documented re-submission
-  path above.) (The repo's bundled SDK does not
+  a record — a `held` deferral, a crash mid-write, or a refusal from a gate
+  that does not clean up after itself, see #9826 — that record is preserved and
+  the retry is adjudicated against it: a re-submission is not re-adjudicated
+  against the 25-item first-adjudication band, only against the 50 ceiling, so
+  it writes what a first pass would have held. `fully_written` is the one case
+  that never reaches a gate at all: it replays as `duplicate: true` above.)
+  (The repo's bundled SDK does not
   yet auto-retry a 429 — see #9799 — so a client driving the endpoint directly
   should honour `Retry-After` itself.) It exists because the removal of the
   flat session cap (#4010 — sessions are unlimited for every tier, by owner
