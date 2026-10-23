@@ -1698,6 +1698,93 @@ def test_the_verb_backup_mode_does_not_claim_the_artifact_restores(monkeypatch, 
     assert storage.list(rb.RECORD_BACKUP_PREFIX) != []
 
 
+def test_the_verb_exits_3_when_the_drill_disagrees_with_its_source(monkeypatch, capsys):
+    """Exit `3` is the ONLY code that says "restore disproved".
+
+    #9601 review (P1): every other exit code had a verb-level test; this one had
+    only a NEGATIVE assertion (`"MISMATCH" not in out`, in the empty-record test).
+    Mutating `return 3` -> `return 0` left the whole suite green, so a regression
+    that turns a RED drill into exit `0` would tell an operator and a scheduler
+    that the record is backed up AND the artifact proven restorable, when the
+    drill proved it does NOT restore. That is the exact false PASS this feature
+    exists to prevent, and nothing pinned it.
+    """
+    storage = MemoryStorage()
+    db = FakeDB(SOURCE_COUNTS)
+    # The restore "runs" and populates nothing: the restored copy disagrees with
+    # a populated source, which is a MISMATCH verdict — not the empty-SOURCE
+    # refusal (the source has rows; the restore produced none).
+    rc = _cli(
+        monkeypatch,
+        ["record-backup", "--record-dsn", DSN, "--scratch-dsn", SCRATCH_DSN, "--json"],
+        storage=storage,
+        db=db,
+        runner=FakeRunner(on_restore=lambda: None),
+    )
+    assert rc == 3, "a red drill must not exit 0 — 0 is 'backed up and proven'"
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out[captured.out.index("{"):])
+    assert payload["verdict"] == "MISMATCH"
+    assert payload["mismatches"], "a MISMATCH must name the tables that disagree"
+    assert "RESTORE DRILL RED" in captured.err
+    # The contract exit 3 shares with its sibling `RecordRestoreFailed` path: a
+    # disagreeing drill is a RESTORE verdict, never a durability outage. The
+    # reviewed suggestion also expected the published artifact id in stderr;
+    # verified against the source and it is NOT in that message, so asserting it
+    # would have pinned a requirement the code does not make (a finding is a
+    # claim — verified, not applied).
+    assert "NOT proven restorable" in captured.err
+    assert "record was NOT backed up" not in captured.err
+
+
+def test_the_verb_passes_keep_to_the_prune(monkeypatch):
+    """`--keep` is the operator's retention policy; it must reach `prune`.
+
+    #9601 review (P2): the prune tests call `prune_record_backups` DIRECTLY with
+    their own `keep`, so nothing asserted the flag is plumbed from the verb.
+    Mutating `keep=keep` -> `keep=1` left the suite green — and then an operator's
+    `--keep 30` would silently delete every artifact past the first.
+    """
+    seen = {}
+
+    def _prune(storage, keep):
+        seen["keep"] = keep
+        return []
+
+    monkeypatch.setattr(rb, "prune_record_backups", _prune)
+
+    assert _cli(
+        monkeypatch, ["record-backup", "--record-dsn", DSN, "--keep", "7"],
+        storage=MemoryStorage(),
+    ) == 0
+    assert seen == {"keep": 7}
+
+
+def test_the_restore_argv_is_data_only_and_single_transaction(monkeypatch):
+    """The restore's atomicity is a documented guarantee — pin the argv.
+
+    `restore_record_backup`'s docstring says `--single-transaction` makes the
+    restore atomic, "the only exit a drill can be trusted to observe". The DUMP
+    side's argv is asserted; the RESTORE side's was not, and dropping
+    `--single-transaction` (or `--data-only`) left the suite green — a mid-restore
+    failure would then leave a half-restored scratch, so the documented "retry"
+    meets exit 2 ("the target record is NOT empty") instead.
+    """
+    db = FakeDB(SOURCE_COUNTS)
+    runner = FakeRunner(on_restore=db.populate_scratch_from_source)
+    assert _cli(
+        monkeypatch,
+        ["record-backup", "--record-dsn", DSN, "--scratch-dsn", SCRATCH_DSN],
+        storage=MemoryStorage(),
+        db=db,
+        runner=runner,
+    ) == 0
+    argv = runner.argv_for("pg_restore")
+    for flag in ("--data-only", "--single-transaction", "--exit-on-error",
+                 "--no-owner", "--no-privileges"):
+        assert flag in argv, f"the restore argv lost {flag}: {argv}"
+
+
 def test_the_dumps_table_set_is_the_schema_s_table_set():
     """The artifact must cover what the MIGRATIONS create, not a parallel list.
 

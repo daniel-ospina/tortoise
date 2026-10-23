@@ -436,7 +436,7 @@ proven restorable"*, and only the drill mode proves it. Run the drill on a sched
 
 ### `--reset-scratch` — what makes a scheduled drill repeatable
 
-With `--reset-scratch`, the verb `TRUNCATE`s the record's **own nine tables** on the scratch DSN
+With `--reset-scratch`, the verb `TRUNCATE`s the record's **own ten tables** on the scratch DSN
 only, in one statement, **after the artifact has been downloaded and verified** (integrity, table
 set, column pin, decryption) and immediately before `pg_restore`. It is
 opt-in because an automatic truncate would destroy the leftover state of a RED drill — the evidence
@@ -449,7 +449,7 @@ can never touch the record itself: a scratch DSN equal to the source is refused 
 
 The record is a **live** system of record, and it is not append-only: it takes rows in and it ages
 them out (`record_projection` emits `DELETE` for `delete`/`merge` journal ops, and the erasure RPC
-removes all nine tables). The artifact is cut from a snapshot taken after the manifest's row counts,
+removes all ten tables). The artifact is cut from a snapshot taken after the manifest's row counts,
 so rows committed in that gap are legitimately in the artifact and not in the count. The drill
 therefore compares each table against the window `[min(before, after), max(before, cut, after)]`,
 where `before` is the pre-dump count, `cut` is a count taken as the artifact is cut, and `after` is
