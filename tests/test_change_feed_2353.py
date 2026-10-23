@@ -850,3 +850,222 @@ def test_precondition_objects_are_not_shared_between_calls():
     assert _PRECONDITIONS["PointPromoted"]["status"] == ["draft", None]
     again = aggregate_changes(events)[0]["changes"][0]
     assert again["precondition"] == {"status": ["draft", None]}
+
+# ── 6. the issue's indicators, as executable closing evidence ────────────────
+#
+# #8705 (MERGED) landed the implementation. This section is the CLOSING
+# EVIDENCE for the O/I/T the issue #2353 states, so "the indicators hold on this
+# tree" is a test run rather than a reading of the sections above. Nothing here
+# adds behaviour: every assertion drives the REAL write path or reads a
+# committed record, and no production code is touched.
+
+def test_indicator_1_point_revised_has_store_parity_under_the_switch(
+        monkeypatch, sdk_factory, tmp_path):
+    """Indicator (1): `PointRevised` lands in the `:GraphEvent` store with
+    PARITY with PointAdded/PointSuperseded/PointRetracted — under
+    `TORTOISE_CHANGE_FEED`, the recorded opt-in (widening the DEFAULT emit set
+    would reverse the plan-review decision this module's docstring names).
+
+    Both halves matter, so both are measured: ON, all four transitions are in the
+    same store page; OFF, the three unconditional ones are still there and ONLY
+    the revision is absent.
+    """
+    def _types(sdk):
+        return [e["type"] for e in _graph_events(sdk._get_proj())]
+
+    def _drive(sdk):
+        claim = sdk.create_point("statement", "v1")
+        sdk.update_point(claim["id"], content="v2")   # the gated record
+        succ = sdk.create_point("statement", "successor")
+        sdk.supersede_point(claim["id"], succ["id"])
+        doomed = sdk.create_point("statement", "doomed")
+        sdk.retract_point(doomed["id"])
+
+    monkeypatch.setenv("TORTOISE_CHANGE_FEED", "1")
+    on = sdk_factory(tmp_path)
+    try:
+        _drive(on)
+        on_types = _types(on)
+    finally:
+        on.close()
+
+    for t in ("PointAdded", "PointRevised", "PointSuperseded",
+              "PointRetracted"):
+        assert t in on_types, f"{t} missing from the store: {sorted(set(on_types))}"
+
+    monkeypatch.delenv("TORTOISE_CHANGE_FEED", raising=False)
+    off = sdk_factory(tmp_path)
+    try:
+        _drive(off)
+        off_types = _types(off)
+    finally:
+        off.close()
+
+    # PARITY BY MULTISET DIFFERENCE, not three membership checks: the OFF emit
+    # list must be the ON one MINUS exactly one `PointRevised` and nothing
+    # else. A second gated type would slip past a membership list; a DUPLICATE
+    # emit under the switch — the regression class this feature is most exposed
+    # to — would slip past a set comparison, so the multiset is the assertion.
+    assert sorted(on_types) == sorted([*off_types, "PointRevised"]), (
+        f"ON={sorted(on_types)} OFF={sorted(off_types)}")
+
+
+def test_indicator_2_one_call_reports_content_validity_status_and_ep(
+        monkeypatch, sdk_factory, tmp_path):
+    """Indicator (2): ONE what-changed read returns per-point deltas carrying
+    before→after for all four field families the issue names — content,
+    validity, status and the EP dimensions — aggregated, not a raw replay.
+    """
+    monkeypatch.setenv("TORTOISE_CHANGE_FEED", "1")
+    sdk = sdk_factory(tmp_path)
+    try:
+        # A DRAFT claim, so the promote door is reachable at all: a point is
+        # created `live`, and `update_point(status="live")` on an already-live
+        # point is a recorded no-op (it emits nothing).
+        p = sdk.create_point("statement", "v1", status="draft")
+        sdk.update_point(p["id"], content="v2")
+        sdk.update_point(p["id"], content="v3")
+        sdk.update_point(p["id"], validTo="2030-01-01T00:00:00+00:00")
+        sdk.update_point(p["id"], status="live")     # the promote door
+        ev = sdk.create_point("statement", "evidence")
+        op = sdk.create_operator("IMPL", p["id"], [ev["id"]])
+        sdk.annotate_operator(op["id"], 0.5, 0.5, 0.5, 0.5)
+        sdk.annotate_operator(op["id"], 0.9, 0.5, 0.5, 0.5)
+        succ = sdk.create_point("statement", "successor")
+        sdk.supersede_point(p["id"], succ["id"])
+
+        resp = sdk.poll_events()                     # ONE call
+        deltas = _group(resp["changes"], p["id"])["changes"]
+
+        # CONTENT: observed before→after.
+        assert [d for d in deltas
+                if d.get("before", {}).get("content") == "v2"
+                and d["after"].get("content") == "v3"]
+        # VALIDITY: the revision that ONLY sets a window (no content edit).
+        validity_only = next(d for d in deltas if set(d["after"]) == {"validTo"})
+        assert validity_only["after"]["validTo"] == "2030-01-01T00:00:00+00:00"
+        # STATUS: the promote door reports the value AND its own precondition.
+        promoted = [d for d in deltas if d["change"] == "promoted"]
+        assert promoted and promoted[0]["after"]["status"] == "live"
+        assert promoted[0]["precondition"] == {"status": ["draft", None]}
+        # STATUS: terminal transition, named and guarded — never a fake before.
+        terminal = next(d for d in deltas if d["change"] == "superseded")
+        assert terminal["after"]["status"] == "superseded"
+        assert terminal["after"]["supersededBy"] == succ["id"]
+        assert terminal["precondition"] == {"terminal": False}
+        # ...and BOTH of those families report before→after here, because the
+        # window observed the promote (status) and the window edit (validTo).
+        assert terminal["before"]["status"] == "live"
+        assert terminal["before"]["validTo"] == "2030-01-01T00:00:00+00:00"
+        assert terminal["after"]["validTo"] != terminal["before"]["validTo"]
+        # EP-RELEVANT FIELDS: observed before→after on the operator.
+        ann = [d for d in _group(resp["changes"], op["id"])["changes"]
+               if d["change"] == "annotated"]
+        assert len(ann) == 2, [d["change"] for d in ann]
+        assert set(ann[1]["after"]) == {"bias", "precision", "consistency",
+                                       "directness"}
+        assert ann[1]["before"]["bias"] == 0.5
+        assert ann[1]["after"]["bias"] == 0.9
+
+        # AGGREGATED, not raw replay, MEASURED: the SAME single OperatorAdded
+        # row is reported as news for all three claims it names (the operator,
+        # the point it supports, the point it relates). A raw replay yields one
+        # row; the fold yields three groups — that is the work the fold does.
+        op_seq = next(e["seq"] for e in resp["events"]
+                      if e["type"] == "OperatorAdded")
+        named_by_the_one_row = {g["id"] for g in resp["changes"]
+                                if any(d["seq"] == op_seq for d in g["changes"])}
+        assert named_by_the_one_row == {p["id"], ev["id"], op["id"]}
+    finally:
+        sdk.close()
+
+
+def test_indicator_3_a_consumer_answers_the_audit_question_from_changes_only(
+        monkeypatch, sdk_factory, tmp_path):
+    """Indicator (3): a consumer drives off the semantic feed without
+    re-deriving intent — the supersession-history/audit answer is reconstructed
+    from `changes` ALONE, never from the raw `events` page.
+    """
+    monkeypatch.setenv("TORTOISE_CHANGE_FEED", "1")
+    sdk = sdk_factory(tmp_path)
+    try:
+        p = sdk.create_point("statement", "v1")
+        sdk.update_point(p["id"], content="v2")
+        succ = sdk.create_point("statement", "successor")
+        sdk.supersede_point(p["id"], succ["id"])
+
+        changes = sdk.poll_events()["changes"]       # the ONLY input read
+
+        def history(claim_id):
+            g = _group(changes, claim_id) or {"changes": []}
+            return [d["change"] for d in g["changes"]]
+
+        def belief(claim_id):
+            """Current status + why — folded from `change`/`after`, no raw replay.
+
+            The `deleted` kind ENDS the incarnation, so it clears the answer
+            instead of carrying the pre-delete status forward: reporting "still
+            superseded" for a DESTROYED node is the fabricated reading the
+            module docstring calls load-bearing (`test_hard_delete_is_not_
+            reported_as_a_retraction` pins that such a row's `after` is `{}`).
+            """
+            g = _group(changes, claim_id) or {"changes": []}
+            status, superseded_by = None, None
+            for d in g["changes"]:
+                if d["change"] == "deleted":
+                    status, superseded_by = None, None
+                    continue
+                after = d["after"]
+                status = after.get("status", status)
+                superseded_by = after.get("supersededBy", superseded_by)
+            return status, superseded_by
+
+        assert history(p["id"]) == ["created", "revised", "superseded"]
+        assert belief(p["id"]) == ("superseded", succ["id"])
+        # the successor's own history is NOT mislabelled as the superseded one
+        assert "superseded" not in history(succ["id"])
+
+        # ...and a destroyed claim is reported GONE, not as its last status.
+        destroyed = sdk.create_point("statement", "gone")
+        sdk.update_point(destroyed["id"], content="gone-v2")
+        sdk.retract_point(destroyed["id"])
+        sdk.delete_point(destroyed["id"])
+        changes = sdk.poll_events()["changes"]
+        assert history(destroyed["id"])[-1] == "deleted"
+        assert belief(destroyed["id"]) == (None, None)
+    finally:
+        sdk.close()
+
+
+def test_indicator_3_cost_is_a_recorded_response_field_not_a_tool_or_verb():
+    """The issue's surface target — **MCP tool count +0, SDK verb count +0 (no
+    new public method)** — measured against the committed records: `changes`
+    rides TWO `response_fields` rows on the EXISTING poll surface (the #3863
+    carve-out), and the fold is neither a tool nor an SDK verb.
+    """
+    from pathlib import Path
+
+    import yaml
+
+    from tortoise.sdk import TortoiseSDK
+    from tortoise.tool_registry import TOOL_REGISTRY
+
+    root = Path(__file__).resolve().parents[1]
+    manifest = yaml.safe_load(
+        (root / "config" / "surface-manifest.yml").read_text())
+    rows = {(r["response"], r["field"]) for r in manifest["response_fields"]}
+    assert ("tortoise_events_poll", "changes") in rows
+    assert ("sdk:poll_events", "changes") in rows
+
+    # NAMED symbols, not a name-substring sweep: a sweep for "change" is a
+    # false green for exactly the addition it claims to prevent (`what_changed`
+    # / `delta_for_point` contain no "change" prefix match failure the sweep
+    # would catch) and a false red for any unrelated future `exchange_*` name.
+    assert [t.name for t in TOOL_REGISTRY
+            if t.sdk_method == "poll_events"] == ["tortoise_events_poll"]
+    assert not [t for t in TOOL_REGISTRY
+                if t.sdk_method in {"aggregate_changes", "what_changed"}]
+    for sym in ("what_changed", "aggregate_changes", "aggregate_change_feed"):
+        assert not hasattr(TortoiseSDK, sym), f"{sym} must not be an SDK verb"
+    assert "poll_events" in {m for m in dir(TortoiseSDK)
+                             if not m.startswith("_")}
