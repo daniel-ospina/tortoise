@@ -526,6 +526,97 @@ def test_reader_marker_does_not_relabel_invalidated_unknown_as_still_true(lane):
     assert marker.endswith("; end unknown]")
 
 
+def test_reader_marker_omits_a_start_that_names_no_instant():
+    """#9730: ``_validity_marker`` interpolated the raw ``valid_from``, so a
+    start naming no instant rendered as a since-DATE (``[valid since TBD]``)
+    — a bound the data denies.
+
+    ``_validity_marker`` reads the BOUND, not the resolved precision, so the
+    #9201/#9244 read gate (``validity.effective_precision``) never reached it:
+    ``""`` escaped by being falsey, but every TRUTHY unorderable value leaked
+    its raw text into the reader-facing evidence. Under the #6140 owner ruling
+    such a start means *no start was recorded*, which is exactly why the
+    precision beside it resolves to ``None`` — so the marker must drop the
+    start clause rather than assert one.
+
+    Fails pre-fix on every window assertion here: ``'[valid since TBD]'``,
+    ``'[valid since TBD; end unknown]'``, ``'[valid since not-a-date]'``.
+    """
+    from tortoise.retrieval import _validity_marker
+    from tortoise.validity import effective_precision
+
+    for bogus in ("TBD", "not-a-date"):
+        # non-vacuous: the bound is PRESENT, and the read gate already reads it
+        # as "no instant" — the marker is the surface that disagreed.
+        assert effective_precision(bogus, None) is None
+        open_marker = _validity_marker(
+            {"valid_from": bogus, "valid_from_precision": None,
+             "end_state": "open"})
+        assert bogus not in open_marker, open_marker
+        assert "since" not in open_marker, open_marker
+        assert open_marker == "[valid]"
+        # the END half is untouched (#9202 owns whether an un-datable END
+        # changes) — only the start clause is omitted.
+        assert _validity_marker({"valid_from": bogus,
+                                 "end_state": "unknown"}) == \
+            "[valid; end unknown]"
+        # a present, orderable END still renders as a bounded window.
+        assert _validity_marker({"valid_from": bogus,
+                                 "valid_to": "2026-06-12"}) == \
+            "[valid → 2026-06-12]"
+
+
+def test_reader_marker_control_keeps_an_orderable_start_byte_identical():
+    """#9730 control: the gate is the read path's OWN predicate
+    (``_created_sort_key(value)[0] == 0``), so every bound that NAMES an
+    instant keeps the exact marker it rendered before the fix — including the
+    END_UNKNOWN form #2350 added."""
+    from tortoise.retrieval import _validity_marker
+
+    assert _validity_marker({"valid_from": "2026-06-10",
+                             "end_state": "open"}) == \
+        "[valid since 2026-06-10]"
+    # a full timestamp is still truncated to the ISO date in the reader text.
+    assert _validity_marker({"valid_from": "2026-06-10T09:30:00Z",
+                             "end_state": "open"}) == \
+        "[valid since 2026-06-10]"
+    assert _validity_marker({"valid_from": "2024-01-01",
+                             "valid_to": "2024-06-01"}) == \
+        "[valid 2024-01-01 → 2024-06-01]"
+    # #2350's ended-but-un-datable end is UNCHANGED (this issue is the START
+    # half only).
+    assert _validity_marker({"valid_from": "2024-01-01",
+                             "end_state": "unknown"}) == \
+        "[valid since 2024-01-01; end unknown]"
+    # an ABSENT start still emits no window marker at all.
+    assert _validity_marker({"valid_from": "", "end_state": "open"}) == ""
+
+
+def test_reader_marker_on_the_search_wire_never_leaks_an_unorderable_start(lane):
+    """#9730 end-to-end: the bug is on the SURFACE THE MODEL READS.
+
+    ``create_point(validFrom="TBD")`` is accepted (narrowing the write
+    contract is #9244's owner decision, not this read-path lane), so the marker
+    is the last honest place to drop the start — measured through the public
+    write and the scan decoration, not just the pure function.
+    """
+    from tortoise.retrieval import _validity_marker
+
+    sdk, _events = lane
+    bogus = sdk.create_point("statement", "undated start", validFrom="TBD")
+    dated = sdk.create_point("statement", "dated start",
+                             validFrom="2024-01-01")
+    hits = {r["id"]: r for r in _scan(sdk)}
+    # non-vacuous: the raw text IS on the wire the renderer consumes.
+    assert hits[bogus["id"]]["valid_from"] == "TBD"
+    assert hits[bogus["id"]]["valid_from_precision"] is None
+    bad_marker = _validity_marker(hits[bogus["id"]])
+    assert "TBD" not in bad_marker, bad_marker
+    assert bad_marker == "[valid]"
+    # control: the same surface still renders an orderable start.
+    assert _validity_marker(hits[dated["id"]]) == "[valid since 2024-01-01]"
+
+
 def test_search_annotation_distinguishes_open_from_unknown(lane):
     sdk, _events = lane
     still = sdk.create_point("statement", "still", validFrom="2024-01-01")

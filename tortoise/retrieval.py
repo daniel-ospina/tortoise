@@ -918,6 +918,13 @@ def _validity_marker(h: dict) -> str:
         way would fabricate coverage, the exact hazard the 3-state end
         exists to prevent.
       - undated hits → NO validity marker (byte-identical rendering)
+      - a PRESENT but UNORDERABLE start (``valid_from="TBD"`` /
+        ``"not-a-date"``) → the start clause is OMITTED, never interpolated
+        (#9730): ``[valid]`` / ``[valid; end unknown]`` / ``[valid → <to>]``.
+        Under the #6140 owner ruling such a bound names no instant, i.e. no
+        start was recorded — which is exactly why ``validity
+        .effective_precision`` reports no precision for it (#9201/#9244) —
+        so ``[valid since TBD]`` asserted a bound the data denies.
     ISO date strings (YYYY-MM-DD — the dataset/``when`` normalization): no
     full timestamps in the reader context; timestamps stay on the graph
     properties. The supersession markers (SUPERSEDED BY / SUPERSEDES) are
@@ -937,25 +944,59 @@ def _validity_marker(h: dict) -> str:
     ex = (h.get("expired_at") or "").strip()
     if vf:
         # ISO date strings only — truncate full timestamps to YYYY-MM-DD.
-        vfd = vf[:10] if len(vf) > 10 else vf
+        # #9730: a START that names no instant renders NO start clause. The
+        # gate is the read gate's OWN predicate (``_bounds_an_instant`` ⇒
+        # ``search_engine._created_sort_key(vf)[0] == 0``, the one
+        # ``validity.effective_precision`` resolves precision behind), not a
+        # second notion of "parseable" — so the marker cannot disagree with
+        # the precision it sits beside. ``""`` already escapes as falsey;
+        # only truthy-but-unorderable values leaked here.
+        vfd = (vf[:10] if len(vf) > 10 else vf) if _bounds_an_instant(vf) \
+            else ""
+        since = f" since {vfd}" if vfd else ""
         if vt:
             vtd = vt[:10] if len(vt) > 10 else vt
+            # the both-ends form never carried "since" — a start it cannot
+            # name leaves only the arrow and the end.
+            lead = f"{vfd} " if vfd else ""
             if ex:
                 exd = ex[:10] if len(ex) > 10 else ex
-                marks.append(f"[valid {vfd} → {vtd}; expired {exd}]")
+                marks.append(f"[valid {lead}→ {vtd}; expired {exd}]")
             else:
-                marks.append(f"[valid {vfd} → {vtd}]")
+                marks.append(f"[valid {lead}→ {vtd}]")
         elif ((h.get("end_state") or "") == END_UNKNOWN
               or (h.get("valid_to_precision") or "") == PRECISION_UNKNOWN):
             # #2350: ENDED but un-datable — never relabel as still-true.
             if ex:
                 exd = ex[:10] if len(ex) > 10 else ex
-                marks.append(f"[valid since {vfd}; expired {exd}; end unknown]")
+                marks.append(f"[valid{since}; expired {exd}; end unknown]")
             else:
-                marks.append(f"[valid since {vfd}; end unknown]")
+                marks.append(f"[valid{since}; end unknown]")
         else:
-            marks.append(f"[valid since {vfd}]")
+            # No start recorded and an OPEN end: ``[valid]`` still states the
+            # open-end reading (still-true) without asserting a start, which
+            # is the half the data denies (#9730). Rendering nothing instead
+            # would hide that a window was written at all.
+            marks.append(f"[valid{since}]")
     return " ".join(marks)
+
+
+def _bounds_an_instant(value: object) -> bool:
+    """True when ``value`` NAMES an instant — i.e. it orders (#9730).
+
+    THE predicate is ``search_engine._created_sort_key(value)[0] == 0``, the
+    one the #6140/#9201/#9244 read gate resolves precision behind and
+    ``commit_schema.validate_validity_window`` orders with — so the
+    reader-facing marker and the precision beside it can never disagree about
+    whether a bound names an instant. Imported lazily inside the call for the
+    same reason ``validity.effective_precision`` does: ``retrieval`` sits in
+    the import graph ``search_engine`` is assembled from, and the eager edge
+    is the cycle.
+    """
+    if not value:
+        return False
+    from .search_engine import _created_sort_key  # lazy — no import cycle
+    return _created_sort_key(value)[0] == 0
 
 
 #: A session identifier that may be interpolated into the reader-facing
