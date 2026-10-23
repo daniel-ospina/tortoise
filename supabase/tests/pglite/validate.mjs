@@ -1415,11 +1415,17 @@ try {
       point: { id: 'p1', content: 'the claim', pointKind: 'observation' } },
     { type: 'SubjectAdded', ts: '2026-10-23T00:00:02Z', id: 's1',
       name: 'sub1', subjectKind: 'other' },
-    // IMPL over a Point AND a Subject input: the two labels the resolver must
-    // tell apart, and the one the old `Point`-only assumption would have lost.
+    // The DOMINANT `EventRecorded` shape: `eventId` nested under `event`, no
+    // `id` — so this row's `id` COLUMN is NULL and only `node_key` carries the
+    // key the graph's node holds as BOTH `id` and `eventId` (`_upsert_event`).
+    // A resolver matching `event.id` finds nothing here and files no row.
+    { type: 'EventRecorded', ts: '2026-10-23T00:00:02Z',
+      event: { eventId: 'ev1', eventKind: 'decision' } },
+    // IMPL over a Point, a Subject AND an Event input: the labels the resolver
+    // must tell apart, and the one the old `Point`-only assumption lost.
     { type: 'OperatorAdded', ts: '2026-10-23T00:00:03Z', id: 'op1',
       point: { id: 'op1', content: 'why', is_operator: true, op_type: 'IMPL',
-               operator: { op_type: 'IMPL', inputs: ['p1', 's1'] } } },
+               operator: { op_type: 'IMPL', inputs: ['p1', 's1', 'ev1'] } } },
     // A mitigation: a NON-operator Point carrying the operator descriptor and
     // a usable strength — the `OperatorAdded` shape `#4937`/#5048 depend on.
     { type: 'OperatorAdded', ts: '2026-10-23T00:00:04Z', id: 'mid',
@@ -1437,8 +1443,8 @@ try {
   ));
   const relationCount = emitted.plan
     .filter((x) => x.sql.startsWith('INSERT INTO public.relation')).length;
-  if (relationCount !== 7) {
-    throw new Error(`expected 7 relation statements (2 IMPL + 2 INPUT + `
+  if (relationCount !== 9) {
+    throw new Error(`expected 9 relation statements (3 IMPL + 3 INPUT + `
       + `IMPL/INPUT/mitigated_by for the mitigation), got ${relationCount} — the `
       + 'operator edge producer is gone and the record loses the topology again '
       + '(#9553 R5 class 3)');
@@ -1457,17 +1463,24 @@ try {
       ORDER BY rel_type, idx, src_key`, tenant);
   await applySegment();
   const first = await readEdges();
+  // Sorted on BOTH sides: the SQL's `ORDER BY rel_type, idx, src_key` leaves
+  // equal keys (two inputs at one idx) in an order no clause pins, so comparing
+  // it verbatim against a JS-sorted `want` asserts a tie-break nobody promised.
   const got = first.rows.map((r) => `${r.rel_type} ${r.src_label}/${r.src_key}`
-    + ` -> ${r.tgt_label}/${r.tgt_key} idx=${r.idx}`);
+    + ` -> ${r.tgt_label}/${r.tgt_key} idx=${r.idx}`).sort();
   const want = [
     // The Subject input is filed under Subject/sub1 — its NODE_KEY, not the
     // journal id — because `relation.src_key` is a `node_identity` FK.
     'IMPL Point/op1 -> Point/p1 idx=0',
     'IMPL Point/mid -> Point/op1 idx=0',
     'IMPL Point/op1 -> Subject/sub1 idx=1',
+    // The Event input (`eventId` only, `event.id` NULL) resolves on `node_key`:
+    // the row that was missing before the fix, for the shape every producer emits.
+    'IMPL Point/op1 -> Event/ev1 idx=2',
     'INPUT Point/p1 -> Point/op1 idx=0',
     'INPUT Point/op1 -> Point/mid idx=0',
     'INPUT Subject/sub1 -> Point/op1 idx=1',
+    'INPUT Event/ev1 -> Point/op1 idx=2',
     'mitigated_by Point/op1 -> Point/mid idx=0',
   ].sort();
   if (JSON.stringify(got) !== JSON.stringify(want)) {
@@ -1477,15 +1490,15 @@ try {
   // Idempotent: `DO NOTHING` on the relation's UNIQUE identity, replayed twice.
   await applySegment();
   const second = await readEdges();
-  if (second.rows.length !== 7) {
+  if (second.rows.length !== 9) {
     throw new Error(`a second replay produced ${second.rows.length} relation rows `
-      + '(expected 7) — the operator relation insert is not idempotent');
+      + '(expected 9) — the operator relation insert is not idempotent');
   }
   unlinkSync(segment);
   console.log('✓ #9553: the operator topology lands (IMPL/INPUT/mitigated_by over a '
-    + 'Point AND a Subject endpoint), and re-replays idempotently');
+    + 'Point, a Subject AND an Event endpoint), and re-replays idempotently');
 } catch (e) {
-  console.error(`✗ #9553 R5/OPERATOR FAILED:\n  ${e.message.split('\n').slice(0, 8).join('\n  ')}`);
+  console.error(`✗ #9553 R5/OPERATOR FAILED:\n  ${e.message.split('\n').slice(0, 40).join('\n  ')}`);
   process.exit(1);
 }
 

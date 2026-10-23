@@ -2375,13 +2375,35 @@ def _epistemic_endpoint(
     `_relation_upsert_statement` — hence a resolver that returns both, and a
     statement built for it below.
 
-    The probe is the fold's: match `id` on each of the four tables, first label
-    in :data:`_EPISTEMIC_LABELS` order wins. The KEY is each label's canonical
-    one (`point.node_key` = the id; `subject`/`object` → `name`;
-    `event` → `node_key` = the `eventId`), because `relation.src_key`/`tgt_key`
-    are composite FKs into `node_identity` — writing the raw journal id for a
+    The probe is the fold's, `s.id = $sid`, over the four tables; first label in
+    :data:`_EPISTEMIC_LABELS` order wins. The KEY is each label's canonical one
+    (`point.node_key` = the id; `subject`/`object` → `name`; `event` →
+    `node_key` = the `eventId`), because `relation.src_key`/`tgt_key` are
+    composite FKs into `node_identity` — writing the raw journal id for a
     Subject would address a phantom identity the hard-delete cascade can never
     reach (the same defect `_endpoint_resolution` exists to prevent).
+
+    ⛔ WHICH COLUMN carries `s.id` is per label, and it is NOT always the
+    table's `id` column — :data:`_ENTITY_MATCH_COLUMNS` is the one answer, and
+    every label here agrees with it (`Point` → `node_key`, `Subject`/`Object` →
+    `id`, `Event` → `node_key`). `Event` is the label where the two DISAGREE and
+    where assuming `id` cost the record the edge: the schema pins
+    `event.node_key = event_id` ``NOT NULL`` (`chk_event_node_key_is_contract_key`)
+    while `event.id` is a plain nullable column, and the dominant
+    `EventRecorded` producers — `mining._make_event` (nested `{eventId: …}`, no
+    `id`) and `github_map.issue_to_event`/`pr_to_event` (`eventId` only) — never
+    fill it. The graph still keys such a node `id == eventId`
+    (`_upsert_event`'s unconditional `props["id"] = eid`, `eid = inner.get("id")
+    or inner.get("eventId")`), so the fold's `s.id = $sid` probe matched and
+    wrote both edges while an `id`-matching record write filed no `relation` row
+    at all: R5 class 3, silently open on the Event arm (`#9553` review).
+
+    ⚠️ RESIDUAL, named: a payload carrying BOTH `id` and a DIFFERENT `eventId`
+    would key the record row on the `eventId` while the fold's MERGE key is the
+    `id` — the record and the graph would then disagree about the node's
+    identity, which is upstream of this resolver and not something a match
+    column can repair. No producer emits that shape (both dominant producers
+    emit `eventId` alone), so it is stated, not handled.
 
     ⚠️ BOUND, stated rather than discovered — and it is the record that is
     POORER, not two arbitrary-but-equal choices. The fold's probe BINDS `s` to
@@ -2402,10 +2424,12 @@ def _epistemic_endpoint(
         # `20261012000001`): `Point`/`Event` → `node_key` (the id / the
         # `eventId`), `Subject`/`Object` → `name`.
         key_column = "node_key" if label in ("Point", "Event") else "name"
-        # The FOLD's match column is `s.id`; for `Point` that IS `node_key`
-        # (its `node_key` is the id), and matching the key keeps the
-        # per-(label, id) index instead of a column no producer must fill.
-        match_column = "node_key" if label == "Point" else "id"
+        # The FOLD's match column is `s.id`; for `Point` AND `Event` that IS
+        # `node_key` (Point's `node_key` is the id; Event's is the `eventId`,
+        # which `_upsert_event` also writes as the node's `id`). Matching the key
+        # keeps the per-(label, id) index instead of a column no producer must
+        # fill — and for `Event` the `id` COLUMN is exactly such a column.
+        match_column = "node_key" if label in ("Point", "Event") else "id"
         selects.append(
             f"SELECT '{label}' AS node_label, {key_column} AS node_key, "
             f"{pref} AS pref FROM public.{table} "

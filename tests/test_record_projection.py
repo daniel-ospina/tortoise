@@ -2975,9 +2975,11 @@ def test_the_input_endpoint_resolves_each_labels_canonical_key():
         "FROM public.subject WHERE org_id = %s AND graph_id = %s AND id = %s",
         "SELECT 'Object' AS node_label, name AS node_key, 2 AS pref "
         "FROM public.object WHERE org_id = %s AND graph_id = %s AND id = %s",
-        # Event: matched on the graph id, keyed on the `eventId` (node_key).
+        # Event: keyed on the `eventId` (node_key) and matched on the SAME
+        # column — `event.id` is nullable and the dominant producers leave it
+        # NULL (`test_the_event_endpoint_matches_a_column_the_record_fills`).
         "SELECT 'Event' AS node_label, node_key AS node_key, 3 AS pref "
-        "FROM public.event WHERE org_id = %s AND graph_id = %s AND id = %s",
+        "FROM public.event WHERE org_id = %s AND graph_id = %s AND node_key = %s",
         # First label wins; the whole probe is one derived table per endpoint.
         "ORDER BY pref LIMIT 1) src",
     ):
@@ -2985,6 +2987,47 @@ def test_the_input_endpoint_resolves_each_labels_canonical_key():
     # Idempotent, and NOT an upsert: these rows carry no attribute to correct.
     assert "ON CONFLICT (org_id, graph_id, rel_type, src_label, src_key, " \
         "tgt_label, tgt_key, idx) DO NOTHING" in sql, sql
+
+
+def test_the_event_endpoint_matches_a_column_the_record_fills():
+    """`event.id` is NULL for the dominant producers, so matching it loses the edge.
+
+    `_upsert_event` keys the graph node `id == eventId` unconditionally
+    (`props["id"] = eid`), so the fold's `s.id = $sid` probe MATCHES a recorded
+    event whose producer emitted no `id` (`mining._make_event`'s nested
+    `{eventId: …}`, `github_map.issue_to_event`/`pr_to_event`) and writes both
+    edges. The record, matching `event.id`, matched no row at all and filed no
+    `relation` row — R5 class 3, silently still open on the Event arm.
+
+    The assertion is the INVARIANT rather than the fix's text: every column the
+    resolver matches on must be a column the record's own Event insert FILLS for
+    this producer shape. It fails on the pre-fix code (`id` is not written at
+    all) and stays honest if the resolver's spelling changes.
+    """
+    records = [
+        # The dominant shape: `eventId` nested under `event`, NO `id` — the fold
+        # reads `inner = event.get("event", event)`, and so does the record.
+        {"type": "EventRecorded", "ts": "2026-10-23T00:00:01Z",
+         "event": {"eventId": "ev1", "eventKind": "decision"}},
+        _operator_added({"op_type": "IMPL", "inputs": ["ev1"]}),
+    ]
+    plan = rp.replay_plan(records, org_id="org-a", graph_id="g1")
+    event_insert = next(
+        s for s in plan if s.sql.startswith("INSERT INTO public.event "))
+    written = set(re.search(r"\(([^)]*)\)", event_insert.sql).group(1).split(", "))
+    assert "id" not in written, (written, event_insert.sql)
+    assert {"node_key", "event_id"} <= written, written
+
+    relation_sql = _relation_statements(records[1])[0].sql
+    # Just the Event subselect: from its `SELECT 'Event'` to the derived table's
+    # own close (`) epistemic`), so no neighbouring label's probe leaks in.
+    probe = relation_sql.split("SELECT 'Event'")[1].split(") epistemic")[0]
+    matched = set(re.findall(r"AND (\w+) = %s", probe))
+    assert matched, probe
+    # Every column the probe compares the journal id against is one this shape
+    # POPULATES — otherwise the subselect returns no row and the endpoint is
+    # `absent` for a node the graph wired.
+    assert matched <= written, (matched, written, probe)
 
 
 def test_a_non_string_or_unwritable_input_lands_no_relation():
