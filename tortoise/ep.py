@@ -2077,7 +2077,7 @@ class TortoiseEP:
             # reported (#6105), never silently discarded while the run reports
             # `converged`.
             _input_classes = [
-                cls for cls, live in zip(  # noqa: B905
+                cls for cls, live in zip(
                     op_input_class[op_id], op_input_live[op_id], strict=True)
                 if live
             ]
@@ -2091,7 +2091,7 @@ class TortoiseEP:
             _full_classes = op_input_class[op_id]
             _source_classes = {_full_classes[0]} if _full_classes else None
             _target_classes = {
-                cls for cls, live in zip(  # noqa: B905
+                cls for cls, live in zip(
                     _full_classes[1:], op_input_live[op_id][1:], strict=True)
                 if live
             }

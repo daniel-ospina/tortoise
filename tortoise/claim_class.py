@@ -42,6 +42,20 @@ with any asserted claim — i.e. it would make the class a degradation rather th
 a provenance marker. Only the leg that would let the computed claim push belief
 INTO the authored one is blocked.
 
+⚠️ KNOWN RESIDUAL — narrowing does not CLEAR previously persisted messages.
+``_update_factor`` writes only the legs a direction flows and never zeroes the
+blocked one, and graph-mode ``_update_claim_posterior`` sums every persisted
+``msg_*`` on the edge. So on an edge that PREDATES this guard **and** already
+carries a message on the derived→asserted leg (written by a run before the
+class was stamped), that stored message keeps contributing even though this
+module now narrows the direction for the factor it builds. The write path
+refuses such edges outright, and every factor built from now on writes only the
+permitted leg — but the backstop does not retroactively neutralise history it
+did not write. Clearing the blocked slots needs a change in the message-WRITE
+path (``_update_factor`` / ``_update_nary_factor``), deliberately not made here:
+it would change behaviour for every ``->`` / ``<-`` factor, well beyond this
+issue. Tracked as #9722.
+
 **The read side.** ``tortoise_fts_query`` / MCP ``tortoise_search`` take
 ``claim_class`` — an optional filter (applied pre-truncation, the same seam as
 ``exclude_status``) that ALSO annotates every returned Point with its class, so

@@ -27926,6 +27926,30 @@ class TortoiseSDK:
                     else _claim_class.ASSERTED)
             return rows
 
+        def _filter_and_annotate_claim_class(rows: list[dict]) -> list[dict]:
+            """Filter + annotate DEGRADED hit rows by claim class (#2351).
+
+            The two fallback tiers (``search_snapshot`` / ``fallback_tfidf``)
+            return BEFORE the pre-truncation filter block, and they already
+            replicate the ``exclude_status`` / ``exclude_turn_echo_session``
+            parity by hand for exactly this reason. Without this, a
+            class-filtered read on a degraded store silently returned claims
+            the caller asked to EXCLUDE — the one failure mode a filter must
+            never have. Classes are read from the graph by id, so an
+            unmarked hit stays ``asserted`` (absence IS the class).
+            """
+            ids = [r.get("id") for r in rows if isinstance(r.get("id"), str)]
+            classes = _claim_class.classes_for_ids(graph, ids)
+            kept: list[dict] = []
+            for row in rows:
+                pid = row.get("id")
+                carried = classes.get(pid) or frozenset({_claim_class.DEFAULT})
+                if claim_class not in carried:
+                    continue
+                row["claim_class"] = claim_class
+                kept.append(row)
+            return kept
+
         try:
             proj = self._get_proj()
         except Exception:
@@ -28277,6 +28301,8 @@ class TortoiseSDK:
                         status_trace.append(_trace_entry(
                             "fallback", ran=True, degraded=True,
                             reason="tfidf_snapshot", count=len(snap_hits)))
+                    if claim_class is not None and entity_type == "point":
+                        snap_hits = _filter_and_annotate_claim_class(snap_hits)
                     return _with_read_status(
                         _decorate_fallback_hits(snap_hits, graph))
                 points = self.query(kind=kind,
@@ -28307,6 +28333,8 @@ class TortoiseSDK:
                     status_trace.append(_trace_entry(
                         "fallback", ran=True, degraded=True,
                         reason="tfidf_legacy", count=len(legacy_hits)))
+                if claim_class is not None and entity_type == "point":
+                    legacy_hits = _filter_and_annotate_claim_class(legacy_hits)
                 return _with_read_status(
                     _decorate_fallback_hits(legacy_hits, graph))
             if status_trace is not None:
@@ -28583,6 +28611,11 @@ class TortoiseSDK:
         # class-filtered read of another entity type annotates every row with a
         # class it was never measured for.
         _claim_class_applies = claim_class is not None and graph_label == "Point"
+        # A FAILED class read must not become an answer: pass-through is the
+        # right degradation for the FILTER (return what the caller would have
+        # got before #2351), but stamping every row ``asserted`` would ASSERT a
+        # class that was never read. So a failure clears the annotation too.
+        _claim_classes_ok = True
         if _claim_class_applies and result_ids:
             _wanted = claim_class
             try:
@@ -28594,8 +28627,10 @@ class TortoiseSDK:
                 ]
             except Exception:
                 _logger.warning(
-                    "claim-class filter failed — pass-through", exc_info=True)
+                    "claim-class filter failed — pass-through, without the "
+                    "class annotation", exc_info=True)
                 claim_classes = {}
+                _claim_classes_ok = False
 
         # 5d-bis (#4509). Apply the OPT-IN turn-echo exclusion at the SAME
         #     pre-truncation seam as exclude_status (#898): a caller that names
@@ -29276,7 +29311,7 @@ class TortoiseSDK:
             if entity_type == "point" and w4_enrich \
                     and w4_enrichment_enabled():
                 ranked = w4_enrich_items(proj, ranked)
-            if _claim_class_applies:
+            if _claim_class_applies and _claim_classes_ok:
                 ranked = _with_claim_class(ranked, claim_classes)
             return _with_read_status(ranked)
         if order_by == "confidence":
@@ -29303,7 +29338,7 @@ class TortoiseSDK:
         if entity_type == "point" and w4_enrich \
                 and w4_enrichment_enabled():
             out = w4_enrich_items(proj, out)
-        if _claim_class_applies:
+        if _claim_class_applies and _claim_classes_ok:
             out = _with_claim_class(out, claim_classes)
         return _with_read_status(out)
 
