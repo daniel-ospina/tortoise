@@ -131,12 +131,13 @@ def _props(proj: FalkorProjection, label: str, key_prop: str,
 def test_a_record_sourced_node_carries_the_discriminator_the_fold_supplies():
     """LIVE ≠ RECORD closed for the fold's `ON CREATE` discriminator (#9634).
 
-    The residual of #9572, measured on a real engine: `_upsert_subject` writes
-    `s.subjectKind=$sk` with the parameter defaulting to `"other"`, and
-    `_upsert_object` writes `coalesce($ok, 'other')` / `coalesce($title, '')`.
-    A bare write journals NO kind, so `public.subject.subject_kind` is NULL —
-    and a cache built from the RECORD used to materialize the node WITHOUT
-    `subjectKind`, a property ONTOLOGY §4.1/§4.2 lists as required. This test
+    The residual of #9572 (open, unmerged) — the half that must land WITH it,
+    measured on a real engine: `_upsert_subject` writes `s.subjectKind=$sk` with
+    the parameter defaulting to `"other"`, and `_upsert_object` writes
+    `coalesce($ok, 'other')` / `coalesce($title, '')`. A record row can be
+    silent about the kind (no column value), and a cache built from the RECORD
+    used to materialize the node WITHOUT `subjectKind`, a property ONTOLOGY §4.2
+    (Subject) / §4.3 (Object) lists as required. This test
     builds each node BOTH ways and compares the properties the fold owns.
 
     ⚠️ The comparison is restricted to the fold's `ON CREATE` properties: a

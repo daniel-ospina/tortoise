@@ -54,8 +54,10 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
    declared, named exception: the properties in
    :data:`FOLD_ON_CREATE_DEFAULTS`, whose DEFAULT belongs to the fold, not the
    record — a record row that is silent about a kind materializes the same
-   constant the live fold would have written (#9634). The test that pins the
-   exactness reads the view, so the two cannot disagree.
+   constant the live fold would have written (#9634). Named honestly, including
+   its cost: the exactness test (:mod:`tests.test_cache_projection`) compares the
+   plan against the VIEW, so it cannot see a property the VIEW carries — the
+   bound on the exception is the drift pin, not that test.
 4. **A cold region reads ``not-hot``, never ``empty``.** ``declaration_for``
    writes the known-hot set **after** the writes and as a function of what was
    materialized, so a record key the projection did not write is not claimed
@@ -189,30 +191,37 @@ ADDITIONAL_PRIMARY_COLUMNS: dict[str, dict[str, str]] = {
 #: The **fold's** `ON CREATE` constants, per label — the properties whose DEFAULT
 #: is the fold's, not the record's (#9634).
 #:
-#: WHY THIS TABLE EXISTS. A bare write journals NO discriminator (#9572 removed
-#: the fabricated `subjectKind`/`objectKind` default from every write door, which
-#: is correct: the record must not state a kind nobody named), while the fold
-#: still supplies one under `ON CREATE` — `projection/entities.py`'s
-#: `_upsert_subject` writes `s.subjectKind=$sk` with the parameter defaulting to
-#: `"other"`, and `_upsert_object` writes both
+#: WHY THIS TABLE EXISTS. A bare write journals NO discriminator ONCE #9572
+#: LANDS — that branch (open, unmerged: `fix/9572-discriminator-clobber`)
+#: removes the fabricated `subjectKind`/`objectKind` default from every write
+#: door, which is correct: the record must not state a kind nobody named. ⚠️ On
+#: the tree this table lands in, five doors still DEFAULT to `"other"`, so the
+#: divergence below is not yet reachable through a live write door; it is the
+#: record→cache half that has to land WITH or BEFORE #9572, and it is reachable
+#: today for any record row written without the column.
+#:
+#: The FOLD supplies that default under `ON CREATE` regardless —
+#: `projection/entities.py`'s `_upsert_subject` writes `s.subjectKind=$sk` with
+#: the parameter defaulting to `"other"`, and `_upsert_object` writes both
 #: `o.objectKind=coalesce($ok, 'other')` and `o.title=coalesce($title, '')`.
-#: `public.subject.subject_kind` / `public.object.title` are NULLABLE, and
-#: `_props_from_row` drops a NULL column (#7971 property 3 — no fabricated
-#: authority reaches the cache), so a **record-sourced** rebuild materialised a
-#: `:Subject` with NO `subjectKind` at all: a property ONTOLOGY §4.1/§4.2 lists as
-#: REQUIRED, and the one `subject_binding.is_subject_kind` keys on. `rebuild_all`
-#: (journal replay, which runs the fold) was never affected — so live ≠ record.
+#: `public.subject.subject_kind` / `public.object.object_kind` / `title` are
+#: NULLABLE, and `_props_from_row` drops a NULL column (#7971 property 3 — no
+#: fabricated authority reaches the cache), so a **record-sourced** rebuild
+#: materialised a `:Subject` with NO `subjectKind` at all: a property ONTOLOGY
+#: §4.2 (Subject) / §4.3 (Object) lists as REQUIRED, and the one
+#: `subject_binding.is_subject_kind` keys on. `rebuild_all` (journal replay,
+#: which runs the fold) was never affected — so live ≠ record.
 #:
 #: The fix is NOT to write the default back into the record (that is the
-#: fabrication #9572 deleted) and NOT to invent one here: it is to apply the
+#: fabrication #9572 deletes) and NOT to invent one here: it is to apply the
 #: FOLD's own `ON CREATE` constant on the way into the cache, so a record-sourced
 #: node is the node the live fold would have built. `subjectKind`/`objectKind`
 #: and `Object.title` are therefore **fold-derived defaults**: the record carries
 #: a kind when one was NAMED (the `EntityMutated` state map does), and this table
 #: supplies the same fallback the fold supplies when none was.
 #:
-#: EXCLUDED, with the reason — the fold's other `ON CREATE` defaults are NOT
-#: constants this loader may apply:
+#: EXCLUDED, each with its reason — the fold's OTHER `ON CREATE` defaults are
+#: not applied here, and the reasons are not all "it is not a constant":
 #:
 #: * `status` (`'live'` on Subject/Object) — PROJECTION-OWNED CACHE (§2.6/
 #:   `record_projection.OpDispatch.never_store`); the schema has no column for it,
@@ -220,17 +229,25 @@ ADDITIONAL_PRIMARY_COLUMNS: dict[str, dict[str, str]] = {
 #:   seeds it through the fold.
 #: * `createdAt` (`coalesce($ca, $now)`) — not a constant: the default is the
 #:   REBUILD INSTANT, so there is nothing for a table to pin.
-#: * `Source.title` (`s.title=$url`) and its siblings in the same clause
-#:   (`canonicalUrl`, `urlAliases=[$raw_url]`, `ingestedAt=$now`) — not CONSTANTS:
-#:   a copy of another record column, or the write instant. A table of constants
-#:   cannot express them, and `public.source` carries each as its own nullable
-#:   column; the loader's inability to reproduce a NULL one is tracked as #9710,
-#:   the residual of this fix, not silently absorbed here.
+#: * `Source.title` (`s.title = coalesce($title, $url)`) and its siblings in
+#:   the same clause (`canonicalUrl`, `urlAliases=[$raw_url]`, `ingestedAt`) —
+#:   not CONSTANTS: a copy of another record column, or the write instant.
+#: * `Source`'s `contentHash` (`coalesce($hash, '')`), `externalId` and
+#:   `version` (`CASE WHEN $stub_completion THEN NULL … END`) — constant-VALUED
+#:   for a creator record, and still excluded, because that clause emits the
+#:   value conditionally: a record that COMPLETES a stub gets `NULL` (the
+#:   property stays absent, #5097), and `public.source` has no column that tells
+#:   the two apart — so applying the constant would fabricate `version=1` /
+#:   `externalId=''` on a node the live fold leaves bare (and `version` is a
+#:   creator-only ordinal the record deliberately never writes). Constant is not
+#:   the only test: the value must be DECIDABLE FROM THE ROW.
+#:   Both residuals are tracked in #9710, not silently absorbed here.
 #:
 #: `tests/test_cache_projection.py` pins this table against the fold's own
 #: clauses (source-parsed, as the repo does for other cross-module contracts), so
 #: a change to the fold's constant reds the pin instead of silently re-opening
-#: the divergence.
+#: the divergence. It pins the clauses it NAMES; it is not a discovery sweep over
+#: the fold (the exclusion list above is hand-maintained, and the pin says so).
 FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
     "Subject": {"subjectKind": "other"},
     "Object": {"objectKind": "other", "title": ""},

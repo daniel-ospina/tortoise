@@ -335,13 +335,17 @@ def test_the_props_tail_keeps_its_verbatim_property_names():
 # ── 2b. the fold's ON CREATE defaults (#9634) ──────────────────────────────
 #
 # `public.subject.subject_kind` and `public.object.object_kind`/`title` are
-# NULLABLE, and a bare write journals no discriminator at all (#9572 deleted the
-# fabricated default from every write door — correctly: the record must not
-# state a kind nobody named). The FOLD still supplies one under `ON CREATE`.
+# NULLABLE, and a record row can be silent about the discriminator: #9572 (open
+# branch `fix/9572-discriminator-clobber`, unmerged) removes the fabricated
+# default from every write door — correctly, because the record must not state a
+# kind nobody named. The FOLD supplies one under `ON CREATE` regardless, and
 # `_props_from_row` drops a NULL column, so without the defaults below a
 # record-sourced rebuild materialized a `:Subject` with no `subjectKind` — a
-# property ONTOLOGY §4.1/§4.2 lists as REQUIRED — while `rebuild_all` (journal
-# replay, which runs the fold) wrote `'other'`. Live ≠ record, for that property.
+# property ONTOLOGY §4.2 (Subject) / §4.3 (Object) lists as REQUIRED — while
+# `rebuild_all` (journal replay, which runs the fold) wrote `'other'`. Live ≠
+# record, for that property. ⚠️ On this tree the five write doors still DEFAULT
+# to `"other"`, so the table is the record→cache half that must land WITH or
+# before #9572, not a fix for a live-reachable defect.
 
 
 def test_a_record_row_silent_about_the_kind_gets_the_folds_own_default():
@@ -364,7 +368,10 @@ def test_a_named_kind_and_a_tail_kind_are_never_overwritten_by_the_default():
     """The default is a FALLBACK, not a write — a named kind wins, wherever it rode."""
     named = _node("Subject", {"name": "Probe", "subject_kind": "team"})
     assert named.props["subjectKind"] == "team"
-    # The open-set tail is the record speaking too: it outranks the fallback.
+    # A tail value outranks the fallback. ⚠️ The FOLD does not read a tail
+    # `subjectKind` (it is in `_SUBJECT_HANDLED`, so `_persist_extra_props` skips
+    # it), so this ordering is the LOADER's contract, not a parity claim: the
+    # loader must never replace something the record said with a fallback.
     from_tail = _node("Subject", {"name": "Probe", "subject_kind": None,
                                   "props": {"subjectKind": "role"}})
     assert from_tail.props["subjectKind"] == "role"
@@ -386,16 +393,29 @@ def test_the_declared_fold_defaults_are_the_folds_own_constants():
     Source-parsed on purpose: the alternative is a live graph, and a pin that
     only runs where an engine is reachable cannot guard the ordinary lane. The
     live half of the same claim is
-    `tests/test_cache_projection_live.py::test_a_record_sourced_subject_matches_the_fold`.
+    `tests/test_cache_projection_live.py::test_a_record_sourced_node_carries_the_discriminator_the_fold_supplies`.
+
+    ⚠️ SCOPE, stated so the pin is not read as more than it is: it checks the
+    clauses it NAMES — it is not a discovery sweep, so a fold constant nobody
+    listed here is invisible to it (the exclusion list in
+    `FOLD_ON_CREATE_DEFAULTS` is hand-maintained; #9710 carries the known
+    members). Each pattern targets the `ON CREATE SET` node property, not a
+    bare params entry, because a params default that the clause stops APPLYING
+    would leave this table fabricating a default.
     """
     fold = (REPO_ROOT / "tortoise" / "projection" / "entities.py").read_text()
     antecedents = {
-        ("Subject", "subjectKind"):
+        # both halves: the `ON CREATE SET` write AND the parameter that feeds it
+        ("Subject", "subjectKind"): (
+            r"s\.name=\$name, s\.subjectKind=\$sk",
             r'"sk":\s*ev\.get\("subject_kind",\s*"other"\)',
-        ("Object", "objectKind"):
+        ),
+        ("Object", "objectKind"): (
             r"o\.objectKind=coalesce\(\$ok, 'other'\)",
-        ("Object", "title"):
+        ),
+        ("Object", "title"): (
             r"o\.title=coalesce\(\$title, ''\)",
+        ),
     }
     declared = {
         (label, prop): value
@@ -408,15 +428,17 @@ def test_the_declared_fold_defaults_are_the_folds_own_constants():
         f"{sorted(set(declared) - set(antecedents))}, pinned-only "
         f"{sorted(set(antecedents) - set(declared))}"
     )
-    for key, pattern in antecedents.items():
-        assert re.search(pattern, fold), (
-            f"the fold clause that supplies {key[0]}.{key[1]}'s default is gone "
-            f"or changed (/{pattern}/ not found in projection/entities.py) — "
-            "re-derive FOLD_ON_CREATE_DEFAULTS from the fold, do not guess. "
-            "A NEW constant the fold owns is the same finding: this table is "
-            "the record→cache side of it."
-        )
-    # And the VALUES, read back from the fold's text rather than restated.
+    for key, patterns in antecedents.items():
+        for pattern in patterns:
+            assert re.search(pattern, fold), (
+                f"the fold clause that supplies {key[0]}.{key[1]}'s default is "
+                f"gone or changed (/{pattern}/ not found in "
+                "projection/entities.py) — re-derive FOLD_ON_CREATE_DEFAULTS "
+                "from the fold, do not guess. A NEW constant the fold owns is "
+                "the same finding: this table is the record→cache side of it."
+            )
+    # The values the patterns above force, asserted so the table cannot drift
+    # while the patterns still match (they pin the CONSTRUCTION, not the literal).
     assert declared[("Subject", "subjectKind")] == "other"
     assert declared[("Object", "objectKind")] == "other"
     assert declared[("Object", "title")] == ""
