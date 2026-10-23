@@ -37,7 +37,7 @@ single-PR verdict vs batch verdict) — not a preference.
 
 THE SHAPE
 =========
-    prepare  -> manifest.json + prompt.txt, one API read per PR (diff cached)
+    prepare  -> manifest.json + prompt.txt, one diff read per PR (cached)
     [task]   -> ONE fresh-context reviewer receives prompt.txt, answers JSON
     verify   -> schema-validated per-PR results; per-PR abort (never batch-wide)
     post     -> one PR comment PER PR (the --evidence artifact), id captured
@@ -86,9 +86,12 @@ DEFAULT_MAX_PRS = 8
 #: A single PR may not consume more than this share of the budget; a bigger diff
 #: is cheaper (and safer) as its own single review than as the tail of a batch.
 PER_PR_MAX_SHARE = 0.4
-#: Measured on this fleet's diffs: 3.5 chars/token is the conservative direction
-#: (fewer chars per token => MORE estimated tokens). Calibrated in the
-#: measurement doc against the batch child's first-call prompt token count.
+#: An ESTIMATE for this fleet's diffs, not a measurement: 3.5 chars/token is the
+#: conservative direction (fewer chars per token => MORE estimated tokens), so the
+#: budget errs high and a diff admitted here is smaller than the estimate says. It
+#: is deliberately NOT calibrated from a recorded prompt token count — the
+#: measurement doc carries no such calibration, and a comment citing one that does
+#: not exist is the "claim nothing can re-validate" failure this repo names.
 DEFAULT_CHARS_PER_TOKEN = 3.5
 
 VERDICTS = ("clean", "clean-micro", "clean-low", "issues")
@@ -220,7 +223,7 @@ class PRInput:
 
 
 def read_pr(repo: str, pr: int, cache_dir: Path) -> PRInput:
-    """ONE meta read + ONE diff read, then everything downstream is local."""
+    """ONE meta read + ONE diff read + a head re-read, then everything is local."""
     meta_raw = run_gh(
         [
             "api",
@@ -246,10 +249,23 @@ def read_pr(repo: str, pr: int, cache_dir: Path) -> PRInput:
     entry.diff_bytes = len(raw)
     entry.est_tokens = est_tokens(len(raw))
     entry.diff_sha256 = normalized_diff_sha256(raw)
+    # Re-read the head AFTER the diff. The two reads are not atomic, and
+    # `head_sha=H1` bound to `digest(diff@H2)` is the one skew nothing downstream
+    # is guaranteed to catch: `verify --recheck-heads` is opt-in and compares the
+    # LIVE head, which by then already equals H2. One cheap read on the safe side
+    # of the race, and the PR falls out to a single review if it moved.
+    live_sha = run_gh(["api", f"repos/{repo}/pulls/{pr}", "--jq", ".head.sha"])
+    live_sha = live_sha.decode("utf-8", "replace").strip()
     if not entry.diff_sha256:
         # An empty or non-diff body NEVER carries a digest, so it can never be
         # reviewed as part of a batch (record-review would refuse it too).
         entry.status, entry.reason = "excluded", "empty_or_non_diff_body"
+    elif live_sha != entry.head_sha:
+        entry.status = "excluded"
+        entry.reason = (
+            f"head_moved_during_read ({entry.head_sha[:12]}… -> {live_sha[:12]}…) — the "
+            "cached diff is not the diff at the head this entry names"
+        )
     return entry
 
 
@@ -702,6 +718,67 @@ def _write_json(path: Path, obj: object) -> None:
     tmp.replace(path)
 
 
+#: Key in the evidence map holding which batch (and which head per PR) wrote it.
+EVIDENCE_META = "__meta__"
+
+
+def _load_evidence(path: Path) -> tuple[dict[int, str], dict, dict[int, str]]:
+    """Read the evidence map, its `__meta__`, and the head each entry was minted at.
+
+    The map lives at a fixed default path (`.batch-review/evidence.json`), so one
+    left behind by an EARLIER batch would otherwise read as this run's evidence: a
+    comment minted for an earlier review of the same PR would be bound by
+    `record-review.sh` as if it reviewed this head. `__meta__` makes that visible,
+    and both tail steps refuse or drop an entry that is not this run's.
+    """
+    if not path.is_file():
+        return {}, {}, {}
+    raw = _load_json(path)
+    if not isinstance(raw, dict):
+        raise BatchError(f"{path} is not an evidence map")
+    meta = raw.pop(EVIDENCE_META, {})
+    if not isinstance(meta, dict):
+        meta = {}
+    evidence: dict[int, str] = {}
+    for k, v in raw.items():
+        if not isinstance(v, str):
+            raise BatchError(f"{path} has a non-string evidence value for {k!r}")
+        try:
+            evidence[int(k)] = v
+        except (TypeError, ValueError) as exc:
+            raise BatchError(f"{path} has a non-numeric evidence key {k!r}") from exc
+    heads: dict[int, str] = {}
+    for k, v in (meta.get("heads") or {}).items():
+        try:
+            heads[int(k)] = str(v)
+        except (TypeError, ValueError):  # pragma: no cover - hand-edited map
+            continue
+    return evidence, meta, heads
+
+
+def _save_evidence(
+    path: Path, evidence: dict[int, str], manifest: dict, heads: dict[int, str]
+) -> None:
+    payload: dict = {str(pr): ev for pr, ev in sorted(evidence.items())}
+    payload[EVIDENCE_META] = {
+        "batch_id": manifest.get("batch_id"),
+        "repo": manifest.get("repo"),
+        "heads": {str(pr): h for pr, h in sorted(heads.items())},
+    }
+    _write_json(path, payload)
+
+
+def _refuse_foreign_batch(path: Path, meta: dict, manifest: dict) -> None:
+    """An evidence map written by another batch is never this batch's evidence."""
+    seen = meta.get("batch_id")
+    if seen and seen != manifest.get("batch_id"):
+        raise BatchError(
+            f"{path} is the evidence map for batch {seen!r}, not this batch "
+            f"{manifest.get('batch_id')!r} — point the path at a fresh file (or delete "
+            "it) so another batch's comment can never be bound to this review"
+        )
+
+
 def cmd_prepare(args) -> int:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -797,10 +874,9 @@ def cmd_post(args) -> int:
     if not isinstance(outcomes, list):
         raise BatchError("answer file has no results list (run `verify` first)")
     by_pr = {e["pr"]: e for e in manifest["prs"]}
-    evidence: dict[str, str] = {}
     ev_path = Path(args.evidence_out)
-    if ev_path.is_file():
-        evidence = {str(k): v for k, v in _load_json(ev_path).items()}
+    evidence, meta, heads = _load_evidence(ev_path)
+    _refuse_foreign_batch(ev_path, meta, manifest)
     for o in outcomes:
         if o.get("status") != "ok":
             print(
@@ -810,6 +886,24 @@ def cmd_post(args) -> int:
             continue
         entry = by_pr.get(o["pr"])
         if entry is None:
+            continue
+        pr = o["pr"]
+        prev, prev_head = evidence.get(pr), heads.get(pr, "")
+        if prev and prev_head and prev_head != o.get("head_sha"):
+            # The id on disk belongs to a DIFFERENT head's review: re-post rather
+            # than let `record` bind a comment that reviewed other bytes.
+            print(
+                f"note #{pr}: {prev} was minted at {prev_head[:12]}…, this outcome is at "
+                f"{str(o.get('head_sha'))[:12]}… — posting a fresh comment",
+                file=sys.stderr,
+            )
+        elif prev and not args.repost:
+            # Already posted (this batch, this head). Re-posting would duplicate the
+            # comment on the PR, which is exactly what persisting the id prevents.
+            print(
+                f"skip #{pr}: already has {prev} at this head — --repost to post again",
+                file=sys.stderr,
+            )
             continue
         body = render_comment(manifest, entry, o)
         if args.dry_run:
@@ -829,18 +923,33 @@ def cmd_post(args) -> int:
         )
         cid = raw.decode("utf-8", "replace").strip()
         if not cid.isdigit():
-            raise BatchError(f"could not capture the comment id for #{o['pr']} (got {cid[:80]!r})")
-        evidence[str(o["pr"])] = f"comment:{cid}"
+            raise BatchError(f"could not capture the comment id for #{pr} (got {cid[:80]!r})")
+        evidence[pr] = f"comment:{cid}"
+        heads[pr] = str(o.get("head_sha") or "")
         # Persist after EACH post, not once at the end: the comment exists on GitHub
         # the moment the API returns, so an abort at PR k (a rate limit, a
-        # non-numeric id) must not lose the ids of PRs 1..k-1 — re-running `post`
-        # would then re-post duplicates while `record` read a stale map. _write_json
-        # is atomic (tmp + replace), so a partial write cannot be observed.
-        _write_json(ev_path, evidence)
-        print(f"posted #{o['pr']} evidence=comment:{cid}")
-    if not args.dry_run:
-        _write_json(ev_path, evidence)  # idempotent; also covers a zero-post run
-        print(f"evidence map -> {ev_path}")
+        # non-numeric id) must not lose the ids of PRs 1..k-1, and a re-run must not
+        # re-post them. _write_json is atomic (tmp + replace), so a partial write
+        # cannot be observed.
+        _save_evidence(ev_path, evidence, manifest, heads)
+        print(f"posted #{pr} evidence=comment:{cid}")
+    if args.dry_run:
+        return 0
+    _save_evidence(ev_path, evidence, manifest, heads)  # idempotent; covers zero posts
+    print(f"evidence map -> {ev_path}")
+    # A PARTIAL batch is not a success: a queued PR left with no evidence comment
+    # cannot be recorded, and a lane keying on rc would otherwise read "all clear".
+    uncovered = [
+        e["pr"] for e in manifest["prs"] if e["status"] == "queued" and e["pr"] not in evidence
+    ]
+    if uncovered:
+        print(
+            f"⛔ {len(uncovered)} queued PR(s) have NO evidence comment — #{uncovered} "
+            "(an unverified PR gets no comment: see `verify`). This batch is PARTIAL; "
+            "re-run `post` once those PRs are covered.",
+            file=sys.stderr,
+        )
+        return 3
     return 0
 
 
@@ -850,7 +959,24 @@ def cmd_record(args) -> int:
     outcomes = payload.get("results") if isinstance(payload, dict) else None
     if not isinstance(outcomes, list):
         raise BatchError("answer file has no results list (run `verify` first)")
-    evidence = {int(k): v for k, v in _load_json(args.evidence).items()}
+    evidence, meta, heads = _load_evidence(Path(args.evidence))
+    _refuse_foreign_batch(Path(args.evidence), meta, manifest)
+    # An entry whose recorded head is not this outcome's head is another review's
+    # comment: drop it here rather than let `record-review.sh` bind it as evidence.
+    outcome_head = {o["pr"]: o.get("head_sha") for o in outcomes}
+    foreign = [
+        pr
+        for pr, head in heads.items()
+        if pr in evidence and head and outcome_head.get(pr) not in (None, head)
+    ]
+    for pr in foreign:
+        evidence.pop(pr, None)
+    if foreign:
+        print(
+            f"⛔ evidence for #{foreign} was minted at another head — it is NOT this "
+            "review's artifact; re-post the comment at this head",
+            file=sys.stderr,
+        )
     plan = plan_records(manifest, outcomes, evidence)
     skipped = [
         o["pr"] for o in outcomes if o.get("status") == "ok" and o.get("verdict") == "issues"
@@ -883,6 +1009,16 @@ def cmd_record(args) -> int:
     ]
     planned = {int(argv[1]) for argv in plan}
     unrecorded = [pr for pr in recordable if pr not in planned]
+    # A PR that fell OUT of the batch (invalid / head_moved) mints no record and is
+    # not "recordable", so it does not change the exit status — but it must be named,
+    # or the exit status is the only signal a lane gets and it says "fine".
+    fell_out = [o["pr"] for o in outcomes if o.get("status") != "ok"]
+    if fell_out:
+        print(
+            f"⛔ #{fell_out} fell OUT of this batch — a single review is needed for each "
+            "(`verify` explains why); this run mints no record for them",
+            file=sys.stderr,
+        )
     recorder = (
         args.record_review
         or shutil.which("record-review.sh")
@@ -939,11 +1075,19 @@ def main(argv: list[str] | None = None) -> int:
     v.add_argument("--recheck-heads", action="store_true", help="drop any PR whose head moved")
     v.set_defaults(func=cmd_verify)
 
-    o = sub.add_parser("post", help="post one evidence comment per PR")
+    o = sub.add_parser(
+        "post",
+        help="post one evidence comment per PR (rc 3 = a queued PR has no comment, 2 = aborted)",
+    )
     o.add_argument("--manifest", required=True)
     o.add_argument("--answer", required=True)
     o.add_argument("--evidence-out", default=".batch-review/evidence.json")
     o.add_argument("--dry-run", action="store_true")
+    o.add_argument(
+        "--repost",
+        action="store_true",
+        help="post again even where this batch already holds a comment id (default: skip)",
+    )
     o.set_defaults(func=cmd_post)
 
     r = sub.add_parser(

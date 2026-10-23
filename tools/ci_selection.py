@@ -1231,7 +1231,7 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # test_batch_review.py absent. That is the #1349/#3332/#3616
              # silent-drop class on the one diff that can break the guard: a
              # follow-up that deletes `plan_records`'s manifest-head equality
-             # (`tools/batch_review.py:591-615`) — the single line stopping a
+             # (`tools/batch_review.py::plan_records`) — the single line stopping a
              # drifted outcome from minting a record — would have merged with
              # the guard cases that pin it never running. The `core` row that
              # registers the file is CLASSIFICATION only (#4348); it does not

@@ -415,6 +415,13 @@ def stub_gh(tmp_path, monkeypatch):
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
         'if [ "$3" = "--jq" ]; then\n'
+        'if [ "$4" = ".head.sha" ]; then\n'
+        '  case "$2" in\n'
+        '    */pulls/1) printf "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\n" ;;\n'
+        '    */pulls/2) printf "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\\n" ;;\n'
+        '  esac\n'
+        "  exit 0\n"
+        "fi\n"
         '  case "$2" in\n'
         '    */pulls/1) printf "open\\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\tbase\\tfirst\\n" ;;\n'
         '    */pulls/2) printf "open\\tbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\\tbase\\tsecond\\n" ;;\n'
@@ -450,7 +457,8 @@ def test_prepare_one_read_per_pr_and_a_prompt_that_delimits_each(stub_gh, tmp_pa
     # The diff was cached, and the manifest binds exactly that cache.
     cached = Path(m["prs"][0]["diff_path"])
     assert cached.is_file()
-    assert br.sha256_bytes(cached.read_bytes()) != ""
+    # The manifest's digest is the digest of THAT cache — not "some non-empty hash"
+    # (a sha256 is always 64 chars, so a `!= ""` check proves nothing).
     assert m["prs"][0]["diff_sha256"] == br.normalized_diff_sha256(cached.read_bytes())
     prompt = Path(m["prompt_path"]).read_text()
     assert m["nonce"] and m["nonce"] in prompt
@@ -635,7 +643,11 @@ def test_post_persists_each_comment_id_so_an_abort_mid_loop_keeps_the_earlier_on
     )
     assert rc == 2  # the rate limit aborts the run (fail closed, never retried)
     assert ev_path.is_file()
-    assert json.loads(ev_path.read_text()) == {"1": "comment:111"}
+    saved = json.loads(ev_path.read_text())
+    assert saved["1"] == "comment:111"
+    # The map records WHICH batch and head it covers, so another batch's map can
+    # never be read as this run's evidence.
+    assert saved[br.EVIDENCE_META]["batch_id"] == "batch0001"
 
 
 # ── record: the ONLY executor of a minted record, over a stub recorder ─────
@@ -667,6 +679,173 @@ def _record_files(tmp_path, m, outcomes, evidence):
     epath = tmp_path / "evidence.json"
     epath.write_text(json.dumps(evidence))
     return ["record", "--manifest", str(mpath), "--answer", str(apath), "--evidence", str(epath)]
+
+
+# ── post: a partial batch, and never the same comment twice ─────────────────
+
+
+@pytest.fixture()
+def stub_gh_posts_ok(tmp_path, monkeypatch):
+    """gh stub that posts a comment for either PR (ids 111 / 222)."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    gh = bindir / "gh"
+    gh.write_text(
+        "#!/usr/bin/env bash\n"
+        'case "$*" in\n'
+        '  *"/issues/1/comments"*) printf "111\\n"; exit 0 ;;\n'
+        '  *"/issues/2/comments"*) printf "222\\n"; exit 0 ;;\n'
+        "esac\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    gh.chmod(gh.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    return gh
+
+
+def _post_files(tmp_path, m, outcomes, evidence=None):
+    mpath = tmp_path / "manifest.json"
+    mpath.write_text(json.dumps(m))
+    apath = tmp_path / "verified.json"
+    apath.write_text(json.dumps({"results": outcomes}))
+    ev_path = tmp_path / "evidence.json"
+    if evidence is not None:
+        ev_path.write_text(json.dumps(evidence))
+    argv = [
+        "post",
+        "--manifest",
+        str(mpath),
+        "--answer",
+        str(apath),
+        "--evidence-out",
+        str(ev_path),
+    ]
+    return argv, ev_path
+
+
+def _ok_outcome(pr, head, digest):
+    """A verified outcome for one PR (distinct from the bare `_ok` dict above)."""
+    return br.validate_answer(
+        manifest((pr, head, digest)), {"results": [result(pr, head, digest)]}
+    )[0]
+
+
+def test_post_returns_3_when_a_queued_pr_has_no_comment(tmp_path, stub_gh_posts_ok, capsys):
+    # A queued PR with no evidence comment cannot be recorded, so rc 0 would tell a
+    # lane the batch was covered. `verify` exits 3 on the same fallout.
+    m = manifest((1, HEAD_A, DIFF_A), (2, HEAD_B, DIFF_B))
+    fallen_out = {
+        **_ok_outcome(2, HEAD_B, DIFF_B),
+        "status": "invalid",
+        "verdict": None,
+        "reason": "malformed result",
+    }
+    argv, ev_path = _post_files(tmp_path, m, [_ok_outcome(1, HEAD_A, DIFF_A), fallen_out])
+    assert br.main(argv) == 3
+    err = capsys.readouterr().err
+    assert "#[2]" in err and "PARTIAL" in err
+    assert json.loads(ev_path.read_text())["1"] == "comment:111"
+
+
+def test_post_does_not_re_post_an_already_recorded_comment(tmp_path, stub_gh_posts_ok, capsys):
+    m = manifest((1, HEAD_A, DIFF_A), (2, HEAD_B, DIFF_B))
+    seeded = {
+        "1": "comment:9",
+        br.EVIDENCE_META: {"batch_id": "batch0001", "repo": "o/r", "heads": {"1": HEAD_A}},
+    }
+    argv, ev_path = _post_files(
+        tmp_path, m, [_ok_outcome(1, HEAD_A, DIFF_A), _ok_outcome(2, HEAD_B, DIFF_B)], evidence=seeded
+    )
+    assert br.main(argv) == 0
+    assert "already has comment:9" in capsys.readouterr().err
+    saved = json.loads(ev_path.read_text())
+    assert saved["1"] == "comment:9"  # NOT duplicated: the earlier id still stands
+    assert saved["2"] == "comment:222"  # the PR with no comment still got one
+    # --repost is the explicit override, and only then does #1 get a new comment.
+    assert br.main([*argv, "--repost"]) == 0
+    assert json.loads(ev_path.read_text())["1"] == "comment:111"
+
+
+def test_post_refuses_an_evidence_map_from_another_batch(tmp_path, stub_gh_posts_ok, capsys):
+    # The default evidence path is per-repo, not per-batch: without this guard,
+    # another batch's comment id would be read as this run's evidence.
+    m = manifest((1, HEAD_A, DIFF_A), (2, HEAD_B, DIFF_B))
+    foreign = {
+        "1": "comment:9",
+        br.EVIDENCE_META: {"batch_id": "oldbatch", "repo": "o/r", "heads": {"1": HEAD_A}},
+    }
+    argv, ev_path = _post_files(
+        tmp_path, m, [_ok_outcome(1, HEAD_A, DIFF_A), _ok_outcome(2, HEAD_B, DIFF_B)], evidence=foreign
+    )
+    assert br.main(argv) == 2
+    assert "oldbatch" in capsys.readouterr().err
+    assert json.loads(ev_path.read_text())["1"] == "comment:9"  # untouched
+
+
+def test_record_refuses_evidence_minted_at_another_head(tmp_path, stub_recorder, capsys):
+    # A comment that reviewed head B is not evidence for head A, however clean its
+    # verdict: binding it would attest a review this PR never received.
+    script, log = stub_recorder
+    m = manifest((1, HEAD_A, DIFF_A))
+    foreign = {
+        "1": "comment:42",
+        br.EVIDENCE_META: {"batch_id": "batch0001", "repo": "o/r", "heads": {"1": HEAD_B}},
+    }
+    mpath = tmp_path / "manifest.json"
+    mpath.write_text(json.dumps(m))
+    apath = tmp_path / "verified.json"
+    apath.write_text(json.dumps({"results": [_ok_outcome(1, HEAD_A, DIFF_A)]}))
+    epath = tmp_path / "evidence.json"
+    epath.write_text(json.dumps(foreign))
+    argv = [
+        "record",
+        "--manifest",
+        str(mpath),
+        "--answer",
+        str(apath),
+        "--evidence",
+        str(epath),
+        "--record-review",
+        str(script),
+    ]
+    # The only recordable PR lost its evidence, so `record` has nothing to mint:
+    # rc 1 (the empty-plan case), not a silent 0 and not a record at head B.
+    assert br.main(argv) == 1
+    err = capsys.readouterr().err
+    assert "minted at another head" in err
+    assert "nothing to record" in err
+    assert not log.exists() or log.read_text().strip() == ""
+
+
+def test_a_head_that_moves_mid_read_is_dropped_not_bound(tmp_path, monkeypatch):
+    # `head_sha=H1` bound to `digest(diff@H2)` is a skew nothing downstream must
+    # catch: the PR falls out of the batch and gets a single review.
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    gh = bindir / "gh"
+    gh.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [ "$3" = "--jq" ]; then\n'
+        '  if [ "$4" = ".head.sha" ]; then\n'
+        '    printf "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\\n"; exit 0\n'
+        "  fi\n"
+        '  printf "open\\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\tbase\\tt\\n"; exit 0\n'
+        "fi\n"
+        'if printf "%s " "$@" | grep -q "vnd.github.v3.diff"; then\n'
+        "  printf 'diff --git a/a.txt b/a.txt\\n--- a/a.txt\\n+++ b/a.txt\\n@@ -1 +1 @@\\n-x\\n+y\\n'\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    gh.chmod(gh.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    entry = br.read_pr("o/r", 1, tmp_path)
+    assert entry.head_sha == HEAD_A  # the head the diff was NOT read at
+    assert entry.status == "excluded"
+    assert "head_moved_during_read" in entry.reason
+    assert HEAD_B[:12] in entry.reason
 
 
 def test_record_execs_the_recorder_once_per_clean_pr_with_the_planned_argv(

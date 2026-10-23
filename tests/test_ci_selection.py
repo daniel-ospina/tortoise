@@ -10240,7 +10240,8 @@ def test_batch_review_tool_change_selects_core_not_tier1():
     # -> surfaces=[], full=False, test_batch_review.py absent. That is the
     # #1349/#3332/#3616 silent-drop class on the one diff that can break the
     # guard: deleting `plan_records`'s manifest-head equality would have merged
-    # with none of its 43 cases running.
+    # with none of its 53 cases running (re-counted at #9790's head; the prose
+    # count decays, so what this pins is the SELECTION, not the number).
     #
     # CORE_ALSO (not TOOL_CARVEOUTS): the suite is hermetic, so `core` is the
     # cheapest leg that can carry it. Mutation check: removing the CORE_ALSO

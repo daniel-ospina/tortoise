@@ -227,8 +227,10 @@ negative at equal review depth.
 ### 6.3 If batching is ever revisited
 
 The harness stays as the tested artifact, with its limits stated: the schema forces a
-per-PR head and diff binding (no batch verdict can be recorded), the caps come from
-measured tokens, and a malformed/aborted PR falls out to a single review. What it
+per-PR head and diff binding (no batch verdict can be recorded), the caps are
+attention guards with a conservative token ESTIMATE (3.5 chars/token, deliberately
+erring high — the code does not claim a calibration this document does not carry),
+and a malformed/aborted PR falls out to a single review. What it
 **cannot** enforce is verification depth — and that is what the disagreement was.
 A future attempt would have to make depth mechanical (e.g. a required evidence list
 of the files read per PR, cross-checked against the caller graph) before the
@@ -249,7 +251,7 @@ well as on depth.
 
 ## 7. The tool (kept, not wired)
 
-`tools/batch_review.py` — `prepare` (one API read per PR, diffs cached, digest from
+`tools/batch_review.py` — `prepare` (one diff read per PR, diffs cached, digest from
 the shared normalizer), `verify` (per-PR schema validation, per-PR abort), `post`
 (one evidence comment per PR), `record` (`record-review.sh` per PR at its own head
 with `--expect-head`). Its docstring carries the rule:
@@ -262,10 +264,14 @@ Enforced in code, not prose: a top-level `{"verdict": "clean"}` makes **every** 
 invalid; a verdict echoed from another PR's head is refused; a `clean*` contradicted
 by a P0/P1 is coerced to `issues`; one malformed result fails only its own PR; and no
 record is minted for a PR that fell out, for `issues`, or without its own evidence
-comment. Neither step reports a partial batch as a success: `verify` exits 3 on any
-fallout, and `record` exits 3 when a recordable PR was left with no record (`post`
-also persists each comment id as it is minted, so an abort mid-loop keeps the ids
-of the comments that already exist on GitHub). `diff_sha256` is computed with
+comment. No tail step reports a partial batch as a success: `verify` exits 3 on any
+fallout, `post` exits 3 when a queued PR is left with no evidence comment (and
+persists each comment id as it is minted, so an abort mid-loop keeps the ids of the
+comments that already exist on GitHub and a re-run does not post them twice), and
+`record` exits 3 when a recordable PR was left with no record. The evidence map
+carries its own `__meta__` (batch id + the head each comment was minted at), so a map
+from an earlier batch, or a comment minted at another head, is refused rather than
+bound as this run's artifact. `diff_sha256` is computed with
 agent-infra's one shared normalizer, and two
 of the four prepared digests match digests `record-review.sh` itself minted today
 (#2428 `5021b171…`, #2355 `1ec46580…`) — verified against the real recorder, not
@@ -283,10 +289,13 @@ uv run python tools/batch_review.py record  --manifest .batch-review/manifest.js
 ```
 
 Tests: `TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_batch_review.py -q`
-(48 cases; the load-bearing ones: a top-level verdict invalidates every PR, one bad
+(53 cases; the load-bearing ones: a top-level verdict invalidates every PR, one bad
 result never invalidates a sibling, a record is never minted for a PR that fell
-out or whose digest is not the manifest's, and neither `post` nor `record` reports
-a partial batch as a success). The record path's EXECUTOR is covered too:
+out or whose digest is not the manifest's, neither `post` nor `record` reports a
+partial batch as a success, a comment is never re-posted for a PR already covered at
+that head, a comment minted at another head is not accepted as evidence, and a PR
+whose head moves between `prepare`'s meta read and its diff read is dropped rather
+than bound). The record path's EXECUTOR is covered too:
 `record` is run against a stub `record-review.sh`, so the planned argv (and the
 fail-closed rc when the recorder refuses a PR) is asserted rather than assumed. A
 finding's file anchor is MEASURED against the cached diff it claims to come from — a
