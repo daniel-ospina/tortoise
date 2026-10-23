@@ -178,10 +178,11 @@ RECORD_MIGRATION_FILES = [REPO_ROOT / "supabase" / "migrations" / name
 #: UNCONDITIONALLY, never by asking the DB which shape it is in
 #: (`_ensure_record_schema`'s job is to reach the shape this TREE expects, and a
 #: reader that trusts the container to report it can be told "already fine" by
-#: exactly the container that is stale). Each of these three is re-apply SAFE,
-#: but by two different mechanisms: the two arm/reshape files carry their own
-#: `DO` guard or `DROP … IF EXISTS` on every statement, while the CREATE-TABLE
-#: file is `creates`-conditional (see the ⚠️ below).
+#: exactly the container that is stale). Each entry is re-apply SAFE, by three
+#: mechanisms: the arm/reshape files carry their own `DO` guard,
+#: `DROP … IF EXISTS` or `ADD … IF NOT EXISTS` on every statement; the
+#: CREATE-TABLE file is `creates`-conditional (see the ⚠️ below); and one entry
+#: is a one-shot-migration-shaped file that was written idempotent on purpose.
 #:
 #: ⛔ THE LIST MUST BE CLOSED AND ORDERED — that is the whole of #9800's P2.
 #: A file here may only name a relation that an EARLIER entry creates, or one
@@ -208,6 +209,27 @@ RECORD_MIGRATION_FILES = [REPO_ROOT / "supabase" / "migrations" / name
 #: ALTERs the table needs its own entry here; existence-conditional is safe for
 #: a CREATE, never for a reshape.
 RECORD_REAPPLY_STEPS: list[tuple[Path, str | None]] = [
+    # #8263's `subject` refusal. It ships AFTER the 20261012 base shape, so a
+    # container migrated by a 2026-10-12 … 2026-10-13 tree does not carry
+    # `chk_subject_props_no_derived` — while `refused_props_names()` parses the
+    # FILES and therefore DROPS `status` from every `subject` props tail. The
+    # projection's own drop is right; the DB-side backstop for a raw SQL caller
+    # is what is missing. `DROP CONSTRAINT IF EXISTS` + `ADD CONSTRAINT` in ONE
+    # statement, and the backfill is `props - 'status'` on the rows that still
+    # have it, so re-applying is a no-op on a container that already ran it.
+    (REPO_ROOT / "supabase" / "migrations"
+     / "20261014000001_record_subject_props_no_derived.sql", None),
+    # #2782's money value: five COLUMNS on `public.point`, added with
+    # `IF NOT EXISTS` (and `COMMENT ON`, also idempotent). This is the entry
+    # that removes a ROW-LOSS failure rather than a backstop gap: `table_columns()`
+    # reads the files, so `_split_properties` emits `amount_minor`/`currency`/…
+    # for a money-bearing Point and the INSERT aborts `42703 UndefinedColumn` on
+    # a container whose `point` predates the ALTER — no row, while the capture
+    # receipt still reports ok, and the residue pass blames *"a NEW defect"* on
+    # the current tree. Same class as the 20261022 narrowing below (#9602 P2-2),
+    # one migration earlier.
+    (REPO_ROOT / "supabase" / "migrations"
+     / "20261018000001_record_point_money_value_2782.sql", None),
     # The column narrowing: `session.capture_redactions` came in as `jsonb` and
     # no re-apply of the `CREATE TABLE` files changes it. Guarded `DO` block, so
     # re-applying on a narrowed column is a no-op.
@@ -221,10 +243,21 @@ RECORD_REAPPLY_STEPS: list[tuple[Path, str | None]] = [
     # tree has `journal_event` and no `tortoise_record_app`, no grants and no
     # `*_app_tenant` policies — the armed leg then connects as a role that does
     # not exist, or one that can touch nothing. LAST on purpose: it is the file
-    # that arms every relation the two above reach.
+    # that arms every relation the entries above reach.
     (REPO_ROOT / "supabase" / "migrations"
      / "20261025000001_record_tenancy_role_and_guc.sql", None),
 ]
+
+#: Record migrations that ship AFTER the base shape yet are deliberately NOT in
+#: :data:`RECORD_REAPPLY_STEPS`, as `name -> why`. Empty is the healthy state and
+#: a real reason is the only thing that may enter it — the point is that the
+#: decision can never be SILENT. The closure test below keeps this honest: a new
+#: record migration must either be re-applied or be named here with its reason,
+#: which is exactly the axis the two omissions behind #9800's reopened P2 sat
+#: on: both migrations say "idempotent on re-apply" in their own headers and
+#: both sort BEFORE the set's first entry, so a pre-#9638 container never reached
+#: them and nothing in the helper said so.
+RECORD_REAPPLY_EXCLUDED: dict[str, str] = {}
 
 #: The minimum Supabase-shaped substrate the record migrations need: the three
 #: roles they GRANT to, and the two control-plane tables their tenancy FKs
@@ -1838,6 +1871,13 @@ def _ensure_record_schema(conn) -> None:
     migration because the tenancy migration names that table unconditionally
     (#9800 review P2: without it the tenancy file aborted `UndefinedTable` and
     rolled back the role, the grants and the nine other policies with it).
+    The set is CLOSED over every record migration newer than the base shape —
+    #2782's money columns and #8263's `subject` refusal are in it for the same
+    reason (the readers parse the files, so they emit columns and refusals an
+    older container does not carry) — and
+    `test_the_reapply_set_covers_every_record_migration_after_the_base_shape`
+    is what keeps that true: a new migration must be re-applied or excluded
+    with a stated reason, never silently omitted.
 
     A `creates`-bearing entry is applied only where its relation is ABSENT —
     that file's `CREATE POLICY`s are unguarded and it is append-only, so a
@@ -2452,15 +2492,142 @@ def test_the_dream_drain_carries_the_enqueueing_requests_tenant(monkeypatch):
 
 
 def _strip_sql_comments(text: str) -> str:
-    """The STATEMENTS of a migration file, with its `--` prose removed.
+    """The STATEMENTS of a migration file, with its prose removed.
 
     These files are ~70% prose *about* their own SQL (the tenancy migration
     explains at length why it does NOT grant `DELETE` on `journal_event`), so a
     substring assertion over the raw text can be satisfied — or reddened — by a
     comment. The guards below are about what will be EXECUTED.
+
+    A scanner, not a line filter, because every comment FORM is a way in: `--`
+    alone leaves `/* … */` and a trailing `-- …` after a statement intact, and
+    the derivation below feeds a DROP list — so a comment naming a table would
+    become a phantom relation and red the required zero-skip Postgres job on an
+    honest diff (#9800 review of d05243806, P3). It tracks single-quoted
+    literals (``''`` escapes) and RECURSES into `$tag$ … $tag$` bodies, so a
+    `--` or `/*` INSIDE a literal survives — the over-stripping that matters,
+    since an under-derivation is the loud failure (`declared <= set(dropped)`)
+    while a weakened positive assertion is not — and one inside a PL/pgSQL body
+    (where it is a comment too) does not.
     """
-    return "\n".join(line for line in text.splitlines()
-                     if not line.lstrip().startswith("--"))
+    out: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        if text[i] == "'":
+            j = i + 1
+            while j < n:
+                if text[j] == "'":
+                    if j + 1 < n and text[j + 1] == "'":
+                        j += 2
+                        continue
+                    j += 1
+                    break
+                j += 1
+            out.append(text[i:j])
+            i = j
+        elif text[i] == "$" and (m := re.match(r"\$[A-Za-z_]*\$", text[i:])):
+            tag = m.group(0)
+            end = text.find(tag, i + len(tag))
+            if end < 0:                     # unterminated: keep the rest as-is
+                out.append(text[i:])
+                i = n
+            else:
+                # RECURSE, do not keep the body opaque: a `DO $$ … $$` body is
+                # PL/pgSQL, where `--` and `/* */` are comments too, so an
+                # opaque body would let a comment inside one name a table. The
+                # recursion still preserves a quoted `EXECUTE 'CREATE TABLE
+                # public.x'` — a table that really exists, so matching it is
+                # correct over-derivation, not a phantom.
+                out.append(tag + _strip_sql_comments(text[i + len(tag):end]) + tag)
+                i = end + len(tag)
+        elif text.startswith("--", i):
+            end = text.find("\n", i)
+            i = n if end < 0 else end
+        elif text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            i = n if end < 0 else end + 2
+        else:
+            out.append(text[i])
+            i += 1
+    return "".join(out)
+
+
+def _journal_event_privileges(sql: str) -> set[str]:
+    """The privileges a migration GRANTS on `public.journal_event`, as a SET.
+
+    A set rather than a substring, because the substring form under-reads what
+    it claims: `GRANT ALL ON public.journal_event` grants UPDATE and DELETE
+    while `"DELETE ON public.journal_event" not in sql` passes it, and
+    `GRANT UPDATE ON public.journal_event` passes it too. The granted words are
+    the thing the append-only asymmetry is about, so they are parsed.
+    """
+    granted: set[str] = set()
+    for privileges in re.findall(
+            r"GRANT\s+([A-Za-z][A-Za-z,\s]*?)\s+ON\s+public\s*\.\s*journal_event\b",
+            sql, re.IGNORECASE):
+        granted |= {word.strip().upper()
+                    for word in privileges.split(",") if word.strip()}
+    return granted
+
+
+def test_the_sql_stripper_reads_sql_not_prose():
+    """The strip is a scanner, so pin each form it has to tell apart.
+
+    It guards a DROP list and three substring assertions, so both directions are
+    a defect: an unstripped comment can invent a table (false red on the
+    required Postgres job) and an over-eager strip can weaken a guard to nothing.
+    """
+    kept = _strip_sql_comments(
+        "CREATE TABLE public.real_one (\n"      # plain SQL
+        "    -- CREATE TABLE public.line_comment\n"   # full-line `--`
+        ");  -- CREATE TABLE public.trailing\n"    # trailing `--`
+        "/* CREATE TABLE public.block */\n"        # `/* */`
+        "SELECT 'a -- not a comment', 'it''s /* fine */';\n"  # literals
+        "DO $$ BEGIN -- CREATE TABLE public.in_body\n END $$;\n")
+    assert "CREATE TABLE public.real_one" in kept, "real SQL must survive"
+    for phantom in ("line_comment", "trailing", "block", "in_body"):
+        assert phantom not in kept, (
+            f"`{phantom}` is comment prose; a name it carries would enter the "
+            "DB leg's DROP list as a relation nothing creates")
+    assert "'a -- not a comment'" in kept, (
+        "`--` inside a single-quoted literal is DATA, and stripping it would "
+        "truncate a statement whose assertion depends on it")
+    assert "'it''s /* fine */'" in kept, "a `/*` inside a literal is data too"
+
+
+def test_the_journal_event_privilege_pin_is_a_set():
+    """The privilege pin must catch what the old substring assertion missed.
+
+    `assert "DELETE ON public.journal_event" not in executed` was reported
+    (#9800 reviews 3 and 5, P3) as checking less than its message: `GRANT ALL`
+    and `GRANT UPDATE` both hand the boundary role the rewrite/erase path and
+    both contain no such substring. This pins the discrimination itself, so
+    narrowing the guard back to a substring is a red rather than a rewrite of
+    the same blind spot.
+    """
+    append_only = ("GRANT SELECT, INSERT ON public.journal_event  "
+                   "TO tortoise_record_app;")
+    assert _journal_event_privileges(append_only) == {"SELECT", "INSERT"}
+
+    for escape in ("GRANT ALL ON public.journal_event TO tortoise_record_app;",
+                   "GRANT UPDATE ON public.journal_event TO tortoise_record_app;"):
+        assert "DELETE ON public.journal_event" not in escape, (
+            "premise: this grant is invisible to the substring assertion")
+        assert _journal_event_privileges(append_only + "\n" + escape) != {
+            "SELECT", "INSERT"}, (
+            f"`{escape}` grants the erase/rewrite surface and the privilege "
+            "set must see it")
+    # The spelling the substring form DID catch is still caught — the set is not
+    # a relaxation of the old guard, it is the old guard plus the two escapes.
+    explicit = ("GRANT SELECT, INSERT, UPDATE, DELETE ON public.journal_event "
+                "TO tortoise_record_app;")
+    assert "DELETE ON public.journal_event" in explicit
+    assert _journal_event_privileges(explicit) != {"SELECT", "INSERT"}
+
+    # Adding the append-only grant to a file that had none is a CHANGE, not a
+    # no-op: the empty set is what the pre-#9554 re-apply set produced, and it
+    # must not read as "nothing forbidden here".
+    assert _journal_event_privileges("CREATE TABLE public.unrelated (id int);") == set()
 
 
 class _StubCursor:
@@ -2534,14 +2701,23 @@ def test_ensure_record_schema_leaves_the_app_role_able_to_write():
     # The STATEMENTS, not the raw text: this file is mostly prose about the
     # grants (it spends a paragraph on why `DELETE` is withheld from
     # `journal_event`), and a comment phrased "…we do not grant DELETE ON
-    # public.journal_event" would redden the negative assertion below while the
-    # SQL was unchanged (#9800 review note).
+    # public.journal_event" would otherwise decide the privilege assertion below
+    # while the SQL was unchanged (#9800 review note).
     executed = _strip_sql_comments("\n".join(conn.log))
-    assert "GRANT SELECT, INSERT ON public.journal_event  TO tortoise_record_app" in executed, (
+    # The PRIVILEGE SET, not a substring (#9800 re-review, residual P3):
+    # `GRANT ALL ON public.journal_event` and `GRANT UPDATE …` grant the
+    # erase/rewrite surface while containing no substring a negative assertion
+    # can catch. `_journal_event_privileges` parses the granted words, and
+    # `test_the_journal_event_privilege_pin_is_a_set` pins that it reads the
+    # forms a substring misses.
+    journal_grants = _journal_event_privileges(executed)
+    assert journal_grants, (
         "the journal grant is the append-only asymmetry and must be re-applied")
-    assert "DELETE ON public.journal_event" not in executed, (
-        "UPDATE/DELETE on the journal would hand the boundary role the erasure "
-        "path the append-only trigger reserves to app.record_journal_purge")
+    assert journal_grants == {"SELECT", "INSERT"}, (
+        f"the app role is granted {sorted(journal_grants)} on `journal_event`, "
+        "not SELECT+INSERT. UPDATE/DELETE would hand the boundary role the "
+        "rewrite/erasure path the append-only trigger reserves to "
+        "app.record_journal_purge, and `GRANT ALL` confers both implicitly")
     assert "GRANT SELECT, INSERT, UPDATE, DELETE ON public.point " in executed, (
         "the plan's own tables need UPDATE for a re-projection to land")
     assert "CREATE POLICY point_app_tenant ON public.point" in executed, (
@@ -2601,6 +2777,74 @@ def test_ensure_record_schema_applies_everything_on_a_fresh_container():
     assert "CREATE ROLE anon" in executed
     for path in RECORD_MIGRATION_FILES:
         assert path.read_text(encoding="utf-8") in executed, path.name
+
+
+def _base_shape_release() -> str:
+    """The release that CREATED `journal_event` — the shortcut's base shape.
+
+    `_ensure_record_schema` decides "already migrated" from
+    `to_regclass('public.journal_event')`, so the release that created that
+    relation is the earliest record schema a stale container is guaranteed to
+    have: `journal_event` present ⇒ those files ran (they ship together). Every
+    record migration from a LATER release is a FORWARD amendment, and a
+    container older than the amendment does not carry it.
+
+    Returned as the migration's date prefix (the first eight characters of the
+    filename, which is the release boundary in this series), derived from the
+    file that creates the relation rather than restated.
+    """
+    for path in RECORD_MIGRATION_FILES:
+        if re.search(
+                r"CREATE\s+TABLE[^;]*?\bpublic\s*\.\s*journal_event\b",
+                _strip_sql_comments(path.read_text(encoding="utf-8")),
+                re.IGNORECASE | re.DOTALL):
+            return path.name[:8]
+    raise AssertionError(
+        "derivation failure: no record migration creates `public.journal_event`, "
+        "so the base shape this test measures from is not on disk")
+
+
+def test_the_reapply_set_covers_every_record_migration_after_the_base_shape():
+    """The re-apply set must be CLOSED over the forward amendments (#9800 P2).
+
+    A container is only "already migrated" as far as `journal_event`. Every
+    record migration from a later release is a forward amendment such a
+    container may not have — while the schema readers (`table_columns()`,
+    `refused_props_names()`) parse the FILES, so they emit columns and refusals
+    the container does not carry. Concretely: a money-bearing Point gets
+    `amount_minor` in its INSERT and the row is lost to `42703` while the
+    capture receipt still reports ok (#2782, the same class as the narrowing
+    below it, #9602 P2-2), and a pre-#8263 container has no DB-side `subject`
+    refusal behind the projection's own drop.
+
+    Derived, not restated: every post-base record migration is either on the
+    re-apply list or named in `RECORD_REAPPLY_EXCLUDED` WITH a reason, so the
+    decision cannot be silent — which is how the two omissions that reopened
+    this P2 happened.
+    """
+    base = _base_shape_release()
+    post_base = [p.name for p in RECORD_MIGRATION_FILES if p.name[:8] > base]
+    assert post_base, "derivation failure: nothing sorts after the base shape"
+
+    applied = [path.name for path, _ in RECORD_REAPPLY_STEPS]
+    assert applied == sorted(applied), (
+        "the re-apply list must be in apply order: a file may only name a "
+        f"relation that an EARLIER entry creates (got {applied})")
+
+    missing = [name for name in post_base
+               if name not in applied and name not in RECORD_REAPPLY_EXCLUDED]
+    assert not missing, (
+        f"{missing} ship after the base shape and are neither re-applied nor "
+        "explicitly excluded. A container predating them still takes the "
+        "already-migrated branch, and the readers — which parse the FILES — "
+        "then emit columns and refusals that container does not have. Add the "
+        "entry if the file is re-apply safe, or name it in "
+        "RECORD_REAPPLY_EXCLUDED with the reason")
+
+    for name, why in RECORD_REAPPLY_EXCLUDED.items():
+        assert why.strip(), f"{name} is excluded from the re-apply with no reason"
+        assert name in post_base, (
+            f"{name} is excluded but is not a post-base record migration")
 
 
 def _tables_added_since_the_reapply_set() -> list[str]:
@@ -2701,6 +2945,66 @@ def test_ensure_record_schema_rebuilds_a_missing_record_table():
                 assert cur.fetchone()[0] is True, (
                     f"public.{table} came back without the app role's grant: a "
                     "replay of its records fails 42501 before RLS is consulted")
+    finally:
+        conn.rollback()
+        conn.close()
+
+
+def test_ensure_record_schema_reaches_the_forward_amendments_it_owes():
+    """The EXECUTED half of the closure over FORWARD amendments (#9800 P2).
+
+    The stub and closure tests say a post-base file is on the re-apply list;
+    only this one proves the list actually REACHES a container that predates the
+    file. The shape matters because the schema readers parse the FILES: with
+    `public.point` predating #2782 the projection still emits `amount_minor`,
+    the INSERT aborts `42703`, the row is lost and the residue pass reports it
+    as *"a NEW defect"* on the current tree — the exact mis-blame the re-apply
+    set exists to remove. Same transaction-and-rollback discipline as the leg
+    above, so the shared database is left as it was.
+    """
+    money_columns = {"amount_minor", "currency", "minor_unit_exponent",
+                     "verbatim", "as_of"}
+    conn = _record_db()
+    conn.autocommit = False
+    try:
+        _ensure_record_schema(conn)
+        with conn.cursor() as cur:
+            cur.execute("ALTER TABLE public.point " + ", ".join(
+                f"DROP COLUMN IF EXISTS {column}" for column in sorted(money_columns)))
+            cur.execute("ALTER TABLE public.subject "
+                        "DROP CONSTRAINT IF EXISTS chk_subject_props_no_derived")
+            cur.execute(
+                "SELECT count(*) FROM information_schema.columns WHERE "
+                "table_schema = 'public' AND table_name = 'point' "
+                "AND column_name = 'amount_minor'")
+            assert cur.fetchone()[0] == 0, (
+                "the fixture did not reach the older-container shape: "
+                "`public.point.amount_minor` survived the drop")
+
+        _ensure_record_schema(conn)
+
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT column_name FROM information_schema.columns WHERE "
+                "table_schema = 'public' AND table_name = 'point' "
+                "AND column_name = ANY(%s)", (sorted(money_columns),))
+            restored = {row[0] for row in cur.fetchall()}
+            assert restored == money_columns, (
+                f"#2782's columns {sorted(money_columns - restored)} were not "
+                "re-applied, so a money-bearing Point's INSERT aborts 42703 "
+                "UndefinedColumn, the row is never written and the capture "
+                "receipt still reports ok (#9800 review P2)")
+            cur.execute(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conname = 'chk_subject_props_no_derived'")
+            row = cur.fetchone()
+            assert row is not None, (
+                "#8263's `subject` refusal was not re-applied, so an older "
+                "container has NO DB-side refusal of a derived `status` and "
+                "the only guard is the projection's own drop")
+            assert "status" in row[0] and "embedding" in row[0], (
+                "the re-applied refusal must be the FULL set: a partial one "
+                f"re-opens `embedding` (got {row[0]})")
     finally:
         conn.rollback()
         conn.close()

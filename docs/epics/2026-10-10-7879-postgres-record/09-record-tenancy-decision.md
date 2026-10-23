@@ -147,12 +147,16 @@ Operator steps: `docs/infra-runbook.md` → "The record's connecting role".
   greps below: unscoped, the search also matches DOCUMENTATION that merely quotes the constant — this
   file among it — so it reports a commit that changed a doc, not a setter. The only setters before R6
   were `supabase/tests/*.sql`. `grep -rn TENANT_GUC_SQL tortoise/` finds the setter and its use.
-  ⚠️ Two greps that look like the test and are NOT:
-  `grep -rn "set_config('app.current_org_id" tortoise/` returns **one** line, and it is PROSE —
-  `replay()`'s docstring at `:3269` quotes the statement, while the setter interpolates `TENANT_GUC` and so
-  cannot match, which reads as "the code never sets the GUC"; and a bare `grep current_setting` also hits
-  `tortoise/projection/`'s `set_config_reset_marker`, a GRAPH marker unrelated to a Postgres GUC. Scope: the
-  greps are over `tortoise/` only — `supabase/migrations/20261025000001_record_tenancy_role_and_guc.sql:43`
+  ⚠️ Three greps that look like the test and are NOT. The setter interpolates
+  `TENANT_GUC`, so `grep -rn "set_config('app.current_org_id" tortoise/` returns **one** line and it is
+  PROSE — `replay()`'s docstring at `:3269` quotes the statement — which reads as "the code never sets the
+  GUC". A bare `grep -rn --include='*.py' set_config tortoise/` reaches two things that are not this GUC:
+  `tortoise/projection/__init__.py:1634`'s `set_config_reset_marker` (a GRAPH marker) and
+  `tortoise/record_backup.py`'s `statement_timeout`/`lock_timeout` statements. And
+  `grep -rn --include='*.py' current_setting tortoise/` returns only the tenant GUC's own read-back
+  (`:277`) and prose about it — it does NOT reach `set_config_reset_marker`, whose name does not contain
+  `current_setting`, so a reader using that grep to count "the GUC's uses" is counting something else.
+  Scope: the greps are over `tortoise/` only — `supabase/migrations/20261025000001_record_tenancy_role_and_guc.sql:43`
   quotes the same statement, so "one place in the tree" is false as a tree-wide claim and is not made here.
 - The `authenticated` **read** surface already had a cross-tenant test
   (`20261012000001_record_schema.sql:410-418`, #7968) — that half was **not** missing. What was
