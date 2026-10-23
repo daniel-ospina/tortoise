@@ -1439,10 +1439,10 @@ def _take_graph_argument(name: str,
 #: instant, and the seam's timer is armed first). Proportional to the residual,
 #: capped so a long budget does not hand the lookup a materially shorter one.
 #: THE TRADE: a lookup that would have finished inside this last slice is
-#: refused instead of served — hence the separate, TRUE message in
-#: ``_resolve_graph_argument`` (it must not reuse the shared budget-breach
-#: prefix, which would claim an exceeded budget and "work may still complete on
-#: the server" for a call that never ran), and the distinct message below.
+#: refused instead of served, which is why ``_resolve_graph_argument`` gives that
+#: refusal its OWN self-contained message — reusing the shared budget-breach
+#: prefix there would claim an exceeded budget and "the work may still complete
+#: on the server" for a call that never ran.
 _GRAPH_LOOKUP_MARGIN_FRACTION = 0.05
 _GRAPH_LOOKUP_MARGIN_CAP_S = 0.015
 
@@ -1531,8 +1531,15 @@ async def _resolve_graph_argument(ref: str | None,
                 "time it had left, so the call was not executed. "
                 f"Retry after {_mcp_auth._TRANSPORT_WAIT_RETRY_AFTER_S}s."
             ) from None
-        # No time left at all (the transport had already spent the bound): the
-        # shared, honest wording — nothing was left for the lookup to use.
+        # No time left at all (the transport had already spent the bound): keep
+        # #9340's shipped wording — that IS the vocabulary callers and tests
+        # already read for this refusal. Its "the work may still complete on the
+        # server" clause is not true of THIS arm (the lookup raises before the
+        # tool is ever called), but the arm does not reach a caller through the
+        # wrapper: at `remaining == 0` the seam's own deadline wins the race, so
+        # this message is read by direct `_resolve_graph_argument` callers (and
+        # the pin below). A future ordering change that surfaces it would need
+        # the same self-contained treatment the margin arm got.
         raise ToolError(
             f"{_mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE} (The graph lookup "
             f"exceeded the wait budget.) Retry after "
@@ -1638,9 +1645,9 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
         except ToolError:
             if not _wait_bound_refused():
                 raise
-            # #9762: the transport already answered this request, so a
-            # tool-level argument refusal is unreachable and recording it would
-            # be the same false `exec_error`/`ToolError` row — just from the
+            # #9762: the transport already answered this request, so the caller
+            # can never receive this tool-level argument refusal — recording it
+            # would be the same false `exec_error`/`ToolError` row, just from the
             # validation half instead of the resolution half. Assign the refusal
             # and FALL THROUGH, so the classification below still labels the row
             # (`refused`/`transport_wait_bound`) and the refusal is repaired by
