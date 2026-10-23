@@ -2679,30 +2679,49 @@ class TestCommitOrgIngestBound:
         # ... and no chain node was minted for the refused request.
         assert TestCommitPointsGate._chain_counts("sIngest2") == (0, 0, 0)
 
-    def test_the_refusal_is_not_write_free_and_says_so(self, client, monkeypatch):
-        """The 429's REAL residual, pinned so the gate is not overclaimed.
+    def test_the_refusal_does_not_change_the_retry_adjudication(
+            self, client, monkeypatch):
+        """A refused attempt leaves NO record of its own, so the retry is a
+        FIRST adjudication (#4051).
 
-        `store.acquire(...)` merges the `:CommitRecord` idempotency anchor
-        before any gate in this handler (as it does for the pre-existing
-        sessions/points gates), so a refused request leaves one
-        `status='partial'` record. It is counted by no quota and deliberately
-        uncharged (a refused charge is not appended), and it is bounded by the
-        per-key rate limit — but it IS a node, so "the gate is pre-write" must
-        never be read as "a refusal mints nothing".
+        `store.acquire(...)` merges the `:CommitRecord` before any gate, and
+        `plan_commit`/`is_first_adjudication` read ANY existing record as a
+        previous attempt — so a leftover `partial` record would drop the
+        first-adjudication hard-25 band. MEASURED before the fix: a 26-net-new
+        payload holds 26 on a clean graph, but after a 429 left the record the
+        retry WROTE all 26 — the client never got the `held[]` adjudication it
+        is supposed to act on, and the documented backoff-and-retry became a
+        way to write what the ceiling had deferred.
         """
-        self._allow(monkeypatch, self._charge())
+        unit = self._charge()
+        self._allow(monkeypatch, unit)
         assert self._empty_commit(client, "sIngestRecA").status_code == 200
-        raw = _raw_payload(0, session_id="sIngestRecB", points=[],
-                           entities=[], provenance_refs=[])
+
+        raw = _raw_payload(
+            26, session_id="sIngestRecB",
+            points=[_point(i, about_entities=[]) for i in range(26)])
         r = _commit(client, raw)
         assert r.status_code == 429, r.text
         cid = _finalize(dict(raw))["client_commit_id"]
-        assert _commit_record(cid) is not None, (
-            "the :CommitRecord anchor is merged before every gate — if this "
-            "fails, the handler's ordering changed and the residual claim in "
-            "hosted_api's [4c] comment is stale")
-        # ... and nothing else was minted for that session.
+        # The attempt's OWN record is gone: nothing was written, so the retry
+        # must plan as a first attempt (and the record is not a leftover node
+        # either — "pre-write" now genuinely mints nothing for this attempt).
+        assert _commit_record(cid) is None, (
+            "the refused attempt left its :CommitRecord behind — the retry "
+            "would be re-adjudicated without the first-adjudication band")
         assert TestCommitPointsGate._chain_counts("sIngestRecB") == (0, 0, 0)
+
+        # Retry the SAME payload after the documented backoff (the window is
+        # reset, which is what the 60 s wait achieves).
+        self._allow(monkeypatch, unit)
+        retry = _commit(client, raw)
+        assert retry.status_code == 200, retry.text
+        body = retry.json()
+        assert len(body["held"]) == 26, (
+            "the retry wrote what the first adjudication should have HELD — "
+            f"held={len(body['held'])}")
+        assert body["nodes_created"] == 0
+        assert TestCommitPointsGate._point_count() == 0
 
     def test_held_commit_is_charged(self, client, monkeypatch):
         """A HELD commit must be charged too — it WRITES.
