@@ -459,6 +459,27 @@ def search_provenance_enabled() -> bool:
 FYI_REASON_SOURCE_DRIFT = "source-version-drift"
 
 
+def version_operand(value: object) -> str:
+    """A version operand, or ``""`` when the value is not a recorded version.
+
+    BLANK-IS-ABSENT, **STRIP-TESTED** — not truthiness. ``"   "`` is truthy, so a
+    whitespace-only ``sourceVersion`` (reachable: ``create_source(url, kind,
+    contentHash="   ")`` anchors the edge with it — ``_anchor_on_create`` nulls
+    only the empty string) would otherwise be compared as a real version: equal
+    to itself it reads ``current``, i.e. a FALSE FRESH on a source that recorded
+    nothing, and unequal it reads ``stale`` with a bogus re-inference target.
+    That is the same rule the write side already states — *"a blank hash is not a
+    version"* (`tests/test_source_version_extractedfrom_5038.py`) — applied to
+    the READ.
+
+    Non-strings are absent too: a version is a content hash, so a number or a
+    node object is a shape the caller got wrong, and silently stringifying it
+    would invent an operand. :func:`currency_status` stays an exact comparison of
+    two prepared operands; this is the ONE place a raw graph value becomes one.
+    """
+    return value.strip() if isinstance(value, str) else ""
+
+
 def currency_status(remembered: str, current: str) -> str:
     """#5199 — the currency of a ``sourceVersion`` note, as a **READ**.
 
@@ -534,6 +555,11 @@ def aggregate_currency(links: Iterable[tuple[str, str]]) -> str:
     # comprehension below, which would answer `current` for an empty set.
     if not pairs:
         return "unknown"
+    # ⚠ NOT normalised here: `aggregate_currency` is a pure function of PAIRS, and
+    # its contract (pinned by `test_aggregate_borrows_the_one_pair_verdict`) is
+    # that it delegates to `currency_status`, whose comparison is EXACT. The
+    # blank-is-absent rule belongs one layer out, where a raw graph value becomes
+    # an operand — `version_operand` in the readers.
     verdicts = {currency_status(remembered or "", current or "")
                 for remembered, current in pairs}
     if "stale" in verdicts:
@@ -588,8 +614,8 @@ def read_currency_links(graph, point_ids: Iterable[str]) -> dict[str, list[dict]
     ).result_set
     out: dict[str, list[dict]] = {}
     for pid, url, remembered, current in rows:
-        recorded = remembered or ""
-        now = current or ""
+        recorded = version_operand(remembered)
+        now = version_operand(current)
         out.setdefault(pid, []).append({
             "source": url or "",
             "recorded": recorded,
@@ -689,8 +715,8 @@ def read_reference_currency_links(
     out: dict[str, list[dict] | None] = {}
     idents: dict[str, set] = {}
     for node_uid, nid, neid, nurl, url, remembered, current in rows:
-        recorded = remembered or ""
-        now = current or ""
+        recorded = version_operand(remembered)
+        now = version_operand(current)
         row = {
             "source": url or "",
             "recorded": recorded,

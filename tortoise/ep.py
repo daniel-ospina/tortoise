@@ -17,6 +17,7 @@ import time
 from .exceptions import UnaddressableClaimError
 from .projection import _declares_apply_first_write_lane
 from .quadrature import tilted_moments, moments_to_beta, phi_nand, phi_impl
+from . import claim_class
 from .live import (
     EPISTEMIC_LABELS,
     _live_only,
@@ -1838,12 +1839,13 @@ class TortoiseEP:
         below 2 becomes degenerate and is skipped — the SVBP-path convention.
 
         ``skipped`` (#6105) is an optional SINK: every factor this call drops
-        (degenerate, or a directional operator whose idx-0 source was
-        stripped) appends one structured record to it — ``operator_id``,
-        ``op_type``, ``reason``, ``participating_inputs`` and every input with
-        its status. ``run()`` passes ``self._last_skipped_factors`` so the run
-        carries the diagnostic; the read-only scope callers pass nothing and
-        stay side-effect free.
+        (degenerate, a directional operator whose idx-0 source was stripped, or
+        — #2351 — a DERIVED over ASSERTED factor whose every leg the claim-class
+        override guard blocked) appends one structured record to it —
+        ``operator_id``, ``op_type``, ``reason``, ``participating_inputs`` and
+        every input with its status. ``run()`` passes
+        ``self._last_skipped_factors`` so the run carries the diagnostic; the
+        read-only scope callers pass nothing and stay side-effect free.
         """
         live_o = _live_only("o.status", include_draft)
         live_c = _live_only("c.status", include_draft)
@@ -1958,7 +1960,21 @@ class TortoiseEP:
                 "MATCH (a)-[r:IMPL|NAND]->(b) "
                 "WHERE " + " AND ".join(_conds) + " "
                 "RETURN id(r), a.id, b.id, type(r), "
-                "       coalesce(r.direction, 'bidirectional'), r.weight"
+                "       coalesce(r.direction, 'bidirectional'), r.weight, "
+                # #2351 (epic #2349 E-derived): the endpoints' claim classes
+                # AND their labels ride the SAME statement, so the override
+                # guard below adds no query (mirrors the #7902 label fan-out:
+                # every hop query carries the columns its consumers need).
+                # ⛔ The LABEL is not optional: ``claimClass`` is a :Point-only
+                # property, so ``coalesce(a.claimClass, 'asserted')`` on a
+                # :Subject/:Object/:Event endpoint yields 'asserted' for a node
+                # that is not a CLAIM at all — the exact conflation the write
+                # doors exclude (#2351 review). The guard fires only when BOTH
+                # endpoints are claims, which is what the door does.
+                "       a.status, b.status, "
+                "       coalesce(a.claimClass, 'asserted'), "
+                "       coalesce(b.claimClass, 'asserted'), "
+                "       labels(a), labels(b)"
             ):
                 for _row in self._hop_query(
                     _q, {"ids": list(affected_claims)}, hop=None,
@@ -1969,11 +1985,59 @@ class TortoiseEP:
                         continue
                     _seen_dir.add(_row[0])
                     dir_rows.append(tuple(_row[1:]))
-        for src_id, tgt_id, rel, direction, weight in dir_rows:
+        for (src_id, tgt_id, rel, direction, weight,
+             src_status, tgt_status, src_cls, tgt_cls,
+             src_labels, tgt_labels) in dir_rows:
             if weight is None:
                 weight = (NAND_BASE_WEIGHT if rel == "NAND" else 1.0)
+            # #2351: the ASSERTED-vs-DERIVED override guard, at the LOAD side.
+            # This is the BACKSTOP, not the gate: the write path refuses to
+            # create such a factor at all, so this arm exists for edges that
+            # PREDATE the guard or were bulk-written. It blocks the leg that
+            # would push the computed claim's belief into the authored one and
+            # keeps the reverse leg, so a derived claim is still corroborated
+            # by the authored belief it sits beside. Both legs blocked ⇒ the
+            # factor is DROPPED and REPORTED (#6105/#689 discipline: a dead arm
+            # contributes nothing, and the run says so rather than reporting
+            # `converged` over a discarding it did silently).
+            # ⛔ A non-``:Point`` endpoint is NOT a claim: it carries no
+            # ``claimClass``, so its absent marker must not be read as the
+            # ASSERTED default. ``claim_class.factor_direction_over_claims``
+            # skips the guard unless BOTH sides are claims — the same rule the
+            # write doors apply by building their target class set from
+            # ``:Point`` rows only (#2351 review: reading a non-claim as
+            # asserted silently narrowed — or dropped — a wiring the doors
+            # deliberately keep writable).
+            effective = claim_class.factor_direction_over_claims(
+                direction,
+                {src_cls} if "Point" in (src_labels or ()) else None,
+                {tgt_cls} if "Point" in (tgt_labels or ()) else None,
+            )
+            if effective is None:
+                logger.warning(
+                    "Direct edge %s -[%s]-> %s: DERIVED source over ASSERTED "
+                    "target — factor skipped (#2351)",
+                    src_id, rel, tgt_id,
+                )
+                if skipped is not None:
+                    skipped.append({
+                        "operator_id": src_id,
+                        "op_type": rel,
+                        "reason": "derived_over_asserted",
+                        # Both endpoints ARE the factor's inputs, so the count
+                        # is 2 — never 0. ``participating_inputs`` is what
+                        # consumers filter and summarise the #6105 report on,
+                        # and a record that claims zero participants while its
+                        # own ``inputs`` array names two contradicts itself.
+                        "participating_inputs": 2,
+                        "inputs": [
+                            {"id": src_id, "status": src_status or "live"},
+                            {"id": tgt_id, "status": tgt_status or "live"},
+                        ],
+                    })
+                continue
             factors.append((src_id, rel, [src_id, tgt_id], float(weight),
-                            None, direction))
+                            None, effective))
 
         if not op_info:
             return factors
@@ -2014,21 +2078,37 @@ class TortoiseEP:
         # is then NOT provably the source, so the directional source-slot
         # guard must not fire (it could check the wrong slot — #943 review).
         op_idx_known: dict[str, bool] = {op_id: True for op_id in op_info}
+        # #2351 (epic #2349 E-derived): each input's claim class, read from the
+        # SAME Batch-2 statement (no extra query) and positionally aligned with
+        # ``op_inputs`` so the override guard below can name the factor's SOURCE
+        # slot (idx 0 — the position ``_update_factor`` reads the forward
+        # message's belief from).
+        # ``None`` marks an input that is NOT a claim (no ``:Point`` label, hence
+        # no ``claimClass``) — distinct from a claim whose marker is absent.
+        op_input_class: dict[str, list[str | None]] = {op_id: [] for op_id in op_info}
         rows = self._hop_query(
             "MATCH (o:Point)-[r:IMPL|NAND]->(c) "
             "WHERE o.id IN $ids "
             f"AND {epistemic_disjunction('c')} "
             # #9269: `c.is_operator` is PROJECTED, not filtered — the row must
             # reach the loop below so a stripped idx-0 source can be detected
-            # (see the note above the input dicts).
+            # (see the note above the input dicts). #2351 projects its own two
+            # columns on the SAME statement: the loop body below reads all
+            # three, so the clause carries all three.
             "RETURN o.id, c.id, r.idx, c.status, coalesce(c.outdated, false), "
-            "       c.is_operator "
+            "       coalesce(c.claimClass, 'asserted'), labels(c), c.is_operator "
             "ORDER BY coalesce(r.idx, 0), c.id",
             {"ids": list(op_info.keys())}, hop=None,
             phase="factor_extraction", frontier_size=len(op_info),
         )
-        for op_id, claim_id, idx, status, outdated, is_operator in rows:
+        for (op_id, claim_id, idx, status, outdated,
+             input_cls, input_labels, is_operator) in rows:
             op_inputs[op_id].append(claim_id)
+            # ``claimClass`` lives only on :Point (#7902 lets an operator input
+            # be a :Subject/:Object/:Event): a non-claim input contributes NO
+            # class, so ``None`` — never the asserted default (#2351 review).
+            op_input_class[op_id].append(
+                input_cls if "Point" in (input_labels or ()) else None)
             # Participation is UNCONDITIONAL on status (#2422): a terminal
             # input (retracted / superseded / outdated / archived /
             # deprecated status — the SAME vocabulary as the Cypher
@@ -2132,6 +2212,81 @@ class TortoiseEP:
                             ],
                         })
                     continue
+            # #2351 (epic #2349 E-derived): the ASSERTED-vs-DERIVED override
+            # guard — the LOAD-side BACKSTOP to the write path's refusal. A
+            # DERIVED claim must not push belief INTO an ASSERTED one: the leg
+            # that would do so is blocked (the reverse leg survives, so a
+            # derived claim is still corroborated by the authored belief beside
+            # it). The factor's SOURCE slot is ``input_ids[0]`` — the position
+            # ``_update_factor`` reads the forward message's belief from and
+            # pushes into ``input_ids[1]`` — and the classes are read from the
+            # SAME Batch-2 statement, so this costs no query. Both legs blocked
+            # ⇒ the factor is DROPPED and
+            # reported (#6105), never silently discarded while the run reports
+            # `converged`.
+            _input_classes = [
+                cls for cls, live in zip(
+                    op_input_class[op_id], op_input_live[op_id], strict=True)
+                if live
+            ]
+            # The SOURCE slot is ``input_ids[0]`` — the FIRST SURVIVING input,
+            # because that is the list ``_update_factor`` receives and the
+            # position it reads the forward message's belief from (fwd writes
+            # into ``input_ids[1]``, bwd into ``input_ids[0]``). It is NOT idx 0
+            # of the FULL list: a stripped input is not in the factor at all,
+            # so classifying it describes a claim EP never uses — and on a
+            # BIDIRECTIONAL factor the #780/#2422 source-stripped guard does
+            # not fire, so that misattribution blocked the corroboration leg
+            # and let the derived->asserted leg flow (#2351 review, P0).
+            # ``None`` (a non-claim input, #7902) is preserved into the source
+            # slot so the helper can decline: a non-claim carries no class, and
+            # an empty target collection is NOT "an asserted target" either —
+            # ``any_asserted(∅)`` is True, which is right for ONE id carrying no
+            # marker and wrong for a side that is not a claim at all. A
+            # degenerate single-input factor therefore keeps its token, exactly
+            # as before (#2351 review).
+            _source_classes = (
+                {_input_classes[0]}
+                if _input_classes and _input_classes[0] is not None
+                else None
+            )
+            _target_classes = {c for c in _input_classes[1:] if c is not None}
+            # ⛔ ``op_idx_known`` gates the guard exactly as the sibling
+            # source-slot guard above is gated: on a legacy/migrated operator
+            # whose input edges carry NO idx, every row coalesces to position 0
+            # and the tie breaks lexicographically — so ``input_ids[0]`` is not
+            # provably the source, and judging a class against the wrong slot
+            # can block the CORROBORATION leg while leaving the override leg
+            # flowing, i.e. invert the very rule this guard encodes (#943
+            # review, same hazard; #2351 review P2).
+            if op_idx_known.get(op_id, True):
+                effective = claim_class.factor_direction_over_claims(
+                    direction,
+                    _source_classes,
+                    _target_classes,
+                )
+            else:
+                effective = direction
+            if effective is None:
+                logger.warning(
+                    "Operator %s: DERIVED source over ASSERTED target — "
+                    "factor skipped (#2351)",
+                    op_id,
+                )
+                if skipped is not None:
+                    skipped.append({
+                        "operator_id": op_id,
+                        "op_type": op_type,
+                        "reason": "derived_over_asserted",
+                        "participating_inputs": len(input_ids),
+                        "inputs": [
+                            {"id": cid, "status": st}
+                            for cid, st in zip(
+                                full_inputs, op_input_status[op_id], strict=True)
+                        ],
+                    })
+                continue
+            direction = effective
             weight = compute_operator_weight(self.proj, op_id)
             factors.append((op_id, op_type, input_ids, weight, label, direction))
         return factors

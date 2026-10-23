@@ -48,6 +48,17 @@ response_fields:
     not built)'
   unchanged_when_off: yes — results, count and status stay byte-identical and the key is absent
 - response: tortoise_search
+  field: claim_class
+  emitted_when: '#2351 (epic #2349 E-derived) — the claim''s asserted/derived class, emitted ONLY when the CALLER
+    opts in by passing claim_class to the SDK verb `tortoise_fts_query` (then every returned Point carries the
+    key, and the same seam FILTERS pre-truncation). Recorded because CONTRIBUTING''s carve-out is about what
+    `tools/surface_manifest.py check` FAILS on, not about what goes unrecorded — but stated precisely: the served
+    handlers (`tortoise_search` and the hosted GET /v1/search) do not declare or forward the parameter today, so
+    NO served response carries this key. Making it reachable from a served surface widens an advertised tool
+    schema and is an MCP/SDK Surface Approval decision, not a consequence of this row'
+  unchanged_when_off: yes — the caller has to pass the parameter, so every pre-#2351 call returns rows with no
+    claim_class key at all (byte-identical)
+- response: tortoise_search
   field: outdated
   emitted_when: the legacy flag half of the terminal vocabulary is set on the Point (invalidate_point terminalises
     WITHOUT stamping status) — present only when true
