@@ -925,7 +925,7 @@ durations:
   test_unchanged.py: 12.0  # #9017 CI-junit 2026-10-18 (run 39165691659); was 11.0
 """
 
-_LOWER_BOUND_LABEL = "ci-timing top-15 2026-10-19 (run 39191149586)"
+_LOWER_BOUND_LABEL = "ci-timing junit-census+top-15 2026-10-19 (run 39191149586)"
 
 
 def _rendered_lower_bound(tmp_path: Path) -> tuple[str, dict]:
@@ -973,7 +973,7 @@ def test_a_partial_reading_cannot_lower_a_recorded_weight(tmp_path: Path) -> Non
     # (#9134 review, P2).
     assert ("test_surface_manifest.py: 199.1  # #9017 CI-junit 2026-10-18 "
             "(run 39165691659); was 180.7"
-            f" — {_LOWER_BOUND_LABEL}: top-15 saw 2 of 10 testcases = 36.0s in "
+            f" — {_LOWER_BOUND_LABEL}: the reading saw 2 of 10 testcases = 36.0s in "
             "the largest single job (not summed across legs), a LOWER bound; "
             "kept 199.1") in text
     assert ci_timing.validate_refreshed_manifest(text) == []
@@ -2207,6 +2207,13 @@ def test_a_note_that_OPENS_with_a_citation_is_not_deleted_whole() -> None:
     pure = (
         "  # #9017 CI-junit 2026-10-18 (run 39165691659); was 42.6",
         "  # ci-timing top-15 2026-10-19 (run 39191149586); was 11.8",
+        # …the label shape this render writes now, in both its ADOPTED
+        # (`; was 11.8`) and HELD (`: the reading saw …; kept …`) forms: a row
+        # rewritten under the current label must classify pure on its next
+        # refresh, or each week's hold appends another basis sentence.
+        "  # ci-timing junit-census+top-15 2026-10-22 (run 39782493641); was 11.8",
+        "  # ci-timing junit-census+top-15 2026-10-22 (run 39782493641): the "
+        "reading saw 2 of 15 testcases = 49.2s, a LOWER bound; kept 49.2",
         "  # #9017 CI-junit 2026-10-18 (run 1); was 20.3 — ci-timing top-15 "
         "2026-10-19 (run 2): top-15 saw 2 of 15 testcases = 49.2s, a LOWER "
         "bound; kept 49.2",
@@ -2919,7 +2926,12 @@ def test_collector_file_measurements_pairs_the_winning_reading_with_its_own_coun
     """The witness must describe the SAME reading as the weight it accompanies:
     the larger of two jobs wins, and its testcase count travels with it — pairing
     the winner's seconds with the loser's count would make a partial reading look
-    complete and re-open the under-weighting the guard exists to stop."""
+    complete and re-open the under-weighting the guard exists to stop.
+
+    `source` travels with them for the same reason (PR #9651 review, P2-2): it is
+    what `main` builds the row's basis label from, so a source naming the LOSING
+    reading would label a census value `top-15` (or the reverse).
+    """
     logs = tmp_path / "logs"
     logs.mkdir()
     write_log(logs, "pytest-log-test-a.log",
@@ -2939,10 +2951,22 @@ def test_collector_file_measurements_pairs_the_winning_reading_with_its_own_coun
 """)
     measurements = ci_timing.collector_file_measurements(logs)
     assert measurements["test_alpha.py"] == {"seconds": pytest.approx(9.0),
-                                             "tests": 2}
+                                             "tests": 2, "source": "top-15"}
+    # A CENSUS reading that wins is what makes the label say `junit-census+top-15`
+    # — the label is derived from this field, never from a file listing.
+    write_junit(logs.parent, "junit.xml",
+                '<testsuites><testsuite name="pytest" tests="3">'
+                '<testcase classname="tests.test_alpha" name="test_one" '
+                'file="tests/test_alpha.py" line="1" time="12.0"/>'
+                '<testcase classname="tests.test_alpha" name="test_two" '
+                'file="tests/test_alpha.py" line="2" time="6.0"/>'
+                "</testsuite></testsuites>")
+    measurements = ci_timing.collector_file_measurements(logs)
+    assert measurements["test_alpha.py"] == {"seconds": pytest.approx(18.0),
+                                             "tests": 2, "source": "census"}
     # the long-standing weights-only view is a projection of the same reading
     assert ci_timing.collector_file_weights(logs) == {
-        "test_alpha.py": pytest.approx(9.0)}
+        "test_alpha.py": pytest.approx(18.0)}
 
 
 def test_the_cli_wires_the_lower_bound_witness(
@@ -2982,16 +3006,121 @@ def test_the_cli_wires_the_lower_bound_witness(
 
     monkeypatch.setattr(ci_timing, "refresh_durations", fake_refresh)
     monkeypatch.setattr(ci_timing, "_is_the_repo_manifest", lambda _p: False)
+
+    def must_not_fetch(*_args: object, **_kwargs: object) -> dict:
+        raise AssertionError(
+            "the refresh shelled out to `gh api` for run metadata — this test is "
+            "about the witness WIRING and must not touch the network")
+
+    monkeypatch.setattr(ci_timing, "fetch_run", must_not_fetch)
     monkeypatch.setenv("CI_TIMING_NOW", "2026-10-19T05:02:37Z")
     monkeypatch.setattr(sys, "argv", [
         "ci_timing.py", "--repo", "o/r", "--run-id", "39191149586",
         "--logs-dir", str(logs), "--refresh-durations",
         "--manifest", str(manifest),
+        # BOTH refusals below this path are overridden deliberately — the subject
+        # is the witness WIRING, not either guard. `--allow-non-push-run` is not
+        # cosmetic: without it this test made a REAL
+        # `gh api repos/o/r/actions/runs/39191149586` call (PR #9651 review,
+        # P2-3). `o/r` is not a repo, so it passed only through the fail-open
+        # warning arm, and `fetch_run`'s `subprocess.run` carries no timeout to
+        # bound a hung or credential-prompting `gh`. `fetch_run` is stubbed to
+        # RAISE above, so this test now proves the flag short-circuits it instead
+        # of proving nothing and waiting on the network.
+        "--allow-window-only", "--allow-non-push-run",
     ])
     assert ci_timing.main() == 0
     assert captured["coverage"] == {"test_alpha.py": (1, 4)}
+    # A window-only sweep says so: its only justification is
+    # `--allow-window-only`, so the label may not claim a census it never read.
     assert captured["sample_label"] == (
         "ci-timing top-15 2026-10-19 (run 39191149586)")
+
+
+def test_the_basis_label_names_the_reading_the_sweep_actually_took(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The basis label is built from the readings the sweep TOOK (PR #9651 review,
+    P2-2), never from a file listing and never from a hardcoded source.
+
+    `--refresh-durations` writes this label onto every row it re-bases or holds, so
+    it is the only thing that tells the next lane whether a figure is a CI
+    measurement or a laden-host guess. It was hardcoded `ci-timing top-15` — a
+    15-row-per-leg window — while the value now comes from the junit census, so the
+    first weekly refresh after this tool landed would have committed a map whose
+    rows cite a source that did not produce them.
+
+    Non-vacuity, and it is the point of the three sweeps below: pre-fix the label is
+    `ci-timing top-15 …` for ALL of them, so sweep 1 fails. An implementation that
+    derived the label from the PRESENCE of a `junit*.xml` (the same
+    artifact-exists-but-was-not-read mistake `--allow-window-only` exists to
+    refuse) passes sweeps 1 and 2 and fails sweep 3.
+    """
+    repo = tmp_path / "repo"
+    (repo / "tests").mkdir(parents=True)
+    (repo / "config").mkdir()
+    (repo / "tests" / "test_alpha.py").write_text(
+        "\n".join(f"def test_{i}():\n    pass" for i in range(4)) + "\n",
+        encoding="utf-8")
+    manifest = repo / "config" / "ci-surfaces.yml"
+    manifest.write_text(
+        "surfaces:\n  core:\n    - test_alpha.py\ndurations:\n  test_alpha.py: 19.0\n",
+        encoding="utf-8")
+    window = """============================= slowest 1 durations =============================
+
+3.30s call     tests/test_alpha.py::test_0
+
+============================= short test summary info =============================
+"""
+    census = ('<?xml version="1.0" encoding="utf-8"?>'
+              '<testsuites><testsuite name="pytest" tests="4">'
+              + "".join(
+                  f'<testcase classname="tests.test_alpha" name="test_{i}" '
+                  f'file="tests/test_alpha.py" line="{i}" time="1.25"/>'
+                  for i in range(4))
+              + "</testsuite></testsuites>")
+    captured: dict = {}
+
+    def fake_refresh(path, weights, captured_at, **kwargs):
+        captured.update(kwargs, path=path, weights=weights)
+        return 0
+
+    monkeypatch.setattr(ci_timing, "refresh_durations", fake_refresh)
+    monkeypatch.setattr(ci_timing, "_is_the_repo_manifest", lambda _p: False)
+    monkeypatch.setenv("CI_TIMING_NOW", "2026-10-22T15:30:00Z")
+
+    def sweep(logs: Path, *extra: str) -> str:
+        captured.clear()
+        monkeypatch.setattr(sys, "argv", [
+            "ci_timing.py", "--repo", "o/r", "--run-id", "39786862344",
+            "--logs-dir", str(logs), "--refresh-durations",
+            "--manifest", str(manifest),
+            # the run's metadata is not the subject here, and `o/r` is not a repo
+            "--allow-non-push-run", *extra,
+        ])
+        assert ci_timing.main() == 0
+        return captured["sample_label"]
+
+    # 1. a sweep that READ a census names it …
+    both = tmp_path / "both"
+    write_log(both, "pytest.log", window)
+    write_junit(both, "junit.xml", census)
+    assert sweep(both / "logs") == (
+        "ci-timing junit-census+top-15 2026-10-22 (run 39786862344)")
+
+    # 2. … and one that could only read the window does not claim one …
+    window_only = tmp_path / "window-only"
+    write_log(window_only, "pytest.log", window)
+    assert sweep(window_only / "logs", "--allow-window-only") == (
+        "ci-timing top-15 2026-10-22 (run 39786862344)")
+
+    # 3. … INCLUDING when a junit artifact is present but unreadable: presence is
+    #    not a reading, so the label follows what the sweep measured.
+    broken = tmp_path / "broken"
+    write_log(broken, "pytest.log", window)
+    write_junit(broken, "junit.xml", "<testsuites><testsuite")
+    assert sweep(broken / "logs", "--allow-window-only") == (
+        "ci-timing top-15 2026-10-22 (run 39786862344)")
 
 
 
@@ -4990,18 +5119,34 @@ def test_cli_returns_2_when_the_manifest_path_cannot_be_read(tmp_path, label: st
     """A path that EXISTS but cannot be read was the sixth escape (#6092
     review round 6): `exists()` guards only absence, so a directory or a
     permission error reached the boundary as a traceback on both entry points.
+
+    A CENSUS artifact is supplied on purpose (PR #9651 review, P2-4). `main`'s
+    census refusal returns 2 for a logs dir carrying no `junit*.xml`, which is
+    why this test passed at #9651's head while never reaching the guard it was
+    written for: both parametrisations asserted rc=2 and "no Traceback", and both
+    held for the WRONG reason (the refusal fired before `refresh_durations` was
+    called). The assertion below names the READ guard's own message, so the
+    subject is reached rather than shadowed, and `--allow-window-only` keeps it
+    reached even if the fixture is ever dropped.
     """
     target = tmp_path / label
     if label == "directory":
         target.mkdir()
+    write_junit(tmp_path, "junit.xml", _JUNIT_CENSUS)
     proc = subprocess.run(
         [sys.executable, str(Path(__file__).resolve().parent.parent / "tools" / "ci_timing.py"),
          "--repo", "o/r", "--refresh-durations", "--dry-run",
-         "--manifest", str(target), "--logs-dir", str(tmp_path)],
+         "--manifest", str(target), "--logs-dir", str(tmp_path),
+         "--allow-window-only"],
         capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 2, f"{label}: rc={proc.returncode} stderr={proc.stderr[-400:]}"
     assert "Traceback" not in proc.stderr
+    expected = ("2: manifest not readable" if label == "directory"
+                else "2: manifest not found")
+    assert expected in proc.stderr, (
+        f"{label}: the run never reached the manifest read guard — stderr was "
+        f"{proc.stderr[-400:]}")
 
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -5093,7 +5238,11 @@ def test_refresh_warns_when_no_declared_count_resolves(tmp_path: Path) -> None:
     proc = subprocess.run(
         [sys.executable, str(_CLI), "--repo", "o/r", "--run-id", "1",
          "--refresh-durations", "--logs-dir", str(tmp_path / "logs"),
-         "--manifest", str(moved)],
+         "--manifest", str(moved),
+         # The subject here is the DECLARED-COUNT warning: this sweep has no junit
+         # artifact and no verifiable push-to-main run, so the two basis guards
+         # (#9651 review) are overridden explicitly rather than bypassed by luck.
+         "--allow-window-only", "--allow-non-push-run"],
         capture_output=True, text=True, timeout=120,
         env={**os.environ, "CI_TIMING_NOW": "2026-10-21T09:30:00Z"},
     )
@@ -5235,3 +5384,424 @@ def test_cli_returns_2_when_a_manifest_leg_list_is_not_a_list(tmp_path, key: str
     assert proc.returncode == 2, f"{key}: rc={proc.returncode} stderr={proc.stderr[-400:]}"
     assert "Traceback" not in proc.stderr
     assert f"`{key}:`" in proc.stderr, "the refusal must name the offending key"
+
+
+# ── the map's measurement source: the JUnit CENSUS, not the log WINDOW ──────
+#
+# WHY THESE EXIST. `config/ci-surfaces.yml:durations` is the sole input the LPT
+# packer balances by, and the collector fed it from pytest's `--durations=15`
+# block — a WINDOW naming the 15 slowest rows of a whole leg. MEASURED on run
+# 39782493641 (2026-10-22, full matrix), keyed the way the tool keys — by the
+# testcase `file=` attribute — `test (h)` executed 2,594 testcases over **76**
+# distinct files and its durations block named 8 of them (`test (g)` spans 71
+# files and its block names 9); across all legs the window names **82 of the fast
+# pool's 991 files — 8.3 %**, and its per-leg test time sums to 1,093 s against
+# the census's 3,341 s, a **3.06x** under-measurement of the pool. The pack was
+# therefore balancing weights that describe a slice of the work.
+#
+# ⛔ These are the FILE-keyed figures, and they are the only ones that belong
+# here: an earlier draft of this note quoted `classname` counts (198 and 157 for
+# `test(h)`/`test(g)`, and "119 files" for the window), which measure test
+# MODULES per leg rather than the files this map packs by, plus a per-pool spread
+# triple that does not reproduce from that run's artifacts. Corrected under the
+# #9651 review (P2-1) to match `tools/ci_timing.py::parse_junit`'s docstring — do
+# not "restore" the module counts. These tests pin the census path so the window
+# can never silently become the source again.
+
+_JUNIT_CENSUS = """<?xml version="1.0" encoding="utf-8"?>
+<testsuites><testsuite name="pytest" tests="4">
+  <testcase classname="tests.test_heavy" name="test_a" file="tests/test_heavy.py" line="1" time="40.0"/>
+  <testcase classname="tests.test_heavy" name="test_b" file="tests/test_heavy.py" line="2" time="20.0"/>
+  <testcase classname="tests.test_light" name="test_c" file="tests/test_light.py" line="1" time="0.5"/>
+  <testcase classname="tests.test_light" name="test_d" file="tests/test_light.py" line="2" time="0.5"/>
+</testsuite></testsuites>
+"""
+
+
+def write_junit(tmp_path: Path, name: str, content: str) -> Path:
+    logs = tmp_path / "logs"
+    p = logs / name
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(content)
+    return p
+
+
+def test_junit_census_measures_a_file_the_durations_window_never_names(
+    tmp_path: Path,
+) -> None:
+    """The defect this reader fixes: a fast file is invisible to the window."""
+    write_log(tmp_path, "pytest.log",
+               "============================= slowest 1 durations =============================\n"
+               "60.00s call     tests/test_heavy.py::test_a\n"
+               "============================= short test summary info =========================\n")
+    write_junit(tmp_path, "junit.xml", _JUNIT_CENSUS)
+    weights = ci_timing.collector_file_weights(tmp_path / "logs")
+    # The window named test_heavy only; the census measures BOTH files in full.
+    assert weights["test_heavy.py"] == pytest.approx(60.0)
+    assert weights["test_light.py"] == pytest.approx(1.0)
+
+
+def test_the_census_supersedes_the_window_partial_sum_for_the_same_file(
+    tmp_path: Path,
+) -> None:
+    """A file's window total is a PARTIAL sum (its top-15 tests), so it is smaller."""
+    write_log(tmp_path, "pytest.log",
+               "============================= slowest 1 durations =============================\n"
+               "40.00s call     tests/test_heavy.py::test_a\n"
+               "============================= short test summary info =========================\n")
+    write_junit(tmp_path, "junit.xml", _JUNIT_CENSUS)
+    weights = ci_timing.collector_file_weights(tmp_path / "logs")
+    assert weights["test_heavy.py"] == pytest.approx(60.0), (
+        "the window's 40s is test_a alone; the census's 60s is the whole file")
+
+
+def test_an_all_skipped_file_contributes_no_weight(tmp_path: Path) -> None:
+    """A leg where every testcase skipped did not CARRY the file.
+
+    Recording it would write DURATIONS_VALUE_FLOOR_S (0.1s) and so DOWNGRADE a
+    real weight — an embedded-only file on a docker leg is exactly that shape.
+    """
+    write_junit(tmp_path, "junit.xml", """<?xml version="1.0" encoding="utf-8"?>
+<testsuites><testsuite name="pytest" tests="2">
+  <testcase classname="tests.test_embedded_only" name="test_a" file="tests/test_embedded_only.py" time="0.0">
+    <skipped type="pytest.skip" message="no embedded engine"/>
+  </testcase>
+  <testcase classname="tests.test_embedded_only" name="test_b" file="tests/test_embedded_only.py" time="0.0">
+    <skipped type="pytest.skip" message="no embedded engine"/>
+  </testcase>
+</testsuite></testsuites>
+""")
+    assert ci_timing.collector_file_weights(tmp_path / "logs") == {}
+
+
+def test_the_d14_uploads_junit_report_is_read_too(tmp_path: Path) -> None:
+    """The D14 lane uploads `junit-d14.xml`, not `junit.xml` — same census."""
+    write_junit(tmp_path, "junit-d14.xml", _JUNIT_CENSUS)
+    weights = ci_timing.collector_file_weights(tmp_path / "logs")
+    assert weights == {"test_heavy.py": pytest.approx(60.0),
+                       "test_light.py": pytest.approx(1.0)}
+
+
+def test_a_testcase_without_a_file_attribute_is_dropped_not_guessed(
+    tmp_path: Path,
+) -> None:
+    """No `file` means no path, and a basename never SELECTS a manifest key."""
+    write_junit(tmp_path, "junit.xml", """<?xml version="1.0" encoding="utf-8"?>
+<testsuites><testsuite name="pytest" tests="1">
+  <testcase classname="test_orphan" name="test_a" time="9.0"/>
+</testsuite></testsuites>
+""")
+    assert ci_timing.collector_file_weights(tmp_path / "logs") == {}
+
+
+def test_a_malformed_junit_report_is_an_error_not_a_traceback(tmp_path: Path) -> None:
+    """One truncated artifact must not abort a sweep (parse_log's contract)."""
+    write_junit(tmp_path, "junit.xml", "<testsuites><testsuite")
+    parsed = ci_timing.parse_junit(tmp_path / "logs" / "junit.xml")
+    assert parsed["file_paths"] == {}
+    assert parsed["error"] and "unreadable" in parsed["error"]
+    assert ci_timing.collector_file_weights(tmp_path / "logs") == {}
+
+
+def test_an_xfail_is_measured_because_the_test_ran(tmp_path: Path) -> None:
+    """P1 (PR #9651 review): pytest writes XFAIL as `<skipped type="pytest.xfail">`
+    on a testcase that DID execute, with a real `time`.
+
+    Reading the child's mere presence would drop an xfail's cost from its file and
+    floor an all-xfail file at 0.1 s — the same defect `tools/skip-guard.py` names
+    (and `tests/test_ci_expected_manifests.py::test_an_xfail_is_not_an_outcome_violation`
+    pins) in the outcome reader.
+    """
+    write_junit(tmp_path, "junit.xml", """<?xml version="1.0" encoding="utf-8"?>
+<testsuites><testsuite name="pytest" tests="3">
+  <testcase classname="tests.test_xf" name="test_ok" file="tests/test_xf.py" time="1.0"/>
+  <testcase classname="tests.test_xf" name="test_xfail_slow" file="tests/test_xf.py" time="2.0">
+    <skipped type="pytest.xfail" message="the shipped behaviour is the defect"/>
+  </testcase>
+  <testcase classname="tests.test_only_xfail" name="test_xfail" file="tests/test_only_xfail.py" time="30.0">
+    <skipped type="pytest.xfail" message="owner ruling pending"/>
+  </testcase>
+  <testcase classname="tests.test_only_xfail" name="test_skipped" file="tests/test_only_xfail.py" time="0.0">
+    <skipped type="pytest.skip" message="no embedded engine"/>
+  </testcase>
+</testsuite></testsuites>
+""")
+    weights = ci_timing.collector_file_weights(tmp_path / "logs")
+    assert weights["test_xf.py"] == pytest.approx(3.0), "the xfail's 2s belongs to its file"
+    assert weights["test_only_xfail.py"] == pytest.approx(30.0), (
+        "an all-xfail file is MEASURED, never floored at 0.1s")
+
+
+def test_a_sweep_with_no_junit_says_so_instead_of_silently_using_the_window(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """P2 (PR #9651 review): a broken junit upload must not look like a census sweep."""
+    write_log(tmp_path, "pytest.log",
+               "============================= slowest 1 durations =============================\n"
+               "5.00s call     tests/test_heavy.py::test_a\n"
+               "============================= short test summary info =========================\n")
+    weights = ci_timing.collector_file_weights(tmp_path / "logs")
+    assert weights == {"test_heavy.py": 5.0}, "the window is still a usable fallback"
+    err = capsys.readouterr().err
+    assert "::warning::no junit artifact" in err
+
+
+def test_a_broken_junit_artifact_is_named_and_the_leg_still_measured(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One truncated report must warn, not abort, and must not hide the census."""
+    write_junit(tmp_path, "junit.xml", _JUNIT_CENSUS)
+    write_junit(tmp_path / "logs" / "broken", "junit.xml", "<testsuites><testsuite")
+    weights = ci_timing.collector_file_weights(tmp_path / "logs")
+    assert weights["test_light.py"] == pytest.approx(1.0)
+    assert "::warning::junit census skipped" in capsys.readouterr().err
+
+
+def test_the_census_coverage_notice_counts_DISTINCT_files_not_leg_pairs(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """P2 (PR #9651 review cycle 2): the notice must not fall silent on a partial sweep.
+
+    The denominator is distinct files, so the numerator has to be a set: counting
+    (file, leg) pairs lets two legs that both carry the same file report `2 of 2`
+    while a third of the map was never sampled at all.
+    """
+    for leg in ("leg-a", "leg-b"):
+        write_junit(tmp_path / "logs" / leg, "junit.xml", _JUNIT_CENSUS)
+    write_log(tmp_path / "logs" / "leg-c", "pytest.log",
+               "============================= slowest 1 durations =============================\n"
+               "7.00s call     tests/test_window_only.py::test_a\n"
+               "============================= short test summary info =========================\n")
+    weights = ci_timing.collector_file_weights(tmp_path / "logs")
+    assert set(weights) == {"test_heavy.py", "test_light.py", "test_window_only.py"}
+    notice = capsys.readouterr().err
+    assert "junit census supplied 2 of 3 measured files" in notice, notice
+    assert "carried forward" in notice, "the remainder is not all window-derived"
+
+
+# ── the sweep's BASIS: a census from a push-to-main run, or no write at all ──
+# PR #9651 review (P1): the census guard was a `::warning::`, so a window-only
+# sweep still rewrote and re-stamped the map and every gate stayed green. These
+# pin the refusal, the provenance check, and the direction the coverage witness
+# allows a PARTIAL census to move a weight.
+
+
+def test_a_window_only_sweep_is_refused_and_cannot_restamp_the_map(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A sweep with no junit artifact must WRITE NOTHING, not re-stamp the map.
+
+    The window is a partial sum (15 rows per leg), so writing it over census
+    values re-stamps `durations_captured_at` as if a census had run — the map is
+    then indistinguishable from a measured one one sweep later.
+
+    Non-vacuity: pre-fix `main()` returns 0 and the stamp moves to
+    `CI_TIMING_NOW`, which is asserted here as the unchanged bytes.
+    """
+    repo = tmp_path / "repo"
+    (repo / "tests").mkdir(parents=True)
+    (repo / "config").mkdir()
+    (repo / "tests" / "test_alpha.py").write_text(
+        "\n".join(f"def test_{i}():\n    pass" for i in range(4)) + "\n",
+        encoding="utf-8")
+    manifest = repo / "config" / "ci-surfaces.yml"
+    manifest.write_text(
+        "surfaces:\n  core:\n    - test_alpha.py\n"
+        'durations_captured_at: "2026-10-21T09:30:00Z"\n'
+        "durations:\n  test_alpha.py: 19.0\n", encoding="utf-8")
+    before = manifest.read_text()
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    write_log(logs, "pytest-log-test-a.log",
+              "============================= slowest 1 durations =============================\n"
+              "\n2.00s call     tests/test_alpha.py::test_0\n"
+              "\n============================= short test summary info =============================\n")
+    monkeypatch.setenv("CI_TIMING_NOW", "2026-10-22T15:30:00Z")
+    monkeypatch.setattr(sys, "argv", [
+        "ci_timing.py", "--repo", "o/r", "--logs-dir", str(logs),
+        "--refresh-durations", "--manifest", str(manifest),
+    ])
+    assert ci_timing.main() == 2
+    err = capsys.readouterr().err
+    assert "no `junit*.xml`" in err, err
+    assert "--allow-window-only" in err, "the refusal must name its override"
+    assert manifest.read_text() == before, (
+        "a window-only sweep must not re-stamp the durations map")
+
+
+def test_a_present_but_unreadable_census_is_refused_and_cannot_restamp_the_map(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Artifact PRESENCE is not a READING — the same refusal, one level down.
+
+    The `--allow-window-only` guard keyed on `rglob("junit*.xml")`, so a single
+    truncated report (the reachable shape `python-ci.yml`'s in-step timeout
+    watchdog produces, and what a partial artifact download leaves) satisfied it
+    while contributing no measured file — the sweep then wrote the window's
+    partial sums over census values and re-stamped `durations_captured_at`, which
+    is the exact outcome that guard exists to prevent (PR #9651 reviews, P2). It
+    now asks what the sweep actually READ.
+
+    Non-vacuity: pre-fix `main()` returns 0 and the stamp moves, so the byte
+    comparison fails; and the message asserted here is this refusal's, not the
+    absent-artifact one.
+    """
+    repo = tmp_path / "repo"
+    (repo / "tests").mkdir(parents=True)
+    (repo / "config").mkdir()
+    (repo / "tests" / "test_alpha.py").write_text(
+        "\n".join(f"def test_{i}():\n    pass" for i in range(4)) + "\n",
+        encoding="utf-8")
+    manifest = repo / "config" / "ci-surfaces.yml"
+    manifest.write_text(
+        "surfaces:\n  core:\n    - test_alpha.py\n"
+        'durations_captured_at: "2026-10-21T09:30:00Z"\n'
+        "durations:\n  test_alpha.py: 19.0\n", encoding="utf-8")
+    before = manifest.read_text()
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    write_log(logs, "pytest-log-test-a.log",
+              "============================= slowest 1 durations =============================\n"
+              "\n2.00s call     tests/test_alpha.py::test_0\n"
+              "\n============================= short test summary info =============================\n")
+    write_junit(tmp_path, "junit.xml", "<testsuites><testsuite")
+    monkeypatch.setenv("CI_TIMING_NOW", "2026-10-22T15:30:00Z")
+    monkeypatch.setattr(sys, "argv", [
+        "ci_timing.py", "--repo", "o/r", "--logs-dir", str(logs),
+        "--refresh-durations", "--manifest", str(manifest),
+    ])
+    assert ci_timing.main() == 2
+    err = capsys.readouterr().err
+    assert "NOT ONE of them produced a measured file" in err, err
+    assert "--allow-window-only" in err, "the refusal must name its override"
+    assert manifest.read_text() == before, (
+        "an unreadable census must not re-stamp the durations map")
+
+
+def test_the_refresh_refuses_a_sampled_run_that_is_not_a_push_to_main(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--refresh-durations` must validate WHICH RUN the artifacts came from.
+
+    `pick_run` samples `event=push&branch=main` because a PR run executes only
+    the diff-selected legs, and a slow-pool file can then be measured from one
+    whole-tree `-e embedded_only` slice (measured on #9651: 174.5 s -> 6.8 s,
+    a 22x under-weight for the slow shards' LPT pack).
+
+    Non-vacuity: pre-fix nothing read `--run-id`, so the refresh runs and
+    returns the stub's 0.
+    """
+    repo = tmp_path / "repo"
+    (repo / "tests").mkdir(parents=True)
+    (repo / "config").mkdir()
+    (repo / "tests" / "test_alpha.py").write_text("def test_a():\n    pass\n",
+                                                  encoding="utf-8")
+    manifest = repo / "config" / "ci-surfaces.yml"
+    manifest.write_text(
+        "surfaces:\n  core:\n    - test_alpha.py\ndurations:\n  test_alpha.py: 19.0\n",
+        encoding="utf-8")
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    write_junit(tmp_path, "junit.xml", _JUNIT_CENSUS)
+    called: dict = {}
+    monkeypatch.setattr(ci_timing, "refresh_durations",
+                        lambda *a, **k: (called.setdefault("ran", True), 0)[1])
+    monkeypatch.setattr(
+        ci_timing, "fetch_run",
+        lambda _repo, _rid: {"event": "pull_request",
+                             "head_branch": "fix/9075-ci-pin-baseline"})
+    base_argv = ["ci_timing.py", "--repo", "o/r", "--run-id", "39782493641",
+                 "--logs-dir", str(logs), "--refresh-durations",
+                 "--manifest", str(manifest)]
+
+    monkeypatch.setattr(sys, "argv", base_argv)
+    assert ci_timing.main() == 2
+    err = capsys.readouterr().err
+    assert "not a push to main" in err, err
+    assert "--allow-non-push-run" in err, "the refusal must name its override"
+    assert "ran" not in called, "a refused refresh must not reach the writer"
+
+    # The override is explicit, and then the same run is accepted.
+    monkeypatch.setattr(sys, "argv", base_argv + ["--allow-non-push-run"])
+    assert ci_timing.main() == 0
+    assert called.get("ran") is True
+
+    # A genuine push-to-main run is accepted WITHOUT the override: the guard
+    # must not block the weekly refresh's own source.
+    called.clear()
+    monkeypatch.setattr(
+        ci_timing, "fetch_run",
+        lambda _repo, _rid: {"event": "push", "head_branch": "main"})
+    monkeypatch.setattr(sys, "argv", base_argv)
+    assert ci_timing.main() == 0
+    assert called.get("ran") is True
+
+
+def test_a_partial_census_cannot_discount_a_weight_but_a_whole_one_can(
+    tmp_path: Path,
+) -> None:
+    """A TRUNCATED census (a leg killed by `--maxfail`) must not lower a weight.
+
+    The census's own `tests` count is the witness: a leg that saw 1 of a file's
+    4 testcases proves a floor, never that the file got cheaper. This is the
+    other half of the P1 — the sweep can still be written, but nothing in it can
+    discount a row it did not see whole.
+
+    Non-vacuity: without the witness the same reading adopts 5.0 over 100.0
+    (`observed >= declared` is not consulted), which is the 3-7x discount #9134
+    measured.
+    """
+    repo = tmp_path / "repo"
+    (repo / "tests").mkdir(parents=True)
+    (repo / "tests" / "test_alpha.py").write_text(
+        "\n".join(f"def test_{i}():\n    pass" for i in range(4)) + "\n",
+        encoding="utf-8")
+    manifest_text = (
+        "surfaces:\n  core:\n    - test_alpha.py\n"
+        "durations:\n  test_alpha.py: 100.0\n")
+
+    partial = tmp_path / "partial" / "logs"
+    partial.mkdir(parents=True)
+    write_junit(partial.parent, "junit.xml",
+                '<testsuites><testsuite name="pytest" tests="1">'
+                '<testcase classname="tests.test_alpha" name="test_0" '
+                'file="tests/test_alpha.py" line="1" time="5.0"/>'
+                "</testsuite></testsuites>")
+    measurements = ci_timing.collector_file_measurements(partial)
+    declared = ci_timing.declared_test_counts(measurements, repo)
+    assert declared == {"test_alpha.py": 4}
+    coverage = {"test_alpha.py": (measurements["test_alpha.py"]["tests"],
+                                  declared["test_alpha.py"])}
+    assert coverage == {"test_alpha.py": (1, 4)}
+    text, stats = ci_timing.render_refreshed_manifest(
+        manifest_text,
+        {p: m["seconds"] for p, m in measurements.items()},
+        "2026-10-22T15:30:00Z", coverage=coverage,
+        sample_label="CI junit census 2026-10-22 (run 39782493641)")
+    assert stats["kept_as_lower_bound"] == 1
+    assert yaml.safe_load(text)["durations"]["test_alpha.py"] == 100.0
+
+    # …and the SAME file, seen whole, MAY be re-based: the census is exactly the
+    # evidence the map's provenance rule asks for.
+    whole = tmp_path / "whole" / "logs"
+    whole.mkdir(parents=True)
+    write_junit(whole.parent, "junit.xml",
+                '<testsuites><testsuite name="pytest" tests="4">'
+                + "".join(
+                    '<testcase classname="tests.test_alpha" '
+                    f'name="test_{i}" file="tests/test_alpha.py" '
+                    f'line="{i}" time="1.25"/>' for i in range(4))
+                + "</testsuite></testsuites>")
+    measurements = ci_timing.collector_file_measurements(whole)
+    coverage = {"test_alpha.py": (measurements["test_alpha.py"]["tests"], 4)}
+    assert coverage == {"test_alpha.py": (4, 4)}
+    text, stats = ci_timing.render_refreshed_manifest(
+        manifest_text,
+        {p: m["seconds"] for p, m in measurements.items()},
+        "2026-10-22T15:30:00Z", coverage=coverage,
+        sample_label="CI junit census 2026-10-22 (run 39782493641)")
+    assert stats["kept_as_lower_bound"] == 0
+    assert yaml.safe_load(text)["durations"]["test_alpha.py"] == 5.0

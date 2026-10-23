@@ -13386,6 +13386,37 @@ class SessionRequest(BaseModel):
     machine_id: str | None = Field(None, max_length=256)
     model: str | None = Field(None, max_length=128)
 
+    # #9599 — a PRESENT-but-blank session id is refused at the boundary, so it
+    # never reaches ``session_id = body.session_id or mint()`` (it is truthy,
+    # so that default never fired and the blank went straight to the write —
+    # where the engine cannot serve a blank key back to an equality seek: the
+    # next capture on the same id minted a DUPLICATE ``:Session`` and the turn
+    # container's CONTAINS edge landed nothing, measured). The rule is
+    # Layer-1's already (``commit_schema.CommitPayload._non_blank_session_id``,
+    # #4005 — the validator lives on ``CommitPayload``; there is no
+    # ``CommitRecord`` class, and citing one sent a review to re-derive a third
+    # spelling); this is the same sentence at the boundary — ONE predicate for
+    # all three DOORS (the two SDK doors and this one), so they cannot drift
+    # apart. ⛔ The blank rule has a SECOND, deliberate home one layer down: the
+    # REPLAY half is ``projection._writable_container_id`` (``_writable_id``
+    # PLUS this same blank clause), which gates both journal carriers and the
+    # sidecar restores and landed on main with #9594 from the #9553 review P2 —
+    # so #9553 is the correct citation for the BLANK rule, and only the PADDED
+    # position below is not its. ``None``/absent still mints (the caller named
+    # no session), and a PADDED-but-real id stays legitimate (#9599's own body;
+    # #9553 records no position on padded ids at all).
+    # Refusing or trimming it is #9599's open owner question (comment
+    # 6342343424): this PR lands only the blank half.
+    @field_validator("session_id")
+    @classmethod
+    def _non_blank_session_id(cls, v):
+        from tortoise.ids import session_id_refusal
+
+        refusal = session_id_refusal(v)
+        if refusal is not None:
+            raise ValueError(refusal)
+        return v
+
     # Invalid harness ⇒ 422 at the model boundary (FastAPI validation), never
     # a silent drop or a 200 — a typo'd harness must be visible (Task 11).
     @field_validator("harness")
@@ -13774,7 +13805,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
 
     VERIFIED gate order (#2093 S2 amendment — the impl docstring's old gate
     list was stale, pre-#1927):
-      1. boundary 422 — invalid harness / conversation shape (Pydantic
+      1. boundary 422 — invalid harness / conversation shape / BLANK session_id
+         (#9599: `SessionRequest._non_blank_session_id`; a blank id names no
+         session, and writing it minted a duplicate `:Session` whose CONTAINS
+         edge landed nothing) (Pydantic
          SessionRequest validation fires BEFORE the handler on REST; the MCP
          tool's SessionRequest construction maps the same failure to its
          422-equivalent error dict) — recording-off never masks a malformed
@@ -13794,7 +13828,6 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     ``request`` is optional (the MCP tool has no HTTP Request) — audit and
     abuse recording degrade to a best-effort stub.
     """
-    import uuid
     from datetime import datetime
 
     from tortoise.quota import (
@@ -13937,7 +13970,13 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # first MATCH. `_capture_session_probe_off_loop` owns the hand-off (the same
     # off-loop seam the onboarding projection read uses); `session_id`/`now` are
     # pure computations, hoisted above it.
-    session_id = body.session_id or f"session_{uuid.uuid4().hex[:12]}"
+    # #9599: the mint is ONE spelling (`tortoise.ids.mint_session_id`) — this
+    # site and `extractor_v2`'s were the two hand-copies the ids.py helper
+    # subsumes. A blank `body.session_id` never reaches here: `SessionRequest`
+    # refuses it at the boundary (`_non_blank_session_id`).
+    from tortoise.ids import mint_session_id
+
+    session_id = body.session_id or mint_session_id()
     now = datetime.now(UTC).isoformat()
     sdk, proj, session_row = await _capture_session_probe_off_loop(
         org, session_id)

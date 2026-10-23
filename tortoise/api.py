@@ -36,6 +36,45 @@ def provenance(source_id, span, quote, *, speaker=None, extracted_by="mock@0"):
     }
 
 
+def _refuse_invisible_point_kinds_in_payload(payload: dict) -> None:
+    """#9287: this seam persists ``pointKind`` verbatim — refuse padding.
+
+    ``EventAPI`` is the write seam every pipeline uses (the v1 extractor,
+    ``ingest``, ``docs_miner``, ``mining``, the CLI), and ``add_point`` splats
+    the caller's ``fields`` into the journal record, which
+    ``projection._upsert_point`` folds with
+    ``n.pointKind = coalesce($pk, n.pointKind)``. It already hosts the #5475
+    kind gate for exactly this reason, and it had no invisible-kind arm —
+    measured at #9591's head: ``api.add_point(..., pointKind='statement
+    \\u2003')`` stored the padded kind, the gate answered ``[]``, and a
+    ``require_calibration=True`` run stamped it.
+
+    The input here is not always a human: ``extractor.py`` builds the kind from
+    the model's JSON and passes it straight to ``add_point``, so a stray
+    em-space/NBSP in model output mints the fail-open shape with no caller
+    intent — a refusal that names the record is the only thing that surfaces it.
+
+    ONE predicate with the SDK doors (``_kind_invisible_char``), never a
+    re-spelling of the categories. The payload walk is ``pack_state``'s
+    (``kind_spellings_in_payload``) — the same miner the approval gate reads —
+    filtered to the canonical ``pointKind``: entity kinds are a different gate
+    with its own blast radius, and this issue is the calibration gate's.
+
+    A MODULE-LEVEL function, deliberately not a method: its one caller
+    (``EventAPI._refuse_unapproved_kinds``) is invoked UNBOUND by duck-typed
+    API doubles (``mining.py``'s ``ConversationMiner``, the #7951 ordering
+    test), so nothing here may touch ``self`` — the first cut did, and raised
+    ``AttributeError`` on a double whose ``projection`` has no ``.g``
+    (#9591 review cycle 2, P1).
+    """
+    from .pack_state import kind_spellings_in_payload
+    from .sdk import _refuse_invisible_kind
+    for kind_prop, value in kind_spellings_in_payload(payload):
+        if kind_prop == "pointKind":
+            _refuse_invisible_kind("pointKind", value,
+                                   door="EventAPI.add_point")
+
+
 class EventAPI:
     def __init__(self, log, *, initiated_by: str, agent_id: str | None = None,
                  projection=None):
@@ -111,6 +150,21 @@ class EventAPI:
         gated by nothing on that lane, and the replay that folds it is
         deliberately ungated too).
         """
+        # ⛔ #9287: the INVISIBLE-KIND refusal is NOT conditional on a graph
+        # handle — it is a pure string predicate, and a ``projection``-less lane
+        # folds the record through the same ``_upsert_point`` later (or replays
+        # it), so it must be refused here too. Only the APPROVAL-set gate
+        # abstains (it needs a read). It runs BEFORE the ``log.append`` commit
+        # point in ``_emit``, like the approval gate below, so a refused payload
+        # leaves nothing to replay.
+        #
+        # Called as a BARE MODULE FUNCTION, never ``self.…``: this method is
+        # exercised UNBOUND by duck-typed API doubles (``mining.py``'s
+        # ``EventAPI._refuse_unapproved_kinds(api, record)``, the #7951 ordering
+        # test's bare ``_API``), and ``self`` there is not an ``EventAPI`` at all
+        # — a ``self.``-routed helper raised ``AttributeError`` on that double
+        # (#9591 review cycle 2, P1, measured: test_7951_write_doors.py red).
+        _refuse_invisible_point_kinds_in_payload(payload)
         g = getattr(getattr(self, "projection", None), "g", None)
         if g is None:
             return

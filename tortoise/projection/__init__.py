@@ -7138,12 +7138,50 @@ def _writable_id(val) -> bool:
     record whose ``name`` was absent (it defaults to ``""``). Refusing it here
     keeps the rule in ONE home rather than repeating ``... and val`` at every
     call site.
+
+    ⛔ A WHITESPACE-ONLY value is deliberately STILL writable here (#9599).
+    Widening this predicate to ``bool(val.strip())`` looks like the same rule,
+    but this function is shared with the fold's LIVE path
+    (``_upsert_subject``/``_upsert_object``). MEASURED with the widening in
+    place: ``create_subject("   ")``/``create_object("   ")`` returned ``{}`` —
+    success, no node written, with a metered write op billed — and
+    ``POST /v1/sessions/commit`` with ``entities:[{"name":"   "}]`` returned
+    **200** with ``nodes_created`` counting a node that never landed and the
+    entity silently dropped. (An earlier draft of this note said "a
+    deterministic 500"; a fresh verifier re-measured it and it is the 200 +
+    silent drop above. The conclusion is unchanged: a 200 that drops the write
+    and reports success is worse than an audible refusal.) The blank SESSION key
+    is therefore refused at EVERY place that writes it, with ONE predicate per
+    layer: the two journal folds and the two snapshot/restore paths
+    (``entities._fold_session_recorded``, ``entities._link_session``,
+    ``rebuild_all``'s ``session_snapshot`` loop, and the record-sourced rebuild
+    — ``rebuild_from_record``, whose node filter lives in
+    ``_project_record_view``) all use ``_writable_container_id`` — this
+    predicate PLUS the blank clause, i.e. the same owner, so a journal replay
+    and a sidecar restore cannot disagree — while the caller-facing doors (the
+    SDK's ``capture_session`` / ``commit_session`` and the hosted
+    ``SessionRequest`` boundary) use ``tortoise.ids.session_id_refusal``, where
+    a caller can be told WHY. ⚠️ That list is the whole replay surface: a new
+    carrier outside it is ungated by construction, so add it here AND in
+    ``tests/test_9599_blank_session_id.py``'s docstring. The blank-NAME class
+    needs the Layer-1 / ingest shape gates, not this predicate.
     """
     return isinstance(val, str) and bool(val) and _annotator_value_ok(val)
 
 
 def _writable_container_id(val) -> bool:
-    """`_writable_id` PLUS the blank refusal — the `contains_session` gate.
+    """`_writable_id` PLUS the blank refusal — the SESSION-ID gate.
+
+    It gates BOTH journal carriers that merge a `:Session` key, so the rule has
+    one owner and not one per fold: `_link_session` (the `contains_session`
+    envelope field on a `PointAdded`) and `_fold_session_recorded` (the `id` of
+    a `SessionRecorded`). The two differ only in the CONSEQUENCE, which each
+    reports through `_log_identity_skip`'s `drops_record` flag: a refused
+    `contains_session` loses one derived EDGE after the Point is written, while
+    a refused `SessionRecorded` loses the container RECORD itself. The DOOR
+    half of the same rule — a caller-supplied `session_id` — is
+    `tortoise.ids.session_id_refusal`, which is a boundary refusal (it has a
+    caller to answer) and never reaches a merge key.
 
     The extra clause is MEASURED, not cosmetic, and it belongs here rather
     than only in the record projection (#9553 review P2), because a rule that
@@ -7159,7 +7197,10 @@ def _writable_container_id(val) -> bool:
     `MATCH … (s:Session {id:$sid})`, landing NO `contains_session` edge — while
     the record projection (Postgres, no such quirk) WOULD have landed the row.
     The embedded engine is worse still: it duplicates the node with no index at
-    all.
+    all. `_fold_session_recorded` had the same hole one carrier up: a
+    `SessionRecorded` for a whitespace-only id resurrected the invisible
+    container on EVERY journal replay, so even a journal written before the
+    capture doors refused one rebuilt the broken session.
 
     ⛔ SCOPE, so this is not over-read as a general sanitizer: the refusals are
     `_writable_id`'s plus BLANK only. A padded-but-real id (`'  s1  '`) is a
@@ -7173,7 +7214,7 @@ def _writable_container_id(val) -> bool:
     and the record fold agree (`record_projection._writable_endpoint_id`
     mirrors this predicate value-for-value, pinned by
     `tests/test_record_projection.py::test_the_envelope_endpoint_gate_is_the_folds_own_rule`).
-    `_link_session` becomes a plain `_writable_id` caller again once #9599 is
+    Both session folds become plain `_writable_id` callers again once #9599 is
     fixed — this gate (`_writable_container_id`) is the stopgap, the index
     defect is the cause.
     """
@@ -15267,6 +15308,19 @@ class FalkorProjection(
             if not _writable_id(sid):
                 _log_identity_skip("Session snapshot", sid, "id (MERGE key)")
                 continue
+            # #9599: the SIDEcar is the OTHER way a pre-fix blank container
+            # comes back. `_writable_id` admits a blank on purpose (it is
+            # shared with entity NAMES), so this leg applies
+            # `_writable_container_id` — the SAME predicate the two journal
+            # folds use, not a second spelling of the rule. Without it the
+            # standard recovery command (`rebuild_all`) restored the very
+            # `:Session {id:'   '}` the journal fold refuses — and journal-only
+            # `rebuild()` over the SAME journal ended with none. Two entry
+            # points disagreeing about one journal is worse than either rule:
+            # the operator's log says "dropped" while the node is present.
+            if not _writable_container_id(sid):
+                _log_identity_skip("Session snapshot", sid, "id (MERGE key)")
+                continue
             clean = {k: v for k, v in props.items() if k != "id"}
             self._restore_write(
                 "MERGE (s:Session {id:$id}) SET s += $props",
@@ -15274,6 +15328,12 @@ class FalkorProjection(
                 reason=":Session containers (#3947)",
             )
         for sid, pid in session_point_links:
+            # #9599: same rule for the CONTAINS link restore — a link is only
+            # meaningful against a container that was restored, and the gate is
+            # the same `_writable_container_id`.
+            if not _writable_container_id(sid):
+                _log_identity_skip("Session snapshot", sid, "id (MERGE key)")
+                continue
             self._restore_write(
                 "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
                 "MERGE (s)-[:CONTAINS]->(p)",
@@ -16979,6 +17039,23 @@ class FalkorProjection(
         )
 
         nodes = tuple(view.nodes)
+        # #9599: `rebuild_from_record` is a GRAPH write, so it obeys the GRAPH's
+        # rule even though the RECORD layer deliberately keeps the row (see
+        # `record_projection`'s `SessionRecorded` note — the record is the
+        # faithful carrier, a Postgres key is addressable, the engine's key is
+        # not). MEASURED before this gate: the blank `:Session` landed, its
+        # CONTAINS edge silently did not (the engine cannot serve a blank
+        # indexed key back to an equality seek), and the receipt still said
+        # `coverage: complete` with `relations_written: 1` — a false PASS on
+        # the one path a lost cache depends on.
+        refused = {(n.label, n.key) for n in nodes
+                   if n.label == "Session"
+                   and not _writable_container_id(n.key)}
+        if refused:
+            for _label, _key in sorted(refused):
+                _log_identity_skip("Session", _key, "id (MERGE key)")
+            nodes = tuple(
+                n for n in nodes if (n.label, n.key) not in refused)
         if limit is not None:
             if limit < 0:
                 raise ValueError(f"limit must be >= 0, got {limit}")
@@ -16990,6 +17067,14 @@ class FalkorProjection(
                 and (r.tgt_label, r.tgt_key) in kept)
         else:
             relations = tuple(view.relations)
+        if refused:
+            # An edge whose endpoint was excluded has nothing to bind — dropping
+            # it here (rather than writing a statement that matches no row) is
+            # what makes `relations_written` mean what it says.
+            relations = tuple(
+                r for r in relations
+                if (r.src_label, r.src_key) not in refused
+                and (r.tgt_label, r.tgt_key) not in refused)
 
         plan = record_plan(nodes, relations)  # raises BEFORE any wipe
 

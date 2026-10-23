@@ -1097,6 +1097,40 @@ SESSION_HARNESSES = frozenset({
 _HARNESS_ALIASES = {"desktop": "claude-desktop"}
 
 
+#: A blank-but-present session id — the spelling `tortoise.ids.
+#: session_id_refusal` refuses at the doors, and the one the server 422s. The
+#: spool must not put it on the wire (#9599).
+def _normalise_session_id(value: object) -> str | None:
+    """The wire's session id: a non-blank str, or ``None`` (the server mints).
+
+    Delegates to ``tortoise.ids.session_id_or_absent`` — the SAME rule the doors
+    apply (``session_id_refusal``), without importing their refusal TEXT: the
+    spool needs the value, not the message. It exists because the spool WIRE and
+    the writers must agree about what "a session id" is.
+
+    A padded-but-real id passes through unchanged — #9599's body records those
+    as legitimate identities. ⚠️ #9553 is NOT the source of that position: it is
+    R5, edge families, and records nothing about padded ids. Refusing or
+    trimming a padded id is #9599's open owner question (comment 6342343424),
+    not the spool's to decide.
+
+    ⛔ WHY THIS IS A BACKSTOP AND NOT THE FIX. ``None`` makes the server MINT a
+    fresh id on every filing, and the drain never reads the id back out of the
+    2xx body, so a blank entry that is filed TWICE lands as two sessions. That
+    continuity loss is acceptable ONLY for a LEGACY entry — one written before
+    the writers refused to store a blank (``__main__._spool_transcript``,
+    ``session import``, the backlog replay now treat a blank as ABSENT and use
+    their own stable fallback, so a NEW entry cannot carry one). Keeping the
+    normaliser is still required: a legacy entry on disk must not become a
+    permanent 422 (422 is classified PERMANENT, the drain quarantines the entry,
+    and the capture is never filed at all — strictly worse than filing it under
+    a minted id).
+    """
+    from tortoise.ids import session_id_or_absent
+
+    return session_id_or_absent(value)
+
+
 def _normalise_harness(value: object) -> str:
     """The ONE harness normalisation, used by the writer and the wire.
 
@@ -2010,7 +2044,22 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
         # an illegal harness on the wire. The server's 422 for a bad harness is
         # now unreachable from this leg, exactly as the lane's is.
         "harness": _normalise_harness(meta.get("harness")),
-        "session_id": sid,
+        # #9599: the SAME rule the server applies, at the wire — the last line
+        # before it. A blank id (`"  "`) is truthy, so a `session_id or
+        # _local_session_id(...)` default never replaced it and it went on the
+        # wire; the server now refuses it with a 422, a 422 is PERMANENT, and
+        # the drain then quarantines the entry, so the capture is never filed.
+        # A blank names no session, so normalising it to None (the server mints
+        # one) makes that refusal unreachable from this leg — exactly what the
+        # harness/lane/machine_id normalisers beside it are here for.
+        # The WRITERS stopped producing this shape (`tortoise.ids.
+        # session_id_or_absent` at `__main__`'s three resolution points, so a
+        # blank takes the path-anchored fallback and KEEPS session continuity),
+        # and the Pi leg mirrors that rule — so this line now covers LEGACY
+        # entries only. For those, `None` costs continuity (a second filing mints
+        # again) and that is the deliberate trade: filing under a minted id beats
+        # quarantining the capture forever.
+        "session_id": _normalise_session_id(sid),
         "source": meta.get("source"),
         "conversation": turns,
         # #8531 review: length-capped at the WIRE. `machine_id` ≤256 and
