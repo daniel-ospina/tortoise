@@ -2617,8 +2617,14 @@ def _tables_added_since_the_reapply_set() -> list[str]:
     for path in RECORD_MIGRATION_FILES:
         if path.name < first:      # filenames sort in migration order
             continue
-        tables += re.findall(r"CREATE TABLE(?: IF NOT EXISTS)? public\.(\w+)",
-                             path.read_text(encoding="utf-8"))
+        # Spelling-tolerant on purpose (`\s+` spans the newline real migrations
+        # put after `CREATE TABLE IF NOT EXISTS`, and the name may be quoted):
+        # the derivation feeds a GUARD, so a spelling it does not know is a
+        # silently unproven relation. `test_ensure_record_schema_rebuilds_…`
+        # closes that hole from the other side, against the declared `creates`.
+        tables += re.findall(
+            r"CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+public\s*\.\s*\"?(\w+)\"?",
+            path.read_text(encoding="utf-8"), re.IGNORECASE)
     return sorted(set(tables))
 
 
@@ -2634,6 +2640,18 @@ def test_ensure_record_schema_rebuilds_a_missing_record_table():
     assert dropped, (
         "derivation failure: the re-apply set already covers every record table, "
         "so this test would prove nothing — check the regex, not the tree")
+    # The other half of the derivation's soundness, and the one that does NOT go
+    # quiet: `dropped` is non-empty today, so a spelling the regex misses would
+    # otherwise leave the relation a `creates` entry exists for undropped and
+    # unproven — green, and green for the #9800-P2 class it guards. Tying the
+    # derivation to the hand-declared truth makes that a red instead (review of
+    # 82c16f71f, P3).
+    declared = {creates.split(".")[-1]
+                for _, creates in RECORD_REAPPLY_STEPS if creates}
+    assert declared <= set(dropped), (
+        f"the derivation missed {sorted(declared - set(dropped))}: a `creates` "
+        "entry is conditional on a relation this test cannot drop, so it proves "
+        "nothing about the file it guards")
     conn = _record_db()
     conn.autocommit = False
     try:

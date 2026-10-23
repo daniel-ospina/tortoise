@@ -141,8 +141,9 @@ Operator steps: `docs/infra-runbook.md` → "The record's connecting role".
   (`tortoise/record_projection.py:239`, `SELECT set_config('app.current_org_id', %s, true)`), executed in
   exactly one place — `_apply_tenant_scope`, `tortoise/record_projection.py:3152` — which both record doors
   reach through `scope_connection()` (`:3200`; `replay()` at `:3327`, `cache_projection.read_record_view()`
-  at `:789`). Before R6 that statement did not exist at all (introduced by this change, `git log -S`
-  `TENANT_GUC_SQL`): the only setters were `supabase/tests/*.sql`. `grep -rn TENANT_GUC_SQL tortoise/`
+  at `:789`). ⚠️ Those line numbers are as of THIS PR's head: at the `ec9132efe` this section is measured
+  at, the statement did not exist at all (introduced by this change, `git log -S` `TENANT_GUC_SQL` returns
+  exactly one commit), and the only setters were `supabase/tests/*.sql`. `grep -rn TENANT_GUC_SQL tortoise/`
   finds it. ⚠️ Two greps that look like the test and are NOT:
   `grep -rn "set_config('app.current_org_id" tortoise/` returns **one** line, and it is PROSE —
   `replay()`'s docstring at `:3269` quotes the statement, while the setter interpolates `TENANT_GUC` and so
