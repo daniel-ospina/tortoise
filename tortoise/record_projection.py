@@ -200,6 +200,10 @@ RECORD_MIGRATIONS: tuple[str, ...] = (
     # the schema read and the placement pin still see one authoritative file
     # list — an unregistered migration is invisible to every reader.
     "20261022000001_record_session_capture_redactions_integer.sql",
+    # §9.1's narrative home (#9555, R7): a NEW table, not an ALTER, so the
+    # reader must see it or `_split_properties` would refuse every narrative
+    # column and the projection would write nothing while reporting success.
+    "20261023000001_record_session_narrative.sql",
 )
 
 #: Where the schema lives when this module is INSTALLED rather than checked out.
@@ -222,6 +226,11 @@ THE_RECORD_TABLES: tuple[str, ...] = (
     "subject",
     "point",
     "relation",
+    # NOT a node table: the §9.1 narrative home (#9555). It is here because
+    # `table_columns()` parses `CREATE TABLE` only for the tables this tuple
+    # names, and the narrative columns must be readable as COLUMNS (PRIMARY,
+    # §3) rather than pushed into a props tail the schema does not keep.
+    "session_narrative",
 )
 
 #: The per-layer node tables, and the canonical key column each one pins
@@ -1736,7 +1745,31 @@ def mutations_for(
     Raises :class:`UnknownJournalRecordType` for a record type the registry
     does not declare, and :class:`RefusedJournalOperation` for a declared
     refusal. Both are failures — neither is a skip.
+
+    The record's DECLARED mutation comes first; the §9.1 narrative home
+    (:func:`_narrative_statements`, #9555) is appended when THIS record
+    carries the narrative or the capture counts that home is keyed on. The
+    append is per-record and idempotent, so a replay in journal order builds
+    the same row the live path built.
     """
+    return [
+        *_declared_mutations(
+            record, org_id=org_id, graph_id=graph_id,
+            columns=columns, refused=refused,
+        ),
+        *_narrative_statements(record, org_id, graph_id),
+    ]
+
+
+def _declared_mutations(
+    record: Mapping[str, Any],
+    *,
+    org_id: str,
+    graph_id: str,
+    columns: Mapping[str, frozenset[str]] | None = None,
+    refused: Mapping[str, frozenset[str]] | None = None,
+) -> list[Statement]:
+    """The mutation :data:`RECORD_MUTATIONS` declares for ONE record."""
     columns = columns if columns is not None else table_columns()
     refused = refused if refused is not None else refused_props_names()
     record_type = record.get("type")
@@ -1848,6 +1881,236 @@ def mutations_for(
         f"{record_type!r} declares an effect this engine does not implement: "
         f"{type(effect).__name__}"
     )
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# §9.1's narrative home (#9555, R7) — the SECONDARY projection
+# ════════════════════════════════════════════════════════════════════════════
+# The narrative is NOT a node (§9.1: "not in the graph, not a `Document` node,
+# not a `Point`") so it has no `node_identity` row and no `NodeSnapshot` — that
+# effect emits an identity row first, by design. It is keyed on the SESSION
+# instead, and it is built by TWO different records: the narrative-carrying
+# `:Source`/`:Event` record owns the text, and the capture's `SessionRecorded`
+# owns the counts. The one rule that makes those two idempotent in either order
+# is that each upsert names only ITS OWN columns in the `DO UPDATE SET`.
+
+#: The record's narrative table (§9.1 / migration 20261023000001).
+NARRATIVE_TABLE = "session_narrative"
+
+#: The payload keys naming the session a narrative/count record belongs to.
+#: Both spellings are live: `sessionId` on the hosted commit's `:Source`/`:Event`
+#: records (hosted_api's §4.1 derived path), `session_id` on the capture's own.
+_SESSION_COORDINATE_KEYS: tuple[str, ...] = ("sessionId", "session_id")
+
+#: The payload key carrying §9.1's narrative — the commit's own name for the
+#: "connected prose form of a captured session", written onto the transcript
+#: `:Source`/`:Event` by the layer-1 commit.
+_NARRATIVE_KEY = "story_arc"
+
+#: The INTEGER fields the narrative home reproduces beside the text.
+_NARRATIVE_INT_KEYS: tuple[str, ...] = ("capture_redactions", "turn_count")
+
+#: The largest value the record's `integer` columns accept. A count above it
+#: fits the carrier's own `jsonb` column and would raise `integer out of range`
+#: INSIDE the carrier's transaction — see the projection's guard.
+_INT4_MAX = 2**31 - 1
+
+
+def _session_coordinate(record: Mapping[str, Any]) -> str | None:
+    """The session this record is a narrative/count carrier for, if any.
+
+    Two spellings, because two producers name it differently: `sessionId` on
+    the commit's `:Source`/`:Event` records, `session_id` on the capture's own.
+    A record whose DECLARED node IS the Session (`SessionRecorded`) names it by
+    `id` — read from the registry rather than guessed, so an ordinary Point
+    (whose `id` is a point) can never be mistaken for a session.
+    """
+    for key in _SESSION_COORDINATE_KEYS:
+        value = record.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    mutation = RECORD_MUTATIONS.get(record.get("type"))
+    node = getattr(mutation.effect, "node", None) if mutation else None
+    if isinstance(node, Node) and node.table == "session":
+        value = record.get("id")
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
+def _narrative_upsert_statement(
+    org_id: str,
+    graph_id: str,
+    session_id: str,
+    values: Mapping[str, Any],
+    resets: Sequence[str] = (),
+) -> Statement:
+    """Upsert the narrative row, touching ONLY the columns this record owns.
+
+    THE SET LIST IS THE POINT. If either carrier wrote the whole column set
+    (NULLs for the fields it does not carry), the second record to arrive
+    would ERASE the first one's half — an order-dependent record, i.e. a
+    replay that is not idempotent and a live/rebuild divergence.
+
+    ``resets`` are columns THIS record carries but cannot represent (a count the
+    INTEGER refuses). They are written NULL on conflict rather than left alone:
+    the count is this carrier's own column, rebuilt by every capture, so
+    "carried but unrepresentable" must read as *no count stated* — leaving the
+    previous capture's number in place would serve a value the latest record
+    contradicts, which is the same false claim as writing 0.
+
+    ⛔ THAT RESET APPLIES ONLY WHEN THE SAME RECORD ALSO CARRIES A REPRESENTABLE
+    VALUE. `_narrative_statements` returns `[]` when a record's whole payload
+    falls outside this home, so a COUNTS-ONLY record (the shape
+    `{"type": "SessionRecorded", "id": …, "capture_redactions": {"total": 7}}`)
+    emits no statement at all and an existing row keeps the previous capture's
+    number. That is a deliberate refusal, not the unconditional rule the rest of
+    this paragraph would otherwise promise, and the reason is the row: emitting
+    the reset without a value means an INSERT with no payload column, which on a
+    FRESH session is exactly the all-NULL row this home refuses to invent — it
+    reads as "session known, no text", a claim no record made. The cost is
+    bounded and unreachable from today's producers: `turn_count` is
+    `len(windowed)` and `capture_redactions` a summed span count (both far inside
+    `[0, _INT4_MAX]`), `session.capture_redactions` has been `integer` since
+    `20261022000001`, and a count is meaningful only beside the text whose
+    carrier writes it — that carrier carries a representable value, so the reset
+    fires there.
+    """
+    columns = ["org_id", "graph_id", "session_id", *values, "props"]
+    params: list[Any] = [
+        org_id, graph_id, session_id,
+        *(_jsonb_or_scalar(c, v) for c, v in values.items()),
+        json.dumps({}),
+    ]
+    placeholders = ", ".join(["%s"] * len(columns))
+    updates = ", ".join(
+        [f"{c} = EXCLUDED.{c}" for c in values] + [f"{c} = NULL" for c in resets]
+    )
+    sql = (
+        f"INSERT INTO public.{NARRATIVE_TABLE} ({', '.join(columns)}) "
+        f"VALUES ({placeholders}) "
+        f"ON CONFLICT (org_id, graph_id, session_id) DO UPDATE SET "
+        f"{updates}, "
+        f"props = public.{NARRATIVE_TABLE}.props || EXCLUDED.props"
+    )
+    return Statement(sql, tuple(params))
+
+
+def _narrative_statements(
+    record: Mapping[str, Any],
+    org_id: str,
+    graph_id: str,
+) -> list[Statement]:
+    """The §9.1 narrative-home upsert a record contributes, if it carries one.
+
+    KEYED ON THE SHAPE, NOT ON THE RECORD TYPE. Several producers write a
+    narrative onto a record (`SourceCreated`, `DocumentCreated`, the layer-1
+    commit's `:Event` record) and a fourth would arrive from a producer nobody
+    listed; a type whitelist misses exactly that one, and a missed narrative is
+    the silent gap #9555 exists to close. So the carrier contract IS the shape:
+    a record that names its session AND carries a field this table holds.
+
+    Returns `[]` for the overwhelming majority of records (an ordinary Point, a
+    relation, a session with no narrative yet), which is why appending it to
+    every record's batch is free.
+
+    THE ENVELOPE MAY NEST. `ConversationMiner` emits
+    `{type: "EventRecorded", event: {…}}` and the declared mutation already
+    accepts that shape (`_nested_node_carrier`), so the shape rule must read it
+    too — a carrier this projection cannot see is the silent drop it exists to
+    prevent.
+    """
+    carrier: Mapping[str, Any] = record
+    if _session_coordinate(record) is None:
+        nested = _nested_node_carrier(record, "eventId")
+        if nested is None:
+            return []
+        carrier = nested
+    session_id = _session_coordinate(carrier)
+    if session_id is None:
+        return []
+
+    # A DELETED SESSION TAKES ITS NARRATIVE WITH IT. The record's own delete path
+    # (`hosted_api._delete_session_sync`) emits, in one journal segment, one
+    # `EntityMutated` (`op=delete`) per removed turn Point PLUS one
+    # `SessionDeleted`; `SessionDeleted`'s declared mutation removes the session
+    # row and the `session:` Source stub (the turns go with their own records,
+    # `delete_ops={"delete"}`). This table is not a node table (no
+    # `node_identity` parent), so it cannot ride `companion_deletes` and carries
+    # its own statement — attached to `SessionDeleted` because that is the
+    # record that means "this session no longer exists". Without it
+    # §9.4's verbatim path would serve the text of a session the graph no longer
+    # has, and a same-id re-capture would inherit the deleted incarnation's
+    # narrative. Journal order still decides: a narrative record arriving AFTER
+    # the delete re-creates the row, which is the graph fold's own semantics.
+    if record.get("type") == "SessionDeleted":
+        return [Statement(
+            f"DELETE FROM public.{NARRATIVE_TABLE} "
+            "WHERE org_id = %s AND graph_id = %s AND session_id = %s",
+            (org_id, graph_id, session_id),
+        )]
+
+    values: dict[str, Any] = {}
+    # THE SAME RULE AS THE COUNTS BELOW: project what the column can hold, never
+    # coerce, and never fail the carrier. ⚠️ The primary path does NOT refuse a
+    # non-string `story_arc` — `_jsonb_or_scalar` serialises a list/dict into the
+    # text column, so `public.source.story_arc` can itself hold a non-prose value
+    # (a pre-existing defect of the carrier, filed separately). This home simply
+    # refuses to propagate a non-string as §9.1 prose, and refuses to raise: a
+    # value the column cannot hold faithfully is an ABSENCE here.
+    narrative = carrier.get(_NARRATIVE_KEY)
+    if isinstance(narrative, str) and narrative.strip():
+        values["narrative"] = narrative
+
+    # ⛔ `summary` is projected ONLY from a record that ALSO carries the
+    # narrative. The capture's own session `:Source` sets `summary` to the
+    # transcript's first substantive utterance (`sdk._session_source_metadata`),
+    # which is NOT the S1 narrative — projecting it unconditionally would let an
+    # order-independent row hold a prose snippet in the narrative's companion
+    # column, and would make `SessionText.verbatim_available` true for a session
+    # whose narrative is unknown. One carrier owns both columns, so they cannot
+    # mean different things.
+    if "narrative" in values:
+        summary = carrier.get("summary")
+        if isinstance(summary, str) and summary.strip():
+            values["summary"] = summary
+
+    resets: list[str] = []
+    for key in _NARRATIVE_INT_KEYS:
+        value = carrier.get(key)
+        # PROJECTED ONLY WHEN THE VALUE FITS THE COLUMN — and never coerced.
+        # The secondary home must not be able to FAIL the carrier's own write:
+        # `session.capture_redactions` is jsonb and accepts shapes AND an
+        # unbounded integer (`[2**31, inf)`), both of which this table's INTEGER
+        # refuses (`#9264`/R4 is the shape half, one table over), so raising or
+        # overflowing here would turn an additive projection into a NEW way for
+        # a live capture to fail — the INSERT raises `integer out of range`
+        # inside the carrier's own transaction, taking the row and the journal
+        # position with it. A value the column cannot hold is therefore an
+        # ABSENCE in this home — the column reads NULL and the reader returns
+        # None — never a 0 (a false claim about the capture) and never a coerced
+        # value (which would hide the disagreement). The field's authority
+        # remains the carrier's own column.
+        if (isinstance(value, int) and not isinstance(value, bool)
+                and 0 <= value <= _INT4_MAX):
+            values[key] = value
+        elif value is not None:
+            # CARRIED, BUT UNREPRESENTABLE. On a FRESH row an omitted column is
+            # already NULL; on a RE-CAPTURE the previous value would survive in
+            # the `DO UPDATE` branch's untouched column, so the reset is what
+            # makes "no count stated" true in both orders.
+            resets.append(key)
+
+    # A record whose whole content this home cannot represent contributes NO row:
+    # a carrier whose only payload is an unrepresentable count is not a narrative,
+    # and inserting an all-NULL row would turn an honest absence into a row that
+    # reads as "session known, no text". `turn_count`/`capture_redactions` are
+    # only meaningful beside the text they belong to, and the carrier that
+    # rebuilds them carries that text.
+    if not values:
+        return []
+    return [_narrative_upsert_statement(org_id, graph_id, session_id, values,
+                                        resets)]
 
 
 # ════════════════════════════════════════════════════════════════════════════
