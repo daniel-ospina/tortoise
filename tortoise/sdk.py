@@ -20017,7 +20017,18 @@ class TortoiseSDK:
                             and src in _absorb_classes
                             and _absorb_targets
                             and _claim_class.direction_blocks_create(
-                                direction,
+                                # ⛔ CANONICALIZE FIRST. `direction` here may be
+                                # ABSENT, and absent is NOT the mutual default
+                                # for every operator: NAND's absent direction is
+                                # `unidirectional` (`_canonical_direction`), so
+                                # judging the raw token treats a
+                                # direction-omitting NAND as bidirectional and
+                                # REFUSES a back-leg that never flows — a
+                                # wiring `create_operator` accepts for the same
+                                # edge shape (#2351 review). `_find_operator`
+                                # canonicalizes for the same reason; the two
+                                # doors must agree.
+                                self._canonical_direction(op_type, direction),
                                 _absorb_classes.get(src),
                                 _absorb_targets)):
                         raise ValueError(_claim_class.override_refusal(
@@ -23991,11 +24002,14 @@ class TortoiseSDK:
         apply: ``diagnostic`` — one of ``truncated`` (#395 degeneration guard),
         ``no_factors`` / ``no_dirty_roots`` (nothing to run), ``factors_skipped``;
         and ``skipped_factors`` — one structured record per factor EP DROPPED
-        before it could be consumed (#6105: a draft/terminal endpoint stripped
-        the operator below 2 participating inputs, or a directional operator
-        lost its idx-0 source). ``converged`` speaks only for the factors the
-        run CONSUMED: read ``skipped_factors`` before treating a run as
-        evidence that every wired operator voted.
+        before it could be consumed (#6105). ``reason`` is one of
+        ``source_stripped`` (a non-bidirectional operator lost its idx-0
+        source), ``degenerate`` (a draft/terminal endpoint stripped the operator
+        below 2 participating inputs) or ``derived_over_asserted`` (#2351 — a
+        DERIVED claim's edge into an ASSERTED one, which the class guard blocks;
+        see ``tortoise/claim_class.py``). ``converged`` speaks only for the
+        factors the run CONSUMED: read ``skipped_factors`` before treating a run
+        as evidence that every wired operator voted.
 
         #780: draft Points/operators are EXCLUDED by default (EP only runs
         over live claims); there is no include_draft escape hatch on this

@@ -89,14 +89,17 @@ issue. Tracked as #9722.
 filter (applied pre-truncation, the same seam as ``exclude_status``) that ALSO
 annotates every returned Point with its class, so a consumer can tell "this was
 told to us" from "this was computed from other beliefs" without a new tool
-(+0 MCP tools, #888/#1521 discipline). The SDK search verb dispatches by
-``sdk_method``, so the kwarg reaches it with no registry change.
+(+0 MCP tools, #888/#1521 discipline).
 
-⚠️ The MCP ``tortoise_search`` handler and the hosted ``/v1/search`` route do
-**NOT** take or forward ``claim_class`` (their kwargs stop at
-``traversal_path``), so a tool caller cannot reach this filter yet. That is a
-tool-SCHEMA change and needs surface approval, so it is scoped out of #2351 and
-tracked as #9725.
+⚠️ It is reachable from the SDK ONLY. ``sdk_method`` in ``tool_registry.py`` is
+METADATA, not a dispatcher — MCP handlers are resolved by tool NAME and their
+advertised input schema IS their own signature, so a kwarg added to the SDK verb
+propagates to no served surface by itself. Concretely, the MCP
+``tortoise_search`` handler and the hosted ``/v1/search`` route do NOT take or
+forward ``claim_class`` (their kwargs stop at ``traversal_path``), so a tool
+caller cannot reach this filter over MCP/REST today. That is a tool-SCHEMA
+change and needs surface approval, so it is scoped out of #2351 and tracked as
+#9725.
 
 **What this deliberately does NOT do.** It does not decide WHAT may be derived.
 Which producers (dream, projection-derived, extraction cross-links) should
@@ -230,6 +233,13 @@ def any_asserted(classes: Iterable[str] | None) -> bool:
     ⛔ An EMPTY set is "no node carried a marker", i.e. the default class —
     which IS asserted. That is what makes the override guard bite on ordinary
     (unmarked) claims without a migration.
+
+    ⚠️ Because of that, an empty set is NOT how a caller says "this id is not a
+    claim": a non-``:Point`` endpoint (``:Subject``/``:Object``/``:Event``,
+    #7902) has no ``claimClass`` at ALL, and reading it as the asserted default
+    invents an override that cannot exist. Callers use ``None`` for that — see
+    :func:`factor_direction_over_claims` (the load side) and the ``:Point``-only
+    class sets the write doors build.
     """
     classes = list(classes or ())
     if not classes:
@@ -296,6 +306,35 @@ def direction_blocks_create(direction: str | None,
         (fwd and blocks_override(source_classes, target_classes))
         or (bwd and blocks_override(target_classes, source_classes))
     )
+
+
+def factor_direction_over_claims(
+        direction: str | None,
+        source_classes: Iterable[str] | None,
+        target_classes: Iterable[str] | None,
+) -> str | None:
+    """``factor_direction`` for a factor whose endpoints may NOT be claims.
+
+    ⛔ ``claimClass`` is a ``:Point``-only property, so an operator or direct
+    edge may legitimately touch a ``:Subject`` / ``:Object`` / ``:Event``
+    (#7902). Such an endpoint is not "an ASSERTED claim" — it is not a claim at
+    all: nothing can override it, and it can override nothing. And because
+    ``any_asserted(∅)`` is True (absence of a marker on a CLAIM is the asserted
+    default), an absent/empty side MUST NOT be passed through to
+    :func:`factor_direction` — that reads the non-claim as an authored belief and
+    silently narrows an edge the write doors deliberately keep.
+
+    ``None`` (or an empty collection) therefore means "no claim on this side":
+    the guard does not apply and the direction is returned UNCHANGED. This is
+    the load-side half of the SAME rule the write doors apply by building their
+    class sets from ``:Point`` rows only — the door cannot refuse a shape the
+    load side drops, nor the load side drop one the door keeps.
+    """
+    if not source_classes or not target_classes:
+        # Mirror ``factor_direction``'s unchanged exit: a bare ``None`` is the
+        # DROP signal, and an absent token means the mutual default.
+        return direction if direction is not None else "<->"
+    return factor_direction(direction, source_classes, target_classes)
 
 
 def factor_direction(direction: str | None, source_classes: Iterable[str] | None,

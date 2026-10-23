@@ -497,6 +497,128 @@ def test_a_derived_claim_may_be_wired_to_a_non_point_endpoint(lane):
     lane.create_operator("IMPL", derived, [obj])
 
 
+def test_ep_backstop_does_not_read_a_non_point_target_as_asserted(lane):
+    """A :Object target is not an ASSERTED claim — the load side must agree.
+
+    The write doors build their class sets from ``:Point`` rows only, so a
+    DERIVED point wired to an ``:Object`` is admitted. Reading that Object's
+    absent ``claimClass`` as the asserted DEFAULT at load reintroduced the very
+    conflation the doors exclude: the factor was narrowed from
+    ``bidirectional`` to ``<-``, so the computed claim silently could no longer
+    feed the endpoint it was wired to (#2351 review P1).
+    """
+    obj = "obj-2351-ep-impl-target"
+    lane._get_proj().g.query(
+        "CREATE (o:Object {id:$id, name:'thing'})", params={"id": obj})
+    derived = lane.create_point("statement", "computed",
+                                claim_class="derived")["id"]
+    op = lane.create_operator("IMPL", derived, [obj])
+    factor = _factor(lane, op["id"], obj)
+    assert factor is not None, "the factor must be built"
+    assert factor[5] == "bidirectional", (
+        "a non-claim target cannot be overridden, so the guard must not touch "
+        f"the direction; got {factor[5]!r}"
+    )
+
+
+def test_ep_backstop_keeps_a_nand_attack_on_a_non_point_endpoint(lane):
+    """A NAND whose target is an ``:Object`` must not be DROPPED as an override.
+
+    A one-way NAND from a DERIVED claim to an ``:Object`` flows only the
+    forward leg, so once the Object's absence read as "asserted" BOTH legs were
+    blocked: the factor was dropped and reported as ``derived_over_asserted`` —
+    an override that cannot exist, because the target is not a claim (#2351
+    review P1).
+    """
+    obj = "obj-2351-ep-nand-target"
+    lane._get_proj().g.query(
+        "CREATE (o:Object {id:$id, name:'thing'})", params={"id": obj})
+    derived = lane.create_point("statement", "computed",
+                                claim_class="derived")["id"]
+    op = lane.create_operator("NAND", derived, [obj], direction="->")
+    ep = TortoiseEP(lane._get_proj())
+    factors = ep._affected_factors({obj}, skipped=ep._last_skipped_factors)
+    reasons = [sk.get("reason") for sk in ep._last_skipped_factors]
+    assert "derived_over_asserted" not in reasons, (
+        "a non-claim target is not an asserted claim — no override to report; "
+        f"got {reasons!r}"
+    )
+    factor = next((f for f in factors if f[0] == op["id"]), None)
+    assert factor is not None, "the factor must not be dropped"
+    assert factor[5] == "->", (
+        f"the declared direction must stand, got {factor[5]!r}")
+
+
+def test_ep_backstop_does_not_narrow_a_direct_edge_to_a_non_point(lane):
+    """The direct-edge arm has the same rule as the operator arm."""
+    obj = "obj-2351-ep-direct-target"
+    lane._get_proj().g.query(
+        "CREATE (o:Object {id:$id, name:'thing'})", params={"id": obj})
+    derived = lane.create_point("statement", "computed",
+                                claim_class="derived")["id"]
+    lane.create_direct_edge("IMPL", derived, obj)
+    factor = _factor(lane, derived, obj)
+    assert factor is not None, "the direct-edge factor must be built"
+    assert factor[5] == "bidirectional", (
+        "a non-claim endpoint participates in neither side of the guard; "
+        f"got {factor[5]!r}"
+    )
+
+
+def test_ep_backstop_leaves_an_unprovable_source_slot_alone(lane):
+    """No idx ⇒ the source slot is NOT provable, so no class verdict (#943).
+
+    ``ORDER BY coalesce(r.idx, 0), c.id`` makes every idx-less input position
+    0 and breaks the tie lexicographically on a legacy/migrated operator, so
+    ``input_ids[0]`` may be a target. Judging a class against that slot can
+    block the CORROBORATION leg and leave the override leg flowing — the exact
+    inversion of this guard. The sibling source-slot guard already refuses to
+    act when ``op_idx_known`` is false (#943 review); the class guard must do
+    the same or it acts on a guess (#2351 review P2).
+    """
+    src = lane.create_point("statement", "authored source")["id"]
+    computed = lane.create_point("statement", "computed input")["id"]
+    op = lane.create_operator("IMPL", src, [computed])  # legal: both asserted
+    # The class and the missing idx are written AFTER creation — the
+    # pre-guard / bulk-written / migrated shape the backstop exists for.
+    lane._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.id=$id SET n.claimClass='derived'",
+        params={"id": computed})
+    lane._get_proj().g.query(
+        "MATCH (o:Point {id:$oid})-[r:IMPL]->(c) REMOVE r.idx",
+        params={"oid": op["id"]})
+    factor = _factor(lane, op["id"], computed)
+    assert factor is not None, "the factor must not be dropped"
+    assert factor[5] == "bidirectional", (
+        "with no idx the source slot is unprovable, so the guard must not "
+        f"narrow the factor on a guess; got {factor[5]!r}"
+    )
+
+
+def test_ingest_partial_absorb_canonicalizes_an_absent_nand_direction(lane):
+    """An absent direction means NAND's ``unidirectional``, not the mutual one.
+
+    ``direction_flows(None)`` is ``(True, True)`` — the MUTUAL default — but a
+    direction-omitting NAND canonicalizes to ``unidirectional`` (the extraction
+    default), so its only flowing leg is source→target. Judging the RAW token
+    made the ingest door see a back-leg that never flows and REFUSE a wiring
+    ``create_operator`` accepts for the identical edge shape (#2351 review P2).
+    """
+    src = lane.create_point("statement", "authored source")["id"]
+    computed = lane.create_point("statement", "computed input",
+                                 claim_class="derived")["id"]
+    other = lane.create_point("statement", "second input")["id"]
+    # Legal at creation: NAND with a one-way direction flows source→target
+    # only, i.e. asserted → derived, which is the CORROBORATION leg.
+    lane.create_operator("NAND", src, [computed], direction="->")
+    bundle = {
+        "points": [], "entities": [], "sources": [],
+        "connections": [{"from": src, "to": [computed, other],
+                          "operator": "NAND", "reify": True}],
+    }
+    lane.ingest(bundle, promotion_policy="auto")   # must not raise
+
+
 def test_the_class_filter_runs_before_the_limit(lane):
     """The filter is PRE-TRUNCATION, so ``limit`` counts filtered candidates.
 

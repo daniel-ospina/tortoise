@@ -1877,12 +1877,19 @@ class TortoiseEP:
                 "RETURN id(r), a.id, b.id, type(r), "
                 "       coalesce(r.direction, 'bidirectional'), r.weight, "
                 # #2351 (epic #2349 E-derived): the endpoints' claim classes
-                # ride the SAME statement, so the override guard below adds no
-                # query (mirrors the #7902 label fan-out: every hop query
-                # carries the columns its consumers need).
+                # AND their labels ride the SAME statement, so the override
+                # guard below adds no query (mirrors the #7902 label fan-out:
+                # every hop query carries the columns its consumers need).
+                # ⛔ The LABEL is not optional: ``claimClass`` is a :Point-only
+                # property, so ``coalesce(a.claimClass, 'asserted')`` on a
+                # :Subject/:Object/:Event endpoint yields 'asserted' for a node
+                # that is not a CLAIM at all — the exact conflation the write
+                # doors exclude (#2351 review). The guard fires only when BOTH
+                # endpoints are claims, which is what the door does.
                 "       a.status, b.status, "
                 "       coalesce(a.claimClass, 'asserted'), "
-                "       coalesce(b.claimClass, 'asserted')"
+                "       coalesce(b.claimClass, 'asserted'), "
+                "       labels(a), labels(b)"
             ):
                 for _row in self._hop_query(
                     _q, {"ids": list(affected_claims)}, hop=None,
@@ -1894,7 +1901,8 @@ class TortoiseEP:
                     _seen_dir.add(_row[0])
                     dir_rows.append(tuple(_row[1:]))
         for (src_id, tgt_id, rel, direction, weight,
-             src_status, tgt_status, src_cls, tgt_cls) in dir_rows:
+             src_status, tgt_status, src_cls, tgt_cls,
+             src_labels, tgt_labels) in dir_rows:
             if weight is None:
                 weight = (NAND_BASE_WEIGHT if rel == "NAND" else 1.0)
             # #2351: the ASSERTED-vs-DERIVED override guard, at the LOAD side.
@@ -1907,8 +1915,19 @@ class TortoiseEP:
             # factor is DROPPED and REPORTED (#6105/#689 discipline: a dead arm
             # contributes nothing, and the run says so rather than reporting
             # `converged` over a discarding it did silently).
-            effective = claim_class.factor_direction(
-                direction, {src_cls}, {tgt_cls})
+            # ⛔ A non-``:Point`` endpoint is NOT a claim: it carries no
+            # ``claimClass``, so its absent marker must not be read as the
+            # ASSERTED default. ``claim_class.factor_direction_over_claims``
+            # skips the guard unless BOTH sides are claims — the same rule the
+            # write doors apply by building their target class set from
+            # ``:Point`` rows only (#2351 review: reading a non-claim as
+            # asserted silently narrowed — or dropped — a wiring the doors
+            # deliberately keep writable).
+            effective = claim_class.factor_direction_over_claims(
+                direction,
+                {src_cls} if "Point" in (src_labels or ()) else None,
+                {tgt_cls} if "Point" in (tgt_labels or ()) else None,
+            )
             if effective is None:
                 logger.warning(
                     "Direct edge %s -[%s]-> %s: DERIVED source over ASSERTED "
@@ -1967,20 +1986,26 @@ class TortoiseEP:
         # ``op_inputs`` so the override guard below can name the factor's SOURCE
         # slot (idx 0 — the position ``_update_factor`` reads the forward
         # message's belief from).
-        op_input_class: dict[str, list[str]] = {op_id: [] for op_id in op_info}
+        # ``None`` marks an input that is NOT a claim (no ``:Point`` label, hence
+        # no ``claimClass``) — distinct from a claim whose marker is absent.
+        op_input_class: dict[str, list[str | None]] = {op_id: [] for op_id in op_info}
         rows = self._hop_query(
             "MATCH (o:Point)-[r:IMPL|NAND]->(c) "
             "WHERE o.id IN $ids "
             f"AND {epistemic_disjunction('c')} "
             "RETURN o.id, c.id, r.idx, c.status, coalesce(c.outdated, false), "
-            "       coalesce(c.claimClass, 'asserted') "
+            "       coalesce(c.claimClass, 'asserted'), labels(c) "
             "ORDER BY coalesce(r.idx, 0), c.id",
             {"ids": list(op_info.keys())}, hop=None,
             phase="factor_extraction", frontier_size=len(op_info),
         )
-        for op_id, claim_id, idx, status, outdated, input_cls in rows:
+        for op_id, claim_id, idx, status, outdated, input_cls, input_labels in rows:
             op_inputs[op_id].append(claim_id)
-            op_input_class[op_id].append(input_cls)
+            # ``claimClass`` lives only on :Point (#7902 lets an operator input
+            # be a :Subject/:Object/:Event): a non-claim input contributes NO
+            # class, so ``None`` — never the asserted default (#2351 review).
+            op_input_class[op_id].append(
+                input_cls if "Point" in (input_labels or ()) else None)
             # Participation is UNCONDITIONAL on status (#2422): a terminal
             # input (retracted / superseded / outdated / archived /
             # deprecated status — the SAME vocabulary as the Cypher
@@ -2096,21 +2121,34 @@ class TortoiseEP:
             # BIDIRECTIONAL factor the #780/#2422 source-stripped guard does
             # not fire, so that misattribution blocked the corroboration leg
             # and let the derived->asserted leg flow (#2351 review, P0).
-            _source_classes = {_input_classes[0]} if _input_classes else None
-            _target_classes = set(_input_classes[1:])
-            if _target_classes:
-                effective = claim_class.factor_direction(
+            # ``None`` (a non-claim input, #7902) is preserved into the source
+            # slot so the helper can decline: a non-claim carries no class, and
+            # an empty target collection is NOT "an asserted target" either —
+            # ``any_asserted(∅)`` is True, which is right for ONE id carrying no
+            # marker and wrong for a side that is not a claim at all. A
+            # degenerate single-input factor therefore keeps its token, exactly
+            # as before (#2351 review).
+            _source_classes = (
+                {_input_classes[0]}
+                if _input_classes and _input_classes[0] is not None
+                else None
+            )
+            _target_classes = {c for c in _input_classes[1:] if c is not None}
+            # ⛔ ``op_idx_known`` gates the guard exactly as the sibling
+            # source-slot guard above is gated: on a legacy/migrated operator
+            # whose input edges carry NO idx, every row coalesces to position 0
+            # and the tie breaks lexicographically — so ``input_ids[0]`` is not
+            # provably the source, and judging a class against the wrong slot
+            # can block the CORROBORATION leg while leaving the override leg
+            # flowing, i.e. invert the very rule this guard encodes (#943
+            # review, same hazard; #2351 review P2).
+            if op_idx_known.get(op_id, True):
+                effective = claim_class.factor_direction_over_claims(
                     direction,
                     _source_classes,
                     _target_classes,
                 )
             else:
-                # A degenerate single-input factor has NO targets, and an empty
-                # target COLLECTION must not be read as "an asserted target":
-                # ``any_asserted(∅)`` is True for ONE id carrying no marker, not
-                # for an empty set of them (#2351 review — the write surface
-                # guards the same conflation with an explicit ``target_ids``
-                # check). Nothing can be overridden, so the token stands.
                 effective = direction
             if effective is None:
                 logger.warning(
