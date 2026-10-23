@@ -110,10 +110,12 @@ Operator steps: `docs/infra-runbook.md` → "The record's connecting role".
 
 - **R1's DSN must name the app role**, not `postgres`:
   `postgresql://tortoise_record_app.<project-ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres?sslmode=require`.
-  R1 is not armed (`TORTOISE_RECORD_DSN` is set in no `fly.toml`, `entrypoint.sh` or deploy workflow —
-  re-measured 2026-10-23). The runbook's Secrets Matrix *documents* the variable as
-  required-when-armed (#9600); documentation is not provisioning, and the value is what `NOT_ARMED`
-  turns on. So this is a correction to a plan, not a migration.
+  R1 is not armed: the arming SURFACES landed in #9548 — `deploy-hosted.yml` binds, probes and
+  stages it from the GitHub secret of the same name, `.github/scripts/fly-managed-secrets.txt`
+  declares it `gh-secret:`, and `fly.toml` + the runbook's Secrets Matrix document it — but the
+  *value* is the operator's act (it does not exist, so the guarded staging is a no-op) and the
+  connecting role ships `NOLOGIN` until it is given a credential. Declared is not provisioned:
+  the seam still reads `NOT_ARMED`. So this is a correction to a plan, not a migration.
 - **R7 (#9555) inherits the posture**: its new table ships the same three policies (read-org,
   `service_role`, app-tenant) or it is a table whose RLS state this decision does not explain.
   `tests/test_record_tenancy_guc.py::test_the_migration_covers_every_record_table` reddens until it
