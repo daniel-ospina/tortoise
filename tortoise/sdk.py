@@ -29001,23 +29001,26 @@ class TortoiseSDK:
                 # #9201: each end's presence rides along — a present-but-
                 # unorderable bound yields precision ``None``, so the block's
                 # presence needs its own datum (see ``SearchResult.to_dict``).
+                # #9244: NO ``or pt.get("validFromPrecision")`` fallback here.
+                # The raw property arm this field used to carry is precisely how
+                # a declared token could re-enter the wire behind
+                # ``effective_precision``'s back, and it is dead weight besides
+                # (``pt`` carries no window column, per the note above) — so the
+                # ONE resolution home stays the only thing that decides.
                 valid_from_present=bool(
                     point_state.get(pid, {}).get("valid_from_present")),
                 valid_to_present=bool(
                     point_state.get(pid, {}).get("valid_to_present")),
                 valid_from_precision=(
-                    point_state.get(pid, {}).get("valid_from_precision")
-                    or pt.get("validFromPrecision") or ""),
+                    point_state.get(pid, {}).get("valid_from_precision") or ""),
                 valid_to_precision=(
-                    point_state.get(pid, {}).get("valid_to_precision")
-                    or pt.get("validToPrecision") or ""),
+                    point_state.get(pid, {}).get("valid_to_precision") or ""),
                 end_state=(
                     point_state.get(pid, {}).get("end_state")
                     or _resolve_end_state(
                         point_state.get(pid, {}).get("valid_to")
                         or pt.get("validTo"),
-                        point_state.get(pid, {}).get("valid_to_precision")
-                        or pt.get("validToPrecision"))),
+                        point_state.get(pid, {}).get("valid_to_precision"))),
                 subject=point_state.get(pid, {}).get("subject"),
                 topics=cap_topics,
                 summary=cap_summary,

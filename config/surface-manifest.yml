@@ -97,7 +97,9 @@ response_fields:
   emitted_when: '#2350 — the hit is a Point carrying a validity window, and the START''s precision: year|month|day,
     or null where the stored start is PRESENT but names no instant (`""`, `TBD`, `not-a-date` — the #6140 ruling
     makes that "no start was recorded", so there is no granularity to claim; #9201). A legacy bare-ISO (orderable)
-    start reads as day; a caller-declared token wins. Emitted with the same block as valid_to_precision and end_state,
+    start reads as day; a caller-DECLARED token is reported only once that bound itself ORDERS — since #9244 a
+    declaration annotates a bound, it cannot summon one, so a token declared on an unorderable start still reads
+    null. Emitted with the same block as valid_to_precision and end_state,
     whenever valid_from / valid_to / valid_from_precision / valid_to_precision is present'
   unchanged_when_off: n/a — not flag-gated; an undated hit stays byte-identical (no window keys at all), never a
     defaulted value
