@@ -1210,3 +1210,92 @@ def test_a_LIVE_failed_rebuild_leaves_a_truthful_declaration(
         f"a wiped graph with no proven write must not read as complete: "
         f"{declaration}")
     assert not declaration.hot_keys, declaration.hot_keys
+
+
+# ── the refusal DATUM, and the cache that cannot be opened (#9604 review) ────
+
+
+def test_the_JSON_report_carries_the_refused_keys():
+    """`refused_keys` is what makes `nodes_selected < record_nodes` auditable.
+
+    §9 publishes it as the audit trail for a difference an operator would
+    otherwise have to guess at, so it is pinned HERE as well as in the LOST
+    line below: a mutation that deletes the field from `as_dict` left every
+    other arm green (measured on the #9604 review), i.e. the documented datum
+    was carried by prose alone.
+    """
+    outcome = rrestore.RestoreOutcome(
+        org_id="o", graph_id="g", cache_graph="test_c",
+        record_nodes=3, record_relations=0, nodes_written=2,
+        relations_written=0, target_nodes_before=0,
+        nodes_selected=2, relations_selected=0,
+        refused_keys=(("Session", ""), ("Session", " ")),
+    )
+    assert outcome.as_dict()["refused_keys"] == [["Session", ""], ["Session", " "]], (
+        "the refusal datum the runbook §9 tells an operator to read is not in "
+        "the report — the difference between nodes_selected and record_nodes "
+        "would then have no stated cause"
+    )
+
+
+def test_the_LOST_line_keeps_the_refusal_that_caused_it(monkeypatch, capsys):
+    """A wiped-and-empty cache must NAME the refusals, not only say LOST.
+
+    The zero-write guard's own datum: when every row of the scope was a row the
+    projection declines (a blank-keyed `:Session`, which the RECORD keeps and
+    the cache cannot address), the cache holds none of the record — so the
+    class stays exit 2 — and the ONE thing that explains it is `refused_keys`.
+    Pre-fix that parse ran AFTER the guard, so the line said LOST with no
+    reason. The mutation that reds this: `refused_note = ""`.
+    """
+    view = cp.RecordView(nodes=(
+        cp.RecordNode(label="Session", key="",
+                      props={"id": "", "summary": "blank-keyed"}),
+    ))
+    projection = _RecordingProjection(result={
+        "nodes_written": 0, "relations_written": 0, "nodes_selected": 0,
+        "relations_selected": 0, "statements": 0, "record_nodes": 1,
+        "record_relations": 0, "coverage": "partial", "declared_keys": 0,
+        "source": "record", "refused_keys": [["Session", ""]],
+    })
+    rc, _, _ = _drive(monkeypatch, view=view, projection=projection)
+    err = capsys.readouterr().err
+
+    assert rc == rrestore.EXIT_UNAVAILABLE, err
+    assert "LOST" in err, err
+    assert "were REFUSED by the projection" in err, (
+        f"the LOST line dropped the refusal that caused it: {err!r}")
+    assert "Session:''" in err, (
+        f"the LOST line must NAME the refused row, not just count it: {err!r}")
+
+
+def test_a_cache_that_cannot_be_opened_is_UNAVAILABLE_not_a_traceback(
+        monkeypatch, capsys):
+    """§9's exit-2 row for "cache unreachable" had no pin at all.
+
+    Measured on the #9604 review: every `from_uri` fake in this file returned a
+    projection (or None), so the `except Exception` around it was never
+    exercised — a re-raise there would have produced a traceback where §9
+    documents exit 2 and an "UNCHANGED" statement.
+    """
+    from tortoise import __main__ as cli
+    from tortoise.projection import FalkorProjection
+
+    _install_fakes(monkeypatch, view=_view(2),
+                   projection=_RecordingProjection())
+
+    def _cannot_open(uri, graph_name=None):
+        raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(
+        FalkorProjection, "from_uri",
+        staticmethod(_cannot_open))
+    rc = cli.main(["record-restore", "--db", "docker://:x@localhost:6379/g",
+                   "--record-dsn", "postgresql://fake/record",
+                   "--org", "o", "--graph", "g",
+                   "--cache-graph", _TARGET])
+    err = capsys.readouterr().err
+
+    assert rc == rrestore.EXIT_UNAVAILABLE, err
+    assert "could not be opened" in err, err
+    assert "ConnectionError" in err, err

@@ -2590,7 +2590,10 @@ python -m tortoise record-restore \
     --org <org_id> --graph <graph_id> \
     --cache-graph <the graph to restore>
 
-# Bounded run (writes at most N nodes, N >= 1; declares coverage=partial):
+# Bounded run (writes at most N nodes, N >= 1). ⛔ `bounded` is set on EVERY
+# bounded run; `coverage` follows the COUNTS, not the flag — a bound at or above
+# the record's node count is coverage=complete with unwritten_keys: 0 (see the
+# "`bounded` vs partial — the flag is not the state" bullet below):
 python -m tortoise record-restore … --limit 500
 # Machine-readable:
 python -m tortoise record-restore … --json
