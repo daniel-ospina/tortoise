@@ -1148,17 +1148,23 @@ def test_a_marker_inside_a_code_block_still_counts(tmp_path) -> None:
 def test_membership_reds_on_a_row_citing_a_document_that_does_not_exist(tmp_path) -> None:
     """`membership_errors` is the membership half; `gate_errors` owns paths.
 
-    Pinned as the PAIR, because reading `membership_errors` alone on a row that
-    cites a renamed document returns clean — it is still declared in ONE
-    document. The gate as a whole must red, or a renamed declaring document
-    becomes registry rot (review cycle 2, P2; `_path_violations` is the half
-    that catches it).
+    Pinned as the PAIR, because the two halves report a renamed declaring
+    document DIFFERENTLY and neither message is sufficient alone: `gate_errors`
+    says the path does not exist (the actual defect), while
+    `membership_errors` — which never stats anything — sees a document that
+    carries no marker and reports it as a rotted half-declaration. Losing
+    either means one of the two ways this drifts goes unreported (review cycle
+    2, P2; `_path_violations` is the half that names the cause).
     """
-    _docs(tmp_path, a__md="a <!-- v4-mechanism: x -->\n")
+    docs = _docs(tmp_path, a__md="a <!-- v4-mechanism: x -->\n")
     row = _row("x")
     row["declared_in"] = ["docs/architecture/renamed-away.md"]
     errors = gate_errors([row], tmp_path)
     assert any("declared path does not exist" in e for e in errors), errors
+    # The membership half does not stat, so it reports the SAME defect as a
+    # missing marker — a different message for the same rot, never silence.
+    member_errors = membership_errors([row], docs)
+    assert any("carries no" in e for e in member_errors), member_errors
 
 
 

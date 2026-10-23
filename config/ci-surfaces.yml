@@ -3469,8 +3469,11 @@ surfaces:
   # `docs/architecture/STORAGE-ARCHITECTURE.md`-only diff does NOT take
   # `select()`'s early return — that path is claimed by the `onboarding`
   # `SOURCE_PATTERNS` entry, so `select()` returns `surfaces=['onboarding'],
-  # full=False, 131 files` — re-derive it after any `tier1` addition (#5064 added
-  # one, which is why this figure moved from 121); a `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md`-only
+  # full=False, 131 files`. ⚠️ Re-derive that figure after any `tier1` addition,
+  # and do not attribute its whole history to one row: #5064's row accounts for
+  # exactly ONE of those files (measured: 130 at the commit before it, 131
+  # after), so the `121` this comment used to carry was already 9 short before
+  # the row existed. A `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md`-only
   # diff DOES take the early return (`surfaces=[]`). The guard is selected in
   # both cases (measured: `guard_selected=True` for either doc), which is the
   # property that matters — `tier1` is unconditional in the tier-2 selection and
