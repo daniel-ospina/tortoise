@@ -731,6 +731,21 @@ _CAPTURE_TURN_CAP = re.compile(r"^_CAPTURE_TURN_CAP\s*=\s*(\d+)", re.MULTILINE)
 #: clause, while a comma is ordinary inside a single clause ("…carries a
 #: truncation marker, but only when text is discarded") and splitting there would
 #: red true copy.
+#:
+#: ⛔ AN ABSENCE DISCHARGE IS A CONDITION TOO (#9608 cycle 4, P3 — rot): the copy
+#: must be able to state the EXCEPTION this whole test is about ("a whitespace-only
+#: turn is returned unmarked, with no truncation marker"), and "holds
+#: non-whitespace" is the clipper's own predicate spelled out, so both discharge
+#: the rule. Without them the guard red the only sentence a maintainer would write
+#: to document the blank path.
+#:
+#: ⛔ KNOWN, DOCUMENTED TRADEOFFS, not oversights: a same-clause appositive that
+#: re-conditions the marker ("…naming its original length — a marker records a cut
+#: that discards readable text") and an anaphoric follow-on clause ("…; the same
+#: applies to a blank turn") are accepted, because the em dash and comma are the
+#: same punctuation that keeps true copy ("…naming the original length — whenever
+#: readable text is discarded") green. This is a smell-detector against an
+#: absolute, not a natural-language prover.
 _MARKER_MENTION_RE = re.compile(r"(?:truncat\w*\s+marker|marker\b)", re.I)
 _MARKER_VERB_RE = re.compile(r"\bmark(?:ed|s|ing)\b", re.I)
 #: The domain that makes a bare marker VERB a marker mention rather than ordinary
@@ -748,6 +763,9 @@ _MARKER_CONDITION_RE = re.compile(
     r"(?:readable|legible) text\s+(?:is|would be|gets)\s+"
     r"(?:lost|discarded|dropped|removed|cut)"
     r"|only (?:when|if)\b|\bunless\b"
+    r"|\b(?:no|without)\s+(?:an?\s+)?(?:truncation\s+)?marker\b"
+    r"|\bunmarked\b"
+    r"|\bnon-whitespace\b"
     r")",
     re.I,
 )
