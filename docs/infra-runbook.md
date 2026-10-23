@@ -2782,8 +2782,11 @@ are decided in
 this section is the **operator procedure** that goes with it.
 
 **The split.** Migration `20261025000001_record_tenancy_role_and_guc.sql` creates the role
-(`NOLOGIN NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE`) and grants it exactly the record tables'
-`SELECT/INSERT/UPDATE/DELETE`, `USAGE` on `public.relation_id_seq` (the IDENTITY sequence — a table
+(`NOLOGIN NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE`) and grants it the record tables'
+`SELECT/INSERT/UPDATE/DELETE` — except the append-only `public.journal_event`, which is
+`SELECT`/`INSERT` **only, by design** (the audit trail's single deletion path is a GUC the boundary
+role must not be able to reach; the posture suite pins the narrow grant) — `USAGE` on
+`public.relation_id_seq` (the IDENTITY sequence — a table
 `INSERT` grant does **not** confer `nextval`, and without it every `relation` insert raises
 `permission denied for sequence relation_id_seq` and aborts the whole replay transaction), plus a
 `*_app_tenant` policy on each. It ships **no password** — a credential in a migration is a secret

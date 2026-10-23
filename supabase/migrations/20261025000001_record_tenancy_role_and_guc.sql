@@ -9,14 +9,19 @@
 --      via row-level security"* — is implemented, not merely documented: the
 --      record's application path connects as a NON-BYPASS role, so every
 --      `*_read_org` / `*_app_tenant` predicate is actually evaluated for it.
---      That sentence is ENFORCED BY CODE, not left to this file's prose: every
---      record connection (write AND read) is scoped by
---      `record_projection.scope_connection()`, which reads `current_user`'s
---      posture back — superuser, BYPASSRLS, membership in either, or ownership
---      of a record table — and REFUSES the connection rather than writing or
---      reading across tenants with the policies unevaluated (#9600 review
---      cycle 2, P2). A DSN string naming `postgres` is therefore a refusal,
---      not a silent bypass.
+--      That sentence is ENFORCED BY CODE, not left to this file's prose: BOTH
+--      record doors — the write path (`record_projection.replay()`) and the read
+--      door (`cache_projection.read_record_view()`, i.e. `tortoise
+--      record-reconcile`) — are scoped by `record_projection.scope_connection()`,
+--      which reads `current_user`'s posture back — superuser, BYPASSRLS,
+--      membership in either, or ownership of a record table — and REFUSES the
+--      connection rather than writing or reading across tenants with the
+--      policies unevaluated (#9600 review cycle 2, P2). A DSN string naming
+--      `postgres` is therefore a refusal on either door, not a silent bypass.
+--      ⚠️ One reader is OUTSIDE both doors: `tortoise/record_read.py` takes a
+--      caller-supplied connection and scopes nothing, so it is neither refused
+--      nor tenant-scoped under this migration — that is #9555's outstanding
+--      read arm, named here rather than implied by "every record connection".
 --   2. THE ROLE IS `tortoise_record_app`. `NOBYPASSRLS`, `NOSUPERUSER`, not the
 --      table owner. The two other candidates are BYPASSING and are therefore
 --      excluded from the application path, not "used with care":
@@ -77,10 +82,18 @@
 -- USING (true)`, `postgres`) makes that policy apply to this role — measured on
 -- `postgres:16.15`: `GRANT svc TO app` (the default `WITH INHERIT TRUE`) made
 -- the app role see 2 rows of 2 tenants while `rolbypassrls` still read `false`.
--- `NOINHERIT` on the role (or `WITH INHERIT FALSE` on the grant) does stop that
--- — which is why the guard below asserts `pg_has_role(…, 'USAGE')` and not
--- `'MEMBER'` — but `INHERIT` is the default on both sides, so the posture must
--- not depend on nobody having chosen it. The boundary is
+-- `NOINHERIT` on the role (or `WITH INHERIT FALSE` on the grant) does make the
+-- policy inapplicable — measured, `GRANT service_role TO tortoise_record_app
+-- WITH INHERIT FALSE` leaves `rolbypassrls` false AND the permissive policy
+-- unapplied — but this migration forbids the membership OUTRIGHT anyway: the
+-- posture suite refuses any `pg_auth_members` row that joins this role to a
+-- BYPASSRLS/SUPERUSER role, so `WITH INHERIT FALSE` reddens the build rather
+-- than passing quietly. That is deliberate, and it is STRICTER than the
+-- runtime gate, which reads `pg_has_role(…, 'USAGE')` and would accept a
+-- non-inheriting membership as harmless. Two rules, ordered: no membership at
+-- all (suite), and — should one ever appear — no applicable policy (runtime).
+-- `INHERIT` is the default on both sides, so the posture must not depend on
+-- nobody having chosen it. The boundary is
 -- therefore expressed TWICE: by the grants below, and by the prohibition on
 -- membership (asserted in
 -- `supabase/tests/20261022000001_record_tenancy_posture.sql` and stated for
@@ -131,8 +144,19 @@ BEGIN
     END IF;
 END $$;
 
-COMMENT ON ROLE tortoise_record_app IS
-    'The record''s APPLICATION role (R6, epic #7879) — the only role the record write path may connect as. NOBYPASSRLS by design: RLS is the tenancy boundary, and every record policy reads app.current_org_id, which record_projection.replay() sets transaction-locally. Not for schema, backup/restore or erasure — those use the owner/service_role on purpose. LOGIN + password are provisioned by ops (docs/infra-runbook.md).';
+-- `COMMENT ON ROLE` needs superuser or ADMIN OPTION on the target role, which is
+-- a DIFFERENT privilege from the ALTER ROLE guard above — a non-superuser
+-- applier that did not create the role cannot comment on it, and an unguarded
+-- statement would abort the whole tenancy posture with a bare `permission
+-- denied`. The comment is documentation, so its absence must never be fatal:
+-- swallow exactly that error.
+DO $$
+BEGIN
+    COMMENT ON ROLE tortoise_record_app IS
+        'The record''s APPLICATION role (R6, epic #7879) — the only role the record write path may connect as. NOBYPASSRLS by design: RLS is the tenancy boundary, and every record policy reads app.current_org_id, which record_projection.replay() sets transaction-locally. Not for schema, backup/restore or erasure — those use the owner/service_role on purpose. LOGIN + password are provisioned by ops (docs/infra-runbook.md).';
+EXCEPTION WHEN insufficient_privilege THEN
+    NULL;
+END $$;
 
 GRANT USAGE ON SCHEMA public TO tortoise_record_app;
 
@@ -144,7 +168,7 @@ GRANT USAGE ON SCHEMA public TO tortoise_record_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.node_identity  TO tortoise_record_app;
 -- `journal_event` gets SELECT and INSERT ONLY, and that asymmetry is the point.
 -- The projection never updates or deletes a journal row — its one journal
--- statement is an INSERT (`record_projection._journal_statement`), and the four
+-- statement is an INSERT (`record_projection._journal_row`), and the four
 -- `DELETE`s in the plan are on `node_identity`, `relation`, the node tables and
 -- `session_narrative`. Erasing a tenant goes through `purge_org_record`, which is
 -- SECURITY DEFINER and owned by the applier, so it does not need this role's
@@ -296,7 +320,11 @@ CREATE POLICY relation_app_tenant ON public.relation
 --     deliberately NOT edited: migrations are append-only (#1095,
 --     `.github/scripts/check-migration-append-only diff`), so a merged file's
 --     comments are as immutable as its SQL. Read the paragraphs above as the
---     correction of that header, not as a duplicate of it. The narrower truth
+--     correction of that header, not as a duplicate of it. The header also cites
+--     this file by its VACATED name (`20261022000001_record_tenancy_role_and_guc
+--     .sql`, which no longer exists): the prefix moved to `20261025000001` in
+--     this same change, to stop sharing it with two other migrations, so a reader
+--     who greps the header's filename finds nothing. The narrower truth
 --     about its guarded block is in that block's own comment: it fires only
 --     where `tortoise_record_app` already existed when that migration applied,
 --     and it cannot fire on a fresh database.

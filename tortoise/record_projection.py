@@ -286,6 +286,7 @@ TENANT_SCOPE_SQL = (
     "                     AND c.relname = ANY(%s) "
     "                     AND (c.relowner = r.oid "
     "                          OR pg_has_role(r.oid, c.relowner, 'USAGE'))) "
+    "       AS bypassing "  # named so a mapping-shaped row (RealDict) can be read
     "  FROM pg_roles r "
     " WHERE r.rolname = current_user"
 )
@@ -3160,7 +3161,15 @@ def _apply_tenant_scope(cursor: Any, org_id: str) -> None:
             "one: refusing rather than assuming the connection is "
             "non-bypassing (RLS is the record's tenancy boundary, R6 / epic "
             "#7879, and #9600 review cycle 2)")
-    applied, bypassing = row[0], row[1]
+    # The row is positional on a plain cursor and mapping-shaped on a
+    # `RealDict` one — `read_record_view` advertises both shapes (its `_rows()`
+    # handles `Mapping`), so unpacking this by index alone would raise
+    # `KeyError: 0` on the read door before its first SELECT. Both columns are
+    # aliased (`tenant`, `bypassing`) so the mapping form is readable.
+    if isinstance(row, Mapping):
+        applied, bypassing = row["tenant"], row["bypassing"]
+    else:
+        applied, bypassing = row[0], row[1]
     if str(applied) != str(org_id):
         raise RecordProjectionError(
             f"the tenant GUC {TENANT_GUC!r} is {applied!r} after setting it to "

@@ -110,7 +110,7 @@ class RecordingCursor:
 
     def fetchone(self) -> tuple[Any, ...] | None:
         # `replay()` reads the tenant GUC BACK after setting it (a
-        # `set_config(..., true)` that set nothing is silent for an
+        # `set_config(..., true)` that set nothing is silent for a
         # UPDATE/DELETE-only plan) and, on the SAME statement, the connecting
         # role's posture (#9600 review cycle 2). The recorder answers both from
         # the connection being modelled: a test OVERRIDES `guc_lost` to model a
@@ -118,6 +118,9 @@ class RecordingCursor:
         if self._conn.last_sql == rp.TENANT_SCOPE_SQL:
             if self._conn.role_posture is _UNREADABLE:
                 return None
+            if self._conn.mapping_rows:
+                return {"tenant": self._conn.guc_reports,
+                        "bypassing": self._conn.role_posture}
             return (self._conn.guc_reports, self._conn.role_posture)
         return (self._conn.guc_reports,)
 
@@ -138,7 +141,8 @@ _UNREADABLE = object()
 class RecordingConnection:
     """Remembers every statement it was asked to execute, and nothing else."""
 
-    def __init__(self, guc_lost: bool = False, role_posture: Any = False) -> None:
+    def __init__(self, guc_lost: bool = False, role_posture: Any = False,
+                 mapping_rows: bool = False) -> None:
         self.executed: list[tuple[str, list[Any] | None]] = []
         self.commits = 0
         self.rollbacks = 0
@@ -151,6 +155,10 @@ class RecordingConnection:
         #: `False` = a non-bypassing role (the decision's app role); `True` = a
         #: BYPASSRLS/superuser/owner role (the DSN trap this file pins).
         self.role_posture = role_posture
+        #: `True` models a `RealDict`-style cursor, which `read_record_view`
+        #: advertises support for: the scope row arrives as a MAPPING, so the
+        #: prologue must read it by key (`tenant`, `bypassing`) and not by index.
+        self.mapping_rows = mapping_rows
 
     @property
     def guc_reports(self) -> Any:
@@ -321,6 +329,35 @@ def test_an_unreadable_role_posture_is_refused_not_assumed() -> None:
     conn = RecordingConnection(role_posture=_UNREADABLE)
 
     with pytest.raises(rp.RecordProjectionError, match="could not be verified"):
+        rp.replay(RECORDS, conn, org_id=ORG, graph_id=GRAPH)
+
+    assert conn.plan_statements() == []
+
+
+def test_the_role_gate_reads_a_mapping_shaped_row_by_key() -> None:
+    """#9600 review cycle 4 (P2): the scope is verified on BOTH cursor shapes.
+
+    `read_record_view` advertises `dict`-shaped rows (a `RealDict` cursor, or a
+    plain cursor's `description`) and its own `_rows()` accepts a `Mapping`. The
+    new scope verify is the FIRST statement either door runs, so unpacking it by
+    position alone raised `KeyError: 0` on exactly the shape the reader
+    documents as supported — before the first SELECT. Both columns are aliased so
+    the mapping form is readable, and this pins it in both directions.
+    """
+    conn = RecordingConnection(mapping_rows=True)
+
+    report = rp.replay(RECORDS, conn, org_id=ORG, graph_id=GRAPH)
+
+    assert conn.plan_statements(), (
+        "a mapping-shaped scope row stopped the plan from running entirely")
+    assert report.statements > 0
+
+
+def test_a_mapping_shaped_bypassing_row_is_still_refused() -> None:
+    """The key the reader reads must be the key the gate means."""
+    conn = RecordingConnection(mapping_rows=True, role_posture=True)
+
+    with pytest.raises(rp.RecordProjectionError, match="BYPASSES RLS"):
         rp.replay(RECORDS, conn, org_id=ORG, graph_id=GRAPH)
 
     assert conn.plan_statements() == []
@@ -693,3 +730,37 @@ def test_the_app_role_is_non_bypass_and_reasserted_on_every_apply() -> None:
     )
     assert not re.search(r"CREATE ROLE tortoise_record_app[^']*BYPASSRLS(?!\s*=)",
                          text.replace("NOBYPASSRLS", ""))
+
+
+def test_the_role_comment_cannot_abort_the_migration() -> None:
+    """#9600 review cycle 4 (P2): the comment is documentation, not a gate.
+
+    `COMMENT ON ROLE` needs superuser **or ADMIN OPTION on the target role** —
+    a different privilege from the `ALTER ROLE` guard above it. On a database
+    where `tortoise_record_app` already exists and was created by somebody else
+    (an operator's admin role in the SQL editor, a role restored from
+    `pg_dumpall --roles`, a second applier), a bare statement raises
+    `permission denied` and aborts the WHOLE tenancy posture — the same failure
+    shape cycle 1 fixed for `ALTER ROLE`, with the same consequence: no grants,
+    no policies, boundary off. The PGlite lane runs as superuser and cannot see
+    it, so this is pinned as text: the comment must live inside a `DO` block
+    that swallows exactly `insufficient_privilege`.
+    """
+    text = _migration_text(TENANCY_MIGRATION.name)
+
+    assert "COMMENT ON ROLE tortoise_record_app" in text, (
+        "the role's documented purpose must still be on the role")
+    guarded = re.search(
+        r"DO \$\$\s*\n\s*BEGIN\s*\n\s*COMMENT ON ROLE tortoise_record_app", text)
+    assert guarded, (
+        "`COMMENT ON ROLE` must be inside a DO block — unguarded, a "
+        "non-admin applier aborts the entire tenancy posture on a role it did "
+        "not create")
+    tail = text[guarded.start():guarded.start() + 2000]
+    assert re.search(r"EXCEPTION WHEN insufficient_privilege THEN\s*\n\s*NULL;\s*\n\s*END \$\$", tail), (
+        "the comment's DO block must swallow `insufficient_privilege` and "
+        "nothing else — a bare COMMENT, or a handler for the wrong class, is "
+        "either fatal or a silent failure")
+    bare = re.findall(r"^COMMENT ON ROLE tortoise_record_app", text, re.M)
+    assert not bare, (
+        "a top-level `COMMENT ON ROLE` bypasses the handler")
