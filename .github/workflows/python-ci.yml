@@ -3468,9 +3468,6 @@ jobs:
         run: |
           SCRATCH="${RUNNER_TEMP:-/tmp}/record-postgres"
           python3 .github/scripts/record-postgres-leg-gate.py "$SCRATCH/junit.xml"
-      - name: Stop Postgres (#9551)
-        if: always()
-        uses: ./.github/actions/postgres-teardown
       - name: Upload record-postgres log (measurement artifact)
         if: always()
         continue-on-error: true
@@ -3481,6 +3478,9 @@ jobs:
             ${{ runner.temp }}/record-postgres/pytest.log
             ${{ runner.temp }}/record-postgres/junit.xml
           if-no-files-found: ignore
+      - name: Stop Postgres (#9551)
+        if: always()
+        uses: ./.github/actions/postgres-teardown
 
   python-ci-gate:
     if: always()

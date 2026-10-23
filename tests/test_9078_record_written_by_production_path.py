@@ -2373,7 +2373,7 @@ def test_ensure_record_schema_applies_everything_on_a_fresh_container():
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# 8. The ARMED CI LEG (#9551) — the leg a skip cannot hide a disagreement behind
+# 10. The ARMED CI LEG (#9551) — the leg a skip cannot hide a disagreement behind
 # ════════════════════════════════════════════════════════════════════════════
 
 PYTHON_CI = REPO_ROOT / ".github" / "workflows" / "python-ci.yml"

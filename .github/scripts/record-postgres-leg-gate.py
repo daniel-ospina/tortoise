@@ -70,7 +70,13 @@ def decide(xml_path: Path) -> tuple[dict[str, int], list[str]]:
         "xfailed": xfailed,
         "failed": failed,
         "armed": len(armed),
-        "armed_skipped": sum(1 for c in armed if c.find("skipped") is not None),
+        # A leg that XFAILED did not skip for lack of a database, so the
+        # report must not call it a skip: on a red, the one line an
+        # operator reads is this one (#9772 review P2).
+        "armed_real_skips": sum(
+            1 for c in armed
+            if (n := c.find("skipped")) is not None
+            and n.get("type") != "pytest.xfail"),
     }
     problems: list[str] = []
     if tests == 0:
@@ -106,7 +112,7 @@ def main(argv: list[str]) -> int:
     print(f"tests={stats['tests']} skipped={stats['skipped']} "
           f"xfailed={stats['xfailed']} failed={stats['failed']} "
           f"armed_capture_legs={stats['armed']} "
-          f"(skipped={stats['armed_skipped']})")
+          f"(real_skips={stats['armed_real_skips']})")
     for problem in problems:
         print(f"::error::{problem}")
     return 1 if problems else 0
