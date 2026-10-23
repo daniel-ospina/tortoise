@@ -2980,10 +2980,12 @@ deployment that never had it. That is why an unstaged name is invisible instead
 of broken: nothing goes red, the record simply never receives a row
 (`docs/epics/2026-10-10-7879-postgres-record/08-hosted-prerequisites.md` §A8).
 
-**The value.** The project's **pooler** DSN — the same shape `.env.example`
-documents for `TORTOISE_AUDIT_DSN`. ⚠️ `.env.example`'s own
-`TORTOISE_RECORD_DSN` line is a **commented, non-pooler `localhost` placeholder**:
-copy the *shape* from the `TORTOISE_AUDIT_DSN` block, not that line.
+**The value.** The project's **pooler** DSN — the same HOST/port/query shape `.env.example`
+documents for `TORTOISE_AUDIT_DSN`. ⚠️ Copy that block's *host* shape, not its USER:
+`TORTOISE_AUDIT_DSN`'s block shows `postgres.<project-ref>`, and that user is the table owner —
+the one role this record must never connect as (see the ⛔ below). And `.env.example`'s own
+`TORTOISE_RECORD_DSN` line is a **commented, non-pooler `localhost` placeholder**: it is not the
+shape either.
 `postgresql://tortoise_record_app.<project-ref>:<urlencoded-password>@aws-0-<region>.pooler.supabase.com:5432/postgres?sslmode=require&connect_timeout=5`.
 ⛔ **The user is R6's application role, `tortoise_record_app` — never `postgres` and never
 `service_role`.** Both bypass row-level security, which is the record's tenancy boundary, so that DSN
