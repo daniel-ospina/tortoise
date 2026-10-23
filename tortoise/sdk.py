@@ -22472,6 +22472,22 @@ class TortoiseSDK:
           (`invalidate_point` refuses operators) therefore remains a
           permanently unsweepable root, exactly as it was before #7505; that
           residual is tracked, not silently assumed away.
+          ⛔ ONE CARVE-OUT, and it is the opposite case (#9269): an
+          OPERATOR-SHAPED node that is another operator's INPUT. The
+          exemption above protects a pass that MAY NOT have run the factor;
+          this class is one every arm of ``_affected_claims`` now excludes by
+          construction (``ep._non_operator``), so before #9269 it was swept
+          only because it entered ``affected`` as an op-input. Excluding it
+          from `affected` while retaining it here re-classified a SWEPT
+          population as never-sweepable: measured, after
+          ``create_operator('IMPL', a, [b, <is_operator:true>])`` and a
+          converged ``dream(mode='full')`` the shaped input was the ONLY
+          remaining graph flag, ``stale_backlog`` could not drain, and
+          ``_auto_dream_mode()`` returned 'local' forever — the #7505/#2422
+          failure class, reached through the one shape #9269 is about. So the
+          shaped-input class is SWEPT BY CLASSIFICATION here (below), which is
+          how a root that can never be affected stays clearable. A TOP-LEVEL
+          operator (nobody's input) is untouched and keeps the residual above.
         * A ROOT WITH **NO** ``IMPL|NAND`` EDGE AT ALL (an isolated claim).
           Its pass computes nothing (the #3139 ``no_ep_factors`` legitimate
           no-op), so sweeping its flag would be a no-op sweeping its own
@@ -22512,13 +22528,29 @@ class TortoiseSDK:
         # (1) an operator's INPUT. Direction is load-bearing: a mitigation
         # points AT an operator (``(m)-[:IMPL]->(op)``), so it is the operator
         # that would match here, never ``m``.
-        participants |= {r[0] for r in proj.g.query(
+        #
+        # #9269: the same row answers the SWEEP question, which is the opposite
+        # of the retention question. An OPERATOR-SHAPED input (``is_operator``
+        # absent-or-false is the ADMITTED form, so the shaped class is its
+        # complement) can now never enter ``affected`` — every arm of
+        # ``_affected_claims`` carries ``ep._non_operator`` — so the
+        # ``affected`` subtraction above can never clear its flag, and retaining
+        # it as a PARTICIPANT (it is an operator, so the first query retains it)
+        # strands it forever. It is swept by CLASSIFICATION instead. The
+        # spelling is the complement of ``ep._non_operator`` and was measured on
+        # the engine against every spelling in that docstring: the STRING
+        # ``'false'`` and both numerics (``0``, ``1``) are shaped, and ``0 = false``
+        # is false there — the same verdict as the Python identity test.
+        op_input_rows = proj.g.query(
             "MATCH (o:Point)-[:IMPL|NAND]->(n:Point) "
             "WHERE n.id IN $ids "
             "AND (o.is_operator = true OR o.op_type IS NOT NULL) "
-            "RETURN DISTINCT n.id",
+            "RETURN DISTINCT n.id, "
+            "(n.is_operator IS NOT NULL AND n.is_operator <> false)",
             params={"ids": ids},
-        ).result_set}
+        ).result_set
+        participants |= {r[0] for r in op_input_rows}
+        shaped_inputs = {r[0] for r in op_input_rows if r[1]}
         # (2) the two facts the remaining classes need from the edges, in ONE
         # sweep: does the candidate have an IMPL|NAND edge at all (the class
         # boundary — an isolated claim has none and is retained), and is that
@@ -22545,7 +22577,9 @@ class TortoiseSDK:
         # operator is already in `participants`). The #2205/#3139
         # index-independent form is used for the far endpoint.
         participants |= {r[0] for r in edge_rows if r[1]}
-        return (points & edge_bearing) - participants
+        # #9269: the shaped input is the ONE participant class this sweep may
+        # still clear — see the carve-out in the docstring.
+        return (points & edge_bearing) - (participants - shaped_inputs)
 
     def _reverse_bfs_neighbors(self, proj, point_ids: list[str]
                                ) -> tuple[list[str], list[str]]:
@@ -25298,8 +25332,12 @@ class TortoiseSDK:
         INPUT — its operator inputs and BOTH endpoints of an operator-less
         direct edge (#888 W5). #9269: the OPERATOR-MEDIATED selections in both
         of those apply the SAME absence-or-false non-operator predicate this
-        gate's universe does (``ep._non_operator``), so an operator-shaped node
-        is in neither — the scope and the run cannot disagree about it. (The
+        gate's universe does, so an operator-shaped node is in neither — the
+        scope and the run cannot disagree about it. That predicate is spelled
+        in Cypher at the affected-set arms and in PYTHON at
+        ``_affected_factors``' Batch 2 (see ``ep._non_operator``, whose
+        Cypher-helper form must NOT be extended to Batch 2 — a WHERE-clause
+        filter there would hide a stripped idx-0 SOURCE). (The
         operator-less DIRECT-EDGE arms stay a STRICTER spelling, this predicate
         AND ``op_type IS NULL``; the one population where the gate deliberately
         demands a prior the run's direct-edge arms exclude is the HYBRID
@@ -25423,10 +25461,17 @@ class TortoiseSDK:
             correctly — demanded nothing of it (the #7478 class), and so did
             an out-of-contract spelling (the STRING ``is_operator = 'false'``)
             that matches neither ``IS NULL`` nor ``= false``. Both were closed
-            on the OTHER side: EP's factor-INPUT selection now carries THIS
-            SAME absence-or-false predicate (``ep._non_operator``), so the two
-            agree by construction — neither demands nor consumes an operator-
-            shaped node. Widening this predicate to reach them was the rejected
+            on the OTHER side: EP's factor-INPUT selection applies THIS SAME
+            absence-or-false predicate, so the two agree by construction —
+            neither demands nor consumes an operator-shaped node. ⛔ It applies
+            it as a PREDICATE with two spellings, not as one helper: in Cypher
+            at the affected-set arms, and in PYTHON at ``_affected_factors``'
+            Batch 2 — which deliberately does NOT use ``ep._non_operator``'s
+            WHERE-clause form, because hiding a stripped idx-0 SOURCE from that
+            arm renumbers the first surviving target into the source slot and
+            inverts directional messages (see that function's docstring). Do
+            not "unify" the two. Widening THIS predicate to reach them was the
+            rejected
             route (it would demand a prior of every operator Point that happens
             to be a factor input, and could not cover the string spelling
             without also demanding every non-boolean spelling).

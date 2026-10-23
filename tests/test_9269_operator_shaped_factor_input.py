@@ -82,6 +82,11 @@ def _wire_third_input(sdk, shaped_id: str):
     return a["id"], b["id"], (op["id"] if isinstance(op, dict) else op)
 
 
+def _dirty_ids(sdk) -> set[str]:
+    return {r[0] for r in sdk._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.ep_dirty = true RETURN n.id").result_set}
+
+
 def _stamp(sdk, node_id: str):
     row = sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) "
@@ -321,3 +326,40 @@ def test_a_two_input_operator_losing_its_shaped_input_is_reported(sdk):
     assert [i["status"] for i in record["inputs"]] == [
         "live", "operator-shaped"]
     assert _stamp(sdk, shaped) == [None, None, None, None]
+
+
+def test_a_nested_operator_is_not_a_permanent_dirty_root(sdk):
+    """Regression: excluding the shaped INPUT must not strand its ``ep_dirty``.
+
+    ``create_operator`` marks its inputs dirty and ``_reverse_bfs_neighbors``
+    carries no non-operator filter, so an operator-shaped Point used as ANOTHER
+    operator's input acquires a persisted ``ep_dirty`` flag. Before this change
+    that flag was cleared because the node entered ``affected`` (the op-input arm
+    had no filter); now the arm excludes it, and ``_sweep_dirty_roots``' only
+    clearing rule is the ``affected`` subtraction — while
+    ``_unsweepable_dirty_roots`` retains every operator as a PARTICIPANT. A
+    shaped input is neither, so no converged pass can ever clear it: the root
+    pins ``_auto_dream_mode()`` to 'local' for the life of the graph and
+    ``dream_health_check()['stale_backlog']`` never drains (the #7505/#2422
+    class, whose sibling assertion is
+    ``test_ep_dirty_persist.py::test_mitigation_write_leaves_no_permanent_dirty_root``).
+    """
+    shaped = _shaped_point(sdk, "shaped-9269-nested", "true")
+    a, b, _op = _wire_third_input(sdk, shaped)
+    for pid in (a, b):
+        sdk.set_point_baseline(pid, 3.0, 1.0)
+
+    # The marking half: the write genuinely flags the shaped node, which is what
+    # makes it a root at all (no filter exists on the marking side).
+    assert shaped in _dirty_ids(sdk)
+
+    result = sdk.dream(mode="full")
+    assert result["converged_all"] is True
+
+    # The clearing half: a converged pass leaves NO root behind, so the shaped
+    # node's flag is gone and the backlog is empty.
+    assert _dirty_ids(sdk) == set()
+    assert not sdk._dirty_roots
+    assert sdk.dream_health_check()["stale_backlog"] == 0
+    # …and nothing pins auto-select to 'local' (small graph → full, J3).
+    assert sdk._auto_dream_mode() == "full"
