@@ -439,12 +439,12 @@ proven restorable"*, and only the drill mode proves it. Run the drill on a sched
    `tortoise_record_app` (`NOBYPASSRLS`, not the table owner) and names the database-level
    backup/restore as one of exactly **three** purposes a bypassing role may serve. Both legs of this
    verb need it, for different reasons:
-   * the **drill's** `count(*)` per table returns **0** under the `*_app_tenant` policies, because
+   - the **drill's** `count(*)` per table returns **0** under the `*_app_tenant` policies, because
      this connection never sets `app.current_org_id` and the R6 migration chose *silent reads* (a
      missing GUC returns NULL, so rows vanish instead of raising). Pre-#9801 that surfaced as
      *"the record is EMPTY"* — a misdiagnosis that sends an operator to the data while the fault is
      the role;
-   * `pg_dump`'s `row_security = off` default is an **error**, not a filtered read, for a
+   - `pg_dump`'s `row_security = off` default is an **error**, not a filtered read, for a
      `NOBYPASSRLS` role, so backup-only mode produced no artifact at all.
 
    The verb therefore resolves its DSN from `TORTOISE_RECORD_BACKUP_DSN` (falling back to
