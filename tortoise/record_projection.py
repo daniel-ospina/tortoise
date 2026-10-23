@@ -3284,9 +3284,11 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
       statement at all.
 
     ⚠️ WRITE ON ``true``. A caller-supplied ``conn`` in autocommit mode makes
-    ``set_config(..., true)`` warn and set nothing, and the read-back below
-    REFUSES it (`tenant GUC … is None after setting it to <org>`) before a
-    single plan statement — so the `WITH CHECK` predicates are never reached
+    ``set_config(..., true)`` set nothing, and the read-back below REFUSES it
+    (`tenant GUC … is <not your org> after setting it to <org>`) before a
+    single plan statement. The observed value is the empty string on an
+    autocommit connection (the set is reported but does not persist) and NULL
+    when the context was dropped entirely (a pooler) — so the `WITH CHECK` predicates are never reached
     on that shape. That is deliberate and it is the point of the read-back:
     a NULL GUC is loud on `INSERT` and SILENT on an `UPDATE`/`DELETE`-only
     plan, which would affect zero rows and report success (#9600 review cycle

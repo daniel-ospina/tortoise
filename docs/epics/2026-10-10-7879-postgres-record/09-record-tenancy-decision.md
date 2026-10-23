@@ -137,10 +137,13 @@ Operator steps: `docs/infra-runbook.md` → "The record's connecting role".
   confer `nextval`, and `has_table_privilege(..., 'INSERT')` reads TRUE while the insert fails
   (#9600 review cycle 2, measured by executing the insert). Granted by the migration; proven by
   §7b of the posture suite, which lands a real `relation` row through the app role.
-- **No production code set that GUC** before this change (`grep` over `tortoise/`, `apps/`, `tools/`,
-  `services/`: zero `current_setting`/`set_config`; the only setters were `supabase/tests/*.sql`).
+- **No production code set that GUC** before this change: the GUC name appears as a SETTER in exactly
+  one place in the tree (`grep -rn "set_config('app.current_org_id" tortoise/` → 1, `record_projection`),
+  and before R6 even that statement did not exist — the only setters were `supabase/tests/*.sql`.
+  ⚠️ A bare `grep current_setting` is NOT the test: `tortoise/projection/` carries `set_config_reset_marker`,
+  a GRAPH marker unrelated to a Postgres GUC.
 - The `authenticated` **read** surface already had a cross-tenant test
-  (`20261012000001_record_schema.sql:389-417`, #7968) — that half was **not** missing. What was
+  (`20261012000001_record_schema.sql:410-418`, #7968) — that half was **not** missing. What was
   missing was the posture the *write path* runs under, which is what this lane added.
 
 **Sources (all read 2026-10-22):**

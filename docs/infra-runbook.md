@@ -2877,8 +2877,9 @@ never reach the *empty source* refusal (`refuse_unrestorable_source`, exit 3) or
 verdict (exit 3): those are what a correctly-roled but EMPTY record would produce. Read the
 exception TYPE as the discriminator — `RecordProjectionError` is a role/scope refusal (fix the
 DSN); a driver `OperationalError` in the same message is a transient outage.
-⚠️ Note `-m tortoise record-restore`, a read-only restore, behaves as described here; the
-R8 drill's `--limit` and `--allow-empty` flags apply to a run that HAS read a record.
+⚠️ `tortoise record-restore` behaves as described here **only for its READ phase**: the
+verb WIPES the cache graph before rebuilding, so a wrong-role DSN is refused before it touches
+anything — which is exactly why this DSN check is the first thing to do.
 
 ### Runtime Config (non-secret)
 

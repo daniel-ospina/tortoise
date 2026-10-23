@@ -176,7 +176,18 @@ RECORD_MIGRATION_FILES = [REPO_ROOT / "supabase" / "migrations" / name
 #: "already fine" by exactly the container that is stale).
 RECORD_NARROWING_FILES = [
     REPO_ROOT / "supabase" / "migrations"
-    / "20261022000001_record_session_capture_redactions_integer.sql"]
+    / "20261022000001_record_session_capture_redactions_integer.sql",
+    # #9600/R6 (#9554), and NOT a narrowing: a container migrated by a
+    # pre-#9554 tree has `journal_event` (so the shortcut returns) and no
+    # `tortoise_record_app`, no grants and no `*_app_tenant` policies — the
+    # armed leg then connects as a role that does not exist, or one that can
+    # touch nothing. Same class as the narrowings ("migrated" is not
+    # "migrated by THIS tree"), so it is re-applied on that path too. Safe to
+    # re-run: every statement is guarded or idempotent, and the attribute
+    # re-assert never touches LOGIN or a password (an operator's credential
+    # survives).
+    REPO_ROOT / "supabase" / "migrations"
+    / "20261025000001_record_tenancy_role_and_guc.sql"]
 
 #: The minimum Supabase-shaped substrate the record migrations need: the three
 #: roles they GRANT to, and the two control-plane tables their tenancy FKs
@@ -1783,7 +1794,9 @@ def _ensure_record_schema(conn) -> None:
     pass reports *"That is a NEW defect"* — blaming the current tree for a
     schema it predates, with re-adding the tolerance (the defect this tree
     correctly deleted) as the cheapest route back to green. The narrowings are
-    therefore re-applied on the already-migrated path too.
+    therefore re-applied on the already-migrated path too — and so is R6's
+    tenancy migration, for the same reason: without it the app role this
+    file's armed leg must connect as does not exist on an older container.
     """
     with conn.cursor() as cur:
         cur.execute("SELECT to_regclass('public.journal_event')")
@@ -2424,6 +2437,35 @@ def test_ensure_record_schema_narrows_a_container_migrated_by_an_older_tree():
     assert "CREATE ROLE anon" not in executed, (
         "the role preamble must not be re-run on a container that already "
         "carries the record schema")
+    assert "tortoise_record_app" in executed, (
+        "an already-migrated container was left without #9554's application "
+        "role, grants and tenant policies: the armed leg below then connects as "
+        "a role that does not exist (or one that can touch nothing) and every "
+        "record write fails PrivilegeError on a container that is merely OLDER "
+        "than this tree — the same \"migrated is not migrated-by-THIS-tree\" "
+        "class as the narrowing above (#9600 review 8, P2)")
+
+
+def test_ensure_record_schema_leaves_the_app_role_able_to_write():
+    """The re-applied tenancy migration must actually ARM the role it creates.
+
+    A role with no privileges would satisfy the check above and still fail every
+    write, so pin the grants and the policy rather than the role's existence.
+    """
+    conn = _StubConn(journal_present=True)
+    _ensure_record_schema(conn)
+
+    executed = "\n".join(conn.log)
+    assert "GRANT SELECT, INSERT ON public.journal_event  TO tortoise_record_app" in executed, (
+        "the journal grant is the append-only asymmetry and must be re-applied")
+    assert "DELETE ON public.journal_event" not in executed, (
+        "UPDATE/DELETE on the journal would hand the boundary role the erasure "
+        "path the append-only trigger reserves to app.record_journal_purge")
+    assert "GRANT SELECT, INSERT, UPDATE, DELETE ON public.point " in executed, (
+        "the plan's own tables need UPDATE for a re-projection to land")
+    assert "CREATE POLICY point_app_tenant ON public.point" in executed, (
+        "without the tenant policy the app role would be refused by RLS, not "
+        "merely unscoped")
 
 
 def test_ensure_record_schema_applies_everything_on_a_fresh_container():
