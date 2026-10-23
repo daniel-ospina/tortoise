@@ -58,6 +58,11 @@ jobs:
   # as Success and would silently pass a required check (the trap #2055 named).
   # Fail-closed on detection: an empty/erroneous diff emits ALL
   # surfaces true so every gated job runs — never a silent coverage loss.
+  #
+  # `ops-harnesses` and `repo-harnesses` are CONSOLIDATED: they replace nine
+  # single-purpose shell-harness jobs (one checkout + one or two bash scripts
+  # each) with two, because the merge ceiling is concurrent JOBS, not runs.
+  # See the block comment above them before splitting one back out.
   changes:
     runs-on: ubuntu-latest
     outputs:
@@ -1225,77 +1230,90 @@ jobs:
       - name: Check test isolation (repo-local lint)
         run: bash .ci-checks/check-test-isolation.sh
 
-  backup-driver-scripts:
-    needs: changes
-    if: needs.changes.outputs.driver_scripts == 'true'  # #2149: driver surface only
-    # #2796: the hourly backup driver's state-classification harness. Gated on
-    # the driver surface (`.github/scripts/registry-cron*` + the cron workflow)
-    # so a change to the driver exercises it in PRs — the driver is otherwise
-    # only run by a schedule and its failures used to be silent. Self-contained:
-    # stubs aws/curl/date, no network.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Backup driver state taxonomy (#2796)
-        run: bash .github/scripts/registry-cron.test.sh
+  # ══════════════════════════════════════════════════════════════════════════
+  # CONSOLIDATED HARNESS JOBS — nine shell-harness jobs are now two.
+  #
+  # THE MEASUREMENT THAT MOTIVATES IT: the merge ceiling is CONCURRENT JOBS,
+  # not runs. A GitHub Free account gets 20 concurrent jobs ACCOUNT-WIDE, and
+  # these two repos alone hold ~12 of them (tortoise 5, agent-infra 7), so
+  # every extra job a PR declares is a slot that a QUEUED PR cannot have
+  # (measured 2026-10-22: 141 queued python-ci runs, 0 of 28 open PRs
+  # mergeable, every one stuck `PENDING` on `python-ci-gate`). Merging two
+  # workflow FILES would have removed nothing — neither does sharding a job
+  # into more of them. What removes pressure is removing JOBS, so this block
+  # replaces nine jobs of ONE SHAPE — `needs: changes` + a checkout + one to
+  # six self-contained bash harnesses (0.1 s … 285 s each), every one of them
+  # paying its own runner boot and its own checkout — with two jobs that run
+  # exactly the same harnesses under exactly the same gates, holding SEVEN
+  # fewer concurrent slots and doing seven fewer checkouts.
+  #
+  # WHAT IS NOT DONE HERE: no harness is dropped, weakened, or moved out from
+  # behind its gate. No `paths:`/`paths-ignore` filter is introduced either —
+  # a path-filtered workflow never runs, so its check never reports and a
+  # required one stays PENDING forever. Gating stays at job level (`changes` +
+  # `if:`), which reports `skipped`, which is a reportable state.
+  #
+  # INDEPENDENCE IS PRESERVED ON PURPOSE — this is the one way a merge like
+  # this goes wrong. In GitHub Actions a step's bare `if:` is implicitly ANDed
+  # with `success()`, so ONE failing harness would SKIP every harness after it:
+  # nine independent checks would collapse into one, and the eight silent
+  # losses would happen exactly when something is already wrong. Every harness
+  # step below is therefore guarded by `!cancelled() && <its own gate>`, which
+  # runs it regardless of what failed before it (the JOB still goes red, so
+  # nothing is reported green that is not) while still refusing to start work
+  # on a CANCELLED run — the common case in this repo, where a superseded
+  # run of a queued PR is cancelled.
+  #
+  # ⚠️ FAILURE-INDEPENDENCE IS STEP-LEVEL; HANG-INDEPENDENCE IS THE JOB TIMEOUT.
+  # `!cancelled()` keeps a FAILING harness from skipping the rest, but the
+  # harnesses are now sequential steps of one job, so a HUNG one would block
+  # every later harness from reporting and hold the slot until GitHub's 360-minute
+  # default — strictly worse than the nine-job shape, where a hang cost one job.
+  # Both merged jobs therefore carry a `timeout-minutes` cap, chosen against the
+  # measured worst case with headroom for a slow runner. Several harnesses poll
+  # (`availability-liveness`, `deploy-health-gate`, `registry-cron`), and the
+  # whole point of a poll loop is that it can spin.
 
-  ai-review-gate-tests:
+  ops-harnesses:
     needs: changes
-    if: needs.changes.outputs.ai_review_gate == 'true'  # #2982: gate workflow/harness only
-    # #2982: the ai-review-gate's evidence-validation shell logic runs inline
-    # in the workflow (that workflow has no checkout step, so it cannot
-    # reference a repo script). This
-    # harness extracts that run block and drives it with fabricated signed
-    # markers + a stubbed gh, covering sha-match, diff-match, backward compat,
-    # fail-closed-on-API-failure, signature-over-diff, PR/repo binding, and the
-    # PR-body source. It ALSO asserts the non-runtime invariants the gate
-    # job depends on: no if:/needs:/continue-on-error:, trigger stays
-    # pull_request_target with no paths: filter, permissions keep
-    # pull-requests: read, and GH_TOKEN is declared. Self-contained, no
-    # network, no secrets.
-    #
-    # ⚠️ This job is NOT a required status check: a red harness does not block a
-    # merge, so a regression here can land and then silently let the
-    # `ai-review-gate` check pass without evaluating evidence. `ai-review-gate`
-    # IS a required check since #5433 (live branch protection + a Mergify entry
-    # condition), so a red there does block — but this harness job still does not.
-    # Tracked in #3091
-    # (add this job to branch protection, or move the harness into an
-    # always-run required job). The `if:` above is a complete per-surface guard:
-    # it fires on any change to the gate workflow, this harness, or ci.yml.
+    if: needs.changes.outputs.watchdog_scripts == 'true'  # #2149/#2850/#3810/#4545/#4759: the monitor + deploy-gate surface
+    # The four monitor/deploy-gate harnesses that shared this gate and this
+    # shape (#2850 #3810 #4545 #4759). All self-contained: stubs
+    # curl/gh/flyctl/aws/date, no network, no secrets. Each one's own note is
+    # kept on its step, because it is what says which regression the harness
+    # exists for and would catch.
+    # 20 min: measured ≈360 s locally with every gate firing (the watchdog
+    # harness alone is 285 s); the cap bounds a hung poll loop without failing a
+    # slow-runner run.
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: AI review gate shell harness (#2982)
-        run: bash .github/scripts/ai-review-gate.test.sh
 
-  availability-watchdog:
-    needs: changes
-    if: needs.changes.outputs.watchdog_scripts == 'true'  # #2850: monitor-script surfaces only
-    # Monitor-script harnesses. Both are self-contained: stubs curl/gh/flyctl,
-    # no network. Mirrors backup-driver-scripts (#2796).
-    #   * the availability probe's state machine — verdict classification, issue
-    #     dedupe (#2706 class), restart cooldown/velocity cap, drill disarm,
-    #     public-body redaction (#2850);
-    #   * the welcome-e2e auto-file monitor — machine-author dedupe and the
-    #     forged-title hijack guard (#3064 review).
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+      # ── availability-watchdog (#2850) ─────────────────────────────────────
+      # The availability probe's state machine — verdict classification, issue
+      # dedupe (#2706 class), restart cooldown/velocity cap, drill disarm,
+      # public-body redaction (#2850) — and the welcome-e2e auto-file
+      # monitor's machine-author dedupe plus forged-title hijack guard
+      # (#3064 review).
       - name: Availability watchdog state machine (#2850)
+        if: ${{ !cancelled() }}
         run: bash .github/scripts/availability-watchdog.test.sh
       - name: Availability pager liveness check (#4573)
         # The INDEPENDENT dead-man switch: a stale or absent heartbeat files a
         # GitHub alert and reds the run, over a channel independent of the
         # Telegram leg it verifies. Also pins the heartbeat-constant parity with
         # the watchdog (a rename on one side would otherwise alarm forever).
+        if: ${{ !cancelled() }}
         run: bash .github/scripts/availability-liveness.test.sh
       - name: Welcome-e2e auto-file monitor (#2706/#2850)
+        if: ${{ !cancelled() }}
         run: bash .github/scripts/welcome-e2e-monitor.test.sh
       - name: Shared auto-file substrate (#3907)
         # One issue per finding, with every occurrence recorded on it: files
         # once, comments `Recurrence #N` after that, refuses to file on a failed
         # search, and never adopts a forged/exact-mismatched look-alike title.
+        if: ${{ !cancelled() }}
         run: bash .github/scripts/auto-file-issue.test.sh
       - name: Deploy failure alert (#2240)
         # The out-of-band alert #2240 exists for: per-step attribution from the
@@ -1303,137 +1321,77 @@ jobs:
         # every later occurrence, the gate's OWN report carried into the body,
         # fail-closed on a failed search OR the PAT trap, and the nudge sent
         # only AFTER the record exists.
+        if: ${{ !cancelled() }}
         run: bash .github/scripts/deploy-api-alert.test.sh
       - name: Shared shell Telegram sender (#4574 item 1)
         # The delivery contract — transport success AND the API's own `ok:true` —
         # plus the token redaction that keeps the bot token out of a PUBLIC log,
         # and the caller hooks the watchdog's own logger/redactor ride on.
+        if: ${{ !cancelled() }}
         run: bash .github/scripts/telegram-send.test.sh
 
-  availability-record:
-    needs: changes
-    if: needs.changes.outputs.watchdog_scripts == 'true'  # #3810: recorder surface only
-    # #3810: the RECORD-ONLY baseline instrument's harness. Self-contained:
-    # stubs gh, no network. It proves the record keeps the delivered/intended
-    # cadence factor beside EVERY availability figure (the revert test — drop
-    # it and this job goes red), that DEGRADED is never folded into DOWN, that
-    # restarts= is read from the ledger, and that a low figure never fails the
-    # run (record-only, not a gate). Mirrors availability-watchdog above.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+      # ── availability-record (#3810) ───────────────────────────────────────
       - name: Availability record-only baseline (#3810)
+        # The RECORD-ONLY baseline instrument's harness. It proves the record
+        # keeps the delivered/intended cadence factor beside EVERY availability
+        # figure (the revert test — drop it and this fails), that DEGRADED is
+        # never folded into DOWN, that restarts= is read from the ledger, and
+        # that a low figure never fails the run (record-only, not a gate).
+        if: ${{ !cancelled() }}
         run: bash .github/scripts/availability-record.test.sh
 
-  deploy-health-gate:
-    needs: changes
-    if: needs.changes.outputs.watchdog_scripts == 'true'  # #4545: deploy-gate surface only
-    # #4545: the post-deploy health gate's harness. Self-contained: stubs curl,
-    # no network. It pins the regression that reddened HEALTHY deploys — the
-    # gate polled db.ok (the FalkorDB data plane) and then asserted
-    # /health/ready ONCE, but readiness is an AND of the Supabase control plane
-    # and the data plane, so db.ok does NOT imply ready. Case 3 fails against
-    # the pre-fix single-shot assertion and passes only with the readiness
-    # poll. #4771 extended the same invariant to the DECISION: cases 2 and 11 pin
-    # that db.ok alone no longer fails the run (readiness 200 → pass with a
-    # warning) while db.ok false + readiness never 200 still fails, so the gate
-    # is not weakened. Mirrors availability-record above.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+      # ── deploy-health-gate (#4545) ────────────────────────────────────────
       - name: Deploy health gate poll (#4545)
+        # Pins the regression that reddened HEALTHY deploys — the gate polled
+        # db.ok (the FalkorDB data plane) and then asserted /health/ready ONCE,
+        # but readiness is an AND of the Supabase control plane and the data
+        # plane, so db.ok does NOT imply ready. Case 3 fails against the pre-fix
+        # single-shot assertion and passes only with the readiness poll. #4771
+        # extended the same invariant to the DECISION: cases 2 and 11 pin that
+        # db.ok alone no longer fails the run (readiness 200 → pass with a
+        # warning) while db.ok false + readiness never 200 still fails, so the
+        # gate is not weakened.
+        if: ${{ !cancelled() }}
         run: bash .github/scripts/deploy-health-gate.test.sh
 
-  orphan-bound-gate:
-    needs: changes
-    if: needs.changes.outputs.orphan_bound_scripts == 'true'  # #4740: orphan-gate surface only
-    # #4740: the redislite orphan gate's harness. Self-contained: writes hygiene
-    # fixtures to a temp dir, no network, no CI runner. It pins that the gate's
-    # bound is READ from the conftest session-end sweep's report (two different
-    # `left` values both pass, so no fixed bound can satisfy both), that a
-    # disagreement between the workflow's count and the sweep's own measurement
-    # reds, that a violation of the sweep's accounting identity
-    # (`reaped + exited + left < before`) reds, that `cleared: false` is keyed on the
-    # measured COUNT (a zero count passes with a warning, a non-zero count
-    # reds), that an 18+ digit number exits 2 as a usage error rather than
-    # reaching the pass line, and that a red verdict never falls through to a
-    # pass line.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Redislite orphan gate (#4740)
-        run: bash .github/scripts/orphan-bound.test.sh
-
-  deploy-bypass-report:
-    needs: changes
-    if: needs.changes.outputs.watchdog_scripts == 'true'  # #4759: any monitor/deploy-gate surface (shared watchdog_scripts group)
-    # #4759: the bypass reporter / expiry helper's harness. Self-contained: no
-    # network, no gh — every input is an argument or an env binding, exactly as
-    # the workflow supplies them. It proves a bypass lands in
-    # $GITHUB_STEP_SUMMARY naming the gate, the lane that fired and BYPASSED
-    # (neuter the summary write and it goes red), that each job's end-of-job
-    # audit states every gate as bypassed or not, and that the expiry check ages
-    # a set lane, VIOLATES past the window, and treats a missing/invalid start
-    # date as a violation rather than silence. Mirrors deploy-health-gate above.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+      # ── deploy-bypass-report (#4759) ──────────────────────────────────────
       - name: Deploy bypass report + expiry check (#4759)
+        # The bypass reporter / expiry helper's harness: no network, no gh —
+        # every input is an argument or an env binding, exactly as the workflow
+        # supplies them. It proves a bypass lands in $GITHUB_STEP_SUMMARY naming
+        # the gate, the lane that fired and BYPASSED (neuter the summary write
+        # and it goes red), that each job's end-of-job audit states every gate as
+        # bypassed or not, and that the expiry check ages a set lane, VIOLATES
+        # past the window, and treats a missing/invalid start date as a
+        # violation rather than silence.
+        if: ${{ !cancelled() }}
         run: bash .github/scripts/deploy-bypass.test.sh
 
-  entrypoint-guards:
+  repo-harnesses:
     needs: changes
-    if: needs.changes.outputs.entrypoints == 'true'  # #2149: entrypoint.sh / its .ci-checks script only
-    # #1349 T11: the hosted entrypoint's guard contracts — env-reject of the
-    # benchmark-only TORTOISE_EMBEDDER_OVERRIDE seam + missing-cache FATAL —
-    # are shell-level and untestable from pytest. Matches the test-isolation
-    # pattern: repo-local script, no setup.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Check entrypoint guards (env-reject + missing-cache FATAL)
-        run: bash .ci-checks/check-entrypoint-guards.sh
-
-  sigpipe-guard:
-    # #841 — the agent-infra guard, wired where the bug actually ships. This is the
-    # DEPLOYMENT half of the gap recorded on tortoise#7588 (the guard existed and was
-    # wired in agent-infra but never invoked HERE), and it does NOT close #7588: that
-    # issue's own sites are a `printf | sed | head -n1` shape this guard does not match.
+    # ALWAYS RUNS (no gate of its own) because `sigpipe-guard` must: the whole
+    # defect class it covers is "a file a path filter decided is not shell", and
+    # two of the four sites that shipped this false negative were extensionless
+    # `.github/scripts/` entries that a `*.sh` filter read as clean. It costs
+    # about a second, so it runs on every change. The four harnesses below it
+    # keep their OWN gates on their own steps — the job runs, their step does
+    # not, which is exactly what their separate jobs did before.
     #
-    # NOT `needs: changes`-gated on purpose: the whole defect class is "a file a path
-    # filter decided is not shell", and two of the four sites that shipped this false
-    # negative were extensionless `.github/scripts/` entries a `*.sh` filter read as
-    # clean. It costs about a second, so it runs on every change.
+    # `!cancelled()` rather than no `if:` at all: this job has `needs: changes`
+    # (it must, to read those outputs), and without the guard a FAILING
+    # `changes` job would skip the whole job — losing the sigpipe coverage that
+    # does not depend on `changes` at all. It runs unless the RUN was cancelled.
     #
-    # The guard lives in agent-infra, reached locally through the machine-local
-    # `scripts` pointer (#9475: gitignored, NOT tracked, materialised from
-    # $AGENT_INFRA_PATH by tools/link_agent_infra_scripts.py), so it is ABSENT on a runner
-    # rather than dangling (see the workflow header). Agent-infra is public, so check it
-    # out alongside and run the SAME guard: a vendored copy would be a second source of
-    # truth free to drift from the one that owns the idiom (#863's "guard nobody runs").
+    # That `!cancelled()` IS the consolidation's form of the guarantee the
+    # standalone `sigpipe-guard` job got by having no `needs:` at all (#841):
+    # the consolidated job cannot drop `needs: changes` — it exists to read those
+    # outputs for the per-step gates below — so run-unless-cancelled is what keeps
+    # a FAILING `changes` job from removing the sigpipe coverage.
     #
-    # ORDERING — SATISFIED: `--dirs` shipped in agent-infra#1643, merged to agent-infra
-    # `main` as `ffa8751ac9afbd0acbfeb32d0619d2208b89217a` and PINNED below. Before that
-    # commit existed this job was red (the guard exits 2 on an unknown argument); the pin
-    # is what stops it following agent-infra `main` from here on, the way this file's other
-    # version-consuming agent-infra jobs fix their revision — node-ci and python-ci at a
-    # tag. (`drift-check` stays on `main` on purpose: detecting drift is its whole job, so
-    # it is the one job that must track it.) A commit pin rather than a tag because #1643
-    # carries no tag yet — replace the sha with the next `v0.1.x` when agent-infra cuts one.
-    #
-    # `--dirs` names THIS repo's layout — the guard's default set is agent-infra's and
-    # `scripts/` here points back at it. The list lives in ONE place, `.sigpipe-grep-dirs`,
-    # shared with .husky/pre-commit, so the two invocation sites cannot diverge.
-    #
-    # ⚠️ THIS JOB IS NOT A REQUIRED CONTEXT YET (tortoise#7778), so a red here does not
-    # block a merge: it is visible but unenforced. The sites it covers are already fixed,
-    # so the exposure is a FUTURE reintroduction of the idiom, not the current tree.
-    # Making it required is a branch-protection change: the declaration home, the
-    # required-context record, and the required-set enumeration must move together.
-    # (The declaration home is deliberately not named here: the recut guard reads any
-    # workflow naming it as a workflow reading it as an authoritative source, and reds.)
-    # `website/` is excluded: it carries a node_modules tree. Its shell files are NOT
-    # covered anywhere else, so this exclusion is a known gap, not a claim of coverage.
+    # 15 min: measured ≈190 s locally (the driver harness alone is 167 s); the
+    # cap bounds a hung harness without failing a slow-runner run.
+    timeout-minutes: 15
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -1445,23 +1403,121 @@ jobs:
           # (agent-infra#1643). Unpinned, this job would track agent-infra `main` and
           # could go red on a change nobody in this repo reviewed.
           ref: ffa8751ac9afbd0acbfeb32d0619d2208b89217a
+
+      # ── sigpipe-guard (#841) ──────────────────────────────────────────────
+      # #841 — the agent-infra guard, wired where the bug actually ships. This is
+      # the DEPLOYMENT half of the gap recorded on tortoise#7588 (the guard
+      # existed and was wired in agent-infra but never invoked HERE), and it does
+      # NOT close #7588: that issue's own sites are a `printf | sed | head -n1`
+      # shape this guard does not match.
+      #
+      # The guard lives in agent-infra, reached locally through the machine-local
+      # `scripts` pointer (#9475: gitignored, NOT tracked, materialised from
+      # $AGENT_INFRA_PATH by tools/link_agent_infra_scripts.py), so it is ABSENT on a
+      # runner rather than dangling (see the workflow header). Agent-infra is public,
+      # so it is checked
+      # out alongside (above) and the SAME guard runs: a vendored copy would be a
+      # second source of truth free to drift from the one that owns the idiom
+      # (#863's "guard nobody runs"). The pin above is a commit rather than a tag
+      # because #1643 carries no tag yet — replace the sha with the next
+      # `v0.1.x` when agent-infra cuts one. (`drift-check` stays on `main` on
+      # purpose: detecting drift is its whole job, so it is the one job that
+      # must track it.)
+      #
+      # `--dirs` names THIS repo's layout — the guard's default set is
+      # agent-infra's and `scripts/` here points back at it. The list lives in
+      # ONE place, `.sigpipe-grep-dirs`, shared with .husky/pre-commit, so the
+      # two invocation sites cannot diverge.
+      #
+      # ⚠️ THIS STEP IS STILL NOT A REQUIRED CONTEXT (tortoise#7778), so a red
+      # here does not block a merge: it is visible but unenforced. The sites it
+      # covers are already fixed, so the exposure is a FUTURE reintroduction of
+      # the idiom, not the current tree. Making it required is a
+      # branch-protection change: the declaration home, the required-context
+      # record, and the required-set enumeration must move together. (The
+      # declaration home is deliberately not named here: the recut guard reads
+      # any workflow naming it as an authoritative source, and reds.)
+      # `website/` is excluded: it carries a node_modules tree. Its shell files
+      # are NOT covered anywhere else, so this exclusion is a known gap, not a
+      # claim of coverage.
       - name: SIGPIPE false-negative guard (#841)
+        if: ${{ !cancelled() }}
         run: |
           bash .agent-infra-guard/scripts/check-no-sigpipe-grep.sh \
             --dirs "$(cat .sigpipe-grep-dirs)"
-      # The hook's own block is tested HERE, not left as a file nobody runs. This test
-      # stubs the guard, so it needs no agent-infra and no network. It exists because the
-      # hook's block once discarded the guard's verdict (a glued `else` made `exit` take
-      # two arguments and fail) while `sh -n` stayed green; only an executed assertion
-      # catches that.
+      # The hook's own block is tested HERE, not left as a file nobody runs. This
+      # test stubs the guard, so it needs no agent-infra and no network. It exists
+      # because the hook's block once discarded the guard's verdict (a glued
+      # `else` made `exit` take two arguments and fail) while `sh -n` stayed
+      # green; only an executed assertion catches that. Measured on #7772's own
+      # CI run: the guard step exited 2 and the job log held no record of this
+      # step at all — which is why the guard here is `!cancelled()` and not a
+      # bare `if:`: `!cancelled()` keeps this step running after a FAILING guard
+      # (the one case it exists for) and, unlike `always()`, does not start work
+      # on a cancelled run.
       - name: SIGPIPE hook block self-test
-        # `if: always()` is REQUIRED here, not defensive. Without it a failing step above
-        # skips this one, so the test written to catch a discarded guard verdict would
-        # itself never run in the one case it exists for — and a FAILING guard is exactly
-        # when the hook's own handling needs asserting. Measured on #7772's own CI run:
-        # the guard step exited 2 and the job log held no record of this step at all.
-        if: always()
+        if: ${{ !cancelled() }}
         run: sh .github/scripts/sigpipe-hook.test.sh
+
+      # ── backup-driver-scripts (#2796) ─────────────────────────────────────
+      # The hourly backup driver's state-classification harness. Gated on the
+      # driver surface (`.github/scripts/registry-cron*` + the cron workflow) so
+      # a change to the driver exercises it in PRs — the driver is otherwise only
+      # run by a schedule and its failures used to be silent. Self-contained:
+      # stubs aws/curl/date, no network.
+      - name: Backup driver state taxonomy (#2796)
+        if: ${{ !cancelled() && needs.changes.outputs.driver_scripts == 'true' }}  # #2149: driver surface only
+        run: bash .github/scripts/registry-cron.test.sh
+
+      # ── ai-review-gate-tests (#2982) ──────────────────────────────────────
+      # The ai-review-gate's evidence-validation shell logic runs inline in the
+      # workflow (that workflow has no checkout step, so it cannot reference a
+      # repo script). This harness extracts that run block and drives it with
+      # fabricated signed markers + a stubbed gh, covering sha-match, diff-match,
+      # backward compat, fail-closed-on-API-failure, signature-over-diff,
+      # PR/repo binding, and the PR-body source. It ALSO asserts the non-runtime
+      # invariants the gate job depends on: no if:/needs:/continue-on-error:,
+      # trigger stays pull_request_target with no paths: filter, permissions keep
+      # pull-requests: read, and GH_TOKEN is declared. Self-contained, no
+      # network, no secrets.
+      #
+      # ⚠️ This STEP is NOT a required status check: a red harness does not block
+      # a merge, so a regression here can land and then silently let the
+      # `ai-review-gate` check pass without evaluating evidence. `ai-review-gate`
+      # IS a required check since #5433 (live branch protection + a Mergify entry
+      # condition), so a red there does block — but this harness does not.
+      # #3091 (add this to branch protection, or move it into an always-run
+      # required job) is still OPEN: this job always runs, but it is not a
+      # required context. The step's gate is a complete per-surface guard: it
+      # fires on any change to the gate workflow, this harness, or ci.yml.
+      - name: AI review gate shell harness (#2982)
+        if: ${{ !cancelled() && needs.changes.outputs.ai_review_gate == 'true' }}  # #2982: gate workflow/harness only
+        run: bash .github/scripts/ai-review-gate.test.sh
+
+      # ── orphan-bound-gate (#4740) ─────────────────────────────────────────
+      # The redislite orphan gate's harness: writes hygiene fixtures to a temp
+      # dir, no network, no CI runner. It pins that the gate's bound is READ from
+      # the conftest session-end sweep's report (two different `left` values both
+      # pass, so no fixed bound can satisfy both), that a disagreement between
+      # the workflow's count and the sweep's own measurement reds, that a
+      # violation of the sweep's accounting identity
+      # (`reaped + exited + left < before`) reds, that `cleared: false` is keyed
+      # on the measured COUNT (a zero count passes with a warning, a non-zero
+      # count reds), that an 18+ digit number exits 2 as a usage error rather
+      # than reaching the pass line, and that a red verdict never falls through
+      # to a pass line.
+      - name: Redislite orphan gate (#4740)
+        if: ${{ !cancelled() && needs.changes.outputs.orphan_bound_scripts == 'true' }}  # #4740: orphan-gate surface only
+        run: bash .github/scripts/orphan-bound.test.sh
+
+      # ── entrypoint-guards (#1349 T11) ─────────────────────────────────────
+      # The hosted entrypoint's guard contracts — env-reject of the
+      # benchmark-only TORTOISE_EMBEDDER_OVERRIDE seam + missing-cache FATAL —
+      # are shell-level and untestable from pytest. Matches the test-isolation
+      # pattern: repo-local script, no setup.
+      - name: Check entrypoint guards (env-reject + missing-cache FATAL)
+        if: ${{ !cancelled() && needs.changes.outputs.entrypoints == 'true' }}  # #2149: entrypoint.sh / its .ci-checks script only
+        run: bash .ci-checks/check-entrypoint-guards.sh
 
   license-surface:
     runs-on: ubuntu-latest

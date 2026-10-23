@@ -1679,10 +1679,10 @@ on a `*/5 * * * *` cron **intent** (measured delivery is ~15 min; see §7.5a).
 
 - **Workflow:** `.github/workflows/availability-watchdog.yml` (schedule `*/5 * * * *` + `workflow_dispatch`)
 - **Logic + limits:** `.github/scripts/availability-watchdog.sh`
-- **Harness (runs in CI job `availability-watchdog`):** `bash .github/scripts/availability-watchdog.test.sh`
+- **Harness (CI: the `Availability watchdog state machine (#2850)` step of `ops-harnesses`):** `bash .github/scripts/availability-watchdog.test.sh`
 - **Independent liveness check (#4573):** `.github/workflows/availability-liveness.yml` (its OWN schedule,
   `*/30`) + `.github/scripts/availability-liveness.sh`, harness `bash .github/scripts/availability-liveness.test.sh`
-  (same CI job). It is a separate workflow on purpose — see §7.8a.
+  (the `Availability pager liveness check (#4573)` step of the same CI job). It is a separate workflow on purpose — see §7.8a.
 
 **Two production targets (#3628).** The watchdog now drives TWO surfaces, as two
 steps of the same job: the Fly API probe (§7.1a) and the Cloudflare Pages auth
