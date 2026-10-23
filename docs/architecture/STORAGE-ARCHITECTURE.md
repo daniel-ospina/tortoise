@@ -478,7 +478,7 @@ The **rejected placement recommendation** is a **comment** on `#1509` (*"Decisio
 | **Personal state** | *"personal best 5K = 27:12"* | retained (E2 carve-out, `#1534`) | retained |
 | **Operational / decision values** | *"p99 latency 480 ms at 3k rps"* | **RETAINED** (commit `4a690d0be`; PR `#2456`) | retained |
 
-**Operational values are DURABLE** (the extension is `#2453`). `STATE_VALUE_CARVE_OUT` with an operational-value paragraph — *"a concrete value that is the SUBJECT of a decision, observation, or plan is DURABLE too … Measurements, deadlines/freezes, thresholds/TTLs, versions, and counts are carried VERBATIM"* — covering *"the p95 hit 4.2 seconds"* and *"a ten minute TTL"*. It is **rendered, not merely defined** (`_granularity_text()`, `:732-744`), and a mechanical gate exists (`tortoise/value_gate.py` — `identifier_only()` strips identifier-like residues).
+**Operational values are DURABLE** (the extension is `#2453`). `STATE_VALUE_CARVE_OUT` with an operational-value paragraph — *"a concrete value that is the SUBJECT of a decision, observation, or plan is DURABLE too … Measurements, deadlines/freezes, thresholds/TTLs, versions, and counts are carried VERBATIM"* — covering *"the p95 hit 4.2 seconds"* and *"a ten minute TTL"*. It is **rendered, not merely defined** (`_granularity_text()`, `:732-744`), and a mechanical gate exists (`tortoise/value_gate.py` — `identifier_only()` strips identifier-like residues). <!-- v4-mechanism: state_value_carve_out -->
 
 **⚠️ Harmonise, do not duplicate.** `#2453` (retain operational values verbatim) · `#2817` (no numeric/locale canonicalisation exists — PT-BR/EN amounts) · `#2782` (money needs amount + currency on entities) · `#2521` (numeric aggregation across sessions) · `#2820` (tracking map — its **"state & value model"** workstream owns all of this). **Read this section together with extractor §7; neither can be built alone.**
 
@@ -574,7 +574,7 @@ FALKORDB — entities · Points (beliefs — "claims" in prose, never a type) ·
 **① The LINK is mandatory and load-bearing — it is not the optional half.**
 > **At answer time, send the source's VERBATIM text, not the extracted claim.** *(Measured: verbatim source beats LLM-extracted artefacts by **15.9 / 22.0 pts** — extractor §2.4; `#3011` would settle it on our stack.)*
 
-**So the link is not a citation nicety — it is the mechanism that gets the evidence to the model.** Every committed `Point`/`Object` must walk up to its `Source`. **A claim with no reachable source cannot be served as evidence.**
+**So the link is not a citation nicety — it is the mechanism that gets the evidence to the model.** Every committed `Point`/`Object` must walk up to its `Source`. **A claim with no reachable source cannot be served as evidence.** <!-- v4-mechanism: span_link -->
 
 **② A summary vector is a different capability — and it buys exactly one query class.**
 
@@ -831,7 +831,7 @@ FalkorDB requires **the entire graph in RAM** — 140 MB × $73/GB/month ≈ **$
 
 ### 11.5 Fan-out cap
 
-**Nothing in our write path bounds how many links one entity accumulates.** Measured hubs: `config/ci-surfaces.yml` **123** · `durations map` **111** · `the admin-merge rail` **70** · `cal-trigger.py` **64** · `the plan doc` **63**. Hindsight caps at **200** and *also* carries a timeout that drops the whole expansion arm.
+**Nothing in our write path bounds how many links one entity accumulates.** Measured hubs: `config/ci-surfaces.yml` **123** · `durations map` **111** · `the admin-merge rail` **70** · `cal-trigger.py` **64** · `the plan doc` **63**. Hindsight caps at **200** and *also* carries a timeout that drops the whole expansion arm. <!-- v4-mechanism: fanout_cap -->
 
 **The initial value is 200** — the comparable's proven value, and **above the worst hub measured (123), so it binds nothing and cannot lose data.** It is a **guard rail against the runaway case, not an optimisation**; refine with real usage (owner, 2026-09-23: *"we haven't launched yet … we optimise with users"*).
 
@@ -1131,7 +1131,7 @@ embedding:
 | **DISCARD** | does the row **exist**? | `classify_consolidation` | **`#4899`** |
 | **EMBED** | does the row **carry a vector**? | the embedding submission step | **`#5008`** |
 
-**⚠️ State of the second gate (2026-10-18).** The EMBED gate is now **built**, not proposed: the predicate is `tortoise/embed_gate.py` (its rule set **is** `value_gate.RULES` — one rule set, two questions), the submission seam is `embeddings.encode_for_row`, and the graph writers (Point/Object/Subject/Document/Event, plus the ingest journal stamp) call it. It is flag-gated **off by default** (`TORTOISE_EMBED_GATE`), so the graph is unchanged until the rate effect is measured — the draft-and-run `#5008` asks for. `config/v4-mechanisms.yml` carries it as `implemented` with its test. **Still absent, and named so it cannot be inferred:** the per-kind override block described below (no pack slot exists and no caller at the submission step holds the brief), and any reaping of vectors already written (the `#4997` backfill).
+**⚠️ State of the second gate (2026-10-18).** The EMBED gate is now **built**, not proposed: the predicate is `tortoise/embed_gate.py` (its rule set **is** `value_gate.RULES` — one rule set, two questions), the submission seam is `embeddings.encode_for_row`, and the graph writers (Point/Object/Subject/Document/Event, plus the ingest journal stamp) call it. It is flag-gated **off by default** (`TORTOISE_EMBED_GATE`), so the graph is unchanged until the rate effect is measured — the draft-and-run `#5008` asks for. `config/v4-mechanisms.yml` carries it as `implemented` with its test. **Still absent, and named so it cannot be inferred:** the per-kind override block described below (no pack slot exists and no caller at the submission step holds the brief), and any reaping of vectors already written (the `#4997` backfill). <!-- v4-mechanism: embed_gate -->
 
 **⇒ The work order is: enforce the declaration that already exists, at both points.** `#4899` builds the rule set from `memory_granularity`; **the embedding gate reuses that same rule set** rather than re-deriving it. **Two gates, one source of policy, zero new declarations.**
 
@@ -1250,7 +1250,7 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 
 **Why: the write-before-query barrier.** Compression and placement decisions are made **at write time**, before anything knows what a future query will hinge on. So a query-type router is guessing at **a need it cannot observe** — and the published failure modes are exactly that guess going wrong: **router overhead**, **policy drift** (the learned router fetches from the wrong tier), **incorrect promotion** (an episodic fact promoted into a semantic rule).
 
-**⇒ Route on a measured property of the ANSWER, not a predicted property of the question:**
+**⇒ Route on a measured property of the ANSWER, not a predicted property of the question:** <!-- v4-mechanism: sufficiency_router -->
 > **"Does the evidence I already have actually answer this?"** — and escalate only when it does not.
 
 **This is the same discipline `#2354` already records for corrections** (*"sweep never auto-resolves"*): **detect insufficiency, do not guess intent.** It is also cheaper — a sufficiency check runs on the **assembled evidence** (already in hand, one call), whereas a complexity classifier needs its own inference on every query.

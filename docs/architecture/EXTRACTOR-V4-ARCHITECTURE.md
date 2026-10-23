@@ -138,7 +138,7 @@ Production graph: **~25,000 quota nodes in 3–4 active days** (~27 per emitting
 
 **The problem it solves:** extraction **rephrases**. A `Point` is the model's rendering of what was said, not what was said. During the LongMemEval work, **raw facts were being deformed** — and that deformation is silently baked into the belief layer, where nothing downstream can detect it.
 
-**The layer:** the **minimal verbatim span** each `Point` was derived from, kept **verbatim in Postgres (the owner's *"supabase"* = the DATABASE, not the object bucket)**, not in the graph, and **linked to the `Point`/`Object` it supports**. Distinct from the other three by granularity and purpose:
+**The layer:** the **minimal verbatim span** each `Point` was derived from, kept **verbatim in Postgres (the owner's *"supabase"* = the DATABASE, not the object bucket)**, not in the graph, and **linked to the `Point`/`Object` it supports**. Distinct from the other three by granularity and purpose: <!-- v4-mechanism: span_link -->
 
 | layer | what it is | granularity | purpose |
 |---|---|---|---|
@@ -565,7 +565,7 @@ unfirable (block at the top of §10).
 >
 > *"S2 sounds ok, but seems like it just needs a counter filter (Jev doing adversarial review), so we have step S2.1 LLM entities list and S2.2 jev"*
 
-**Jev, asked to FALSIFY, not confirm.** Two **levels**, and they are different shapes — one is many cheap decisions, the other is a single batch verdict.
+**Jev, asked to FALSIFY, not confirm.** Two **levels**, and they are different shapes — one is many cheap decisions, the other is a single batch verdict. <!-- v4-mechanism: vet -->
 
 #### Level 1 — per-candidate (many, cheap, evaluated in parallel)
 
@@ -751,7 +751,7 @@ A four-way audit of the write path found **FOUR distinct dedups at FOUR differen
 | **D-c** | **vs store, raw content hash** | `sdk.py:12412` (`_find_point_by_content`; the shared predicate builder is `_dedup_match_clauses`, `:12364`) | ✅ |
 | **D-d** | **semantic** | `:3021+` | ✅ |
 
-**⇒ `S0a NORMALIZE + HASH → S0b SOURCE DEDUP` is genuinely absent, and it is the largest single volume lever available.** Catching the same conversation firehose twice is a **whole-narrative** save, not a claim-level one — and since **S0 is already mechanical and free**, this costs nothing to add.
+**⇒ `S0a NORMALIZE + HASH → S0b SOURCE DEDUP` is genuinely absent, and it is the largest single volume lever available.** Catching the same conversation firehose twice is a **whole-narrative** save, not a claim-level one — and since **S0 is already mechanical and free**, this costs nothing to add. <!-- v4-mechanism: source_dedup -->
 
 #### The five correctness constraints
 
@@ -1051,7 +1051,7 @@ Points X, Y, Z   ← the reasons. Carry "why".
 
 v3's **E2** requires state-value facts be preserved verbatim (*"personal best 5K time = 27:12, as of <date>"*) rather than filtered as "counts are noise." `STATE_VALUE_CARVE_OUT` in `_granularity_text()` is the code anchor for exactly this.
 
-**⇒ Any mechanical filter MUST carry this carve-out, or it will drop the facts users care about most.** See `STORAGE-ARCHITECTURE.md` §7 for the low-cost storage question.
+**⇒ Any mechanical filter MUST carry this carve-out, or it will drop the facts users care about most.** See `STORAGE-ARCHITECTURE.md` §7 for the low-cost storage question. <!-- v4-mechanism: state_value_carve_out -->
 
 #### ✅ The carve-out MUST cover decision-relevant numbers
 
@@ -1737,7 +1737,7 @@ reached, and of the review cycles that followed, is in
 
 ### 16.4 ⭐ O4 applied — what "merge near-duplicates" means here, bounded by the evidence
 
-**Owner ruling:** *"yes we can merge near duplicate claims. maybe we can have jev with the claim and the narrative/raw data/both arbiter that."*
+**Owner ruling:** *"yes we can merge near duplicate claims. maybe we can have jev with the claim and the narrative/raw data/both arbiter that."* <!-- v4-mechanism: near_dup_merge -->
 
 **Design, as bounded by the research (research §16.3 — `STORAGE-ARCHITECTURE.md`):**
 

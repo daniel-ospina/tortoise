@@ -37,6 +37,28 @@ WHAT THIS GATE DELIBERATELY DOES NOT DO (#5064, bounded slice)
 * It does not generate a design document from the registry (indicator (2) /
   #5064's open question (a): registry-as-source vs registry-as-check). The
   registry is a CHECK over the two design documents here, not their source.
+
+⭐ MEMBERSHIP IS CHECKED IN BOTH DIRECTIONS, because `DECLARED_IDS` alone cannot
+prove it is COMPLETE — and that is how `state_value_carve_out` (the verbatim
+state/operational-value carve-out, #2453) stayed unregistered while this gate
+stayed green: a hand-written list of seven cannot notice an eighth mechanism the
+design declares in prose. So every declaring document carries a
+`<!-- v4-mechanism: <id> -->` marker AT THE DECLARATION SITE, and
+`membership_errors` fails closed on BOTH shapes:
+
+  * a marker in `docs/architecture/*.md` whose id has NO registry row — the
+    declared-and-absent shape this whole issue exists to kill; and
+  * a registry row whose id NO design document marks — a row whose declaration
+    cannot be found, i.e. an *unmarked* row (#5064 refactor direction 1: "there
+    is no third state and no unmarked row").
+
+⚠️ ITS STATED LIMIT, because overclaiming here is the same defect: a prose
+declaration that carries NEITHER a marker NOR a row is invisible to this gate —
+the marker is a convention, and nothing forces prose to adopt it. The convention
+is what makes the comparison POSSIBLE (there is no other machine-readable
+surface in a prose design); which declarations exist TODAY is the enumeration
+deliverable #5064's Scope section names, and that enumeration is the backfill,
+not a property the gate can derive.
 * It does not touch the extraction/write-path stages.
 * It does not check that a cited test file is REGISTERED in the CI manifest —
   that surface is owned by `tools/ci_selection.py --integrity`. The gate checks
@@ -67,6 +89,7 @@ meets an ordering instead of a surprise.
 from __future__ import annotations
 
 import ast
+import re
 import sys
 import tokenize
 from pathlib import Path
@@ -79,11 +102,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 ROOT = Path(__file__).resolve().parent.parent
 REGISTRY = ROOT / "config" / "v4-mechanisms.yml"
 
-#: The declared set is CLOSED — exactly these seven, in this order (#5064 O/I/T
-#: indicator (1): "VET, source dedup, near-dup MERGE, SPAN link, EMBED gate,
-#: sufficiency router, fan-out cap"). Pinning the tuple means a mechanism cannot
-#: be dropped from the registry without the gate going red, which is the whole
-#: point: the set is declared, not implied.
+#: The declared set, pinned (#5064 O/I/T indicator (1): "VET, source dedup,
+#: near-dup MERGE, SPAN link, EMBED gate, sufficiency router, fan-out cap" —
+#: plus `state_value_carve_out`, the enumeration's first deliverable: #5064's
+#: Verification Checklist names "verbatim operational values" as one of the
+#: three write-path behaviours to verify, and the 2026-10-13 E2 comment records
+#: *"mark the omission explicit in the registry this issue builds"*). Pinning the
+#: tuple means a mechanism cannot be dropped from the registry without the gate
+#: going red, which is the whole point: the set is declared, not implied.
 DECLARED_IDS = (
     "vet",
     "source_dedup",
@@ -92,7 +118,19 @@ DECLARED_IDS = (
     "embed_gate",
     "sufficiency_router",
     "fanout_cap",
+    "state_value_carve_out",
 )
+
+#: WHERE the design's declarations live, and HOW one is marked. The marker is the
+#: only machine-readable surface a prose design has, so the marker convention is
+#: what turns "the design declares a set" into something one gate can compare
+#: against the registry — in BOTH directions (`membership_errors`). Bounded to
+#: `docs/architecture/*.md` on purpose: the two documents that declare the v4
+#: write path live there, and widening the scan to every `.md` would make an
+#: unrelated doc's prose able to red (or silently satisfy) the gate.
+ARCH_DOCS = ROOT / "docs" / "architecture"
+MARKER_TOKEN = "v4-mechanism:"
+MECHANISM_MARKER = re.compile(r"<!--\s*v4-mechanism:\s*(\S+)\s*-->")
 
 IMPLEMENTED = "implemented"
 NOT_IMPLEMENTED = "not-implemented"
@@ -166,6 +204,112 @@ def load_registry(path: Path = REGISTRY) -> dict:
         doc = yaml.safe_load(fh)
     assert isinstance(doc, dict), f"{path} must parse to a mapping"
     return doc
+
+
+def declaration_markers(docs_dir: Path = ARCH_DOCS) -> tuple[dict[str, list[str]], list[str]]:
+    """``{mechanism id: [doc name, ...]}`` from the design docs' own markers.
+
+    The marker is `<!-- v4-mechanism: <id> -->` and it sits at the DECLARATION
+    SITE, so the id is read where the design says the thing, not from a list
+    someone later maintained beside it. Two docs may declare the same mechanism
+    (`span_link`, `state_value_carve_out`) — that is a declaration, not a
+    duplicate defect, so repeats are collected rather than refused.
+
+    FAIL CLOSED on the shapes that would otherwise be silent: a `v4-mechanism:`
+    TOKEN that does not complete a marker (`<!-- v4-mechanism: -->` with no id,
+    an unterminated comment) is reported rather than skipped — a malformed
+    declaration is not an absent one, and treating it as absent is how a marker
+    gets neutered by a typo. A missing documents directory is reported too: an
+    unreadable surface is a verdict, not an empty set (the same polarity as
+    `_defined_names` returning ``None``).
+
+    The second return value is the violation list, so one caller can report the
+    malformed shapes and the membership verdicts together.
+    """
+    errors: list[str] = []
+    markers: dict[str, list[str]] = {}
+    if not docs_dir.is_dir():
+        return markers, [
+            f"the declaration-marker surface is missing: {docs_dir} is not a "
+            f"directory — the gate cannot compare the declared set against "
+            f"anything (fail closed, never an empty pass)"
+        ]
+    for doc in sorted(docs_dir.glob("*.md")):
+        try:
+            text = doc.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:  # unreadable is a verdict
+            errors.append(
+                f"{doc.name}: a declaring document could not be read "
+                f"({type(exc).__name__}) — its declarations cannot be "
+                f"compared, which is not the same as having none"
+            )
+            continue
+        found = MECHANISM_MARKER.findall(text)
+        for mid in found:
+            markers.setdefault(mid, []).append(doc.name)
+        # Every complete marker contains the token exactly once, so a token count
+        # above the match count means at least one occurrence is MALFORMED. It is
+        # reported, never skipped: a declaration the reader cannot parse must not
+        # read as "no declaration here".
+        if text.count(MARKER_TOKEN) > len(found):
+            errors.append(
+                f"{doc.name}: a `{MARKER_TOKEN}` occurrence does not complete a "
+                f"marker (`<!-- v4-mechanism: <id> -->`) — a malformed "
+                f"declaration is a violation, not an absence"
+            )
+    return markers, errors
+
+
+def membership_errors(
+    mechanisms: list[dict], docs_dir: Path = ARCH_DOCS
+) -> list[str]:
+    """The BIDIRECTIONAL membership rule: no unregistered declaration, no
+    undeclared row.
+
+    `gate_errors` proves every row is implemented-with-a-test or explicitly
+    marked absent. It cannot prove the row set is COMPLETE — a hand-pinned tuple
+    is exactly the shape that let a declared mechanism stay unregistered (#5064).
+    So membership is read from the design documents and checked both ways:
+
+      * a marker id with no registry row -> the declaration has no verdict, i.e.
+        a declared mechanism that reads exactly like a shipped one (the root);
+      * a registry row with no marker -> a row whose declaration cannot be found,
+        which #5064's refactor direction rules out by name ("no unmarked row").
+
+    Kept SEPARATE from `gate_errors` on purpose: `gate_errors` is also the
+    per-row mutation surface, and folding a repository-wide scan into it would
+    make every synthetic row in those proofs also a membership defect — a verdict
+    the synthetic case never meant to make.
+
+    ``mechanisms`` is the parsed registry list (same shape `gate_errors` takes).
+    """
+    markers, errors = declaration_markers(docs_dir)
+    ids: set[str] = set()
+    for row in mechanisms:
+        if not isinstance(row, dict):
+            continue
+        row_id = row.get("id")
+        if isinstance(row_id, str) and row_id:
+            ids.add(row_id)
+
+    for mid in sorted(set(markers) - ids):
+        where = ", ".join(sorted(set(markers[mid])))
+        errors.append(
+            f"{mid}: declared in {where} with a `{MARKER_TOKEN}` marker but has "
+            f"NO row in config/v4-mechanisms.yml — a declared mechanism with no "
+            f"row is exactly the declared-and-absent shape this gate exists to "
+            f"catch (#5064): mark it `implemented` (code path + test + symbol) "
+            f"or `not-implemented` (tracking issue), so it cannot be read as "
+            f"shipped"
+        )
+    for mid in sorted(ids - set(markers)):
+        errors.append(
+            f"{mid}: a registry row with NO `{MARKER_TOKEN} {mid}` marker in "
+            f"{docs_dir.name}/*.md — a row whose declaration cannot be found is "
+            f"an UNMARKED row, and #5064's refactor direction allows none: put "
+            f"the marker at the site that declares the mechanism, or drop the row"
+        )
+    return errors
 
 
 def _defined_names(path: Path) -> set[str] | None:
@@ -631,8 +775,8 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
 # ── the gate over the real registry ─────────────────────────────────────────
 
 
-def test_declared_set_is_exactly_the_seven_named_mechanisms() -> None:
-    """The registry declares the closed set from #5064 indicator (1)."""
+def test_declared_set_is_exactly_the_eight_named_mechanisms() -> None:
+    """The registry declares the closed set from #5064 indicator (1) + the enumeration."""
     mechanisms = load_registry()["mechanisms"]
     assert tuple(r["id"] for r in mechanisms) == DECLARED_IDS
     assert len(mechanisms) == len(DECLARED_IDS)
@@ -642,6 +786,141 @@ def test_every_declared_mechanism_is_implemented_with_a_test_or_marked_absent() 
     """#5064 indicator (1), checkable: 0 mechanisms with neither code nor a marker."""
     errors = gate_errors(load_registry()["mechanisms"])
     assert errors == [], "declared-mechanism gate violations:\n  " + "\n  ".join(errors)
+
+
+def test_every_declared_mechanism_has_a_declaration_marker_and_vice_versa() -> None:
+    """#5064 indicator (2) as a CHECK: the declared set is compared, both ways.
+
+    The root sentence is *"nothing compared the declared set against the code
+    set"*. The code half is `gate_errors`; this is the DECLARATION half — every
+    row points at a marker at the site that declares it, and every marker has a
+    row. Without it the registry's completeness rests on a hand-written tuple,
+    which is exactly how `state_value_carve_out` stayed unregistered while the
+    gate stayed green.
+    """
+    errors = membership_errors(load_registry()["mechanisms"])
+    assert errors == [], "declared-mechanism membership violations:\n  " + \
+        "\n  ".join(errors)
+
+
+def test_the_state_value_carve_out_is_registered_and_marked_absent() -> None:
+    """The enumeration's first deliverable, pinned by name (#5064, #2453, #9775).
+
+    `STATE_VALUE_CARVE_OUT` is declared by name in §7 of BOTH design documents and
+    the table carried only seven rows — so the mechanism the checklist names
+    ("verbatim operational values hold on a live write") had **neither code entry
+    nor marker** in the registry while the gate passed. Its state must stay
+    `not-implemented` while the guarantee is prompt-only and one render path
+    (`_render_master_compact`) deliberately omits it: a row marked `implemented`
+    here would make prompt text read as the guarantee, which is the defect this
+    registry exists to catch.
+    """
+    rows = {r["id"]: r for r in load_registry()["mechanisms"]}
+    assert "state_value_carve_out" in rows, sorted(rows)
+    row = rows["state_value_carve_out"]
+    assert row["state"] == NOT_IMPLEMENTED, row
+    assert isinstance(row.get("tracking_issue"), int), row
+    # The compact render's omission is NAMED in the row — the bounded alternative
+    # #5064's E2 comment records ("mark the omission explicit in the registry").
+    assert "_render_master_compact" in row["note"], row["note"]
+
+
+# ── MEMBERSHIP: the declared set is compared, not pinned by hand ─────────────
+#
+# A hand-written tuple cannot prove it is COMPLETE. Each case below is a way the
+# comparison can be defeated, so each is a permanent proof rather than a comment:
+# a declaration with no row (the root), a row with no declaration (an unmarked
+# row), a marker that does not parse, a marker outside the scanned surface, and
+# a surface that cannot be read at all.
+
+
+def _row(mid: str = "x") -> dict:
+    return {
+        "id": mid,
+        "name": mid,
+        "declared_in": ["config/v4-mechanisms.yml"],
+        "state": "implemented",
+        "code": ["tortoise/fanout.py"],
+        "tests": ["tests/test_fanout_cap.py"],
+        "symbols": ["PER_ENTITY_FANOUT_CAP"],
+    }
+
+
+def _docs(tmp_path: Path, **files: str) -> Path:
+    docs = tmp_path / "docs" / "architecture"
+    docs.mkdir(parents=True, exist_ok=True)
+    for name, body in files.items():
+        (docs / name.replace("__", ".")).write_text(body, encoding="utf-8")
+    return docs
+
+
+def test_membership_accepts_a_row_and_its_marker(tmp_path) -> None:
+    docs = _docs(tmp_path, a__md="text <!-- v4-mechanism: x -->\n")
+    assert membership_errors([_row("x")], docs) == []
+
+
+def test_membership_fails_closed_on_a_marker_with_no_registry_row(tmp_path) -> None:
+    """The root sentence: a mechanism the design declares must have a verdict."""
+    docs = _docs(
+        tmp_path,
+        EXTRACTOR__md="text <!-- v4-mechanism: x --> "
+        "<!-- v4-mechanism: ghost -->\n",
+    )
+    errors = membership_errors([_row("x")], docs)
+    assert any("ghost" in e and "NO row" in e for e in errors), errors
+
+
+def test_membership_fails_closed_on_a_row_with_no_marker(tmp_path) -> None:
+    """An UNMARKED row: the declaration cannot be found (#5064 direction 1)."""
+    docs = _docs(tmp_path, a__md="no declaration here\n")
+    errors = membership_errors([_row("x")], docs)
+    assert any("x:" in e and "UNMARKED row" in e for e in errors), errors
+
+
+def test_membership_accepts_a_mechanism_two_documents_declare(tmp_path) -> None:
+    """`span_link` and `state_value_carve_out` are declared in BOTH docs."""
+    docs = _docs(
+        tmp_path,
+        EXTRACTOR__md="a <!-- v4-mechanism: x -->\n",
+        STORAGE__md="b <!-- v4-mechanism: x -->\n",
+    )
+    assert membership_errors([_row("x")], docs) == []
+
+
+def test_membership_fails_closed_on_a_malformed_marker(tmp_path) -> None:
+    """A declaration a reader cannot parse must not read as 'nothing here'."""
+    docs = _docs(
+        tmp_path,
+        a__md="text <!-- v4-mechanism: x -->\nand <!-- v4-mechanism: -->\n",
+    )
+    errors = membership_errors([_row("x")], docs)
+    assert any("malformed" in e for e in errors), errors
+
+
+def test_membership_scans_only_the_architecture_docs(tmp_path) -> None:
+    """A marker elsewhere must not silently satisfy a row's declaration."""
+    docs = _docs(tmp_path, a__md="no declaration here\n")
+    elsewhere = tmp_path / "docs" / "plans"
+    elsewhere.mkdir(parents=True)
+    (elsewhere / "p.md").write_text("<!-- v4-mechanism: x -->\n", encoding="utf-8")
+    errors = membership_errors([_row("x")], docs)
+    assert any("UNMARKED row" in e for e in errors), errors
+
+
+def test_membership_fails_closed_on_a_missing_documents_directory(tmp_path) -> None:
+    """An unreadable surface is a verdict, not an empty set."""
+    missing = tmp_path / "docs" / "architecture"
+    errors = membership_errors([_row("x")], missing)
+    assert any("is not a directory" in e for e in errors), errors
+    assert any("UNMARKED row" in e for e in errors), errors
+
+
+def test_membership_fails_closed_on_an_unreadable_document(tmp_path) -> None:
+    """A doc that cannot be decoded is reported, never skipped."""
+    docs = _docs(tmp_path, a__md="text <!-- v4-mechanism: x -->\n")
+    (docs / "latin1.md").write_bytes(b"\xff\xfe not utf-8 \xff")
+    errors = membership_errors([_row("x")], docs)
+    assert any("could not be read" in e for e in errors), errors
 
 
 # ── the gate's own fail-closed proof (mutation) ─────────────────────────────
