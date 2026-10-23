@@ -208,6 +208,25 @@ def _try_decrypt_with_chain(blob: bytes, keys: tuple[bytes, ...]) -> bytes:
     raise ValueError("Backup decryption failed — no decrypt key available")
 
 
+def decrypt_backup_with_rotation(blob: bytes, key: bytes | None = None) -> bytes:
+    """Decrypt with the active key, then the #2318 candidate chain.
+
+    The ONE definition of "this artifact may be older than the current key", so
+    a second artifact family cannot quietly implement only the first half
+    (#9601 review, P1): a bare :func:`decrypt_backup` resolves the ACTIVE key
+    only, so after a `TORTOISE_BACKUP_KEY` rotation every retained artifact
+    encrypted under the rotated-out key stops restoring — and, reported as
+    tamper, at the exact moment the artifact is needed.
+
+    Raises ``ValueError`` (the primitive's own class, so callers keep their
+    wrong-key/tamper arm) when NO candidate authenticates.
+    """
+    candidates = _decrypt_candidate_keys(key)
+    if not candidates:
+        raise ValueError("Backup decryption failed — no decrypt key available")
+    return _try_decrypt_with_chain(blob, candidates)
+
+
 def encrypt_backup(data: bytes, key: bytes | None = None) -> bytes:
     """Encrypt backup payload. Returns magic || nonce(12) || ciphertext."""
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM

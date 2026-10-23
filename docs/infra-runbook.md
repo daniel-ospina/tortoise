@@ -378,12 +378,14 @@ fly deploy --image $(fly releases -a tortoise-y4mjjq --json | jq -r '.[1].ImageR
 (`backup_sweep.py`, `hosted_backup.py`, `selfhost_backup.py`) copy the **graph** and are not this.
 
 ```bash
-# backup only — dump -> encrypt -> upload to R2 under record-backups/
-python -m tortoise record-backup --record-dsn "$TORTOISE_RECORD_DSN"
+# backup only — dump -> encrypt -> upload to R2 under record-backups/.
+# The DSN comes from the ENVIRONMENT (`TORTOISE_RECORD_DSN`, and
+# `TORTOISE_RECORD_SCRATCH_DSN` for the drill). Prefer the env vars: an argument
+# is readable by every local user via `ps` and lands in shell history.
+python -m tortoise record-backup
 
 # backup + RESTORE DRILL — restore into a scratch record and compare per-table row counts
-python -m tortoise record-backup --record-dsn "$TORTOISE_RECORD_DSN" \
-    --scratch-dsn "$TORTOISE_RECORD_SCRATCH_DSN" --reset-scratch
+TORTOISE_RECORD_SCRATCH_DSN=... python -m tortoise record-backup --reset-scratch
 ```
 
 Exit codes (a scheduler's only signal):
@@ -391,8 +393,8 @@ Exit codes (a scheduler's only signal):
 | code | meaning |
 |---|---|
 | `0` | backup published — and in drill mode, the restore **verified** against the source |
-| `1` | the run **could not be completed** (pg_dump/pg_restore non-zero, a transport failure). What that means depends on the mode: in **backup mode** (no `--scratch-dsn`) the record is NOT backed up — **retry**. In **drill mode** the artifact is published *before* the restore is attempted, so the record IS backed up and only the restore is **NOT proven** — retry, and if it keeps failing check preconditions 3-4 (the scratch target's schema and the tenancy rows its foreign keys reference): a missing parent row never clears on a retry |
-| `2` | could not run: no/malformed DSN, R2 unavailable, psycopg2 absent, a **pooler** DSN (the source's or the drill's **scratch** one — both are refused before anything is dumped), a missing/malformed `TORTOISE_BACKUP_KEY`, a populated scratch target, an **empty** record to drill, an artifact whose **integrity or shape pin does not verify**, an artifact whose own `row_counts` claim **more rows than the source was ever observed to hold** (checked against the largest of the drill's own source counts, so a live record's ordinary concurrent writes — and its ordinary deletes — can never trigger it), or a `--keep` below 1. No verdict was produced — never read as green, and never retry blindly: these are configuration faults |
+| `1` | the run **could not be completed** (pg_dump/pg_restore non-zero, a transport failure). What that means depends on the **failure class**, not the mode: a failure **after** the artifact was published raises `RecordRestoreFailed` and names the artifact id — the record IS backed up and only the restore is **NOT proven**: retry, and if it keeps failing check preconditions 3-4 (the scratch target's schema and the tenancy rows its foreign keys reference): a missing parent row never clears on a retry. **Any other** exit-1 failure (a dump, encrypt or upload failure, in either mode) means **nothing was published** — the record is NOT backed up |
+| `2` | could not run: no/malformed DSN, R2 unavailable, psycopg2 absent, a **pooler** DSN (the source's or the drill's **scratch** one — both are refused before anything is dumped), a missing/malformed `TORTOISE_BACKUP_KEY`, a populated scratch target, an **empty** record to drill, an artifact whose **integrity, shape pin or decryption does not verify**, or a `--keep` below 1. No verdict was produced — never read as green, and never retry blindly: these are configuration faults |
 | `3` | the drill **ran** and the restored record disagrees with its source — an incident, with the tables named |
 
 Every configuration fault is `2`, deliberately: a pooler DSN, a missing `psycopg2` and a missing
@@ -435,10 +437,11 @@ proven restorable"*, and only the drill mode proves it. Run the drill on a sched
 ### `--reset-scratch` — what makes a scheduled drill repeatable
 
 With `--reset-scratch`, the verb `TRUNCATE`s the record's **own nine tables** on the scratch DSN
-only, in one statement, **after** the artifact cross-check and immediately before restoring. It is
+only, in one statement, **after the artifact has been downloaded and verified** (integrity, table
+set, column pin, decryption) and immediately before `pg_restore`. It is
 opt-in because an automatic truncate would destroy the leftover state of a RED drill — the evidence
-an operator needs — with nothing to show for it; for the same reason it never runs on a run that
-refuses, so a refused drill leaves the last run's evidence in place. It
+an operator needs — with nothing to show for it; for the same reason every step that can REFUSE runs
+before it, so a refused drill leaves the last run's evidence in place. It
 can never touch the record itself: a scratch DSN equal to the source is refused first, and no
 `CASCADE` is used, so the tenancy rows the FKs need (`organizations`, `graphs`) are left alone.
 
@@ -461,13 +464,14 @@ on any record with continuous writes, and a drill that reds every day on a healt
 the one falsifier this exists for. The report names a table that moved with both bounds, e.g.
 `journal_event: source=512 restored=512 (source moved to 515 by the end of the dump)`.
 
-The artifact's OWN `row_counts` are a **cross-check, never the baseline**: the number is measured as
-the artifact is cut, so the only disagreement it can legitimately establish is one-sided — an
-artifact claiming more rows than the source was ever *observed* to hold, which is a refusal (exit
-`2`, nothing restored), not a data-loss verdict. The bound it is checked against is the drill's own
-measurement, so a manifest that inflated its own count cannot widen the acceptance window.
-Comparing the claim against the pre-dump count was a false incident on every live record (#9601
-review cycle 2).
+The artifact's OWN `row_counts` are **never a baseline and never a bound**: the number is measured
+as the artifact is cut, so it is the drill's own reading of the source, not an independent claim.
+Comparing it against a ceiling built from the same reading was a check that could never fire — the
+runbook used to list a refusal no run could produce — so it is gone. What decides the verdict is the
+comparison of the **restored** counts against the source reads; a manifest that inflates its own
+number neither refuses a healthy run nor rescues a short restore (the drill reds with the table
+named). Comparing the claim against the pre-dump count was a false incident on every live record
+(#9601 review cycle 2).
 
 ### Retention
 
@@ -488,8 +492,11 @@ and its loss window is whatever an operator's manual run makes it (i.e. unbounde
 is one job, alongside the graph sweep's `registry-backup-cron.yml`:
 
 ```cron
-17 3 * * *   python -m tortoise record-backup --record-dsn "$TORTOISE_RECORD_DSN" --scratch-dsn "$TORTOISE_RECORD_SCRATCH_DSN" --reset-scratch
+17 3 * * *   python -m tortoise record-backup --reset-scratch
 ```
+
+Both DSNs are read from the environment (`TORTOISE_RECORD_DSN`,
+`TORTOISE_RECORD_SCRATCH_DSN`), so the job's command line carries no password.
 
 Once that job exists the loss window is its cadence (one day, for a daily line); until it does, do not
 restate the record's loss window as anything smaller. The drill's own cadence can be slower than the

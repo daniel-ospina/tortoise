@@ -559,6 +559,25 @@ database has had no recent activity — which weakens "RPO = seconds" for a low-
 The two are **not substitutes**: the dump buys an artifact we own and can prove; PITR buys a finer
 recovery point. A deployment may hold both, and holding the dump is what makes turning PITR on safe.
 
+### What the record artifact does NOT cover (recorded here so it cannot be assumed away)
+
+- **The control plane.** The artifact is the record's own nine tables. The record's foreign keys
+  reference `public.organizations(id)` and `public.graphs(org_id, id)`, and **no module in this tree
+  backs those up** — a restore target must already carry them (`docs/infra-runbook.md` §3.5
+  precondition 4). So the artifact restores the record **into a surviving tenant**, not into a fresh
+  project: after loss of the hosting project the tenancy rows (and their ids) are gone with it. That
+  gap predates this row and is tracked as its own decision (#9745) — it is stated here rather than
+  solved by this mechanism.
+- **Bucket-lock immutability.** The adopted object-lock rule is prefix-scoped to `backups/`
+  (`docs/ops/registry-backup-dr.md`), which is the **graph** archive prefix. Record artifacts live
+  under `record-backups/` and are therefore **not** covered by it: they are protected by credential
+  scope and the app-level retention prune only. Whether to add a second lock rule (and make the prune
+  lock-tolerant) is a decision tracked in #9746, not silently adopted here.
+- **Key rotation.** The artifact is encrypted with the same key as the graph archives and restores
+  through the same candidate chain (active + retained previous, #2318) — so a rotation does not strand
+  retained artifacts while the previous key is still configured. Once the previous key is dropped, a
+  retained artifact written under it is unreadable by design.
+
 **Sources read 2026-10-22** (vendor documentation; the full brief with quotes, per-tier tables and its
 `NOT VERIFIED` list is recorded on #9557): Supabase *Database Backups*,
 *Manage Point-in-Time Recovery usage*, *Pricing & Fees*, *Connect to your database*. One citation is

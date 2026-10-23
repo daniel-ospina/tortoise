@@ -48,8 +48,13 @@ on a general "nothing is downloadable" claim.
 
 `pg_dump`/`pg_restore` are the vendor's own documented escape hatch for exactly
 this (a logical dump is what their CLI wraps), they need no new privileged
-surface, and the artifact is portable to any Postgres — so the drill does not
-have to trust the vendor's restore path in order to check the vendor's data.
+surface, and the artifact is portable to any Postgres **that already carries the
+record's schema and the tenancy rows its foreign keys reference** — so the drill
+does not have to trust the vendor's restore path in order to check the vendor's
+data. The precondition is not incidental: nothing in this tree backs up the
+control plane (`organizations`, `graphs`), so this artifact is a recovery of the
+record into a target that still has its tenancy, NOT a recovery from project
+loss on its own (see `docs/durability-posture.md`).
 ⚠️ The vendor routes dump/restore through the **direct** connection, not the
 pooler: a transaction-mode pooler loses session state between transactions, and
 a dump/restore *is* a session. :func:`require_direct_dsn` refuses a pooler DSN,
@@ -133,7 +138,7 @@ from pathlib import Path
 from typing import Any, Callable  # noqa: UP035
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from .hosted_backup import decrypt_backup, encrypt_backup
+from .hosted_backup import decrypt_backup_with_rotation, encrypt_backup
 from .record_projection import THE_RECORD_TABLES
 
 __all__ = [
@@ -971,27 +976,22 @@ def _verify_manifest(manifest: dict[str, Any], blob: bytes) -> None:
         )
 
 
-def restore_record_backup(
+def load_verified_artifact(
     storage,
     backup_key: str,
-    target_dsn: str,
     *,
-    run: Runner | None = None,
-    connect: Connector | None = None,
-    workdir: str | os.PathLike[str] | None = None,
     key: bytes | None = None,
-    pg_restore: str = "pg_restore",
-) -> dict[str, Any]:
-    """Download → verify → refuse a populated target → restore; return the outcome.
+) -> tuple[dict[str, Any], bytes]:
+    """Download → verify integrity + schema pin → decrypt; return (manifest, payload).
 
-    The ORDER is the guarantee. The integrity and table-set checks run before
-    any bytes are handed to `pg_restore`, and the target is read for row counts
-    before the restore starts, so a mistaken invocation against the live record
-    is refused while it is still harmless. `--single-transaction` then makes the
-    restore itself atomic: a failure halfway leaves the target as it was, which
-    is the only exit a drill can be trusted to observe.
+    Split out of :func:`restore_record_backup` so the caller can verify the
+    artifact BEFORE it destroys anything. `--reset-scratch` TRUNCATEs the
+    drill's target, and a truncate performed on the way to a refusal destroys
+    the leftover state of the last RED drill — exactly what
+    :func:`reset_record_tables` says it must never destroy (#9601 review, P2).
+    Download, manifest parse, sha256 check, table set, column pin and decryption
+    all live here, so nothing that can refuse runs after the reset.
     """
-    require_direct_dsn(target_dsn)
     if not backup_key.endswith(f"/{DUMP_OBJECT}"):
         raise RecordRestoreRefused(
             f"backup_key must reference a {DUMP_OBJECT} object, got {backup_key!r}"
@@ -1011,15 +1011,56 @@ def restore_record_backup(
     manifest = _read_manifest(storage, backup_key)
     _verify_manifest(manifest, blob)
     try:
-        payload = decrypt_backup(blob, key=key)
+        # ⛔ NOT the bare primitive: it resolves the ACTIVE key only, so a
+        # `TORTOISE_BACKUP_KEY` rotation stranded every retained record artifact
+        # and reported it as tampering (#9601 review, P1). The rotation chain is
+        # the graph restore path's own, shared as ONE definition
+        # (`decrypt_backup_with_rotation`); a record artifact is encrypted with
+        # the SAME key, so it must be restorable by the same rule.
+        payload = decrypt_backup_with_rotation(blob, key=key)
     except ValueError as e:
         # A wrong key and a forged payload both surface as ValueError from
         # AES-GCM. Neither is a transport failure, so neither may be reported
-        # as "retry later" — a caller must see a REFUSAL.
+        # as "retry later" — a caller must see a REFUSAL. Reaching here means NO
+        # candidate authenticated, which is a genuinely wrong key or tamper.
         raise RecordRestoreRefused(
-            f"the artifact could not be decrypted ({e}) — the key is wrong or the "
-            "payload was tampered with; nothing was restored"
+            f"the artifact could not be decrypted ({e}) — no configured backup key "
+            "authenticated it (the active key or a retained previous one), so the "
+            "payload is tampered with or was written under a key this box does not "
+            "hold; nothing was restored"
         ) from e
+    return manifest, payload
+
+
+def restore_record_backup(
+    storage,
+    backup_key: str,
+    target_dsn: str,
+    *,
+    run: Runner | None = None,
+    connect: Connector | None = None,
+    workdir: str | os.PathLike[str] | None = None,
+    key: bytes | None = None,
+    pg_restore: str = "pg_restore",
+    artifact: tuple[dict[str, Any], bytes] | None = None,
+) -> dict[str, Any]:
+    """Download → verify → refuse a populated target → restore; return the outcome.
+
+    The ORDER is the guarantee. The integrity and table-set checks run before
+    any bytes are handed to `pg_restore`, and the target is read for row counts
+    before the restore starts, so a mistaken invocation against the live record
+    is refused while it is still harmless. `--single-transaction` then makes the
+    restore itself atomic: a failure halfway leaves the target as it was, which
+    is the only exit a drill can be trusted to observe.
+    """
+    require_direct_dsn(target_dsn)
+    # `artifact` is the already-verified (manifest, payload) pair. A caller that
+    # had to reset the target first passes it so NO refusal can happen after
+    # that reset; the default path verifies here, before touching the target.
+    if artifact is None:
+        manifest, payload = load_verified_artifact(storage, backup_key, key=key)
+    else:
+        manifest, payload = artifact
 
     before = record_row_counts(target_dsn, connect=connect)
     populated = {t: n for t, n in before.items() if n}
@@ -1164,9 +1205,8 @@ def verify_restore(
     ``source_after`` is the post-dump re-count: pass it whenever the source can
     be written to (see :func:`compare_row_counts`), so the drill measures what
     the artifact could legitimately contain rather than what a count taken
-    before the dump saw. ``source_high`` is the ceiling the caller already used
-    for its own artifact cross-check, so the two comparisons cannot disagree
-    about how many rows the record could have held.
+    before the dump saw. ``source_high`` is the drill's own reading taken as the artifact was cut (``cut``),
+    which RAISES the ceiling of the accepted window — it never lowers it.
     """
     report = compare_row_counts(
         source, restored, source_after=source_after, source_high=source_high
@@ -1263,9 +1303,10 @@ def run_restore_drill(
     endpoint (#9601 review cycle 4, P1: a row that landed after ``before`` and
     was deleted before ``after`` made ``max(before, after)`` refuse a healthy
     artifact with a sentence this module had already disproved — it had measured
-    the higher number itself). All three reads are the DRILL's own; the artifact's
-    claim is what gets checked, never what bounds it (see
-    :func:`compare_row_counts`).
+    the higher number itself). All three reads are the DRILL's own measurement of
+    the source; the manifest's claim is never read as a bound here, and it is not
+    a check either — it IS ``cut``, so any ceiling built from these reads contains
+    it by construction (see :func:`compare_row_counts`).
 
     Refusals, in the order they matter:
 
@@ -1280,14 +1321,15 @@ def run_restore_drill(
       upload have all happened, and the post-publish wrap re-classified that
       PERMANENT config fault as "retry" — so a scheduler minted a fresh artifact
       on every attempt while the runbook's exit table promised `2`;
-    * an artifact whose own ``row_counts`` claim **more rows than the source held
-      at any point the drill measured** — cross-checked against the maximum of
-      ``before``, ``cut`` and ``after``, never against ``before`` alone (#9601
-      review cycle 2, P1): the manifest's count is read after ``before``, so on a
-      live record it is legitimately the LARGER number, and comparing it against
-      ``before`` red a healthy backup on the documented daily schedule;
     * a non-empty scratch target (refused inside
       :func:`restore_record_backup`) — unless ``reset_scratch`` emptied it first.
+
+    ⚠️ There is deliberately NO "the artifact claims more rows than the source
+    held" refusal. The manifest's ``row_counts`` is ``cut`` — the drill's own
+    measurement, handed to :func:`create_record_backup` — so comparing it against
+    a ceiling of ``before``/``cut``/``after`` could never fire; listing it as a
+    refusal promised a run that cannot happen (#9601 review, P2). The verdict's
+    bound is the comparison of the RESTORED counts against the source reads.
 
     A failure AFTER the artifact is published raises :class:`RecordRestoreFailed`,
     not a bare :class:`RecordBackupError` (#9601 review cycle 3, P2): the drill
@@ -1430,11 +1472,10 @@ def run_restore_drill(
         # red a HEALTHY backup on the documented daily schedule, on a run whose
         # restore had not started, and — because `RecordRestoreVerifyError` carries
         # no `mismatches` here — printed `{"verdict": "MISMATCH", "mismatches": []}`:
-        # a loss verdict naming no loss. What the cross-check can legitimately
-        # decide is one-sided: an artifact may not claim more rows than the source
-        # held during the run (the largest of the three reads — see the per-table
-        # ceiling below), and that disagreement is a REFUSAL (exit 2, no
-        # verdict), not a data-loss incident.
+        # a loss verdict naming no loss. The check that survives is the restore
+        # comparison itself (source reads vs RESTORED counts); the old "the
+        # artifact may not claim more rows than the source held" bound was
+        # tautological on this path and is gone — see the note below.
         after = record_row_counts(dsn, connect=connect)
         # The source numbers are the ones READ FROM THE SOURCE DATABASE (`before`),
         # never the artifact's own claim about itself (#9601 review cycle 1, P2):
@@ -1442,54 +1483,34 @@ def run_restore_drill(
         # manifest whose `row_counts` were zeroed widened acceptance to `[0, after]`
         # and a short artifact restored green — while this function's own docstring
         # promises it "never trusts the writer's own claim about what it wrote". The
-        # manifest is a CROSS-CHECK now, not the baseline.
+        # manifest's claim is never an input to the verdict.
         source = {t: int(n) for t, n in before.items()}
-        claimed = {t: int(n) for t, n in (manifest.get("row_counts") or {}).items()}
         if not source:
             raise RecordBackupError(
                 "the source held no rows when they were read — a drill with nothing "
                 "to compare against is not a verification"
             )
-        for table in source:
-            want = None if not claimed else claimed.get(table)
-            # The CEILING is the LARGEST of the three source reads — `before`, `cut`
-            # and `after` — never one endpoint alone, and never the artifact's own
-            # claim (#9601 review cycles 3 and 4, P1). Two facts make an endpoint a
-            # false bound:
-            #
-            # * the record is NOT append-only — a `delete`/`merge` journal op emits
-            #   `DELETE` on `point`/`subject`/`object`/`node_identity`/`relation`
-            #   (`record_projection.py`) and the erasure RPC removes all nine tables,
-            #   so a NET DELETION inside the dump window leaves `after` BELOW the
-            #   artifact's own count on a perfectly healthy backup (cycle 3);
-            # * the record MOVES — rows can land after `before` and age out before
-            #   `after`, so an artifact that legitimately carries 515 rows sits above
-            #   BOTH endpoints (512, 500) and an endpoint-bound ceiling refused with
-            #   the diagnosis "the source never held more than 512" — a sentence this
-            #   very run had already disproved by measuring 515 (cycle 4).
-            #
-            # Taking the maximum keeps the check one-sided (an artifact still cannot
-            # claim more than the record was ever observed to hold) and every input
-            # is the drill's own measurement, so a manifest that inflates `row_counts`
-            # cannot widen it.
-            seen = [
-                int(n)
-                for n in (source.get(table), cut.get(table), after.get(table))
-                if n is not None
-            ]
-            ceiling = max(seen) if seen else None
-            if want is not None and ceiling is not None and int(want) > ceiling:
-                raise RecordRestoreRefused(
-                    f"the artifact claims {want} {table} row(s) but the source never "
-                    f"held more than {ceiling} during the drill — an artifact cannot "
-                    "carry rows the record never held, so the drill produced no "
-                    "verdict (nothing was restored)"
-                )
-        # The scratch reset runs AFTER the cross-check, never before it (#9601 review
-        # cycle 4, P3): a refusing artifact used to TRUNCATE the scratch target on its
-        # way to the refusal, destroying exactly the leftover state of a RED drill
-        # that this docstring says the reset must not destroy. Nothing between the
-        # cross-check and here reads the scratch target.
+        # ⛔ THERE IS NO "the artifact claims more rows than the source held"
+        # CHECK, because it cannot fire — and documenting it as a refusal was
+        # worse than not having it (#9601 review, P2). The manifest's
+        # `row_counts` IS `cut`, the drill's own measurement, passed into
+        # `create_record_backup(counts=cut)`; a ceiling built from
+        # `max(before, cut, after)` therefore CONTAINS the claim by construction,
+        # so `want > ceiling` was unsatisfiable and the branch was dead. What
+        # bounds ACCEPTANCE is the restore comparison (`verify_restore(source,
+        # restored, source_after=after, source_high=cut)`): its window is built
+        # from the source's own reads, and the manifest's claim never widens it.
+        # A manifest that inflates its numbers is caught by the restored counts
+        # mismatching, which is the verdict that actually measures the data.
+        #
+        # ⛔ VERIFY THE ARTIFACT BEFORE THE RESET. `--reset-scratch` TRUNCATEs
+        # the drill's target; download, manifest parse, sha256, the table set,
+        # the column pin and decryption each can REFUSE, and a truncate performed on the way
+        # to such a refusal destroys the leftover state of the last RED drill
+        # that `reset_record_tables` says it must never destroy (#9601 review,
+        # P2). Loading the verified artifact here leaves NO refusing step between
+        # the reset and `pg_restore`.
+        manifest, payload = load_verified_artifact(storage, backup_key, key=key)
         if reset_scratch:
             reset_record_tables(scratch_dsn, connect=connect)
         restored = restore_record_backup(
@@ -1501,6 +1522,7 @@ def run_restore_drill(
             workdir=workdir,
             key=key,
             pg_restore=pg_restore,
+            artifact=(manifest, payload),
         )
     except (RecordRestoreRefused, RecordRestoreVerifyError, RecordBackupUnavailable):
         # `RecordBackupUnavailable` is a PERMANENT config fault and keeps its own
@@ -1513,12 +1535,11 @@ def run_restore_drill(
         raise RecordRestoreFailed(
             str(e), backup_id=manifest["backup_id"], backup_key=backup_key
         ) from e
-    # ONE upper bound for both comparisons (#9601 review cycle 4, P1): the verify
-    # window and the artifact cross-check above must not disagree about how many
-    # rows the record could have held — when they did, an artifact carrying no
-    # `row_counts` claim (an older or hand-built manifest, which skips the
-    # cross-check) was verified against `[after, before]` alone and red as a
-    # data-loss incident on a run that lost nothing.
+    # ONE upper bound for the verify window (#9601 review cycle 4, P1): `cut`, the
+    # drill's own reading taken as the artifact was cut, must be passed as ``source_high`` — without it a
+    # healthy artifact whose rows landed after `before` and aged out before
+    # `after` was verified against `[after, before]` alone and red as a data-loss
+    # incident on a run that lost nothing.
     report = verify_restore(source, restored["restored"], source_after=after, source_high=cut)
     return {
         "verdict": "RESTORED",

@@ -808,21 +808,26 @@ def _cmd_record_backup(args):
     Exit codes, because a scheduler's only signal is the code:
       ``0`` backup published (and, in drill mode, the restore VERIFIED)
       ``1`` the run could not be completed (pg_dump/pg_restore non-zero, a
-          transport failure). What that means depends on the MODE, and saying it
-          flatly made the drill's ordinary failure read as a durability outage:
-          in BACKUP mode the record is NOT backed up — retry. In DRILL mode the
-          artifact is published BEFORE the restore is attempted, so the record
-          IS backed up and only the restore is NOT proven — retry, and if it
-          repeats check preconditions 3-4 (the scratch target's schema and the
-          tenancy rows its foreign keys reference): a missing parent row never
-          clears on a retry
+          transport failure). What that means is decided by the FAILURE CLASS,
+          not by the mode — deciding it by mode made a drill-mode dump failure
+          (nothing published) print the sentence reserved for a post-publish
+          restore failure: a durability outage read as "backed up":
+          * a failure AFTER the artifact was published raises
+            ``RecordRestoreFailed`` and names the artifact id — the record IS
+            backed up and only the restore is NOT proven: retry, and if it
+            repeats check preconditions 3-4 (the scratch target's schema and
+            the tenancy rows its foreign keys reference): a missing parent row
+            never clears on a retry;
+          * any other ``RecordBackupError`` means NOTHING was published (the
+            dump, encrypt or upload leg failed, in either mode) — the record is
+            NOT backed up: retry
       ``2`` could not run: no/malformed DSN, R2 not configured, psycopg2 absent,
           a pooler DSN (the **source's** or the drill's **scratch** one — the
           scratch side is checked before anything is dumped), `TORTOISE_BACKUP_KEY`
           absent or malformed, a populated
-          scratch target, an empty record to drill, an artifact whose integrity
-          or shape pin does not verify (no verdict was produced — and NOT a
-          green one), or a ``--keep`` that would delete every artifact
+          scratch target, an empty record to drill, an artifact whose integrity,
+          shape pin or decryption does not verify (no verdict was produced — and
+          NOT a green one), or a ``--keep`` that would delete every artifact
       ``3`` the drill RAN and the restored record DISAGREES with its source
 
     ``2`` is also the code for every PERMANENT configuration fault, deliberately:
@@ -836,6 +841,7 @@ def _cmd_record_backup(args):
     — a scheduler must read ``2`` as *no verdict*, never as a green one.
     """
     import json as _json
+    import os
 
     from tortoise.record_backup import (
         RECORD_BACKUP_KEEP,
@@ -859,6 +865,16 @@ def _cmd_record_backup(args):
     except RecordWriteError as e:
         print(f"Error: {e} — the record was NOT backed up.", file=sys.stderr)
         return 2
+    # ⛔ argv is PUBLIC — every user on the box can read a process's arguments
+    # (`ps`), and an argument also lands in shell history and the scheduler's own
+    # command file. So the scratch DSN has an environment surface, mirroring
+    # `TORTOISE_RECORD_DSN` (#9601 review, P2): a documented cron line that passes
+    # the password as `--scratch-dsn "$VAR"` puts the system-of-record credential
+    # in argv, which is the one thing this verb's module docstring promises it
+    # never does. An explicit flag still wins (an injected value keeps the DB-free
+    # pin possible).
+    if args.scratch_dsn is None:
+        args.scratch_dsn = os.environ.get("TORTOISE_RECORD_SCRATCH_DSN") or None
     if not dsn:
         print("Error: no record DSN — pass --record-dsn or set "
               "TORTOISE_RECORD_DSN. Nothing was backed up, and no restore was "
@@ -11358,10 +11374,12 @@ def main(argv: list[str] | None = None) -> int:
     rb.add_argument("--scratch-dsn", default=None,
                     help="Drill mode: an EMPTY scratch Postgres DSN to restore "
                          "the artifact into and compare row counts against the "
-                         "live record. It must not be the record itself — a "
-                         "restore into a populated record is refused. Without "
-                         "this flag the verb backs up only, and says the "
-                         "artifact is NOT proven restorable")
+                         "live record (default: $TORTOISE_RECORD_SCRATCH_DSN — "
+                         "prefer the env var: an argument is readable in `ps` "
+                         "and shell history). It must not be the record itself "
+                         "— a restore into a populated record is refused. "
+                         "Without this flag the verb backs up only, and says "
+                         "the artifact is NOT proven restorable")
     rb.add_argument("--reset-scratch", action="store_true",
                     help="Drill mode: TRUNCATE the record's tables on the "
                          "--scratch-dsn target before restoring. A successful "

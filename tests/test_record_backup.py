@@ -804,15 +804,16 @@ def test_the_drill_does_not_red_when_a_row_lands_between_the_two_source_reads():
     }
 
 
-def test_an_artifact_claiming_rows_the_source_never_held_is_a_REFUSAL(monkeypatch):
-    """The cross-check still bites — as a REFUSAL, never as a mismatch verdict.
+def test_an_inflated_manifest_claim_is_neither_a_REFUSAL_nor_a_bound(monkeypatch):
+    """The manifest's `row_counts` is NOT a bound on the verdict (#9601 review, P2).
 
-    The check is one-sided on purpose (see the test above): an artifact may not
-    claim more rows than the source held once the dump finished, because it
-    cannot carry rows that never existed. That is a disagreement between the
-    artifact and the record, so NOTHING is restored and no verdict is produced:
-    exit 2, not exit 3 — a `RecordRestoreVerifyError` here would print
-    `{"verdict": "MISMATCH", "mismatches": []}`, a loss verdict naming no loss.
+    A `want > ceiling` check used to sit here, documented as refusing an artifact
+    that claims more rows than the source ever held. It could never fire: the
+    manifest's `row_counts` IS the drill's own `cut`, so a ceiling built from
+    `max(before, cut, after)` contains the claim by construction. The check is
+    gone; what must remain true is the property it was meant to protect — an
+    inflated claim must neither refuse a healthy run nor rescue a SHORT one. The
+    restore comparison is the bound, and it reds with the table named.
     """
     db = FakeDB(SOURCE_COUNTS)
     real = rb.create_record_backup
@@ -822,16 +823,18 @@ def test_an_artifact_claiming_rows_the_source_never_held_is_a_REFUSAL(monkeypatc
         manifest["row_counts"] = {**manifest["row_counts"], "journal_event": 10_000}
         return manifest
 
+    def short_restore():
+        # The artifact restores 12 journal rows short of its source.
+        db.scratch.update(SOURCE_COUNTS | {"journal_event": 500})
+
     monkeypatch.setattr(rb, "create_record_backup", overclaiming)
-    runner = FakeRunner(on_restore=db.populate_scratch_from_source)
-    with pytest.raises(rb.RecordRestoreRefused, match="never held") as excinfo:
+    runner = FakeRunner(on_restore=short_restore)
+    with pytest.raises(rb.RecordRestoreVerifyError) as excinfo:
         rb.run_restore_drill(
             DSN, MemoryStorage(), SCRATCH_DSN, run=runner, connect=db.connect, key=KEY,
         )
-    assert not isinstance(excinfo.value, rb.RecordRestoreVerifyError)
-    # No restore ran, and the scratch target was not touched.
-    assert [argv[0] for argv, _kw in runner.calls] == ["pg_dump"]
-    assert db.scratch == dict.fromkeys(THE_RECORD_TABLES, 0)
+    assert "journal_event" in str(excinfo.value)
+    assert excinfo.value.mismatches
 
 
 def test_a_NET_DELETION_during_the_dump_is_not_an_impossible_artifact():
@@ -1085,34 +1088,87 @@ def test_the_scratch_reset_truncates_the_record_tables_and_nothing_else():
 
 
 def test_a_REFUSED_drill_does_not_truncate_the_scratch_evidence(monkeypatch):
-    """#9601 review cycle 4 (P3): `--reset-scratch` must not destroy a RED drill.
+    """#9601 review cycle 4 (P3) and cycle 5 (P2): the reset must not precede a refusal.
 
     The reset is opt-in precisely because an automatic truncate would erase the
     leftover state of a RED drill — the evidence an operator needs. It used to run
-    BETWEEN the post-dump re-count and the artifact cross-check, so a run that then
-    REFUSED had already emptied the scratch target on its way to the refusal. It
-    now runs after the cross-check and immediately before the restore.
+    BETWEEN the post-dump re-count and the artifact cross-check; it then moved
+    after the cross-check, but `restore_record_backup` still re-downloaded and
+    re-verified the artifact AFTER the truncate — so an artifact that corrupted in
+    the bucket (exactly what the drill exists to detect) truncated the scratch on
+    its way to the refusal. The verified artifact is now loaded BEFORE the reset,
+    so nothing that can refuse runs after it.
     """
+
+    class CorruptOnRead(MemoryStorage):
+        """A bucket-side corruption: the bytes no longer match the sha256 pin."""
+
+        def download(self, key, *a, **k):
+            blob = super().download(key, *a, **k)
+            if key.endswith(rb.DUMP_OBJECT):
+                return blob[:-1] + bytes([blob[-1] ^ 0xFF])
+            return blob
+
     db = FakeDB(
         SOURCE_COUNTS,
         scratch=dict.fromkeys(THE_RECORD_TABLES, 0) | {"journal_event": 9},
     )
-    real = rb.create_record_backup
-
-    def overclaiming(*args, **kwargs):
-        manifest = real(*args, **kwargs)
-        manifest["row_counts"] = {**manifest["row_counts"], "journal_event": 10_000}
-        return manifest
-
-    monkeypatch.setattr(rb, "create_record_backup", overclaiming)
-    with pytest.raises(rb.RecordRestoreRefused, match="never held"):
+    runner = FakeRunner(on_restore=db.populate_scratch_from_source)
+    with pytest.raises(rb.RecordRestoreRefused, match=r"sha256|tampered|verify"):
         rb.run_restore_drill(
-            DSN, MemoryStorage(), SCRATCH_DSN,
-            run=FakeRunner(on_restore=db.populate_scratch_from_source),
-            connect=db.connect, key=KEY, reset_scratch=True,
+            DSN, CorruptOnRead(), SCRATCH_DSN,
+            run=runner, connect=db.connect, key=KEY, reset_scratch=True,
         )
     # The previous run's rows are still there — the refusal preserved the evidence.
     assert db.scratch["journal_event"] == 9
+    # And nothing was restored: pg_dump ran, pg_restore never did.
+    assert [argv[0] for argv, _kw in runner.calls] == ["pg_dump"]
+
+
+def test_an_artifact_encrypted_under_a_retained_previous_key_still_restores(monkeypatch):
+    """#9601 review (P1): a key rotation must not strand a retained artifact.
+
+    The restore leg called the bare `decrypt_backup`, which resolves the ACTIVE
+    key only. After a rotation (the documented `TORTOISE_BACKUP_KEY_PREVIOUS`
+    overlap, #2318) every retained record artifact became unreadable — and was
+    reported as TAMPERING, i.e. a security incident on a healthy artifact, at the
+    exact moment a restore was needed. The graph restore path has always tried the
+    candidate chain; the record path now shares that ONE definition.
+    """
+    import tortoise.hosted_backup as hb
+
+    old_key = bytes(range(32, 64))
+    storage = MemoryStorage()
+    db = FakeDB(SOURCE_COUNTS)
+    manifest = rb.create_record_backup(
+        DSN, storage, run=FakeRunner(), connect=db.connect, key=old_key
+    )
+    key = f"{rb.RECORD_BACKUP_PREFIX}{manifest['backup_id']}/{rb.DUMP_OBJECT}"
+    # The box has rotated: KEY is active, `old_key` is retained as the previous one.
+    monkeypatch.setattr(hb, "_decrypt_candidate_keys", lambda explicit=None: (KEY, old_key))
+    verified, payload = rb.load_verified_artifact(storage, key, key=KEY)
+    assert verified["backup_id"] == manifest["backup_id"]
+    assert payload == b"PGDUMP-CUSTOM-FORMAT"
+
+
+def test_an_artifact_under_a_key_this_box_no_longer_holds_is_a_REFUSAL(monkeypatch):
+    """The other half: once no candidate authenticates, the refusal says WHY.
+
+    Without this, a mutant that always falls back to some stored key would pass
+    the rotation test above while restoring an artifact it should not have.
+    """
+    import tortoise.hosted_backup as hb
+
+    old_key = bytes(range(32, 64))
+    storage = MemoryStorage()
+    db = FakeDB(SOURCE_COUNTS)
+    manifest = rb.create_record_backup(
+        DSN, storage, run=FakeRunner(), connect=db.connect, key=old_key
+    )
+    key = f"{rb.RECORD_BACKUP_PREFIX}{manifest['backup_id']}/{rb.DUMP_OBJECT}"
+    monkeypatch.setattr(hb, "_decrypt_candidate_keys", lambda explicit=None: (KEY,))
+    with pytest.raises(rb.RecordRestoreRefused, match="no configured backup key"):
+        rb.load_verified_artifact(storage, key, key=KEY)
 
 
 def test_the_drill_reds_when_the_restored_record_is_short():
@@ -1296,10 +1352,17 @@ def test_list_record_backups_skips_unreadable_manifests():
 
 
 def _cli(monkeypatch, argv, storage=None, fail_storage=None, db=None, *, runner=None,
-         patch_connector=True, backup_key=KEY):
+         patch_connector=True, backup_key=KEY, scratch_env=None):
     from tortoise import __main__ as cli
 
     monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
+    # The scratch DSN has an environment surface too (#9601 review, P2). Clear it
+    # by default so an operator's shell env cannot turn every backup-mode test
+    # into a drill; a test that pins the env route passes `scratch_env=`.
+    if scratch_env is None:
+        monkeypatch.delenv("TORTOISE_RECORD_SCRATCH_DSN", raising=False)
+    else:
+        monkeypatch.setenv("TORTOISE_RECORD_SCRATCH_DSN", scratch_env)
     import tortoise.hosted_backup as hb
 
     if fail_storage is not None:
@@ -1531,12 +1594,16 @@ def test_a_backup_mode_exit_1_still_says_the_record_is_not_backed_up(monkeypatch
     assert storage.list("") == []
 
 
-def test_the_documented_exit_1_contract_is_mode_aware_in_the_runbook_and_the_verb():
+def test_the_documented_exit_1_contract_is_CLASS_aware_in_the_runbook_and_the_verb():
     """The exit-code contract lives in two artifacts a scheduler's author reads.
 
-    Both said "the record is NOT backed up" flatly, which is false in the one
-    mode this same runbook tells the operator to schedule. Pinning both keeps a
-    later doc tidy-up from restoring the false claim.
+    Both used to say the meaning of exit `1` depends on the MODE — "in drill mode
+    the artifact is published before the restore is attempted, so the record IS
+    backed up". That is false for a drill-mode DUMP failure: nothing was published,
+    and the scheduler read the sentence reserved for a post-publish restore
+    failure — a durability outage triaged as "backed up" (#9601 review, P2). The
+    discriminator is the failure CLASS, and these assertions hold both artifacts
+    to it.
     """
     from tortoise import __main__ as cli
 
@@ -1544,14 +1611,60 @@ def test_the_documented_exit_1_contract_is_mode_aware_in_the_runbook_and_the_ver
     rows = [line for line in runbook.read_text().splitlines() if line.startswith("| `1` |")]
     assert len(rows) == 1, f"expected exactly one exit-1 row, found {len(rows)}"
     row = rows[0]
-    assert "drill mode" in row.lower()
-    assert "NOT proven" in row
-    assert "IS backed up" in row
+    assert "failure class" in row.lower()
+    assert "RecordRestoreFailed" in row
+    assert "nothing was published" in row.lower()
 
     doc = cli._cmd_record_backup.__doc__ or ""
-    assert "In DRILL mode" in doc
-    assert "IS backed up" in doc
+    assert "FAILURE CLASS" in doc
+    assert "RecordRestoreFailed" in doc
+    assert "NOTHING was published" in doc
     assert "check preconditions 3-4" in doc
+
+
+def test_a_drill_mode_dump_failure_does_not_claim_the_record_is_backed_up(monkeypatch, capsys):
+    """The failure the mode-based wording got wrong (#9601 review, P2).
+
+    A drill-mode `pg_dump` failure happens BEFORE anything is published, so the
+    run must say the record is NOT backed up — not "published, restore unproven".
+    """
+    storage = MemoryStorage()
+    rc = _cli(
+        monkeypatch,
+        ["record-backup", "--record-dsn", DSN, "--scratch-dsn", SCRATCH_DSN],
+        storage=storage,
+        runner=FakeRunner(dump_returncode=1),
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "the record was NOT backed up" in err
+    assert "IS backed up" not in err
+    assert storage.list("") == []
+
+
+def test_the_scratch_dsn_can_come_from_the_environment(monkeypatch, capsys):
+    """argv is world-readable (`ps`), so the drill has an env route (#9601 review).
+
+    The runbook's cron line used to pass `--scratch-dsn "$VAR"`, putting the
+    record's password on the command line — the one thing the module promises it
+    never does.
+    """
+    storage = MemoryStorage()
+    db = FakeDB(SOURCE_COUNTS)
+    rc = _cli(
+        monkeypatch,
+        ["record-backup", "--record-dsn", DSN],
+        storage=storage,
+        db=db,
+        runner=FakeRunner(on_restore=db.populate_scratch_from_source),
+        scratch_env=SCRATCH_DSN,
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "RESTORED" in out
+    # The drill really ran (a restore was performed), so the env route reached the
+    # same code the flag path uses — not a no-op that merely exited 0.
+    assert db.scratch["journal_event"] == SOURCE_COUNTS["journal_event"]
 
 
 def test_the_verb_backup_mode_does_not_claim_the_artifact_restores(monkeypatch, capsys):
