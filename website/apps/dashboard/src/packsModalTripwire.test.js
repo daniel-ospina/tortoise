@@ -249,6 +249,16 @@ test('#2728: the dialog renders each honest state, including an EMPTY configured
   assert.match(modal, /body\.configured === false/, 'the unconfigured-vs-empty distinction must be rendered')
   assert.match(modal, /PACK_CONSEQUENCE\.(unconfigured|disable|remove|add)/,
     'the consequence copy comes from the shared module (one vocabulary with the row titles)')
+  // FAIL-ON (#9691): the note was selected implicitly by `configured === false`
+  // alone, so a starter-seeded default graph (`configured: false` WITH five
+  // starter rows — the hosted default) was told "the full pack catalog"
+  // applies while `resolved_pack_set` had already narrowed it to those five.
+  // The selection must go through the resolved-set predicate in packs.js; a
+  // bare `PACK_CONSEQUENCE.unconfigured` here reds.
+  assert.match(modal, /unconfiguredConsequence\(body\)/,
+    'the unconfigured note is chosen by the RECORDS, never by the flag alone')
+  assert.doesNotMatch(modal, /\{PACK_CONSEQUENCE\.unconfigured\}/,
+    'rendering the catalog-union sentence unconditionally is the #9691 defect')
 })
 
 test('#2728: the modal is rendered at the App root, not inside a tab', () => {

@@ -1,152 +1,100 @@
-"""Investment Portfolio Manager overlay pack (issue #9663) — the overlay shape,
-the value test re-derived from the manifest, the clash rules, and the proof that
-core extraction is unchanged with the pack OFF.
+"""Investment portfolio manager overlay pack (issue #9663) — clash rules and
+the value test for every kind.
 
-What this file pins, and why each half is separate:
+What this file pins, in the issue's own terms:
 
-1. **Overlay shape** — `depends_on: [venture]`, no rename of what `venture`
-   already models. The position is `venture:investment`; this pack declares no
-   `investment`/`holding` of its own and every cross-pack KIND reference is
-   written namespaced. The one outcome #9663 exists to prevent is an overlay
-   that gives one concept two homes, so the shape half is asserted structurally
-   (kind buckets + reference spellings), not by prose.
-2. **The value test** — re-derived from `manifest.yaml` on every run instead of
-   restated. A kind is admitted only if it owns a closed lifecycle with declared
-   folds, declares a `values` shape, is a chain step, or is an endpoint of a
-   relation carrying a `mechanism`; anything else belongs in a `synonyms` entry
-   on an existing kind. Each declared kind's pass is asserted exactly, and each
-   REJECTED candidate is pinned against the entry or kind that absorbed it.
-3. **The clash rules** — `synonyms`/`examples`/`nearMisses` are how ambiguity is
-   resolved here, never a competing kind: every kindDef carries all three, the
-   `nearMisses` name the genuinely confusable sibling (cross-pack targets
-   namespaced, relation targets bare by contract), and no synonym collides with
-   a `venture` synonym (two kinds sharing one synonym is the ambiguity this pack
-   is supposed to remove).
-4. **Core extraction unchanged with the pack OFF** — the actual "does not
-   disturb anything" proof: the brief, the kind-index spec and its cache key
-   compiled for a graph that has NOT installed the overlay are identical to the
-   same three compiled from a catalog copy with the pack removed entirely. The
-   positive control (installed ⇒ the vocabulary IS there) is in the same class,
-   so a permanently-absent pack cannot pass this either.
-5. **Wiring guards** — the `_PACK_TRIGGERS` row (compact-mode selection), the
-   master list, the prompt's `[values: …]` segment, and the absence of a
-   pack-declared chain (a chain outside `extractor_v2.CHAINS` reaches no prompt,
-   so declaring one would be inert).
-6. **The two engine gaps this pack forced** — the #2781 missing-peer gate for
-   relation `nearMisses` (a pack naming a sibling pack's PREDICATE as its
-   near-miss must not be isolated for it) and the `tortoise pack validate`
-   false green for a pack whose directory name is not its namespace.
-7. **Write doors + `validate_domain`** — the pack installs on a fresh graph,
-   each new kind mints with its own status, the mark attaches to the position,
-   and the domain validator is clean. DB-gated (the docker lane).
+1. **Overlay, not a second home.** The pack `depends_on: [venture]`, declares no
+   `equivalentTo`, and never re-declares a venture kind. Where the
+   portfolio-manager concept IS a venture concept the manifest references
+   `venture:investment` NAMESPACED — an overlay that renames the position is the
+   one outcome #9663 exists to prevent, because it gives one concept two homes.
+2. **The value test, computed rather than claimed.** Every admitted kind must
+   pass at least one of the four bullets (`statuses`+`folds`, `values`, a chain
+   step, a relation endpoint carrying a mechanism). The test below RE-DERIVES
+   each kind's passing bullets from the compiled manifest — a kind added later
+   with no shape behind it fails here instead of validating clean.
+3. **Every rejected candidate names its absorbing home** — a claim is the core
+   Point kind (`statement`), `benchmark` rides `allocationTarget`'s `synonyms`,
+   and `rebalance` is absorbed by the KIND `venture:actionItem` (this pack
+   declares no `rebalance` kind or synonym, and the test enforces that).
+4. **The clash rules are declared where the classifier reads them** — every
+   kind carries `synonyms` / `examples` (classifier) and `nearMisses` (rerank),
+   so ambiguity is resolved in the manifest rather than by minting a kind.
+5. **Core extraction is unchanged with the pack OFF** — and the UNGATED path
+   is measured too, because it is a different path: a graph with no
+   `:PackInstall` records gets the catalog union (#2714/#5163), so the pack IS
+   there. The gated half is compared against a packs dir with this pack
+   REMOVED (value brief, kind-index spec, cache key); the ungated half asserts
+   that stripping this pack's own contributions leaves exactly the gated
+   compile — the pack adds entries and modifies nobody's.
+6. **Each new kind is mintable on a fresh graph**, and the declared
+   `values` declaration reaches the extraction prompt.
 
-Note on the lifecycle bullet: the value test reads "owns a closed `statuses`
-lifecycle WITH a declared `folds`". No kind in this pack claims that bullet —
-the two Objects own a lifecycle but declare no fold (no event would drive
-draft→adopted→breached→retired; inventing one to satisfy the bullet is the
-mechanism-invention the value test exists to stop), and `valuationMark` is an
-Event, which carries no state at all. Every kind therefore passes a DIFFERENT
-bullet, asserted below.
+Docker lane (default): TORTOISE_DB_URI must be set (epic #1647 P4).
 """
 from __future__ import annotations
 
 import os
 import shutil
-import subprocess
 import sys
 from pathlib import Path
+from typing import ClassVar
 from urllib.parse import urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest  # noqa: I001
+import pytest
 import yaml
 
 from tests._live_utils import LIVE_URI_SKIP_REASON
 from tortoise import extractor_v2 as v2
 from tortoise.kind_index import cache_key_for
 from tortoise.pack_registry import (
-    CORE_KINDS,
+    CANONICAL_POINT_KINDS,
     PackRegistry,
     default_packs_dir,
 )
-from tortoise.pack_state import DEFAULT_STARTER_PACKS, ensure_tenant_packs
+from tortoise.pack_values import declared_value_fields
 from tortoise.sdk import TortoiseSDK
-from tortoise.value_extractor import (
-    compile_kind_index_spec,
-    compile_value_brief,
-)
+from tortoise.value_extractor import compile_kind_index_spec, compile_value_brief
 
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-REPO_PACKS_DIR = REPO_ROOT / "packs"
+REPO_PACKS_DIR = Path(__file__).resolve().parents[1] / "packs"
 PACK_DIR = REPO_PACKS_DIR / "investment-portfolio-manager"
-MANIFEST_PATH = PACK_DIR / "manifest.yaml"
-RAW = yaml.safe_load(MANIFEST_PATH.read_text())
-VENTURE_RAW = yaml.safe_load(
-    (REPO_PACKS_DIR / "venture" / "manifest.yaml").read_text())
+MANIFEST = PACK_DIR / "manifest.yaml"
+RAW = yaml.safe_load(MANIFEST.read_text())
 
 NS = "portfolio"
+
+#: The approved kind set. Objects hold state; the mark is a dated occurrence.
 EXPECTED_OBJECT_KINDS = frozenset({"mandate", "allocationTarget"})
 EXPECTED_EVENT_KINDS = frozenset({"valuationMark"})
-EXPECTED_NAMESPACES = frozenset({
-    "agent-ops", "dev", "marketing", "pm", "portfolio", "product-strategy",
-    "venture",
-})
-POSITION = "venture:investment"
 
-#: The names this pack must NOT declare: each is either the position itself
-#: (a rename), a claim (a Point), or a label the value test rejects.
-REJECTED_KIND_NAMES = frozenset({
-    "investment", "holding", "valuation", "thesis", "view", "hypothesis",
-    "benchmark", "rebalance",
-})
+#: The value test (#9663), one bullet per admitted kind:
+#:   1 = closed `statuses` lifecycle WITH a declared `folds`
+#:   2 = declares a `values` shape
+#:   3 = a step in a declared `chains` path
+#:   4 = an endpoint of a declared relation carrying a `mechanism`
+#: Every admitted kind names the bullet its admission RESTS on. It may pass
+#: others (allocationTarget also ends a relation) — the named one is why it is a
+#: kind and not a synonym.
+VALUE_TEST = {
+    "mandate": 4,
+    "allocationTarget": 2,
+    "valuationMark": 4,
+}
 
-
-def _pack_kind_names(raw: dict) -> set[str]:
-    ont = raw.get("ontology", {}) or {}
-    out: set[str] = set()
-    for field in ("objectKinds", "eventKinds", "pointKinds", "documentKinds",
-                  "actionKinds"):
-        out.update(ont.get(field) or [])
-    return out
-
-
-VENTURE_KIND_NAMES = _pack_kind_names(VENTURE_RAW)
-
-
-def _value_test_bullets(kind: str) -> set[str]:
-    """Re-derive #9663's value test for ``kind`` from the manifest.
-
-    Returns the subset of the four admitted bullets the manifest actually
-    satisfies — nothing is restated here, so a manifest edit that adds or drops
-    a declaration changes this verdict.
-    """
-    ont = RAW["ontology"]
-    spec = (ont.get("kindDefs") or {}).get(kind) or {}
-    bullets: set[str] = set()
-    # (1) a closed lifecycle WITH declared folds. `folds` is required by the
-    # bullet as written, so a lifecycle alone does not pass it.
-    if spec.get("statuses") and spec.get("folds"):
-        bullets.add("lifecycle_with_folds")
-    # (2) a declared value shape.
-    if spec.get("values"):
-        bullets.add("values_shape")
-    # (3) a step in a declared chain.
-    steps = {s for c in (ont.get("chains") or []) for s in (c.get("steps") or [])}
-    if kind in steps:
-        bullets.add("chain_step")
-    # (4) an endpoint of a declared relation carrying a mechanism. Relation
-    # endpoints are NAMESPACED, so the bare kind name is compared prefixed —
-    # a bare comparison would silently report no endpoint for every kind.
-    full = f"{NS}:{kind}"
-    for rel in ont.get("relations") or []:
-        if full not in (rel.get("fromKind"), rel.get("toKind")):
-            continue
-        if rel.get("mechanism"):
-            bullets.add("relation_endpoint")
-            break
-    return bullets
+#: Candidates #9663 examined and the test PRUNED, with the home that absorbs the
+#: mention. A rejected candidate that names no home is a concept with nowhere to
+#: land, which is how a "drop it" becomes an extraction hole. The home is either
+#: a `synonyms` entry on an existing kind (`benchmark`), a KIND the mention
+#: resolves to (`rebalance` → venture's action item; `thesis` → the core Point
+#: kind) — and the third field says which shape, so the test can enforce the
+#: right one instead of accepting a synonym list that never names the candidate.
+REJECTED = {
+    "thesis": ("core point", "statement"),
+    "benchmark": ("synonyms", "allocationTarget"),
+    "rebalance": ("kind", "venture:actionItem"),
+}
 
 
 def _server_uri_set() -> bool:
@@ -162,8 +110,8 @@ requires_db = pytest.mark.skipif(not _server_uri_set(), reason=LIVE_URI_SKIP_REA
 def registry() -> PackRegistry:
     r = PackRegistry(default_packs_dir())
     n = r.load_all()
-    assert n == len(EXPECTED_NAMESPACES), (
-        f"expected {len(EXPECTED_NAMESPACES)} packs, got {n}: {r.errors}")
+    assert n == len(list(REPO_PACKS_DIR.glob("*/manifest.yaml"))) - 1, (
+        f"every catalog dir except _template must load, got {n}: {r.errors}")
     assert not r.errors, f"whole-registry compile must be clean: {r.errors}"
     return r
 
@@ -173,712 +121,14 @@ def pack(registry: PackRegistry):
     return registry.get_pack(NS)
 
 
-# ══════════════════════════════════════════════════════════════════════════
-# 1. Overlay shape — an overlay ADDS, it never renames
-# ══════════════════════════════════════════════════════════════════════════
+@pytest.fixture(scope="module")
+def venture(registry: PackRegistry):
+    return registry.get_pack("venture")
 
-class TestOverlayShape:
-
-    def test_pack_identity(self, pack):
-        assert pack.namespace == NS
-        assert pack.version == "0.1.0"
-        assert pack.tier == "free"
-
-    def test_declares_the_base_pack_as_a_dependency(self):
-        """#2781: the cross-pack references below are only survivable because
-        the dependency is DECLARED — that declaration is what turns an absent
-        `venture` into a named gap instead of an isolation."""
-        assert RAW["depends_on"] == ["venture"]
-
-    def test_registry_compiles_clean_and_keeps_every_pack(self, registry):
-        assert set(registry.packs) == set(EXPECTED_NAMESPACES)
-        assert not registry.errors
-
-    def test_kind_buckets_are_exactly_the_admitted_set(self, pack):
-        assert set(pack.object_kinds) == EXPECTED_OBJECT_KINDS
-        assert set(pack.event_kinds) == EXPECTED_EVENT_KINDS
-        assert set(pack.point_kinds) == set()
-        assert set(pack.document_kinds) == set()
-        assert set(pack.action_kinds) == set()
-
-    def test_objects_and_events_are_disjoint(self, pack):
-        assert not (set(pack.object_kinds) & set(pack.event_kinds))
-
-    def test_no_kind_renames_the_portfolio_position(self, pack):
-        """The failure #9663 exists to prevent: a second home for one concept.
-
-        FAIL-ON: the pack declares `investment`/`holding` (or any other name
-        `venture` already owns) as its OWN kind, so every later reader has to
-        know two spellings for the position.
-        REACHABLE: `venture` really does declare the position (`investment` is
-        in the sibling's objectKinds), so the intersection being empty is an
-        observation about this pack, not about an empty set.
-        """
-        assert "investment" in VENTURE_KIND_NAMES
-        assert "investment" in VENTURE_RAW["ontology"]["kindDefs"]
-        own = _pack_kind_names(RAW)
-        assert not (own & VENTURE_KIND_NAMES), own & VENTURE_KIND_NAMES
-        assert not (own & REJECTED_KIND_NAMES), own & REJECTED_KIND_NAMES
-
-    def test_every_cross_pack_kind_reference_is_namespaced(self):
-        """`venture:investment`, never a bare `investment` — the issue's lever 1.
-
-        FAIL-ON: a cross-pack nearMiss is written bare, which reads as a
-        reference to this pack's own vocabulary (or, worse, invites re-declaring
-        the kind so the bare name resolves).
-        """
-        refs = []
-        for kind, spec in (RAW["ontology"].get("kindDefs") or {}).items():
-            refs.extend(spec.get("nearMisses") or [])
-        cross = [r for r in refs if r.split(":", 1)[-1] in VENTURE_KIND_NAMES]
-        assert cross, "fixture: at least one cross-pack nearMiss must exist"
-        # A bare name that happens to BE a venture kind is the failure; a
-        # `venture:`-prefixed one is the contract.
-        assert [r for r in cross if ":" not in r] == [], (
-            "cross-pack kind references must be namespaced: "
-            f"{[r for r in cross if ':' not in r]}")
-        assert set(cross) == {
-            "venture:condition", "venture:investment", "venture:disbursement",
-        }
-
-    def test_relation_endpoints_point_at_this_pack_or_the_declared_base(
-            self, registry):
-        """Every endpoint RESOLVES, and the cross-pack ones resolve into the
-        pack named in `depends_on` (not into a third pack by accident)."""
-        local = _pack_kind_names(RAW)
-        for rel in RAW["ontology"]["relations"]:
-            for side in ("fromKind", "toKind"):
-                ref = rel[side]
-                assert ref.startswith(f"{NS}:") or ref.startswith("venture:"), ref
-                if ref.startswith(f"{NS}:"):
-                    assert ref.split(":", 1)[1] in local, ref
-        # zero errors == every ref resolved (the registry's own verdict)
-        assert not registry.errors
-
-    def test_the_pack_is_not_a_starter(self):
-        """An overlay that auto-installs would put its vocabulary into every
-        graph's prompt — the choice `venture` also makes."""
-        assert NS not in DEFAULT_STARTER_PACKS
-
-    def test_no_chain_is_declared(self):
-        """A pack-declared chain outside `extractor_v2.CHAINS` reaches no
-        prompt (`master["chains"]` is built from that constant on every path),
-        so declaring one would be inert. The absence is the decision, pinned so
-        a later "add the flow" edit has to face `CHAINS` first."""
-        assert (RAW["ontology"].get("chains") or []) == []
-        assert "portfolioReviewFlow" not in v2.CHAINS
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# 2. The value test — re-derived from the manifest, per kind
-# ══════════════════════════════════════════════════════════════════════════
-
-class TestValueTest:
-
-    def test_every_declared_kind_passes_at_least_one_bullet(self):
-        """No kind rides in on prose. A kind that fails all four belongs in a
-        `synonyms` entry instead."""
-        for kind in _pack_kind_names(RAW):
-            bullets = _value_test_bullets(kind)
-            assert bullets, f"kind '{kind}' passes none of the four bullets"
-
-    def test_each_kind_passes_exactly_the_bullets_it_earns(self):
-        assert _value_test_bullets("mandate") == {"relation_endpoint"}
-        assert _value_test_bullets("allocationTarget") == {
-            "values_shape", "relation_endpoint"}
-        assert _value_test_bullets("valuationMark") == {"relation_endpoint"}
-
-    def test_the_lifecycle_bullet_is_claimed_by_nobody(self):
-        """Both Objects own a lifecycle but declare no `folds`, and the mark is
-        an Event (stateless). Pinned so a future `folds` addition is a decision
-        recorded here, not a silent one — and so the test does not pretend the
-        lifecycle bullet carried a kind it did not."""
-        for kind in _pack_kind_names(RAW):
-            assert _value_test_bullets(kind) != {"lifecycle_with_folds"}, kind
-            assert "lifecycle_with_folds" not in _value_test_bullets(kind), kind
-        for kind in EXPECTED_OBJECT_KINDS:
-            assert RAW["ontology"]["kindDefs"][kind]["statuses"]
-            assert not RAW["ontology"]["kindDefs"][kind].get("folds")
-
-    def test_the_value_shape_is_the_percent_the_issue_asked_for(self):
-        values = RAW["ontology"]["kindDefs"]["allocationTarget"]["values"]
-        assert values == [{"name": "targetPct", "valueKind": "percent"}]
-
-    def test_rejected_candidates_are_not_declared(self):
-        own = _pack_kind_names(RAW)
-        assert not (own & REJECTED_KIND_NAMES)
-
-    def test_each_rejection_names_what_absorbed_it(self):
-        """The acceptance half: every rejected candidate says which `synonyms`
-        entry (or existing kind) absorbed it — and the absorption is REAL, not
-        a promise in a comment."""
-        header = MANIFEST_PATH.read_text()
-        # `benchmark` → a synonym on allocationTarget (a benchmark weight IS a
-        # target the allocation is measured against).
-        assert "benchmark" in header
-        assert "benchmark weight" in RAW["ontology"]["kindDefs"][
-            "allocationTarget"]["synonyms"]
-        # `rebalance` → `venture:actionItem` (a unit of work with an owner and
-        # a date). No new kind, and no synonym grafted onto a sibling's kind.
-        assert "rebalance" in header
-        assert "actionItem" in VENTURE_RAW["ontology"]["objectKinds"]
-        # `thesis` / `view` / `hypothesis` → the core `statement` Point.
-        assert "thesis" in header
-        assert "statement" in CORE_KINDS
-        # `valuation` (as an Object) → the `valuationMark` EVENT + the position.
-        assert "valuationMark" in own_of(RAW)
-        assert "valuation" not in own_of(RAW)
-
-    def test_the_header_records_all_four_bullets(self):
-        header = MANIFEST_PATH.read_text()
-        for phrase in ("owns a closed `statuses` lifecycle",
-                       "declares a `values` shape",
-                       "is a step in a declared `chains` path",
-                       "is an endpoint of a declared `relations` entry"):
-            assert phrase in header, phrase
-
-
-def own_of(raw: dict) -> set[str]:
-    return _pack_kind_names(raw)
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# 3. The clash rules — ambiguity is resolved in the manifest, not by a new kind
-# ══════════════════════════════════════════════════════════════════════════
-
-class TestClashRules:
-
-    def test_every_kind_carries_synonyms_examples_and_near_misses(self):
-        """`synonyms`/`examples` are what the classifier reads; `nearMisses` is
-        what the rerank reads. A kind missing any of the three leans on a
-        competing kind being declared instead — which is the thing this pack
-        must not do."""
-        for kind, spec in RAW["ontology"]["kindDefs"].items():
-            for field in ("synonyms", "examples", "nearMisses"):
-                assert spec.get(field), f"kindDefs '{kind}' has no {field}"
-
-    def test_the_near_misses_name_the_confusable_sibling(self):
-        kd = RAW["ontology"]["kindDefs"]
-        assert "allocationTarget" in kd["mandate"]["nearMisses"]
-        assert "venture:condition" in kd["mandate"]["nearMisses"]
-        assert POSITION in kd["allocationTarget"]["nearMisses"]
-        assert "mandate" in kd["allocationTarget"]["nearMisses"]
-        assert POSITION in kd["valuationMark"]["nearMisses"]
-        assert "venture:disbursement" in kd["valuationMark"]["nearMisses"]
-
-    def test_relation_near_misses_are_bare_and_resolved(self):
-        """Predicates are declared and matched BARE by contract (#2030), so a
-        relation near-miss target is bare too — a namespaced one would be a
-        typo, not a cross-pack gap. Both halves are asserted on the real
-        catalog: bare here, and resolved through `depends_on` when the sibling
-        is loaded (`registry.errors` is empty)."""
-        targets = []
-        for rel in RAW["ontology"]["relations"]:
-            for t in rel.get("nearMisses") or []:
-                assert ":" not in t, t
-                targets.append(t)
-        assert "gatedBy" in targets          # venture's predicate, bare
-        # Every relation declares its near-misses (the clash surface exists).
-        for rel in RAW["ontology"]["relations"]:
-            assert rel.get("nearMisses"), rel.get("predicate")
-            assert rel.get("mechanism") == "IMPL", rel.get("predicate")
-            assert rel.get("semantics"), rel.get("predicate")
-
-    def test_no_synonym_collides_with_a_venture_synonym(self):
-        """One synonym on two kinds is exactly the ambiguity an overlay must
-        remove: the classifier would face two candidates for one phrase. The
-        pack is disjoint from the base pack's synonym surface — checked in both
-        directions, case-insensitively."""
-        mine = {s.lower() for spec in RAW["ontology"]["kindDefs"].values()
-                for s in (spec.get("synonyms") or [])}
-        theirs = {s.lower() for spec in VENTURE_RAW["ontology"]["kindDefs"].values()
-                  for s in (spec.get("synonyms") or [])}
-        assert mine and theirs, "fixture: both packs must declare synonyms"
-        assert mine & theirs == set(), sorted(mine & theirs)
-
-    def test_no_synonym_is_another_kind_s_bare_name(self):
-        """A synonym that is literally a declared kind name ('investment') is a
-        rename wearing a synonym's clothes."""
-        mine = {s.lower() for spec in RAW["ontology"]["kindDefs"].values()
-                for s in (spec.get("synonyms") or [])}
-        assert not (mine & {k.lower() for k in VENTURE_KIND_NAMES})
-        assert not (mine & {k.lower() for k in _pack_kind_names(RAW)})
-
-    def test_the_brazilian_vocabulary_is_carried(self):
-        """`venture` carries pt-BR synonyms (`investida`, `edital`, …) and the
-        overlay follows the same convention — the domain is Brazilian."""
-        for kind in EXPECTED_OBJECT_KINDS:
-            syn = " ".join(RAW["ontology"]["kindDefs"][kind]["synonyms"]).lower()
-            assert any(word in syn for word in
-                       ("mandato", "política", "alocação", "peso-alvo",
-                        "meta de alocação")), kind
-        mark = " ".join(
-            RAW["ontology"]["kindDefs"]["valuationMark"]["synonyms"]).lower()
-        assert "marcação" in mark or "avaliação" in mark
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# 4. Core extraction unchanged with the pack OFF (the "doesn't disturb" proof)
-# ══════════════════════════════════════════════════════════════════════════
-
-@pytest.fixture
-def catalog_without_the_pack(tmp_path) -> Path:
-    """A full copy of the real catalog with ONLY this pack removed — the
-    control arm: everything else identical, so a difference cannot come from a
-    different catalogue."""
-    dest = tmp_path / "packs"
-    shutil.copytree(REPO_PACKS_DIR, dest)
-    shutil.rmtree(dest / PACK_DIR.name)
-    assert not (dest / PACK_DIR.name).exists()
-    return dest
-
-
-class TestExtractionWithThePackOff:
-
-    def test_the_brief_is_byte_identical_when_the_pack_is_not_installed(
-            self, catalog_without_the_pack):
-        """A graph that has not installed the overlay gets the SAME brief as a
-        catalog that does not contain it at all.
-
-        FAIL-ON: the overlay's kinds leak into the gated brief of a graph that
-        never installed it (a gate that only filters on the caller's side, or a
-        compile that reads the catalog regardless of `installed_namespaces`).
-        REACHABLE: the same compile WITH the namespace installed differs, and
-        differs exactly by this pack's kinds — so the equality is not a
-        comparison of two empty things.
-        """
-        gated = compile_value_brief(
-            REPO_PACKS_DIR,
-            installed_namespaces=frozenset(EXPECTED_NAMESPACES) - {NS})
-        control = compile_value_brief(catalog_without_the_pack)
-        assert gated == control
-        assert {k for k in control if k.startswith(f"{NS}:")} == set()
-
-        installed = compile_value_brief(
-            REPO_PACKS_DIR,
-            installed_namespaces=frozenset(EXPECTED_NAMESPACES))
-        assert {k for k in installed if k.startswith(f"{NS}:")} == {
-            f"{NS}:mandate", f"{NS}:allocationTarget", f"{NS}:valuationMark"}
-        assert set(installed) - set(control) == {
-            f"{NS}:mandate", f"{NS}:allocationTarget", f"{NS}:valuationMark"}
-
-    def test_the_kind_index_spec_and_its_cache_key_are_unchanged_when_off(
-            self, catalog_without_the_pack):
-        """The classifier's candidate set is what the gate protects, and
-        `cache_key_for` is its content hash — so an equal key is the strongest
-        statement that the pack changed nothing for a graph that did not install
-        it (no silent re-embed of the whole index).
-
-        FAIL-ON: a declared value field / kind reaches the index text (the
-        #2818 hazard) so the cache key rotates on install for EVERY graph.
-        REACHABLE: the installed spec's key differs, so an unchanged key is a
-        real observation.
-        """
-        gated = compile_kind_index_spec(
-            REPO_PACKS_DIR,
-            installed_namespaces=frozenset(EXPECTED_NAMESPACES) - {NS})
-        control = compile_kind_index_spec(catalog_without_the_pack)
-        assert gated == control
-        assert cache_key_for(gated) == cache_key_for(control)
-        assert f"{NS}:mandate" not in gated
-
-        installed = compile_kind_index_spec(
-            REPO_PACKS_DIR,
-            installed_namespaces=frozenset(EXPECTED_NAMESPACES))
-        assert f"{NS}:mandate" in installed
-        assert cache_key_for(installed) != cache_key_for(control)
-
-    def test_the_declared_value_is_invisible_to_the_kind_index(self):
-        """#2818: `values` is deliberately invisible to the classification
-        index (the spec is built from description/synonyms/examples/nearMisses
-        only), so a declaration cannot rotate the npz cache key by itself.
-
-        FAIL-ON: a `values` key reaches the spec entry, which `cache_key_for`
-        hashes — every install of this pack would re-embed the whole index.
-        REACHABLE: the entry IS present and carries the prose/synonyms that the
-        classifier uses, so the absent key is a real absence, not an empty
-        entry.
-        """
-        spec = compile_kind_index_spec(
-            REPO_PACKS_DIR, installed_namespaces=frozenset({NS, "venture"}))
-        entry = spec[f"{NS}:allocationTarget"]
-        assert set(entry) == {
-            "text", "section", "description", "synonyms", "examples",
-            "nearMisses"}, set(entry)
-        assert "allocation target" in entry["text"].lower()
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# 5. Wiring guards
-# ══════════════════════════════════════════════════════════════════════════
-
-class TestWiring:
-
-    def test_compact_mode_can_select_the_namespace(self):
-        """#5165: a shipped catalog namespace with no `_PACK_TRIGGERS` entry is
-        injected WHOLE in compact mode (fail-open). The row is what lets story
-        selection gate it — and it must fire on the pack's own words."""
-        assert f"{NS}:" in v2._PACK_TRIGGERS
-        triggers = v2._PACK_TRIGGERS[f"{NS}:"]
-        assert triggers and all(isinstance(t, str) and t for t in triggers)
-
-        pack_kinds = {"portfolio:mandate": "The constraints holdings respect",
-                      "venture:investment": "The fund's stake"}
-        # A portfolio-MANAGER story selects the overlay and NOT the base: the
-        # two namespaces have their own trigger rows, which is the point.
-        assert set(v2._select_pack_kinds(
-            "the mandate is breached: our allocation is off-target",
-            pack_kinds)) == {"portfolio:mandate"}
-        # A base-pack story selects the base on its own words.
-        assert set(v2._select_pack_kinds(
-            "the fund's stake in the grant tranche", pack_kinds)) == {
-                "venture:investment"}
-        # …and a story carrying both selects both.
-        assert set(v2._select_pack_kinds(
-            "the mandate caps the tranche", pack_kinds)) == {
-                "portfolio:mandate", "venture:investment"}
-        assert set(v2._select_pack_kinds(
-            "we shipped the ticket fix", pack_kinds)) == set(pack_kinds), (
-            "an unrelated story must fall OPEN (all kinds), never to a subset")
-
-    def test_the_kinds_reach_the_master_list_and_its_forms(self):
-        master = v2.build_master_list()
-        expected = {f"{NS}:{k}" for k in
-                    EXPECTED_OBJECT_KINDS | EXPECTED_EVENT_KINDS}
-        assert expected <= set(master["pack_kinds"])
-        assert expected <= v2.master_kind_forms(master)
-
-    def test_the_declared_value_reaches_the_prompt_when_it_IS_installed(self):
-        """The declaration is inert until installed — and then it is rendered
-        exactly once, as `[values: targetPct(percent)]`, with the policy block
-        that tells the model where to put the value."""
-        brief = compile_value_brief(
-            REPO_PACKS_DIR, installed_namespaces=frozenset({NS, "venture"}))
-        master = v2._build_master_from_brief(brief)
-        assert set(master["pack_values"]) == {f"{NS}:allocationTarget"}
-        rendered = v2._render_master_verbose(master)
-        assert f"{NS}:allocationTarget" in rendered
-        assert "[values: targetPct(percent)]" in rendered
-        rules = v2._s2s4_rules(master)
-        assert "KIND VALUE FIELDS" in rules
-        # POLICY, never vocabulary (the rule must not name the kind or field).
-        assert "allocationTarget" not in rules and "targetPct" not in rules
-
-    def test_the_overlay_contributes_no_chain_completeness_noise(self):
-        """Portfolio review is normal without a mark, and a mandate without a
-        target: the completeness contract ('first emitted step requires the
-        next') would fire on ordinary captures, so this pack declares no chain
-        and must not appear in the notes."""
-        notes = v2.validate_chain_completeness({
-            "entities": [{"kind": "portfolio:mandate"},
-                         {"kind": "portfolio:allocationTarget"},
-                         {"kind": "portfolio:valuationMark"}]})
-        assert [n for n in notes if n["chain"].startswith(NS)] == []
-
-    def test_dropping_venture_does_not_drop_the_overlay(self):
-        """#2781 at the catalog level for THIS pack: with the base pack absent
-        the overlay's manifest is still valid, so it stays loaded and every
-        reference into `venture` is REPORTED by name."""
-        r = PackRegistry(REPO_PACKS_DIR)
-        # Simulate the absent base pack by loading a copy that lacks it.
-        import tempfile
-        with tempfile.TemporaryDirectory() as td:
-            dest = Path(td) / "packs"
-            shutil.copytree(REPO_PACKS_DIR, dest)
-            shutil.rmtree(dest / "venture")
-            r = PackRegistry(dest)
-            n = r.load_all()
-        assert n == len(EXPECTED_NAMESPACES) - 1
-        assert NS in r.packs, "the overlay must stay loaded without its base"
-        assert not r.errors, r.errors
-        gaps = r.unresolved_refs.get(NS) or []
-        assert gaps, "the missing base pack must be reported against this pack"
-        assert any("depends_on" in g and "'venture'" in g for g in gaps), gaps
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# 6. The two engine gaps this pack forced
-# ══════════════════════════════════════════════════════════════════════════
-
-def _manifest(**over) -> dict:
-    raw = {
-        "namespace": "dev",
-        "name": "Development",
-        "ontology": {"extends": "core", "objectKinds": ["issue"]},
-    }
-    raw.update(over)
-    return raw
-
-
-def _write_pack(root: Path, raw: dict) -> None:
-    d = root / raw["namespace"]
-    d.mkdir(parents=True, exist_ok=True)
-    (d / "manifest.yaml").write_text(yaml.dump(raw))
-
-
-class TestRelationNearMissesGoThroughTheMissingPeerGate:
-    """#9663: relation `nearMisses` was the ONE cross-pack site that never got
-    the #2781 missing-peer gate. A pack naming a SIBLING pack's predicate as its
-    near-miss (the documented, cheap way to disambiguate vocabulary) was
-    isolated when that sibling was not installed — measured on the real pack:
-    dropping `venture` produced 2 fatal errors and dropped `portfolio`."""
-
-    def test_a_sibling_pack_s_predicate_is_reported_not_fatal(self, tmp_path):
-        root = tmp_path / "packs"
-        _write_pack(root, _manifest(
-            depends_on=["venture"],
-            ontology={
-                "extends": "core",
-                "objectKinds": ["issue"],
-                "relations": [{
-                    "predicate": "addresses",
-                    "fromKind": "dev:issue",
-                    "toKind": "dev:issue",
-                    "mechanism": "IMPL",
-                    # `gatedBy` is declared by the (absent) sibling — bare, as
-                    # predicates are matched by contract.
-                    "nearMisses": ["gatedBy"],
-                }],
-            },
-        ))
-        r = PackRegistry(root)
-        assert r.load_all() == 1, "a missing PEER must not isolate the pack"
-        assert not r.errors, r.errors
-        gaps = r.unresolved_refs.get("dev") or []
-        assert any("nearMisses target 'gatedBy'" in g for g in gaps), gaps
-
-    def test_a_typo_stays_fatal(self, tmp_path):
-        """The gate must not weaken the typo guard: with a COMPLETE dependency
-        set (none declared), an unresolvable target is still an isolation."""
-        root = tmp_path / "packs"
-        _write_pack(root, _manifest(
-            ontology={
-                "extends": "core",
-                "objectKinds": ["issue"],
-                "relations": [{
-                    "predicate": "addresses",
-                    "fromKind": "dev:issue",
-                    "toKind": "dev:issue",
-                    "mechanism": "IMPL",
-                    "nearMisses": ["noSuchPredicate"],
-                }],
-            },
-        ))
-        r = PackRegistry(root)
-        assert r.load_all() == 0
-        assert any("nearMisses target 'noSuchPredicate'" in e
-                   for e in r.errors.get("dev", [])), r.errors
-
-    def test_the_survivable_gap_names_the_predicate_universe(self, tmp_path):
-        """The `kind=` rewording must reach the SURVIVABLE branch (#9663).
-
-        This is the branch the `kind=` parameter exists for, and the only one
-        it can change: the FATAL branch's text is identical either way. A pack
-        that declares an absent `depends_on` peer routes its unresolvable
-        near-miss through `unresolved_refs`, and the gap must still name
-        predicates + semantics, never "any known kind".
-
-        Fails on the pre-#9663 code in two independent ways: the reference was
-        appended straight to `errors` (so the pack was ISOLATED, `load_all()
-        == 0`), and the wording there was a hardcoded predicate sentence that
-        `kind=` cannot reach.
-        """
-        root = tmp_path / "packs"
-        _write_pack(root, _manifest(
-            depends_on=["venture"],
-            ontology={
-                "extends": "core",
-                "objectKinds": ["issue"],
-                "relations": [{
-                    "predicate": "addresses",
-                    "fromKind": "dev:issue",
-                    "toKind": "dev:issue",
-                    "mechanism": "IMPL",
-                    "nearMisses": ["gatedBy"],  # a predicate `venture` declares
-                }],
-            },
-        ))
-        r = PackRegistry(root)
-        assert r.load_all() == 1, r.errors
-        gaps = r.unresolved_refs.get("dev") or []
-        msg = " ".join(gaps)
-        assert "any declared predicate or semantics value" in msg, msg
-        assert "any known kind" not in msg, msg
-
-    def test_the_fatal_message_names_the_predicate_universe(self, tmp_path):
-        """Regression guard for the FATAL branch's wording.
-
-        This branch reads identically before and after #9663 (the pre-fix code
-        hardcoded the same predicate sentence), so it proves nothing about the
-        `kind=` parameter — `test_the_survivable_gap_names_the_predicate_universe`
-        above is that pin. Kept because the fatal string is what an operator
-        sees when a typo isolates a pack, and it must not drift to "kind".
-        """
-        root = tmp_path / "packs"
-        _write_pack(root, _manifest(
-            ontology={
-                "extends": "core",
-                "objectKinds": ["issue"],
-                "relations": [{
-                    "predicate": "addresses",
-                    "fromKind": "dev:issue",
-                    "toKind": "dev:issue",
-                    "mechanism": "IMPL",
-                    "nearMisses": ["noSuchPredicate"],
-                }],
-            },
-        ))
-        r = PackRegistry(root)
-        assert r.load_all() == 0
-        msg = " ".join(r.errors.get("dev", []))
-        assert "any declared predicate or semantics value" in msg, msg
-        assert "any known kind" not in msg, msg
-
-    def test_a_namespaced_near_miss_is_fatal_even_without_the_sibling(
-            self, tmp_path):
-        """A namespaced `nearMisses` target is a typo in EVERY catalog.
-
-        Predicates are declared and matched BARE by contract (#2030), so
-        `venture:holds` is not a predicate reference at all — the pack's own
-        manifest says so. It must therefore never be explained away as a
-        missing peer: with the #2781 gate applied uniformly (this PR's head
-        before the `bare_only` guard) the absent `venture` made
-        `_missing_pack_explanation` return "install pack 'venture'", the ref
-        became a SURVIVABLE gap, `load_all()` returned 1, and `pack validate`
-        (which never reads `unresolved_refs`) printed `✓ Clean` — advice no
-        installation can satisfy. Verified to fail on that intermediate state
-        and to pass on `origin/main`, which was fatal for the trivial reason
-        that it gated nothing.
-        """
-        root = tmp_path / "packs"
-        _write_pack(root, _manifest(
-            depends_on=["venture"],
-            ontology={
-                "extends": "core",
-                "objectKinds": ["issue"],
-                "relations": [{
-                    "predicate": "addresses",
-                    "fromKind": "dev:issue",
-                    "toKind": "dev:issue",
-                    "mechanism": "IMPL",
-                    "nearMisses": ["venture:holds"],
-                }],
-            },
-        ))
-        r = PackRegistry(root)
-        assert r.load_all() == 0, (
-            "a namespaced predicate target must isolate the pack, not become "
-            f"a survivable gap: {r.unresolved_refs}")
-        msg = " ".join(r.errors.get("dev", []))
-        assert "nearMisses target 'venture:holds'" in msg, msg
-        assert "is not loaded" not in msg, msg  # never the missing-peer advice
-        assert not r.unresolved_refs.get("dev"), r.unresolved_refs
-
-
-class TestPackValidateCLI:
-    """The acceptance command, and the FALSE GREEN #9663 exposed in it."""
-
-    def _run(self, *argv: str) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            [sys.executable, "-m", "tortoise", "pack", "validate", *argv],
-            capture_output=True, text=True, cwd=str(REPO_ROOT), timeout=180)
-
-    def test_the_pack_validates_clean(self):
-        r = self._run(str(PACK_DIR))
-        out = r.stdout + r.stderr
-        assert r.returncode == 0, out
-        assert f"✓ {NS}" in out
-        assert "Clean" in out
-        # #2766: every relation's write path is reported, not assumed.
-        assert f"{NS}.constrainedBy" in out
-        assert f"{NS}.boundedBy" in out
-        assert f"{NS}.marks" in out
-
-    def test_json_carries_the_relation_verdicts(self):
-        import json
-        r = self._run(str(PACK_DIR), "--json")
-        assert r.returncode == 0, r.stderr
-        payload = json.loads(r.stdout)
-        assert payload["ok"] is True
-        assert NS in payload["loaded"]
-        mine = [x for x in payload["relation_verdicts"]["relations"]
-                if x["pack"] == NS]
-        assert {x["predicate"] for x in mine} == {
-            "constrainedBy", "boundedBy", "marks"}
-        assert all(x["write_verdict"] == "writable" for x in mine), mine
-
-    def test_a_broken_pack_whose_dir_is_not_its_namespace_is_not_a_false_green(
-            self, tmp_path):
-        """⭐ The fail-open gate: `tortoise pack validate` filtered the
-        registry's errors by `ns == <directory name>`, but the registry keys
-        them by the MANIFEST namespace — so for every pack whose directory name
-        differs (`packs/project-management` → `pm`,
-        `packs/investment-portfolio-manager` → `portfolio`) the command printed
-        `✓ Clean` and exited 0 while the pack had been ISOLATED.
-
-        FAIL-ON: the filter compares the directory name only — the measured
-        pre-fix output for this tree was `1 pack(s) failed validation and were
-        isolated: portfolio` followed by `✓ Clean — pack(s) validate`, exit 0.
-        REACHABLE: the same tree prints `✗ portfolio:` and exits 1 once the
-        declared namespace is matched, and the CONTROL run on the clean pack in
-        the same tree exits 0.
-        """
-        dest = tmp_path / "packs"
-        shutil.copytree(REPO_PACKS_DIR, dest)
-        target = dest / PACK_DIR.name
-        broken = (target / "manifest.yaml").read_text().replace(
-            "      - venture:condition", "      - venture:conditon")
-        (target / "manifest.yaml").write_text(broken)
-
-        r = self._run(str(target))
-        out = r.stdout + r.stderr
-        assert r.returncode == 1, out
-        assert f"✗ {NS}" in out, out
-        assert "Clean" not in out
-        assert "venture:conditon" in out
-
-        # CONTROL: the untouched pack in the same tree still validates clean,
-        # so the failure above is the injected typo and not a broken command.
-        shutil.copyfile(MANIFEST_PATH, target / "manifest.yaml")
-        ok = self._run(str(target))
-        assert ok.returncode == 0, ok.stdout + ok.stderr
-
-    def test_a_broken_pack_is_reported_when_the_PACKS_DIR_is_the_target(
-            self, tmp_path):
-        """The parent-directory mode ("validate every pack") filtered the SAME
-        way, one level up: no manifest lives at the target, so the
-        directory-name leg could never match a namespace whose directory is
-        named differently (`pm`, `portfolio`) and the command printed
-        `✓ Clean` over an isolation.
-
-        FAIL-ON: the filter also runs on this leg. REACHABLE: the clean pack in
-        the same tree passes when it is the target, so the failure is the
-        injected typo.
-        """
-        dest = tmp_path / "packs"
-        shutil.copytree(REPO_PACKS_DIR, dest)
-        manifest = dest / PACK_DIR.name / "manifest.yaml"
-        manifest.write_text(manifest.read_text().replace(
-            "      - venture:condition", "      - venture:conditon"))
-
-        r = self._run(str(dest))
-        out = r.stdout + r.stderr
-        assert r.returncode == 1, out
-        assert f"✗ {NS}" in out, out
-        assert "venture:conditon" in out
-
-        # CONTROL: the untouched catalog as a parent-directory target is clean.
-        shutil.copyfile(MANIFEST_PATH, manifest)
-        ok = self._run(str(dest))
-        assert ok.returncode == 0, ok.stdout + ok.stderr
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# 7. Write doors: install on a fresh graph, mint every kind, validate_domain
-# ══════════════════════════════════════════════════════════════════════════
 
 @pytest.fixture
 def sdk(tmp_path, force_sparse_tfidf):
+    """A fresh graph per test."""
     s = TortoiseSDK(db_path=str(tmp_path / "portfolio.db"),
                     namespace=f"test_portfolio_{os.urandom(4).hex()}")
     try:
@@ -887,55 +137,911 @@ def sdk(tmp_path, force_sparse_tfidf):
         s.close()
 
 
-@requires_db
-class TestInstallAndMint:
+def _portfolio_synonyms(pack) -> set[str]:
+    """Every `synonyms` entry THIS pack declares, across all its kinds."""
+    return {
+        word
+        for spec in pack.kind_defs.values()
+        for word in spec.get("synonyms", [])
+    }
 
+
+def _passes_bullets(kind: str, spec: dict, manifest) -> set[int]:
+    """The value-test bullets ONE kind actually passes, derived from the manifest.
+
+    Deliberately re-derived rather than read from a comment: the manifest's
+    justification prose is not evidence, the declarations are.
+    """
+    passed: set[int] = set()
+    if spec.get("statuses") and spec.get("folds"):
+        passed.add(1)
+    if spec.get("values"):
+        passed.add(2)
+    chain_steps = {
+        str(step).rsplit(":", 1)[-1]
+        for chain in (manifest.chains or [])
+        for step in (chain.get("steps") or [])
+    }
+    if kind in chain_steps:
+        passed.add(3)
+    for rel in manifest.relations:
+        if rel.get("mechanism") not in ("IMPL", "NAND"):
+            continue
+        ends = {
+            str(rel.get("fromKind", "")).rsplit(":", 1)[-1],
+            str(rel.get("toKind", "")).rsplit(":", 1)[-1],
+        }
+        if kind in ends:
+            passed.add(4)
+    return passed
+
+
+# ── 1. The pack loads, and it is an OVERLAY ───────────────────────────────
+
+
+class TestManifestAndOverlayShape:
+    def test_manifest_validates_clean_in_the_whole_catalog(self, registry, pack):
+        assert pack is not None, "portfolio pack must load"
+        assert not registry.errors
+        assert pack.namespace == NS
+        assert pack.name == "Investment Portfolio Manager"
+        assert pack.version == "0.1.0"
+        assert pack.tier == "free"
+
+    def test_it_declares_its_venture_dependency(self, pack):
+        """#2781: the cross-pack references are DECLARED, so an absent `venture`
+        is reported against this pack instead of isolating it."""
+        assert list(pack.depends_on) == ["venture"]
+
+    def test_it_survives_an_absent_venture_and_names_it(self, tmp_path):
+        """The #2781 promise the declaration makes, ASSERTED (a declaration that
+        is never exercised is a comment).
+
+        This pack names two of venture's own predicates as relation
+        `nearMisses` (`gatedBy`, `producedBy`), so it is the first shipped pack
+        to depend on relation `nearMisses` resolution going through the same
+        missing-peer gate the relation ENDPOINTS use. Before that routing it was
+        DROPPED with no diagnostic naming the pack to install. The unit-level
+        pin for the registry rule is in tests/test_pack_registry_gaps.py.
+        """
+        dst = tmp_path / "packs"
+        shutil.copytree(REPO_PACKS_DIR, dst)
+        shutil.rmtree(dst / "venture")
+
+        reg = PackRegistry(dst)
+        reg.load_all()
+        assert NS in reg.packs, f"a missing peer must not isolate the pack: {reg.errors}"
+        assert NS not in reg.errors, reg.errors
+        msgs = " ".join(reg.unresolved_refs.get(NS, []))
+        assert "venture" in msgs and "not loaded" in msgs, msgs
+
+    def test_kind_buckets_are_exactly_the_approved_set(self, pack):
+        assert set(pack.object_kinds) == EXPECTED_OBJECT_KINDS
+        assert set(pack.event_kinds) == EXPECTED_EVENT_KINDS
+        assert not pack.point_kinds, (
+            "a claim is a core Point (statement), never a pack pointKind")
+
+    def test_state_lives_on_objects_and_events_carry_none(self, pack):
+        for kind in pack.object_kinds:
+            assert pack.store_as(kind) == "entity", kind
+        for kind in pack.event_kinds:
+            assert pack.store_as(kind) == "event", kind
+        # The mark is an occurrence, so it declares no lifecycle: state would
+        # have to move onto an Object, and the position's belongs to venture.
+        assert "statuses" not in pack.kind_defs["valuationMark"]
+
+    def test_the_pack_renames_nothing_venture_already_models(
+            self, pack, venture):
+        """⛔ The outcome #9663 exists to avoid: one concept, two homes."""
+        assert not pack.kind_equivalences, (
+            "no equivalentTo: this pack is not the same bare name under a "
+            "second namespace")
+        # No declared kind collides with a venture kind — the overlay adds
+        # vocabulary, it does not restate the position/programme/asset.
+        assert not (set(pack.object_kinds) | set(pack.event_kinds)) & (
+            set(venture.object_kinds) | set(venture.event_kinds))
+
+    def test_every_reference_to_the_position_is_namespaced(self, pack):
+        """`venture:investment` — never bare (the issue's lever 1)."""
+        endpoints = set()
+        for rel in pack.relations:
+            endpoints.add(rel.get("fromKind"))
+            endpoints.add(rel.get("toKind"))
+        assert "venture:investment" in endpoints
+        # No bare `investment` endpoint: a bare ref resolves by accident of
+        # load order, which is exactly the ambiguity this manifest removes.
+        assert "investment" not in endpoints
+        for kind, spec in pack.kind_defs.items():
+            assert "investment" not in (spec.get("nearMisses") or []), kind
+            assert "venture:investment" in (spec.get("nearMisses") or [
+            ]) or kind == "valuationMark", kind
+
+
+# ── 2. The value test — computed, not claimed ─────────────────────────────
+
+
+class TestValueTest:
+    def test_every_admitted_kind_passes_the_bullet_it_claims(self, pack):
+        for kind, bullet in VALUE_TEST.items():
+            spec = pack.kind_defs[kind]
+            passed = _passes_bullets(kind, spec, pack)
+            assert bullet in passed, (
+                f"{NS}:{kind} claims value-test bullet ({bullet}) but the "
+                f"manifest passes {sorted(passed) or 'none'} — an admission "
+                f"with no shape behind it belongs in a synonym, not a kind")
+
+    def test_no_kind_is_admitted_without_passing_a_bullet(self, pack):
+        declared = set(pack.object_kinds) | set(pack.event_kinds)
+        assert declared == set(VALUE_TEST), (
+            "every declared kind must be named in VALUE_TEST with the bullet "
+            "its admission rests on")
+        for kind in declared:
+            assert _passes_bullets(kind, pack.kind_defs[kind], pack), (
+                f"{NS}:{kind} passes no value-test bullet at all")
+
+    def test_allocationTarget_declares_the_percent_shape(self, pack):
+        """Bullet (2), concretely: `is this within mandate?` gets a SHAPE."""
+        values = declared_value_fields(pack.kind_defs["allocationTarget"])
+        assert values == [{
+            "name": "targetPct",
+            "valueKind": "percent",
+            "required": True,
+            "cardinality": "one",
+        }]
+
+    def test_relation_mechanisms_bind_a_write_path(self, pack):
+        """Bullet (4) means a DECLARED mechanism, not a declaration-only edge
+        (#2766): a relation that binds no write path is not an admission."""
+        from tortoise.pack_registry import RELATION_WRITABLE, relation_write_verdict
+
+        for rel in pack.relations:
+            verdict, paths = relation_write_verdict(rel)
+            assert verdict == RELATION_WRITABLE, (rel["predicate"], verdict)
+            assert paths
+
+    def test_no_chain_is_declared_because_none_would_reach_a_prompt(self, pack):
+        """`master["chains"]` is built from `extractor_v2.CHAINS`, so a chain
+        declared here would reach no prompt. The pack says so instead of
+        shipping a declaration that does nothing."""
+        assert not pack.chains
+
+    def test_kind_descriptions_are_extractor_prose_not_review_bookkeeping(
+            self, pack):
+        """`description` is PROMPT TEXT, not a comment (issue #9663).
+
+        Three consumers read it verbatim: `value_extractor` carries it into the
+        value brief, `_build_master_from_brief` puts it in `pack_kinds`, and
+        `_render_master_verbose`/the compact render emit
+        ``- {kind} — {description}`` into the S2/S4 classification prompt
+        (`compile_kind_index_spec` embeds it too). So review bookkeeping in a
+        description ships into EVERY extraction on the catalog-union path
+        (#2714/#5163 — every graph with no `:PackInstall` records), and it is
+        the one place this pack's design rationale must NOT live: the rationale
+        belongs in YAML comments, which do not ship.
+
+        Both halves are pinned — the junk marker is absent, and the prose that
+        the extractor actually needs is still there (a fix that deleted the
+        kind's description outright would pass the first assertion alone).
+        """
+        for kind, spec in pack.kind_defs.items():
+            description = spec.get("description") or ""
+            assert "[" not in description and "value test" not in description, (
+                f"{NS}:{kind}'s description carries review bookkeeping; it is "
+                f"rendered into every extraction prompt — move it to the "
+                f"manifest's comment header: {description!r}")
+            assert description.strip(), (
+                f"{NS}:{kind} ships no description — the extractor prompt "
+                f"renders it as the kind's only disambiguation prose")
+        # The extractor-facing disambiguation this pack NEEDS is extractor prose
+        # and must survive the move (`test_benchmark_is_absorbed_only_with_a_
+        # weight` pins the same sentence from the declaration side).
+        assert "bare benchmark LABEL" in (
+            pack.kind_defs["allocationTarget"]["description"])
+
+    # ── rejected candidates ───────────────────────────────────────────────
+
+    def test_thesis_is_a_core_point_not_a_kind(self, pack):
+        home, ref = REJECTED["thesis"]
+        assert home == "core point" and ref in CANONICAL_POINT_KINDS
+        assert "thesis" not in pack.kind_defs
+        assert not pack.point_kinds
+        # …and no synonym list here quietly claims it either.
+        assert "thesis" not in _portfolio_synonyms(pack)
+
+    def test_benchmark_is_absorbed_only_with_a_weight(self, pack):
+        """`benchmark` is absorbed by a WEIGHT-flavoured synonym, and the bare
+        label is deliberately NOT a synonym.
+
+        The rule is stated in one place and enforced here: this kind declares
+        `targetPct` as REQUIRED, so routing a bare "our benchmark is the MSCI
+        World" mention to it would push the extractor to invent a percentage the
+        utterance never stated. A benchmark with a weight is this kind; a bare
+        benchmark label stays prose.
+        """
+        home, ref = REJECTED["benchmark"]
+        assert home == "synonyms"
+        synonyms = pack.kind_defs[ref]["synonyms"]
+        assert "benchmark weight" in synonyms and "reference weight" in synonyms
+        assert "benchmark" not in synonyms
+        # …and the description states the same boundary, so the two cannot drift.
+        assert "bare benchmark LABEL" in pack.kind_defs[ref]["description"]
+        # The declaration that makes the boundary load-bearing.
+        assert declared_value_fields(pack.kind_defs[ref])[0]["required"] is True
+
+    def test_rebalance_rides_ventures_action_item_predicate(self, pack, venture):
+        """`rebalance` is an OWNED DATED ACTION, not a state carrier, so its home
+        is the KIND `venture:actionItem` — the absorbing `synonyms` are that
+        kind's existing action aliases. ⛔ This pack must NOT claim it: a second
+        home here is the rename #9663 exists to avoid."""
+        home, ref = REJECTED["rebalance"]
+        assert home == "kind"
+        ns, kind = ref.split(":", 1)
+        assert ns == "venture" and kind in venture.kind_defs
+        assert {"action item", "task", "next step"} <= set(
+            venture.kind_defs[kind]["synonyms"])
+        assert "rebalance" not in pack.kind_defs
+        assert "rebalance" not in _portfolio_synonyms(pack), (
+            "this pack must not absorb `rebalance` — the mention belongs to "
+            "venture's action item, and claiming it here gives the same "
+            "concept two homes")
+
+
+# ── 3. Clash rules live where the classifier reads them ───────────────────
+
+
+class TestClashRules:
+    def test_every_kind_carries_synonyms_examples_and_near_misses(self, pack):
+        for kind in set(pack.object_kinds) | set(pack.event_kinds):
+            spec = pack.kind_defs[kind]
+            assert spec.get("synonyms"), f"{kind} needs synonyms"
+            assert spec.get("examples"), f"{kind} needs examples"
+            assert spec.get("nearMisses"), f"{kind} needs nearMisses"
+
+    def test_near_misses_name_the_confusable_sibling(self, pack):
+        """The rerank reads `nearMisses`, so the confusable sibling is named
+        there rather than left to the classifier's judgement."""
+        assert "venture:investment" in pack.kind_defs["mandate"]["nearMisses"]
+        assert "venture:fundingAgreement" in pack.kind_defs["mandate"]["nearMisses"]
+        assert "mandate" in pack.kind_defs["allocationTarget"]["nearMisses"]
+        assert "venture:disbursement" in pack.kind_defs["valuationMark"]["nearMisses"]
+
+    def test_pt_br_synonyms_follow_the_venture_convention(self, pack):
+        """`venture` carries pt-BR synonyms (investida, desembolso). The
+        overlay does the same, so the same corpus classifies consistently."""
+        pt = {"mandato", "alocação alvo", "marcação"}
+        found = {
+            word
+            for spec in pack.kind_defs.values()
+            for word in spec.get("synonyms", [])
+        }
+        assert pt <= found
+
+    def test_relation_near_misses_disambiguate_the_two_depends_on_edges(self, pack):
+        """`constrainedBy` (position bound to a mandate) and `boundedBy` (target
+        bound to a mandate) are two dependsOn edges; each names the other."""
+        by_pred = {r["predicate"]: r for r in pack.relations}
+        assert "boundedBy" in by_pred["constrainedBy"]["nearMisses"]
+        assert "constrainedBy" in by_pred["boundedBy"]["nearMisses"]
+
+    #: Declared synonyms deliberately NOT in the trigger row, each with the
+    #: reason. A missing trigger is CHEAP here: with nothing else matching, the
+    #: selector falls back to ALL packs, so the overlay is still injected — while
+    #: a spurious trigger is EXPENSIVE, because one match suppresses that
+    #: fallback and strips every other pack's kinds from the prompt.
+    NON_TRIGGER_SYNONYMS: ClassVar[dict[str, str]] = {
+        "target weight": (
+            "generic in engineering prose ('target weight for the casing'); the "
+            "declared compounds 'policy weight' / 'benchmark weight' / "
+            "'reference weight' carry the same meaning without the collision"),
+        # The trigger rows are English throughout (`_PACK_TRIGGERS` has no
+        # pt-BR entry in any pack); a pt-BR mention reaches the pack through its
+        # own synonym layer at classification, not through story selection.
+        "peso alvo": "pt-BR: story selection in `_PACK_TRIGGERS` is English-only",
+    }
+
+    def test_compact_mode_can_gate_the_namespace_by_story(self, pack):
+        """The namespace has a `_PACK_TRIGGERS` row, so compact-mode story
+        selection gates it instead of injecting it WHOLE into every prompt (the
+        fail-open fallback `_select_pack_kinds` documents).
+
+        Three directions, because a row alone is not a gate, and one wrong
+        trigger word is worse than no row: `_select_pack_kinds` matches
+        SUBSTRINGS, and a single spurious match suppresses the all-packs
+        fallback — so a false-positive trigger does not add a section, it DROPS
+        every other pack's kinds.
+
+        The assertion that matters is NARROWING (`set(hit) != set(pack_kinds)`):
+        a bare "is the namespace present?" check is satisfied by the all-packs
+        fallback for ANY synonym the row omits, which is how a missing trigger
+        passed review twice.
+        """
+        from tortoise.extractor_v2 import _PACK_TRIGGERS, _select_pack_kinds
+
+        assert f"{NS}:" in _PACK_TRIGGERS
+        assert all(isinstance(t, str) and t for t in _PACK_TRIGGERS[f"{NS}:"])
+
+        # The row is derived from the manifest, not from memory: every entry is
+        # the namespace's own name or a declared synonym carrying a space or a
+        # hyphen (a single generic word is exactly the substring trap).
+        declared = {syn.lower()
+                    for spec in RAW["ontology"]["kindDefs"].values()
+                    for syn in (spec.get("synonyms") or [])}
+        compound = {w for w in declared
+                    if (" " in w or "-" in w) and w.isascii()}
+        assert compound, "the manifest must declare compound synonyms"
+        expected = (compound - set(self.NON_TRIGGER_SYNONYMS)) | {NS}
+        assert set(_PACK_TRIGGERS[f"{NS}:"]) == expected, (
+            set(_PACK_TRIGGERS[f"{NS}:"]) ^ expected)
+
+        # The REAL catalogue, so a sibling namespace collision (agent-ops's
+        # "policy") is visible: a four-entry fixture hides exactly the failure
+        # this row exists to avoid.
+        pack_kinds = v2._build_master_from_brief(
+            compile_value_brief())["pack_kinds"]
+
+        hit = _select_pack_kinds(
+            "the board reviewed the allocation target last week", pack_kinds)
+        assert f"{NS}:mandate" in hit, list(hit)
+        assert set(hit) != set(pack_kinds), "that is the all-packs fallback"
+        assert "dev:issue" not in hit, list(hit)
+
+        # An unrelated story that DOES match another pack — so the result is a
+        # real selection, not the all-packs fallback (which would make the
+        # negative assertion vacuous).
+        miss = _select_pack_kinds(
+            "deploy the hotfix and fix the CI test failure", pack_kinds)
+        assert "dev:issue" in miss, list(miss)
+        assert not [k for k in miss if k.startswith(f"{NS}:")], list(miss)
+
+        # The substring trap: "evaluation" is not "valuation mark". A trigger
+        # that matched it would drop dev's kinds from an unrelated prompt — the
+        # failure mode is vocabulary LOSS, not an extra section.
+        evaluation = _select_pack_kinds(
+            "the quarterly evaluation of the design system is in this deploy",
+            pack_kinds)
+        assert "dev:issue" in evaluation, list(evaluation)
+        assert not [k for k in evaluation if k.startswith(f"{NS}:")], list(evaluation)
+
+        # Bare generic words are the OTHER half of the same trap: an overlay
+        # trigger must match the mentions the pack DECLARES, and only those.
+        # Each of these is a real-world sentence with no portfolio subject, and
+        # each has to leave the selection to the packs that story is about.
+        for story in ("the team's mandate is to ship the CLI during this deploy",
+                      "resource allocation across the fleet during this deploy",
+                      "the accessibility audit found a visual impairment in the "
+                      "keyboard navigation flow, so fix the UI test"):
+            got = _select_pack_kinds(story, pack_kinds)
+            assert not [k for k in got if k.startswith(f"{NS}:")], (story, got)
+            assert set(got) != set(pack_kinds), (
+                "the story must match some OTHER pack, or the all-packs "
+                "fallback makes this assertion vacuous")
+
+        # …and every compound synonym the pack declares (minus the recorded
+        # exceptions) must NARROW to the namespace, not merely appear in the
+        # fallback — including the ones a sibling would otherwise win
+        # ("policy statement" contains agent-ops's "policy").
+        for mention in sorted(compound - set(self.NON_TRIGGER_SYNONYMS)):
+            story = f"the board reviewed the {mention} last week during the deploy"
+            got = _select_pack_kinds(story, pack_kinds)
+            assert [k for k in got if k.startswith(f"{NS}:")], (mention, got)
+            assert set(got) != set(pack_kinds), (mention, "all-packs fallback")
+
+
+# ── 4. Core extraction unchanged with the pack OFF ────────────────────────
+
+
+@pytest.fixture(scope="module")
+def packs_without_portfolio(tmp_path_factory) -> Path:
+    """A copy of the shipped catalog with this pack REMOVED — the comparison
+    target for "core extraction unchanged with the pack off"."""
+    dst = tmp_path_factory.mktemp("packs-no-portfolio") / "packs"
+    shutil.copytree(REPO_PACKS_DIR, dst)
+    shutil.rmtree(dst / "investment-portfolio-manager")
+    return dst
+
+
+def _strip_portfolio(table: dict) -> dict:
+    """`table` minus THIS pack's own contributions.
+
+    Both compiles key their kind entries by `ns:kind`, but
+    `memory_granularity` is keyed by bare namespace — filtering only on the
+    former would leave one of this pack's entries in place and make the
+    comparison below fail for the wrong reason.
+    """
+    out = {k: v for k, v in table.items() if not k.startswith(f"{NS}:")}
+    gran = out.get("memory_granularity")
+    if isinstance(gran, dict) and NS in gran:
+        out["memory_granularity"] = {
+            n: g for n, g in gran.items() if n != NS}
+    return out
+
+
+def _installed_minus_portfolio() -> list[str]:
+    """The catalog's installed set with THIS pack excluded — the gate a graph
+    that never installed it resolves (the pack is not a starter)."""
+    registry = PackRegistry(default_packs_dir())
+    registry.load_all()
+    return [ns for ns in registry.packs if ns != NS]
+
+
+class TestExtractionWithThePackOff:
+    """The acceptance's "doesn't disturb anything" half, measured on BOTH paths
+    that actually run — they are not the same path, and treating them as one is
+    how this check passed on evidence that covered neither of them.
+
+    * **GATED** — a graph whose resolved installed set excludes this pack
+      (`installed_namespaces=`): the pack must contribute NOTHING. Compared
+      against a catalog copy with the pack physically removed, for the value
+      brief, the kind-index spec and its cache key.
+    * **UNGATED** — a graph with NO `:PackInstall` records gets the catalog
+      union by contract (#2714 indicator 3 / #5163), so this pack IS present.
+      "Unchanged" therefore cannot mean "absent": the invariant is that it ADDS
+      its own entries and MODIFIES nobody else's — asserted below, per entry.
+    """
+
+    def test_gated_off_contributes_nothing(self):
+        gated = compile_value_brief(
+            default_packs_dir(), installed_namespaces=_installed_minus_portfolio())
+        assert not [k for k in gated if k.startswith(f"{NS}:")], list(gated)
+
+    def test_gated_off_equals_a_catalog_without_the_pack(
+            self, packs_without_portfolio):
+        gated = compile_value_brief(
+            default_packs_dir(), installed_namespaces=_installed_minus_portfolio())
+        without = compile_value_brief(packs_without_portfolio)
+        assert gated == without
+        # The positive control that makes the equality mean something.
+        assert any(k.startswith(f"{NS}:") for k in compile_value_brief())
+
+    def test_gated_off_kind_index_and_its_cache_key_are_unchanged(
+            self, packs_without_portfolio):
+        gated = compile_kind_index_spec(
+            default_packs_dir(), installed_namespaces=_installed_minus_portfolio())
+        without = compile_kind_index_spec(packs_without_portfolio)
+        assert gated == without
+        assert cache_key_for(gated) == cache_key_for(without)
+
+    def test_the_ungated_union_adds_the_pack_and_modifies_no_other_entry(self):
+        """The path a graph with no `:PackInstall` records actually takes.
+
+        This pack IS in the union there, so the meaningful assertion is
+        per-entry: stripping the pack's OWN contributions (its `ns:kind` brief
+        keys and its `memory_granularity[ns]` text) leaves EXACTLY the gated
+        brief / kind index — i.e. no other pack's entry, and no core entry,
+        moved.
+        """
+        installed = _installed_minus_portfolio()
+        gated_brief = compile_value_brief(
+            default_packs_dir(), installed_namespaces=installed)
+        ungated_brief = compile_value_brief()
+        assert _strip_portfolio(ungated_brief) == gated_brief
+        assert set(ungated_brief) - set(gated_brief) == {
+            f"{NS}:mandate", f"{NS}:allocationTarget", f"{NS}:valuationMark",
+        }
+        assert NS in ungated_brief["memory_granularity"]
+        assert NS not in gated_brief["memory_granularity"]
+
+        gated_index = compile_kind_index_spec(
+            default_packs_dir(), installed_namespaces=installed)
+        ungated_index = compile_kind_index_spec()
+        assert _strip_portfolio(ungated_index) == gated_index
+        added = set(ungated_index) - set(gated_index)
+        assert added == {
+            f"{NS}:mandate", f"{NS}:allocationTarget", f"{NS}:valuationMark",
+        }, added
+
+    def test_the_declared_value_reaches_the_prompt(self):
+        """The consumer half of #2818: a declaration no prompt reads is
+        decoration. This is the UNGATED (union) render — the one a graph with no
+        pack records gets."""
+        master = v2._build_master_from_brief(compile_value_brief())
+        assert master["pack_values"] == {
+            f"{NS}:allocationTarget": [{
+                "name": "targetPct",
+                "valueKind": "percent",
+                "required": True,
+                "cardinality": "one",
+            }],
+        }
+        assert "[values: targetPct(percent" in v2._render_master_verbose(master)
+        assert "KIND VALUE FIELDS" in v2._s2s4_rules(master)
+        # …and it is the ONLY kind in the catalog that renders the segment.
+        assert v2._render_master_verbose(master).count("[values:") == 1
+
+
+# ── 5. Each new kind is mintable on a fresh graph ─────────────────────────
+
+
+class TestKindsAreMintable:
+    @requires_db
     def test_the_pack_installs_on_a_fresh_graph_and_validates_clean(self, sdk):
-        records = ensure_tenant_packs(sdk, starter=["venture", NS])
-        assert {r["namespace"] for r in records} == {"venture", NS}
+        """The acceptance's install line, literally: activated on a fresh graph,
+        then `tortoise_validate_domain` is clean for it."""
+        from tortoise.pack_state import ensure_tenant_packs, get_tenant_packs
 
-        pos = sdk.create_object("Alpha Holdings", objectKind=POSITION)
-        mandate = sdk.create_object(
-            "Mandate M-1: no single position above 20% of committed capital",
-            objectKind=f"{NS}:mandate", status="adopted")
-        target = sdk.create_object(
-            "Allocation Target AT-1: 15% in agritech",
-            objectKind=f"{NS}:allocationTarget", status="adopted",
-            targetPct=1500)
-        mark = sdk.create_event(
-            "Valuation Mark VM-3: Alpha Holdings at 2.1x cost, 2026-06-30",
-            f"{NS}:valuationMark", aboutObject=pos["id"])
+        ensure_tenant_packs(sdk, starter=["venture", NS])
+        assert {p["namespace"] for p in get_tenant_packs(sdk)} == {
+            "venture", NS}
+        verdict = sdk.validate_domain(NS)
+        assert verdict["ok"] is True, verdict
+        assert verdict["violations"] == []
 
-        kinds = {r[0] for r in sdk._get_proj().g.query(
-            "MATCH (n) WHERE n.objectKind IS NOT NULL "
-            "RETURN n.objectKind").result_set}
-        assert {f"{NS}:mandate", f"{NS}:allocationTarget", POSITION} <= kinds
-        event_kinds = {r[0] for r in sdk._get_proj().g.query(
-            "MATCH (e:Event) RETURN e.eventKind").result_set}
-        assert f"{NS}:valuationMark" in event_kinds
+    @requires_db
+    def test_validate_domain_has_teeth(self, sdk):
+        """`tortoise_validate_domain` clean is only evidence if the domain HAS
+        rules: `run_domain_graph_validators` returns `([], [])` for a known
+        namespace with none registered, so a clean verdict alone would be
+        vacuous. Both of this pack's rules are exercised — each fires on the
+        shape it names, and the clean case is the same graph corrected.
+        """
+        from tortoise.domain_validators import (
+            SURFACE_GRAPH,
+            domain_validators,
+        )
 
-        # The lifecycle the manifest declares is the one that lands.
-        status = sdk._get_proj().g.query(
-            "MATCH (o:Object {id:$id}) RETURN o.status",
-            params={"id": mandate["id"]}).result_set[0][0]
-        assert status == "adopted"
-        # The value DECLARATION is also a STORED property — read both back, or
-        # the acceptance claim ("both Objects mint with their declared status,
-        # incl. targetPct") has no evidence behind it: `assert target and mark`
-        # passes for any successful mint whatever was written. `percent` is
-        # basis points (`pack_values.VALUE_KINDS`), so 1500 == 15%.
-        target_row = sdk._get_proj().g.query(
-            "MATCH (o:Object {id:$id}) RETURN o.status, o.targetPct",
-            params={"id": target["id"]}).result_set[0]
-        assert target_row[0] == "adopted", target_row
-        assert target_row[1] == 1500, target_row
-        # …and the mark is about the POSITION, not merely an Event that exists.
-        mark_about = sdk._get_proj().g.query(
-            "MATCH (e:Event {id:$id})-[:aboutObject]->(o:Object) RETURN o.id",
-            params={"id": mark["id"]}).result_set
-        assert [row[0] for row in mark_about] == [pos["id"]], mark_about
+        assert domain_validators(NS, surface=SURFACE_GRAPH), (
+            "the portfolio domain must register at least one graph-surface "
+            "validator, or `validate_domain` is a green light over nothing")
 
-        report = sdk.validate_domain(NS)
-        assert report["domain"] == NS
-        assert report["ok"] is True, report
-        assert report["violations"] == []
+        position = sdk.create_object("Alpha Holdings (seed position)",
+                                     objectKind="venture:investment")
+        # 1. an out-of-vocabulary status on a state-owning kind
+        sdk.create_object("Mandate M-9", objectKind=f"{NS}:mandate",
+                          status="active")
+        # 2. a mark with no position behind it
+        sdk.create_entity("event", "VM orphan",
+                          eventKind=f"{NS}:valuationMark")
+
+        verdict = sdk.validate_domain(NS)
+        assert verdict["ok"] is False
+        rules = {v["rule"] for v in verdict["violations"]}
+        assert rules == {"undeclared_object_status", "orphaned_valuation_mark"}
+        orphan = next(v for v in verdict["violations"]
+                      if v["rule"] == "orphaned_valuation_mark")
+        assert orphan["kind"] == f"{NS}:valuationMark"
+        assert orphan["fix"], "a violation must name its fix"
+
+        # The same graph, corrected, is clean — the rules are about the shape,
+        # not about the kinds existing.
+        sdk._get_proj().g.query(
+            "MATCH (o:Object {name:'Mandate M-9'}) SET o.status = 'adopted'")
+        sdk._get_proj().g.query(
+            "MATCH (e:Event {name:'VM orphan'}) DETACH DELETE e")
+        # TWO attached marks, one per declared write shape: `aboutObject` (the
+        # structural form) and the `marks` relation as DECLARED — `mechanism:
+        # IMPL` resolves to the operator path, which writes INPUT→Point→IMPL
+        # and never `aboutObject`. A rule that honours only one of them forbids
+        # the relation that admits the kind.
+        sdk.create_entity("event", "VM-1",
+                          eventKind=f"{NS}:valuationMark",
+                          aboutObject=position["id"])
+        vm2 = sdk.create_entity("event", "VM-2",
+                                eventKind=f"{NS}:valuationMark")
+        sdk.create_operator("IMPL", vm2["node"]["id"], [position["id"]],
+                            label="marks", semantics="related")
+        assert sdk.validate_domain(NS)["ok"] is True
+
+    @requires_db
+    def test_a_mis_wired_mark_is_an_orphan(self, sdk):
+        """A mark attached to the WRONG thing is as unusable as an unattached
+        one: the manifest declares ONE relation (`marks` → `venture:investment`),
+        so a `producedBy` operator pointing at a mandate answers a different
+        question — and a rule that accepted "some IMPL operator to some Object"
+        would report it clean while claiming the mark reaches a position.
+        """
+        sdk.create_entity("object", "Mandate M-7",
+                          objectKind=f"{NS}:mandate", is_episodic=False)
+
+        # (a) an IMPL operator with the WRONG label
+        wrong_rel = sdk.create_entity("event", "VM wrong-relation",
+                                      eventKind=f"{NS}:valuationMark")
+        sdk.create_operator("IMPL", wrong_rel["node"]["id"],
+                            [sdk._get_proj().g.query(
+                                "MATCH (o:Object {name:'Mandate M-7'}) "
+                                "RETURN o.id").result_set[0][0]],
+                            label="producedBy", semantics="related")
+
+        # (b) the RIGHT label on the WRONG kind of target
+        wrong_target = sdk.create_entity("event", "VM wrong-target",
+                                          eventKind=f"{NS}:valuationMark")
+        sdk.create_operator("IMPL", wrong_target["node"]["id"],
+                            [sdk._get_proj().g.query(
+                                "MATCH (o:Object {name:'Mandate M-7'}) "
+                                "RETURN o.id").result_set[0][0]],
+                            label="marks", semantics="related")
+
+        verdict = sdk.validate_domain(NS)
+        flagged = {v["ref"] for v in verdict["violations"]
+                   if v["rule"] == "orphaned_valuation_mark"}
+        assert flagged == {wrong_rel["node"]["id"], wrong_target["node"]["id"]}, (
+            flagged)
+
+    @requires_db
+    def test_a_superseded_mandate_is_not_an_undeclared_status(self, sdk):
+        """Supersession is the ENGINE's own state-change fold
+        (``commit_ops.apply_supersessions`` writes ``status='superseded'``), and
+        it is how a mandate changes: a rule that only accepted the manifest's
+        four words would redden `validate_domain portfolio` on every graph that
+        superseded one — the pack would forbid its own write path.
+        """
+        from tortoise.commit_ops import OBJECT_TERMINAL_STATUSES, apply_supersessions
+
+        sdk.create_entity("object", "Mandate M-1 — draft",
+                          objectKind=f"{NS}:mandate", is_episodic=False)
+        sdk.create_entity("object", "Mandate M-2",
+                          objectKind=f"{NS}:mandate", is_episodic=False)
+        applied = apply_supersessions(
+            sdk._get_proj(), sdk,
+            [{"superseded": "Mandate M-1 — draft",
+              "supersedes_by": "Mandate M-2", "evidence": "board vote"}],
+            session_id="s-9663")
+        assert applied == 1, "the live fold must apply, or this test is vacuous"
+
+        stored = sdk._get_proj().g.query(
+            "MATCH (o:Object {name:'Mandate M-1 — draft'}) RETURN o.status"
+        ).result_set
+        assert stored and stored[0][0] in OBJECT_TERMINAL_STATUSES, stored
+
+        declared = set(RAW["ontology"]["kindDefs"]["mandate"]["statuses"])
+        assert "superseded" not in declared, (
+            "the framework terminal vocabulary is written by the engine, not "
+            "declared by the kind — declaring it would be a second definition")
+        assert sdk.validate_domain(NS)["ok"] is True
+
+    @requires_db
+    def test_a_bare_spelled_kind_is_not_blind_to_the_rule(self, sdk):
+        """The write gate admits BOTH spellings of a pack kind —
+        ``extractor_v2._object_kind_forms`` lowercases ``portfolio:mandate`` and
+        ``mandate`` — and the projection stores ``objectKind`` verbatim. A rule
+        that queried only the namespaced spelling therefore reported CLEAN over
+        an Object the gate had just produced: the fail-open half of the same
+        problem the supersession exemption fixes on the other side.
+
+        Both directions are pinned: the BARE spelling is now seen, and a
+        NAMESPACED kind whose local part carries a capital
+        (``portfolio:allocationTarget``) is still seen after the vocabulary was
+        case-folded — a case-sensitive query over lowercased forms would miss
+        it, which is the same blindness with a smaller blast radius.
+        """
+        # (a) bare spelling, out-of-vocabulary status → REPORTED
+        sdk.create_object("Mandate M-11 (bare kind)", objectKind="mandate",
+                          status="active")
+        # (b) namespaced spelling stored verbatim with a capital, out-of-
+        #     vocabulary status → REPORTED
+        sdk.create_object("Allocation Target AT-2",
+                          objectKind=f"{NS}:allocationTarget",
+                          status="active")
+        stored = dict(sdk._get_proj().g.query(
+            "MATCH (o:Object) RETURN o.name, o.objectKind").result_set)
+        assert stored["Mandate M-11 (bare kind)"] == "mandate", stored
+        assert stored["Allocation Target AT-2"] == f"{NS}:allocationTarget", (
+            stored)
+
+        verdict = sdk.validate_domain(NS)
+        flagged = {(v["rule"], v["kind"]) for v in verdict["violations"]}
+        assert flagged == {
+            ("undeclared_object_status", "mandate"),
+            ("undeclared_object_status", f"{NS}:allocationTarget"),
+        }, verdict
+
+        # (c) the bare spelling carrying a DECLARED status is not a violation —
+        #     the rule reads the kind's own vocabulary, not the prefix.
+        sdk._get_proj().g.query(
+            "MATCH (o:Object {name:'Mandate M-11 (bare kind)'}) "
+            "SET o.status = 'adopted'")
+        sdk._get_proj().g.query(
+            "MATCH (o:Object {name:'Allocation Target AT-2'}) "
+            "SET o.status = 'proposed'")
+        assert sdk.validate_domain(NS)["ok"] is True
+
+    @requires_db
+    def test_a_pipeline_spelled_mark_is_seen_by_the_orphan_rule(self, sdk):
+        """Rule 2 must read the spellings the ENGINE writes, not only the ones a
+        caller types — the rule-2 analogue of
+        ``test_a_bare_spelled_kind_is_not_blind_to_the_rule``.
+
+        Two independent widenings, and both directions are pinned:
+
+          * the extraction pipeline's own event commit STRIPS the namespace
+            (``sdk._extract_session_v2`` writes ``ekind.rsplit(":", 1)[-1]``),
+            so every mark minted by extraction is stored ``valuationMark``. An
+            exact ``e.eventKind = 'portfolio:valuationMark'`` matched nothing the
+            pipeline wrote — the unattached mark was never reported, a false
+            CLEAN on the rule's own purpose;
+          * the write gate admits the BARE object-kind spelling too
+            (``objectKind='investment'``), and the projection stores it
+            verbatim — so an exact ``(o:Object {objectKind: 'venture:investment'})``
+            flagged a CORRECTLY wired mark as an orphan (a false violation).
+        """
+        # (a) an UNATTACHED mark under the pipeline's bare event-kind spelling
+        #     → REPORTED (the false-CLEAN half).
+        sdk.create_entity("event", "VM pipeline-spelled orphan",
+                          eventKind="valuationMark")
+        # (b) a mark wired to a BARE-spelled position → CLEAN (the false-
+        #     violation half).
+        bare_position = sdk.create_object("Beta Holdings (bare position kind)",
+                                          objectKind="investment")
+        sdk.create_entity("event", "VM-4 (bare position)",
+                          eventKind="valuationMark",
+                          aboutObject=bare_position["id"])
+
+        # The graph really holds the spellings this test claims (a test that
+        # silently got canonicalised kinds would prove nothing).
+        marks = dict(sdk._get_proj().g.query(
+            "MATCH (e:Event) RETURN e.name, e.eventKind").result_set)
+        assert marks["VM pipeline-spelled orphan"] == "valuationMark", marks
+        positions = dict(sdk._get_proj().g.query(
+            "MATCH (o:Object) RETURN o.name, o.objectKind").result_set)
+        assert positions["Beta Holdings (bare position kind)"] == "investment", (
+            positions)
+
+        orphan_id = sdk._get_proj().g.query(
+            "MATCH (e:Event {name:'VM pipeline-spelled orphan'}) RETURN e.id"
+        ).result_set[0][0]
+        verdict = sdk.validate_domain(NS)
+        flagged = {v["ref"] for v in verdict["violations"]
+                   if v["rule"] == "orphaned_valuation_mark"}
+        assert flagged == {orphan_id}, verdict
+
+        # (c) attaching the pipeline-spelled mark to the bare-spelled position
+        #     clears it: the rule is about the attachment, never the spelling.
+        sdk._get_proj().g.query(
+            "MATCH (e:Event {name:'VM pipeline-spelled orphan'}) "
+            "MATCH (o:Object {name:'Beta Holdings (bare position kind)'}) "
+            "CREATE (e)-[:aboutObject]->(o)")
+        assert sdk.validate_domain(NS)["ok"] is True
+
+    def test_the_mark_contract_is_pinned_to_the_manifest(self):
+        """``POSITION_KIND``/``MARK_RELATION`` used to be an UNPINNED second copy
+        of the manifest's ``marks`` entry while the comment claimed they were
+        read off it. Both halves are now pinned: the contract the rule uses is
+        read from the loaded pack, and the registry-less FALLBACK constants are
+        asserted against the manifest so they cannot drift either.
+        """
+        from tortoise import domain_validators as dv
+
+        marks = next(r for r in RAW["ontology"]["relations"]
+                     if r["predicate"] == "marks")
+        expected = (f"{NS}:valuationMark", marks["toKind"], marks["predicate"])
+        assert dv._portfolio_mark_contract() == expected, (
+            "the rule must read the pack's own `marks` declaration")
+        assert expected == (dv.MARK_KIND, dv.POSITION_KIND, dv.MARK_RELATION), (
+            "the registry-less fallback must not drift from the manifest it "
+            "stands in for")
+
+    def test_the_mark_contract_follows_a_manifest_edit(self, monkeypatch):
+        """Why derivation rather than a constant: a manifest edit to ``toKind``
+        or a predicate rename must move the rule WITH it, or the orphan rule
+        silently flags every correctly-wired mark (or goes blind) with nothing
+        red in CI.
+        """
+        from tortoise import domain_loader
+        from tortoise import domain_validators as dv
+
+        class _Pack:
+            relations: ClassVar[list[dict]] = [{
+                "predicate": "marksPosition",
+                "fromKind": f"{NS}:valuationMark",
+                "toKind": "venture:deal",
+                "mechanism": "IMPL",
+            }]
+
+        class _Reg:
+            status_fold_index = None
+
+            def get_pack(self, namespace):
+                return _Pack() if namespace == NS else None
+
+        monkeypatch.setattr(domain_loader, "_get_registry", lambda: _Reg())
+        assert dv._portfolio_mark_contract() == (
+            f"{NS}:valuationMark", "venture:deal", "marksPosition")
+
+    def test_the_admitted_kind_forms_are_widened_and_case_folded(self,
+                                                                monkeypatch):
+        """The vocabulary the rule queries is every spelling the write gate
+        admits, lowercased — ``portfolio:allocationTarget`` keeps its capital in
+        storage, so folding only ONE side would trade the bare-spelling
+        blindness for a namespaced one. Read from ``StatusFoldIndex``'s own
+        seam, never re-derived a third time.
+        """
+        from tortoise import domain_loader
+        from tortoise import domain_validators as dv
+        from tortoise.status_folds import StatusFoldIndex
+
+        index = StatusFoldIndex()
+
+        class _Reg:
+            status_fold_index = index
+
+            def get_pack(self, namespace):  # pragma: no cover — unused here
+                return None
+
+        monkeypatch.setattr(domain_loader, "_get_registry", lambda: _Reg())
+        assert dv._admitted_kind_forms(f"{NS}:valuationMark") == [
+            f"{NS}:valuationmark", "valuationmark"]
+        # The same set the index itself returns — the seam, not a copy of it.
+        assert dv._admitted_kind_forms(f"{NS}:allocationTarget") == [
+            str(f).lower()
+            for f in index.kind_forms_for(f"{NS}:allocationTarget")]
+
+    @requires_db
+    def test_each_object_kind_mints_with_its_own_status(self, sdk):
+        sdk.create_object("Mandate M-1: no sector above 25%",
+                          objectKind=f"{NS}:mandate", status="adopted")
+        sdk.create_object("Allocation Target AT-1: 30% venture",
+                          objectKind=f"{NS}:allocationTarget", status="proposed")
+
+        rows = sdk._get_proj().g.query(
+            "MATCH (o:Object) RETURN o.name, o.objectKind, o.status"
+        ).result_set
+        minted = {r[0]: (r[1], r[2]) for r in rows}
+        assert minted["Mandate M-1: no sector above 25%"] == (
+            f"{NS}:mandate", "adopted")
+        assert minted["Allocation Target AT-1: 30% venture"] == (
+            f"{NS}:allocationTarget", "proposed")
+
+    @requires_db
+    def test_the_valuation_mark_mints_as_an_event_about_the_position(self, sdk):
+        position = sdk.create_object("Alpha Holdings (seed position)",
+                                     objectKind="venture:investment",
+                                     status="invested")
+        mark = sdk.create_entity(
+            "event", "Valuation Mark VM-3: 2026-Q3",
+            eventKind=f"{NS}:valuationMark",
+            aboutObject=position["id"])
+
+        rows = sdk._get_proj().g.query(
+            "MATCH (e:Event) RETURN e.name, e.eventKind, e.status"
+        ).result_set
+        assert [tuple(r) for r in rows] == [
+            ("Valuation Mark VM-3: 2026-Q3", f"{NS}:valuationMark", None)
+        ], rows
+        assert mark["node"]  # the write returned a node, not a refusal
+        # The mark is wired to the position it marks — the `marks` relation's
+        # shape, written through the event door.
+        linked = sdk._get_proj().g.query(
+            "MATCH (e:Event {name:'Valuation Mark VM-3: 2026-Q3'})"
+            "-[:aboutObject]->(o:Object) RETURN o.name").result_set
+        assert [r[0] for r in linked] == ["Alpha Holdings (seed position)"]
+
+    @requires_db
+    def test_every_new_kind_is_mintable_after_the_install(self, sdk):
+        """All three kinds, on the installed graph — the write gate has
+        `:PackInstall` records here, so an unapproved namespace would be
+        refused (#5475) rather than silently admitted."""
+        from tortoise.pack_state import ensure_tenant_packs
+
+        ensure_tenant_packs(sdk, starter=["venture", NS])
+        for kind in sorted(EXPECTED_OBJECT_KINDS):
+            sdk.create_object(f"{kind} 1", objectKind=f"{NS}:{kind}")
+        for kind in sorted(EXPECTED_EVENT_KINDS):
+            sdk.create_entity("event", f"{kind} 1", eventKind=f"{NS}:{kind}")
+
+        rows = sdk._get_proj().g.query(
+            "MATCH (o:Object) RETURN DISTINCT o.objectKind").result_set
+        assert {r[0] for r in rows} == {f"{NS}:{k}" for k in EXPECTED_OBJECT_KINDS}
+        rows = sdk._get_proj().g.query(
+            "MATCH (e:Event) RETURN DISTINCT e.eventKind").result_set
+        assert {r[0] for r in rows} == {f"{NS}:{k}" for k in EXPECTED_EVENT_KINDS}
+
+    @requires_db
+    def test_a_mandate_state_change_supersedes_rather_than_appends(self, sdk):
+        """State on Objects (#2725 rule 1): a later state is a supersession, so
+        "is this within mandate?" has exactly one current answer."""
+        from tortoise.commit_ops import apply_supersessions
+
+        sdk.create_object("Mandate M-1 — draft", objectKind=f"{NS}:mandate",
+                          status="draft")
+        sdk.create_object("Mandate M-1 — adopted", objectKind=f"{NS}:mandate",
+                          status="adopted")
+        applied = apply_supersessions(
+            sdk._get_proj(), sdk,
+            [{"superseded": "Mandate M-1 — draft",
+              "supersedes_by": "Mandate M-1 — adopted",
+              "evidence": "the board adopted it"}],
+            session_id="sess_mandate", warn=lambda _m: None)
+        assert applied == 1
+        rows = sdk._get_proj().g.query(
+            "MATCH (o:Object {name:'Mandate M-1 — draft'}) "
+            "RETURN o.status, o.supersededBy").result_set
+        assert next(iter(rows[0])) == "superseded"

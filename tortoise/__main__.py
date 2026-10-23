@@ -8578,8 +8578,20 @@ def _cmd_pack_validate(args) -> int:
     """tortoise pack validate <dir> — schema + cross-pack validation.
 
     Reuses PackRegistry._validate + _validate_cross_pack_refs (thin glue —
-    the validator is the single source of truth). Exit 0 clean, 1 errors.
+    the validator is the single source of truth). Exit 0 clean, 1 otherwise.
     Accepts the pack dir (packs/<ns>) or its parent (a packs/ dir).
+
+    The verdict reads BOTH registry buckets, because they answer the same
+    question from two sides and only one of them used to reach the exit code:
+    `reg.errors` (a typo → the pack is ISOLATED) and `reg.unresolved_refs` (a
+    missing PEER → the pack stays loaded and its references into the absent
+    pack do not resolve, #2781). Reading only `errors` printed `✓ Clean` and
+    exited 0 for a catalog whose declared `depends_on` was not installed
+    (#9663) — the same false green, one bucket over. A pack whose declared
+    dependency is absent is not clean: it is *loaded but unresolved*, and
+    nothing it declares could be used. This also matches the hosted install
+    gate (`pack_manifest_store.validate_manifest` refuses exactly these refs),
+    so the local and hosted gates cannot disagree in the fail-open direction.
 
     #2766: also prints the per-relation write-path verdict
     (writable | declaration-only | predicate-not-in-allowlist) from the one
@@ -8609,6 +8621,20 @@ def _cmd_pack_validate(args) -> int:
     # BOTH the declared namespace and the directory name, so a manifest too
     # broken to yield a namespace (keyed by directory name) is still reported.
     target_manifest = target / "manifest.yaml"
+
+    def _scope(found: dict[str, list[str]],
+               keys: set[str]) -> dict[str, list[str]]:
+        """The registry's per-namespace bucket, scoped to the requested pack.
+
+        Both spellings are checked because the registry keys a diagnostic by
+        whatever it KNOWS: a pack it loaded by its MANIFEST namespace, a
+        manifest too broken to yield one by its DIRECTORY name. Nothing else
+        is the caller's business — a SIBLING's gap must not become this pack's
+        verdict (`errors` always had that false red; `unresolved_refs` only
+        inherited it once it reached the exit code, #9663).
+        """
+        return {ns: msgs for ns, msgs in found.items() if ns in keys}
+
     if not target_manifest.exists():
         # No manifest at the target means a `packs/` DIRECTORY was passed: the
         # "validate every pack" mode, where there is no single pack to scope
@@ -8616,20 +8642,21 @@ def _cmd_pack_validate(args) -> int:
         # directory name differs (`pm`, `portfolio`) — the same false green one
         # level up (#9663 review), so this leg reports the registry verbatim.
         errors: dict[str, list[str]] = dict(reg.errors)
+        unresolved: dict[str, list[str]] = dict(reg.unresolved_refs)
     else:
         target_keys = {target.name}
         import yaml
         try:
             declared = yaml.safe_load(target_manifest.read_text()) or {}
-        except Exception:  # noqa: BLE001 — an unparseable manifest is keyed by dir
+        except Exception:  # noqa: BLE001, RUF100 — unparseable ⇒ keyed by dir
             declared = {}
         declared_ns = declared.get("namespace") if isinstance(declared, dict) else None
         if isinstance(declared_ns, str) and declared_ns.strip():
             target_keys.add(declared_ns.strip())
-        errors = {}
-        for ns, errs in reg.errors.items():
-            if (packs_dir / ns / "manifest.yaml").exists() or ns in target_keys:
-                errors[ns] = errs
+        errors = _scope(reg.errors, target_keys)
+        # Same scoping for the missing-peer bucket: it is keyed by the LOADED
+        # pack's namespace, and `target_keys` already carries the declared one.
+        unresolved = _scope(reg.unresolved_refs, target_keys)
     # #2766: the per-relation write-path verdict, from the ONE resolver pack
     # load warns with — so `validate` cannot report a relation as bound to a
     # path its own declaration does not bind. Enumerated from the registry
@@ -8652,13 +8679,19 @@ def _cmd_pack_validate(args) -> int:
     for rel in relations:
         verdict_counts[rel["write_verdict"]] = (
             verdict_counts.get(rel["write_verdict"], 0) + 1)
-    ok = not errors
+    n_errors = sum(len(v) for v in errors.values())
+    n_unresolved = sum(len(v) for v in unresolved.values())
+    # An unresolved reference is NOT clean: the pack loaded, but what it
+    # declares does not resolve, so `✓ Clean` over it is a claim the registry's
+    # own data contradicts (#9663).
+    ok = not errors and not n_unresolved
     if getattr(args, "json", False):
         print(_json.dumps({
             "ok": ok,
             "packs_dir": str(packs_dir),
             "loaded": sorted(reg.packs),
             "errors": errors,
+            "unresolved_refs": unresolved,
             "relation_verdicts": {
                 "counts": verdict_counts,
                 "relations": relations,
@@ -8672,6 +8705,16 @@ def _cmd_pack_validate(args) -> int:
             print(f"  ✗ {ns}:")
             for e in errs:
                 print(f"      {e}")
+        if unresolved:
+            # Distinct from the isolated-pack section above: these packs are
+            # LOADED, and the diagnostic names the pack that is missing. Kept
+            # separate so "installed but incomplete" is never read as "typo".
+            print("  ⚠ unresolved references — the pack is loaded, the peer it "
+                  "names is not:")
+            for ns, msgs in sorted(unresolved.items()):
+                print(f"    {ns}:")
+                for m in msgs:
+                    print(f"      {m}")
         if relations:
             print("  relation write verdicts:")
             for rel in sorted(relations, key=lambda r: (r["pack"], r["predicate"])):
@@ -8682,7 +8725,11 @@ def _cmd_pack_validate(args) -> int:
         if ok:
             print("✓ Clean — pack(s) validate")
         else:
-            print(f"✗ {sum(len(v) for v in errors.values())} error(s)")
+            if n_errors:
+                print(f"✗ {n_errors} error(s)")
+            if n_unresolved:
+                print(f"✗ {n_unresolved} unresolved reference(s) — a declared "
+                      f"or referenced pack is not installed")
     return 0 if ok else 1
 
 
@@ -10523,10 +10570,47 @@ def _cmd_decide(args) -> int:
             """Operator kwargs carrying the chosen direction (empty when unset)."""
             return {"direction": chosen_direction} if chosen_direction is not None else {}
 
+        # ── Idempotent operator wiring (#6671 / #9631) ──
+        # The lookup is `tortoise.decide_wiring`, the SAME writer
+        # `graph-scripts/decide.py` calls. This command carried its own
+        # per-run-only `created_ops` cache after #6671 fixed the script, so a
+        # re-run minted a fresh operator per edge and split the mitigations
+        # across copies — the ranking depended on how many times it was run
+        # (#9631, measured on the 2-edge fixture below: 3 → 6 operators,
+        # 1 → 2 mitigations, opt:a 0.6592 → 0.6756).
+        from tortoise.decide_wiring import (
+            damped_factor_ids,
+            may_mint_damped_bridge,
+            resolve_or_create_operator,
+            select_damp_targets,
+        )
+
+        proj = sdk._proj
+        # Keyed on the RESOLVED ids, so a key and a raw id that denote the same
+        # point converge on one operator (the script's cache has always done
+        # this; the name-keyed cache missed it).
+        created_ops: dict[tuple[str, str, str, str], str] = {}
+
+        def _elect(src_key: str, op_type: str, tgt_key: str,
+                   label: str | None) -> tuple[str | None, bool, str | None]:
+            """Resolve-or-create the bridge. Returns (op id, reused, note)."""
+            try:
+                op_id, reused, note = resolve_or_create_operator(
+                    sdk, proj, op_type, _resolve(src_key), _resolve(tgt_key),
+                    label, created_ops, create_kwargs=_direction_kw())
+            except Exception as e:
+                return None, False, str(e)
+            # A factor list must not carry the same operator twice — EP would
+            # count one bridge as two (the script's rule; this loop used to
+            # append blindly).
+            if op_id not in all_operator_ids:
+                all_operator_ids.append(op_id)
+            return op_id, reused, note
+
+        def _suffix(op_id: str, reused: bool) -> str:
+            return f" (reused {op_id})" if reused else ""
+
         # ── Create regular edges (IMPL/NAND) ──
-        # Track created operators so relevance_edges can reuse them instead of
-        # creating duplicates (same src/op_type/tgt in both sections).
-        created_ops: dict[tuple[str, str, str], str] = {}
         for edge in edges:
             if isinstance(edge, list):
                 # Tuple format: [source, op_type, target]
@@ -10541,27 +10625,27 @@ def _cmd_decide(args) -> int:
                 print(f"  ⚠ Unknown edge format: {edge}")
                 continue
 
-            try:
-                op = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)],
-                                         label=label, **_direction_kw())
-                created_ops[(src, op_type, tgt)] = op["id"]
-                all_operator_ids.append(op["id"])
-                print(f"  ✓ {src} --{op_type}--> {tgt}")
-            except Exception as e:
-                print(f"  ⚠ {src} --{op_type}--> {tgt}: {e}")
+            op_id, reused, note = _elect(src, op_type, tgt, label)
+            if op_id is None:
+                print(f"  ⚠ {src} --{op_type}--> {tgt}: {note}")
+                continue
+            print(f"  ✓ {src} --{op_type}--> {tgt}{_suffix(op_id, reused)}")
+            if note:
+                print(f"  ⚠ {src} --{op_type}--> {tgt}: {note}")
 
         # ── Truth edges: NAND the target finding point (it's FALSE) ──
         for te in truth_edges:
             src = te["source"]
             op_type = te.get("op_type", "NAND")
             tgt = te["target"]
-            try:
-                top = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)],
-                                          **_direction_kw())
-                all_operator_ids.append(top["id"])
-                print(f"  ⚡ truth: {src} --{op_type}--> {tgt}")
-            except Exception as e:
-                print(f"  ⚠ truth {src} --{op_type}--> {tgt}: {e}")
+            op_id, reused, note = _elect(src, op_type, tgt, te.get("label"))
+            if op_id is None:
+                print(f"  ⚠ truth {src} --{op_type}--> {tgt}: {note}")
+                continue
+            print(f"  ⚡ truth: {src} --{op_type}--> {tgt}"
+                  f"{_suffix(op_id, reused)}")
+            if note:
+                print(f"  ⚠ truth {src} --{op_type}--> {tgt}: {note}")
 
         # ── Relevance edges: mitigate the OPERATOR (TRUE but matters LESS) ──
         for re in relevance_edges:
@@ -10572,17 +10656,55 @@ def _cmd_decide(args) -> int:
             strength = re.get("strength", 0.30)
             # Clamp to valid mitigation range
             strength = max(0.10, min(0.50, strength))
+            label = re.get("label")
             try:
-                # Reuse the operator if already created in `edges` (prevents
-                # duplicate operators feeding EP twice).
-                op_id = created_ops.get((src, op_type, tgt))
-                if op_id is None:
-                    op = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)],
-                                             **_direction_kw())
-                    op_id = op["id"]
-                    all_operator_ids.append(op_id)
-                sdk.mitigate_operator(op_id, reason, strength)
-                print(f"  ⚖ relevance: {src} --{op_type}--> {tgt} (mitigated {strength:.2f}: {reason})")
+                # The selection rule is the script's (`select_damp_targets`):
+                # damp EVERY single-pair bridge on the triple, and refuse the
+                # ones that also claim other pairs.
+                pick = select_damp_targets(proj, op_type, _resolve(src),
+                                           _resolve(tgt), label)
+                targets = pick["targets"]
+                if not targets:
+                    for note in pick["notes"]:
+                        print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: "
+                              f"{note}")
+                    # This command's documented semantics are to wire the
+                    # operator it damps; WHICH cases licence that is stated once
+                    # in `may_mint_damped_bridge` (the script never mints).
+                    if not may_mint_damped_bridge(pick):
+                        continue
+                    op_id, reused, note = _elect(src, op_type, tgt, label)
+                    if op_id is None:
+                        print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: "
+                              f"{note}")
+                        continue
+                    if note:
+                        print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: "
+                              f"{note}")
+                    # Name the consequence: the notes above describe the
+                    # bridges that were ALREADY there, and this command's answer
+                    # to "nothing to damp" is to wire the bridge it damps.
+                    print(f"  ✓ relevance: {src} --{op_type}--> {tgt} "
+                          f"(wired single-pair bridge {op_id} to damp)")
+                    targets = [op_id]
+                elif pick["notes"]:
+                    for note in pick["notes"]:
+                        print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: "
+                              f"{note}")
+                # Every damped copy belongs in the factor list — a damped bridge
+                # that is missing from it drops out of the ranking, which is the
+                # "ranking depends on the run count" defect in its other
+                # direction (#9631 review). The rule lives in
+                # `damped_factor_ids` so both entry points agree.
+                for target_id in damped_factor_ids(targets):
+                    if target_id not in all_operator_ids:
+                        all_operator_ids.append(target_id)
+                for target_id in targets:
+                    sdk.mitigate_operator(target_id, reason, strength)
+                extra = ("" if len(targets) == 1
+                         else f" on {len(targets)} operators")
+                print(f"  ⚖ relevance: {src} --{op_type}--> {tgt} "
+                      f"(mitigated {strength:.2f}{extra}: {reason})")
             except Exception as e:
                 print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: {e}")
 

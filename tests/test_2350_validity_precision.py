@@ -134,11 +134,58 @@ def test_effective_precision_denies_a_bound_that_names_no_instant():
     # epoch 0 is an INSTANT, not an absent start
     assert effective_precision(0, None) == "day"
     assert effective_precision(False, None) == "day"
-    # a caller-DECLARED token is an assertion, not a derivation: it wins
-    assert effective_precision("TBD", "year") == "year"
     # a numeric bound is an instant even when ``_created_sort_key`` cannot
     # float() it — the read path must not acquire a raise it never had
     assert effective_precision(10 ** 400, None) == "day"
+    # #9244 REVERSES the pre-#9244 assertion here (``("TBD", "year") ==
+    # "year"``, "a caller-DECLARED token is an assertion, not a derivation:
+    # it wins"): a declaration ANNOTATES a bound, it cannot summon one.
+    assert effective_precision("TBD", "year") is None
+
+
+def test_declared_precision_does_not_resurrect_a_bound_that_names_no_instant():
+    """#9244 (residual of #9201): the DECLARED token is gated on the bound too.
+
+    ``effective_precision`` returned the declared token BEFORE the
+    ``_created_sort_key`` orderability gate, so ``create_point(validFrom="TBD",
+    validFromPrecision="year")`` — accepted by the write boundary, which only
+    refuses a declaration on an ABSENT bound — made every read surface report
+    ``valid_from_precision == "year"`` for a start the #6140 owner ruling reads
+    as *never recorded*. That is the #9201 lie with one extra step: a
+    declaration annotates a bound, it cannot make one name an instant.
+
+    The gate is on the BOUND, so an ABSENT bound keeps its declaration
+    (``validToPrecision="unknown"`` IS #2350's ``END_UNKNOWN`` marker — there is
+    no bound to order), and an ORDERABLE bound keeps it too (the declaration
+    still wins over the legacy ``day`` default).
+    """
+    from tortoise.validity import effective_precision, window_read_fields
+
+    # PRESENT but UNORDERABLE ⇒ no precision, declared or not.
+    assert effective_precision("TBD", "year") is None
+    assert effective_precision("", "year") is None
+    assert effective_precision("not-a-date", "month") is None
+    # ORDERABLE ⇒ the declaration still wins over the legacy default.
+    assert effective_precision("2024-06-01", "year") == "year"
+    assert effective_precision("2024-06-01", "month") == "month"
+    assert effective_precision("2024-06-01", "day") == "day"
+    assert effective_precision("2024-06-01", None) == "day"
+    # ABSENT ⇒ the declaration is the only datum there is; the 3-state end
+    # marker survives (``END_UNKNOWN``), it is not a claim about an instant.
+    assert effective_precision(None, "unknown") == "unknown"
+    assert effective_precision(None, None) is None
+    assert effective_precision(None, "year") == "year"
+    # a NUMERIC bound always names an instant: the declaration wins, and the
+    # no-declaration default stays ``day`` without an ``OverflowError``.
+    assert effective_precision(0, "year") == "year"
+    assert effective_precision(0, None) == "day"
+    assert effective_precision(10 ** 400, "year") == "year"
+    # the ONE read projection reports the same ``None``, key still emitted.
+    assert window_read_fields("TBD", None, "year", None) == {
+        "valid_from_precision": None,
+        "valid_to_precision": None,
+        "end_state": "open",
+    }
 
 
 def test_window_read_fields_denies_precision_to_an_unorderable_bound():
@@ -498,6 +545,109 @@ def test_search_annotation_carries_declared_precision(lane):
     hit = next(r for r in _scan(sdk) if r["id"] == p["id"])
     assert hit["valid_from_precision"] == "year"
     assert hit["end_state"] == "open"
+
+
+def test_declared_precision_on_an_unorderable_start_reads_null_everywhere(lane):
+    """#9244 residual of #9201, measured through the PUBLIC write.
+
+    ``create_point(validFrom="TBD", validFromPrecision="year")`` is ACCEPTED —
+    ``validate_validity_precision`` only refuses a declaration on an ABSENT
+    bound, and narrowing that is a write-contract change this read-path lane
+    deliberately does not make (#9244: that shape goes to the owner). What is
+    fixed here is the READ: every window surface must report the start's
+    precision as ``None``, because the stored bound names no instant.
+
+    The CONTROL is the same declaration on an ORDERABLE start, which must still
+    report ``year`` — otherwise this test would pass by erasing declarations.
+    """
+    sdk, _events = lane
+    from tortoise.assembly import docker_walker_port
+    from tortoise.sdk import _decorate_fallback_hits
+
+    p = sdk.create_point("statement", "declared on no instant",
+                         validFrom="TBD", validFromPrecision="year")
+    # non-vacuous: the write boundary stored BOTH the bound and the declaration
+    props = _window_props(sdk, p["id"])
+    assert props["validFrom"] == "TBD", props
+    assert props["validFromPrecision"] == "year", props
+
+    # 1. get_historical_knowledge (raw bound)
+    gk = sdk.get_historical_knowledge(p["id"], A_DATE)
+    assert gk["chain"][0]["valid_from_precision"] is None
+
+    # 2. assembly window rows
+    port = docker_walker_port(sdk)
+    today = _utc_today()
+    row = next(r for r in port.window_rows(today, today) if r["id"] == p["id"])
+    assert row["valid_from_precision"] is None
+
+    # 3. search/recall wire — PRESENT key, ``None`` value (dropping the key
+    #    would be the cross-surface drift of #2350 review P2).
+    hit = next(r for r in _scan(sdk) if r["id"] == p["id"])
+    assert "valid_from_precision" in hit, hit
+    assert hit["valid_from_precision"] is None, hit
+
+    # 4. the embedded fallback decoration
+    fb = _decorate_fallback_hits([{"id": p["id"]}], sdk._get_proj().g)
+    assert fb[0].get("valid_from_precision") is None, fb[0]
+
+    # CONTROL — the same declaration on an ORDERABLE start still reads ``year``
+    # (the day is re-read for the lookup: ``window_rows`` selects on
+    # ``when OR createdAt``, and ``q`` is only reachable through its
+    # ``createdAt`` stamp, so a run crossing UTC midnight between the two
+    # ``_utc_today()`` calls would drop it — the #9406 clock-reading class
+    # this file's ``_utc_today`` docstring records).
+    q = sdk.create_point("statement", "declared on an instant",
+                         validFrom="2024-06-01", validFromPrecision="year")
+    assert sdk.get_historical_knowledge(
+        q["id"], A_DATE)["chain"][0]["valid_from_precision"] == "year"
+    q_day = _utc_today()
+    qrow = next(r for r in port.window_rows(q_day, q_day) if r["id"] == q["id"])
+    assert qrow["valid_from_precision"] == "year"
+    qhit = next(r for r in _scan(sdk) if r["id"] == q["id"])
+    assert qhit["valid_from_precision"] == "year"
+    qfb = _decorate_fallback_hits([{"id": q["id"]}], sdk._get_proj().g)
+    assert qfb[0].get("valid_from_precision") == "year"
+
+
+def test_declared_precision_on_an_unorderable_end_reads_null_both_sides(lane):
+    """#9244 applies to BOTH ends — ``effective_precision`` is end-agnostic.
+
+    The issue asked that the both-ends consequence be stated EXPLICITLY rather
+    than discovered: a declaration on a PRESENT-but-unorderable ``validTo``
+    (accepted by the same write boundary, which only refuses a declaration on an
+    ABSENT end) also resolves to no precision. Measured through the public write
+    so a future edit to either end's plumbing reddens this.
+
+    ``end_state`` stays ``known``: whether a stored-but-un-datable END should
+    report ``END_UNKNOWN`` is #9202's owner ruling, and a precision gate must
+    not pre-empt it — that assertion is the pin.
+    """
+    sdk, _events = lane
+    p = sdk.create_point("statement", "declared end on no instant",
+                         validFrom="2024-06-01", validTo="TBD",
+                         validToPrecision="year")
+    props = _window_props(sdk, p["id"])
+    assert props["validTo"] == "TBD", props
+    assert props["validToPrecision"] == "year", props
+
+    gk = sdk.get_historical_knowledge(p["id"], A_DATE)["chain"][0]
+    assert gk["valid_to_precision"] is None
+    assert gk["end_state"] == "known"
+
+    hit = next(r for r in _scan(sdk) if r["id"] == p["id"])
+    assert "valid_to_precision" in hit, hit
+    assert hit["valid_to_precision"] is None, hit
+    assert hit["end_state"] == "known"
+
+    # CONTROL — the same declaration on an ORDERABLE end still reads ``year``
+    q = sdk.create_point("statement", "declared end on an instant",
+                         validFrom="2024-06-01", validTo="2026-01-01",
+                         validToPrecision="year")
+    assert sdk.get_historical_knowledge(
+        q["id"], A_DATE)["chain"][0]["valid_to_precision"] == "year"
+    qhit = next(r for r in _scan(sdk) if r["id"] == q["id"])
+    assert qhit["valid_to_precision"] == "year"
 
 
 def test_undated_hits_emit_no_precision_keys(lane):

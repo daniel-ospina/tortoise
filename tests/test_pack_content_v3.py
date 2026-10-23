@@ -37,8 +37,8 @@ REPO_PACKS_DIR = Path(__file__).resolve().parents[1] / "packs"
 @pytest.fixture(scope="module")
 def registry():
     """The real repo registry — every shipped pack (agent-ops joined dev,
-    marketing, product-strategy, project-management; venture #2725;
-    investment-portfolio-manager #9663), converted to manifest v3."""
+    marketing, product-strategy, project-management; venture #2725; portfolio
+    #9663), converted to manifest v3."""
     r = PackRegistry(REPO_PACKS_DIR)
     n = r.load_all()
     assert n == 7, f"expected 7 packs to load, got {n}"

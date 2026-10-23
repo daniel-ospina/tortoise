@@ -2098,28 +2098,36 @@ class PackRegistry:
                 # declared predicate or a semantics value — the same split
                 # kindDefs uses (shape per-manifest, resolution here, because a
                 # bare name is not decidable from one manifest alone).
-                # #9663: resolution goes through the SAME #2781 missing-peer
-                # gate as kindDefs `nearMisses`, chain steps and the relation
-                # endpoints above. A pack that names a SIBLING pack's predicate
-                # as its near-miss is naming a pack it has declared in
-                # `depends_on` — so with that pack absent the reference is a
-                # named, survivable gap, never an isolation. Before this, the
-                # gate was applied to every other cross-pack site and not this
-                # one, so installing an overlay without its base pack dropped
-                # the overlay (measured: `packs/investment-portfolio-manager`
-                # without `venture` → 2 errors, pack isolated).
-                # #9663: the universe is BARE by contract (#2030), so a
-                # namespaced target here (`venture:holds`) is a typo in EVERY
-                # catalog, not only one that happens to have `venture`
-                # installed — `bare_only=True` keeps it fatal.
+                # #9663: resolution shares the ONE #2781 bucket decision
+                # (`_record_unresolved`) the relation ENDPOINTS above use, rather
+                # than writing straight to `self.errors`. A relation may
+                # legitimately name another pack's PREDICATE as its near-miss
+                # (`constrainedBy` vs venture's `gatedBy`), and a pack that
+                # DECLARED that dependency must be reported as having a missing
+                # peer — not isolated as if it had a typo, which is what an error
+                # here does. Measured on a catalog with `venture` removed:
+                # `gatedBy` went to `errors` and `unresolved_refs` stayed empty,
+                # so the whole pack was dropped with no diagnostic naming the
+                # pack to install.
+                #
+                # #9663: that gate must NOT swallow a NAMESPACED ref here. The
+                # universe this ref resolves against is predicates + semantics
+                # values, and predicates are BARE by contract (#2030) — declared
+                # bare, matched bare. `venture:holds` therefore names nothing in
+                # ANY catalog, so "install pack 'venture'" is advice that cannot
+                # make it resolve; `bare_only=True` keeps it fatal. A BARE target
+                # still takes the gate, because naming a sibling pack's predicate
+                # is the documented, legitimate use of `depends_on`
+                # (`constrainedBy` vs venture's `gatedBy`).
                 for target in rel.get("nearMisses", []) or []:
-                    if target not in all_predicates:
-                        self._report_unresolved(
-                            ns,
-                            f"relation '{pred}': nearMisses target '{target}'",
-                            target, loaded, missing_deps[ns],
-                            kind="any declared predicate or semantics value",
-                            bare_only=True)
+                    if target in all_predicates:
+                        continue
+                    self._record_unresolved(
+                        ns,
+                        f"relation '{pred}': nearMisses target '{target}' does "
+                        f"not resolve to any declared predicate or semantics "
+                        f"value (core or loaded pack)",
+                        target, loaded, missing_deps[ns], bare_only=True)
 
             # Check every equivalentTo target resolves
             for kind, targets in pack.kind_equivalences.items():
@@ -2202,8 +2210,6 @@ class PackRegistry:
     def _report_unresolved(
         self, ns: str, site: str, ref: str,
         loaded: set[str], missing_deps: list[str],
-        kind: str = "any known kind",
-        bare_only: bool = False,
     ) -> None:
         """Record an unresolvable ``ref`` as FATAL or as an unresolved peer.
 
@@ -2211,24 +2217,37 @@ class PackRegistry:
         ``"relation 'addresses': toKind 'pm:issue'"``); ``ref`` is the bare
         reference it carries. The FATAL half keeps the pre-#2781 message
         verbatim so existing diagnostics and their assertions are unchanged.
+        """
+        self._record_unresolved(
+            ns, f"{site} does not resolve to any known kind (core or loaded pack)",
+            ref, loaded, missing_deps)
 
-        ``kind`` names the RESOLUTION UNIVERSE the reference was checked
-        against, so a caller resolving something other than a kind (relation
-        ``nearMisses`` resolves against predicates + semantics, #9663) reports
-        what it actually looked for instead of claiming a kind was missing. The
-        default is the pre-#9663 wording, so every existing site is unchanged.
+    def _record_unresolved(
+        self, ns: str, message: str, ref: str,
+        loaded: set[str], missing_deps: list[str],
+        bare_only: bool = False,
+    ) -> None:
+        """THE #2781 bucket decision, in one place (#9663 review).
 
-        ``bare_only`` says the universe holds BARE names ONLY — no namespaced
-        spelling of ``ref`` exists at all, so a namespaced ref is a typo
-        whatever is installed and the #2781 gate must not explain it away
-        (#9663). Predicates are exactly such a universe (#2030: declared and
-        matched bare), so `venture:holds` in a relation `nearMisses` cannot be
-        rescued by installing `venture`; downgrading it to a survivable gap
-        would print advice that cannot make the reference resolve, and `pack
-        validate` never reads `unresolved_refs` — a false green in the
-        direction this fix exists to close. A BARE ref in the same universe is
-        left to the gate, because naming a sibling pack's predicate is the
-        documented, legitimate use of `depends_on`.
+        Every reference site (relation endpoints, `equivalentTo`, kindDefs and
+        relation `nearMisses`, chain steps, v3.1 extraction slots) must answer
+        the same question — is this reference a MISSING PEER (reported, pack
+        survives) or a TYPO (fatal, pack isolated)? `_report_unresolved` used to
+        be the only holder of that decision because it also owned the message;
+        relation `nearMisses` needs a different message, so it re-implemented the
+        branch — and a policy that lives in two places diverges the first time a
+        third bucket is added, in the site nobody remembers. This helper owns the
+        branch; callers own their wording.
+
+        ``bare_only`` says the universe holds BARE names ONLY, so no namespaced
+        spelling of ``ref`` exists at all and the gate must not explain it away
+        (#9663). Predicates are exactly such a universe (#2030), so
+        `venture:holds` in a relation `nearMisses` cannot be rescued by
+        installing `venture`; downgrading it to a survivable gap would print
+        advice that cannot make the reference resolve. It also matters to the
+        VERDICT: `pack validate` reads `unresolved_refs` into its exit code
+        (#9663), so a gap no installation can close would have reported a typo
+        as an installable, fixable gap.
         """
         if bare_only and isinstance(ref, str) and ":" in ref:
             explanation = None  # namespaced in a bare universe ⇒ always a typo
@@ -2236,13 +2255,10 @@ class PackRegistry:
             explanation = self._missing_pack_explanation(
                 ref, loaded, missing_deps)
         if explanation is None:
-            self.errors.setdefault(ns, []).append(
-                f"{site} does not resolve to {kind} (core or loaded pack)"
-            )
+            self.errors.setdefault(ns, []).append(message)
         else:
             self.unresolved_refs.setdefault(ns, []).append(
-                f"{site} does not resolve to {kind} — {explanation}"
-            )
+                f"{message} — {explanation}")
 
     @staticmethod
     def _missing_pack_explanation(
@@ -2276,7 +2292,7 @@ class PackRegistry:
         if not isinstance(ref, str):
             # Defence in depth: every caller's own SHAPE check rejects a
             # non-string reference before this pass, so this is unreachable
-            # today — but `"," in ref` on a non-string would raise out of a
+            # today — but `":" in ref` on a non-string would raise out of a
             # method whose contract is to RECORD a diagnostic. Treat it as
             # unexplained, which keeps it fatal.
             return None

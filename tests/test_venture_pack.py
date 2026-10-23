@@ -73,8 +73,8 @@ EXPECTED_EVENT_KINDS = frozenset({
     "disbursement", "conditionMet", "actionItemCompleted",
 })
 EXPECTED_NAMESPACES = frozenset({
-    "agent-ops", "dev", "marketing", "pm", "portfolio", "product-strategy",
-    "venture",
+    "agent-ops", "dev", "marketing", "pm", "portfolio",
+    "product-strategy", "venture",
 })
 
 

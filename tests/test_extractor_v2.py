@@ -3621,8 +3621,7 @@ def _hand_built_master() -> dict:
         },
         # FIXED order (agent-ops, dev, marketing, pm, portfolio,
         # product-strategy, venture) — the golden pins THIS order; it is
-        # independent of the packs' readdir order. `portfolio` joined the
-        # catalog with #9663 (the investment-portfolio-manager overlay).
+        # independent of the packs' readdir order.
         "memory_granularity": {
             "agent-ops": "Durable: the rule text, the situation that created it, "
                           "and the reasoning that supports or undermines it. "
@@ -3646,15 +3645,17 @@ def _hand_built_master() -> dict:
                    "committed, the reasoning, and milestone outcomes. "
                    "Ephemeral: card/board status, sprint burndown, assignment "
                    "logistics, issue triage.",
-            "portfolio": "Durable: the mandate terms the portfolio is actually "
-                          "run under and whether it is currently breached, the "
-                          "adopted target allocation per class/sector and why "
-                          "it was chosen, and the dated valuation marks with "
-                          "their basis (a multiple of cost, a write-down "
-                          "reason). Ephemeral: the mechanics of a mark "
-                          "(spreadsheet, sign-off logistics), superseded "
-                          "allocations, and any restatement of a position that "
-                          "`venture:investment` already carries.",
+            # #9663 — the portfolio overlay's granularity, verbatim from
+            # packs/investment-portfolio-manager/manifest.yaml.
+            "portfolio": "Durable: the mandate a position or target is bound "
+                         "to and its current status; the weight each class, "
+                         "sector or geography is steered toward and the "
+                         "benchmark it is measured against; when each "
+                         "position was last marked, by whom and as of which "
+                         "date. Ephemeral: market commentary, macro "
+                         "narrative, the arithmetic of a mark, and "
+                         "restatements of a target or mandate already "
+                         "recorded.",
             "product-strategy": "Durable: the productDelivery chain itself — "
                                  "which JTBDs/use-cases/features are being "
                                  "pursued, the chosen vs rejected options at "
@@ -3816,19 +3817,21 @@ class TestClassifyStage:
         """The flag-off S2/S4 prompts are byte-identical to the base
         templates (the core-only variants are separate constants). The
         exact-fragment pins catch template regressions (e.g. a joined
-        newline) that self-referential compares miss."""
+        newline) that self-referential compares miss.
+
+        The rule slot is reconstructed from the SAME master the renderer uses:
+        since #2818 `_s2s4_rules` is master-DEPENDENT (a declared value field
+        adds its policy block), so a bare `_s2s4_rules()` would compare the
+        render against a prompt that omits that block — a mismatch about the
+        catalogue, not the template, which is what this test is for.
+        """
         monkeypatch.delenv("TORTOISE_CLASSIFY_LATER", raising=False)
         assert v2.render_s2_prompt() == v2.render_s2_prompt()
-        # The base is rendered from the SAME master the prompt uses: the
-        # KIND VALUE FIELDS rule block is emitted only when a catalog kind
-        # DECLARES a value field (#2818), and since #9663 one shipped pack
-        # does (`portfolio:allocationTarget`), so `_s2s4_rules()` without the
-        # master is no longer the base this prompt is built from.
-        _m = v2.build_master_list()
+        master = v2.build_master_list()
         base = (v2.S2_TMPL
-                .replace("{master_list}", v2._render_master(_m))
-                .replace("{chains_text}", v2._render_chains(_m))
-                .replace("{anti_routine}", v2._s2s4_rules(_m))
+                .replace("{master_list}", v2._render_master(master))
+                .replace("{chains_text}", v2._render_chains(master))
+                .replace("{anti_routine}", v2._s2s4_rules(master))
                 .replace("{date_anchor}", v2._date_anchor(None, include_emission_rules=True))
                 .replace("{output_contract}", v2.OUTPUT_CONTRACT))
         assert v2.render_s2_prompt() == base

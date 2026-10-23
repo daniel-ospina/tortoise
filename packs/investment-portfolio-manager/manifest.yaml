@@ -1,203 +1,210 @@
-# Investment Portfolio Manager — an OVERLAY on `venture` (issue #9663)
+# Investment Portfolio Manager — overlay pack on `venture` (issue #9663)
 #
-# `packs/venture/manifest.yaml` already carries the portfolio position: its
-# `investment` kind IS the fund's stake in a backed company (`prospective →
-# invested → active → written-off`), with `program`/`asset` beneath it and the
-# `venturePortfolioFlow` chain. Its own header states the rule this pack exists
-# to honour: "Vertical vocabulary belongs in an overlay pack, never here."
+# The portfolio manager's own vocabulary, on top of the fund/venture model that
+# `packs/venture/manifest.yaml` already carries. venture's header states the
+# boundary this pack exists to respect: "Vertical vocabulary belongs in an
+# overlay pack, never here."
 #
-# So this pack ADDS the portfolio-manager specifics and never renames what
-# venture already models. The one outcome #9663 exists to prevent is an overlay
-# that re-declares a concept it could reference: the position is
-# `venture:investment` here, always referenced NAMESPACED, never as a second
-# bare `investment`/`holding`. Ambiguity between the two packs' vocabulary is
-# resolved by `synonyms`/`nearMisses` in this manifest (the classifier reads
-# `synonyms`/`examples`; the rerank reads `nearMisses`), never by minting a
-# competing kind.
+# ⛔ The one outcome to avoid: an overlay that RENAMES something venture already
+# models. When the portfolio-manager concept IS a venture concept, this pack
+# references it as `venture:investment` (namespaced, never bare) — it never
+# declares a second home for the position. Consequently this manifest declares
+# NO `equivalentTo`: nothing here is the same bare name under two namespaces.
+# The position, the programme, the asset, the funding agreement, the tranche and
+# the action item all stay venture's.
 #
-# A pack cannot extend another pack's lifecycle: `statuses`/`folds` may only be
-# declared for kinds in THIS pack's `objectKinds` (the fold dispatches on the
-# namespaced kind, and `status_folds.validate_status_decl` refuses a lifecycle
-# on a kind this pack does not own). This pack therefore declares a lifecycle
-# only for its own two Objects and leaves `venture:investment`'s alone.
-#
-# ── The value test (issue #9663), applied to every candidate ────────────────
-# A new kind is admitted only if it does at least one of:
-#   (1) owns a closed `statuses` lifecycle, with a declared `folds`;
-#   (2) declares a `values` shape (money / percent / multiple / duration /
-#       quantity);
-#   (3) is a step in a declared `chains` path;
-#   (4) is an endpoint of a declared `relations` entry carrying a `mechanism`.
-# Anything else belongs in a `synonyms` entry on an existing kind. Each kindDef
-# below carries a `# value test:` line naming the bullets it passes, and the
-# rejections are recorded at the bottom of this header — the test file
-# re-derives the same verdict from this manifest, so the two cannot drift.
-#
-# ── REJECTED candidates (and what absorbed each) ────────────────────────────
-#   investment / holding (as this pack's own kind)
-#       The rename #9663 exists to prevent — one concept, two homes. Use
-#       `venture:investment`; the "holding" wording is a `synonyms` entry on
-#       `allocationTarget` only where it names a TARGET, never a position.
-#   valuation (Object)
-#       A second state carrier for what `venture:investment` already carries.
-#       Rejected; the dated mark is the `valuationMark` EVENT (bullet 4), and
-#       the position stays `venture:investment`.
-#   thesis / view / hypothesis (Object)
-#       A claim is a core POINT (`statement`) carried by `aboutObject` /
-#       `aboutSubject`, never an Object: state lives on Objects only.
-#   benchmark
-#       Labels only — fails all four bullets. Absorbed as the `synonyms` entry
-#       "benchmark weight" on `allocationTarget` (a benchmark is a target the
-#       allocation is measured against, which is exactly `targetPct`).
-#   rebalance (Object or event kind)
-#       Labels only — fails all four bullets. A rebalance is a unit of work
-#       with an owner and a date, which is `venture:actionItem`; absorbed
-#       there (no new kind, no synonym on another pack's kind — a pack's
-#       kindDefs may not extend a sibling's kind).
-#   equivalentTo: investment → venture:investment
-#       Only meaningful for the SAME bare name under two namespaces; this pack
-#       declares no `investment`, so a twin declared only to be equated would be
-#       the two-homes failure with extra steps.
-#   A declared chain (e.g. `portfolioReviewFlow`)
-#       Inert: `master["chains"]` is built from `extractor_v2.CHAINS` on every
-#       path, so a pack chain outside that constant reaches no prompt. Boundary
-#       (a chain belongs in `extractor_v2.CHAINS`, not in a pack manifest) is
-#       pinned by `tests/test_investment_portfolio_manager_pack.py`. That is
-#       why NO kind below claims bullet 3.
+# Constraint respected: a pack cannot extend another pack's lifecycle. `statuses`
+# / `folds` may only be declared for kinds in THIS pack's `objectKinds` (the fold
+# dispatches on the namespaced kind, `status_folds.validate_status_decl`), so
+# nothing here re-declares `venture:investment`'s lifecycle. That is why a
+# valuation mark does not fold the position's status — see `valuationMark` below.
 
 namespace: portfolio
+# Directory `packs/investment-portfolio-manager`, namespace `portfolio`: a
+# namespace is the prompt-visible kind prefix (`portfolio:mandate`), so it is
+# kept short — the same split the shipped `packs/project-management` uses for
+# namespace `pm`.
 name: Investment Portfolio Manager
 version: 0.1.0
 tier: free
 description: >-
-  Portfolio-manager vocabulary layered on the venture pack — the mandate a
-  portfolio's holdings must respect, the target allocation per class/sector, and
-  the dated valuation mark on a position. The position itself is
-  `venture:investment`; this pack never renames it.
-
-# #2781: this pack references `venture:investment` in relations and in
-# kindDefs nearMisses, so the dependency is DECLARED. With `venture` absent the
-# registry reports those references against this pack by name instead of
-# isolating it (and instead of cascading) — and a TYPO in a reference to a
-# present pack stays fatal, which is what keeps the declaration honest.
-depends_on:
-- venture
+  Overlay on `venture` for the portfolio manager's own vocabulary: the mandate
+  that bounds what may be held, the per-class/sector allocation target that
+  states the weight the portfolio is steered toward (and the benchmark it is
+  measured against), and the dated valuation mark. The holdings themselves are
+  `venture:investment`.
 
 ontology:
   extends: core
 
-  # ── State carriers (Objects) ─────────────────────────────────────────────
-  # State lives on Objects. Each of these holds a current position that a later
-  # claim must SUPERSEDE, never append to.
+  # ── State carriers ────────────────────────────────────────────────────────
+  # Objects = state. A kind that declares `statuses` OWNS its state, so the
+  # built-in connector fold no longer re-labels it.
   objectKinds:
   - mandate
   - allocationTarget
 
-  # ── Dated occurrences (Events) ───────────────────────────────────────────
-  # Events carry NO state: a valuation mark records that the position was
-  # marked, at a date, and for what value. The position keeps its own current
-  # state on `venture:investment`.
+  # ── Dated occurrences ─────────────────────────────────────────────────────
+  # Events carry NO state. A valuation mark records WHEN a position was marked
+  # and is not a property of anything: it is evidence, never the current value.
   eventKinds:
   - valuationMark
 
-  # NO `hierarchies` entry for mandate → allocationTarget: the pair is already
-  # modelled by the `boundedBy` relation below, which is the one the runtime can
-  # write. A `hierarchies` path is shape-validated only and consumed by nothing,
-  # so declaring the same link twice would invite a later reader to pick the
-  # inert copy. One link, one representation.
+  subclassOf:
+    # A mandate is a bounded, dated permission — the fund/board grants it the
+    # way it grants an agreement. `agreement` is a canonical lowercase object
+    # kind and an allowed subclassOf parent (#2727).
+    mandate: agreement
+    # An allocation target IS a target (§5 canonical object kind): a declared
+    # end-state the portfolio is measured against.
+    allocationTarget: target
 
   kindDefs:
+    # ── Value-test justification (issue #9663) ──────────────────────────────
+    # Every admitted kind names the ONE bullet it passes. The test:
+    #   (1) owns a closed `statuses` lifecycle WITH a declared `folds`;
+    #   (2) declares a `values` shape;
+    #   (3) is a step in a declared `chains` path;
+    #   (4) is an endpoint of a declared `relations` entry carrying a
+    #       `mechanism`.
+    #
+    # ⛔ The justification lives HERE, in comments — never in `description`.
+    # `description` is PROMPT TEXT: `value_extractor` carries it into the value
+    # brief, `_render_master_verbose`/the compact render emit
+    # `- {kind} — {description}` into the S2/S4 classification prompt, and
+    # `compile_kind_index_spec` embeds it too. So design-review bookkeeping in a
+    # description ships into every extraction on the catalog-union path
+    # (#2714/#5163 — every graph with no `:PackInstall` records). Pinned by
+    # `test_kind_descriptions_are_extractor_prose_not_review_bookkeeping`.
+    #
+    #   mandate         — (4) endpoint of the `constrainedBy` relation, mechanism
+    #                     IMPL. It ALSO declares a closed `statuses` vocabulary,
+    #                     so it OWNS its state, but publishes no `folds` — no
+    #                     event kind in this pack is the driving occurrence of a
+    #                     mandate's status, and inventing one to satisfy the
+    #                     wording of (1) would be a kind that declares nothing.
+    #   allocationTarget — (2) declares `targetPct` as a `percent` value. Also
+    #                     (4): endpoint of `boundedBy`, mechanism IMPL.
+    #   valuationMark   — (4) endpoint of the `marks` relation, mechanism IMPL.
     mandate:
-      # value test: (4) endpoint of `constrainedBy` (a `mechanism: IMPL`
-      # relation) — and ONLY that bullet. The kind DOES own a closed lifecycle
-      # (draft → adopted → breached → retired), but bullet (1) as written asks
-      # for a declared `folds`, and there is none: a breach is a judgment the
-      # manager records, and this pack declares no event that would FOLD it.
-      # Inventing one to satisfy a bullet would be the mechanism-invention the
-      # value test exists to stop — so the bullet is not claimed.
       description: >-
-        The constraints a portfolio's holdings must respect — investment period,
-        sector/geography limits, concentration caps and reserve policy. The
-        mandate gates what may be held; the position records what IS held.
-        Lifecycle: draft → adopted → breached → retired.
+        A bounded permission the fund or the board grants the portfolio manager
+        — the constraints a holding or an allocation must respect (sector and
+        class limits, concentration caps, liquidity floors, holding-period
+        rules). Lifecycle: draft → adopted → breached → retired. A mandate is
+        the constraint, not the holding: "is this within mandate?" is answered
+        by looking at the mandate a position or target is bound to.
       statuses: [draft, adopted, breached, retired]
       synonyms:
       - investment mandate
-      - fund mandate
       - investment policy
-      - investment policy statement
-      - IPS
-      - mandate terms
+      - policy statement
+      - mandate limits
+      - investment guidelines
       - mandato
       - política de investimento
-      - restrições do mandato
+      - restrição de mandato
       examples:
-      - "Mandate M-1: no single position above 20% of committed capital"
-      - "the fund's 2026 investment mandate"
+      - "Mandate M-1: no single sector above 25% of committed capital"
+      - "the fund's 10-year holding-period mandate"
       nearMisses:
+      - venture:investment
+      - venture:fundingAgreement
       - allocationTarget
-      - venture:condition
 
     allocationTarget:
-      # value test: (2) declares `values: targetPct (percent)` — the shape
-      # "is this within mandate?" needs — and (4) endpoint of `boundedBy`.
       description: >-
-        The intended share of the portfolio a class, sector or geography should
-        hold — a target, not a position. `targetPct` is the declared value shape
-        (percent); the POSITION side of the comparison is
-        `venture:investment`. Lifecycle: proposed → adopted → retired.
+        The weight the portfolio is steered toward for one asset class, sector
+        or geography — and the benchmark weight it is measured against. This is
+        the object that gives "is this within mandate?" a shape: the target
+        carries a declared percent value, so an over/under-weight is a
+        comparison rather than a sentence. Lifecycle: proposed → adopted →
+        retired. A target is not a holding: the holdings are
+        `venture:investment`. The mention boundary for a benchmark: this kind
+        takes a benchmark WEIGHT (a reference weight the target is stated
+        against); a bare benchmark LABEL with no weight is not this kind, and is
+        kept as prose rather than minted into a kind with a `targetPct` the
+        utterance never stated.
       statuses: [proposed, adopted, retired]
       values:
       - name: targetPct
         valueKind: percent
+        required: true
       synonyms:
-      - target allocation
       - allocation target
+      - target allocation
       - target weight
       - policy weight
       - benchmark weight
-      - alocação-alvo
-      - meta de alocação
-      - peso-alvo
+      - reference weight
+      - alocação alvo
+      - peso alvo
+      - benchmark de referência
+      - peso de referência
       examples:
-      - "Allocation Target AT-1: 15% in agritech"
-      - "50% of the portfolio in core software"
+      - "Allocation Target AT-1: 30% in venture capital"
+      - "the 15% agritech target against a 10% benchmark"
       nearMisses:
-      - venture:investment
       - mandate
+      - venture:investment
 
     valuationMark:
-      # value test: (4) endpoint of `marks` (a `mechanism: IMPL` relation). An
-      # Event — it records a dated mark and carries no state, so it is not an
-      # Object and needs no lifecycle.
       description: >-
-        A dated valuation of a position — the mark the manager sets at a point
-        in time (fair value, a multiple of cost, or a write-down). An Event: it
-        records that the position was marked, when, and for how much; the
-        current worth of the position lives on `venture:investment`, never here.
+        The dated act of marking a position's value — a quarterly or annual
+        mark, an impairment, a write-up. An Event: it records that the marking
+        happened, by whom and as of when, and carries no state. The current
+        value of a position stays on `venture:investment` (whose lifecycle and
+        state this pack deliberately does not re-declare — a pack cannot extend
+        another pack's lifecycle), so this event publishes no `folds`.
       synonyms:
       - mark
       - valuation mark
-      - fair value mark
       - valuation
-      - markup
-      - markdown
+      - fair value mark
+      - impairment
       - write-down
+      - write-up
       - marcação
+      - marcação a mercado
       - avaliação
-      - reavaliação
+      - impairment contábil
       examples:
-      - "Valuation Mark VM-3: Alpha Holdings at 2.1x cost, 2026-06-30"
-      - "Q2 mark: Delta Sciences written down 40%"
+      - "Valuation Mark VM-3: 2026-Q3 mark of the Alpha Holdings position"
+      - "a 40% write-down of the Delta Sciences position at year end"
       nearMisses:
-      - venture:investment
       - venture:disbursement
+      - allocationTarget
+
+  # ── Candidates the value test REJECTED, and where the mention goes ────────
+  # `thesis` — a claim is a Point, not an Object (the issue's own ruling). It
+  #   lands on the core `statement` pointKind; this pack declares no pointKind,
+  #   so there is no pack-side home to absorb it and none is needed.
+  # `benchmark` — passes no bullet on its own (a bare benchmark states no
+  #   weight, and this kind declares `targetPct` as REQUIRED — minting one from
+  #   "our benchmark is the MSCI World" would force a percentage the utterance
+  #   never stated, the over-extraction the description's boundary exists to
+  #   prevent). A benchmark WITH a weight is absorbed by `allocationTarget`'s
+  #   `synonyms` ("benchmark weight", "reference weight", "benchmark de
+  #   referência"); a bare benchmark label stays prose. Both places state this
+  #   one rule and the test pins it.
+  # `rebalance` — an owned, dated action rather than a state carrier, so the
+  #   mention classifies to the KIND `venture:actionItem` (an owned, dated
+  #   commitment). ⚠ NOT by synonym: none of actionItem's synonyms ("action
+  #   item", "next step", "follow-up", "task") matches "rebalance", so
+  #   absorption rests on the kind's own definition. That is what the test
+  #   below pins, and adding the word as a venture synonym would be a
+  #   venture-side edit, not this overlay's.
+  #   ⛔ This pack deliberately declares NO `rebalance` kind and NO `rebalance`
+  #   synonym: the ambiguity belongs to venture's own kind, and a second home
+  #   here is the rename this pack exists to avoid.
 
   # ── Relations ─────────────────────────────────────────────────────────────
-  # Every endpoint is a kind of this pack or of `venture` (declared in
-  # `depends_on`); no core structural predicate is re-invented. `semantics:`
-  # names the Layer-2 meaning (ONTOLOGY §8, #7852) and `mechanism: IMPL` is what
-  # makes the declaration bind a runtime write path (#2766).
+  # Every endpoint is this pack's own kind or a `venture` kind. `venture` is a
+  # DECLARED dependency (below), so an absent venture is reported against this
+  # pack instead of surfacing as a bare "does not resolve" (#2781).
+  # `semantics:` is the ONTOLOGY §8 meaning (#7852); the direction convention is
+  # venture's own — `dependsOn` runs FROM the dependant TO what it depends on
+  # (`venture:gatedBy` is tranche → condition).
   relations:
   - predicate: constrainedBy
     mechanism: IMPL
@@ -206,13 +213,9 @@ ontology:
     toKind: portfolio:mandate
     cardinality: many_to_one
     extractable: true
-    # #7852: a relation may be confused with a SIBLING PREDICATE. `gatedBy` is
-    # venture's own predicate for "this is held back by that" — the closest
-    # confusion for a mandate constraint. It is declared BARE (predicates are
-    # bare by contract, #2030), so with `venture` absent it is a named,
-    # survivable gap against `depends_on` — never an isolation (#2781).
     nearMisses:
     - gatedBy
+    - boundedBy
   - predicate: boundedBy
     mechanism: IMPL
     semantics: dependsOn
@@ -222,48 +225,51 @@ ontology:
     extractable: true
     nearMisses:
     - constrainedBy
-    - mutuallyExclusive
   - predicate: marks
     mechanism: IMPL
     semantics: related
     fromKind: portfolio:valuationMark
     toKind: venture:investment
-    # many_to_one: a position is marked MANY times over its life (one mark per
-    # period), which is the whole point of a dated mark. `one_to_one` would
-    # assert at most one mark per position and be refuted by the second period.
     cardinality: many_to_one
     extractable: true
     nearMisses:
-    - addresses
-    # BARE: predicates are declared and matched bare by contract (#2030), so a
-    # relation nearMisses target is bare too — `venture:holds` is not a
-    # predicate reference and would be a typo, not a cross-pack gap.
-    - holds
+    - producedBy
+
+  # ── Chains — deliberately none ────────────────────────────────────────────
+  # A pack-declared chain with an id outside `extractor_v2.CHAINS` is never
+  # lifted into the extraction master (`master["chains"]` is built from that
+  # constant on every path — docs/EXPANSION_PACKS.md §"The extractor contract"),
+  # so declaring one here would add a prompt-shaped declaration that reaches no
+  # prompt. The relations above already give every admitted kind its write path.
+  # Adding `portfolioReviewFlow` to CHAINS is an engine-side edit, not an
+  # overlay's business.
 
   memory_granularity: >-
-    Durable: the mandate terms the portfolio is actually run under and whether
-    it is currently breached, the adopted target allocation per class/sector and
-    why it was chosen, and the dated valuation marks with their basis (a
-    multiple of cost, a write-down reason). Ephemeral: the mechanics of a mark
-    (spreadsheet, sign-off logistics), superseded allocations, and any
-    restatement of a position that `venture:investment` already carries.
+    Durable: the mandate a position or target is bound to and its current
+    status; the weight each class, sector or geography is steered toward and the
+    benchmark it is measured against; when each position was last marked, by
+    whom and as of which date. Ephemeral: market commentary, macro narrative,
+    the arithmetic of a mark, and restatements of a target or mandate already
+    recorded.
 
 extraction:
   active: true
-  # Empty = active for every source type — the same choice `venture` makes, and
-  # for the same reason: a portfolio review is a meeting, a memo or a document,
-  # so narrowing to the meeting source kinds would drop real captures.
+  # Empty = active for every source type.
   sourceTypes: []
   enforcement:
     default: warn
-    # Per-kind retry stays on the kindDefs where the evidence justifies it, not
-    # restated here (the kindDefs rung wins this map). No kind in this pack
-    # declares one: `allocationTarget` vs `venture:investment` is a
-    # `nearMisses` pair with distinct lifecycle words, which is the cheaper
-    # disambiguation.
     kinds: {}
     relations: {}
     chains: {}
 
 connectors: []
 tools: []
+
+# #2781: the cross-pack references this manifest actually makes are DECLARED —
+# `venture:investment` is a relation endpoint in TWO of the three relations
+# (`constrainedBy` fromKind, `marks` toKind); the third, `boundedBy`, stays
+# inside this pack (allocationTarget → mandate). Consumer: registry load reports
+# an absent `venture` against THIS pack and keeps the pack loaded; the hosted
+# install refuses fail-closed, naming the missing pack.
+depends_on:
+- venture

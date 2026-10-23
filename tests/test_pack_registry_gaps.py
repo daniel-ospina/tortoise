@@ -1098,6 +1098,117 @@ class TestCrossPackRefs:
         assert any("nearMisses target 'gadget'" in m
                    for m in registry.unresolved_refs["dev"])
 
+    def test_relation_near_miss_on_an_absent_pack_is_reported_not_fatal(
+            self, tmp_path):
+        """#9663: a RELATION `nearMisses` target resolves through the SAME #2781
+        gate the relation endpoints use.
+
+        A pack may legitimately name another pack's PREDICATE as the sibling it
+        is confused with (`constrainedBy` vs venture's `gatedBy`). Before this,
+        relation `nearMisses` wrote straight to `self.errors` — so a pack that
+        declared the dependency was ISOLATED for it, and `unresolved_refs`
+        stayed empty: the whole pack was dropped with no diagnostic naming the
+        pack to install. Measured on the shipped catalog with `venture` removed,
+        `portfolio` was dropped and `unresolved_refs` was `{}`.
+        """
+        d = str(tmp_path / "packs")
+        os.makedirs(f"{d}/dev", exist_ok=True)
+        with open(f"{d}/dev/manifest.yaml", "w") as f:
+            yaml.dump({
+                "namespace": "dev",
+                "name": "Development",
+                "ontology": {
+                    "extends": "core",
+                    "objectKinds": ["issue"],
+                    "relations": [{
+                        "predicate": "addresses",
+                        "fromKind": "dev:issue",
+                        "toKind": "dev:issue",
+                        "mechanism": "IMPL",
+                        "nearMisses": ["gatedBy"],
+                    }],
+                },
+                "depends_on": ["hr"],
+            }, f)
+        registry = PackRegistry(d)
+        assert registry.load_all() == 1
+        assert not registry.errors
+        assert any("nearMisses target 'gatedBy'" in m
+                   for m in registry.unresolved_refs["dev"])
+        assert any("hr" in m for m in registry.unresolved_refs["dev"])
+
+    def test_relation_near_miss_typo_without_a_dep_stays_fatal(self, tmp_path):
+        """The typo guard is NOT weakened by the #2781 routing: an unknown
+        predicate with no declared-but-absent dependency has no evidence that a
+        pack is missing, so the pack is still isolated."""
+        d = str(tmp_path / "packs")
+        os.makedirs(f"{d}/dev", exist_ok=True)
+        with open(f"{d}/dev/manifest.yaml", "w") as f:
+            yaml.dump({
+                "namespace": "dev",
+                "name": "Development",
+                "ontology": {
+                    "extends": "core",
+                    "objectKinds": ["issue"],
+                    "relations": [{
+                        "predicate": "addresses",
+                        "fromKind": "dev:issue",
+                        "toKind": "dev:issue",
+                        "mechanism": "IMPL",
+                        "nearMisses": ["gadget"],
+                    }],
+                },
+            }, f)
+        registry = PackRegistry(d)
+        assert registry.load_all() == 0
+        assert any("nearMisses target 'gadget'" in e
+                   for e in registry.errors["dev"])
+
+    def test_a_namespaced_near_miss_is_fatal_even_without_the_sibling(
+            self, tmp_path):
+        """A NAMESPACED relation `nearMisses` target is a typo in EVERY catalog.
+
+        The #2781 gate is right for a bare ref: the pack may legitimately be
+        naming a SIBLING pack's predicate (predicates are declared and matched
+        bare, #2030), so an absent `hr` explains `gatedBy` away as "install
+        pack 'hr'". Predicates do not exist under a namespace at all, so
+        `venture:holds` names nothing however much is installed — the gate's
+        own advice ("install pack 'venture'") cannot make it resolve, and once
+        `pack validate` reads `unresolved_refs` into its verdict (#9663) that
+        advice would also turn a TYPO into an installable, fixable gap.
+
+        `bare_only=True` at that one call site keeps it fatal. FAIL-ON: drop
+        that argument and this pack LOADS (0 → 1) with the ref filed as a
+        survivable gap; the bare case above must keep loading, so the guard
+        narrows nothing else.
+        """
+        d = str(tmp_path / "packs")
+        os.makedirs(f"{d}/dev", exist_ok=True)
+        with open(f"{d}/dev/manifest.yaml", "w") as f:
+            yaml.dump({
+                "namespace": "dev",
+                "name": "Development",
+                "ontology": {
+                    "extends": "core",
+                    "objectKinds": ["issue"],
+                    "relations": [{
+                        "predicate": "addresses",
+                        "fromKind": "dev:issue",
+                        "toKind": "dev:issue",
+                        "mechanism": "IMPL",
+                        # `venture` is absent from this catalog, and it would
+                        # not help if it were present.
+                        "nearMisses": ["venture:holds"],
+                    }],
+                },
+                "depends_on": ["venture"],
+            }, f)
+        registry = PackRegistry(d)
+        assert registry.load_all() == 0, registry.unresolved_refs
+        assert any("nearMisses target 'venture:holds'" in e
+                   for e in registry.errors["dev"])
+        assert "dev" not in registry.packs
+
     # ── #2781 regression: the shipped catalog must not cascade ──────────
 
     @pytest.mark.parametrize("victim", ["project-management", "product-strategy"])

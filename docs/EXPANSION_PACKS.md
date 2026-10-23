@@ -8,9 +8,12 @@ An expansion pack extends Tortoise's core ontology with a **domain vocabulary** 
 
 The five starter packs shipped by default: `dev`, `marketing`, `product-strategy`, `pm`, and `agent-ops` (rules-with-why). Your custom packs install alongside them.
 
-One further pack ships in the catalog **without** being a starter: `venture` (fund / venture-builder / accelerator vocabulary — portfolio stakes, programmes, assets, funding agreements, tranches and their gating conditions, disbursement events, action items). It is deliberately not auto-installed, and `docs/`-visible per-graph pack selection is #2728.
+Two further packs ship in the catalog **without** being starters:
 
-A second non-starter is an **overlay**: `investment-portfolio-manager` (namespace `portfolio`, `depends_on: [venture]`) adds only what the portfolio manager needs on top of `venture` — the mandate, the target allocation, the dated valuation mark — and references the position as `venture:investment` rather than re-declaring it. See §"Overlay packs — add, never rename" below.
+- `venture` (fund / venture-builder / accelerator vocabulary — portfolio stakes, programmes, assets, funding agreements, tranches and their gating conditions, disbursement events, action items).
+- `portfolio` (#9663) — an **overlay on `venture`** (`depends_on: [venture]`) for the portfolio manager's own vocabulary: the `mandate` that bounds what may be held, the `allocationTarget` that states the per-class/sector weight the portfolio is steered toward (and the benchmark it is measured against — `values: targetPct (percent)`), and the `valuationMark` event. It renames nothing venture owns: the position stays `venture:investment`, referenced **namespaced**, and the overlay declares no `equivalentTo`. Every admitted kind passes one bullet of the pack value test, and every rejected candidate names the home that absorbs it — see `tests/test_investment_portfolio_manager_pack.py`, which re-derives each passing bullet from the manifest instead of trusting the comment.
+
+Neither is auto-installed, and `docs/`-visible per-graph pack selection is #2728.
 
 > ⚠️ **Interim caveat — the ungated paths are still catalog-wide (#2714/#2728).** Shipping a pack under `packs/` puts its vocabulary into the **catalog union**, and the union is what a graph gets whenever no per-graph gate is resolved: its kinds enter that graph's value brief and kind index, its `memory_granularity` enters the S1 prompt, and its chains are rendered as chain guidance. Per-graph `:PackInstall` records now gate the classifier and the write gate as well as the pack-state introspection surfaces — but only where a gate is actually resolved. Two paths resolve none: a graph that has **no** `:PackInstall` records falls back to the catalog union by contract (#2714 indicator 3), and the `sdk=None` path is the union by contract (#5163). A third does not resolve one for the whole session: the SDK v2 extraction master (`_commit_session_v2` calls `extract_session_v2` with no `master`) falls through to `build_master_list()` for S1/S2/S4 **and the S5 write gate**, while the classify-later index in that same call IS gated (#5202). So "installed" narrows a graph's vocabulary exactly where records exist, and nowhere else — **except chains**, which are never narrowed (see the `CHAINS` note below), and **except the SDK v2 extraction master**, whose index is gated but whose prompt and write gate are not. The two pack-fit layers remain separate — **approval** (which packs a graph allows, per graph) and **classification** (which approved kind an item gets, per item) — and making approval gate classification on **every** path is #2714/#2728. Do not read "not a starter" as "not active".
 
@@ -396,16 +399,15 @@ kindDefs:
   `description`/`synonyms`/`examples`/`nearMisses`; rendering value schemas into the index `text`
   would rotate `kind_index.cache_key_for` on every install and silently re-embed the whole kind
   index. A test pins the index spec byte-identical with and without a declaration.
-- **A props-less pack renders byte-identically.** The brief key is absent when a kind declares
-  nothing, so for a pack that declares none the brief, the master's `pack_kinds` section and every
-  rendered prompt are byte-for-byte what they were before #2818 (the master gains one empty
-  `pack_values` section — the same always-present shape as `pack_hints`; tests pin the renders and
-  all seven starter packs still validate unchanged). ⚠️ This is a property of a **props-less** pack,
-  not of the shipped catalog: `packs/investment-portfolio-manager` declares
-  `values: [{targetPct, percent}]` on `allocationTarget`, so with it installed every rendered
-  prompt gains a `[values: targetPct(percent)]` segment plus the KIND VALUE FIELDS policy block
-  (#9663). The catalog-wide byte-identity claim that stood here before that pack landed is
-  therefore conditional now.
+- **A props-less KIND renders byte-identically; a declaring PACK does not.** The brief key is
+  absent when a kind declares nothing, so that kind's `pack_kinds` line and its brief entry are
+  byte-for-byte what they were before #2818. The shipped catalogue is no longer props-less as a
+  whole: since #9663 `portfolio:allocationTarget` declares `targetPct (percent, required)`, which
+  adds one `[values: …]` segment to the PACK KINDS list and the `KIND VALUE FIELDS` policy block to
+  the S2/S4 rule slot — on the gated path only when that pack is installed, and on the catalog
+  UNION path (a graph with no `:PackInstall` records, #2714/#5163) for everyone else. The other six
+  shipped packs still declare nothing, so their entries are unchanged; a test pins the catalogue's
+  declared set to exactly that ONE field and asserts the segment count is 1.
 - **The hosted overlay carries it too.** Unlike `statuses`/`folds` (catalog-only — a tenant
   manifest never enters a `PackRegistry`), `values` is compiled by the same loop in
   `compile_value_brief(tenant_manifests=…)`, so a hosted tenant pack's declaration reaches its own
@@ -416,61 +418,6 @@ path for a declared value field is #2782, and the shape's companion props (`curr
 `minorUnitExponent`, …) plus the reserved-name guard belong to the core property register
 (WS-A `POINT_PROPS` / WS-C D12), which is not in code yet. Declaring a shape is therefore necessary
 but not sufficient to make a value durable — see #2818's residuals.
-
-## Overlay packs — add, never rename (#9663)
-
-An **overlay** declares what a narrower role needs on top of a broad domain pack. The shape is
-always the same:
-
-```yaml
-namespace: portfolio            # short, because it is prompt-visible (`portfolio:mandate`)
-depends_on: [venture]           # #2781 — the base pack is a DECLARED dependency
-ontology:
-  extends: core
-  objectKinds: [mandate, allocationTarget]
-  eventKinds: [valuationMark]
-  relations:
-    - predicate: constrainedBy
-      fromKind: venture:investment   # the base pack's kind, NAMESPACED, never re-declared
-      toKind: portfolio:mandate
-      mechanism: IMPL
-      semantics: dependsOn
-      nearMisses: [gatedBy]          # a sibling pack's PREDICATE — BARE (predicates are bare by contract)
-```
-
-Three rules make an overlay safe, and #9663 exists because getting them wrong gives one concept two
-homes:
-
-1. **Never rename what the base pack already models.** If the concept IS `venture:investment`, use
-   `venture:investment` and reference it as `venture:investment` (never bare). Declaring a twin
-   kind — even one equated with `equivalentTo` — is the failure mode, not the fix.
-2. **Resolve ambiguity in the manifest, not by minting a kind.** `synonyms`/`examples` are what the
-   classifier reads and `nearMisses` is what the rerank reads, so a confusable sibling is named
-   there. Two packs must not share one synonym: a phrase offered for two kinds is exactly the
-   ambiguity an overlay is supposed to remove (`tests/test_investment_portfolio_manager_pack.py`
-   asserts the synonym surfaces of `portfolio` and `venture` are disjoint).
-3. **A pack cannot extend another pack's lifecycle.** `statuses`/`folds` may only be declared for
-   kinds in *this* pack's `objectKinds` (the fold dispatches on the namespaced kind, and
-   `status_folds.validate_status_decl` refuses anything else), so an overlay that needs a different
-   lifecycle for the base pack's state carrier is asking for a base-pack amendment — a decision to
-   make explicitly, not something a manifest can quietly do.
-
-**The value test.** A new kind is admitted only if it does at least one of: owns a closed `statuses`
-lifecycle with declared `folds`; declares a `values` shape; is a step in a declared `chains` path;
-or is an endpoint of a declared `relations` entry carrying a `mechanism`. Otherwise the concept
-belongs in a `synonyms` entry on an existing kind — and a claim (thesis, view, hypothesis) is a
-core `statement` **Point**, never an Object. `packs/investment-portfolio-manager/manifest.yaml`
-records the verdict per kind and, in its header, every rejected candidate with the entry that
-absorbed it; the test file re-derives the same verdict from the manifest each run instead of
-restating it.
-
-**A pack-declared chain is inert.** `master["chains"]` is built from `extractor_v2.CHAINS` on every
-path, so a chain declared only in an overlay's manifest reaches no prompt. Adding one is an engine
-edit (`CHAINS`) first; the overlay therefore declares none.
-
-The overlay's `_PACK_TRIGGERS` row gives compact-mode story selection its own keywords, so an
-ordinary portfolio sentence does not drag the overlay into a prompt that did not need it (see
-"The extractor contract" above — a catalog namespace with no row is injected whole, fail-open).
 
 ## Per-graph pack selection (#2728)
 
@@ -485,11 +432,22 @@ unreachable before #2728.
 extraction-off; `removed` = a tombstone — absent from the introspection list,
 kept for audit. **Removal is expressed by omitting the namespace from the
 desired set**, never by a status the caller sends.
-- **Resolution contract** (`pack_state.resolved_pack_set`): no marker → the
-catalog union (the back-compat fallback — every pre-#318, self-hosted and
-restored graph, #2714 indicator 3); marker present → the `active` records **∪**
-the namespaces already in the graph's data. The data leg is what keeps
-historical points writable after a pack is disabled.
+- **Resolution contract** (`pack_state.resolved_pack_set`) — THREE arms, and
+  only the first is the catalog union:
+  - no marker **and no `:PackInstall` records** → the catalog union (the
+    back-compat fallback — every pre-#318, self-hosted and restored graph,
+    #2714 indicator 3);
+  - no marker **but records present** → `recorded(any status)` ∪ the namespaces
+    in the graph's data. This is the arm a **hosted default graph** lands in:
+    provisioning seeds the starter set (#318), so the graph is
+    `configured: false` and already NARROWED — a catalog pack that exists but is
+    not installed is not in the set (#9691);
+  - marker present → the `active` records **∪** the namespaces already in the
+    graph's data, `configured: true`. The data leg is what keeps historical
+    points writable after a pack is disabled.
+
+So `configured: false` is **not** a synonym for "the whole catalog applies" —
+the RECORDS are the predicate. Read it as "never explicitly configured".
 - **`set_graph_packs` is the only path that moves the revision.** Every seeding
 path (`get_tenant_packs`'s self-heal *and* `ensure_tenant_packs` — the
 provision retry, the Supabase control plane, and
@@ -562,11 +520,18 @@ customer-facing territory that owns per-graph permissions.
 > `src/packs.js` holds the status grouping, the add-list diff, the PUT body and
 > the per-failure classification, so the surface cannot drift from the route's
 > semantics (the server's `removed` is never sent as an input status — omission
-> is what removes). `configured: false` is stated in words, with the resolved
-> set's count qualified in parentheses beside them, because such a graph still
-> resolves to the whole catalog: "Not configured yet — the full catalog applies
-> (2 active packs · 1 off)" — the count describes the rows the payload carries,
-> never a bare number a reader could mistake for the enforced set.
+> is what removes). `configured: false` is stated in words, and WHICH words
+> depend on the **records**, never on the flag alone (#9691): only the
+> record-less graph resolves to the whole catalog, so only it is told so — "Not
+> configured yet — this graph holds no packs, so the full catalog applies." The
+> arm every starter-seeded default graph is in gets the other sentence — "Not
+> configured yet — this graph uses the packs it already holds (2 active packs ·
+> 1 off). Saving pins the set." The count in parentheses describes the rows the
+> payload carries, never a bare number a reader could mistake for the enforced
+> set, and it is omitted in the record-less arm rather than printed as a
+> structurally-0 "0 active packs" beside the catalog claim.
+> `packs.js::usesCatalogUnion` is that predicate — `configured: false` **and**
+> zero records (a tombstone counts; the catalog arm of `available` does not).
 
 ### The write-gate closure — which writes are gated, and which are not (#5475/#9068)
 
@@ -704,7 +669,7 @@ A chain is an ordered kind path the extractor respects when connecting `about_en
 
 ## Testing a pack
 
-1. **Validate** — `tortoise pack validate <dir>` (or `--json` for machines). This runs the same schema + cross-pack validation as the daemon, and prints the **relation write-path verdict table** (`writable` / `declaration-only` / `predicate-not-in-allowlist`; `--json` carries the full list under `relation_verdicts`).
+1. **Validate** — `tortoise pack validate <dir>` (or `--json` for machines). This runs the same schema + cross-pack validation as the daemon, and prints the **relation write-path verdict table** (`writable` / `declaration-only` / `predicate-not-in-allowlist`; `--json` carries the full list under `relation_verdicts`). The exit code covers **both** registry buckets, and scopes both to the pack you asked about: a manifest that is a typo is *isolated* (`✗ <ns>`), and a pack that loads but whose `depends_on` — or a namespaced reference — names a pack that is **not installed** is reported under `⚠ unresolved references` and fails the run too (`--json` carries them under `unresolved_refs`). The pack is loaded, but nothing it declares resolves, which is what the hosted install path refuses as well. Scoping is by the pack's **namespace**, read from its manifest, not by its directory name — `packs/investment-portfolio-manager` declares `portfolio` and `packs/project-management` declares `pm`, and a directory-name filter reported both as `✓ Clean` for a manifest the registry had already isolated (#9663). A SIBLING's gap never becomes your pack's verdict.
 2. **Install** — self-hosted: put the pack under `TORTOISE_PACKS_DIR` and restart (or use the packaged `packs/` dir on a clone). Hosted: `POST /v1/packs/manifests` / `tortoise_pack_install` (ontology-only — no connectors/tools on tenant packs).
 3. **Extract** — mine a representative transcript with the offline/mock model and check the minted kinds (`tortoise list-kinds`, queries on the graph). The default render is verbose and carries every installed pack's kinds; keyword selection applies only to `TORTOISE_EXTRACTOR_PROMPT=compact`, and even there a namespace with no engine-side trigger row is injected whole (see "The extractor contract" above).
 4. **Iterate** — fix near-misses by adding `nearMisses` and `synonyms`; tighten chains with `enforcement: warn`; declare `retry` where the classifier hesitates.
@@ -726,13 +691,7 @@ declaration that would be inert.
 
 ## Reserved namespaces
 
-`dev`, `pm`, `marketing`, `product-strategy`, `agent-ops` are reserved starter namespaces — both the CLI scaffold and the hosted upload reject them (one guard, both surfaces). `venture` ships in the catalog but is **not** a starter and is not in the reserved list. The same is true of the `portfolio` overlay: not a starter, not reserved.
-
-⚠️ **A pack's directory name need not be its namespace** (`packs/project-management` → `pm`,
-`packs/investment-portfolio-manager` → `portfolio`). `tortoise pack validate` used to key its error
-filter on the directory name, so a pack whose two names differed reported `✓ Clean` and exited 0
-while the registry had already isolated it (#9663). If you are writing a tool that reports on a
-single pack, read the namespace from its manifest.
+`dev`, `pm`, `marketing`, `product-strategy`, `agent-ops` are reserved starter namespaces — both the CLI scaffold and the hosted upload reject them (one guard, both surfaces). `venture` and `portfolio` ship in the catalog but are **not** starters and are not in the reserved list.
 
 ## Reference
 
@@ -741,4 +700,4 @@ single pack, read the namespace from its manifest.
 - Governance research (enforcement layering): `docs/research/2026-08-05-expansion-pack-governance-surfaces.md`
 - Worked example: `packs/agent-ops/manifest.yaml` (rules-with-why)
 - Domain pack example: `packs/venture/manifest.yaml` (fund/portfolio state model — Objects hold state, Events are dated, claims are Points)
-- Overlay pack example: `packs/investment-portfolio-manager/manifest.yaml` (adds to `venture`, renames nothing — see §"Overlay packs — add, never rename")
+- Overlay example: `packs/investment-portfolio-manager/manifest.yaml` (declares `depends_on`, references another pack's kind namespaced, and states its value test per kind)
