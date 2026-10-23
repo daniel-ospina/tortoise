@@ -1206,10 +1206,10 @@ def test_id_less_point_does_not_break_the_whole_graph_query(sdk):
     rows = {row["id"]: row for row in sdk.calibrate_summary()}
     assert None not in rows
     # …and its remedy for the numeric id must be the numeric id, not its repr as
-    # a quoted string: ``set_point_baseline('42', …)`` names no node, takes the
-    # #9262 phantom-success path, and leaves the gate refusing forever — the
-    # same "advice that cannot resolve" loop this PR closed for source-linked
-    # points.
+    # a quoted string: ``set_point_baseline('42', …)`` names no node, so since
+    # #9262 the writer REFUSES it (before that it returned the phantom-success
+    # dict) and either way the gate keeps refusing — the same "advice that
+    # cannot resolve" loop this PR closed for source-linked points.
     assert "set_point_baseline(42," in rows[42]["suggestion"]
     sdk.set_point_baseline(42, 3.0, 1.0)
     assert 42 not in sdk._uncalibrated_ep_participants(None)
@@ -1232,6 +1232,36 @@ def test_set_point_baseline_refuses_a_non_epistemic_node(sdk):
     with pytest.raises(ValueError, match=r":Source"):
         sdk.set_point_baseline("https://example.org/9063", 4.0, 2.0)
     assert "https://example.org/9063" not in sdk._evidence
+
+
+def test_set_point_baseline_refuses_an_id_that_names_no_node(sdk):
+    """#9262: an id naming NO node is refused, never reported as a stored prior.
+
+    ``MATCH (n:Point {id:$id}) SET …`` matches zero rows on an id that names
+    nothing, yet the method returned the success dict AND planted the prior in
+    ``self._evidence`` — which ``_hydrate_evidence`` only reloads from
+    ``baseline_set = true`` rows, so the phantom dies on restart and a run's
+    belief state depended on which process set it (#1163's request-scoped SDK
+    is exactly that multi-process case). Same "false PASS" class #9063 closed
+    for a node on a label the writer does not address, one step further: here
+    there is no node at all.
+    """
+    with pytest.raises(ValueError, match=r"no node with id 'ghost-9262'"):
+        sdk.set_point_baseline("ghost-9262", 5.0, 2.0)
+    # No phantom seat: the in-memory map is a mirror of the graph, and the
+    # graph holds nothing (#9063's rule, applied to the absent-id path).
+    assert "ghost-9262" not in sdk._evidence
+    assert sdk._get_proj().g.query(
+        "MATCH (n) WHERE n.id = 'ghost-9262' RETURN n.id").result_set == []
+    # …and the refusal did not silence the writer: the same call on a point
+    # that exists still stores, so the guard can never become unsatisfiable
+    # (#8175's trap).
+    p = sdk.create_point("statement", "Real claim", status="live")
+    assert sdk.set_point_baseline(p["id"], 5.0, 2.0)["claim_id"] == p["id"]
+    assert sdk._evidence[p["id"]] == (5.0, 2.0)
+    assert sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.baseline_set, n.ep_alpha",
+        params={"id": p["id"]}).result_set == [[True, 5.0]]
 
 
 def test_guidance_for_a_source_linked_legacy_point_actually_works(sdk):
@@ -1415,8 +1445,10 @@ def test_refusal_never_claims_a_point_is_not_a_point(sdk):
     unlabelled probe hits it), which made the new guard raise "'' is a :Point,
     not a :Point" — a false diagnosis no caller can act on, on a node whose
     label is exactly the one the writer targets. That path keeps the historical
-    no-op of a write that bound nothing (#9262's family); the guard fires only
-    on a label that genuinely cannot carry a :Point baseline.
+    no-op of a write that bound nothing BECAUSE a node was found (an id the
+    labelled equality misses, not an absent id — the absent case is #9262's
+    refusal); the guard fires only on a label that genuinely cannot carry a
+    :Point baseline.
     """
     sdk._get_proj().g.query(
         "CREATE (n:Point {id:'', pointKind:'statement', status:'live'})")
