@@ -94,7 +94,12 @@ limits) — and `membership_errors` fails closed on ALL THREE shapes:
     than followed — the walk and the attribution would disagree about its name (a
     linked directory is not descended, so a marker behind it would get no
     verdict), which is a verdict of its own and not a silent hole. No link exists
-    there today; a NON-markdown link is an uncovered source, as above.
+    there today; a NON-markdown link is an uncovered source, as above;
+  * the sibling `*-CHANGELOG.md` is NOT scanned (`CHANGELOG_SUFFIX`): #8542 moved
+    status and change narration into those files, so an entry recording a marker
+    change may legitimately quote the convention, and scanning it would turn that
+    quote into a declaration the row must name. The exclusion is applied by BOTH
+    halves, so a row naming a changelog is not a false red either.
 * It does not touch the extraction/write-path stages.
 * It does not check that a cited test file is REGISTERED in the CI manifest —
   that surface is owned by `tools/ci_selection.py --integrity`. The gate checks
@@ -177,6 +182,12 @@ DECLARED_IDS = (
 ARCH_DOCS = ROOT / "docs" / "architecture"
 MARKER_TOKEN = "v4-mechanism:"
 MARKER_COMMENT = re.compile(r"^\s*v4-mechanism:\s*([a-z][a-z0-9_]*)\s*$")
+#: The sibling change log is HISTORY, not a declaration site (#8542 keeps status
+#: and change narration out of the design documents, which is exactly why a
+#: changelog entry may quote the convention when it records a marker change).
+#: Excluded from BOTH halves of the surface definition, so the scan and the
+#: attribution rule cannot disagree about it.
+CHANGELOG_SUFFIX = "-CHANGELOG.md"
 #: The CONVENTION written down: an angle-bracketed placeholder id. It names no
 #: mechanism, so it is neither a declaration nor a defect — skipped, which is
 #: what lets a scanned document explain the convention without satisfying a row
@@ -305,6 +316,13 @@ def declaration_markers(docs_dir: Path = ARCH_DOCS) -> tuple[dict[str, list[str]
     skipped: it names no mechanism, so counting it as a declaration made
     describing the rule in a scanned document a red gate (#9778 review P3).
 
+    The scan also EXCLUDES the sibling `*-CHANGELOG.md` (`CHANGELOG_SUFFIX`),
+    which records history rather than design — that is the document #8542 moved
+    status and change narration INTO, so an entry there may legitimately quote
+    the convention, and scanning it would make every such quote a declaration.
+    `_scanned_targets` applies the same exclusion, so the two halves keep one
+    definition of the surface.
+
     The scan is RECURSIVE (`**/*.md`), and that is not a detail: the attribution
     rule in :func:`_scanned_targets` treats a document under the dir as inside the
     surface, so a non-recursive scan made the two halves disagree at nesting depth
@@ -353,6 +371,8 @@ def declaration_markers(docs_dir: Path = ARCH_DOCS) -> tuple[dict[str, list[str]
                 f"{docs_dir.name}/"
             )
             continue
+        if doc.name.endswith(CHANGELOG_SUFFIX):
+            continue  # history, not a declaration site — see the docstring
         if doc.suffix != ".md" or not doc.is_file():
             continue
         try:
@@ -444,6 +464,8 @@ def _scanned_targets(entries: list[str], docs_dir: Path) -> set[Path]:
         rel = Path(entry)
         if rel.is_absolute() or rel.suffix != ".md":
             continue
+        if rel.name.endswith(CHANGELOG_SUFFIX):
+            continue  # the same exclusion the marker scan makes
         try:
             resolved = (root / rel).resolve()
         except (OSError, RuntimeError, ValueError):  # unresolvable: not attributable
@@ -1106,6 +1128,14 @@ def test_the_compact_render_omits_the_carve_out_the_row_records() -> None:
     carve-out must be present where the row says it is, and ABSENT from the
     compact render — the shape `tests/test_extractor_v2.py` already pins for
     `SHORT_SESSION_FACT_RULE` (review cycle 1, P2).
+
+    The compact render is called with a story that RENDERS its one conditional
+    block: passing `None` (as an earlier revision did) skips the `if story:`
+    branch entirely, so a fix that appended the carve-out INSIDE it — #9775's
+    first closing option — would have left this assertion green while the row
+    kept recording an omission that no longer existed (review P2). The
+    granularity block's presence is asserted first, so the vacancy claim cannot
+    pass by rendering nothing.
     """
     from tortoise import extractor_v2 as v2
 
@@ -1114,7 +1144,15 @@ def test_the_compact_render_omits_the_carve_out_the_row_records() -> None:
     assert marker in v2._granularity_text(master), "S1 lost the carve-out"
     assert marker in v2._render_master_core_only(master), "core-only lost it"
     assert marker in v2._render_master_verbose(master), "verbose lost it"
-    assert marker not in v2._render_master_compact(master, None), (
+    # A dev:-triggered story selects granularity subsections, i.e. the branch a
+    # carve-out fix would land in. If this stops rendering the block, the
+    # assertion below would be vacuous — so it is pinned too.
+    compact = v2._render_master_compact(master, "we shipped the dev: extractor change")
+    assert "MEMORY GRANULARITY" in compact, (
+        "the compact render no longer emits its granularity block for a "
+        "dev:-matched story, so the carve-out assertion below proves nothing"
+    )
+    assert marker not in compact, (
         "the compact render now carries the carve-out: the `state_value_carve_out` "
         "row still records the omission, so update the row (and #9775) with the "
         "decision instead of deleting this assertion"
@@ -1417,6 +1455,30 @@ def test_membership_accepts_a_nested_document_that_carries_the_marker(tmp_path) 
     # ... while the flat document's marker is now one the row omits, so the
     # bidirectional rule still fires — recursion did not turn the gate permissive.
     assert any("a.md" in e and "does not name it" in e for e in errors), errors
+
+
+def test_membership_does_not_scan_the_sibling_changelog(tmp_path) -> None:
+    """A changelog records history, so it is not a declaration site (#8542).
+
+    Scanning it would make every quoted convention in a change record a
+    declaration the row must name, and the changelogs are exactly where #8542
+    moved status and narration. Both halves exclude it, so a row naming one is
+    not a false red either. Pinned as BEHAVIOUR with the constant disabled: this
+    is what makes deleting the skip red rather than silently widen the surface
+    (a rule with no test is the blind-rule shape this file exists to refuse).
+    """
+    docs = _docs(tmp_path, a__md="a <!-- v4-mechanism: x -->\n")
+    (docs / "EXTRACTOR-CHANGELOG.md").write_text(
+        "records <!-- v4-mechanism: ghost -->\n", encoding="utf-8"
+    )
+    markers, errors = declaration_markers(docs)
+    assert "ghost" not in markers, markers
+    assert errors == [], errors
+    # And the row-naming half: a changelog is outside the surface, so naming one
+    # is the coverage verdict, not a "carries no marker" one.
+    row = _row("x")
+    row["declared_in"] = ["docs/architecture/EXTRACTOR-CHANGELOG.md"]
+    assert any("names NO declaring document" in e for e in membership_errors([row], docs))
 
 
 def test_membership_treats_a_non_markdown_source_inside_the_surface_as_unscanned(

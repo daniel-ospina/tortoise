@@ -751,7 +751,7 @@ A four-way audit of the write path found **FOUR distinct dedups at FOUR differen
 | **D-c** | **vs store, raw content hash** | `sdk.py:12412` (`_find_point_by_content`; the shared predicate builder is `_dedup_match_clauses`, `:12364`) | ✅ |
 | **D-d** | **semantic** | `:3021+` | ✅ |
 
-**⇒ `S0a NORMALIZE + HASH → S0b SOURCE DEDUP` is genuinely absent, and it is the largest single volume lever available.** Catching the same conversation firehose twice is a **whole-narrative** save, not a claim-level one — and since **S0 is already mechanical and free**, this costs nothing to add. <!-- v4-mechanism: source_dedup -->
+**⇒ `S0a NORMALIZE + HASH → S0b SOURCE DEDUP` is the largest single volume lever available, and it is mechanical and free: `tortoise/source_identity.py` is its implementation (`normalize_source_url`, `resolve_source_key`), wired in `projection/entities.py` and acceptance-tested by `tests/test_source_dedup_registration.py`, which is why `config/v4-mechanisms.yml` carries it as `implemented`.** Catching the same conversation firehose twice is a **whole-narrative** save, not a claim-level one. What stays absent is narrower than the step: **D-a above is still URL-keyed**, and resolving a spelling to the `:Source` that owns its identity is not hashing the narrative. <!-- v4-mechanism: source_dedup -->
 
 #### The five correctness constraints
 

@@ -251,7 +251,7 @@ mechanisms:
     name: "connection fan-out cap (200)"
     declared_in:
       - docs/architecture/STORAGE-ARCHITECTURE.md       # §11.5, the hub measurement
-      - docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md  # §13.8 "the cap is the design", §15
+      - docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md  # §13.8 "the cap is the design" (§15 restates the answer)
     state: implemented
     code:
       - tortoise/fanout.py
