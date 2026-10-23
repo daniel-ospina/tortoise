@@ -3291,8 +3291,10 @@ exception TYPE as the discriminator — `RecordProjectionError` is a role/scope 
 DSN); a driver `OperationalError` in the same message is a transient outage.
 ⚠️ Note `-m tortoise record-restore` behaves as described here, and "read-only" here means
 **read-only with respect to the RECORD**: the verb never writes the record — it reads it through
-`read_record_view` — but it **REBUILDS the cache graph** from what it read, so on a graph it is the
-destructive operation the guard above is about. The
+`read_record_view` — but it **REBUILDS the cache graph** from what it read (it WIPES the target
+graph before rebuilding), so on a graph it is the destructive operation the guard above is about.
+That is also why the scope check is the FIRST thing the verb does: the read phase is refused on a
+wrong-role DSN **before** the wipe runs, so a mis-scoped restore touches nothing. The
 R8 drill's `--limit` and `--allow-empty` flags apply to a run that HAS read a record.
 
 ### Runtime Config (non-secret)
