@@ -77,9 +77,12 @@ that distinction behind a green exit code.
 
 A PARTIAL RESTORE IS NOT AN ABSENCE
 -----------------------------------
-``--limit`` bounds how many nodes are written, so a bounded run declares
-``coverage=partial`` and the unwritten keys read as **``not-hot``** (§17.3): a
-residency miss that ``degraded`` on read, never ``empty``. The outcome carries
+``--limit`` bounds how many nodes are written; it declares ``coverage=partial``
+ONLY when the bound actually cut the record's keys. A bound at or above the
+record's node count still covers every key and therefore declares ``complete``
+(``bounded`` is not a state, it is a flag) — see §9's "bounded vs partial" bullet.
+When the plan does fall short, the unwritten keys read as **``not-hot``** (§17.3):
+a residency miss that ``degraded`` on read, never ``empty``. The outcome carries
 ``unwritten_keys`` so an operator sees the count rather than inferring a
 complete cache from a clean exit.
 
@@ -561,6 +564,28 @@ def restore_from_record_view(view: Any, *, org_id: str, graph_id: str,
     nodes_written = _as_int(result.get("nodes_written"), "nodes_written")
     relations_written = _as_int(result.get("relations_written"),
                                 "relations_written")
+    # ⛔ Parsed BEFORE the zero-write guard (#9604 review). The guard below raises
+    # for a wiped-and-empty cache, and it used to do so without ever reading
+    # `refused_keys` — so a scope whose EVERY row was a row the projection
+    # declines (a blank-keyed `:Session`, which the RECORD keeps and the cache
+    # cannot address) reported LOST with no mention of the refusal that caused
+    # it. The classification stays exit 2 (the cache really does hold none of
+    # the record); only the datum that explains it is no longer discarded.
+    nodes_selected = _as_optional_int(result.get("nodes_selected"))
+    relations_selected = _as_optional_int(result.get("relations_selected"))
+    refused_keys = tuple(
+        (str(key[0]), str(key[1]))
+        for key in (result.get("refused_keys") or ())
+        if isinstance(key, (list, tuple)) and len(key) == 2)
+    refused_note = ""
+    if refused_keys:
+        shown = ", ".join(f"{label}:{key!r}" for label, key in refused_keys[:5])
+        more = "" if len(refused_keys) <= 5 else f" (+{len(refused_keys) - 5} more)"
+        refused_note = (
+            f" — {len(refused_keys)} of the record's row(s) were REFUSED by the "
+            f"projection as unaddressable in this cache ({shown}{more}), which "
+            f"is why nothing landed; that refusal is not itself a shortfall, "
+            f"but the cache still holds none of the record")
 
     if (record_nodes or record_relations) and nodes_written == 0:
         # ⚠️ NOT the exit-3 class. Exit 3's documented meaning is "REFUSED,
@@ -582,9 +607,9 @@ def restore_from_record_view(view: Any, *, org_id: str, graph_id: str,
             f"the rebuild ran, wiped cache {cache_graph!r}, and the cache now "
             f"holds 0 node(s) while the record holds {record_nodes} node(s) and "
             f"{record_relations} relation(s) for {org_id}/{graph_id} — the wipe "
-            f"happened and nothing was put back. Treat the cache as LOST, not "
-            f"as restored and not as it was; fix the cause and re-run "
-            f"`record-restore`")
+            f"happened and nothing was put back"
+            f"{refused_note}. Treat the cache as LOST, not as restored and not "
+            f"as it was; fix the cause and re-run `record-restore`")
 
     # ⛔ The NODE denominator prefers the projection's OWN plan size, for exactly
     # the reason `relations_not_written` does for edges. `record_nodes` is the
@@ -600,7 +625,6 @@ def restore_from_record_view(view: Any, *, org_id: str, graph_id: str,
     # post-limit plan size, i.e. the only denominator that describes what THIS
     # run was supposed to write. A projection that reports none keeps the old
     # record-derived denominator, so the guard still discriminates.
-    nodes_selected = _as_optional_int(result.get("nodes_selected"))
     expected_nodes = (
         nodes_selected if nodes_selected is not None
         else (record_nodes if limit is None else min(record_nodes, limit))
@@ -632,9 +656,6 @@ def restore_from_record_view(view: Any, *, org_id: str, graph_id: str,
         declared_keys=_as_int(result.get("declared_keys"), "declared_keys"),
         bounded=limit is not None,
         nodes_selected=nodes_selected,
-        relations_selected=_as_optional_int(result.get("relations_selected")),
-        refused_keys=tuple(
-            (str(key[0]), str(key[1]))
-            for key in (result.get("refused_keys") or ())
-            if isinstance(key, (list, tuple)) and len(key) == 2),
+        relations_selected=relations_selected,
+        refused_keys=refused_keys,
     )
