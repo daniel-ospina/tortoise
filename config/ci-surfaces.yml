@@ -2877,6 +2877,14 @@ surfaces:
   # Registered beside its sibling capture tests; `tortoise/sdk.py` is a
   # SHARED_MODULE, so an sdk.py-only change already runs the full matrix.
   - test_capture_validfrom_3945.py
+  # #5064: the declared-mechanism gate. `core` is its classification home and
+  # the lane for a code diff; `tier1` is REQUIRED because the gate's subject is
+  # now half DOCUMENT — `membership_errors()` reads the
+  # `<!-- v4-mechanism: <id> -->` markers in `docs/architecture/*.md`, and
+  # `docs/` is in NON_PYTHON_PREFIXES, so a docs-only diff takes `select()`'s
+  # early return and would delete or rename a marker with this gate absent (the
+  # #5092 class, and every sibling v4 doc-subject guard is dual-registered for
+  # exactly this reason).
   - test_v4_declared_mechanisms.py
   # #4495: `pricing.allowance_reachability` — cap vs allowance quantised at the
   # node boundary — lives in tortoise/pricing.py, which matches no SOURCE_PATTERNS
@@ -5868,6 +5876,17 @@ tier1:
 # `ast`-only shape, and the same docs-only PR is exactly the change that can
 # falsify a claim it pins (or tidy the marker away).
 - test_extractor_v4_s4_stage_claims.py
+# #5064: the declared-mechanism gate (`core` above) — its membership half scans
+# `docs/architecture/*.md` for the `v4-mechanism:` markers, so a docs-only PR is
+# exactly the change that can delete, rename or forge one with the gate absent
+# from the tier-1 arm. Same no-DB, doc/`ast` shape as the guards above.
+# ⚠️ #9778 review (P1): the docs-only diff really does reach this entry —
+# EXTRACTOR-V4-ARCHITECTURE.md takes `select()`'s early return (tier1 only) and
+# STORAGE-ARCHITECTURE.md matches the `api` entry, while `core` is added only
+# when NOTHING matched. Registered in `core` alone the gate was asleep on the
+# exact diff class that can red it (#1349/#3332/#3616 silent-drop class); pinned
+# by `tests/test_ci_selection.py::test_docs_scanning_gates_stay_in_tier1`.
+- test_v4_declared_mechanisms.py
 # #8495: the same document's per-step FAILURE-POLICY guard (`core` above) — same
 # no-DB shape, and the same docs-only PR is exactly the change that can drop or
 # contradict the declared policy.
@@ -5994,18 +6013,6 @@ tier1:
 # relationship-variable `SET` census; no DB, so a docs-only PR — the exact change
 # class that can re-introduce a retracted sentence — must run it here.
 - test_9397_about_edge_properties.py
-# #9778 review (P1): the declared-mechanism MEMBERSHIP gate (`core` above) reads
-# `docs/architecture/*.md` — it derives the declared mechanism set from the
-# `<!-- v4-mechanism: <id> -->` markers in those two documents and fails closed
-# when a marker has no registry row. That is a NEW doc-side input, and `docs/`
-# is in NON_PYTHON_PREFIXES: a docs-only diff takes `select()`'s early return
-# (or matches the `api` entry for STORAGE-ARCHITECTURE.md) and runs tier1 ONLY,
-# so registered in `core` alone the gate was asleep on the one change class
-# that can red it — deleting or renaming a marker, or rewriting a declaring
-# section, merged green while the gate was red on `main` (#1349/#3332/#3616
-# silent-drop class). The same dual registration the six sibling
-# `test_extractor_v4_*` doc guards already carry for exactly this reason.
-- test_v4_declared_mechanisms.py
 # ── #9017 (2026-10-18): the slow pool's weights and its leg split are MEASURED
 #
 slow_files:

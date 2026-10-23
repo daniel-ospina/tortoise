@@ -66,10 +66,10 @@
 # while the seven-entry gate stayed green. So every declaration in
 # `docs/architecture/*.md` carries a `<!-- v4-mechanism: <id> -->` marker at the
 # declaration site, and `membership_errors()` in the gate fails closed in BOTH
-# directions — a marker with no row, and a row with no marker — AND attributes
-# each marker to the document the row itself declares: a marker in any
-# architecture doc does not stand in for a row whose own declared document is
-# unmarked (#9778 review P2). See the gate's docstring for the rule and its
+# directions — a marker with no row, and a row with no marker — AND holds each
+# row to its OWN declared documents: every scanned document a row names must
+# carry its marker (a marker elsewhere does not stand in for it), and a row that
+# names none is refused outright. See the gate's docstring for the rule and its
 # stated limits.
 #
 # ⚠️ ONE DECLARING SOURCE IS OUTSIDE THE GATE'S SCANNED SURFACE, and it is named
@@ -256,9 +256,13 @@ mechanisms:
       `_s2s4_rules()` — never S1, never the master render (a code fact the
       `SEAMS:` comment above `SHORT_SESSION_FACT_RULE` states;
       `tests/test_extractor_v4_citation_rot.py` pins the never-S1 half, and
-      `tests/test_extractor_v2.py` pins the render). WHAT DOES NOT — (a) there is
-      NO mechanical enforcement: the guarantee is prompt-only (#2453's own
-      closing records this), and the strict-verbatim measurement is
+      `tests/test_extractor_v2.py` pins the render). The FILTER side is
+      mechanical and is NOT what this row records as absent:
+      `tortoise/value_gate.py::identifier_only` is the SELECTION predicate
+      that drops identifier-like residues (`#4899`), and the EMBED gate reuses
+      the same rule set (row `embed_gate`). WHAT DOES NOT — (a) there is no
+      mechanical enforcement of the GUARANTEE: VERBATIM SURVIVAL is prompt-only
+      (#2453's own closing records this), and the strict-verbatim measurement is
       38/77 = 49.4% on the flags-on arm against a 49/90 = 54.4% committed
       baseline (#5064 comment 2026-10-13, #7949 E2);
       (b) `_render_master_compact` — selected by the documented
