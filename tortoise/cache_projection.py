@@ -50,7 +50,14 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
    a silent drop.
 3. **Rebuildable from the record alone.** The plan is a pure function of the
    record view: same view ⇒ same statements (idempotent), and the written field
-   set equals the record's field set exactly (never a superset).
+   set equals the record view's field set exactly (never a superset). ⚠️ One
+   declared, named exception: the properties in
+   :data:`FOLD_ON_CREATE_DEFAULTS`, whose DEFAULT belongs to the fold, not the
+   record — a record row that is silent about a kind materializes the same
+   constant the live fold would have written (#9634). Named honestly, including
+   its cost: the exactness test (:mod:`tests.test_cache_projection`) compares the
+   plan against the VIEW, so it cannot see a property the VIEW carries — the
+   bound on the exception is the drift pin, not that test.
 4. **A cold region reads ``not-hot``, never ``empty``.** ``declaration_for``
    writes the known-hot set **after** the writes and as a function of what was
    materialized, so a record key the projection did not write is not claimed
@@ -95,6 +102,7 @@ from .stored_form import STORED_VECTOR_PROPS, VERBATIM_MARKER, is_verbatim
 
 __all__ = [
     "ADDITIONAL_PRIMARY_COLUMNS",
+    "FOLD_ON_CREATE_DEFAULTS",
     "KEY_PROPERTY",
     "NODE_TABLES",
     "RELATION_TABLE",
@@ -178,6 +186,126 @@ def bookkeeping_columns(table: str) -> frozenset[str]:
 ADDITIONAL_PRIMARY_COLUMNS: dict[str, dict[str, str]] = {
     "point": {"baseline_alpha": "baseline_alpha", "baseline_beta": "baseline_beta"},
     "subject": {"superseded_by": "supersededBy", "superseded_at": "supersededAt"},
+}
+
+#: The **fold's** `ON CREATE` constants, per label — the properties whose DEFAULT
+#: is the fold's, not the record's (#9634).
+#:
+#: WHY THIS TABLE EXISTS. A bare write journals NO discriminator ONCE #9572
+#: LANDS — that branch (open, unmerged: `fix/9572-discriminator-clobber`)
+#: removes the fabricated `subjectKind`/`objectKind` default from every write
+#: door, which is correct: the record must not state a kind nobody named. ⚠️ On
+#: the tree this table lands in the discriminator is still FABRICATED at every
+#: write door (the SDK/EventAPI identity doors, the hosted `POST /v1/subjects`
+#: and `/v1/objects` models, the seed surfaces, the extractor lanes), so the
+#: divergence below is not yet reachable through a live write door; this is the
+#: record→cache half that has to land WITH or BEFORE #9572, and it is reachable
+#: today for any record row written without the column.
+#:
+#: The FOLD supplies that default under `ON CREATE` regardless —
+#: `projection/entities.py`'s `_upsert_subject` writes `s.subjectKind=$sk` with
+#: the parameter defaulting to `"other"`, and `_upsert_object` writes both
+#: `o.objectKind=coalesce($ok, 'other')` and `o.title=coalesce($title, '')`.
+#: `public.subject.subject_kind` / `public.object.object_kind` / `title` are
+#: NULLABLE, and `_props_from_row` drops a NULL column (#7971 property 3 — no
+#: fabricated authority reaches the cache), so a **record-sourced** rebuild
+#: materialised a `:Subject` with NO `subjectKind` at all: a property ONTOLOGY
+#: §4.2 (Subject) / §4.3 (Object) lists as REQUIRED. `rebuild_all` (journal
+#: replay, which runs the fold) was never affected — so live ≠ record.
+#:
+#: The fix is NOT to write the default back into the record (that is the
+#: fabrication #9572 deletes) and NOT to invent one here: it is to apply the
+#: FOLD's own `ON CREATE` constant on the way into the cache, so a record-sourced
+#: node is the node the live fold would have built. These are therefore
+#: **fold-derived defaults**: the record carries a kind when one was NAMED (the
+#: `EntityMutated` state map does), and this table supplies the same fallback the
+#: fold supplies when none was.
+#:
+#: ⚠️ RESIDUAL — the Subject clause does NOT coalesce, so this table's
+#: `subjectKind` fallback is the LOADER's DECISION for the null case, not fold
+#: parity (the Object half below IS parity). `_upsert_subject` writes
+#: `s.subjectKind=$sk` with no `coalesce`, and the parameter is
+#: `ev.get("subject_kind", "other")` — a default for an ABSENT key only. A key
+#: PRESENT-and-null therefore sets `$sk = null`, and `SET ... = NULL` REMOVES
+#: the property (`#7936`, on `_upsert_subject` itself), so the live fold leaves
+#: a present-null Subject with NO `subjectKind` at all while an absent key gets
+#: `'other'`. The record cannot reproduce that split: `subject_kind` is NULL and
+#: the tail is empty in BOTH cases, so the row carries nothing that separates
+#: them. This table fills `'other'` for both — a present-null tail names no
+#: kind, and leaving a REQUIRED property (§4.2) absent is the defect #9634
+#: exists to close. Effectively unreachable through the product today (`sdk.py`
+#: moves a caller's `subjectKind` into the column, and `subjectKind` is in
+#: `_SUBJECT_HANDLED`, so `_persist_extra_props` never puts it in the tail), so
+#: the residual is stated rather than measured for this case.
+#:
+#: EXCLUDED, each with its reason — the fold's OTHER `ON CREATE` defaults are
+#: not applied here, and the reasons are not all "it is not a constant":
+#:
+#: * `status` (`'live'` on Subject/Object) — PROJECTION-OWNED CACHE (§2.6/
+#:   `record_projection.OpDispatch.never_store`); the schema has no column for it,
+#:   so nothing a record row carries could contradict this table, and the cache
+#:   seeds it through the fold.
+#: * `createdAt` (`coalesce($ca, $now)`) — not a constant: the default is the
+#:   REBUILD INSTANT, so there is nothing for a table to pin.
+#: * `Source.sourceKind` — ONTOLOGY §4.6 REQUIRED, `public.source.source_kind`
+#:   NULLABLE, and `s.sourceKind=$sk` IS the same construction as Subject's…
+#:   but the fold has TWO defaults for it, so there is no single constant to
+#:   transcribe: `_upsert_source` passes `ev.get("sourceKind", "document")`,
+#:   while `_mint_source_stub` (`projection/edges.py`) defaults to
+#:   `"agentSession"` for a `session:` ref and `"document"` otherwise — its own
+#:   docstring records that `session:` stubs minted as `document` were the wart
+#:   #5012 removed. Defaulting a NULL row to `"document"` would therefore
+#:   FABRICATE the wrong kind on every session Source, so the value is not one
+#:   this table can hold; it needs the prefix rule (or a record column that
+#:   states it). Tracked in #9710.
+#: * `Source.is_episodic` (`s.is_episodic=$ep`, TRUE only for a `session:` ref)
+#:   — the same prefix-conditional shape as `sourceKind`, and the flag
+#:   `graph-scripts/backfill_is_episodic.py` reads to exclude a session Source
+#:   from its one-time backfill. `source.is_episodic` is placed PRIMARY and
+#:   NULLABLE, so a silent row loses it exactly like the kinds. Tracked in
+#:   #9710.
+#: * `Source.title = coalesce($title, $url)` and the other copies in the same
+#:   clauses (`canonicalUrl`, `urlAliases=[$raw_url]`, `ingestedAt`, and
+#:   `id = coalesce($id, $url)`) — not CONSTANTS: a copy of another record
+#:   column, or the write instant.
+#: * `Source`'s `contentHash` (`coalesce($hash, '')`), `externalId` and
+#:   `version` (`CASE WHEN $stub_completion THEN NULL … END`) — constant-VALUED
+#:   for a creator record, and still excluded, because that clause emits the
+#:   value conditionally: a record that COMPLETES a stub gets `NULL` (the
+#:   property stays absent, #5097), and `public.source` has no column that tells
+#:   the two apart — so applying the constant would fabricate `version=1` /
+#:   `externalId=''` on a node the live fold leaves bare (and `version` is a
+#:   creator-only ordinal the record deliberately never writes). Constant is not
+#:   the only test: the value must be DECIDABLE FROM THE ROW.
+#:   Both residuals are tracked in #9710, not silently absorbed here.
+#:
+#: ⚠️ **THIS DECLARATION IS NOT TOTAL, and the bound is named rather than
+#: implied.** The fold writes further `ON CREATE` values this loader does not
+#: reproduce, and the biggest is `:Event`: `_upsert_event` builds a `props` dict
+#: of DEFAULTS (`eventKind` `''`, `subject`/`object` `''`, `startedAt` `''`,
+#: `participants` `[]`, `classificationLevel` `'internal'`, `format` `'jsonl'`,
+#: and `id`) and writes all of it unconditionally with `e += $props`, so a
+#: record-sourced `:Event` loses every one of them the record row does not carry
+#: (seven, for an event whose optional columns are NULL) — including the
+#: ONTOLOGY §4.5-REQUIRED `eventKind` when a producer omits it. Also undeclared:
+#: the other `:Source` create clauses (`_materialize_connector_source`,
+#: `_upsert_document`, `_mint_source_stub`) and the `_stub` adoption marker the
+#: fold clears. Filed as #9721, as its own change, for two shapes this table cannot
+#: express: `participants` is a LIST (a mutable default per node) and `id` is a
+#: key-ish copy of `eventId`.
+#:
+#: So: the table plus the exclusions above are what the pin below covers. It is
+#: not a census of every `ON CREATE` value in the fold, and it must not be read
+#: as one.
+#:
+#: `tests/test_cache_projection.py` pins this table against the fold's own
+#: clauses (source-parsed, as the repo does for other cross-module contracts), so
+#: a change to the fold's constant reds the pin instead of silently re-opening
+#: the divergence. It pins the clauses it NAMES; it is not a discovery sweep over
+#: the fold (the exclusion list above is hand-maintained, and the pin says so).
+FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
+    "Subject": {"subjectKind": "other"},
+    "Object": {"objectKind": "other", "title": ""},
 }
 
 #: The placement table (#7955) — the field contract the schema is pinned to.
@@ -572,6 +700,28 @@ def node_from_row(label: str, row: Mapping[str, Any]) -> RecordNode:
     # The key column is a graph property too (`id`, `name`, `url`, `eventId`),
     # so it is projected under its own name as well as being the MERGE key.
     props.setdefault(key_prop, raw)
+    # The fold's `ON CREATE` constants, applied where the record is SILENT
+    # (#9634). `None` counts as silence, not as a value: it is a FALLBACK, so a
+    # value the record states — a named kind, from the column or from the
+    # `props` tail, which `_props_from_row` keeps verbatim — is never replaced.
+    #
+    # On the OBJECT side null-as-silence IS the fold's own rule: both clauses
+    # COALESCE (`coalesce($ok, 'other')`, `coalesce($title, '')`), so an
+    # explicit null and an absent column behave identically there.
+    #
+    # On the SUBJECT side it is a DECISION, not parity: `s.subjectKind=$sk`
+    # carries no coalesce and its parameter is
+    # `ev.get("subject_kind", "other")` — defaulting on an ABSENT key only. A
+    # key present-and-null sets `$sk = null`, and `SET ... = NULL` REMOVES the
+    # property (#7936), so the fold leaves a present-null Subject with NO
+    # `subjectKind` while an absent one gets `'other'`; the record row
+    # (`subject_kind` NULL, tail empty) is identical either way and cannot
+    # distinguish them. This loader chooses `'other'` for both, because a
+    # present-null tail names no kind and an absent REQUIRED property (§4.2) is
+    # the defect #9634 closes. Declared where the table is, as a residual.
+    for prop, default in FOLD_ON_CREATE_DEFAULTS.get(label, {}).items():
+        if props.get(prop) is None:
+            props[prop] = default
     return RecordNode(label=label, key=raw, props=props)
 
 
