@@ -1582,6 +1582,34 @@ def test_addresses_normalise_an_ipv4_mapped_ipv6_spelling(real_address_math):
     )
 
 
+def test_a_percent_encoded_credential_reaches_libpq_DECODED(tmp_path):
+    """#3039: the record DSN's userinfo must be percent-DECODED before libpq.
+
+    `urllib.parse.urlsplit` does NOT decode userinfo; `redis.from_url` and
+    libpq's own URI handling DO. `record_backup` read `.username`/`.password`
+    straight off the `_split_dsn` result, so a password containing `@`, `:`,
+    `/`, `?`, `#` or `%` reached `pg_dump` as a literal `%XX` and the backup
+    failed with a misleading auth error.
+
+    This pin exists because the #3039 source guard CANNOT see that shape: it
+    tracks attribute reads on bindings from a `urlparse`/`urlsplit` CALL, and
+    `parts = _split_dsn(dsn)` is neither — so the bug survived the sweep and
+    nothing stopped the raw read from being restored silently.
+    """
+    # `@` and `:` inside the password, percent-encoded the way a DSN must.
+    dsn = "postgresql://record_user:p%40ss%3Aword@db.projectref.supabase.co:5432/rec"
+    env = rb.libpq_env(dsn)
+    assert env["PGUSER"] == "record_user"
+    assert env["PGPASSWORD"] == "p@ss:word", (
+        "the credential reached libpq still percent-encoded — libpq decodes "
+        "URI userinfo, so the decoded form is what authenticates (#3039)"
+    )
+    # The non-secret coordinates still come from `_split_dsn`, undamaged.
+    assert env["PGHOST"] == "db.projectref.supabase.co"
+    assert env["PGPORT"] == "5432"
+    assert env["PGDATABASE"] == "rec"
+
+
 def test_the_guard_REFUSES_ambient_libpq_coordinates(monkeypatch):
     """#9601 review cycle 7 (P2): `PGHOSTADDR` outranks the URI's host.
 

@@ -19429,9 +19429,11 @@ class TortoiseSDK:
                                f"key {pkey!r} is held by terminal point "
                                f"{holder!r} (dedup hit) — create_point would "
                                f"fold onto it and MUTATE a terminal point, so "
-                               f"the bundle is rejected at validation; pass a "
-                               f"fresh key with dedup=False to mint a second "
-                               f"point (#8400)",
+                               f"the bundle is rejected at validation — see "
+                               f"the terminal holder; call "
+                               f"create_point(..., dedup=False) OUTSIDE the "
+                               f"bundle to mint a second point under that "
+                               f"content (#8400)",
                 })
 
     def _check_endpoint_race(self, index: int, conn: dict,
