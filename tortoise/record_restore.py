@@ -580,17 +580,36 @@ def restore_from_record_view(view: Any, *, org_id: str, graph_id: str,
             f"as restored and not as it was; fix the cause and re-run "
             f"`record-restore`")
 
-    expected_nodes = record_nodes if limit is None else min(record_nodes,
-                                                            limit)
+    # ⛔ The NODE denominator prefers the projection's OWN plan size, for exactly
+    # the reason `relations_not_written` does for edges. `record_nodes` is the
+    # RAW record count, and since #9599 the projection REFUSES some record rows
+    # on the way in: a blank-/whitespace-keyed `:Session` is kept by the RECORD
+    # (it is the faithful carrier, and a Postgres key is addressable) but cannot
+    # be a GRAPH key, so `_project_record_view` drops it from the plan. Comparing
+    # the MEASURED count against the RAW one then reports a shortfall the
+    # projection itself declared, on a restore that landed every writable row:
+    # exit 2 "the cache state is UNKNOWN" over a correct cache, telling an
+    # operator whose cache was just destroyed to "fix the cause and re-run" — a
+    # remedy that can never succeed. `nodes_selected` is the post-refusal,
+    # post-limit plan size, i.e. the only denominator that describes what THIS
+    # run was supposed to write. A projection that reports none keeps the old
+    # record-derived denominator, so the guard still discriminates.
+    nodes_selected = _as_optional_int(result.get("nodes_selected"))
+    expected_nodes = (
+        nodes_selected if nodes_selected is not None
+        else (record_nodes if limit is None else min(record_nodes, limit))
+    )
     if nodes_written != expected_nodes:
-        # The MEASURED cache count is the authority here; `nodes_selected`
-        # (what the projection said it selected) is reported beside it so a
-        # disagreement names which side is wrong.
+        # The MEASURED cache count is the authority here; the denominator is the
+        # projection's plan size where it reports one, so a disagreement names
+        # which side is wrong rather than blaming the record for rows the
+        # projection was never going to write.
         raise RestoreUnavailable(
             f"the cache holds {nodes_written} node(s) from the record after "
-            f"the rebuild, but the record holds {record_nodes}"
-            + (f" (bounded by --limit {limit} to {expected_nodes})"
-               if limit is not None else "")
+            f"the rebuild, but the plan selected {expected_nodes}"
+            + (f" of the record's {record_nodes}"
+               if expected_nodes != record_nodes else "")
+            + (f" (bounded by --limit {limit})" if limit is not None else "")
             + " — the restored cache and the source disagree, so the cache "
               "state is UNKNOWN")
 
@@ -606,6 +625,6 @@ def restore_from_record_view(view: Any, *, org_id: str, graph_id: str,
         coverage=result.get("coverage"),
         declared_keys=_as_int(result.get("declared_keys"), "declared_keys"),
         bounded=limit is not None,
-        nodes_selected=_as_optional_int(result.get("nodes_selected")),
+        nodes_selected=nodes_selected,
         relations_selected=_as_optional_int(result.get("relations_selected")),
     )

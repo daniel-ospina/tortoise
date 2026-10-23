@@ -422,6 +422,51 @@ def test_a_contradictory_report_is_UNAVAILABLE_rather_than_a_silent_pass(
     assert "disagree" in err, err
 
 
+def test_a_row_the_projection_REFUSES_is_not_a_restore_shortfall(
+        monkeypatch, capsys):
+    """RED pre-fix: the denominator was the RAW record count, not the plan's size.
+
+    Since #9599 a blank-/whitespace-keyed ``:Session`` is kept by the RECORD (it
+    is the faithful carrier, and a Postgres key is addressable) but refused by
+    the GRAPH write (the engine cannot serve a blank indexed key back to an
+    equality seek), so ``_project_record_view`` drops it from the plan.
+
+    Comparing the MEASURED count against ``len(view.nodes)`` then reported a
+    shortfall the projection itself had declared: exit 2 "the cache state is
+    UNKNOWN" over a cache that landed every writable row, and an operator whose
+    cache this run had just destroyed told to "fix the cause and re-run" — a
+    remedy that can never succeed. ``nodes_selected`` is the post-refusal plan
+    size, so it is the only denominator that describes what the run was
+    supposed to write.
+
+    The mutation that reds this: drop ``nodes_selected`` from the result dict
+    (keep ``nodes_written: 2`` and a 3-node view) — the raw count comes back as
+    the denominator and the run reports UNKNOWN for a correct restore.
+    """
+    view = cp.RecordView(nodes=(
+        cp.RecordNode(label="Point", key="p-9556-keep",
+                      props={"id": "p-9556-keep", "content": "kept",
+                             "status": "live"}),
+        cp.RecordNode(label="Point", key="p-9556-keep-2",
+                      props={"id": "p-9556-keep-2", "content": "kept too",
+                             "status": "live"}),
+        # The row the projection refuses: the record keeps it, the graph cannot.
+        cp.RecordNode(label="Session", key="",
+                      props={"id": "", "summary": "blank-keyed"}),
+    ))
+    projection = _RecordingProjection(result={
+        "nodes_written": 2, "relations_written": 0, "nodes_selected": 2,
+        "relations_selected": 0, "statements": 0, "record_nodes": 3,
+        "record_relations": 0, "coverage": "complete", "declared_keys": 0,
+        "source": "record"})
+    rc, _, _ = _drive(monkeypatch, view=view, projection=projection)
+    err = capsys.readouterr().err
+
+    assert rc == rrestore.EXIT_RESTORED, err
+    assert "UNKNOWN" not in err, err
+    assert "LOST" not in err, err
+
+
 def test_a_non_mapping_report_is_UNAVAILABLE_not_a_traceback(monkeypatch,
                                                              capsys):
     """A future projection that returns a non-report must not escape as a crash.
