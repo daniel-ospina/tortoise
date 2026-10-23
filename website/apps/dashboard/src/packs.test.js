@@ -280,7 +280,14 @@ test('packCountLine: counts active, shows the off count, and names the unconfigu
   const union = packCountLine({ configured: false, packs: [] })
   assert.match(union, /Not configured yet/)
   assert.match(union, /full catalog applies/)
+  assert.match(union, /Saving pins the set/, 'the arm where a save changes most must say so')
   assert.doesNotMatch(union, /active pack/, 'no count where the count is structurally zero')
+  // `catalog_ok` is the ADD-LIST read, not the resolution: the SAME sentence
+  // must render either way (the union is derived from records + marker), and
+  // the degraded caveat belongs to `ADD_LIST_DEGRADED_LINE` where that list
+  // renders. Withholding it here would leave the home claiming nothing while
+  // the modal one click away says the catalog applies.
+  assert.equal(packCountLine({ configured: false, packs: [], catalog_ok: false }), union)
   // …and the STARTER-SEEDED default graph — `configured: false` WITH five
   // records — must not claim it. `resolved_pack_set` is `recorded ∪ data` in
   // that arm, so `venture` is not in the set; the old line asserted the catalog
@@ -323,9 +330,17 @@ test('unconfiguredConsequence: the modal note is selected by the resolved set', 
     PACK_CONSEQUENCE.unconfigured)
   assert.equal(unconfiguredConsequence({ configured: false, packs: STARTERS.map((ns) => ROW(ns)) }),
     PACK_CONSEQUENCE.unconfiguredHolding)
+  // NOT keyed on `catalog_ok` — it reports the add-list read, not the set.
+  assert.equal(unconfiguredConsequence({ configured: false, packs: [], catalog_ok: false }),
+    PACK_CONSEQUENCE.unconfigured)
   // FAIL-ON: the seeded arm must not carry the catalog sentence at all.
   assert.doesNotMatch(PACK_CONSEQUENCE.unconfiguredHolding, /full pack catalog/)
   assert.match(PACK_CONSEQUENCE.unconfiguredHolding, /packs it already holds/)
+  // …and it must not mention the catalog AT ALL. A comparative ("rather than
+  // the full catalog", "not the whole catalog") is still an absolute the
+  // contract cannot keep: `recorded ∪ data` may equal the whole catalog, so the
+  // guard is semantic — the arm simply has no business naming the catalog.
+  assert.doesNotMatch(PACK_CONSEQUENCE.unconfiguredHolding, /catalog/i)
   // Both keep the promise that a SAVE is what pins the graph.
   assert.match(PACK_CONSEQUENCE.unconfigured, /pins this graph to the set you save/)
   assert.match(PACK_CONSEQUENCE.unconfiguredHolding, /pins this graph to the set you save/)

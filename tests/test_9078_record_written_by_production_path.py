@@ -39,12 +39,17 @@ WHAT IS NOT HERE, NAMED SO THE ABSENCE IS VISIBLE.
 * The reconciler's production trigger (#9189), and (before it landed) the
   `journal_event.seq` ordinal
   (#9190) and the reconciler's own dirty-run behaviour are other lanes.
-* ⚠️ **No CI job arms `TEST_RECORD_DB_URI`** (checked: `.github/` and `config/`
-  never set it), so the two Postgres legs skip in CI and the DB-FREE wiring gate
-  (`tools/record_wiring_check.py`) is what guards this seam on the PR path. The
-  Postgres legs are the operator-run acceptance command from #9078
-  ("a throwaway Postgres with only the RECORD migrations"), not a CI check.
-  Wiring them into a CI service container is its own change.
+* ⚠️ **Until #9551 the two Postgres legs never ran in CI** (`_record_db()` skips
+  twice over: no `TEST_RECORD_DB_URI`, and no `[postgres]` extra), so the DB-FREE
+  wiring gate (`tools/record_wiring_check.py`) was the only guard on this seam on
+  the PR path. #9551 arms them in the dedicated `test-record-postgres` job
+  (`.github/actions/postgres-provision`, a throwaway Postgres carrying the record
+  migrations, asserted to run with ZERO skips) — `test_ci_arms_the_record_against_a_real_postgres`
+  below pins that wiring so it cannot silently go unarmed again.
+  What a green there still does NOT prove: the migrations are applied **as files**
+  against a bare `postgres:16`, not as applied to the hosted Supabase project, and
+  the DSN is a DIRECT connection — so the transaction-mode-pooler failure mode is
+  unexercised (epic #7879 doc 08 §G1/§G6).
 * The fold defect that keeps captured Points out of the record today is pinned
   CONDITIONALLY (see `_fold_refuses_captured_points`), so this file neither
   hides it nor reddens the day it is fixed.
@@ -1370,7 +1375,8 @@ def test_an_armed_live_write_commits_and_closes_exactly_once(monkeypatch):
     Both Postgres legs SKIP without `TEST_RECORD_DB_URI`, and every DB-free leg
     asserts a REFUSAL (`no_tenant`, `no_durable_journal`, `malformed_dsn`) — so
     `write_live_record → write_records(position=False) → commit() → close()` was
-    only ever exercised by an operator with a database. Deleting the `commit()`
+    only ever exercised by an operator with a database (until #9551 armed the
+    leg in CI). Deleting the `commit()`
     left CI green and every layer row uncommitted on an armed deployment. This
     drives the real door against a fake seam and counts the promises it makes:
     the record reaches the seam unchanged, the position is deferred, and the
@@ -1417,9 +1423,9 @@ def test_an_armed_live_write_commits_and_closes_exactly_once(monkeypatch):
 def test_the_live_door_threads_the_ordinal_into_the_seam(monkeypatch):
     """The ORDINAL half of the seam, DB-free — the half CI could not see.
 
-    Both Postgres legs SKIP without `TEST_RECORD_DB_URI` and no CI job arms it,
-    so a door could satisfy every AST rule in this file and still hand the seam
-    `position=False` / `first_seq=1` — the empty-layer-1 defect, on the one path
+    Both Postgres legs SKIP without `TEST_RECORD_DB_URI` (and no CI job armed it
+    before #9551), so a door could satisfy every AST rule in this file and still
+    hand the seam `position=False` / `first_seq=1` — the empty-layer-1 defect, on the one path
     the static rules cannot execute (#9307 review advisory). This drives the
     real door against the same fake seam as the leg above: the ordinal the
     journal reported arrives AS the row's number, one call, one number.
@@ -1838,6 +1844,17 @@ def _capture(capture_sdk, monkeypatch,
              tenant: tuple[str, str]) -> tuple[object, Path, int]:
     """Seed, arm, capture through the PUBLIC API, return (sdk, journal, losses)."""
     monkeypatch.setenv(record_writer.RECORD_DSN_ENV, os.environ[RECORD_DB_ENV])
+    # ⛔ The extraction leg must be HERMETIC (#3695/#5477 class). The semantic-
+    # layer claim below is asserted against the objects a capture EMITS, and on a
+    # box with no provider key the capture SKIPS extraction by design (#3892) —
+    # so the same armed leg passed on a keyed laptop and RED in CI, for an
+    # environment cause. Measured 2026-10-23 on PR #9772's own leg: armed and
+    # keyless, the journal held ['EventRecorded', 'PointAdded', 'SessionRecorded',
+    # 'SourceCreated'] and the run failed on `assert objects`. The mock seam is
+    # the repo's documented deterministic, ZERO-NETWORK extractor (the same one
+    # `test_capture_session.py` uses), so the leg exercises the real capture →
+    # record path identically on every box.
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
     sdk, journal_path = capture_sdk()
     before = dict(monitoring.record_write_failure_counts())
     with use_record_tenant(*tenant):
@@ -2353,3 +2370,348 @@ def test_ensure_record_schema_applies_everything_on_a_fresh_container():
     assert "CREATE ROLE anon" in executed
     for path in RECORD_MIGRATION_FILES:
         assert path.read_text(encoding="utf-8") in executed, path.name
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 10. The ARMED CI LEG (#9551) — the leg a skip cannot hide a disagreement behind
+# ════════════════════════════════════════════════════════════════════════════
+
+PYTHON_CI = REPO_ROOT / ".github" / "workflows" / "python-ci.yml"
+POSTGRES_PROVISION = (REPO_ROOT / ".github" / "actions"
+                      / "postgres-provision" / "provision.sh")
+#: The zero-skip decision the armed job applies to its junit XML. A FILE, so it
+#: is executable from here (#9772 review P2 — an inline heredoc is only pinnable
+#: by substrings of its own text, and those survived deleting the skip clause).
+RECORD_LEG_GATE = (REPO_ROOT / ".github" / "scripts"
+                   / "record-postgres-leg-gate.py")
+
+
+def _record_ci_job():
+    """(job name, job) for the python-ci leg that ARMS the record database.
+
+    `yaml` is imported HERE, not at module scope: this file runs in every lane
+    matcher (including the embedded carve-out), and pyyaml is a CI/test-tooling
+    dependency this module has no other reason to require.
+    """
+    import yaml
+
+    jobs = yaml.safe_load(PYTHON_CI.read_text())["jobs"]
+    arming = [
+        (name, job) for name, job in jobs.items()
+        if any(str(step.get("uses", "")).endswith("actions/postgres-provision")
+               for step in (job.get("steps") or []))
+    ]
+    assert arming, (
+        "no python-ci job provisions the record's Postgres (#9551): both "
+        "Postgres legs then SKIP on every PR, so a new schema↔producer "
+        "disagreement of the #9264 class has NO CI failure path at all — the "
+        "operator-run command from #9078 is the only thing that ever sees it")
+    assert len(arming) == 1, (
+        "more than one job arms the record database — the armed leg is one "
+        f"named check, not a family: {[name for name, _ in arming]}")
+    return arming[0]
+
+
+def test_ci_arms_the_record_against_a_real_postgres():
+    """Indicator (a)/(b) of #9551: a job sets `TEST_RECORD_DB_URI` + the extra.
+
+    The env var is exported by the provisioning action (`$GITHUB_ENV`), not by a
+    workflow literal — that is what a `services:` block cannot do on this host
+    (#6673) — so both halves are pinned: the job that calls the action, and the
+    action that exports the variable.
+    """
+    name, job = _record_ci_job()
+    steps = job.get("steps") or []
+    runs = "\n".join(str(step.get("run", "")) for step in steps)
+
+    assert "TEST_RECORD_DB_URI=" in POSTGRES_PROVISION.read_text(), (
+        f"{name} provisions a database but the action never exports "
+        f"{RECORD_DB_ENV}: the legs still skip (#9551)")
+    assert re.search(r"\.\[[^\]]*\bpostgres\b[^\]]*\]", runs), (
+        f"{name} does not install the `postgres` extra, so `_record_db()`'s "
+        "`importorskip('psycopg2')` skips the legs for the OTHER half of the "
+        f"reason and the job passes by skipping (#9551)")
+    assert Path(__file__).name in runs, (
+        f"{name} arms a database but runs none of this file's legs")
+    # ⛔ The assertion that was here — `"skipped" in runs and "exit 1" in runs`
+    # — did not discriminate, and #9772's review PROVED it by mutation: delete
+    # the clause that fails the job on a real skip and both substrings survive
+    # ("skipped" 8× in the surviving comment/print text, "exit 1" in the
+    # missing-junit guard), so the pin certified an assertion-less job. What is
+    # pinned instead is the DECISION, in a file this suite can execute against
+    # fixture XMLs (`test_the_arm_gate_*` below): the step must CALL that file,
+    # and it must not carry a second, inline parser beside it.
+    gate_steps = [step for step in steps
+                  if RECORD_LEG_GATE.name in str(step.get("run", ""))]
+    assert len(gate_steps) == 1, (
+        f"{name} runs the legs but no single step applies "
+        f"{RECORD_LEG_GATE.name}: without the zero-skip assertion the armed job "
+        "is green when the leg skips, which is exactly the shape #9551 exists "
+        f"to remove. steps calling it: {len(gate_steps)}")
+    gate_run = str(gate_steps[0]["run"])
+    assert "junit.xml" in gate_run, (
+        "the zero-skip step does not read the junit XML — a skip count taken "
+        "from the log text is a rendering, an attribute is the result")
+    assert "import xml" not in gate_run and "ET.parse" not in gate_run, (
+        "the zero-skip step carries its own inline junit parser again: that "
+        "decision is untestable inside YAML (it was — #9772 review P2), so it "
+        f"belongs in {RECORD_LEG_GATE.name} and nowhere else")
+
+
+def test_the_armed_record_leg_can_block_a_merge():
+    """Decision 2 of #9551: REQUIRED on day one, not advisory.
+
+    An advisory leg is a check nobody's merge depends on — and this leg already
+    had to be armed twice over (the DSN *and* the driver). The aggregate
+    `python-ci-gate` is the required context, so the leg must be one of its
+    `needs:` AND carry a LEGS row: a `needs:` entry with no row cannot fail
+    closed on `skipped` (#5219), and a row with no `needs:` entry is dead.
+    """
+    name, _job = _record_ci_job()
+    gate = yaml_jobs()["python-ci-gate"]
+
+    assert name in (gate.get("needs") or []), (
+        f"{name} is not in python-ci-gate.needs — the armed leg cannot block a "
+        f"merge, so a red record leg is advisory (#9551 decision 2: REQUIRED)")
+    legs = "\n".join(str(step.get("run", "")) for step in gate["steps"])
+    assert f"{name}|" in legs, (
+        f"{name} has no row in python-ci-gate's LEGS table — a `skipped` "
+        "result for it would not fail closed (#5219)")
+
+
+def yaml_jobs():
+    import yaml
+
+    return yaml.safe_load(PYTHON_CI.read_text())["jobs"]
+
+
+# ── The arm gate's DECISION, executable (#9772 review P2) ──────────────────
+#
+# The step that asserts the legs RAN used to be an inline heredoc, and the only
+# pin on it was two substrings of its own text. Every test below runs the moved
+# script (`.github/scripts/record-postgres-leg-gate.py`) as a PROCESS against a
+# fixture junit XML, so what is asserted is the exit code and the named problem
+# — the effect — rather than a word appearing somewhere in a YAML string.
+
+#: A green armed run: both legs ran, nothing skipped, nothing failed.
+_JUNIT_GREEN = """<testsuites><testsuite name="pytest" tests="2" failures="0" \
+ errors="0" skipped="0">
+  <testcase classname="tests.test_9078" 
+            name="test_the_public_capture_path_writes_the_record"/>
+  <testcase classname="tests.test_9078"
+            name="test_the_public_capture_path_writes_the_epistemic_layer"/>
+</testsuite></testsuites>"""
+
+#: The defect #9551 exists for: the DSN (or the driver) did not arm, so BOTH
+#: legs skipped and pytest exited 0 — a run that certified nothing.
+_JUNIT_REAL_SKIP = """<testsuites><testsuite name="pytest" tests="2" failures="0" \
+ errors="0" skipped="2">
+  <testcase classname="tests.test_9078"
+            name="test_the_public_capture_path_writes_the_record">
+    <skipped type="pytest.skip" message="no record DSN">test_x.py:1711: skip</skipped>
+  </testcase>
+  <testcase classname="tests.test_9078"
+            name="test_the_public_capture_path_writes_the_epistemic_layer">
+    <skipped type="pytest.skip" message="no record DSN">test_x.py:1711: skip</skipped>
+  </testcase>
+</testsuite></testsuites>"""
+
+#: A strict xfail of one armed leg (the engine-dependency pin). It is recorded
+#: as `type="pytest.xfail"` AND counted in the suite's `skipped` attribute, so a
+#: gate that read the attribute would red this required job for a database that
+#: armed perfectly.
+_JUNIT_XFAIL = """<testsuites><testsuite name="pytest" tests="2" failures="0" \
+ errors="0" skipped="1">
+  <testcase classname="tests.test_9078"
+            name="test_the_public_capture_path_writes_the_record"/>
+  <testcase classname="tests.test_9078"
+            name="test_the_public_capture_path_writes_the_epistemic_layer">
+    <skipped type="pytest.xfail" message="the fold refuses captured Points"/>
+  </testcase>
+</testsuite></testsuites>"""
+
+#: One leg deselected out of the run — the Postgres proof never happened.
+_JUNIT_DESELECTED = """<testsuites><testsuite name="pytest" tests="1" \
+ failures="0" errors="0" skipped="0">
+  <testcase classname="tests.test_9078"
+            name="test_the_public_capture_path_writes_the_record"/>
+</testsuite></testsuites>"""
+
+#: A red leg (the ordinary failing case).
+_JUNIT_FAILED = """<testsuites><testsuite name="pytest" tests="2" failures="1" \
+ errors="0" skipped="0">
+  <testcase classname="tests.test_9078"
+            name="test_the_public_capture_path_writes_the_record">
+    <failure message="AssertionError">boom</failure>
+  </testcase>
+  <testcase classname="tests.test_9078"
+            name="test_the_public_capture_path_writes_the_epistemic_layer"/>
+</testsuite></testsuites>"""
+
+#: pytest collected nothing (a bad `-k`, a broken module): nothing certified.
+_JUNIT_EMPTY = """<testsuites><testsuite name="pytest" tests="0" failures="0" \
+ errors="0" skipped="0"/></testsuites>"""
+
+
+def _run_leg_gate(tmp_path, xml: str, script: Path | None = None):
+    """Run the arm gate as a PROCESS over one fixture XML."""
+    path = tmp_path / "junit.xml"
+    path.write_text(xml, encoding="utf-8")
+    return subprocess.run(
+        [sys.executable, str(script or RECORD_LEG_GATE), str(path)],
+        capture_output=True, text=True, timeout=120)
+
+
+def _gate_errors(result) -> list[str]:
+    return [line for line in result.stdout.splitlines()
+            if line.startswith("::error::")]
+
+
+def test_the_arm_gate_reds_on_a_real_skip_and_names_it(tmp_path):
+    """#9551's defect, executable: a skipped armed leg must FAIL the check.
+
+    The skip is the ONLY problem in an otherwise green run, so this asserts the
+    exact problem list — which is what makes the pin discriminating: a gate that
+    lost the skip clause reports `[]` and exits 0, and this test reds (proven
+    mechanically by `test_deleting_the_skip_clause_...` below).
+    """
+    result = _run_leg_gate(tmp_path, _JUNIT_REAL_SKIP)
+
+    assert result.returncode == 1, (
+        "the gate certified a run in which BOTH Postgres legs skipped — the "
+        f"exact defect #9551 exists to remove:\n{result.stdout}")
+    assert _gate_errors(result) == [
+        "::error::2 leg(s) SKIPPED — the record database did not arm, or the "
+        "driver is missing (#9551)"], _gate_errors(result)
+    assert "skipped=2" in result.stdout and "armed_capture_legs=2" in result.stdout, (
+        "the gate must report the counts it decided on, not just its verdict")
+
+
+def test_the_arm_gate_passes_a_green_armed_run(tmp_path):
+    """The other direction: a certified run must not be red (a gate that cannot
+    pass is indistinguishable from a broken job)."""
+    result = _run_leg_gate(tmp_path, _JUNIT_GREEN)
+
+    assert result.returncode == 0, result.stdout
+    assert _gate_errors(result) == [], _gate_errors(result)
+
+
+def test_the_arm_gate_tolerates_a_strict_xfail(tmp_path):
+    """A `pytest.xfail` is not a skip-for-lack-of-a-database.
+
+    One armed leg carries a strict xfail pinned to a MEASURED engine defect, and
+    xfail is counted in the suite's `skipped` attribute — so this pins that the
+    gate counts SKIPPED TESTCASES and excludes `type="pytest.xfail"`, or the
+    required check would red on the day the engine defect returns.
+    """
+    result = _run_leg_gate(tmp_path, _JUNIT_XFAIL)
+
+    assert result.returncode == 0, result.stdout
+    assert "xfailed=1" in result.stdout and "skipped=0" in result.stdout, (
+        result.stdout)
+
+
+def test_the_arm_gate_reds_on_a_failure_a_deselect_and_an_empty_run(tmp_path):
+    """The three other ways the run certifies nothing, each named."""
+    failed = _run_leg_gate(tmp_path, _JUNIT_FAILED)
+    assert failed.returncode == 1, failed.stdout
+    assert any("failing/erroring" in line for line in _gate_errors(failed)), (
+        _gate_errors(failed))
+
+    deselected = _run_leg_gate(tmp_path, _JUNIT_DESELECTED)
+    assert deselected.returncode == 1, deselected.stdout
+    assert any("deselected" in line for line in _gate_errors(deselected)), (
+        _gate_errors(deselected))
+
+    empty = _run_leg_gate(tmp_path, _JUNIT_EMPTY)
+    assert empty.returncode == 1, empty.stdout
+    assert any("0 tests collected" in line for line in _gate_errors(empty)), (
+        _gate_errors(empty))
+
+
+def test_the_arm_gate_refuses_to_pass_on_a_missing_or_unreadable_xml(tmp_path):
+    """No XML (or an unparseable one) is NOT "no problems found".
+
+    The step this replaced had the missing-file branch inline and the parse
+    inside the same heredoc: a parse that never ran would have exited 0 with no
+    output, i.e. a silent pass — the rendering-vs-result failure the gate
+    exists to refuse. Exit 2 is "nothing was certified", never 0.
+    """
+    missing = subprocess.run(
+        [sys.executable, str(RECORD_LEG_GATE), str(tmp_path / "absent.xml")],
+        capture_output=True, text=True, timeout=120)
+    assert missing.returncode == 2, missing.stdout
+    assert any("no junit XML" in line for line in _gate_errors(missing)), (
+        _gate_errors(missing))
+
+    garbage = _run_leg_gate(tmp_path, "<testsuites><testsuite tests=")
+    assert garbage.returncode == 2, garbage.stdout
+    assert any("unreadable junit XML" in line for line in _gate_errors(garbage)), (
+        _gate_errors(garbage))
+
+
+def test_deleting_the_skip_clause_reds_the_arm_gate(tmp_path):
+    """⚠️ The mutation #9772's review used as PROOF, kept as an executable pin.
+
+    The review showed that removing
+
+        if skipped:
+            problems.append(f"{skipped} leg(s) SKIPPED — ...")
+
+    from the old inline step left both substring pins green AND the job green on
+    a skipped leg. That mutation is applied here instead of argued: the mutated
+    script is run on the SAME `_JUNIT_REAL_SKIP` fixture and must exit 0 (i.e.
+    the mutation is a real behaviour change, not a syntax error), which is what
+    makes `test_the_arm_gate_reds_on_a_real_skip_and_names_it` bind to that
+    clause specifically rather than to the fixture happening to fail.
+
+    If the clause's shape moves, this test fails LOUDLY at the anchor rather
+    than silently mutating nothing — a mutation test that mutates nothing is
+    the vacuity it is supposed to disprove.
+    """
+    source = RECORD_LEG_GATE.read_text(encoding="utf-8")
+    start = source.find("    if skipped:")
+    end = source.find("    if len(armed) < MIN_ARMED_LEGS:")
+    assert start != -1 and end > start, (
+        "the skip clause moved — re-point this mutation test at it instead of "
+        "deleting the proof that the pin discriminates")
+    mutated = tmp_path / "record-postgres-leg-gate.py"
+    mutated.write_text(source[:start] + source[end:], encoding="utf-8")
+
+    result = _run_leg_gate(tmp_path, _JUNIT_REAL_SKIP, script=mutated)
+
+    assert result.returncode == 0, (
+        "deleting the zero-skip clause did NOT change the verdict, so the "
+        f"clause is not what reds a skipped leg:\n{result.stdout}")
+    assert _gate_errors(result) == [], _gate_errors(result)
+
+
+def test_the_arm_gate_is_a_file_the_job_calls_never_an_inline_heredoc():
+    """The step's decision must live in the tested file — this is the pointer.
+
+    `test_ci_arms_the_record_against_a_real_postgres` pins that the job CALLS
+    it; this pins that the file it calls is the one exercised above (a rename in
+    one place and not the other is how a tested decision silently stops being
+    the decision that runs).
+    """
+    assert RECORD_LEG_GATE.is_file(), (
+        f"{RECORD_LEG_GATE} is missing — the armed leg's zero-skip assertion "
+        "has no tested home again")
+    spec = importlib.util.spec_from_file_location(
+        "record_postgres_leg_gate", RECORD_LEG_GATE)
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader, RECORD_LEG_GATE
+    spec.loader.exec_module(module)
+    assert callable(module.decide) and callable(module.main), (
+        "the gate script exposes no `decide`/`main` — a module whose logic is "
+        "unreachable cannot be tested against a fixture, which is the whole "
+        "point of moving it out of the YAML")
+    assert module.MIN_ARMED_LEGS == 2, (
+        "the armed leg count moved — the job exists for exactly two legs, so "
+        "a third (or a second) needs the fixture set re-derived, not a number "
+        "retyped")
+    _name, job = _record_ci_job()
+    called = [str(step.get("run", "")) for step in (job.get("steps") or [])]
+    assert any(RECORD_LEG_GATE.name in run for run in called), (
+        f"no step of the armed job calls {RECORD_LEG_GATE.name} — the tested "
+        "decision is not the decision that runs")

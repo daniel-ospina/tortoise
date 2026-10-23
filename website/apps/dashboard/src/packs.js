@@ -79,7 +79,14 @@ export const PACK_CONSEQUENCE = Object.freeze({
   // that resolves to the catalog union, so it is the only state allowed to say
   // so; a starter-seeded graph is unconfigured too and reads the other line.
   unconfigured: 'This graph has never been configured and holds no packs, so it uses the full pack catalog. Adding or removing a pack here pins this graph to the set you save.',
-  unconfiguredHolding: 'This graph has never been configured, so it uses the packs it already holds \u2014 not the whole catalog. Adding or removing a pack here pins this graph to the set you save.',
+  // No comparative against the catalog here. `resolved_pack_set` for this arm is
+  // `recorded(any status) ∪ data`, and NOTHING stops that union equalling the
+  // catalog — a graph holding records for every catalog namespace (an
+  // out-of-band activer such as `upsert_tenant_manifest` writes a `:PackInstall`
+  // without moving the marker) really does apply the whole catalog while being
+  // `configured: false`. So state the narrowing POSITIVELY and never claim what
+  // the set is not.
+  unconfiguredHolding: 'This graph has never been configured, so only the packs it already holds apply. Adding or removing a pack here pins this graph to the set you save.',
 })
 
 function asRows(body) {
@@ -95,10 +102,20 @@ function asAvailable(body) {
 // (removal means absent from the list), while the server offers a graph's OWN
 // tombstones back in `available` with `status: 'removed'`, so the two together
 // are the record set. They cannot double-count: `_packs_payload` never lists a
-// tombstone in `packs`. The one shape they do not cover — a CATALOG-shipped
-// tombstone with no marker, offered by the catalog arm as `available` — is
-// unreachable: removal only happens through `set_graph_packs`, which writes the
-// `:PackSelection` marker, so that graph takes the `configured` branch instead.
+// tombstone in `packs`.
+// ⚠ ONE shape is not covered: a CATALOG-shipped tombstone, which the catalog
+// arm offers as `available` with `status: 'available'` (never `removed`), so it
+// counts as zero records. It is NOT unreachable: `:PackSelection` is missing
+// from the projection's config capture, so a `rebuild_all` KEEPS the tombstoned
+// `:PackInstall` row and DROPS the marker — measured: before
+// `configured:true, revision:1`, after `configured:false, revision:0` with a
+// `removed` row, which reads here as the catalog union. (The other unwired
+// writer, `pack_manifest_store.delete_tenant_manifest`, has no caller — that
+// half is latent.) Preserving the marker fixes both this predicate and the
+// silent re-admission; #9752 carries it, and `:TeamMeta` is the precedent for
+// the shape that fix must take (a SECTION, not a `_config_classes()` row: the
+// registry keys on a single string identity property and `:PackSelection` has
+// none — it is one node per graph by construction).
 export function packRecordCount(body) {
   return asRows(body).length
     + asAvailable(body).filter((p) => p && p.status === 'removed').length
@@ -113,6 +130,9 @@ export function usesCatalogUnion(body) {
 
 // The unconfigured note the surface renders: two different graphs, two
 // different sentences. Callers pass the payload, never the flag.
+// NOT keyed on `catalog_ok`: that flag reports whether the shared catalog could
+// be READ (the add-list's enumeration), never which set resolves — so it must
+// not change what this note says about the resolution.
 export function unconfiguredConsequence(body) {
   return usesCatalogUnion(body)
     ? PACK_CONSEQUENCE.unconfigured
@@ -278,7 +298,16 @@ export function packCountLine(body) {
   // "the full catalog applies" — the same self-contradiction in a new shape,
   // so this arm reports no count at all.
   if (usesCatalogUnion(body)) {
-    return 'Not configured yet \u2014 this graph holds no packs, so the full catalog applies.'
+    // `catalog_ok` deliberately does NOT branch this sentence — the resolution
+    // is derived from the RECORDS and the marker (`resolved_pack_set`), never
+    // from the catalog read, so the union is the union whether or not the
+    // catalog could be enumerated. `_packs_payload` reads them separately:
+    // `resolved` first, `catalog_ok` from `_pack_catalog_rows()`. The degraded
+    // fact is about the ADD-LIST's enumeration, and it surfaces there
+    // (`ADD_LIST_DEGRADED_LINE`), in the same modal where that list renders.
+    // Withholding a true sentence from the home, where no degraded signal
+    // exists, would leave a user reasoning that no pack applies.
+    return 'Not configured yet \u2014 this graph holds no packs, so the full catalog applies. Saving pins the set.'
   }
   return `Not configured yet \u2014 this graph uses the packs it already holds (${line}). Saving pins the set.`
 }

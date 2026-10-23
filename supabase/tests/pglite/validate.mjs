@@ -1095,5 +1095,412 @@ try {
   process.exit(1);
 }
 
+// ── #9553 (R5 class 1): the point-PROPERTY edge lands a `relation` row ──
+//
+// `_upsert_point_edges` derives `extractedFrom` from the Point's own payload
+// (`_link_source`), so a JOURNAL rebuild restored
+// `(:Point)-[:extractedFrom]->(:Source)` while a RECORD-sourced rebuild restored
+// nothing: the point row carried `extracted_from` and not a single relation row
+// carried the edge. Unlike the CONTAINS leg above, the two records here are
+// SYNTHETIC — the shared fixture carries no `extractedFrom` — so the segment is
+// spelled out rather than lifted, and it is the LIVE order: the Source is
+// journaled before the Point whose payload names it
+// (`sdk._materialize_session_source` mints the capture Source first).
+//
+// ⛔ ONE RESIDUAL, asserted by the DIAGNOSTIC below rather than by a green row:
+// the insert RESOLVES the Source from the record's own `source` row. Replay the
+// Point first and it lands nothing — the `absent` verdict every relation gives,
+// not a minted endpoint. A record-sourced rebuild is fed in journal order
+// (#9190); the reverse order is the documented gap, not a contract.
+try {
+  const tenant = ['9553c1-org', '9553c1-graph'];
+  await db.exec(`
+    INSERT INTO public.organizations (id, name, graph_name)
+      VALUES ('9553c1-org', '9553c1-org', 'org_9553c1-org');
+    INSERT INTO public.graphs (id, org_id, name, namespace)
+      VALUES ('9553c1-graph', '9553c1-org', '9553c1-graph', 'org_9553c1-org_9553c1-graph');
+  `);
+  const sourceRecord = {
+    type: 'SourceCreated', ts: '2026-10-22T00:00:01Z', id: 'src1',
+    url: 'src1', sourceKind: 'document', contentHash: 'h1',
+  };
+  const pointRecord = {
+    type: 'PointAdded', ts: '2026-10-22T00:00:02Z', id: 'p1',
+    point: {
+      id: 'p1', content: 'extracted claim', pointKind: 'observation',
+      extractedFrom: 'src1',
+      // #5256: the read-version anchor rides the Point's OWN carrier, keyed by
+      // the raw ref, and the record must stamp it on the EDGE
+      // (`relation.source_version`), not smuggle it into `relation.props`
+      // (`chk_relation_props_no_derived` exists to stop exactly that class).
+      sourceVersionTransit: [['src1', 'h1']],
+    },
+  };
+  const segment = join(tmpdir(), `9553c1-${process.pid}.jsonl`);
+  writeFileSync(segment, `${JSON.stringify(sourceRecord)}\n${JSON.stringify(pointRecord)}\n`);
+  const emitted = JSON.parse(execFileSync(
+    'python3',
+    ['-c', PROJECTION_PY, join(REPO_ROOT, 'tortoise', 'record_projection.py'),
+     segment, ...tenant],
+    { encoding: 'utf8' },
+  ));
+  if (!emitted.plan.some((x) => x.sql.startsWith('INSERT INTO public.relation'))) {
+    throw new Error('the pair emitted NO relation statement at all — the '
+      + 'extractedFrom producer is gone and the record loses the provenance '
+      + 'edge again (#9553 R5 class 1)');
+  }
+  const applySegment = async () => {
+    await db.exec('BEGIN');
+    for (const statement of emitted.plan) {
+      await db.query(statement.sql, statement.params);
+    }
+    await db.exec('COMMIT');
+  };
+  const readProvenance = async () => db.query(
+    `SELECT rel_type, src_label, src_key, tgt_label, tgt_key, idx, source_version
+       FROM public.relation
+      WHERE org_id = $1 AND graph_id = $2 AND rel_type = 'extractedFrom'`,
+    tenant);
+  await applySegment();
+  const first = await readProvenance();
+  if (first.rows.length !== 1) {
+    const diag = await db.query(
+      `SELECT
+         (SELECT count(*) FROM public.source
+            WHERE org_id = $1 AND graph_id = $2 AND node_key = 'src1')  AS source_row,
+         (SELECT count(*) FROM public.point
+            WHERE org_id = $1 AND graph_id = $2 AND node_key = 'p1')    AS point_row,
+         (SELECT count(*) FROM public.node_identity
+            WHERE org_id = $1 AND graph_id = $2
+              AND node_label = 'Source' AND node_key = 'src1')        AS source_identity,
+         (SELECT count(*) FROM public.node_identity
+            WHERE org_id = $1 AND graph_id = $2
+              AND node_label = 'Point' AND node_key = 'p1')           AS point_identity`,
+      tenant);
+    throw new Error(
+      `expected exactly 1 extractedFrom relation row, got ${first.rows.length} — `
+      + 'the target Source was absent when the insert ran (ORDERING), or the '
+      + `point-property directive was dropped. endpoints: ${JSON.stringify(diag.rows[0])}`);
+  }
+  const row = first.rows[0];
+  const got = `${row.src_label}/${row.src_key} -> ${row.tgt_label}/${row.tgt_key} `
+    + `idx=${row.idx} version=${row.source_version}`;
+  const want = 'Point/p1 -> Source/src1 idx=0 version=h1';
+  if (got !== want) {
+    throw new Error(
+      `the extractedFrom row is ${got}, expected ${want} — the endpoint `
+      + 'resolution (node_key, never the `id` fallback) or the #5256 anchor is wrong');
+  }
+  // Idempotent: the upsert is keyed on the relation's UNIQUE identity.
+  await applySegment();
+  const second = await readProvenance();
+  if (second.rows.length !== 1) {
+    throw new Error(
+      `a second replay produced ${second.rows.length} extractedFrom rows `
+      + '(expected 1) — the relation upsert is not idempotent');
+  }
+  unlinkSync(segment);
+  console.log('✓ #9553: the point-property extractedFrom edge lands one `relation` row '
+    + '(Point/p1 -> Source/src1, source_version=h1), and re-replays idempotently');
+
+  // ── #9553 review P1: a URL-VARIANT ref resolves to the REGISTERED Source ──
+  //
+  // The fold does not address a `:Source` by the raw ref: `_mint_source_stub`
+  // calls `resolve_source_key` FIRST (canonicalise, then take the url of any
+  // Source already registered under that canonical form) and only then MERGEs.
+  // So a point whose `extractedFrom` is a tracking-param VARIANT of a registered
+  // Source lands its edge on the REGISTERED node. A record that matched the raw
+  // ref alone found no `source` row and emitted a relation whose target subselect
+  // was empty: zero rows, no error, while the journal rebuild restored the edge.
+  //
+  // The record's `canonical_url` column is fed by NO payload —
+  // `projection/entities.py::_EntityHandlers._SOURCE_HANDLED` puts `canonicalUrl`
+  // among the writer-DERIVED keys — so the projection derives it from the node's
+  // own key; this leg fails if either half regresses (the derivation, or the
+  // two-spelling resolution).
+  const variantRecords = [
+    {
+      type: 'SourceCreated', ts: '2026-10-22T00:00:03Z', id: 'https://example.com/a',
+      url: 'https://example.com/a', sourceKind: 'document', contentHash: 'h2',
+    },
+    {
+      type: 'PointAdded', ts: '2026-10-22T00:00:04Z', id: 'p2',
+      point: {
+        id: 'p2', content: 'variant claim', pointKind: 'observation',
+        extractedFrom: 'https://example.com/a/?utm_source=x',
+      },
+    },
+  ];
+  const variantSegment = join(tmpdir(), `9553c1v-${process.pid}.jsonl`);
+  writeFileSync(variantSegment,
+    variantRecords.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  const variantPlan = JSON.parse(execFileSync(
+    'python3',
+    ['-c', PROJECTION_PY, join(REPO_ROOT, 'tortoise', 'record_projection.py'),
+     variantSegment, ...tenant],
+    { encoding: 'utf8' },
+  )).plan;
+  await db.exec('BEGIN');
+  for (const statement of variantPlan) {
+    await db.query(statement.sql, statement.params);
+  }
+  await db.exec('COMMIT');
+  const canonicalRow = await db.query(
+    `SELECT node_key, canonical_url FROM public.source
+      WHERE org_id = $1 AND graph_id = $2 AND node_key = 'https://example.com/a'`,
+    tenant);
+  if (canonicalRow.rows.length !== 1 || canonicalRow.rows[0].canonical_url !== 'https://example.com/a') {
+    throw new Error(
+      'the record did not derive the Source canonical identity '
+      + `(rows: ${JSON.stringify(canonicalRow.rows)}) — no payload may carry it, so a `
+      + 'URL-variant ref cannot resolve and the provenance edge is lost');
+  }
+  const variantRows = await db.query(
+    `SELECT src_label, src_key, tgt_label, tgt_key, idx FROM public.relation
+      WHERE org_id = $1 AND graph_id = $2 AND rel_type = 'extractedFrom'
+        AND src_key = 'p2'`,
+    tenant);
+  const variantGot = variantRows.rows.map((r) =>
+    `${r.src_label}/${r.src_key} -> ${r.tgt_label}/${r.tgt_key}`);
+  if (variantRows.rows.length !== 1
+      || variantGot[0] !== 'Point/p2 -> Source/https://example.com/a') {
+    throw new Error(
+      `the variant ref resolved to ${JSON.stringify(variantGot)}, expected exactly `
+      + '["Point/p2 -> Source/https://example.com/a"] — the fold resolves a variant '
+      + 'to the registered Source, so a record that binds only the raw ref is POORER '
+      + 'than the graph and a record-sourced rebuild drops the edge (#9553 review P1)');
+  }
+  unlinkSync(variantSegment);
+  console.log('✓ #9553: a URL-variant ref resolves to the registered Source '
+    + '(Point/p2 -> Source/https://example.com/a), matching the fold');
+
+  // ── #9553 '#5256': the anchor is written ON CREATE, never ADVANCED ──
+  //
+  // The fold stamps `r.sourceVersion` through `_anchor_on_create` (`ON CREATE
+  // SET`), and `_link_source` states the rule: "a re-link must not ADVANCE a
+  // recorded version". The record writes the anchor through ON CONFLICT, whose
+  // generic `DO UPDATE SET c = EXCLUDED.c` WOULD advance it — a re-emitted
+  // `PointAdded` (`create_point` appends one before a DETACH DELETE and may
+  // append a second) carrying a newer hash then rewrites an anchor the journal
+  // route keeps, and the two rebuild routes disagree about the same journal.
+  // This leg replays that second record and asserts the FIRST hash survives.
+  const rerunSegment = join(tmpdir(), `9553c1a-${process.pid}.jsonl`);
+  writeFileSync(rerunSegment, `${JSON.stringify({
+    ...pointRecord, ts: '2026-10-22T00:00:09Z',
+    point: { ...pointRecord.point, sourceVersionTransit: [['src1', 'h2']] },
+  })}\n`);
+  const rerunPlan = JSON.parse(execFileSync(
+    'python3',
+    ['-c', PROJECTION_PY, join(REPO_ROOT, 'tortoise', 'record_projection.py'),
+     rerunSegment, ...tenant],
+    { encoding: 'utf8' },
+  )).plan;
+  await db.exec('BEGIN');
+  for (const statement of rerunPlan) {
+    await db.query(statement.sql, statement.params);
+  }
+  await db.exec('COMMIT');
+  const reAnchored = await db.query(
+    `SELECT src_key, source_version FROM public.relation
+      WHERE org_id = $1 AND graph_id = $2 AND rel_type = 'extractedFrom'
+        AND src_key = 'p1'`,
+    tenant);
+  if (reAnchored.rows.length !== 1) {
+    throw new Error(
+      `replaying the same edge produced ${reAnchored.rows.length} p1 rows (expected 1) `
+      + '— the relation upsert is not keyed on its UNIQUE identity');
+  }
+  if (reAnchored.rows[0].source_version !== 'h1') {
+    throw new Error(
+      `the replayed edge ADVANCED its read-version anchor to `
+      + `${JSON.stringify(reAnchored.rows[0].source_version)} (expected 'h1') — the `
+      + 'fold stamps it ON CREATE, so a re-link must not overwrite a recorded '
+      + 'version; the record is diverging from the journal route (#5256/#5199)');
+  }
+  unlinkSync(rerunSegment);
+  console.log('✓ #9553: the read-version anchor is written ON CREATE — a replayed '
+    + 'record with a NEWER hash keeps the recorded h1 (the fold\'s ON CREATE rule)');
+
+  // ── #9553 class 1: a PROMOTE record carries the family too ──
+  //
+  // `apply()` materialises a Point from four arms and three of them reach
+  // `_upsert_point_edges`, which reads `extractedFrom` with no type gate of its
+  // own: `PointAdded`/`OperatorAdded` (`self._upsert(p)`) and
+  // `PointPromoted`/`OperatorPromoted` (`self._upsert(gated_promote_payload(...))`
+  // / `self._upsert(_promotion_point_with_operator(...))`, neither wrapper
+  // dropping the ref). A promote-only record is the #2256 capture case, where
+  // the promote IS the operator's only durable record — so declining the promote
+  // rows would leave the record POORER than the graph on the engine `rebuild` /
+  // `recover_from_log` run.
+  const promoteRecords = [
+    {
+      type: 'SourceCreated', ts: '2026-10-22T00:00:10Z', id: 'src3',
+      url: 'src3', sourceKind: 'document', contentHash: 'h3',
+    },
+    {
+      type: 'PointPromoted', ts: '2026-10-22T00:00:11Z', id: 'p3',
+      point: {
+        id: 'p3', content: 'promoted claim', pointKind: 'observation',
+        extractedFrom: 'src3',
+      },
+    },
+  ];
+  const promoteSegment = join(tmpdir(), `9553c1p-${process.pid}.jsonl`);
+  writeFileSync(promoteSegment,
+    promoteRecords.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  const promotePlan = JSON.parse(execFileSync(
+    'python3',
+    ['-c', PROJECTION_PY, join(REPO_ROOT, 'tortoise', 'record_projection.py'),
+     promoteSegment, ...tenant],
+    { encoding: 'utf8' },
+  )).plan;
+  if (!promotePlan.some((x) => x.sql.startsWith('INSERT INTO public.relation'))) {
+    throw new Error('the PointPromoted record emitted NO relation statement — a '
+      + 'promote-only operator has the extractedFrom edge in the graph (`apply()`) '
+      + 'and none in the record, the record POORER than the graph (#9553 class 1)');
+  }
+  await db.exec('BEGIN');
+  for (const statement of promotePlan) {
+    await db.query(statement.sql, statement.params);
+  }
+  await db.exec('COMMIT');
+  const promotedRows = await db.query(
+    `SELECT src_label, src_key, tgt_label, tgt_key FROM public.relation
+      WHERE org_id = $1 AND graph_id = $2 AND rel_type = 'extractedFrom'
+        AND src_key = 'p3'`,
+    tenant);
+  const promotedGot = promotedRows.rows.map((r) =>
+    `${r.src_label}/${r.src_key} -> ${r.tgt_label}/${r.tgt_key}`);
+  if (promotedRows.rows.length !== 1
+      || promotedGot[0] !== 'Point/p3 -> Source/src3') {
+    throw new Error(
+      `the promote record landed ${JSON.stringify(promotedGot)}, expected exactly `
+      + '["Point/p3 -> Source/src3"]');
+  }
+  unlinkSync(promoteSegment);
+  console.log('✓ #9553: a PointPromoted record carries the extractedFrom row too '
+    + '(Point/p3 -> Source/src3), matching apply()\'s promote arm');
+} catch (e) {
+  console.error(`✗ #9553 R5/EXTRACTED-FROM FAILED:\n  ${e.message.split('\n').slice(0, 6).join('\n  ')}`);
+  process.exit(1);
+}
+
+
+// ── #9553 (R5 class 3): the OPERATOR's own topology lands ─────────────────────
+//
+// An operator's `IMPL`/`NAND`/`hasPart` edge, its reverse `INPUT`, and the
+// canonical `mitigated_by` mirror exist only as `_create_edges` Cypher driven
+// from the `{op_type, inputs}` descriptor in the Point's snapshot. The record
+// materialised the operator's `point` row and emitted no `relation` row, so a
+// JOURNAL rebuild restored the epistemic topology while a RECORD-sourced
+// rebuild restored the claims and none of their structure.
+//
+// Two things this leg can only prove against a REAL Postgres: that the
+// four-label endpoint probe is valid SQL, and that the endpoint LABEL comes
+// from the record's own node rows — an operator input may be any of
+// Point/Subject/Object/Event (#7902), so the label cannot be assumed.
+try {
+  const tenant = ['9553c3-org', '9553c3-graph'];
+  await db.exec(`
+    INSERT INTO public.organizations (id, name, graph_name)
+      VALUES ('9553c3-org', '9553c3-org', 'org_9553c3-org');
+    INSERT INTO public.graphs (id, org_id, name, namespace)
+      VALUES ('9553c3-graph', '9553c3-org', '9553c3-graph', 'org_9553c3-org_9553c3-graph');
+  `);
+  const records = [
+    // The inputs' own node records must precede the operator's, or the
+    // relation insert has no `node_identity` endpoint to join (the `absent`
+    // verdict every relation gives).
+    { type: 'PointAdded', ts: '2026-10-23T00:00:01Z', id: 'p1',
+      point: { id: 'p1', content: 'the claim', pointKind: 'observation' } },
+    { type: 'SubjectAdded', ts: '2026-10-23T00:00:02Z', id: 's1',
+      name: 'sub1', subjectKind: 'other' },
+    // The DOMINANT `EventRecorded` shape: `eventId` nested under `event`, no
+    // `id` — so this row's `id` COLUMN is NULL and only `node_key` carries the
+    // key the graph's node holds as BOTH `id` and `eventId` (`_upsert_event`).
+    // A resolver matching `event.id` finds nothing here and files no row.
+    { type: 'EventRecorded', ts: '2026-10-23T00:00:02Z',
+      event: { eventId: 'ev1', eventKind: 'decision' } },
+    // IMPL over a Point, a Subject AND an Event input: the labels the resolver
+    // must tell apart, and the one the old `Point`-only assumption lost.
+    { type: 'OperatorAdded', ts: '2026-10-23T00:00:03Z', id: 'op1',
+      point: { id: 'op1', content: 'why', is_operator: true, op_type: 'IMPL',
+               operator: { op_type: 'IMPL', inputs: ['p1', 's1', 'ev1'] } } },
+    // A mitigation: a NON-operator Point carrying the operator descriptor and
+    // a usable strength — the `OperatorAdded` shape `#4937`/#5048 depend on.
+    { type: 'OperatorAdded', ts: '2026-10-23T00:00:04Z', id: 'mid',
+      point: { id: 'mid', content: 'counter-evidence', is_operator: false,
+               mitigation_strength: 0.4,
+               operator: { op_type: 'IMPL', inputs: ['op1'] } } },
+  ];
+  const segment = join(tmpdir(), `9553c3-${process.pid}.jsonl`);
+  writeFileSync(segment, records.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  const emitted = JSON.parse(execFileSync(
+    'python3',
+    ['-c', PROJECTION_PY, join(REPO_ROOT, 'tortoise', 'record_projection.py'),
+     segment, ...tenant],
+    { encoding: 'utf8' },
+  ));
+  const relationCount = emitted.plan
+    .filter((x) => x.sql.startsWith('INSERT INTO public.relation')).length;
+  if (relationCount !== 9) {
+    throw new Error(`expected 9 relation statements (3 IMPL + 3 INPUT + `
+      + `IMPL/INPUT/mitigated_by for the mitigation), got ${relationCount} — the `
+      + 'operator edge producer is gone and the record loses the topology again '
+      + '(#9553 R5 class 3)');
+  }
+  const applySegment = async () => {
+    await db.exec('BEGIN');
+    for (const statement of emitted.plan) {
+      await db.query(statement.sql, statement.params);
+    }
+    await db.exec('COMMIT');
+  };
+  const readEdges = async () => db.query(
+    `SELECT rel_type, src_label, src_key, tgt_label, tgt_key, idx
+       FROM public.relation
+      WHERE org_id = $1 AND graph_id = $2
+      ORDER BY rel_type, idx, src_key`, tenant);
+  await applySegment();
+  const first = await readEdges();
+  // Sorted on BOTH sides: the SQL's `ORDER BY rel_type, idx, src_key` leaves
+  // equal keys (two inputs at one idx) in an order no clause pins, so comparing
+  // it verbatim against a JS-sorted `want` asserts a tie-break nobody promised.
+  const got = first.rows.map((r) => `${r.rel_type} ${r.src_label}/${r.src_key}`
+    + ` -> ${r.tgt_label}/${r.tgt_key} idx=${r.idx}`).sort();
+  const want = [
+    // The Subject input is filed under Subject/sub1 — its NODE_KEY, not the
+    // journal id — because `relation.src_key` is a `node_identity` FK.
+    'IMPL Point/op1 -> Point/p1 idx=0',
+    'IMPL Point/mid -> Point/op1 idx=0',
+    'IMPL Point/op1 -> Subject/sub1 idx=1',
+    // The Event input (`eventId` only, `event.id` NULL) resolves on `node_key`:
+    // the row that was missing before the fix, for the shape every producer emits.
+    'IMPL Point/op1 -> Event/ev1 idx=2',
+    'INPUT Point/p1 -> Point/op1 idx=0',
+    'INPUT Point/op1 -> Point/mid idx=0',
+    'INPUT Subject/sub1 -> Point/op1 idx=1',
+    'INPUT Event/ev1 -> Point/op1 idx=2',
+    'mitigated_by Point/op1 -> Point/mid idx=0',
+  ].sort();
+  if (JSON.stringify(got) !== JSON.stringify(want)) {
+    throw new Error(`the operator topology is\n  ${got.join('\n  ')}\n`
+      + `expected\n  ${want.join('\n  ')}`);
+  }
+  // Idempotent: `DO NOTHING` on the relation's UNIQUE identity, replayed twice.
+  await applySegment();
+  const second = await readEdges();
+  if (second.rows.length !== 9) {
+    throw new Error(`a second replay produced ${second.rows.length} relation rows `
+      + '(expected 9) — the operator relation insert is not idempotent');
+  }
+  unlinkSync(segment);
+  console.log('✓ #9553: the operator topology lands (IMPL/INPUT/mitigated_by over a '
+    + 'Point, a Subject AND an Event endpoint), and re-replays idempotently');
+} catch (e) {
+  console.error(`✗ #9553 R5/OPERATOR FAILED:\n  ${e.message.split('\n').slice(0, 40).join('\n  ')}`);
+  process.exit(1);
+}
+
 console.log('✅ ALL MIGRATIONS + BOTH TEST SUITES + SPOT CHECKS PASSED');
 await db.close();

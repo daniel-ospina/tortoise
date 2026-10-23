@@ -2109,6 +2109,22 @@ class PackRegistry:
                 # `gatedBy` went to `errors` and `unresolved_refs` stayed empty,
                 # so the whole pack was dropped with no diagnostic naming the
                 # pack to install.
+                #
+                # #9663: that gate must NOT swallow a NAMESPACED ref here. The
+                # universe this ref resolves against is predicates + semantics
+                # values, and those are declared BARE by contract (#2030) — the
+                # engine emits and matches them bare. `venture:holds` therefore
+                # matches nothing a bare-conforming catalog can supply, so
+                # "install pack 'venture'" cannot make it resolve;
+                # `bare_only=True` keeps it fatal. (The one way it does resolve:
+                # `_validate` only checks a declared predicate's first
+                # character, so a pack could itself declare
+                # `predicate: venture:holds` — nothing in the shipped catalog
+                # does, and rejecting it is a behaviour change filed
+                # separately, #9760.)
+                # A BARE target still takes the gate, because naming a sibling
+                # pack's predicate is the documented, legitimate use of
+                # `depends_on` (`constrainedBy` vs venture's `gatedBy`).
                 for target in rel.get("nearMisses", []) or []:
                     if target in all_predicates:
                         continue
@@ -2117,7 +2133,7 @@ class PackRegistry:
                         f"relation '{pred}': nearMisses target '{target}' does "
                         f"not resolve to any declared predicate or semantics "
                         f"value (core or loaded pack)",
-                        target, loaded, missing_deps[ns])
+                        target, loaded, missing_deps[ns], bare_only=True)
 
             # Check every equivalentTo target resolves
             for kind, targets in pack.kind_equivalences.items():
@@ -2215,6 +2231,7 @@ class PackRegistry:
     def _record_unresolved(
         self, ns: str, message: str, ref: str,
         loaded: set[str], missing_deps: list[str],
+        bare_only: bool = False,
     ) -> None:
         """THE #2781 bucket decision, in one place (#9663 review).
 
@@ -2227,8 +2244,22 @@ class PackRegistry:
         branch — and a policy that lives in two places diverges the first time a
         third bucket is added, in the site nobody remembers. This helper owns the
         branch; callers own their wording.
+
+        ``bare_only`` says the universe holds BARE names ONLY, so no namespaced
+        spelling of ``ref`` exists at all and the gate must not explain it away
+        (#9663). Predicates are exactly such a universe (#2030), so
+        `venture:holds` in a relation `nearMisses` cannot be rescued by
+        installing `venture`; downgrading it to a survivable gap would print
+        advice that cannot make the reference resolve. It also matters to the
+        VERDICT: `pack validate` reads `unresolved_refs` into its exit code
+        (#9663), so a gap no installation can close would have reported a typo
+        as an installable, fixable gap.
         """
-        explanation = self._missing_pack_explanation(ref, loaded, missing_deps)
+        if bare_only and isinstance(ref, str) and ":" in ref:
+            explanation = None  # namespaced in a bare universe ⇒ always a typo
+        else:
+            explanation = self._missing_pack_explanation(
+                ref, loaded, missing_deps)
         if explanation is None:
             self.errors.setdefault(ns, []).append(message)
         else:
@@ -2264,6 +2295,13 @@ class PackRegistry:
         name that resolves nowhere with a complete dependency set, and any
         ambiguous bare name, remain fatal (they go to ``errors``).
         """
+        if not isinstance(ref, str):
+            # Defence in depth: every caller's own SHAPE check rejects a
+            # non-string reference before this pass, so this is unreachable
+            # today — but `":" in ref` on a non-string would raise out of a
+            # method whose contract is to RECORD a diagnostic. Treat it as
+            # unexplained, which keeps it fatal.
+            return None
         if ":" in ref:
             if ref.startswith("core:"):
                 # A core ref never names a pack, so no declared dependency can
