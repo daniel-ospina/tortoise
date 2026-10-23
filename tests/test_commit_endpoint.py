@@ -2901,7 +2901,11 @@ class TestCommitOrgIngestBound:
         allowance (NOT monkeypatched), the empty commit — the zero-budget
         payload `test_empty_commit_ok_zero_budget` pins — still 200s."""
         import tortoise.quota as quota_mod
-        assert quota_mod.MAX_COMMIT_INGEST_BYTES_PER_MIN_PER_ORG >= 1_000_000
+        # Pin the SHIPPED figure, not a floor: the docs promise 10 MiB
+        # (`docs/INGEST_CONTRACT.md` §9, `docs/capacity.md` §3), so a silent
+        # retune must fail here rather than only in a doc drift report.
+        # (Review cycle 2: `>= 1_000_000` would still pass at 1 MiB.)
+        assert quota_mod.MAX_COMMIT_INGEST_BYTES_PER_MIN_PER_ORG == 10 * 1024 * 1024
         r = self._empty_commit(client, "sIngestDefault")
         assert r.status_code == 200, r.text
         assert r.json()["nodes_created"] == 0
@@ -2959,6 +2963,49 @@ class TestCommitOrgIngestBound:
         assert commit_ingest_admit(None, 10 ** 9).allowed is True
         assert commit_ingest_admit("", 10 ** 9).allowed is True
 
+    def test_the_charge_is_never_cheaper_than_the_write(self, client,
+                                                       monkeypatch):
+        """The declared node count is an UPPER bound on the nodes the write
+        phase ACTUALLY mints — measured against the graph, not asserted from
+        the formula that produced it.
+
+        Review cycle 2 found the count under-charging: every created Point and
+        Operator also leaves a `:GraphEvent` (`sdk._GRAPH_EVENT_TYPES`), so a
+        points-bearing payload minted ~2x the nodes the count declared. That is
+        the fail-OPEN direction for a throttle — a charge cheaper than the
+        write — so the bound is pinned against the graph itself. The allowance
+        is set wide on purpose: this test is about the SHAPE, not the limit.
+        """
+        from tortoise.commit_schema import (
+            CommitPayload,
+            declared_commit_write_count,
+        )
+        self._allow(monkeypatch, 64 * 1024 * 1024)
+        raw = _raw_payload(2, session_id="sIngestBound")
+        declared = declared_commit_write_count(
+            CommitPayload(**{**raw, "client_commit_id": "0" * 64}))
+
+        def node_total() -> int:
+            return int(_team_sdk()._get_proj().g.query(
+                "MATCH (n) RETURN count(n)").result_set[0][0])
+
+        # Measured on a STEADY-STATE commit: the very first write to a graph
+        # also creates the event store's one-time metadata singletons
+        # (`:GraphEventMeta`, `:EpMeta`, `:Meta`), which are per-GRAPH
+        # constants rather than per-request growth — the loop #4051 describes
+        # repeats this shape, not that one. So commit once to absorb them and
+        # measure the second.
+        assert _commit(client, raw).status_code == 200
+        before = node_total()
+        second = _commit(client, _raw_payload(2, session_id="sIngestBound2"))
+        assert second.status_code == 200, second.text
+        minted = node_total() - before
+        assert minted > 0
+        assert declared >= minted, (
+            f"the charge declared {declared} nodes but the commit minted "
+            f"{minted} — the throttle would be cheaper than the write, which "
+            "is the fail-open direction (#4051)")
+
 
 class TestDeclaredCommitWriteCount:
     """The budget's unit — every node `_execute_commit_writes` mints."""
@@ -2988,6 +3035,9 @@ class TestDeclaredCommitWriteCount:
         assert declared_commit_write_count(p) == 5
 
     def test_each_collection_entry_is_charged_once(self):
+        """Flat lanes cost one node per entry; the point/operator/
+        supersession lanes cost TWO (the node plus the `:GraphEvent`
+        durability record it leaves — `_COMMIT_EVENT_RECORD_LANES`)."""
         from tortoise.commit_schema import declared_commit_write_count
         p = self._payload(
             points=[_point(0), _point(1)],
@@ -3000,7 +3050,8 @@ class TestDeclaredCommitWriteCount:
             sources=[{"url": "https://example.test/a",
                       "sourceKind": "web"}],
         )
-        assert declared_commit_write_count(p) == 4 + 2 + 1 + 3 + 1
+        # 4 fixed + (2 points × 2) + 1 entity + 3 events + 1 source
+        assert declared_commit_write_count(p) == 4 + 4 + 1 + 3 + 1
 
     def test_the_node_floor_is_the_pricing_cost_basis(self):
         """The floor is the repo's own per-node figure, not a new number.

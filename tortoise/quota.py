@@ -213,17 +213,20 @@ MAX_PROVENANCE_REFS = 500
 # refuses the customer's data.
 #
 # CALIBRATION (a tuning parameter, not a price): 10 MiB/min/org is one free
-# tier's whole node capacity (10,000 nodes × 1024 B) per minute. At the node
-# floor that admits ~3,400 empty commits/min, i.e. ~2,400 bytes/s sustained on
-# an empty-commit loop and ~10 MiB/min (≈14.4 GiB/day) on any payload-shaped
-# traffic — well above a client-side capture loop, and far BELOW the
-# 6,000 req/min a 20-key team could reach through the per-key buckets alone
-# (6000 × ~4 KB ≈ 23 MB/min). Override with
+# tier's whole node capacity (10,000 nodes × 1024 B) per minute. An empty
+# commit is charged its 4-node floor = 4,096 B (pinned by
+# ``tests/test_commit_endpoint.py::test_the_charge_is_the_node_floor_for_a_
+# small_payload``), so the allowance admits 2,560 of them per minute —
+# 10,485,760 B / 60 s = 174,763 B/s sustained on the cheapest possible loop,
+# and the same 10 MiB/min (14,400 MiB = 14.06 GiB/day) on payload-shaped
+# traffic. That is well above a real client-side capture loop and far BELOW
+# the ~24 MB/min a 20-key team could reach through the per-key buckets alone
+# (6,000 req/min × 4,096 B = 24,576,000 B). Override with
 # ``TORTOISE_COMMIT_INGEST_BYTES_PER_MIN`` when a real workload argues for a
 # different number. A knob set BELOW the largest possible single request does
-# not refuse that request for ever: `commit_ingest_admit` admits one over-sized
-# request per empty window (see its docstring), so the worst case is throttling,
-# never an unbreakable retry loop.
+# not refuse that request for ever: ``commit_ingest_admit`` admits one
+# over-sized request per EMPTY window (see its docstring), so the worst case is
+# one commit per window — throttling, never an unbreakable retry loop.
 #
 # RESIDUAL (stated so this is not over-read): it bounds the RATE. A tenant
 # writing at the allowed rate forever still grows without limit, and that is BY

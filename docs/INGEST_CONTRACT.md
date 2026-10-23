@@ -449,9 +449,12 @@ the `{error}`-only shape whose retry action is different.
 - **One bound IS rate-based — and backoff DOES clear it (429).** `POST
   /v1/sessions/commit` also carries a **per-team ingest budget**: a rolling
   60-second allowance of `10 MiB` of writes per team. A request is charged
-  `max(canonical payload bytes, nodes it will write × 1024)` — the serialized
-  payload the server builds for `client_commit_id`, which is never less than
-  the nodes it leaves behind. Exceeding the allowance answers **429** with a
+  the larger of (a) the bytes of the serialized payload the server builds for
+  `client_commit_id` and (b) the nodes it will write × 1024 — where (b) is a
+  declared **upper bound** on the nodes the request leaves behind (a node plus
+  its `:GraphEvent` record for every point/operator/supersession, the fixed
+  record/session/source/event chain), never an under-count. Exceeding the
+  allowance answers **429** with a
   `Retry-After` header and `detail.code = "ingest_rate_limited"`. This is a
   **throttle, not a cap**: it never refuses your data, the window self-heals
   within 60 s, and the correct action is **backoff-and-retry** — the opposite

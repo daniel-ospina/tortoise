@@ -909,16 +909,35 @@ _COMMIT_FIXED_NODES = 4
 #: cannot silently leave this rate charging the old figure.
 COMMIT_INGEST_BYTES_PER_NODE = 1024
 
+#: The commit lanes that mint a ``:GraphEvent`` durability record ALONGSIDE the
+#: node they create: a Point (``PointAdded``/``PointSuperseded``) and an
+#: Operator (``OperatorAdded``) each leave one in the event store
+#: (``sdk._GRAPHEVENT_TYPES`` — the closed set `_emit_event` writes through
+#: ``event_store.create_graph_event``). MEASURED through the endpoint: a
+#: 2-point + 1-entity + provenance payload minted
+#: ``{Point: 2, GraphEvent: 2, CommitRecord: 1, Session: 1, Object: 1,
+#: Source: 2, Event: 1}`` = 10 nodes, which is exactly
+#: ``declared_commit_write_count`` below. Omitting this term under-charged a
+#: points-only payload by ~2x (a first cut of this module charged 8 for those
+#: 10 nodes) — the fail-OPEN direction for a throttle, so the count is a
+#: declared UPPER bound and every entry in these lanes costs TWO nodes.
+_COMMIT_EVENT_RECORD_LANES = ("points", "operators", "supersessions")
+_COMMIT_FLAT_NODE_LANES = ("entities", "events", "sources")
+
 
 def declared_commit_write_count(payload) -> int:
-    """Every graph NODE one commit payload will mint (upper bound).
+    """Graph NODES one commit payload will mint — a declared UPPER bound.
 
-    One per ``points[]``/``entities[]``/``operators[]``/``events[]``/
-    ``sources[]``/``supersessions[]`` entry, the ``_COMMIT_FIXED_NODES`` chain,
-    and one more for the canonical ``session:<id>`` ``:Source`` that step 4 of
-    ``_execute_commit_writes`` materializes **only when ``provenance_refs`` is
-    non-empty** (an ordinary commit has provenance refs, so omitting it would
-    under-charge the common case by 20%).
+    * ``_COMMIT_FIXED_NODES`` — the ``:CommitRecord`` anchor, ``:Session``, its
+      transcript ``:Source`` and the AgentSession ``:Event``;
+    * one more for the canonical ``session:<id>`` ``:Source`` that step 4 of
+      ``_execute_commit_writes`` materializes **only when ``provenance_refs``
+      is non-empty** (an ordinary commit has provenance refs, so omitting it
+      would under-charge the common case by 20%);
+    * ``entities[]``/``events[]``/``sources[]``: one node per entry;
+    * ``points[]``/``operators[]``/``supersessions[]``: TWO nodes per entry —
+      the node itself plus the ``:GraphEvent`` durability record it leaves
+      (see ``_COMMIT_EVENT_RECORD_LANES``).
 
     ``provenance_refs[]`` entries are otherwise NOT charged one-for-one: beyond
     that single Source they grow the session ``:Source``'s stored
@@ -926,18 +945,22 @@ def declared_commit_write_count(payload) -> int:
     already bounded by ``quota.MAX_PROVENANCE_REFS`` — the payload term of
     :func:`commit_ingest_charge_bytes` charges the bytes they actually add.
 
-    This is an UPPER bound for a Layer-1-validated payload, deliberately: a
-    MERGE that finds an existing node mints nothing, so a replay-heavy or
+    UPPER, deliberately, in both directions that can be wrong: a MERGE that
+    finds an existing node mints nothing, and the ``:GraphEvent`` term is
+    charged per ENTRY rather than per actual event, so a replay-heavy or
     dedup-heavy client is charged for more than it writes. That is the
     fail-closed direction for a throttle (over-charging delays a request;
-    under-charging removes the bound).
+    under-charging removes the bound). A payload shape that mints MORE nodes
+    than this returns is a defect: the charge must never be cheaper than the
+    write.
     """
     total = _COMMIT_FIXED_NODES
     if getattr(payload, "provenance_refs", None):
         total += 1  # the canonical ``session:<id>`` :Source (step 4)
-    for field_name in ("points", "entities", "operators", "events",
-                       "sources", "supersessions"):
-        total += len(getattr(payload, field_name, None) or ())
+    for lane in _COMMIT_FLAT_NODE_LANES:
+        total += len(getattr(payload, lane, None) or ())
+    for lane in _COMMIT_EVENT_RECORD_LANES:
+        total += 2 * len(getattr(payload, lane, None) or ())
     return total
 
 
