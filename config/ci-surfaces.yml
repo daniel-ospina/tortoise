@@ -5445,6 +5445,7 @@ surfaces:
   - test_temporal_constraint.py
   - test_terminal_dedup_nullhash.py  # #2971: _find_terminal_dedup_hit A10 hash-less fallback (rebuild-durable terminal guard)
   - test_temporal_leg_2976.py  # #2976: temporal retrieval leg — detector shapes, anchor co-presence + date spread, additive-fusion no-op (hermetic, no DB)
+  - test_2976_session_admission.py  # #2976: TR session-level admission — token budget binds + session is the admission unit (gold at rank 45 admitted); render stays dated/contiguous (hermetic, pure functions)
   - test_sdk_ep.py
   - test_sdk_group3.py
   - test_sdk_legacy_coverage.py
@@ -5657,6 +5658,8 @@ surfaces:
   - longmem_eval/test_freq_count_disposition.py  # #2886: guards tools/longmem_eval/freq_count_disposition.py (the census frequency/count disposition tool) — `tools/longmem_eval/` is a SOURCE_PATTERNS entry of this surface, so an eval-tool change alone selects it
   - test_temporal_aggregate_arm.py  # #2886: guards tools/longmem_eval/retrieve.py's `temporal_aggregate_verdict` adapter — `tools/longmem_eval/` is a SOURCE_PATTERNS entry of this surface, so a retrieve.py-only change selects it (dual-registered with `core` for the core's verdict semantics)
   - longmem_eval/test_temporal_admission_trace.py  # #2976: temporal admission trace — pool-membership vs reader-window-cut receipts + TR-machinery-inert mechanism pin (hermetic, no DB)
+  - longmem_eval/test_variant_containment_judge.py  # #2976: deterministic variant-aware containment judge — the keyless grader that reproduces the 42/52 ceiling (hermetic; the dataset leg skips when the split is not cached)
+  - longmem_eval/test_temporal_admission_arms.py  # #2976: the admission-arms instrument — arm table/shared knobs/gold census/shard partition/summary aggregation (hermetic)
   - longmem_eval/test_probe_v2.py  # #2578 Task 5: v2-lane structural probe — wave guard, saturation stop rule, substrate measurement (embedded-safe)
   - longmem_eval/test_context_assembly_arms.py  # #3011: 4-arm (A/B/C/D) context-assembly runner — arm source selection, metrics 5/8/9, report shape (hermetic)
   - longmem_eval/test_context_assembly_leakage.py  # #3011: gold-leakage hard stop — static reference assertion + gold-field perturbation (hermetic)
@@ -7807,6 +7810,18 @@ durations:
   test_surface_resolution.py: 0.9
   test_telemetry_registration.py: 1.6
   test_temporal_leg_2976.py: 0.4
+  # #2976: the three new surfaces take the header's flat `DEFAULT_FAST_WEIGHT`
+  # (the #2818/#3419/#9121 convention), NOT a local timing. A file ADDED BY A
+  # PR can never carry a CI junit measurement (the refresher samples
+  # push-to-main runs only), and a weight is a SHARD-LAYOUT input — a dev-box
+  # reading would size shards for a cost CI does not pay. The
+  # `test_variant_containment_judge.py` reading in particular was dominated by
+  # loading a 277 MB cached split that CI does not have (the dataset leg SKIPS
+  # there), so a local number would model this box, not the shard.
+  # `tools/ci_timing.py --refresh-durations` replaces these from junit.
+  test_2976_session_admission.py: 2.0  # unmeasured — new in #2976; no sweep has collected it (hermetic, pure functions)
+  longmem_eval/test_variant_containment_judge.py: 2.0  # unmeasured — new in #2976; the 277 MB split leg SKIPS in CI, so no CI reading exists
+  longmem_eval/test_temporal_admission_arms.py: 2.0  # unmeasured — new in #2976; no sweep has collected it (hermetic)
   test_terminal_dedup_nullhash.py: 1.5
   test_terminal_status_vocabulary.py: 0.6
   test_time_aware_2520.py: 0.0        # unmeasured — arrived via main #5297; no source leg measured it, 0.0 is main's minimum-weight pin
