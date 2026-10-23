@@ -2858,10 +2858,8 @@ def test_9046_every_kind_the_served_skills_name_is_declared_by_a_pack():
           f"daniel-ospina/tortoise-skills-and-integrations, so fix it THERE and "
           f"re-sync (`--sync`).")
 
-    stale = {(name, kind)
-             for name, kinds in KNOWN_UNDECLARED_KINDS.items() for kind in kinds
-             if name in {p.parent.name for p in _served_skill_files()}
-             and kind not in declared} - seen_allowed
+    stale = {(name, kind) for name, kinds in KNOWN_UNDECLARED_KINDS.items()
+             for kind in kinds if (name, kind) not in seen_allowed}
     assert not stale, (
         f"KNOWN_UNDECLARED_KINDS entries no longer occur: {sorted(stale)} — "
         "shrink the map, it exists only as an exact pin on known-bad mentions")
