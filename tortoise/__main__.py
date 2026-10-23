@@ -10609,6 +10609,14 @@ def _cmd_decide(args) -> int:
                               f"{note}")
                     targets = [op_id]
                 for target_id in targets:
+                    # A damped bridge that is not in the factor list drops out of
+                    # the ranking, and on a re-run the relevance-only triples
+                    # would silently stop being counted — the "ranking depends
+                    # on the run count" defect in its other direction (the
+                    # script has always appended these; #9631 review).
+                    if target_id not in all_operator_ids:
+                        all_operator_ids.append(target_id)
+                for target_id in targets:
                     sdk.mitigate_operator(target_id, reason, strength)
                 extra = ("" if len(targets) == 1
                          else f" on {len(targets)} operators")

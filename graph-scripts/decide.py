@@ -110,19 +110,9 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from tortoise.decide_wiring import (  # noqa: E402
-    find_operators,
-    is_ranked,
     resolve_or_create_operator,
     select_damp_targets,
-    status_note,
 )
-
-# The pre-hoist private names, kept so an out-of-tree caller of this script
-# module does not break on the move.
-_find_operators = find_operators
-_is_ranked = is_ranked
-_status_note = status_note
-_resolve_or_create_operator = resolve_or_create_operator
 
 
 def file_decision(sdk, data: dict, *, context_free: bool = False) -> dict:
@@ -183,7 +173,7 @@ def file_decision(sdk, data: dict, *, context_free: bool = False) -> dict:
         """Resolve-or-create the bridge and record it. Never creates a twin."""
         src, tgt = _resolve(src_key), _resolve(tgt_key)
         try:
-            op_id, reused, note = _resolve_or_create_operator(
+            op_id, reused, note = resolve_or_create_operator(
                 sdk, proj, op_type, src, tgt, label, created_ops,
                 any_label=any_label)
         except Exception as e:

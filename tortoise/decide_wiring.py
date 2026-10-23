@@ -182,9 +182,14 @@ def resolve_or_create_operator(sdk, proj, op_type: str, source_id: str,
         # identical, so storage order is arbitrary.
         elected = ([row for row in single if is_ranked(row)] or single)[0]
         cache[key] = elected["id"]
-        return (elected["id"], True,
-                status_note(elected)
-                or direction_note(elected, (create_kwargs or {}).get("direction")))
+        # BOTH facts, not whichever comes first: a draft bridge whose declared
+        # direction was not applied is exactly the one a reader will promote
+        # later, so it is the last place to drop half the warning.
+        notes = [n for n in (
+            status_note(elected),
+            direction_note(elected, (create_kwargs or {}).get("direction")),
+        ) if n]
+        return elected["id"], True, (" ".join(notes) or None)
     note = None
     if matches:
         multi = ", ".join(f"{row['id']} ({row['targets']} targets)"
@@ -192,6 +197,24 @@ def resolve_or_create_operator(sdk, proj, op_type: str, source_id: str,
         note = (f"existing operator(s) {multi} on this triple also claim other "
                 "pairs — not reused (it would widen this decision's claim); a "
                 "single-pair bridge is created")
+    elif label:
+        # The label is part of the identity, so a labelled write does not reuse
+        # an unlabelled bridge — two predicates over one triple are two claims.
+        # An EXISTING decision file whose edges carried a label the caller used
+        # to be silently dropped (the CLI ignored `label` before #9631) would
+        # otherwise file an unreported twin on its first post-upgrade run, so
+        # say that a bridge is there under another label instead.
+        others = [row for row in find_operators(
+            proj, op_type, source_id, target_id, None, any_label=True)
+            if row["label"] != label]
+        if others:
+            named = ", ".join(
+                f'{row["id"]} ({row["label"] or "unlabelled"})'
+                for row in others)
+            note = (f"existing operator(s) {named} on this triple carry a "
+                    "DIFFERENT label — not reused (the label is part of the "
+                    "operator identity, so this is a second claim); a labelled "
+                    "bridge is created")
     op = sdk.create_operator(op_type, source_id, [target_id], label=label,
                              **(create_kwargs or {}))
     cache[key] = op["id"]
@@ -212,8 +235,12 @@ def select_damp_targets(proj, op_type: str, source_id: str, target_id: str,
     ``bridges == 0`` is the caller's decision: the script refuses to mint a
     claim ("a relevance edge never mints a claim"), while the `tortoise decide`
     CLI documents minting the damped operator. Anything else — including a
-    triple whose every bridge is shared with other pairs — must never mint, or
-    the twin duplicated the very claim this module guards.
+    triple whose every bridge is shared with other pairs, or one that carries a
+    bridge under a DIFFERENT label than the edge names — must never mint, or the
+    twin duplicated the very claim this module guards. That is why ``bridges``
+    counts what sits on the TRIPLE (any label), not what the label-scoped
+    lookup returned: a label-scoped miss on a labelled triple is not an empty
+    triple.
 
     ``label`` scopes the dampening when the caller names one (two labels over
     one triple are two claims — damping a `refutes` bridge on behalf of a
@@ -225,9 +252,21 @@ def select_damp_targets(proj, op_type: str, source_id: str, target_id: str,
                            any_label=label is None)
     if not found:
         named = f"{label} " if label else ""
-        return {"targets": [], "bridges": 0,
-                "notes": [f"no {named}bridge on this triple — nothing damped "
-                          "(a relevance edge never mints a claim)"]}
+        notes = [f"no {named}bridge on this triple — nothing damped "
+                 "(a relevance edge never mints a claim)"]
+        # A labelled edge on a triple that carries other labels is NOT an empty
+        # triple, and the caller must not treat it as licence to mint.
+        others = [row for row in find_operators(
+            proj, op_type, source_id, target_id, None, any_label=True)
+            if row["label"] != label]
+        if others:
+            present = ", ".join(
+                f'{row["id"]} ({row["label"] or "unlabelled"})'
+                for row in others)
+            notes.append(
+                f"the triple carries {present} under a DIFFERENT label — not "
+                "damped (a relevance edge damps only the claim it names)")
+        return {"targets": [], "bridges": len(others), "notes": notes}
     notes: list[str] = []
     # #6671 review: a bridge with ``targets > 1`` also claims OTHER pairs, so
     # damping it here would weaken claims this edge never named — the exact

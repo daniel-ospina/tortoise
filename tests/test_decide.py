@@ -1247,6 +1247,71 @@ class TestIssue9631CliDecideRerunIsIdempotent:
                 "the ranking depends on how many times the command was run: "
                 f"run1={run1} run2={run2}")
 
+    def test_relevance_only_triple_keeps_its_operator_in_the_ranking(
+            self, tmp_path, monkeypatch, capsys):
+        """A relevance edge whose triple is NOT also declared in `edges` wires
+        the operator it damps (this command's documented semantics), and that
+        operator must stay in the explicit factor list. Dropping it on the
+        REUSED branch silently removed the option from the table on the second
+        run (#9631 review, measured: run 1 ranked 2 factors, run 2 ranked 1 and
+        `opt:b` vanished)."""
+        db = self._db(tmp_path, monkeypatch)
+        data = {
+            "options": {"opt:a": "Option A", "opt:b": "Option B"},
+            "criteria": {"crit:1": "Criterion 1", "crit:2": "Criterion 2"},
+            "findings": {},
+            "edges": [["crit:1", "IMPL", "opt:a"]],
+            "truth_edges": [],
+            # Relevance-ONLY triple: nothing else declares crit:2 → opt:b.
+            "relevance_edges": [{"source": "crit:2", "op_type": "NAND",
+                                 "target": "opt:b", "reason": "weak",
+                                 "strength": 0.20}],
+        }
+
+        assert self._run_cli(db, data) == 0
+        run1 = self._printed_ranking(capsys)
+        assert self._run_cli(db, data) == 0
+        run2 = self._printed_ranking(capsys)
+
+        assert run1, "the first run printed no ranking"
+        assert run2.keys() == run1.keys(), (
+            "a relevance-only triple fell out of the ranking on the re-run: "
+            f"run1={run1} run2={run2}")
+        for name, value in run1.items():
+            assert abs(run2[name] - value) <= 1e-4, (
+                f"run1={run1} run2={run2}")
+
+    def test_labelled_relevance_edge_never_mints_on_an_unlabelled_triple(
+            self, tmp_path, monkeypatch, capsys):
+        """A label is part of the operator identity, so a relevance edge naming
+        `supports` finds nothing on a triple whose only bridge is unlabelled —
+        and that must NOT read as an empty triple (which licenses minting for
+        this command). Pre-#9631 the label was ignored entirely, so filing a
+        labelled twin would be an unreported new claim (#9631 review)."""
+        db = self._db(tmp_path, monkeypatch)
+        data = {
+            "options": {"opt:a": "Option A"},
+            "criteria": {"crit:1": "Criterion 1"},
+            "findings": {},
+            "edges": [["crit:1", "IMPL", "opt:a"]],
+            "truth_edges": [],
+            "relevance_edges": [{"source": "crit:1", "op_type": "IMPL",
+                                 "target": "opt:a", "reason": "weak",
+                                 "strength": 0.20, "label": "supports"}],
+        }
+
+        assert self._run_cli(db, data) == 0
+        census = self._census(db)
+        assert census.get("IMPL") == 1, (
+            "a label-scoped relevance edge minted a second, labelled claim on "
+            f"a triple it does not name: {census}")
+        assert census.get("_mitigations") == 0, (
+            f"an unlabelled bridge was damped by a 'supports' mitigation: {census}")
+        out = capsys.readouterr().out
+        assert "DIFFERENT label" in out, (
+            "the refusal was silent — the caller cannot tell nothing was "
+            f"damped: {out}")
+
     def test_rerun_does_not_duplicate_part_whole_operators(self, tmp_path,
                                                           monkeypatch):
         """`composedOf` mirrors its bridge as `hasPart`. The lookup is
