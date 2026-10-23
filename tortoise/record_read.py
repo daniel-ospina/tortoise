@@ -32,8 +32,10 @@ WHAT IT READS, AND WHAT IT DELIBERATELY DOES NOT
   level up.
 
 ⛔ It never reads `public.journal_event`, and it never reads the graph. The
-moment a rebuild's source of truth is the journal, "the record is the system of
-record" (§2.0) is false for exactly the text §9.1 says must survive.
+journal is a reconstruction source only — the durability authority is
+`docs/durability-posture.md` — so a rebuild that had to replay it in order to
+serve this text would make "the record is the system of record" (§2.0) false
+for exactly the text §9.1 says must survive.
 
 TURN IDENTITY, STATED AS A RULE
 ===============================
