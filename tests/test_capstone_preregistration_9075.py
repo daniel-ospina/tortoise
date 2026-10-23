@@ -1485,6 +1485,10 @@ _EXPECTED_AGGREGATE_MARKERS = ("needs.*.result", "failure")
 #:           is now read from `tools/ci_selection.slow_leg_files()` instead of the workflow's own
 #:           matrix, and `slow_matrix` is emitted to `$GITHUB_OUTPUT`. No `$GITHUB_PATH`/
 #:           `$GITHUB_ENV` write, no exit-code swallowing — the sibling-shim check above stays quiet.
+#:   #9551 — `python-ci-gate` → `Aggregate matrix result`: ONE row appended to the LEGS heredoc
+#:           (`test-record-postgres|…|-`), so the new armed record leg fails closed by name instead of
+#:           certifying a `skipped` shard. No `$GITHUB_ENV`/`$GITHUB_PATH` write, no exit-code
+#:           swallowing, no early-return added; the sweep's marker words are unchanged.
 _GATE_SENTINEL = "<the gate step — pinned by its own allow-list>"
 _EXPECTED_JOB_STEPS: dict[str, tuple[tuple[str, str], ...]] = {
     "changes": (
@@ -1509,7 +1513,7 @@ _EXPECTED_JOB_STEPS: dict[str, tuple[tuple[str, str], ...]] = {
     # deletes the whole failure sweep. Both leave every other check in this pin clean.
     "python-ci-gate": (
         ("Aggregate matrix result",
-         "ea95699a4b934a6bf5852a0b35cec1be7b2e89a473b935753fcafe22ab121a5c"),
+         "3109139f187cee52e5a3b56192743f25ab7f44d691a7979176acf8f351b3f9ac"),
     ),
 }
 

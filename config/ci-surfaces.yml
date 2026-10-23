@@ -1589,6 +1589,11 @@ surfaces:
   #
   # DB-free except its last leg, which SKIPS unless `TEST_RECORD_DB_URI` names a
   # Postgres carrying the record migrations — the `TEST_AUDIT_DB_URI` pattern.
+  # #9551 arms that leg in the DEDICATED `test-record-postgres` job
+  # (`.github/actions/postgres-provision` + the `[postgres]` extra, asserted to
+  # run with zero skips); THIS registration is what keeps the file in the fast
+  # matrix, where the same two legs still skip. Do not read the armed job as a
+  # replacement for it — the DB-free legs run here.
   - test_9078_record_written_by_production_path.py
   # #9192: the production caller of the record's tenant scope + the arming
   # gate. `core` is load-bearing for `tortoise/record_writer.py` (no
@@ -2784,6 +2789,18 @@ surfaces:
   # it is not embedded-ONLY, and it exercises the real project-search path
   # (`tortoise_fts_query`, full-scan mode), which is the docker lane's subject.
   - test_source_currency_5581.py
+  # #5038 deliverable 3 (the SOURCE-addressed half): `source_staleness` sweeps
+  # everything ONE source derived — `extractedFrom` Points AND the anchored
+  # derivation `references` targets `#5199` introduced — and names which of them
+  # were read from an OLDER version. That enumeration is the target list a
+  # re-inference pass must walk; the per-Point verdict above can only be asked
+  # one Point at a time. Registered under `core` for the same reason as
+  # `test_source_currency_5581.py` (the surface it exercises is
+  # `tools/source_currency.py`, a CORE_ALSO path, plus `tortoise/sdk.py`, a
+  # SHARED_MODULE that already forces the full matrix). Lane: URI-less-runnable
+  # (embedded FalkorDBLite per module), so `TORTOISE_TEST_CARVE_OUT=1` runs it
+  # locally; deliberately NOT carve_out-registered — it is not embedded-ONLY.
+  - test_source_staleness_sweep_5038.py
   # #2352: the evidence-currency predicate's three-way LIVE / STALE / DECAYED
   # fixture — the issue's E2E Target ("currency E2E green"). Registered under
   # `core` because every surface it drives selects it: the currency derive + the
@@ -8028,6 +8045,12 @@ durations:
   test_source_dedup_registration.py: 0.9
   test_source_identity.py: 0.2
   test_source_kind_runtime_registration.py: 0.3
+  test_source_staleness_sweep_5038.py: 260.0  # #5038 deliverable 3: 34 tests; locally measured 176-256s on the
+                                             # embedded (TORTOISE_TEST_CARVE_OUT=1) lane (fleet-contention sensitive).
+                                             # The WEIGHT is the HIGHER end of that range — never correct a weight
+                                             # downward without a CI junit reading, so a loaded leg cannot under-pack
+                                             # (the same rule the #5199 row below states). The 6.0 this replaced was
+                                             # an unmeasured placeholder (embedded FalkorDBLite per test).
   test_source_version_read_wiring_5199.py: 0.6
   test_source_version_entity_currency_5199.py: 7.5  # unmeasured — #5199: 13 tests, embedded lane (`TORTOISE_TEST_CARVE_OUT=1`); locally measured 5.9-7.0s per run (SDK/engine startup dominates, fleet-contention sensitive). This row is the branch's LOCAL reading under the `# unmeasured` convention, NOT the flat-default case and NOT a claim of a CI measurement: a file ADDED BY A PR can never have a junit measurement (the refresher samples push-to-main runs only), and this map's neighbouring rows take the same shape — `test_8702_identity_skip_accounting.py` 5.0, `test_9256_lane_probe_attribution.py` 6.8, `test_8098_webhook_retry_sweep.py` 8.8, `test_9233_webhook_declared_lane.py` 14.0 (all `# unmeasured`, all local). The WEIGHT is the HIGHER end of the observed range on the rows' stated rule (never correct a weight downward without a CI junit reading, so a loaded leg cannot under-pack), not a hand-picked number. The flat 2.0s default is a row with NO reading; an absent row packs the file at it. `tools/ci_timing.py --refresh-durations` is the sole writer and replaces this from junit.
   test_source_version_references_5199.py: 1.1

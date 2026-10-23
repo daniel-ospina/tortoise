@@ -378,9 +378,7 @@ from going unnoticed (its pin would dangle). There is NO carrier fallback in
 (2): a row is a literal read, a pinned computed-name read, or red — the old
 fallback ("any `MATCH` in the span plus a bare mention of a carrier-shaped
 constant") decided no current row and would have greened a future one that read
-nothing. The UNTYPED walks (rows 3, 22, 24–33) are NOT a lower bound any more:
-(16) derives them from the tree, which is what stopped the class moving on
-every pass. Line NUMBERS are not asserted — the symbol is authoritative and a
+nothing. The UNTYPED walks — every row whose query carries a relationship with NO type written, in any of the three spellings §13 derives (the bracketed `-[r]->`, the bracket-less `(n)--()`, and a pattern comprehension), whether that is its whole read or a walk beneath a constant-carried one — are NOT a lower bound any more, and are deliberately not enumerated here: (16) derives them from the tree, which is what stopped the class moving on every pass. Line NUMBERS are not asserted — the symbol is authoritative and a
 symbol that merely moved passes. And the enumeration is of READERS of the edge
 as data; writers that MERGE it are not rows here.
 

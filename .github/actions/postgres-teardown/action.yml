@@ -1,0 +1,13 @@
+name: postgres-teardown
+description: >-
+  Stop the container started by `.github/actions/postgres-provision` (#9551).
+  Add as the LAST step of the job with `if: always()`, so a failed or cancelled
+  job does not leave a Postgres holding memory on the runner host. Selected by
+  the ownership label recorded at start — never by a guess at the name.
+runs:
+  using: composite
+  steps:
+    - name: Stop Postgres (#9551)
+      if: always()
+      shell: bash
+      run: bash ${{ github.action_path }}/cleanup.sh

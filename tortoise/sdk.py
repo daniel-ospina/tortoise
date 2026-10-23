@@ -38520,16 +38520,34 @@ class TortoiseSDK:
         entity read at, and is that still the source's current version?* Each row
         carries ``linkRelation`` (the link set it describes — always
         ``references`` here), ``linkRecordedVersion`` (the version recorded on
-        THAT link, i.e. the edge's own ``sourceVersion`` property),
-        ``sourceCurrentVersion`` (the source's version now) and ``linkCurrency``
-        (the verdict). Every one of those names is scoped to the link on purpose:
+        THAT link), ``sourceCurrentVersion`` (the source's version now) and
+        ``linkCurrency`` (the verdict). ⚠ The two versions are the NORMALISED
+        operands — ``search_engine.version_operand``, i.e. blank-is-absent and
+        strip-tested — NOT the raw properties: an edge holding ``"   "`` reports
+        ``""``, because a truthiness comparison would read ``"   " == "   "`` as
+        ``current``. Normalising here is what keeps this reader's verdict
+        IDENTICAL to ``read_reference_currency_links``', the other reader that
+        addresses this same ``references`` hop — ``read_currency_links`` answers
+        a Point over its ``extractedFrom`` links and never sees this one. A
+        caller that needs the stored bytes must read the property itself.
+
+        Every one of those names is scoped to the link on purpose:
         §4.6's aggregate reads the Point's ``extractedFrom`` link, which records a
         version of its OWN under the same ``sourceVersion`` property name, so a
         bare ``sourceVersion``/``currency`` on a Point-addressed call is the
         conflation the search-hit half was retracted for.
         """
         proj = self._get_proj()
-        from .search_engine import currency_status
+        # `version_operand` is REQUIRED here, not cosmetic: this method re-derives
+        # the (recorded, current) pair itself instead of going through
+        # `search_engine.read_reference_currency_links` (the reader for THIS hop),
+        # so without it a whitespace-only
+        # operand (`create_source(..., contentHash="   ")`, which
+        # `_anchor_on_create` stamps because it nulls only `''`) compares EQUAL
+        # to itself and reads `current` here while the same link reads `unknown`
+        # through `tools/source_currency.py`. Two readers disagreeing about one
+        # pair is the exact drift §4.6's "a read" rule forbids.
+        from .search_engine import currency_status, version_operand
 
         r = proj.g.query(
             "MATCH (p:Point {id:$pid})-[:extractedFrom]->(src:Source) "
@@ -38600,8 +38618,8 @@ class TortoiseSDK:
             entity_props = bag.get("entity")
             labels = bag.get("labels")
             entity_is_source = bool(bag.get("entity_is_source"))
-            remembered = bag.get("remembered") or ""
-            current = source_props.get("contentHash") or ""
+            remembered = version_operand(bag.get("remembered"))
+            current = version_operand(source_props.get("contentHash"))
             out.append({
                 # #3998 (D30): the bag is filtered to the DECLARED :Source
                 # surface. A graph written before this change can still hold a
