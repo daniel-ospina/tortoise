@@ -2971,9 +2971,11 @@ def test_the_posture_statement_carries_the_SAME_predicates_as_the_scope():
 
     `ROLE_POSTURE_SQL` is what decides whether a dump may run at all, and nothing
     else in the Python tree executes it: a dropped predicate here would fail
-    closed at runtime (exit 1 on a scheduled job) with no test reddening. The
-    four legs are therefore pinned against `TENANT_SCOPE_SQL` — the statement the
-    runtime SQL suite DOES execute — so drift reddens here instead.
+    closed at runtime with no test reddening — a SEMANTICALLY valid drop yields
+    `bypassing = false` → `RecordBackupUnavailable` → exit `2`, and only a SQL
+    SYNTAX break reaches exit `1` through `_connection_failure`. The four legs are
+    therefore pinned against `TENANT_SCOPE_SQL` — the statement the runtime SQL
+    suite DOES execute — so drift reddens here instead.
     """
     from tortoise import record_projection as rp
 

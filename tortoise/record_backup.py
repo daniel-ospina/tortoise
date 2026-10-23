@@ -709,7 +709,9 @@ def _dsn_identity(dsn_str: str, *, label: str = "the record") -> dict[str, str]:
             f"({', '.join(moving)}) — libpq honours those, so the target this "
             "guard compared is NOT the target the connection would reach. Put "
             "the coordinate in the URI itself, and the credential in the "
-            "environment surface (TORTOISE_RECORD_DSN / TORTOISE_RECORD_SCRATCH_DSN)."
+            "environment surface (TORTOISE_RECORD_BACKUP_DSN for a dump's source, "
+            "TORTOISE_RECORD_SCRATCH_DSN for a drill's target, TORTOISE_RECORD_DSN "
+            "for the record itself)."
         )
     host = unquote(parts.hostname or "").lower()
     if not host:
