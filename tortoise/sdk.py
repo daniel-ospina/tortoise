@@ -38970,7 +38970,62 @@ class TortoiseSDK:
         before re-routing this method through the anchor.
         """
         proj = self._get_proj()
+
+        # R5 class 4 (#9553): this door wrote the edge LIVE and emitted nothing,
+        # so `rebuild_all` replayed a journal holding no record of it and the
+        # edge was GONE after a rebuild — measured on `main` as `edges: 0` and
+        # disclosed by the #9079 lane as "the engine's `DirectEdgeCreated` fold
+        # could carry them, and this verb emits nothing". Emit the canonical flat
+        # descriptor that `create_direct_edge` emits, so the pass-2b fold
+        # re-creates the edge.
+        #
+        # ⛔ The record carries the RESOLVED node ids, never `from_id`/`to_id`.
+        # The projection verb resolves each endpoint through an OR-set (id |
+        # eventId | url) and the replay fold resolves by `id` only, so a record
+        # naming the caller's spelling would be SKIPPED in silence (a green test
+        # over a lost edge). The resolution is repeated here rather than widening
+        # `_EdgeHandlers.create_edge`'s signature — that signature is pinned by
+        # §9.6 / `tests/test_references_boundary_5213.py` ("the caller cannot
+        # supply the anchor"), and a journaling convenience must not become a
+        # second way to hand that verb a value.
+        #
+        # Emitted on every minted edge, not on created-only, for the crash-window
+        # reason `create_direct_edge` records: a MERGE dedup-hit must still be
+        # able to close the window.
+        #
+        # ⛔ TWO bounds, both measured, neither claimed away:
+        #   * a SELF-EDGE (`src == tgt`) is minted live but no record is emitted:
+        #     the fold refuses to re-create one (`E2E-11.6` no-self contract), so
+        #     a record would only be dropped at replay. Live and replay disagree
+        #     there by design — a pre-existing divergence, not one this adds.
+        #   * the record carries NO `direction`/attrs. The live write mints a BARE
+        #     relationship (this verb takes no property parameter, §9.6), and the
+        #     fold sets attrs only for the keys the record carries — so passing
+        #     `direction="out"` here would leave the same edge bare live and
+        #     `{direction:'out'}` post-rebuild. Omitted so live and replay agree.
         created = proj.create_edge(from_id, to_id, relation)  # validates relation
+        if created:
+            sources = proj._resolve_entity(
+                from_id, by_id=True, by_eventId=True, by_url=True)
+            targets = proj._resolve_entity(
+                to_id, by_id=True, by_eventId=True)
+            emitted: set[tuple[str, str]] = set()
+            for s in sources:
+                src = (s.get("properties") or {}).get("id")
+                for t in targets:
+                    tgt = (t.get("properties") or {}).get("id")
+                    if not isinstance(src, str) or not isinstance(tgt, str):
+                        continue
+                    if not src or not tgt or src == tgt:
+                        continue
+                    if (src, tgt) in emitted:
+                        continue
+                    emitted.add((src, tgt))
+                    self._emit_event(
+                        "DirectEdgeCreated",
+                        id=f"{src}->{tgt}:{relation}",
+                        src=src, tgt=tgt, edge_type=relation,
+                    )
         return {
             "edge": {"relation": relation, "from": from_id, "to": to_id},
             "created": created,

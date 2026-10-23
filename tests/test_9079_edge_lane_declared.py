@@ -50,9 +50,15 @@ for the argument. Its two measured legs:
   writes it property-free and a later `link_source_to_*` `MERGE` cannot repair
   it (`#5213` option 3, §9.6, `tests/test_references_boundary_5213.py`);
   `test_the_references_edge_is_still_written_bare` asserts THAT shape.
-* it does not claim durability for the relations this lane emits no carrier for
-  (above) — the engine's `DirectEdgeCreated` fold could carry them, and this verb
-  emits nothing.
+* it does not claim durability for the relations this verb emits no carrier
+  for **itself** — the emission lives one level up, at the public SDK door
+  (`#9553` made `sdk.create_edge` emit the flat `DirectEdgeCreated`
+  descriptor). What this suite pins is the DECLARATION, not the carrier; the
+  carrier is pinned by
+  `tests/test_9553_class4_structural_edge_carrier.py`, whose measured bounds
+  (the typed wrappers, `:Source` endpoints, self-edges, the other direct
+  `proj.create_edge` callers) are still live-only and named at the point of
+  enforcement.
 
 ⚠️ What is NOT acceptable, and what these tests exist to prevent: "fixing" this
 by making `create_edge` tolerate a refusal, or by treating the lane as a bypass
@@ -103,10 +109,12 @@ SNAPSHOT_CARRIED = frozenset({
     "aboutSubject", "aboutObject", "aboutEvent", "aboutPoint",
     "aboutDocument",
 })
-#: No carrier is EMITTED from this lane, so a rebuild drops these edges. The
-#: name says "emitted", not "exists": the replay engine has a carrier
-#: (`DirectEdgeCreated` + its pass-2b fold) and emitting that record restores
-#: them — what is missing is the emission from this projection verb.
+#: No carrier is EMITTED from this PROJECTION VERB, so a rebuild drops an edge
+#: minted here. The name says "emitted", not "exists": the replay engine has a
+#: carrier (`DirectEdgeCreated` + its pass-2b fold), and the public SDK door
+#: emits it since #9553 — what is missing HERE is the emission from this verb
+#: (it has no journal handle, and its callers include the typed wrappers and the
+#: node-property lane, which the door's emission does not reach).
 NO_CARRIER_EMITTED = frozenset({
     "performs", "produces", "uses", "authoredBy", "ownedBy", "managedBy",
     "hasMember", "holdsRole", "memberOf", "reportsTo",
@@ -932,7 +940,7 @@ def test_the_lane_and_its_argument_are_recorded():
     # DECLARATION paragraph is present.
     for phrase in (
         "WHAT THIS LANE CLAIMS, PER RELATION",
-        "This lane does NOT claim durability for them",
+        "WHAT THAT DOES **NOT** COVER",
         "WHAT THIS LANE DOES NOT COVER",
         "`references` KEEPS ITS OWN SHAPE",
     ):

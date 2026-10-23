@@ -1818,11 +1818,29 @@ def _nested_node_carrier(record: Mapping[str, Any],
 #: edges are carried by their OWN declarations, not this one:
 #: `_POINT_PROPERTY_RELATIONS` (class 1, `extractedFrom`) and
 #: `_OPERATOR_RELATION_RECORDS` (class 3 — the operator's `IMPL`/`NAND`/`hasPart`,
-#: its reverse `INPUT`, and the canonical `mitigated_by` mirror). What stays
-#: missing is the rest of the point-property set (`about*`, `TAGGED`) and the
-#: structural predicates `ownedBy`/`hasPart`/`dependsOn`/`references` and
-#: friends, which have a working `DirectEdgeCreated` fold and NO producer
-#: (class 4 — a producer-side change in `sdk.py`, not a projection one).
+#: its reverse `INPUT`, and the canonical `mitigated_by` mirror). What is STILL
+#: missing is the rest of the point-property set (`about*`, `TAGGED`) — those
+#: ride their own doors and have no record carrier yet — plus, on the STRUCTURAL
+#: side, the internal writers that call `proj.create_edge` directly (the derived-
+#: edge apply, the approver/event `performs`/`uses`/`produces` writes and the
+#: `wasDerivedFrom` writer).
+#:
+#: ✅ The epistemic-endpoint half of the structural predicates is no longer in
+#: the gap: `#9553` (R5 class 4) made the PUBLIC SDK door (`sdk.create_edge` —
+#: the MCP tool `tortoise_create_edge` and the onboarding seed) emit the SAME
+#: flat `DirectEdgeCreated` descriptor `create_direct_edge` emits, carrying the
+#: RESOLVED node ids, so a predicate minted through that door survives a
+#: journal-sourced `rebuild_all` — pinned by
+#: `tests/test_9553_class4_structural_edge_carrier.py`.
+#:
+#: ⛔ What is STILL uncarried, measured and not inferred: the typed wrappers /
+#: node-property lane (`sdk.create_object(..., ownedBy=…)` calls
+#: `proj.create_owned_by` directly, so the door's emission never runs); any edge
+#: with a `:Source` endpoint (the fold's id sweep covers `EPISTEMIC_LABELS` only,
+#: so a `references`/`aboutSource` record is skipped at replay); self-edges (the
+#: fold refuses to re-create them); and the other direct `proj.create_edge`
+#: callers. `projection/edges.py`'s declaration block carries the same list at
+#: the point of enforcement.
 _ENVELOPE_RELATIONS: tuple[tuple[str, str, str, str, str], ...] = (
     ("PointAdded", "contains_session", "CONTAINS", "Session", "Point"),
     ("OperatorAdded", "contains_session", "CONTAINS", "Session", "Point"),
