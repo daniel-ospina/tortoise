@@ -243,7 +243,23 @@ def compute_operator_weight(proj, op_id: str, use_dynamic: bool = False) -> floa
     if op_type == "NAND":
         w *= NAND_BASE_WEIGHT
 
-    # Mitigation: operator targets another operator
+    # Mitigation: operator targets another operator.
+    # ⛔ #9269 — this counts a STRUCTURE, and since that fix it is no longer a
+    # statement that the counted input PARTICIPATES in a factor. An
+    # operator-shaped node is not a claim, so EP strips it from the operator's
+    # factor inputs (the same treatment drafts get, #780): the relation is still
+    # PRICED here, but its belief effect now depends on how many OTHER live
+    # inputs remain. With TWO OR MORE the surviving factor still runs and still
+    # carries the multiplier; with one or none the factor is SKIPPED
+    # (`skipped_factors` records `degenerate` / `source_stripped`, #6105) and the
+    # multiplier never reaches a belief. That is the cost of the #9269 ruling —
+    # recorded deliberately, so nobody later reads the "pricing is untouched"
+    # claim as "the belief effect is untouched": the `input_ops` read is a
+    # structure count, NOT a read of the factor's participating input set, and
+    # unifying the two would change every weight on such a graph.
+    # Do NOT delete this block as dead code without reopening #9269's option 3
+    # (refusing the shape at the write door would be the alternative, and it
+    # removes a capability the engine prices).
     input_ops = g.query(
         "MATCH (o:Point {id:$id})-[r:IMPL|NAND]->(p:Point) "
         "WHERE p.is_operator = true RETURN count(p)",

@@ -319,6 +319,11 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # ``config/ci-surfaces.yml``; a stem in only one of the two is the silent
     # hole ``test_carve_out_mirrors_test_no_redirect_stems`` catches.
     "test_9209_handle_non_cypher_wipe",
+    # #9639: the x86_64 runner installer's invariants are subprocess-only (temp base dir, stub
+    # `gh`, no network, no graph), so there is nothing to redirect — but the stem must still be
+    # here: `carve_out` and this tuple are one set in two homes, and a stem in only one is the
+    # silent hole `test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems` catches.
+    "test_ci_runner_x64_install",
     # #8488: the in-process Okapi BM25 lexical arm — module-level
     # ``pytest.mark.embedded_only`` (its subject is the embedded lane and the
     # shipped read's own fusion), so it is exempt from the docker redirect and

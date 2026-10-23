@@ -17,6 +17,7 @@ import time
 from .exceptions import UnaddressableClaimError
 from .projection import _declares_apply_first_write_lane
 from .quadrature import tilted_moments, moments_to_beta, phi_nand, phi_impl
+from . import claim_class
 from .live import (
     EPISTEMIC_LABELS,
     _live_only,
@@ -92,6 +93,55 @@ _EP_GUARD_MIN_GRAPH_CLAIMS = 500
 # drops variables bound before the predicate and fails with `'a' not defined`
 # (measured on 4.20.4 and 6.0.1, see `cypher_guard._predicate_drop_barrier`).
 _EP_ANCHOR_BARRIER = "WITH * "
+
+
+def _non_operator(var: str) -> str:
+    """The absence-or-false non-operator predicate for a Cypher variable.
+
+    #9269: an operator-shaped node is not a CLAIM. EP's factor-INPUT arms (the
+    ``(o)-[:IMPL|NAND]->(c)`` selection and the two operator-mediated
+    affected-set hops) used to carry NO non-operator filter, so a node with
+    ``is_operator = true`` — or any out-of-contract spelling the calibration
+    gate's identical predicate does not match, e.g. the STRING ``'false'`` —
+    was consumed as a factor input and STAMPED with a posterior while the
+    #9063 gate saw nothing to demand a prior of (the #7478 class: an
+    uncalibrated EP run stamping a belief).
+
+    The form is ABSENCE-OR-FALSE, deliberately, and it is the SAME predicate
+    the gate's universe uses (``sdk._uncalibrated_ep_participants``), so the
+    two cannot disagree about who participates:
+
+    * ``is_operator`` ABSENT — a legacy plain Point (#3139/#3154) is a CLAIM
+      and stays admitted.
+    * ``is_operator = false`` — the modern plain Point AND the hybrid
+      ``create_point(op_type=...)`` shape (``is_operator = false`` WITH
+      ``op_type``) are CLAIMS and stay admitted. Adding an ``op_type IS NULL``
+      conjunct here (as the direct-edge arms carry) would exclude the hybrid
+      and REMOVE coverage the audit already had — a fail-open, the one
+      direction this filter must never move.
+    * ``is_operator = true`` — an operator. Excluded.
+    * any other value (the string ``'false'``, a numeric ``1``) — outside
+      ``is_operator = true`` AND unequal to the boolean ``false``, so it was
+      consumed but never demanded. Excluded here for the same reason: the
+      gate's predicate does not match it, so admitting it is a stamp with no
+      prior.
+
+    ⛔ WHERE IT APPLIES, precisely: the OPERATOR-MEDIATED selections — the two
+    operator-input arms of ``_affected_claims``, ``_live_neighbors_many`` and
+    ``_affected_factors`` Batch 2. The operator-less DIRECT-EDGE arms keep their
+    own, STRICTER spelling (``_non_op`` in ``_affected_factors`` Batch 3, plus the
+    inline copies in the direct-edge hops): this predicate AND ``op_type IS
+    NULL``, because a direct IMPL/NAND edge is a factor between two PLAIN points
+    (#888 W5) and a hybrid is not one. The two are deliberately NOT unified, and
+    that is also why the gate still DEMANDS a prior of the hybrid the direct-edge
+    arms exclude — see ``sdk._uncalibrated_ep_participants``.
+
+    Cypher-side at the AFFECTED-SET arms (a hop returns only ids, so there is no
+    information to lose), and deliberately NOT at Batch 2: that arm must SEE an
+    operator-shaped input to know an idx-0 SOURCE was stripped, or the first
+    surviving target gets renumbered into the source slot — see Batch 2's note.
+    """
+    return f"({var}.is_operator IS NULL OR {var}.is_operator = false)"
 
 
 try:  # redis-py is a hard dependency of the graph lane; guard anyway (#6211)
@@ -1182,13 +1232,45 @@ class TortoiseEP:
         otherwise `_update_claim_posterior` would recompute that node from
         empty natural parameters as `Beta(1,1)` and discard its persisted
         prior. This is the neutral-link rule (#5025, ONTOLOGY §3.9/§8).
+        #9269: an OPERATOR-SHAPED node is not a claim, so every
+        operator-mediated arm applies `_non_operator` to the far endpoint — the
+        same absence-or-false predicate the #9063 calibration gate's universe
+        uses. Without it, `is_operator = true` (and any out-of-contract
+        spelling such as the string `'false'`) was admitted, consumed as a
+        factor input and STAMPED with a posterior while the gate saw nothing to
+        demand a prior of (the #7478 class). The filter is absence-or-false,
+        NOT `op_type IS NULL`: the hybrid `op_type` shape and the legacy
+        property-absent Point are claims and stay admitted. The operator-less
+        DIRECT-EDGE arms are deliberately not unified with it — see
+        `_non_operator`.
         KNOWN EXCEPTION, not fixed here: a factor with fewer than 2
         PARTICIPATING inputs (draft/terminal inputs are stripped before
         `_update_factor`, and a unidirectional operator whose source was
         stripped is skipped entirely) no-ops, so an admitted input can still
         reach `_update_claim_posterior` with no message and be recomputed as
         `Beta(1,1)` — #5566's second half, owner-reserved (belief model,
-        DECISION-LEDGER §22).
+        DECISION-LEDGER §22). #9269 adds a new TRIGGER for that pre-existing
+        behaviour, named rather than left implicit: an operator whose only
+        other input was OPERATOR-SHAPED now has one participating input, so its
+        factor is SKIPPED — recorded as `degenerate`, or as `source_stripped`
+        when the shaped input held the NON-bidirectional source slot — and
+        reported through `_last_skipped_factors` (#6105). A bidirectional
+        operator that merely DEGRADES (3+ inputs → 2) leaves no record and no log
+        line: it still runs, on the surviving inputs.
+        ⚠️ What the surviving claim then reads is NOT necessarily Beta(1,1): a
+        skipped factor does not zero the messages a PREVIOUS run persisted on
+        its input edges, and `_load_cache` loads every `(o)-[r:IMPL|NAND]->(c)`
+        message whose `c` is affected whether or not that pair is still a
+        factor — so on a graph that already ran the pre-fix code, a stale
+        message keeps moving the surviving claim (measured: with a persisted
+        `msg_alpha 5.0` on the now-skipped edge, the claim reads posterior
+        7.01/2.11 = 0.769 instead of 2.22/2.22 = 0.500). That is PRE-EXISTING for
+        every stripped-input trigger (drafts #780, terminal #2422) and is filed
+        as its own residual rather than fixed here: zeroing an edge's messages
+        is a journaled write with its own invalidation semantics, not a
+        docstring. Likewise, posteriors a PRE-FIX run already stamped on an
+        operator-shaped node are not cleared by this filter — nothing consumes
+        those nodes any more, so nothing will ever recompute them.
         """
         live_c = _live_only("c.status", include_draft)
         live_o = _live_only("o.status", include_draft)
@@ -1245,7 +1327,7 @@ class TortoiseEP:
             # operator's inputs (the operator's factor). Draft operators and
             # draft target claims are excluded (#780). #7853: the input may
             # be any epistemic label.
-            conds = [epistemic_disjunction("c")]
+            conds = [epistemic_disjunction("c"), _non_operator("c")]
             if live_c:
                 conds.append(live_c)
             if live_o:
@@ -1370,6 +1452,7 @@ class TortoiseEP:
                         "-[r2:IMPL|NAND]->(m) "
                         "WHERE m.id <> n.id "
                         f"AND {epistemic_disjunction('m')} "
+                        f"AND {_non_operator('m')} "
                         "AND (op.is_operator = true OR op.op_type IS NOT NULL) "
                         f"AND {_live_only('op.status', include_draft)} "
                         f"AND {_live_only('m.status', include_draft)} "
@@ -1715,6 +1798,9 @@ class TortoiseEP:
             "-[r2:IMPL|NAND]->(m) "
             "WHERE m.id <> n.id "
             f"AND {epistemic_disjunction('m')} "
+            # #9269: an operator-shaped far endpoint is not a claim — the SAME
+            # filter the direct-edge hops below already carry.
+            f"AND {_non_operator('m')} "
             "AND (op.is_operator = true OR op.op_type IS NOT NULL) "
             f"AND {_live_only('op.status', include_draft)} "
             f"AND {_live_only('m.status', include_draft)} "
@@ -1753,12 +1839,13 @@ class TortoiseEP:
         below 2 becomes degenerate and is skipped — the SVBP-path convention.
 
         ``skipped`` (#6105) is an optional SINK: every factor this call drops
-        (degenerate, or a directional operator whose idx-0 source was
-        stripped) appends one structured record to it — ``operator_id``,
-        ``op_type``, ``reason``, ``participating_inputs`` and every input with
-        its status. ``run()`` passes ``self._last_skipped_factors`` so the run
-        carries the diagnostic; the read-only scope callers pass nothing and
-        stay side-effect free.
+        (degenerate, a directional operator whose idx-0 source was stripped, or
+        — #2351 — a DERIVED over ASSERTED factor whose every leg the claim-class
+        override guard blocked) appends one structured record to it —
+        ``operator_id``, ``op_type``, ``reason``, ``participating_inputs`` and
+        every input with its status. ``run()`` passes
+        ``self._last_skipped_factors`` so the run carries the diagnostic; the
+        read-only scope callers pass nothing and stay side-effect free.
         """
         live_o = _live_only("o.status", include_draft)
         live_c = _live_only("c.status", include_draft)
@@ -1873,7 +1960,21 @@ class TortoiseEP:
                 "MATCH (a)-[r:IMPL|NAND]->(b) "
                 "WHERE " + " AND ".join(_conds) + " "
                 "RETURN id(r), a.id, b.id, type(r), "
-                "       coalesce(r.direction, 'bidirectional'), r.weight"
+                "       coalesce(r.direction, 'bidirectional'), r.weight, "
+                # #2351 (epic #2349 E-derived): the endpoints' claim classes
+                # AND their labels ride the SAME statement, so the override
+                # guard below adds no query (mirrors the #7902 label fan-out:
+                # every hop query carries the columns its consumers need).
+                # ⛔ The LABEL is not optional: ``claimClass`` is a :Point-only
+                # property, so ``coalesce(a.claimClass, 'asserted')`` on a
+                # :Subject/:Object/:Event endpoint yields 'asserted' for a node
+                # that is not a CLAIM at all — the exact conflation the write
+                # doors exclude (#2351 review). The guard fires only when BOTH
+                # endpoints are claims, which is what the door does.
+                "       a.status, b.status, "
+                "       coalesce(a.claimClass, 'asserted'), "
+                "       coalesce(b.claimClass, 'asserted'), "
+                "       labels(a), labels(b)"
             ):
                 for _row in self._hop_query(
                     _q, {"ids": list(affected_claims)}, hop=None,
@@ -1884,11 +1985,59 @@ class TortoiseEP:
                         continue
                     _seen_dir.add(_row[0])
                     dir_rows.append(tuple(_row[1:]))
-        for src_id, tgt_id, rel, direction, weight in dir_rows:
+        for (src_id, tgt_id, rel, direction, weight,
+             src_status, tgt_status, src_cls, tgt_cls,
+             src_labels, tgt_labels) in dir_rows:
             if weight is None:
                 weight = (NAND_BASE_WEIGHT if rel == "NAND" else 1.0)
+            # #2351: the ASSERTED-vs-DERIVED override guard, at the LOAD side.
+            # This is the BACKSTOP, not the gate: the write path refuses to
+            # create such a factor at all, so this arm exists for edges that
+            # PREDATE the guard or were bulk-written. It blocks the leg that
+            # would push the computed claim's belief into the authored one and
+            # keeps the reverse leg, so a derived claim is still corroborated
+            # by the authored belief it sits beside. Both legs blocked ⇒ the
+            # factor is DROPPED and REPORTED (#6105/#689 discipline: a dead arm
+            # contributes nothing, and the run says so rather than reporting
+            # `converged` over a discarding it did silently).
+            # ⛔ A non-``:Point`` endpoint is NOT a claim: it carries no
+            # ``claimClass``, so its absent marker must not be read as the
+            # ASSERTED default. ``claim_class.factor_direction_over_claims``
+            # skips the guard unless BOTH sides are claims — the same rule the
+            # write doors apply by building their target class set from
+            # ``:Point`` rows only (#2351 review: reading a non-claim as
+            # asserted silently narrowed — or dropped — a wiring the doors
+            # deliberately keep writable).
+            effective = claim_class.factor_direction_over_claims(
+                direction,
+                {src_cls} if "Point" in (src_labels or ()) else None,
+                {tgt_cls} if "Point" in (tgt_labels or ()) else None,
+            )
+            if effective is None:
+                logger.warning(
+                    "Direct edge %s -[%s]-> %s: DERIVED source over ASSERTED "
+                    "target — factor skipped (#2351)",
+                    src_id, rel, tgt_id,
+                )
+                if skipped is not None:
+                    skipped.append({
+                        "operator_id": src_id,
+                        "op_type": rel,
+                        "reason": "derived_over_asserted",
+                        # Both endpoints ARE the factor's inputs, so the count
+                        # is 2 — never 0. ``participating_inputs`` is what
+                        # consumers filter and summarise the #6105 report on,
+                        # and a record that claims zero participants while its
+                        # own ``inputs`` array names two contradicts itself.
+                        "participating_inputs": 2,
+                        "inputs": [
+                            {"id": src_id, "status": src_status or "live"},
+                            {"id": tgt_id, "status": tgt_status or "live"},
+                        ],
+                    })
+                continue
             factors.append((src_id, rel, [src_id, tgt_id], float(weight),
-                            None, direction))
+                            None, effective))
 
         if not op_info:
             return factors
@@ -1903,6 +2052,18 @@ class TortoiseEP:
         # source slot would invert directional semantics — and (b)
         # distinguish draft-caused degradation from genuinely unary
         # operators (pre-existing behavior: _update_factor no-ops <2 inputs).
+        # #9269: OPERATOR-SHAPED inputs are stripped the SAME way, in Python and
+        # for the same two reasons — `c.is_operator` is projected instead of
+        # being filtered in the WHERE clause. A Cypher-side filter drops the row
+        # BEFORE this loop, so an operator-shaped idx-0 SOURCE of a directional
+        # operator would vanish from `full_inputs`, `stripped` would stay 0, the
+        # `source_stripped` guard below could not fire, and the first surviving
+        # TARGET would be renumbered into the source slot (measured: an
+        # `IMPL(direction='->')` wired `[shaped, B, C]` became `[B, C]`, i.e.
+        # the message flowed B→C instead of shaped→{B, C}). It would also make
+        # a 2-input operator collapse to a silent unary factor with no
+        # `_last_skipped_factors` record (#6105's diagnostic is the only thing
+        # that tells a caller the operator contributed nothing).
         op_inputs: dict[str, list[str]] = {op_id: [] for op_id in op_info}
         op_input_live: dict[str, list[bool]] = {op_id: [] for op_id in op_info}
         # Raw input statuses for diagnostic surfacing (#992): when an operator
@@ -1917,17 +2078,37 @@ class TortoiseEP:
         # is then NOT provably the source, so the directional source-slot
         # guard must not fire (it could check the wrong slot — #943 review).
         op_idx_known: dict[str, bool] = {op_id: True for op_id in op_info}
+        # #2351 (epic #2349 E-derived): each input's claim class, read from the
+        # SAME Batch-2 statement (no extra query) and positionally aligned with
+        # ``op_inputs`` so the override guard below can name the factor's SOURCE
+        # slot (idx 0 — the position ``_update_factor`` reads the forward
+        # message's belief from).
+        # ``None`` marks an input that is NOT a claim (no ``:Point`` label, hence
+        # no ``claimClass``) — distinct from a claim whose marker is absent.
+        op_input_class: dict[str, list[str | None]] = {op_id: [] for op_id in op_info}
         rows = self._hop_query(
             "MATCH (o:Point)-[r:IMPL|NAND]->(c) "
             "WHERE o.id IN $ids "
             f"AND {epistemic_disjunction('c')} "
-            "RETURN o.id, c.id, r.idx, c.status, coalesce(c.outdated, false) "
+            # #9269: `c.is_operator` is PROJECTED, not filtered — the row must
+            # reach the loop below so a stripped idx-0 source can be detected
+            # (see the note above the input dicts). #2351 projects its own two
+            # columns on the SAME statement: the loop body below reads all
+            # three, so the clause carries all three.
+            "RETURN o.id, c.id, r.idx, c.status, coalesce(c.outdated, false), "
+            "       coalesce(c.claimClass, 'asserted'), labels(c), c.is_operator "
             "ORDER BY coalesce(r.idx, 0), c.id",
             {"ids": list(op_info.keys())}, hop=None,
             phase="factor_extraction", frontier_size=len(op_info),
         )
-        for op_id, claim_id, idx, status, outdated in rows:
+        for (op_id, claim_id, idx, status, outdated,
+             input_cls, input_labels, is_operator) in rows:
             op_inputs[op_id].append(claim_id)
+            # ``claimClass`` lives only on :Point (#7902 lets an operator input
+            # be a :Subject/:Object/:Event): a non-claim input contributes NO
+            # class, so ``None`` — never the asserted default (#2351 review).
+            op_input_class[op_id].append(
+                input_cls if "Point" in (input_labels or ()) else None)
             # Participation is UNCONDITIONAL on status (#2422): a terminal
             # input (retracted / superseded / outdated / archived /
             # deprecated status — the SAME vocabulary as the Cypher
@@ -1937,15 +2118,29 @@ class TortoiseEP:
             # and NEVER participates — include_draft=True re-includes DRAFTS
             # only (the #780 escape hatch), never terminal points. A None
             # status = legacy live node.
+            # #9269: an OPERATOR-SHAPED input never participates, under BOTH
+            # modes (it is not a claim, so no escape hatch applies). The value
+            # test is IDENTITY against None/False, not truthiness: it must match
+            # the Cypher predicate `(is_operator IS NULL OR is_operator = false)`
+            # exactly, and `0 == False` in Python would wrongly admit a numeric
+            # spelling the engine excludes (`0 = false` is false in Cypher).
+            is_operator_shaped = not (is_operator is None or is_operator is False)
             is_terminal = status in TERMINAL_EXCLUDED_STATUSES or bool(outdated)
-            participates = not is_terminal and (status != "draft" or include_draft)
+            participates = (not is_terminal
+                            and (status != "draft" or include_draft)
+                            and not is_operator_shaped)
             op_input_live[op_id].append(participates)
             # Display: status + flag marker so the #992 diagnostic names a
             # flag-dead input accurately (status 'live' + outdated flag shows
-            # as "live(outdated)").
-            op_input_status[op_id].append(
-                f"{status or 'live'}(outdated)" if outdated else (status or 'live')
-            )
+            # as "live(outdated)"), and an operator-shaped one by its SHAPE —
+            # it is not dead by status, so a `live` label would misdirect
+            # whoever reads the skipped-factor record.
+            if is_operator_shaped:
+                op_input_status[op_id].append("operator-shaped")
+            else:
+                op_input_status[op_id].append(
+                    f"{status or 'live'}(outdated)" if outdated else (status or 'live')
+                )
             if idx is None:
                 op_idx_known[op_id] = False
 
@@ -2017,6 +2212,81 @@ class TortoiseEP:
                             ],
                         })
                     continue
+            # #2351 (epic #2349 E-derived): the ASSERTED-vs-DERIVED override
+            # guard — the LOAD-side BACKSTOP to the write path's refusal. A
+            # DERIVED claim must not push belief INTO an ASSERTED one: the leg
+            # that would do so is blocked (the reverse leg survives, so a
+            # derived claim is still corroborated by the authored belief beside
+            # it). The factor's SOURCE slot is ``input_ids[0]`` — the position
+            # ``_update_factor`` reads the forward message's belief from and
+            # pushes into ``input_ids[1]`` — and the classes are read from the
+            # SAME Batch-2 statement, so this costs no query. Both legs blocked
+            # ⇒ the factor is DROPPED and
+            # reported (#6105), never silently discarded while the run reports
+            # `converged`.
+            _input_classes = [
+                cls for cls, live in zip(
+                    op_input_class[op_id], op_input_live[op_id], strict=True)
+                if live
+            ]
+            # The SOURCE slot is ``input_ids[0]`` — the FIRST SURVIVING input,
+            # because that is the list ``_update_factor`` receives and the
+            # position it reads the forward message's belief from (fwd writes
+            # into ``input_ids[1]``, bwd into ``input_ids[0]``). It is NOT idx 0
+            # of the FULL list: a stripped input is not in the factor at all,
+            # so classifying it describes a claim EP never uses — and on a
+            # BIDIRECTIONAL factor the #780/#2422 source-stripped guard does
+            # not fire, so that misattribution blocked the corroboration leg
+            # and let the derived->asserted leg flow (#2351 review, P0).
+            # ``None`` (a non-claim input, #7902) is preserved into the source
+            # slot so the helper can decline: a non-claim carries no class, and
+            # an empty target collection is NOT "an asserted target" either —
+            # ``any_asserted(∅)`` is True, which is right for ONE id carrying no
+            # marker and wrong for a side that is not a claim at all. A
+            # degenerate single-input factor therefore keeps its token, exactly
+            # as before (#2351 review).
+            _source_classes = (
+                {_input_classes[0]}
+                if _input_classes and _input_classes[0] is not None
+                else None
+            )
+            _target_classes = {c for c in _input_classes[1:] if c is not None}
+            # ⛔ ``op_idx_known`` gates the guard exactly as the sibling
+            # source-slot guard above is gated: on a legacy/migrated operator
+            # whose input edges carry NO idx, every row coalesces to position 0
+            # and the tie breaks lexicographically — so ``input_ids[0]`` is not
+            # provably the source, and judging a class against the wrong slot
+            # can block the CORROBORATION leg while leaving the override leg
+            # flowing, i.e. invert the very rule this guard encodes (#943
+            # review, same hazard; #2351 review P2).
+            if op_idx_known.get(op_id, True):
+                effective = claim_class.factor_direction_over_claims(
+                    direction,
+                    _source_classes,
+                    _target_classes,
+                )
+            else:
+                effective = direction
+            if effective is None:
+                logger.warning(
+                    "Operator %s: DERIVED source over ASSERTED target — "
+                    "factor skipped (#2351)",
+                    op_id,
+                )
+                if skipped is not None:
+                    skipped.append({
+                        "operator_id": op_id,
+                        "op_type": op_type,
+                        "reason": "derived_over_asserted",
+                        "participating_inputs": len(input_ids),
+                        "inputs": [
+                            {"id": cid, "status": st}
+                            for cid, st in zip(
+                                full_inputs, op_input_status[op_id], strict=True)
+                        ],
+                    })
+                continue
+            direction = effective
             weight = compute_operator_weight(self.proj, op_id)
             factors.append((op_id, op_type, input_ids, weight, label, direction))
         return factors
