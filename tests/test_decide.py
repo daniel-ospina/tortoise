@@ -1483,25 +1483,41 @@ class TestIssue9631SharedWiringRulesAreStatedOnce:
         assert damped_factor_ids(["a", "b", "a"]) == ["a", "b"]
         assert damped_factor_ids([]) == []
 
-    def test_mint_gate_licenses_the_empty_and_shared_triple_only(self):
+    def test_mint_gate_refuses_a_twin_and_a_foreign_label(self):
+        """The REFUSAL states, as a pure function. The two LICENSED states are
+        pinned against real `select_damp_targets` output instead of hand-built
+        dicts — a dict differing only in `bridges` (a field the gate never reads)
+        is not a second case (#9631 review, round 5)."""
         from tortoise.decide_wiring import may_mint_damped_bridge
 
-        # The two licensed states are DISTINCT (the shared-only one really does
-        # have a bridge on the triple), so the case the test is named for can
-        # fail on its own.
-        empty = {"targets": [], "singles": [], "other_singles": [],
-                 "bridges": 0}
-        shared_only = {"targets": [], "singles": [], "other_singles": [],
-                       "bridges": 1}
+        empty = {"targets": [], "singles": [], "other_labels": [], "bridges": 0}
         has_single = {"targets": ["op"], "singles": ["op"],
-                      "other_singles": [], "bridges": 1}
-        other_label = {"targets": [], "singles": [],
-                       "other_singles": ["op2"], "bridges": 1}
+                      "other_labels": [], "bridges": 1}
+        other_label = {"targets": [], "singles": [], "other_labels": ["op2"],
+                       "bridges": 1}
 
         assert may_mint_damped_bridge(empty) is True
-        assert may_mint_damped_bridge(shared_only) is True
         assert may_mint_damped_bridge(has_single) is False
         assert may_mint_damped_bridge(other_label) is False
+
+    def test_shared_only_triple_licenses_the_mint(self, sdk):
+        """The other licensed state, read from a REAL graph: every bridge on the
+        triple is shared with other pairs, so there is no single-pair bridge to
+        damp and no other config — minting is the same move the `edges` arm makes
+        (#9631 review, round 5)."""
+        from tortoise.decide_wiring import may_mint_damped_bridge, select_damp_targets
+
+        crit = sdk.create_point("criterion", f"Criterion {_mk()}")
+        a = sdk.create_point("option", f"Option A {_mk()}")
+        b = sdk.create_point("option", f"Option B {_mk()}")
+        sdk.create_operator("IMPL", crit["id"], [a["id"], b["id"]])
+
+        pick = select_damp_targets(sdk._get_proj(), "IMPL", crit["id"],
+                                   a["id"], None)
+        assert pick["singles"] == [], pick
+        assert pick["other_labels"] == [], pick
+        assert pick["bridges"] == 1, pick
+        assert may_mint_damped_bridge(pick) is True
 
     def test_other_label_single_pair_bridge_blocks_the_mint(self, sdk, capsys):
         """A triple can carry a SHARED bridge under the named label AND a
@@ -1523,7 +1539,7 @@ class TestIssue9631SharedWiringRulesAreStatedOnce:
                                    a["id"], "supports")
         assert pick["singles"] == [], pick
         assert pick["targets"] == [], pick
-        assert pick["other_singles"] == [unlabelled["id"]], (
+        assert pick["other_labels"] == [unlabelled["id"]], (
             "the single-pair bridge under another label was not reported, so "
             f"the mint gate would license a new claim: {pick}")
         assert pick["bridges"] == 2, (
@@ -1531,6 +1547,27 @@ class TestIssue9631SharedWiringRulesAreStatedOnce:
         assert may_mint_damped_bridge(pick) is False, (
             "a new claim would be filed next to an existing single-pair bridge")
         assert shared["id"] not in pick["targets"]
+
+    def test_shared_other_label_bridge_also_blocks_the_mint(self, sdk):
+        """The other-label refusal must not flip on the other bridge's TARGET
+        COUNT: a triple whose only bridge is a SHARED claim under another label
+        is just as much "this claim does not exist", and minting there filed a
+        third bridge next to it (#9631 review, round 5)."""
+        from tortoise.decide_wiring import may_mint_damped_bridge, select_damp_targets
+
+        crit = sdk.create_point("criterion", f"Criterion {_mk()}")
+        a = sdk.create_point("option", f"Option A {_mk()}")
+        b = sdk.create_point("option", f"Option B {_mk()}")
+        foreign = sdk.create_operator("IMPL", crit["id"], [a["id"], b["id"]],
+                                      label="refutes")
+
+        pick = select_damp_targets(sdk._get_proj(), "IMPL", crit["id"],
+                                   a["id"], "supports")
+        assert pick["targets"] == [], pick
+        assert pick["other_labels"] == [foreign["id"]], (
+            f"a shared bridge under another label was not reported: {pick}")
+        assert may_mint_damped_bridge(pick) is False, (
+            "a claim was filed next to a shared claim under another label")
 
     def test_different_label_bridge_is_named_not_silently_twinned(self, sdk,
                                                                  capsys):

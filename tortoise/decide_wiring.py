@@ -88,6 +88,22 @@ def find_operators(proj, op_type: str, source_id: str, target_id: str,
              "targets": int(counts.get(row[0], 0))} for row in rows]
 
 
+def single_pair(rows: list[dict]) -> list[dict]:
+    """The rows that ARE a single-pair bridge (``targets == 1``).
+
+    The predicate that decides reuse, dampability and mint licensing, stated
+    once: `targets > 1` means the operator also claims other pairs, so it is not
+    "this" bridge. Four hand-written ``row["targets"] == 1`` filters is how the
+    two arms drifted apart before #9631.
+    """
+    return [row for row in rows if row["targets"] == 1]
+
+
+def shared_bridges(rows: list[dict]) -> list[dict]:
+    """The rows that are NOT a single-pair bridge (they claim other pairs)."""
+    return [row for row in rows if row["targets"] != 1]
+
+
 def is_ranked(row: dict) -> bool:
     """EP's own rule (`tortoise.live._live_only`): not draft, not terminal."""
     from tortoise.live import is_draft_status, is_terminal_status
@@ -184,7 +200,7 @@ def resolve_or_create_operator(sdk, proj, op_type: str, source_id: str,
         return cache[key], True, None
     matches = find_operators(proj, op_type, source_id, target_id, label,
                              any_label=any_label)
-    single = [row for row in matches if row["targets"] == 1]
+    single = single_pair(matches)
     if single:
         # Prefer the copy EP reads; on a polluted bridge the copies are
         # identical, so storage order is arbitrary.
@@ -240,7 +256,7 @@ def select_damp_targets(proj, op_type: str, source_id: str, target_id: str,
         {"targets": [ids...],          # every dampable copy on the triple
          "notes": ["...", ...],        # why it declined / what it scoped
          "singles": [ids...],          # single-pair bridges in the LABEL SCOPE
-         "other_singles": [ids...],    # single-pair bridges under ANOTHER label
+         "other_labels": [ids...],     # bridges under ANY OTHER label
          "bridges": int}               # how many bridges sit on the triple
 
     The NOTES describe the bridges that are ALREADY there; they never state what
@@ -262,12 +278,16 @@ def select_damp_targets(proj, op_type: str, source_id: str, target_id: str,
     on_triple = find_operators(proj, op_type, source_id, target_id, None,
                                any_label=True)
     if label is None:
-        found, other_singles, other_rows = on_triple, [], []
+        found, other_labels, other_rows = on_triple, [], []
     else:
         found = [row for row in on_triple if row["label"] == label]
         other_rows = [row for row in on_triple if row["label"] != label]
-        other_singles = [row["id"] for row in other_rows
-                         if row["targets"] == 1]
+        # EVERY other-label bridge, shared or not: the gate refuses to mint next
+        # to a claim under another label whether or not that claim is
+        # single-pair, so counting only single-pair ones made two states that
+        # differ solely in the other bridge's target count behave oppositely
+        # (#9631 review, round 5).
+        other_labels = [row["id"] for row in other_rows]
     bridges = len(on_triple)
 
     if not found:
@@ -281,29 +301,29 @@ def select_damp_targets(proj, op_type: str, source_id: str, target_id: str,
                 f"the triple carries {present} under a DIFFERENT label — not "
                 "damped (a relevance edge damps only the claim it names)")
         return {"targets": [], "bridges": bridges, "singles": [],
-                "other_singles": other_singles, "notes": notes}
+                "other_labels": other_labels, "notes": notes}
     notes: list[str] = []
     # #6671 review: a bridge with ``targets > 1`` also claims OTHER pairs, so
     # damping it here would weaken claims this edge never named — the exact
     # hazard ``resolve_or_create_operator`` refuses to create. The two arms
     # must state ONE rule, so the exclusion is applied here too instead of
     # being asserted only in the ``edges`` arm's prose.
-    shared = [row for row in found if row["targets"] != 1]
+    shared = shared_bridges(found)
     if shared:
         named = ", ".join(f'{row["id"]} ({row["targets"]} targets)'
                           for row in shared)
         notes.append(f"{named} also claim other pairs — not damped (it would "
                      "weaken claims this edge did not name)")
-    single = [row for row in found if row["targets"] == 1]
+    single = single_pair(found)
     if not single:
         scope = f"under {label!r} " if label else ""
         notes.append(f"no single-pair bridge {scope}on this triple — every "
                      "bridge in scope is shared with other pairs")
-        # `other_singles` still matters HERE: a single-pair bridge under a
-        # different label is a claim this edge did not name, so the mint gate
-        # must refuse even though the named scope has nothing to damp.
+        # `other_labels` still matters HERE: a bridge under a different label is
+        # a claim this edge did not name, so the mint gate must refuse even
+        # though the named scope has nothing to damp.
         return {"targets": [], "bridges": bridges, "singles": [],
-                "other_singles": other_singles, "notes": notes}
+                "other_labels": other_labels, "notes": notes}
     found = single
     if label is not None:
         targets = [row["id"] for row in found]
@@ -318,7 +338,7 @@ def select_damp_targets(proj, op_type: str, source_id: str, target_id: str,
         targets = []
     return {"targets": targets, "bridges": bridges,
             "singles": [row["id"] for row in found],
-            "other_singles": other_singles, "notes": notes}
+            "other_labels": other_labels, "notes": notes}
 
 
 def may_mint_damped_bridge(pick: dict) -> bool:
@@ -329,18 +349,21 @@ def may_mint_damped_bridge(pick: dict) -> bool:
     claim"). That is the only difference between them, and it is stated HERE so
     the two entry points cannot drift into different answers:
 
-    * no single-pair bridge in the label scope, and no single-pair bridge under
-      ANOTHER label → mint. Either the triple is empty, or every bridge on it is
+    * no single-pair bridge in the label scope, and NOTHING on the triple under
+      another label → mint. Either the triple is empty, or every bridge on it is
       shared with other pairs — the same state `resolve_or_create_operator`
       writes a single-pair bridge out of for the `edges` arm. Minting here is
       that rule, not a twin.
     * a single-pair bridge exists in scope → NEVER mint: that is the twin, and
       the relevance edge had something to damp (including the ambiguous
       several-labels case, which refuses rather than guesses).
-    * the only bridge is under a DIFFERENT label → NEVER mint: the caller named
-      a claim that does not exist, and filing it would add an unreported claim.
+    * the triple carries a bridge under a DIFFERENT label (`other_labels`, shared
+      or single-pair) → NEVER mint: the caller named a claim that does not
+      exist as such, and filing a parallel one would add a claim the input never
+      declared. The bridge's target count must not change the answer, which is
+      why this reads every other-label bridge and not just the single-pair ones.
     """
-    return not pick["singles"] and not pick["other_singles"]
+    return not pick["singles"] and not pick["other_labels"]
 
 
 def damped_factor_ids(targets: list[str]) -> list[str]:
