@@ -73,9 +73,10 @@ Mutations that turn these RED (each verified RED before merge, restored byte-exa
     fails: on a host whose awk is mawk the readable AGENTS.md is refused at exit 3
     — Ubuntu 24.04's mawk PANICS at REcompile time (so the state pass dies and the
     file is called unreadable), Debian 12's has no interval support at all (so
-    ``{3,}`` is LITERAL, no fence matches, and a documented fenced example is
-    counted as the block → a false MALFORMED). #9274, invisible on this host's BSD
-    awk and on CI's gawk;
+    ``{3,}`` is LITERAL and no fence matches → the MALFORMED remedy on a file with
+    a fenced example AND a block, and a silent in-place overwrite of the fenced
+    example at exit 0 on a file whose only markers are the example). #9274,
+    invisible on this host's BSD awk and on CI's gawk;
   * neutralise BOTH the ``tr`` guard and the non-empty check -> the failing-``tr``
     test fails: ``tr`` dying empties both stripped markers, which silently disables
     the mangled detector, and a file whose two markers are BOTH spacing-mangled
@@ -694,9 +695,11 @@ def test_a_cr_inside_a_line_is_a_real_difference(tmp_path):
 #:     compile fine);
 #:   * 1.3.4 20200120 (Debian 12) predates interval support entirely
 #:     (``-W re-interval`` is a "vacuous option"), so ``{3,}`` is a LITERAL and no
-#:     fence ever matches (measured: ``/^a{3,}/`` misses "aaa") — the state pass
-#:     then SUCCEEDS and reports a false MALFORMED, a DIFFERENT lie from the
-#:     unreadable-file one above.
+#:     fence ever matches (measured: ``/^a{3,}/`` misses "aaa"). The state pass
+#:     then SUCCEEDS: a fenced example PLUS a block reads as malformed (a false
+#:     MALFORMED), while a file whose ONLY markers are the fenced example reads as
+#:     paired — the example is overwritten in place and the run says "✓ upgraded"
+#:     at exit 0 (measured in debian:12-slim).
 #: The shim models the PANIC for the whole interval-quantifier class rather than
 #: re-implementing mawk's state-stack bug: on the Debian build every interval is
 #: already wrong, so "a classifier that needs none" is the only spelling that is
@@ -860,20 +863,21 @@ def test_an_unparsed_state_fails_instead_of_claiming_an_upgrade(tmp_path):
 def test_the_fence_classifier_installs_on_a_host_whose_awk_is_mawk(tmp_path):
     """#9274 — the block must install where ``awk`` is mawk, not refuse a readable
     file. On Debian/Ubuntu (mawk is the distro default) the fence classifier's
-    interval quantifiers break the install in two DIFFERENT ways, and the user is
-    lied to differently each time: Ubuntu 24.04's mawk panics at REcompile time,
-    so the state pass dies and the run says
-    ``✗ AGENTS.md — could not read AGENTS.md (unreadable, or not a regular file)``;
-    Debian 12's mawk has no interval support at all, so ``{3,}`` is literal, no
-    fence matches, a documented fenced EXAMPLE is counted as the block, and the run
-    instead says ``the Tortoise block markers are MALFORMED … delete from the FIRST
-    start marker`` (advice that deletes the user's documentation). Both at exit 3
-    over a file that was perfectly readable. Unobservable on BSD awk (this host)
-    and on CI's gawk, which is why it shipped.
+    interval quantifiers break the install in two DIFFERENT ways. Ubuntu 24.04's
+    mawk panics at REcompile time, so the state pass dies and the run says
+    ``✗ AGENTS.md — could not read AGENTS.md (unreadable, or not a regular file)``.
+    Debian 12's mawk has no interval support at all, so ``{3,}`` is literal and no
+    fence ever matches: a fenced example PLUS a block then reads as malformed
+    (``the Tortoise block markers are MALFORMED … delete from the FIRST start
+    marker`` — advice that deletes the user's documentation), while a file whose
+    ONLY markers are the example reads as paired and the example is overwritten in
+    place at exit 0, reported as ``✓ upgraded`` (measured in debian:12-slim). All
+    of it over files that were perfectly readable. Unobservable on BSD awk (this
+    host) and on CI's gawk, which is why it shipped.
 
-    The shim models the FIRST class (the panic); it refusing the whole interval
-    class is the safe direction, because the SECOND class has no correct intervals
-    to model."""
+    The shim models the FIRST class (the panic). It refusing the whole interval
+    class is the safe direction: the SECOND class has no correct intervals to
+    model, and its symptom is not a panic at all."""
     real_awk = shutil.which("awk")
     assert real_awk, "no awk on PATH — cannot model a mawk host"
     probe_called = tmp_path / "probe-awk-called"

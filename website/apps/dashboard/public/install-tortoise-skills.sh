@@ -581,12 +581,18 @@ ${me}" > "$block" || _emit_fail "could not build the new block text — nothing 
     #   * Debian 12, mawk 1.3.4 20200120: intervals are not ENABLED at all
     #     (`-W re-interval` there is a "vacuous option"), so the braces are LITERAL
     #     and no fence ever matches (measured: /^a{3,}/ misses "aaa"). The state
-    #     pass then SUCCEEDS and counts a documented fenced EXAMPLE of the markers
-    #     as the block, so the refusal comes from the MALFORMED branch below —
-    #     "the Tortoise block markers are MALFORMED … delete from the FIRST start
-    #     marker", i.e. advice that deletes the user's documentation.
-    # Both end at exit 3 over a file the installer could read, and neither names
-    # the real cause — the defect #8947 exists to end. substr() implements the same
+    #     pass then SUCCEEDS, and what it does depends on the FILE:
+    #       - a fenced EXAMPLE plus a real block -> starts=2/ends=2, so the
+    #         MALFORMED branch below refuses with "the Tortoise block markers are
+    #         MALFORMED … delete from the FIRST start marker" — advice that deletes
+    #         the user's documentation (measured, exit 3);
+    #       - ONLY a fenced example (no real block) -> state PAIRED, the example's
+    #         body is REPLACED in place and the run reports "✓ upgraded" at exit 0:
+    #         the documentation is silently gone, which is exactly the outcome
+    #         #3429's fence skip exists to prevent (measured in debian:12-slim).
+    # So only the panic class above is a blanket refusal; this one is a lie on
+    # SOME files and a silent overwrite on others, and NEITHER names the real
+    # cause — the defect #8947 exists to end. substr() implements the same
     # CommonMark rule on every awk, so the classifier needs no interval support.
     state="$(LC_ALL=C awk -v ms="$ms" -v me="$me" -v msws="$ms_ws" -v mews="$me_ws" \
                  -v msre="$ms_re" -v mere="$me_re" '
