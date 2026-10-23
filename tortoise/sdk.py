@@ -6297,17 +6297,28 @@ def _supersede_window_start_source(stored_vf, successor_created_at):
     """The stored successor window START ``_supersede_window_end`` will use, or
     ``_WRITER_CLOCK`` when it falls through to the writer's ``now``.
 
-    THE ONE HOME for this predicate (#3985, #5360): the writer
-    (``_supersede_window_end``) and the hosted pre-write mirror
-    (``hosted_api._prevalidate_supersede_window``) BOTH resolve through it, so
-    the PREDICATE cannot drift. (The two sites still derive its INPUTS
-    independently — the mirror reads before the write, the writer after — a
-    separately-positioned read, the #7000 class.) The mirror's whole question —
-    "does the resolution land on the writer's clock?" — is ``is _WRITER_CLOCK``. A duplicated predicate
+    THE ONE HOME for this predicate (#3985, #5360, #9729): THREE callers
+    resolve through it — the writer (``_supersede_window_end``), the hosted
+    pre-write mirror (``hosted_api._prevalidate_supersede_window``), and
+    ``supersede_point``'s precision-inheritance gate, so the PREDICATE cannot
+    drift. The mirror derives its INPUTS on its own, separately positioned read
+    (the #7000 class); the writer and the gate share ONE read, so they cannot
+    see different rows. The mirror's whole question — "does the resolution land
+    on the writer's clock?" — is ``is _WRITER_CLOCK``. A duplicated predicate
     drifted once already (the mirror kept a truthiness test after #3985 made a
     falsey stored start resolvable) and deferred a resolution the writer takes:
     the successor was minted and the boundary then refused it, the #5363
     orphan.
+
+    RETURN CONTRACT: this function returns one of its ARGUMENTS by identity —
+    the ``stored_vf`` or ``successor_created_at`` object itself, never a copy or
+    a normalized value. The first two callers never compare that identity: the
+    mirror only asks ``is _WRITER_CLOCK`` and the writer stamps the returned
+    value. The #9729 gate does compare it (``is stored_vf``) to decide whether
+    the predecessor's END came from the successor's own start, and may
+    therefore inherit its declared precision — so a normalization would go
+    silent THERE ALONE: the END would lose the declaration with no error
+    anywhere. Keep the identity when this predicate changes.
 
     The predicate is PRESENT (not truthy) AND ORDERABLE:
 
@@ -14169,10 +14180,17 @@ class TortoiseSDK:
         state — the window ENDED but at a time we cannot pin, so NO ``validTo``
         is fabricated (the 'half-honest dates are worse than none' rule) and
         the stored marker is what every read path reports as
-        ``end_state='unknown'``. Otherwise the predecessor's end IS the
-        successor's start, so it inherits the successor's ``validFromPrecision``
-        when the caller does not state one, keeping the contiguous boundary's
-        precision honest on both sides.
+        ``end_state='unknown'``. Otherwise the predecessor's end is the
+        successor's RESOLVED start — the caller's ``valid_from`` kwarg when it is
+        usable (it wins outright: the agreement guard forces instant equality
+        whenever the successor has a stored start, and it is the SOLE source for
+        an undated successor), else its own ``validFrom`` when that names an
+        instant, else its ``createdAt``, else ``now`` — and it inherits the
+        successor's ``validFromPrecision`` when, and only when, the resolved end
+        names the successor's start instant: a declaration annotates a bound, it
+        cannot summon one (#9244), so a fallback instant nobody declared a
+        granularity for is stamped with no precision (#9729). A caller who wants
+        a token on a fallback instant states ``valid_to_precision`` explicitly.
 
         Transfers all edges from the old point to the new point:
           - Operator edges (IMPL, NAND, hasPart) with idx, AND their reverse
@@ -14342,20 +14360,43 @@ class TortoiseSDK:
         # ``invalidate_point``. (Pre-fix the guard ran first and refused a
         # request that writes no end at all: fail-closed, but wrong for its
         # stated reason and unreachable at the sibling door.) Otherwise the
-        # predecessor's end IS the successor's start, so it inherits the
-        # successor's declared start precision when the caller does not state
-        # one — the precision travels with the contiguous boundary.
+        # predecessor's end is the successor's RESOLVED start (a USABLE
+        # valid_from kwarg, which wins outright — agreed with the stored start
+        # whenever one exists → its own validFrom → its createdAt → now), and it
+        # inherits the successor's declared start precision ONLY when the
+        # resolved end names the successor's start instant (#9729): a
+        # declaration annotates a bound, it cannot summon one (#9244), so a
+        # fabricated fallback instant carries no token.
         from .validity import PRECISION_UNKNOWN as _PREC_UNKNOWN
         from .validity import normalize_precision as _normalize_precision
+        successor_created_at = vf_rows[0][1] if vf_rows else None
         end_precision = _normalize_precision(
             valid_to_precision, field="valid_to_precision")
-        if end_precision is None and vf_rows:
+        if (end_precision is None and vf_rows
+                and _supersede_window_start_source(
+                    stored_vf, successor_created_at) is stored_vf):
+            # #9729: the declared token annotates the successor's START, so it
+            # may ride onto the predecessor's END only when that END came FROM
+            # that start. `_supersede_window_start_source` is the ONE HOME for
+            # "which source does the end resolve from" — an unorderable start
+            # falls through to `createdAt`/`now`, instants nobody declared a
+            # granularity for, and stamping the declaration there is the #9244
+            # lie one surface over: a declaration annotates a bound, it cannot
+            # summon an instant. (Guarding the SOURCE, not `createdAt`'s
+            # orderability, covers both fallback steps with the same predicate
+            # the writer itself resolves through, so the two cannot drift. The
+            # `is` test is exact because that helper RETURNS the argument it
+            # accepted — a future normalization inside it must keep doing so,
+            # or inheritance goes silent. The rung AHEAD of it, the caller's
+            # `valid_from` kwarg, is pinned to the same instant by the
+            # agreement guard above — relax that guard and this gate must be
+            # re-derived.)
             end_precision = vf_rows[0][2] or None
         _end_is_unknown = end_precision == _PREC_UNKNOWN
         succ_vf = _supersede_window_end(
             old_id=old_id, new_id=new_id, old_vfs=old_vfs,
             valid_from=valid_from, stored_vf=stored_vf,
-            successor_created_at=(vf_rows[0][1] if vf_rows else None),
+            successor_created_at=successor_created_at,
             now=now,
             skip_inversion_guard=_end_is_unknown,
         )
