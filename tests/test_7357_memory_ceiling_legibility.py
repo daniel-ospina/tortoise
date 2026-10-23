@@ -807,8 +807,8 @@ def test_an_implicit_context_is_not_ceiling_evidence():
         "the fixture must be the IMPLICIT chain, not `from None`")
     assert is_memory_ceiling_refusal(failure) is True, (
         "still the family — but BY CLASS on the top link here; the CONTEXT half "
-        "of the family walk is pinned where the top link cannot match: "
-        "tests/test_7357_transport_legibility.py")
+        "of the family walk is pinned by "
+        "test_the_family_walk_follows_an_implicit_context_to_a_ceiling, below")
     hedged = explain_memory_ceiling(failure) or ""
     assert "it has reached its configured dataset limit" not in hedged
 
@@ -817,6 +817,43 @@ def test_an_implicit_context_is_not_ceiling_evidence():
     explicit.__cause__ = _ceiling_error()
     assert "it has reached its configured dataset limit" in (
         explain_memory_ceiling(explicit) or "")
+
+
+def test_the_family_walk_follows_an_implicit_context_to_a_ceiling():
+    """COVERAGE for the ``__context__`` half of the family walk.
+
+    Not a regression guard for this PR's hedge split — ``main`` already walked
+    ``__context__`` here. It is the shape nothing else in this file reaches:
+    every other use of the ceiling predicate is admitted by the TOP link (by
+    class, or through ``__cause__``), so narrowing the walk to ``__cause__``
+    alone would redden nothing, while the predicate's own docstring records the
+    wider walk as what closed #7357's measured shape.
+
+    NON-VACUOUS relative to that narrowing: delete the ``__context__`` fallback
+    in ``is_memory_ceiling_refusal`` and the first two assertions redden (both
+    cases below were run against exactly that mutation).
+    """
+    # (a) the context names the ceiling in its own TEXT; the top link is not
+    # the family at all, so nothing but the walk can admit it.
+    text_half = redis_exc.ResponseError("write failed")
+    text_half.__context__ = redis_exc.ResponseError(CEILING_SENTENCE)
+    assert text_half.__cause__ is None
+    assert text_half.__suppress_context__ is False, (
+        "the fixture must be the IMPLICIT chain, not `from None`")
+    assert is_memory_ceiling_refusal(text_half) is True
+
+    # (b) …and by its CLASS, which is the shape the driver itself mints.
+    class_half = redis_exc.ResponseError("write failed")
+    class_half.__context__ = redis_exc.OutOfMemoryError(
+        "OOM failed to allocate 1GB")
+    assert is_memory_ceiling_refusal(class_half) is True
+
+    # …while `raise ... from None` DETACHES the context: the author said this
+    # failure is not that one, so the walk stops and no note is owed.
+    detached = redis_exc.ResponseError("write failed")
+    detached.__context__ = redis_exc.ResponseError(CEILING_SENTENCE)
+    detached.__suppress_context__ = True
+    assert is_memory_ceiling_refusal(detached) is False
 
 
 # ── the wiring, through a real guarded client ───────────────────────────────
