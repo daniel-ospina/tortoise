@@ -100,17 +100,21 @@ ontology:
   eventKinds:
   - valuationMark
 
-  hierarchies:
-  - path: Mandate → AllocationTarget
-    type: hasPart
+  # NO `hierarchies` entry for mandate → allocationTarget: the pair is already
+  # modelled by the `boundedBy` relation below, which is the one the runtime can
+  # write. A `hierarchies` path is shape-validated only and consumed by nothing,
+  # so declaring the same link twice would invite a later reader to pick the
+  # inert copy. One link, one representation.
 
   kindDefs:
     mandate:
-      # value test: (1) closed lifecycle draft → adopted → breached → retired —
-      # and (4) endpoint of `constrainedBy` (a `mechanism: IMPL` relation).
-      # No `folds`: a breach is a judgment recorded by the manager, and this
-      # pack declares no event that would FOLD it — inventing one to satisfy a
-      # bullet would be the mechanism-invention the value test exists to stop.
+      # value test: (4) endpoint of `constrainedBy` (a `mechanism: IMPL`
+      # relation) — and ONLY that bullet. The kind DOES own a closed lifecycle
+      # (draft → adopted → breached → retired), but bullet (1) as written asks
+      # for a declared `folds`, and there is none: a breach is a judgment the
+      # manager records, and this pack declares no event that would FOLD it.
+      # Inventing one to satisfy a bullet would be the mechanism-invention the
+      # value test exists to stop — so the bullet is not claimed.
       description: >-
         The constraints a portfolio's holdings must respect — investment period,
         sector/geography limits, concentration caps and reserve policy. The
@@ -224,7 +228,10 @@ ontology:
     semantics: related
     fromKind: portfolio:valuationMark
     toKind: venture:investment
-    cardinality: one_to_one
+    # many_to_one: a position is marked MANY times over its life (one mark per
+    # period), which is the whole point of a dated mark. `one_to_one` would
+    # assert at most one mark per position and be refuted by the second period.
+    cardinality: many_to_one
     extractable: true
     nearMisses:
     - addresses

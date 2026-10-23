@@ -2251,6 +2251,13 @@ class PackRegistry:
         name that resolves nowhere with a complete dependency set, and any
         ambiguous bare name, remain fatal (they go to ``errors``).
         """
+        if not isinstance(ref, str):
+            # Defence in depth: every caller's own SHAPE check rejects a
+            # non-string reference before this pass, so this is unreachable
+            # today — but `"," in ref` on a non-string would raise out of a
+            # method whose contract is to RECORD a diagnostic. Treat it as
+            # unexplained, which keeps it fatal.
+            return None
         if ":" in ref:
             if ref.startswith("core:"):
                 # A core ref never names a pack, so no declared dependency can

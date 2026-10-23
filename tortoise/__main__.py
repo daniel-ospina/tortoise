@@ -8581,9 +8581,16 @@ def _cmd_pack_validate(args) -> int:
     # `nearMisses` typo — one isolation, zero printed errors, exit 0). Match
     # BOTH the declared namespace and the directory name, so a manifest too
     # broken to yield a namespace (keyed by directory name) is still reported.
-    target_keys = {target.name}
     target_manifest = target / "manifest.yaml"
-    if target_manifest.exists():
+    if not target_manifest.exists():
+        # No manifest at the target means a `packs/` DIRECTORY was passed: the
+        # "validate every pack" mode, where there is no single pack to scope
+        # to. The old filter ran here too and hid every namespace whose
+        # directory name differs (`pm`, `portfolio`) — the same false green one
+        # level up (#9663 review), so this leg reports the registry verbatim.
+        errors: dict[str, list[str]] = dict(reg.errors)
+    else:
+        target_keys = {target.name}
         import yaml
         try:
             declared = yaml.safe_load(target_manifest.read_text()) or {}
@@ -8592,10 +8599,10 @@ def _cmd_pack_validate(args) -> int:
         declared_ns = declared.get("namespace") if isinstance(declared, dict) else None
         if isinstance(declared_ns, str) and declared_ns.strip():
             target_keys.add(declared_ns.strip())
-    errors: dict[str, list[str]] = {}
-    for ns, errs in reg.errors.items():
-        if (packs_dir / ns / "manifest.yaml").exists() or ns in target_keys:
-            errors[ns] = errs
+        errors = {}
+        for ns, errs in reg.errors.items():
+            if (packs_dir / ns / "manifest.yaml").exists() or ns in target_keys:
+                errors[ns] = errs
     # #2766: the per-relation write-path verdict, from the ONE resolver pack
     # load warns with — so `validate` cannot report a relation as bound to a
     # path its own declaration does not bind. Enumerated from the registry

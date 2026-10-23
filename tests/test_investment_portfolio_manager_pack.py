@@ -761,6 +761,35 @@ class TestPackValidateCLI:
         ok = self._run(str(target))
         assert ok.returncode == 0, ok.stdout + ok.stderr
 
+    def test_a_broken_pack_is_reported_when_the_PACKS_DIR_is_the_target(
+            self, tmp_path):
+        """The parent-directory mode ("validate every pack") filtered the SAME
+        way, one level up: no manifest lives at the target, so the
+        directory-name leg could never match a namespace whose directory is
+        named differently (`pm`, `portfolio`) and the command printed
+        `✓ Clean` over an isolation.
+
+        FAIL-ON: the filter also runs on this leg. REACHABLE: the clean pack in
+        the same tree passes when it is the target, so the failure is the
+        injected typo.
+        """
+        dest = tmp_path / "packs"
+        shutil.copytree(REPO_PACKS_DIR, dest)
+        manifest = dest / PACK_DIR.name / "manifest.yaml"
+        manifest.write_text(manifest.read_text().replace(
+            "      - venture:condition", "      - venture:conditon"))
+
+        r = self._run(str(dest))
+        out = r.stdout + r.stderr
+        assert r.returncode == 1, out
+        assert f"✗ {NS}" in out, out
+        assert "venture:conditon" in out
+
+        # CONTROL: the untouched catalog as a parent-directory target is clean.
+        shutil.copyfile(MANIFEST_PATH, manifest)
+        ok = self._run(str(dest))
+        assert ok.returncode == 0, ok.stdout + ok.stderr
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # 7. Write doors: install on a fresh graph, mint every kind, validate_domain

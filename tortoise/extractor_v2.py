@@ -489,8 +489,10 @@ def _s2s4_rules(master: dict | None = None, *,
     it is the slot that states the value policy — a pack's keep/drop hints and
     instruction snippets are policy, not vocabulary, so they must sit where
     the policy does and not in the master render. ``None``
-    (or a master whose packs declare nothing — every shipped pack today)
-    renders the pre-#4894 block byte-for-byte.
+    (or a master whose packs declare no hints — which every shipped pack
+    still does; the first shipped per-kind VALUE declaration landed in #9663
+    and rides the ``pack_values`` leg below, not this one) renders the
+    pre-#4894 block byte-for-byte.
 
     #2818: ``master`` also carries ``pack_values`` — the per-kind value-field
     declarations a pack makes. The declared FIELDS are rendered per kind in
@@ -688,8 +690,10 @@ def _build_master_from_brief(brief: dict,
         "pack_kinds": pack_kinds,
         # #2818: per-kind value-field declarations (only kinds that declare
         # one appear). A SEPARATE section so ``pack_kinds``' description
-        # strings keep their meaning for every existing reader; empty for
-        # every shipped pack today (so no render changes).
+        # strings keep their meaning for every existing reader. Empty until
+        # #9663, which shipped the catalog's FIRST declaration
+        # (`portfolio:allocationTarget.targetPct`) — every OTHER shipped pack
+        # still contributes nothing, so their renders are unchanged.
         "pack_values": pack_values,
         "chains": {name: {"path": list(c["path"]), "note": c["note"]}
                    for name, c in CHAINS.items()},
@@ -697,7 +701,8 @@ def _build_master_from_brief(brief: dict,
         # #4894 / #1026: the packs' DECLARED value-brief hints (valueGate /
         # promptFragments). Carried verbatim on the master so the S1/S2/S4
         # render sites read one compiled source; empty for every pack that
-        # declares neither, which is every shipped pack today.
+        # declares neither, which is still every shipped pack (#9663 shipped a
+        # per-kind VALUE field, not a hint — the hint slot stays empty).
         "pack_hints": {ns: dict(h) for ns, h in
                        (brief.get("pack_hints") or {}).items()},
         # E2 (#1534): user-personal-state vocabulary — the Tier-A classification
@@ -1045,9 +1050,12 @@ def _values_suffixes(master: dict | None) -> dict[str, str]:
     """kind → `` [values: name(valueKind[, required][, many]), …]`` (#2818).
 
     Only kinds that DECLARE value fields appear, so every ``- kind — desc``
-    line for a props-less kind is byte-identical to pre-#2818 (``{}`` for the
-    whole shipped catalog today). Shared by the verbose and compact renders so
-    the two prompt modes spell a declaration the same way.
+    line for a props-less kind is byte-identical to pre-#2818. Since #9663 one
+    shipped kind declares a value field (``portfolio:allocationTarget``), so
+    the map is no longer empty for the whole catalog — every other kind is
+    still absent, which is what keeps their lines unchanged. Shared by the
+    verbose and compact renders so the two prompt modes spell a declaration
+    the same way.
     """
     from tortoise.pack_values import value_field_annotations
     master = master or {}

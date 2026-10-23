@@ -188,7 +188,7 @@ def test_the_hint_block_is_ordered_by_namespace(tmp_path):
 # ── byte identity on every shipped-pack path ───────────────────────────────
 
 
-def test_the_default_prompt_path_is_byte_identical():
+def test_the_default_prompt_path_is_byte_identical_for_the_hint_slot():
     """No shipped pack declares the HINT slots, so nothing may move.
 
     This is the half that matters in production: a change here would alter
