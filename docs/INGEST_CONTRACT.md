@@ -467,24 +467,21 @@ the `{error}`-only shape whose retry action is different.
   refusal is about the instance and not about anything you wrote). This is a
   **throttle, not a cap**: it never refuses your data, the window self-heals
   within 60 s, and the correct action is **backoff-and-retry** — the opposite
-  of the cumulative `ERR_QUOTA` advice above. A refused request leaves the graph
-  as it found it — its net effect is nil (the idempotency record it opened is
-  removed when it was that request that created it), so the refusal adds no
-  node a later attempt could be judged against. If that attempt was the first
-  for this `client_commit_id`, retrying it after the backoff is a **first**
-  attempt — the same `held[]` adjudication a clean request would have
-  received, not a second one. (If an EARLIER attempt of the same id already left
-  a record — a `held` deferral, a crash mid-write, or a refusal from a gate
-  that does not clean up after itself, see #9826 — that record is preserved and
-  the retry is adjudicated against it: a re-submission is not re-adjudicated
-  against the 25-item first-adjudication band, only against the 50 ceiling, so
-  it writes what a first pass would have held. A `fully_written` record never
-  reaches an ORG-LIMIT or ingest-budget gate: the replay check returns
-  `duplicate: true` with zero writes before either limit is consulted. (The
-  request-level checks still run first — the per-key rate limiter in
-  middleware, then Layer-1 shape validation — so a re-POST of a written id with
-  a changed non-canonical field can still be refused 429 or 422 before the
-  replay.)
+  of the cumulative `ERR_QUOTA` advice above. A request refused by THIS throttle
+  leaves no record of its own: the `:CommitRecord` it opened is removed when
+  that request created it, so the retry cannot be judged against it. If that
+  attempt was the first for this `client_commit_id`, the retry is therefore a
+  **first** attempt — the same `held[]` adjudication a clean request would have
+  received, not a second one. When an EARLIER attempt of the same id left a
+  record — a `held` deferral, a crash mid-write, or a refusal by a gate that
+  does not clean up after itself (see #9826) — that record is preserved and the
+  retry is a re-submission: it is not re-adjudicated against the 25-item
+  first-adjudication band, only against the 50-item ceiling. A `fully_written`
+  record is not re-run at all: the replay check returns `duplicate: true` with
+  zero writes before the org-cap and ingest gates are consulted (the per-key
+  rate limiter and Layer-1 validation still run first, so a re-POST of a
+  written id whose non-canonical fields changed can still be refused 429 or
+  422).
   (The repo's bundled SDK does not
   yet auto-retry a 429 — see #9799 — so a client driving the endpoint directly
   should honour `Retry-After` itself.) It exists because the removal of the

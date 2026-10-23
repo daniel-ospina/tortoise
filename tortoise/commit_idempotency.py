@@ -181,7 +181,10 @@ class CommitRecordStore:
         record at its FIRST statement (``hosted_api`` step 1 — "the stamp and
         the arithmetic are one statement"), so a crash leaves it SET, while
         ``write_ops_billed`` is only written AFTER the phase completes and is
-        therefore still 0 on a mid-write record. Both limbs are checked (belt
+        therefore still 0 on a mid-write record (``acquire`` writes the column as
+        ``0`` when it creates the record; the ``1`` lands only after the phase
+        completes: ``store.update(... "fully_written")`` then
+        ``SET r.write_ops_billed=1``). Both limbs are checked (belt
         and braces), but do NOT simplify the guard to ``status``/``wob`` alone —
         that would delete a live in-flight record.
 
