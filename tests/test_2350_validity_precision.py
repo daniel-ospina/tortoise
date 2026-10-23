@@ -345,6 +345,85 @@ def test_supersede_inherits_the_successors_start_precision(lane):
     assert _window_props(sdk, old["id"])["validTo"] == "2026-01-01"
 
 
+def test_supersede_inherits_through_an_agreeing_valid_from_kwarg(lane):
+    """#9729 control: the kwarg rung of the end ladder still inherits.
+
+    ``_supersede_window_end`` takes the caller's ``valid_from`` kwarg AHEAD of
+    the stored start, and the agreement guard admits it only when it names the
+    same instant — so that end IS the successor's start and must keep the
+    declared token. Pinned separately because the no-kwarg test above passes
+    with the kwarg arm of the #9729 gate deleted (measured: a mutant adding
+    ``valid_from is None`` to the gate left the whole suite green).
+    """
+    sdk, _events = lane
+    old = sdk.create_point("statement", "old", validFrom="2024-01-01")
+    new = sdk.create_point("statement", "new", validFrom="2026-01-01",
+                           validFromPrecision="month")
+    sdk.supersede_point(old["id"], new["id"], valid_from="2026-01-01")
+    props = _window_props(sdk, old["id"])
+    assert props["validTo"] == "2026-01-01"
+    assert props["validToPrecision"] == "month"
+
+
+def test_supersede_does_not_inherit_a_declaration_onto_a_fabricated_end(lane):
+    """#9729: the inherited token annotates the successor's START — the
+    predecessor's END may only carry it when that END **is** that start.
+
+    ``effective_precision`` gates a declared token on the bound naming an
+    instant (#9244), so the successor's own ``validFrom="TBD"`` reads ``None``.
+    ``supersede_point`` did not go through that resolution: it inherited
+    ``vf_rows[0][2]`` onto the predecessor UNCONDITIONALLY as a WRITE, while the
+    resolution ladder fell through the unorderable start to ``createdAt`` — so a
+    declaration made for a start that names no instant was re-stamped onto an
+    instant nobody declared a granularity for (the successor's ``createdAt``)
+    and read back as that end's precision. The same declaration read ``None``
+    one property away.
+    """
+    sdk, _events = lane
+    old = sdk.create_point("statement", "old", validFrom="2024-01-01")
+    new = sdk.create_point("statement", "new", validFrom="TBD",
+                           validFromPrecision="year")
+    sdk.supersede_point(old["id"], new["id"])
+    props = _window_props(sdk, old["id"])
+    # the end came from the fallback ladder (createdAt / now), never from the
+    # successor's unorderable start.
+    assert props["validTo"] not in (None, "TBD")
+    # …so no declaration may be attached to it: the property stays ABSENT (the
+    # legacy read default derives `day` from the bare timestamp, #9202's axis).
+    assert props["validToPrecision"] is None
+    assert "validToPrecision" not in _props(sdk, old["id"])
+    # the read surface must not resurrect it either. The stored property is
+    # ABSENT, so the read derives the legacy `day` default from the bare
+    # timestamp — the pre-#2350 reading every undeclared END gets (whether an
+    # undeclared END should read `null` instead is #9202's owner decision, not
+    # this write fix). What it must NOT read is the inherited `year`.
+    assert sdk.get_historical_knowledge(
+        old["id"], "2025-01-01")["chain"][0]["valid_to_precision"] == "day"
+    # …and it agrees with what the SAME declaration reads on the successor's own
+    # start: `None`, because that bound names no instant.
+    assert sdk.get_historical_knowledge(
+        new["id"], "2027-01-01")["valid_point"]["valid_from_precision"] is None
+
+
+def test_supersede_stamps_no_precision_when_the_end_is_the_writer_clock(lane):
+    """#9729 control: the gate is on the END'S SOURCE, not on ``createdAt``.
+
+    With the successor's ``validFrom`` unorderable AND its ``createdAt``
+    unparseable, the ladder lands on the writer's ``now`` — the third source,
+    which no declared token ever annotated. The same no-precision verdict must
+    hold there too, otherwise the fix would only cover the ``createdAt`` step.
+    """
+    sdk, _events = lane
+    old = sdk.create_point("statement", "old", validFrom="2024-01-01")
+    new = sdk.create_point("statement", "new", validFrom="TBD",
+                           validFromPrecision="month",
+                           createdAt="not-a-date")
+    sdk.supersede_point(old["id"], new["id"])
+    props = _window_props(sdk, old["id"])
+    assert props["validTo"] not in (None, "TBD", "not-a-date")
+    assert props["validToPrecision"] is None
+
+
 def test_supersede_does_not_fabricate_precision_on_a_legacy_chain(lane):
     sdk, _events = lane
     old = sdk.create_point("statement", "old", validFrom="2025-01-01")
@@ -524,6 +603,231 @@ def test_reader_marker_does_not_relabel_invalidated_unknown_as_still_true(lane):
     # the SUPERSEDED BY marker renders first, so match the window half.
     assert "[valid since 2024-01-01; expired " in marker
     assert marker.endswith("; end unknown]")
+
+
+def test_reader_marker_omits_a_start_that_names_no_instant():
+    """#9730: ``_validity_marker`` interpolated the raw ``valid_from``, so a
+    start naming no instant rendered as a since-DATE (``[valid since TBD]``)
+    — a bound the data denies.
+
+    ``_validity_marker`` reads the BOUND, not the resolved precision, so the
+    #9201/#9244 read gate (``validity.effective_precision``) never reached it:
+    ``""`` escaped by being falsey, but every TRUTHY unorderable value leaked
+    its raw text into the reader-facing evidence. Under the #6140 owner ruling
+    such a start means *no start was recorded*, which is exactly why the
+    precision beside it resolves to ``None`` — so the marker must drop the
+    start clause rather than assert one.
+
+    Fails pre-fix on every window assertion here: ``'[valid since TBD]'``,
+    ``'[valid since TBD; end unknown]'``, ``'[valid since not-a-date]'``.
+    """
+    from tortoise.retrieval import _validity_marker
+    from tortoise.validity import effective_precision
+
+    for bogus in ("TBD", "not-a-date"):
+        # non-vacuous: the bound is PRESENT, and the read gate already reads it
+        # as "no instant" — the marker is the surface that disagreed.
+        assert effective_precision(bogus, None) is None
+        open_marker = _validity_marker(
+            {"valid_from": bogus, "valid_from_precision": None,
+             "end_state": "open"})
+        assert bogus not in open_marker, open_marker
+        assert "since" not in open_marker, open_marker
+        assert open_marker == "[valid]"
+        # the END half is untouched (#9202 owns whether an un-datable END
+        # changes) — only the start clause is omitted.
+        assert _validity_marker({"valid_from": bogus,
+                                 "end_state": "unknown"}) == \
+            "[valid; end unknown]"
+        # a present, orderable END still renders as a bounded window.
+        assert _validity_marker({"valid_from": bogus,
+                                 "valid_to": "2026-06-12"}) == \
+            "[valid → 2026-06-12]"
+
+
+def test_reader_marker_control_keeps_an_orderable_start_byte_identical():
+    """#9730 control: the gate is the read path's OWN predicate
+    (``_created_sort_key(value)[0] == 0``), so every bound that NAMES an
+    instant keeps the exact marker it rendered before the fix — including the
+    END_UNKNOWN form #2350 added."""
+    from tortoise.retrieval import _validity_marker
+
+    assert _validity_marker({"valid_from": "2026-06-10",
+                             "end_state": "open"}) == \
+        "[valid since 2026-06-10]"
+    # a full timestamp is still truncated to the ISO date in the reader text.
+    assert _validity_marker({"valid_from": "2026-06-10T09:30:00Z",
+                             "end_state": "open"}) == \
+        "[valid since 2026-06-10]"
+    assert _validity_marker({"valid_from": "2024-01-01",
+                             "valid_to": "2024-06-01"}) == \
+        "[valid 2024-01-01 → 2024-06-01]"
+    # #2350's ended-but-un-datable end is UNCHANGED (this issue is the START
+    # half only).
+    assert _validity_marker({"valid_from": "2024-01-01",
+                             "end_state": "unknown"}) == \
+        "[valid since 2024-01-01; end unknown]"
+    # an ABSENT start still emits no window marker at all.
+    assert _validity_marker({"valid_from": "", "end_state": "open"}) == ""
+
+
+def test_reader_marker_on_the_search_wire_never_leaks_an_unorderable_start(lane):
+    """#9730 end-to-end: the bug is on the SURFACE THE MODEL READS.
+
+    ``create_point(validFrom="TBD")`` is accepted (narrowing the write
+    contract is #9244's owner decision, not this read-path lane), so the marker
+    is the last honest place to drop the start — measured through the public
+    write and the scan decoration, not just the pure function.
+    """
+    from tortoise.retrieval import _validity_marker
+
+    sdk, _events = lane
+    bogus = sdk.create_point("statement", "undated start", validFrom="TBD")
+    dated = sdk.create_point("statement", "dated start",
+                             validFrom="2024-01-01")
+    hits = {r["id"]: r for r in _scan(sdk)}
+    # non-vacuous: the raw text IS on the wire the renderer consumes.
+    assert hits[bogus["id"]]["valid_from"] == "TBD"
+    assert hits[bogus["id"]]["valid_from_precision"] is None
+    bad_marker = _validity_marker(hits[bogus["id"]])
+    assert "TBD" not in bad_marker, bad_marker
+    assert bad_marker == "[valid]"
+    # control: the same surface still renders an orderable start.
+    assert _validity_marker(hits[dated["id"]]) == "[valid since 2024-01-01]"
+
+
+def test_a_padded_start_is_gated_on_the_raw_bound_not_the_display_copy(lane):
+    """#9730 P2: the orderability gate must run on the RAW stored bound.
+
+    ``_validity_marker`` trims the bound for DISPLAY, but every other surface
+    resolves orderability from the raw value: ``search_engine._created_sort_key``
+    tests ``s[0].isdigit()``, so one leading/trailing space buckets the bound as
+    UNORDERABLE — therefore ``validity.effective_precision`` (and the #6140 start
+    gate in ``sdk._covers``, and the write-path warning) reads a padded date as
+    "no start was recorded", while gating on the trimmed copy made the marker
+    assert one. That is the cross-surface drift ``window_read_fields`` passes the
+    bounds RAW to prevent (#2350 review P2).
+
+    The trimmed text is still what a rendered start PRINTS; a bound that cannot
+    be ordered prints no start clause at all — the reading the precision beside
+    it gives.
+
+    Fails pre-fix on every assertion here: the marker was
+    ``[valid since 2024-06-01]`` for a bound whose ``valid_from_precision`` is
+    ``None``.
+    """
+    from tortoise.retrieval import _validity_marker
+    from tortoise.validity import effective_precision
+
+    for padded in (" 2024-06-01", "2024-06-01 ", "  2024-06-01  "):
+        # non-vacuous: the bound IS present, is a date once trimmed, and the
+        # read gate already reads it as "no instant" — the marker disagreed.
+        assert padded.strip() == "2024-06-01"
+        assert effective_precision(padded, None) is None, padded
+        marker = _validity_marker({"valid_from": padded,
+                                   "valid_from_precision": None,
+                                   "end_state": "open"})
+        assert marker == "[valid]", (padded, marker)
+        # ... and the same for the two other shapes the start clause feeds.
+        assert _validity_marker({"valid_from": padded,
+                                 "end_state": "unknown"}) == \
+            "[valid; end unknown]"
+        assert _validity_marker({"valid_from": padded,
+                                 "valid_to": "2026-06-12"}) == \
+            "[valid → 2026-06-12]"
+
+    # the wire: the padded bound is stored VERBATIM (no write-side trim), so the
+    # renderer really does receive the raw value it must gate on.
+    sdk, _events = lane
+    padded_pt = sdk.create_point("statement", "padded start",
+                                 validFrom=" 2024-06-01 ")
+    dated = sdk.create_point("statement", "clean start",
+                             validFrom="2024-06-01")
+    hits = {r["id"]: r for r in _scan(sdk)}
+    assert hits[padded_pt["id"]]["valid_from"] == " 2024-06-01 "
+    assert hits[padded_pt["id"]]["valid_from_precision"] is None
+    assert _validity_marker(hits[padded_pt["id"]]) == "[valid]"
+    # control: the untrimmed-orderable twin keeps its start clause.
+    assert hits[dated["id"]]["valid_from_precision"] == "day"
+    assert _validity_marker(hits[dated["id"]]) == "[valid since 2024-06-01]"
+
+
+def test_bounds_an_instant_agrees_with_the_read_gate_on_every_bound_it_sees():
+    """#9730 P3: ``_bounds_an_instant`` resolves orderability exactly as
+    ``validity.effective_precision`` does — including that helper's NUMERIC
+    short-circuit, not just its ``_created_sort_key`` gate.
+
+    Scope, precisely: this pins the PREDICATE parity (the two helpers agree on
+    every value either is handed). It does not claim the RENDERER consults the
+    predicate for every bound — a falsey numeric is dropped upstream by
+    ``(raw_vf or "")``; that residual is pinned separately in
+    ``test_an_epoch_zero_start_renders_no_window_is_recorded``.
+
+    ``effective_precision`` short-circuits ``int``/``float`` BEFORE ordering,
+    deliberately: an integer too large for ``float()`` raises ``OverflowError``
+    out of ``_created_sort_key``, and a read path must not acquire a failure
+    mode it never had (#9201 review P3). Without the same branch here, a
+    numeric bound makes the two surfaces disagree — ``effective_precision(0,
+    None) == "day"`` while ``_bounds_an_instant(0)`` was ``False`` (the falsey
+    shortcut) and a huge int RAISED.
+
+    (1) FAILS pre-fix: ``_bounds_an_instant(0)`` was False and
+        ``_bounds_an_instant(10**400)`` raised OverflowError.
+    (2) REACHABLE: both args are bounds ``_created_sort_key`` documents as
+        supported (a mixed ISO/epoch graph), and the assertion is on the real
+        helpers.
+    """
+    from tortoise.retrieval import _bounds_an_instant
+    from tortoise.validity import effective_precision
+
+    for numeric in (0, 0.0, False, 1735689600, 10 ** 400):
+        assert _bounds_an_instant(numeric) is True, numeric
+        assert effective_precision(numeric, None) == "day", numeric
+    # the string half is unchanged — parity for absent and unorderable text.
+    for text in ("", None, "TBD", "not-a-date", "2026"):
+        assert _bounds_an_instant(text) is False, text
+        assert effective_precision(text, None) is None, text
+    # a PADDED date is unorderable on BOTH surfaces: ``_created_sort_key``
+    # tests ``s[0].isdigit()`` / ``fromisoformat`` on the raw string, so one
+    # space is enough. Parity here is what makes the marker drop the start
+    # clause instead of asserting one (``_validity_marker`` gates on the raw
+    # bound for exactly this reason).
+    for padded in (" 2024-06-01", "2024-06-01 ", "  2024-06-01  "):
+        assert _bounds_an_instant(padded) is False, padded
+        assert effective_precision(padded, None) is None, padded
+    assert _bounds_an_instant("2024-01-01") is True
+    assert effective_precision("2024-01-01", None) == "day"
+
+
+def test_an_epoch_zero_start_renders_no_window_is_recorded():
+    """#9730 P3: the ONE recorded residual of the parity claim — pinned so a
+    future change cannot silently keep the docstring that says otherwise.
+
+    ``(raw_vf or "")`` drops a FALSEY numeric (``0``/``False``) before the gate
+    ever sees it, while ``validity.effective_precision(0, None)`` reads
+    ``"day"`` (epoch 0 IS an instant). So for a stored epoch-0 start the marker
+    renders no window at all and the precision beside it names one.
+
+    That truthiness trap is the same one ``sdk._supersede_window_start``
+    records fixing, and it is a WRITE/RENDER contract question owned by #9741 —
+    not by the orderability gate, which is why this test asserts today's
+    answer rather than the eventual one. It is green on both sides of #9730
+    (the pre-fix renderer also rendered nothing here), so it is a lock, not a
+    catch: if #9741 makes an epoch-0 start render a start clause, this test
+    goes red and the fixer must also widen ``_bounds_an_instant``'s scoping
+    paragraph.
+    """
+    from tortoise.retrieval import _validity_marker
+    from tortoise.validity import effective_precision
+
+    for epoch_zero in (0, 0.0, False):
+        assert effective_precision(epoch_zero, None) == "day", epoch_zero
+        assert _validity_marker({"valid_from": epoch_zero,
+                                 "end_state": "open"}) == "", epoch_zero
+        # a TRUTHY numeric does not even get this far — it raises at
+        # ``.strip()`` (#9741), so neither surface renders a start today.
+        with pytest.raises(AttributeError):
+            _validity_marker({"valid_from": 1735689600, "end_state": "open"})
 
 
 def test_search_annotation_distinguishes_open_from_unknown(lane):

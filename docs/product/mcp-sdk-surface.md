@@ -476,13 +476,13 @@ Grouped by **who reaches them**. This is the ranking that matters for cutting: e
 | `TortoiseSDK.ulid` | reached by no registered MCP tool; caller categories: engine | eval-harness, tooling, docs | **review** | no MCP tool binds it; callers: engine |
 | `TortoiseSDK.annotate_ask_hits` | reached by no registered MCP tool; caller categories: engine, eval-harness, other-tooling | eval-harness, tooling, docs | **review** | no MCP tool binds it; callers: engine, eval-harness, other-tooling |
 | `TortoiseSDK.supersede_point` | reached by no registered MCP tool; caller categories: engine, eval-harness, other-tooling, tenant-rest | eval-harness, tooling, skill-docs, docs | **review** | no MCP tool binds it; callers: engine, eval-harness, other-tooling, tenant-rest |
+| `TortoiseSDK.graph_list` | reached by no registered MCP tool; caller categories: engine, other-tooling, tenant-rest | tooling, docs | **review** | no MCP tool binds it; callers: engine, other-tooling, tenant-rest |
 | `TortoiseSDK.invitation_get_by_id` | reached by no registered MCP tool; caller categories: engine, tenant-rest | docs | **review** | no MCP tool binds it; callers: engine, tenant-rest |
 | `TortoiseSDK.link_source_to_entity` | reached by no registered MCP tool; caller categories: engine, tenant-rest | tooling, docs | **review** | no MCP tool binds it; callers: engine, tenant-rest |
 | `TortoiseSDK.membership_create` | reached by no registered MCP tool; caller categories: engine, tenant-rest | tooling, docs | **review** | no MCP tool binds it; callers: engine, tenant-rest |
 | `TortoiseSDK.org_get` | reached by no registered MCP tool; caller categories: engine, tenant-rest | tooling, docs | **review** | no MCP tool binds it; callers: engine, tenant-rest |
 | `TortoiseSDK.signup_token_lookup` | reached by no registered MCP tool; caller categories: engine, tenant-rest | docs | **review** | no MCP tool binds it; callers: engine, tenant-rest |
 | `TortoiseSDK.topic_summarize` | reached by no registered MCP tool; caller categories: engine, tenant-rest | tooling, docs | **review** | no MCP tool binds it; callers: engine, tenant-rest |
-| `TortoiseSDK.graph_list` | reached by no registered MCP tool; caller categories: other-tooling, tenant-rest | tooling, docs | **review** | no MCP tool binds it; callers: other-tooling, tenant-rest |
 | `TortoiseSDK.sweep_invite_ghost_memberships` | reached by no registered MCP tool; caller categories: other-tooling, tenant-rest | tooling, docs | **review** | no MCP tool binds it; callers: other-tooling, tenant-rest |
 
 ### control-plane — 2

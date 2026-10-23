@@ -388,6 +388,15 @@ kindDefs:
   raw into the prompt; a colon, whitespace or punctuation is refused.
 - **The declaration reaches the extraction prompt.** `compile_value_brief()` carries a declared
   kind's `values` on its brief entry, and the S2/S4 master renders the kind as
+  `- <namespace>:<kind>[ — <description>] [values: <field>(<kind>[, required][, many]), …]` —
+  the annotation is exactly what `tortoise/pack_values.py::value_field_annotations` emits: a
+  token is present only when it applies (`required` for a required field, `many` for
+  `cardinality: many`; there is no `optional` token — an optional field simply omits it). The
+  `[ — <description>]` gloss belongs to the RENDER, not to that annotation, and the two render
+  modes differ: the default (verbose) one always prints it, while under
+  `TORTOISE_EXTRACTOR_PROMPT=compact` `tortoise/extractor_v2.py::_needs_gloss` withholds it
+  unless the description disambiguates. The shape below is ILLUSTRATIVE — a two-field tenant
+  kind, not a shipped one, and it is the VERBOSE render's shape:
   `- venture:fundingTranche — A tranche of a financing round [values: committedAmountMinor(money,
   required), trancheLabel(quantity, many)]`. The shared S2/S4 rule slot also states the policy:
   keep a declared value EXACT, use the declared name, and never invent a field or a value kind.
@@ -493,8 +502,9 @@ not be read"* — never as the claim that everything is already on the graph.
 optional `packs: [{namespace, status}]` alongside `org_id`/`name`/`scopes`, so
 create-and-configure is ONE call and an unconfigured graph becomes a *choice*
 rather than the only possibility. Three behaviours to keep straight, because
-they are deliberately different: **field absent** → no pack decision, the graph
-is born UNCONFIGURED and keeps the catalog union (the decided default below);
+they are deliberately different: **field absent** → no pack decision, so the graph
+is born UNCONFIGURED with no `:PackInstall` records — the catalog-union arm until
+records exist (the first packs read self-heals the starter set, which narrows it);
 **`packs: []`** → born CONFIGURED with an empty set, the narrowest deliberate
 act; **a list** → exactly that set. The 201 envelope then carries the resolved
 set under `packs` (`{namespaces, revision, configured}`) so the caller never
@@ -523,15 +533,47 @@ customer-facing territory that owns per-graph permissions.
 > is what removes). `configured: false` is stated in words, and WHICH words
 > depend on the **records**, never on the flag alone (#9691): only the
 > record-less graph resolves to the whole catalog, so only it is told so — "Not
-> configured yet — this graph holds no packs, so the full catalog applies." The
-> arm every starter-seeded default graph is in gets the other sentence — "Not
-> configured yet — this graph uses the packs it already holds (2 active packs ·
-> 1 off). Saving pins the set." The count in parentheses describes the rows the
-> payload carries, never a bare number a reader could mistake for the enforced
-> set, and it is omitted in the record-less arm rather than printed as a
-> structurally-0 "0 active packs" beside the catalog claim.
+> configured yet — this graph holds no packs, so the full catalog applies.
+> Saving pins the set." The arm every starter-seeded default graph is in gets
+> the other sentence — "Not configured yet — this graph uses the packs it
+> already holds (2 active packs · 1 off). Saving pins the set." The count in
+> parentheses describes the rows the payload carries, never a bare number a
+> reader could mistake for the enforced set, and it is omitted in the
+> record-less arm rather than printed as a structurally-0 "0 active packs"
+> beside the catalog claim.
+> A catalog that could not be READ (`catalog_ok: false`) changes NOTHING about
+> this line, and that is deliberate. The resolution is derived from the RECORDS
+> and the marker (`resolved_pack_set`), never from the catalog read —
+> `_packs_payload` reads `resolved` first and `catalog_ok` from a separate
+> `_pack_catalog_rows()` — so the union is the union whether or not the catalog
+> could be enumerated. The degraded fact is about the ADD-LIST's enumeration, and
+> it surfaces there (`ADD_LIST_DEGRADED_LINE`, in the modal beside that list).
+> Suppressing a TRUE sentence on the home — which renders no degraded signal at
+> all — would leave a user concluding that no pack applies, which is the inverse
+> of the surprise #9691 exists to remove. `packs.test.js` pins the
+> state-independence directly.
 > `packs.js::usesCatalogUnion` is that predicate — `configured: false` **and**
 > zero records (a tombstone counts; the catalog arm of `available` does not).
+> ⚠️ The predicate derives the record set from the two lists the payload carries
+> rather than from the resolved set itself, so it cannot see a tombstone the
+> catalog arm offers as `available` instead of `removed`. **That shape is
+> reachable today, and a REBUILD produces it:** `:PackSelection` is not enrolled
+> in the projection's `_config_classes()`, so `rebuild_all` keeps the
+> tombstoned `:PackInstall` row and drops the marker. Measured — before
+> `configured: true, revision: 1`; after `configured: false, revision: 0` with a
+> `removed` row, which reads as the catalog union while the resolved set is that
+> one removed namespace. The same marker loss silently RE-ADMITS a pack an admin
+> removed and resets `revision`. Preserving the marker fixes both — #9752 — and
+> the SHAPE of that fix matters: `:PackSelection` is ONE node per graph with no
+> identity property, so it is a SECTION like `:TeamMeta`, NOT a
+> `_config_classes()` row. The registry keys on a single string identity property
+> and `_capture_config_snapshot` silently skips a class whose identity value is
+> not a string, so "enrol it as a config class" would capture nothing and leave
+> both defects in place. Surfacing the record count — or `namespaces is None`
+> itself — on the payload would make the client exact in the meantime. Separately,
+> `pack_manifest_store.delete_tenant_manifest` sets `removed` without moving the
+> marker and has no caller or route today — latent, and the same preservation
+> covers it.
 
 ### The write-gate closure — which writes are gated, and which are not (#5475/#9068)
 

@@ -24,11 +24,19 @@ These tests pin BOTH paths of that helper:
   (c) non-terminal + NULL hash  -> NOT returned (terminal scoping preserved)
       UNLESS it carries the legacy ``outdated=true`` flag (#3142 — the flag
       IS terminal; see ``test_outdated_flag_is_terminal``),
-  (d) end-to-end: after ``rebuild_all`` the ingest guard still rejects a
+  (d) end-to-end: after ``rebuild_all`` the helper still MATCHES a
       bundle-local ref that resolves to a terminal point, via the PRIMARY
-      hash path (the rebuild re-derives the hash — issue Indicator 2),
-  (e) end-to-end: the same guard still rejects a DELIBERATELY hash-less
-      terminal point, proving the fallback path (issue Indicator 2).
+      hash path (the rebuild re-derives the hash — issue Indicator 2), and the
+      bundle commits on the OPERATOR route,
+  (e) end-to-end: the same for a DELIBERATELY hash-less terminal point,
+      proving the fallback path (issue Indicator 2).
+
+⛔ #9173 narrowed the INGEST-LEVEL refusal that (d)/(e) used to pair with the
+match: a bundle-local ``points`` ref is Point-bearing, so the endpoint-kind gate
+(#8499) reifies the connection into an operator, which never evaluates endpoint
+status. The MATCH is intact (it still backs the direct-edge route); the refusal
+is a prediction about ``create_direct_edge`` and no longer fires on the pair
+these bundles use. See ``_assert_bundle_local_ref_routed_via_operator``.
 
 Runnable embedded (with the carve-out opt-in):
 
@@ -48,7 +56,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
-from tortoise.exceptions import BundleValidationError
 from tortoise.sdk import TortoiseSDK
 
 
@@ -177,14 +184,30 @@ class TestFindTerminalDedupHitFallback:
 
 class TestIngestGuardAfterRebuild:
     @staticmethod
-    def _assert_bundle_local_ref_rejected(sdk: TortoiseSDK, content: str) -> None:
+    def _assert_bundle_local_ref_routed_via_operator(
+            sdk: TortoiseSDK, content: str) -> None:
         """Ingest a bundle whose ``pTerm`` local ref resolves to an existing
-        TERMINAL point holding ``content``, and assert the Phase-1 guard
-        rejects it.
+        TERMINAL point holding ``content``.
 
-        Phase-1 (``BundleValidationError``): if the dedup guard misses, the
-        failure surfaces later as a Phase-2 error instead — so the exception
-        TYPE is the assertion, not merely "some error"."""
+        ⛔ **#9173 — this helper used to assert a refusal, and that refusal is
+        gone by construction.** The guard it asserted (`dedup hit` in
+        ``_check_endpoints``) predicts a mid-write raise from
+        ``create_direct_edge``, but a bundle-local ``points`` ref makes the
+        connection Point-bearing, and the endpoint-kind gate (owner ruling
+        2026-10-13, #8499) reifies every Point-bearing pair into an OPERATOR —
+        a primitive that never reads endpoint status. So the ingest-level
+        refusal only ever applied to the connection's REQUEST, and the plain
+        spelling was refused while the identical connection carrying
+        ``reify: true`` was accepted and committed (the #8623 residual class).
+
+        The #2971 subject of these tests is unchanged and is asserted FIRST:
+        ``_find_terminal_dedup_hit`` still MATCHES the terminal point (that is
+        the helper these tests exist to protect, and it still backs the
+        direct-edge route). What the bundle then does is commit on the operator
+        route, so the assertion here is "matched, accepted, and reified" —
+        never a silent operator-less edge to a terminal point."""
+        assert sdk._find_terminal_dedup_hit(content, "statement") is not None, (
+            "#2971: the terminal dedup predicate must still match this point")
         bundle = {
             "points": [
                 {"ref": "pTerm", "kind": "statement", "content": content},
@@ -194,13 +217,20 @@ class TestIngestGuardAfterRebuild:
                 {"from": "pTerm", "to": "pB", "operator": "IMPL"},
             ],
         }
-        with pytest.raises(BundleValidationError, match="dedup hit"):
-            sdk.ingest(bundle)
+        assert sdk._validate_bundle(bundle) == []
+        res = sdk.ingest(bundle)
+        assert res["created"]["connections"] == 1
+        # reified: the positional descriptor is the OPERATOR id, not the
+        # `{direct_edge, from, to}` shape a direct edge returns
+        assert isinstance(res["ids"]["connections"][0], str)
 
-    def test_bundle_local_ref_to_rebuilt_terminal_point_rejected(self, tmp_path):
+    def test_bundle_local_ref_to_rebuilt_terminal_point_routed_via_operator(self, tmp_path):
         """(d) Indicator 2, PRIMARY path: create a terminal point, rebuild the
-        graph, then assert a bundle whose local ref resolves to that point is
-        rejected at Phase-1 (the cycle-17/18 dedup-hit guard).
+        graph, then assert the guard still MATCHES a bundle-local ref that
+        resolves to that point (the cycle-17/18 dedup-hit PREDICATE), and that
+        the bundle is accepted and reified on the operator route (#9173 — the
+        guard's MATCH is what these tests protect; the ingest-level refusal it
+        used to feed is gone by construction, see the helper).
 
         ``rebuild_all`` now re-derives ``content_hash`` (#2795), so this
         exercises the helper's primary content-hash MATCH — the path the guard
@@ -230,17 +260,18 @@ class TestIngestGuardAfterRebuild:
                 "rebuild_all must re-derive content_hash (#2795)")
             assert row[1] == "retracted"
 
-            self._assert_bundle_local_ref_rejected(sdk, content)
+            self._assert_bundle_local_ref_routed_via_operator(sdk, content)
         finally:
             sdk.close()
 
-    def test_bundle_local_ref_to_hashless_terminal_point_rejected(self, tmp_path):
+    def test_bundle_local_ref_to_hashless_terminal_point_routed_via_operator(self, tmp_path):
         """(e) Indicator 2, FALLBACK path: the #2971 hash-less fallback is
         still exercised end-to-end. After the rebuild, ``content_hash`` is
         nulled DIRECTLY — the deliberate stand-in for a crash between the node
         CREATE and the props SET (or a graph rebuilt before the fix) — and the
-        guard must still reject the bundle-local ref via the content+kind
-        fallback scan."""
+        guard must still MATCH the bundle-local ref via the content+kind
+        fallback scan. As in (d), the bundle is then accepted and reified on
+        the operator route (#9173), never refused."""
         events = tmp_path / "events"
         events.mkdir()
         sdk = TortoiseSDK(str(tmp_path / "hashless.db"),
@@ -263,11 +294,11 @@ class TestIngestGuardAfterRebuild:
             assert row[0] is None, "the deliberate null-hash seed must apply"
             assert row[1] == "retracted"
 
-            self._assert_bundle_local_ref_rejected(sdk, content)
+            self._assert_bundle_local_ref_routed_via_operator(sdk, content)
         finally:
             sdk.close()
 
-    def test_bundle_local_ref_to_superseded_point_rejected(self, tmp_path):
+    def test_bundle_local_ref_to_superseded_point_routed_via_operator(self, tmp_path):
         """(f) Indicator 1, REAL flow: ``supersede_point`` stamps
         ``status='superseded'`` AND ``outdated=true`` — the pair the guard
         existed for and, pre-#3142, could not see. Uses the real lifecycle
@@ -307,11 +338,11 @@ class TestIngestGuardAfterRebuild:
                 "rebuild_all must re-derive content_hash (#2795)")
             assert row[1] == "superseded"
 
-            self._assert_bundle_local_ref_rejected(sdk, content)
+            self._assert_bundle_local_ref_routed_via_operator(sdk, content)
         finally:
             sdk.close()
 
-    def test_bundle_local_ref_to_invalidated_live_point_rejected(self, tmp_path):
+    def test_bundle_local_ref_to_invalidated_live_point_routed_via_operator(self, tmp_path):
         """(g) Indicator 2, REAL flow: ``invalidate_point`` leaves ``status``
         untouched and sets ONLY the terminal marker ``outdated=true`` (status
         unmodified; its other writes — ``updatedAt``/``validTo``/``expiredAt``
@@ -341,19 +372,28 @@ class TestIngestGuardAfterRebuild:
             assert row[1] is True, "invalidate_point must set the flag"
 
             sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
-            self._assert_bundle_local_ref_rejected(sdk, content)
+            self._assert_bundle_local_ref_routed_via_operator(sdk, content)
         finally:
             sdk.close()
 
     def test_bundle_local_ref_to_live_point_still_allowed(self, tmp_path):
-        """NEGATIVE CONTROL for (f)/(g): a genuinely live point (no flag, live
-        status) must still be an ALLOWED bundle-local endpoint. Without this,
-        (f)/(g) would also pass if the guard had been made to reject
-        everything."""
+        """NEGATIVE CONTROL for (d)-(g): a genuinely live point (no flag, live
+        status) must NOT be a terminal dedup hit, and its bundle-local ref must
+        ingest as an ALLOWED endpoint.
+
+        ⛔ #9173 moved what discriminates here. Because every bundle-local
+        ``points`` ref now commits on the operator route, ACCEPTANCE alone is
+        no longer evidence of anything — so the load-bearing assertion is the
+        NEGATIVE one below (``_find_terminal_dedup_hit`` resolves nothing),
+        the mirror of the positive match (d)-(g) each assert FIRST. Without
+        it, those tests would also pass if the predicate had been widened to
+        call every live point terminal."""
         sdk = TortoiseSDK(str(tmp_path / "live.db"))
         try:
             content = "a perfectly live claim"
             sdk.create_point("statement", content)
+            assert sdk._find_terminal_dedup_hit(content, "statement") is None, (
+                "a live point must not be a terminal dedup hit")
             bundle = {
                 "points": [
                     {"ref": "pLive", "kind": "statement", "content": content},
@@ -375,8 +415,11 @@ class TestLegacyPropertyAbsentShape:
     ``_find_terminal_dedup_hit`` kept its own narrow ``n.is_operator = false``
     copy, so that shape was resolved by ``_find_point_by_content`` (the
     absence-or-false form) but MISSED by the guard — which then failed OPEN
-    and let a bundle wire a direct edge onto a superseded/retracted Point (the
-    #2062/#2971 hazard). These tests pin the two sides to the same answer.
+    on a superseded/retracted Point (the #2062/#2971 hazard; note that the
+    ingest-level refusal this gap fed is itself gone after #9173, since a
+    bundle-local ref is reified into an operator — what survives, and what
+    these tests pin, is the MATCH). These tests pin the two sides to the same
+    answer.
     """
 
     @staticmethod
@@ -426,14 +469,16 @@ class TestLegacyPropertyAbsentShape:
             content, pointKind="statement") is None
         assert sdk._find_terminal_dedup_hit(content, "statement") is None
 
-    def test_ingest_guard_rejects_legacy_property_absent_terminal_point(
+    def test_ingest_legacy_property_absent_terminal_point_routed_via_operator(
             self, sdk):
-        """End-to-end: the guard now rejects (Phase-1) a bundle whose
-        local ref resolves to a legacy property-absent terminal point — the
-        exact state that failed OPEN before F1."""
+        """End-to-end: the guard MATCHES a bundle whose local ref resolves to
+        a legacy property-absent terminal point — the exact state that failed
+        OPEN before F1 — and, per #9173, that bundle ingests and commits on the
+        OPERATOR route instead of being refused (a ``points`` ref is
+        Point-bearing, so ``create_direct_edge`` is never reached)."""
         content = "legacy property-absent ingest claim"
         self._create_legacy_point(sdk, "legacy-plain-ingest-2949", content)
-        TestIngestGuardAfterRebuild._assert_bundle_local_ref_rejected(
+        TestIngestGuardAfterRebuild._assert_bundle_local_ref_routed_via_operator(
             sdk, content)
 
 

@@ -424,15 +424,77 @@ class TestClashRules:
         assert "constrainedBy" in by_pred["boundedBy"]["nearMisses"]
 
     #: Declared synonyms deliberately NOT in the trigger row, each with the
-    #: reason. A missing trigger is CHEAP here: with nothing else matching, the
-    #: selector falls back to ALL packs, so the overlay is still injected — while
-    #: a spurious trigger is EXPENSIVE, because one match suppresses that
-    #: fallback and strips every other pack's kinds from the prompt.
+    #: reason. The asymmetry that decides every exclusion: a SPURIOUS trigger is
+    #: EXPENSIVE — one match suppresses the all-packs fallback and strips every
+    #: other pack's kinds from the prompt — while a MISSING trigger costs the
+    #: overlay, and sometimes does not even cost that.
+    #:
+    #: ⚠️ State the cost ACCURATELY: the all-packs fallback fires only when
+    #: NOTHING matched in ANY namespace, and the sibling rows are full of ordinary
+    #: English (`dev:` matches "deploy"/"sprint"/"test", `venture:` matches
+    #: "fund"/"asset"). So a genuinely portfolio-shaped story whose ONLY
+    #: portfolio vocabulary is an excluded synonym does lose the overlay when a
+    #: sibling also matches — "the allocation target for the fund was missed;
+    #: deploy the fix" selects dev+venture and no `portfolio:*`. That loss is
+    #: ACCEPTED and pinned below (`test_the_accepted_loss_is_a_recorded_decision`),
+    #: not denied: the alternative costs another pack's whole vocabulary.
+    #:
+    #: The row's own invariant (asserted in `test_compact_mode_can_gate_the_
+    #: namespace_by_story`) is: an entry is the namespace name, or it STARTS
+    #: WITH `investment ` (the SPACE prefix, not a bare containment and not the
+    #: hyphen form — a bare `investment` collides in "the investment of effort",
+    #: and `investment-grade` collides in "sub-investment-grade bonds"). Every
+    #: ENGLISH exclusion below fails that invariant for a
+    #: measured reason — each was run through the REAL `_select_pack_kinds`
+    #: against the real catalog and selected `portfolio:*` on ordinary prose,
+    #: dropping the other packs. `peso alvo` is excluded for a different reason
+    #: (the rows are English-only), which is why it is listed last and probed
+    #: with a pt-BR sentence.
     NON_TRIGGER_SYNONYMS: ClassVar[dict[str, str]] = {
+        "allocation target": (
+            "budgeting prose — 'the allocation target for the training budget "
+            "was missed' selected portfolio:* ALONE"),
+        "target allocation": (
+            "the same budgeting collision, mirrored — 'the council approved "
+            "its target allocation of the road budget'"),
         "target weight": (
-            "generic in engineering prose ('target weight for the casing'); the "
-            "declared compounds 'policy weight' / 'benchmark weight' / "
-            "'reference weight' carry the same meaning without the collision"),
+            "engineering prose — 'target weight for the casing'"),
+        "policy weight": (
+            "engineering prose — 'the policy weight of the review was high'"),
+        "benchmark weight": (
+            "engineering prose — 'the benchmark weight for the new composite "
+            "was 4.2 kg' selected portfolio:* ALONE. This is the entry that "
+            "falsified the earlier '+/- 1 sibling carries the meaning' "
+            "rationale: it collides in exactly the sentence that makes "
+            "'reference weight' unsafe"),
+        "reference weight": (
+            "engineering prose — 'the reference weight of the assembly is "
+            "4.2 kg' selected portfolio:* ALONE"),
+        "policy statement": (
+            "compliance prose — 'our privacy policy statement explains how "
+            "the data is handled' selected portfolio:* and dropped dev, "
+            "marketing, pm and venture kinds"),
+        "mandate limits": (
+            "ordinary English — 'the mandate limits how much we can spend'"),
+        # A COMPOUND synonym is not automatically safe: the two below rode
+        # inside an ordinary word one character to the left, which is exactly
+        # the trap bare `valuation` was removed for.
+        "valuation mark": (
+            "a SUBSTRING of 'evaluation mark' and 'revaluation mark' — "
+            "'valuation mark' in 'the evaluation mark scheme' is True, so the "
+            "trap the bare 'valuation' entry was removed for reappears one "
+            "word longer"),
+        "fair value mark": (
+            "'fair value' is an accounting term for ANY asset, so it does not "
+            "name a portfolio position ('a fair value mark to each essay' "
+            "still matches); a genuine portfolio valuation carries "
+            "'portfolio' or 'investment'"),
+        "write-down": (
+            "ordinary English/accounting prose ('a write-down of the "
+            "inventory at year end') — not a portfolio-specific mention"),
+        "write-up": (
+            "ordinary English prose — measured: 'the write-up covered the "
+            "migration' selected portfolio:* ALONE"),
         # The trigger rows are English throughout (`_PACK_TRIGGERS` has no
         # pt-BR entry in any pack); a pt-BR mention reaches the pack through its
         # own synonym layer at classification, not through story selection.
@@ -473,6 +535,18 @@ class TestClashRules:
         assert set(_PACK_TRIGGERS[f"{NS}:"]) == expected, (
             set(_PACK_TRIGGERS[f"{NS}:"]) ^ expected)
 
+        # THE INVARIANT, mechanically: a substring match over a phrase this
+        # generic cannot be trusted to a judgement call, so an entry is the
+        # namespace's own name or an `investment `-prefixed phrase (SPACE form
+        # only). The prefix matters: a bare "investment" would satisfy a naked
+        # containment test while colliding in "the investment of effort" and
+        # "disinvestment of the plant". The HYPHEN form is NOT admitted —
+        # measured, `investment-grade` selects `portfolio:*` alone on
+        # "sub-investment-grade bonds widened the spread".
+        row = _PACK_TRIGGERS[f"{NS}:"]
+        assert all(t == NS or t.startswith("investment ") for t in row), [
+            t for t in row if not (t == NS or t.startswith("investment "))]
+
         # The REAL catalogue, so a sibling namespace collision (agent-ops's
         # "policy") is visible: a four-entry fixture hides exactly the failure
         # this row exists to avoid.
@@ -480,7 +554,7 @@ class TestClashRules:
             compile_value_brief())["pack_kinds"]
 
         hit = _select_pack_kinds(
-            "the board reviewed the allocation target last week", pack_kinds)
+            "the board reviewed the investment mandate last week", pack_kinds)
         assert f"{NS}:mandate" in hit, list(hit)
         assert set(hit) != set(pack_kinds), "that is the all-packs fallback"
         assert "dev:issue" not in hit, list(hit)
@@ -502,6 +576,44 @@ class TestClashRules:
         assert "dev:issue" in evaluation, list(evaluation)
         assert not [k for k in evaluation if k.startswith(f"{NS}:")], list(evaluation)
 
+        # …and a COMPOUND entry is not automatically safe: every exclusion in
+        # NON_TRIGGER_SYNONYMS has an ordinary-prose probe here, so the row
+        # cannot regain one by declaring it in the manifest. Each story also
+        # matches ANOTHER pack, so the negative assertion is not satisfied by
+        # the all-packs fallback. The last probe is pt-BR: `peso alvo` is
+        # excluded because these rows are English-only, and the probe pins that
+        # an untranslated mention stays out of the row rather than matching it.
+        for story in (
+            "the evaluation mark scheme for the coursework, then deploy it",
+            "the revaluation mark was booked, so deploy the fix",
+            "a fair value mark was added to each essay; deploy the fix",
+            "the reference weight of the assembly is 4.2 kg; deploy the fix",
+            "the benchmark weight for the new composite was 4.2 kg; deploy it",
+            "the policy weight of the review was high; deploy the fix",
+            "the target weight for the casing was 4.2 kg; deploy the fix",
+            "the allocation target for the training budget was missed; deploy",
+            "the council approved its target allocation of the road budget; "
+            "deploy the fix",
+            "our privacy policy statement explains the data; deploy the fix",
+            "the mandate limits how much we can spend, so deploy the fix",
+            "a write-down of the inventory at year end, then deploy",
+            "the write-up of the release covered the deploy",
+            "o conselho revisou o peso alvo no semestre passado; deploy the fix",
+        ):
+            got = _select_pack_kinds(story, pack_kinds)
+            assert not [k for k in got if k.startswith(f"{NS}:")], (story, got)
+            assert "dev:issue" in got, (story, got)
+
+        # Two of those exclusions could never have matched this namespace
+        # ALONE, and the row's comment states that as the reason they are not
+        # counter-examples to the measurement: `policy statement` and `policy
+        # weight` also carry `agent-ops:`'s bare "policy". Pinned, not a
+        # fail-on — the point is that the RECORD stays checkable rather than
+        # being prose that re-stales the day `agent-ops:`'s row changes.
+        for entry in ("policy statement", "policy weight"):
+            assert entry in self.NON_TRIGGER_SYNONYMS, entry
+            assert any(t in entry for t in _PACK_TRIGGERS["agent-ops:"]), entry
+
         # Bare generic words are the OTHER half of the same trap: an overlay
         # trigger must match the mentions the pack DECLARES, and only those.
         # Each of these is a real-world sentence with no portfolio subject, and
@@ -518,13 +630,43 @@ class TestClashRules:
 
         # …and every compound synonym the pack declares (minus the recorded
         # exceptions) must NARROW to the namespace, not merely appear in the
-        # fallback — including the ones a sibling would otherwise win
-        # ("policy statement" contains agent-ops's "policy").
+        # fallback — including the ones a sibling would otherwise win (a bare
+        # "policy statement" contains agent-ops's "policy").
         for mention in sorted(compound - set(self.NON_TRIGGER_SYNONYMS)):
             story = f"the board reviewed the {mention} last week during the deploy"
             got = _select_pack_kinds(story, pack_kinds)
             assert [k for k in got if k.startswith(f"{NS}:")], (mention, got)
             assert set(got) != set(pack_kinds), (mention, "all-packs fallback")
+
+    def test_the_accepted_loss_is_a_recorded_decision(self, pack):
+        """The COST of the row's invariant, pinned so it is a decision and not an
+        accident.
+
+        `_select_pack_kinds` falls back to ALL packs only when NOTHING matched in
+        ANY namespace, and the sibling rows carry ordinary English (dev:'s
+        "deploy"/"sprint"/"test", venture:'s "fund"/"asset"). A genuinely
+        portfolio-shaped story whose only portfolio vocabulary is an excluded
+        synonym therefore LOSES the overlay as soon as a sibling matches. That is
+        the accepted side of the trade — a spurious trigger would instead strip
+        another pack's whole vocabulary — and it is pinned here so a future row
+        change that alters it is visible rather than silent.
+
+        If one of these starts selecting `portfolio:*`, the trade-off moved:
+        update the recorded decision above rather than deleting this test.
+        """
+        from tortoise.extractor_v2 import _select_pack_kinds
+
+        pack_kinds = v2._build_master_from_brief(
+            compile_value_brief())["pack_kinds"]
+        for story in (
+            "the allocation target for the fund was missed; deploy the fix",
+            "the board reviewed the valuation mark before the sprint",
+            "the benchmark weight for the mandate was off; deploy the fix",
+        ):
+            got = _select_pack_kinds(story, pack_kinds)
+            assert not [k for k in got if k.startswith(f"{NS}:")], (
+                "the accepted cost changed — update the recorded decision",
+                story, got)
 
 
 # ── 4. Core extraction unchanged with the pack OFF ────────────────────────
@@ -720,6 +862,49 @@ class TestKindsAreMintable:
         sdk.create_operator("IMPL", vm2["node"]["id"], [position["id"]],
                             label="marks", semantics="related")
         assert sdk.validate_domain(NS)["ok"] is True
+
+    def test_an_unreadable_pack_is_named_in_the_callers_payload(
+            self, monkeypatch):
+        """A CLEAN verdict over ZERO graded rules must not reach the caller
+        unqualified.
+
+        The UNDECLARED-STATUS rule reads its whole vocabulary off the pack, so
+        with no readable `portfolio` pack it grades ZERO rules and `ok` stays
+        `True` — honestly, since there is no violation to report. (The orphan
+        rule is NOT blind in that state: `_portfolio_mark_contract` falls back
+        to the module constants, so it still grades.) But the
+        server-side `logger.warning` is not a channel an MCP/CLI caller of
+        `tortoise_validate_domain` can read, so without this the caller gets an
+        unqualified green light over an EMPTY rule set — the exact failure
+        `test_validate_domain_has_teeth` guards from the other side. The
+        degradation is therefore carried in the advisory `drift` list, which
+        `validate_domain` returns in its payload.
+        """
+        from tortoise import domain_loader
+        from tortoise.domain_validators import run_domain_graph_validators
+
+        class _EmptyGraph:
+            """Empty result sets: with no pack nothing can be found, and a rule
+            that reached the graph would still find no rows."""
+
+            class g:  # stand-in for the FalkorDB client
+                @staticmethod
+                def query(*_a, **_k):
+                    return type("R", (), {"result_set": []})()
+
+        monkeypatch.setattr(domain_loader, "_get_registry", lambda: None)
+        violations, drift = run_domain_graph_validators(NS, _EmptyGraph())
+        assert violations == [], violations
+        rules = {d["rule"] for d in drift}
+        assert "portfolio_rules_unavailable" in rules, drift
+        entry = next(d for d in drift
+                     if d["rule"] == "portfolio_rules_unavailable")
+        assert {"rule", "kind", "ref", "message", "fix"} <= set(entry), entry
+        assert entry["ref"] == NS
+        # It is ADVISORY: it names the degradation without inventing a
+        # violation, so the verdict stays `ok` and the payload says why.
+        assert run_domain_graph_validators(
+            NS, _EmptyGraph(), include_drift=False)[1] == []
 
     @requires_db
     def test_a_mis_wired_mark_is_an_orphan(self, sdk):
