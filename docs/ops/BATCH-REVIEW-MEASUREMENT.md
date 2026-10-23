@@ -24,7 +24,7 @@ this experiment caught it working on a live PR.
 The quoted dispatch-log lines are emitted by the task watchdog for the **load-scaled
 first-message bound**, latched at spawn:
 
-```
+```text
 [task] first-message bound 300s → 600s (load1=13.48)   # 2x band (load 8–15)
 [task] cut-gap bound 75s -> 113s   (load1=17.06)
 [task] first-message bound 300s → 900s (load1=17.06)   # 3x band (load >= 16)
@@ -109,7 +109,7 @@ cap** and an explicit instruction to follow callers.
 The single-PR reviewer (`888e4735`), which read all three callers of the changed
 function, returned:
 
-> ```
+> ```text
 > ISSUE:
 >   check_type: infra-safety
 >   severity: P1
@@ -221,6 +221,19 @@ measured tokens, and a malformed/aborted PR falls out to a single review. What i
 A future attempt would have to make depth mechanical (e.g. a required evidence list
 of the files read per PR, cross-checked against the caller graph) before the
 agreement test could pass at any N > 1. Until then: **N = 1**.
+
+**A second, larger limit: batching widens prompt injection from one PR to N.** Every
+structural defence in `validate_answer`/`plan_records` echoes data the prompt itself
+supplied — `===== BEGIN PR {pr} @ {head_sha} diff={diff_sha256} nonce=…` in
+`build_prompt` — and the answer schema asks the model to copy those values back. The
+nonce stops a diff from *forging a delimiter*; it does not stop a diff from
+*instructing* the model. So a single attacker-controlled diff in the batch can ask for
+`clean` for its siblings, and the per-PR head/diff echo will **validate**, because the
+values it is checked against are the ones that same header handed it. Blast radius
+under a single-PR review is one attestation; under a batch it is N. The only
+mechanical mitigation is not a schema check but isolation — one child per PR, i.e.
+exactly §6.1 — which is why the recommendation below is N = 1 on safety grounds as
+well as on depth.
 
 ## 7. The tool (kept, not wired)
 
