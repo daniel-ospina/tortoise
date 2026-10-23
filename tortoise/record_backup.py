@@ -891,6 +891,7 @@ def record_row_counts(
     connect: Connector | None = None,
     tables: tuple[str, ...] | None = None,
     timeout_ms: int = RECORD_STATEMENT_TIMEOUT_MS,
+    role: str = "record",
 ) -> dict[str, int]:
     """``{table: row count}`` for the record, read in ONE session.
 
@@ -903,17 +904,24 @@ def record_row_counts(
     ``connect`` exists so the drill can be exercised without a database; the
     default opens psycopg2 with the same connect/statement bounds the record's
     other readers use.
+
+    ``role`` names WHICH side a driver failure happened on, and it is not
+    cosmetic (#9601 review cycle 11): the drill counts the SOURCE and the SCRATCH
+    target through this same function, and every failure sentence said "the
+    record could not be reached" — telling an operator during a scratch-side
+    outage that their system of record was unreachable. The restore leg passes
+    ``role="scratch target"``.
     """
     names = tuple(_require_table(t) for t in (tables or record_tables()))
     connector = connect or _default_connector
-    conn = _connect(connector, dsn)
+    conn = _connect(connector, dsn, role=role)
     try:
         try:
             cur = conn.cursor()
         except Exception as e:
             # `cursor()` is a round trip on some drivers, so it belongs to the same
             # class as the connect it follows: a dead session must not be a traceback.
-            raise _connection_failure(dsn, e) from e
+            raise _connection_failure(dsn, e, role=role) from e
         try:
             # `set_config` rather than `SET`: a placeholder is only legal in a
             # function call, and a `SET` built by string formatting is how an
@@ -938,7 +946,7 @@ def record_row_counts(
             # A session that dies BETWEEN statements (the server restarted, the
             # connection was reaped) is the connector's failure class too — otherwise
             # only the CONNECT is documented and the next statement is a traceback.
-            raise _connection_failure(dsn, e) from e
+            raise _connection_failure(dsn, e, role=role) from e
         finally:
             cur.close()
     finally:
@@ -1518,7 +1526,9 @@ def restore_record_backup(
     else:
         manifest, payload = artifact
 
-    before = record_row_counts(target_dsn, connect=connect)
+    before = record_row_counts(
+        target_dsn, connect=connect, role="scratch target"
+    )
     populated = {t: n for t, n in before.items() if n}
     if populated:
         raise RecordRestoreRefused(
@@ -1589,7 +1599,9 @@ def restore_record_backup(
     return {
         "backup_id": manifest.get("backup_id"),
         "target": _source_of(target_dsn),
-        "restored": record_row_counts(target_dsn, connect=connect),
+        "restored": record_row_counts(
+            target_dsn, connect=connect, role="scratch target"
+        ),
         "manifest": manifest,
     }
 

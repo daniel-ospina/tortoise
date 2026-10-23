@@ -2666,3 +2666,40 @@ def test_a_scratch_reset_blocked_past_the_bound_is_a_REFUSAL_not_a_traceback():
         )
     assert "could not empty the scratch record" in str(excinfo.value)
     assert not isinstance(excinfo.value, rb.RecordBackupUnavailable)
+
+
+def test_a_scratch_side_count_failure_does_not_blame_the_record():
+    """#9601 review cycle 11: the sentence must name the side that failed.
+
+    The drill counts the SOURCE and the SCRATCH target through the same
+    `record_row_counts`, and the restore leg never passed a `role` — so a
+    scratch-side driver failure was reported as "the record could not be
+    reached", i.e. a system-of-record outage that does not exist, on the exact
+    path (`--reset-scratch`, stale scratch credential) the runbook calls the
+    likeliest. Pre-fix this says "the record could not be reached".
+    """
+
+    class ScratchCountRefused(FakeDB):
+        def connect(self, dsn):
+            if dsn == SCRATCH_DSN and self.scratch_reads_seen():
+                raise _DriverError(
+                    'password authentication failed for user "scratch"', "28P01"
+                )
+            return super().connect(dsn)
+
+        def scratch_reads_seen(self) -> bool:
+            # Only the RESTORE leg's count: the artifact must be minted first, so
+            # the failure is post-publish and the class/exit codes are the ones
+            # the drill documents.
+            return any(c.dsn == SCRATCH_DSN for c in self.connections)
+
+    with pytest.raises(rb.RecordBackupError) as excinfo:
+        rb.run_restore_drill(
+            DSN, MemoryStorage(), SCRATCH_DSN,
+            run=FakeRunner(), connect=ScratchCountRefused(SOURCE_COUNTS).connect, key=KEY,
+        )
+    message = str(excinfo.value)
+    assert "scratch target" in message, (
+        "the failure happened on the SCRATCH side — the sentence must say so")
+    assert "the record could not be reached" not in message, (
+        "a scratch-side outage must not be reported as a record outage")
