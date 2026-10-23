@@ -158,8 +158,8 @@ __all__ = [
     "refused_props_names",
     "replay",
     "replay_plan",
-    "snake",
     "scope_connection",
+    "snake",
     "table_columns",
     "to_dollar_placeholders",
 ]

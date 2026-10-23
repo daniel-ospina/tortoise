@@ -70,7 +70,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -133,7 +133,9 @@ class RecordingCursor:
         # on the scope preceding them, never on projected data.
         return []
 
-    description: list[Any] = []
+    # ClassVar, not a mutable instance default (RUF012): this double mimics
+    # psycopg2's `cursor.description`, which the readers only ever read.
+    description: ClassVar[list[Any]] = []
 
 
 #: Sentinel: `pg_roles` returned no row for `current_user` (the posture is
