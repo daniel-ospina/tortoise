@@ -17,10 +17,24 @@
 //   `status: 'removed'` is NEVER an input — omission from `packs` is what
 //   tombstones a namespace, which is why the draft is the whole desired set.
 //
-// `configured: false` is NOT "no packs": it means the graph was never
-// explicitly configured, so it still resolves to the legacy catalog union
-// (#2714 indicator 3). The surface says that in words — a user must not read
-// "5 packs listed" as "5 packs enforced".
+// `configured: false` is NOT "no packs" — and it is NOT "the whole catalog"
+// either (#9691). It means "never explicitly configured", which covers TWO
+// different resolution states:
+//
+//   * no `:PackInstall` records at all → `namespaces=None`, the legacy CATALOG
+//     UNION (#2714 indicator 3);
+//   * records present → `recorded(any status) ∪ data`, a NARROWED set: a
+//     catalog namespace with no record is NOT in it.
+//
+// The record-bearing arm is not theoretical — it is the DEFAULT graph a hosted
+// organization gets. Provisioning seeds the platform STARTER set
+// (`ensure_tenant_packs`, #318) and ships one pack it deliberately does not
+// install, so that graph is `configured: false` with the starter rows and is
+// already narrowed (docs/EXPANSION_PACKS.md). `pack_state.resolved_pack_set` is
+// the authority and already separates the two arms: the RECORDS are the
+// predicate, never `configured` alone. Claiming "the full catalog applies" over
+// those records is how a user comes to file content in the catalog pack the
+// graph does not hold — the surprise #9660 exists to remove.
 
 // The Settings home's heading id. It is a LOCAL anchor only, deliberately: the
 // #3890 deep-link contract is a CLOSED registry (`overviewEmptyAction.js`
@@ -61,7 +75,11 @@ export const PACK_CONSEQUENCE = Object.freeze({
   disable: 'Stops new classification into packs this graph holds no memories from yet; kinds already here stay searchable and writable.',
   remove: 'This pack leaves the approved set for this graph. Kinds already here stay searchable and writable, and no memory is deleted.',
   add: "New extraction on this graph can mint this pack's kinds.",
-  unconfigured: 'This graph has never been configured, so it still uses the full pack catalog. Adding or removing a pack here pins this graph to the set you save.',
+  // `unconfigured` is the record-less arm ONLY (#9691). It is the single state
+  // that resolves to the catalog union, so it is the only state allowed to say
+  // so; a starter-seeded graph is unconfigured too and reads the other line.
+  unconfigured: 'This graph has never been configured and holds no packs, so it uses the full pack catalog. Adding or removing a pack here pins this graph to the set you save.',
+  unconfiguredHolding: 'This graph has never been configured, so it uses the packs it already holds \u2014 not the whole catalog. Adding or removing a pack here pins this graph to the set you save.',
 })
 
 function asRows(body) {
@@ -70,6 +88,35 @@ function asRows(body) {
 
 function asAvailable(body) {
   return Array.isArray(body && body.available) ? body.available : []
+}
+
+// How many `:PackInstall` records the payload says this graph holds — the
+// quantity the resolution contract actually reads. `packs` omits tombstones
+// (removal means absent from the list), while the server offers a graph's OWN
+// tombstones back in `available` with `status: 'removed'`, so the two together
+// are the record set. They cannot double-count: `_packs_payload` never lists a
+// tombstone in `packs`. The one shape they do not cover — a CATALOG-shipped
+// tombstone with no marker, offered by the catalog arm as `available` — is
+// unreachable: removal only happens through `set_graph_packs`, which writes the
+// `:PackSelection` marker, so that graph takes the `configured` branch instead.
+export function packRecordCount(body) {
+  return asRows(body).length
+    + asAvailable(body).filter((p) => p && p.status === 'removed').length
+}
+
+// The ONLY state that resolves to the catalog union: never configured AND no
+// records (#2714 indicator 3). This — not `configured` on its own — is the
+// predicate the "full catalog" copy may hang on.
+export function usesCatalogUnion(body) {
+  return Boolean(body) && body.configured === false && packRecordCount(body) === 0
+}
+
+// The unconfigured note the surface renders: two different graphs, two
+// different sentences. Callers pass the payload, never the flag.
+export function unconfiguredConsequence(body) {
+  return usesCatalogUnion(body)
+    ? PACK_CONSEQUENCE.unconfigured
+    : PACK_CONSEQUENCE.unconfiguredHolding
 }
 
 // `kind_count` is best-effort server-side (a registry failure omits it). Never
@@ -213,9 +260,12 @@ export function addListEmptyLine(body) {
 }
 
 // "2 of 6 packs on this graph" — the count line. `configured === false` is
-// stated as a caveat, never as an equivalent state: an unconfigured graph
-// resolves to the catalog union, so a count here would misdescribe what the
-// graph actually enforces.
+// stated as a caveat, never as an equivalent state, and WHICH caveat depends on
+// the records (#9691): only a record-less graph resolves to the catalog union,
+// so only it may say "the full catalog applies". The bare `configured` flag
+// produced a sentence that contradicted itself on screen — "the full catalog
+// applies (5 active packs)" — over the starter-seeded default graph, where the
+// catalog's sixth pack (`venture`) is genuinely not installed.
 export function packCountLine(body) {
   const rows = asRows(body)
   const active = rows.filter((p) => p.status !== 'disabled').length
@@ -223,9 +273,14 @@ export function packCountLine(body) {
   const parts = [`${active} active pack${active === 1 ? '' : 's'}`]
   if (off) parts.push(`${off} off`)
   const line = parts.join(' \u00b7 ')
-  return body && body.configured === false
-    ? `Not configured yet \u2014 the full catalog applies (${line}).`
-    : `${line}.`
+  if (!body || body.configured !== false) return `${line}.`
+  // Record-less: the count would be a structurally-0 "0 active packs" beside
+  // "the full catalog applies" — the same self-contradiction in a new shape,
+  // so this arm reports no count at all.
+  if (usesCatalogUnion(body)) {
+    return 'Not configured yet \u2014 this graph holds no packs, so the full catalog applies.'
+  }
+  return `Not configured yet \u2014 this graph uses the packs it already holds (${line}). Saving pins the set.`
 }
 
 // The graph selector's option order: the DEFAULT graph first (it is the

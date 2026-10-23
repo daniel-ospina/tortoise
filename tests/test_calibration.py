@@ -1119,9 +1119,20 @@ def test_mis_cased_evidence_kind_is_demanded(sdk):
     # exact-membership check while EP — which reads no kind at all — consumed
     # and stamped the node (measured; ``origin/main`` compared the raw kind, so
     # it escaped every spelling there).
-    padded = [sdk.create_point(k, f"Padded kind {k!r}", status="live")
-              for k in ("\tstatement\t", "\nstatement", "\rstatement\r",
-                        "\x0bstatement", "\x0cstatement", "\u00a0statement")]
+    #
+    # #9287: these rows are now minted as IMPORTED rows (raw ``SET``), which is
+    # the only reachable path left for them — the write door REFUSES a padded
+    # kind (``tests/test_9287_invisible_kind_write_door.py``), so a padded
+    # ``pointKind`` arrives from a hand-written/imported graph. The assertion is
+    # unchanged: the READ path still demands a prior for every one of them.
+    padded = []
+    for k in ("\tstatement\t", "\nstatement", "\rstatement\r",
+              "\x0bstatement", "\x0cstatement", "\u00a0statement"):
+        node = sdk.create_point("statement", f"Padded kind {k!r}", status="live")
+        sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) SET n.pointKind = $k",
+            params={"id": node["id"], "k": k})
+        padded.append(node)
     want = sorted([p["id"]] + [n["id"] for n in padded], key=str)
 
     assert sdk._uncalibrated_ep_participants(None) == want
@@ -1432,7 +1443,14 @@ def test_out_of_contract_kind_shapes_do_not_abort_the_gate(sdk):
     claims like any other.
     """
     numeric = sdk.create_point(42, "Numeric kind", status="live")
-    padded = sdk.create_point(" statement", "Padded kind", status="live")
+    # #9287: an ASCII-padded kind is no longer writable through the door, so the
+    # imported-row path is the one that reaches the gate (see
+    # ``tests/test_9287_invisible_kind_write_door.py``). The property under test
+    # — the gate normalises it rather than aborting — is unchanged.
+    padded = sdk.create_point("statement", "Padded kind", status="live")
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n.pointKind = ' statement'",
+        params={"id": padded["id"]})
     # …and an ARRAY kind is writable through the same passthrough. `toString`
     # (and therefore a bare normalisation) RAISES on a list in this engine, so
     # without the type guard this single hand-written row turned every gated

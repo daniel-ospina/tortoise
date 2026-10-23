@@ -30,7 +30,7 @@ export default {
       fontFamily: {
         // Google-Docs-style headings (owner-validated editor feel)
         serif: ['Georgia', 'Cambria', 'Times New Roman', 'serif'],
-        mono: ["'SF Mono'", "'Cascadia Code'", "'Fira Code'", "'JetBrains Mono'", 'monospace'],
+        mono: ['ui-monospace', 'SFMono-Regular', "'SF Mono'", 'Menlo', "'Cascadia Code'", "'Fira Code'", "'JetBrains Mono'", 'monospace'],
         sans: ["-apple-system", "BlinkMacSystemFont", "'Segoe UI'", "Roboto", "sans-serif"],
       },
       keyframes: {
