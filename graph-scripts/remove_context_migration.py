@@ -25,7 +25,8 @@ Gate summary
    must exist (Task 2.0).  **Warn** if missing, not a hard block.
 4. **Recent BGSAVE**                    — FalkorDB BGSAVE within last 24h.  **Warn** if not.
 5. **#99 guard**                        — REMOVE n.context passes through because
-   ``_is_bulk_wipe`` only matches ``DETACH DELETE``, not property removal.
+   ``_is_bulk_wipe`` classifies a DELETE clause (``DETACH DELETE`` or the bare
+   spelling), and a property removal is neither (#8256).
 
 Post-migration: verifies ``MATCH (n:Point) WHERE n.context IS NOT NULL`` returns 0.
 """

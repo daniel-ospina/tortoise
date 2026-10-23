@@ -103,6 +103,7 @@ from .projection.nonfolded import (  # #3585 — R8/R9 fail-closed set
     SHAPE_STATE_OP_MISS,
     classify_terminalizer_miss,
     collect_identity_skips,
+    collect_malformed_envelopes,
     collect_non_folded,
     record_non_folded,
     refused_events,
@@ -2977,7 +2978,12 @@ def recover_from_log(events_dir: str, projection) -> dict:
     (whose cause is crash damage), and the clause names the TRUE cause: an
     identity that is PRESENT but unwritable, never "missing". `log_points`
     still counts the records READ, so reads = applied + identity_skipped +
-    torn + refused reconciles.
+    malformed_skipped + torn + refused reconciles for a WELL-FORMED journal
+    (``malformed_skipped`` added by #8843 — see the closing paragraphs, which
+    name the channels this fix does NOT close, with their DIRECTIONS: one leaves
+    the sum short, the rest leave it balanced with the drop inside ``applied``.
+    Deliberately no count — an earlier draft said "two", then "three", and each
+    numeral went stale the moment another channel was found; review cycle 8.)
 
     ⛔ GRANULARITY (#8840 review P1): the collector these counts read sees
     every refused identity, and most of them are NESTED inside a record that
@@ -2994,11 +3000,83 @@ def recover_from_log(events_dir: str, projection) -> dict:
     needed: a trailing sweep's skips are nested, and a fold that recorded a
     drop and then raised is counted ONCE, as `torn`.
 
-    KNOWN, PRE-EXISTING and NOT an identity skip: ``apply()``'s malformed
-    envelopes (a missing/non-string ``type``, a non-dict ``point``) are dropped
-    silently and still increment `applied`. They carry no identity to attribute,
-    so the invariant above does not hold for them either way — recorded here so
-    the next reader does not assume the counting is exhaustive (#8843).
+    #8843 closes the remaining hole in that accounting, and it is deliberately
+    NOT folded into `identity_skipped`: ``apply()`` also drops a record whose
+    ENVELOPE itself is broken (the ``#331`` guard — a missing/non-string
+    ``type``; the ``#325`` guard — a non-dict ``point``). Both returned
+    normally, so the replay loop's
+    ``else`` arm incremented ``applied`` and a journal of
+    ``[healthy PointAdded, {"event_id": "ev-x", "type": null}]`` reported a
+    complete, faithful recovery over a record it had dropped. Those drops get
+    their OWN tally and their own clause (``malformed_skipped``), because the
+    causes send an operator to different places — an identity skip is a
+    well-formed record with an unwritable key, a malformed envelope leaves no
+    record to key. The count is written by the GUARD itself into the run's
+    collector (``collect_malformed_envelopes``), never re-derived here, so the
+    replay loop and ``apply()`` cannot disagree about what is malformed. The
+    malformed-ENVELOPE channel is therefore IN the sum:
+
+        reads = applied + identity_skipped + malformed_skipped + torn + refused
+
+    ⛔ NOT claimed complete, and this is a correction rather than a caveat:
+    four channels remain UNACCOUNTED, all PRE-EXISTING and all untouched here
+    (measured on the branch, disclosed so no reader infers exhaustiveness from
+    the sentence above — the mistake the paragraph this replaced warned about).
+    ⛔ They do NOT all fail the same way, and conflating them under one heading
+    would mislead the lane that fixes them (review cycle 3; the third and fourth
+    were found by cycles 6 and 7):
+
+    * a `EntityLinked` record the ``fold_deferred_entity_links`` trailing sweep
+      DROPS (malformed, absent endpoint, or stale) BREAKS THE SUM. That sweep
+      returns the links APPLIED — see ``fold_deferred_entity_links``'s own
+      "a MALFORMED record, an ABSENT endpoint, and a STALE link are all
+      DROPPED and never counted as applied" — so the record matches no bucket
+      and ``log_points`` exceeds the sum by one per drop (MEASURED:
+      ``log_points=2``, ``reason='replayed 1 events'``).
+    * a Point-lifecycle terminalizer whose entry in ``plan_point_restamp_folds``
+      is ineligible (an id the store cannot write maps to ``(False, False)``):
+      ``apply_journal_point_restamp`` returns ``None`` without folding, and the
+      row still arrives in the ``else`` arm and increments `applied`. The SUM
+      STILL BALANCES — ``log_points == applied`` — because `applied` is the
+      term that absorbs the record; the falsehood is one level down, inside
+      `applied`, which is #8843's shape at a third site rather than a
+      reconciliation deficit. (MEASURED: ``log_points=2``,
+      ``reason='replayed 2 events'`` over a one-node graph. Do NOT 'fix' this by
+      adjusting the sum — the sum is arithmetically correct.)
+    * a record whose type is in ``_APPLY_WARN_ONLY_TYPES``
+      (``DirectEdgeRepoint``, ``DirectEdgeCreated``) — recognized, folded by
+      ``rebuild_all``'s deferred pass-2b, and folded by NOTHING in this
+      one-record engine. ``apply()`` warns and returns; the row reaches the
+      ``else`` arm and increments `applied`. SAME DIRECTION as the terminalizer
+      above and for the same reason: the SUM BALANCES and `applied` lies.
+      (MEASURED: a journal of ``[healthy PointAdded, DirectEdgeRepoint]`` →
+      ``log_points=2``, ``reason='replayed 2 events'``, one node, no bucket.
+      This is the *deliberate* parity gap #3585/#8499 preserved so a journal
+      holding a direct-edge descriptor stays recoverable — counting it is a
+      REPORTING gap, not a reason to refuse.)
+    * a record whose type is in ``_NO_PROJECTION_FOLD`` — ``BatchIdStamped``
+      (and ``IngestStarted``, which is audit-only and has no graph effect to
+      lose). ``apply()`` falls through its ``pass``, the row reaches the ``else``
+      arm and increments `applied`. ⛔ The batch id is restored from the
+      PRE-WIPE ``batch_point_links`` capture in ``rebuild_all``'s **pass-1b
+      tail** — never from the journal record — so a JOURNAL-ONLY rebuild
+      (``rebuild()`` / ``recover_from_log`` from the journal alone) loses it.
+      (``sdk.py``'s A10 note calls this journal-only gap "pass-2b" — the A10
+      PROGRAMME name — and ``_NO_PROJECTION_FOLD``'s comment labels the
+      SNAPSHOT RESTORE "rebuild_all pass-2b" even though that restore runs in
+      the pass-1b tail, so the two labels disagree about the same code. Named
+      precisely here because a lane closing this will grep for what actually
+      applies the value and find the comment asserting the opposite; review
+      cycles 8 and 9.) SAME DIRECTION as the two above: the SUM BALANCES and
+      `applied` lies. (MEASURED: a journal of
+      ``[PointAdded p-ok, BatchIdStamped{p-ok, batch_id="batch-42"}]`` →
+      ``log_points=2``, ``reason='replayed 2 events'``, and
+      ``n.batch_id`` is NULL afterwards.) ``IngestStarted`` is genuinely
+      audit-only, so a lane closing this should count the type, not the
+      category.
+
+    All four are recorded as **#9643**, not folded into this fix: each needs
+    its own drop/refusal signal, not a widened tally here.
     """
     import os
 
@@ -3443,6 +3521,17 @@ def recover_from_log(events_dir: str, projection) -> dict:
     # damage, and reporting a deliberate degrade as damage is the confusion
     # #7174 removed for the numeric-domain refusal.
     identity_skipped = 0
+    # #8843: the OTHER record-drop channel, and its OWN tally. `apply()` drops a
+    # record whose ENVELOPE is broken (a missing/non-string `type` — the #331
+    # guard; a non-dict `point` — the #325 guard) and returns NORMALLY, so the
+    # `else` arm below counted the drop as a replay: a journal of
+    # `[healthy PointAdded, {"event_id":"ev-x", "type": null}]` reported a
+    # complete, faithful recovery over a record it had dropped, and the
+    # documented reconciliation over-reported. Kept apart from `identity_skipped`
+    # because the causes send an operator to different places (no key at all vs.
+    # a key the store cannot take), and apart from `torn` because a broken record
+    # the fold declined is not crash damage.
+    malformed_skipped = 0
     # #7174: a record the store's numeric domain would ALTER is not a TORN
     # record, so it gets its own tally and its own ADDITIVE clause in `reason`.
     # DEFENSIVE by construction: this function runs under the journal-path
@@ -3499,8 +3588,13 @@ def recover_from_log(events_dir: str, projection) -> dict:
     # #8702: the identity-skip collector rides the SAME run boundary — a skip
     # is recorded by the fold and counted below, so the two views of "this
     # record was not folded" cannot drift apart.
+    # #8843: the malformed-ENVELOPE collector rides it too. It is a SEPARATE
+    # collector, not a fold into `collect_identity_skips`: a malformed envelope
+    # has no identity to attribute, and conflating the two causes would tell an
+    # operator to look for an unwritable key on a record that has none.
     with collect_non_folded() as _nf_entries, \
-            collect_identity_skips() as _id_skips:
+            collect_identity_skips() as _id_skips, \
+            collect_malformed_envelopes() as _malformed:
         # #3305: the Point lifecycle terminalizers are folded by the SHARED
         # whole-journal plan, not by ``apply()``'s inline branch — that branch
         # folds every terminalizer, while ``rebuild_all`` deliberately drops the
@@ -3560,6 +3654,13 @@ def recover_from_log(events_dir: str, projection) -> dict:
                 # whose fold DECLARED a record drop count as one (see the
                 # docstring's GRANULARITY note).
                 skips_before = len(_id_skips)
+                # #8843: the same delta shape for the malformed-envelope
+                # collector, which `apply()` writes from INSIDE the fold (the
+                # #331/#325 guards). Reading the collector — rather than
+                # re-testing the envelope here — is what keeps ONE reader of
+                # "what is a malformed envelope": this loop and the guard
+                # cannot disagree about it.
+                malformed_before = len(_malformed)
                 if seq in restamp_plan:
                     # #7719 (E7): the consumer's contract was validated ONCE
                     # before this loop, so a genuine fold failure inside this
@@ -3603,7 +3704,16 @@ def recover_from_log(events_dir: str, projection) -> dict:
                 # the graph, so it is `applied` — its skip is evidence in the
                 # clause, not a drop. `any()` (not a count): the tally is
                 # records, and one record cannot be dropped twice.
-                if any(s.drops_record for s in _id_skips[skips_before:]):
+                if len(_malformed) > malformed_before:
+                    # #8843: the fold DROPPED this record because its envelope
+                    # is broken (the #331/#325 guards). It reached the fold and
+                    # RETURNED normally, so only the collector can tell this
+                    # apart from a replay — which is exactly the false PASS
+                    # this arm closes. Checked first: an envelope-level drop
+                    # cannot also be an identity skip (there is no record left
+                    # to carry an identity).
+                    malformed_skipped += 1
+                elif any(s.drops_record for s in _id_skips[skips_before:]):
                     identity_skipped += 1
                 else:
                     applied += 1
@@ -3707,6 +3817,29 @@ def recover_from_log(events_dir: str, projection) -> dict:
             f" rather than aborting the replay (#7406), so "
             f"{'it is' if identity_skipped == 1 else 'they are'} NOT in this "
             f"graph: {_named}{_more})")
+    if malformed_skipped:
+        # #8843: its OWN clause. `torn` would report a broken RECORD as crash
+        # damage, and `identity_skipped` would send the operator looking for an
+        # unwritable key on a record that carries none — the #8018 class (a
+        # report naming a cause that is false for the record it describes).
+        # The exemplars are the dropped records, each carrying `event_id`, so an
+        # operator can find WHICH line to repair.
+        # ⛔ The AGGREGATE sentence is deliberately NEUTRAL ("it could not
+        # read"), review cycle 7: it covers FOUR causes and the earlier "whose
+        # discriminator is unreadable" was FALSE for two of them — a
+        # `PointAdded` with `point: "not-a-dict"` has a perfectly readable
+        # discriminator; the PAYLOAD is what is bad. Only three exemplars are
+        # rendered, so for a fourth-and-later drop this sentence is the ONLY
+        # description the operator gets.
+        _bad_named = "; ".join(str(s) for s in _malformed[:3])
+        _bad_more = (f" (+{len(_malformed) - 3} more)"
+                     if len(_malformed) > 3 else "")
+        extra += (
+            f" ({malformed_skipped} dropped — the fold SKIPPED "
+            f"{'a record' if malformed_skipped == 1 else 'records'} it could "
+            f"not read (#331/#325 — see the note), so "
+            f"{'it is' if malformed_skipped == 1 else 'they are'} NOT in this "
+            f"graph and the journal line needs repair: {_bad_named}{_bad_more})")
     if nested_skips:
         # #8840 review P1(c): the OTHER direction, and the reason it gets its
         # own sentence rather than sharing the clause above: these records DID
@@ -3752,6 +3885,12 @@ def recover_from_log(events_dir: str, projection) -> dict:
         # `reason`. Additive, and present only when non-zero (the same shape as
         # `onboarding_gap` / `team_meta_gap`).
         result["identity_skipped"] = identity_skipped
+    if malformed_skipped:
+        # #8843: same additive field shape, for the same reason: a caller
+        # reconciling `log_points` against the graph must be able to see the
+        # malformed drop without parsing prose. Present only when non-zero, so
+        # the key's absence keeps meaning "no malformed record".
+        result["malformed_skipped"] = malformed_skipped
     # #7929: `ok is False` is the other late verdict this replay can reach —
     # nothing applied yet the graph is non-empty (a deferred CORRECTS/link fold
     # landed) — and it must not leave that partial population behind either.

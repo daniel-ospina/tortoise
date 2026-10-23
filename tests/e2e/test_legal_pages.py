@@ -153,6 +153,32 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError  # noqa: 
 # ── Tortoise-host check contract (cycle-4 P2-1). ───────────────────────────
 TORTISE_HOST_CHECK = os.environ.get("TORTISE_HOST_CHECK") == "1"
 
+# ── Product-root marker (cycle-4 P2-2; re-cut by PR #9652). ───────────────
+# The tortoise host serves `website/product.html` at `/` (the
+# `functions/_middleware.ts` rewrite), so this marker is how the suite proves
+# the rewrite happened. It is deliberately STRUCTURAL — an attribute on the
+# page's `<html>` element, not marketing copy.
+#
+# ⛔ This constant is a CI CONTRACT with TWO other surfaces; move all three or
+# none:
+#   1. `.github/workflows/deploy-pages.yml` — the `verify-legal` DNS preflight
+#      greps the served root for this exact string before exporting
+#      `TORTISE_HOST_CHECK=1`. Its miss branch is a `::warning::`, so a stale
+#      marker SKIPS the tortoise-host half of this suite (green), it does not
+#      red it.
+#   2. `tests/test_website_static.py::TestProductRootMarkerContract` — pinned so
+#      the two strings cannot drift, the marker still occurs in the committed
+#      page, and it stays structural.
+# The pin used to be the hero `<h1>` ("Agent memory that"); PR #8597 and PR
+# #9652 each had to move it, and a hero rewrite is what would break it next.
+# Attribute markers are stripped by `_clean()`, so read the RAW document when
+# asserting it (see `_assert_serves_product`).
+#
+# ⛔ Bound BEFORE `TORTISE_EMULATED` below: that module-level call reads this
+# name, and its own bare `except Exception` would swallow the resulting
+# NameError into a constant `False` (canary silently dead on every local run).
+PRODUCT_ROOT_MARKER = 'data-page="product"'
+
 # ── Third-party external-link crawl gate (cycle-8 P1, #747 CI) ────────────
 # The crawl fetches unauthenticated third-party hrefs (github.com/LICENSE,
 # etc.). From shared CI runner IPs those hosts rate-limit aggressively (429
@@ -165,6 +191,26 @@ EXTERNAL_CRAWL_SKIP = pytest.mark.skipif(
     "third-party fetches from shared runner IPs are rate-limit flaky) — "
     "run locally for the full crawl",
 )
+
+
+def _assert_serves_product(body: str, where: str) -> None:
+    """The served document is `product.html` — asserted on the RAW body.
+
+    The marker is a structural attribute on the root element
+    (`data-page="product"`), so a hero rewrite cannot move it; `_clean()`
+    strips tags and therefore strips attributes too, which is why this reads
+    `body` rather than the cleaned text.
+
+    The message names both causes on purpose: a stale marker reported as
+    "middleware rewrite broken" blames the wrong file for a copy edit
+    (PR #9652 review, P1).
+    """
+    assert PRODUCT_ROOT_MARKER in body, (
+        f"{where}: the root document is not product.html — marker "
+        f"{PRODUCT_ROOT_MARKER!r} is absent. Either the middleware rewrite is "
+        "broken, or website/product.html's identity moved (then move the "
+        "marker in PRODUCT_ROOT_MARKER, the deploy-pages.yml preflight and "
+        "tests/test_website_static.py::TestProductRootMarkerContract).")
 
 
 def _tortoise_emulated_locally() -> bool:
@@ -221,8 +267,6 @@ PRIVACY_DRAFT = DRAFTS_DIR / "2026-08-08-657-privacy-draft.md"
 
 LEGAL_PAGES = ("/privacy", "/tos", "/license", "/dpa", "/security")
 FOOTER_LINK_HREFS = ("/privacy", "/tos", "/license", "/dpa", "/security")
-PRODUCT_ROOT_MARKER = "Agent memory that"
-PRODUCT_ROOT_MARKER_LOWER = PRODUCT_ROOT_MARKER.lower()
 FOOTER_SELECTOR = "footer, .legal-footer, .footer"
 # The ABSOLUTE canonical Pricing Page URL (reviewer P2): the relative
 # '/#pricing-section' form breaks on premiselabs.co, where '/' serves index.html
@@ -718,7 +762,7 @@ def test_tortoise_host_footer_half(page: Page) -> None:
     resp = page.request.get(TORTISE_HOST + "/", headers={"Host": spoof}, timeout=15_000)
     assert resp.status == 200, f"tortoise host root returned {resp.status}"
     body = resp.text()
-    assert PRODUCT_ROOT_MARKER in body, "tortoise root does not serve product.html"
+    _assert_serves_product(body, "tortoise host root (footer half)")
     _footer_links_present(body)
 
 
@@ -757,7 +801,7 @@ def test_tortoise_root_links_to_the_blog(page: Page) -> None:
     resp = page.request.get(TORTISE_HOST + "/", headers={"Host": spoof}, timeout=15_000)
     assert resp.status == 200, f"tortoise host root returned {resp.status}"
     body = resp.text()
-    assert PRODUCT_ROOT_MARKER in body, "tortoise root does not serve product.html"
+    _assert_serves_product(body, "tortoise host root (blog entry point)")
     assert _has_blog_entry(body), (
         "tortoise.premiselabs.co/ carries no /blog entry point (#3950) — this is the "
         "exact page the owner reported as unreachable. It must offer the blog in the "
@@ -917,8 +961,7 @@ def test_middleware_root_rewrites(page: Page) -> None:
     t_spoof = t_host if t_host.startswith("tortoise.") else "tortoise.premiselabs.co"
     r = page.request.get(TORTISE_HOST + "/", headers={"Host": t_spoof}, timeout=15_000)
     assert r.status == 200
-    assert PRODUCT_ROOT_MARKER_LOWER in _clean(r.text()), \
-        "tortoise root marker missing (middleware rewrite broken)"
+    _assert_serves_product(r.text(), "tortoise root (middleware rewrite)")
 
     b_host = urlsplit(BASE_URL).hostname or "premiselabs.co"
     b_spoof = b_host if b_host.endswith("premiselabs.co") else "premiselabs.co"
@@ -950,8 +993,7 @@ def test_product_served_on_tortoise_host(page: Page) -> None:
     t_spoof = t_host if t_host.startswith("tortoise.") else "tortoise.premiselabs.co"
     r_t = page.request.get(TORTISE_HOST + "/", headers={"Host": t_spoof}, timeout=15_000)
     assert r_t.status == 200
-    assert PRODUCT_ROOT_MARKER_LOWER in _clean(r_t.text()), \
-        "tortoise root must still serve the product page"
+    _assert_serves_product(r_t.text(), "tortoise root (product page served)")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1201,7 +1243,7 @@ def test_crawl_tortoise_root_serves_product(page: Page) -> None:
     resp = page.request.get(TORTISE_HOST + "/", headers={"Host": spoof}, timeout=15_000)
     assert resp.status == 200, f"tortoise root → {resp.status}"
     body = resp.text()
-    assert PRODUCT_ROOT_MARKER in body
+    _assert_serves_product(body, "tortoise root (crawl)")
     _footer_links_present(body)
 
 

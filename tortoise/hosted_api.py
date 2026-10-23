@@ -10321,7 +10321,15 @@ async def _session_login_exchange(
 
 @app.get("/v1/packs")
 async def list_packs(org: dict = Depends(get_current_org_gated)):  # noqa: B008
-    """#318: read-only pack introspection — the tenant's ACTIVE packs.
+    """#318: pack introspection — the tenant's ACTIVE packs.
+
+    NOT a pure read (#9583): this GET can cause a WRITE. The route fronts
+    ``pack_state.get_tenant_packs``, whose self-heal ``ensure_tenant_packs``
+    MERGEs a missing starter ``:PackInstall`` activation (one MERGE per starter
+    namespace, skipped when the graph's pack set was deliberately configured —
+    #2728/#8648). Mirrors the MCP ``packs_list`` correction (#4122/#9575) — and
+    it matters twice on this route, because FastAPI serves this docstring as the
+    OpenAPI operation ``description``, i.e. the string a generated client reads.
 
     Shared pack catalog + per-tenant ``PackInstall`` activation records
     (graph-native install-state in the tenant graph ``org_{org_id}``).
@@ -13378,6 +13386,37 @@ class SessionRequest(BaseModel):
     machine_id: str | None = Field(None, max_length=256)
     model: str | None = Field(None, max_length=128)
 
+    # #9599 — a PRESENT-but-blank session id is refused at the boundary, so it
+    # never reaches ``session_id = body.session_id or mint()`` (it is truthy,
+    # so that default never fired and the blank went straight to the write —
+    # where the engine cannot serve a blank key back to an equality seek: the
+    # next capture on the same id minted a DUPLICATE ``:Session`` and the turn
+    # container's CONTAINS edge landed nothing, measured). The rule is
+    # Layer-1's already (``commit_schema.CommitPayload._non_blank_session_id``,
+    # #4005 — the validator lives on ``CommitPayload``; there is no
+    # ``CommitRecord`` class, and citing one sent a review to re-derive a third
+    # spelling); this is the same sentence at the boundary — ONE predicate for
+    # all three DOORS (the two SDK doors and this one), so they cannot drift
+    # apart. ⛔ The blank rule has a SECOND, deliberate home one layer down: the
+    # REPLAY half is ``projection._writable_container_id`` (``_writable_id``
+    # PLUS this same blank clause), which gates both journal carriers and the
+    # sidecar restores and landed on main with #9594 from the #9553 review P2 —
+    # so #9553 is the correct citation for the BLANK rule, and only the PADDED
+    # position below is not its. ``None``/absent still mints (the caller named
+    # no session), and a PADDED-but-real id stays legitimate (#9599's own body;
+    # #9553 records no position on padded ids at all).
+    # Refusing or trimming it is #9599's open owner question (comment
+    # 6342343424): this PR lands only the blank half.
+    @field_validator("session_id")
+    @classmethod
+    def _non_blank_session_id(cls, v):
+        from tortoise.ids import session_id_refusal
+
+        refusal = session_id_refusal(v)
+        if refusal is not None:
+            raise ValueError(refusal)
+        return v
+
     # Invalid harness ⇒ 422 at the model boundary (FastAPI validation), never
     # a silent drop or a 200 — a typo'd harness must be visible (Task 11).
     @field_validator("harness")
@@ -13766,7 +13805,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
 
     VERIFIED gate order (#2093 S2 amendment — the impl docstring's old gate
     list was stale, pre-#1927):
-      1. boundary 422 — invalid harness / conversation shape (Pydantic
+      1. boundary 422 — invalid harness / conversation shape / BLANK session_id
+         (#9599: `SessionRequest._non_blank_session_id`; a blank id names no
+         session, and writing it minted a duplicate `:Session` whose CONTAINS
+         edge landed nothing) (Pydantic
          SessionRequest validation fires BEFORE the handler on REST; the MCP
          tool's SessionRequest construction maps the same failure to its
          422-equivalent error dict) — recording-off never masks a malformed
@@ -13786,7 +13828,6 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     ``request`` is optional (the MCP tool has no HTTP Request) — audit and
     abuse recording degrade to a best-effort stub.
     """
-    import uuid
     from datetime import datetime
 
     from tortoise.quota import (
@@ -13929,7 +13970,13 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # first MATCH. `_capture_session_probe_off_loop` owns the hand-off (the same
     # off-loop seam the onboarding projection read uses); `session_id`/`now` are
     # pure computations, hoisted above it.
-    session_id = body.session_id or f"session_{uuid.uuid4().hex[:12]}"
+    # #9599: the mint is ONE spelling (`tortoise.ids.mint_session_id`) — this
+    # site and `extractor_v2`'s were the two hand-copies the ids.py helper
+    # subsumes. A blank `body.session_id` never reaches here: `SessionRequest`
+    # refuses it at the boundary (`_non_blank_session_id`).
+    from tortoise.ids import mint_session_id
+
+    session_id = body.session_id or mint_session_id()
     now = datetime.now(UTC).isoformat()
     sdk, proj, session_row = await _capture_session_probe_off_loop(
         org, session_id)
@@ -18660,6 +18707,23 @@ def _session_count_by_harness(proj, harness: str | None) -> int:
     return int(rows[0][0]) if rows else 0
 
 
+def _capture_receipt_buckets() -> list[tuple[str | None, str]]:
+    """The (harness, receipt-key) buckets the reconcile pass clears (#5051).
+
+    Kept CALLABLE and module-level so the derivation is testable WITHOUT a
+    graph: this bucket list used to spell ``session_capture_receipt_{h}``
+    inline, a second source of truth for the key FORMAT that
+    ``tortoise/capture_receipts.py`` owns. Drift there is silent and one-sided
+    — a changed format leaves this pass looking up key names no writer
+    produces, so ``state.get(key)`` is always falsy and an orphaned receipt is
+    never cleared (a leak the delete path is the only sweep for). Pinned to the
+    formatter by ``tests/test_5051_capture_receipt_key_registry.py``.
+    """
+    return [(None, _capture_receipt_key(None))] + [
+        (h, _capture_receipt_key(h)) for h in sorted(_SESSION_HARNESS_VALUES)
+    ]
+
+
 def _reconcile_capture_receipts(proj, org_id: str) -> list[str]:
     """Receipt cleanup by recompute (the delete-side half of the T1-P12
     receipt↔Session invariant): a receipt is an orphan iff zero Sessions
@@ -18679,9 +18743,7 @@ def _reconcile_capture_receipts(proj, org_id: str) -> list[str]:
         logging.getLogger("tortoise.api").exception(
             "capture-receipt reconcile: state read failed (skipped pass)")
         return []
-    buckets = [(None, "session_capture_receipt")] + [
-        (h, f"session_capture_receipt_{h}") for h in sorted(_SESSION_HARNESS_VALUES)
-    ]
+    buckets = _capture_receipt_buckets()
     clear_fields: dict[str, None] = {}
     cleaned: list[str] = []
     for harness, key in buckets:
@@ -30442,11 +30504,19 @@ def _capture_server_owned_keys() -> set[str]:
     (``_ALLOWED_STATE_KEYS`` ← ``_ONBOARDING_DEFAULT_STATE``), so a harness
     that registers an ``install_probe_{h}`` key is server-owned the moment it
     is registered — a literal pair would silently re-open a client-writable
-    evidence key for the next harness (review P2)."""
+    evidence key for the next harness (review P2).
+
+    #5051: the receipt / last-error members are DERIVED from the one key
+    definition (``tortoise/capture_receipts.py``), never re-spelled. They used
+    to be inline f-strings, and the drift is one-sided the wrong way: after a
+    format change the live receipt keys no longer match this set, so a client
+    PATCH could write them — re-opening the exact fabricated-receipt surface
+    #3681 closed (``captureStatus.js`` would read the client's own claim)."""
     return {
-        "session_capture_receipt",
-        *{f"session_capture_receipt_{h}" for h in _SESSION_HARNESS_VALUES},
-        *{f"session_capture_last_error_{h}" for h in _SESSION_HARNESS_VALUES},
+        _capture_receipt_key(None),
+        *{_capture_receipt_key(h) for h in _SESSION_HARNESS_VALUES},
+        *{k for h in _SESSION_HARNESS_VALUES
+          if (k := _capture_last_error_key(h)) is not None},
         *{k for k in _ALLOWED_STATE_KEYS if k.startswith("install_probe_")},
     }
 

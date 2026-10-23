@@ -27,10 +27,14 @@ WHAT THIS PINS
 3. A ``docs/architecture/*-CHANGELOG.md`` companion does not assert
    `ONTOLOGY.md`'s owner-approval gate; the rule stays in the one file it
    governs.
+4. Every ``docs/evidence/*/README.md`` declares them — the CLASS, not one
+   pinned bundle. The single-file pin added for #9110 was satisfied while a
+   second bundle (#9664) landed with no frontmatter at all.
 
 Non-vacuity: on the pre-fix tree the two architecture companions carry neither
 ``created`` nor a team key, and the STORAGE companion carries the copied gate —
-so checks 2 and 3 fail there.
+so checks 2 and 3 fail there; and ``docs/evidence/9664-capstone/README.md``
+opens at ``# #9664 — capstone acceptance``, so check 4 fails there.
 
 Static, no network / DB / graph.
 """
@@ -158,6 +162,51 @@ def test_architecture_changelogs_do_not_assert_the_ontology_owner_gate() -> None
         "a docs/architecture changelog asserts ONTOLOGY.md's file-modification "
         "gate, which was never established for it and contradicts a changelog's "
         "purpose: " + ", ".join(offenders)
+    )
+
+
+#: `docs/` file that predates the affiliation rule (and already carries baseline
+#: `docs`-job findings). Listed, never silently skipped.
+GRANDFATHERED = "docs/evidence/3770-embedded-lane-preexisting-failures/README.md"
+
+
+def test_every_evidence_bundle_readme_declares_its_affiliation() -> None:
+    """#9664 review P2: close the CLASS, not one pinned bundle.
+
+    ``tests/test_doc_affiliation_frontmatter.py``'s #9110 arm pins exactly one
+    file (``docs/evidence/7949-capstone/E1-E2.md``), and #9664's bundle landed
+    with NO frontmatter block while that pin stayed green. Verified with the
+    repo's own checker: ``check-doc-affiliation.cjs --files
+    docs/evidence/9664-capstone/README.md`` → ``ERROR: Missing front matter
+    block``. The checker is NOT wired into CI (``.github/workflows/ci.yml``
+    says so), so only a test over the population closes it.
+
+    ``GRANDFATHERED`` is the one bundle that predates the rule; it is listed
+    explicitly (not silently skipped) so the exception is a decision this test
+    records rather than an accident of the glob.
+
+    Non-vacuity: at the pre-fix tree ``docs/evidence/9664-capstone/README.md``
+    opens at ``# #9664 — capstone acceptance``, so this reds on it.
+    """
+    assert _missing(ROOT / GRANDFATHERED), (
+        "the grandfathered bundle now HAS frontmatter — drop it from the "
+        "exception list instead of leaving a dead exemption behind"
+    )
+    paths = [
+        path
+        for path in sorted((ROOT / "docs" / "evidence").glob("*/README.md"))
+        if str(path.relative_to(ROOT)) != GRANDFATHERED
+    ]
+    assert paths, "docs/evidence/ has no README.md files — re-point this guard"
+    failures = {
+        str(path.relative_to(ROOT)): _missing(path)
+        for path in paths
+        if _missing(path)
+    }
+    assert not failures, (
+        "docs/evidence/*/README.md missing required affiliation frontmatter: "
+        f"{failures} — AGENTS.md's Documentation Filing Protocol; copy the "
+        "block from docs/evidence/7950-capstone/README.md"
     )
 
 

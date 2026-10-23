@@ -35,6 +35,7 @@ import logging
 import os
 import re
 import stat
+import unicodedata
 from collections.abc import Callable
 from contextvars import ContextVar
 from time import monotonic as _monotonic
@@ -163,6 +164,13 @@ register_kind("diary")
 register_kind("checkpoint-item")
 register_kind("option")    # used by file_decision (#133)
 register_kind("evidence")  # used by file_decision (#133)
+# #6671: `criterion` is a DECIDE_PART_KINDS member (the decide rubric's
+# criteria axis: options/criteria/findings) and was the ONE decide-part kind
+# missing from this block — so a criterion write from the decide flow
+# (`graph-scripts/decide.py`, `tortoise decide`; NOT `file_decision`, which
+# writes decision/option/evidence only) warned "Unrecognized pointKind" while
+# the SDK itself already treated it as a decision part.
+register_kind("criterion")
 
 # Valid status values for Point nodes (used by update_point status validation)
 # #432: claim lifecycle vocabulary — draft → live → retracted → superseded
@@ -393,16 +401,23 @@ _CALIBRATION_GATED_LABELS = ("Point",)
 #:
 #: ⚠️ DECLARED BOUNDARY: Unicode spaces beyond NBSP (em space, ideographic
 #: space, ZWSP, BOM…) are NOT in this family. A ``pointKind`` padded with one of
-#: those still escapes the kind normalisation while EP consumes the node and
-#: stamps it — measured, and pre-existing (``origin/main`` compared the raw kind,
-#: so every spelling escaped). Reachability is NOT "hand-written only": the write
-#: door stores a bare kind verbatim with a warning, so ``create_point`` mints the
-#: shape; every such node IS demandable and clearable, so the gap is one of
-#: coverage, not of an unsatisfiable demand. Each further code point costs one
-#: ``replace()`` on every scanned row (measured: seven characters ≈ +5.7 ms at
-#: 2,000 Points; the full Unicode list timed out on an eight-node fixture), so
-#: the boundary is recorded here and filed (#9287) rather than left implicit or
-#: paid for on the hot path.
+#: those escapes the kind normalisation while EP consumes the node and stamps it
+#: — measured, and pre-existing (``origin/main`` compared the raw kind, so every
+#: spelling escaped). Each further code point costs one ``replace()`` on every
+#: scanned row (measured: seven characters ≈ +5.7 ms at 2,000 Points; the full
+#: Unicode list timed out on an eight-node fixture), so the boundary stays
+#: recorded here rather than paid for on the hot path.
+#:
+#: #9287 closed the REACHABLE half of that boundary at the WRITE DOOR instead:
+#: ``create_point``/``update_point`` now REFUSE a ``pointKind`` carrying any
+#: non-identifier character (``_refuse_invisible_kind`` below), so the SDK can
+#: no longer mint a kind this filter cannot classify. Reachability of the
+#: remaining spellings is therefore an IMPORTED / hand-written row (a raw Cypher
+#: ``SET n.pointKind = …``), which is exactly what this filter is for: such a
+#: node IS demandable and clearable, so the gap is one of coverage, not of an
+#: unsatisfiable demand. The two halves are documented together on purpose —
+#: widening this family without touching the door (or vice versa) re-opens
+#: #9287, where the demand and the door disagreed on what a kind may be.
 #: For IDS: exactly the ASCII whitespace class — measured to be the set an id
 #: equality cannot resolve. NBSP is deliberately NOT here: ``create_point``
 #: ACCEPTS an NBSP-padded id, the labelled equality resolves it and
@@ -447,6 +462,238 @@ def _strip_whitespace(expr: str) -> str:
     for ch in _KIND_WHITESPACE_CHARS:
         out = f"replace({out}, {_cypher_ws_literal(ch)}, '')"
     return out
+
+
+#: #9287: what a ``pointKind`` MAY contain — the WRITE-DOOR half of the
+#: boundary ``_KIND_WHITESPACE_CHARS`` declares above.
+#:
+#: A kind is an IDENTIFIER, not prose. The rule is stated POSITIVELY and over
+#: PROPERTIES, not examples: a character is admissible when it is PRINTABLE
+#: (``str.isprintable`` is False across ``Cc``/``Cf``/``Cs``/``Co``/``Cn`` and
+#: the ``Z*`` separators — the whole invisible half of Unicode, where every
+#: escape in this issue lived) and is not one of the measured NON-RENDERING code
+#: points below (Unicode files those under printable categories, so nothing
+#: decidable reaches them). The kind is probed in NFC form, so a decomposed
+#: accent (``'cafe\\u0301'``) is the same identifier as its composed spelling;
+#: the STORED value is never rewritten.
+#:
+#: Why properties and not a blacklist: this fix was opened TWICE on enumerated
+#: rules. A category blacklist missed ``U+3164`` HANGUL FILLER (``Lo``, renders
+#: blank); the enumerated fix for that missed ``U+E0100``..``U+E01EF``
+#: (variation selectors-17+) and ``U+1D159`` (MUSICAL SYMBOL NULL NOTEHEAD,
+#: ``So``) — each measured accepted-and-gate-escaping on the head it was found on
+#: (#9591 review cycles 2 and 3).
+#:
+#: ⚠️ THE RESIDUAL, declared rather than implied: a printable code point whose
+#: glyph renders nothing (or renders a no-op) cannot be recognised by any Unicode
+#: property — "does this draw ink" is not machine-decidable. So that class is an
+#: explicit MEASURED list below, and the tests pin both halves: the generative
+#: `test_the_door_accepts_no_invisible_code_point` walks all 0x110000 code points
+#: (accepted ⇒ printable, at BOTH an edge and an interior position) and asserts
+#: every listed code point is refused, so the next member of the class cannot
+#: slip in silently.
+#:
+#: The other direction is pinned too, and it is the one that matters for the
+#: calibration gate: the read path's normalisation family must be a SUBSET of
+#: what this door refuses — `test_the_door_refuses_every_character_the_gate_strips`.
+#: (The reverse is not true and must not be claimed: the door accepts 'a', '-'
+#: and ':', which the read path does not strip and has no reason to.)
+#:
+#: Why the READ path stays a small enumeration and the DOOR carries the rule:
+#: each code point the read path strips costs one ``replace()`` on every scanned
+#: row (measured: seven characters ≈ +5.7 ms at 2,000 Points; the full Unicode
+#: space list timed out the gate on an eight-node fixture), while the door pays
+#: it once per write.
+_KIND_NON_RENDERING_CHARS = frozenset({
+    "\u115f",  # HANGUL CHOSEONG FILLER (Lo) — renders blank
+    "\u1160",  # HANGUL JUNGSEONG FILLER (Lo)
+    "\u3164",  # HANGUL FILLER (Lo)
+    "\uffa0",  # HALFWIDTH HANGUL FILLER (Lo)
+    "\u2800",  # BRAILLE PATTERN BLANK (So)
+    "\U0001d159",  # MUSICAL SYMBOL NULL NOTEHEAD (So)
+    "\u034f",  # COMBINING GRAPHEME JOINER (Mn) — a visible no-op
+    "\u17b4",  # KHMER VOWEL INHERENT AQ (Mn)
+    "\u17b5",  # KHMER VOWEL INHERENT AA (Mn)
+}) | frozenset(chr(cp) for cp in range(0x180b, 0x1810)) \
+  | frozenset(chr(cp) for cp in range(0xfe00, 0xfe10)) \
+  | frozenset(chr(cp) for cp in range(0xe0100, 0xe01f0))
+
+
+def _kind_non_identifier_char(kind: str, i: int) -> bool:
+    """True when ``kind[i]`` cannot be part of an identifier.
+
+    The POSITIVE rule (see ``_KIND_NON_RENDERING_CHARS``): a character is part
+    of an identifier when it is PRINTABLE and does not render blank, or when it
+    is a plain INTERIOR space. Everything else — separators, controls, format
+    marks, unassigned and non-rendering code points — is refused.
+
+    ONE predicate for both halves of this module's kind rule: the refusal
+    (``_kind_invisible_char``) and the suggested fix (``_kind_suggestion``) read
+    it, so the value a refusal offers is by construction a value the door
+    accepts — a suggestion the caller cannot use is the loop #9591's first
+    review found (``strip()`` cannot remove a ``Cf`` mark, and ``repr()``
+    escaping hands back a DIFFERENT string).
+    """
+    ch = kind[i]
+    if ch == " ":
+        # A plain INTERIOR space is a legitimate separator in an
+        # open-vocabulary kind ('technical debt') and the gate strips it
+        # wherever it occurs, so it can never be an escape. A LEADING/trailing
+        # one is the padding this door exists to refuse.
+        return not (0 < i < len(kind) - 1)
+    if ch in _KIND_NON_RENDERING_CHARS:
+        return True
+    return not ch.isprintable()
+
+
+def _kind_invisible_char(kind: str) -> str | None:
+    """The first character of ``kind`` that cannot be part of an identifier.
+
+    ``' '`` is exempted when it is INSIDE the string: a plain interior space is
+    a legitimate separator in an open-vocabulary kind (``'technical debt'``),
+    and it can never make a node escape the gate's classification — the read
+    path strips it wherever it occurs, so ``'state ment'`` is already demanded
+    as the ``statement`` it is. Every character the POSITIVE rule above does not
+    admit (see ``_KIND_NON_RENDERING_CHARS``)
+    is refused in any position, including the interior: ``'state\\u2003ment'`` is
+    either a separator or padding, and guessing is how a kind silently becomes
+    a different kind.
+    """
+    # NFC probe: a DECOMPOSED spelling ('cafe' + U+0301) is the same
+    # identifier as its composed form, and refusing it would make the door
+    # depend on which normalisation form the caller happened to produce. The
+    # stored value is untouched — normalising what we WRITE would move the dedup
+    # identity `(pointKind, content_hash)` behind the caller's back, which is why
+    # this refuses rather than rewrites in the first place.
+    probe = unicodedata.normalize("NFC", kind)
+    for i in range(len(probe)):
+        if _kind_non_identifier_char(probe, i):
+            return probe[i]
+    return None
+
+
+def _kind_suggestion(kind: str) -> str:
+    """``kind`` with its non-identifier characters removed, for the message.
+
+    One home with ``_kind_invisible_char``: the same categories and the same
+    interior-space exemption, so the value a refusal SUGGESTS is a value the
+    door accepts — a suggestion the caller cannot use is the loop #9287's
+    review found (``strip()`` cannot remove a ``Cf`` mark).
+
+    An interior SPACE SEPARATOR (``Zs``/``Zl``/``Zp`` — em space, ideographic
+    space, NBSP…) is folded to ONE ASCII space instead of being deleted (#9591
+    review cycle 7, P3): deleting it joins the words around it, so
+    ``'technical\\u2003debt'`` was suggested back as ``'technicaldebt'`` — a
+    silently DIFFERENT identifier, which is the hazard the refusal exists to
+    avoid. At an EDGE the separator is padding (the door refuses it there), so
+    it is dropped; ``Cf`` marks (ZWSP, BOM, soft hyphen) are joiners/no-ops and
+    are still deleted — ``'state\\u200bment'`` really is ``'statement'``.
+    """
+    out: list[str] = []
+    for i, ch in enumerate(kind):
+        if not _kind_non_identifier_char(kind, i):
+            out.append(ch)
+            continue
+        if (0 < i < len(kind) - 1
+                and unicodedata.category(ch) in ("Zs", "Zl", "Zp")
+                and out and out[-1] != " "):
+            out.append(" ")
+    return "".join(out).strip()
+
+
+def _clean_model_kind(value, *, default: str = "statement",
+                      door: str = "extractor") -> str:
+    """#9287: canonicalise a kind an LLM produced, BEFORE a write door sees it.
+
+    Model output is UNTRUSTED DATA, not an authored spelling, and the two write
+    seams it reaches are opposites: the SDK doors / the journal seam REFUSE an
+    invisible-character kind (the durable guarantee), while a capture must not
+    abort because a model emitted a stray em-space or zero-width mark inside
+    its JSON. So the producer keeps its own output in contract here — cleaned
+    once, with a WARNING naming the value — instead of either storing the
+    padulation (which the calibration gate cannot classify while EP consumes
+    the node) or failing the whole extraction.
+
+    An empty/blank kind falls back to ``default`` for the same reason: nothing
+    a model returns should be able to mint a kind the gate cannot demand
+    (#9592 is the gate-side half of that).
+    """
+    kind = "" if value is None else str(value)
+    if kind and _kind_invisible_char(kind) is None:
+        return kind
+    fixed = _kind_suggestion(kind) or default
+    _logger.warning(
+        "%s: model returned pointKind %r — using %r (#9287)",
+        door, kind, fixed,
+    )
+    return fixed
+
+
+def _refuse_invisible_kind(prop: str, value, *, door: str) -> None:
+    """#9287: refuse a kind the calibration gate cannot classify.
+
+    The gate demands a prior for every node EP consumes whose ``pointKind``
+    normalises to an evidence kind; EP itself reads NO kind. So a kind the gate
+    cannot classify is a node that is consumed and stamped while the gate stays
+    silent — measured at ``HEAD``: ``create_point('\\u2003statement\\u2003',
+    'x')`` was stored verbatim, ``_uncalibrated_ep_participants(None)`` answered
+    ``[]``, and a ``require_calibration=True`` run stamped it
+    (``ep_alpha 1.287``/``ep_beta 1.242`` — the ``Beta(1, 1)``-as-calibrated
+    class #7478 exists to prevent).
+
+    Refusing is the repair the issue asks for (option 1) and it is the door's
+    own posture for a value its post-write check cannot resolve: it NAMES the
+    argument and the offending code point, so the author fixes the spelling,
+    instead of a silent rewrite of what they asked for (``pointKind`` is part of
+    the dedup identity ``(pointKind, content_hash)``, so a silent canonical
+    form would also move the identity behind the caller's back).
+
+    Non-string kinds are NOT examined: ``create_point(42, …)`` is out of
+    contract, writable on ``origin/main``, and the gate's ``toLower(typeof(…))``
+    guard already keeps it out of the universe (#9063); refusing it here would
+    be a different change with its own blast radius.
+    """
+    if not isinstance(value, str):
+        return
+    bad = _kind_invisible_char(value)
+    if bad is None:
+        return
+    # The suggestion is derived from the refusal itself, never ``value.strip()``:
+    # ``strip()`` removes WHITESPACE only, so for the ``Cf`` half of the family
+    # (ZWSP, BOM, soft hyphen, ZWNJ/ZWJ) it returns the value UNCHANGED and a
+    # caller who follows the message verbatim loops on the identical error
+    # (measured: ``'\ufeffstatement'.strip() == '\ufeffstatement'``).
+    suggestion = _kind_suggestion(value)
+    # ⛔ NOT ``{suggestion!r}``: ``repr`` ESCAPES a ``Cf`` character into its
+    # six-character backslash form, so the message would hand the caller a
+    # DIFFERENT string (`'\\ufeffstatement'` — literally backslash-u-…) that the
+    # door happily accepts and stores under a name they never had. The suggestion
+    # is interpolated raw, inside quotes, so it is the value itself.
+    tail = (
+        f"Pass the kind without the {bad!r} — e.g. '{suggestion}'."
+        if suggestion
+        else "The kind is only invisible characters — supply a name."
+    )
+    # ⛔ STATE THE REASON THAT IS TRUE FOR THIS CHARACTER (#9591 review cycle 4):
+    # the read path HAPPENS to normalise the ASCII/NBSP family, so claiming "the
+    # gate would not demand a prior" for those is false — measured: an imported
+    # row with `' statement'` IS demanded (pinned by
+    # `test_out_of_contract_kind_shapes_do_not_abort_the_gate`). The door is the
+    # guarantee either way; only the out-of-family half is the measured fail-open.
+    reason = (
+        "the read path's own whitespace normalisation happens to fold this "
+        "spelling today, but the door — not a per-row scan — is the guarantee, "
+        "and a kind is an identifier"
+        if bad in _KIND_WHITESPACE_CHARS
+        else "the calibration gate classifies kinds after its own normalisation, "
+             "so this spelling is a DIFFERENT kind: the gate would not demand a "
+             "prior for it while EP still consumed and stamped the node"
+    )
+    raise ValueError(
+        f"{door}: {prop} must be an identifier, but {value!r} carries "
+        f"{bad!r} (U+{ord(bad):04X}). A kind is matched by exact membership, "
+        f"so {reason} (#9287). {tail}"
+    )
 
 
 #: id types an id-equality can resolve. A hand-written array id is not one of
@@ -3846,6 +4093,18 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
         raise ValueError(
             "'_stub_completion' is a server-managed capture-completion "
             "discriminator and cannot be set via props."
+        )
+    # #9451: the sibling key on the same `SourceCreated` record. It states that
+    # the record's `ingestedAt` is the instant the write STORED (not the capture
+    # clock), which is what licenses the fold's ON MATCH arm to apply it — so a
+    # caller able to set it could move a `:Source`'s `ingestedAt` on replay, i.e.
+    # out of the recency/decay ordering, and the key rides the journal so every
+    # rebuild would restore it. Same class and same hard-reject as
+    # `_stub_completion` above; the ONE producer never re-enters this intake.
+    if "_ingestedAtStored" in props:
+        raise ValueError(
+            "'_ingestedAtStored' is a server-managed journal discriminator and "
+            "cannot be set via props."
         )
     # #7951 (review round 5): `credibility` is NOT a generic prop — it is the
     # author's declared WORD, a documented input of `create_point` /
@@ -8195,6 +8454,16 @@ class TortoiseSDK:
         the cheap fix — ``extractedFrom='session:<id>'`` for an assertion the
         writer itself originates.
         """
+        # #9287: a kind is an IDENTIFIER — refuse invisible padding/format
+        # characters BEFORE `_validate_kind` would only WARN about them. The
+        # warning is what let this shape through: a padded kind is not an
+        # unrecognised spelling to register, it is one the calibration gate
+        # classifies as a DIFFERENT kind, so EP consumed and stamped a node the
+        # gate never demanded a prior for (measured; the read-path enumeration
+        # that guards imported rows is documented on
+        # `_KIND_WHITESPACE_CHARS`). First, so a caller whose value is not a
+        # kind at all hears that, not an approval complaint about it.
+        _refuse_invisible_kind("pointKind", kind, door="create_point")
         self._validate_kind(kind)
         # #5475: `pointKind` is one of the properties
         # `pack_state.graph_kind_namespaces` mines the approval set from, so the
@@ -8205,6 +8474,12 @@ class TortoiseSDK:
         # as the entity funnel (`_refuse_unapproved_kind`).
         self._refuse_unapproved_kind("pointKind", kind)
         _coerce_props(props)
+        # #9287: the props passthrough can carry `pointKind` itself and it WINS
+        # over the positional kind (measured: `create_point("statement", …,
+        # pointKind="\u2003statement\u2003")` stored the padded value), so the same
+        # refusal has to run over the mined spellings — the same key set the
+        # approval gate below reads, never a second hand-written list.
+        self._refuse_invisible_point_kinds(props, door="create_point")
         # The props passthrough accepts the OTHER mined key names too
         # (`objectKind`, `eventKind`, ...), and each of those is persisted on
         # the Point and mined back into the approval set — measured:
@@ -9297,8 +9572,25 @@ class TortoiseSDK:
         deployment's provider account; that divergence is warned about
         (``UserWarning``) rather than silently assumed (#6869)."""
         import os
-        import uuid
-        session_id = session_id or f"session_{uuid.uuid4().hex[:12]}"
+
+        # #9599: the caller's RAW argument is diagnosed BEFORE the mint, in the
+        # same order as `capture_session` (one rule, two doors). Diagnosing the
+        # minted value instead would make the doors disagree with each other and
+        # with the hosted boundary: `session_id or mint()` replaces a FALSY
+        # non-str (`0`, `False`), so the predicate would never see it here while
+        # `SessionRequest`'s typed model 422s it — a review finding.
+        from tortoise.ids import mint_session_id, session_id_refusal
+
+        _blank_session = session_id_refusal(session_id)
+        if _blank_session is not None:
+            return {"session_id": session_id, "ok": False,
+                    "errors": [_blank_session], "error": _blank_session,
+                    "payload": None}
+        # The mint keeps its ORIGINAL position — before the consent gate — so a
+        # consent-declined receipt still reports the minted id exactly as it did
+        # before this change (`session_id` is public receipt surface; moving the
+        # mint below the gate would have silently turned that field into `None`).
+        session_id = session_id or mint_session_id()
         # #3662: consent FIRST — this is the SDK sibling of the gated CLI
         # primitives (`session capture` / `sessions import`), which also refuse
         # before doing any work, so no extraction (and therefore no BYOK provider
@@ -9319,6 +9611,7 @@ class TortoiseSDK:
             return {"session_id": session_id, "ok": False,
                     "errors": [declined], "error": declined,
                     "payload": None}
+
         # #6869: base_url/api_key are the Tortoise API POST credentials ONLY —
         # they never reach the extraction model. With extractor_model=None the
         # model is built from the AMBIENT environment (_default_byok_model →
@@ -9682,10 +9975,17 @@ class TortoiseSDK:
         "ok" is the success signal (never "extracted" — extracted > 0 can
         co-occur with ok=False on partial-emission failure), "extraction_mode"
         is truthful ("llm:<route>" / "llm" on success, "empty" when the
-        conversation has no extractable content — always with ok=False and an
-        errors entry — and "error" when extraction failed), errors/warnings
-        are additive and never clobbered, and an empty/blank conversation is
-        rejected BEFORE any write (no Session stub, turns=0). W5 Phase F
+        conversation has no extractable content, and "error" when extraction
+        failed), errors/warnings are additive and never clobbered, and an
+        empty/blank conversation is rejected BEFORE any write (no Session stub,
+        turns=0). A request REFUSED at the door (a blank `session_id`, #9599)
+        reports ``extraction_mode: "empty"`` too — nothing was accepted, so
+        nothing was extractable — with ok=False and an ``errors``/
+        ``diagnostics`` entry naming the cause. Reusing "empty" is deliberate:
+        every consumer of this receipt (``tortoise/__main__.py``) already reads
+        "empty" as "degraded / not filed", which is the correct read of a
+        refusal, and a new token would change the receipt shape for no added
+        truth. W5 Phase F
         (#2104): a re-capture of an EXISTING session_id reports
         "extraction_mode": "replayed" (ok=True, 0 points, additive warning —
         the hosted #1727 replay skip; a replay is a no-op on the first
@@ -9708,8 +10008,34 @@ class TortoiseSDK:
         re-attempts extraction through the existing #2335 TRUE-retry path
         instead of silently replaying.
         """
-        import uuid
         from datetime import datetime, timezone
+
+        # #9599: the same door rule as ``commit_session``'s, in the SAME ORDER —
+        # the caller's RAW argument is diagnosed first, then the mint — so the
+        # two doors cannot disagree about any input shape (a review finding: an
+        # earlier draft checked the MINTED value, so `0`/`False` were minted over
+        # here while `123`/`b"  "` were refused, and both doors disagreed with
+        # the hosted boundary, whose typed model 422s all four). Checked BEFORE
+        # the extractor, the projection handle or any graph write: a refused id
+        # writes nothing and journals nothing.
+        from tortoise.ids import mint_session_id, session_id_refusal
+
+        _blank_session = session_id_refusal(session_id)
+        if _blank_session is not None:
+            return {
+                "session_id": session_id,
+                "turns": 0,
+                "extracted": 0,
+                "points": [],
+                "extraction_mode": "empty",
+                "ok": False,
+                "errors": [_blank_session],
+                "diagnostics": [_blank_session],
+                "stats": {},
+                "warnings": [],
+                "capture_redactions": 0,
+            }
+        session_id = session_id or mint_session_id()
 
         # #3892: resolve the extractor ONCE, up front, but NEVER refuse the
         # capture for a missing key — the key gates EXTRACTION, not storage.
@@ -9718,7 +10044,6 @@ class TortoiseSDK:
 
         proj = self._get_proj()
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
-        session_id = session_id or f"session_{uuid.uuid4().hex[:12]}"
         # #5632: snapshot the LIFETIME journal-failure counter at the START of
         # THIS capture. The receipt below must disclose only appends that
         # failed DURING it — a failure from an earlier, unrelated write on this
@@ -11902,6 +12227,30 @@ class TortoiseSDK:
             "s.summary=$sum",
             "s.topics=$topics",
             f"s.{SOURCE_SEARCH_TEXT_FIELD}=coalesce($st, s.{SOURCE_SEARCH_TEXT_FIELD})",
+            # ⛔ THIS STAYS A `coalesce` — #398's NEVER-OVERWRITE CONTRACT, and
+            # #9451's fix is in the RECORD, not here. `ingestedAt` means "when
+            # Tortoise FIRST saw this source" (`_upsert_document`'s note below,
+            # entities.py), and a writer never moves an instant another writer
+            # already recorded. The bug was never the coalesce: it was that the
+            # `SourceCreated` record further down stated `now` — a value this
+            # write does NOT store when the stub already existed. So on a
+            # PRE-EXISTING stub (minted by `_link_source`/`_mint_source_stub`
+            # via `create_point(session_id=...)`, the hosted commit path's
+            # `create_source`, the #4125 reconciler — a mint journals NO
+            # ingestion, so nothing carries its instant) the live node held the
+            # EARLIER instant while the record carried the capture's, and
+            # `_upsert_source`'s ON CREATE arm reads the RECORDED value (#5024):
+            # `rebuild_all()` folded a value the live write never wrote, so
+            # `derived == replay(journal)` (#5024/#5097/#8501) was FALSE for the
+            # field and a recovery silently re-ordered session Sources in the
+            # recency computation.
+            #
+            # The fix: the RETURN below reads back the instant this SET leaves on
+            # the node and the record carries THAT (the same "the payload carries
+            # the values the WRITE STORED" rule `validFrom`/`is_episodic` already
+            # follow), and `_upsert_source`'s ON MATCH arm applies it under the
+            # `$stub_completion` gate so the record also lands on the arm where
+            # the node already exists at fold time.
             "s.ingestedAt=coalesce(s.ingestedAt, $now)",
         ]
         if event_id:
@@ -11928,9 +12277,15 @@ class TortoiseSDK:
         # pins the resulting property set against the pre-#8501 shape.
         from .projection.edges import _mint_source_stub
         # `now` is the CAPTURE's instant, not a fresh clock read: for a capture
-        # that mints no Point this is the only writer of `ingestedAt`, and the
-        # `SourceCreated` record below carries `now` — so a fresh clock here
-        # would make the live node disagree with the replayed one (#8501).
+        # that mints no Point this is the only writer of `ingestedAt` on the arm
+        # where the mint CREATES the stub, and the `SourceCreated` record below
+        # states `now` on that arm — the SET coalesces into `$now`, so the
+        # read-back it journals is this same value. (#9451: on a PRE-EXISTING
+        # stub the mint's ON MATCH leaves `ingestedAt` alone and the SET's
+        # `coalesce` KEEPS the earlier writer's instant, so the record carries
+        # THAT, not `now` — the mint's clock is inert there.) A fresh clock here
+        # would make the live node on the create arm disagree with the replayed
+        # one (#8501).
         #
         # ⛔ THE RETURNED KEY IS USED, NEVER DISCARDED (#8501 review P3).
         # `_mint_source_stub`'s contract is explicit — callers MUST address
@@ -11951,11 +12306,26 @@ class TortoiseSDK:
         params["url"] = source_key
         _rows = proj.g.query(
             "MERGE (s:Source {url:$url}) SET " + ", ".join(set_clauses)
-            + " RETURN s.validFrom, s.is_episodic",
+            # `s.ingestedAt` is the THIRD read-back, for the same reason as the
+            # other two: #9451 — the record must state the instant this write
+            # STORED, which is the earlier writer's when the stub pre-existed
+            # (`s.ingestedAt=coalesce(s.ingestedAt, $now)` keeps it), not `now`.
+            + " RETURN s.validFrom, s.is_episodic, s.ingestedAt",
             params=params,
         ).result_set
         prior_valid_from = _rows[0][0] if _rows else None
         prior_is_episodic = _rows[0][1] if _rows else None
+        # `now` only as a fallback for a MERGE that returned no row (nothing was
+        # written, so there is no stored value to state); every real write leaves
+        # a non-null instant because the SET above coalesces into `$now`.
+        #
+        # ⛔ AN EXPLICIT NULL TEST, NOT `or` (#9451 review round 2, P2): a node
+        # holding `ingestedAt=''` is FALSY but NON-NULL, and the live SET's
+        # `coalesce` KEEPS it — so `... or now` would state an instant the write
+        # did not store and hand `rebuild_all()` a `now` the live node never had,
+        # the very divergence this issue closes, on that one state.
+        _stored = _rows[0][2] if _rows else None
+        stored_ingested_at = now if _stored is None else _stored
         # ⛔ §17.1 ORDER (#9206 review P1): THE RECORD IS APPENDED HERE, BEFORE
         # the `link_source_to_event` write below — not after it (where it used to
         # sit), and BEFORE the record's own explanatory block explains why it is
@@ -11987,11 +12357,24 @@ class TortoiseSDK:
             sourceKind="agentSession",
             contentHash=content_hash,
             title=None,
-            ingestedAt=now,
+            ingestedAt=stored_ingested_at,
             updatedAt=now,
             validFrom=prior_valid_from,
             is_episodic=prior_is_episodic,
             _stub_completion=True,
+            # #9451: the record's `ingestedAt` above is the instant this write
+            # STORED (read back from the node), not the capture clock. This
+            # marker is what tells the two apart at FOLD time: a record written
+            # before #9451 carries `_stub_completion` but no marker and states a
+            # `now` the live write never stored on a pre-existing stub, so the
+            # ON MATCH arm leaves the node alone for those lines exactly as it
+            # did before this change (a legacy record must not start MOVING a
+            # value the pre-fix replay reproduced faithfully). Server-managed:
+            # refused as a caller key by `_sanitize_props` / `create_source` /
+            # MCP, listed in `_META_KEYS` so it never reaches a `:Source`, and
+            # in `record_projection._RECORD_ONLY_KEYS` so it never enters a
+            # record's props tail.
+            _ingestedAtStored=True,
             **{SOURCE_SEARCH_TEXT_FIELD: search_text},
             sessionId=session_id,
             capturedAt=now,
@@ -12056,39 +12439,55 @@ class TortoiseSDK:
         #   * `updatedAt` carries the instant the write stamped, so the fold's
         #     stub-completion arm reproduces it instead of the replay clock.
         #
-        #   * `ingestedAt` is emitted and IS faithful on the capture path
-        #     (#8501 corrected this note; it used to call the field a KNOWN
-        #     RESIDUAL on a premise this change removed). The stub this write
-        #     completes is now minted BY THIS DOOR — `_mint_source_stub(...
-        #     now=now)` above — so its `ingestedAt` is the CAPTURE's instant, not
-        #     a fresh clock at a later write; this record carries that same
-        #     `now`, and `_upsert_source`'s ON CREATE arm reads the RECORDED
-        #     value (`coalesce($ingestedAt, $now)`, the #5024 rule) instead of
-        #     the replay clock. So live == rebuilt for the field, which is what
-        #     `test_the_stub_the_early_materialization_mints_survives_a_rebuild`
-        #     asserts (`s.ingestedAt` compared after a destructive
-        #     `rebuild_all()`), and
+        #   * `ingestedAt` carries `stored_ingested_at` — the instant READ BACK
+        #     from the node the SET just wrote — not `now`. On the lane where this
+        #     door's own mint CREATES the stub, the two are the same value (the
+        #     mint is `_mint_source_stub(..., now=now)`, and the SET coalesces
+        #     into `$now`), which is what
         #     `test_a_keyless_capture_stamps_its_stub_with_the_capture_instant`
-        #     pins the value on the no-Point lane, and
+        #     and
         #     `test_the_extracting_lane_stamps_its_stub_with_the_capture_instant`
-        #     pins it on the lane that extracts.
+        #     pin. On a PRE-EXISTING stub they DIFFER: the live SET's `coalesce`
+        #     keeps the earlier writer's instant (#398's never-overwrite contract
+        #     — `ingestedAt` means when Tortoise FIRST saw this source), so a
+        #     record stating `now` journals a value the write never wrote (#9451).
+        #     `_upsert_source`'s ON CREATE arm reads the recorded value (#5024)
+        #     and its ON MATCH arm applies it under the `$stub_completion AND
+        #     $ingestedAtStored` gate, so for a record written BY THIS VERSION
+        #     both replay engines reproduce the node's value on both arms —
+        #     pinned by `tests/test_9451_pre_existing_stub_ingest_instant.py`
+        #     (whole-bag live vs after `rebuild_all()` AND after `rebuild()`,
+        #     mutation-measured red on the pre-#9451 tree).
         #
-        #     The residual it used to describe is still REACHABLE — the
-        #     boundary is the stub's CREATOR, not the path. The field above is
-        #     faithful exactly where this door's own mint CREATED the node.
-        #     Whenever a `session:<id>` stub ALREADY EXISTS when this door runs,
-        #     the mint's ON MATCH arm leaves that earlier writer's `ingestedAt`
-        #     in place while the record carries the capture's instant, and
-        #     `_upsert_source`'s ON MATCH arm has no `ingestedAt` clause at all
-        #     (only ON CREATE reads the recorded value) — so a rebuild folds the
-        #     recorded instant onto a live node still holding the earlier one.
-        #     That earlier writer is any door that minted the ref first (a
-        #     `create_point` carrying a `session_id` → `_link_source`, the
-        #     hosted commit path's `create_source`, the #4125 reconciler) plus
-        #     every node written before #8501 or by a legacy writer. This record
-        #     cannot correct that — the instant was never journaled by the
-        #     writer that chose it — but it is no longer the capture path's
-        #     DEFAULT shape: a fresh capture now mints as it materializes.
+        #     ⛔ THE RESIDUAL THAT REMAINS, stated rather than implied and
+        #     engine by engine (#9451 review rounds 3-4): a `SourceCreated` line
+        #     written BEFORE this change states `now`, which the live write never
+        #     stored on a pre-existing stub — and no record can correct that,
+        #     because the instant the mint chose was never journaled. Those lines
+        #     carry `_stub_completion` but NOT `_ingestedAtStored`, so the ON
+        #     MATCH arm leaves the node's `ingestedAt` alone for them, exactly as
+        #     it did before this change. The consequence, engine by engine: on
+        #     `rebuild_all()` the ON CREATE arm still applies the recorded `now`
+        #     in the shape where this record is the node's CREATOR (pass 1b folds
+        #     it before pass 2 mints the stub) — so those rebuilt nodes are still
+        #     not the LIVE node's value; on `rebuild()` such a node keeps the
+        #     replay clock the re-minted stub was given, as it did before. In the
+        #     other legacy shape — the node was created by a JOURNALLED earlier
+        #     write (`create_source`'s own `SourceCreated` at T0) and a pre-#9451
+        #     capture merely completed it — the ON MATCH arm being a NO-OP is
+        #     what keeps `rebuild()`/`rebuild_all()` FAITHFUL to the live T0
+        #     (#9451 review round 3, ISSUE 2: applying the legacy record's
+        #     never-stored `now` there would have turned a faithful recovery into
+        #     a divergence, so the marker — not just `$stub_completion` — is what
+        #     the clause is gated on; pinned by
+        #     `test_a_legacy_capture_record_does_not_move_a_journalled_instant`).
+        #     Convergence for the CREATOR shape needs a MIGRATION or a fresh
+        #     faithful record — NOT a plain re-capture, because `capture_session`
+        #     short-circuits an already-captured session ("session already
+        #     captured (same session_id) — no new extraction") and journals no
+        #     `SourceCreated` for it at all. What #9451 closes is the DOOR: every
+        #     capture that REACHES this writer from this version onward journals
+        #     the instant it stored, on either arm.
 
     # ── Update / Delete consolidation (epic #888 W2, PR #912) ─────────
     # One update()/delete() for Points AND entities. The legacy methods
@@ -12194,6 +12593,11 @@ class TortoiseSDK:
         """
         proj = self._get_proj()
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        # #9287: an UPDATE is a WRITE, and ``pointKind`` is writable through it
+        # (measured: ``update_point(id, pointKind='\u2003observation\u2003')``
+        # stored the padded value and the gate never demanded it) — the same
+        # invisible-kind refusal the create door applies, at ITS own door.
+        self._refuse_invisible_point_kinds(props, door="update_point")
         # ── #5475 (residual): an UPDATE is a WRITE, and it widened the set ──
         # The create-side gate is at the funnels every CREATE meets, but
         # ``pointKind`` is one of the properties ``graph_kind_namespaces``
@@ -14316,7 +14720,13 @@ class TortoiseSDK:
                 # Row shape: [internal id, logical id, labels, properties] —
                 # #2489 extends the SELECT with properties(target) so the shared
                 # stub_key resolver (projection/edges.py) extracts the per-rel
-                # replay key (name / coalesce(title,name) / url) at emission.
+                # replay key at emission: `name` for aboutSubject/Object/Event/
+                # Point, `url` for aboutDocument and extractedFrom (D10 — a
+                # document IS a :Source). The retired pre-D10 title fallback key
+                # is NOT one: `stub_key` never returns it (a title-only target
+                # yields None), so such a descriptor cannot be emitted at all.
+                # ONE key map in this loop — the emission comment below states
+                # the same, and the two must not drift apart (#5265).
                 target_graph_id = row[0]  # FalkorDB internal node id — exact match
                 target_props = row[3] or {}
                 if target_graph_id in succ_internals:
@@ -14348,10 +14758,13 @@ class TortoiseSDK:
                     transferred += 1
                     continue
                 # #2489: per-rel key extraction via the SHARED resolver — never
-                # target.id (Subjects MERGE by name, Sources by url, Documents by
-                # name-or-title). SKIP unresolvable keys (name-less Point from an
-                # id-targeted create_about_edge; url-less extractedFrom target): a
-                # null-key descriptor is un-replayable — those edges die at
+                # target.id (Subjects MERGE by name, Sources by url — and D10: a
+                # document IS a :Source, so aboutDocument and extractedFrom both
+                # key by `url`, the SAME key the target label moved with; a
+                # title-keyed aboutDocument descriptor is no longer resolvable and
+                # is never emitted). SKIP unresolvable keys (name-less Point from
+                # an id-targeted create_about_edge; a Source target lacking url):
+                # a null-key descriptor is un-replayable — those edges die at
                 # rebuild today anyway (zero regression).
                 if derivable:
                     keyed = stub_key(rel, target_props)
@@ -17006,6 +17419,27 @@ class TortoiseSDK:
                            "entity item with type:'event' and eventKind "
                            "('occurrence'/'turn') for episodic records",
             })
+        # #9287 (review cycle 4): the same refusal the Point write doors raise,
+        # reported as a PHASE-1 violation. Without it this class was
+        # Phase-2-only in `ingest()` — measured: a bundle whose second point
+        # carried a padded kind PASSED `_validate_bundle` (zero mutations) and
+        # then raised from `create_point` mid-write, with the FIRST item already
+        # committed. Every other kind rule here is collected, zero-mutation and
+        # shared by both phases (`TestPhase1Phase2Parity`); this one now is too.
+        bad = _kind_invisible_char(kind)
+        if bad is not None:
+            fix = _kind_suggestion(kind)
+            violations.append({
+                "section": "points", "index": index,
+                "message": f"pointKind must be an identifier, but {kind!r} "
+                           f"carries {bad!r} (U+{ord(bad):04X}) — a kind is "
+                           "matched by exact membership, so this spelling is a "
+                           "different kind (#9287). "
+                           + (f"Pass the kind without the {bad!r} — e.g. "
+                              f"'{fix}'." if fix else
+                              "The kind is only invisible characters — "
+                              "supply a name."),
+            })
 
     def _check_refs(self, bundle: dict, violations: list[dict]) -> None:
         """Check 3 (ref-table half) — duplicate refs across the whole bundle
@@ -18720,12 +19154,53 @@ class TortoiseSDK:
         passes Phase 1 and raises in step 3 after earlier items committed. Those
         are examples, not the closed set: #8755 carries it.
         """
+        from .pack_state import _KIND_PROP_SPELLINGS
+
         violations: list[dict] = []
         for section in ("sources", "points", "entities"):
             for i, item in enumerate(bundle.get(section) or []):
                 self._check_item_shape(section, i, item, violations)
                 if section == "points" and isinstance(item, dict):
-                    self._check_kind(item.get("kind"), i, violations)
+                    kind = item.get("kind")
+                    self._check_kind(kind, i, violations)
+                    # #9287 (review cycle 5): the POSITIONAL `kind` is not the
+                    # only spelling a points item can carry. `create_point`'s
+                    # free-form props passthrough also accepts `pointKind` /
+                    # `point_kind` (mined from `pack_state._KIND_PROP_SPELLINGS`,
+                    # never re-spelled here), and the write door REFUSES a
+                    # padded one. Checking only `kind` here left that refusal
+                    # to Phase 2: measured at this head, a bundle item carrying
+                    # `kind: 'statement'` PLUS `pointKind: '\u2003statement\u2003'`
+                    # passed Phase 1 (zero violations), the FIRST item was
+                    # written, and the second raised a bare `ValueError` from
+                    # `create_point` MID-BATCH — a partial write with a
+                    # non-contract error, the exact class this check exists to
+                    # make zero-mutation. Both spellings are read at the item's
+                    # OWN flatten depth (the reviewer of #9591 measured the
+                    # depth, `_item_prop_at_depth`'s contract).
+                    _depth = _item_flatten_depth(item, section)
+                    for _spelling, _kind_prop in (
+                            _KIND_PROP_SPELLINGS.items()):
+                        if _kind_prop != "pointKind":
+                            continue
+                        _declared, _value = _item_prop_at_depth(
+                            item, _spelling, _depth)
+                        if not _declared:
+                            continue
+                        # The same value already reported as `kind` is ONE
+                        # defect with two spellings, not two violations.
+                        if kind is not None and _value == kind:
+                            continue
+                        # `isinstance(str)` gate (#9591 review cycle 6, P2):
+                        # the DOOR does not examine a non-string kind —
+                        # `_refuse_invisible_kind` returns early for one by
+                        # explicit decision — so a Phase-1 refusal here made
+                        # the validator stricter than the writer and turned a
+                        # previously-successful `ingest` into a whole-bundle
+                        # error (the "reads further than the door" class
+                        # `_item_prop_at_depth`'s docstring names).
+                        if isinstance(_value, str):
+                            self._check_kind(_value, i, violations)
         for i, conn in enumerate(bundle.get("connections") or []):
             self._check_item_shape("connections", i, conn, violations)
             self._check_connection(i, conn, violations)
@@ -21821,6 +22296,16 @@ class TortoiseSDK:
         try:
             rows = self._get_proj().g.query(
                 "MATCH (n:Point) WHERE n.ep_dirty = true "
+                # #9275: an id-LESS dirty :Point is excluded at the source —
+                # `_dirty_roots` is a set of ids the rest of the lifecycle
+                # MATCHes on, so a NULL id would hydrate as `None` and rejoin
+                # every downstream ordering (`dream_window`'s dirty-root sort,
+                # `_unsweepable_dirty_roots`) as a second id TYPE. It is also
+                # unreachable by construction: no pass can affect it (it can
+                # identify no factor participant) and no sweep can clear its
+                # flag, so mirroring it would only pin the mirror. Same
+                # posture as `analyze.py`'s keyless-legacy-node handling.
+                "AND n.id IS NOT NULL "
                 "AND NOT coalesce(n.status, 'live') IN $terminal "
                 "AND coalesce(n.outdated, false) = false "
                 "RETURN n.id",
@@ -22005,7 +22490,12 @@ class TortoiseSDK:
         if not candidates:
             return set()
         proj = self._get_proj()
-        ids = sorted(candidates)
+        # #9275: `key=str` — these are ids the engine returned and the caller's
+        # graph may carry a non-string one (`set_point_baseline(42, …)` is a
+        # supported, measured shape), so a bare `sorted()` is the same
+        # mixed-type ordering crash the affected-claim path no longer has. The
+        # order is only for a deterministic `$ids` batch.
+        ids = sorted(candidates, key=str)
         # The classification is :Point-only, exactly like the rest of the dirty
         # lifecycle (`_mark_dirty`'s persist, `_hydrate_dirty_roots`,
         # `_prune_nonexistent_dirty_roots` all anchor `MATCH (n:Point)`).
@@ -24988,9 +25478,13 @@ class TortoiseSDK:
         disagree (measured) — so it can never consume the
         ``limit=1`` probe's budget. It is excluded because no caller can name it
         to ``set_point_baseline`` and the run cannot survive it anyway: EP keys
-        claims on ``id``, so an id-less ``:Point`` wired as an operator claim
-        DIES the run with a ``TypeError`` during ordering — nothing is ever
-        stamped on it (#9275). Sorted (``key=str``, so a numeric id cannot raise
+        claims on ``id``, so an id-less claim wired to an operator makes the pass
+        REFUSE with ``UnaddressableClaimError`` before the refusing pass stamps
+        anything (#9275 — fixed there; it used to die in the ordering with a bare
+        ``TypeError``; a multi-batch ``dream_window``/``dream_all`` pass may have
+        committed an earlier batch) — nothing is ever stamped on such a node.
+        Sorted
+        (``key=str``, so a numeric id cannot raise
         on a mixed list) for a deterministic message.
         """
         if ids is not None and not ids:
@@ -25020,12 +25514,17 @@ class TortoiseSDK:
             f"AND {_live_only('n.status')} "
             "AND (n.baseline_set IS NULL OR n.baseline_set <> true "
             "     OR n.ep_alpha IS NULL OR n.ep_beta IS NULL) "
-            # A hand-written / imported graph can hold an id-less :Point (no
-            # repo writer mints one). No caller can name it to
-            # ``set_point_baseline``, and an id-less participating claim crashes
-            # the run DURING ORDERING, after the batches have stamped the other
-            # nodes — so the run is not fail-closed, but nothing is ever stamped
-            # ON IT (no id to key) (#9275) — so it must never be reported — and
+            # A hand-written / imported graph can hold an id-less epistemic
+            # node (a :Point has no writer that mints one; an :Event has a
+            # LEGITIMATE id-less identity — ``session_indexer`` mints
+            # ``(:Event {eventId})``). No caller can name one to
+            # ``set_point_baseline``, and an id-less participating claim makes EP
+            # REFUSE the run before the refusing pass computes or stamps anything
+            # (``UnaddressableClaimError``, #9275 — it used to crash in the
+            # ordering AFTER the batches had stamped the other nodes), so
+            # no POSTERIOR is ever stamped on it — a graph-wide trivial stamp
+            # (``dream_all``) still writes its ``lastDreamedAt``, the residual
+            # #9275 records — so it must never be reported — and
             # the filter belongs HERE, in the WHERE clause, not only in the
             # Python post-pass: ``limit=1`` is applied by the engine BEFORE the
             # post-pass, so a single id-less row would consume the existence
@@ -31644,7 +32143,12 @@ class TortoiseSDK:
 
     @staticmethod
     def _validate_kind(kind: str) -> None:
-        # ponytail: open-ended kind vocabularies — any string accepted.
+        # ponytail: open-ended kind vocabularies — any VISIBLE identifier-shaped
+        # string accepted. (#9287 narrowed this from "any string": a kind
+        # carrying surrounding whitespace or an invisible format mark is refused
+        # at the door by `_refuse_invisible_kind` before this runs — it is not a
+        # spelling to register, it is a different kind the calibration gate
+        # cannot classify.)
         # Warning for unrecognized values; domain_loader.register_kind() can suppress.
         # #951: vocabulary source is the domain_loader adapter — the compiled
         # pack pointKind bucket (pack_registry canonical, plan §5.2 boundary 4).
@@ -31805,6 +32309,21 @@ class TortoiseSDK:
             approved = _installed_namespaces_for_gate(self)
         refuse_unapproved_kinds_in_payload(record, approved, spells=spells)
 
+    def _refuse_invisible_point_kinds(self, props: dict, *, door: str) -> None:
+        """#9287: refuse a padded/invisible ``pointKind`` riding the props path.
+
+        Both mutating Point doors forward a free-form ``props`` dict, and the
+        mined key set is what they are screened with (`_refuse_unapproved_kinds_in_props`'s
+        reason, one rule over): the canonical ``pointKind`` AND its snake
+        spelling — measured at HEAD, an update through either reached the node
+        (`update_point(id, pointKind='\u2003observation\u2003')` stored it).
+        """
+        from .pack_state import _KIND_PROP_SPELLINGS as _kind_spellings
+        for spelling, kind_prop in _kind_spellings.items():
+            if kind_prop == "pointKind" and spelling in props:
+                _refuse_invisible_kind("pointKind", props.get(spelling),
+                                       door=door)
+
     def _refuse_unapproved_kinds_in_props(self, props: dict) -> None:
         """Run the #5475 gate over EVERY kind property a write is carrying.
 
@@ -31905,6 +32424,15 @@ class TortoiseSDK:
         # closes open under another name; and it runs BEFORE any write, so a
         # refusal leaves the graph untouched.
         self._refuse_unapproved_kinds_in_props(props)
+        # ⛔ #9287: NOT gated here, deliberately (#9591 review cycle 3). This
+        # funnel only ever creates Subject/Object/Event/Document/Source —
+        # ``create_entity("Point", …)`` raises `unknown type`
+        # (``_ENTITY_ITEM_LABELS``) — so a ``pointKind`` riding it is a stray
+        # property on a label the calibration gate never reads
+        # (``_CALIBRATION_GATED_LABELS = ("Point",)``), and refusing it failed an
+        # unrelated write (measured: ``create_object(..., props={'point_kind':
+        # padded})``) over a name this gate has no business with. The Point doors
+        # are where it belongs.
         # #329: id + sourcePath/source_path are server-managed — reject.
         # is_episodic is ALSO server-managed (#1486, quota discriminator) —
         # NEVER popped here: the sanitizer's unconditional reject is the
@@ -32517,6 +33045,21 @@ class TortoiseSDK:
         # ``['dev','marketing']``. Same rule, same funnel, same refusal as the
         # create doors because it is the SAME helper.
         self._refuse_unapproved_kinds_in_props(props)
+        # #9287: ``update_entity`` is the SECOND documented UPDATE door onto a
+        # ``:Point`` (``commit_schema`` lists the pair: ``update_point`` /
+        # ``_update_entity``) and it writes caller props with a live
+        # ``SET n += $p`` — measured at #9591's head: ``update_entity(p["id"],
+        # pointKind='\u2003statement\u2003')`` stored the padded kind and a
+        # ``require_calibration=True`` run stamped the node. The refusal runs
+        # in the ``Point`` branch of the per-label loop below (#9591 review
+        # cycle 5), NOT here: this method is the documented tenant route onto
+        # EVERY label, and an unconditional refusal here failed an unrelated
+        # write on a label the calibration gate never reads — measured:
+        # ``update_entity(object_id, point_kind='statement\u200b')`` raised
+        # while ``create_object(..., props={'point_kind': padded})`` is allowed
+        # (`_create_entity` carries the sibling exemption for the same reason).
+        # The branch below is reached exactly when the node IS a ``:Point``, so
+        # the gate stays closed on the door that matters and inert elsewhere.
         # #3998 (D30): the generic entity surface reaches `:Source` TOO, and its
         # per-label branch below writes caller props with a live `SET n += $p`.
         # Without this the closed :Source surface declared in
@@ -32691,6 +33234,51 @@ class TortoiseSDK:
                 raise ValueError(
                     "'eventId' is server-managed (Event identity) and cannot "
                     "be set via props.")
+        # #9287 (#9591 review cycle 7, P2 — ATOMICITY): the refusal must run
+        # BEFORE this method's FIRST write. The Point `status` arm below commits
+        # `SET n += $s` AND journals `restatus`; placed after it, a refused
+        # `update_entity(pid, status='live', point_kind=<padded>)` told the
+        # caller the call failed while the status change had already landed and
+        # been journaled — a partial commit on a refused call, and the only
+        # gate on this door that was not atomic (every other one, and
+        # `update_point`'s twin of this rule, raise before their write).
+        #
+        # #9287 (review cycle 5): a `point_kind` spelling that actually carries
+        # an invisible character, on THIS call's props — computed once so the
+        # cost is paid only by an offending write, never by every
+        # `update_entity` (the gate reads the props, the probe below reads the
+        # node).
+        from .pack_state import _KIND_PROP_SPELLINGS as _kind_spellings
+        # `isinstance(str)` FIRST (#9591 review cycle 6, P1): `_kind_invisible_char`
+        # requires a string and `unicodedata.normalize` raises TypeError
+        # otherwise, so an unguarded call made `update_entity(id,
+        # point_kind=None)` — the documented property-REMOVAL write, and an
+        # int/None kind is accepted by the doors themselves (they return early
+        # for non-str, `_refuse_invisible_kind`) — raise a raw TypeError from a
+        # gate that has nothing to say about it, on EVERY label.
+        _padded_point_kind = any(
+            isinstance(props.get(_spelling), str)
+            and _kind_invisible_char(props.get(_spelling)) is not None
+            for _spelling, _kind_prop in _kind_spellings.items()
+            if _kind_prop == "pointKind" and _spelling in props)
+        if _padded_point_kind:
+            # ⛔ LABEL-AGNOSTIC, and before the per-label loop (review cycle 6,
+            # P2). Probing inside the `Point` arm left a hole: a node carrying
+            # BOTH `:Point` and another canonical label, addressed by the OTHER
+            # label's key (e.g. `(:Point:Source {url: …})` with no `id`), missed
+            # the Point arm's `{id: $id}` probe and was written by the Source
+            # arm — with the padded kind, on a node the calibration gate scans
+            # by `:Point`. One probe over every key this surface can address a
+            # Point by covers both arms, and it runs ONLY when the props
+            # actually carry an invisible kind, so no ordinary update pays for
+            # it.
+            _pt_hits = proj.g.query(
+                "MATCH (n:Point) WHERE n.id = $id OR n.eventId = $id "
+                "OR n.url = $id RETURN count(n)",
+                params={"id": id_val}).result_set
+            if _pt_hits and _pt_hits[0][0]:
+                self._refuse_invisible_point_kinds(
+                    props, door="update_entity")
         # NOTE (issue #327): like _get_entity, entity mutation covers only the
         # canonical labels (Point/Subject/Object/Document/Source/Event).
         # Session/APIKey/Org/Tag nodes are intentionally NOT updated — legacy
@@ -32843,6 +33431,19 @@ class TortoiseSDK:
             # and #327 index plan), the secondary only on a miss.
             id_keys = (prop, *secondary_entity_id_props(label))
             if label == "Point":
+                # #9287: this IS the ``:Point`` update door (``commit_schema``
+                # lists the pair ``update_point`` / ``_update_entity``), and it
+                # writes caller props with a live ``SET n += $p``. The refusal
+                # itself is fired in the match loop below, where a hit proves
+                # the node IS a Point: an unconditional refusal here (or at the
+                # top of this method) failed an unrelated write, because this
+                # surface reaches EVERY label — measured:
+                # ``update_entity(object_id, point_kind='statement\u200b')``
+                # raised while ``create_object(..., props={'point_kind':
+                # padded})`` is allowed by ``_create_entity``'s sibling
+                # exemption, and no calibration gate reads a non-Point label's
+                # ``pointKind`` (``_CALIBRATION_GATED_LABELS == ("Point",)``).
+                # The door that matters stays closed; the others stay inert.
                 # #5004 round-10: mirror `update_point`'s CALLER-VECTOR
                 # discipline on this generic surface too. `_sanitize_props`
                 # deliberately ACCEPTS a caller `embedding` (the recorded
@@ -36330,6 +36931,17 @@ class TortoiseSDK:
                 "'_stub_completion' is a server-managed capture-completion "
                 "discriminator and cannot be set via props — it is set only "
                 "by the session-capture writer (#5097)."
+            )
+        # #9451: its sibling on the same record — `True` declares the record's
+        # `ingestedAt` to be the instant the write STORED, which the fold's ON
+        # MATCH arm then applies. Same class: a forged key moves a `:Source`'s
+        # `ingestedAt` on every replay. Same hard-reject; the ONE producer is
+        # the session-capture writer's own `_emit_event` call.
+        if "_ingestedAtStored" in props:
+            raise ValueError(
+                "'_ingestedAtStored' is a server-managed journal discriminator "
+                "and cannot be set via props — it is set only by the "
+                "session-capture writer (#9451)."
             )
         # #3998 (D30): the LOUD half of the payload guard. The guarantee itself
         # is the CLOSED :Source property surface in `projection/entities.py`

@@ -297,8 +297,19 @@ class Dreamer:
                 # (the zero-affected retention path, #780).
                 if stamp_dreamed_at and trivial_stamp:
                     stamped = self._trivial_stamp(proj, anchors)
+                    # #9275: `key=str` — `_trivial_stamp` returns `n.id` from the
+                    # engine, and a hand-written numeric id is orderable only
+                    # against its own type. This early return precedes
+                    # `ep.run()` entirely, so no claim has been admitted by EP
+                    # here. What keeps `None` out of THIS set is the stamp's
+                    # `claim_ids` form — `WHERE n.id IN $ids` cannot match a
+                    # never-named id. The graph-wide form (`claim_ids=None`, used
+                    # only by `dream_all`) is NOT covered: it matches an id-less
+                    # isolated Point and stamps it (`scanned_count` counts it),
+                    # which is the recorded residual on #9275, not something this
+                    # early return can produce.
                     return {"iterations": 0, "converged": True,
-                            "affected_claims": sorted(stamped)}
+                            "affected_claims": sorted(stamped, key=str)}
                 return {"iterations": 0, "converged": True, "affected_claims": []}
             ep = self._sdk._get_ep()  # noqa: F841
             # #330: dream must honour the SDK's persistent evidence (baselines)
@@ -317,7 +328,16 @@ class Dreamer:
             return {
                 "iterations": iterations,
                 "converged": converged,
-                "affected_claims": sorted(affected),
+                # #9275: `key=str`. Every member of `affected` is an id the
+                # engine returned, and `_affected_claims` refuses an id-less one
+                # (an unaddressable claim — see `UnaddressableClaimError`). A
+                # PRESENT id that is not a string (a numeric id in a hand-written
+                # graph) is addressable and runs fine; only this ordering could
+                # not take it — measured: `TypeError: '<' not supported between
+                # instances of 'str' and 'int'`, after the pass had stamped. The
+                # same `key=str` the calibration gate uses for its own sorted
+                # message (sdk.py `_uncalibrated_ep_participants`).
+                "affected_claims": sorted(affected, key=str),
             }
 
     def _ep_run_batch(self, proj, seed_ids: list[str], max_hops: int,
@@ -518,8 +538,17 @@ class Dreamer:
             # chunking (BFS collection is order-independent — sets — but the
             # window slice is not).
             ranked_set = set(ranked)
+            # #9275: `key=str` — `_dirty_roots` is a set of ids the engine or
+            # the caller's graph handed us, and `_mark_dirty` mirrors whatever
+            # id the write path was given (`set_point_baseline(42, …)` is a
+            # supported, measured shape), so the set can hold more than one id
+            # TYPE. A bare `sorted()` over it is exactly the ordering crash
+            # #9275 removed from the affected-claim path — `TypeError: '<' not
+            # supported between instances of 'int' and 'str'` — and it fires
+            # HERE, on the stale-first path, before any EP work. Ordering is
+            # only for deterministic chunking; the ids' own order is irrelevant.
             window = list(ranked) + [
-                d for d in sorted(self._sdk._dirty_roots)
+                d for d in sorted(self._sdk._dirty_roots, key=str)
                 if d not in ranked_set
             ]
             # Epic 903-C6 (#1244): record the pre-pass window for the SDK
@@ -566,7 +595,17 @@ class Dreamer:
                     # the next pass (claims stay stale, re-enter ranking).
                     break
                 if len(new_ops) > remaining:
-                    new_ops = set(sorted(new_ops)[:remaining])
+                    # #9275: `key=str` — operator ids come from the engine too,
+                    # so a hand-written numeric id makes the truncation order
+                    # (nothing more) undefined under a bare sort. DEFENSIVE, and
+                    # UNPINNED BY DESIGN: with `op_cap=eff_budget` in the same
+                    # selection and `WINDOW_CLAIM_BATCH = 2000`, reaching this
+                    # arm needs > 2000 window claims AND a batch-2 selection
+                    # larger than the remaining budget, which no test builds
+                    # cheaply. It is kept because a bare sort here is the same
+                    # crash class for one keyword, and it is recorded as
+                    # unpinned rather than claimed as tested.
+                    new_ops = set(sorted(new_ops, key=str)[:remaining])
                 seed_ids = list(new_ops)
                 for (src, tgt, _t) in factor_anchors:
                     seed_ids.append(src)
@@ -602,7 +641,7 @@ class Dreamer:
                 "converged_all": converged_all,
                 "operators_deduped": len(seen_ops),
                 "budget_used": len(seen_ops),
-                "affected_claims": sorted(affected),
+                "affected_claims": sorted(affected, key=str),  # #9275: see dream()
             }
 
     def _trivial_stamp(self, proj, claim_ids: list[str] | None = None) -> set[str]:

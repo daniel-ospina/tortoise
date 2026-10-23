@@ -820,6 +820,34 @@ def test_checker_rejects_more_forming_operators_than_the_run_committed():
     assert "E4-FORMING" in _failures(_check(receipt))
 
 
+def test_a_duplicate_whose_rows_are_not_a_list_is_not_blamed_for_coverage():
+    """A wrongly-TYPED `planted_operators` earns one refusal, not two.
+
+    The artifact supplied the cross-check; it supplied one session's rows in a
+    shape the checker cannot read. Without `duplicate_shape_ok` the coverage
+    arm then appends "covers 0 of the 2 graded rows", which misdescribes the
+    defect as an omission — the receipt named every row, it just named them in
+    a non-list (#9618 r7).
+
+    This is the suppression site the `session_results`-is-not-a-list case does
+    NOT reach: that one is coerced to `[]` before the loop, so its coverage arm
+    is unreachable and only the absent/empty arm needs suppressing there (pinned
+    by `test_checker_names_a_non_list_session_results`). Here the duplicate IS a
+    list and IS non-empty, so `duplicate_shape_ok` is the only thing standing
+    between a shape error and a second, misleading refusal.
+    """
+    receipt = _receipt()
+    receipt["session_results"] = [{"session_id": "wp01_quarry_debug",
+                                  "planted_operators": 5}]
+    result = _check(receipt)
+    assert result["ok"] is False
+    numerator = [r for r in result["rules"]
+                 if not r["ok"] and r["rule"] == "E4-NUMERATOR"]
+    assert len(numerator) == 1, [r["detail"] for r in numerator]
+    assert "expected a list" in numerator[0]["detail"]
+    assert "graded rows" not in numerator[0]["detail"]
+
+
 @pytest.mark.parametrize("field,value", [
     ("session_results", 5),
     ("session_results", {"s": 1}),
@@ -847,6 +875,19 @@ def test_checker_names_a_non_list_planted_operators(value):
     assert "E4-NUMERATOR" in _failures(_check(receipt))
 
 
+def test_a_duplicate_entry_that_is_not_an_object_is_refused_once():
+    """The `:543` suppression site: an entry that is not an object is refused by
+    its own rule and must NOT also be blamed for covering no rows — the receipt
+    did supply the duplicate, just in an unreadable shape (#9674 round 10)."""
+    receipt = _receipt()
+    receipt["session_results"] = [5]
+    result = _check(receipt)
+    numerator = [r for r in result["rules"]
+                 if not r["ok"] and r["rule"] == "E4-NUMERATOR"]
+    assert len(numerator) == 1, [r["detail"] for r in numerator]
+    assert "not an object" in numerator[0]["detail"]
+
+
 @pytest.mark.parametrize("bad_id", [5, None, ["a"], {"a": 1}])
 def test_checker_names_a_non_string_duplicate_edge_id(bad_id):
     """`results.get(<unhashable>)` raises `TypeError: unhashable type` — the
@@ -857,7 +898,15 @@ def test_checker_names_a_non_string_duplicate_edge_id(bad_id):
         "planted_operators": [{"id": bad_id, "verdict": "edge_correct",
                                "edge_correct": True, "expected_kind": "SUPPORTS"}],
     }]
-    assert "E4-NUMERATOR" in _failures(_check(receipt))
+    result = _check(receipt)
+    assert "E4-NUMERATOR" in _failures(result)
+    # …exactly ONCE. This entry also breaks the coverage arm's view of the
+    # duplicate, so without the `:570` suppression site the receipt is told
+    # both "id 5 is not a string" AND "covers 0 of the 2 graded rows" — the
+    # second misdescribing a shape error as an omission (#9674 round 10).
+    numerator = [r for r in result["rules"]
+                 if not r["ok"] and r["rule"] == "E4-NUMERATOR"]
+    assert len(numerator) == 1, [r["detail"] for r in numerator]
 
 
 def test_checker_names_a_non_string_operator_id_without_crashing():
@@ -927,6 +976,10 @@ def _malformed(mutate):
     ("endpoint ref not a dict",
      lambda r: r["operator_audit"]["results"]["wp01_quarry_debug_op_01"]
      ["endpoints"]["from"].__setitem__(0, 5), "E4-REFS"),
+    # `[5]` is the `:543` suppression site: a non-object ENTRY must be refused
+    # once, not also as "covers 0 of the graded rows" (#9674 round 10). The
+    # exactly-once half is asserted in
+    # `test_a_duplicate_entry_that_is_not_an_object_is_refused_once`.
     ("session_results entry not a dict",
      lambda r: r.__setitem__("session_results", [5]), "E4-NUMERATOR"),
     # `results` itself, and a non-LIST `endpoints.from` — the parametrisation
@@ -936,9 +989,50 @@ def _malformed(mutate):
     # which is the contract break this test exists for (#9618 review).
     ("results not a dict",
      lambda r: r["operator_audit"].__setitem__("results", 5), "E4-SHAPE"),
+    # `results` EMPTY, not merely the wrong type: with no graded rows the
+    # coverage arms are skipped by their own `and results` gates, so this
+    # refusal is not joined by a "covers 0 of the N graded rows" coverage
+    # refusal (other rules DO fire on this row — `E4-DENOM` among them) — and
+    # the `or not results` half is what makes the refusal
+    # (`{}` is a dict, so the isinstance half alone passes) (#9618 round 8).
+    ("results empty",
+     lambda r: (r["operator_audit"].__setitem__("results", {}),
+                r["operator_audit"].__setitem__("edge_correct", 0),
+                r["operator_audit"].__setitem__("content_ok", 0),
+                r["session_results"][0].__setitem__("planted_operators", [])),
+     "E4-SHAPE"),
     ("endpoints.from not a list",
      lambda r: r["operator_audit"]["results"]["wp01_quarry_debug_op_01"]
      ["endpoints"].__setitem__("from", 5), "E4-REFS"),
+    # The E4-FORMING pair: a DICT satisfies "truthy" and "iterable", so a
+    # checker that only asks for a non-empty value certifies it. `forms_found`
+    # as `{"IMPL": 1}` and `edge_op_ids` as `{<valid id>: 1}` (its KEYS pass
+    # `_OP_ID_RE`) both shipped `ok=True` with the list-ness guard neutralised
+    # (#9618 review round 7).
+    ("forms_found not a list",
+     lambda r: r["operator_audit"]["results"]["wp01_quarry_debug_op_01"]
+     .__setitem__("forms_found", {"IMPL": 1}), "E4-FORMING"),
+    ("edge_op_ids not a list",
+     lambda r: r["operator_audit"]["results"]["wp01_quarry_debug_op_01"]
+     .__setitem__("edge_op_ids", {_op_id("forms"): 1}), "E4-FORMING"),
+    # …and the ELEMENT shape, which the list-ness half does not cover: a
+    # one-element list is truthy, so only `_non_empty_str` refuses these
+    # (#9618 round 8).
+    ("forms_found element blank",
+     lambda r: r["operator_audit"]["results"]["wp01_quarry_debug_op_01"]
+     .__setitem__("forms_found", [""]), "E4-FORMING"),
+    ("forms_found element not a string",
+     lambda r: r["operator_audit"]["results"]["wp01_quarry_debug_op_01"]
+     .__setitem__("forms_found", [5]), "E4-FORMING"),
+    # `operators_total` is the same bool/`int` pair this PR pinned for
+    # `planted`: `True == True` clears E4-PERSIST, and `"7"` reaches the `>`
+    # comparison and raises TypeError with no rule named.
+    ("operators_total is a bool",
+     lambda r: r["operator_audit"].update(
+         {"operators_total": True, "operators_provenanced": True}), "E4-PERSIST"),
+    ("operators_total is a string",
+     lambda r: r["operator_audit"].__setitem__("operators_total", "7"),
+     "E4-PERSIST"),
 ])
 def test_a_malformed_shape_is_named_never_a_traceback(label, mutate, rule):
     """`2` is reserved for an unreadable FILE; `1` must NAME the failing rule.
@@ -969,6 +1063,24 @@ def test_checker_rejects_a_duplicate_that_contradicts_its_graded_row():
                if not r["ok"]), _failures(result)
 
 
+@pytest.mark.parametrize("side", ["pre_ref", "post_ref"])
+def test_checker_refuses_a_half_blank_endpoint_ref(side):
+    """ONE blank ref is enough, and each side is pinned on its own.
+
+    The both-blank case below pins the conjunction, not either half — so
+    neutralising just `_non_empty_str(pre)` (or just `post`) left the suite
+    green while certifying a half-blank #4716 proof. Here the surviving side
+    keeps `remapped` consistent with it, so the non-empty arm is the only thing
+    that can refuse (#9618 round 8).
+    """
+    receipt = _receipt()
+    ref = receipt["operator_audit"]["results"]["wp01_quarry_debug_op_01"]
+    ref = ref["endpoints"]["from"][0]
+    ref[side] = ""
+    ref["remapped"] = True           # consistent: one side is still a payload id
+    assert "E4-REFS" in _failures(_check(receipt))
+
+
 def test_checker_refuses_a_receipt_whose_endpoint_refs_are_blank():
     """A blank endpoint ref is not ref evidence.
 
@@ -993,6 +1105,13 @@ def test_checker_refuses_a_duplicate_entry_that_is_not_an_object():
     assert "E4-NUMERATOR" in _failures(result)
     assert any("entry is not an object" in r["detail"] for r in result["rules"]
                if not r["ok"]), _failures(result)
+    # …exactly ONCE. Without `duplicate_shape_ok` the coverage arm appends a
+    # second, misleading refusal about "covering 0 of the 2 graded rows" to a
+    # receipt whose real defect is a malformed entry — the artifact did supply
+    # the duplicate, it just supplied a broken one (#9618 round 7).
+    numerator = [r for r in result["rules"]
+                 if not r["ok"] and r["rule"] == "E4-NUMERATOR"]
+    assert len(numerator) == 1, [r["detail"] for r in numerator]
 
 
 def test_checker_refuses_a_duplicate_naming_an_edge_the_rows_do_not_carry():

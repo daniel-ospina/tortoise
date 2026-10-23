@@ -14,6 +14,7 @@ import random
 import re
 import time
 
+from .exceptions import UnaddressableClaimError
 from .projection import _declares_apply_first_write_lane
 from .quadrature import tilted_moments, moments_to_beta, phi_nand, phi_impl
 from .live import (
@@ -998,15 +999,7 @@ class TortoiseEP:
         if not (fwd or bwd):
             # `-`: the connection exists and NO confidence transfers.
             return
-        if op_type == "IMPL":
-            pairs = [(input_ids[0], input_ids[j]) for j in range(1, n)]
-        elif op_type == "NAND" and not mutual:
-            # Directed NAND: the source (and, for `<-`, the receiving end)
-            # pairs with each target only; targets do not attack each other.
-            pairs = [(input_ids[0], input_ids[j]) for j in range(1, n)]
-        else:
-            pairs = [(input_ids[i], input_ids[j])
-                     for i in range(n) for j in range(i + 1, n)]
+        pairs = self._factor_pairs(op_type, input_ids, mutual)
         if not pairs:
             return
 
@@ -1458,6 +1451,51 @@ class TortoiseEP:
                 frontier = new_frontier
                 if not frontier:
                     break
+        # #9275: an id-less claim is UNNAMEABLE, so it is not a claim this run
+        # can compute. The admission points above collect `c.id`/`b.id`/`m.id`
+        # verbatim from the engine, and a `:Point` written outside the SDK (no
+        # writer mints one — every id-binding write path refuses a missing id on
+        # its own post-write check) can carry none, so the engine returns a row
+        # whose id is NULL and `None` lands in this set. ONE admission arm is
+        # reachable: the operator-SEED query (`RETURN DISTINCT c.id`, no id
+        # predicate at all). Every other arm compares ids — the operator-bridge
+        # hop `m.id <> n.id`, the direct-edge hop and `_live_neighbors_many`
+        # `b.id <> a.id` / `m.id <> n.id` — and in Cypher those predicates are
+        # NULL, not TRUE, for an id-less endpoint, so the row never arrives.
+        # Pinned by `tests/test_6211_ep_anchor.py`, whose fixture keeps an
+        # id-less direct-edge endpoint alive in `_affected_factors`.
+        #
+        # THAT SAME ASYMMETRY is why the node must ALSO be refused at factor
+        # assembly (`run()`, below): the hops NULL-drop it, so an operator the
+        # selector does NOT seed — a legacy `op_type`-only operator (the selector
+        # matches `is_operator = true` only), or one outside the selector's hops —
+        # never puts the node in `affected`, yet `_affected_factors` Batch 2
+        # collects that operator's inputs verbatim and `_update_factor` then
+        # computes a NAMED claim against a phantom `Beta(1, 1)` input.
+        #
+        # WHY REFUSE HERE rather than order around it. `affected` is not a
+        # report: every member is loaded into the node cache, run through its
+        # factors, and written back by `WHERE id = $id`. A member that names no
+        # node can therefore be neither hydrated nor stamped, and no SDK caller
+        # can repair it (`set_point_baseline(None)` names nothing — the #9063
+        # gate excludes it for exactly that reason, and that exclusion stays
+        # sound only while the run REFUSES such a node rather than admitting it).
+        # MEASURED before this guard (origin/main 02e18e752): the `None` rode the
+        # set to `dream.py`'s `sorted(affected)` and the pass died with
+        # `TypeError: '<' not supported between instances of 'str' and
+        # 'NoneType'` AFTER flushing the named claims' posteriors (3.246/1.103 and
+        # 3.202/1.040 written, the id-less node left null). A crash that has
+        # already written half a pass is not fail-closed, and the caller could
+        # not diagnose it — the traceback names a sort, not the graph. So the one
+        # place every affected claim is collected refuses, before `_load_cache`
+        # and before the run's FIRST write: its caller in `run()` collects this
+        # set ahead of the #2884 evidence pre-write — which persists a
+        # caller-supplied prior and clears a non-baseline claim's posterior — so
+        # that pre-write cannot commit ahead of the refusal (measured before
+        # that ordering: a baseline-free claim went `[None, None, None, None]`
+        # → `[7.0, 2.0, None, None]` across the raise).
+        if None in affected:
+            raise self._unaddressable_claim_error("its affected set")
         # Final strip: FAIL-SAFE only — every admission point into `affected`
         # already excludes drafts (seed predicates, _live_neighbors, direct-edge
         # filters); the strip guards the nuclear-risk invariant against future
@@ -1465,6 +1503,105 @@ class TortoiseEP:
         if not include_draft and affected:
             affected -= self._filter_draft_ids(affected)
         return affected
+
+    def _unaddressable_claim_error(self, where: str) -> UnaddressableClaimError:
+        """The ONE #9275 refusal message, shared by both collection points.
+
+        Two places can see an id-less claim before any posterior is computed —
+        the affected set (operator-seeded admission) and the assembled factor
+        inputs (Batch 2/3 collect ids verbatim) — and they must not drift into
+        telling a caller two different things about the same graph.
+        """
+        return UnaddressableClaimError(
+            f"EP cannot run: a claim id in {where} is NULL — a "
+            ":Point wired as an operator's claim carries no `id`. Such a node "
+            "cannot be addressed by EP (every claim is keyed on `id` for "
+            "hydration, for message caching and for the posterior write-back), "
+            "so it can be neither computed nor stamped, and no SDK caller can "
+            "repair it. An id-less claim in the run's AFFECTED SET is refused "
+            "even when it only receives and cannot influence a named claim, "
+            "because the run answers for every claim it collects; a NULL factor "
+            "INPUT is refused only when it occupies a SENDING slot. Refused "
+            "before the refusing pass computes or stamps any posterior (#9275) — note that a MULTI-BATCH pass "
+            "(``dream_window``/``dream_all``) writes per batch, and the fail-safe "
+            "dream inside no-arg ``compute_confidence`` runs BEFORE its exact "
+            "run, so an EARLIER batch may already have committed. The offender "
+            "is not necessarily a :Point: EP admits all four epistemic labels "
+            "(:Point, :Subject, :Object, :Event), and it may be a DIRECT EDGE's "
+            "endpoint rather than an operator's claim. Find and repair the "
+            "node(s) — ONE NEW id per node, because a single literal would mint "
+            "the duplicate-id #7822 / #8879 cross-key shapes; a node that "
+            "already carries a second identity key (the ``session_indexer`` "
+            "producer mints ``(:Event {eventId})`` with no ``id``; "
+            "``_upsert_event`` sets both) needs a DISTINCT id, never a copy of "
+            "that key:\n"
+            "  MATCH (n) WHERE (n:Point OR n:Subject OR n:Object OR n:Event) "
+            "AND n.id IS NULL "
+            "RETURN labels(n), id(n), n.pointKind, "
+            "left(coalesce(n.content, ''), 80)\n"
+            "  -- then give each row its own NEW id, or DETACH DELETE it"
+        )
+
+    @staticmethod
+    def _factor_pairs(op_type: str, input_ids: list, mutual: bool) -> list[tuple]:
+        """The (source, target) pairs an n-ary factor decomposes into.
+
+        ONE definition, read by BOTH `_update_nary_factor` (which computes them)
+        and `_null_input_sends` (which must ask whether a NULL sits on either
+        end's sending slot) — a guard that re-derived this would drift from what
+        it guards (#9275).
+        """
+        n = len(input_ids)
+        if op_type == "IMPL" or (op_type == "NAND" and not mutual):
+            # IMPL is a star: `input_ids[0]` is the source. Directed NAND too:
+            # targets do not attack each other (#795).
+            return [(input_ids[0], input_ids[j]) for j in range(1, n)]
+        return [(input_ids[i], input_ids[j])
+                for i in range(n) for j in range(i + 1, n)]
+
+    @staticmethod
+    def _null_input_sends(factor: tuple) -> bool:
+        """#9275: can this factor deliver a message FROM a NULL input?
+
+        Mirrors `_update_factor`'s flow handling: it returns before writing when
+        `direction_flows` is (False, False), and for a TWO-input factor `fwd`
+        writes source→target while `bwd` writes target→source — so only a NULL on
+        an enabled SENDING end can move a named claim. A receive-only NULL is
+        exempt (measured: it leaves every named posterior identical to the `-`
+        case). THIS FUNCTION DECIDES THE FACTOR-INPUT ARM ONLY. The AFFECTED-SET
+        arm (`_affected_claims`) is unconditional BY DESIGN and is NOT a false
+        refusal of the same kind: a claim inside the run's SCOPE is hydrated,
+        run through its factors and written back by id, so an id-less member
+        cannot be answered for even when it cannot influence anyone — `main`
+        leaves it naively unstamped and returns a run that silently omits a
+        claim it collected (measured: named posteriors flushed, the id-less node
+        left null). Refusing is the fail-closed answer; influencing a NAMED claim
+        is what the factor arm must be precise about. The n-ary arm applies the
+        SAME per-endpoint question to the pairs
+        `_update_nary_factor` decomposes the factor into (`_factor_pairs`, one
+        shared definition): an IMPL or directed-NAND STAR sends `input_ids[0]`
+        under `fwd` and each target under `bwd`, while a mutual NAND is a CLIQUE
+        in which every member sends. Two earlier arms were false refusals and are
+        recorded here as the falsifiers: refusing every 3+-input operator (no
+        NULL at all, round 7) and refusing a star `->` whose NULL only receives
+        (round 8).
+        """
+        _op_id, _op_type, input_ids, _weight, _label, direction = factor
+        if len(input_ids) < 2:
+            return False          # `_update_factor` no-ops below two inputs
+        fwd, bwd = direction_flows(direction)
+        if not (fwd or bwd):
+            return False          # `-`: no confidence transfers at all
+        if len(input_ids) > 2:
+            # n-ary: ask per PAIR, exactly as `_update_nary_factor` decomposes
+            # the star/clique — `fwd` sends the pair's source, `bwd` its target.
+            # A star's `->` therefore exempts a NULL at idx >= 1 (it only
+            # RECEIVES), while `<-` refuses it (it sends into the source).
+            return any((fwd and _a is None) or (bwd and _b is None)
+                       for _a, _b in TortoiseEP._factor_pairs(
+                           _op_type, input_ids, fwd and bwd))
+        id_a, id_b = input_ids
+        return (fwd and id_a is None) or (bwd and id_b is None)
 
     def _graph_claim_count(self) -> int:
         """Claim count in the graph (degeneration-guard sizing, #395).
@@ -2286,6 +2423,68 @@ class TortoiseEP:
             if hasattr(self, _attr):
                 delattr(self, _attr)
 
+        # #9275: COLLECT THE AFFECTED SET BEFORE ANY WRITE. This call can refuse
+        # the run (`UnaddressableClaimError` — an affected node with no `id`),
+        # and a refusal must not leave the evidence pre-write below committed:
+        # the pre-write SETs `ep_alpha`/`ep_beta` and (for a non-baseline claim)
+        # NULLs `posterior_alpha`/`posterior_beta`, plus their journal records —
+        # so with the collection AFTER it, `evidence=` (a public parameter of
+        # `run` and of `compute_confidence`) turned "refused, nothing written"
+        # into a committed half-write. Nothing in the collection depends on the
+        # pre-write (the BFS reads edges, labels and status; the priors are not
+        # an input to it), and evidence still applies when there is no affected
+        # claim — the pre-write stays ahead of every early return below.
+        affected = self._affected_claims(operator_ids, max_hops,
+                                         include_draft=include_draft)
+
+        # #9275: ASSEMBLE + GUARD THE FACTORS AHEAD OF THE SAME WRITE. The
+        # factor list is the SECOND collection point that can see an id-less
+        # claim (Batch 2 collects an operator's inputs verbatim, and the hop
+        # admissions NULL-drop such a node, so an operator the selector does not
+        # seed still consumes it — see `_affected_claims`' note), and a refusal
+        # there must not commit the evidence pre-write below for the same reason
+        # the affected set is collected first: `evidence=` is a public parameter,
+        # so a refusal that persisted a prior and NULLed a posterior would tell
+        # the caller "nothing was written" after writing. Nothing here reads the
+        # priors (Batch 1/2/3 read labels, edges, status and `id`), and the
+        # pre-write still precedes every early return below, so caller evidence
+        # still applies to a run with no affected claim or no factors.
+        factors = self._affected_factors(
+            affected, include_draft=include_draft,
+            skipped=self._last_skipped_factors)
+        # The `f[2]` arm is the one that can corrupt a NAMED claim's posterior:
+        # an input that names no node is read as `Beta(1, 1)` and votes. The
+        # operator-id arm is deliberately NOT here — an id-less OPERATOR yields a
+        # factor whose `input_ids` is empty (`WHERE o.id IN $ids` with a NULL
+        # operator matches nothing) and `_update_factor` no-ops below two
+        # inputs, so such a node cannot change any belief; refusing on it would
+        # turn a graph `main` computes (measured: iterations 9, converged, both
+        # posteriors stamped) into a refused one.
+        # GATED ON WHETHER THE NULL CAN SEND, not on "any flow". (Only a factor
+        # that HAS a NULL input can reach this: `_null_input_sends` returns False
+        # when there is none, including for an ordinary 3+-input operator.) This
+        # is the arm that must be precise: its offender need not be in the run's
+        # SCOPE (`_affected_claims`' hops NULL-drop it), so the question is only
+        # whether it INFLUENCES a named claim. The affected-set arm asks a
+        # different question and stays unconditional: a claim in scope is one the
+        # run must ANSWER FOR (hydrated, computed, written back by id). A factor only
+        # moves a NAMED claim when the NULL endpoint is a SENDER on an enabled
+        # direction (`_update_factor`'s `if fwd:` writes source→target, `if
+        # bwd:` target→source; a `-` factor returns before writing anything).
+        # So the receive-only shapes are exempt — `-` in full, and a
+        # one-directional factor whose NULL sits on the RECEIVING end — while a
+        # NULL that sends is refused. MEASURED (2-input direct edge, varying only
+        # the direction, named claim's posterior): bidirectional 1.04407021681169,
+        # `<-` 1.04407021681169 (the NULL target sends a back-message into the
+        # named source), `->` 1.0 and `-` 1.0 (indistinguishable — the named claim
+        # is never reached), yet a flat "any flow" gate refused `->` too.
+        if any(self._null_input_sends(f) for f in factors):
+            # No run set is published: `_last_affected` was reset at entry and is
+            # assigned only after this guard. (`_last_skipped_factors` keeps what
+            # the assembly just collected — those factors WERE dropped, so the
+            # diagnostic describes work that happened.)
+            raise self._unaddressable_claim_error("a factor's inputs")
+
         # Apply evidence priors to graph before EP iterations.
         # ponytail: direct graph write so evidence is visible even
         # when there are no operators / affected claims.
@@ -2384,8 +2583,6 @@ class TortoiseEP:
                     self._emit("ConfidenceChanged", id=_cid,
                                posterior_alpha=None, posterior_beta=None)
 
-        affected = self._affected_claims(operator_ids, max_hops,
-                                         include_draft=include_draft)
         # #395 (delta C): stash the run set BEFORE the early returns — the
         # write-back callers (sdk.compute_confidence, dream.py) consume
         # _last_affected so the write-back set == the run set by construction,
@@ -2402,9 +2599,8 @@ class TortoiseEP:
                 )
             return 0, True
 
-        factors = self._affected_factors(
-            affected, include_draft=include_draft,
-            skipped=self._last_skipped_factors)
+        # #9275: `factors` (and its id-less refusal) was assembled ABOVE, ahead
+        # of the evidence pre-write — do not recompute it here.
         if not factors:
             return 0, True
 
@@ -2429,7 +2625,13 @@ class TortoiseEP:
             random.shuffle(factors)
             for op_id, op_type, input_ids, weight, label, direction in factors:
                 if warm_snapshot is not None:
-                    key = (op_id, op_type, tuple(sorted(input_ids)))
+                    # #9275: `key=str` — a hand-written graph can carry an id
+                    # that is not a string (a numeric id is addressable and
+                    # legitimately runnable), and a mixed-type ordering would
+                    # raise here for the same reason it raised in
+                    # `sorted(affected)`.
+                    key = (op_id, op_type,
+                           tuple(sorted(input_ids, key=str)))
                     last = warm_snapshot.get(key)
                     if last is not None:
                         delta = 0.0

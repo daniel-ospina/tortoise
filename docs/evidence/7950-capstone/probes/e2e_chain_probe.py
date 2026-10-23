@@ -46,6 +46,8 @@ RECORD_MIGRATIONS = [
     # is allowed to drift becomes a live lie the moment it is re-lit (#8976 P3).
     # Pinned by `tests/test_7950_capstone_probe.py`.
     "20261018000001_record_point_money_value_2782.sql",
+    # #9264's forward migration, kept in step with the list that applies them.
+    "20261022000001_record_session_capture_redactions_integer.sql",
 ]
 DSN = os.environ.get(
     "CAPSTONE_PG_DSN", "postgresql://postgres:cap@127.0.0.1:15499/capstone")

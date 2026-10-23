@@ -7,6 +7,25 @@ class CalibrationError(Exception):
     pass
 
 
+class UnaddressableClaimError(ValueError):
+    """EP refused the run: a claim it selected carries no usable ``id`` (#9275).
+
+    EP keys every claim on ``id`` — the node cache, the message cache, and the
+    posterior write-back's ``WHERE id = $id`` — so a ``:Point`` with no ``id``
+    wired as an operator's claim has no address in the run. It can be neither
+    hydrated nor stamped, and no SDK caller can repair it: ``set_point_baseline``
+    needs the id to name the node, which is why the #9063 calibration gate
+    excludes such a node rather than demanding a prior it could never satisfy.
+
+    The run refuses BEFORE it stamps any posterior and says which repair the
+    graph needs. It used to do the whole EP pass, flush the posteriors of every
+    NAMED claim, and only then die in ``sorted(affected_claims)`` with a bare
+    ``TypeError`` — so the caller saw a sort error while half the pass had
+    already been written, and a retry stamped the same claims a second time.
+    """
+    pass
+
+
 class ControlPlaneError(ValueError):
     """Registry operation failed — duplicate, not found, invalid role, etc."""
     pass

@@ -64,11 +64,15 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 from tests.test_record_schema_placement import parse_placement
 from tortoise import record_projection as rp
@@ -387,6 +391,204 @@ def test_identity_row_precedes_its_node_row():
     kinds = ["identity" if "public.node_identity" in s.sql else
              "point" if "public.point" in s.sql else "journal" for s in plan]
     assert kinds == ["identity", "point", "journal"]
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 2b. The capture's ENVELOPE edge — `contains_session` → a `relation` row
+#     (#9553 R5 class 2)
+# ════════════════════════════════════════════════════════════════════════════
+#
+# The turn loop's `PointAdded` carries the container id on the ENVELOPE (never
+# in the point payload — a caller-supplied property of that name would forge a
+# link on replay). `_RECORD_ONLY_KEYS` dropped it, correctly, and dropped the
+# EDGE with it, so a record-sourced rebuild restored the turn Points with no
+# `(:Session)-[:CONTAINS]->(:Point)` above them while a journal rebuild restored
+# the link. These legs pin the three things that make the fix correct and none
+# of which a row count can see: WHICH records may carry it, the ORDER, and that
+# the cache projection can materialise the row it produces.
+
+_TURN_RECORD = {
+    "type": "PointAdded",
+    "ts": "2026-10-12T00:00:00Z",
+    "point": dict(_SNAPSHOT, pointKind="event", is_episodic=True),
+    "contains_session": "sess1",
+}
+
+
+def _relation_statements(record: dict[str, Any]) -> list[rp.Statement]:
+    return [s for s in rp.mutations_for(record, org_id="org-a", graph_id="g1")
+            if s.sql.startswith("INSERT INTO public.relation")]
+
+
+def test_a_capture_turn_lands_its_CONTAINS_relation_after_the_point_identity():
+    """The edge lands, and it lands LAST — its endpoints are FK children.
+
+    Ordering is the whole fix: `relation.src_key`/`tgt_key` are composite FKs
+    into `node_identity`, so a relation insert that ran before the Point's own
+    identity row would raise an FK violation — which lands on
+    `record_write_failures`, invisible without #9551.
+    """
+    plan = rp.replay_plan([_TURN_RECORD], org_id="org-a", graph_id="g1")
+    kinds = []
+    for statement in plan:
+        sql = statement.sql
+        # `relation` FIRST: its endpoint subqueries read `public.point`, so a
+        # table-name classifier that tested `point` before it would file the
+        # edge under the node and pass whatever the order was.
+        kinds.append("identity" if "public.node_identity" in sql else
+                     "relation" if "public.relation" in sql else
+                     "point" if "public.point" in sql else "journal")
+    assert kinds == ["identity", "point", "relation", "journal"], kinds
+
+    relation = plan[2]
+    # (org, graph, rel_type, src_label, tgt_label, idx) precede the `props`
+    # value and the two correlated endpoint subqueries, which resolve each key
+    # from the record's OWN node row rather than trusting the journal id.
+    assert relation.params[:6] == ("org-a", "g1", "CONTAINS", "Session",
+                                   "Point", 0), relation.params
+    assert "FROM (SELECT node_key FROM public.session" in relation.sql
+    assert "(SELECT node_key FROM public.point" in relation.sql
+    assert relation.params[7:10] == ("org-a", "g1", "sess1"), relation.params
+    assert relation.params[10:] == ("org-a", "g1", _SNAPSHOT["id"]), relation.params
+    # Idempotent: a replayed turn converges on the one row.
+    assert "ON CONFLICT (org_id, graph_id, rel_type, src_label, src_key, " in relation.sql
+
+
+def test_an_operator_turn_lands_the_same_CONTAINS_relation():
+    """`OperatorAdded` is the fold's OTHER `contains_session` consumer."""
+    operator = {**_TURN_RECORD, "type": "OperatorAdded",
+                "point": dict(_SNAPSHOT, is_operator=True, op_type="IMPL")}
+    relations = _relation_statements(operator)
+    assert len(relations) == 1, [s.sql for s in relations]
+    assert relations[0].params[2:5] == ("CONTAINS", "Session", "Point")
+
+
+def test_a_contains_session_the_fold_ignores_lands_no_relation():
+    """Only `PointAdded`/`OperatorAdded` may carry the directive.
+
+    The graph fold reads `contains_session` for exactly those two types
+    (`projection/__init__.py::apply`). A label-keyed rule would let a stray key
+    on ANY Point record mint a `relation` row the graph never wrote — the record
+    richer than the graph, the one direction Interface A forbids.
+    """
+    base = {k: v for k, v in _TURN_RECORD.items() if k != "contains_session"}
+    for record_type in ("PointPromoted", "OperatorPromoted", "DedupeRecorded",
+                        "DedupeRejected", "EntityBindingRefused"):
+        record = {**base, "type": record_type, "contains_session": "sess1"}
+        assert _relation_statements(record) == [], record_type
+
+
+def test_an_absent_or_unwritable_contains_session_lands_no_relation():
+    """A non-string / EMPTY / BLANK / unstorable id is the fold's own skip.
+
+    The set is `projection._writable_container_id`'s — the gate `_link_session`
+    applies — not an invention at this layer. The BLANK cases look like a
+    divergence from the fold's truthiness test and are not: an indexed graph
+    cannot match a whitespace-only key, so the fold writes no edge for one
+    either (see `_writable_endpoint_id`; the parity pin is
+    `test_the_envelope_endpoint_gate_is_the_folds_own_rule` below).
+    """
+    for value in (None, "", "   ", "\t\n", 7, ["sess1"], "a\x00b", "\ud800"):
+        record = {**_TURN_RECORD, "contains_session": value}
+        assert _relation_statements(record) == [], value
+    assert len(_relation_statements(_TURN_RECORD)) == 1
+
+
+def test_a_session_whose_id_equals_the_point_lands_its_relation():
+    """A same-id pair IS an edge: the fold's two MATCHes bind two nodes.
+
+    `_link_session` matches `(s:Session {id:$sid})` and `(t:Point {id:$tid})`
+    as separate bound variables, so with `sid == tid` the differing labels
+    still bind two distinct nodes and the MERGE writes the edge — executed
+    proof, not inference: `tests/test_rebuild_turn_points_3947.py::
+    test_the_fold_writes_contains_when_the_session_id_equals_the_point_id`.
+    `relation` holds it too: `node_identity` (and both composite FKs) is keyed
+    on `(label, key)`, so `(Session, x)` and `(Point, x)` are two identities.
+    An earlier draft refused this pair on the false premise that one node
+    cannot be both ends; the producer cannot emit it today
+    (`_capture_turn_id` suffixes the session id), which is exactly why the
+    record must follow the fold rather than encode today's producer.
+    """
+    same = _SNAPSHOT["id"]
+    relation = _relation_statements({**_TURN_RECORD, "contains_session": same})
+    assert len(relation) == 1, [s.sql for s in relation]
+    # src and tgt address the same KEY under two labels.
+    assert relation[0].params[3] == "Session"
+    assert relation[0].params[4] == "Point"
+    assert relation[0].params[9] == same, relation[0].params
+    assert relation[0].params[12] == same, relation[0].params
+
+
+def test_the_envelope_endpoint_gate_is_the_folds_own_rule():
+    """Non-vacuity for the legs above: the two predicates agree, value by value.
+
+    The record restates the fold's endpoint gate rather than importing it (this
+    module is loaded STANDALONE by the PGlite harness, where a package-relative
+    import raises), so the two spellings must be pinned EQUAL — a drift in
+    either one is a red, not a quiet divergence between a journal rebuild and
+    a record rebuild.
+    """
+    from tortoise.projection import _writable_container_id
+
+    values = (None, "", "   ", "\t\n", " \u00a0 ", 7, 0, ["sess1"], {"a": 1},
+              b"x", True, "sess1", "p1", "  padded  ", "a\x00b", "\ud800")
+    for value in values:
+        fold_writes = _writable_container_id(value)
+        assert rp._writable_endpoint_id(value) is fold_writes, (
+            f"the record's endpoint gate disagrees with the fold's for "
+            f"{value!r}: record={rp._writable_endpoint_id(value)} "
+            f"fold={fold_writes} (the journal and the record would rebuild to "
+            f"two different graphs)"
+        )
+    # Non-vacuity: the table must exercise BOTH answers, or "equal" is trivial.
+    assert any(_writable_container_id(v) for v in values)
+    assert not all(_writable_container_id(v) for v in values)
+
+
+def test_the_contains_session_key_never_becomes_a_point_property():
+    """It is an ENVELOPE directive — a node prop would let a caller forge it.
+
+    The GRAPH fold reads it off the raw envelope, before `_norm` can splice the
+    payload over it, precisely so a Point property cannot shadow (and forge) the
+    link; the record must not store what the graph refuses to hold.
+    """
+    plan = rp.replay_plan([_TURN_RECORD], org_id="org-a", graph_id="g1")
+    point = [s for s in plan if s.sql.startswith("INSERT INTO public.point")]
+    assert len(point) == 1
+    props = point[0].params[-1]
+    assert "contains_session" not in props, props
+    assert props == "{}", props
+
+
+def test_a_record_sourced_rebuild_materialises_the_session_container():
+    """S3: the row this lands is one the cache projection can re-create.
+
+    A `relation` row is worthless if the record→FalkorDB leg refuses its
+    predicate or cannot resolve its endpoints: `cache_projection`
+    allowlist-validates the type and MATCHes both nodes by `(label, key)`. This
+    is parity the journal rebuild already had (`_link_session` MERGEs the same
+    edge) and the record path did not.
+    """
+    from tortoise import cache_projection as cp
+
+    statement = _relation_statements(_TURN_RECORD)[0]
+    rel_type, src_label, tgt_label = statement.params[2:5]
+    rel = cp.relation_from_row({
+        "rel_type": rel_type,
+        # Params: 0-6 are the row's own values; 7-9 / 10-12 are the two
+        # `(org, graph, key)` triples the endpoint subqueries bind, in that
+        # order.
+        "src_label": src_label, "src_key": statement.params[9],
+        "tgt_label": tgt_label, "tgt_key": statement.params[12],
+        "idx": 0, "props": {},
+    })
+    built = cp.relation_statement(rel)
+    assert built.cypher == (
+        "MATCH (src:Session {id:$src_key}), (tgt:Point {id:$tgt_key}) "
+        "MERGE (src)-[r:CONTAINS {idx:$idx}]->(tgt) SET r += $props"
+    ), built.cypher
+    assert built.params["src_key"] == "sess1"
+    assert built.params["tgt_key"] == _SNAPSHOT["id"]
 
 
 def test_dollar_placeholder_rewrite_is_faithful():
@@ -2063,3 +2265,97 @@ def test_the_journal_payload_keeps_the_producer_fields_that_are_not_props():
     # ...while the NODE prop is still stripped (the fix this PR is about).
     upsert = next(s for s in plan if s.sql.startswith("INSERT INTO public.point"))
     assert "agent_id" not in _props_tail([upsert])
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# #9553 review P2: the DB-level half of this guard must actually RUN in CI
+# ════════════════════════════════════════════════════════════════════════════
+#
+# `supabase/tests/pglite/validate.mjs` replays the SHIPPED journal through THIS
+# module's emitter against a real Postgres (PGlite) — it is the half of the
+# #9553 guard that a DB-free suite cannot be. It ran only via `schema-drill`,
+# which was gated on `migrations` alone, so a PROJECTION-only change (exactly
+# this PR) never ran it: the assertion the PR itself names as its class-2
+# evidence could not fire in CI on the change that produced it. The legs below
+# execute the `changes` job's REAL gate script rather than scanning it, so a
+# predicate that stops covering the harness is a RED, not a review note.
+
+def _gate_outputs(changed: list[str], tmp_path: Path) -> dict[str, str]:
+    """Run ci.yml's `changes` gate for a synthetic changed set.
+
+    Lifted out of the step's `run:` exactly as
+    `tests/test_website_functions_typecheck.py` does (the shell wrapper only
+    feeds it a diff), so this never writes the shared `/tmp/ci-gates.py`.
+    """
+    wf = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "ci.yml")
+                        .read_text(encoding="utf-8"))
+    body = next(s for s in wf["jobs"]["changes"]["steps"]
+                if s.get("id") == "gate")["run"]
+    marker = "cat > /tmp/ci-gates.py <<'PY'\n"
+    start = body.index(marker) + len(marker)
+    script = body[start:body.index("\nPY\n", start)]
+
+    src = tmp_path / "ci-gates.py"
+    src.write_text(script, encoding="utf-8")
+    out = tmp_path / "github_output"
+    out.write_text("", encoding="utf-8")
+    # Inherit the environment (the script shells out to client/), but force the
+    # two scalar inputs the `run:` reads from `env:` so a fleet run that set
+    # MAIN_HEALTH cannot turn every gate off under us.
+    env = {**os.environ, "MAIN_HEALTH": "", "BASE_SHA": ""}
+    proc = subprocess.run(
+        [sys.executable, str(src), str(out)],
+        input="\n".join(changed), capture_output=True, text=True,
+        cwd=str(REPO_ROOT), check=False,
+        env=env,
+    )
+    assert proc.returncode == 0, f"the changes gate script failed:\n{proc.stderr}"
+    return dict(line.split("=", 1)
+                for line in out.read_text(encoding="utf-8").splitlines()
+                if "=" in line)
+
+
+def test_the_pglite_harness_runs_on_a_projection_only_change(tmp_path):
+    """`schema-drill` must fire for the harness, the module it spawns and the fixture.
+
+    Falsifier (measured on the pre-fix `if:`): with `schema-drill` gated on
+    `migrations` alone, every case below left `pglite=false` AND
+    `migrations=false` — the job was skipped on all three inputs the narrow
+    predicate named (`supabase/tests/pglite/`, the module, the fixture), and a
+    fourth input it read — the assertion suites under `supabase/tests/*.sql` —
+    was skipped by the same gate, so
+    `validate.mjs`'s #9553 leg could only ever fail where a human ran it.
+    """
+    wf = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "ci.yml")
+                        .read_text(encoding="utf-8"))
+    assert "pglite" in wf["jobs"]["changes"]["outputs"], (
+        "the `changes` job never emits `pglite` — schema-drill's `if:` would "
+        "read an empty string and the PGlite harness would run for ever on "
+        "nothing but migration changes")
+    assert "pglite" in wf["jobs"]["schema-drill"]["if"], (
+        "schema-drill does not consume the pglite output, so the gate below "
+        "measures nothing")
+
+    # `supabase/tests/` is named WHOLE: `validate.mjs` reads
+    # `TESTS_DIR = supabase/tests` for every entry of its explicit `suites`
+    # list and for `C1_SUITE`, so an assertion suite is an input it reads —
+    # and a `supabase/tests/*.sql`-only edit is neither under
+    # `supabase/migrations/` nor under `supabase/tests/pglite/`, which is how
+    # the narrower first entry left the only job that runs those suites
+    # skipped.
+    for path in ("supabase/tests/pglite/validate.mjs",
+                 "supabase/tests/20261012000001_record_schema.sql",
+                 "tortoise/record_projection.py",
+                 "supabase/tests/fixtures/record_projection_journal.jsonl"):
+        outs = _gate_outputs([path], tmp_path)
+        assert outs.get("pglite") == "true", (
+            f"{path} does not set pglite=true, so the PGlite harness never "
+            f"runs on a change it reads: {outs}")
+        # The distinct-surface half: a projection-only change is NOT a
+        # migrations change, which is exactly why the old gate missed it.
+        assert outs.get("migrations") == "false", (
+            f"{path} was classified as a migrations change — the gate is not "
+            f"measuring the input it names: {outs}")
+
+    # ...and an unrelated path still turns it off (not a constant).
+    assert _gate_outputs(["docs/README.md"], tmp_path).get("pglite") == "false"

@@ -308,3 +308,117 @@ class TestDreamEvidence:
             params={"id": b["id"]},
         ).result_set[0]
         assert row[0] is True
+
+
+# ── #9275 — a non-string id must not crash the dirty lifecycle ──────────────
+#
+# The EP affected-claim path stopped raising `TypeError: '<' not supported
+# between instances of 'int' and 'str'` (#9275, `ep._affected_claims` +
+# `dream.py`'s `sorted(..., key=str)`), because a PRESENT id that is not a
+# string is ADDRESSABLE: `set_point_baseline(42, 3.0, 1.0)` resolves the node
+# and `compute_confidence` computes it. That is exactly what makes these tests
+# reachable — the same supported write puts `42` into `_dirty_roots`, the set
+# every later pass orders with a bare `sorted()`. The defect class is the SAME
+# one the affected-claim fix removed, one call away from it: the stale-first
+# window (BEFORE any EP work) and the sweep's `$ids` batch (AFTER a converged
+# pass has written posteriors — the half-written shape #9275 exists to end).
+
+class TestMixedTypeIdsInTheDirtyLifecycle:
+    def test_dream_window_orders_a_numeric_dirty_root_instead_of_crashing(
+            self, sdk):
+        """`dream_window` sorts `_dirty_roots` on the stale-first path.
+
+        Pre-fix this raises `TypeError: '<' not supported between instances of
+        'int' and 'str'` at `dream.py`'s dirty-root sort — before a single EP
+        query ran, so the caller has no diagnosis at all.
+        """
+        anchor = _make_claim(sdk, "anchor")
+        claim = _make_claim(sdk, "claim")
+        sdk.create_operator("IMPL", anchor["id"], [claim["id"]])
+        proj = sdk._get_proj()
+        proj.g.query("MATCH (n:Point {id:$id}) SET n.id = 42",
+                     params={"id": claim["id"]})
+        # The supported, measured write: it resolves the node AND mirrors 42
+        # into `_dirty_roots` (`set_point_baseline` ends with `_mark_dirty`).
+        sdk.set_point_baseline(42, 3.0, 1.0)
+        sdk.set_point_baseline(anchor["id"], 3.0, 1.0)
+        assert 42 in sdk._dirty_roots
+        assert any(isinstance(r, str) for r in sdk._dirty_roots), (
+            "the fixture must mix id TYPES — a homogeneous set cannot fail the "
+            "ordering")
+
+        result = sdk._get_dreamer().dream_window()
+
+        assert 42 in result["affected_claims"], (
+            "the numeric-id claim is addressable and must be computed, not "
+            f"skipped (affected={result['affected_claims']})")
+
+    def test_unsweepable_dirty_roots_orders_a_numeric_root(self, sdk):
+        """The sweep's classification batch is reached AFTER a converged pass.
+
+        Pre-fix `ids = sorted(candidates)` raised `TypeError` here — i.e. after
+        the pass had already written its posteriors, which is the half-written
+        failure #9275 exists to eliminate.
+        """
+        anchor = _make_claim(sdk, "anchor")
+        claim = _make_claim(sdk, "claim")
+        sdk.create_operator("IMPL", anchor["id"], [claim["id"]])
+        proj = sdk._get_proj()
+        proj.g.query("MATCH (n:Point {id:$id}) SET n.id = 42",
+                     params={"id": claim["id"]})
+        sdk.set_point_baseline(42, 3.0, 1.0)
+        sdk._dirty_roots |= {anchor["id"]}
+        assert 42 in sdk._dirty_roots
+
+        # No candidate is in `affected` — the classification leg must run.
+        retained = sdk._unsweepable_dirty_roots(set())
+
+        assert isinstance(retained, set)
+        assert retained <= {42, anchor["id"]}
+
+    def test_hydrate_dirty_roots_excludes_an_id_less_point(self, sdk):
+        """A dirty `:Point` with no `id` must not hydrate `None` into the mirror.
+
+        Pre-fix `loaded = {r[0] for r in rows}` put `None` into `_dirty_roots`,
+        which re-joined the same mixed-type ordering crash — and the node can
+        never be swept or affected (it identifies no factor participant), so
+        mirroring it only pins the mirror.
+        """
+        _make_claim(sdk, "namable")
+        proj = sdk._get_proj()
+        proj.g.query("CREATE (n:Point {pointKind:'statement', status:'live', "
+                     "content:'no id', ep_dirty: true})")
+        sdk._dirty_roots.clear()
+
+        loaded = sdk._hydrate_dirty_roots()
+
+        assert None not in loaded, (
+            f"an id-less :Point hydrated into the dirty mirror: {loaded!r}")
+        assert None not in sdk._dirty_roots
+
+    def test_the_operator_cap_truncation_orders_mixed_type_ids(self, sdk):
+        """`_bfs_select_operators` sorts its collected operator ids at `op_cap`.
+
+        Pre-fix `set(sorted(collected)[:op_cap])` raised `TypeError` on a
+        hand-written numeric operator id — reached from `dream_window`
+        (`op_cap=budget`) and from every scheduler pass.
+        """
+        from tortoise.analyze import _bfs_select_operators
+
+        seed = _make_claim(sdk, "seed")
+        t1 = _make_claim(sdk, "target 1")
+        t2 = _make_claim(sdk, "target 2")
+        op1 = sdk.create_operator("IMPL", seed["id"], [t1["id"]])
+        op2 = sdk.create_operator("IMPL", seed["id"], [t2["id"]])
+        proj = sdk._get_proj()
+        proj.g.query("MATCH (n:Point {id:$id}) SET n.id = 42",
+                     params={"id": op2["id"]})
+
+        collected, _anchors = _bfs_select_operators(
+            proj, [seed["id"]], max_hops=1, rel_filter="IMPL|NAND",
+            direction="both", op_cap=1,
+        )
+
+        assert len(collected) == 1, (
+            "the cap must still truncate to op_cap — only the ORDERING changed")
+        assert op1["id"] in collected or 42 in collected

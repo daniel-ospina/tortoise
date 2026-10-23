@@ -188,6 +188,107 @@ transcript separately rather than pasting it into the article.
 
 ---
 
+## IndexNow notifications (Bing, Yandex and the other IndexNow engines)
+
+Publishing an article notifies **IndexNow**, which passes the URL to the search engines that
+implement it: **Bing, Yandex, Seznam, Naver, Amazon, Yep**.
+
+⚠️ **Google does not consume IndexNow.** This has no effect on Google's index and does not shorten
+Google's crawl latency — Google's equivalent is Search Console's request-indexing, which is a
+separate, authenticated API that is not wired up. Do not report this feature as "indexing on
+Google".
+
+**What fires it.** Only the transition to published through the agent API
+(`PATCH /blog/api/posts/:slug` with `status: "published"`). It submits **one** URL — the article's
+canonical URL — in the background, so the publish never waits for it.
+
+**Never fired:**
+
+- writing a draft;
+- **creating a post directly as `published`** — `POST /blog/api/posts` with `status: "published"` is a
+  publish transition, but the notification belongs to the PATCH transition. Publish a draft with
+  PATCH if you want the submission;
+- editing an article that is already published;
+- unpublishing;
+- re-publishing the same URL within 24 hours (`blog_posts.indexnow_submitted_at` records the last
+  attempt);
+- bulk submission — deliberately **not** part of the publish path (see the backfill below).
+
+**When it fails.** The publish still succeeds — the article is live either way — and there is no
+retry. The failure is logged instead. Filter the Pages/Cloudflare logs for `[indexnow]`. These are
+the shapes the path produces:
+
+| Log line | Meaning | What to do |
+|---|---|---|
+| `submitted (status 200)` | accepted | nothing |
+| `submitted (status 202)` | received, the endpoint is verifying the key — the normal answer to a key's **first** submission | nothing |
+| `submit failed (status 403)` | the key file was not found at the host root | check the `curl` below; the file did not deploy |
+| `submit failed (status 422)` | a URL does not belong to the host, or the key does not match the protocol's schema | check `host`/`urlList` in the payload |
+| `submit failed (status 400)` | the payload itself was rejected | check `host`/`key`/`keyLocation` in `_shared/indexnow.ts` |
+| `submit failed (status 429)` | **rate-limited** — you are submitting too often | nothing on the publish path (the 24 h window prevents it); if a hand-run backfill triggers this, stop and retry tomorrow |
+| `submit failed (status 5xx)` | the endpoint is failing — a vendor-side fault, not ours | nothing urgent; the next publish of a *different* article is unaffected |
+| `submit failed (no status — timeout/network)` | the request did not complete inside the timeout, or the network refused it | same — nothing to do; a submission is best-effort |
+| `submit failed (unusable url)` | `SITE_URL` and the slug did not form a valid URL | a code/config fault, not a vendor one — fix `SITE_URL` |
+| `stamp failed (supabase <n>)` | the submission was attempted but the 24-hour window was **not recorded** (the control-plane write failed) | nothing to do, but do **not** treat it as deduped: a re-publish within 24 h will submit again |
+| `stamp failed (upstream unreachable)` | same — the window was **not recorded**, because the network failed before the write landed | as above |
+| `skipped (submitted <ts>)` | inside the 24-hour window | nothing |
+| `skipped (state unreadable, supabase 400)` | the column is not in the schema — what a deploy that ran **ahead of its migration** looks like | apply the migration, then re-publish (or backfill by hand) — until then **nothing is submitted** and the publish still succeeds |
+| `skipped (state unreadable, supabase 401\|403\|5xx)` | the read failed for another reason: a rotated/wrong service-role key, or a Supabase fault | check the key / the Supabase status — **the migration will not help here**. Nothing was submitted |
+| `skipped (state unreadable, upstream unreachable)` | the state read timed out or the network failed — **not** a migration problem | nothing urgent; the publish is live and the next publish of that article will submit |
+| `skipped (state unreadable, no row)` | the row was gone when the stamp was read (a concurrent delete) | nothing — but note the state was unknown, so nothing was submitted |
+| `unexpected failure` | a bug-shaped error inside the notification | file it; the publish itself already succeeded |
+
+⚠️ **A publish from the admin console is not submitted.** The console writes the status change
+directly to Supabase and never reaches the agent API that fires the notification.
+
+⚠️ **Known limit of the 24-hour window.** The stamp is per post *row* and is read before the
+submission and written after it. Two publish transitions of the same post that overlap (both read the
+old stamp while the first submission is in flight), or an unpublish → delete → re-create of the same
+slug, can therefore each submit once. It takes a deliberate double action within seconds, so the
+exposure is one extra submission — not a flood — but it is not zero.
+
+### The key file
+
+The key is a public value, checked in rather than a secret: the endpoint proves we own the host by
+fetching `https://tortoise.premiselabs.co/<key>.txt`, so the file must be readable by anyone. It is
+committed at `website/<key>.txt` (that directory is the deploy root) and its only content is the key.
+After a deploy, this must answer 200 with the key alone:
+
+```bash
+KEY=$(grep -o 'INDEXNOW_KEY = "[a-f0-9]*"' website/functions/blog/_shared/indexnow.ts | cut -d'"' -f2)
+curl -sS -D- "https://tortoise.premiselabs.co/$KEY.txt"
+```
+
+### Backfilling the articles published before this existed
+
+Backfill is a **deliberate, one-off operator act** — one request, by hand, once the key file above is
+verified live. The publish handler has no bulk path on purpose: a loop there is a submission flood
+waiting for a retry.
+
+> **OVERRIDES:** indexnow.org's FAQ answers "Should I submit URLs that changed before I started using
+> IndexNow?" with **"No"** (it points at sitemaps with accurate `lastmod` instead) — this one-off
+> submits five URLs once, deliberately, because those articles shipped before the capability existed
+> and their `lastmod` alone would not surface them. It is not a precedent for retroactive bulk
+> submission, and the publish path must never grow one.
+
+```bash
+KEY=$(grep -o 'INDEXNOW_KEY = "[a-f0-9]*"' website/functions/blog/_shared/indexnow.ts | cut -d'"' -f2)
+curl -sS -o /dev/null -w '%{http_code}\n' -X POST https://api.indexnow.org/indexnow \
+  -H 'Content-Type: application/json; charset=utf-8' \
+  -d "{\"host\":\"tortoise.premiselabs.co\",\"key\":\"$KEY\",
+       \"keyLocation\":\"https://tortoise.premiselabs.co/$KEY.txt\",
+       \"urlList\":[\"https://tortoise.premiselabs.co/blog\",
+         \"https://tortoise.premiselabs.co/blog/state-of-agentic-memory-2026\",
+         \"https://tortoise.premiselabs.co/blog/agent-memory-software-engineering-bottleneck\",
+         \"https://tortoise.premiselabs.co/blog/types-of-agent-memory\",
+         \"https://tortoise.premiselabs.co/blog/agents-dont-need-more-memory-they-need-a-world-model\"]}"
+```
+
+A `200` or `202` means accepted. A `403` means the key file was not found at the host root (deploy it
+first); a `422` means a URL does not belong to the host.
+
+---
+
 ## What is *not* supported
 
 - Raw HTML — escaped, publishes as text.
