@@ -874,7 +874,21 @@ def _cmd_record_backup(args):
     # never does. An explicit flag still wins (an injected value keeps the DB-free
     # pin possible).
     if args.scratch_dsn is None:
-        args.scratch_dsn = (os.environ.get("TORTOISE_RECORD_SCRATCH_DSN") or "").strip() or None
+        env_scratch = os.environ.get("TORTOISE_RECORD_SCRATCH_DSN")
+        if env_scratch is not None and not env_scratch.strip():
+            # ⛔ THE ENV SURFACE REFUSES A BLANK DRILL DSN TOO (#9601 review cycle 6,
+            # P3). The flag branch below already treats a supplied-but-empty value as
+            # an error; the env var is the surface the runbook PREFERS, and it still
+            # collapsed "unset" and "set to blank" into backup-only mode — exit 0,
+            # `published`, no drill. A blank value here used to reach the drill and be
+            # refused as a malformed DSN (exit 2), so this is also the return of a
+            # refusal the fix had accidentally widened away.
+            print("Error: TORTOISE_RECORD_SCRATCH_DSN is set but names nothing — a "
+                  "drill DSN that is empty cannot be run, and backup-only mode is "
+                  "not what this run said it would do. Nothing was backed up, and "
+                  "no verdict was produced.", file=sys.stderr)
+            return 2
+        args.scratch_dsn = env_scratch.strip() if env_scratch else None
     elif not args.scratch_dsn.strip():
         # ⛔ A BLANK `--scratch-dsn` IS NOT "backup only" (#9601 review cycle 5, P2).
         # `--scratch-dsn "$SCRATCH"` with the variable unset is the exact shape a cron

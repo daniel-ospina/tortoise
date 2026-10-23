@@ -489,9 +489,10 @@ also stops retention; `--reset-scratch` is what keeps the scheduled drill on the
 artifact *before* it restores, so any post-publish refusal — the commonest being a **populated scratch
 target because `--reset-scratch` was dropped from the cron line** — mints a new artifact and then
 returns without pruning. That grows `record-backups/` by one full encrypted dump per run, without
-bound, while the exit table reads as "no verdict" rather than as "retention has stopped". Count the
-artifacts (`record-backup --list`) if the drill has been red for more than `--keep` runs; the reset is
-the repair, and it returns the job to the pruning path.
+bound, while the exit table reads as "no verdict" rather than as "retention has stopped". If the drill
+has been `2` for more than `--keep` runs, count what is there with the bucket tool you already have
+(`aws s3 ls s3://<bucket>/record-backups/`, or `wrangler r2 object list <bucket> --prefix
+record-backups/`); the reset is the repair, and it returns the job to the pruning path.
 
 ### Schedule — NOT YET DEPLOYED, and that is the current loss window
 

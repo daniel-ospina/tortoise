@@ -446,6 +446,17 @@ def _subprocess_env(dsn: str) -> dict[str, str]:
 # ── the identity guard: what must never be TRUNCATEd ────────────────────────
 
 
+#: The query keys that CANNOT move a connection, so a DSN carrying them is still
+#: one the identity guard can reason about — they are exactly the keys `libpq_env`
+#: forwards to the dump/restore legs, so the two legs agree on what they mean.
+#: EVERYTHING ELSE is refused: libpq honours `dbname`, `host`, `hostaddr`, `port`
+#: and `service` from the query string, and a coordinate this guard does not read
+#: is a coordinate it cannot compare (#9601 review cycle 6, P1 — measured:
+#: `…/scratchdb?dbname=postgres` passed the guard and libpq connected to
+#: `postgres`).
+_INERT_QUERY_KEYS = frozenset({"sslmode", "connect_timeout", "sslrootcert", "options"})
+
+
 def _dsn_identity(dsn_str: str, *, label: str = "the record") -> dict[str, str]:
     """The coordinates a DSN names — REFUSING one that names no database.
 
@@ -462,6 +473,22 @@ def _dsn_identity(dsn_str: str, *, label: str = "the record") -> dict[str, str]:
     drill TRUNCATEs through that connection. The dump leg already refused this
     shape (`libpq_env`: "the record DSN names no database — refusing to let libpq
     fall back to a default"); the leg that DELETES had no such check.
+
+    ⛔ THIS GUARD MUST READ THE DSN THE WAY LIBPQ READS IT (#9601 review cycle 6,
+    P1). Two axes the authority/path parse above cannot see, both MEASURED as
+    guard passes that then TRUNCATE the record:
+
+    * a QUERY coordinate — `…/scratchdb?dbname=postgres` parses here to database
+      `scratchdb`, while libpq resolves `dbname=postgres` (the query overrides the
+      path). `host`, `hostaddr`, `port` and `service` are the same trick.
+    * a MISSING host — `postgresql:///postgres` parses here to host `''`, which can
+      never intersect a real record host, while libpq falls back to `PGHOST` (or a
+      local socket) and reaches the record.
+
+    Both are REFUSED rather than folded in: `refusing too much is the safe
+    direction for a guard whose miss TRUNCATEs the record`. The credentials belong
+    in the environment surface this module already documents, not in a query string
+    the guard and `libpq_env` would parse differently.
     """
     parts = _split_dsn(dsn_str)
     try:
@@ -470,6 +497,25 @@ def _dsn_identity(dsn_str: str, *, label: str = "the record") -> dict[str, str]:
         raise RecordRestoreRefused(
             f"a {label} DSN has an unreadable port: {e}"
         ) from e
+    moving = sorted(
+        key
+        for key in parse_qs(parts.query, keep_blank_values=True)
+        if key not in _INERT_QUERY_KEYS
+    )
+    if moving:
+        raise RecordRestoreRefused(
+            f"a {label} DSN passes connection coordinates in its query string "
+            f"({', '.join(moving)}) — libpq honours those, so the target this "
+            "guard compared is NOT the target the connection would reach. Put "
+            "the coordinate in the URI itself, and the credential in the "
+            "environment surface (TORTOISE_RECORD_DSN / TORTOISE_RECORD_SCRATCH_DSN)."
+        )
+    host = (parts.hostname or "").lower()
+    if not host:
+        raise RecordRestoreRefused(
+            f"the {label} DSN names no host — libpq would fall back to PGHOST or "
+            "a local socket, which can be the record. Name the server explicitly."
+        )
     # Strip BOTH slashes, not just the leading one: `…/postgres/` names the same
     # database as `…/postgres`, and refusing too much is the safe direction for a
     # guard whose miss TRUNCATEs the record.
@@ -480,11 +526,7 @@ def _dsn_identity(dsn_str: str, *, label: str = "the record") -> dict[str, str]:
             "PGDATABASE, else the user name, so this target cannot be shown to be "
             "a DIFFERENT database from the record. Name it explicitly."
         )
-    return {
-        "host": (parts.hostname or "").lower(),
-        "port": port,
-        "database": database,
-    }
+    return {"host": host, "port": port, "database": database}
 
 
 def _dsn_addresses(host: str) -> frozenset[str]:
@@ -506,8 +548,7 @@ def _dsn_addresses(host: str) -> frozenset[str]:
     compared by address.
     """
     try:
-        infos = socket.getaddrinfo(host or "localhost", None,
-                                   proto=socket.IPPROTO_TCP)
+        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
     except OSError:
         return frozenset()
     return frozenset(str(info[4][0]) for info in infos)

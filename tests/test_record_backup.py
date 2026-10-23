@@ -1260,6 +1260,46 @@ def test_the_reset_REFUSES_a_Dsn_that_names_no_database():
             rb.reset_record_tables(target, source_dsn=DSN, connect=connect)
 
 
+def test_the_reset_refuses_the_shapes_libpq_RESOLVES_somewhere_else():
+    """#9601 review cycle 6 (P1): the guard must read the DSN the way LIBPQ does.
+
+    Two measured bypasses of the cycle-5 guard, both of which reached the TRUNCATE:
+
+    * a QUERY coordinate — libpq lets `?dbname=`, `?host=`, `?hostaddr=`, `?port=` and
+      `?service=` override the URI it was given, so `…/scratchdb?dbname=postgres`
+      compared as `scratchdb` while the connection reached `postgres` (the record).
+    * a MISSING host — `postgresql:///postgres` compared as host `''`, which can
+      never intersect a real record host, while libpq fell back to `PGHOST` / a local
+      socket. The dump leg already refused this shape (`libpq_env`: "the record DSN
+      names no host"), so the leg that DELETES was the odd one out.
+
+    Both are refused rather than folded in: an unread coordinate is an uncomparable
+    one, and refusing too much is the safe direction for this guard.
+    """
+
+    def connect(dsn):
+        raise AssertionError("connected to a target the guard could not reason about")
+
+    def _refused(target: str, needle: str) -> None:
+        with pytest.raises(rb.RecordRestoreRefused, match=needle):
+            rb.reset_record_tables(target, source_dsn=DSN, connect=connect)
+
+    for key in ("dbname", "host", "hostaddr", "port", "service"):
+        _refused(
+            f"postgresql://record_user:pw@db.scratchref.supabase.co:5432/scratchdb?{key}=x",
+            "query string",
+        )
+    _refused("postgresql:///postgres", "names no host")
+    _refused("postgresql:///scratch?host=db.projectref.supabase.co", "query string")
+    # The inert keys still work: they cannot move the connection, and the dump leg
+    # forwards exactly these.
+    rb.reset_record_tables(
+        "postgresql://record_user:pw@db.scratchref.supabase.co:5432/scratch?sslmode=require",
+        source_dsn=DSN,
+        connect=lambda dsn: FakeConn(dsn, dict.fromkeys(THE_RECORD_TABLES, 0)),
+    )
+
+
 def test_a_failed_dump_delete_does_NOT_orphan_its_manifest():
     """#9601 review cycle 5 (P3): the manifest is the index — it goes last.
 
@@ -1332,6 +1372,15 @@ def test_a_BLANK_scratch_dsn_is_a_usage_error_not_backup_only(monkeypatch):
     # ...and the absent-flag path is unchanged: backup-only, exit 0, one artifact.
     assert _cli(monkeypatch, ["record-backup", "--record-dsn", DSN], storage=storage) == 0
     assert len(storage.list(rb.RECORD_BACKUP_PREFIX)) > 0
+    # The ENV surface refuses a blank value too (#9601 review cycle 6, P3): it is the
+    # surface the runbook prefers, and it used to collapse "set to blank" into
+    # backup-only mode — the same silent no-drill the flag branch refuses.
+    assert _cli(
+        monkeypatch,
+        ["record-backup", "--record-dsn", DSN],
+        storage=MemoryStorage(),
+        scratch_env="   ",
+    ) == 2
 
 
 def test_a_failed_upload_is_a_documented_failure_class_not_a_traceback(monkeypatch, capsys):
