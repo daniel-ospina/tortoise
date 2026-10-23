@@ -1396,8 +1396,26 @@ def commit_ingest_admit(org_id: str | None, charge_bytes: int) -> IngestAdmissio
             store[key] = bucket
             store.move_to_end(key)
             return IngestAdmission(True, used + charge, limit, 0.0, scope)
-        oldest = bucket[0][0] if bucket else now_ts
-        retry_after = max(0.0, _COMMIT_INGEST_WINDOW_S - (now_ts - oldest))
+        # RETRY-AFTER: the wait until ENOUGH of the window has expired for
+        # THIS charge to fit — not until the OLDEST entry expires. Expiry is
+        # oldest-first and the charges are uneven, so `window - age(oldest)`
+        # promises a wait after which the request still does not fit, and a
+        # client honouring the header exactly is refused again (measured:
+        # 10 B at t+0 and 900 B at t+2 against a 1,000 B allowance left a
+        # 500 B request needing the t+2 entry to expire at t+62, while the
+        # header said 2 s at t+60). Walk the bucket oldest-first, subtracting
+        # each charge until the request fits, and answer for THAT entry. A
+        # charge larger than the whole allowance never fits this way; it ages
+        # out with the window, and the `used == 0` rule above admits it at
+        # once when the window empties.
+        remaining = bucket_used
+        retry_ts = bucket[-1][0] if bucket else now_ts
+        for entry_ts, _owner, entry_charge in bucket:
+            remaining -= entry_charge
+            retry_ts = entry_ts
+            if remaining + charge <= limit:
+                break
+        retry_after = max(0.0, _COMMIT_INGEST_WINDOW_S - (now_ts - retry_ts))
         # Keep the pruned bucket so the org's remaining window still ages out.
         if bucket:
             store[key] = bucket

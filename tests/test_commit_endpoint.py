@@ -2998,6 +2998,47 @@ class TestCommitOrgIngestBound:
         assert commit_ingest_admit(None, 10 ** 9).allowed is True
         assert commit_ingest_admit("", 10 ** 9).allowed is True
 
+    def test_retry_after_is_the_wait_until_this_charge_fits(self, monkeypatch):
+        """`Retry-After` must be the wait after which THIS request fits, not
+        `window - age(oldest entry)`.
+
+        Charges expire oldest-first and they are uneven, so the oldest entry's
+        expiry can leave a request still too big: 10 B at t+0 and 900 B at t+2
+        against a 1,000 B allowance leave the window at 900 B when the first
+        expires, and a 500 B request needs the SECOND to expire at t+62.
+        Promising `window - age(oldest)` makes a client that honours the header
+        exactly be refused again (review cycle 3, measured `retry=2.00` at
+        t+60 for a request that needed t+62).
+        """
+        import tortoise.quota as quota_mod
+
+        class _Clock:
+            now = 1000.0
+
+            @classmethod
+            def monotonic(cls):
+                return cls.now
+
+        monkeypatch.setattr(quota_mod, "time", _Clock)
+        monkeypatch.setattr(
+            quota_mod, "MAX_COMMIT_INGEST_BYTES_PER_MIN_PER_ORG", 1000)
+        quota_mod._reset_commit_ingest_budget_for_tests()
+        assert quota_mod.commit_ingest_admit("orgAdj", 10).allowed is True
+        _Clock.now += 2.0
+        assert quota_mod.commit_ingest_admit("orgAdj", 900).allowed is True
+        _Clock.now += 1.0
+        refused = quota_mod.commit_ingest_admit("orgAdj", 500)
+        assert refused.allowed is False
+        assert refused.used == 910
+        # The 900 B charge was taken at t+2, so the request fits only at t+62.
+        assert refused.retry_after == pytest.approx(59.0), (
+            f"retry_after {refused.retry_after} promises a wait after which "
+            "the request still does not fit (the 900 B charge expires at "
+            "t+62, not t+60)")
+        # ... and it is admitted exactly then.
+        _Clock.now = 1062.0
+        assert quota_mod.commit_ingest_admit("orgAdj", 500).allowed is True
+
     def test_the_charge_is_never_cheaper_than_the_write(self, client,
                                                        monkeypatch):
         """The declared node count is an UPPER bound on the nodes the write
