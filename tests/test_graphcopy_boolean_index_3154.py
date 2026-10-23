@@ -28,19 +28,20 @@ non-embedded FalkorDB is reachable (mirrors tests/test_indexes.py's #522
 non-embedded gate).
 
 ⛔ WHERE the corruption appears is an ENGINE property, not a constant (#9226).
-``GRAPH.COPY`` introduces it on the v4 cores (42004 / 42006 — the engine CI
-pins); on **v6 (60001)** it is already present IN PLACE, with no copy at all,
-once the ``Point`` label carries a FULLTEXT **and** a VECTOR index — the two
-``_ensure_indexes`` creates. Measured on a live 60001 server: ``= false`` reads
-0 of 10 immediately after ``CREATE INDEX FOR (n:Point) ON (n.is_operator)``,
-while ``NOT n.is_operator`` (10), ``= true`` (5) and the absence-or-false
-predicate ``(n.is_operator IS NULL OR n.is_operator = false)`` (10) all stay
-CORRECT — the data is intact, the range index's ``false`` postings are not.
-Neither index alone reproduces it (fulltext-only and vector-only sources both
-read 10/10). The tests below therefore MEASURE which shape the engine exhibits
-and assert the compensation against it, instead of asserting the engine
-invariant — a v6 engine defect is not ours to fix, and asserting it on a
-sanctioned engine can only redden the lane (#9226).
+``GRAPH.COPY`` introduces it on the v4 cores (42004 / 42006 — the
+``docker-compose.yml`` pin and the CI pin respectively); on **v6 (60001)** it is
+already present IN PLACE, with no copy at all, once the ``Point`` label carries
+a FULLTEXT **and** a VECTOR index — the two ``_ensure_indexes`` creates.
+Measured on a live 60001 server: ``= false`` reads 0 of 10 immediately after
+``CREATE INDEX FOR (n:Point) ON (n.is_operator)``, while ``NOT n.is_operator``
+(10), ``= true`` (5) and the absence-or-false predicate
+``(n.is_operator IS NULL OR n.is_operator = false)`` (10) all stay CORRECT —
+the data is intact, the range index's ``false`` postings are not. Neither index
+alone reproduces it (fulltext-only and vector-only sources both read 10/10).
+The tests below therefore MEASURE which shape the engine exhibits and assert
+the compensation against it, instead of asserting the engine invariant — a v6
+engine defect is not ours to fix, and asserting it on a sanctioned engine can
+only redden the lane (#9226).
 """
 from __future__ import annotations
 
