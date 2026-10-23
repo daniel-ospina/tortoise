@@ -89,6 +89,16 @@
       letter-spacing: -0.01em;
     }
     #beat-hero h1 span { color: var(--accent); }
+    /* hero subtitle: same family role as the product page's .hero-sub */
+    #beat-hero .hero-sub {
+      margin-top: 1.25rem;
+      max-width: 560px;
+      font-family: var(--mono);
+      font-size: clamp(0.9rem, 1.6vw, 1.1rem);
+      color: var(--text);
+      line-height: 1.6;
+      text-align: center;
+    }
 
     /* Sub-beats */
     .beat p {
@@ -301,7 +311,8 @@
 
   <div id="scroll-wrapper">
     <section id="beat-hero" class="beat">
-      <h1>The primary function of memory is not <span>recall</span>, but <span>learning</span>.</h1>
+      <h1>The primary function of memory is not <span>recall</span>, but <span>learning &amp; reasoning</span>.</h1>
+      <p class="hero-sub">We made them persistent and computational, unlocking better decisions, learning, and collaboration.</p>
     </section>
     <section id="beat-origin" class="beat">
       <p style="color: var(--text); font-size: clamp(1.15rem, 2.2vw, 1.5rem); line-height: 1.5;">Humans update their <span style="color: var(--accent);">world models</span> too slowly.<br>Agents forget them halfway through a session.<br><br>We made them persistent — unlocking better decisions, learning, and collaboration.</p>
