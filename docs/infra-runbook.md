@@ -491,8 +491,10 @@ target because `--reset-scratch` was dropped from the cron line** — mints a ne
 returns without pruning. That grows `record-backups/` by one full encrypted dump per run, without
 bound, while the exit table reads as "no verdict" rather than as "retention has stopped". If the drill
 has been `2` for more than `--keep` runs, count what is there with the bucket tool you already have
-(`aws s3 ls s3://<bucket>/record-backups/`, or `wrangler r2 object list <bucket> --prefix
-record-backups/`); the reset is the repair, and it returns the job to the pruning path.
+(`aws s3 ls --endpoint-url "https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com" --region auto
+"s3://$R2_BUCKET/record-backups/"` — the endpoint is DERIVED from `R2_ACCOUNT_ID`, so without it
+the CLI addresses AWS and answers with an auth error that reads as "the bucket is empty"); the
+reset is the repair, and it returns the job to the pruning path.
 
 ### Schedule — NOT YET DEPLOYED, and that is the current loss window
 

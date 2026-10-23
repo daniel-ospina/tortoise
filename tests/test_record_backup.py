@@ -1291,6 +1291,20 @@ def test_the_reset_refuses_the_shapes_libpq_RESOLVES_somewhere_else():
         )
     _refused("postgresql:///postgres", "names no host")
     _refused("postgresql:///scratch?host=db.projectref.supabase.co", "query string")
+    # ⛔ A `#` hides a whole query from `urlsplit` while libpq reads it as data
+    # (cycle 7, P0 — measured end-to-end: libpq sent `database=postgres`).
+    with pytest.raises(rb.RecordBackupUnavailable, match="contains `#`"):
+        rb.reset_record_tables(
+            f"{DSN[:-len('postgres')]}scratchdb#?dbname=postgres",
+            source_dsn=DSN,
+            connect=connect,
+        )
+    # ⛔ A MULTI-HOST list is one unreadable name to `urlsplit` and N servers to libpq
+    # (cycle 7, P1 — measured: it dialed the second entry, the record).
+    _refused(
+        "postgresql://record_user:pw@db.invalid,db.projectref.supabase.co:5432/scratch",
+        "MORE THAN ONE host",
+    )
     # The inert keys still work: they cannot move the connection, and the dump leg
     # forwards exactly these.
     rb.reset_record_tables(
@@ -1353,12 +1367,13 @@ def test_the_documented_retention_depth_is_pinned():
 
 
 def test_a_BLANK_scratch_dsn_is_a_usage_error_not_backup_only(monkeypatch):
-    """#9601 review cycle 5 (P2): `--scratch-dsn "$UNSET"` must not read as "published".
+    """#9601 review cycle 5 (P2) and cycle 6 (P3): `--scratch-dsn "$UNSET"` must not read as "published".
 
-    An empty flag value used to fall into backup mode — exit 0, `published`, and no
-    drill — on a schedule whose exit table defines `0` in drill mode as "the restore
-    verified". An ABSENT flag still means backup-only, and a blank ENV value still
-    means "not configured"; only a SUPPLIED flag that names nothing is an error.
+    An empty value used to fall into backup mode — exit 0, `published`, and no drill —
+    on a schedule whose exit table defines `0` in drill mode as "the restore verified".
+    An ABSENT flag still means backup-only. A SUPPLIED flag that names nothing is an
+    error, and so is a SET env var that names nothing (cycle 6: the env surface is the
+    one the runbook prefers, and it collapsed the same two states).
     """
     storage = MemoryStorage()
     assert _cli(
@@ -1420,6 +1435,43 @@ def test_the_prune_keeps_the_documented_depth_by_default(monkeypatch):
     monkeypatch.setattr(rb, "prune_record_backups", spy)
     assert _cli(monkeypatch, ["record-backup", "--record-dsn", DSN]) == 0
     assert seen == [14], f"the verb pruned with {seen}, not the documented depth"
+
+
+def test_addresses_normalise_an_ipv4_mapped_ipv6_spelling():
+    """#9601 review cycle 7 (P1): `[::ffff:127.0.0.1]` IS `127.0.0.1`.
+
+    Measured before this fix: the two spellings produced disjoint address sets, so
+    `same_server` stayed False, the guard passed, and libpq dialed the record.
+    """
+    v4 = rb._dsn_addresses("127.0.0.1")
+    v6_mapped = rb._dsn_addresses("::ffff:127.0.0.1")
+    assert v4, "the fixture address did not resolve — the probe would be vacuous"
+    assert v6_mapped == v4, (
+        f"an IPv4-mapped IPv6 spelling resolved to {sorted(v6_mapped)} while the plain "
+        f"IPv4 spelling resolved to {sorted(v4)} — the guard would compare them as "
+        "different servers"
+    )
+
+
+def test_the_guard_REFUSES_ambient_libpq_coordinates(monkeypatch):
+    """#9601 review cycle 7 (P2): `PGHOSTADDR` outranks the URI's host.
+
+    Measured: a scratch DSN naming `127.0.0.2` reached `127.0.0.1` (the record)
+    through an ambient `PGHOSTADDR`, and an absent port let an ambient `PGPORT`
+    choose the port. `hostaddr` beats `host`, and a service file can set anything, so
+    while those variables are set the DSN the guard compared is not the DSN libpq
+    would use. (The connector no longer reads ambient values either — it is built
+    from `libpq_env` with an explicit port — so this refusal is defence in depth.)
+    """
+    for name in ("PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE"):
+        monkeypatch.setenv(name, "127.0.0.1" if name == "PGHOSTADDR" else "svc")
+        with pytest.raises(rb.RecordRestoreRefused, match="OUTRANK the DSN"):
+            rb.reset_record_tables(
+                SCRATCH_DSN,
+                source_dsn=DSN,
+                connect=lambda dsn: pytest.fail("connected with ambient coordinates set"),
+            )
+        monkeypatch.delenv(name)
 
 
 # ── retention: prune never guesses ─────────────────────────────────────────

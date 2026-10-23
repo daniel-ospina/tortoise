@@ -124,6 +124,7 @@ caller's schedule, stated in `docs/infra-runbook.md`.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -310,6 +311,21 @@ class RecordRestoreFailed(RecordBackupError):
 def _split_dsn(dsn: str):
     if not isinstance(dsn, str) or not dsn.strip():
         raise RecordBackupUnavailable("no record DSN — an unarmed backup is not a backup")
+    # ⛔ A `#` IS A FRAGMENT TO `urlsplit` AND ORDINARY DATA TO LIBPQ (#9601 review
+    # cycle 7, P0 — measured end-to-end: `…/scratchdb#?dbname=postgres` read as
+    # database `scratchdb` with an empty query HERE, while libpq sent
+    # `database=postgres` on the wire, so the reset TRUNCATEd the record). The two
+    # parsers can never be reconciled on this character, and every coordinate this
+    # module reasons about is read through `urlsplit` — so it is REFUSED, at the one
+    # function both the guard and `libpq_env` use. A `#` also truncates the netloc,
+    # so a password containing one could only ever be silently mangled.
+    if "#" in dsn:
+        raise RecordBackupUnavailable(
+            "the record DSN contains `#` — libpq treats it as data and every parser "
+            "here treats it as a fragment terminator, so the coordinates this "
+            "module would check are NOT the ones libpq would use. Percent-encode "
+            "it (%23) or move the secret to the environment."
+        )
     parts = urlsplit(dsn.strip())
     if parts.scheme not in ("postgres", "postgresql"):
         raise RecordBackupUnavailable(
@@ -516,6 +532,17 @@ def _dsn_identity(dsn_str: str, *, label: str = "the record") -> dict[str, str]:
             f"the {label} DSN names no host — libpq would fall back to PGHOST or "
             "a local socket, which can be the record. Name the server explicitly."
         )
+    if "," in host:
+        # ⛔ A MULTI-HOST LIST IS AN UNREAD COORDINATE (#9601 review cycle 7, P1 —
+        # measured: `host1,host2` compared as one name whose `getaddrinfo` fails, so
+        # the address fallback was silently inert, while libpq tried each host in
+        # turn and succeeded on the record). `urlsplit` keeps the list whole, so no
+        # comparison here can see the individual hosts it would dial.
+        raise RecordRestoreRefused(
+            f"the {label} DSN names MORE THAN ONE host ({host!r}) — libpq tries each "
+            "in turn, so the server this guard compared is not the server the "
+            "connection would reach. Name one host."
+        )
     # Strip BOTH slashes, not just the leading one: `…/postgres/` names the same
     # database as `…/postgres`, and refusing too much is the safe direction for a
     # guard whose miss TRUNCATEs the record.
@@ -551,7 +578,21 @@ def _dsn_addresses(host: str) -> frozenset[str]:
         infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
     except OSError:
         return frozenset()
-    return frozenset(str(info[4][0]) for info in infos)
+    # ⛔ NORMALISE THE ADDRESS, or two spellings of one address never meet (#9601
+    # review cycle 7, P1 — measured: `[::ffff:127.0.0.1]` vs `127.0.0.1` compared as
+    # disjoint sets while libpq dialed the same server and the reset TRUNCATEd the
+    # record). An IPv4-mapped IPv6 address IS the IPv4 address; compare it as one.
+    addresses: set[str] = set()
+    for info in infos:
+        raw = str(info[4][0])
+        try:
+            parsed = ipaddress.ip_address(raw)
+        except ValueError:
+            addresses.add(raw)
+            continue
+        mapped = getattr(parsed, "ipv4_mapped", None)
+        addresses.add(str(mapped or parsed))
+    return frozenset(addresses)
 
 
 def refuse_same_database(
@@ -567,6 +608,20 @@ def refuse_same_database(
     """
     source_id = _dsn_identity(source_dsn, label="record")
     target_id = _dsn_identity(target_dsn, label=target_label)
+    # ⛔ AND THE AMBIENT ENVIRONMENT IS REFUSED, not just parsed (#9601 review cycle
+    # 7, P2 — measured: an ambient `PGHOSTADDR` outranked the URI's host and the
+    # reset reached the record). `hostaddr` beats `host`, and a service file can set
+    # any coordinate, so while they are set there is no honest answer this guard can
+    # give: the DSN it compared is not the DSN libpq would use.
+    ambient = sorted(
+        name for name in ("PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE") if os.environ.get(name)
+    )
+    if ambient:
+        raise RecordRestoreRefused(
+            "the environment sets libpq coordinates that OUTRANK the DSN "
+            f"({', '.join(ambient)}) — the connection could reach a server this "
+            "guard never compared. Unset them for the drill."
+        )
     same_server = source_id["host"] == target_id["host"]
     if not same_server:
         same_server = bool(
@@ -627,6 +682,17 @@ def require_backup_key() -> bytes:
 
 
 def _default_connector(dsn: str):
+    """Connect to exactly the coordinates `libpq_env` resolved — nothing ambient.
+
+    ⛔ THE RAW DSN WAS THE HOLE (#9601 review cycle 7, P2 — measured: a target with
+    no port plus an ambient `PGPORT` reached the record's port, and an ambient
+    `PGHOSTADDR` outranked the URI's host entirely). `psycopg2.connect(dsn)` hands
+    the URI to libpq, which merges every libpq variable the URI omits from the
+    process environment; the dump and restore legs already refuse that (they run
+    with `_subprocess_env`'s allow-list). The count leg is the MEASUREMENT the whole
+    verdict rests on, so it is built from the same resolution the guard compared:
+    explicit keywords, a pinned port, and no fallback to the ambient environment.
+    """
     try:
         import psycopg2
     except ImportError as e:
@@ -634,7 +700,25 @@ def _default_connector(dsn: str):
             "psycopg2 is not installed — the record cannot be counted, so a "
             "restore cannot be verified. Install the `postgres` extra."
         ) from e
-    return psycopg2.connect(dsn, connect_timeout=RECORD_CONNECT_TIMEOUT_S)
+    env = libpq_env(dsn)
+    kwargs: dict[str, object] = {
+        "host": env["PGHOST"],
+        # EXPLICIT, not `parts.port or 5432`: an absent port must not let an ambient
+        # `PGPORT` decide which server this counts.
+        "port": env.get("PGPORT", "5432"),
+        "dbname": env["PGDATABASE"],
+        "connect_timeout": RECORD_CONNECT_TIMEOUT_S,
+    }
+    for libpq_key, kwarg in (
+        ("PGUSER", "user"),
+        ("PGPASSWORD", "password"),
+        ("PGSSLMODE", "sslmode"),
+        ("PGSSLROOTCERT", "sslrootcert"),
+        ("PGOPTIONS", "options"),
+    ):
+        if libpq_key in env:
+            kwargs[kwarg] = env[libpq_key]
+    return psycopg2.connect(**kwargs)
 
 
 def record_row_counts(
