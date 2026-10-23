@@ -5034,6 +5034,10 @@ def _spool_transcript(args) -> dict:
         spool_dir,
         write_spool_entry,
     )
+    # One spelling for "does this value name a session": the spool's wire
+    # normaliser delegates to the same helper, so the local entry key and the
+    # wire cannot disagree (#9599).
+    from tortoise.ids import session_id_or_absent
     from tortoise.session_attribution import derive_machine_id, sanitize_attribution_field
 
     transcript_path = Path(args.file)
@@ -5117,7 +5121,15 @@ def _spool_transcript(args) -> dict:
     # colliding (the server upserts on `session_id`). Capped: 240 + "-" + 12 = 253
     # ≤ the server's `max_length` (256); a longer id is a 422 → a permanent
     # discard of the whole capture.
-    session_id = getattr(args, "session_id", None) or _local_session_id(transcript_path)
+    # ⛔ #9599: a blank `--session-id "   "` is TRUTHY, so `or` never replaced it
+    # and the entry was stored under an id that names nothing. The WIRE is safe
+    # (the spool normalises a blank to None and the server mints), but the LOCAL
+    # entry would be keyed on nothing — so two blank-id captures collide on one
+    # spool key while the server files them as separate sessions. A blank is
+    # therefore ABSENT, exactly as an absent one is, and takes the path-anchored
+    # id: the entry keeps ONE stable key across snapshots.
+    session_id = (session_id_or_absent(getattr(args, "session_id", None))
+                  or _local_session_id(transcript_path))
 
     # #2681: derive machine_id + forward model when provided. Derive-only
     # sha256 of hostname\0username — never-throw, memoized per process.
@@ -6670,6 +6682,7 @@ def _process_saved_backlog(state: dict, *, decided_at: str) -> int:
     import time
 
     from tortoise import capture_backlog
+    from tortoise.ids import session_id_or_absent
 
     # Nothing to do is decided FIRST — before any provider messaging. An empty
     # (or transcript-less) backlog has no re-capture to spend on, so naming a
@@ -6775,7 +6788,12 @@ def _process_saved_backlog(state: dict, *, decided_at: str) -> int:
             # raises `no parser for harness 'claude'` — which is the exact
             # harness path that produces the backlog.
             harness=_backlog_parser_harness(record.get("harness")),
-            session_id=session_id or None,
+            # #9599: the ledger may carry a blank id (written before the
+            # writers refused to store one). `or None` kept it — it is truthy —
+            # so the import POSTed a blank, 422'd at the boundary, and the
+            # record was never retired. Absent takes the import's own digest
+            # fallback instead.
+            session_id=session_id_or_absent(session_id),
             # Inside a run, the per-entry progress line IS the report: letting
             # the import's own offer print too would repeat the whole backlog
             # summary once per entry, which reads as noise and buries the
@@ -6847,6 +6865,7 @@ def _cmd_sessions_import(args) -> int:
     from urllib.error import URLError, HTTPError
     from http.client import HTTPException as _HTTPException
 
+    from tortoise.ids import session_id_or_absent
     from tortoise.session_import import (
         MAX_TURNS, hermes_selected_session_id, parse_transcript,
         window_turns)
@@ -6941,7 +6960,15 @@ def _cmd_sessions_import(args) -> int:
                                       sort_keys=True)).encode("utf-8")
     else:
         key_material = read_path.read_bytes()
-    session_id = args.session_id or (
+    # #9599: a PRESENT-but-BLANK `--session-id` names no session, and this leg
+    # must agree with its three siblings (the SDK doors, the spool's wire
+    # normaliser, the TS hook): those all treat a blank as "named no session"
+    # and let one be minted. Here `args.session_id or …` kept a blank (it is
+    # truthy), which the server now answers with 422 — and this leg classifies a
+    # 422 as PERMANENT, so the import was neither spooled nor filed: a capture
+    # silently lost, plus a raw FastAPI body shown instead of the refusal text.
+    # Absent takes the stable content-addressed fallback below.
+    session_id = session_id_or_absent(args.session_id) or (
         "imp_" + hashlib.sha256(key_material).hexdigest()[:12])
 
     # Local receipt — 2xx-only (a failed POST must never look imported).

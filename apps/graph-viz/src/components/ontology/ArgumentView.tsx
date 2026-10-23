@@ -142,7 +142,7 @@ export default function ArgumentView({ nodeId, nodeName, onBack }: Props) {
     const fontSize = 10 + tier * 1.5;
     const radius = isCenter ? 16 : 6 + tier * 2;
 
-    ctx.font = `${fontSize}px monospace`;
+    ctx.font = `${fontSize}px ui-monospace, SFMono-Regular, Menlo, monospace`;
 
     // Draw circle
     ctx.beginPath();

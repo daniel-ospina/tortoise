@@ -1,4 +1,4 @@
-// tortoise-hook-version: 5
+// tortoise-hook-version: 6
 // tortoise-capture — the in-repo Pi capture extension (#3575, #1727 T1).
 //
 // The `tortoise-hook-version` marker above is the install-contract generation
@@ -98,13 +98,14 @@ import {
   openSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { homedir, hostname, userInfo } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join, resolve as resolvePath } from "node:path";
 
 // ── Constants ─────────────────────────────────────────────────────────────
 
@@ -568,6 +569,108 @@ export function boundAttribution(value: unknown, maxLength: number): string | un
   return clean ? clean.slice(0, maxLength) : undefined;
 }
 
+/** The wire's session id: a NON-BLANK string, or `undefined` (the server mints).
+ *
+ *  ⛔ The twin of the Python leg's `capture_spool._normalise_session_id`
+ *  (#9599), and it is load-bearing, not tidying. A present but BLANK id
+ *  (`"   "`, `"\t"`) is truthy, so every `?? ""`/`||` default upstream keeps
+ *  it; the server now answers `POST /v1/sessions` with **422**, and
+ *  `classifyFailure` calls a 422 PERMANENT — so an un-normalised blank would
+ *  strand the capture in the spool FOREVER instead of letting the server mint
+ *  an id. Sending `undefined` (the key is dropped by JSON.stringify) is the
+ *  same "name no session, let the server mint" contract the Python spool
+ *  wires, which is what the two legs must agree on.
+ *
+ *  A padded-but-REAL id (`"  s1  "`) passes through unchanged: it is a
+ *  legitimate identity (#9599's recorded position), and trimming here would
+ *  silently file the capture under a DIFFERENT session than the client named.
+ *
+ *  ⚠️ `String.prototype.trim` and Python's `str.strip` do NOT agree on the
+ *  whitespace class: `trim` misses `\u001c-\u001f` and `\u0085`, which Python
+ *  treats as blank, and it ADDS `\uFEFF` (a BOM), which Python does not. Both
+ *  directions are wrong for this wire: the first would put a blank on the wire
+ *  the server refuses PERMANENTLY, the second would silently replace a
+ *  client-named id with a minted one. So the class is spelled out rather than
+ *  borrowed from `trim` — `[^\S\uFEFF]` is "whitespace, but not the BOM", plus
+ *  the two ranges Python has and JS `\s` lacks. The twin has to be the SAME
+ *  rule, not a similar one, and both halves are pinned in the test.
+ */
+const BLANK_SESSION_ID = /^(?:[^\S\uFEFF]|[\u001c-\u001f\u0085])*$/;
+
+export function normaliseSessionId(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  return BLANK_SESSION_ID.test(value) ? undefined : value;
+}
+
+/** A STABLE local session id for a session that arrived with none (#9599).
+ *
+ *  The exact twin of Python's `__main__._local_session_id` (#3963): anchored to
+ *  the resolved transcript PATH — never its content — so every per-turn
+ *  snapshot of one conversation addresses ONE spool entry, with the stem kept
+ *  readable and the path digest disambiguating two files with one basename.
+ *
+ *  ⛔ It has to be the SAME derivation on both legs: they share one spool
+ *  directory, so a different spelling would split one session across two
+ *  entries (or, worse, collide two sessions onto one).
+ *
+ *  Returns `undefined` when there is no path to anchor to — the caller then
+ *  treats the session as unnamed and declines to spool, which is what an
+ *  absent id already did.
+ */
+/** Python's `Path(p).resolve()` — the LONGEST EXISTING PREFIX, then the rest.
+ *
+ *  ⛔ Node's `realpathSync` is not a drop-in: it throws ENOENT for a missing
+ *  LEAF, so a fallback to the lexical `resolve()` would key a session on a
+ *  different string than Python whenever the leaf does not exist yet (a hook
+ *  spooling before its transcript is created) AND the path crosses a symlink —
+ *  one session, two entries, once the file appears. `resolve(strict=False)`
+ *  never raises for that: it resolves what exists and appends the remainder, so
+ *  the same walk is done here.
+ */
+function pythonResolve(file: string): string {
+  const whole = resolvePath(file);
+  const remaining: string[] = [];
+  let head = whole;
+  for (;;) {
+    try {
+      const real = realpathSync(head);
+      return remaining.length ? join(real, ...remaining.reverse()) : real;
+    } catch {
+      const parent = dirname(head);
+      if (parent === head) return whole; // filesystem root: nothing resolved
+      remaining.push(basename(head));
+      head = parent;
+    }
+  }
+}
+
+export function localSessionId(sessionFile: unknown): string | undefined {
+  if (typeof sessionFile !== "string" || !sessionFile) return undefined;
+  // ⛔ The digest anchors on the REAL path, and the stem on the ORIGINAL one —
+  // exactly what Python's `Path(p).resolve()` + `Path(p).stem` do. Getting
+  // either wrong splits one session across two spool entries on the very
+  // platforms that matter: a lexical anchor differs from Python's realpath on
+  // macOS (`/tmp` -> `/private/tmp`) and anywhere a harness reaches its
+  // transcript through a symlinked directory.
+  const anchor = pythonResolve(sessionFile);
+  const digest = createHash("sha256").update(anchor, "utf8").digest("hex").slice(0, 12);
+  return `${pythonStem(sessionFile).slice(0, 240)}-${digest}`;
+}
+
+/** `pathlib.Path.stem` for the trailing-dot case Node's `extname` gets wrong.
+ *
+ *  `Path('a.jsonl.').stem` is `'a.jsonl.'` — Python treats a TRAILING dot as no
+ *  suffix — while `basename(x, extname(x))` strips it, because Node's `extname`
+ *  returns `'.'` for that name. And `Path('.gitignore').stem` is `.gitignore`,
+ *  so a leading dot is not a suffix either.
+ */
+function pythonStem(file: string): string {
+  const base = basename(file);
+  const dot = base.lastIndexOf(".");
+  if (dot <= 0 || dot === base.length - 1) return base;
+  return base.slice(0, dot);
+}
+
 /** The POST /v1/sessions payload — the same shape `tortoise session capture` sends. */
 export function buildCapturePayload(args: {
   sessionId: string;
@@ -593,7 +696,12 @@ export function buildCapturePayload(args: {
 }): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     harness: HARNESS,
-    session_id: args.sessionId,
+    // #9599: NORMALISED at the WIRE, like the lane/stamp/machine_id below — a
+    // blank id from the shared spool directory would otherwise be a permanent
+    // 422 (classified PERMANENT, which strands the capture). Omitted rather
+    // than `null`, matching how `machine_id`/`capture_lane` signal absence.
+    // See `normaliseSessionId`.
+    session_id: normaliseSessionId(args.sessionId),
     source: args.source,
     conversation: args.turns,
     // #8531 review: capped at the WIRE (`machine_id` ≤256, `model` ≤128 are
@@ -2439,14 +2547,23 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
       const entries = (manager?.getEntries?.() ?? []) as Array<Record<string, unknown>>;
       const turns = extractTurns(entries);
       if (turns.length === 0) return;
-      const sessionId = manager?.getSessionId?.() ?? "";
+      // #9599: the LOCAL spool key is an identity too. `getSessionId()` handing
+      // back a whitespace-only id is truthy, so two different blank-id sessions
+      // landed in ONE entry (keyed `sha256("   ")[:32]`) and the second REPLACED
+      // the first's turns — measured, not theoretical. A blank therefore falls
+      // through to the path-anchored id, exactly as an absent one does on the
+      // Python leg. (The WIRE is normalised separately by `buildCapturePayload`:
+      // it must name no session so the server mints one.)
+      const sessionFile = manager?.getSessionFile?.();
+      const sessionId = normaliseSessionId(manager?.getSessionId?.())
+        ?? localSessionId(sessionFile);
       if (!sessionId) return;
       const { discards } = writeSpoolEntry(
         spoolDir,
         {
           sessionId,
           turns,
-          source: sourceName(manager?.getSessionFile?.()),
+          source: sourceName(sessionFile),
           machineId: deriveMachineId(),
           model: modelLabel(ctx?.model),
           // #3516 §B: this IS the in-process hook, so the entry it spools
