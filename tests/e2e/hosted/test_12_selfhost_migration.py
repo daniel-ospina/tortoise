@@ -282,6 +282,14 @@ def test_parity_export_import(api, session_jwt, tmp_path):
 
     key = os.urandom(32)
     env = dict(os.environ, TORTOISE_BACKUP_KEY=_b64.b64encode(key).decode())
+    # #9548: the same presence-based-arming scrub the two boot paths apply. This
+    # `tortoise export` child runs against an on-disk graph, so no journal write
+    # is reachable from it today (`_cmd_export` never appends a record) — but an
+    # inherited DSN would make "no child in this directory sees the real record"
+    # an invariant that holds only until the exporter grows a write path. Scrubbing
+    # it here keeps that a property of the directory rather than of today's call
+    # graph, which is the only version of it a future lane can rely on.
+    env["TORTOISE_RECORD_DSN"] = ""
     out = str(tmp_path / "parity.tortoise")
     r = subprocess.run(
         [sys.executable, "-m", "tortoise", "export",
