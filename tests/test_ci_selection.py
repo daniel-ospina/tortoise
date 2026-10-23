@@ -2782,6 +2782,25 @@ def test_capstone_probe_change_selects_core_not_tier1():
         assert r["full"] is False, (path, r)
 
 
+def test_the_capstone_gate_change_selects_core_not_tier1():
+    # #9089 review P2: the GATE itself (tools/capstone_verdict_check.py) owns
+    # tests/test_7949_capstone_verdict_check.py, which is registered `core` —
+    # and `config/ci-surfaces.yml` names `core` as its home. Before the
+    # CORE_ALSO row a gate-only diff came back with NO surface at all and the
+    # pin ran only because it also sits in the `tier1` curated list, so `core`
+    # was nominal and one `tier1` edit would have dropped the pin silently
+    # (the #1349/#3332/#3616 class, reached through the docs-only early return
+    # rather than through `_selection_relevant`).
+    #
+    # MEASURED before the row (2026-10-20, `select()` in-process):
+    # `_sel(["tools/capstone_verdict_check.py"])` -> surfaces=[], full=False.
+    # Mutation check: removing the CORE_ALSO row fails assert 1 below.
+    r = _sel(["tools/capstone_verdict_check.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_7949_capstone_verdict_check.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
 def test_the_capstone_evidence_bundle_selects_core_not_tier1():
     # PR #9196 review P1: the S2 verdict's deciding artifacts are committed TEXT
     # — `s2-wiring-census.log` (the census output), `e2e-chain-probe.log` (the
@@ -2835,6 +2854,51 @@ def test_the_capstone_census_pin_runs_on_a_main_py_change():
     assert "api" in r["surfaces"], r
     assert "test_7950_capstone_probe.py" in r["test_files"], r
     assert r["full"] is False, r
+
+
+def test_7949_capstone_probe_change_selects_core_not_tier1():
+    # #9080: docs/evidence/7949-capstone/probes/capstone_run.py owns
+    # tests/test_7949_capstone_verdict_check.py (`core`), the DB-free pin on the
+    # run's refusal chain and the pure observers every row is derived from.
+    #
+    # ⛔ The entry that keeps this `core` is the BUNDLE prefix
+    # (`docs/evidence/7949-capstone/`, added by #9076), NOT a `probes/` row.
+    # This PR added the narrower `docs/evidence/7949-capstone/probes/` and its
+    # claim was wrong on both halves (#9089 review P1): the broader row was
+    # already in place and `path.startswith()` makes a narrower prefix inside
+    # it dead, so (a) the entry changed no selection, and (b) the mutation
+    # claim this comment used to carry ("removing the entry fails assert 1")
+    # was falsified — the test passed with the entry deleted. MEASURED
+    # (2026-10-20, `select()` in-process, narrow row deleted):
+    # `_sel(["docs/evidence/7949-capstone/probes/capstone_run.py"])` ->
+    # surfaces=['core'], full=False, the pin present. The narrow row was
+    # removed; the mutation check below now names the row that does the work.
+    for path in (
+        "docs/evidence/7949-capstone/probes/capstone_run.py",
+        "docs/evidence/7949-capstone/probes/README.md",
+    ):
+        r = _sel([path])
+        assert "core" in r["surfaces"], (path, r)
+        assert "test_7949_capstone_verdict_check.py" in r["test_files"], (path, r)
+        assert r["full"] is False, (path, r)
+
+
+def test_no_core_also_entry_is_shadowed_by_a_parent_prefix():
+    # #9089 review P1: `CORE_ALSO` matching is `path.startswith(entry)`, so an
+    # entry that is a DESCENDANT of another entry can never admit a path its
+    # parent does not — it is dead config that reads as the reason a path is
+    # covered. This bundle added exactly one such row
+    # (`docs/evidence/7949-capstone/probes/` under the bundle prefix) and its
+    # pin passed with the row deleted, so nothing else could notice.
+    #
+    # Non-vacuity: with that row restored this test fails (it is the only
+    # shadowed pair in the tuple, measured 2026-10-20: 63 entries, 1 pair).
+    entries = list(cs.CORE_ALSO)
+    shadowed = sorted((a, b) for a in entries for b in entries
+                      if a != b and a.startswith(b))
+    assert shadowed == [], (
+        "CORE_ALSO rows shadowed by a parent prefix (dead config — delete the "
+        f"narrow row, keep the broad one): {shadowed}")
 
 
 def test_the_capture_receipt_key_registry_pin_runs_for_every_surface_that_owns_it():

@@ -152,6 +152,103 @@ MAX_EVENTS = 500
 MAX_SOURCES = 500
 MAX_PROVENANCE_REFS = 500
 
+# ── #4051 §3.1: the per-ORG ingest budget on the commit lane ───────────────
+# WHAT THIS IS. A per-ORG, rolling-60s allowance on the STORED BYTES a tenant's
+# ``POST /v1/sessions/commit`` requests may add, refused with 429 +
+# ``Retry-After``. It is a THROTTLE (bounds the rate), NOT a cap (bounds the
+# total) — see the RESIDUAL block below for what it deliberately leaves open.
+#
+# WHY IT EXISTS. The commit lane's only org-limit gate used to be the flat
+# ``max_sessions``; #4010 made sessions unlimited for every tier (owner ruling,
+# not to be reversed), and the replacement gates bound the REQUEST, not the
+# total: the payload's collections are capped (#9425), the pre-write
+# ``max_points`` gate is present (#5637) — but a ``points: []`` commit mints
+# :Session + transcript :Source + AgentSession :Event and
+# ``_count_resource("points")`` matches none of those labels, so that count
+# never moves and its gate can never trip. Measured pre-fix: a free-tier key
+# looping the endpoint with a fresh ``session_id`` minted unbudgeted nodes
+# forever. The only per-key bound on the lane was 300 req/min
+# (``RateLimitMiddleware.PATH_LIMITS``) — and a team plan allows 20 keys, so a
+# PER-KEY bound multiplies with the number of keys the tenant can mint.
+#
+# WHY THE UNIT IS BYTES (and the floor is nodes). The unit the owner ruled for
+# storage is MB/GB, not nodes (#4495/#5331: "we shouldn't measure 'per node'"),
+# and the repo's own cost basis prices one node at ``bytes_per_node`` = 1024
+# (``product/pricing.json`` ``cost_basis``; tied to that file by
+# ``tests/test_commit_endpoint.py::test_the_node_floor_is_the_pricing_cost_basis``).
+# So a request is charged ``max(payload bytes, nodes it will mint × 1024)`` — the
+# payload it actually sent, never less than the nodes it will leave behind. That
+# floor is what makes the ``points: []`` loop visible at all (its ~1 KB body
+# mints ~4 KB of nodes), and the payload term is what stops the reverse bypass:
+# ``summary`` / ``story_arc`` carry no field cap (Layer-1 caps content/quote
+# only), so without it a commit of a few nodes and an 8 MiB summary would add
+# megabytes for a few hundred bytes of budget.
+#
+# ⚠️ ``OVERRIDES:`` THE ALLOWANCE IS IN BYTES BUT ITS CHARGE CARRIES A
+# NODE-COUNT FLOOR (nodes × 1024). #5331 rules the storage UNIT is bytes — "any
+# node count × a per-node constant is not the model" — and this keeps the unit:
+# the allowance, the comparison and the reported ``used``/``limit`` are all
+# BYTES. The floor is a lower bound on the byte charge, not a re-denomination,
+# and it exists because the payload alone under-counts exactly the shape #4051
+# is about (a ~800-byte body that mints 4 KB of nodes). A lane that deletes it
+# by citing #5331 re-opens the hole; the departure is recorded on #4051 itself
+# (a comment carrying the same ``OVERRIDES:`` line), which is where a reader
+# holding #5331 will look.
+#
+# WHY NOT ``nodes_written``. The PL4 metering figure (``plan.reconcile.
+# net_new``) is points+entities+operators ONLY, so a payload whose ``events[]``
+# / ``sources[]`` are large while its points all reconcile as merges meters 0
+# while minting a node per entry — the budget would be bypassable by the very
+# hole it bounds. The charge is therefore COMPUTED FROM THE PAYLOAD before the
+# write (``commit_schema.commit_ingest_charge_bytes``), never read back from
+# metering.
+#
+# WHY IT IS NOT A DECISION REVERSAL. It adds no session cap (#4010 stands), no
+# retention/eviction window (#3853 stands), and no node-count ceiling and no
+# change to ``max_points``' meaning (#4495/#5331 stand). The enforcement
+# instrument is a transient 429 that self-heals in ≤60s — the instrument #5425
+# rules for ("we should just have rate-limits and if they want more they need
+# to speak with us"), and the same class the lane already answers on this path
+# (``RateLimitMiddleware``'s 300/min/key). A throttle DELAYS a capture; it never
+# refuses the customer's data.
+#
+# CALIBRATION (a tuning parameter, not a price): 10 MiB/min/org is one free
+# tier's whole node capacity (10,000 nodes × 1024 B) per minute. An empty
+# commit is charged its 4-node floor = 4,096 B (pinned by
+# ``tests/test_commit_endpoint.py::test_the_charge_is_the_node_floor_for_a_
+# small_payload``), so the allowance admits 2,560 of them per minute —
+# 10,485,760 B / 60 s = 174,763 B/s sustained on the cheapest possible loop,
+# and the same 10 MiB/min (14,400 MiB = 14.06 GiB/day) on payload-shaped
+# traffic. That is well above a real client-side capture loop and far BELOW
+# the ~24 MB/min a 20-key team could reach through the per-key buckets alone
+# (6,000 req/min × 4,096 B = 24,576,000 B). Override with
+# ``TORTOISE_COMMIT_INGEST_BYTES_PER_MIN`` when a real workload argues for a
+# different number. A knob set BELOW the largest possible single request does
+# not refuse that request for ever: ``commit_ingest_admit`` admits one
+# over-sized request per EMPTY window (see its docstring), so the worst case is
+# one commit per window — throttling, never an unbreakable retry loop.
+#
+# RESIDUAL (stated so this is not over-read): it bounds the RATE. A tenant
+# writing at the allowed rate forever still grows without limit, and that is BY
+# DECISION (retention unlimited, #4010/#3853). The TOTAL bound on the two
+# session write lanes is #4051 §4 and turns on ``max_graph_nodes`` vs the
+# recorded "storage is free" position — an owner ruling (#4495/#5331), not
+# something this lane may take. #4051's own triage names this rate bound the
+# only legitimate slice that needs no ruling.
+#: The SHIPPED default allowance — the figure the public contract states
+#: (``docs/INGEST_CONTRACT.md`` §9, ``docs/capacity.md`` §3: 10 MiB / 60 s / org).
+#: Named separately from the resolved constant for ONE reason: the knob below is
+#: read at import, and the contract ADVERTISES it — so an operator shell or CI
+#: job that exports ``TORTOISE_COMMIT_INGEST_BYTES_PER_MIN`` must not red a test
+#: that is asserting the default it never changed. The tests pin THIS constant
+#: (so a silent retune of the documented figure still fails) and opt the
+#: endpoint check onto it explicitly.
+COMMIT_INGEST_DEFAULT_BYTES_PER_MIN = 10 * 1024 * 1024
+
+MAX_COMMIT_INGEST_BYTES_PER_MIN_PER_ORG = max(1, int(
+    os.environ.get("TORTOISE_COMMIT_INGEST_BYTES_PER_MIN", "") or
+    COMMIT_INGEST_DEFAULT_BYTES_PER_MIN))
+
 # ── Default limits ──────────────────────────────────────────────────────────
 # max_points/max_api_keys have NO constant here — they resolve from
 # tortoise.pricing.tier_limits (product/pricing.json) so a legacy org without
@@ -1123,6 +1220,218 @@ def ask_budget_retry_after(org_id: str | None) -> float:
             return 0.0
         oldest = min(bucket)
         return max(0.0, 60.0 - (now_ts - oldest))
+
+
+# ── #4051 §3.1: the per-org commit ingest budget ────────────────────────
+# A weighted (bytes) window, so it cannot reuse ``rate_buckets._bucket_route``
+# as-is: that primitive compares ``len(bucket) >= limit`` on per-request
+# timestamp entries, which cannot express "the SUM of these charges". What it
+# CAN do — and what this store therefore copies rather than inventing — is its
+# documented capacity policy (``tortoise/rate_buckets.py``, #3124/#2866): an
+# ACTIVE key is NEVER evicted, because evicting one resets a victim's consumed
+# budget (the fail-open shape #2866 rejects as alternative C); only buckets
+# with no in-window charges are reclaimed, head-first; and a new key arriving
+# at a full store is charged to ONE shared overflow bucket instead of growing
+# the store, refused only when that overflow is spent too.
+#
+# The bucket stores ``(timestamp, org_id, charge_bytes)`` because the WINDOW
+# TOTAL is the quantity compared against the allowance — both the sum and the
+# oldest entry's age are needed on a refusal (``used`` and ``Retry-After``),
+# and both come from the ONE locked read that refused (#4614). The org field is
+# the PER-KEY OVERFLOW ATTRIBUTION ``rate_buckets.py`` records as closing a
+# known fail-open regression (#3124 review): the shared overflow holds charges
+# for several orgs, so without attribution (a) a refusal would report OTHER
+# orgs' bytes as the caller's own ``used``, and (b) an org that spent the
+# overflow could graduate to a fresh owned bucket the moment ANY slot freed and
+# obtain a SECOND full allowance inside one window — the exact defect
+# ``test_sticky_overflow_blocks_a_second_budget`` pins there, re-pinned here.
+_COMMIT_INGEST_WINDOW_S = 60.0
+#: Owned-key cap, matching ``RateLimitMiddleware.MAX_BUCKETS`` — the repo's own
+#: bound on a per-process bucket store.
+_COMMIT_INGEST_MAX_ORGS = 10_000
+#: The ONE shared overflow bucket a new org is charged to when the owned store
+#: is full of ACTIVE buckets. A sentinel that cannot collide with an org id
+#: (those come from the auth layer; none contains a NUL).
+_COMMIT_INGEST_OVERFLOW_KEY = "\x00commit-ingest-overflow"
+_commit_ingest_budget: collections.OrderedDict[
+    str, list[tuple[float, str, int]]] = collections.OrderedDict()
+_commit_ingest_lock = threading.Lock()
+
+
+class IngestAdmission(collections.namedtuple(
+        "IngestAdmission", "allowed used limit retry_after scope")):
+    """One per-org ingest-budget decision — allowed, and the numbers compared.
+
+    A decision, not a predicate, because the 429 must report ``used``/``limit``
+    and a ``Retry-After`` that come from the SAME read that refused (#4614:
+    a refusal is a structured state; a second read could disagree with the
+    first under concurrency).
+
+    ``scope`` names WHICH allowance the decision was made against:
+
+    * ``"org"`` — the org's own bucket. ``used`` is the org's own spend and the
+      numbers in the refusal describe the caller's traffic.
+    * ``"process"`` — the SHARED overflow bucket, used only when the owned
+      store is full of active orgs (the fail-closed flood regime). ``used`` is
+      still THIS org's own spend in it, which can legitimately be ``0``: the
+      refusal is then about the instance's shared capacity, not about anything
+      the caller wrote. A client branching on ``used >= limit`` would misread
+      that as its own overrun, so the scope — not the number — is the signal.
+    """
+
+    __slots__ = ()
+
+
+def _commit_ingest_owned_count(store) -> int:
+    """Org-keyed buckets in ``store`` — the ONE shared overflow bucket does not
+    consume a slot (``rate_buckets._bucket_owned_count``, same policy)."""
+    return len(store) - (1 if _COMMIT_INGEST_OVERFLOW_KEY in store else 0)
+
+
+def _commit_ingest_reclaim(store, now_ts: float) -> None:
+    """Drop only buckets with no IN-WINDOW charges — the head, while it lasts.
+
+    ``rate_buckets.py``'s documented policy, kept rather than re-invented: an
+    active key is never evicted (that would hand a throttled org a fresh
+    minute). Last-charge ordering (``move_to_end`` on every charge) makes the
+    head the least-recently-charged key, so stopping at the first bucket that
+    still holds an in-window charge is provably safe — every later key was
+    charged at least as recently. Bounded work: no store-wide iteration on any
+    charge.
+    """
+    while store:
+        head_key = next(iter(store))
+        head = store[head_key]
+        head[:] = [e for e in head
+                   if now_ts - e[0] < _COMMIT_INGEST_WINDOW_S]
+        if head:
+            return
+        del store[head_key]
+
+
+def commit_ingest_admit(org_id: str | None, charge_bytes: int) -> IngestAdmission:
+    """Charge ``charge_bytes`` against the org's rolling-60s ingest allowance.
+
+    Exemptions:
+
+    * ``not org_id`` (stdio/operator) is unbounded — it mirrors
+      ``enforce_org_limit``'s ``if not org_id: return`` and
+      ``_check_org_limit``'s "internal/no-org context — skip".
+    * a SINGLE request larger than the whole allowance is ADMITTED AND
+      RECORDED when the window is EMPTY. Refusing it (with a Retry-After) would
+      tell a client to retry a request that can never fit — an unbreakable loop
+      that only appears if an operator sets
+      ``TORTOISE_COMMIT_INGEST_BYTES_PER_MIN`` below the route's 8 MiB body cap.
+      Admitting it once spends the window, so the NEXT request is throttled: at
+      most one over-sized request per window, never an unlimited stream of
+      them (which is why the ``used == 0`` condition is load-bearing, not a
+      detail — without it every over-sized request would be admitted).
+
+    A REFUSED charge is not appended, so a client parked at the boundary is not
+    pushed further away from recovery by each futile retry.
+
+    The SHARED-overflow regime keeps ``rate_buckets.py``'s per-key attribution
+    (#3124 review), which is what makes the two numbers below honest rather
+    than merely conservative:
+
+    * the ADMISSION predicate compares the whole target bucket against the
+      allowance, so the overflow cannot be over-subscribed by many orgs adding
+      one charge each (the shared capacity ``rate_buckets`` documents);
+    * ``used`` is what THIS ORG spent — an owned bucket is entirely its own,
+      and in the shared overflow only entries attributed to this org count. A
+      refusal therefore never names another tenant's bytes, and a fresh org
+      refused because the shared bucket is spent reports ``used`` 0 (the truth:
+      it spent nothing; the store is full, which is the fail-closed overflow
+      class both stores accept) — and the returned ``scope`` is ``"process"``,
+      so a client never reads ``used: 0`` as an overrun of its own;
+    * an org is STICKY in the overflow while its own charges are in-window, so
+      freeing one slot cannot hand it a second full allowance.
+    """
+    limit = MAX_COMMIT_INGEST_BYTES_PER_MIN_PER_ORG
+    charge = max(0, int(charge_bytes))
+    if not org_id:
+        return IngestAdmission(True, 0, limit, 0.0, "org")
+    now_ts = time.monotonic()
+    with _commit_ingest_lock:
+        store = _commit_ingest_budget
+        key = org_id
+        if key != _COMMIT_INGEST_OVERFLOW_KEY and key not in store:
+            _commit_ingest_reclaim(store, now_ts)
+            overflow = store.get(_COMMIT_INGEST_OVERFLOW_KEY)
+            if overflow is not None:
+                overflow[:] = [e for e in overflow
+                               if now_ts - e[0] < _COMMIT_INGEST_WINDOW_S]
+            # STICKY PER ORG, never store-wide: an org with its OWN in-window
+            # overflow charges stays in the overflow until they expire (no
+            # second allowance), while an org with none takes a free slot at
+            # once (a store-wide rule would deny every fresh org for the rest
+            # of the window once the overflow held any charge). Both halves are
+            # ``rate_buckets._bucket_route``'s #3124 rule, restated for a
+            # weighted bucket.
+            sticky = overflow is not None and any(e[1] == org_id
+                                                  for e in overflow)
+            if sticky or (_commit_ingest_owned_count(store)
+                          >= _COMMIT_INGEST_MAX_ORGS):
+                key = _COMMIT_INGEST_OVERFLOW_KEY
+        bucket = store.get(key)
+        if bucket is None:
+            bucket = []
+        # prune THIS bucket's expired charges, then sum what is in-window
+        bucket[:] = [e for e in bucket
+                     if now_ts - e[0] < _COMMIT_INGEST_WINDOW_S]
+        # ``bucket_used`` is the capacity predicate (for the shared overflow it
+        # is EVERY org's charges: one shared bucket, one allowance). ``used`` is
+        # what THIS org spent — the number a refusal reports, so it never names
+        # another tenant's bytes.
+        bucket_used = sum(e[2] for e in bucket)
+        used = (bucket_used if key != _COMMIT_INGEST_OVERFLOW_KEY
+                else sum(e[2] for e in bucket if e[1] == org_id))
+        scope = ("process" if key == _COMMIT_INGEST_OVERFLOW_KEY else "org")
+        # ADMIT when the window has room, and ALSO when this single request is
+        # bigger than the whole allowance AND the window is empty (the
+        # over-sized case: see the docstring — once per window, never forever).
+        if bucket_used + charge <= limit or (bucket_used == 0
+                                            and charge > limit):
+            bucket.append((now_ts, org_id, charge))
+            store[key] = bucket
+            store.move_to_end(key)
+            return IngestAdmission(True, used + charge, limit, 0.0, scope)
+        # RETRY-AFTER: the wait until ENOUGH of the window has expired for
+        # THIS charge to fit — not until the OLDEST entry expires. Expiry is
+        # oldest-first and the charges are uneven, so `window - age(oldest)`
+        # promises a wait after which the request still does not fit, and a
+        # client honouring the header exactly is refused again (measured:
+        # 10 B at t+0 and 900 B at t+2 against a 1,000 B allowance left a
+        # 500 B request needing the t+2 entry to expire at t+62, while the
+        # header said 2 s at t+60). Walk the bucket oldest-first, subtracting
+        # each charge until the request fits, and answer for THAT entry. A
+        # charge larger than the whole allowance never fits this way; it ages
+        # out with the window, and the `used == 0` rule above admits it at
+        # once when the window empties.
+        remaining = bucket_used
+        retry_ts = bucket[-1][0] if bucket else now_ts
+        for entry_ts, _owner, entry_charge in bucket:
+            remaining -= entry_charge
+            retry_ts = entry_ts
+            if remaining + charge <= limit:
+                break
+        retry_after = max(0.0, _COMMIT_INGEST_WINDOW_S - (now_ts - retry_ts))
+        # Keep the pruned bucket so the org's remaining window still ages out.
+        if bucket:
+            store[key] = bucket
+        return IngestAdmission(False, used, limit, retry_after, scope)
+
+
+def _reset_commit_ingest_budget_for_tests() -> None:
+    """Test seam — clears the per-org commit ingest window.
+
+    The window is PROCESS state keyed by org_id, so a test that spends an
+    org's minute must not 429 the next test in the same process (the same
+    hazard the ask lane's ``_reset_ask_budget_for_tests`` exists for).
+    ``tests/conftest.py`` calls this per test.
+    """
+    with _commit_ingest_lock:
+        _commit_ingest_budget.clear()
 
 
 class AskInFlightLimitError(Exception):
