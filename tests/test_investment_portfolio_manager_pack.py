@@ -887,7 +887,7 @@ class TestKindsAreMintable:
             """Empty result sets: with no pack nothing can be found, and a rule
             that reached the graph would still find no rows."""
 
-            class g:  # noqa: N801 — stand-in for the FalkorDB client
+            class g:  # stand-in for the FalkorDB client
                 @staticmethod
                 def query(*_a, **_k):
                     return type("R", (), {"result_set": []})()
