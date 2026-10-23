@@ -183,7 +183,7 @@ idempotent, total, and stores no EP scalar`.
 
 | thing that looks live | its actual state | evidence |
 |---|---|---|
-| **the record, in the hosted deployment** | ⛔ **NOT ARMED.** `TORTOISE_RECORD_DSN` appeared **nowhere** in `fly.toml`, `entrypoint.sh`, `.github/workflows/deploy-hosted.yml`, or the runbook's Secrets Matrix. Unset ⇒ `NOT_ARMED` ⇒ *"zero statements, no connection attempt"* — the record path is inert on the deployment, so its behaviour is unchanged. **#9548 (2026-10-23) landed the arming surfaces** (deploy stages it from its own GitHub secret, manifest declares it, runbook + `fly.toml` document it) — the remaining half is the secret itself, a credential only the operator can create, so the LIVE state is still `NOT_ARMED` until it exists. | `grep -rn TORTOISE_RECORD_DSN fly.toml entrypoint.sh .github/workflows/ docs/infra-runbook.md` → empty **before #9548** |
+| **the record, in the hosted deployment** | ⛔ **NOT ARMED.** `TORTOISE_RECORD_DSN` appeared **nowhere** in `fly.toml`, `entrypoint.sh`, `.github/workflows/deploy-hosted.yml`, or the runbook's Secrets Matrix. Unset ⇒ `NOT_ARMED` ⇒ *"zero statements, no connection attempt"* — the record path is inert on the deployment, so its behaviour is unchanged. **#9548 (2026-10-23) landed the arming surfaces** (deploy stages it from its own GitHub secret, manifest declares it, runbook + `fly.toml` document it) — the remaining half is the secret itself, a credential only the operator can create, so the LIVE state is still `NOT_ARMED` until it exists. | `grep -rn TORTOISE_RECORD_DSN fly.toml entrypoint.sh .github/workflows/ docs/infra-runbook.md` → **1 line immediately before #9548**, not empty: `docs/infra-runbook.md:2585`, the §9 `record-restore` operator example landed by #9556/R8 — an invocation, not an arming surface. No hit in `fly.toml`, `entrypoint.sh`, `.github/workflows/`, or the runbook's Secrets Matrix. |
 | **the end-to-end proof, in CI** | ✅ **ARMED by #9551** (PR #9772). The dedicated `test-record-postgres` job provisions a throwaway `postgres:16` on an ephemeral loopback port (`.github/actions/postgres-provision`), sets `TEST_RECORD_DB_URI`, installs the `[postgres]` extra and asserts **zero** skips from the junit XML — so the two Postgres legs run instead of skipping, and an armed-but-skipping job cannot read as green. It is a REQUIRED leg of `python-ci-gate`. | measured on the arming tree (the collection is **70** — 61 record legs + the 9 CI-leg tests this change adds): unarmed → `68 passed, 2 skipped`; armed → **`70 passed, 0 skipped`**, the record migrations applied inside that run |
 | **the edge / operator half of the record** | ⚠️ **`relation` = 0 rows** on the live capture measurement, and the number is a consequence of **R4**: the capture *does* write journaled `EntityLinked` records (each one a `RelationUpsert` (`record_projection`)), but their endpoints are the claim `PointAdded` rows, which that capture's `search_keys` disagreement gets refused — so the relations have nowhere to land. `04-projection.md` §3 *additionally* declares the point-property-derived edge family *"not materialized by this increment"*. | §G run 2; R4 |
 | **the `session` record** | ✅ **FIXED (#9264).** `capture_redactions` was `jsonb` while the producer emits an **integer**, so the `SessionRecorded` carrying it was refused (`DatatypeMismatch`) and counted on `record_write_failures`; the module refuses to coerce (`record_projection._jsonb_or_scalar`), which is what kept it visible. The forward migration `20261022000001_record_session_capture_redactions_integer.sql` narrows the column to `integer` (every other `public.session` counter was already `integer`), and the tolerance entry for it is deleted — `_SCHEMA_DISAGREEMENTS` now carries `search_keys` only, which is the remaining half of R4. | migration `20261022000001`; `tests/test_9078_record_written_by_production_path.py` `_SCHEMA_DISAGREEMENTS = {"search_keys": …}` |
@@ -718,7 +718,7 @@ cd supabase/tests/pglite && npm install && npm run validate
 
 ```text
 grep -rn TORTOISE_RECORD_DSN fly.toml entrypoint.sh .github/workflows/ \
-  docs/infra-runbook.md                                                       → (no output)
+  docs/infra-runbook.md                    → (no output) when taken; ⚠️ 1 line after #9556/R8 (see below)
 grep -riE 'pgvector|vector\(' supabase/migrations/*.sql | wc -l              → 0
 grep -riE 'narrative|raw_turn|raw_text|transcript' supabase/migrations/*.sql → 0   ⚠️ see below
 grep -rn 'app.current_org_id' --include=*.py tortoise/ tools/                → 0 setters
@@ -733,6 +733,12 @@ grep -rniE '\bpostgres\b|psycopg|pg_dump' tortoise/backup.py tortoise/hosted_bac
 ⚠️ **The first census line is superseded by #9548 (2026-10-23)** — over that command's own path set
 (`fly.toml entrypoint.sh .github/workflows/ docs/infra-runbook.md`) it now returns the deploy
 workflow's bind/probe/stage lines, the runbook's row and section, and `fly.toml`'s `[env]` comment.
+⛔ **It was NOT empty immediately before #9548.** #9556/R8 landed the runbook's §9 operator example
+(`export TORTOISE_RECORD_DSN=…`, `docs/infra-runbook.md:2585`), so the pre-#9548 reading over these
+same paths was **1 line** — an operator invocation, not an arming surface. Stating that line is the
+whole point of this note: a later lane re-running the census must be able to tell a `record-restore`
+DSN apart from a #9548 arming surface, and the "the name is written nowhere" framing was never true
+of this path set after R8.
 The manifest declaration (`TORTOISE_RECORD_DSN  gh-secret:TORTOISE_RECORD_DSN` in
 `.github/scripts/fly-managed-secrets.txt`) is the fourth surface, and it is **not** in that path set —
 naming the file is what returns it:

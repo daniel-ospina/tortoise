@@ -2933,6 +2933,21 @@ connect FAILED (wrong host/password, project paused, network) — i.e. the
 happen lands in those two channels rather than in a red deploy, which is exactly
 why the two recipes above are the verification and the deploy status is not.
 
+   ⚠️ **The `no_tenant` arm is BOUND to the proving capture, not to the process.**
+   `no_tenant` is ALSO the designed outcome for a credential that names no graph:
+   an org-wide / session / legacy / OAuth key, the self-host registry lane
+   (`record_writer.record_tenant_for` returns `None` by design), and the
+   onboarding-seed and background-indexing surfaces (`hosted_api._bind_record_tenant`)
+   — all documented as the fail-closed direction (#9188/#9192), not a regression.
+   These counters are **process-global**, so a before/after delta also covers
+   whatever else the process served: ordinary traffic on a healthy armed
+   deployment can grow `no_tenant` with nothing wrong. So make the capture
+   **graph-bound** — its own writes cannot land in `no_tenant` — and attribute any
+   `no_tenant` growth inside the window to a specific request through recipe 1's
+   log line rather than to the capture. Growth with no log line to attribute it
+   to is a fail-and-fix; the route is never `TORTOISE_RECORD_SINGLE_TENANT`, which
+   the #9192 cross-tenant note below forbids.
+
 ⛔ **Do NOT put it in `fly.toml`'s `[env]`.** A DSN carries a password, so a
 versioned `[env]` entry is a committed credential; and a Fly **secret** shadows
 `[env]`, so the versioned value would not even be what the app reads. The

@@ -2474,6 +2474,36 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     assert re.search(r"does \*\*not start with\*\*\s+`postgresql://`", section), (
         "`malformed_dsn` is not defined by the scheme check it actually is"
     )
+    # `no_tenant` is also the DESIGNED outcome for a credential that names no
+    # graph (`record_tenant_for` returns None for org-wide / session / legacy /
+    # OAuth keys; `hosted_api._bind_record_tenant` documents the seed and
+    # background-indexing surfaces the same way, #9188/#9192), and these counters
+    # are process-global — so an absolute "none at all for `no_tenant`" reds a
+    # healthy armed deployment on ordinary traffic and offers no legitimate
+    # remedy. The bar must bound that arm to the CAPTURE and say how to attribute
+    # growth, while keeping it a fail-and-fix for the capture's own writes.
+    assert re.search(r"BOUND to the proving capture, not to the process", section), (
+        "the `no_tenant` arm is absolute — it fails a healthy deployment on the "
+        "unbound-credential `no_tenant` the code counts by design, and the only "
+        "lever the section offers (`TORTOISE_RECORD_SINGLE_TENANT`) is the "
+        "#9192 cross-tenant hazard it forbids below"
+    )
+    # ⛔ NOT the bare token `process-global`: the section already says "env is
+    # process-global" about the #9192 env pair (line ~2960), so a bare-token arm
+    # passed on the PRE-fix wording — a vacuous assertion, caught by the verifier
+    # and re-anchored to this clause.
+    assert re.search(r"These counters are \*\*process-global\*\*", section), (
+        "the section does not say the counters are process-global, so a "
+        "before/after delta reads as if it measured only the capture"
+    )
+    assert re.search(r"graph-bound", section), (
+        "the section gives no way to make the capture's own `no_tenant` "
+        "impossible — a graph-bound credential is the discriminator"
+    )
+    assert re.search(r"record_tenant_for|_bind_record_tenant", section), (
+        "the bounded arm names no counting site, so a reader cannot check the "
+        "claim that `no_tenant` is designed on those lanes"
+    )
 
 
 def _guarded_append(name: str) -> str:
@@ -2646,6 +2676,29 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
     assert len(hits) == 1, (
         f"`grep -rn {_RECORD_DSN_ENV} {manifest}` returns {len(hits)} lines, not "
         "the 1 the note promises"
+    )
+    # Claim 3 — the BASELINE reading the note's provenance rests on. The note
+    # said the census was empty before #9548; it was not. #9556/R8 landed the
+    # runbook's §9 `record-restore` operator example (`export TORTOISE_RECORD_DSN=`),
+    # so the same path set returned ONE line before #9548 — an invocation, not an
+    # arming surface. Without this arm the note can go back to claiming an empty
+    # baseline and nothing reds: the manifest grep above is executed, the baseline
+    # census grep never was (#9548 review P1/P2).
+    assert re.search(r"NOT empty", note), (
+        "the note claims the pre-#9548 census was empty — it returned one line, "
+        "#9556/R8's §9 operator example, and a later lane needs that line named to "
+        "tell it apart from a #9548 arming surface"
+    )
+    assert re.search(r"#9556", note), (
+        "the note does not attribute the pre-existing census line to #9556/R8, so "
+        "the reader cannot tell which cause put it there"
+    )
+    # ... and that attribution is TRUE of the runbook it names: the operator
+    # example really is in the runbook's §9, at the line the note cites.
+    runbook = (_REPO_ROOT / "docs/infra-runbook.md").read_text(encoding="utf-8")
+    assert re.search(r"export TORTOISE_RECORD_DSN=", runbook), (
+        "the note blames #9556/R8 for a runbook line that is not there — the "
+        "census hit it explains has no referent"
     )
 
 
