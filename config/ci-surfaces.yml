@@ -5974,6 +5974,18 @@ tier1:
 # relationship-variable `SET` census; no DB, so a docs-only PR — the exact change
 # class that can re-introduce a retracted sentence — must run it here.
 - test_9397_about_edge_properties.py
+# #9778 review (P1): the declared-mechanism MEMBERSHIP gate (`core` above) reads
+# `docs/architecture/*.md` — it derives the declared mechanism set from the
+# `<!-- v4-mechanism: <id> -->` markers in those two documents and fails closed
+# when a marker has no registry row. That is a NEW doc-side input, and `docs/`
+# is in NON_PYTHON_PREFIXES: a docs-only diff takes `select()`'s early return
+# (or matches the `api` entry for STORAGE-ARCHITECTURE.md) and runs tier1 ONLY,
+# so registered in `core` alone the gate was asleep on the one change class
+# that can red it — deleting or renaming a marker, or rewriting a declaring
+# section, merged green while the gate was red on `main` (#1349/#3332/#3616
+# silent-drop class). The same dual registration the six sibling
+# `test_extractor_v4_*` doc guards already carry for exactly this reason.
+- test_v4_declared_mechanisms.py
 # ── #9017 (2026-10-18): the slow pool's weights and its leg split are MEASURED
 #
 slow_files:
