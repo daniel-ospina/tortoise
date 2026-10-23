@@ -1166,21 +1166,26 @@ class TestCrossPackRefs:
 
     def test_a_namespaced_near_miss_is_fatal_even_without_the_sibling(
             self, tmp_path):
-        """A NAMESPACED relation `nearMisses` target is a typo in EVERY catalog.
+        """A NAMESPACED relation `nearMisses` target is fatal while predicates
+        and semantics values are declared BARE (the #2030 contract).
 
         The #2781 gate is right for a bare ref: the pack may legitimately be
-        naming a SIBLING pack's predicate (predicates are declared and matched
-        bare, #2030), so an absent `hr` explains `gatedBy` away as "install
-        pack 'hr'". Predicates do not exist under a namespace at all, so
-        `venture:holds` names nothing however much is installed — the gate's
-        own advice ("install pack 'venture'") cannot make it resolve, and once
-        `pack validate` reads `unresolved_refs` into its verdict (#9663) that
+        naming a SIBLING pack's predicate, so an absent `hr` explains `gatedBy`
+        away as "install pack 'hr'". A namespaced target names no predicate or
+        semantics value, so that advice cannot make it resolve — and once
+        `pack validate` reads `unresolved_refs` into its verdict (#9663) the
         advice would also turn a TYPO into an installable, fixable gap.
 
         `bare_only=True` at that one call site keeps it fatal. FAIL-ON: drop
         that argument and this pack LOADS (0 → 1) with the ref filed as a
         survivable gap; the bare case above must keep loading, so the guard
         narrows nothing else.
+
+        The one escape is a pack that itself declares a namespaced PREDICATE
+        (`_validate` only checks `pred[0].islower()`, so one is accepted and
+        then resolves such a ref). No shipped pack does; rejecting one is a
+        behaviour change filed as #9760. Do not restate this docstring as
+        "in every catalog" — measured false on such a catalog.
         """
         d = str(tmp_path / "packs")
         os.makedirs(f"{d}/dev", exist_ok=True)
