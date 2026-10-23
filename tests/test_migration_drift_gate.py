@@ -442,7 +442,7 @@ def test_in_order_block_offers_the_ddl_free_remedy_for_bookkeeping_drift():
     # and rules out auto-dispatch on this path (docs/infra-runbook.md §8.6 states
     # the same bound for the audience that reads this gate's output).
     assert "#2240" in out, out
-    assert "OWNER ACTION" in out, out
+    assert "OWNER-ONLY" in out, out
 
 
 def test_repo_ahead_note_accompanies_the_duplicate_prefix_branch():
@@ -459,6 +459,10 @@ def test_repo_ahead_note_accompanies_the_duplicate_prefix_branch():
     assert r.returncode == 1, r.stdout
     assert "duplicate" in r.stdout.lower(), r.stdout
     assert "schema_migrations ROW" in r.stdout, r.stdout
+    # A duplicate report is NOT the repo-ahead report, even when its files are
+    # block-class (BLOCKING non-empty): the sentence that names the report must
+    # not appear (round-6 review finding).
+    assert "produces exactly this report" not in r.stdout, r.stdout
     # The #2240 owner bound rides the OWNER BOUND statement (a separate one from
     # the repo-ahead diagnosis since round 4), so every red exit carries it; the
     # two repair SITES also carry an inline qualifier, because the alert wrapper
@@ -478,8 +482,8 @@ def test_diagnosis_reaches_the_duplicate_branch_without_a_blocking_member():
     """
     r = _run_fixture(
         {
-            "20260813000005_a.sql": "CREATE INDEX IF NOT EXISTS i1 ON public.t (a);\n",
-            "20260813000005_b.sql": "CREATE INDEX IF NOT EXISTS i2 ON public.t (b);\n",
+            "20260813000005_first.sql": "CREATE INDEX IF NOT EXISTS i1 ON public.t (a);\n",
+            "20260813000005_second.sql": "CREATE INDEX IF NOT EXISTS i2 ON public.t (b);\n",
         },
         ["0001"],
     )
@@ -487,10 +491,34 @@ def test_diagnosis_reaches_the_duplicate_branch_without_a_blocking_member():
     assert "duplicate" in r.stdout.lower(), r.stdout
     assert "note: 'repo-ahead' means prod has no" in r.stdout, r.stdout
     assert "produces exactly this report" not in r.stdout, r.stdout
-    # The rename example must be runnable: the SECOND duplicate moves to a free
-    # prefix, and the destination it names is the one it uses.
-    assert "git mv 20260813000005_b.sql <next-free>_b.sql" in r.stdout, r.stdout
-    assert "git mv 20260813000005_a.sql 20260813000005_b.sql" not in r.stdout, r.stdout
+    # The rename operand is the ACTUAL second file (the fixture's names are
+    # descriptive on purpose — the repo's duplicates all are, e.g.
+    # 20261022000001_blog_indexnow / _record_session_capture_redactions_integer),
+    # carries the migrations path so it runs from the repo root, and the
+    # destination is the one the command uses.
+    assert (
+        "git mv supabase/migrations/20260813000005_second.sql"
+        " supabase/migrations/<next-free-prefix>_second.sql"
+    ) in r.stdout, r.stdout
+    # Nothing shape-specific to a `_a`/`_b` fixture pair, and never the old
+    # rename-onto-the-other-duplicate form ("fatal: destination exists").
+    assert "_b.sql" not in r.stdout, r.stdout
+    assert "git mv 20260813000005_a.sql" not in r.stdout, r.stdout
+
+    # Every colliding prefix gets its own operand: naming one of two leaves the
+    # next run red.
+    r2 = _run_fixture(
+        {
+            "20260813000005_first.sql": "CREATE INDEX IF NOT EXISTS i1 ON public.t (a);\n",
+            "20260813000005_second.sql": "CREATE INDEX IF NOT EXISTS i2 ON public.t (b);\n",
+            "20260813000006_first.sql": "CREATE INDEX IF NOT EXISTS i3 ON public.t (c);\n",
+            "20260813000006_second.sql": "CREATE INDEX IF NOT EXISTS i4 ON public.t (d);\n",
+        },
+        ["0001"],
+    )
+    assert r2.returncode == 1, r2.stdout
+    assert "git mv supabase/migrations/20260813000005_second.sql" in r2.stdout, r2.stdout
+    assert "git mv supabase/migrations/20260813000006_second.sql" in r2.stdout, r2.stdout
 
 
 def test_note_covers_the_duplicate_branch_when_nothing_is_repo_ahead():
@@ -517,7 +545,7 @@ def test_note_covers_the_duplicate_branch_when_nothing_is_repo_ahead():
     assert "note: 'repo-ahead' means prod has no" not in r.stdout, r.stdout
     # What must survive is the OWNER bound — and it is the ONLY thing pinning the
     # `$DUP_LOCAL_VERSIONS` disjunct of that guard, since BLOCKING is empty here.
-    assert "OWNER ACTION" in r.stdout, r.stdout
+    assert "OWNER-ONLY" in r.stdout, r.stdout
     assert "#2240" in r.stdout, r.stdout
 
 
@@ -669,6 +697,10 @@ def test_duplicate_branch_flags_out_of_order_after_rename():
     assert ooo, r.stdout
     assert "20260917000001" in ooo[0], ooo[0]
     assert "apply via supabase-deploy dispatch" in r.stdout, r.stdout
+    # The repair instruction on THIS branch carries its own inline owner bound
+    # (the alert wrapper keeps only the report's last 6000 bytes), pinned
+    # literally — `#2240` alone is also supplied by the statement above it.
+    assert "— OWNER ACTION, a lane must not run prod DDL" in r.stdout, r.stdout
 
 
 def test_fresh_project_with_no_applied_migrations_is_not_out_of_order():
@@ -749,7 +781,7 @@ def test_clean_run_has_no_remediation_markers():
         "PENDING AFTER",
         "include-all",
         "note: 'repo-ahead' means prod has no",
-        "OWNER ACTION",
+        "OWNER-ONLY",
     ):
         assert marker not in r.stdout, f"{marker!r} leaked into a clean run: {r.stdout}"
 
@@ -767,7 +799,7 @@ def test_warn_only_run_is_green_and_carries_no_red_diagnosis_note():
     assert "OK (no blocking drift)" in r.stdout, r.stdout
     assert "warn-only" in r.stdout.lower(), r.stdout
     assert "note: 'repo-ahead' means prod has no" not in r.stdout, r.stdout
-    assert "OWNER ACTION" not in r.stdout, r.stdout
+    assert "OWNER-ONLY" not in r.stdout, r.stdout
 
 
 # ── #6136 regression: early-exit pipeline consumers under `set -euo pipefail` ──

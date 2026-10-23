@@ -199,19 +199,22 @@ if [ -n "$REPO_AHEAD" ] && { [ -n "$BLOCKING" ] || [ -n "$DUP_LOCAL_VERSIONS" ];
   echo "  note: 'repo-ahead' means prod has no schema_migrations ROW — NOT that prod lacks"
   echo "        the objects."
 fi
-# The SENTENCE BELOW names the report it explains, so it prints only on the branch
-# whose report IS the repo-ahead list. On a duplicate-prefix report it would say
-# bookkeeping drift "produces exactly this report" about a report bookkeeping drift
-# cannot produce (a colliding prefix), re-opening the misread this note closes:
-# that the remedy is to record a version, when the remedy is to rename a file
-# (round-5 review finding, #9613).
-if [ -n "$BLOCKING" ]; then
+# The SENTENCE BELOW names the report it explains, so it prints only when THAT
+# report is the one on screen: repo-ahead with NO duplicate prefix. `$BLOCKING`
+# alone is not enough — a duplicate prefix whose files are block-class (ALTER
+# TABLE/DO block/…) is a `$BLOCKING` member too, and that branch exits BEFORE any
+# repo-ahead list is printed, so the sentence would claim bookkeeping drift
+# "produces exactly this report" about a report it cannot produce, re-opening the
+# misread this note exists to close: record the version, instead of renaming the
+# colliding file (#9613 review rounds 5 and 6).
+if [ -n "$BLOCKING" ] && [ -z "$DUP_LOCAL_VERSIONS" ]; then
   echo "        Bookkeeping drift (DDL applied outside 'supabase db push',"
   echo "        so the version was never recorded) produces exactly this report (#9613)."
 fi
 if [ -n "$BLOCKING" ] || [ -n "$DUP_LOCAL_VERSIONS" ]; then
-  echo "  ⛔ OWNER ACTION for any remedy below that runs DDL or 'migration repair': a lane"
-  echo "     must not run prod DDL or repair, and no auto-dispatch exists (#2240 ruling)."
+  echo "  ⛔ OWNER-ONLY for any remedy below that runs DDL DIRECTLY, or 'migration repair':"
+  echo "     a lane must not run prod DDL or repair, and no auto-dispatch exists (#2240)."
+  echo "     Dispatching supabase-deploy (below) IS the lane-sanctioned path (runbook §8.6)."
 fi
 
 if [ -n "$DUP_LOCAL_VERSIONS" ]; then
@@ -219,6 +222,25 @@ if [ -n "$DUP_LOCAL_VERSIONS" ]; then
   for v in $DUP_LOCAL_VERSIONS; do
     files="$(ls "$MIGRATIONS_DIR"/${v}_*.sql 2>/dev/null | xargs -n1 basename | tr '\n' ' ')"
     echo "    - $v  [$files]"
+  done
+  # ⛔ THE OPERAND IS THE ACTUAL SECOND FILE, NOT `${v}_b.sql` (review rounds 5-6).
+  # The printed remedy was `git mv ${v}_a.sql ${v}_b.sql`, which renames one
+  # duplicate ONTO the other — "fatal: destination exists" (rc 128) — and its
+  # replacement `${v}_b.sql → <next-free>_b.sql` was runnable only for filenames
+  # literally shaped `_a`/`_b` (the test fixture's shape). Every duplicate prefix
+  # in this repo's history has DESCRIPTIVE names (0011x3, 0012x3, 0015x3,
+  # 20261022000001 x4, …), so a hardcoded `_b` aborts with "fatal: bad source".
+  # Print the real second filename, with the migrations path, one per prefix:
+  # a report listing two colliding prefixes needs both renamed, and naming only
+  # one leaves the next run red.
+  echo "  Rename operand per prefix (the SECOND file listed, left in place: the first) —"
+  echo "  run from the repo root, once per prefix above:"
+  for v in $DUP_LOCAL_VERSIONS; do
+    second="$(ls "$MIGRATIONS_DIR"/${v}_*.sql 2>/dev/null | sed -n 2p | xargs -n1 basename 2>/dev/null || true)"
+    if [ -n "$second" ]; then
+      slug="${second#${v}_}"
+      echo "    git mv supabase/migrations/$second supabase/migrations/<next-free-prefix>_$slug"
+    fi
   done
   if [ -n "$BLOCK_OOO" ]; then
     # The same refusal applies here: once the rename is done the deploy still
@@ -229,21 +251,15 @@ if [ -n "$DUP_LOCAL_VERSIONS" ]; then
     echo "  OUT OF ORDER after the rename (older than prod's newest applied version $REMOTE_MAX) — resolve these FIRST:$BLOCK_OOO"
     echo '    The deploy runs `supabase db push --include-all`, which applies the whole repo-pending set.'
     echo "  Remediation (in this order):"
-    echo "    1. rename ONE duplicate file to a free prefix that sorts AFTER $REMOTE_MAX;"
+    echo "    1. rename the operand(s) printed above to a free prefix that sorts AFTER $REMOTE_MAX;"
     echo "    2. resolve each OUT OF ORDER version above (never applied -> forward migration;"
     echo "       already applied but unrecorded -> supabase migration repair --linked"
     echo "       --status applied <version> — OWNER ACTION, a lane must not run prod DDL"
     echo "       or repair, #2240);"
     echo "    3. then apply via supabase-deploy dispatch."
   else
-    echo "  Remediation: pure-prefix rename ONE file to the next free prefix (content unchanged) —"
-    # ⛔ The operand must be a file that EXISTS and the destination must be free.
-    # The pre-#9613 line was `git mv ${v}_a.sql ${v}_b.sql`: `${v}_b.sql` is the
-    # OTHER duplicate, so that command fails with "destination exists" (rc 128),
-    # and its `→ <next-free>_a.sql` tail named a destination the command never
-    # used — the one line printed as the remedy aborted for the operator. Rename
-    # the SECOND file to a free prefix and leave `${v}_a.sql` in place.
-    echo "    e.g. git mv ${v}_b.sql <next-free>_b.sql, then apply via supabase-deploy dispatch."
+    echo "  Remediation: pure-prefix rename — move the operand(s) printed above to a free"
+    echo "    prefix (content unchanged), then apply via supabase-deploy dispatch."
   fi
   exit 1
 fi
