@@ -3269,9 +3269,20 @@ def _beta_variance(alpha: float, beta: float) -> float:
     TortoiseEP.get_contested_claims.
     """
     s = alpha + beta
-    if s <= 0:
+    # A sum that is not finite is not a usable pair either: an overflowing sum
+    # gives a denominator of inf (0.0/0.0-free but meaningless), and a NaN alpha
+    # would put a NaN variance on the wire (`json.dumps` emits a bare `NaN`
+    # token). Report "no variance" instead of a bogus or unwritable number.
+    if not math.isfinite(s) or s <= 0:
         return 0.0
-    return (alpha * beta) / (s * s * (s + 1))
+    denom = s * s * (s + 1)
+    # Underflow case: a subnormal pair (e.g. α=β=1e-200) makes `s*s` and
+    # `α*β` both 0.0 → 0.0/0.0 raised ZeroDivisionError out of the batch
+    # decoration, discarding every assembled point (the #8504 failure shape,
+    # one line under the site this change repairs).
+    if denom == 0.0 or not math.isfinite(denom):
+        return 0.0
+    return (alpha * beta) / denom
 
 
 def _beta_mean(alpha: float, beta: float) -> float:
@@ -3283,7 +3294,10 @@ def _beta_mean(alpha: float, beta: float) -> float:
     ZeroDivisionError.
     """
     s = alpha + beta
-    return alpha / s if s > 0 else 0.5
+    # `isfinite` as well as `> 0`: an overflowing sum (+inf) would otherwise
+    # yield α/inf == 0.0 — a wrong belief (maximum disbelief) rather than the
+    # neutral fallback this guard exists to serve.
+    return alpha / s if math.isfinite(s) and s > 0 else 0.5
 
 
 def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
@@ -4037,7 +4051,25 @@ def get_relationships_bounded(
                             # never a fabricated Beta(1,1) posterior (0.5/0.0833
                             # would be internally contradictory: variance above
                             # the contested threshold but contested=false).
-                            "confidence": round(alpha / (alpha + beta), 4) if has_ep else None,
+                            #
+                            # #8504: a MEASURED peer whose persisted pair is
+                            # (0.0, 0.0) has no posterior mean either, and the
+                            # raw division here raised ZeroDivisionError
+                            # mid-assembly — discarding every point assembled
+                            # before it (#330's guard, missed at this site).
+                            # `_beta_mean` carries that guard, and its uniform
+                            # fallback (0.5) is the SAME value the sibling
+                            # signal surface reports for the pair
+                            # (StateRanker._fetch_point_signals,
+                            # ranking.py:1046 → NEUTRAL_CONFIDENCE: measured
+                            # on the write-path shape, which mirrors
+                            # `confidence`; the GraphRanker sibling has no
+                            # guard and is untouched by this read).
+                            # It is not the fabricated posterior above: for this
+                            # pair `_beta_variance`'s own s <= 0 guard yields
+                            # variance 0.0, so contested stays False and nothing
+                            # above the threshold is claimed.
+                            "confidence": round(_beta_mean(alpha, beta), 4) if has_ep else None,
                             "variance": round(variance, 6) if has_ep else None,
                             "contested": contested,
                             "created_at": created,
@@ -4320,13 +4352,16 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
             # passed RAW: ``window_read_fields``' presence gate is
             # ``is not None``, so a falsey-but-present bound — ``""``, ``0`` —
             # is a REAL bound and its key is still emitted. Since #9201 a bound
-            # with NO declared precision that cannot be ordered reports ``None``
-            # on BOTH ends — a caller-declared token still wins, because it is an
-            # assertion rather than a derivation (``effective_precision`` returns
-            # it before the orderability test). That is how this surface stops
-            # disagreeing with the #6140 start gate in ``sdk._covers`` (an
-            # unorderable start is an OPEN start there): neither derives a
-            # precision from a value it cannot order.
+            # that cannot be ordered reports ``None`` on BOTH ends — and since
+            # #9244 that holds for a caller-DECLARED token too: a declaration
+            # ANNOTATES a bound, it cannot summon one, so a ``year`` declared on
+            # ``"TBD"`` reads ``None`` rather than resurrecting a start the
+            # #6140 ruling reads as never recorded (the write boundary still
+            # STORES the pair; refusing it there is the owner's contract call
+            # #9244 leaves open). That is how this surface stops disagreeing
+            # with the #6140 start gate in ``sdk._covers`` (an unorderable start
+            # is an OPEN start there): neither derives a precision from a value
+            # it cannot order.
             # Pre-normalizing with
             # ``or None`` here made the same stored window read ``day`` in
             # assembly / ``get_historical_knowledge`` and ``None`` here — the

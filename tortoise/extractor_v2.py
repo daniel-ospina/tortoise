@@ -489,7 +489,7 @@ def _s2s4_rules(master: dict | None = None, *,
     it is the slot that states the value policy — a pack's keep/drop hints and
     instruction snippets are policy, not vocabulary, so they must sit where
     the policy does and not in the master render. ``None``
-    (or a master whose packs declare nothing — every shipped pack today)
+    (or a master whose packs declare no hints — every shipped pack today)
     renders the pre-#4894 block byte-for-byte.
 
     #2818: ``master`` also carries ``pack_values`` — the per-kind value-field
@@ -528,8 +528,8 @@ def _pack_values_text(master: dict | None) -> str:
     ``_select_pack_kinds`` dropped from this story's PACK KINDS section,
     contradicting "EVERY kind you emit MUST come from this list". Policy,
     never vocabulary. ``""`` when nothing is declared, so the S2/S4 rule slot
-    is byte-identical for every pack that declares none (every shipped pack
-    today).
+    is byte-identical for every pack that declares none (the other six shipped
+    packs — since #9663 `portfolio:allocationTarget` does declare one).
     """
     values = (master or {}).get("pack_values") or {}
     if not isinstance(values, dict) or not values:
@@ -660,8 +660,8 @@ def _build_master_from_brief(brief: dict,
     # rather than folded into ``pack_kinds``' string values — every existing
     # consumer of ``pack_kinds`` (``master_kind_forms``, the write gates, the
     # compact selector) treats a value as the kind's description string, and a
-    # props-less kind must render byte-identically. Empty for every shipped
-    # pack today, so the render is unchanged unless a pack declares one.
+    # props-less kind must render byte-identically. The other six shipped packs
+    # declare nothing; since #9663 `portfolio:allocationTarget` does.
     pack_values: dict[str, list] = {}
     # #4894: the brief's RESERVED, non-kind sections are skipped by the SAME
     # set ``value_extractor`` uses to keep them out of the objectKind
@@ -688,8 +688,11 @@ def _build_master_from_brief(brief: dict,
         "pack_kinds": pack_kinds,
         # #2818: per-kind value-field declarations (only kinds that declare
         # one appear). A SEPARATE section so ``pack_kinds``' description
-        # strings keep their meaning for every existing reader; empty for
-        # every shipped pack today (so no render changes).
+        # strings keep their meaning for every existing reader. Since #9663 the
+        # catalogue is no longer wholly props-less — ONE kind declares a field
+        # (``portfolio:allocationTarget``), so the pack-kinds list gains that
+        # kind's ``[values: …]`` segment and this section is non-empty for any
+        # master that includes the portfolio pack.
         "pack_values": pack_values,
         "chains": {name: {"path": list(c["path"]), "note": c["note"]}
                    for name, c in CHAINS.items()},
@@ -697,7 +700,7 @@ def _build_master_from_brief(brief: dict,
         # #4894 / #1026: the packs' DECLARED value-brief hints (valueGate /
         # promptFragments). Carried verbatim on the master so the S1/S2/S4
         # render sites read one compiled source; empty for every pack that
-        # declares neither, which is every shipped pack today.
+        # declares neither, which is still every shipped pack today.
         "pack_hints": {ns: dict(h) for ns, h in
                        (brief.get("pack_hints") or {}).items()},
         # E2 (#1534): user-personal-state vocabulary — the Tier-A classification
@@ -814,6 +817,75 @@ _PACK_TRIGGERS = {
     "venture:": ("venture", "fund", "portfolio", "grant", "tranche",
                   "disbursement", "term of award", "programme", "asset",
                   "patent", "condition"),
+    # #9663: the portfolio overlay (`packs/investment-portfolio-manager`) is
+    # also a shipped pack with a trigger entry — without one it is injected
+    # WHOLE into every compact-mode prompt, which is the fail-open fallback,
+    # not a design.
+    # ⚠ These are matched with `t in story`, i.e. as SUBSTRINGS, so every entry
+    # must be one that cannot ride inside an unrelated word. `valuation` was the
+    # first draft and matched "evaluation" — which made an unrelated story
+    # select `portfolio:*` AND (because one match suppresses the all-packs
+    # fallback) drop every other pack's kinds from the compact prompt. Bare
+    # `mandate`, `allocation` and `impairment` reproduce that on "the team's
+    # mandate…", "resource allocation…", "a visual impairment…".
+    #
+    # A space or a hyphen is NOT enough. Measured on this row's earlier drafts,
+    # each of these selected `portfolio:*` on an ordinary non-portfolio story
+    # and so suppressed the all-packs fallback, dropping the OTHER packs' kinds
+    # — the overlay the story actually needed. Two of them are exceptions to the
+    # SCOPE of that measurement rather than counter-examples to it:
+    # `policy statement` and `policy weight` also match `agent-ops:`'s bare
+    # "policy", so instead of every sibling they dropped dev/marketing/pm/
+    # venture and left agent-ops standing — and since every story carrying
+    # "policy statement" necessarily carries "policy", no sentence exists on
+    # which those two could have matched alone:
+    #   * `valuation mark` — a SUBSTRING of "evaluation mark" and "revaluation
+    #     mark", the same trap as bare `valuation` one word longer;
+    #   * `write-up` / `write-down` — "the write-up of the release", "a
+    #     write-down of the inventory";
+    #   * `reference weight` / `policy weight` / `benchmark weight` — engineering
+    #     prose, "the reference weight of the assembly is 4.2 kg";
+    #   * `allocation target` / `target allocation` — budgeting prose, "the
+    #     council approved its target allocation of the road budget";
+    #   * `policy statement` — compliance prose, "our privacy policy statement";
+    #   * `mandate limits` — "the mandate limits how much we can spend";
+    #   * `fair value mark` / `target weight` — accounting and engineering terms
+    #     that apply to any asset, not to a portfolio position.
+    # All of them are recorded, with the measurement, in
+    # `tests/test_investment_portfolio_manager_pack.py::NON_TRIGGER_SYNONYMS`,
+    # so this is a recorded choice, not an omission.
+    #
+    # THE INVARIANT, made mechanical by that test: an entry is this namespace's
+    # own name, or an `investment `-prefixed phrase (space form only). Nothing
+    # else reaches this row — a per-phrase judgement call is exactly how a
+    # substring collision survives review (the first draft of this fix removed
+    # five and kept five of the same class). A HYPHEN form is deliberately NOT
+    # admitted: measured, `investment-grade` in the row selects `portfolio:*`
+    # alone on "sub-investment-grade bonds widened the spread" and on
+    # "non-investment-grade credits were sold" — the same strip this row exists
+    # to prevent. If the manifest ever declares an `investment-*` compound, it
+    # belongs in `NON_TRIGGER_SYNONYMS` with that measurement.
+    #
+    # THE COST, stated accurately rather than waved away. `_select_pack_kinds`
+    # falls back to ALL packs only when NOTHING matched in ANY namespace — and
+    # the sibling rows carry ordinary English (`dev:` "deploy"/"sprint"/"test",
+    # `venture:` "fund"/"asset"), so that fallback is not much of a net. A
+    # genuinely portfolio-shaped story whose only portfolio vocabulary is a
+    # synonym excluded above DOES lose the overlay once a sibling matches
+    # ("the allocation target for the fund was missed; deploy the fix" selects
+    # dev+venture, no portfolio). That loss is ACCEPTED — the alternative costs
+    # another pack's entire vocabulary — and it is pinned as a recorded decision
+    # in `tests/test_investment_portfolio_manager_pack.py::
+    # test_the_accepted_loss_is_a_recorded_decision`, so a later lane can tell it
+    # from a bug.
+    #
+    # A row missing a synonym the pack DOES declare is a real loss when a
+    # sibling matches: a bare "policy statement" used to lose the overlay to
+    # `agent-ops:`'s "policy". That is the cost of the invariant (`investment
+    # policy` — which a portfolio policy statement is actually called — still
+    # matches).
+    "portfolio:": ("portfolio", "investment mandate", "investment policy",
+                   "investment guidelines"),
     "agent-ops:": ("standard operating", "protocol", "token acknowledgement",
                     "destructive action", "policy", "standing rule"),
     # NOTE (#2031): the legacy "epistemic-team:" entry was removed — it
@@ -852,7 +924,7 @@ def _select_pack_kinds(story: str | None, pack_kinds: dict) -> dict:
         # A namespace with NO trigger entry cannot be story-selected —
         # always include it (per-tenant custom packs AND, since #5165, any
         # catalog pack shipped without a trigger entry; dropping them would
-        # silently strip their kinds from the compact prompt). All six
+        # silently strip their kinds from the compact prompt). All seven
         # shipped catalog namespaces HAVE entries, so the default
         # render's selection is unchanged for them — but the byte-identity
         # argument is about those entries, not about a starter-set
@@ -1036,9 +1108,10 @@ def _values_suffixes(master: dict | None) -> dict[str, str]:
     """kind → `` [values: name(valueKind[, required][, many]), …]`` (#2818).
 
     Only kinds that DECLARE value fields appear, so every ``- kind — desc``
-    line for a props-less kind is byte-identical to pre-#2818 (``{}`` for the
-    whole shipped catalog today). Shared by the verbose and compact renders so
-    the two prompt modes spell a declaration the same way.
+    line for a props-less kind is byte-identical to pre-#2818 (the other six
+    shipped packs declare nothing; since #9663 ``portfolio:allocationTarget``
+    does, so ``{}`` is no longer the whole catalogue). Shared by the verbose and
+    compact renders so the two prompt modes spell a declaration the same way.
     """
     from tortoise.pack_values import value_field_annotations
     master = master or {}
@@ -7782,8 +7855,11 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     active backend is embedded, S3 degrades gracefully and the pipeline
     proceeds treating everything as new).
     """
-    import uuid
-    session_id = session_id or f"session_{uuid.uuid4().hex[:12]}"
+    # #9599: the mint is ONE spelling (`tortoise.ids.mint_session_id`); the
+    # hand-copied literal here was one of the four this helper subsumes.
+    from tortoise.ids import mint_session_id
+
+    session_id = session_id or mint_session_id()
     errors: list[str] = []
     # M3 (#1524, D3): per-session LLM roll-up + granular error census (class →
     # count across S1/S2/S4 failures). ``errors`` (strings) stays unchanged —

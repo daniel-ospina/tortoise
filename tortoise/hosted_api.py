@@ -119,6 +119,11 @@ from tortoise.incident_kinds import (  # #4780: the one kind declaration site
     KIND_RESTORE_DRILL_FAILED,
     KIND_SIZE_GUARD_ABORT,
 )
+
+# #9572 review P2: the "nothing was named" predicate (absent OR blank) — ONE
+# home, shared with the SDK doors, EventAPI and the seed surfaces, so the two
+# spellings cannot be drawn differently at the next door.
+from tortoise.kind_fallbacks import named_kind
 from tortoise.live import epistemic_disjunction  # #7902: the shared label set
 from tortoise.mcp_server import create_http_app
 from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
@@ -9215,7 +9220,13 @@ async def _require_approved_kind(sdk: TortoiseSDK, kind: str, *, door: str) -> N
 
 class CreateObjectRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
-    objectKind: str = Field(default="other")
+    # #9572: ``None`` means "the caller named no kind" and is FORWARDED AS "not
+    # supplied". A fabricated ``"other"`` default here re-opened the exact
+    # clobber the SDK doors had: the fold writes the discriminator ON MATCH as
+    # ``coalesce($ok, o.objectKind)``, so a defaulted request silently reset a
+    # stored ``capability`` to ``other`` on a re-create. The ``'other'`` default
+    # is the fold's ON CREATE arm.
+    objectKind: str | None = Field(default=None)
     # lifecycle status rides props (create_entity splats **props over the
     # 'live' default) — the onboarding STATE seed passes in_progress.
     status: str | None = None
@@ -9236,18 +9247,27 @@ async def create_object(body: CreateObjectRequest, request: Request,
     await _graph_offload(lambda: _check_org_limit(org, "points"),
                          op="check_org_limit.points")
     sdk = await _data_sdk_offloaded(org)
-    # #5475: the kind must not widen the graph's own approval set.
-    await _require_approved_kind(sdk, body.objectKind, door="create_object")
+    # #5475: the kind must not widen the graph's own approval set. #9572: only a
+    # NAMED kind is checked — an absent one is not a kind, and the fold supplies
+    # the ``'other'`` default ON CREATE. #9572 review P2: BLANK is not a kind
+    # either — ``""`` is not ``None``, so it passed this gate (a bare value names
+    # no pack, by design) and reached the fold's ``coalesce($k, stored)``, which
+    # returns the first NON-NULL argument: a blank re-create reset a stored kind
+    # to ``""``. ``kind_fallbacks.named_kind`` is the ONE predicate for that.
+    _okind = named_kind(body.objectKind)
+    if _okind is not None:
+        await _require_approved_kind(sdk, _okind, door="create_object")
     try:
         props = {}
         if body.status:
             props["status"] = body.status
+        if _okind is not None:
+            props["objectKind"] = _okind
         # #3718: sdk.create_object is SYNC FalkorDB socket I/O — run it in a
         # worker thread so THIS pinned call cannot freeze the single event loop
         # while it runs. Same asyncio.to_thread pattern as /v1/search;
         # response and error semantics are unchanged.
-        node = await asyncio.to_thread(
-            sdk.create_object, body.name, objectKind=body.objectKind, **props)
+        node = await asyncio.to_thread(sdk.create_object, body.name, **props)
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("create_object failed")
@@ -9270,7 +9290,8 @@ async def create_object(body: CreateObjectRequest, request: Request,
 
 class CreateSubjectRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
-    subjectKind: str = Field(default="other")
+    # #9572: ``None`` = not supplied — see CreateObjectRequest above.
+    subjectKind: str | None = Field(default=None)
 
 
 @app.post("/v1/subjects")
@@ -9288,13 +9309,20 @@ async def create_subject(body: CreateSubjectRequest, request: Request,
     await _graph_offload(lambda: _check_org_limit(org, "points"),
                          op="check_org_limit.points")
     sdk = await _data_sdk_offloaded(org)
-    # #5475: the same input constraint as /v1/objects, on the subject door.
-    await _require_approved_kind(sdk, body.subjectKind, door="create_subject")
+    # #5475: the same input constraint as /v1/objects, on the subject door
+    # (#9572: only a NAMED kind — see CreateObjectRequest; BLANK is not a kind,
+    # per ``kind_fallbacks.named_kind``).
+    _skind = named_kind(body.subjectKind)
+    if _skind is not None:
+        await _require_approved_kind(sdk, _skind, door="create_subject")
     try:
         # #3718: sync FalkorDB I/O — off-loaded off the event loop (see
-        # create_object above for the pattern and rationale).
+        # create_object above for the pattern and rationale). #9572: forward the
+        # kind ONLY when the caller named one, so a bare re-create cannot reset
+        # a stored kind to the default.
+        _kind = ({"subjectKind": _skind} if _skind is not None else {})
         node = await asyncio.to_thread(
-            sdk.create_subject, body.name, subjectKind=body.subjectKind)
+            sdk.create_subject, body.name, **_kind)
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("create_subject failed")
@@ -10321,7 +10349,15 @@ async def _session_login_exchange(
 
 @app.get("/v1/packs")
 async def list_packs(org: dict = Depends(get_current_org_gated)):  # noqa: B008
-    """#318: read-only pack introspection — the tenant's ACTIVE packs.
+    """#318: pack introspection — the tenant's ACTIVE packs.
+
+    NOT a pure read (#9583): this GET can cause a WRITE. The route fronts
+    ``pack_state.get_tenant_packs``, whose self-heal ``ensure_tenant_packs``
+    MERGEs a missing starter ``:PackInstall`` activation (one MERGE per starter
+    namespace, skipped when the graph's pack set was deliberately configured —
+    #2728/#8648). Mirrors the MCP ``packs_list`` correction (#4122/#9575) — and
+    it matters twice on this route, because FastAPI serves this docstring as the
+    OpenAPI operation ``description``, i.e. the string a generated client reads.
 
     Shared pack catalog + per-tenant ``PackInstall`` activation records
     (graph-native install-state in the tenant graph ``org_{org_id}``).
@@ -13378,6 +13414,37 @@ class SessionRequest(BaseModel):
     machine_id: str | None = Field(None, max_length=256)
     model: str | None = Field(None, max_length=128)
 
+    # #9599 — a PRESENT-but-blank session id is refused at the boundary, so it
+    # never reaches ``session_id = body.session_id or mint()`` (it is truthy,
+    # so that default never fired and the blank went straight to the write —
+    # where the engine cannot serve a blank key back to an equality seek: the
+    # next capture on the same id minted a DUPLICATE ``:Session`` and the turn
+    # container's CONTAINS edge landed nothing, measured). The rule is
+    # Layer-1's already (``commit_schema.CommitPayload._non_blank_session_id``,
+    # #4005 — the validator lives on ``CommitPayload``; there is no
+    # ``CommitRecord`` class, and citing one sent a review to re-derive a third
+    # spelling); this is the same sentence at the boundary — ONE predicate for
+    # all three DOORS (the two SDK doors and this one), so they cannot drift
+    # apart. ⛔ The blank rule has a SECOND, deliberate home one layer down: the
+    # REPLAY half is ``projection._writable_container_id`` (``_writable_id``
+    # PLUS this same blank clause), which gates both journal carriers and the
+    # sidecar restores and landed on main with #9594 from the #9553 review P2 —
+    # so #9553 is the correct citation for the BLANK rule, and only the PADDED
+    # position below is not its. ``None``/absent still mints (the caller named
+    # no session), and a PADDED-but-real id stays legitimate (#9599's own body;
+    # #9553 records no position on padded ids at all).
+    # Refusing or trimming it is #9599's open owner question (comment
+    # 6342343424): this PR lands only the blank half.
+    @field_validator("session_id")
+    @classmethod
+    def _non_blank_session_id(cls, v):
+        from tortoise.ids import session_id_refusal
+
+        refusal = session_id_refusal(v)
+        if refusal is not None:
+            raise ValueError(refusal)
+        return v
+
     # Invalid harness ⇒ 422 at the model boundary (FastAPI validation), never
     # a silent drop or a 200 — a typo'd harness must be visible (Task 11).
     @field_validator("harness")
@@ -13766,7 +13833,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
 
     VERIFIED gate order (#2093 S2 amendment — the impl docstring's old gate
     list was stale, pre-#1927):
-      1. boundary 422 — invalid harness / conversation shape (Pydantic
+      1. boundary 422 — invalid harness / conversation shape / BLANK session_id
+         (#9599: `SessionRequest._non_blank_session_id`; a blank id names no
+         session, and writing it minted a duplicate `:Session` whose CONTAINS
+         edge landed nothing) (Pydantic
          SessionRequest validation fires BEFORE the handler on REST; the MCP
          tool's SessionRequest construction maps the same failure to its
          422-equivalent error dict) — recording-off never masks a malformed
@@ -13786,7 +13856,6 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     ``request`` is optional (the MCP tool has no HTTP Request) — audit and
     abuse recording degrade to a best-effort stub.
     """
-    import uuid
     from datetime import datetime
 
     from tortoise.quota import (
@@ -13929,7 +13998,13 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # first MATCH. `_capture_session_probe_off_loop` owns the hand-off (the same
     # off-loop seam the onboarding projection read uses); `session_id`/`now` are
     # pure computations, hoisted above it.
-    session_id = body.session_id or f"session_{uuid.uuid4().hex[:12]}"
+    # #9599: the mint is ONE spelling (`tortoise.ids.mint_session_id`) — this
+    # site and `extractor_v2`'s were the two hand-copies the ids.py helper
+    # subsumes. A blank `body.session_id` never reaches here: `SessionRequest`
+    # refuses it at the boundary (`_non_blank_session_id`).
+    from tortoise.ids import mint_session_id
+
+    session_id = body.session_id or mint_session_id()
     now = datetime.now(UTC).isoformat()
     sdk, proj, session_row = await _capture_session_probe_off_loop(
         org, session_id)
@@ -16646,17 +16721,32 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # edges are the canonical predicate (aboutEntity does NOT exist, §4.2); the
     # gated binder is the only aboutSubject producer. ──
     for er in reconcile.entities:
-        if is_subject_kind(er.entity.kind):
+        # #9572: the payload's `kind` is a CLASSIFICATION and `extractor_v2`
+        # repairs an unclassifiable entity to `core:other`. Writing that repair
+        # as the discriminator reached the fold's
+        # `ON MATCH … =coalesce($k, stored)` as a real kind, so this door — the
+        # PRODUCTION capture entry point (`TortoiseSDK.commit_session` POSTs
+        # here) — reset a stored `capability` on a bare re-mention. ONE
+        # predicate, shared with `sdk._payload_entity_kind`
+        # (`tortoise.kind_fallbacks`): a repair is not a discriminator, so it is
+        # omitted and the fold's `ON CREATE` arm supplies `other`.
+        from tortoise.kind_fallbacks import writable_kind
+        _ekind = writable_kind(er.entity.kind)
+        _kind_kw = {}
+        if _ekind is not None:
+            _kind_kw = ({"subjectKind": _ekind} if is_subject_kind(_ekind)
+                        else {"objectKind": _ekind})
+        if is_subject_kind(_ekind or ""):
             sdk.create_entity(
                 "subject", er.entity.name,
-                subjectKind=er.entity.kind,
+                **_kind_kw,
                 passes_frequency_gate=er.entity.passes_frequency_gate,
                 is_episodic=False,
             )
         else:
             sdk.create_entity(
                 "object", er.entity.name,
-                objectKind=er.entity.kind,
+                **_kind_kw,
                 passes_frequency_gate=er.entity.passes_frequency_gate,
                 is_episodic=False,
             )
@@ -19899,7 +19989,10 @@ def _provision_graph(org: dict, name: str,
     created_by_key_id — P2-6, NEVER a key id in created_by).
 
     ``packs`` (#9667): the optional desired pack set from the create body.
-    ``None`` = no pack decision (the graph stays UNCONFIGURED, catalog union).
+    ``None`` = no pack decision, so the graph is born UNCONFIGURED with no
+    ``:PackInstall`` records — the catalog-union arm until records exist (the
+    first packs read self-heals the starter set, which narrows it; #2714
+    indicator 3, #9691).
     A list — including ``[]`` — configures the graph at birth, in the SAME
     call and against the new graph's own physical namespace; the resolved set
     rides back in the envelope under ``packs``. A refusal rolls the graph back
@@ -20234,8 +20327,9 @@ async def create_graph(body: dict, request: Request,
 
     #9667 — ``packs``: create and configure in ONE call, so an unconfigured
     graph is a CHOICE rather than the only possibility. Absent ⇒ the graph
-    is born unconfigured and keeps the catalog-union default (the owner's
-    decided behaviour — #2714 indicator 3); ``[]`` ⇒ born configured with an
+    is born unconfigured with no ``:PackInstall`` records, i.e. the
+    catalog-union arm until records exist (the first packs read self-heals the
+    starter set, which narrows it — #9691); ``[]`` ⇒ born configured with an
     EMPTY set; a list ⇒ exactly that set, and the 201 envelope carries the
     resolved ``packs`` so the caller never has to re-read. An invalid or
     unauthorised namespace fails the CREATION (rolled back, 422) rather than
@@ -20562,9 +20656,11 @@ def _pack_entries_from_body(raw: object) -> list[dict] | None:
     """#9667 — parse the optional ``packs`` field of a graph-CREATE body.
 
     ``None`` (field absent) means NO pack decision: the graph is created
-    UNCONFIGURED and keeps the catalog-union default (#2714 indicator 3), which
-    is the owner's decided behaviour — creation is not the place to narrow it
-    by accident. ``[]`` is the opposite and deliberate: the graph is born
+    UNCONFIGURED with no ``:PackInstall`` records — the catalog-union arm until
+    records exist (the first packs read self-heals the starter set, which
+    narrows the set; #2714 indicator 3, #9691) — which is the owner's decided
+    behaviour: creation is not the place to narrow it by accident. ``[]`` is the
+    opposite and deliberate: the graph is born
     CONFIGURED with an empty set, so nothing outside core is writable on it.
     That is the whole point of the atomic form — an unconfigured graph becomes
     a choice instead of the only possibility.
@@ -31058,8 +31154,14 @@ class _OrgSeedSurface:
     def query(self, cypher, **params):
         return self._sdk._get_proj().query(cypher, **params)
 
-    def create_subject(self, name, subjectKind="other", **props):
-        return self._sdk.create_subject(name, subjectKind=subjectKind, **props)
+    def create_subject(self, name, subjectKind=None, **props):
+        # #9572: ``None`` = not supplied, forwarded as absent — a fabricated
+        # ``"other"`` default here would re-open the clobber the SDK doors had.
+        # A BLANK kind is "not supplied" too (review P2): ``named_kind``.
+        subjectKind = named_kind(subjectKind)
+        if subjectKind is not None:
+            props["subjectKind"] = subjectKind
+        return self._sdk.create_subject(name, **props)
 
     def create_edge(self, relation, from_id, to_id):
         return self._sdk.create_edge(relation, from_id, to_id)

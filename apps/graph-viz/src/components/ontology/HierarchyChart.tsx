@@ -716,7 +716,7 @@ export default function HierarchyChart({
         );
       })()}
 
-      <div style={{ position: 'absolute', left: 0, bottom: 0, width: '100%', padding: '8px 16px', background: `${C.panel}dd`, backdropFilter: 'blur(6px)', borderTop: `1px solid ${C.border}`, fontSize: 11, fontFamily: 'monospace', color: C.muted, display: 'flex', gap: 16, zIndex: 10 }}>
+      <div style={{ position: 'absolute', left: 0, bottom: 0, width: '100%', padding: '8px 16px', background: `${C.panel}dd`, backdropFilter: 'blur(6px)', borderTop: `1px solid ${C.border}`, fontSize: 11, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', color: C.muted, display: 'flex', gap: 16, zIndex: 10 }}>
         {Array.from({ length: maxDepth + 1 }, (_, d) => (<span key={d}>Level {d}: {(byDepth[d] || []).length} nodes</span>))}
         <span style={{ marginLeft: 'auto' }}>Total: {flat.length} nodes</span>
       </div>

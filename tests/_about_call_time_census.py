@@ -80,19 +80,40 @@ _BARE_TRAVERSAL = re.compile(r"(?<=\))\s*(?:<-->|<--|-->|--)\s*(?=\()")
 #: never ran, even though `_resolve()` folds `ast.BinOp/Add` and WOULD have
 #: derived the site. Latent on today's corpus, which is exactly why
 #: `test_the_file_filter_un_sees_nothing` cannot see it.
-#: ⚠️ This is a FILTER, so a false positive costs one unused parse and is free
-#: — but the SOURCE of a false positive is not free: the shape is anchored on a
-#: bracket that OPENS WITH A NAME and carries no comma or quote (a relationship
-#: variable, with or without a property map or a `*` range), followed by the `-`
-#: that every Cypher traversal puts immediately after its `]` (or by a literal
-#: boundary and then that `-`). Without the anchor, Python subscripts and
-#: comparisons matched — `sim[i, j] >= t`, `if df[t] > 0`, `r["created_at"] >`
-#: — and the gate admitted 61 extra modules (102 walked, 79 gate-true) instead
-#: of 17 (76 walked, 35 gate-true) for a byte-identical derivation. The type
-#: slot is deliberately NOT inspected here.
-_SPLIT_TRAVERSAL = re.compile(
-    r"\[[A-Za-z_][^\]\n,\"']*\]\s*-|[\[][A-Za-z_][^\]\n,\"']*\]\s*[\"']\s*\+\s*[\"']\s*-"
-)
+#: ⚠️ This is a FILTER, so a false positive costs one unused parse and is free;
+#: a false NEGATIVE drops a module before the derivation — which can see the walk
+#: — ever runs. So the test is deliberately UNANCHORED: any `[` + a name + `]`
+#: with no comma or quote inside. The `-` adjacency the first cut required is not
+#: a property the resolver has — `_A = "-[r]"` beside `"MATCH (n)" + _A + "->(m)"`
+#: puts the bracket in one literal and the dash in another, and `_resolve()`
+#: reassembles it while that regex saw no `-` after the `]`, so the module was
+#: dropped while the resolver could see it. The module's own docstring states
+#: the principle the anchor missed: a SUPERSET needs every spelling the resolver
+#: can reassemble, not every spelling the regex can see. `_is_empty_pattern_read`
+#: makes the real decision on the resolved candidate, so the filter only has to
+#: be generous.
+#: The price is measured, not assumed, and the RELATION is what is pinned rather
+#: than any count: the unanchored form is a strict SUPERSET of the anchored one, so
+#: nothing admitted before is dropped, for a BYTE-IDENTICAL derivation. The price
+#: is a parse of some module that holds no Cypher at all, because a Python
+#: SUBSCRIPT whose key is a bare name (`if df[t] > 0`) matches too — the comma and
+#: quote exclusions in this pattern keep `sim[i, j]` and `r["created_at"]` out of
+#: it, so those are NOT instances of the price and are not cited as such — and the
+#: rest of `_files()` comes from the other three halves of the gate. Three arms
+#: measure that:
+#: `test_the_module_filter_is_a_strict_superset_of_the_anchored_form` (no module
+#: dropped, and the widening really does admit modules the anchored form refused),
+#: `test_the_module_filter_admits_a_split_traversal` (the derived keys / site rows,
+#: which is what "byte-identical" means, and it is re-derived rather than trusted),
+#: and `test_the_file_filter_un_sees_nothing`.
+#: ⚠️ The module COUNTS used to be written down here (and in the CHANGELOG), and
+#: they rotted inside this very PR's lifetime — a sibling merge added a module and
+#: the numerals went stale while the prose went on claiming to be measured. The
+#: arms above measure the relation, so this comment states no number that a "grep
+#: the tree" would contradict. That is the right trade for a filter: a spurious
+#: parse is free, a dropped module is a reader nobody can see. The type slot is
+#: deliberately NOT inspected here.
+_SPLIT_TRAVERSAL = re.compile(r"\[[A-Za-z_][^\]\n,\"']*\]")
 #: Is the offset inside a Cypher PATTERN COMPREHENSION? The delimiter test is
 #: exact rather than a heuristic: no other construct puts a relationship
 #: bracket inside an unclosed `[` of the same query string — `[(n)-[r]->(m) |
@@ -137,7 +158,8 @@ _UNKNOWN = ""
 #: silently: `test_the_empty_pattern_class_is_derived_and_declared` derives the class from
 #: the pattern's shape and requires every member to be either a §13 row or an
 #: entry here. Each entry is
-#: `(filename, symbol, why it is not an about read, the code facts that earn it)`.
+#: `(filename, symbol, why it is not an about read, the code facts that earn it,
+#: how many SITES of the derivation the entry covers)`.
 #:
 #: ⚠️ **A site that owns a §13 ROW is not carried here (#9493).** A row says the
 #: reader IS enumerated; an entry says the walk cannot observe the edge — both on
@@ -151,14 +173,45 @@ _UNKNOWN = ""
 #: ⚠️ **The PROSE is the register's only record of WHY, so it is checked too.**
 #: Each entry carries a fourth element: the literal source fragments that express
 #: the ground, asserted by `test_every_empty_pattern_entry_states_a_true_fact`
-#: inside the symbol's own span (plus the body of any module-level constant that
-#: span NAMES, because a query constant is where the walk lives for its consumer).
-#: Without it the reason was unverifiable prose: retype one anchor —
+#: inside the STATEMENT of each derived site (plus the body of any module-level
+#: constant that statement NAMES, because a query constant is where the walk lives
+#: for its consumer). Without it the reason was unverifiable prose: retype one
+#: anchor —
 #: `session_source_migration._OUT_TYPES` from `(old:Source {url:$u})` to `(old)`,
 #: or `sdk.provenance` off `:Subject` — and the walk starts observing an
 #: `aboutObject` edge while every arm stays green, because all of them read only
 #: `(file, symbol)`. That is the exact fail-open direction this class exists to
 #: close, one level up from the read itself.
+#:
+#: ⚠️ **The facts are bound PER SITE, the fifth element is the site COUNT, and
+#: each stated fact must still be CARRIED by some site.** A symbol-keyed fact
+#: check owns any walk added inside that symbol later — measured on the first
+#: cut: one unconstrained all-edge walk appended to `sdk.provenance`
+#: (`MATCH (x)-[rr]->(y) RETURN count(rr)`) left all 43 arms green, because the
+#: entry's KEY already matched. The key is a symbol; the derivation is a site.
+#:
+#: ⚠️ **The count is NOT the net for a copy written INSIDE an already-registered
+#: query string.** A site is keyed on `(symbol, line)`, so a second walk appended
+#: to an existing statement (a `UNION` arm beside the first walk) produces no new
+#: site and the number never moves — measured on that cut, the second walk shipped
+#: green on the first walk's fact. What catches it is the guard's per-WALK fact
+#: check: every walk OCCURRENCE must be bounded by a fact that is inside its OWN
+#: window of the resolved query — the window is delimited by the two boundaries a
+#: walk's bindings cannot cross, a `UNION` (an arm binds its own variables) and a
+#: top-level comma (a second pattern in one `MATCH` is a second walk) — AND that
+#: NAMES the walk's own relationship binding (`-[r]->` by a fact naming `r`), not
+#: one that merely sits beside it. The window alone was measured open: `MATCH
+#: (x)-[rr]->(y)` appended with no boundary in front of it, a chained hop
+#: `-[r]->(n)-[rr]->(y)`, and a comprehension in the registered walk's `WHERE` all
+#: stayed inside the registered walk's window and shipped green on the window rule.
+#: An earlier per-CLAUSE form of this rule shipped two escapes green:
+#: `, (x)-[rr]->(y)` appended to a registered `MATCH`, and a `UNION` arm that
+#: REUSED the first arm's variable name (the overlap was `n`, which the second
+#: arm's own `RETURN` happened to re-mention). The count catches the other shape —
+#: a copy on its OWN line — and the union direction (`every fact is still carried
+#: by some site`) catches a fact whose ground the code lost while another fact
+#: still matches. Three nets, three different blind spots; none of them implies
+#: another.
 #:
 #: Three grounds are legal, and each entry names the one it rests on:
 #:
@@ -177,7 +230,7 @@ _UNKNOWN = ""
 #: `session_link.ENTITY_LINKED_TRIPLES`), and the conclusions happened to hold
 #: either way. A ground a future exclusion copies has to be the fact the schema
 #: actually carries.
-EMPTY_PATTERN: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
+EMPTY_PATTERN: tuple[tuple[str, str, str, tuple[str, ...], int], ...] = (
     (
         "tortoise/domain_validators.py",
         "validate_chain_integrity",
@@ -189,6 +242,7 @@ EMPTY_PATTERN: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
         "spelling is also why the class walk had to cover both spellings: it was "
         "live and invisible while only the bracketed form derived",
         ("AND NOT (n)--()",),
+        1,
     ),
     (
         "tortoise/hosted_api.py",
@@ -200,6 +254,7 @@ EMPTY_PATTERN: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
         "MEMORY (nothing written here)`, so it does not rewire the edge it "
         "cannot see",
         ("WHERE type(r) IN ['IMPL','NAND']",),
+        1,
     ),
     (
         "tortoise/mining.py",
@@ -209,6 +264,7 @@ EMPTY_PATTERN: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
         "`aboutObject` triple's target is `:Object`, so neither walk can return "
         "the edge; it asserts a shape, not a referent",
         ("-[r]->(n:Point)", "-[r]->(s:Point)"),
+        2,
     ),
     (
         "tortoise/projection/entities.py",
@@ -222,6 +278,7 @@ EMPTY_PATTERN: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
             "size([(old)-[x]-(y) | x]) AS deg",
             "MATCH (old:Source)-[r:references]->(e:Event",
         ),
+        1,
     ),
     (
         "tortoise/sdk.py",
@@ -230,8 +287,12 @@ EMPTY_PATTERN: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
         "walks pin every endpoint to `:Point` (`(op:Point …)-[r1]->(a:Point)`, "
         "`(a:Point)-[r]-(b:Point)`). An `aboutObject` target is `:Object`, so the "
         "edge cannot be returned; the TYPE is deliberately left unbound, which "
-        "is what makes the shape derive at all",
-        ("-[r1]->(a:Point)", "MATCH (a:Point)-[r]-(b:Point)"),
+        "is what makes the shape derive at all. Each walk of the first statement "
+        "is stated separately: it carries TWO comma-separated patterns "
+        "(`-[r1]->(a:Point)`, `-[r2]->(b:Point)`) and a ground for the first does "
+        "not bound the second",
+        ("-[r1]->(a:Point)", "-[r2]->(b:Point)", "MATCH (a:Point)-[r]-(b:Point)"),
+        2,
     ),
     (
         "tortoise/sdk.py",
@@ -241,6 +302,7 @@ EMPTY_PATTERN: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
         "{id:$sid})-[r]->(n)`); no `aboutObject` triple has a `:Subject` source "
         "(`ENTITY_LINKED_TRIPLES`: `Point`/`Event`/`Session` → `Object`)",
         ("MATCH (s:Subject {id:$sid})-[r]->(n)",),
+        1,
     ),
     (
         "tortoise/session_source_migration.py",
@@ -252,6 +314,7 @@ EMPTY_PATTERN: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
             "MATCH (old:Source {url:$u}) ",
             "size([(old)-[x]-(y) | x]) AS deg",
         ),
+        1,
     ),
     (
         "tortoise/session_source_migration.py",
@@ -264,6 +327,7 @@ EMPTY_PATTERN: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
             "size([(old)-[x]-(y) | x]) AS deg",
             "DETACH DELETE old",
         ),
+        1,
     ),
     (
         "tortoise/session_source_migration.py",
@@ -276,6 +340,7 @@ EMPTY_PATTERN: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
             "MATCH (old:Source {url:$u})-[r]->(t) ",
             "MATCH (n)-[r]->(old:Source {url:$u}) ",
         ),
+        2,
     ),
 )
 
@@ -711,11 +776,12 @@ def _may_traverse_every_type(source: str) -> bool:
 
     ⚠️ **A SUPERSET needs every spelling the resolver can reassemble, not every
     spelling the regex can see.** The pattern may be built from parts
-    (`"MATCH (n)-" + "[r]->(m)"`, `"MATCH (n)-[r]" + "->(m)"`), and the two
-    detectors above require the dash and the bracket to be adjacent in the SAME
-    literal. `_resolve()` folds `ast.BinOp/Add`, so the derivation would find the
-    site — but the file never reaches it. Those spellings are admitted by
-    `_SPLIT_TRAVERSAL`.
+    (`"MATCH (n)-" + "[r]->(m)"`, `"MATCH (n)-[r]" + "->(m)"`), and a third
+    spelling puts the bracket and the dash in DIFFERENT constants (`_A = "-[r]"`
+    beside `"MATCH (n)" + _A + "->(m)"`). `_resolve()` folds `ast.BinOp/Add`, so
+    the derivation finds every one of them — but the file never reaches it. So
+    `_SPLIT_TRAVERSAL` requires no dash adjacency at all: any `[` + a name + `]`
+    inside the text admits the module, and the resolved candidate decides.
     """
     if any(_type_slot(m.group(1)) is None for m in _EMPTY_TRAVERSAL.finditer(source)):
         return True
@@ -801,6 +867,31 @@ def _reads_at(text: str, start: int) -> bool:
     return " ".join(clauses[-1].split()).upper() in ("MATCH", "OPTIONAL MATCH")
 
 
+def _walk_occurrences(text: str) -> tuple[int, ...]:
+    """The offsets of every untyped traversal that IS a walk of this class.
+
+    Positional, because the guard's clause net must know WHERE each walk sits and
+    not merely whether the text carries one: a single query can hold two walks in
+    ONE clause (`MATCH (a)-[r]->(b), (x)-[rr]->(y) …`), and each has to carry its
+    own bound. `_is_empty_pattern_read` is deliberately this function's boolean,
+    so a shape one admits the other cannot be blind to.
+    """
+    found: list[int] = []
+    for match in _EMPTY_TRAVERSAL.finditer(text):
+        if _type_slot(match.group(1)) is not None:
+            continue
+        if _reads_at(text, match.start()) or _inside_pattern_comprehension(
+            text, match.start()
+        ):
+            found.append(match.start())
+    found.extend(
+        match.start()
+        for match in _BARE_TRAVERSAL.finditer(text)
+        if _reads_at(text, match.start())
+    )
+    return tuple(found)
+
+
 def _is_empty_pattern_read(text: str) -> bool:
     """Does this Cypher traverse a relationship it does NOT name?
 
@@ -821,15 +912,12 @@ def _is_empty_pattern_read(text: str) -> bool:
     size([(n)-[r]-(m) | r]) AS deg`) must still derive, or a walk over every
     relationship type would be discarded as a write — a fail-open in the one
     direction this class exists to close.
+
+    This is the boolean of `_walk_occurrences`, which is the same predicate
+    asked positionally; there is one definition so the guard's per-walk net
+    cannot check a shape this derivation does not call a walk.
     """
-    for match in _EMPTY_TRAVERSAL.finditer(text):
-        if _type_slot(match.group(1)) is not None:
-            continue
-        if _reads_at(text, match.start()):
-            return True
-        if _inside_pattern_comprehension(text, match.start()):
-            return True
-    return any(_reads_at(text, match.start()) for match in _BARE_TRAVERSAL.finditer(text))
+    return bool(_walk_occurrences(text))
 
 
 def _is_gap_type_read(text: str) -> bool:

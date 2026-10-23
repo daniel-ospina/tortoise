@@ -116,6 +116,24 @@ is taken to govern what the assistant may DO, not to reverse what the product AL
 
 status: approved · principal: daniel-ospina · PR #8863 · date: 2026-10-17.
 
+**Amended 2026-10-22** (owner-filed and owner-scoped on **#9575**, **PR #9582**): the
+`tortoise_packs_list` description no longer claims *"Read-only;"*. The handler reaches
+`pack_state.get_tenant_packs`, whose `ensure_tenant_packs` MERGEs a missing starter
+`:PackInstall` activation, so a `graphs:read` caller can cause a write — which is why **#4122**
+re-tiered that entry to **`maintenance`** and stopped it declaring `readOnlyHint: true` (PR #9573
+landed the tier; PR #9546 then rewrote the axis so every hint is *derived* from `risk`), and why it
+deliberately left the description — the other string an agent
+reads before deciding to call — asserting the opposite (#9575). The new text states what the call
+does instead of asserting a read-only guarantee: a
+graph carrying no `PackInstall` record at all gets its starter set re-seeded before the answer,
+skipped when the graph's pack set was deliberately configured (#8648). The rule is enforced by a
+test, not by prose: `tests/test_tool_registry.py` holds **every** entry whose `risk` is not `read`
+to the description it publishes, so a future non-read tool cannot claim *"Read-only;"* either.
+**No tool is added,
+removed or renamed; the served schema, parameters and bindings are unchanged** — only the
+description text, and hence that row's `job` and the baseline's `cut_at_commit`, change.
+status: approved · principal: daniel-ospina · PR #9582 · date: 2026-10-22.
+
 ## Principle: reads and writes never share a tool
 
 On the customer-grantable surface, a tool is either **read** or **write** — never both, so

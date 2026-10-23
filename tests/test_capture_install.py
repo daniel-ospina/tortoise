@@ -3415,7 +3415,7 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # also flags the missing script/entry on its own, so the bump is what carries
 # the change to an install whose bytes are frozen at generation 3.
 _EXPECTED_INSTALL_CONTRACT = {"claude": 11, "codex": 3, "cursor": 4,
-                             "pi": 5}
+                             "pi": 6}
 
 
 @pytest.mark.parametrize("harness", sorted(_EXPECTED_INSTALL_CONTRACT))
@@ -3511,12 +3511,12 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
     siblings, so a stale installed copy is comparable rather than
     unmeasurable (#4680).
 
-    Mutation: delete ``// tortoise-hook-version: 5`` from
+    Mutation: delete ``// tortoise-hook-version: 6`` from
     ``tortoise/pi-hooks/tortoise-capture.ts`` — ``read_hook_version`` returns
     ``None``, ``contract_version_for('pi')`` returns ``None``, and both this
     test and the generation pin RED.
     """
-    assert hook_install.read_hook_version(_PI_SRC) == 5
+    assert hook_install.read_hook_version(_PI_SRC) == 6
     assert hook_install.count_canonical_markers(_PI_SRC) == 1, (
         "the Pi seam must carry exactly ONE column-0 marker (a second one is a "
         "site marker that would be mistaken for the contract)")
@@ -3532,7 +3532,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: SHIPPED bytes and so compares equal by construction.  Edit the artifact, move
 #: the generation, update this pair — all three in one commit.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    5, "5b8e434f69f03127ff49787a5584e0c595343dad4a75533ebd3b845d4149aa8e")
+    6, "6f8c94b5f333fe571b9e913e9cec17c00d537395bce804290d9f2fe7ca445ae9")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -3544,6 +3544,23 @@ _GENERATION_DIGESTS = {
     3: "1f653d9b93775149c93838e6c9fbf70b44702341ac94e12f67ddb6480a8f0580",
     4: "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498",
     5: "5b8e434f69f03127ff49787a5584e0c595343dad4a75533ebd3b845d4149aa8e",
+    # #9599: the blank session id is normalised at the WIRE (the server's 422 is
+    # classified PERMANENT, so an un-normalised blank would strand a capture).
+    # The marker moved WITH the bytes: a byte change under an unchanged marker
+    # degrades `detect_artifact_install` to `modified-artifact`. ⚠️ Generation 6
+    # has NOT shipped (it is introduced by the same unmerged PR), which is the
+    # one case where rewriting its entry is legitimate: the never-rewrite rule
+    # protects a SHIPPED digest, not an unshipped one.
+    #
+    # ⚠️ RECOMPUTE AFTER EVERY MERGE OF MAIN. This digest was briefly stale by
+    # exactly one merge: a comment-only merge resolution on
+    # `tortoise-capture.ts` changed the bytes without changing the marker, the
+    # pin kept naming the pre-merge blob, and the install-contract test went red
+    # on a tree where the fix itself was correct. A comment-only edit still
+    # changes the sha256 — derive it, never assume it:
+    #   `sha256sum tortoise/pi-hooks/tortoise-capture.ts`
+    # (or `git show HEAD:tortoise/pi-hooks/tortoise-capture.ts | sha256sum`).
+    6: "6f8c94b5f333fe571b9e913e9cec17c00d537395bce804290d9f2fe7ca445ae9",
 }
 
 

@@ -35,6 +35,8 @@ change's to touch.
 
 from __future__ import annotations
 
+import ast
+import re
 import sys
 from pathlib import Path
 
@@ -689,3 +691,225 @@ def test_every_rule_is_declared_by_its_source() -> None:
                 f"{pin['declares']!r} in {pin['source']}"
             )
         assert pin.get("label"), f"{rule_id}: a pin needs a human-readable label"
+
+
+# ── the DESIGN DOC must not invert or over-claim this file's measurement ────
+
+
+def _g5_destructive_half() -> str:
+    """§4.3's relocation subsection — the passage a ruling is made against."""
+    doc = ROOT / "docs" / "architecture" / "EXTRACTOR-V4-ARCHITECTURE.md"
+    text = doc.read_text(encoding="utf-8")
+    heading = "#### G5's destructive half"
+    assert heading in text, (
+        f"{heading!r} is gone from {doc.name} — the measured state of G5's "
+        "destructive half (#5333) no longer has a home."
+    )
+    start = text.index(heading)
+    return text[start:text.index("### S3 — RESOLVE", start)]
+
+
+def _measured_the_class() -> tuple[int, int]:
+    """``(matches, load_bearing)`` for the bare ``the `` class, from THIS module.
+
+    Read from the module's own docstring (the recorded ``#5059`` measurement)
+    rather than restated here, so the doc's percentage is checked against the
+    number it claims to quote and a corrected measurement moves both.
+    """
+    source = Path(dd.__file__).read_text(encoding="utf-8")
+    match = re.search(
+        r"``the `` alone: \*\*(\d[\d,]*), of which ([\d,]+) are load-bearing",
+        source,
+    )
+    assert match, (
+        "the recorded `the ` measurement is no longer in the module docstring — "
+        "this guard would pass vacuously; re-point it (#5333)."
+    )
+    return (int(match.group(1).replace(",", "")), int(match.group(2).replace(",", "")))
+
+
+def test_the_doc_states_the_load_bearing_share_not_its_complement():
+    """⚠️ 48% is the DELETE PRECISION, and the complement is what the bar weighs.
+
+    ``#5059`` measured 4,901 ``the <X>`` rows of which 2,570 are load-bearing —
+    *"≈48% precision on an irreversible delete"* (this module's docstring,
+    ``:20``). The load-bearing share is therefore ≈52%, and the design document
+    inverted them: it read *"≈48% of the `the <X>` rows are load-bearing"*,
+    which says a bare name-pattern delete is *worse* than the measurement
+    supports and, read literally, that a majority of the class is droppable.
+    The passage exists to justify never letting a name pattern be authority, so
+    the number that argues for the strictest bar must be the measured one.
+    """
+    matches, load_bearing = _measured_the_class()
+    share = round(load_bearing / matches * 100)
+    precision = 100 - share
+    assert share != precision, (
+        f"the recorded measurement came out even ({share}%), so this guard "
+        "cannot distinguish the two quantities — re-read the docstring."
+    )
+
+    section = _g5_destructive_half()
+    stated = re.search(r"≈(\d+)% of the `the <X>` rows are load-bearing", section)
+    assert stated, (
+        "the evidence-bar paragraph no longer states the load-bearing share of "
+        "the `the <X>` class — the one measured number behind 'never a name "
+        "pattern' is gone (#5333)."
+    )
+    assert int(stated.group(1)) == share, (
+        f"the doc states ≈{stated.group(1)}% of the `the <X>` rows are "
+        f"load-bearing; the measurement is {load_bearing:,} of {matches:,} = "
+        f"{share}% (≈{precision}% is the DELETE PRECISION, i.e. the complement — "
+        "not the load-bearing share)."
+    )
+    assert re.search(rf"≈{precision}% precision", section), (
+        f"the doc must state the ≈{precision}% delete precision that the "
+        f"{share}% load-bearing share implies — the two numbers are different "
+        "quantities and both belong in the sentence (#5333)."
+    )
+
+
+def test_the_doc_does_not_claim_archived_has_no_writer():
+    """`archived` IS writable today through the generic, unvalidated path.
+
+    The pre-fix passage read *"Nothing writes `archived` today — it is declared
+    and reserved (`sdk.py:2955`)"*, and cited that line as the authority. That
+    line is an entry in ``_ALLOWED_TRANSITIONS`` (``sdk.py:2942``), a
+    declarative **Point**-lifecycle spec that **nothing consults** — so it
+    neither establishes that the Object family has no writer nor bounds what a
+    write does. Meanwhile ``_update_entity`` issues an unvalidated
+    ``SET n += $props`` (``assembly.py:4108``), which is the same path the
+    document itself names for ``outdated`` — an example, not a closed set. The
+    consequence the passage must state is the one a relocation pass depends on:
+    **the existing `archived` population is unmeasured**, not empty.
+    """
+    section = _g5_destructive_half()
+    assert "Nothing writes `archived`" not in section, (
+        "the passage again claims nothing writes `archived`. It is false: the "
+        "generic unvalidated write path reaches it on an :Object (#5333)."
+    )
+    assert "UNMEASURED" in section, (
+        "the passage must state that the number of existing `archived` Objects "
+        "is UNMEASURED — enumerating it is a precondition of any relocation "
+        "pass (#5333)."
+    )
+    lowered = section.lower()
+    assert "_allowed_transitions" in lowered, (
+        "the passage must name the map it cites (`_ALLOWED_TRANSITIONS`) so the "
+        "reader can check what it is (#5333)."
+    )
+    assert "nothing consults" in lowered, (
+        "the passage must say that nothing consults `_ALLOWED_TRANSITIONS`; "
+        "citing it as an authority is what made the claim false (#5333)."
+    )
+
+
+#: The map the design document cites as *declaring* the Point lifecycle while
+#: `nothing consults it` (§4.3, `#5333`). The claim is about READS of the name.
+TRANSITION_MAP = "_ALLOWED_TRANSITIONS"
+
+
+def _transition_map_sites(
+    root: Path, symbol: str = TRANSITION_MAP
+) -> tuple[list[str], list[str]]:
+    """``(definitions, reads)`` of ``symbol`` under ``root``, as ``rel:line``.
+
+    ⚠️ **A READ, not a mention.** The claim the design document makes is that no
+    code *consults* the map. A textual search cannot tell that apart from a
+    comment or a docstring that merely names it — and this tree is comment-dense
+    (the map's own block is nine comment lines), so a substring search both
+    reds a guard whose message says "now has a production reader" for prose, and
+    cannot see a reader that lives in the file the definition is in.
+
+    Parsing settles both: a definition binds the name (`ast.Store`), every
+    consultation loads it (`ast.Load`), and comments do not survive the parse at
+    all.
+    """
+    definitions: list[str] = []
+    reads: list[str] = []
+    for path in sorted(root.rglob("*.py")):
+        rel = path.relative_to(root).as_posix()
+        text = path.read_text(encoding="utf-8")
+        if symbol not in text:
+            continue  # cheap prefilter: parsing 244 modules for nothing is tier1 cost
+        tree = ast.parse(text, filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Name) or node.id != symbol:
+                continue
+            site = f"{rel}:{node.lineno}"
+            (reads if isinstance(node.ctx, ast.Load) else definitions).append(site)
+    return definitions, reads
+
+
+def test_the_transition_map_the_doc_cites_has_no_production_reader() -> None:
+    """The doc's own reason for distrusting `_ALLOWED_TRANSITIONS`, executed.
+
+    If a consumer is ever wired up, the doc's *"nothing consults that map"*
+    becomes false and this reds — the pin is the claim, in both directions.
+
+    The scan covers **`sdk.py` too**, and it counts READS rather than textual
+    mentions. Both halves are load-bearing: the map and every verb that would
+    plausibly consult it (`update_point`, `retract_point`, `supersede_point`)
+    live in the same file, so a guard that skipped the definition's own file
+    could not red on the most likely consumer — the one the map's own comment
+    names — while reding on a comment elsewhere.
+    """
+    definitions, reads = _transition_map_sites(ROOT / "tortoise")
+    assert definitions, (
+        f"`{TRANSITION_MAP}` is not defined anywhere under `tortoise/`, so the "
+        "design doc's citation of it is stale — re-point this guard (#5333)."
+    )
+    assert reads == [], (
+        f"`{TRANSITION_MAP}` now has a production reader ({reads}), so the "
+        "design doc's 'nothing consults that map' is stale — and so is the "
+        "claim that it cannot bound a write (#5333)."
+    )
+    assert "sdk.py:" in definitions[0], (
+        f"the map moved out of `sdk.py` (defined at {definitions}); the doc's "
+        "`sdk.py:2942` citation is stale (#5333)."
+    )
+
+
+def test_the_reader_scan_sees_a_consumer_in_the_definitions_own_file(tmp_path):
+    """Non-vacuity: a reader beside the definition is a READ, and is seen.
+
+    This is the shape the reviewer named: wiring the map into `update_point` —
+    the verb the map's own comment says it is *"NOT consulted by … per-call"* —
+    inside `tortoise/sdk.py`. The pre-fix guard skipped that whole file
+    (`if path == definition: continue`), so it reported no reader here.
+    """
+    (tmp_path / "sdk.py").write_text(
+        f'{TRANSITION_MAP} = {{"live": frozenset()}}\n'
+        "\n"
+        "def update_point(status, cur):\n"
+        f"    if status not in {TRANSITION_MAP}[cur]:\n"
+        "        raise ValueError(status)\n",
+        encoding="utf-8",
+    )
+    definitions, reads = _transition_map_sites(tmp_path)
+    assert definitions == ["sdk.py:1"], definitions
+    assert reads == ["sdk.py:4"], (
+        "a read of the map in the file that defines it is not reported — the "
+        "guard is blind to the one place a consumer is most likely to be "
+        "wired (#5333)."
+    )
+
+
+def test_the_reader_scan_ignores_a_mention_that_is_not_a_read(tmp_path):
+    """Non-vacuity, other direction: prose is not a reader.
+
+    A comment or a docstring naming the map does not consult it. Counting
+    mentions would red this guard — whose message says *"now has a production
+    reader"* — on a comment.
+    """
+    (tmp_path / "notes.py").write_text(
+        f'# {TRANSITION_MAP} is a Point-lifecycle spec; nothing consults it.\n'
+        "def describe():\n"
+        f'    """`{TRANSITION_MAP}` is declared and reserved."""\n'
+        "    return None\n",
+        encoding="utf-8",
+    )
+    definitions, reads = _transition_map_sites(tmp_path)
+    assert (definitions, reads) == ([], []), (
+        "a comment/docstring naming the map was counted as a definition or a "
+        f"read ({definitions}, {reads}) — prose is not a consultation (#5333)."
+    )

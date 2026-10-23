@@ -737,6 +737,68 @@ def test_url_less_source_target_skipped_at_emission(sup):
     _rebuild(sdk, events)  # no crash
 
 
+def test_pre_5206_aboutdocument_descriptor_never_repoints_to_a_provenance_source(sup):
+    """#5265: the resolver's ``documentKind`` test is LOAD-BEARING on the
+    descriptor route — a descriptor a pre-#5206 build journaled.
+
+    ``create_edge`` refused nothing before #5206, so a graph can already hold
+    ``(old:Point)-[:aboutDocument]->(provenance :Source)``. Superseding it
+    journals a ``DirectEdgeRepoint`` keyed on the target's ``url`` ALONE
+    (``stub_key`` carries no kind — the label is ``Source`` for a document and
+    for a provenance node alike), and supersede 2b enumerates
+    ``(old:Point)-[rel]->`` only, so no Event-sourced ``about*`` seam edge
+    produces a *descriptor* — and a descriptor carries no kind of its own, so
+    nothing else on this route supplies the test. Replay must therefore apply
+    the kind test ITSELF: with it the descriptor is SKIPPED (the edge is absent
+    from the rebuild), without it the successor is re-pointed at a non-document
+    Source.
+
+    ⚠️ Scoped to the descriptor route on purpose: ``resolve_structural_target``
+    IS reached from elsewhere — the name-path arm of ``replay_about_links`` —
+    but with a ``url`` ``resolve_about_link`` pinned to a document, so the kind
+    test is a defence there rather than the only witness. This test exercises
+    the descriptor route.
+
+    Non-vacuity: dropping ``AND s.documentKind IS NOT NULL`` from
+    ``resolve_structural_target``'s ``Source``/``aboutDocument`` match reds the
+    last assert (the descriptor then lands on the re-materialised provenance
+    ``:Source``). The Source is journaled via ``create_source`` so the rebuild
+    re-creates it — a raw-only node would be wiped and the match would miss for
+    the wrong reason.
+    """
+    _, events, sdk = sup
+    x = sdk.create_point("statement", "X", status="live")["id"]
+    succ = sdk.create_point("statement", "X'", status="live")["id"]
+    proj = sdk._get_proj()
+    # journaled provenance :Source — no documentKind (not a document)
+    sdk.create_source("https://x/5265-prov", "github")
+    # the pre-#5206 shape, minted raw because today's guarded producers refuse it
+    proj.g.query(
+        "MATCH (x:Point {id:$x}), (s:Source {url:'https://x/5265-prov'}) "
+        "MERGE (x)-[:aboutDocument]->(s)", params={"x": x})
+
+    r = sdk.supersede_point(x, succ)
+    assert r["edges_transferred"] >= 1
+    descs = [d for d in _descriptors(events)
+             if d.get("edge_type") == "aboutDocument"]
+    assert descs, (
+        "precondition: supersede must emit a DirectEdgeRepoint descriptor for "
+        "the pre-#5206 edge")
+    assert descs[0]["tgt"] == "https://x/5265-prov", descs
+    assert descs[0]["target_label"] == "Source", descs
+
+    _rebuild(sdk, events)
+    assert proj.g.query(
+        "MATCH (s:Source {url:'https://x/5265-prov'}) RETURN count(*)"
+    ).result_set[0][0] == 1, "precondition: the provenance Source must replay"
+    n = proj.g.query(
+        "MATCH (p:Point {id:$id})-[:aboutDocument]->(s:Source) "
+        "RETURN count(*)", params={"id": succ}).result_set[0][0]
+    assert n == 0, (
+        "a pre-#5206 descriptor re-pointed the successor at a provenance "
+        ":Source — the replay guard's documentKind test is gone")
+
+
 # ── Double-rebuild idempotence ──
 
 def test_structural_replay_is_idempotent_across_rebuilds(sup):
