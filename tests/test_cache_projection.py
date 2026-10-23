@@ -395,6 +395,52 @@ def test_the_source_discriminator_is_declared_excluded_not_guessed():
     )
 
 
+def test_the_subject_null_case_is_the_loaders_decision_not_fold_parity():
+    """Subject's null half is a DECISION — the fold does NOT coalesce it.
+
+    The rationale for `FOLD_ON_CREATE_DEFAULTS` must not claim parity it does
+    not have. Object's two clauses COALESCE, so null-as-silence is exactly what
+    the fold does there; `_upsert_subject` writes `s.subjectKind=$sk` with the
+    parameter built as `ev.get("subject_kind", "other")` — a default for an
+    ABSENT key only — so a key PRESENT-and-null sets `$sk = null` and
+    `SET ... = NULL` REMOVES the property (#7936). The fold therefore
+    DISTINGUISHES absent (→ `'other'`) from present-and-null (→ no property at
+    all), and `public.subject.subject_kind` is NULL in both cases, so the record
+    row cannot reproduce the split: filling `'other'` for the null case is the
+    loader's choice (declared in the table's RESIDUAL note), not parity.
+
+    Source-parsed like the sibling pin, so the claim reds if the fold gains a
+    coalesce on Subject (the residual would then be stale in the other
+    direction) or if the declaration is deleted back into a parity claim.
+    """
+    fold = (REPO_ROOT / "tortoise" / "projection" / "entities.py").read_text()
+    # Object: null-as-silence IS the fold's rule (both clauses coalesce).
+    assert re.search(r"o\.objectKind=coalesce\(\$ok, 'other'\)", fold)
+    assert re.search(r"o\.title=coalesce\(\$title, ''\)", fold)
+    # Subject: it is NOT — no coalesce on the `ON CREATE` write, and a default
+    # that fires on an ABSENT key only. (`ON MATCH` DOES coalesce
+    # — `s.subjectKind=coalesce($sk, s.subjectKind)` — which keeps an existing
+    # value; it never fills a null, so it does not make the null case parity.)
+    create = fold[fold.index("ON CREATE SET s.id=$id, s.name=$name"):]
+    create = create[:create.index("ON MATCH")]
+    assert not re.search(r"s\.subjectKind=coalesce\(", create), (
+        "_upsert_subject now coalesces subjectKind, so the null case IS fold "
+        "parity — the RESIDUAL note on FOLD_ON_CREATE_DEFAULTS is stale and "
+        "must be re-derived"
+    )
+    assert re.search(r'"sk":\s*ev\.get\("subject_kind",\s*"other"\)', fold), (
+        "the Subject parameter no longer defaults only on an ABSENT key — the "
+        "null-vs-absent split this residual describes has changed shape"
+    )
+    # And the decision is DECLARED where an editor of the table reads it.
+    src = (REPO_ROOT / "tortoise" / "cache_projection.py").read_text()
+    assert re.search(r"RESIDUAL — the Subject clause does NOT coalesce", src), (
+        "FOLD_ON_CREATE_DEFAULTS lost the note declaring that Subject's null "
+        "half is the loader's decision rather than fold parity — the table "
+        "would read as parity it does not have"
+    )
+
+
 def test_a_named_kind_and_a_tail_kind_are_never_overwritten_by_the_default():
     """The default is a FALLBACK, not a write — a named kind wins, wherever it rode."""
     named = _node("Subject", {"name": "Probe", "subject_kind": "team"})
@@ -406,9 +452,15 @@ def test_a_named_kind_and_a_tail_kind_are_never_overwritten_by_the_default():
     from_tail = _node("Subject", {"name": "Probe", "subject_kind": None,
                                   "props": {"subjectKind": "role"}})
     assert from_tail.props["subjectKind"] == "role"
-    # A tail NULL is SILENCE, not a value: the fold coalesces on null, so the
-    # default must still fill it (an explicit null left in place would write a
-    # null property the live fold never writes).
+    # A tail NULL takes the fallback too — ⚠️ the LOADER's DECISION for Subject,
+    # not fold parity: Object's clauses COALESCE on null, but `s.subjectKind=$sk`
+    # does not, and `SET ... = NULL` REMOVES the property, so the fold
+    # distinguishes absent key (→ `'other'`) from present-and-null (→ no property
+    # at all) — while `public.subject.subject_kind` is NULL for both, leaving the
+    # row unable to tell them apart. Declared: a present-null tail names no kind,
+    # and leaving a REQUIRED property absent is the defect #9634 closes. See the
+    # RESIDUAL note on `cache_projection.FOLD_ON_CREATE_DEFAULTS`, and
+    # `test_the_subject_null_case_is_the_loaders_decision_not_fold_parity`.
     null_tail = _node("Subject", {"name": "Probe", "subject_kind": None,
                                   "props": {"subjectKind": None}})
     assert null_tail.props["subjectKind"] == "other"

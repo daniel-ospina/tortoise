@@ -221,6 +221,23 @@ ADDITIONAL_PRIMARY_COLUMNS: dict[str, dict[str, str]] = {
 #: `EntityMutated` state map does), and this table supplies the same fallback the
 #: fold supplies when none was.
 #:
+#: ⚠️ RESIDUAL — the Subject clause does NOT coalesce, so this table's
+#: `subjectKind` fallback is the LOADER's DECISION for the null case, not fold
+#: parity (the Object half below IS parity). `_upsert_subject` writes
+#: `s.subjectKind=$sk` with no `coalesce`, and the parameter is
+#: `ev.get("subject_kind", "other")` — a default for an ABSENT key only. A key
+#: PRESENT-and-null therefore sets `$sk = null`, and `SET ... = NULL` REMOVES
+#: the property (`#7936`, on `_upsert_subject` itself), so the live fold leaves
+#: a present-null Subject with NO `subjectKind` at all while an absent key gets
+#: `'other'`. The record cannot reproduce that split: `subject_kind` is NULL and
+#: the tail is empty in BOTH cases, so the row carries nothing that separates
+#: them. This table fills `'other'` for both — a present-null tail names no
+#: kind, and leaving a REQUIRED property (§4.2) absent is the defect #9634
+#: exists to close. Effectively unreachable through the product today (`sdk.py`
+#: moves a caller's `subjectKind` into the column, and `subjectKind` is in
+#: `_SUBJECT_HANDLED`, so `_persist_extra_props` never puts it in the tail), so
+#: the residual is stated rather than measured for this case.
+#:
 #: EXCLUDED, each with its reason — the fold's OTHER `ON CREATE` defaults are
 #: not applied here, and the reasons are not all "it is not a constant":
 #:
@@ -684,12 +701,24 @@ def node_from_row(label: str, row: Mapping[str, Any]) -> RecordNode:
     # so it is projected under its own name as well as being the MERGE key.
     props.setdefault(key_prop, raw)
     # The fold's `ON CREATE` constants, applied where the record is SILENT
-    # (#9634). `None` counts as silence, not as a value: the fold COALESCEs on
-    # null (`coalesce($ok, 'other')`), so an explicit null — which is what a
-    # `props`-tail key holding None produces here, `_props_from_row` keeps the
-    # tail verbatim — must fall back exactly as an absent column does. Anything
-    # else (a named kind, from the column or the tail) is the record speaking
-    # and is never replaced.
+    # (#9634). `None` counts as silence, not as a value: it is a FALLBACK, so a
+    # value the record states — a named kind, from the column or from the
+    # `props` tail, which `_props_from_row` keeps verbatim — is never replaced.
+    #
+    # On the OBJECT side null-as-silence IS the fold's own rule: both clauses
+    # COALESCE (`coalesce($ok, 'other')`, `coalesce($title, '')`), so an
+    # explicit null and an absent column behave identically there.
+    #
+    # On the SUBJECT side it is a DECISION, not parity: `s.subjectKind=$sk`
+    # carries no coalesce and its parameter is
+    # `ev.get("subject_kind", "other")` — defaulting on an ABSENT key only. A
+    # key present-and-null sets `$sk = null`, and `SET ... = NULL` REMOVES the
+    # property (#7936), so the fold leaves a present-null Subject with NO
+    # `subjectKind` while an absent one gets `'other'`; the record row
+    # (`subject_kind` NULL, tail empty) is identical either way and cannot
+    # distinguish them. This loader chooses `'other'` for both, because a
+    # present-null tail names no kind and an absent REQUIRED property (§4.2) is
+    # the defect #9634 closes. Declared where the table is, as a residual.
     for prop, default in FOLD_ON_CREATE_DEFAULTS.get(label, {}).items():
         if props.get(prop) is None:
             props[prop] = default
