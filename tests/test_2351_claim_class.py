@@ -205,13 +205,26 @@ def test_nothing_is_wired_when_the_direct_edge_is_refused(lane):
 
 
 def test_direct_edge_allows_the_legal_wirings(lane):
-    """Asserted→derived flows, derived→derived flows, asserted→asserted flows."""
-    for src_class, tgt_class in (("asserted", "derived"),
-                                 ("derived", "derived"),
+    """Same-class wirings flow both ways; a MIXED one must state its legal leg.
+
+    A class-mixed bidirectional edge flows BOTH legs, so one of them is always
+    an override — the DOOR refuses it and asks the caller to name the leg it
+    means (`->` = the authored claim corroborates the computed one). The EP
+    backstop is the LENIENT side: it NARROWS an edge that already exists.
+    """
+    for src_class, tgt_class in (("derived", "derived"),
                                  ("asserted", "asserted")):
         src, tgt = _two(lane, src_class=src_class, tgt_class=tgt_class)
         lane.create_direct_edge("IMPL", src, tgt)   # must not raise
         assert _factor(lane, src, tgt) is not None
+    # Corroboration is stated one-way: the asserted claim feeds the derived.
+    a_src, d_tgt = _two(lane, src_class="asserted", tgt_class="derived")
+    lane.create_direct_edge("IMPL", a_src, d_tgt, direction="->")
+    assert _factor(lane, a_src, d_tgt) is not None
+    # The same wiring asked for BIDIRECTIONALLY flows the override leg too.
+    a2, d2 = _two(lane, src_class="asserted", tgt_class="derived")
+    with pytest.raises(ValueError, match="DERIVED"):
+        lane.create_direct_edge("IMPL", a2, d2)
 
 
 def test_create_operator_refuses_derived_source_over_asserted(lane):
@@ -220,9 +233,13 @@ def test_create_operator_refuses_derived_source_over_asserted(lane):
         lane.create_operator("IMPL", src, [tgt])
     with pytest.raises(ValueError, match="DERIVED"):
         lane.create_operator("NAND", src, [tgt])
-    # An asserted source over a derived input is fine (corroboration).
+    # An asserted source over a derived input is fine — stated one-way.
     a_src, d_tgt = _two(lane, src_class="asserted", tgt_class="derived")
-    lane.create_operator("IMPL", a_src, [d_tgt])
+    lane.create_operator("IMPL", a_src, [d_tgt], direction="->")
+    # ...but the same operator requested BIDIRECTIONALLY flows the override leg.
+    a2, d2 = _two(lane, src_class="asserted", tgt_class="derived")
+    with pytest.raises(ValueError, match="DERIVED"):
+        lane.create_operator("IMPL", a2, [d2])
 
 
 def test_supersede_refuses_a_derived_successor(lane):
@@ -305,10 +322,15 @@ def test_ep_backstop_classifies_the_slot_ep_actually_uses(lane):
     one flow, i.e. let the computed claim push belief INTO the authored one.
     """
     authored = lane.create_point("statement", "asserted source")["id"]
-    derived = lane.create_point("statement", "derived input",
-                                claim_class="derived")["id"]
+    derived = lane.create_point("statement", "derived input")["id"]
     other = lane.create_point("statement", "second asserted input")["id"]
     op = lane.create_operator("IMPL", authored, [derived, other])
+    # The class is stamped AFTER creation — a raw write, the way a bulk or
+    # projection producer (and any pre-guard graph) can — because the door
+    # refuses a class-mixed bidirectional wiring.
+    lane._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.id=$id SET n.claimClass='derived'",
+        params={"id": derived})
     # The source goes draft AFTER creation — bypassing the write guard the way
     # a status change legitimately can.
     lane._get_proj().g.query(
@@ -367,6 +389,31 @@ def test_ingest_partial_absorb_cannot_wire_a_derived_source(lane):
         lane.ingest(bundle, promotion_policy="auto")
 
 
+def test_ingest_partial_absorb_allows_a_non_point_target(lane):
+    """A :Object is not a claim — the ingest door agrees with the others.
+
+    ``classes_for_ids`` is :Point-anchored, so a non-Point id is ABSENT from the
+    class map. Reading that absence as "asserted" refused a derived source
+    whose absorbed inputs are Objects — a shape ``create_operator`` admits — so
+    the two doors onto one edge shape disagreed (#2351 review). The targets
+    here are ONLY Objects: a derived Point target would make the readmission
+    legal for the wrong reason.
+    """
+    derived = lane.create_point("statement", "derived source",
+                                claim_class="derived")["id"]
+    obj1, obj2 = "obj-2351-ingest-1", "obj-2351-ingest-2"
+    for oid in (obj1, obj2):
+        lane._get_proj().g.query(
+            "CREATE (o:Object {id:$id, name:'thing'})", params={"id": oid})
+    lane.create_operator("IMPL", derived, [obj1], promote_source=False)
+    bundle = {
+        "points": [], "entities": [], "sources": [],
+        "connections": [{"from": derived, "to": [obj1, obj2],
+                          "operator": "IMPL", "reify": True}],
+    }
+    lane.ingest(bundle, promotion_policy="auto")   # must not raise
+
+
 def test_ep_backstop_leaves_same_class_factors_alone(lane):
     """Two asserted claims (no marker) propagate exactly as before."""
     src, tgt = _two(lane, src_class="asserted", tgt_class="asserted")
@@ -404,6 +451,68 @@ def test_read_without_the_param_is_unchanged(lane):
     assert {r["id"] for r in rows} == {d["id"], a["id"]}, "None must not filter"
     for row in rows:
         assert "claim_class" not in row, "None must not emit the annotation"
+
+
+def test_the_write_guard_judges_the_leg_that_flows(lane):
+    """A one-way ``<-`` is judged on its target->source leg (#2351 review P1).
+
+    Judging the SOURCE slot alone inverted both arms: it refused ``<-`` FROM a
+    derived claim (only target->source flows, i.e. the permitted corroboration)
+    and admitted ``<-`` INTO a derived target (whose flowing leg is exactly the
+    derived->asserted push). The door and the EP backstop must agree.
+    """
+    derived = lane.create_point("statement", "computed",
+                                claim_class="derived")["id"]
+    asserted = lane.create_point("statement", "authored")["id"]
+
+    # `<-` from a DERIVED source: the asserted claim corroborates it. Legal.
+    lane.create_direct_edge("IMPL", derived, asserted, direction="<-")
+    lane.create_operator("IMPL", derived, [asserted], direction="<-")
+
+    # `<-` INTO a derived target: the flowing leg is derived -> asserted.
+    with pytest.raises(ValueError, match="DERIVED"):
+        lane.create_direct_edge("IMPL", asserted, derived, direction="<-")
+    with pytest.raises(ValueError, match="DERIVED"):
+        lane.create_operator("IMPL", asserted, [derived], direction="<-")
+
+    # `->` is the mirror: the derived SOURCE is the one that may not push.
+    with pytest.raises(ValueError, match="DERIVED"):
+        lane.create_direct_edge("IMPL", derived, asserted, direction="->")
+
+
+def test_a_derived_claim_may_be_wired_to_a_non_point_endpoint(lane):
+    """A :Object is not a CLAIM — its absent marker is not "asserted".
+
+    ``claimClass`` is a :Point property. Reading an Object's absence as
+    "asserted" refused a derived point wired to an Object, a shape #7902 made
+    writable (owner ruling #7813) — and told the caller to mark the Object
+    derived, which no door can do (#2351 review P1).
+    """
+    derived = lane.create_point("statement", "computed",
+                                claim_class="derived")["id"]
+    obj = "obj-2351-endpoint"
+    lane._get_proj().g.query(
+        "CREATE (o:Object {id:$id, name:'thing'})", params={"id": obj})
+    lane.create_direct_edge("IMPL", derived, obj)
+    lane.create_operator("IMPL", derived, [obj])
+
+
+def test_the_class_filter_runs_before_the_limit(lane):
+    """The filter is PRE-TRUNCATION, so ``limit`` counts filtered candidates.
+
+    Filtering after the cut would silently under-fill the caller's ``limit`` —
+    the regression the ``exclude_status`` seam comment exists to prevent. The
+    asserted row is given the stronger match so a post-cut filter returns
+    nothing rather than passing by luck.
+    """
+    asserted = lane.create_point(
+        "statement", "zebra zebra zebra zebra zebra authored")["id"]
+    derived = lane.create_point("statement", "zebra computed",
+                                claim_class="derived")["id"]
+    rows = lane.tortoise_fts_query("zebra", claim_class="derived", limit=1)
+    assert [r["id"] for r in rows] == [derived], (
+        f"the filter must run before ``limit``; got {[r['id'] for r in rows]!r} "
+        f"(asserted={asserted!r})")
 
 
 def test_operator_with_no_targets_is_not_a_derived_override(lane):
