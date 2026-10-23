@@ -2935,7 +2935,7 @@ def test_install_ci_runner_x64_tool_change_selects_core_not_tier1():
     # and that `core` is selected, not that it rides in the diff selection.
     #
     # Mutation check: removing the CORE_ALSO entry makes the first assert fail (surfaces == []).
-    from tools.ci_selection import carve_out_files  # noqa: I001
+    from tools.ci_selection import carve_out_files
 
     r = _sel(["tools/install-ci-runner-x64.sh"])
     assert r["surfaces"] == ["core"], r
