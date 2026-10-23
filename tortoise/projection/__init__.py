@@ -11029,7 +11029,10 @@ class FalkorProjection(
         # are the readings), while the SDK note has only an exception and must
         # tell the caller to go and read — so they say different things about
         # the same rule on purpose, and neither asserts a `maxmemory` it did not
-        # read.
+        # read. NOR is this message's `cap <= 2 * drift` SCALE GUARD bound: a cap
+        # whose own tolerance exceeds it makes the bias branch unreachable, and
+        # only a reader that HOLDS a reading can decide that — the note, holding
+        # none, cannot and does not claim it.
         #
         # ⚠️ What is STILL not agreed is the classification, not the claim:
         # `_WRITE_REFUSAL_MARKERS` does not match a class-only `OOM …` reply,

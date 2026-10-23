@@ -665,6 +665,7 @@ def test_the_reached_decision_has_one_authority():
     from pathlib import Path
 
     import tortoise
+    import tortoise.projection as projection
     from tortoise.retry import ceiling_reading_drift
 
     # The measured absolute floor, the 1 % heuristic, and its 1 MiB cap.
@@ -675,12 +676,47 @@ def test_the_reached_decision_has_one_authority():
     root = Path(tortoise.__file__).resolve().parent
     projection_src = (root / "projection" / "__init__.py").read_text(encoding="utf-8")
     retry_src = (root / "retry.py").read_text(encoding="utf-8")
+
+    # ⚠️ IDENTITY, not a text scan (#7357 cycle-2 review P3). The first version
+    # counted one exact literal in each file, which a reflow, a renamed local or
+    # a rewritten equivalent (`max(65536, min(cap // 100, 1048576))`) all evade
+    # while the drift is genuinely duplicated — and which FALSE-REDS a faithful
+    # refactor of the function it was pinning. The property that matters is that
+    # the projection's code path resolves to the SAME callable object, and it is
+    # checked directly.
+    assert projection.ceiling_reading_drift is ceiling_reading_drift, (
+        "the projection must resolve the shared rule, not a local copy of it")
     assert "ceiling_reading_drift(cap)" in projection_src, (
-        "the projection must call the shared rule, not hold its own copy")
-    assert "max(64 << 10, min(cap // 100, 1 << 20))" not in projection_src, (
-        "a second copy of the tolerance is free to drift from the note's")
-    assert retry_src.count("max(64 << 10, min(cap // 100, 1 << 20))") == 1, (
-        "the tolerance must exist exactly once, in ceiling_reading_drift")
+        "the shared rule must still be what the branch calls")
+    assert retry_src.count("def ceiling_reading_drift") == 1, (
+        "one definition, whose values the behavioural assertions above pin")
+
+
+def test_the_evidence_walk_cannot_replace_the_exception_it_explains():
+    """A raising `__str__` in the chain must not lose the note (#7357 cycle 2).
+
+    `_chain_names_the_ceiling` stringifies EVERY link, so it can read a
+    caller-supplied `__str__` that raises — where the family predicate only
+    stringifies `ResponseError` links. Without a belt the raise escapes to
+    `cypher_guard._note_instance_outage`, whose own belt swallows it and hands
+    the caller the raw illegible message with NO note at all: #7357's defect, for
+    that one exception. The module's rule for `is_instance_unavailable` is that a
+    legibility predicate never REPLACES the error it explains, and the fail-safe
+    answer here is the hedge (which asserts no ceiling).
+
+    NON-VACUOUS: remove the `try` in `_chain_names_the_ceiling` and this raises.
+    """
+
+    class _Exploding(Exception):
+        def __str__(self):
+            raise RuntimeError("boom")
+
+    exc = redis_exc.OutOfMemoryError("OOM failed to allocate 1GB")
+    exc.__cause__ = _Exploding()
+    text = explain_memory_ceiling(exc) or ""
+    assert text.startswith("OOM failed to allocate 1GB")
+    assert "it has reached its configured dataset limit" not in text, (
+        "an unreadable chain establishes nothing — the hedge is the safe arm")
 
 
 # ── the wiring, through a real guarded client ───────────────────────────────

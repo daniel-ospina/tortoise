@@ -967,17 +967,31 @@ def _chain_names_the_ceiling(exc: BaseException) -> bool:
     """
     seen: set[int] = set()
     link: BaseException | None = exc
-    while link is not None and id(link) not in seen:
-        seen.add(id(link))
-        if _MEMORY_CEILING_RE.search(
-                str(link).partition(_LEGIBLE_OPENER)[0]):
-            return True
-        if link.__cause__ is not None:
-            link = link.__cause__
-        elif link.__suppress_context__:
-            link = None
-        else:
-            link = link.__context__
+    try:
+        while link is not None and id(link) not in seen:
+            seen.add(id(link))
+            if _MEMORY_CEILING_RE.search(
+                    str(link).partition(_LEGIBLE_OPENER)[0]):
+                return True
+            if link.__cause__ is not None:
+                link = link.__cause__
+            elif link.__suppress_context__:
+                link = None
+            else:
+                link = link.__context__
+    except Exception:  # noqa: BLE001, RUF100 — never replace the error being explained
+        # ⚠️ THIS WALKS *EVERY* LINK, so unlike `is_memory_ceiling_refusal` (which
+        # only stringifies `ResponseError` links) it can read a caller-supplied
+        # `__str__` that raises. Same rule as `is_instance_unavailable`'s P1: a
+        # legibility predicate must never REPLACE the exception it explains.
+        # An unreadable link establishes nothing, and "not established" is the
+        # HEDGE arm — the fail-safe direction, because the hedge asserts no
+        # ceiling (measured shape: `OutOfMemoryError("OOM …")` whose
+        # `__cause__.__str__` raises). Without this belt the raise reaches
+        # `cypher_guard._note_instance_outage`, whose own belt swallows it and
+        # hands the caller the raw illegible message with NO note at all — the
+        # #7357 defect, for exactly that exception.
+        return False
     return False
 
 
