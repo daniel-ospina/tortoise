@@ -17160,9 +17160,13 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
         # for a fresh `session_id` that MERGE CREATES it) and the `fail`
         # outcome still leaves the :CommitRecord merged above — so every request
         # that gets past the replay returns writes at least one node, and a gate
-        # below those returns would leave the held band's :Session mint
+        # below the adjudication (i.e. below the `held` return, not below the
+        # replay returns) would leave the held band's :Session mint
         # (one uncounted node per request, the very class this issue is about)
-        # completely uncharged.
+        # completely uncharged. ⛔ Moving the gate ABOVE the replay returns is the
+        # opposite error and is forbidden: a replay writes no nodes and must
+        # never 402 (#1727, pinned by
+        # `test_replay_does_not_consume_the_budget`).
         #
         # ⛔ SCOPE, stated precisely because overstating a gate is worse than the
         # gap it leaves: the refusal is NOT write-free. `store.acquire(...)`
