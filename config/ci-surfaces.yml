@@ -4215,6 +4215,17 @@ surfaces:
   # which skips when no TORTOISE_DB_URI is set — the `sdk` fixture itself does
   # not skip, so a new URI-dependent test must carry the marker.
   - test_venture_pack.py
+  # #9663: the investment-portfolio-manager OVERLAY pack — the "overlay, not a
+  # second home" shape, the value test re-derived per kind, the #2781
+  # `nearMisses` routing for its two venture predicates, the compact-mode
+  # `portfolio:` trigger, and the pack's own graph-surface validator
+  # (`tortoise/domain_validators.py::validate_portfolio_shape`). Registered
+  # here, beside its pack siblings, because `tortoise/pack_registry.py`,
+  # `tortoise/extractor_v2.py` AND `tortoise/domain_validators.py` all select
+  # `core` — the lane a change to any of them actually runs. Mostly DB-free;
+  # the graph/state assertions carry the `requires_db` marker, so they skip
+  # when no server TORTOISE_DB_URI is set.
+  - test_investment_portfolio_manager_pack.py
   # #2714 (lane L7): vocab gating by graph — the compile seams
   # (compile_value_brief / compile_vocab) and the graph's :PackInstall
   # APPROVAL set. Guards tortoise/value_extractor.py,
@@ -6871,6 +6882,7 @@ durations:
   test_write_doors_9068.py: 2.0
   test_value_extractor.py: 49.3  # ci-timing top-15 2026-10-19 (run 39191149586); was 39.0 — ci-timing top-15 2026-10-21 (run 39467226356): top-15 saw 4 of 37 testcases = 42.9s in the largest single job (not summed across legs), a LOWER bound; kept 49.3
   test_venture_pack.py: 2.0  # unmeasured — new in #3419; no sweep has collected it, so it carries the flat default exactly as an absent key would, which is main's own weight for it. Do NOT substitute a local timing here: a measured-on-this-box 67.2 was recorded first, and it is a SHARD-LAYOUT input, so it moved tests/test_tortoise_search.py into the same shard as tests/test_subject_layer_read_surfaces_4889.py and exposed a pre-existing embedded-lane isolation leak (#3750 family) that main's grouping keeps apart. A weight that does not model CI must not be used to decide what runs together.
+  test_investment_portfolio_manager_pack.py: 2.0  # unmeasured — new in #9663; no sweep has collected it, so it carries the flat default exactly as an absent key would (the `test_venture_pack.py` rule above). The row is REQUIRED, not cosmetic: the file is new to the fast pool, and an absent key drops `durations` coverage under the 90% floor — the map had one file of headroom (#3400 trap). Do NOT substitute a locally measured timing: the weight is a SHARD-LAYOUT input that must model CI, not this box.
   # #2729: same rule as the entry directly above — unmeasured, carries the flat
   # default exactly as an absent key would. The explicit entry is REQUIRED, not
   # cosmetic: the file is new to the fast pool and an absent key lowers

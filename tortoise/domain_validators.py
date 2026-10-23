@@ -7,12 +7,17 @@ MCP server (mcp_server.py → sdk.validate_domain) and the SDK path
 a missing import would make ``tortoise validate`` report a false-clean.
 
 Registered surfaces:
-  - ``graph`` (on-demand): ``product_strategy.validate_chain_integrity`` — a
+  - ``graph`` (on-demand): ``validate_chain_integrity`` for `product-strategy` — a
     mechanism-complete, batched migration of the legacy ``sdk.check_structure``
     (all 5 rule types: orphan_use_case, dangling_use_case_ref,
     dangling_jtbd_ref, dangling_workflow_ref, orphaned_draft). Runs from
     ``tortoise validate --domain`` and the MCP tool. Never runs at commit
     (the commit path has no graph state by construction).
+  - ``graph`` (on-demand): ``validate_portfolio_shape`` for `portfolio` (#9663) —
+    rules ``undeclared_object_status`` and ``orphaned_valuation_mark``, derived
+    from the overlay pack's own declarations. Without a rule, a domain's
+    ``validate`` verdict is ``([], [])`` — a green light over nothing — which is
+    why this list exists.
   - ``payload_local`` (commit path): ``validate_payload_intra_chain`` — the
     deterministic intra-payload leapfrog rule, run by
     ``commit_schema.validate_domain_rules`` (warn-first, additive
@@ -336,6 +341,291 @@ def run_domain_graph_validators(
             continue
     drift = _drift_warnings(domain) if include_drift else []
     return violations, drift
+
+
+# ── graph-surface validator: the portfolio overlay (#9663) ────────────────
+
+_PORTFOLIO_DOMAIN = "portfolio"
+
+#: Statuses that mean "no lifecycle state was written", not "a state outside the
+#: kind's vocabulary". ``projection/entities.py`` MERGEs an Object with
+#: ``o.status=coalesce($st, 'live')``, so a node created without an explicit
+#: status carries ``live`` — flagging it would redden every freshly-minted
+#: mandate until someone set a status, which is not a graph defect. Named here
+#: (not inlined) because the exemption is a decision, not a test.
+_OBJECT_UNSET_STATUSES = frozenset({"live"})
+
+#: The mark's kind, and the FALLBACK contract used only when the pack registry
+#: cannot be read (the same degradation `_portfolio_declared_statuses` accepts).
+#: The live contract is read off the pack's own declarations at call time
+#: (`_portfolio_mark_contract`) — a hardcoded copy is the drift this pack exists
+#: to avoid, so these two values are pinned against the manifest by
+#: ``test_the_mark_contract_fallback_matches_the_manifest``.
+MARK_KIND = "portfolio:valuationMark"
+POSITION_KIND = "venture:investment"
+MARK_RELATION = "marks"
+
+
+def _pack_relations() -> list[dict]:
+    """The loaded portfolio pack's declared relations (``[]`` when unreadable)."""
+    try:
+        from .domain_loader import _get_registry
+        reg = _get_registry()
+        pack = reg.get_pack(_PORTFOLIO_DOMAIN) if reg is not None else None
+    except Exception:  # noqa: BLE001, RUF100 — advisory surface, see docstring
+        return []
+    if pack is None:
+        return []
+    return [r for r in (pack.relations or []) if isinstance(r, dict)]
+
+
+def _portfolio_mark_contract() -> tuple[str, str, str]:
+    """``(mark_kind, position_kind, relation)`` for the valuation-mark rule.
+
+    Read from the loaded pack at call time — the ``marks`` relation whose
+    ``fromKind`` is this pack's ``valuationMark`` — so a manifest edit to
+    ``toKind`` or a predicate rename moves the rule with it instead of silently
+    desynchronising it (the orphan rule then flags every correctly-wired mark,
+    or goes blind, with nothing red in CI). Falls back to the module constants
+    when the registry is unavailable, which is the same fail-open-but-visible
+    degradation ``_portfolio_declared_statuses`` takes: a validator that raised
+    here would be swallowed by ``run_domain_graph_validators`` and read CLEAN.
+    """
+    forms = {MARK_KIND.lower(), MARK_KIND.partition(":")[2].lower()}
+    for rel in _pack_relations():
+        from_kind = str(rel.get("fromKind") or "").lower()
+        to_kind = rel.get("toKind")
+        predicate = rel.get("predicate")
+        if from_kind in forms and to_kind and predicate:
+            return MARK_KIND, str(to_kind), str(predicate)
+    return MARK_KIND, POSITION_KIND, MARK_RELATION
+
+
+def _admitted_kind_forms(namespaced_kind: str) -> list[str]:
+    """Every case-folded spelling the write gate admits for a pack kind.
+
+    ``portfolio:valuationMark`` → ``["portfolio:valuationmark",
+    "valuationmark"]``. Both spellings matter here for two INDEPENDENT reasons,
+    and missing either is a false CLEAN (or a false violation) on the shape the
+    rule exists to report:
+
+      * the write gate admits ``ns:local`` AND bare ``local``
+        (``extractor_v2._object_kind_forms``/``_event_kind_forms`` lowercase
+        both) and the projection stores the spelling VERBATIM;
+      * the extraction pipeline's own event commit STRIPS the namespace
+        (``sdk.py`` ``_extract_session_v2`` writes ``ekind.rsplit(":", 1)[-1]``),
+        so every mark minted by extraction is stored bare — the #2729 review
+        P1 that widened ``StatusFoldIndex``'s keys, and the reason the rule
+        must read the same map rather than re-derive it.
+
+    The spellings come from that canonical seam
+    (``StatusFoldIndex.kind_forms_for``); the inline pair is the registry-less
+    fallback, identical to what the index returns.
+    """
+    try:
+        from .domain_loader import _get_registry
+        reg = _get_registry()
+        fold_index = reg.status_fold_index if reg is not None else None
+    except Exception:  # noqa: BLE001, RUF100 — advisory surface, see docstring
+        fold_index = None
+    if fold_index is not None:
+        try:
+            return [str(f).lower() for f in
+                    fold_index.kind_forms_for(namespaced_kind)]
+        except Exception:  # advisory surface — fall through to the pair below
+            pass
+    forms = [namespaced_kind.lower()]
+    local = namespaced_kind.partition(":")[2]
+    if local and local.lower() not in forms:
+        forms.append(local.lower())
+    return forms
+
+
+def _portfolio_declared_statuses() -> dict[str, frozenset[str]]:
+    """``{case-folded kind spelling: declared statuses}`` for the pack.
+
+    Read from the registry at call time (never a hardcoded copy — that is the
+    map `#2729` exists to remove). ``{}`` when the pack machinery is unavailable:
+    the same degradation ``_expand`` accepts, since a validator that raised here
+    would be swallowed by ``run_domain_graph_validators`` and read as CLEAN.
+
+    Keyed on EVERY spelling the write gate admits for the kind — the namespaced
+    ``portfolio:mandate`` AND the bare ``mandate`` — because the gate admits both
+    (``extractor_v2._object_kind_forms`` lowercases every form) and the
+    projection stores ``objectKind`` verbatim. Keyed on the namespaced spelling
+    alone, the rule is BLIND to a bare-spelled Object the gate produced: an
+    out-of-vocabulary status on it is never reported, i.e. a false CLEAN. The
+    spellings come from the canonical seam
+    (``StatusFoldIndex.kind_forms_for`` — the same map the declared fold uses,
+    #2729) instead of being re-derived here.
+    """
+    try:
+        from .domain_loader import _get_registry
+        reg = _get_registry()
+        pack = reg.get_pack(_PORTFOLIO_DOMAIN) if reg is not None else None
+    except Exception:  # noqa: BLE001, RUF100 — advisory surface, see docstring
+        return {}
+    if pack is None:
+        return {}
+    try:
+        fold_index = reg.status_fold_index
+    except Exception:  # advisory surface, see docstring — never raise into the swallow
+        fold_index = None
+    out: dict[str, frozenset[str]] = {}
+    for kind, spec in (pack.kind_defs or {}).items():
+        statuses = spec.get("statuses") if isinstance(spec, dict) else None
+        if not (isinstance(statuses, list) and statuses):
+            continue
+        namespaced = f"{_PORTFOLIO_DOMAIN}:{kind}"
+        if fold_index is not None:
+            forms = fold_index.kind_forms_for(namespaced)
+        else:  # registry without a fold index — the same two admitted forms
+            forms = [namespaced.lower(), str(kind).lower()]
+        allowed = frozenset(s for s in statuses if isinstance(s, str))
+        for form in forms:
+            out[str(form).lower()] = allowed
+    return out
+
+
+@domain_validator(_PORTFOLIO_DOMAIN, surface=SURFACE_GRAPH)
+def validate_portfolio_shape(graph) -> list[dict]:
+    """The portfolio overlay's own graph-surface rules (issue #9663).
+
+    The pack's acceptance asks for ``tortoise_validate_domain`` to be CLEAN, and
+    a validator that does not exist cannot be clean:
+    ``run_domain_graph_validators`` returns ``([], [])`` for a known namespace
+    with no rules registered, so the check would pass on ANY graph. These two
+    rules come from the manifest's own declarations:
+
+      1. ``undeclared_object_status`` — a `portfolio:mandate` /
+         `portfolio:allocationTarget` whose ``status`` is outside its kind's
+         declared ``statuses``. A declared-statuses kind OWNS its state (the
+         connector fold no longer applies to it), so an out-of-vocabulary status
+         is a state nothing declared — and every "what is the current position?"
+         read misses it. The rule reads the BARE kind spelling too (the write
+         gate admits `mandate` as well as `portfolio:mandate`), because an
+         address the gate accepts but the rule cannot see is a false CLEAN.
+      2. ``orphaned_valuation_mark`` — a `portfolio:valuationMark` Event not
+         attached to a POSITION (a `venture:investment`), by the declared
+         relation (`marks`, an operator edge) or by the structural
+         ``aboutObject`` form some callers use. An unattached one records that a
+         mark happened and can never be joined back to what it marked; one
+         attached to the WRONG thing (a `producedBy` operator pointing at a
+         mandate) answers the wrong question and is just as unusable.
+
+    One batched query per rule (no N+1), each anchored on a LABEL — and the
+    claim stops there. ``objectKind``/``eventKind`` are properties with no index,
+    so the kind filter is a label scan within the anchored walk. That is the
+    honest residual: a query slow enough to time out is swallowed by
+    ``run_domain_graph_validators`` and reads as CLEAN (#8173), and this rule
+    does not design that away — it keeps the walk label-anchored so it cannot
+    degrade to a whole-graph scan.
+    """
+    violations: list[dict] = []
+
+    # The framework's terminal vocabulary (``superseded`` / ``deprecated`` /
+    # ``archived`` / ``retracted``) is written by the ENGINE, never by a caller:
+    # ``commit_ops.apply_supersessions`` folds a superseded Object to
+    # ``superseded``. Supersession is exactly how a mandate or target changes
+    # state, so treating that status as undeclared would redden
+    # `validate_domain portfolio` on every graph that ever superseded one — the
+    # pack's own acceptance would forbid its own write path. Exempt, from the
+    # one definition (never a second literal).
+    from .commit_ops import OBJECT_TERMINAL_STATUSES
+
+    declared = _portfolio_declared_statuses()
+    if declared:
+        # BOTH sides case-folded. The vocabulary keys are the write gate's
+        # lowercased forms, while `objectKind` is stored VERBATIM
+        # (`portfolio:allocationTarget` keeps its capital) — a case-sensitive
+        # `IN` over lowercased forms would miss the namespaced spelling
+        # entirely, which is the wider half of the same blindness.
+        rows = graph.g.query(
+            "MATCH (o:Object) WHERE toLower(o.objectKind) IN $kinds "
+            "AND o.status IS NOT NULL "
+            "RETURN o.id, o.objectKind, o.name, o.status",
+            params={"kinds": sorted(declared)},
+        ).result_set
+        exempt = OBJECT_TERMINAL_STATUSES | _OBJECT_UNSET_STATUSES
+        for node_id, object_kind, name, status in rows:
+            valid = declared.get((object_kind or "").lower())
+            if not valid or status in valid or status in exempt:
+                continue
+            violations.append({
+                "rule": "undeclared_object_status",
+                "kind": object_kind,
+                "ref": node_id,
+                "message": (
+                    f"{object_kind} '{name}' carries status '{status}', which "
+                    f"its kind does not declare (declared: "
+                    f"{', '.join(sorted(valid))})"
+                ),
+                "fix": (
+                    "write the state the kind declares, or amend the kind's "
+                    "`statuses` in packs/investment-portfolio-manager/"
+                    "manifest.yaml — a declared-statuses kind OWNS its state"
+                ),
+            })
+
+    mark_kind, position_kind, mark_relation = _portfolio_mark_contract()
+    # A mark is attached when it reaches a POSITION either way round:
+    #   * the DECLARED relation. The manifest declares `marks` with
+    #     ``mechanism: IMPL``, and a mechanism resolves to the OPERATOR write
+    #     path (``pack_registry.relation_write_paths``) —
+    #     ``create_operator(op_type='IMPL', label='marks', ...)`` writes
+    #     ``(e)-[:INPUT]->(op:Point)-[:IMPL]->(o)``, NOT ``aboutObject``.
+    #     Checking only ``aboutObject`` would call a mark wired exactly as
+    #     declared an orphan. The operator's own ``label`` is REQUIRED here
+    #     (``create_operator`` writes it, ``sdk.create_operator`` →
+    #     ``label:$label``): otherwise any IMPL operator — ``producedBy`` to a
+    #     mandate — would pass and the rule would only answer "touches some
+    #     Object".
+    #   * the STRUCTURAL ``aboutObject`` form some callers use, which is just as
+    #     attached (it is not a declared relation, and is accepted as such).
+    # Both legs require the target to be the declared ``toKind`` (read from the
+    # pack, ``_portfolio_mark_contract``) — a mark that values something else is
+    # not a mark on a position.
+    #
+    # Every kind filter is ``toLower(...) IN $forms`` over EVERY spelling the
+    # write gate admits, on BOTH sides: an exact namespaced literal misses the
+    # marks the extraction pipeline writes (``eventKind`` stored bare, see
+    # ``_admitted_kind_forms``) — a false CLEAN on the rule's own purpose — and
+    # misses a position stored under the bare ``investment``, which would flag a
+    # correctly-wired mark as an orphan. Same seam, same widening as rule 1.
+    rows = graph.g.query(
+        "MATCH (e:Event) WHERE toLower(e.eventKind) IN $mark_forms "
+        "OPTIONAL MATCH (e)-[:aboutObject]->(o1:Object) "
+        "WHERE toLower(o1.objectKind) IN $position_forms "
+        "OPTIONAL MATCH (e)-[:INPUT]->(op:Point {label: $rel})"
+        "-[:IMPL]->(o2:Object) "
+        "WHERE toLower(o2.objectKind) IN $position_forms "
+        "WITH e, count(DISTINCT o1) + count(DISTINCT o2) AS targets "
+        "WHERE targets = 0 "
+        "RETURN e.id, e.name",
+        params={
+            "mark_forms": _admitted_kind_forms(mark_kind),
+            "position_forms": _admitted_kind_forms(position_kind),
+            "rel": mark_relation,
+        },
+    ).result_set
+    for node_id, name in rows:
+        violations.append({
+            "rule": "orphaned_valuation_mark",
+            "kind": mark_kind,
+            "ref": node_id,
+            "message": (
+                f"valuation mark '{name}' is not linked to any Object — the "
+                f"manifest declares `marks` as a relation to the position it "
+                f"marks, so the mark cannot be joined back to what it valued"
+            ),
+            "fix": (
+                f"record the declared `{mark_relation}` relation: "
+                "create_operator('IMPL', <mark>, [<the "
+                f"{position_kind} it values>], label='{mark_relation}', "
+                "semantics='related')"
+            ),
+        })
+    return violations
 
 
 def _drift_warnings(domain: str) -> list[dict]:
