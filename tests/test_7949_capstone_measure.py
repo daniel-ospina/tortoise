@@ -954,3 +954,136 @@ def test_the_derivation_figure_moves_when_a_derivation_link_is_lost():
     assert measure.derivation_only(
         dict(intact, extraction_claims_anchored=120,
              extraction_claims=120, other_points=9))[2] < 1.0
+
+
+# ── the E3 row note: no live count inside a historical claim ─────────────
+
+def _e3_result(anchored: int = 148, derived: int = 433) -> dict:
+    return measure.e3_outcome(anchored=anchored, derived=derived,
+                              bars=measure.parse_bars(_prereg()))
+
+
+def _shipped_composition(**overrides) -> dict:
+    """The shipped run's census shape (141 claims, all anchored, + 9 `other`)."""
+    composition = {"points": 338, "turn_rows": 159, "turn_rows_anchored": 0,
+                   "extraction_claims": 141, "extraction_claims_anchored": 141,
+                   "operator_points": 29, "operator_points_anchored": 0,
+                   "other_points": 9, "other_points_anchored": 0}
+    composition.update(overrides)
+    return composition
+
+
+def test_the_e3_note_never_splices_this_runs_counts_into_a_historical_ratio():
+    """The superseded-reading clause must not carry THIS run's counts or a typed ratio.
+
+    #9823 review (P3): the note built the historical sentence as
+    ``f"{claims_anchored}/{claims} = 1.000000"`` — the current census's counts with a
+    HARDCODED quotient. On the shipped run that read ``141/141 = 1.000000``
+    (coincidentally consistent, because every claim happened to be anchored) and it
+    would have printed ``140/141 = 1.000000`` the moment a link was lost — a false
+    arithmetic identity inside the record a reader quotes for #9736's decision. It
+    also attributed those numbers to the SUPERSEDED reading, whose own figure was
+    ``132/132``.
+
+    Non-vacuity: on the pre-fix probe `e3_row_note` did not exist (the note was built
+    inline in `main()`), so this reds as an AttributeError; the SPLICE itself — the
+    ``141/141 = 1.000000`` it printed into the shipped record — is what
+    `test_the_shipped_log_states_the_e3_note_the_same_way_in_both_copies` reds on
+    against the artifact, which is the check that would have caught it.
+    """
+    graph, corpus_sha = "capstone_measure_test_1", "sha256:" + "d" * 64
+    results = _e3_result()
+
+    intact = measure.e3_row_note(composition=_shipped_composition(),
+                                 e3_result=results, graph=graph,
+                                 corpus_sha=corpus_sha)
+    assert "141/141" not in intact, intact
+    lost = measure.e3_row_note(
+        composition=_shipped_composition(extraction_claims_anchored=140),
+        e3_result=results, graph=graph, corpus_sha=corpus_sha)
+    assert "140/141" not in lost, lost
+    for note in (intact, lost):
+        assert not re.search(r"\d+/\d+ = 1\.000000", note), note
+    # the circularity is stated as a CONSTRUCTION (derivable from the definition),
+    # which is what lets it be said without any measured number at all
+    for fragment in ("the earlier reading divided by the extraction claims ALONE",
+                     "the class that link defines",
+                     "nothing but 1.000000 BY CONSTRUCTION",
+                     "'other' Points sitting outside it"):
+        assert fragment in intact, (fragment, intact)
+
+    # every composition figure the note DOES print is this run's, derived
+    custom = measure.e3_row_note(
+        composition=_shipped_composition(extraction_claims=7,
+                                         extraction_claims_anchored=3,
+                                         other_points=4),
+        e3_result=results, graph=graph, corpus_sha=corpus_sha)
+    assert "7 extraction claims (3 anchored)" in custom, custom
+    assert "4 other (0 anchored)" in custom, custom
+    assert "3/11 = 0.272727" in custom, custom
+
+
+def test_the_shipped_log_states_the_e3_note_the_same_way_in_both_copies():
+    """One note, two copies (the human `row E3 note:` line and the machine `note`).
+
+    #9823 review: the sentence was built from THIS run's counts with a typed quotient,
+    so the shipped log asserted that the SUPERSEDED reading produced ``141/141``. An
+    earlier revision of this branch had the two copies contradict each other outright
+    (the human line said the earlier reading was ``132/132`` while the machine copy
+    said ``141/141``), which is the class the byte-identity assertion guards; the
+    false-identity assertion is what reds on the pre-fix artifact here — it matches
+    ``141/141 = 1.000000`` in both copies.
+    """
+    log = _newest_log(_scored_logs())
+    text = log.read_text()
+    record = cvc.extract_block(text)
+    machine = [row for row in record["rows"] if row["criterion"] == "E3"]
+    assert len(machine) == 1, [row["criterion"] for row in record["rows"]]
+    human = re.search(r"^row E3 note: (.*)$", text, re.MULTILINE)
+    assert human, "the shipped log carries no `row E3 note:` line"
+    assert human.group(1) == machine[0]["note"], (
+        "the log's human and machine copies of the E3 note disagree")
+    for where, copy in (("human", human.group(1)), ("machine", machine[0]["note"])):
+        assert not re.search(r"\d+/\d+ = 1\.000000", copy), (where, copy)
+
+
+def test_the_not_established_section_quotes_the_s5_operator_counts_the_log_measured():
+    """The README's own S5 row and the log's `step S5` line must agree with it.
+
+    #9823 review (P2): the "What this bundle does NOT establish" bullet kept a
+    SUPERSEDED run's ``IMPL 61 / INPUT 58 / NAND 6`` while the shipped log's `step S5`
+    line — and the README's own S5 table row — measured something else. That specific
+    drift was cured by the re-run, and this pin is what keeps it cured: the bullet is
+    prose nothing else cross-checks, and the failure it had is the bundle's own rule —
+    every number it prints is carried by its artifact.
+
+    Non-vacuity: against the pre-re-run README (bullet ``61 / 58 / 6`` beside a log
+    that measured ``70 / 70 / 8``) the equality assertion reds. The separator is
+    allowed to be ``=`` or a space, because #9823's fix normalised one call site and a
+    future one may spell it the other way; what must not move is the NUMBERS.
+    """
+    readme = (PROBE.parents[1] / "README.md").read_text()
+    log = _newest_log(_scored_logs()).read_text()
+    measured = re.search(r"operator-shaped relationships written "
+                         r"\[IMPL=(\d+), INPUT=(\d+), NAND=(\d+)\]", log)
+    assert measured, "the shipped log carries no `step S5` operator-shaped line"
+    assert "step S5 WITNESSED" in log, (
+        "the shipped log no longer witnesses S5, so the counts above are not a witness")
+
+    section = readme.split("## What this bundle does NOT establish", 1)[1]
+    section = section.split("\n## ", 1)[0]
+    quoted = re.search(r"IMPL[= ](\d+)[ ,/]*INPUT[= ](\d+)[ ,/]*NAND[= ](\d+)",
+                       section)
+    assert quoted, (
+        "the 'does NOT establish' section no longer quotes the operator-shaped counts; "
+        f"the log measured IMPL={measured.group(1)} INPUT={measured.group(2)} "
+        f"NAND={measured.group(3)}")
+    assert quoted.groups() == measured.groups(), (
+        f"the README's not-established bullet says IMPL={quoted.group(1)} "
+        f"INPUT={quoted.group(2)} NAND={quoted.group(3)}; the shipped log measured "
+        f"IMPL={measured.group(1)} INPUT={measured.group(2)} NAND={measured.group(3)}")
+    # and the S5 table row in the same document must not disagree either
+    s5_row = next(ln for ln in readme.splitlines()
+                  if ln.startswith("| S5 CONNECT"))
+    assert f"IMPL={measured.group(1)} INPUT={measured.group(2)} " \
+           f"NAND={measured.group(3)}" in s5_row, s5_row

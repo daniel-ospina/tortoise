@@ -118,6 +118,17 @@ line of this log: both surfaces were ABSENT on this run, so the refusal branch n
 below carry the absent-surface cause). Disclosed rather than smoothed, like the dirty-tree delta
 itself.
 
+⚠️ **One clause of this log was corrected IN PLACE, and here is which.** The `row E3 note` (human and
+machine copies) and the `e3 point composition` line described the *superseded* reading by splicing
+THIS run's counts into it with a typed `= 1.000000` — so the record stated a historical fact that
+never happened (`141/141` rather than that run's `132/132`), and would have printed
+`140/141 = 1.000000` on a run that lost a link. The prose now states the circularity as a
+CONSTRUCTION (a denominator defined by the link it reports can only read `1.000000`) with no live
+count in the historical claim, and the composition line discloses that the `132/132` figure's log is
+not committed because superseding deleted it. **No measured number moved** — neither corrected span
+carries a figure belonging to this run; only that explanatory clause is different, and the probe at
+this head (now `e3_row_note`) emits the corrected form.
+
 | session | ok | mode | extracted | edus | points | operators | search |
 |---|---|---|---|---|---|---|---|
 | `wp01_quarry_debug` | ✅ | `llm:deepseek-direct` | 26 | 26 | 26 | 5 | 15 queries, not degraded |
@@ -484,7 +495,8 @@ witnessed steps is printed — an honest finding for `#7949`, never a guess.
   mention links are unanchored by design (#5199 → #9736 owns the choice).
 - **No E4 edge denominator of our own.** E4's number is the committed operator receipt's
   (`2/15`), whose corpus revision is not the frozen one; the run's own operator-shaped
-  relationships (IMPL 57 / INPUT 58 / NAND 10) are a *step witness*, not the 15-edge gold.
+  relationships (`IMPL=57 INPUT=58 NAND=10` — the `S5` row above and the log's `step S5`
+  line carry the same three numbers) are a *step witness*, not the 15-edge gold.
 - **Nothing about E5's population reconciliation.** The instrument's `n` is 25 bound qualifiers;
   the record's denominator is 29 marker-bearing sentences. #9738 owns that, and this bundle says
   so instead of calling the numbers final.

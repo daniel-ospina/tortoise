@@ -1064,8 +1064,11 @@ def point_composition_line(composition: dict | None) -> str:
         f"(non-episodic, non-operator Points = {claims} extraction claims + "
         f"{others} other = {total}); it is NOT defined by the extractedFrom link "
         f"itself, because a denominator filtered on the link cannot move when the "
-        f"link is lost (measured: the earlier reading of this figure was "
-        f"132/132 = 1.000000 while 9 Points sat in 'other'). TWO classes are "
+        f"link is lost (measured on the superseded `8a8bbcba` run: the earlier "
+        f"reading of this figure was 132/132 = 1.000000 while 9 Points sat in "
+        f"'other' — and that run's log is NOT committed, because superseding "
+        f"DELETES the file it replaces, so the figure is provenance this bundle "
+        f"records rather than an artifact it can hand you). TWO classes are "
         f"STRUCTURALLY INCAPABLE of an extractedFrom link and are therefore NOT "
         f"in the denominator, with their anchored counts stated: turn rows carry "
         f"none BY CONSTRUCTION (_TURN_WRITE_CYPHER in _write_capture_turns, "
@@ -1078,6 +1081,84 @@ def point_composition_line(composition: dict | None) -> str:
         f"it, the line does not excuse it. derivation figure (anchored / "
         f"expected-to-derive): {figure}. The frozen 'all derived nodes' reading "
         f"above is unchanged")
+
+
+def e3_row_note(*, composition: dict | None, e3_result: dict, graph: str,
+                corpus_sha: str) -> str:
+    """The E3 row's note. Every figure DERIVED; no live count in a historical claim.
+
+    Two defects this function exists to make unrepresentable (#9823 review, round 5):
+
+    (1) The superseded-reading clause used to splice THIS run's counts into a
+    ratio about the EARLIER one — ``f"{claims_anchored}/{claims} = 1.000000"`` —
+    with the quotient TYPED rather than computed. On the shipped run that read
+    ``141/141 = 1.000000`` (coincidentally right, since every claim happened to be
+    anchored) and on a run that lost one link it would have printed
+    ``140/141 = 1.000000``, a false arithmetic identity inside the record.
+
+    (2) Those counts are this census's, so the sentence asserted that the
+    SUPERSEDED probe produced them; its own figure was ``132/132``. A claim the
+    artifact cannot carry is exactly what this bundle refuses everywhere else.
+
+    So the clause now states the circularity as a CONSTRUCTION — a denominator
+    defined by the link it reports can only ever read 1.0 — with no number taken
+    from the current run and no invented ratio. The numbers of the earlier run
+    are provenance the bundle README carries (its log was deleted by superseding,
+    so the tree cannot check them); the note does not restate them.
+    """
+    block = composition or {}
+    # NOTE the names: this is the WRITER class (claims + other), NOT the claims
+    # alone — a `claim_den` here would be the circular denominator again.
+    deriv_anchored, deriv_expected, derivation_share = derivation_only(block)
+    derivation = (f"{deriv_anchored}/{deriv_expected}" +
+                  (f" = {derivation_share:.6f}"
+                   if derivation_share is not None else ""))
+    return (
+        f"{e3_result['value']}; bar {e3_result['bar']}; measured on THIS "
+        f"run's own graph ({graph}, fixtures_hash {corpus_sha}). The "
+        f"Source->Object identity link carries no sourceVersion BY "
+        f"DESIGN (owner option A, #5199), so ':Object mention links' can "
+        f"never anchor — and the frozen denominator counts them anyway, "
+        f"so the = 1.000 bar is unreachable as registered (#9736: either "
+        f"the metric is re-registered or the model is reopened; a lane "
+        f"cannot pick). COMPOSITION of the {block.get('points', 0)} "
+        f"Point nodes the denominator also counts: "
+        f"{block.get('turn_rows', 0)} mechanical turn rows + "
+        f"{block.get('extraction_claims', 0)} extraction claims "
+        f"({block.get('extraction_claims_anchored', 0)} anchored) "
+        f"+ {block.get('operator_points', 0)} operator Points "
+        f"({block.get('operator_points_anchored', 0)} anchored) "
+        f"+ {block.get('other_points', 0)} other "
+        f"({block.get('other_points_anchored', 0)} anchored), each "
+        f"class read off the property its writer stamps. TWO of those "
+        f"classes cannot carry a derivation link AT ALL and are named "
+        f"rather than folded into the figure: the turn rows carry none BY "
+        f"CONSTRUCTION (_TURN_WRITE_CYPHER in _write_capture_turns, "
+        f"tortoise/sdk.py:2367, t.is_episodic=true, wired only by "
+        f"CONTAINS), and the operator Points are written by "
+        f"create_operator (tortoise/sdk.py — the IMPL/NAND/INPUT "
+        f"operator writer), which never writes extractedFrom. So "
+        f"counting them under 'all derived nodes' is defensible but "
+        f"they can never anchor and are not a provenance shortfall, and "
+        f"a denominator summing them would report a shortfall nothing "
+        f"could close. The DERIVATION figure is anchored / "
+        f"expected-to-derive over the WRITER class (non-episodic, "
+        f"non-operator Points = the extraction claims PLUS the 'other' "
+        f"Points, which are the class where a LOST derivation link lands "
+        f"— Points with no extractedFrom that are neither turn rows nor "
+        f"operator Points): {derivation}. It is computed over that "
+        f"class and NOT over the claims alone, because a denominator "
+        f"defined by the extractedFrom link itself cannot move when that "
+        f"link is lost: the earlier reading divided by the extraction "
+        f"claims ALONE — the class that link defines — so it read "
+        f"nothing but 1.000000 BY CONSTRUCTION, with the 'other' Points "
+        f"sitting outside it. "
+        f"Whether an unanchored 'other' Point lost a link or "
+        f"was minted by a writer that never derives is the attribution "
+        f"#9736 still owns. #9736 must choose between "
+        f"re-registering the metric and reopening the model, and this "
+        f"row reports BOTH readings so neither choice is made on a "
+        f"denominator whose composition was hidden")
 
 
 def _stage_calls(stats: dict, stage: str) -> int:
@@ -1921,12 +2002,6 @@ def main(argv: list[str] | None = None) -> int:
     e3_result = e3_outcome(anchored=census_data["anchored_total"],
                            derived=census_data["derived_total"], bars=bars)
     composition = census_data.get("point_composition") or {}
-    # NOTE the names: this is the WRITER class (claims + other), NOT the claims
-    # alone — a `claim_den` here would be the circular denominator again.
-    deriv_anchored, deriv_expected, derivation_share = derivation_only(composition)
-    derivation = (f"{deriv_anchored}/{deriv_expected}" +
-                  (f" = {derivation_share:.6f}"
-                   if derivation_share is not None else ""))
     e3 = {
         "verdict": verdict_word(e3_result),
         "numerator": census_data["anchored_total"],
@@ -1934,51 +2009,8 @@ def main(argv: list[str] | None = None) -> int:
         "below_floor": e3_result["below_floor"],
         "outcome": e3_result["outcome"],
         "bar": e3_result["bar"],
-        "note": (f"{e3_result['value']}; bar {e3_result['bar']}; measured on THIS "
-                 f"run's own graph ({graph}, fixtures_hash {corpus_sha}). The "
-                 f"Source->Object identity link carries no sourceVersion BY "
-                 f"DESIGN (owner option A, #5199), so ':Object mention links' can "
-                 f"never anchor — and the frozen denominator counts them anyway, "
-                 f"so the = 1.000 bar is unreachable as registered (#9736: either "
-                 f"the metric is re-registered or the model is reopened; a lane "
-                 f"cannot pick). COMPOSITION of the {composition.get('points', 0)} "
-                 f"Point nodes the denominator also counts: "
-                 f"{composition.get('turn_rows', 0)} mechanical turn rows + "
-                 f"{composition.get('extraction_claims', 0)} extraction claims "
-                 f"({composition.get('extraction_claims_anchored', 0)} anchored) "
-                 f"+ {composition.get('operator_points', 0)} operator Points "
-                 f"({composition.get('operator_points_anchored', 0)} anchored) "
-                 f"+ {composition.get('other_points', 0)} other "
-                 f"({composition.get('other_points_anchored', 0)} anchored), each "
-                 f"class read off the property its writer stamps. TWO of those "
-                 f"classes cannot carry a derivation link AT ALL and are named "
-                 f"rather than folded into the figure: the turn rows carry none BY "
-                 f"CONSTRUCTION (_TURN_WRITE_CYPHER in _write_capture_turns, "
-                 f"tortoise/sdk.py:2367, t.is_episodic=true, wired only by "
-                 f"CONTAINS), and the operator Points are written by "
-                 f"create_operator (tortoise/sdk.py — the IMPL/NAND/INPUT "
-                 f"operator writer), which never writes extractedFrom. So "
-                 f"counting them under 'all derived nodes' is defensible but "
-                 f"they can never anchor and are not a provenance shortfall, and "
-                 f"a denominator summing them would report a shortfall nothing "
-                 f"could close. The DERIVATION figure is anchored / "
-                 f"expected-to-derive over the WRITER class (non-episodic, "
-                 f"non-operator Points = the extraction claims PLUS the 'other' "
-                 f"Points, which are the class where a LOST derivation link lands "
-                 f"— Points with no extractedFrom that are neither turn rows nor "
-                 f"operator Points): {derivation}. It is computed over that "
-                 f"class and NOT over the claims alone, because a denominator "
-                 f"defined by the extractedFrom link itself cannot move when that "
-                 f"link is lost — the earlier reading of this figure was "
-                 f"{composition.get('extraction_claims_anchored', 0)}/"
-                 f"{composition.get('extraction_claims', 0)} = 1.000000 while "
-                 f"{composition.get('other_points', 0)} Points sat in 'other' "
-                 f"outside it. Whether an unanchored 'other' Point lost a link or "
-                 f"was minted by a writer that never derives is the attribution "
-                 f"#9736 still owns. #9736 must choose between "
-                 f"re-registering the metric and reopening the model, and this "
-                 f"row reports BOTH readings so neither choice is made on a "
-                 f"denominator whose composition was hidden"),
+        "note": e3_row_note(composition=composition, e3_result=e3_result,
+                            graph=graph, corpus_sha=corpus_sha),
     }
 
     # ── E4 ────────────────────────────────────────────────────────────────
