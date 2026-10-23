@@ -3031,10 +3031,17 @@ the counter either.
 
 1. **The failure log line** — every WARN-level non-write is logged with its reason
    (`tortoise/record_writer.py`: `malformed_dsn` / `no_tenant` / `circuit_open` /
-   `write_failed`), and this needs no auth. ⚠️ **Exactly ONE reading is not in
-   this grep**: the `no_durable_journal` decline — logged at **DEBUG**, under a
+   `write_failed`), and this needs no auth. ⚠️ **TWO readings are not in this
+   grep.** (a) The `no_durable_journal` decline — logged at **DEBUG**, under a
    *different* prefix (`the record write was declined (no_durable_journal)`,
    `record_writer.py`), because it is the healthy M2 path and not a failure.
+   (b) The once-per-window `position_unproven` WARN — `no layer-1 position row
+   for this record (position_unproven)` (`record_writer.py`), emitted when the
+   journal append **SUCCEEDED** but the seam could not prove the record's position,
+   so replay writes no layer-1 row. It is a real non-write under the OTHER prefix,
+   it repeats at most once per window, and it is exactly the line that item 2's
+   `record_position_unproven` counter is counting — grepping only the
+   `did not happen` prefix for it returns nothing.
    ⛔ **`no_journal` and `seam_unimportable` ARE in it**, so do not dismiss them
    as "the SDK, not the seam": `tortoise/sdk.py::_record_write_failure` emits the
    **identical** prefix (`the record write did not happen (%s)`) — an armed

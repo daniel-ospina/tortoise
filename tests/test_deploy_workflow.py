@@ -2758,7 +2758,12 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         "so `NOT empty` is all it claims and the count can drift to any number"
     )
     count = int(stated.group(1))
-    cites = re.findall(r"docs/infra-runbook\.md:(\d{4,5})", note)
+    # \d{3,5}, not \d{4,5}: the runbook's early sections cite THREE-digit lines
+    # (`docs/infra-runbook.md:382` is R9's `record-backup` section, and :528 its
+    # drill commentary), and the narrower pattern silently dropped them while the
+    # count kept claiming them — a pin blind in exactly the direction that lets
+    # the enumeration and the number disagree (#9585 review r3).
+    cites = re.findall(r"docs/infra-runbook\.md:(\d{3,5})", note)
     assert len(cites) == count, (
         f"the note states {count} line(s) but enumerates {len(cites)} "
         f"({', '.join(cites)}) — the number and the enumerated hits are then two "

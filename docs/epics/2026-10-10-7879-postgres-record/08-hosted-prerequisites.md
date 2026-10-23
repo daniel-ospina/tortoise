@@ -543,14 +543,20 @@ at 03:00.
 
 ### R9 — Back up the record, and test the restore · **M** · ops + decision · **BLOCKER**
 
-**What:** no module of ours backs up the record. `tortoise/backup.py` (module docstring: *"JSONL archiver +
-FalkorDB BGSAVE"*), `hosted_backup.py` (Cloudflare R2), `backup_sweep.py` (the cron driver) and the self-hosted sweep `selfhost_backup.py` archive the **graph** — `backup.py` additionally copies the local journal's `events.jsonl` — and none of them backs up the record.
-§3 and §14.1's **O1** record the decision: **durability = the store's backup; rebuildability = the journal** —
-so promoting Postgres to the record **moves the durability obligation onto Postgres**, and no
-module of ours holds it (whether the paid plan does is unverified — every statement in the tree
-about it is plan-level, and A8 names two of them). Two halves — Supabase's PITR (a plan-tier fact, and therefore an owner decision on cost) versus an
-independent off-box logical dump to Cloudflare R2 on the existing sweep — **plus** a drill that proves
-whichever is chosen.
+**What:** ✅ **the mechanism LANDED (#9557/R9):** `tortoise/record_backup.py` + the `record-backup`
+verb dump the RECORD to Cloudflare R2, `docs/durability-posture.md` now carries a row for it, and
+`§A8` states the same. What is **NOT** landed is the operational half — **no cron invokes the verb**
+(the posture row's RPO reads *UNBOUNDED today*) and **no drill has run against the hosted Supabase
+record**. So R9 is no longer "no module holds it"; it is "the module exists and nothing runs it".
+Historical note, kept because it is why the item was a blocker: `tortoise/backup.py` (module
+docstring: *"JSONL archiver + FalkorDB BGSAVE"*), `hosted_backup.py` (Cloudflare R2),
+`backup_sweep.py` (the cron driver) and the self-hosted sweep `selfhost_backup.py` archive the
+**graph** — `backup.py` additionally copies the local journal's `events.jsonl` — and none of them
+backs up the record. §3 and §14.1's **O1** record the decision: **durability = the store's backup;
+rebuildability = the journal** — so promoting Postgres to the record **moves the durability
+obligation onto Postgres**. Whether Supabase's own PITR covers it is still unverified (every
+statement in the tree about it is plan-level, and A8 names two of them) — that remains the owner
+decision on cost, and it is independent of the dump now shipped.
 **What it blocks:** durability of the new system of record. This is the item most likely to be
 mistaken for "already done" because the backup machinery *looks* present — it is present, for the
 wrong store.
@@ -649,7 +655,7 @@ exists*
 home — the text is carried as data (an episodic `point.content` row and its `journal_event.payload`),
 so a record-sourced rebuild loses the narrative, not the text*
 8. **R8** a restore verb + a drill → *a restore that has never been run is not a restore*
-9. **R9** back up the record → *the durability obligation moved, and no module of ours holds it*
+9. **R9** back up the record → *✅ the module + verb LANDED (#9557); what is open is the cron that runs it and a drill against the hosted record — see R9 above*
 
 **What can wait:** **R10** (pooling — gated on a captured tenant write volume, not a date), **R11** (the byte gate and the
 meter → allowance wiring — gates the first *allowance*, not the first customer), **N1** (the read path, by
@@ -770,20 +776,29 @@ grep -rniE '\bpostgres\b|psycopg|pg_dump' tortoise/backup.py tortoise/hosted_bac
 (`fly.toml entrypoint.sh .github/workflows/ docs/infra-runbook.md`) it now returns the deploy
 workflow's bind/probe/stage lines, the runbook's row and section, and `fly.toml`'s `[env]` comment.
 ⛔ **It was NOT empty immediately before #9548 — and it was not one line either.** Measured over
-that command's own path set at **this head's merge base `c5cbcbb4f`**, the pre-#9548 reading is
-**3 lines**, all in the runbook, none of them an arming surface:
+that command's own path set at **`ff6379eb2`** — the `origin/main` this branch merged, i.e. the tree
+"immediately before #9548" actually means — the pre-#9548 reading is **5 lines**, all in the
+runbook, none of them an arming surface:
 
-1. `docs/infra-runbook.md:2585` — #9556/R8's §9 `record-restore` operator example
+1. `docs/infra-runbook.md:382` — #9557/R9's `record-backup` section: the DSN is read from the
+   environment. **Documentation** of a verb, one lane over;
+2. `docs/infra-runbook.md:528` — the same, in R9's drill commentary;
+3. `docs/infra-runbook.md:2774` — #9556/R8's §9 `record-restore` operator example
    (`export TORTOISE_RECORD_DSN=…`): an **invocation**, not an arming surface;
-2. `docs/infra-runbook.md:2782` — #9600's Secrets Matrix row (`| TORTOISE_RECORD_DSN |`): the name
+4. `docs/infra-runbook.md:2971` — #9600's Secrets Matrix row (`| TORTOISE_RECORD_DSN |`): the name
    **documented** as required-when-armed, never provisioned;
-3. `docs/infra-runbook.md:2815` — #9600's §"The record's connecting role" example
+5. `docs/infra-runbook.md:3004` — #9600's §"The record's connecting role" example
    (`TORTOISE_RECORD_DSN=postgresql://tortoise_record_app.`): the DSN the operator is told to build.
 
-⚠️ **The count is per tree — pin the tree or the number is a stale flag.** It is **0** at this
-branch's start point `d5c71a470`, **1** at `473ff8a6f0`/`7761252f` (after #9556/R8, before #9600),
-and **3** from #9600 until #9548. ⚠️ The three `:NNNN` above are the merge base's line numbers and
-they drift as the runbook grows — re-measure by grepping the name, not by trusting the offset.
+⚠️ **The count is per tree — pin the tree or the number is a stale flag, and pin BOTH ends of an
+interval or it silently re-stales.** It is **0** at this branch's start point `d5c71a470`, **1** at
+`473ff8a6f0`/`7761252f` (after #9556/R8, before #9600), **3** at `c5cbcbb4f` (#9600/#9554), and
+**5** at `ff6379eb2` (#9601/R9 added the two `record-backup` mentions) — which is the tree this
+branch merges, so **5** is the number the "before #9548" comparison is against. An earlier version of
+this note pinned `c5cbcbb4f` and **3**, and was stale by the very next main-side doc edit: R9's two
+lines were invisible to the pin because nothing bound the interval's upper end. ⚠️ The `:NNNN`
+above are `ff6379eb2`'s line numbers and they drift as the runbook grows — re-measure by grepping
+the name against a named sha, not by trusting the offset.
 Stating all of it is the whole point of this note: a later lane re-running the census must be able to
 tell a `record-restore` invocation **and** a *documentation* line apart from a #9548 arming surface —
 and the "1 line" framing silently merged #9600's two documentation hits into a story about one
