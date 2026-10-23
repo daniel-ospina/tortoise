@@ -284,7 +284,7 @@ function notAnAdmin(): Response {
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="robots" content="noindex, nofollow">
 <title>Not a blog admin — Tortoise</title>
-<style>body{background:#060b14;color:#cbd5e1;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
+<style>body{background:#060b14;color:#cbd5e1;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
 .card{text-align:center;border:1px solid #1e293b;border-radius:12px;padding:40px;background:#0b1220;max-width:44ch}
 a{color:#06b6d4}</style></head>
 <body><div class="card"><h1>Not a blog admin</h1>
