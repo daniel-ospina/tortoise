@@ -92,6 +92,15 @@ the point, and precisely what the drill is for.
 ## What this module refuses, and why each refusal is the point
 
 * **A pooler DSN** (:func:`require_direct_dsn`) — see above.
+* **A connection whose ROLE cannot bypass RLS** (:func:`require_bypassing_role`,
+  #9801) — R6 arms the record as `tortoise_record_app` (`NOBYPASSRLS`), and under
+  that role every per-table count returns ZERO (the `*_app_tenant` policies read
+  an `app.current_org_id` this leg never sets, and the migration chose silent
+  reads) while `pg_dump`'s `row_security = off` default errors outright. The two
+  symptoms were an artifact that never existed and a drill that called a
+  populated record EMPTY. The verb therefore takes its DSN from
+  `TORTOISE_RECORD_BACKUP_DSN` when set, and refuses a non-bypassing role naming
+  the role rather than the data.
 * **A dump that produced nothing** (:func:`dump_record`) — an empty artifact
   uploaded is worse than a failed backup: it suppresses the operator's own copy
   while reporting health.
@@ -141,11 +150,12 @@ from typing import Any, Callable  # noqa: UP035
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from .hosted_backup import decrypt_backup_with_rotation, encrypt_backup
-from .record_projection import THE_RECORD_TABLES
+from .record_projection import ROLE_POSTURE_SQL, THE_RECORD_TABLES
 
 __all__ = [
     "DUMP_OBJECT",
     "MANIFEST_OBJECT",
+    "RECORD_BACKUP_DSN_ENV",
     "RECORD_BACKUP_KEEP",
     "RECORD_BACKUP_PREFIX",
     "RECORD_DUMP_FORMAT",
@@ -164,6 +174,7 @@ __all__ = [
     "record_row_counts",
     "record_tables",
     "require_backup_key",
+    "require_bypassing_role",
     "require_direct_dsn",
     "reset_record_tables",
     "restore_record_backup",
@@ -178,6 +189,19 @@ log = logging.getLogger(LOG_NAME)
 #: `prune_backups`) and a record artifact there would be listed as a graph
 #: archive whose org/graph segments it does not have.
 RECORD_BACKUP_PREFIX = "record-backups/"
+
+#: The DSN surface the BACKUP uses, separate from `TORTOISE_RECORD_DSN` (#9801).
+#:
+#: The record itself connects as `tortoise_record_app` (`NOBYPASSRLS`, R6), and
+#: that is the right role for every read and write the product makes. A
+#: `pg_dump`/`pg_restore` session is NOT one of those: R6 names the
+#: database-level backup as one of three purposes a bypassing role may serve,
+#: because a backup that cannot see every tenant backs nothing up. Two roles,
+#: two surfaces — a `TORTOISE_RECORD_BACKUP_DSN` that is unset keeps the old
+#: behaviour (fall back to the record's DSN) rather than making the verb
+#: unreachable, and :func:`require_bypassing_role` turns the resulting
+#: role mismatch into a refusal that NAMES the role instead of an empty record.
+RECORD_BACKUP_DSN_ENV = "TORTOISE_RECORD_BACKUP_DSN"
 
 #: The artifact format. A reader that does not recognise the value refuses the
 #: artifact rather than restoring something it cannot describe.
@@ -421,6 +445,119 @@ def require_direct_dsn(dsn: str, *, label: str = "record") -> str:
             "DIRECT connection — see require_direct_dsn's docstring."
         )
     return dsn
+
+
+def require_bypassing_role(
+    dsn: str,
+    *,
+    connect: Connector | None = None,
+    label: str = "record",
+) -> str:
+    """Refuse a dump/restore DSN whose ROLE cannot see every tenant; return the role.
+
+    ⛔ THE OPPOSITE PRECONDITION FROM THE TENANT SCOPE, AND THE SAME FOUR
+    PREDICATES (#9801). R6
+    (`docs/epics/2026-10-10-7879-postgres-record/09-record-tenancy-decision.md`)
+    decides that the record connects as `tortoise_record_app` — `NOBYPASSRLS`,
+    not the table owner — and names the database-level backup/restore (*"R9:
+    `pg_dump`/`pg_restore`"*) as one of exactly three purposes a bypassing role
+    may serve. So this leg must NOT use the app DSN, and nothing enforced that:
+    the verb read `TORTOISE_RECORD_DSN`, connected as the app role, and
+
+    * the drill's `count(*)` per table returned **0** under every `*_app_tenant`
+      policy (`app.current_org_id` is never set on this connection, and the R6
+      migration chose *silent reads* — a missing GUC returns NULL, so rows
+      VANISH rather than raising). The drill then refused with *"the record is
+      EMPTY"* — pointing the operator at the DATA when the fault was the role,
+      and doing it on a healthy record that was in fact fully populated;
+    * backup-only mode died inside `pg_dump`, whose `row_security = off` errors
+      on the first RLS table under a `NOBYPASSRLS` role, so exit `1` ("retry")
+      was returned for a PERMANENT configuration fact on every scheduled
+      attempt.
+
+    Both outcomes published **no artifact** while the module read as done —
+    the exact "looks present, holds nothing" failure R9 exists to remove — so
+    this is a refusal at the same layer as :func:`require_direct_dsn`, with the
+    ROLE named in the sentence for the same reason (the fix is a config edit,
+    and the message must say which one).
+
+    `ROLE_POSTURE_SQL` is `record_projection`'s own posture statement, not a
+    second copy of the predicates: the scope requires ``bypassing is False``
+    and this requires ``bypassing is True``, and one definition is what keeps
+    those two answers about the same question.
+
+    ⚠️ One residual the shared predicate carries, named rather than papered
+    over: ``bypassing`` is true for MEMBERSHIP in a bypassing role
+    (`pg_has_role(..., 'USAGE')`), which is what the RLS *policies* honour — so a
+    role merely granted `service_role` passes this gate. `pg_dump`'s
+    `row_security = off` needs the exemption on the CONNECTING role (superuser,
+    `BYPASSRLS`, or the table owner), so such a role would pass here and then
+    fail inside `pg_dump` (exit 1, retry). It is unreachable from this schema
+    (no migration grants a bypassing role to `tortoise_record_app`), and
+    tightening it here would make the gate stricter than the boundary it reads,
+    so it is recorded instead of guessed at.
+
+    Returns the connecting role's name, so a caller can say which role did the
+    dump instead of leaving it to be inferred from a DSN.
+    """
+    connector = connect or _default_connector
+    conn = _connect(connector, dsn, role=label)
+    try:
+        try:
+            cur = conn.cursor()
+        except Exception as e:  # pragma: no cover - driver-specific, same class
+            raise _connection_failure(dsn, e, role=label) from e
+        try:
+            cur.execute(ROLE_POSTURE_SQL, (list(record_tables()),))
+            row = cur.fetchone()
+        except Exception as e:
+            raise _connection_failure(dsn, e, role=label) from e
+        finally:
+            with contextlib.suppress(Exception):
+                cur.close()
+    finally:
+        with contextlib.suppress(Exception):
+            conn.rollback()
+        with contextlib.suppress(Exception):
+            conn.close()
+    if not row:
+        raise RecordBackupUnavailable(
+            f"the {label} connection's role could not be read — `current_user` "
+            "has no pg_roles row, so its RLS posture is unknown. A backup must "
+            "see EVERY tenant (the RLS policies otherwise return zero rows "
+            "silently), and an unverifiable role is not a verified one; "
+            "refusing rather than publishing an artifact that may be empty "
+            "(#9801)"
+        )
+    # Positional on a plain cursor, mapping-shaped on a `RealDict` one — both
+    # columns are aliased (`role`, `bypassing`) so either shape is readable.
+    if isinstance(row, dict) or hasattr(row, "keys"):
+        role, bypassing = row["role"], row["bypassing"]
+    else:
+        role, bypassing = row[0], row[1]
+    if bypassing is None:
+        raise RecordBackupUnavailable(
+            f"the {label} connection's role posture could not be evaluated "
+            f"(role {role!r}) — refusing rather than assuming it bypasses RLS "
+            "(#9801)"
+        )
+    if bypassing is not True:
+        raise RecordBackupUnavailable(
+            f"the {label} connection runs as role {role!r}, which does NOT "
+            "bypass RLS. The record's tables are all RLS-enabled and every "
+            "`*_app_tenant` policy reads `app.current_org_id`, which this "
+            "connection never sets — so every per-table count returns ZERO and "
+            "`pg_dump` (whose `row_security = off` default is an ERROR for a "
+            "NOBYPASSRLS role) cannot read the record at all. The record is "
+            "probably not empty; THIS CONNECTION cannot see it. R9's backup is "
+            "one of the three purposes R6 (epic #7879) names as a legitimate "
+            "RLS bypass, so it must NOT use the app-role DSN: arm "
+            f"{RECORD_BACKUP_DSN_ENV} with a role that bypasses RLS (the table "
+            "owner / `postgres`, or `service_role`), separate from "
+            "TORTOISE_RECORD_DSN, using the DIRECT connection "
+            "(docs/infra-runbook.md §3.5, precondition 1)."
+        )
+    return str(role)
 
 
 def libpq_env(dsn: str) -> dict[str, str]:
@@ -1115,6 +1252,7 @@ def create_record_backup(
     key: bytes | None = None,
     pg_dump: str = "pg_dump",
     counts: dict[str, int] | None = None,
+    role_verified: bool = False,
 ) -> dict[str, Any]:
     """Dump, encrypt and upload the record; return the plaintext manifest.
 
@@ -1145,6 +1283,23 @@ def create_record_backup(
     # a caller that passed `key=` has already satisfied the precondition.
     if key is None:
         require_backup_key()
+    # ⛔ THE ROLE, BEFORE THE COUNT AND THE DUMP (#9801). Deliberately AFTER the
+    # key check so a keyless box still makes no connection at all (that is the
+    # invariant the arm below pins), and BEFORE the count so backup-only mode
+    # cannot publish an empty artifact under the record's app-role DSN: under
+    # `NOBYPASSRLS`, `pg_dump`'s `row_security = off` default is an ERROR on the
+    # first RLS table and every count reads zero.
+    #
+    # `role_verified` is the DRILL's path: it has already run the same check on
+    # the same DSN (it had to, BEFORE its first count — see
+    # :func:`run_restore_drill`), and a second round trip in the middle of its
+    # read sequence would be a check whose only effect is cost. It is scoped to
+    # that caller: it makes the DRILL's path safe, not a hypothetical direct
+    # caller's — a function that took `role_verified=True` on trust would be the
+    # unwatched door, so only the drill passes it and only for the DSN it just
+    # checked.
+    if not role_verified:
+        require_bypassing_role(dsn, connect=connect)
     if counts is None:
         counts = record_row_counts(dsn, connect=connect)
     else:
@@ -1906,6 +2061,12 @@ def run_restore_drill(
     # a closure: it emptied whatever DSN it was handed, and the safety was a
     # property of THIS caller.
     refuse_same_database(dsn, scratch_dsn)
+    # ⛔ THE ROLE GATE COMES BEFORE THE FIRST COUNT (#9801), which is the whole
+    # point of its position: the counts below are the drill's evidence, and under
+    # the app-role DSN R6 mandates they return ZERO for every table — after which
+    # the drill's own refusal says "the record is EMPTY" about a record that is
+    # fully populated. One round trip, and the sentence names the role instead.
+    require_bypassing_role(dsn, connect=connect)
     before = record_row_counts(dsn, connect=connect)
     if not any(before.values()):
         # A refusal, NOT `RecordRestoreVerifyError`: exit 3 means "the drill ran
@@ -1952,6 +2113,7 @@ def run_restore_drill(
         key=key,
         pg_dump=pg_dump,
         counts=cut,
+        role_verified=True,
     )
     # The post-dump re-count (`after`) is read INSIDE the post-publish leg below;
     # see the comment on the first statement of that `try` for why its position is
