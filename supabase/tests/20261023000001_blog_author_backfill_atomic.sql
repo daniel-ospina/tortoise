@@ -123,11 +123,26 @@ SELECT tests.assert(
 
 -- ...and it really does fire afterwards: an UPDATE advances updated_at, so the
 -- frozen timestamps above prove the DISABLE ran rather than an inert trigger.
+--
+-- The margin is the row's OWN prior value, re-baselined from the database
+-- clock a moment ago — NOT a literal date. Comparing against the seeded
+-- literal made this assertion depend on the host clock being later than the
+-- seed (`2026-01-01`): a future-dated seed or a replayed fixture reds a
+-- perfectly healthy trigger, and the seed and this literal can drift apart.
+-- Parking the trigger to re-baseline makes "advanced" mean only what it says:
+-- an inert (or still-disabled) trigger leaves the baseline exactly in place and
+-- reds here, whatever the clock reads.
+ALTER TABLE public.blog_posts DISABLE TRIGGER blog_posts_set_updated_at;
+UPDATE public.blog_posts
+   SET updated_at = now() - interval '1 hour'
+ WHERE slug = '1383b-preseed-named';
+ALTER TABLE public.blog_posts ENABLE TRIGGER blog_posts_set_updated_at;
+
 UPDATE public.blog_posts SET title = title WHERE slug = '1383b-preseed-named';
 
 SELECT tests.assert(
   (SELECT updated_at FROM public.blog_posts WHERE slug = '1383b-preseed-named')
-    > '2026-01-01 00:00:00+00'::timestamptz,
+    > now() - interval '1 hour',
   '1383b: after this migration the trigger DOES bump updated_at on an UPDATE (so the frozen timestamps above prove the disable, not an inert trigger)');
 
 -- Cleanup — rows use the '1383b-' prefix so a rerun never collides.
