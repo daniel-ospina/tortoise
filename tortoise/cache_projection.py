@@ -773,7 +773,9 @@ def read_record_view(conn: Any, *, org_id: str, graph_id: str,
     `replay()` used to set — so ARMED under the app-role DSN this PR mandates, this
     reader would have read ZERO rows from every record table (a missing GUC is
     "no rows", never an error), reported every cache key
-    ``missing_in_record``, and exited ``3`` on a coherent pair. That is the
+    ``extra_in_cache`` with ``missing_in_cache = 0`` — the chokepoint-violation
+    / second-writer signature, not a projection lag — and exited ``3`` on a
+    coherent pair. That is the
     counterfactual, not a measurement: the DSN is unset on the hosted
     deployment (R1), and no schedule drives the verb, so it had not been
     observed in production. The same

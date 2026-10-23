@@ -771,10 +771,12 @@ def test_the_cli_verb_reports_clean_only_when_it_compared(
 # under test (#9600 review cycle 2, P1):
 #
 #   After R1 arms that DSN with `tortoise_record_app` (the role #9554 makes
-#   mandatory), the policies read `app.current_org_id`. `replay()` set it; this
-#   verb did not — and a missing GUC is ZERO ROWS, never an error. So the
-#   reconciler read an empty record and reported a coherent pair as DIVERGENT
-#   (exit 3), from the one observer §17.2 relies on.
+#   mandatory), the policies read `app.current_org_id`. `replay()` sets it; this
+#   verb, before the pin below, did not — and a missing GUC is ZERO ROWS, never
+#   an error. So an ARMED reconciler WOULD have read an empty record, landed
+#   every cache key in `extra_in_cache` with `missing_in_cache = 0`, and reported
+#   a coherent pair as DIVERGENT (exit 3) — from the one observer §17.2 relies
+#   on. A counterfactual, not an observation: the DSN is unset on the deployment.
 
 
 class _ScopedCursor:

@@ -426,9 +426,13 @@ SELECT tests.assert(
 -- whoever reads this file.
 --
 -- ⚠️ The result is captured in a TEMP TABLE while the role is switched, because
--- `tests.assert` lives in schema `tests` and the app role deliberately has no
--- USAGE on it — asserting in place fails with `permission denied for schema
--- tests`, which is the grant posture working, not a bug.
+-- in-place assertion is NOT available in this harness. MEASURED here: BOTH
+-- forms — `SET ROLE tortoise_record_app; SELECT tests.assert(true, …)` and
+-- `BEGIN; SET LOCAL ROLE tortoise_record_app; SELECT tests.assert(true, …);
+-- ROLLBACK;` — fail with `permission denied for schema tests`, even though line
+-- 49 grants that role USAGE on the schema (the grant is not what the engine
+-- consults for a `SET ROLE`-effected user here). The temp-table capture
+-- sidesteps it: EVALUATE as the role, ASSERT after `RESET ROLE`.
 SET ROLE tortoise_record_app;
 CREATE TEMP TABLE r6_gate_app AS SELECT (SELECT (r.rolsuper OR r.rolbypassrls
            OR EXISTS (SELECT 1 FROM pg_roles g

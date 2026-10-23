@@ -49,8 +49,11 @@ driver:
    ``record-reconcile`` opens its own connection from the SAME
    ``TORTOISE_RECORD_DSN`` and reads through ``cache_projection.read_record_view``
    — which therefore sets the prologue (and the role gate) before its first
-   ``SELECT``. Without it, the app-role DSN made the production reconciler read
-   zero rows and report a coherent pair as DIVERGENT (exit 3).
+   ``SELECT``. Without it, an ARMED reconciler on the app-role DSN would have read
+   zero rows — every cache key ``extra_in_cache`` with ``missing_in_cache = 0``,
+   the chokepoint-violation signature, not a lag — and reported a coherent pair
+   as DIVERGENT (exit 3). That is the counterfactual the read-back prevents, not
+   an observed event: the DSN is unset on the deployment.
 9. **The identity sequence is granted in its own right** (#9600 review cycle 2).
    ``public.relation.id`` is ``GENERATED ALWAYS AS IDENTITY``, so the app role
    needs ``USAGE`` on ``relation_id_seq``: a table ``INSERT`` grant does not
@@ -553,11 +556,14 @@ def test_the_reader_installs_the_tenant_scope_before_it_reads() -> None:
 
     `record-reconcile` opens its OWN connection from the SAME
     `TORTOISE_RECORD_DSN` and calls `read_record_view`. Before this pin the
-    prologue lived only on the write door, so under the app-role DSN this PR
-    mandates the production reconciler read ZERO rows from every record table
-    (a missing GUC is "no rows", never an error) and exited 3 — "divergence
-    OBSERVED" — on a coherent pair. The verb's own docstring: a wrong VERDICT is
-    worse than no verdict.
+    prologue lived only on the write door, so an ARMED reconciler on the
+    app-role DSN this PR mandates WOULD have read ZERO rows from every record
+    table (a missing GUC is "no rows", never an error), landed every cache key
+    in `extra_in_cache` with `missing_in_cache = 0` (the chokepoint-violation
+    signature, not a lag) and exited 3 — "divergence OBSERVED" — on a coherent
+    pair. That is the counterfactual the read-back prevents, not an observed
+    event: the DSN is unset on the deployment. The verb's own docstring: a
+    wrong VERDICT is worse than no verdict.
     """
     conn = RecordingConnection()
 

@@ -408,8 +408,10 @@ exactly this question and the tree cannot answer it today.
 > the **owner of a record table** — so a DSN naming `postgres` fails closed on the first write or
 > read instead of quietly bypassing every policy. The same scope is installed by the **read** door
 > (`cache_projection.read_record_view`, i.e. `tortoise record-reconcile`), which shares R1's one DSN:
-> before it, a reconciler armed with the app role read zero rows and reported a coherent pair as
-> divergent.
+> before it, a reconciler armed with the app role WOULD have read zero rows, landed every cache key
+> in `extra_in_cache` with `missing_in_cache = 0` (the chokepoint-violation signature, not a lag),
+> and reported a coherent pair as divergent. That is the counterfactual the read-back prevents, not
+> an observed event (the DSN is unset on the deployment).
 > ⚠️ **This corrects R1's DSN above**: its `postgres.<ref>` user is the table owner and would
 > bypass RLS. R1 must arm
 > `postgresql://tortoise_record_app.<ref>:…@…pooler.supabase.com:5432/postgres?sslmode=require`

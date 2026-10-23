@@ -3202,11 +3202,13 @@ def scope_connection(conn: Any, org_id: str) -> Any:
 
     ``replay()`` and ``cache_projection.read_record_view()`` are the record's two
     doors and they share ONE DSN (``TORTOISE_RECORD_DSN``). The prologue lived
-    only on the write door, so the moment R1 arms that DSN with the app role the
-    reconciler read ZERO rows from every record table — the policies treat a
-    missing GUC as "no rows", never as an error — reported every cache key
-    ``missing_in_record``, and exited ``3`` ("divergence OBSERVED") on a
-    coherent pair. A wrong verdict from the one observer §17.2 relies on is
+    only on the write door, so an ARMED reconciler WOULD have read ZERO rows
+    from every record table — the policies treat a missing GUC as "no rows",
+    never as an error — landing every cache key ``extra_in_cache`` with
+    ``missing_in_cache = 0`` — the chokepoint-violation / second-writer
+    signature, not a lag — and WOULD have exited ``3`` ("divergence
+    OBSERVED") on a coherent pair. That is the counterfactual, not an observed
+    event: R1 has not armed the DSN. A wrong verdict from the one observer §17.2 relies on is
     worse than no verdict, so BOTH doors install the scope through this ONE
     function (#9600 review cycle 2, P1).
 
@@ -3282,11 +3284,14 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
       statement at all.
 
     ⚠️ WRITE ON ``true``. A caller-supplied ``conn`` in autocommit mode makes
-    ``set_config(..., true)`` warn and set nothing, and the projection's writes
-    then fail the ``WITH CHECK`` predicate instead of landing unscoped — loud,
-    which is the intended direction. The seam's own connections are not in
-    autocommit (``_default_connect`` never turns it on), so the live path is
-    unaffected.
+    ``set_config(..., true)`` warn and set nothing, and the read-back below
+    REFUSES it (`tenant GUC … is None after setting it to <org>`) before a
+    single plan statement — so the `WITH CHECK` predicates are never reached
+    on that shape. That is deliberate and it is the point of the read-back:
+    a NULL GUC is loud on `INSERT` and SILENT on an `UPDATE`/`DELETE`-only
+    plan, which would affect zero rows and report success (#9600 review cycle
+    1). The seam's own connections are not in autocommit
+    (``_default_connect`` never turns it on), so the live path is unaffected.
 
     ⛔ VERIFIED, NOT ASSUMED (#9600 review cycle 1, P2). Executing the prologue
     is not the same event as the GUC being in force, and the failure mode of

@@ -2585,9 +2585,12 @@ whole reason this path exists.
 #      export TORTOISE_RECORD_DSN='postgresql://…'          # or --record-dsn
 #    ⛔ That DSN is the APP ROLE (`tortoise_record_app`), not `postgres`: this verb
 #    READS the record through the read door, which refuses a bypassing role. A
-#    `postgres`/`service_role` DSN here exits 3 with "the record is unreadable
-#    (RecordProjectionError)" — that message names no role, and it is the SAME
-#    text as a real outage (see "The record's connecting role").
+#    `postgres`/`service_role` DSN here exits 2 (UNAVAILABLE — no verdict, and
+#    nothing written) with "the record is unreadable (RecordProjectionError)".
+#    That message names no role and is the SAME text as a real outage, so read
+#    the exception TYPE as the discriminator: `RecordProjectionError` is a
+#    refusal (fix the DSN), a driver `OperationalError` is an outage (see
+#    "The record's connecting role").
 #
 # 2. Restore. --cache-graph is REQUIRED and has no default (see below).
 python -m tortoise record-restore \
@@ -2776,7 +2779,7 @@ not put them in this section, where they would rot.
 | RESEND_FROM_EMAIL | ✅ (single managed sender identity — #1136; default `noreply@premiselabs.co`) | — | ✅ |
 | BILLING_FROM_EMAIL | optional (distinct billing sender override — #1136) | — | ✅ |
 | BILLING_NOTIFY_TO | ✅ (ops inbox for billing email) | — | ✅ |
-| TORTOISE_RECORD_DSN | ✅ **when the record is armed** (R1) — the Postgres record's DSN. ⚠️ Its **user must be `tortoise_record_app`**, never `postgres`/`service_role` (see below) | — | — |
+| TORTOISE_RECORD_DSN | — **NOT SET on the app** (R1 has not happened: it is in no `fly.toml`, `entrypoint.sh` or deploy workflow — do not read this row as provisioned). Required **when the record is armed**; its **user must be `tortoise_record_app`**, never `postgres`/`service_role` (see below) | — | — |
 
 ### The record's connecting role (R6 decision, 2026-10-22, #9554)
 
@@ -2839,8 +2842,10 @@ asymmetry is deliberate and pinned in
 review cycle 1), so a connection whose transaction-local set did nothing cannot report a successful
 write: without that read-back a patch/delete-only plan would simply affect zero rows. The **read
 door** (`cache_projection.read_record_view()`, i.e. `tortoise record-reconcile`) installs the same
-scope before its first `SELECT` (#9600 review cycle 2) — before that it read zero rows under the
-app-role DSN and reported every cache key `missing_in_record`, i.e. `exit 3` on a coherent pair.
+scope before its first `SELECT` (#9600 review cycle 2) — before that an ARMED reconciler would have read zero rows under the
+app-role DSN and reported every cache key `extra_in_cache` with `missing_in_cache = 0` — the
+chokepoint-violation / second-writer signature, not a projection lag — i.e. `exit 3` on a
+coherent pair.
 
 **⛔ NEVER GRANT `tortoise_record_app` MEMBERSHIP IN `service_role`, `postgres`, or any role that
 carries a permissive policy.** Policy applicability follows `has_privs_of_role`, so membership makes
@@ -2862,9 +2867,10 @@ superuser, is `BYPASSRLS`, is a **member** of either, or **owns** a record table
 write and read across tenants with the policies unevaluated: the first write or read raises, and
 the operator fixes the DSN.
 The same refusal covers BOTH read verbs — `tortoise record-reconcile` and `tortoise
-record-restore` (R8) — whose record read would otherwise return zero rows; the reconciler would
-report a coherent pair as **divergent**, and the restore would rebuild an EMPTY cache and call it
-done. It is fail-closed but not self-explaining: the
+record-restore` (R8) — whose record read would otherwise return zero rows. Fail-closed, and the
+two verbs fail DIFFERENTLY: the reconciler would report a coherent pair as **divergent** (exit
+3), and the restore would find an empty source and **refuse** before touching the target graph
+(`refuse_unrestorable_source`, exit 3, "nothing was written") — unless `--allow-empty` was passed. It is fail-closed but not self-explaining: the
 verb's CLI reports the error's TYPE only, so a wrong-role DSN surfaces as
 `record is unreadable (RecordProjectionError)` with no role named — if you see that, check the DSN's
 role against this section first, because the same message covers a transient record outage.
