@@ -27926,7 +27926,8 @@ class TortoiseSDK:
                     else _claim_class.ASSERTED)
             return rows
 
-        def _filter_and_annotate_claim_class(rows: list[dict]) -> list[dict]:
+        def _filter_and_annotate_claim_class(
+                rows: list[dict]) -> list[dict] | None:
             """Filter + annotate DEGRADED hit rows by claim class (#2351).
 
             The two fallback tiers (``search_snapshot`` / ``fallback_tfidf``)
@@ -27938,10 +27939,14 @@ class TortoiseSDK:
             never have. Classes are read from the graph by id, so an
             unmarked hit stays ``asserted`` (absence IS the class).
 
-            A store that cannot answer must not raise out of ``search()`` —
-            this tier exists to serve a SICK store — so a failed read passes
-            the rows through UNANNOTATED, the same degradation the primary
-            path uses for a failed class read.
+            ⛔ ``None`` means THE CLASS READ FAILED. The caller must then
+            neither filter NOR annotate: this tier exists to serve a SICK
+            store, so it may not raise — but a failed read must also not
+            become an answer, and returning the rows unchanged would be
+            indistinguishable from "every id is allowed" and would get every
+            row stamped with a class that was never read (the primary path
+            refuses to do exactly that). Saying nothing is the only honest
+            degradation.
             """
             ids = [r.get("id") for r in rows if isinstance(r.get("id"), str)]
             try:
@@ -27950,7 +27955,7 @@ class TortoiseSDK:
                 _logger.warning(
                     "claim-class filter failed on the degraded fallback — "
                     "pass-through, without the class annotation", exc_info=True)
-                return rows
+                return None
             kept: list[dict] = []
             for row in rows:
                 carried = classes.get(row.get("id")) or frozenset(
@@ -28353,8 +28358,10 @@ class TortoiseSDK:
                     # above: a filter applied AFTER the limit cut silently
                     # under-fills the caller's ``limit``.
                     _allowed = _filter_and_annotate_claim_class(points)
-                    allowed_ids = {p.get("id") for p in _allowed}
-                    points = [p for p in points if p.get("id") in allowed_ids]
+                    if _allowed is not None:
+                        allowed_ids = {p.get("id") for p in _allowed}
+                        points = [p for p in points
+                                  if p.get("id") in allowed_ids]
                 legacy_hits = fallback_tfidf(query, points, limit=limit)
                 if allowed_ids is not None:
                     # The ANNOTATION has to be re-applied: ``fallback_tfidf``
