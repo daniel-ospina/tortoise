@@ -2273,15 +2273,36 @@ def test_the_manifest_reader_keeps_a_fly_only_reference_intact():
     past bug. The reader is now the gate's own `read_manifest`, and this asserts
     the READING (the reference keeps its `#<N>`), not merely that the name
     appears, so a future hand-rolled copy turns this red.
+
+    The reference is validated with the GATE's own `_FLY_ONLY_REF_RE`, not a
+    locally retyped `fly-only:#\\d+` (#9585 review, non-blocking): the gate's
+    contract admits `<owner>/<repo>#<N>` as well as `#<N>`, so the narrower copy
+    would have red a future cross-repo `fly-only:` entry on prose, not on a bug —
+    the same "one reader per surface" rule the module applies to `read_manifest`.
     """
+    gate = _drift_gate()
+    ref_re = gate._FLY_ONLY_REF_RE
+    # The relaxed pin must still reject the EXACT truncation it exists to catch,
+    # and still accept both documented spellings — otherwise "use the gate's
+    # regex" could widen to nothing (#9585 review r5).
+    assert ref_re.fullmatch("#661") and ref_re.fullmatch("acme/repo#661"), (
+        "the gate's fly-only reference no longer accepts the documented `#<N>` / "
+        "`<owner>/<repo>#<N>` spellings — this pin's scope has changed, re-derive it"
+    )
+    assert not ref_re.fullmatch(""), (
+        "the gate's fly-only reference accepts the EMPTY argument, so a `#`-split "
+        "reader (`fly-only:#661` → `fly-only:`) would pass this pin"
+    )
     declared = _manifest_declarations()
     fly_only = {n: s for n, s in declared.items() if s.startswith("fly-only:")}
     assert fly_only, "the shipped manifest declares no fly-only: name — the reader is wrong"
     for name, source in fly_only.items():
-        assert re.fullmatch(r"fly-only:#\d+", source), (
-            f"{name} parsed as {source!r} — the `#` inside the issue reference was "
-            "read as a comment marker (read the manifest with the gate's "
-            "`read_manifest` instead of a `split('#')` copy)"
+        argument = source.split(":", 1)[1]
+        assert ref_re.fullmatch(argument), (
+            f"{name} parsed as {source!r} (reference {argument!r}) — the `#` inside "
+            "the issue reference was read as a comment marker (read the manifest "
+            "with the gate's `read_manifest` instead of a `split('#')` copy), or "
+            "the entry carries no well-formed issue reference at all"
         )
 
 
