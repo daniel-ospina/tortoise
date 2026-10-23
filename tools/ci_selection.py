@@ -1482,6 +1482,21 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # class. Pinned by
              # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
              "supabase/migrations/20261023000001_record_session_narrative.sql",
+             # #9554 / PR #9600 review cycle 1 (P2): the TENANCY POSTURE migration —
+             # the app role, its grants (including `relation_id_seq`'s USAGE) and
+             # the `*_app_tenant` policies, one per record table (ten, since
+             # #9555's `session_narrative`). It sorts outside the
+             # `2026101200000` prefix and `supabase/` is a NON_PYTHON_PREFIX, so a
+             # migration-only edit (dropping a `WITH CHECK`, flipping `is_local`,
+             # re-adding `BYPASSRLS`, removing the sequence grant) selected NO
+             # surface: `tests/test_record_tenancy_guc.py` — the suite that reads
+             # this migration's TEXT and pins it — did not run on the change that
+             # DEFINES the boundary. (The PGlite posture suite is NOT the gap: it
+             # is selected by the workflow's own `supabase/migrations/` prefix
+             # output and runs on every migration edit. The PYTHON pin is what
+             # had no entry.) Pinned by
+             # tests/test_ci_selection.py::test_the_tenancy_migration_selects_the_posture_pins.
+             "supabase/migrations/20261025000001_record_tenancy_role_and_guc.sql",
              # Re-stated at the migration pair, NOT replaced by it (#9638 review
              # P1): the DOC side is an independent member of this set. The
              # #9555/R7 entry above was inserted over this path, so a

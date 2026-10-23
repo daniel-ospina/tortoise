@@ -2424,6 +2424,28 @@ def test_record_schema_pin_runs_on_migration_or_doc_change():
         assert "test_record_projection.py" in r["test_files"], (changed, r)
 
 
+def test_the_tenancy_migration_selects_the_posture_pins():
+    # #9554, PR #9600 review cycle 1 (P2): the TENANCY POSTURE migration defines
+    # the record's entire boundary — the role, its grants (including the
+    # IDENTITY sequence's USAGE) and the `*_app_tenant` policies (one per record
+    # table, ten since #9555's `session_narrative`). It sorts
+    # outside the `2026101200000` CORE_ALSO prefix and `supabase/` is in
+    # NON_PYTHON_PREFIXES, so without its own entry a migration-only edit
+    # (dropping a `WITH CHECK`, flipping `is_local`, re-adding `BYPASSRLS`,
+    # deleting the sequence grant) selected NO PYTHON surface: the PGlite posture
+    # suite already ran (the workflow selects it from its own `supabase/migrations/`
+    # prefix output), but `tests/test_record_tenancy_guc.py` — the suite that pins
+    # this migration's text — did not. Mutation check: removing the CORE_ALSO entry makes
+    # this assertion fail with `surfaces == []`.
+    changed = "supabase/migrations/20261025000001_record_tenancy_role_and_guc.sql"
+
+    r = _sel([changed])
+
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert "test_record_tenancy_guc.py" in r["test_files"], r
+
+
 def test_postgres_storage_guard_runs_on_migration_or_doc_change():
     # PR #8744 review P2: `tests/test_postgres_storage.py` pins the SQL↔Python
     # contract — the two RPC names and the `p_since`/`p_until` parameter names
