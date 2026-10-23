@@ -373,6 +373,91 @@ class TestPhase1GuardSeesTheKeyIdentity:
         assert res["created"]["points"] == 0
         assert res["ids"]["points"] == [holder]
 
+    def test_intra_bundle_key_fold_onto_a_self_minted_terminal_point(self, sdk):
+        """#8400 review P2: the graph read alone cannot see a terminal point
+        the SAME bundle is about to mint.
+
+        Phase 1 runs before any item is written, so
+        ``{"points": [{"key": K, "status": "retracted"}, {"key": K}]}``
+        used to pass validation (the graph holds no ``K``), then step 3 minted
+        ``points[0]`` terminal and folded ``points[1]`` onto it —
+        ``_stamp_batch_id`` has no terminal exclusion — stamping ``batch_id``
+        on a node born terminal. That is the exact mutation the graph-held arm
+        above stops, one statement inside the bundle.
+
+        Discriminating: on the pre-fix tree this bundle is ACCEPTED and both
+        points exist, so the ``pytest.raises`` fails on the missing raise.
+        """
+        k = "#8400 intra-bundle terminal key"
+        with pytest.raises(BundleValidationError, match="FRESH key"):
+            sdk.ingest(
+                {"points": [
+                    {"ref": "p1", "kind": "statement", "content": "A",
+                     "key": k, "status": "retracted"},
+                    {"ref": "p2", "kind": "statement", "content": "B",
+                     "key": k},
+                ]},
+                promotion_policy="auto",
+            )
+        assert _points_with_key(sdk, k) == [], (
+            "Phase-1 must reject BEFORE any write — the bundle minted points "
+            "and folded onto the terminal one it had just created (#8400)"
+        )
+
+    def test_intra_bundle_guard_does_not_over_reject_a_distinct_key(self, sdk):
+        """The bundle-order simulation refuses ONE shape: a later item reusing
+        a key an earlier item mints terminal. A terminal item followed by an
+        item under a DIFFERENT key is the writer's legal path and must commit.
+
+        Without this arm a ``return`` on "this bundle declares any terminal
+        status" would still pass the test above.
+        """
+        k1 = "#8400 intra-bundle terminal key, distinct 1"
+        k2 = "#8400 intra-bundle terminal key, distinct 2"
+        res = sdk.ingest(
+            {"points": [
+                {"ref": "p1", "kind": "statement", "content": "A",
+                 "key": k1, "status": "retracted"},
+                {"ref": "p2", "kind": "statement", "content": "B",
+                 "key": k2},
+            ]},
+            promotion_policy="auto",
+        )
+        assert res["created"]["points"] == 2
+        assert len(_points_with_key(sdk, k1)) == 1
+        assert len(_points_with_key(sdk, k2)) == 1
+        assert sdk.get_point(res["ids"]["points"][0]).get("status") == "retracted"
+
+
+class TestNoInBundleDedupEscape:
+    """#8400 review P2: the refusal told callers to "pass a fresh key with
+    dedup=False", which is not reachable through ``ingest``.
+
+    The points loop writes ``create_point(kind, content, dedup=True,
+    **write_item)``, so a top-level ``dedup`` on a bundle item binds the same
+    keyword twice: the caller who follows the old message gets a RAW
+    ``TypeError`` from inside the write loop, after step 1 and any earlier
+    point item committed. It is refused at shape time instead — a
+    zero-mutation Phase-1 verdict, and the message names a route that exists
+    (an out-of-bundle ``create_point(..., dedup=False)``).
+    """
+
+    def test_top_level_dedup_on_a_points_item_is_a_phase1_violation(self, sdk):
+        """Discriminating: pre-fix this raises ``TypeError`` (not the
+        ``BundleValidationError`` Phase 1 contract), after the source item
+        already committed."""
+        with pytest.raises(BundleValidationError, match="not a bundle item field"):
+            sdk.ingest({
+                "sources": [{"ref": "s1", "url": "https://example.test/s",
+                             "sourceKind": "web"}],
+                "points": [{"ref": "p1", "kind": "statement",
+                            "content": "DEDUP-ESCAPE", "dedup": False,
+                            "extractedFrom": "s1"}],
+            })
+        assert sdk._get_proj().g.query(
+            "MATCH (n:Point {content:'DEDUP-ESCAPE'}) RETURN n.id"
+        ).result_set == [], "the bundle wrote an item before refusing"
+
 
 class TestKeyLookupIsIndexBacked:
     """#8400 review P2: the key leg resolves FIRST on every key-bearing write,
