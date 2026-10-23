@@ -36,6 +36,10 @@ EXPECTED_H2 = (
     "Key takeaways",
     "FAQ section",
     "Video",
+    # #9680: the operator-facing half of the IndexNow capability — what fires a
+    # submission, what never does, and the one-off backfill. It lives here
+    # because this is the page a person publishing an article actually reads.
+    "IndexNow notifications (Bing, Yandex and the other IndexNow engines)",
     "What is <em>not</em> supported",
 )
 EXPECTED_H3 = ("The answer box, house style", "Transcripts")
