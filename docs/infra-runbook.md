@@ -3037,8 +3037,10 @@ the counter either.
    `record_writer.py`), because it is the healthy M2 path and not a failure.
    (b) The once-per-window `position_unproven` WARN — `no layer-1 position row
    for this record (position_unproven)` (`record_writer.py`), emitted when the
-   journal append **SUCCEEDED** but the seam could not prove the record's position,
-   so replay writes no layer-1 row. It is a real non-write under the OTHER prefix,
+   journal append **SUCCEEDED** but the seam could not prove the record's position —
+   so the **live** pass writes no layer-1 position row (**a later replay re-numbers the
+   SAME journal and heals it**, which is why this is a warning and not an outage).
+   It is a real non-write under the OTHER prefix,
    it repeats at most once per window, and it is exactly the line that item 2's
    `record_position_unproven` counter is counting — grepping only the
    `did not happen` prefix for it returns nothing.

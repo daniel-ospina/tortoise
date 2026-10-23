@@ -2801,6 +2801,33 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
             "count without a tree is exactly the stale flag; a migration or a "
             "doc landing elsewhere silently re-numbers it"
         )
+    # ⚠️ The SAME claim is published a second time, ~600 lines earlier, in §A8's
+    # evidence cell — and the note extractor above is deliberately scoped to exclude
+    # it ("so a TORTOISE_RECORD_DSN mention elsewhere in the doc can neither satisfy
+    # nor fail these assertions"). That exclusion is a hole, not a guard: #9585
+    # review r4 found the row still stating the "3 lines immediately before #9548"
+    # reading at c5cbcbb4f's line numbers while the note said 5 at ff6379eb2, and
+    # both passed. Pin the row to the same number and tree the note states.
+    row = next(
+        (
+            line
+            for line in _EPIC_DOC.read_text(encoding="utf-8").splitlines()
+            if line.startswith("| **the record, in the hosted deployment**")
+        ),
+        None,
+    )
+    assert row, (
+        "§A8's arming row is gone — the census it republishes has no reader"
+    )
+    assert f"**{count} lines at `ff6379eb2`**" in row, (
+        f"§A8's evidence cell does not state the same {count}-line reading at "
+        "ff6379eb2 that the census note states, so the document answers \"how many "
+        "lines immediately before #9548\" twice, with different numbers"
+    )
+    assert "3 lines immediately before #9548" not in row, (
+        "§A8's evidence cell still carries the retired 3-line reading — the "
+        "figure the census note's own last paragraph calls stale"
+    )
 
 
 def test_the_census_migration_denominator_agrees_with_the_docs_own_head_count():
