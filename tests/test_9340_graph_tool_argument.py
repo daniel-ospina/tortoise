@@ -1168,15 +1168,18 @@ def test_no_advertised_handler_names_the_workspace_default_itself():
 # `transport_wait_bound` (the very series #3834 F-1/F-2 keep honest), and a
 # control-plane `graph_list` read was issued for an answered request.
 #
-# The obvious guard (`if not _wait_bound_refused(): resolve`) is WRONG, and two
-# of its defects are pinned below: the scope it applies to the CALLER's context
+# The obvious guard (`if not _wait_bound_refused(): resolve`) is WRONG, and the
+# tests below pin its real defects: the scope it applies to the CALLER's context
 # (ContextVars with no reset token) outlives the dispatch, and it still schedules
-# a side-effecting dispatch whose result nothing will read. Its *stated* hazard —
-# a skipped resolution handing back an unscoped result — turns out to be
-# UNREACHABLE (a refused transport implies `remaining == 0`, and a zero budget
-# can never surface `task.result()`), which is why no test here claims it. The
-# fix moves the resolution INSIDE the dispatch task, so the scope moves with the
-# task and cannot outlive it.
+# a side-effecting dispatch whose result nothing will read. It would also reopen
+# the unscoped-result hazard in principle — `await_under_wait_bound` returns
+# `task.result()` when the task finished as the deadline expired, and a ZERO
+# timeout does not preclude that (`wait_for(shield(task), 0)` still lets an
+# already-scheduled task run during its cancel wait). The hazard is unreachable
+# on the refused path only because a refused request never creates a task at
+# all — the entry short-circuit — so removing that short-circuit is a wrong-graph
+# risk, not a tidy-up. The fix moves the resolution INSIDE the dispatch task, so
+# the scope moves with the task and cannot outlive it.
 
 
 def _spent_budget_state(*, refused: bool) -> dict:
@@ -1246,6 +1249,18 @@ def test_a_transport_refused_graph_call_is_not_a_graph_error(monkeypatch):
     # Without this the assertion below would also be racing the abandoned
     # task's executor thread.
     monkeypatch.setattr(mcp_server, "_original_call_tool", _body)
+    # Spied at CREATION time, not at the body: a task that is scheduled and then
+    # abandoned before its first step never reaches `_body`, so the body alone
+    # would report "nothing happened" for exactly the regression this guards.
+    real_scoped = mcp_server._scoped_dispatch
+    scheduled: list = []
+
+    def _spy_scoped(name, arguments, graph_ref, *, version, task_meta):
+        scheduled.append((name, graph_ref))
+        return real_scoped(name, arguments, graph_ref, version=version,
+                           task_meta=task_meta)
+
+    monkeypatch.setattr(mcp_server, "_scoped_dispatch", _spy_scoped)
 
     result = _wrapped_call(monkeypatch, "tortoise_query",
                            {"query": "x", "graph": "g_fund_a"})
@@ -1260,9 +1275,11 @@ def test_a_transport_refused_graph_call_is_not_a_graph_error(monkeypatch):
         "truthful")
     assert breaches == [], (
         f"a second breach event was emitted for one request: {breaches}")
-    assert dispatched == [], (
-        "the dispatch was scheduled for a request the transport had already "
+    assert scheduled == [], (
+        "a scoped dispatch was CREATED for a request the transport had already "
         "answered — a WRITE tool would have mutated state for a refused call")
+    assert dispatched == [], (
+        "the dispatch body ran for a request the transport had already answered")
     assert reads == [], (
         "a control-plane `graph_list` read was issued for a request the "
         "transport had already answered")
@@ -1495,10 +1512,13 @@ def test_a_slow_graph_lookup_refuses_as_a_graph_error_every_time(monkeypatch):
             _wrapped_call(monkeypatch, "tortoise_query",
                           {"query": "x", "graph": "g_fund_a"})
         message = str(excinfo.value)
-        assert "graph lookup exceeded the wait budget" in message, (
+        assert "graph lookup" in message and "Retry after" in message, (
             f"attempt {attempt}: the lookup's own refusal lost to the generic "
             f"wait-bound one, so the caller cannot tell what timed out: "
             f"{message}")
+        assert "exceeded the wait budget." not in message, (
+            "the margin cut this lookup while the request still had time on "
+            f"the clock, so claiming its budget was exceeded is false: {message}")
     assert rows == [("exec_error", "ToolError")] * 3, (
         f"one failure class recorded more than one row: {rows}")
     assert dispatched == [], (

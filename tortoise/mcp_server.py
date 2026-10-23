@@ -645,13 +645,18 @@ async def _scoped_dispatch(name: str, arguments, graph_ref: str | None, *,
     construction.
 
     On the naive guard the review of #9762 considered (`if not refused:
-    resolve`, left in the wrapper): its stated hazard — an "unscoped result" —
-    turns out to be UNREACHABLE, because a refused transport implies
-    ``remaining == 0``, and a zero budget can never surface ``task.result()``
-    (``wait_for(shield(task), 0)`` cancels the shield, never the task, so
-    ``task.done()`` is False at that ``except TimeoutError``). Its real defects
-    are the two above: the caller-context leak, and scheduling a
-    side-effecting dispatch whose result nothing will read.
+    resolve`, left in the wrapper): it is wrong for the two reasons above — the
+    caller-context leak, and scheduling a side-effecting dispatch whose result
+    nothing will read. It would ALSO reopen the unscoped-result hazard in
+    principle: ``mcp_auth.await_under_wait_bound`` returns ``task.result()`` when
+    the task finished as the deadline expired, and a zero timeout does NOT make
+    that impossible — ``wait_for(shield(task), 0)`` still lets an
+    already-scheduled task run during its cancel wait (measured: a
+    non-suspending body completes and its result is returned). The hazard is
+    unreachable on THIS path only because a refused request never creates a task
+    at all (the entry short-circuit in ``_await_under_mcp_wait_bound``), which is
+    what makes removing that short-circuit a wrong-graph risk rather than a
+    tidy-up.
 
     The ``ExitStack`` is owned HERE, not by the caller: `use_record_tenant`
     carries a ContextVar token, and a token created in this task's context can
@@ -722,10 +727,13 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
     setup_ref = arrival if arrival is not None else _time.monotonic()
     # #3834 F-2: the transport already refused AND answered this request (a
     # pre-SSE stall, where pre-SSE cost >= bound and this seam's remaining
-    # deadline was 0). Read ONCE, here, before anything is scheduled: the flag
-    # is set before this seam is ever entered (an SSE-started request takes the
-    # middleware's `await task` path instead, which never sets it), so it cannot
-    # flip under this function.
+    # deadline was 0). Read here to decide whether to schedule ANYTHING: the
+    # writer is ``hosted_api.WaitBoundMiddleware``, whose own ``task.done()`` /
+    # ``response_started`` guards have already run, so a flag set at this point
+    # means the caller holds a refusal and the dispatch's result is unreachable.
+    # ⚠️ The flag CAN still flip LATER on a transport that does not start its
+    # response before dispatching (fastmcp's ``json_response`` mode), which is
+    # why the emit site re-reads it — neither read subsumes the other.
     transport_refused = _wait_bound_refused()
     if transport_refused:
         # #9762: do not even schedule the dispatch. Its result is unreachable
@@ -1424,13 +1432,15 @@ def _take_graph_argument(name: str,
 
 
 #: #9762: the slice of the transport's residual budget the graph lookup must
-#: leave on the clock, so its own "the graph lookup exceeded the wait budget"
-#: refusal wins the race against the seam's generic one deterministically (both
-#: deadlines are otherwise the same absolute instant, and the seam's timer is
-#: armed first). Proportional to the residual, capped so a long budget does not
-#: hand the lookup a materially shorter one.
-_GRAPH_LOOKUP_MARGIN_FRACTION = 0.1
-_GRAPH_LOOKUP_MARGIN_CAP_S = 0.05
+#: leave on the clock, so its own refusal wins the race against the seam's
+#: generic one deterministically (both deadlines are otherwise the same absolute
+#: instant, and the seam's timer is armed first). Proportional to the residual,
+#: capped so a long budget does not hand the lookup a materially shorter one.
+#: THE TRADE: a lookup that would have finished inside this last slice is
+#: refused instead of served — hence the distinct, TRUE message below (it must
+#: not claim the request's budget was exceeded when it was not).
+_GRAPH_LOOKUP_MARGIN_FRACTION = 0.05
+_GRAPH_LOOKUP_MARGIN_CAP_S = 0.015
 
 
 async def _resolve_graph_argument(ref: str | None,
@@ -1468,17 +1478,22 @@ async def _resolve_graph_argument(ref: str | None,
         0.0, _mcp_auth._TRANSPORT_WAIT_BOUND_S - (_time.monotonic() - arrival)))
     # #9762: the lookup's deadline is strictly EARLIER than the dispatch's, by a
     # small share of what is left. Both are armed from the same absolute
-    # deadline (``arrival + bound``), but the seam's timer is created first —
-    # before this task's first step — so with equal deadlines the seam always
-    # wins the race, abandons this lookup and returns the GENERIC wait-bound
-    # refusal. Measured on the pre-margin code with a degraded control plane
-    # (lookup length ≈ the whole residual): 3 of 4 runs recorded
-    # ``timeout/wait_bound`` and 1 recorded the graph refusal, i.e. one failure
-    # class with two different rows in the series this issue is about, and the
-    # actionable "the graph lookup timed out" message usually lost. Leaving a
-    # slice of the residual on the clock makes THIS message win deterministically.
-    # Proportional and capped, so a nearly-spent residual is still usable for a
-    # fast lookup instead of being refused outright.
+    # deadline (``arrival + bound``) while the seam's timer is created first —
+    # before this task's first step — so with EQUAL deadlines the seam takes the
+    # race, abandons this lookup and returns the GENERIC wait-bound refusal.
+    # Measured on the equal-deadline code with a degraded control plane (lookup
+    # length ≈ the whole residual): 3 of 4 runs recorded ``timeout/wait_bound``
+    # and 1 the graph refusal — one failure class, two different rows in the
+    # series this issue is about, and the actionable message usually lost. The
+    # race is not reliably decided either way at equal deadlines (another
+    # measurement saw 5/5 seam-wins), so a margin is what makes it deterministic
+    # rather than lucky.
+    #
+    # THE TRADE, stated because it is real: a lookup that WOULD have finished
+    # inside this last slice is refused instead of served. The slice is bounded
+    # (≤15 ms, 5% of the residual) and the refusal it produces says only that the
+    # lookup did not finish in the time left — never that the request's budget was
+    # exceeded, which in that band would be false.
     margin = min(_GRAPH_LOOKUP_MARGIN_CAP_S, remaining * _GRAPH_LOOKUP_MARGIN_FRACTION)
     lookup_budget = max(0.0, remaining - margin)
     # `asyncio.timeout`, NOT `wait_for`: `wait_for` raises `TimeoutError` for
@@ -1501,9 +1516,11 @@ async def _resolve_graph_argument(ref: str | None,
             # caller sees the real failure instead of a bogus "retry after Ns".
             raise
         raise ToolError(
-            f"{_mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE} (The graph lookup "
-            f"exceeded the wait budget.) Retry after "
-            f"{_mcp_auth._TRANSPORT_WAIT_RETRY_AFTER_S}s.") from None
+            f"{_mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE} "
+            + ("(The graph lookup did not finish inside the time left for "
+               "this request.) " if margin > 0 else
+               "(The graph lookup exceeded the wait budget.) ")
+            + f"Retry after {_mcp_auth._TRANSPORT_WAIT_RETRY_AFTER_S}s.") from None
     except _mcp_auth.GraphTargetError as exc:
         # ToolError → an is_error tool result carrying the actionable message
         # (naming the graphs the caller CAN reach), the same shape the budget
