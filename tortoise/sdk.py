@@ -38524,10 +38524,14 @@ class TortoiseSDK:
         ``linkCurrency`` (the verdict). ⚠ The two versions are the NORMALISED
         operands — ``search_engine.version_operand``, i.e. blank-is-absent and
         strip-tested — NOT the raw properties: an edge holding ``"   "`` reports
-        ``""``, which is what keeps this reader's verdict identical to
-        ``read_currency_links``' for the same link (a truthiness comparison would
-        read ``"   " == "   "`` as ``current``). A caller that needs the stored
-        bytes must read the property itself. Every one of those names is scoped to the link on purpose:
+        ``""``, because a truthiness comparison would read ``"   " == "   "`` as
+        ``current``. Normalising here is what keeps this reader's verdict
+        IDENTICAL to ``read_reference_currency_links``', the other reader that
+        addresses this same ``references`` hop — ``read_currency_links`` answers
+        a Point over its ``extractedFrom`` links and never sees this one. A
+        caller that needs the stored bytes must read the property itself.
+
+        Every one of those names is scoped to the link on purpose:
         §4.6's aggregate reads the Point's ``extractedFrom`` link, which records a
         version of its OWN under the same ``sourceVersion`` property name, so a
         bare ``sourceVersion``/``currency`` on a Point-addressed call is the
@@ -38536,7 +38540,8 @@ class TortoiseSDK:
         proj = self._get_proj()
         # `version_operand` is REQUIRED here, not cosmetic: this method re-derives
         # the (recorded, current) pair itself instead of going through
-        # `search_engine.read_currency_links`, so without it a whitespace-only
+        # `search_engine.read_reference_currency_links` (the reader for THIS hop),
+        # so without it a whitespace-only
         # operand (`create_source(..., contentHash="   ")`, which
         # `_anchor_on_create` stamps because it nulls only `''`) compares EQUAL
         # to itself and reads `current` here while the same link reads `unknown`
