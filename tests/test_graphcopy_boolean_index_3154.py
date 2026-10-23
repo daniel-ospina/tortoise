@@ -26,6 +26,21 @@ Docker/server lane only: the corruption is a FalkorDB ``GRAPH.COPY``
 behaviour and needs a real server. The file skips cleanly when no
 non-embedded FalkorDB is reachable (mirrors tests/test_indexes.py's #522
 non-embedded gate).
+
+⛔ WHERE the corruption appears is an ENGINE property, not a constant (#9226).
+``GRAPH.COPY`` introduces it on the v4 cores (42004 / 42006 — the engine CI
+pins); on **v6 (60001)** it is already present IN PLACE, with no copy at all,
+once the ``Point`` label carries a FULLTEXT **and** a VECTOR index — the two
+``_ensure_indexes`` creates. Measured on a live 60001 server: ``= false`` reads
+0 of 10 immediately after ``CREATE INDEX FOR (n:Point) ON (n.is_operator)``,
+while ``NOT n.is_operator`` (10), ``= true`` (5) and the absence-or-false
+predicate ``(n.is_operator IS NULL OR n.is_operator = false)`` (10) all stay
+CORRECT — the data is intact, the range index's ``false`` postings are not.
+Neither index alone reproduces it (fulltext-only and vector-only sources both
+read 10/10). The tests below therefore MEASURE which shape the engine exhibits
+and assert the compensation against it, instead of asserting the engine
+invariant — a v6 engine defect is not ours to fix, and asserting it on a
+sanctioned engine can only redden the lane (#9226).
 """
 from __future__ import annotations
 
@@ -86,6 +101,10 @@ pytestmark = pytest.mark.skipif(
 
 _N_FALSE = 10
 _N_TRUE = 5
+
+# What `_seed_points` puts behind the `= false` predicate: 10 non-operator
+# points at ep_alpha 1.5, `baseline_set = false`, one distinct hash each.
+_SEED_BELIEF = {"ep_alpha_sum": 15.0, "uncalibrated": 10, "dedup_hashes": 10}
 
 
 def _uri() -> str:
@@ -380,16 +399,26 @@ def test_audit_raises_when_a_boolean_index_cannot_be_dropped(db, monkeypatch):
 
 
 def test_audit_helper_repairs_a_corrupted_copy(db):
-    """The copy-path compensation: `_audit_copied_boolean_indexes` detects the
-    corruption a GRAPH.COPY introduced, drops the boolean index (presence-
-    based), and reports the repair loudly — and reports a graph that carries
-    no boolean index as clean."""
+    """The compensation: `_audit_copied_boolean_indexes` detects a graph whose
+    boolean index has lost its `false` postings, drops the index (presence-
+    based), and reports the repair loudly — and reports a graph that carries no
+    boolean index as clean.
+
+    "Copy" in the name is now too narrow (#9226): the SAME audit is the
+    compensation wherever the poison came from, and WHERE it comes from is the
+    engine's business. `GRAPH.COPY` introduces it on v4; a v6 (60001) server has
+    it IN PLACE the moment the legacy index exists alongside the fulltext +
+    vector indexes `_ensure_indexes` creates (measured — see the module
+    docstring). The test measures which of the two it is getting and asserts
+    against that, so a sanctioned v6 server exercises the repair instead of
+    reding on an engine invariant we cannot hold.
+    """
     from tortoise.hosted_backup import _audit_copied_boolean_indexes
     from tortoise.projection import FalkorProjection
 
     graph_db, created = db
     src_name, dst_name = _name("audit_src"), _name("audit_dst")
-    created += [src_name, dst_name]
+    created.append(src_name)
 
     proj = FalkorProjection.from_uri(_uri(), graph_name=src_name)
     proj.g.query("MATCH (n) DETACH DELETE n")
@@ -398,31 +427,107 @@ def test_audit_helper_repairs_a_corrupted_copy(db):
     # Reproduce the legacy shape that carries the hazard: a persisted
     # single-property boolean index (the SDK no longer creates one — #3154).
     proj.g.query("CREATE INDEX FOR (n:Point) ON (n.is_operator)")
-    _assert_healthy(proj.g, tag="source with legacy boolean index")
 
-    proj.g.copy(dst_name)
-    dst_g = graph_db.select_graph(dst_name)
-    corrupt = _predicate_counts(dst_g)
-    if corrupt["eq_false"] == corrupt["not"]:
-        pytest.skip(
-            "this FalkorDB build no longer corrupts the boolean index on "
-            "GRAPH.COPY — the compensation is not exercised here"
+    src_counts = _predicate_counts(proj.g)
+    if src_counts["eq_false"] == _N_FALSE:
+        # Inert on this engine — the index is only poisoned by the COPY (v4).
+        assert src_counts["not"] == _N_FALSE, src_counts
+        assert src_counts["eq_true"] == _N_TRUE, src_counts
+        assert _belief_state(proj.g) == _SEED_BELIEF
+        proj.g.copy(dst_name)
+        created.append(dst_name)
+        victim_g, victim_name, victim_kind = (
+            graph_db.select_graph(dst_name), dst_name, "GRAPH.COPY")
+        corrupt = _predicate_counts(victim_g)
+        if corrupt["eq_false"] == corrupt["not"]:
+            pytest.skip(
+                "this FalkorDB build no longer corrupts the boolean index on "
+                "GRAPH.COPY — the compensation is not exercised here"
+            )
+        assert corrupt["eq_false"] == 0, corrupt
+        assert corrupt["not"] == _N_FALSE, corrupt
+    else:
+        # Poisoned IN PLACE (v6) — but only the `= false` form: the data and
+        # the absence-or-false predicate the live readers use are untouched.
+        assert src_counts["eq_false"] == 0, src_counts
+        assert src_counts["not"] == _N_FALSE, src_counts
+        assert src_counts["eq_true"] == _N_TRUE, src_counts
+        assert int(proj.g.query(
+            "MATCH (n:Point) WHERE (n.is_operator IS NULL "
+            "OR n.is_operator = false) RETURN count(n)"
+        ).result_set[0][0]) == _N_FALSE, (
+            "the absence-or-false predicate must survive the corrupt index — "
+            "it is what every live reader selects on (#3139/#3154/#9063)"
         )
-    assert corrupt["eq_false"] == 0 and corrupt["not"] == _N_FALSE, corrupt
+        victim_g, victim_name, victim_kind = proj.g, src_name, "in place"
 
     repaired = _audit_copied_boolean_indexes(
-        dst_g, graph_name=dst_name, stage="test copy")
+        victim_g, graph_name=victim_name, stage=f"test {victim_kind} corruption")
 
-    assert repaired is True, "the corrupt boolean index must be reported"
-    _assert_healthy(dst_g, tag="after audit repair")
-    assert _belief_state(dst_g) == _belief_state(proj.g)
+    assert repaired is True, (
+        f"the corrupt boolean index must be reported ({victim_kind})")
+    _assert_healthy(victim_g, tag=f"after audit repair ({victim_kind})")
+    assert _belief_state(victim_g) == _SEED_BELIEF, (
+        f"the repair must restore the belief/calibration/dedup surface "
+        f"({victim_kind})")
 
     # A graph that carries no boolean index is the clean case — the second
-    # call on the just-repaired copy finds nothing to drop.
+    # call on the just-repaired graph finds nothing to drop.
     assert _audit_copied_boolean_indexes(
-        dst_g, graph_name=dst_name, stage="test clean-idempotent",
+        victim_g, graph_name=victim_name, stage="test clean-idempotent",
     ) is False
     proj.close()
+
+
+def test_open_heals_a_legacy_boolean_index(db):
+    """Opening a graph that carries the legacy boolean index must HEAL it.
+
+    This is the answer to the open question #9226 raised — the remedy for a
+    v6 server, where the poison is present in place, would be to "mutate a
+    user's graph on open, or refuse". No new decision is needed: the #3154
+    purge in `_ensure_indexes` already mutates it (drops the forbidden index)
+    on EVERY backend, and `_schema_is_current` already reports such a graph as
+    not-current (measured on 60001: `index_catalogue_has_field(...,
+    "is_operator", label="Point")` is True, `_schema_is_current()` is False, so
+    the sweep that carries the purge is not skipped). This pins that a REOPEN
+    of a legacy graph comes back healthy on any engine.
+    """
+    from tortoise.index_catalogue import index_catalogue_has_field
+    from tortoise.projection import FalkorProjection
+
+    _graph_db, created = db
+    name = _name("open_heal")
+    created.append(name)
+
+    proj = FalkorProjection.from_uri(_uri(), graph_name=name)
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    proj._ensure_indexes()
+    _seed_points(proj.g)
+    proj.g.query("CREATE INDEX FOR (n:Point) ON (n.is_operator)")
+    # The poison must actually be THERE before the reopen, or the assertions
+    # below are vacuous: a graph with no legacy index is trivially healthy and
+    # an absent `is_operator` field passes the catalogue check by default.
+    assert index_catalogue_has_field(
+        proj.g.query("CALL db.indexes()").result_set, "is_operator",
+        label="Point"), "the legacy boolean index must exist before the reopen"
+    proj.close()
+
+    # The production open path (hosted_api builds a projection per request).
+    reopened = FalkorProjection.from_uri(_uri(), graph_name=name)
+    try:
+        _assert_healthy(reopened.g, tag="after reopen")
+        fields = set()
+        for row in reopened.g.query("CALL db.indexes()").result_set:
+            if row and row[0] == "Point":
+                fields.update(str(f) for f in (row[1] or ()))
+        assert "is_operator" not in fields, (
+            f"the #3154 purge must drop the legacy boolean index on open: "
+            f"{sorted(fields)}"
+        )
+        assert "lastDreamedAt" in fields, (
+            f"the staleness index must survive the purge: {sorted(fields)}")
+    finally:
+        reopened.close()
 
 
 def test_audit_drops_boolean_index_when_counts_agree(db):
