@@ -80,7 +80,11 @@ carries a `<!-- v4-mechanism: <id> -->` marker AT THE DECLARATION SITE, and
     what is uncovered is that extra source, and it is named in the registry
     header rather than silently assumed to be checked. The same holds for a
     non-markdown file INSIDE the architecture dir: the surface is `**/*.md`, so a
-    `.yaml` there is an uncovered source, not a document that owes a marker.
+    `.yaml` there is an uncovered source, not a document that owes a marker;
+  * a SYMLINK anywhere in the surface is refused rather than followed — the walk
+    and the attribution would disagree about its name (a linked directory is not
+    descended, so a marker behind it would get no verdict), which is a verdict of
+    its own and not a silent hole. No link exists there today.
 * It does not touch the extraction/write-path stages.
 * It does not check that a cited test file is REGISTERED in the CI manifest —
   that surface is owned by `tools/ci_selection.py --integrity`. The gate checks
@@ -299,7 +303,20 @@ def declaration_markers(docs_dir: Path = ARCH_DOCS) -> tuple[dict[str, list[str]
     refuse) while a row naming that same file was reported as an unmarked row even
     when it carried the marker (#9778 review P2). One surface, read the same way
     by both halves; markers are keyed by their path relative to the docs dir
-    (`sub/x.md`), so a nested document is named exactly as the row names it.
+    (`sub/x.md`), so a nested document is named exactly as the row names it — and
+    every verdict below names the document that way too, because a basename is
+    not a document identity (`a.md` can exist at two depths).
+
+    ⛔ A SYMLINK in the surface is a REFUSAL, not a document. The surface is read
+    two ways — this scan WALKS it (`rglob`) while attribution RESOLVES each
+    `declared_in:` entry — and those two readings cannot be kept identical across
+    a link: `rglob` does not descend a linked DIRECTORY (a `v4-mechanism:` marker
+    inside one would get NO verdict at all, the fail-open direction), and a linked
+    FILE whose target lies outside the surface is walked under its link name while
+    resolving outside it, so a row naming the link could never be attributed
+    (an unsatisfiable red). Rather than teach both halves to agree about aliases,
+    the alias is refused: no link exists in the surface today, and a declaration
+    belongs in a document, not behind one.
 
     The second return value is the violation list, so one caller can report the
     malformed shapes and the membership verdicts together.
@@ -312,12 +329,25 @@ def declaration_markers(docs_dir: Path = ARCH_DOCS) -> tuple[dict[str, list[str]
             f"directory — the gate cannot compare the declared set against "
             f"anything (fail closed, never an empty pass)"
         ]
-    for doc in sorted(docs_dir.rglob("*.md")):
+    for doc in sorted(docs_dir.rglob("*")):
+        rel = doc.relative_to(docs_dir).as_posix()
+        if doc.is_symlink():
+            errors.append(
+                f"{rel}: a symlink inside the declaration surface — this scan "
+                f"does not follow a linked directory, and a linked file is "
+                f"walked under one name while it resolves under another, so a "
+                f"marker behind it could be read here and attributed nowhere "
+                f"(fail closed): declare the mechanism in a real document under "
+                f"{docs_dir.name}/"
+            )
+            continue
+        if doc.suffix != ".md" or not doc.is_file():
+            continue
         try:
             text = doc.read_text(encoding="utf-8")
         except (OSError, UnicodeError) as exc:  # unreadable is a verdict
             errors.append(
-                f"{doc.name}: a declaring document could not be read "
+                f"{rel}: a declaring document could not be read "
                 f"({type(exc).__name__}) — its declarations cannot be "
                 f"compared, which is not the same as having none"
             )
@@ -331,20 +361,18 @@ def declaration_markers(docs_dir: Path = ARCH_DOCS) -> tuple[dict[str, list[str]
             match = MARKER_COMMENT.match(body)
             if match is None:
                 errors.append(
-                    f"{doc.name}: a `{MARKER_TOKEN}` comment does not name a "
+                    f"{rel}: a `{MARKER_TOKEN}` comment does not name a "
                     f"mechanism id (expected `<!-- v4-mechanism: "
                     f"<lowercase_id> -->`, got `{body.strip()[:60]}`) — a "
                     f"malformed declaration is a violation, not an absence"
                 )
                 continue
-            markers.setdefault(match.group(1), []).append(
-                doc.relative_to(docs_dir).as_posix()
-            )
+            markers.setdefault(match.group(1), []).append(rel)
         # An opener with no closer is not a comment at all, so its marker (if it
         # carries one) is invisible to the scan above — the fail-OPEN direction.
         if _prose_only(text).count("<!--") > len(comments):
             errors.append(
-                f"{doc.name}: an unterminated HTML comment (`<!--` with no "
+                f"{rel}: an unterminated HTML comment (`<!--` with no "
                 f"`-->`) — a marker inside it cannot be read, which must not "
                 f"read as 'no declaration here'"
             )
@@ -370,11 +398,14 @@ def _scanned_targets(entries: list[str], docs_dir: Path) -> set[Path]:
     """The declared documents that resolve INSIDE the gate's scanned surface.
 
     ONE definition of the surface, shared with :func:`declaration_markers`, which
-    collects markers with `docs_dir.rglob("*.md")`: containment (recursive, so a
+    walks it with `docs_dir.rglob("*")`: containment (recursive, so a
     `docs/architecture/sub/x.md` IS inside) AND a `.md` suffix (so a non-markdown
     source is not) — the two halves cannot disagree about what a scanned document
     is, which is what made a nested document invisible to the scan while being
-    demanded of the row (#9778 review P2).
+    demanded of the row (#9778 review P2). The one place a walk and a resolution
+    could still diverge — a SYMLINK — is refused outright by the scan rather than
+    admitted here (`declaration_markers`: a linked directory is not descended and
+    a linked file's target is outside the name it is walked under).
 
     Resolved against the docs dir's own root (`<root>/docs/architecture` ->
     `<root>`), not string-compared: a declaration written as
@@ -1385,6 +1416,65 @@ def test_membership_treats_a_non_markdown_source_inside_the_surface_as_unscanned
     # source alongside a marked document is a stated limit, not a violation.
     ok = _row("x", declared_in=["docs/architecture/policy.yaml", FIXTURE_DECLARED_DOC])
     assert membership_errors([ok], docs) == []
+
+
+def test_membership_refuses_a_linked_directory_in_the_surface(tmp_path) -> None:
+    """A linked DIRECTORY is not descended, so its markers would get NO verdict.
+
+    `rglob` does not follow a directory symlink, while `_scanned_targets` resolves
+    a `declared_in:` entry — so a marker inside `docs/architecture/linked/` would
+    be invisible to the scan, and a mechanism declared only there would read as
+    nothing at all: the fail-open direction. A symlink in the surface is therefore
+    refused, with a message that says what to do (#9778 review P3). Measured
+    pre-fix: no errors here — `ghost` had no verdict.
+    """
+    docs = _docs(tmp_path, a__md="top <!-- v4-mechanism: x -->\n")
+    outside = tmp_path / "elsewhere" / "arch"
+    outside.mkdir(parents=True)
+    (outside / "y.md").write_text("nested <!-- v4-mechanism: ghost -->\n", encoding="utf-8")
+    (docs / "linked").symlink_to(outside, target_is_directory=True)
+    errors = membership_errors([_row("x")], docs)
+    assert any("linked" in e and "symlink" in e for e in errors), errors
+
+
+def test_membership_refuses_a_linked_file_whose_target_is_outside(tmp_path) -> None:
+    """The mirror case: walked under one name, attributed under none (review P3).
+
+    `docs/architecture/link.md -> docs/notes/real.md` is read by the scan (so its
+    marker IS collected under `link.md`) but resolves outside the surface (so the
+    row's own `declared_in: link.md` is never attributed to it): the row was told
+    "link.md carries the marker, but the row does not name it" — a red whose
+    remedy no edit could satisfy. Refusing the link replaces that with one
+    actionable verdict, and no name-mismatch red.
+    """
+    docs = _docs(tmp_path, a__md="top <!-- v4-mechanism: x -->\n")
+    notes = tmp_path / "docs" / "notes"
+    notes.mkdir(parents=True)
+    (notes / "real.md").write_text("real <!-- v4-mechanism: x -->\n", encoding="utf-8")
+    (docs / "link.md").symlink_to(notes / "real.md")
+    row = _row("x", declared_in=[FIXTURE_DECLARED_DOC, "docs/architecture/link.md"])
+    errors = membership_errors([row], docs)
+    assert any("link.md" in e and "symlink" in e for e in errors), errors
+    assert not any("does not name it" in e for e in errors), errors
+
+
+def test_a_nested_unreadable_document_is_named_by_its_relative_path(tmp_path) -> None:
+    """A verdict names the DOCUMENT, not its basename (#9778 review P3).
+
+    The scan keys markers by relative path (`sub/a.md`) because a basename is not
+    an identity — two `a.md` can exist at two depths. The verdicts of the same
+    function still used `doc.name`, so an unreadable NESTED document was reported
+    against the top-level one, naming the document that is fine.
+    """
+    docs = _docs(tmp_path, a__md="readable <!-- v4-mechanism: x -->\n")
+    nested = docs / "sub"
+    nested.mkdir()
+    (nested / "a.md").write_bytes(b"\xff\xfe\x00 not utf-8")
+    errors = membership_errors([_row("x")], docs)
+    assert any(e.startswith("sub/a.md: ") and "could not be read" in e for e in errors), (
+        errors
+    )
+    assert not any(e.startswith("a.md: ") for e in errors), errors
 
 
 def test_membership_refuses_a_marker_in_a_document_the_row_omits(tmp_path) -> None:

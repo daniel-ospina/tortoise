@@ -173,7 +173,7 @@ def test_docs_scanning_gates_stay_in_tier1():
     assert "test_v4_declared_mechanisms.py" in tier1, (
         "#9778 review (P1): the declared-mechanism MEMBERSHIP gate derives the "
         "declared set from the `<!-- v4-mechanism: <id> -->` markers in "
-        "docs/architecture/*.md — `docs/` is in NON_PYTHON_PREFIXES, so a "
+        "docs/architecture/**/*.md — `docs/` is in NON_PYTHON_PREFIXES, so a "
         "docs-only diff runs tier1 only (EXTRACTOR-V4-ARCHITECTURE.md takes "
         "the early return, STORAGE-ARCHITECTURE.md selects `onboarding`, and "
         "`core` is added only when NOTHING matched); registered in `core` "
