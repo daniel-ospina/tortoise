@@ -596,6 +596,10 @@ def test_the_dispatch_resolution_is_bounded_and_refuses_legibly(monkeypatch):
             asyncio.run(_dispatch())
         message = str(excinfo.value)
         assert "wait budget" in message and "Retry after" in message, message
+        assert "(The graph lookup exceeded the wait budget.)" in message, (
+            "with NO time left the refusal must be the shipped #9340 wording — "
+            "the margin message ('did not finish inside the time it had left') "
+            f"would misdescribe a budget that was already fully spent: {message}")
         assert mcp_auth._current_graph_id.get() is None, (
             "a timed-out lookup still scoped the request")
     finally:
@@ -1175,11 +1179,12 @@ def test_no_advertised_handler_names_the_workspace_default_itself():
 # the unscoped-result hazard in principle — `await_under_wait_bound` returns
 # `task.result()` when the task finished as the deadline expired, and a ZERO
 # timeout does not preclude that (`wait_for(shield(task), 0)` still lets an
-# already-scheduled task run during its cancel wait). The hazard is unreachable
-# on the refused path only because a refused request never creates a task at
-# all — the entry short-circuit — so removing that short-circuit is a wrong-graph
-# risk, not a tidy-up. The fix moves the resolution INSIDE the dispatch task, so
-# the scope moves with the task and cannot outlive it.
+# already-scheduled task run during its cancel wait). That hazard belongs to the
+# naive-guard variant; on this code it is unreachable only because a refused
+# request never creates a task at all — the entry short-circuit — whose removal
+# costs a control-plane read and a side-effecting dispatch, not a wrong graph.
+# The fix moves the resolution INSIDE the dispatch task, so the scope moves with
+# the task and cannot outlive it.
 
 
 def _spent_budget_state(*, refused: bool) -> dict:
@@ -1516,9 +1521,14 @@ def test_a_slow_graph_lookup_refuses_as_a_graph_error_every_time(monkeypatch):
             f"attempt {attempt}: the lookup's own refusal lost to the generic "
             f"wait-bound one, so the caller cannot tell what timed out: "
             f"{message}")
-        assert "exceeded the wait budget." not in message, (
-            "the margin cut this lookup while the request still had time on "
-            f"the clock, so claiming its budget was exceeded is false: {message}")
+        assert mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE not in message, (
+            "the margin cut this lookup while the request still had time on the "
+            "clock, so the shared budget-breach wording ('…was exceeded… the "
+            f"work may still complete on the server') is false here: {message}")
+        assert "not executed" in message, (
+            "the band's refusal must say that nothing ran — a caller told only "
+            "'wait and retry' about a call that may have written would re-send "
+            f"it: {message}")
     assert rows == [("exec_error", "ToolError")] * 3, (
         f"one failure class recorded more than one row: {rows}")
     assert dispatched == [], (
@@ -1565,3 +1575,39 @@ def test_a_refusal_that_lands_MID_SEAM_does_not_emit_a_second_breach(monkeypatch
         f"had already refused mid-wait: {breaches}")
     assert rows == [("refused", "transport_wait_bound")], (
         f"one refusal recorded as {rows} instead of one truthful row")
+
+
+def test_an_excluded_tool_is_not_a_graph_error_when_the_transport_refused(
+        monkeypatch):
+    """#9762: the VALIDATION half must not beat the transport's refusal either.
+
+    ``_take_graph_argument`` refuses a `graph` on a tool that does not target
+    graphs, and that refusal is raised in the wrapper — ahead of the seam's
+    short-circuit. On an already-refused request it therefore recorded the SAME
+    false ``exec_error``/``ToolError`` row as the resolution half, for a call the
+    transport had already answered. Both halves return the refusal now; the
+    refusal itself is unchanged when the transport has NOT refused.
+    """
+    name = "tortoise_graph_set_recording"
+    assert name in mcp_auth.GRAPH_ARGUMENT_EXCLUDED, name
+    monkeypatch.setattr(mcp_server, "_wait_bound_state",
+                        lambda: _spent_budget_state(refused=True))
+    rows = _record_telemetry(monkeypatch)
+
+    result = _wrapped_call(monkeypatch, name, {"graph": "g_fund_a"})
+
+    assert getattr(result, "meta", None) and \
+        result.meta.get(mcp_server._WAIT_BOUND_META_KEY) is True, (
+            "an excluded-tool argument refusal replaced the transport's own "
+            "refusal for a request it had already answered")
+    assert rows == [("refused", "transport_wait_bound")], (
+        f"the argument refusal was recorded as {rows} — a false row in the "
+        "series #3834 F-2 keeps truthful")
+
+    # ...and NOT refused: the argument refusal still surfaces, classified.
+    monkeypatch.setattr(mcp_server, "_wait_bound_state", lambda: None)
+    refused_rows = _record_telemetry(monkeypatch)
+    with pytest.raises(ToolError) as excinfo:
+        _wrapped_call(monkeypatch, name, {"graph": "g_fund_a"})
+    assert "does not take a `graph` argument" in str(excinfo.value)
+    assert refused_rows == [("exec_error", "ToolError")], refused_rows

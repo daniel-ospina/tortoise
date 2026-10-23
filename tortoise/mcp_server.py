@@ -652,11 +652,13 @@ async def _scoped_dispatch(name: str, arguments, graph_ref: str | None, *,
     the task finished as the deadline expired, and a zero timeout does NOT make
     that impossible — ``wait_for(shield(task), 0)`` still lets an
     already-scheduled task run during its cancel wait (measured: a
-    non-suspending body completes and its result is returned). The hazard is
-    unreachable on THIS path only because a refused request never creates a task
-    at all (the entry short-circuit in ``_await_under_mcp_wait_bound``), which is
-    what makes removing that short-circuit a wrong-graph risk rather than a
-    tidy-up.
+    non-suspending body completes and its result is returned). That hazard
+    belongs to the naive-guard VARIANT (resolve in the wrapper, plain dispatch).
+    On THIS code it is unreachable because a refused request never creates a task
+    at all — the entry short-circuit in ``_await_under_mcp_wait_bound`` — and
+    what removing that short-circuit costs is different: a control-plane read
+    issued for an answered request, and a side-effecting dispatch that keeps
+    running after the caller was told the request was refused.
 
     The ``ExitStack`` is owned HERE, not by the caller: `use_record_tenant`
     carries a ContextVar token, and a token created in this task's context can
@@ -1437,8 +1439,10 @@ def _take_graph_argument(name: str,
 #: instant, and the seam's timer is armed first). Proportional to the residual,
 #: capped so a long budget does not hand the lookup a materially shorter one.
 #: THE TRADE: a lookup that would have finished inside this last slice is
-#: refused instead of served — hence the distinct, TRUE message below (it must
-#: not claim the request's budget was exceeded when it was not).
+#: refused instead of served — hence the separate, TRUE message in
+#: ``_resolve_graph_argument`` (it must not reuse the shared budget-breach
+#: prefix, which would claim an exceeded budget and "work may still complete on
+#: the server" for a call that never ran), and the distinct message below.
 _GRAPH_LOOKUP_MARGIN_FRACTION = 0.05
 _GRAPH_LOOKUP_MARGIN_CAP_S = 0.015
 
@@ -1515,12 +1519,24 @@ async def _resolve_graph_argument(ref: str | None,
             # Raised INSIDE the lookup, not by this deadline: re-raise so the
             # caller sees the real failure instead of a bogus "retry after Ns".
             raise
+        if margin > 0:
+            # The margin cut this lookup while the request still had time on the
+            # clock, so the shared budget-breach wording below ("…was exceeded…
+            # the work may still complete on the server") is FALSE here on both
+            # counts: the budget was not exceeded, and nothing was executed —
+            # the dispatch is never created. Hence a self-contained message
+            # rather than that prefix with a different parenthetical.
+            raise ToolError(
+                "The graph lookup for this request did not finish inside the "
+                "time it had left, so the call was not executed. "
+                f"Retry after {_mcp_auth._TRANSPORT_WAIT_RETRY_AFTER_S}s."
+            ) from None
+        # No time left at all (the transport had already spent the bound): the
+        # shared, honest wording — nothing was left for the lookup to use.
         raise ToolError(
-            f"{_mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE} "
-            + ("(The graph lookup did not finish inside the time left for "
-               "this request.) " if margin > 0 else
-               "(The graph lookup exceeded the wait budget.) ")
-            + f"Retry after {_mcp_auth._TRANSPORT_WAIT_RETRY_AFTER_S}s.") from None
+            f"{_mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE} (The graph lookup "
+            f"exceeded the wait budget.) Retry after "
+            f"{_mcp_auth._TRANSPORT_WAIT_RETRY_AFTER_S}s.") from None
     except _mcp_auth.GraphTargetError as exc:
         # ToolError → an is_error tool result carrying the actionable message
         # (naming the graphs the caller CAN reach), the same shape the budget
@@ -1607,18 +1623,33 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
         # like every other tool-level failure rather than bypassing the
         # telemetry seam.
         #
-        # #9762: the argument is only POPPED here — the handler must not receive
-        # a keyword its signature does not declare — and RESOLVED inside the
-        # dispatch task (`_await_under_mcp_wait_bound` → `_scoped_dispatch`).
-        # Resolving it here ran before the seam spent the transport's remaining
-        # deadline, so on a request the transport had already refused the
-        # lookup's `asyncio.timeout(0)` expired and turned the transport's own
-        # refusal into a graph `ToolError` (a false `exec_error` row in the
-        # `mcp_tool_call` series), and it left the scope set in the CALLER's
-        # context after the dispatch.
-        result = await _await_under_mcp_wait_bound(
-            name, arguments, version=version, task_meta=task_meta,
-            graph_ref=_take_graph_argument(name, arguments))
+        # #9762: the argument is POPPED and VALIDATED here (`_take_graph_argument`
+        # refuses a `graph` on a tool that does not target graphs — the handler
+        # must also never receive a keyword its signature does not declare) and
+        # RESOLVED inside the dispatch task (`_await_under_mcp_wait_bound` →
+        # `_scoped_dispatch`). Resolving it here ran before the seam spent the
+        # transport's remaining deadline, so on a request the transport had
+        # already refused the lookup's `asyncio.timeout(0)` expired and turned
+        # the transport's own refusal into a graph `ToolError` (a false
+        # `exec_error` row in the `mcp_tool_call` series), and it left the scope
+        # set in the CALLER's context after the dispatch.
+        try:
+            graph_ref = _take_graph_argument(name, arguments)
+        except ToolError:
+            if not _wait_bound_refused():
+                raise
+            # #9762: the transport already answered this request, so a
+            # tool-level argument refusal is unreachable and recording it would
+            # be the same false `exec_error`/`ToolError` row — just from the
+            # validation half instead of the resolution half. Assign the refusal
+            # and FALL THROUGH, so the classification below still labels the row
+            # (`refused`/`transport_wait_bound`) and the refusal is repaired by
+            # the same envelope path as every other one.
+            result = _wait_bound_refusal_result()
+        else:
+            result = await _await_under_mcp_wait_bound(
+                name, arguments, version=version, task_meta=task_meta,
+                graph_ref=graph_ref)
         # #3675: the items this call RETURNED. Counted here, before the status
         # classification below, so the row carries the result of the dispatch
         # whether that dispatch succeeded or failed: a transport-wait-bound
