@@ -922,9 +922,10 @@ def _validity_marker(h: dict) -> str:
         ``"not-a-date"``) → the start clause is OMITTED, never interpolated
         (#9730): ``[valid]`` / ``[valid; end unknown]`` / ``[valid → <to>]``.
         Under the #6140 owner ruling such a bound names no instant, i.e. no
-        start was recorded — which is exactly why ``validity
-        .effective_precision`` reports no precision for it (#9201/#9244) —
-        so ``[valid since TBD]`` asserted a bound the data denies.
+        start was recorded — which is exactly why
+        ``validity.effective_precision`` reports no precision for it
+        (#9201/#9244) — so ``[valid since TBD]`` asserted a bound the data
+        denies.
     ISO date strings (YYYY-MM-DD — the dataset/``when`` normalization): no
     full timestamps in the reader context; timestamps stay on the graph
     properties. The supersession markers (SUPERSEDED BY / SUPERSEDES) are
