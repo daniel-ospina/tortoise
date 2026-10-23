@@ -465,9 +465,13 @@ def test_audit_helper_repairs_a_corrupted_copy(db):
             "the absence-or-false predicate must survive the corrupt index — "
             "it is the form the calibration gate and dream's anchor selection "
             "use (#3139/#3154/#9063). Readers still on the bare form are "
-            "safe only because the index never survives an open, which "
-            "test_open_heals_a_legacy_boolean_index pins — do not read this "
-            "as licence to drop that purge"
+            "safe only because every open RETRIES the purge "
+            "(`_schema_is_current` keeps answering False while the index "
+            "exists, so the sweeping branch runs again) — but that purge is "
+            "BEST-EFFORT: a drop error other than 'no such index' is only "
+            "warned, and nothing re-checks the catalogue, so an open CAN "
+            "leave the poison in place. Do not read this as licence to drop "
+            "the purge or to remove the retry"
         )
         victim_g, victim_name, victim_kind = proj.g, src_name, "in place"
 
