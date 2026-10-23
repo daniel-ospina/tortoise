@@ -157,8 +157,9 @@ def test_docs_scanning_gates_stay_in_tier1():
         "reads docs/runbook/b7-activation-scorecard.md — `docs/` is in "
         "NON_PYTHON_PREFIXES and the runbook matches no SOURCE_PATTERNS "
         "entry, so a runbook-only diff runs tier1 only; without this "
-        "registration the pre-#8135 sentence (or a dropped #9084 plain-dict "
-        "clause) merges green (#4309 class, same as #8614)"
+        "registration the pre-#8135 sentence (or a dropped #9084 CLOSED "
+        "claim, or a re-asserted plain-dict producer) merges green (#4309 "
+        "class, same as #8614)"
     )
     assert "test_definite_description_backfill_5059.py" in tier1, (
         "#5333 review (P1): the *G5's destructive half* doc guards in this file "
@@ -315,7 +316,8 @@ def test_b7_runbook_ok_semantics_gate_runs_on_a_runbook_only_diff():
     The pin used to live in `tests/test_activation_scorecard.py`, registered on
     `api` and `core` but NOT in `tier1`, so it was asleep on the one change that
     can break it: re-introducing "means only that the tool did not raise", or
-    deleting the #9084 plain-dict clause, in a docs-only PR merged green.
+    dropping the #9084 CLOSED claim (and the two residuals it names), in a
+    docs-only PR merged green.
     Dropping the tier1 entry moves the pin back into that hole (#4309 silent-drop
     class; the #8614 shape one runbook over).
     """
@@ -326,7 +328,7 @@ def test_b7_runbook_ok_semantics_gate_runs_on_a_runbook_only_diff():
         "a docs/runbook/b7-activation-scorecard.md-only diff must select the "
         "pin that binds its prose (test_b7_runbook_ok_semantics_8135.py) — "
         "otherwise a docs-only edit that re-teaches the pre-#8135 meaning of "
-        "`ok`, or drops the #9084 boundary, merges green (#8135 review P1, "
+        "`ok`, or drops the #9084 CLOSED claim, merges green (#8135 review P1, "
         "#4309 class)"
     )
 
