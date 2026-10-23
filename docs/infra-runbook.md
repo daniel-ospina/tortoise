@@ -387,8 +387,10 @@ fly deploy --image $(fly releases -a tortoise-y4mjjq --json | jq -r '.[1].ImageR
 # read the product makes and WRONG here: a backup must see every tenant. Point
 # TORTOISE_RECORD_BACKUP_DSN at a role that bypasses RLS (the table owner /
 # `postgres`, or `service_role`) and keep TORTOISE_RECORD_DSN as the app role.
-# Unset, the verb falls back to TORTOISE_RECORD_DSN — which then fails
-# closed with a sentence naming the role, not an "empty record".
+# Unset, the verb falls back to TORTOISE_RECORD_DSN — and when that DSN names the
+# app role, it fails closed with a sentence naming the role, not an "empty
+# record" (a deployment whose record DSN already bypasses RLS keeps working
+# unchanged — the fallback is checked, not refused on sight).
 TORTOISE_RECORD_BACKUP_DSN=... python -m tortoise record-backup
 
 # backup + RESTORE DRILL — restore into a scratch record and compare per-table row counts
@@ -556,8 +558,10 @@ is one job, alongside the graph sweep's `registry-backup-cron.yml`:
 All three DSNs are read from the environment, so the job's command line carries no password — and the
 BACKUP one is **`TORTOISE_RECORD_BACKUP_DSN`**, not the app-role `TORTOISE_RECORD_DSN` (#9801): a
 backup must see every tenant, and the record's own app role (`NOBYPASSRLS`) is refused with exit `2`
-by design. A job armed with only `TORTOISE_RECORD_DSN` therefore exits `2` on every run and publishes
-nothing — loud, but never a working archive. The three are:
+by design. A job armed with only `TORTOISE_RECORD_DSN` **whose record role is the app role
+therefore exits `2` on every run and publishes nothing** — loud, but never a working archive. (A
+record DSN that already bypasses RLS is still accepted through the fallback; the gate checks the
+ROLE, not which variable supplied it.) The three are:
 
 | variable | what it is |
 |---|---|

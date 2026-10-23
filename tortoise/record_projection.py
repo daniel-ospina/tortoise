@@ -275,7 +275,7 @@ TENANT_GUC_SQL = f"SELECT set_config('{TENANT_GUC}', %s, true)"
 #: every non-plan statement the seam issues. The org id and the table names
 #: travel as bind parameters.
 
-#: The ROLE POSTURE half of the statement above, on its own, so the SAME four
+#: The ROLE POSTURE half of `TENANT_SCOPE_SQL` below, on its own, so the SAME four
 #: predicates decide "does this connection bypass RLS?" on every path that asks
 #: — the tenant scope (which REQUIRES non-bypassing) and R9's backup (which
 #: REQUIRES bypassing, one of the three purposes R6 names). Two copies of these

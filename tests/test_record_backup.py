@@ -904,8 +904,9 @@ def test_the_drill_does_not_red_when_a_row_lands_between_the_two_source_reads():
     perfectly healthy backup: exit 3, `"verdict": "MISMATCH"` with no
     `mismatches`, on the exact schedule `docs/infra-runbook.md` documents, on a
     run whose restore had not started. The sibling test above places the
-    concurrent row at the THIRD read, which is the one placement that never
-    exercises that guard; this one places it at the second.
+    concurrent row AFTER the dump (read 4), which is the one placement that never
+    exercises that guard; this one places it AT the `cut` read (read 3), so the
+    count that becomes the artifact's own claim sees it.
     """
     db = FakeDB(SOURCE_COUNTS)
     reads = {"source": 0}
