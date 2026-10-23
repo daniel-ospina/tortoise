@@ -347,14 +347,21 @@ def test_uses_stub_does_not_reset_a_stored_kind(sdk):
     assert row and row[0][0] == "capability", row
 
 
-def test_commit_door_does_not_write_the_classifier_fallback():
-    """#9572 review round 4 (P1): the hosted `/v1/sessions/commit` door.
+def test_family_fallback_is_not_a_writable_kind():
+    """#9572 review round 4 (P1): the shared predicate the payload doors import.
 
-    `TortoiseSDK.commit_session` POSTs the v2 payload here, and `extractor_v2`
-    repairs every unclassifiable entity to `core:other` — so this door wrote the
-    repair as a real kind and reset stored discriminators. It is the PRODUCTION
-    capture entry point; the private `sdk._payload_entity_kind` guard does not
-    cover it. Both now share `tortoise.kind_fallbacks`.
+    `extractor_v2` repairs every unclassifiable entity to `core:other`; a door
+    that writes that repair as a real kind resets a stored discriminator. Both
+    the private SDK door (`sdk._payload_entity_kind`) and the hosted
+    `/v1/sessions/commit` door import `tortoise.kind_fallbacks` so there is one
+    predicate, not a per-door check.
+
+    ⚠️ SCOPE: this case exercises the PREDICATE only — it does not touch the
+    commit door, and it used to be named for that door, which overstated it.
+    The route-level pin for `/v1/sessions/commit` is
+    `tests/test_commit_endpoint.py::TestFourNodeChain::test_entity_commit_does_not_reset_a_stored_discriminator`
+    (fail pre-fix). The bare-`other` half of the predicate, which this must not
+    swallow, is `test_kind_fallbacks_do_not_swallow_an_explicit_other`.
     """
     from tortoise.kind_fallbacks import payload_entity_kind, writable_kind
 
