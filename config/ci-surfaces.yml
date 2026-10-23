@@ -1527,6 +1527,7 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+  - test_2351_claim_class.py
   - test_9583_openapi_read_only_claim.py
   # #9583: the `core` arm of the read-only-claim / lockstep pin. Half of the file asserts
   # the SERVED OpenAPI descriptions (`api`, above); the other half asserts that
@@ -2908,6 +2909,18 @@ surfaces:
   # Registered beside its sibling capture tests; `tortoise/sdk.py` is a
   # SHARED_MODULE, so an sdk.py-only change already runs the full matrix.
   - test_capture_validfrom_3945.py
+  # #5064: the declared-mechanism gate. `core` is its classification home and
+  # the lane for a code diff; `tier1` is REQUIRED because half the gate's subject
+  # is now DOCUMENT — `membership_errors()` reads the
+  # `<!-- v4-mechanism: <id> -->` markers in `docs/architecture/**/*.md` — and this
+  # file is in NEITHER named surface a docs-only diff can select. `docs/` is in
+  # NON_PYTHON_PREFIXES, so the mechanism differs by document: an
+  # EXTRACTOR-V4-ARCHITECTURE.md-only diff takes `select()`'s early return
+  # (`surfaces=[]`, 60 files) while a STORAGE-ARCHITECTURE.md-only diff is
+  # claimed by the `onboarding` SOURCE_PATTERNS entry (`surfaces=['onboarding']`,
+  # 131 files) — neither selects `core`. Measured for both: the gate is selected
+  # only once this `tier1` row exists, which is the same placement every sibling
+  # v4 doc-subject guard uses (#5092).
   - test_v4_declared_mechanisms.py
   # #4495: `pricing.allowance_reachability` — cap vs allowance quantised at the
   # node boundary — lives in tortoise/pricing.py, which matches no SOURCE_PATTERNS
@@ -3488,7 +3501,11 @@ surfaces:
   # `docs/architecture/STORAGE-ARCHITECTURE.md`-only diff does NOT take
   # `select()`'s early return — that path is claimed by the `onboarding`
   # `SOURCE_PATTERNS` entry, so `select()` returns `surfaces=['onboarding'],
-  # full=False, 121 files` — re-derive it after any `tier1` addition (this change added one); a `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md`-only
+  # full=False, 131 files`. ⚠️ Re-derive that figure after any `tier1` addition,
+  # and do not attribute its whole history to one row: #5064's row accounts for
+  # exactly ONE of those files (measured: 130 at the commit before it, 131
+  # after), so the `121` this comment used to carry was already 9 short before
+  # the row existed. A `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md`-only
   # diff DOES take the early return (`surfaces=[]`). The guard is selected in
   # both cases (measured: `guard_selected=True` for either doc), which is the
   # property that matters — `tier1` is unconditional in the tier-2 selection and
@@ -5909,6 +5926,19 @@ tier1:
 # `ast`-only shape, and the same docs-only PR is exactly the change that can
 # falsify a claim it pins (or tidy the marker away).
 - test_extractor_v4_s4_stage_claims.py
+# #5064: the declared-mechanism gate (`core` above) — its membership half scans
+# `docs/architecture/**/*.md` for the `v4-mechanism:` markers, so a docs-only PR is
+# exactly the change that can delete, rename or forge one with the gate absent
+# from the tier-1 arm. Same no-DB, doc/`ast` shape as the guards above.
+# ⚠️ #9778 review (P1): the docs-only diff really does reach this entry, and the
+# mechanism differs by DOCUMENT — measured with `tools/ci_selection.py`:
+# EXTRACTOR-V4-ARCHITECTURE.md takes `select()`'s early return (`surfaces=[]`,
+# 60 files) while STORAGE-ARCHITECTURE.md matches the `onboarding` entry
+# (`surfaces=['onboarding']`, 131 files), and `core` is added only when NOTHING
+# matched. Registered in `core` alone the gate was asleep on the exact diff class
+# that can red it (#1349/#3332/#3616 silent-drop class); pinned by
+# `tests/test_ci_selection.py::test_docs_scanning_gates_stay_in_tier1`.
+- test_v4_declared_mechanisms.py
 # #8495: the same document's per-step FAILURE-POLICY guard (`core` above) — same
 # no-DB shape, and the same docs-only PR is exactly the change that can drop or
 # contradict the declared policy.
@@ -6482,6 +6512,7 @@ durations:
   test_9555_session_narrative.py: 2.0  # unmeasured — new in #9555 (R7, §9.1's narrative home); no sweep has collected it, so it carries the flat `DEFAULT_FAST_WEIGHT` for an unmeasured file (the #2818/#3419/#9121 convention) rather than a local reading, which this map forbids as a SHARD-LAYOUT input. What the weight covers: DB-free and graph-free — it parses the record migrations on disk (`table_columns`/`RECORD_MUTATIONS`), builds statement plans in memory against a DB-API-shaped double, and reads no journal, no Postgres and no FalkorDB. It is registered HERE as well as in a surface list because the row IS the coverage numerator: without it the map fell to 892/992 = 89.92%, below `--integrity`'s 0.90 floor, and `tests/test_ci_selection.py::test_duration_coverage_guard_boundary_and_realistic` reds (the same zero-headroom trap the #9121/#9362 rows record). `tools/ci_timing.py --refresh-durations` replaces this from junit.
   test_9287_invisible_kind_write_door.py: 2.0  # unmeasured — new in #9287 (#3400/#4348 trap): a file ADDED BY A PR can never carry a CI junit measurement (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT`, not a dev-box reading (#2818/#3419). The row is REQUIRED here, not cosmetic: the `core` surface row above is manifest CLASSIFICATION, and this file entering `fast_pool()` without a weight reds `--integrity`'s `duration_coverage_issues` — measured at this head, 894/994 = 89.94% without the row (below the 0.90 floor) and 895/994 = 90.04% with it. LOCAL cost NOT adopted, and it is not small: `test_the_door_accepts_no_invisible_code_point` calls the predicate twice for all 0x110000 code points, so the flat default UNDER-estimates this file; a weight is a SHARD-LAYOUT input, so it stays at the default until `tools/ci_timing.py --refresh-durations` replaces it from junit.
   test_link_agent_infra_scripts.py: 2.0  # unmeasured — new in #9475 (#3400/#4348 trap): the `scripts` pointer becomes machine-local, so this file is ADDED to the fast pool by the PR that introduces it and can never carry a CI junit measurement yet (the refresher samples push-to-main runs only). Do NOT substitute a local reading (three runs on this box while the fleet was busy measured the 23 cases at 10.03–12.18 s, a ~2× spread — it does not reproduce, which is the #8254/`test_7948` provenance lesson): a weight is a SHARD-LAYOUT input, so a number that does not model CI decides which files run together (#3419, #9003 review). It also has to exist as a row, not merely as a default: at the parent commit the map sat at 99/991 missing = 0.900109, i.e. ONE unweighted fast file of headroom, so this file entering the pool unweighted would red `--integrity`'s `duration_coverage_issues` at 100/992 = 0.89919. With the row: 99/992 = 0.900202. `tools/ci_timing.py --refresh-durations` replaces this from junit once a sweep collects it.
+  test_2351_claim_class.py: 2.0  # unmeasured — new in #2351 (#3400/#4348 trap): a file ADDED BY A PR can never carry a CI junit measurement (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT`, not a dev-box reading (#2818/#3419). The row is REQUIRED, not cosmetic: at this head `--integrity` reports 100 unweighted fast files of 999 = 0.89990 WITHOUT it, and 99/999 = 0.90090 WITH it — one row of headroom is all this manifest has. No local reading is adopted (a weight is a SHARD-LAYOUT input, and this suite's cost is dominated by graph fixtures whose wall time swings with fleet load); `tools/ci_timing.py --refresh-durations` replaces this from junit once a sweep collects it.
   test_7948_about_object_read_sites.py: 2.0  # unmeasured — new in #7948 (#3400/#4348 trap): a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it carries the header's flat `DEFAULT_FAST_WEIGHT`, not a dev-box reading — the #2818/#3419 convention (`tests/test_ci_selection.py::test_2818_new_file_row_carries_the_flat_default_until_a_sweep_collects_it`), and the LEADING marker is what lets `tools/ci_timing.py::render_refreshed_manifest` clear this note once a sweep measures it. What the weight covers: §13's whole `aboutObject` census — `ast`-only passes over `tortoise/**/*.py` (all ~242 modules are parsed, and the door→reader attribution walks a symbol index of them) plus regex sweeps of three markdown documents; nothing is imported from the package, no DB, no network, no graph fixture. LOCAL readings were taken and are NOT adopted, and no figure is recorded here because they did not reproduce: on this box, while the fleet was busy, the same 26-test file ran 27–61 s wall across four runs (load-dependent, and the door-attribution arm now sweeps 418 row×door pairs over 37 rows). The `2.0` is the flat default for an unmeasured file, NOT a dev-box weight — quoting a single local sum as provenance was how this comment came to state numbers three runs could not reproduce. Coverage, stated in BOTH states because they differ by exactly this row: WITH it (`fast_pool` 977) 95 keys missing = 0.902764, headroom for TWO more unweighted fast files above the 0.90 floor; WITHOUT it, 96 missing = 0.901740, headroom for ONE. `duration_coverage_issues` is `[]` in both states, so this row closes a gap rather than a gate. A locally derived weight would misstate a SHARD-LAYOUT input; refresh from the first post-merge sweep.
   test_9362_sweep_mirror_order.py: 2.0  # unmeasured — new in #9362; no CI sweep has collected it, so it carries the flat default for an unmeasured file (the #9121/#9192/#3400 convention). Do NOT substitute a local timing: the map is a SHARD-LAYOUT input modelling CI, and the local whole-file reading here (135.6s) is ~124s of SESSION cost that lands on whichever test runs first (measured both ways: `-k stale_epoch` alone 125.2s, `-k peer_already_cleared` alone 123.9s, and the same two cost ~1s each when not first — the #3400 attribution the map's header warns about), so a locally derived row would misstate the file by whatever order the shard happens to run. It matters here rather than being cosmetic: at b76de57c the map sat at 96/961 missing = coverage 0.900104 against the 0.90 floor with ZERO headroom, so one more unweighted fast file reds `--integrity`'s `duration_coverage_issues`. `tools/ci_timing.py --refresh-durations` is the sole writer and replaces this from junit.
   test_9121_onboarding_residual_pins.py: 2.0  # unmeasured — new in #9121; no sweep has collected it, so it carries the flat default for an unmeasured file (same convention as test_prod_csp_monitor.py / test_venture_pack.py). Do NOT substitute a local timing: the map is a SHARD-LAYOUT input modelling CI, and a locally measured weight that does not model CI must not decide what runs together. Measured 2026-10-19: 15 cases, source-structural only (no graph fixture). `test_9079_onboarding_declared_lane.py` already carries a measured row in the #3400-trap block below (3.6) — do NOT add a second key here; a duplicate mapping key is refused by `tools/registry_integrity.py` and silently keeps the LAST value (#5373).

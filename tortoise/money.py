@@ -51,6 +51,8 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from tortoise.numeric_domain import numeric_alteration_reason
+
 __all__ = [
     "AMOUNT_MINOR",
     "AS_OF",
@@ -142,6 +144,18 @@ def _validate_amount_minor(value: Any) -> int:
         raise MoneyValueError(
             f"{AMOUNT_MINOR} must be an int in minor units, "
             f"got {type(value).__name__}: {value!r}")
+    # #2817 (review P1): an ``int`` outside the store's INT64 domain is not an
+    # amount — FalkorDB silently CLAMPS it (#4647), and the write path refuses
+    # it, so admitting it here would make a derived value able to sink the
+    # record it was derived from (at the capture seam the refusal loses the
+    # whole POINT and reports the whole capture `ok=False`). Refusing it HERE —
+    # at the boundary every consumer shares — turns it into the normalizer's
+    # `refused_by_layer1` abstention, i.e. prose only, for every caller. The
+    # predicate has ONE home (`numeric_domain`); this is a reuse, not a second
+    # bound.
+    reason = numeric_alteration_reason(AMOUNT_MINOR, value)
+    if reason:
+        raise MoneyValueError(reason)
     return value
 
 
