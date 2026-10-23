@@ -40,7 +40,9 @@ WHAT IS BEING PINNED
   4. A dry run decides nothing and calls nothing: no token, no download, no label read.
   5. `COUNT` is validated for EVERY mode, so `--count 0 --uninstall` cannot report success having
      deregistered nothing — and `--uninstall` deletes only a directory it can PROVE is a runner
-     install (`.runner` / `config.sh` / `bin/Runner.Listener`), never just "whatever `BASE` names".
+     install (`.runner` / `bin/Runner.Listener`; a lone `config.sh` is explicitly NOT proof — it is
+     a common filename and a bare script that exits 0 passes `./config.sh remove`), never just
+     "whatever `BASE` names".
   5b. `--uninstall` removes the systemd unit BEFORE the directory, and a unit it cannot remove
      stops that target dead: the directory and its registration are LEFT INTACT (exit 3), never
      deleted out from under an enabled unit. Every removal token is minted before the FIRST
@@ -367,6 +369,22 @@ def test_uninstall_refuses_to_sudo_rm_a_directory_that_is_not_a_runner(tmp_path:
     # the refusal is the same gate in a plan: it is not deferred to the destructive step
     r = _run("--uninstall", "--count", "1", "--dry-run", env={**env, "CI_RUNNER_BASE": str(debris)})
     assert r.returncode == 2 and "not a runner install" in r.stderr, r.stderr
+
+    # ⛔ `config.sh` ALONE IS NOT PROOF, and accepting it deleted a directory this installer never
+    # created. It is a very common filename, and a bare `config.sh` that exits 0 satisfies
+    # `./config.sh remove …` — so the loop reached `sudo rm -rf` on an unrelated tree and reported a
+    # clean removal (measured before the fix: `deregistered proj`, EXIT=0, tree gone). It also adds
+    # no coverage: the tarball is extracted in ONE `tar xzf`, so `config.sh` and `bin/Runner.Listener`
+    # always land together.
+    cfg_only = tmp_path / "a-config-script-that-is-not-a-runner"
+    cfg_only.mkdir()
+    _stub_tool(cfg_only, "config.sh", "exit 0")
+    r = _run("--uninstall", "--count", "1", env={**env, "CI_RUNNER_BASE": str(cfg_only)})
+    assert r.returncode == 2, f"a lone config.sh is not proof of a runner: {r.returncode} {r.stderr}"
+    assert "not a runner install" in r.stderr, r.stderr
+    assert cfg_only.is_dir() and (cfg_only / "config.sh").exists(), (
+        "the installer deleted a directory it could not prove was a runner"
+    )
 
     # positive arm: `.runner` is proof of a configured runner, so this one IS removed
     runner = _deregisterable(tmp_path / "a-runner")

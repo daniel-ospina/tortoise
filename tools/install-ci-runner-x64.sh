@@ -162,8 +162,16 @@ runner_dir() { # $1 = instance number: instance 1 keeps the base dir, the rest g
 unit_for() { printf 'actions.runner.%s.%s.service' "$(printf '%s' "$REPO" | tr '/' '-')" "$1"; }
 # Is this directory PROVABLY a runner install? Only such a directory may be deleted by
 # `--uninstall`; see the uninstall block for why "it is a directory" is not enough.
+#
+# ⛔ `config.sh` ALONE IS **NOT** PROOF, and it used to be accepted as such. It is a very common
+# filename, and a directory holding nothing but an executable `config.sh` that exits 0 passes
+# `./config.sh remove …` — so the uninstall loop reached `sudo rm -rf` on a tree this installer
+# never created (measured: `deregistered proj`, EXIT=0, tree gone). It also adds no coverage: the
+# install path extracts the whole tarball with ONE `tar xzf`, so `config.sh` and `bin/Runner.Listener`
+# always land together — a lone `config.sh` is a state this script cannot produce. The proof is
+# therefore `config.sh` WRITTEN BY A REGISTRATION (`.runner`) or the listener binary itself.
 is_runner_install() {
-  [ -f "$1/.runner" ] || [ -f "$1/config.sh" ] || [ -f "$1/bin/Runner.Listener" ]
+  [ -f "$1/.runner" ] || [ -f "$1/bin/Runner.Listener" ]
 }
 
 # ── the fallback label: follow the gate's own state, never assume it ───────────
@@ -349,8 +357,9 @@ if [ "$MODE" = uninstall ]; then
   # (`CI_RUNNER_BASE`), so "a directory exists at this path" is NOT evidence of a runner: the
   # pre-fix gate was exactly `[ -d "$d" ]`, so `CI_RUNNER_BASE=/opt --uninstall` ran
   # `sudo rm -rf /opt` and `CI_RUNNER_BASE=$HOME/work --uninstall` deleted a worktree. Proof of
-  # a runner install is `.runner` (written by config.sh on success), `config.sh` itself (a
-  # download that never registered), or the listener binary.
+  # a runner install is `.runner` (written by `config.sh` on success) or the listener binary —
+  # a lone `config.sh` is NOT proof (see `is_runner_install`; it is a common filename, and a bare
+  # script that exits 0 satisfies `./config.sh remove`, which is the precondition for the delete).
   #
   # ⛔ TWO PHASES, AND EVERYTHING THAT CAN REFUSE HAPPENS IN THE FIRST ONE. Phase 1 walks every
   # target and proves it is a runner install; phase 2 mints a removal token for EVERY target and
@@ -377,7 +386,7 @@ if [ "$MODE" = uninstall ]; then
       continue
     fi
     if ! is_runner_install "$d"; then
-      die "$d is not a runner install (no .runner, config.sh or bin/Runner.Listener) — refusing to delete it. Remove it by hand if it is debris, or pass the right CI_RUNNER_BASE."
+      die "$d is not a runner install (no .runner and no bin/Runner.Listener) — refusing to delete it. Remove it by hand if it is debris, or pass the right CI_RUNNER_BASE."
     fi
     uninstall_dirs+=("$d")
     # the unit name comes from the INSTANCE NUMBER, not from the array index: instance 1 may be
@@ -470,7 +479,7 @@ done
 for i in $(seq 1 "$COUNT"); do
   d="$(runner_dir "$i")"; name="$NAME_PREFIX-$i"
   say "── runner $i: name=$name dir=$d labels=$LABELS"
-  if [ "$DRY" = 1 ]; then say "dry-run: would download $url, verify sha256, then run config.sh --labels $LABELS, then svc.sh install+start"; continue; fi
+  if [ "$DRY" = 1 ]; then say "dry-run: would download $url, verify sha256, then run config.sh --unattended --url https://github.com/$REPO --token <minted> --name $name --labels $LABELS --work _work --replace, then svc.sh install+start"; continue; fi
   need gh; need curl; need tar; need sha256sum
 
   if [ ! -f "$d/.runner" ]; then
@@ -482,8 +491,10 @@ for i in $(seq 1 "$COUNT"); do
     say "sha256 verified ($got)"
     tar xzf "$d/$tarball" -C "$d" && rm -f "$d/$tarball" || die "extract failed in $d" 3
     tok="$(gh api -X POST "repos/$REPO/actions/runners/registration-token" --jq .token)" || die "could not mint a registration token" 3
-    # ⛔ ONE ARGV, BUILT ONCE. The plan above prints the same string the exec below hands
-    # config.sh, so a wrong label cannot pass the plan and reach registration.
+    # ⛔ ONE ARGV, BUILT ONCE — and the plan above prints the SAME argv (`--name`, `--work` and
+    # `--replace` included, token elided), so what a dry run shows is what config.sh receives. A
+    # narrower plan is how `--replace` — the flag that takes over an existing registration of the
+    # same name — stayed invisible to the one mode whose job is to show it.
     set -- --unattended --url "https://github.com/$REPO" --token "$tok" \
            --name "$name" --labels "$LABELS" --work _work --replace
     ( cd "$d" && ./config.sh "$@" ) || die "config.sh failed for $name" 3
