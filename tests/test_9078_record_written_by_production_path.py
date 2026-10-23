@@ -165,29 +165,66 @@ def _disagreement(record: dict) -> str | None:
 RECORD_MIGRATION_FILES = [REPO_ROOT / "supabase" / "migrations" / name
                           for name in record_projection.RECORD_MIGRATIONS]
 
-#: The record migrations that NARROW an already-created column. They are the one
-#: class the "`journal_event` present ⇒ already migrated" shortcut below cannot
-#: stand in for: a container first migrated by a pre-#9264 tree carries
-#: `session.capture_redactions` as `jsonb`, and no re-apply of the `CREATE TABLE`
-#: files changes it. Each file carries its own `DO` guard, so re-applying it on a
-#: narrowed column is a no-op — apply unconditionally, never by asking the DB
-#: which shape it is in (`_ensure_record_schema`'s job is to reach the shape this
-#: TREE expects, and a reader that trusts the container to report it can be told
-#: "already fine" by exactly the container that is stale).
-RECORD_NARROWING_FILES = [
-    REPO_ROOT / "supabase" / "migrations"
-    / "20261022000001_record_session_capture_redactions_integer.sql",
-    # #9600/R6 (#9554), and NOT a narrowing: a container migrated by a
-    # pre-#9554 tree has `journal_event` (so the shortcut returns) and no
-    # `tortoise_record_app`, no grants and no `*_app_tenant` policies — the
-    # armed leg then connects as a role that does not exist, or one that can
-    # touch nothing. Same class as the narrowings ("migrated" is not
-    # "migrated by THIS tree"), so it is re-applied on that path too. Safe to
-    # re-run: every statement is guarded or idempotent, and the attribute
-    # re-assert never touches LOGIN or a password (an operator's credential
-    # survives).
-    REPO_ROOT / "supabase" / "migrations"
-    / "20261025000001_record_tenancy_role_and_guc.sql"]
+#: The record migrations re-applied on the "`journal_event` present ⇒ already
+#: migrated" shortcut's OTHER branch, in apply order, as `(path, creates)`:
+#: `creates` is the ONE relation the file itself creates, or `None` for a file
+#: that only re-shapes or arms relations that are already there.
+#:
+#: WHY A LIST AT ALL. The shortcut cannot stand in for these files: a container
+#: first migrated by an older tree carries `journal_event` while missing what
+#: this TREE added — `session.capture_redactions` as `jsonb` (#9264), no
+#: `tortoise_record_app`, no grants, no `*_app_tenant` policy (#9554) — and
+#: "migrated" is not "migrated by THIS tree". So these are applied
+#: UNCONDITIONALLY, never by asking the DB which shape it is in
+#: (`_ensure_record_schema`'s job is to reach the shape this TREE expects, and a
+#: reader that trusts the container to report it can be told "already fine" by
+#: exactly the container that is stale). Each of these three is re-apply SAFE,
+#: but by two different mechanisms: the two arm/reshape files carry their own
+#: `DO` guard or `DROP … IF EXISTS` on every statement, while the CREATE-TABLE
+#: file is `creates`-conditional (see the ⚠️ below).
+#:
+#: ⛔ THE LIST MUST BE CLOSED AND ORDERED — that is the whole of #9800's P2.
+#: A file here may only name a relation that an EARLIER entry creates, or one
+#: the shortcut's base shape guarantees (`journal_event` present ⇒ the 20261012
+#: CREATE-TABLE files, which ship as one release). The tenancy migration's §4b
+#: names `public.session_narrative` UNCONDITIONALLY (`DROP POLICY IF EXISTS … /
+#: CREATE POLICY …`, justified in that file by "the table is guaranteed to exist
+#: by this migration's own position in the sequence" — true for a fresh ordered
+#: apply, false for this hand-picked replay). With that table absent, the whole
+#: file aborts `UndefinedTable` and — one implicit transaction per `execute` —
+#: rolls back the role, the grants and the nine other policies, leaving the
+#: armed leg exactly as unarmed as before and failing as `42P01` instead of the
+#: `InsufficientPrivilege` the re-apply exists to remove. Measured on
+#: postgres:16.15 (#9800 review P2), so the table's own migration is entry 2.
+#:
+#: ⚠️ `creates` IS NOT THE "NEVER ASK THE DB" RULE BEING BROKEN. That rule is
+#: about SHAPE (a stale container answering "already fine" about a column
+#: type). This asks EXISTENCE of a table with exactly one creator, and it is
+#: the only re-apply shape that file supports: it creates the table with
+#: `IF NOT EXISTS` but its two `CREATE POLICY` statements are UNGUARDED and
+#: migrations are append-only (#1095), so re-applying it where the table already
+#: exists raises `42710` (measured) — "present" therefore means "created by this
+#: file", which means the shape it wanted is there. A future migration that
+#: ALTERs the table needs its own entry here; existence-conditional is safe for
+#: a CREATE, never for a reshape.
+RECORD_REAPPLY_STEPS: list[tuple[Path, str | None]] = [
+    # The column narrowing: `session.capture_redactions` came in as `jsonb` and
+    # no re-apply of the `CREATE TABLE` files changes it. Guarded `DO` block, so
+    # re-applying on a narrowed column is a no-op.
+    (REPO_ROOT / "supabase" / "migrations"
+     / "20261022000001_record_session_capture_redactions_integer.sql", None),
+    # The tenth record table (§9.1 / R7). `creates`-conditional — see the ⚠️
+    # above. Without this entry the entry below cannot apply at all.
+    (REPO_ROOT / "supabase" / "migrations"
+     / "20261023000001_record_session_narrative.sql", "public.session_narrative"),
+    # #9600/R6 (#9554), and NOT a narrowing: a container migrated by a pre-#9554
+    # tree has `journal_event` and no `tortoise_record_app`, no grants and no
+    # `*_app_tenant` policies — the armed leg then connects as a role that does
+    # not exist, or one that can touch nothing. LAST on purpose: it is the file
+    # that arms every relation the two above reach.
+    (REPO_ROOT / "supabase" / "migrations"
+     / "20261025000001_record_tenancy_role_and_guc.sql", None),
+]
 
 #: The minimum Supabase-shaped substrate the record migrations need: the three
 #: roles they GRANT to, and the two control-plane tables their tenancy FKs
@@ -1786,22 +1823,39 @@ def _ensure_record_schema(conn) -> None:
 
     Idempotent by inspection (`journal_event` present ⇒ done), so it works both
     on a throwaway container and on one a previous run already migrated — with
-    ONE exception, the column narrowings (#9602 review P2-2): "migrated" is not
-    the same question as "migrated by THIS tree". A container first migrated by
-    a pre-#9264 tree has `journal_event` AND `session.capture_redactions jsonb`,
-    so the shortcut returns without narrowing it; the production INSERT then
-    fails with `DatatypeMismatch`, and with the tolerance deleted the residue
-    pass reports *"That is a NEW defect"* — blaming the current tree for a
-    schema it predates, with re-adding the tolerance (the defect this tree
-    correctly deleted) as the cheapest route back to green. The narrowings are
-    therefore re-applied on the already-migrated path too — and so is R6's
-    tenancy migration, for the same reason: without it the app role this
-    file's armed leg must connect as does not exist on an older container.
+    ONE exception, the entries in `RECORD_REAPPLY_STEPS` (#9602 review P2-2):
+    "migrated" is not the same question as "migrated by THIS tree". A container
+    first migrated by a pre-#9264 tree has `journal_event` AND
+    `session.capture_redactions jsonb`, so the shortcut returns without
+    narrowing it; the production INSERT then fails with `DatatypeMismatch`, and
+    with the tolerance deleted the residue pass reports *"That is a NEW
+    defect"* — blaming the current tree for a schema it predates, with
+    re-adding the tolerance (the defect this tree correctly deleted) as the
+    cheapest route back to green. Those entries are therefore re-applied on the
+    already-migrated path too — R6's tenancy migration for the same reason
+    (without it the app role this file's armed leg must connect as does not
+    exist on an older container), and `session_narrative`'s CREATE-TABLE
+    migration because the tenancy migration names that table unconditionally
+    (#9800 review P2: without it the tenancy file aborted `UndefinedTable` and
+    rolled back the role, the grants and the nine other policies with it).
+
+    A `creates`-bearing entry is applied only where its relation is ABSENT —
+    that file's `CREATE POLICY`s are unguarded and it is append-only, so a
+    re-apply over an existing table raises `42710`; see the list's own comment.
     """
     with conn.cursor() as cur:
         cur.execute("SELECT to_regclass('public.journal_event')")
         if cur.fetchone()[0] is not None:
-            for path in RECORD_NARROWING_FILES:
+            for path, creates in RECORD_REAPPLY_STEPS:
+                if creates is not None:
+                    # The relation name is inlined, never passed as a parameter,
+                    # so the stubbed cursor can see WHICH probe was answered
+                    # (`_StubCursor.fetchone`) — a stub that cannot tell the two
+                    # probes apart cannot model the container this branch is
+                    # for, which is how the missing entry above stayed green.
+                    cur.execute(f"SELECT to_regclass('{creates}')")
+                    if cur.fetchone()[0] is not None:
+                        continue
                 cur.execute(path.read_text(encoding="utf-8"))
             return
         # ONE statement: the preamble's role guards are `DO $$ … $$` blocks, and
@@ -2391,17 +2445,37 @@ def test_the_dream_drain_carries_the_enqueueing_requests_tenant(monkeypatch):
 # alone. That is the right question for the CREATE TABLE files and the WRONG one
 # for a column narrowing: a container first migrated by a pre-#9264 tree has
 # `journal_event` AND `session.capture_redactions jsonb`, so the shortcut would
-# return without narrowing it. These two cases pin both halves of the branch
-# without a Postgres (the DB legs of this file skip where psycopg2 is absent,
-# which is every CI job — so a stub is the only automated witness there is).
+# return without narrowing it. These cases pin both halves of the branch — and
+# their closure (#9800 review P2) — without a Postgres; the DB leg further down
+# is the one that actually EXECUTES the re-apply, against a container whose
+# `session_narrative` is gone.
+
+
+def _strip_sql_comments(text: str) -> str:
+    """The STATEMENTS of a migration file, with its `--` prose removed.
+
+    These files are ~70% prose *about* their own SQL (the tenancy migration
+    explains at length why it does NOT grant `DELETE` on `journal_event`), so a
+    substring assertion over the raw text can be satisfied — or reddened — by a
+    comment. The guards below are about what will be EXECUTED.
+    """
+    return "\n".join(line for line in text.splitlines()
+                     if not line.lstrip().startswith("--"))
 
 
 class _StubCursor:
-    """Records every statement `_ensure_record_schema` executes."""
+    """Records every statement `_ensure_record_schema` executes.
 
-    def __init__(self, log, journal_present):
+    `present` is the set of relations this simulated container CARRIES, so the
+    stub can model the shape the re-apply branch exists for: the record is there
+    (`public.journal_event`) while a table a later migration added is not.
+    `fetchone` therefore answers whichever `to_regclass('…')` probe was just
+    logged — the harness inlines the name for exactly that reason.
+    """
+
+    def __init__(self, log, present):
         self._log = log
-        self._journal_present = journal_present
+        self._present = present
 
     def __enter__(self):
         return self
@@ -2413,23 +2487,25 @@ class _StubCursor:
         self._log.append(sql)
 
     def fetchone(self):
-        return ("public.journal_event",) if self._journal_present else (None,)
+        probed = re.findall(r"to_regclass\('([^']+)'\)", self._log[-1])
+        assert probed, f"an unexpected fetchone() on {self._log[-1]!r}"
+        return (probed[0],) if probed[0] in self._present else (None,)
 
 
 class _StubConn:
-    def __init__(self, journal_present):
+    def __init__(self, *present):
         self.log = []
-        self._journal_present = journal_present
+        self._present = set(present)
 
     def cursor(self):
-        return _StubCursor(self.log, self._journal_present)
+        return _StubCursor(self.log, self._present)
 
 
 def test_ensure_record_schema_narrows_a_container_migrated_by_an_older_tree():
-    conn = _StubConn(journal_present=True)
+    conn = _StubConn("public.journal_event")
     _ensure_record_schema(conn)
 
-    executed = "\n".join(conn.log)
+    executed = _strip_sql_comments("\n".join(conn.log))
     assert "capture_redactions TYPE integer" in executed, (
         "an already-migrated container was left with its pre-#9264 column "
         "shape: every SessionRecorded row is then refused DatatypeMismatch and "
@@ -2452,10 +2528,15 @@ def test_ensure_record_schema_leaves_the_app_role_able_to_write():
     A role with no privileges would satisfy the check above and still fail every
     write, so pin the grants and the policy rather than the role's existence.
     """
-    conn = _StubConn(journal_present=True)
+    conn = _StubConn("public.journal_event")
     _ensure_record_schema(conn)
 
-    executed = "\n".join(conn.log)
+    # The STATEMENTS, not the raw text: this file is mostly prose about the
+    # grants (it spends a paragraph on why `DELETE` is withheld from
+    # `journal_event`), and a comment phrased "…we do not grant DELETE ON
+    # public.journal_event" would redden the negative assertion below while the
+    # SQL was unchanged (#9800 review note).
+    executed = _strip_sql_comments("\n".join(conn.log))
     assert "GRANT SELECT, INSERT ON public.journal_event  TO tortoise_record_app" in executed, (
         "the journal grant is the append-only asymmetry and must be re-applied")
     assert "DELETE ON public.journal_event" not in executed, (
@@ -2468,14 +2549,135 @@ def test_ensure_record_schema_leaves_the_app_role_able_to_write():
         "merely unscoped")
 
 
+def test_ensure_record_schema_reapplies_the_table_the_tenancy_file_names():
+    """The re-apply set must be CLOSED — #9800 review P2, both directions.
+
+    The tenancy migration names `public.session_narrative` in §4b
+    unconditionally, so on a container older than that table the whole file
+    aborted `UndefinedTable` and rolled back the role, the grants and the nine
+    other policies with it — the armed leg left exactly as unarmed as before.
+    Its CREATE-TABLE migration therefore has to be re-applied too, and BEFORE
+    the file that names the table.
+
+    The other direction is why that entry is `creates`-conditional rather than
+    unconditional: the file's two `CREATE POLICY`s are unguarded and it is
+    append-only, so re-applying it over an existing table raises `42710`
+    (measured on postgres:16.15) — an unconditional entry would break the
+    container that IS up to date, which is every CI run.
+    """
+    narrative = (REPO_ROOT / "supabase" / "migrations"
+                 / "20261023000001_record_session_narrative.sql")
+    tenancy = (REPO_ROOT / "supabase" / "migrations"
+               / "20261025000001_record_tenancy_role_and_guc.sql")
+
+    stale = _StubConn("public.journal_event")
+    _ensure_record_schema(stale)
+    applied = [sql for sql in stale.log if sql == narrative.read_text(encoding="utf-8")]
+    assert applied, (
+        "a container that predates `public.session_narrative` was not given it, "
+        "so the tenancy migration's unconditional §4b aborts 42P01 and the "
+        "role is never armed (#9800 review P2)")
+    order = [next(i for i, sql in enumerate(stale.log) if sql == p.read_text(encoding="utf-8"))
+             for p in (narrative, tenancy)]
+    assert order[0] < order[1], (
+        "the table must be created before the file that policies it")
+
+    current = _StubConn("public.journal_event", "public.session_narrative")
+    _ensure_record_schema(current)
+    assert not [sql for sql in current.log if sql == narrative.read_text(encoding="utf-8")], (
+        "re-applying a CREATE-TABLE file over a table that already exists "
+        "raises 42710 on its unguarded CREATE POLICY and rolls the tenancy "
+        "posture back with it — that entry is `creates`-conditional")
+    assert [sql for sql in current.log if sql == tenancy.read_text(encoding="utf-8")], (
+        "the arming half is unconditional: a container that has the table but "
+        "predates #9554 still needs the role, the grants and the policies")
+
+
 def test_ensure_record_schema_applies_everything_on_a_fresh_container():
-    conn = _StubConn(journal_present=False)
+    conn = _StubConn()
     _ensure_record_schema(conn)
 
     executed = "\n".join(conn.log)
     assert "CREATE ROLE anon" in executed
     for path in RECORD_MIGRATION_FILES:
         assert path.read_text(encoding="utf-8") in executed, path.name
+
+
+def _tables_added_since_the_reapply_set() -> list[str]:
+    """The record tables a container migrated by an OLDER tree does not have.
+
+    Derived from the migration files, never restated: every `CREATE TABLE` in a
+    record migration that sorts AT OR AFTER the first re-apply entry. That is
+    precisely the set of relations the re-apply branch has to reach, so a later
+    migration's new table joins it by existing — which is what keeps the
+    closure above a GUARD rather than a snapshot of today's defect (#9800 P2).
+    """
+    first = RECORD_REAPPLY_STEPS[0][0].name
+    tables: list[str] = []
+    for path in RECORD_MIGRATION_FILES:
+        if path.name < first:      # filenames sort in migration order
+            continue
+        tables += re.findall(r"CREATE TABLE(?: IF NOT EXISTS)? public\.(\w+)",
+                             path.read_text(encoding="utf-8"))
+    return sorted(set(tables))
+
+
+def test_ensure_record_schema_rebuilds_a_missing_record_table():
+    """The EXECUTED proof of the closure above (#9800 review P2).
+
+    The stub cases pin the shape of the re-apply; only this one runs the SQL, and
+    it runs it on the container the re-apply branch exists for: the record
+    present, the tables a LATER migration added absent. Inside a transaction that
+    is rolled back, so the shared database a lane or CI points at is untouched.
+    """
+    dropped = _tables_added_since_the_reapply_set()
+    assert dropped, (
+        "derivation failure: the re-apply set already covers every record table, "
+        "so this test would prove nothing — check the regex, not the tree")
+    conn = _record_db()
+    conn.autocommit = False
+    try:
+        _ensure_record_schema(conn)
+        with conn.cursor() as cur:
+            for table in dropped:
+                cur.execute(f"DROP TABLE IF EXISTS public.{table} CASCADE")
+                cur.execute(f"SELECT to_regclass('public.{table}')")
+                assert cur.fetchone()[0] is None, (
+                    f"the fixture did not reach the older-container shape: "
+                    f"public.{table} survived the drop")
+
+        # The already-migrated path, on a container missing those tables.
+        # Pre-fix this raised `UndefinedTable` (42P01) out of the tenancy
+        # migration, which rolled the whole tenancy posture back with it.
+        _ensure_record_schema(conn)
+
+        with conn.cursor() as cur:
+            cur.execute(
+                # `policyname = tablename || '_app_tenant'`, never a `LIKE '%…'`:
+                # psycopg2 reads a bare `%` as a placeholder (`%%` escapes it),
+                # and the exact form is what the migration actually creates.
+                "SELECT tablename, count(*) FILTER (WHERE policyname = "
+                "tablename || '_app_tenant') FROM pg_policies WHERE "
+                "schemaname = 'public' AND tablename = ANY(%s) GROUP BY tablename",
+                (list(dropped),))
+            policies = dict(cur.fetchall())
+            for table in dropped:
+                cur.execute(f"SELECT to_regclass('public.{table}')")
+                assert cur.fetchone()[0] is not None, (
+                    f"public.{table} was not re-created, so the file that names "
+                    "it aborts 42P01 and takes the role, the grants and the "
+                    "other policies down with it (#9800 review P2)")
+                assert policies.get(table) == 1, (
+                    f"public.{table} came back without its `*_app_tenant` "
+                    "policy, so the app role reads zero rows of it")
+                cur.execute(f"SELECT has_table_privilege('tortoise_record_app', "
+                            f"'public.{table}', 'INSERT')")
+                assert cur.fetchone()[0] is True, (
+                    f"public.{table} came back without the app role's grant: a "
+                    "replay of its records fails 42501 before RLS is consulted")
+    finally:
+        conn.rollback()
+        conn.close()
 
 
 # ════════════════════════════════════════════════════════════════════════════

@@ -137,11 +137,19 @@ Operator steps: `docs/infra-runbook.md` → "The record's connecting role".
   confer `nextval`, and `has_table_privilege(..., 'INSERT')` reads TRUE while the insert fails
   (#9600 review cycle 2, measured by executing the insert). Granted by the migration; proven by
   §7b of the posture suite, which lands a real `relation` row through the app role.
-- **No production code set that GUC** before this change: the GUC name appears as a SETTER in exactly
-  one place in the tree (`grep -rn "set_config('app.current_org_id" tortoise/` → 1, `record_projection`),
-  and before R6 even that statement did not exist — the only setters were `supabase/tests/*.sql`.
-  ⚠️ A bare `grep current_setting` is NOT the test: `tortoise/projection/` carries `set_config_reset_marker`,
-  a GRAPH marker unrelated to a Postgres GUC.
+- **No production code set that GUC** before this change. The one SETTER is `TENANT_GUC_SQL`
+  (`tortoise/record_projection.py:239`, `SELECT set_config('app.current_org_id', %s, true)`), executed in
+  exactly one place — `_apply_tenant_scope`, `tortoise/record_projection.py:3152` — which both record doors
+  reach through `scope_connection()` (`:3200`; `replay()` at `:3327`, `cache_projection.read_record_view()`
+  at `:789`). Before R6 that statement did not exist at all (introduced by this change, `git log -S`
+  `TENANT_GUC_SQL`): the only setters were `supabase/tests/*.sql`. `grep -rn TENANT_GUC_SQL tortoise/`
+  finds it. ⚠️ Two greps that look like the test and are NOT:
+  `grep -rn "set_config('app.current_org_id" tortoise/` returns **one** line, and it is PROSE —
+  `replay()`'s docstring at `:3269` quotes the statement, while the setter interpolates `TENANT_GUC` and so
+  cannot match, which reads as "the code never sets the GUC"; and a bare `grep current_setting` also hits
+  `tortoise/projection/`'s `set_config_reset_marker`, a GRAPH marker unrelated to a Postgres GUC. Scope: the
+  greps are over `tortoise/` only — `supabase/migrations/20261025000001_record_tenancy_role_and_guc.sql:43`
+  quotes the same statement, so "one place in the tree" is false as a tree-wide claim and is not made here.
 - The `authenticated` **read** surface already had a cross-tenant test
   (`20261012000001_record_schema.sql:410-418`, #7968) — that half was **not** missing. What was
   missing was the posture the *write path* runs under, which is what this lane added.
