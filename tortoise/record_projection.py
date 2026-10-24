@@ -136,7 +136,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -548,6 +548,28 @@ class NodeDelete:
 
 
 @dataclass(frozen=True)
+class NodesDelete:
+    """Remove ONE row per key in a LIST payload field (a merge's losers).
+
+    Why a second delete shape rather than a wider :class:`NodeDelete`: the
+    field a merge carries is a LIST of ids (``merge_ids``), not one key, and
+    overloading ``key_from`` to mean "sometimes one key, sometimes a list"
+    would make the two shapes indistinguishable at the declaration. One effect,
+    one shape — the ``#5285`` totality rule applies to the vocabulary too.
+
+    ``match`` is the identity the graph fold deletes by, and it is stated per
+    declaration for the same reason :data:`_ENTITY_MATCH_COLUMNS` exists: the
+    record's ``node_key`` column IS the journal id for Point/Session/Event, but
+    Object/Subject key on ``name`` and Source on ``url``, so a ``node_key``
+    predicate against a journal id silently touches 0 rows.
+    """
+
+    node: Node
+    keys_from: str
+    match: tuple[str, ...] = ("node_key",)
+
+
+@dataclass(frozen=True)
 class RelationUpsert:
     """One row per edge, per `ONTOLOGY.md` §8's reification rule."""
 
@@ -611,7 +633,7 @@ class Mutation:
     """The declared mutation for one record type (a documented union)."""
 
     effect: (
-        NodeSnapshot | NodePatch | NodeDelete
+        NodeSnapshot | NodePatch | NodeDelete | NodesDelete
         | RelationUpsert | RelationDelete | OpDispatch | NoRecordEffect
     )
     note: str = ""
@@ -778,21 +800,31 @@ RECORD_MUTATIONS: dict[str, Mutation] = {
         ),
     ),
     "PointsMerged": Mutation(
-        OpDispatch(
-            table_for_label={"Point": "point"},
-            patch_ops=frozenset(),
-            delete_ops=frozenset({"merge"}),
-            refused_ops={
-                "merge": "#331 merge is not materialized yet: the record's "
-                         "merge is survivor-update + loser-delete + edge "
-                         "re-point, and no unit owns that shape (the journal "
-                         "carries `keep_id`/`merge_ids`/`corrects`, not the "
-                         "post-merge edge set). Declared and REFUSED rather "
-                         "than approximated.",
-            },
-        ),
-        note="refused, not skipped — an approximate merge would silently "
-             "re-point edges the journal does not describe",
+        # #9892 — the refusal is GONE, and it was refused for the wrong reason.
+        #
+        # The merge this tree implements is "delete the merged-away Points": the
+        # graph fold's WHOLE mutation for the type is `_EntityHandlers._delete(mid)`
+        # (`MATCH (n:Point {id:$id}) DETACH DELETE n`) once per `merge_ids` entry
+        # (`projection/entities.py`, reached from `apply()`'s arm, `rebuild_all`'s
+        # pass-1b and `_apply_one`). `keep_id` is READ NOWHERE in `tortoise/`
+        # outside this module — the survivor is not patched, and no unit re-points
+        # an edge; `DETACH` drops the loser's incident relations instead.
+        #
+        # So this pair — the identity parent, then the node row — IS the faithful
+        # mutation, and it is the same pair `EntityMutated op=delete` emits. The
+        # issue's option 2 (derive a re-point from `keep_id`/`merge_ids` + the
+        # `relation` rows) is REJECTED: it would make the record richer than the
+        # graph fold, so `rebuild_from_record` would mint edges a journal replay
+        # deletes and the two rebuild routes would disagree.
+        #
+        # The refusal also cost more than a poor record: the plan never
+        # materialized, so the merge got no `journal_event` POSITION row either and
+        # a later replay could not see it was consumed.
+        NodesDelete(Node("point", "Point", "id"), keys_from="merge_ids"),
+        note="#9892 — one hard delete per `merge_ids` entry, the graph fold's "
+             "own mutation (`DETACH DELETE`); the cascade removes the loser's "
+             "incident relations, and `keep_id` is not written because no "
+             "unit on the graph side reads it",
     ),
     "EntityMutated": Mutation(
         OpDispatch(
@@ -1357,6 +1389,49 @@ def _key_value(node: Node, payload: Mapping[str, Any], key_from: str,
             "resolves to nothing, in silence"
         )
     return value
+
+
+def _key_list(record: Mapping[str, Any], keys_from: str) -> list[str]:
+    """The ids a record carries under `keys_from`, in the fold's own reading.
+
+    This is `_norm`'s carrier rule, not a new one: the graph fold reads the
+    NORMALIZED record, and `_norm` is `{**ev, **ev["point"]}` when `point` is a
+    dict — so `{"type": "PointsMerged", "point": {"merge_ids": [...]}}` is a
+    SUPPORTED journal shape (`tests/test_projection.py::test_falkor_apply_
+    points_merged_nested_format`, #325), and its ids sit one level down **and
+    WIN over an envelope copy of the same key**. Read nested first, then flat,
+    for exactly that reason; a non-dict `point` is ignored, as `_norm` ignores
+    it.
+
+    The entry filter is the fold's, verbatim (`for mid in ev.get("merge_ids")
+    or []` + `isinstance(mid, str)`): a non-str entry is skipped in both. The two
+    must agree on a MALFORMED record for the same reason they must agree on a
+    well-formed one — a divergence is a rebuild that produces a different graph
+    than the journal.
+
+    An absent/empty field is `[]`, which is a 0-statement no-op: the fold's
+    `merge_ids: []`/missing arm deletes nothing and does not raise, and
+    `tests/test_projection.py` pins that a `PointsMerged` with no ids must not
+    error.
+    """
+    nested = record.get("point")
+    value = (nested.get(keys_from) if isinstance(nested, Mapping) else None)
+    if value is None:
+        value = record.get(keys_from)
+    if value is None:
+        return []
+    if not isinstance(value, Iterable) or isinstance(value, Mapping):
+        # Not a shape any producer emits and not one the fold can iterate as
+        # ids — it would raise a bare TypeError mid-replay with no record named.
+        # ⚠️ ONE deliberate divergence, named: a MAPPING is refused here while
+        # the fold would iterate its KEYS and delete by them. No producer emits
+        # that shape, and deleting Points named by a dict's keys is the kind of
+        # silent loss this module exists to refuse.
+        raise RecordProjectionError(
+            f"record's {keys_from!r} is not an iterable of ids "
+            f"(got {type(value).__name__}: {value!r})"
+        )
+    return [key for key in value if isinstance(key, str)]
 
 
 def _identity_statement(org_id: str, graph_id: str, node: Node, key: str) -> Statement:
@@ -2950,6 +3025,12 @@ def _declared_mutations(
             statements += _delete_statements(
                 org_id, graph_id, companion, template.format(key=key)
             )
+        return statements
+    if isinstance(effect, NodesDelete):
+        statements = []
+        for key in _key_list(record, effect.keys_from):
+            statements += _delete_statements(org_id, graph_id, effect.node, key,
+                                             match=effect.match)
         return statements
     raise RecordProjectionError(
         f"{record_type!r} declares an effect this engine does not implement: "
