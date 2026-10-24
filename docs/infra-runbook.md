@@ -2987,9 +2987,87 @@ not put them in this section, where they would rot.
   graph that never reached the record is not in the record to restore from.
 - **It does not serve reads** — that is #7970. It does not reconcile
   (`record-reconcile`) and it does not write the record (`record_writer`).
+  ⚠️ **§9.4's verbatim fetch is its own verb, `record-text` (#9555 / R7)** — see
+  the section immediately below. This one restores the CACHE; that one serves the
+  RECORD's text, and neither reads the other's store.
 - **It is not a backup of the record.** Restoring the *record* itself is the
   backup/restore posture in #9557; this verb restores the **cache** from an
   already-restored record.
+
+## 9b. Serve §9.4's VERBATIM source text from the record (#9555 / R7)
+
+**When to run this.** §9.4 makes the claim→source link load-bearing: *"at answer
+time, send the source's VERBATIM text, not the extracted claim"* (measured 15.9 /
+22.0 pts). §9.1 places that text in Postgres — the S1 narrative in
+`public.session_narrative`, the raw turns in the episodic `public.point` rows —
+so this verb serves BOTH from the record alone: **not the journal, not the graph.**
+It is therefore the one evidence path that still answers with the graph gone.
+
+```bash
+# By session (the narrative + its transcript + the redaction count):
+python -m tortoise record-text \
+    --org <org_id> --graph <graph_id> --session <session_id>
+
+# §9.4's own shape — "the verbatim text behind this claim" — by source url.
+# The link is public.source.session_id, a COLUMN, so it survives the cache:
+python -m tortoise record-text --org … --graph … --source-url 'session:<session_id>'
+
+# Rendering bound only (the REPORTED turn count is never capped):
+python -m tortoise record-text … --session <id> --limit 20 --json
+```
+
+**A `--source-url` miss says WHICH miss it was.** "No such source in this
+tenant" and "the link resolved, the session holds no text" send you in opposite
+directions, so the verb prints the distinction rather than a generic absence
+(`--json` carries it too, as `source_linked` / `linked_session_id`, because
+`session_id` is `null` for both):
+
+- `… nothing was resolved, so nothing was proven about a session's text` — no
+  `public.source` row for that url in this tenant, or its `session_id` is unset.
+  The url is wrong, the capture never landed, or you are in the wrong tenant;
+- `… the source's link resolved to session '<id>', and the record holds no text
+  for that session` — the link IS good, so look at that session's capture.
+
+**Exit codes — and the 3-versus-2 split is the reason the verb exists:**
+
+| code | meaning | next step |
+|---|---|---|
+| `0` | served: the narrative and/or the turns came back, with `redactions`, `turn_count` and `turns` **read from the record** | use the text; `--json` carries the same numbers |
+| `3` | the tenant was **SCOPED AND READ** and the record holds no §9.1 text for that key — an honest absence (a session captured before the narrative carrier landed, one whose distillation produced no narrative, or a mistyped `--org`/`--graph`, which is a tenant that holds nothing) | check the session id / scope; do NOT read it as "the record lost the data" |
+| `2` | **no verdict**: no/invalid DSN, `psycopg2` absent, an unreadable record — **or a connection the tenant prologue REFUSES** (a role that bypasses RLS; a tenant GUC that did not stick) | fix the DSN/role. ⛔ A connection that cannot be scoped is reported HERE, never as `3` |
+
+⛔ **Why an unscopable connection is `2` and not `3`.** A tenancy-filtered read
+returns **0 rows silently**: the app role with no tenant GUC, or a transaction-mode
+pooler that dropped it, answers "this session has no narrative" about a session
+that has one. So the verb installs the record's **own tenant prologue**
+(`record_projection.scope_connection`) before any read: it sets
+`app.current_org_id` transaction-locally, **reads it back**, and refuses a
+connection whose role can bypass RLS — every refusal is `2`. Once it returns, the
+connection is provably scoped to one tenant, so a zero-row answer is a true
+statement about that tenant and `3` is an answer rather than a guess. That is the
+G1 note on #9555 and the app role from #9600, not a hypothetical.
+
+⛔ **The DSN must therefore be the app role** (`tortoise_record_app`), exactly as
+`record-restore` requires: a `postgres`/superuser DSN exits `2` with the role
+named. ⚠️ If you spell the role as a libpq connect option
+(`…?options=-c%20role=tortoise_record_app`) rather than as the DSN's user, that
+still works here — the verb no longer passes its own `options=` to `connect()`,
+which would have replaced yours (a measured defect in the first draft).
+
+**What it does NOT do.** The hosted ask/answer path's own verbatim fetch is not
+wired here: it is an MCP/SDK **surface** change, and `AGENTS.md` → *MCP/SDK Surface
+Approval* puts that behind Daniel's sign-off. This verb is the operator path.
+
+**Verification.** `tests/test_9555_narrative_carrier.py` — the carrier in the
+write path, the shape-keyed projection, the record-only read, and this verb's exit
+codes against a real Postgres, **run as the app role** (armed in CI's
+`test-record-postgres` job, which asserts zero skips).
+`tests/test_9555_narrative_cache_rebuild.py` — the cache destroyed and rebuilt
+from the record alone, with the narrative and the redaction count identical across
+the wipe. ⚠️ That leg needs **both** a record Postgres and a FalkorDB, and **no CI
+job arms both** (the armed record job provisions no cache; every FalkorDB job sets
+no record DSN), so it runs only on a manually-armed lane — stated here because an
+operator who read the line above as "CI defends this" would never run it.
 
 ## Secrets Matrix
 

@@ -1482,6 +1482,16 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # class. Pinned by
              # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
              "supabase/migrations/20261023000001_record_session_narrative.sql",
+             # #9555 / PR #9862 review round 4: R7's CARRIER migration
+             # (`20261024000001`, `COMMENT ON` only). Measured: a diff touching
+             # ONLY this file selected `surfaces: []`, so
+             # `test_9555_session_narrative.py` — which reads this file's text and
+             # pins the schema's narrative claim by name — did not run on the one
+             # change that can make its pin false. No `2026101*` prefix applies
+             # (same reason as the tenancy row below: `supabase/` is a
+             # NON_PYTHON_PREFIX), so without this entry the arm is a silent drop
+             # of the #1349/#3332/#3616 class.
+             "supabase/migrations/20261024000001_record_session_narrative_carrier.sql",
              # #9554 / PR #9600 review cycle 1 (P2): the TENANCY POSTURE migration —
              # the app role, its grants (including `relation_id_seq`'s USAGE) and
              # the `*_app_tenant` policies, one per record table (ten, since

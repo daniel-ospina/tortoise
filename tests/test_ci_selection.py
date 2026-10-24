@@ -2425,6 +2425,12 @@ def test_record_schema_pin_runs_on_migration_or_doc_change():
         # column set, `test_record_schema_placement.py` pins the record schema
         # against the placement table — plus the narrative suite itself.
         "supabase/migrations/20261023000001_record_session_narrative.sql",
+        # #9555/R7 (PR #9862 review round 4): the CARRIER migration — the
+        # append-only `COMMENT ON` correction that states the schema's narrative
+        # claim, and the file `test_9555_session_narrative.py` READS to pin it.
+        # Measured on the pre-fix head: `_sel([<this path>])` -> surfaces=[],
+        # full=False, so editing the very file the pin parses ran no guard.
+        "supabase/migrations/20261024000001_record_session_narrative_carrier.sql",
         # The DOC side of the #7968 pair, restated after #9638 review P1 deleted
         # it: `test_record_schema_placement.py` reads this file's table, so a
         # docs-only edit must select `core` too. Measured on the pre-fix head:

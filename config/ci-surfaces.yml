@@ -154,6 +154,14 @@ surfaces:
   # `__main__.py`-only diff (the #1349/#2938/#3154 silent-drop class). The file
   # is NOT in `carve_out:` — it rides in `test_files`.
   - test_9556_record_restore_verb.py
+  # #9555 (R7): §9.1's narrative CARRIER and §9.4's verbatim fetch. DUAL-
+  # REGISTERED with `core` for the #9556 reason exactly: `record_text.py` (the
+  # fetch composition, its exit codes, its scope proof) and its reader
+  # `record_read.py` match no SOURCE_PATTERN, while the operator verb lives in
+  # `tortoise/__main__.py` — an EXACT `api` SOURCE_PATTERN whose match REPLACES
+  # the `core` fallback, so one registration alone leaves the pins unexecuted
+  # on a diff touching the other half (the #1349/#2938/#3154 silent-drop class).
+  - test_9555_narrative_carrier.py
   # PR #9196 review P1: DUAL-REGISTERED with `core`, and THIS one IS
   # diff-carrying — the file is NOT in `carve_out:`, so it rides in
   # `test_files` for the surfaces `select()` matches. The S2 census pin
@@ -1555,6 +1563,8 @@ surfaces:
   - test_vector_write_seam_4520.py
   core:
   - test_2351_claim_class.py
+  - test_9555_narrative_cache_rebuild.py
+  - test_9555_narrative_carrier.py
   - test_9583_openapi_read_only_claim.py
   # #9583: the `core` arm of the read-only-claim / lockstep pin. Half of the file asserts
   # the SERVED OpenAPI descriptions (`api`, above); the other half asserts that

@@ -27,9 +27,44 @@ import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-#: The two legs this job exists for, by name: a deselect is not a pass.
+#: The legs this job exists for, by NAME prefix: a deselect is not a pass.
 ARMED_LEG_PREFIX = "test_the_public_capture_path"
-MIN_ARMED_LEGS = 2
+
+#: ⛔ WHICH FILES must each contribute at least one armed leg — a SET, not a
+#: count. A flat `armed >= 2` was the original rule and it was satisfiable with a
+#: whole FILE deselected the moment this job ran more than one file: measured on
+#: PR #9862, `tests/test_9555_narrative_carrier.py` alone carries three prefixed
+#: names, so `armed = 3 >= 2` certified a run in which NEITHER
+#: `tests/test_9078_…` leg executed — the #9551 hole ("the leg that would catch
+#: it never ran") reopened silently.
+#: And a COUNT of distinct files is the same defect one level down (PR #9862
+#: review round 4): two files that are not the two this job arms would satisfy
+#: `len(armed_files) >= 2`. The requirement is therefore the set: every file named
+#: here must have RUN one armed leg, and a file removed from the job's pytest
+#: argument list is a gate failure rather than a smaller certificate.
+ARMED_LEG_FILES = frozenset({
+    "test_9078_record_written_by_production_path",
+    "test_9555_narrative_carrier",
+})
+
+
+def _leg_module(case) -> str:
+    """The MODULE an armed leg belongs to — bare name, no path, no package.
+
+    `file` (`tests/test_x.py`) and `classname` (`tests.test_x`, or
+    `tests.test_x.Class`) both reduce to `test_x`, which is what
+    :data:`ARMED_LEG_FILES` names. The classname fallback drops trailing CLASS
+    components only (a class is capitalised) — ⛔ it must NOT drop the last
+    component unconditionally, which strips the MODULE name and collapses every
+    file into `tests` (measured on this change's own fixtures).
+    """
+    explicit = case.get("file")
+    if explicit:
+        return Path(explicit).stem
+    parts = (case.get("classname") or "").split(".")
+    while len(parts) > 1 and parts[-1][:1].isupper():
+        parts.pop()
+    return parts[-1] if parts else ""
 
 
 def decide(xml_path: Path) -> tuple[dict[str, int], list[str]]:
@@ -64,12 +99,15 @@ def decide(xml_path: Path) -> tuple[dict[str, int], list[str]]:
             skipped += 1
     armed = [c for c in root.iter("testcase")
              if c.get("name", "").startswith(ARMED_LEG_PREFIX)]
+    armed_files = sorted({_leg_module(c) for c in armed if _leg_module(c)})
     stats = {
         "tests": tests,
         "skipped": skipped,
         "xfailed": xfailed,
         "failed": failed,
         "armed": len(armed),
+        "armed_files": len(armed_files),
+        "armed_file_names": armed_files,
         # A leg that XFAILED did not skip for lack of a database, so the
         # report must not call it a skip: on a red, the one line an
         # operator reads is this one (#9772 review P2).
@@ -84,9 +122,13 @@ def decide(xml_path: Path) -> tuple[dict[str, int], list[str]]:
     if skipped:
         problems.append(f"{skipped} leg(s) SKIPPED — the record database "
                         "did not arm, or the driver is missing (#9551)")
-    if len(armed) < MIN_ARMED_LEGS:
-        problems.append(f"only {len(armed)} of the {MIN_ARMED_LEGS} armed capture "
-                        "legs ran — the Postgres proof was deselected (#9551)")
+    missing_files = sorted(ARMED_LEG_FILES - set(armed_files))
+    if missing_files:
+        problems.append(
+            f"no armed capture leg ran from {', '.join(missing_files)} — a whole "
+            f"file's legs were deselected (ran: {', '.join(armed_files) or 'none'}), "
+            "which neither a flat leg count nor a count of distinct files can see "
+            "(#9551)")
     if failed:
         problems.append(f"{failed} failing/erroring leg(s) — see the run step")
     return stats, problems
@@ -112,6 +154,7 @@ def main(argv: list[str]) -> int:
     print(f"tests={stats['tests']} skipped={stats['skipped']} "
           f"xfailed={stats['xfailed']} failed={stats['failed']} "
           f"armed_capture_legs={stats['armed']} "
+          f"from_files={stats['armed_files']} "
           f"(real_skips={stats['armed_real_skips']})")
     for problem in problems:
         print(f"::error::{problem}")

@@ -141,6 +141,15 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # fold the assertion onto a shared server graph. The delenv IS the point;
     # the fixture-param monkeypatch auto-restores (no lane leak).
     "test_destructive_wipe_guard.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #9664 capstone connector (the ChatGPT onboarding journey): the test drives
+    # the REAL HTTP app + tenancy resolver + record seam against a local SQLite
+    # db (`TORTOISE_DB_PATH` to a tmp_path), so it forces the EMBEDDED lane — the
+    # delenv IS the point, and a URI redirect would fold the assertion onto a
+    # shared server graph. Declared here because the module landed without its
+    # entry, which reds this gate on `main` (measured 2026-10-24: the only
+    # undeclared mutation in the tree).
+    "test_9664_capstone_connector_to_record.py": [
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     # #2724 churn-wave hygiene (2026-09-09): the two #2600 Phase 1 Task 1
     # apikey-verify unit tests (TestRegistryApikeyVerifyRawCreatedBy at
     # :163/:184) force the embedded lane (delenv the URI, then pin
