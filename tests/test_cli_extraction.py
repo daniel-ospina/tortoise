@@ -555,6 +555,63 @@ class TestWriterValidation(unittest.TestCase):
                        sdk_cls=_DriftSDK)
         self.assertIn("SDK drift", str(cm.exception))
 
+    def test_read_back_tripwires_fail_loudly(self):
+        # The README sells these four guards as the lane's ONLY loud failure
+        # mode for silent signature drift (a `**props` API turns a renamed
+        # kwarg into a stale property, not an error), and as "EP is checked,
+        # honestly". Nothing pinned them: every fake below returned the happy
+        # path, so the raises were unreachable and deleting them kept the suite
+        # green. Each case below makes its guard's condition TRUE and asserts
+        # the specific failure, so the guard cannot be removed silently.
+        #
+        # Mutation checks (each reds exactly one subtest):
+        #   * delete the `_bad` domain raise      -> "missing domain"
+        #   * delete the untiered-source raise    -> "still untiered"
+        #   * delete the not-converged raise      -> "did not converge"
+        #   * delete the truncated raise          -> "run truncated"
+        def _sdk(*, domain="d", reliability=None, ep=None):
+            class _S:
+                def __init__(self, **kw):
+                    pass
+                def query(self, **kw):
+                    return [{"id": "p1", "domain": domain, "status": "live"}]
+                def create_point(self, kind, content, **kw):
+                    return {"id": "p1", "status": "live"}
+                def set_source_tier(self, url, tier):
+                    pass
+                def get_source_reliability(self, url):
+                    return reliability
+                def compute_confidence(self, anchors=None, **kw):
+                    return ep
+                def close(self):
+                    pass
+            return _S
+
+        ok_ep = {"converged": True, "iterations": 1, "diagnostic": None,
+                 "truncated": False}
+        ok_rel = {"url": "s://t", "reliability": 0.9}
+        cases = [
+            # (fake-SDK kwargs, the message the writer must raise)
+            (dict(domain="other-domain", reliability=ok_rel, ep=ok_ep),
+             "points under source missing domain"),
+            (dict(reliability=None, ep=ok_ep),
+             "source still untiered after set_source_tier"),
+            (dict(reliability=ok_rel,
+                  ep={"converged": False, "iterations": 3,
+                      "diagnostic": "max_iterations", "truncated": False}),
+             "EP did not converge"),
+            (dict(reliability=ok_rel,
+                  ep={"converged": True, "iterations": 1,
+                      "diagnostic": None, "truncated": True}),
+             "EP run truncated"),
+        ]
+        for kwargs, message in cases:
+            with self.subTest(read_back=message):
+                with self.assertRaises(RuntimeError) as cm:
+                    self._exec([{"kind": "fact", "content": "tripwire probe"}],
+                               sdk_cls=_sdk(**kwargs))
+                self.assertIn(message, str(cm.exception))
+
 
 class TestWriterContract(unittest.TestCase):
     """The writer's contract with the REAL in-repo SDK (carve-out embedded
