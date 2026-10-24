@@ -140,9 +140,11 @@ WHAT THIS PINS
    every arm green, and the blast-radius door count is derived from those very
    cells. The residual is named there — the closure is name-based (permissive:
    it can miss a bad door, and it can invent a hop through a repeated attribute or
-   builtin name; a repeated function-LOCAL name no longer resolves, `#9817`), the
+   builtin name; a repeated function-local VARIABLE target no longer resolves
+   (`#9817` — the NAME of a nested `def`/`class` still does, and that residue is
+   declared in the note at `_DOOR_REACH_HOPS`), the
    budget is a BOUND (3, with two
-   measured exceptions), and its acceptance RATE is pinned by (22) so it cannot
+   measured exceptions), and its acceptance COUNT is pinned by (22) so it cannot
    loosen again silently. **The REST door is keyed on `(verb, path)`, not path
    alone** — a cell naming the sibling `GET` of a `POST` route is a different
    door, and was green before the verb was checked.
@@ -2521,9 +2523,10 @@ def _route_table() -> dict[tuple[str, str], frozenset[str]]:
 #: 2/3/4/5 = 26/59/90/170 of 418 and the shipped predicate 69, which is why
 #: `16.5 %` (69/418) reproduces there and `15.6 %` reproduces on NO index (a
 #: uniform 3 was 59/418 = 14.1 %, and the uniform-5 rate was 170/418, which is
-#: the "roughly two fifths" the arm BELOW states). ⚠️ The index matters: the
-#: CURRENT sweep above, locals excluded, applied to that same tree measures
-#: 24/34/42/52 and a shipped 36 — the difference is the defect, not the tree.
+#: the "170 of the 418 (row, table-door) pairs" the arm BELOW states). ⚠️ The
+#: index matters: the CURRENT sweep above, locals excluded, applied to that same
+#: tree measures 24/34/42/52 and a shipped 36 — the difference is the defect,
+#: not the tree.
 #: The DISCRIMINATION the old wording claimed was only PARTLY true there, and the
 #: per-DOOR distances are what show it, not a per-cell minimum. Measured there, per
 #: door and per CELL — a swapped DOOR changes every cell that carries it, so the
@@ -2604,7 +2607,9 @@ def _symbol_index() -> tuple[dict[str, frozenset[str]], dict[str, frozenset[str]
     same collision from 5 hops to 4 and took the accepted count from 69 pairs
     to 70). The relation's own note now states what the code enforces: a
     repeated ATTRIBUTE or builtin name can still buy a hop (`list`, `.delete`),
-    while a repeated function-LOCAL name no longer resolves. The `#9817`
+    while a repeated function-local VARIABLE target no longer resolves (the NAME
+    of a nested `def`/`class` still does — the residual note above declares that
+    remaining permissive direction). The `#9817`
     local-VARIABLE defect was the class that produced a WRONG attribution rather
     than an extra hop, so those definition nodes are excluded here and the
     negative probe for that exact pair lives in
@@ -2669,9 +2674,12 @@ def _symbol_index() -> tuple[dict[str, frozenset[str]], dict[str, frozenset[str]
                 index(node.body, rel, f"{qual}.", in_function=True)
             elif isinstance(node, ast.ClassDef):
                 defs.setdefault(node.name, set()).add(f"{rel}::{prefix}{node.name}")
-                # A class BODY still declares symbols (`Class.ATTR` constants) — but
-                # only when the CLASS is a symbol: a class defined inside a function
-                # is itself local, so its body carries the flag through unchanged.
+                # A class BODY still declares symbols (`Class.ATTR` constants) —
+                # the class ITSELF is always a symbol (a nested `def`/`class` is
+                # indexed whether or not it is inside a function), but a class
+                # local to a function has a local BODY, so only its `Assign`
+                # targets are dropped and the flag carries through unchanged (see
+                # `test_a_local_class_body_is_not_a_source_of_symbols`).
                 index(node.body, rel, f"{prefix}{node.name}.", in_function=in_function)
             elif (
                 isinstance(node, (ast.Assign, ast.AnnAssign))
@@ -3003,17 +3011,18 @@ _WORST_ROW_AT_THIS_HEAD = 4
 def test_the_attribution_predicate_does_not_swallow_the_whole_table():
     """The bound above is only a check if the predicate still DISCRIMINATES.
 
-    The REJECTED `_DOOR_REACH_HOPS = 5` accepted roughly two fifths of the
-    (row, table-door) pairs — 170 of 418 — against the PRE-`#9817` index that stood
-    when it was rejected (measured at `3f2f48932`, the commit that wrote the old
-    wording; ⚠️ the population is 418 pairs at BOTH commits, so the difference from
-    today's 52 is the index, not the table) — and at THAT index two of the three
-    substitutions that keep a REAL tool in a cell stayed green under it: the
-    backup-doors swap was ALREADY refused at 5, on row 31's 7-hop cell (under the
-    CURRENT index all three are refused even at 5; the per-door figures are in the
-    `_DOOR_REACH_HOPS` note). (The figure is stated as
-    a proportion on purpose: the population has grown since, and a percentage
-    restated against a fixed denominator is the rot this file retires.) A bound is not a proof, so the acceptance RATE is
+    The REJECTED `_DOOR_REACH_HOPS = 5` accepted 170 of the 418 (row, table-door)
+    pairs — and the population is 418 pairs at BOTH commits, so the difference
+    from today's 52 is the INDEX, not the table — measured against the
+    PRE-`#9817` index that stood when it was rejected (`3f2f48932`, the commit
+    that wrote the old wording). At THAT index two of the three substitutions
+    that keep a REAL tool in a cell stayed green under it: the backup-doors swap
+    was ALREADY refused at 5, on row 31's 7-hop cell (under the CURRENT index
+    all three are refused even at 5; the per-door figures are in the
+    `_DOOR_REACH_HOPS` note). The figure is a COUNT over that population, not a
+    rate, for the reason the `_DOOR_REACH_HOPS` note gives: a rate restated
+    against a fixed denominator rots on the next table growth (the `63/340`
+    precedent). A bound is not a proof, so the acceptance COUNT is
     pinned as its own number: the predicate may accept, over the table's own
     doors, at most `_ACCEPTED_PAIRS_AT_THIS_HEAD` pairs and at most
     `_WORST_ROW_AT_THIS_HEAD` for any single row. A predicate that starts
