@@ -2077,10 +2077,13 @@ def test_the_public_capture_path_writes_the_record(capture_sdk, monkeypatch,
       `public.record_event_stream`). The row is keyed on the ordinal
       `EventLog.append` reported (#9190), so the live write and a later replay
       give one record one number;
-    * **semantic** — `object` / `subject`, asserted against the objects the
-      capture actually emitted (counted from the journal, so the claim is
-      non-vacuous either way: a capture that emits no Object record must produce
-      no Object row);
+    * **semantic** — `object` only, asserted against the objects the capture
+      actually emitted (counted from the journal, so the claim is non-vacuous
+      either way: a capture that emits no Object record must produce no Object
+      row). The layer's **Subject** half is a SEPARATE leg below, because a
+      capture never emits `SubjectAdded` (#9893) — this sentence used to claim
+      `subject` here, which was false of the product and is the claim that let
+      the half go unguarded.
     * **procedural** — a VIEW, never a table ("the procedural layer owns no
       table", migration 4): `object_current_status` folds the `object` rows.
 
@@ -2222,7 +2225,7 @@ def test_the_public_capture_path_writes_the_epistemic_layer(capture_sdk,
 
 
 def test_the_public_subject_door_writes_the_semantic_layers_subject_half(
-        monkeypatch, tenant, tmp_path):
+        capture_sdk, monkeypatch, tenant):
     """#9893 — `subject` receives a row from the PUBLIC door, not a probe.
 
     The epic's acceptance names **Subjects** alongside Objects, and the semantic
@@ -2237,10 +2240,16 @@ def test_the_public_subject_door_writes_the_semantic_layers_subject_half(
     reading as a pass. Then the row count must cover the records the journal
     actually carried.
 
-    The FALSIFIER was observed red: deleting the `SubjectAdded` dispatch from
-    `record_projection.RECORD_MUTATIONS` reds this leg (`subject` gets no row)
-    rather than skipping it, and the non-vacuity guard alone reds it if the
-    producer stops journaling. Recorded in the PR body.
+    The FALSIFIER was observed red, and the shape matters: replacing
+    `RECORD_MUTATIONS["SubjectAdded"]` with a `NoRecordEffect` reds this leg at
+    the count (`the record holds 0 Subject row(s) for the 1 SubjectAdded
+    record(s)`). DELETING the dispatch instead reds EARLIER, at the
+    `write_failed` delta below, because an undeclared record type is refused
+    (`UnknownJournalRecordType`) — both are red and neither is a skip, but the
+    two failures are different assertions, so a lane reproducing the falsifier
+    should use the `NoRecordEffect` form and read the count. The non-vacuity
+    guard alone reds it if the producer stops journaling. Recorded in the PR
+    body.
     """
     conn = _record_db()
     try:
@@ -2250,9 +2259,7 @@ def test_the_public_subject_door_writes_the_semantic_layers_subject_half(
         # superuser handle stays with the seeding/assertion connection.
         monkeypatch.setenv(record_writer.RECORD_DSN_ENV,
                            _app_role_dsn(os.environ[RECORD_DB_ENV]))
-        journal_path = tmp_path / "subject-journal.jsonl"
-        sdk = TortoiseSDK(str(tmp_path / "subject-graph.db"),
-                          event_log_path=str(journal_path))
+        sdk, journal_path = capture_sdk()
         before = dict(monitoring.record_write_failure_counts())
         with use_record_tenant(*tenant):
             created = sdk.create_subject("Acme Corp",
@@ -2260,7 +2267,11 @@ def test_the_public_subject_door_writes_the_semantic_layers_subject_half(
         lost = (monitoring.record_write_failure_counts().get("write_failed", 0)
                 - before.get("write_failed", 0))
 
-        assert created, "the public subject door returned no id"
+        # The door returns a FLAT node (`_flat_entity_result`), so assert the
+        # key the message names — a bare truthiness check would pass on a node
+        # carrying no identity at all.
+        assert created.get("id"), (
+            f"the public subject door returned no id: {created!r}")
         assert lost == 0, (
             "the subject door's record write failed — `SubjectAdded` is a "
             "declared `NodeSnapshot` on `subject`, so the row must land")
