@@ -1220,9 +1220,7 @@ def _results_row(doc: str, number: int) -> str:
     characters for most rows, eight where a finding cell itself carries one. Taking
     the first match would pin the WRONG ROW and silently assert against the input
     list, so pick the row with the most pipe characters; that is the results row by
-    construction. No absolute count is claimed here beyond the comparison, because
-    the count varies by row and this docstring is not where such a number would
-    notice it had moved.
+    construction.
 
     Returns "" when no such row exists, which fails the caller's assertion rather
     than the extraction — a deleted row must read as "the row no longer says it",
