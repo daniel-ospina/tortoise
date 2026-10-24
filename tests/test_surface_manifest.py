@@ -2584,7 +2584,8 @@ def test_the_guard_refuses_an_sdk_row_whose_name_is_not_its_method(tmp_path):
     keeping a real method contributes nothing to the comparison. Measured before the fix:
     a fabricated `name: sdk:totally_new_and_unapproved` carrying an existing `method` and
     `exemption: true` → `OK … 151 public SDK methods (1 exempt)`, exit 0. The derivation
-    emits `sdk:<method>` for every one of the 150 rows, so that identity is the check.
+    emits `sdk:<method>` for every `sdk:` row, so that identity is the check (the
+    count is whatever the surface is — 149 today, 150 when this was measured).
     """
     doc = _manifest()
     real = next(r for r in doc["rows"] if str(r["name"]).startswith("sdk:"))

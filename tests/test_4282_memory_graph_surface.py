@@ -171,6 +171,32 @@ class TestTheMergeDidNotChangeBehaviour:
                    if r["graph_id"] == g["graph_id"])
         assert row["name"] == "prod"
 
+    def test_a_non_bool_recording_is_refused_not_stored(self, sdk, team):
+        """The `_Unset` annotation is NOT the enforcement — this guard is.
+
+        `sdk.py` is `from __future__ import annotations`, so at runtime every
+        annotation is a string; the only static consumer (`mypy tortoise/`) disables
+        `arg-type` repo-wide. So a `recording="false"` reaching the write would be
+        stored VERBATIM, and `hosted_api._apply_graph_recording_override` resolves the
+        override with `bool(override)` — `bool("false")` is `True`, i.e. session
+        recording left ON for a caller who asked to disable it. Same strict-bool rule
+        the REST twin declares (`GraphRecordingPatch._strict_bool`: "reject anything
+        that is not an actual bool"), enforced here before any read or write.
+
+        Pre-fix this fails: the string is stored and the call returns True.
+        """
+        g = sdk._graph_create(team["id"], "prod", kind="custom")
+        for bad in ("false", "true", "", 1, 0, [False], {"on": False}):
+            with pytest.raises(TypeError, match="STRICT bool"):
+                sdk.update_memory_graph(team["id"], g["graph_id"], recording=bad)
+        assert _recording(sdk, team["id"], g["graph_id"]) is None, (
+            "a REFUSED `recording` still wrote the override")
+        # The refusals must leave the method usable and the node untouched: a real
+        # bool still writes, and a rename still does not disturb the override.
+        assert sdk.update_memory_graph(
+            team["id"], g["graph_id"], recording=False) is True
+        assert _recording(sdk, team["id"], g["graph_id"]) is False
+
     def test_an_update_that_asks_for_nothing_is_refused(self, sdk, team):
         """A silent no-op that reports True is the failure mode this refuses."""
         g = sdk._graph_create(team["id"], "prod", kind="custom")

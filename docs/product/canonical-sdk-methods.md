@@ -22,7 +22,7 @@ related:
 
 **Read this for coverage, not for names.** This document is two things: an **inventory of all 149
 methods that exist today**, placed in exactly one group, duplicates collapsed and gaps named; and an
-alongside that, an **earlier target sketch** (32 groups over 149 names).
+alongside that, an **earlier target sketch** (32 groups over 148 names).
 
 > ⛔ **The SDK target is `docs/product/beta-sdk-surface.md` (40 methods), not this document.**
 > Where the two disagree, that doc governs. They really do disagree: this sketch says
@@ -337,7 +337,7 @@ public SDK/API surface?** Counts were derived by parsing source with `ast`, not 
 **Where this lands for us.** 149 public methods on one flat class is ~5.5× the largest flat
 surface observed (Pinecone's `Index`, 27). But the
 evidence does **not** say "delete 128 methods" — it says **namespace**, and it says
-**collapse the aliases**. The sketch above does exactly that: **32 groups over 149
+**collapse the aliases**. The sketch above does exactly that: **32 groups over 148
 names** — 26 memory-facing (R1–R9, W1–W17) and 6 control-plane namespaces (N1–N6) —
 reached by grouping and merging; the retired primitives stop resolving — a call raises with the
 hint naming its replacement (#3836 (c)) — and `backfill_v25` is archived. The

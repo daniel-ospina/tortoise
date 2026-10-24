@@ -4941,8 +4941,17 @@ class _Unset:
     Annotating the parameter ``bool | None | object`` would collapse to ``object``
     (a union with ``object`` IS ``object``), which silently drops the contract: a
     caller could pass ``recording="false"`` and the registry would store a STRING
-    that reads back truthy, leaving recording ON. With a distinct type the accepted
-    set is exactly ``{True, False, None, _UNSET}`` at zero runtime cost.
+    that reads back truthy, leaving recording ON.
+
+    ⛔ The ANNOTATION is not the enforcement — ``sdk.py`` is
+    ``from __future__ import annotations``, so at runtime every annotation is a
+    string, and the only static consumer (``mypy tortoise/``) disables
+    ``arg-type``. ``update_memory_graph`` therefore REFUSES a non-``bool``
+    ``recording`` with a ``TypeError`` before any write, so the accepted set really
+    is ``{True, False, None, _UNSET}``. Same rule, same wording as the REST twin
+    (``hosted_api.GraphRecordingPatch._strict_bool``: *"reject anything that is not
+    an actual bool"*), because ``_apply_graph_recording_override`` resolves the
+    stored value with ``bool(override)`` — a stored ``"false"`` reads back ON.
     """
 
     __slots__ = ()
@@ -32113,7 +32122,7 @@ class TortoiseSDK:
         SOR is the ``graphs`` table (20260901000001) — but the INSERT path
         into it is C2/C3 (provisioning service, out of C1 scope), so this
         method still returns the deterministic id WITHOUT persisting; the
-        registry-shaped list seam (graph_metadata/graph_list) derives the
+        registry-shaped list seam (graph_metadata/list_memory_graphs) derives the
         default graph from organizations.graph_name and reads custom rows once they
         exist. Selfhost (registry mode) keeps the registry Graph node. The
         zero-registry-writes cutover contract (registry node count == 0)
@@ -32342,13 +32351,31 @@ class TortoiseSDK:
         False on an unknown graph — callers map that to 404. At least one of
         ``name``/``recording`` must be given; a call that asks for nothing is
         a programming error, not a no-op (it would otherwise report success
-        having written nothing).
+        having written nothing). ``recording`` must be a REAL ``bool`` or
+        ``None`` — anything else (``"false"``, ``1``, …) raises ``TypeError``
+        rather than being stored, the same strict-bool rule the REST PATCH
+        applies.
         """
         if name is None and recording is _UNSET:
             raise ValueError(
                 "update_memory_graph needs at least one field to change — "
                 "pass name=... and/or recording=... (recording=None CLEARS "
                 "the override; omitting it leaves the field untouched)")
+        # The `_Unset` annotation narrows the TYPE; this is the runtime half, and the
+        # half that matters: `sdk.py` defers annotations (`from __future__ import
+        # annotations`), so the annotation is a STRING to the interpreter and mypy's
+        # `arg-type` is disabled repo-wide — nothing would reject a truthy string.
+        # Refusing it here (before any read or write) is what stops a caller's
+        # `recording="false"` becoming a stored STRING that `bool(override)` in
+        # `hosted_api._apply_graph_recording_override` reads back as recording ON.
+        if (recording is not _UNSET and recording is not None
+                and not isinstance(recording, bool)):
+            raise TypeError(
+                "update_memory_graph's `recording` is a STRICT bool or None — got "
+                f"{type(recording).__name__} ({recording!r}). `None` CLEARS the "
+                "override and omitting the parameter leaves it untouched; a truthy "
+                "string (e.g. \"false\") would be stored verbatim and read back as "
+                "recording ON, so it is refused rather than coerced.")
         reg = self._get_registry()
         rows = reg.query(
             "MATCH (g:Graph {org_id:$tid}) RETURN g.id, g.kind, "
