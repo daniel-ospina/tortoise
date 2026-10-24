@@ -1613,9 +1613,17 @@ def test_the_documented_failure_classes_reconcile_with_the_committed_records():
         f"the correction run carries {correction_undeclared} undeclared kind(s) — "
         f"update results row 5 and the aggregate sentence together"
     )
-    assert f"{number_words[correction_undeclared]} undeclared kind elsewhere" in doc, (
-        "results row 5 and the aggregate no longer agree on the correction run's "
-        f"undeclared-kind count ({correction_undeclared})"
+    # BOTH statements, not one. The aggregate's copy is line-wrapped ("one
+    # undeclared\nkind elsewhere"), so a raw `in doc` matched only row 5 and
+    # masked the aggregate drifting alone — the exact defect cycle 5 found, pinned
+    # in one direction only (#9695 review cycle 6). Normalised: two occurrences.
+    normalized_doc = " ".join(doc.split())
+    correction_phrase = (
+        f"{number_words[correction_undeclared]} undeclared kind elsewhere"
+    )
+    assert normalized_doc.count(correction_phrase) == 2, (
+        f"results row 5 AND the aggregate must both state {correction_phrase!r}; "
+        f"the doc states it {normalized_doc.count(correction_phrase)} time(s)"
     )
 
     contradicting_graph = json.loads(
