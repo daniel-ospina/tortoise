@@ -3317,7 +3317,10 @@ def _run_indexnow_proxy(
     tmp_path: Path,
     proxy_code: str = "401",
     proxy_body: str = '{"error":"not_signed_in"}',
-    fail_first: bool = False,
+    # a COUNT (`99` fails EVERY attempt) — a bool could only ever express "one
+    # blip", which the retry absorbs, so the step's transport-failure arm was
+    # unreachable from here.
+    fail_first: int | bool = False,
 ) -> tuple[int, str, list[str]]:
     """Run the shipped app-origin proxy gate; return (rc, output, urls requested)."""
     bin_dir = _stub_bin(tmp_path, "curl", STUB_INDEXNOW_CURL)
@@ -3493,6 +3496,9 @@ def test_the_indexnow_gate_passes_when_the_surface_is_correct(tmp_path) -> None:
             {"gate_code": "503", "gate_body": "<html><body>503</body></html>"},
             "could not verify",
         ),
+        # A transport failure never reached the route: it must not be reported as
+        # "did not refuse an anonymous caller" (the blip-as-broken-route mistake).
+        ({"gate_code": "000"}, "could not verify"),
     ],
 )
 def test_the_indexnow_gate_fails_for_each_broken_surface(tmp_path, argv: dict, needle: str) -> None:
@@ -3523,6 +3529,11 @@ def test_the_indexnow_gate_fails_for_each_broken_surface(tmp_path, argv: dict, n
             {"proxy_code": "503", "proxy_body": '{"error":"session_store_unavailable"}'},
             "could not verify",
         ),
+        # ANY 5xx is the same class. An exact `503)` arm let 502/504 (origin down)
+        # and Cloudflare's 520-522/524 fall through to the arm that blames the route.
+        ({"proxy_code": "502", "proxy_body": "<html>bad gateway</html>"}, "could not verify"),
+        ({"proxy_code": "504", "proxy_body": ""}, "could not verify"),
+        ({"proxy_code": "521", "proxy_body": "<html>origin down</html>"}, "could not verify"),
     ],
 )
 def test_the_indexnow_proxy_gate_fails_for_each_broken_surface(
@@ -3576,6 +3587,23 @@ def test_the_indexnow_gate_retries_a_bad_200_instead_of_accepting_it(tmp_path) -
     assert rc == 0, out
     origin = [c for c in calls if f"/{_INDEXNOW_KEY}.txt?cb=" in c]
     assert len(origin) == 2, f"a bad 200 was accepted on the first attempt: {calls}"
+
+
+def test_the_indexnow_proxy_gate_diagnoses_a_dead_route_instead_of_blaming_it(tmp_path) -> None:
+    """Every proxy attempt blips: an outage, not a missing route.
+
+    `deploy-dashboard` is a blocking job and its `000)` arm is the ONLY thing that
+    distinguishes "the origin never answered" from "the route is gone" — two
+    failures with opposite fixes. It was unreachable from this harness while
+    `fail_first` was a bool, so a mutation deleting the arm would have left the
+    suite green.
+    """
+    rc, out, calls = _run_indexnow_proxy(tmp_path, fail_first=99)
+    assert rc == 1, out
+    assert "::error::" in out, out
+    assert "could not verify" in out, f"a transport failure blamed the route: {out!r}"
+    assert "did not answer the proxy's session gate" not in out, out
+    assert calls, "nothing was requested"
 
 
 def test_the_shipped_extractor_reads_the_shipped_constant(tmp_path) -> None:
@@ -3646,7 +3674,11 @@ def test_the_indexnow_gate_diagnoses_a_dead_origin_instead_of_aborting_silently(
     rc, out, calls = _run_indexnow_gate(tmp_path, fail_first=99)
     assert rc == 1, out
     assert "::error::" in out, f"the step died without a diagnosis: {out!r}"
-    assert "curl-failed" in out or "000" in out, out
+    assert "could not verify" in out, out
+    assert "is not served by the deployment" not in out, (
+        f"a transport failure was reported as a deploy fault: {out!r}"
+    )
+    assert "curl-failed" in out, out
     assert calls, "nothing was requested"
 
 

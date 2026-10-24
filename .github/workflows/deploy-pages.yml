@@ -734,6 +734,9 @@ jobs:
           # 32 bytes — a false PASS in exactly the arm that compares the body (#5084).
           D="${RUNNER_TEMP:-/tmp}/indexnow-$$"
           mkdir -p "$D"
+          # A self-hosted runner would otherwise accumulate one scratch dir per run —
+          # the same shared-`/tmp` surface this change exists to de-risk.
+          trap 'rm -rf "$D"' EXIT
           : > "$D/key.body"
           : > "$D/key.hdr"
           : > "$D/key.err"
@@ -787,12 +790,22 @@ jobs:
           # step when the header file is empty, bypassing the `case` arm below that
           # exists to say "is not text/plain".
           ctype=$(awk 'tolower($1) == "content-type:" { sub(/^[^:]*:[[:space:]]*/, ""); gsub(/\r/, ""); print; exit }' \
-                    "$D/key.hdr" 2>/dev/null)
+                    "$D/key.hdr" 2>/dev/null || true)
           body_len=$(wc -c < "$D/key.body" | tr -d ' ')
           edge_len=$(wc -c < "$D/edge.body" 2>/dev/null | tr -d ' ')
           echo "$url -> origin $code (cache ${cache:-unknown}) | ${ctype:-no content-type} | $body_len bytes (the key is ${#KEY} bytes) | edge $edge / $edge_len bytes"
           if [ "$code" != "200" ]; then
-            echo "::error::$url answered $code at ORIGIN — the IndexNow key file is not served by the deployment ($nonce), so the endpoint cannot fetch the proof of host ownership and answers 403 to every submission (#9680)."
+            # A transport failure is NOT "the deployment stopped serving the file".
+            # The two failures in this loop have opposite fixes — a runner/edge
+            # outage needs a re-run, a missing file needs a deploy looked at — so
+            # they must not share a sentence (#3485 for the other probes; this one
+            # said "is not served by the deployment" for BOTH).
+            case "$code" in
+              curl-failed*)
+                echo "::error::could not verify $url at ORIGIN — no response completed after 10 attempts (${code}); curl said: $(head -3 "$D/key.err" 2>/dev/null | tr '\n' ' '). This is a runner/edge transport failure, NOT evidence the key file is gone. Re-run the job." ;;
+              *)
+                echo "::error::$url answered $code at ORIGIN — the IndexNow key file is not served by the deployment ($nonce), so the endpoint cannot fetch the proof of host ownership and answers 403 to every submission (#9680)." ;;
+            esac
             exit 1
           fi
           if [ "$cache" = "hit" ]; then
@@ -857,6 +870,11 @@ jobs:
               # already handles this shape this way.
               503*)
                 echo "::error::could not verify /blog/api/notify-publish — the answer was ${gate%|*} (body: ${gate_body:-<empty>}), which is an outage, not a missing route (#3485). Re-run the job; nothing about the route is disproven." ;;
+              # A transport failure never reached the route at all. Without this arm
+              # it fell through to "did not refuse an anonymous caller", i.e. a blip
+              # reported as a broken route — the arm's own comment forbids it.
+              000*)
+                echo "::error::could not verify /blog/api/notify-publish — no response completed after 5 attempts (transport failure). NOT evidence the route is gone; re-run the job." ;;
               *)
                 echo "::error::/blog/api/notify-publish did not refuse an anonymous caller with the admin gate (status $gate, body: ${gate_body:-<empty>}) — the console's publish would submit nothing, and nothing else would say so." ;;
             esac
@@ -1327,6 +1345,7 @@ jobs:
           # every lane running the suite on this host (#5084).
           D="${RUNNER_TEMP:-/tmp}/indexnow-proxy-$$"
           mkdir -p "$D"
+          trap 'rm -rf "$D"' EXIT
           : > "$D/proxy.body"
           proxy=000
           for attempt in $(seq 1 5); do
@@ -1356,6 +1375,11 @@ jobs:
               echo "::error::could not verify app.premiselabs.co/blog/api/notify-publish — no response completed after 5 attempts. NOT evidence the route is gone; re-run the job." ;;
             503)
               echo "::error::could not verify app.premiselabs.co/blog/api/notify-publish — the proxy answered 503 (${proxy_body:-no body}), which is its session-store-unavailable path, NOT a missing route. Re-run the job." ;;
+            # Any 5xx is the same class: an origin/edge outage, not the route
+            # disappearing. 502/504 (origin down) and Cloudflare's 520-522/524 were
+            # falling through to the arm that blames the route.
+            5[0-9][0-9])
+              echo "::error::could not verify app.premiselabs.co/blog/api/notify-publish — the answer was $proxy (${proxy_body:-no body}), an origin/edge outage, NOT a missing route. Re-run the job." ;;
             *)
               echo "::error::app-origin /blog/api/notify-publish did not answer the proxy's session gate (status $proxy, body: ${proxy_body:-none}) — the console's IndexNow call would not reach the handler, and only the browser console would say so." ;;
           esac
