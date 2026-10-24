@@ -587,7 +587,7 @@ way: a table whose rows carry the literal string `HEAD` is red by this repo's ow
 ## The entry point the run drives (and the receipt that hides four steps)
 
 The pipeline's OWN path is `TortoiseSDK.capture_session` →
-`sdk._extract_session_v2` (`sdk.py:11623`; called at `:10660`) →
+`sdk._extract_session_v2` (`sdk.py:11709`; called at `:10746`) →
 `extractor_v2.extract_session_v2` (`extractor_v2.py:7804`), which calls, in one pass.
 
 📌 **Cite convention for this bundle's own cites.** Every `file:line` THIS bundle adds is
