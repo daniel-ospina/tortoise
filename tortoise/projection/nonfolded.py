@@ -59,6 +59,15 @@ logger = logging.getLogger(__name__)
 
 #: ``EntityMutated`` state op (rename/restatus/revise) matched no entity.
 SHAPE_STATE_OP_MISS = "state-op-miss"
+#: #3590 D9: a fold record referenced an Object/Subject by NAME and NO live
+#: holder exists. NON-exempt: the projection never mints (a fold-time mint is
+#: not replay-deterministic), so the producer must register what it references
+#: before referencing it. A green pass here would silently drop the link.
+SHAPE_UNREGISTERED_REFERENCE = "unregistered-reference"
+#: #3590: a fold record referenced an Object/Subject by NAME and TWO OR MORE
+#: live entities hold it. NON-exempt, same reason as above — resolving would be
+#: a guess, and the graph then folds an arbitrary carrier.
+SHAPE_AMBIGUOUS_ENTITY_NAME = "ambiguous-entity-name"
 #: ``EntityMutated op=delete`` matched 0 rows.
 SHAPE_DELETE_MISS = "delete-miss"
 #: An ``EntityMutated`` op the fold has no arm for (recorded on #3299).

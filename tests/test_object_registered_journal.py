@@ -1,9 +1,13 @@
-"""#2194 — ObjectRegistered journaling for SDK capture-created Objects.
+"""#2194/#3590 — ObjectRegistered journaling for SDK capture-created Objects.
 
 Capture-created Objects (and their ObjectSuperseded folds) must survive
-``rebuild_all``: ``_create_entity`` journals ``ObjectRegistered`` on FIRST
-canonical registration (probe-gated — a canonical re-mention never
-double-journals), so the pass-1b replay + fold sweep have a node to fold.
+``rebuild_all``: ``_create_entity`` journals ``ObjectRegistered`` on EVERY
+Object create (#3590 retired the first-registration probe: with a minted id,
+"the node exists" no longer implies "this name was registered", so a probe could
+skip the registration of a live node and `rebuild_all` would destroy it). The
+duplicate line is replay-idempotent — the fold MERGEs by id and `createdAt`
+adopts first-wins — so the pass-1b replay + fold sweep always have a node to
+fold.
 
 Test classes:
 - Tests 1-7: RED at base (no journal / no unconditional reserved-prop pop).
@@ -19,11 +23,12 @@ import sys  # noqa: E402
 sys.path.insert(0, sys_path)
 
 import pytest  # noqa: E402
+from _node_ids import node_id  # noqa: E402
 
 from tortoise.ids import ulid  # noqa: E402
 from tortoise.log import EventLog  # noqa: E402
 from tortoise.projection.nonfolded import NonFoldedEventsError  # noqa: E402
-from tortoise.sdk import TortoiseSDK, _entity_name_id  # noqa: E402
+from tortoise.sdk import TortoiseSDK  # noqa: E402
 
 
 def _journaled(sdk, events_dir):
@@ -111,7 +116,7 @@ class TestCaptureFoldRoundTrip:
         createdAt == journaled createdAt (no rebuild-time drift).
 
         Parametrized over an ASCII name and a non-ASCII name so the probe's
-        name-conjunct + _entity_name_id sha-digest + JSONL mirror get unicode
+        minted-id + JSONL mirror get unicode
         coverage — a digest/param regression on non-ASCII input would
         silently fail-closed on genuinely-new registrations (the plan's
         Step 1.1 acceptance; the fail-closed consequence is the exact
@@ -132,7 +137,7 @@ class TestCaptureFoldRoundTrip:
             ors = _name_ors(journal, name)
             assert len(ors) == 1, f"exactly one ObjectRegistered expected: {ors}"
             line = ors[0]
-            assert line["id"] == _entity_name_id("Object", name), line
+            assert line["id"] == node_id(proj, "Object", name), line
             assert line["name"] == name
             assert line["object_kind"] == "core:org"
             assert line["status"] == "live"
@@ -155,12 +160,17 @@ class TestCaptureFoldRoundTrip:
 # ── Tests 3-4 (RED): only-on-create semantics ──────────────────────────────
 
 class TestOnlyOnCreate:
-    def test_remenion_does_not_double_journal_and_prop_churn_is_live_only(
+    def test_remenion_double_journals_and_rebuild_matches_live(
             self, tmp_path):
-        """Boundary 1 + accepted divergence pin: a canonical re-mention
-        (MERGE by name, ON MATCH) never double-journals; its prop mutations
-        are live-only — the journal keeps FIRST-registration props and
-        rebuild reverts to them."""
+        """A canonical re-mention (MERGE by ID, ON MATCH) APPENDS a duplicate
+        ``ObjectRegistered`` (#3590 retired the first-registration probe — see
+        the module docstring).
+
+        The old "only-on-create" divergence is GONE with it: replay used to see
+        only the first registration, so a live prop churn was invisible and
+        ``rebuild`` reverted to the first value. Now every create is journaled,
+        so replay lands on the same props as live — `rebuild == live`, which is
+        the invariant the epic exists for."""
         events = tmp_path / "events"
         events.mkdir()
         sdk = TortoiseSDK(str(tmp_path / "t3.db"),
@@ -183,15 +193,16 @@ class TestOnlyOnCreate:
             assert len(ids) == 1, "exactly one Object node"
             journal = _journaled(sdk, events)
             ors = _name_ors(journal, "strategy-A")
-            assert len(ors) == 1, (
-                f"re-mention must NOT double-journal: {len(ors)} lines")
-            assert ors[0]["object_kind"] == "dev:issue", (
-                "journal must hold FIRST-registration props, not the "
-                "churned live value")
+            assert len(ors) == 2, (
+                "a re-mention journals a second (replay-idempotent) "
+                f"registration line: {len(ors)} lines")
+            assert [ln["object_kind"] for ln in ors] == [
+                "dev:issue", "core:strategy"], (
+                "both registrations are journaled, in call order")
             proj.rebuild_all(str(events), confirm_destructive=True)
             rebuilt = _object_row(proj, "strategy-A", "objectKind")
-            assert rebuilt and rebuilt[0][0] == "dev:issue", (
-                "rebuild reverts to first-registration props (accepted "
+            assert rebuilt and rebuilt[0][0] == "core:strategy", (
+                "rebuild must reproduce the LIVE props (#3590: no "
                 "only-on-create divergence)")
         finally:
             sdk.close()
@@ -215,15 +226,18 @@ class TestOnlyOnCreate:
                 [{"superseded": "strategy-A", "supersedes_by": "strategy-B",
                   "evidence": "fold"}],
                 session_id="s1") == 1
-            # re-mention the SUPERSEDED name (post-fix: probe hits → skip)
+            # re-mention the SUPERSEDED name (post-#3590: resolves to the SAME
+            # id, so it appends a registration line that MERGEs onto the
+            # existing node — it must not clear the fold)
             sdk.create_entity("object", "strategy-A",
                               objectKind="core:strategy", is_episodic=False)
             rows = _object_row(proj, "strategy-A", "status")
             assert rows and rows[0][0] == "superseded", (
                 "re-mention must not reset superseded (#1350 clobber guard)")
             journal = _journaled(sdk, events)
-            assert len(_name_ors(journal, "strategy-A")) == 1, (
-                "re-mention of a superseded Object must not journal")
+            assert len(_name_ors(journal, "strategy-A")) == 2, (
+                "re-mention of a superseded Object journals a duplicate "
+                "registration, but must not add a fold or a reset")
             proj.rebuild_all(str(events), confirm_destructive=True)
             rows = _object_row(proj, "strategy-A", "status", "supersededBy")
             assert rows and rows[0][0] == "superseded", (
@@ -268,7 +282,7 @@ class TestStubAdoption:
                 "stub adoption must journal the canonical registration "
                 f"(probe by canonical id+name found no canonical row): {ors}")
             line = ors[0]
-            assert line["id"] == _entity_name_id("Object", "connector-name")
+            assert line["id"] == node_id(proj, "Object", "connector-name")
             # live adopted node carries the journaled createdAt (ON MATCH
             # coalesce(o.createdAt, $ca)) — byte-identity on the stub path
             rows = _object_row(proj, "connector-name", "id", "createdAt")
@@ -314,7 +328,7 @@ class TestDeleteDurability:
             proj = sdk._get_proj()
             sdk.create_entity("object", "delete-me-A",
                               objectKind="core:other", is_episodic=False)
-            oid = _entity_name_id("Object", "delete-me-A")
+            oid = node_id(proj, "Object", "delete-me-A")
             journal = _journaled(sdk, events)
             assert len(_name_ors(journal, "delete-me-A")) == 1
             assert sdk._delete_entity(oid) is True, "node must be deleted"
@@ -340,7 +354,7 @@ class TestDeleteDurability:
             proj = sdk._get_proj()
             sdk.create_entity("object", "delete-me-B",
                               objectKind="core:other", is_episodic=False)
-            oid = _entity_name_id("Object", "delete-me-B")
+            oid = node_id(proj, "Object", "delete-me-B")
             assert sdk._delete_entity(oid) is True
             sdk.create_entity("object", "delete-me-B",
                               objectKind="core:other", is_episodic=False)
@@ -446,7 +460,9 @@ class TestFoldMissWarning:
                           event_log_path=str(events / "events.jsonl"))
         try:
             proj = sdk._get_proj()
-            oid = _entity_name_id("Object", "ghost-name")
+            # #3590: an id to journal against for a name with NO node — an
+            # opaque value is all it can be now (the derived id is retired).
+            oid = ulid()
             sdk._emit_event("ObjectSuperseded", id=oid, name="ghost-name",
                             supersedes_by="successor-name")
             import logging
@@ -478,7 +494,9 @@ class TestDuplicateReplay:
                           event_log_path=str(events / "events.jsonl"))
         try:
             proj = sdk._get_proj()
-            oid = _entity_name_id("Object", "race-name")
+            # #3590: any opaque id — this test builds both registrations by
+            # hand, so the value only has to be ONE id.
+            oid = ulid()
             first_ts = "2026-01-01T00:00:00+00:00"
             second_ts = "2026-06-01T00:00:00+00:00"
             sdk._emit_event("ObjectRegistered", id=oid, name="race-name",
@@ -698,7 +716,7 @@ class TestCasReplayParity:
         try:
             proj = sdk._get_proj()
             name = "fr-B"
-            oid = _entity_name_id("Object", name)
+            oid = node_id(proj, "Object", name)
             sdk.create_entity("object", name, objectKind="core:other",
                               is_episodic=False)                  # Reg 1
             sdk._emit_event("ObjectSuperseded", id=oid, name=name,
@@ -749,7 +767,7 @@ class TestCasReplayParity:
         try:
             proj = sdk._get_proj()
             name = "dup-B"
-            oid = _entity_name_id("Object", name)
+            oid = node_id(proj, "Object", name)
             sdk.create_entity("object", name, objectKind="core:other",
                               is_episodic=False)
             sdk._emit_event("ObjectSuperseded", id=oid, name=name,

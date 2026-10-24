@@ -72,7 +72,7 @@ original keys back.
 
 ## The mapping, and why it is not a new id scheme
 
-``new = entity_name_id(label, old)`` — the **existing** canonical minter
+``new = _derived_legacy_handle(label, old)`` — a MIGRATION-ONLY handle
 (``tortoise/ids.py``), applied to the node's already-unique key. §1.4 rule 1:
 *"the legacy id is already the node's unique key; the rewrite is a rename of
 the key value, not a merge"*. So the target is one a reader can recompute, and
@@ -81,7 +81,7 @@ there is no second MINTER to drift. The resulting handle is canonical by
 
 ### ⚠️ What that target IS, stated plainly: a ``:Point`` key is then `poi-<hash>`
 
-The handle ``entity_name_id`` emits is ``label[:3]-<sha256[:26]>``, so a
+The handle ``_derived_legacy_handle`` emits is ``label[:3]-<sha256[:26]>``, so a
 re-keyed ``:Point`` key is **``poi-<hash>``** — and that is **not** the
 ``<timestamp-hex>-<uuid12>`` shape ``create_point`` mints, nor the one
 ``STORAGE-ARCHITECTURE`` §17.5 records `:Point` ids are minted in. Three
@@ -108,7 +108,8 @@ consequences a reader must not have to infer from :func:`is_canonical`'s union:
   random UUID, so a plan built from it could not be recomputed from the input,
   reviewed by a second lane, or verified on a revert. A deterministic,
   recomputable target is what makes this pass an auditable transform, and
-  ``entity_name_id`` is the only minter the repo already has that provides one.
+  ``_derived_legacy_handle`` is the only minter that provides one, and it exists
+  for this migration alone (#3590 retired the spelling as an entity id).
 
 What is NOT true, and must not be claimed: that this restores *the* canonical
 ``:Point`` spelling. It gives one deterministic, contract-recognised spelling to
@@ -175,8 +176,25 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from tortoise.cache_projection import KEY_PROPERTY
-from tortoise.ids import entity_name_id
 from tortoise.sdk import _CROCKFORD_ULID_RE, _ULID_RE, _is_canonical_entity_id
+
+
+def _derived_legacy_handle(label: str, legacy: str) -> str:
+    """``label[:3]-<sha256[:26]>`` for a LEGACY key — migration-only (#8607).
+
+    ⛔ #3590 retired this spelling as an ENTITY id: nothing derives identity from
+    a name any more, because ``obj-<sha26(name)>`` made a rename mint a second
+    entity and a delete+re-create resurrect the first one. This function exists
+    for exactly one job, and it is not a create path: it maps an ALREADY-EXISTING
+    legacy node key (``p-NNNNNNN``, ``EV-*``) to a deterministic, recomputable
+    handle so the offline re-key is idempotent and reviewable. It is defined
+    HERE — not in ``tortoise/ids.py`` — so no entity writer can reach for it.
+
+    Never call this from a write path. Use ``ids.ulid()`` (a minted opaque id).
+    """
+    digest = hashlib.sha256(f"{label}:{legacy}".encode()).hexdigest()[:26]
+    return f"{label[:3].lower()}-{digest}"
+
 
 #: Census buckets.
 CANONICAL = "canonical"
@@ -258,7 +276,7 @@ def shape(value: str) -> str:
     ``crockford-ulid``
         a standard 26-char Crockford base32 ULID (``_CROCKFORD_ULID_RE``).
     ``entity-handle``
-        ``label[:3]-<sha256[:26]>``, what ``_entity_name_id`` emits
+        ``label[:3]-<sha256[:26]>``, what ``_derived_legacy_handle`` emits
         (``sdk._CANONICAL_ENTITY_ID_RE``).
     ``legacy``
         anything else — the only bucket that is a rename candidate.
@@ -296,7 +314,7 @@ def is_canonical(value: object) -> bool:
 
 
 def canonical_id(label: str, legacy: str) -> str:
-    """The canonical id a legacy key is renamed to — ``entity_name_id``'s.
+    """The canonical id a legacy key is renamed to — ``_derived_legacy_handle``'s.
 
     Deterministic and total (one value per ``(label, legacy)``), which is what
     makes the pass idempotent and the plan reviewable: a reader recomputes it.
@@ -305,7 +323,7 @@ def canonical_id(label: str, legacy: str) -> str:
     the **entity-handle** spelling — NOT the ``<ts-hex>-<uuid12>`` a created
     point is minted with. See the module docstring, "What that target IS".
     """
-    return entity_name_id(label, legacy)
+    return _derived_legacy_handle(label, legacy)
 
 
 # ── dump access (the same accessors ``retype`` uses, so both read one shape) ─
@@ -957,7 +975,7 @@ def apply_plan(
         # never happened (measured: run documented step 2 twice — the second
         # pass renames nothing and REWRITES the report with `renames: []` — and
         # step 3 then "restores" the normalised dump while the original ids
-        # survive in no artifact, because `entity_name_id` is a sha256 and they
+        # survive in no artifact, because `_derived_legacy_handle` is a sha256 and they
         # are not re-derivable). Refused instead.
         if not plan.renames:
             problems.append(
