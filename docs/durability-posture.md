@@ -797,7 +797,7 @@ a written claim to the system it describes is **#5063**.
   `is [the|a|an|our|its|their|your] durab(le|ility)`. Every site below fails that
   SHAPE — and **not** because "store" is a different noun: `is the truth store`
   bound to a `journal` subject *would* match the middle alternation, as measured.
-  The blindness is the SHAPE, in three measured forms: *truth* sits with no `is`
+  The blindness comes in three measured forms: *truth* sits with no `is`
   copula after the subject (`appended to the truth store`, `rebuild retains the
   truth`, bare `TRUTH`); an adverb interrupts the predicate (`is still the
   truth`); or the copula predicates a NOUN and durability survives only inside an
