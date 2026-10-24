@@ -99,7 +99,7 @@ the runs and their output are in **§G**.
 | `object` | `supabase/migrations/20261012000002_record_semantic.sql:21` | 2 — semantic |
 | `subject` | `…02_record_semantic.sql:68` | 2 — semantic |
 | `point` | `supabase/migrations/20261012000003_record_epistemic.sql:50` | 3 — epistemic |
-| `relation` | `…03_record_epistemic.sql:166` | 3 — epistemic (**reified edges**). A row lands when a journaled record carries the edge — an **edge record**: `DirectEdgeCreated` — `create_direct_edge` writes `IMPL`/`NAND` with it, and since #9553 the structural-edge lane writes every predicate whose endpoints the fold can address through it (`aboutDocument`/`aboutSource` target a `:Source` and are excluded — see below) — `EntityLinked` (`about*`), and `DirectEdgeRepoint` on supersede; or, since #9553, a **node record's own carrier**: `CONTAINS` (the capture's ENVELOPE directive, `record_projection._ENVELOPE_RELATIONS`), `extractedFrom` (the Point's PROPERTY, `record_projection._POINT_PROPERTY_RELATIONS` — declared for all four of the fold's point-materialisation types, because `apply()` re-derives it on its promote arms too and the record follows `apply()`, with the #5256 anchor in `relation.source_version`, written ON CREATE only, so the conflict path never touches the column), and the OPERATOR topology the descriptor carries — `IMPL`/`NAND`/`hasPart`, its reverse `INPUT`, and the canonical `mitigated_by` mirror (`record_projection._OPERATOR_RELATION_RECORDS`, endpoints resolved across the four epistemic labels) — all emitted after the Point's `node_identity`, because the endpoints are composite FKs into it. ✅ **Class 4 closed by #9553**: the edge lane's two mints now JOURNAL a flat `DirectEdgeCreated` (`{src, tgt, edge_type, source_label, target_label}` — labels are additive for the record and ignored by pass-2b, which resolves them itself), so every predicate the lane can mint lands a `relation` row when its endpoints are addressable (`RECORD_CARRIED_STRUCTURAL_RELS` is the whole lane write set, 23 predicates; PGlite leg in `supabase/tests/pglite/validate.mjs`). ⚠️ TWO qualifications, both measured: (a) a write whose endpoint resolves to a `:Source` is DECLINED at the mint and warned once — `SOURCE_ENDPOINT_CANONICAL_RELS` names the two whose CANONICAL target is a `:Source` (`aboutDocument`, `aboutSource`), and that shape is a FOLD limitation (`EPISTEMIC_LABELS`/`p.id`), tracked in #9834; the predicates themselves are carried, and both ARE journaled between epistemic endpoints (measured); (b) after a SUPERSEDE the routes diverge — see the supersede paragraph in §R5's class-4 block, and #9836. `TAGGED` is the ONE family with no carrier at all (no record `tag` table for `relation.tgt_key`'s composite FK), and it is SILENT: `_sync_tags` reaches neither the lane nor this producer and warns nothing — named here and in §R5 rather than warned at the write |
+| `relation` | `…03_record_epistemic.sql:166` | 3 — epistemic (**reified edges**). A row lands when a journaled record carries the edge — an **edge record**: `DirectEdgeCreated` — `create_direct_edge` writes `IMPL`/`NAND` with it, and since #9553 the structural-edge lane writes every predicate it can mint through it, declining only a write whose ENDPOINT is a `:Source` (the canonical shape of `aboutDocument`/`aboutSource` — see below) — `EntityLinked` (`about*`), and `DirectEdgeRepoint` on supersede; or, since #9553, a **node record's own carrier**: `CONTAINS` (the capture's ENVELOPE directive, `record_projection._ENVELOPE_RELATIONS`), `extractedFrom` (the Point's PROPERTY, `record_projection._POINT_PROPERTY_RELATIONS` — declared for all four of the fold's point-materialisation types, because `apply()` re-derives it on its promote arms too and the record follows `apply()`, with the #5256 anchor in `relation.source_version`, written ON CREATE only, so the conflict path never touches the column), and the OPERATOR topology the descriptor carries — `IMPL`/`NAND`/`hasPart`, its reverse `INPUT`, and the canonical `mitigated_by` mirror (`record_projection._OPERATOR_RELATION_RECORDS`, endpoints resolved across the four epistemic labels) — all emitted after the Point's `node_identity`, because the endpoints are composite FKs into it. ✅ **Class 4 closed by #9553**: the edge lane's two mints now JOURNAL a flat `DirectEdgeCreated` (`{src, tgt, edge_type, source_label, target_label}` — labels are additive for the record and ignored by pass-2b, which resolves them itself), so every predicate the lane can mint lands a `relation` row when its endpoints are addressable (`RECORD_CARRIED_STRUCTURAL_RELS` is the whole lane write set, 23 predicates; PGlite leg in `supabase/tests/pglite/validate.mjs`). ⚠️ TWO qualifications, both measured: (a) a write whose endpoint resolves to a `:Source` is DECLINED at the mint and REPORTED through `projection._log_identity_skip` (`drops_record=True`, so it is COUNTED, not just logged) — `SOURCE_ENDPOINT_CANONICAL_RELS` names the two whose CANONICAL target is a `:Source` (`aboutDocument`, `aboutSource`), and that shape is a FOLD limitation (`EPISTEMIC_LABELS`/`p.id`), tracked in #9834; the predicates themselves are carried, and both ARE journaled between epistemic endpoints (measured); (b) after a SUPERSEDE the routes diverge — see the supersede paragraph in §R5's class-4 block, and #9836. `TAGGED` has no RECORD carrier (no record `tag` table for `relation.tgt_key`'s composite FK) although a JOURNAL rebuild restores it from the Point's `tags` property (measured) — and it is SILENT: `_sync_tags` reaches neither the lane nor this producer and warns nothing, so it is named here and in §R5 rather than warned at the write |
 | `session_narrative` | `supabase/migrations/20261023000001_record_session_narrative.sql:122` | — **NOT a node table** (no `node_identity` FK): §9.1's verbatim-narrative home, **#9555**/R7. Keyed `(org_id, graph_id, session_id)`, cascading from **`public.graphs`** — not from `public.session`, see R7's DECIDED block for why, and for what a live capture does and does not carry into it today (no journal carrier for `story_arc` yet ⇒ a `NULL` `narrative`) |
 | `record_event_stream`, `object_current_status`, `subject_current_status` | `supabase/migrations/20261012000004_record_procedural.sql` | 4 — procedural (**views, no table** — `Object.status` is a cache and is computed, never stored) |
 
@@ -301,8 +301,10 @@ HISTORICAL anchor: the current ledger is `RECORD_CARRIED_STRUCTURAL_RELS` /
 `SOURCE_ENDPOINT_CANONICAL_RELS` (the two whose canonical target is a `:Source`), the record
 route's CI gate is the PGlite leg in
 `supabase/tests/pglite/validate.mjs`, and the behaviour is pinned by
-`tests/test_9553_class4_structural_edge_records.py`. Three carriers remain declared-uncarried (a `:Source`
-endpoint: `aboutDocument`/`aboutSource`, and a `:Source`-anchored `references`; and `TAGGED`) — §R5's
+`tests/test_9553_class4_structural_edge_records.py`. Two shapes remain UNCARIED, both declared: a write whose
+endpoint is a `:Source` (`aboutDocument`/`aboutSource` canonically; a `:Source`-anchored `references`) — a FOLD
+limitation, #9834 — and `TAGGED`, which has no RECORD carrier although a JOURNAL rebuild restores it from the
+Point's `tags` property (measured; record-only gap) — §R5's
 class-4 block below names them and why, with `#9834` for the fold work. ⚠️ **One more family is missing for its own reason, and one has been closed.** `CONTAINS` — the capture's
 `contains_session` rides the **journal envelope**, so a *journal* rebuild restored the edge while a
 *record*-sourced rebuild could not, because the projection dropped that key (`record_projection.py`'s
@@ -432,8 +434,8 @@ the record, because its `search_keys` string meets `point.search_keys jsonb` (**
 `_SCHEMA_DISAGREEMENTS` entry, `tests/test_9078_…`), so the edges that Point carried have no endpoint to
 resolve. Named here so it is not read as an edge defect.
 
-**The families that stay uncarried, with why** — this is the "0 families without a stated reason" answer, and
-there are THREE:
+**What is still not carried, with why** — this is the "0 families without a stated reason" answer: TWO families
+and ONE shape.
 
 1. `TAGGED` — a `:Tag` node target, and `NODE_TABLES` has no `tag` table for `relation.tgt_key`'s composite FK:
    a schema decision, not a projection one.
@@ -442,20 +444,24 @@ there are THREE:
    a `references` between epistemic endpoints IS carried.
 3. `aboutDocument` / `aboutSource` — NOT a family with no carrier: the producer journals both (measured; a test
    pins it), but their CANONICAL shape targets a `:Source`, which the fold's sweep cannot address, so that shape
-   is declined per write with the reason (`SOURCE_ENDPOINT_CANONICAL_RELS`). Making a `:Source` addressable is a
-   FOLD change — **#9834** (with `TAGGED`).
+   is declined per write and REPORTED through the package's one skip reporter (`SOURCE_ENDPOINT_CANONICAL_RELS`).
+   Making a `:Source` addressable is a FOLD change — **#9834** (with `TAGGED`).
 
 **Family 2 is not silent**: `structural_edge_record_carrier` answers the record half per relation, the carried
-set is the lane's own write set (asserted at import), and `_record_structural_edges` warns once per relation with
-the endpoint labels and the reason (`SOURCE_ENDPOINT_CANONICAL_RELS` names the two whose canonical shape that
-hits). A SELF-EDGE is skipped for the fold's own `E2E-11.6` reason and warns the same way — the mint did write
-the live self-loop, so a silent skip would be a live ≠ rebuild divergence with no diagnostic.
+set is the lane's own write set (asserted at import), and a declined write goes through the package's ONE skip
+reporter — `projection._log_identity_skip`, with `absent_is_ordinary=False, drops_record=True` — which both
+reports the endpoint and RECORDS the skip, so a run boundary can COUNT what a rebuild will not restore instead
+of reading a log (`SOURCE_ENDPOINT_CANONICAL_RELS` names the two predicates whose canonical shape that hits).
+A SELF-EDGE is skipped for the fold's own `E2E-11.6` reason and warned once per relation by
+`TortoiseSDK._record_structural_edge` — the mint did write the live self-loop, so a silent skip would be a
+live ≠ rebuild divergence with no diagnostic.
 
-⛔ **`TAGGED` (family 1) IS silent, and that is stated rather than papered over**: `_sync_tags` writes it with
-bare MERGEs, reaches neither the lane nor this producer, and has no warning — `structural_edge_record_carrier`
-answers `None` for it only because "not a lane predicate" and "carried" are different questions it does not
-distinguish. It is named here (and in the `relation` row above) so a reader meets it, not because a write would
-tell them.
+⛔ **`TAGGED` IS silent, and that is stated rather than papered over.** It has NO RECORD carrier (no `tag` table
+for `relation.tgt_key`'s composite FK) — but it is NOT lost: `_sync_tags` is called by the replay fold's pass 2 and
+re-mints the edges from the Point's `tags` property, so a JOURNAL rebuild restores them (measured: live
+`['alpha','beta']` = rebuild). The gap is the `relation` row only, which is why it is a record-shape decision and
+not a durability bug. `_sync_tags` reaches neither the lane nor this producer and warns nothing, so it is named
+here rather than warned at the write.
 
 ⚠️ **One uncarried writer is outside this lane and stays open**: `sdk.backfill_about_entities` mints
 `aboutSubject`/`aboutObject`/`aboutEvent`/`aboutDocument` through `_create_about_edges` → `wire_about_link` (a
@@ -463,42 +469,39 @@ bare MERGE), journaling nothing and setting no `aboutEntities` snapshot prop —
 It is a different door (not `create_edge`/`create_about_edge`) and is filed as **#9833** rather than folded
 into this change.
 
-⚠️ **Supersede: the skip is a DIRECTION test, not a rel-type test — and not an ORDERING test either.**
-The `DirectEdgeCreated` fold used to skip EVERY creation whose endpoint had been superseded, on the premise that
-a supersede had moved the edge and journaled a `DirectEdgeRepoint`. That premise is a property of *what the
-supersede did to this edge*, so the gate now asks exactly that (`_supersede_took_this_edge`):
+⚠️ **Supersede: the skip is gated on what the supersede DID to that edge** — direction, order, AND the
+delete-leg's blind spot. Three shapes had to be measured, and each was a live ≠ rebuild divergence until the gate
+learned it (`_supersede_took_this_edge`):
 
-* `IMPL`/`NAND` — leg 2a moves them in BOTH directions and always journals a repoint ⇒ either superseded
-  endpoint means "moved";
-* every other moved rel — leg 2b moves only what is OUTGOING from the superseded point, at supersede time ⇒ it
-  is skipped only when the superseded point is the SOURCE. An incoming edge (`p2 -[aboutPoint]-> old`) is never
-  moved by the supersede and stays live at the old point, so it must be replayed — it was being dropped.
+1. **direction** — leg 2a (`IMPL`/`NAND`) moves BOTH directions and always journals a repoint, so a superseded
+   endpoint on either side means "moved"; leg 2b (`SUPERSEDE_TRANSFERRED_RELS`) queries only the OUTGOING side, so
+   an INCOMING edge (`(other)-[aboutPoint]-> old`) is never moved and must be replayed (measured: a rel-keyed gate
+   dropped it — live `p2->p1 = ['aboutPoint']`, rebuild `[]`).
+2. **order** — leg 2b moves what EXISTS at supersede time. An edge MINTED at an already-superseded id
+   (`create_edge`/`create_about_edge` have no terminal-endpoint guard, unlike `create_direct_edge`'s #2422
+   refusal) gets no repoint and is kept live at the old point, so the guard compares the creation's journal seq
+   with the supersede's and replays it.
+3. **the delete-leg's blind spot** — for a replayed post-supersede creation whose edge ALSO has a 2b repoint
+   descriptor, that descriptor's delete-leg (which cleans pass-2's resurrection and cannot tell it from a fresh
+   replay) removed it again. The creation fold now records `(src, edge_type, RESOLVED target node)` and the
+   delete-leg is exempted for those keys — while still performing the successor-side transfer, because live holds
+   BOTH (the moved edge at the successor, the re-assertion at the old point; measured).
 
-⛔ **There is no journal-seq comparison, and an earlier revision of this paragraph said there was.** An
-ordering gate (`creation_seq < supersede_seq`) was implemented and reverted: replaying the creation of an edge
-minted AFTER its own supersede is then deleted again by pass-2b's structural repoint delete-leg, which cannot
-tell the pass-2 resurrection from a fresh replay. Measured in every direction: live keeps it, the record keeps
-it, the journal route ends with it absent either way. `_supersede_took_this_edge` therefore takes four
-arguments (`etype, src, tgt, succ`) and no seq, and its docstring records the measurement. That shape is the
-third residual below.
-
-Measured across 16 combinations (rel × direction × before/after supersede), the residuals are:
+Measured across 16 combinations (rel × direction × before/after supersede) plus the exists-and-is-re-asserted
+shape: everything agrees live↔rebuild except the residuals below.
 
 * **journal route, `wasDerivedFrom`/`aboutAction`** — MOVED live by 2b but not derivable, so 2b journals no
   repoint: live has the edge at the successor, the journal rebuild has it nowhere.
 * **record route, EVERY moved structural rel** — a 2b repoint descriptor carries `src=old_id` and the record's
-  `DirectEdgeRepoint` is a plain upsert, so `relation` keeps the row at the PRE-supersede point and never writes
-  the successor. A record-sourced rebuild therefore attaches those edges to the terminal point (nothing for the
-  successor) where live has them at the successor. Before this producer the record had no row at all, so the
-  divergence changes shape (missing → misplaced), not existence.
-* **both routes, an edge MINTED at an already-superseded id** (`create_edge`/`create_about_edge` have no
-  terminal-endpoint guard, unlike `create_direct_edge`'s #2422): live keeps it, the record keeps it, and the
-  journal rebuild loses it — a replay is undone by pass-2b's structural repoint delete-leg, which cannot tell a
-  fresh replay from the pass-2 resurrection. Pinned as a KNOWN RESIDUAL test.
+  `DirectEdgeRepoint` is a plain upsert (`record_projection.py`), so `relation` keeps the row at the PRE-supersede
+  point and never writes the successor: a record-sourced rebuild attaches those edges to the terminal point. ⚠️
+  This pre-dates #9553 for the families class 1 (`extractedFrom`) and `EntityLinked` already carried — for those
+  the row was already at the old point; what this producer changed is that the remaining structural rels now have
+  a row there too (previously they had none).
 
-Closing all three needs the supersede move to be journaled for non-derivable rels AND for the record to model
-the move (delete-old + write-successor) — **#9836**, which supersedes the two-relation scope this paragraph first
-carried.
+Closing both needs the supersede move journaled for non-derivable rels AND the record taught to model a move
+(delete-old + write-successor): **#9836**, whose scope covers all eight moved rels.
+
 
 **Decision needed:** none in principle; the `about*` stored-vs-derived ruling is already made (owner,
 2026-09-23: *"keep them for now, we optimise with users"*) and **KEEP** is the instruction — this item

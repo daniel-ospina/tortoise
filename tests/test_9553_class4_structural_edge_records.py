@@ -338,10 +338,9 @@ def test_the_lane_is_classified_per_relation_and_the_partition_is_total():
     """Carried, or declared uncarried with a reason — nothing in between.
 
     ⛔ NOT a tautology, deliberately. `RECORD_CARRIED_STRUCTURAL_RELS` is a
-    LITERAL and `SOURCE_ENDPOINT_CANONICAL_RELS` is a second literal; this leg is
-    what makes adding a predicate to either mint a red test rather than a silent
-    widening, and what keeps the ledger honest about the two families that are in
-    the lane but can never be journaled.
+    LITERAL; this leg is what makes adding a predicate to either mint a red test
+    rather than a silent widening, and `SOURCE_ENDPOINT_CANONICAL_RELS` names —
+    without excluding — the two whose canonical shape is declined per write.
     """
     assert (frozenset(STRUCTURAL_EDGE_LANE_PREDICATES)
             == RECORD_CARRIED_STRUCTURAL_RELS), (
@@ -609,21 +608,51 @@ def test_a_supersede_does_not_drop_an_INCOMING_structural_edge(edge_sdk):
         "superseded point — leg 2b moves outgoing edges only")
 
 
-def test_an_edge_minted_AT_a_superseded_point_is_a_KNOWN_RESIDUAL(edge_sdk):
-    """A moved rel re-asserted at a superseded id: live keeps it, the journal
-    route does not. PINNED as a residual so a fix reds this leg.
+def test_an_edge_minted_AT_a_superseded_point_is_replayed(edge_sdk):
+    """The gate is an ORDERING test as well: a creation that POSTDATES the
+    supersede was never moved by it, so it must be replayed.
 
     `create_edge`/`create_about_edge` have no terminal-endpoint guard (unlike
     `create_direct_edge`'s `#2422` refusal), so an edge can be minted at an
-    already-superseded id. Supervise §why-it-cannot-be-replayed in
-    `_supersede_took_this_edge`: replaying the creation at the old point is
-    undone by pass-2b's structural repoint delete-leg, which cannot tell a fresh
-    replay from the pass-2 resurrection. #9836 owns the fix.
+    already-superseded id. Live keeps it at the old point and the supersede left
+    it alone — a rel-keyed gate dropped it on replay (measured).
     """
     sdk, _journal = edge_sdk
     ids = _world(sdk)
     proj = sdk._get_proj()
     successor = sdk.create_point("claim", "post-supersede successor", pointKind="statement")
+    sdk.supersede_point(ids["p1"], successor["id"])
+    assert proj.create_edge(ids["p1"], ids["p2"], "dependsOn") is True
+
+    def outgoing(pid: str) -> set[str]:
+        return {row[0] for row in proj.g.query(
+            "MATCH (:Point {id:$p})-[r]->() RETURN type(r)",
+            params={"p": pid}).result_set}
+
+    live = outgoing(ids["p1"])
+    assert "dependsOn" in live, live
+    proj.rebuild_all(str(_journal.parent), confirm_destructive=True)
+    assert outgoing(ids["p1"]) == live, (
+        "a rebuild dropped an edge minted AFTER its point was superseded — the "
+        "supersede never moved it, so the creation must be replayed")
+
+
+def test_a_reasserted_edge_survives_the_repoint_delete_leg(edge_sdk):
+    """The delete-leg's blind spot, pinned (peer review, cycle 5).
+
+    An edge that EXISTED at supersede time AND is re-asserted at the old id after
+    it has a 2b `DirectEdgeRepoint` descriptor, whose delete-leg cleans pass-2's
+    resurrection at the old point and cannot tell it from the fresh replay. Live
+    holds BOTH (the moved edge at the successor, the re-assertion at the old
+    point), so the fold records the replayed edge's resolved target and the
+    delete-leg is exempted for that key — while still performing the successor
+    transfer, which skipping the whole branch lost (measured).
+    """
+    sdk, _journal = edge_sdk
+    ids = _world(sdk)
+    proj = sdk._get_proj()
+    successor = sdk.create_point("claim", "reassert successor", pointKind="statement")
+    assert proj.create_edge(ids["p1"], ids["subject"], "aboutSubject") is True
     sdk.supersede_point(ids["p1"], successor["id"])
     assert proj.create_edge(ids["p1"], ids["subject"], "aboutSubject") is True
 
@@ -632,10 +661,13 @@ def test_an_edge_minted_AT_a_superseded_point_is_a_KNOWN_RESIDUAL(edge_sdk):
             "MATCH (:Point {id:$p})-[r]->() RETURN type(r)",
             params={"p": pid}).result_set}
 
-    live = outgoing(ids["p1"])
-    assert "aboutSubject" in live, live
+    live_old, live_succ = outgoing(ids["p1"]), outgoing(successor["id"])
+    assert "aboutSubject" in live_old and "aboutSubject" in live_succ, (
+        live_old, live_succ)
     proj.rebuild_all(str(_journal.parent), confirm_destructive=True)
-    rebuilt = outgoing(ids["p1"])
-    assert "aboutSubject" not in rebuilt, (
-        "the residual is FIXED — delete this pin (and the #9836 reference) if a "
-        "rebuild now re-creates an edge minted at a superseded id")
+    assert outgoing(ids["p1"]) == live_old, (
+        "the delete-leg removed a re-asserted edge the live graph keeps at the "
+        "terminal point")
+    assert outgoing(successor["id"]) == live_succ, (
+        "the successor-side transfer was lost — the exemption must guard the "
+        "DELETE only, never the transfer")

@@ -787,10 +787,13 @@ def source_change_notices(g, source_refs, current_versions: dict[str, str] | Non
 #     a producer: `#9834`, declared in `04-projection.md` §3 and doc 08 §R5.
 #
 #     ⚠️ Per-WRITE caveats, not per-relation ones: a `references` whose SOURCE is
-#     a `:Source` (the `link_source_to_entity` shape) is declined the same way,
-#     and a SELF-EDGE is skipped (the fold's `E2E-11.6` no-self contract) — both
-#     warn once. Before `#9553`, EVERY one of these was uncarried and silent;
-#     the point of the ledger is that the remaining gaps are named.
+#     a `:Source` (the `link_source_to_entity` shape) is declined the same way
+#     and REPORTED through `projection._log_identity_skip` (`drops_record=True`,
+#     which also RECORDS it so a run boundary can count what a rebuild will not
+#     restore); a SELF-EDGE is skipped (the fold's `E2E-11.6` no-self contract)
+#     and warned once per relation by `TortoiseSDK._record_structural_edge`.
+#     Before `#9553`, EVERY one of these was uncarried and silent; the point of
+#     the ledger is that the remaining gaps are named.
 #
 # ⛔ WHAT THIS LANE DOES NOT COVER — stated, so a reader does not infer it from
 # a green suite. `_EdgeHandlers` holds OTHER edge-minting verbs; they are not
@@ -862,7 +865,8 @@ def structural_edge_carrier(rel: str) -> str | None:
     while the EMISSION is per write and declines a `:Source` endpoint —
     `SOURCE_ENDPOINT_CANONICAL_RELS` names the two predicates whose canonical
     shape that hits (`aboutDocument`, `aboutSource`). The function answers per
-    CARRIER; the decline is `_record_addressable`'s, warned once.
+    CARRIER; the decline is `_record_addressable`'s, reported through
+    `projection._log_identity_skip`.
 
     DERIVED from ``DERIVABLE_STRUCTURAL_RELS`` — the one set the replay engines
     read — rather than a second hand-maintained table, so adding a rel to that
@@ -944,7 +948,9 @@ def structural_edge_record_carrier(rel: str) -> str | None:
 
     ⚠️ Per RELATION, and the emission is per WRITE: a write whose endpoint is not
     :data:`RECORD_ADDRESSABLE_EDGE_LABELS` (a `:Source`; a node whose value is not
-    its `id`) is DECLINED at the mint and warned once. `"record"` therefore means
+    its `id`) is DECLINED at the mint and reported through
+    `projection._log_identity_skip` (`absent_is_ordinary=False`,
+    `drops_record=True`), which also RECORDS it. `"record"` therefore means
     "the producer carries this relation for the endpoints the record can
     address", not "every instance of it is carried" — and
     :data:`SOURCE_ENDPOINT_CANONICAL_RELS` names the two whose canonical shape is

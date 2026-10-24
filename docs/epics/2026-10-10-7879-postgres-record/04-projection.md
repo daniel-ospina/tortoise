@@ -326,33 +326,28 @@ closed at both layers:
   > sweeps `EPISTEMIC_LABELS` on `p.id` and a `:Source` is url-keyed, so
   > `SOURCE_ENDPOINT_CANONICAL_RELS` (`aboutDocument`, `aboutSource`) and a
   > `:Source`-anchored `references` (`link_source_to_entity`) are declined and
-  > WARNed once; making a `:Source` addressable is a FOLD change — **#9834**. A
-  > self-edge is skipped (the fold's `E2E-11.6`) and warns the same way. The one
-  > family with NO carrier at all is `TAGGED` (no record `tag` table to key
-  > `relation.tgt_key` on — a schema decision), and it is silent: `_sync_tags`
-  > reaches neither the lane nor this producer.
+  > REPORTED through the package's one skip reporter (`projection._log_identity_skip`,
+  > `absent_is_ordinary=False, drops_record=True` — so the skip is COUNTED, not just
+  > logged); making a `:Source` addressable is a FOLD change — **#9834**. A
+  > self-edge is skipped (the fold's `E2E-11.6`) and warned once per relation at the
+  > recorder. The one
+  > family with no RECORD carrier is `TAGGED` (no record `tag` table to key
+  > `relation.tgt_key` on — a schema decision); a JOURNAL rebuild DOES restore it
+  > from the Point's `tags` property (`_sync_tags`, measured), and it is silent:
+  > `_sync_tags` reaches neither the lane nor this producer.
   >
-  > ⚠️ **Supersede.** The `DirectEdgeCreated` fold's superseded-endpoint skip is gated on what the supersede
-  > DID to that edge, not on the rel type (`_supersede_took_this_edge`): `IMPL`/`NAND` are moved in both
-  > directions by leg 2a (which always journals a repoint), while every other moved rel is moved by 2b
-  > OUTGOING-only and only at supersede time — so the skip requires the superseded point to be the SOURCE.
-  > Without that, a rebuild dropped edges live still held: an INCOMING edge to the superseded point.
-  >
-  > ⛔ **The gate is DIRECTION, not ORDER, and the difference is a residual — do not read a seq comparison
-  > into it.** An ordering gate (`creation_seq < supersede_seq`) was implemented and REVERTED: replaying the
-  > creation of an edge minted AFTER its own supersede is then deleted again by pass-2b's structural repoint
-  > delete-leg, which cannot tell the pass-2 resurrection from a fresh replay — measured: live keeps it, the
-  > record keeps it, the journal route ends with it absent either way. So `_supersede_took_this_edge` takes
-  > no seq (`projection/__init__.py`, its docstring records the measurement), and the shape is a NAMED
-  > residual below rather than a behaviour this fold delivers.
-  >
-  > **Residuals.** (1) `wasDerivedFrom`/`aboutAction` are moved live by 2b but are not derivable, so 2b
-  > journals no repoint and the journal route loses them after a supersede. (2) An edge MINTED at an
-  > already-superseded id (`create_edge`/`create_about_edge` have no terminal-endpoint guard, unlike
-  > `create_direct_edge`'s #2422 refusal) is kept LIVE at the terminal point and kept by the RECORD, and the
-  > journal rebuild drops it — pinned as a known residual by
-  > `test_an_edge_minted_AT_a_superseded_point_is_a_KNOWN_RESIDUAL`. Both need the supersede move journaled
-  > for non-derivable rels AND the record to model the move (delete-old + write-successor) — **#9836**.
+  > ⚠️ **Supersede.** The `DirectEdgeCreated` fold's superseded-endpoint skip is gated on what the supersede DID
+  > to that edge (`_supersede_took_this_edge`), because each of its three shapes was a live ≠ rebuild divergence
+  > until the gate learned it: (1) DIRECTION — leg 2a (`IMPL`/`NAND`) moves both ways and always journals a
+  > repoint, while leg 2b moves only the OUTGOING side, so an incoming edge must be replayed; (2) ORDER — an edge
+  > minted at an already-superseded id was never moved by the supersede, so the gate compares the creation's
+  > journal seq with the supersede's and replays it; (3) THE DELETE-LEG'S BLIND SPOT — a replayed post-supersede
+  > creation is exempted from the 2b repoint delete-leg (which cleans pass-2's resurrection and cannot tell the
+  > two apart) by `(src, edge_type, RESOLVED target node)`, while the successor-side transfer still runs. Residuals:
+  > (a) `wasDerivedFrom`/`aboutAction` are moved live but not derivable, so 2b journals no repoint for them and the
+  > journal route loses them after a supersede; (b) the RECORD keeps EVERY moved structural rel at the
+  > pre-supersede point (a 2b descriptor carries `src=old_id` and the record's `DirectEdgeRepoint` is a plain
+  > upsert) — pre-dating this producer for `extractedFrom`/`EntityLinked`, newly visible for the rest — **#9836**.
   >
   > ⚠️ One uncarried writer is OUTSIDE this lane and stays open:
   > `sdk.backfill_about_entities` mints about edges through `_create_about_edges` →

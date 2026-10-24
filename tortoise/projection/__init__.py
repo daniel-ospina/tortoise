@@ -4701,11 +4701,11 @@ def _supersede_moved_rels() -> frozenset[str]:
     return SUPERSEDE_DIRECT_RELS | SUPERSEDE_TRANSFERRED_RELS
 
 
-def _supersede_took_this_edge(etype, src, tgt, succ) -> bool:
+def _supersede_took_this_edge(etype, ev_seq, src, tgt, succ, supersede_last) -> bool:
     """Did a supersede MOVE this recorded edge away from the endpoints it names?
 
-    Two families, with DIFFERENT shapes, and the direction is the part a
-    rel-keyed gate gets wrong (a peer review found it):
+    Three facts decide it, and a rel-type-only gate gets the last two wrong (both
+    were found by measurement, not reasoning):
 
       * `SUPERSEDE_DIRECT_RELS` (`IMPL`/`NAND`) — leg 2a moves them in BOTH
         directions and always journals a repoint, so a superseded endpoint on
@@ -4714,31 +4714,38 @@ def _supersede_took_this_edge(etype, src, tgt, succ) -> bool:
         (`MATCH (old:Point {id:$old_id})-[r:rel]->(target)`), so it moves an
         outgoing edge and NOTHING ELSE. `(other)-[aboutPoint]-> old` is never
         moved, live keeps it at the old point, and skipping its creation would
-        drop it (measured: live `p2->p1 = ['aboutPoint']`, rebuild `[]`).
+        drop it (measured: live `p2->p1 = ['aboutPoint']`, rebuild `[]`);
+      * ORDER — leg 2b moves what EXISTS at supersede time. An edge MINTED at an
+        already-superseded id (`create_edge`/`create_about_edge` have no
+        terminal-endpoint guard, unlike `create_direct_edge`'s `#2422` refusal) is
+        journaled as a plain creation, gets no repoint, and is kept live at the
+        old point — so it must be replayed, and the guard compares the creation's
+        journal seq with the supersede's to tell the two apart.
 
-    ⛔ WHY THERE IS NO ORDERING TEST HERE, having been tried. The premise has a
-    second shape a seq comparison should catch — an edge MINTED at an
-    already-superseded id (`create_edge`/`create_about_edge` have no
-    terminal-endpoint guard, unlike `create_direct_edge`'s `#2422` refusal). A
-    `ev_seq < supersede_seq` gate replayed those, and the pass-2b structural
-    repoint delete-leg — which removes `(old)-[rel]->(t)` for the transferred
-    target, and cannot tell the pass-2 resurrection from a fresh replay — deleted
-    it again. Measured: live keeps it, the record keeps it, the journal route
-    ends with it absent either way. So the shape is a KNOWN RESIDUAL stated here
-    and in the docs (live: kept at the terminal point; record: kept; journal
-    rebuild: absent), NOT a behaviour this fold can deliver without teaching the
-    delete-leg to distinguish the two — tracked with `#9836`.
+    ⛔ THE ORDERING ARM NEEDS A SECOND HALF, and this is where it lives: a
+    replayed creation whose edge ALSO has a 2b repoint descriptor would be deleted
+    again by that descriptor's delete-leg (which cleans pass-2's resurrection and
+    cannot tell it from a fresh replay). The caller therefore RECORDS every
+    `(src, edge_type, tgt)` it replayed at a superseded source, and the delete-leg
+    skips those keys — so both shapes end where live is: the re-asserted edge at
+    the old point (this fold) and the transferred one at the successor (the
+    repoint leg).
 
-    ⚠️ The other residual: `wasDerivedFrom`/`aboutAction` are moved by 2b but are
-    not derivable, so 2b journals no repoint for them; a pre-supersede creation is
-    still skipped, keeping the `E2E-11.6` no-dead-point invariant at the price of
-    losing the edge on the journal route.
+    ⚠️ Residual, stated: `wasDerivedFrom`/`aboutAction` are moved by 2b but are
+    not derivable, so 2b journals no repoint for them; a PRE-supersede creation is
+    skipped, keeping the `E2E-11.6` no-dead-point invariant at the price of losing
+    the edge on the journal route (`#9836`).
     """
     if etype in SUPERSEDE_DIRECT_RELS:
         return src in succ or tgt in succ
     if etype not in _supersede_moved_rels():
         return False
-    return src in succ
+    if src not in succ:
+        return False
+    superseded_at = supersede_last.get(src)
+    if superseded_at is None:            # not a surviving supersede of THIS pass
+        return True
+    return ev_seq < superseded_at[0]
 
 
 def _fold_lane_for_event(seq: int, event_source):
@@ -14884,12 +14891,12 @@ class FalkorProjection(
                 # #8499 / A10 #1048: the plain direct-edge BASE creation —
                 # deferred to the pass-2b sweep (see its declaration and the
                 # fold there for why it must precede the repoint leg).
-                # ⚠️ The event only, NOT `(seq, ev)`: an ordering gate on the
-                # journal seq was tried here and reverted (see
-                # `_supersede_took_this_edge`'s docstring for the measurement),
-                # and a tuple nothing unpacks reads to the next reader as a
-                # comparison that exists.
-                direct_edge_created_events.append(ev)
+                # #9553: the journal SEQ rides along, because the supersede guard
+                # inside that fold is an ORDERING property as well as a direction
+                # one (a creation AFTER its own supersede was never moved by it) —
+                # the seq is READ by `_supersede_took_this_edge`, not carried for
+                # shape.
+                direct_edge_created_events.append((seq, ev))
             elif t == "DirectEdgeRepoint":
                 # #2423: supersede's 2a-DIRECT transfer emits a flat
                 # DirectEdgeRepoint descriptor {src, tgt, edge_type, attrs}
@@ -16226,7 +16233,15 @@ class FalkorProjection(
             # hardcoded :Point match would silently drop every Object↔Object
             # direct edge — the SAME defect the repoint leg's direct branch
             # carried until #8622 widened it with this identical sweep.
-            for ev in direct_edge_created_events:
+            # Keys this fold REPLAYED at a superseded source (#9553). The 2b
+            # repoint delete-leg runs after this loop and cleans pass-2's
+            # resurrection at the old point; it cannot tell that resurrection from
+            # a fresh replay, so these keys are exempted from the delete.
+            # ⚠️ The journal SEQ rides on each event because the supersede guard is
+            # a DIRECTION test AND an ORDER one (a creation AFTER its own supersede
+            # was never moved by it) — see `_supersede_took_this_edge`.
+            replayed_at_terminal: set[tuple[str, str, int]] = set()
+            for ev_seq, ev in direct_edge_created_events:
                 etype = ev.get("edge_type")
                 src, tgt = ev.get("src"), ev.get("tgt")
                 if (not isinstance(src, str) or not isinstance(tgt, str)
@@ -16240,7 +16255,8 @@ class FalkorProjection(
                     # Phantom self-edge: never re-create (E2E-11.6 no-self
                     # contract — the same guard the repoint leg applies).
                     continue
-                if _supersede_took_this_edge(etype, src, tgt, succ):
+                if _supersede_took_this_edge(etype, ev_seq, src, tgt, succ,
+                                             supersede_last):
                     # A SUPERSEDED endpoint OF A RELATION SUPERSEDE ACTUALLY MOVED.
                     #
                     # ⛔ THE GATE IS THE PREMISE (#9553). This guard's argument is
@@ -16296,6 +16312,18 @@ class FalkorProjection(
                     f"MERGE (a)-[:{etype}]->(b)",
                     params={"a": src, "b": tgt},
                 )
+                if src in succ:
+                    # A creation REPLAYED at a superseded source (the ORDERING arm
+                    # above) — exempt the edge from the repoint delete-leg below.
+                    # The key is the RESOLVED NODE, not the logical endpoint: this
+                    # descriptor carries the journal id (`tgt`), while a 2b repoint
+                    # descriptor carries the replay key (a Subject's NAME) — same
+                    # node, two spellings, so only the node identity can match them.
+                    tid_rows = self.g.query(
+                        f"MATCH (t:{labels[tgt]}) WHERE t.id = $v "
+                        f"RETURN ID(t) LIMIT 1", params={"v": tgt}).result_set
+                    if tid_rows:
+                        replayed_at_terminal.add((src, etype, tid_rows[0][0]))
                 # Last-writer-wins attr SET — the final attrs post-rebuild
                 # (REVIEW-FIX P1 cycle-26 on the emission site).
                 attrs = {k: ev[k] for k in
@@ -16555,10 +16583,18 @@ class FalkorProjection(
                         # src (id-reuse) owns its edges legitimately.
                         if not _src_is_terminal(src):
                             continue
-                        self.g.query(
-                            f"MATCH (old:Point {{id:$old}})-[r:{etype}]->(t) "
-                            f"WHERE ID(t) = $tid DELETE r",
-                            params={"old": src, "tid": resolved["internal"]})
+                        # ⛔ THE EXEMPTION GUARDS ONLY THE DELETE, never the
+                        # transfer below it: a creation the fold REPLAYED at the
+                        # old point (a post-supersede re-assertion) must survive
+                        # the resurrection cleanup, AND the moved edge must still
+                        # be re-created at the successor — live holds BOTH
+                        # (#9553). Skipping the whole branch kept the old side and
+                        # lost the successor side (measured).
+                        if (src, etype, resolved["internal"]) not in replayed_at_terminal:
+                            self.g.query(
+                                f"MATCH (old:Point {{id:$old}})-[r:{etype}]->(t) "
+                                f"WHERE ID(t) = $tid DELETE r",
+                                params={"old": src, "tid": resolved["internal"]})
                         # #2489 step 6b (2nd-model P1): structural descriptors
                         # must obey #2488's survivor-filtered succ map — once
                         # #2488 lands (pre-recreation supersede folds dropped),
