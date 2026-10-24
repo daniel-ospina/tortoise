@@ -1410,7 +1410,13 @@ def test_member_without_key_reaches_keyless_claude_connectors(
     assert "sign-in" in body or "sign in" in body, \
         f"{surface}: the OAuth recipe must state the sign-in step"
     assert "Authorize" in body, f"{surface}: the OAuth recipe must state the Authorize step"
-    assert "Pick the Organization" in body, \
+    # Case-insensitive on purpose: the sentence's casing is a copy decision (the
+    # recipes write lower-case "organization" in prose — see
+    # `test_9660_the_recipe_carriers_use_one_casing_for_the_tenant_noun`), and this
+    # pin is about the STEP being stated, not about how it is spelled. A
+    # case-sensitive pin here is what red `dashboard-e2e` when the casing swept
+    # (PR #9895 review).
+    assert re.search(r"Pick the organization", body, re.I), \
         f"{surface}: the OAuth recipe must state the org chooser step"
     # (e) Continue is reachable and ENABLED without a key — the guarantee that
     # replaces the pre-#2865 owner-only no-dead-end tripwire.

@@ -2017,6 +2017,13 @@ _KEYLESS_BRANCH = "wizardKeyless ? ("
 _CHATGPT_BLOCKS = ("Add the Tortoise connector", "Install the Tortoise skills",
                    "Give it its first job")
 
+# Any harness selector in the connect ternary. `_chatgpt_block` requires exactly ONE
+# of these between the card's own selector and the end of each block: a unique title
+# proves where a block STARTS, never that it belongs to this arm, so a sibling arm
+# inserted between two titles would otherwise be swallowed by the slice — and its
+# copy would satisfy the pins for a card that lost them (#9895 review).
+_ARM_SELECTOR = "wizardConnectHarness ==="
+
 
 _ORG_CHOOSER = "or asks you to choose when your account can use more than one"
 
@@ -2030,12 +2037,16 @@ def _assert_org_pick_precedes_authorize(block: str) -> None:
     test so the law itself can be proved on synthetic copy — an inline assertion is
     only ever exercised by the real file, which cannot show it would red.
     """
-    at_org = block.find(_ORG_CHOOSER)
+    # Flattened first: JSX and markdown wrap mid-sentence, so matching the raw
+    # source would red a correct card whose sentence happens to break across a
+    # line (#9895 review).
+    flat = " ".join(block.split())
+    at_org = flat.find(_ORG_CHOOSER)
     assert at_org != -1, (
         "the card no longer tells the reader to pick the Organization when the "
         "consent page offers a chooser — a multi-Organization account sees no "
         "named organization, and Authorize stays disabled")
-    at_authorize = block.find("Authorize</strong>")
+    at_authorize = flat.find("Authorize</strong>")
     assert at_authorize != -1, "the card no longer names the Authorize button"
     assert at_org < at_authorize, (
         "the card picks the Organization AFTER Authorize — on a multi-Organization "
@@ -2045,14 +2056,24 @@ def _assert_org_pick_precedes_authorize(block: str) -> None:
 def _chatgpt_block(main: str, index: int) -> str:
     """The text of the card's `index`-th block, sliced on the block titles.
 
-    The boundaries are content the card itself renders, so a slice cannot span a
-    sibling arm: each title appears exactly once in `main.jsx` and only here. The
-    LAST block ends at the card's own terminator (`_KEYLESS_BRANCH`), which must
+    The boundaries are content the card itself renders — each title appears exactly
+    once in `main.jsx` and only here — AND every slice is required to hold exactly
+    one harness selector, the card's own. The second requirement is not implied by
+    the first: a unique title says where a block STARTS, never which arm it belongs
+    to, so a sibling arm inserted between two titles would be swallowed by the slice
+    (and its copy would satisfy the pins for a card that lost them) — the false
+    green both earlier versions of this guard kept reintroducing (#9895 review).
+
+    The LAST block ends at the card's own terminator (`_KEYLESS_BRANCH`), which must
     start its own clause — a quoted copy of it, mid-line, would truncate the slice.
 
     Every failure raises `AssertionError` naming what moved, never a bare
     `ValueError` from `str.index`.
     """
+    arm_at = main.find(_CHATGPT_SELECTOR)
+    assert arm_at != -1, (
+        f"the chatgpt card no longer opens with {_CHATGPT_SELECTOR!r} — the arm was "
+        "renamed or deleted, so the slices below would be judging another arm's copy")
     positions = []
     for title in _CHATGPT_BLOCKS:
         seen = main.count(title)
@@ -2066,23 +2087,30 @@ def _chatgpt_block(main: str, index: int) -> str:
 
     start_pos = positions[index]
     if index + 1 < len(_CHATGPT_BLOCKS):
-        return main[start_pos:positions[index + 1]]
+        end_pos = positions[index + 1]
+    else:
+        # The last block runs to the card's terminator.
+        end_pos = main.find(_KEYLESS_BRANCH, start_pos)
+        assert end_pos != -1, (
+            f"the chatgpt card is no longer terminated by {_KEYLESS_BRANCH!r}: the "
+            "card is the last arm in the connect step, or the branch was renamed. "
+            "The last block cannot be bounded — update this guard with the shape "
+            "that is there.")
+        line_start = main.rfind("\n", start_pos, end_pos) + 1
+        assert main[line_start:end_pos].strip() in (") :", "):"), (
+            "the key-less anchor does not start its own clause, so it is probably "
+            f"being QUOTED in the card's copy rather than ending the arm "
+            f"({main[line_start:end_pos]!r}). Re-pin the bound: a truncated slice "
+            "can pass the pins vacuously.")
 
-    # The last block runs to the card's terminator.
-    end_pos = main.find(_KEYLESS_BRANCH, start_pos)
-    assert end_pos != -1, (
-        f"the chatgpt card is no longer terminated by {_KEYLESS_BRANCH!r}: the card "
-        "is the last arm in the connect step, or the branch was renamed. The last "
-        "block cannot be bounded — update this guard with the shape that is there.")
-    assert "wizardConnectHarness ===" not in main[start_pos:end_pos], (
-        "another harness arm sits between the last chatgpt block and the card's "
-        "terminator, so the slice for that block spans a sibling arm — the copy "
-        "pinned inside it could then be satisfied by the wrong card")
-    line_start = main.rfind("\n", start_pos, end_pos) + 1
-    assert main[line_start:end_pos].strip() in (") :", "):"), (
-        "the key-less anchor does not start its own clause, so it is probably being "
-        f"QUOTED in the card's copy rather than ending the arm ({main[line_start:end_pos]!r}). "
-        "Re-pin the bound: a truncated slice can pass the pins vacuously.")
+    # Exactly one harness selector — the card's own — may precede the end of this
+    # block. Two means a SIBLING arm was inserted between the card's start and the
+    # block's end, and the slice spans it.
+    assert main.count(_ARM_SELECTOR, arm_at, end_pos) == 1, (
+        "another harness arm sits between the chatgpt card's start and the end of "
+        f"block {index + 1} ({main.count(_ARM_SELECTOR, arm_at, end_pos)} harness "
+        "selectors before that bound): this slice spans a sibling arm, so the copy "
+        "pinned inside it could be satisfied by the wrong card")
     return main[start_pos:end_pos]
 
 
@@ -2131,6 +2159,31 @@ def test_9660_the_chatgpt_card_slices_red_on_a_moved_or_duplicated_title():
             "  <WizardBlock title=\"Give it its first job\">c</WizardBlock>\n"
             ") : wizardConnectHarness === 'codex' ? (\n  <p>sibling</p>\n"
             ") : wizardKeyless ? (\n  <p>keyless</p>\n", 2)
+
+    # …and the SAME is required of the earlier blocks, whose only bound is the next
+    # title: a sibling arm inserted between two titles is inside the slice, so its
+    # copy would satisfy the pins for a card that lost them (#9895 review). Both
+    # gaps are proved, because each is a different boundary of the helper.
+    for gap in (0, 1):
+        titles = "".join(
+            f'  <WizardBlock title="{title}">{slot}</WizardBlock>\n'
+            for slot, title in enumerate(_CHATGPT_BLOCKS))
+        split_at = titles.index(f'<WizardBlock title="{_CHATGPT_BLOCKS[gap + 1]}"')
+        with pytest.raises(AssertionError, match="another harness arm sits between"):
+            _chatgpt_block(
+                "{wizardConnectHarness === 'chatgpt' ? (\n"
+                + titles[:split_at]
+                + ") : wizardConnectHarness === 'codex' ? (\n  <p>sibling</p>\n"
+                "  <p>sibling copy: wizardPromptText('chatgpt', 1)</p>\n"
+                + titles[split_at:]
+                + ") : wizardKeyless ? (\n  <p>keyless</p>\n", gap)
+
+    # A reflowed sentence still satisfies the ordering law: JSX and markdown wrap
+    # mid-sentence, so the anchor must be matched on flattened copy rather than on
+    # the raw source (#9895 review).
+    _assert_org_pick_precedes_authorize(
+        "pick the organization\n   or asks you to choose when your account can use\n"
+        "   more than one; then click <strong>Authorize</strong>")
 
     # The last block cannot run past the card: its terminator is pinned, and a
     # quoted copy of it is refused rather than truncating the slice.
@@ -2222,7 +2275,17 @@ def test_9660_chatgpt_is_a_live_onboarding_journey_not_a_docs_dead_end():
     # block. Two uses — it bounds the plan-note pin, and the assertion below that
     # no other harness selector sits between the note and the first block. (The
     # re-typed-URL pin runs on the ARM, below.)
-    card_from = main.index("paid ChatGPT plan")
+    #
+    # Guarded by name, not by `str.index`: a reworded note must report which anchor
+    # moved instead of dying as `ValueError: substring not found` naming nothing —
+    # the diagnostic the rest of this guard preserves everywhere (#9895 review).
+    plan_note = "paid ChatGPT plan"
+    assert plan_note in main, (
+        "the ChatGPT card no longer names its plan floor ('paid ChatGPT plan'): the "
+        "note was reworded or removed, so the card slice this test bounds cannot be "
+        "derived — re-pin the note, do not drop the fact that the card names a "
+        "plan requirement")
+    card_from = main.index(plan_note)
     first_at = main.index(_CHATGPT_BLOCKS[0])
     last_at = main.index(_CHATGPT_BLOCKS[2])
     last_end = last_at + len(first_job)
@@ -2299,6 +2362,7 @@ def test_9660_chatgpt_is_a_live_onboarding_journey_not_a_docs_dead_end():
     assert "Plus" in plan_lines[0], (
         "the plan warning must name the floor (Plus or higher), not just say the "
         "plan is paid")
+
 
 def test_9660_the_recipe_carriers_use_one_casing_for_the_tenant_noun():
     """"organization" in body prose, on every carrier — one casing, guarded.
