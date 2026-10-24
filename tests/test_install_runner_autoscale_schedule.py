@@ -403,6 +403,50 @@ def test_launchd_install_fails_when_the_agent_is_not_loaded(tmp_path):
     assert "not loaded" in res.stderr, res.stderr
 
 
+def test_launchd_rearm_check_is_not_fooled_by_a_large_job_table(tmp_path):
+    """⛔ `launchctl list | grep -qF label` + `set -o pipefail` = a FALSE "not loaded" on a real Mac.
+
+    `grep -q` exits at the FIRST match, so a still-writing `launchctl list` gets SIGPIPE and the
+    pipeline reports 141; `!` then reads "the agent is not loaded" while it is. A real
+    `launchctl list` with a few hundred registered jobs is 10-40 KB — past the pipe buffer — so
+    every HEALTHY re-run would bootstrap an already-loaded agent, the bootstrap fails
+    ("Bootstrap failed: 5: Input/output error"), and the installer exits 1 claiming the opposite
+    of the truth. The single-line stub in the sibling case cannot reach this: one line never
+    blocks the writer.
+
+    Mutation: restore `grep -qF` -> the healthy re-run reports rc 1 (and bootstraps twice) -> RED.
+    """
+    sb = _sandbox(tmp_path)
+    # A `launchctl` shaped like a real one on a busy Mac: the label appears FIRST (so `-q` would
+    # leave early), followed by ~3000 unrelated jobs (~60 KB, well past a 64 KB pipe's capacity
+    # once the reader is gone), and a bootstrap of an ALREADY-LOADED label FAILS as the real tool
+    # does.
+    _write_stub(
+        sb["bin"],
+        "launchctl",
+        "#!/usr/bin/env bash\n"
+        'printf "%s\\n" "launchctl $*" >> "$STUB_LOG/launchctl.log"\n'
+        'case "${1:-}" in\n'
+        '  list) if [ -f "$STUB_LOG/loaded" ]; then\n'
+        '          echo "501 0 com.tortoise.runner-autoscale"\n'
+        '          i=1; while [ "$i" -le 3000 ]; do echo "501 0 com.example.bgjob.$i"; i=$((i+1)); done\n'
+        '        fi; exit 0 ;;\n'
+        '  bootstrap) if [ -f "$STUB_LOG/loaded" ]; then\n'
+        '                echo "Bootstrap failed: 5: Input/output error" >&2; exit 5; fi\n'
+        '              : > "$STUB_LOG/loaded"; exit 0 ;;\n'
+        '  bootout) rm -f "$STUB_LOG/loaded"; exit 0 ;;\n'
+        "esac\nexit 0\n",
+    )
+    assert _run(sb).returncode == 0
+    # The healthy re-run — plist unchanged, agent loaded — must converge, not re-bootstrap.
+    res = _run(sb)
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    assert "Bootstrap failed" not in res.stderr, res.stderr
+    log = sb["launchctl_log"].read_text(encoding="utf-8")
+    assert "re-armed" not in res.stdout, res.stdout
+    assert log.count("launchctl bootstrap") == 1, log
+
+
 def test_launchd_reinstall_re_arms_an_agent_that_was_unloaded_out_of_band(tmp_path):
     """⛔ "UNCHANGED" IS NOT "LOADED": re-running the installer must CONVERGE to a loaded agent.
 
@@ -675,8 +719,11 @@ def test_cron_refuses_a_period_it_cannot_deliver(tmp_path):
         uname="Linux",
         env_overrides={"AUTOSCALE_HAS_SYSTEMD": "0", "AUTOSCALE_HAS_CRON": "1"},
     )
-    # 46800 = 13h (no divisor of 24 is >= 13) and 90000 = 25h (above a day at all).
-    for interval in ("46800", "90000"):
+    # 46800 = 13h (no divisor of 24 is >= 13), 90000 = 25h (above a day at all), and
+    # 2**63-1 — the ceiling of a signed 64-bit shell integer, where `(INTERVAL + 59) / 60`
+    # WRAPS NEGATIVE and a `-lt 1` clamp pins the entry to `*/1` (every minute). Ceiling by
+    # `(N - 1) / 60 + 1` cannot overflow.
+    for interval in ("46800", "90000", "9223372036854775807", "9223372036854775750"):
         res = _run(sb, "--dry-run", env=dict(sb["env"], RUNNER_AUTOSCALE_INTERVAL=interval))
         assert res.returncode == 2, (interval, res.stdout, res.stderr)
         assert "REFUSED" in res.stderr and "MORE often" in res.stderr, (interval, res.stderr)
@@ -873,6 +920,29 @@ def test_status_fails_when_the_schedule_would_fire_and_do_nothing(tmp_path):
     res = _run(sb, "--status", env=dict(sb["env"], AUTOSCALE_PYTHON=str(sb["bin"] / "py312_crash")))
     assert res.returncode == 2, (res.stdout, res.stderr)
     assert "probe: FAILED (exit 1)" in res.stderr, res.stderr
+
+
+def test_status_fails_when_the_timer_was_stopped_out_of_band(tmp_path):
+    """⛔ A STOPPED TIMER IS INERT, AND `--status` SAID OTHERWISE.
+
+    The install path already fails hard when `is-active` is not `active`, so `--status` printing
+    "active:  inactive" and returning 0 was the same false PASS one branch over: a `systemctl
+    stop`, a mask, or a unit that failed after install all leave the timer installed, enabled, and
+    never firing. Pre-existing (found in cycle 2, same family as the P1 above) and fixed here
+    because the whole contract of this function is that a caller can gate on it.
+
+    Mutation: drop `armed=0` from the active check -> rc 0 for a stopped timer -> RED.
+    """
+    sb = _sandbox(tmp_path, uname="Linux")
+    _systemd_stubs(sb)
+    env = dict(sb["env"], AUTOSCALE_PLATFORM="systemd")
+    assert _run(sb, env=env).returncode == 0
+    # stop the timer OUT OF BAND: the unit files are untouched, the timer is no longer active.
+    _systemd_stubs(sb, active="inactive")
+    res = _run(sb, "--status", env=env)
+    assert res.returncode == 2, (res.stdout, res.stderr)
+    assert "active:  inactive" in res.stdout, res.stdout
+    assert "not active" in res.stdout or "will not fire" in res.stdout, res.stdout
 
 
 def test_the_probe_runs_the_schedule_s_repo_and_pinned_environment(tmp_path):
