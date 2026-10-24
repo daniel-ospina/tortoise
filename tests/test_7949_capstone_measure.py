@@ -682,7 +682,7 @@ def test_a_surface_that_says_the_pass_did_not_run_is_not_a_witness():
     # The refusal names WHERE the OFF block was found, so a reader can tell
     # "absent" (the #9116 cause) from "present and off" (this cause).
     assert "receipt['vet']" in unobserved["S2.2"], unobserved["S2.2"]
-    assert "tortoise/sdk.py:12679" not in unobserved["S2.2"], unobserved["S2.2"]
+    assert "tortoise/sdk.py:12738" not in unobserved["S2.2"], unobserved["S2.2"]
 
 
 def test_the_witness_rule_requires_the_flag_and_a_pass_that_did_work():
@@ -752,7 +752,7 @@ def test_the_flag_alone_is_not_a_witness_and_has_its_own_cause():
         # the LIST gate, and must NOT be attributed to the #9116 meta fold
         assert "`enabled` reads True" in cause, cause
         assert "never that the pass ran" in cause, cause
-        assert "tortoise/sdk.py:12679" not in cause, cause
+        assert "tortoise/sdk.py:12738" not in cause, cause
         assert "did NOT run" not in cause, cause
 
     # ── S2.2 cites the VET pass's own code … ──────────────────────────────
@@ -829,7 +829,7 @@ def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
     The shipped constant said "the receipt's stats carries 20 keys" — a number
     nothing counted — and blamed `extract_session_v2`, which in fact BUILDS
     `result["vet"]` (:8534-8538) and `result["classify_later"]` (:8524-8530). The
-    drop is the meta fold at `tortoise/sdk.py:12679` — the cite was `:12196` until
+    drop is the meta fold at `tortoise/sdk.py:12738` — the cite was `:12196` until
     this round, which at this PR's base is a comment line 200 lines away, so the
     bundle was sending the #9116 fixer into unrelated code. Getting it wrong sends
     the next lane to the wrong file; getting the ARITHMETIC wrong sends it to a
@@ -845,11 +845,11 @@ def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
     assert "S2.2" not in observed
     cause = unobserved["S2.2"]
     assert f"inspected {len(stats)} stats key(s)" in cause, cause
-    assert "tortoise/sdk.py:12679" in cause, cause
+    assert "tortoise/sdk.py:12738" in cause, cause
     assert "tortoise/extractor_v2.py:8534-8538" in cause, cause
     assert "tortoise/sdk.py:12196" not in cause, cause
     assert "20 keys" not in cause, cause
-    assert "tortoise/sdk.py:12679" in unobserved["S2.3"], unobserved["S2.3"]
+    assert "tortoise/sdk.py:12738" in unobserved["S2.3"], unobserved["S2.3"]
 
 
 def test_every_step_is_witnessed_or_given_a_cause():
@@ -1162,7 +1162,7 @@ def _bundle_in_scope(doc_name: str, line: str) -> bool:
     scope = _BUNDLE_ROW_FILTER.get(doc_name)
     return scope is None or bool(scope.search(line))
 
-# `tortoise/sdk.py:12679`, ``tortoise/projection/edges.py:2424-2449``, `edges.py:468`,
+# `tortoise/sdk.py:12738`, ``tortoise/projection/edges.py:2424-2449``, `edges.py:468`,
 # ``tortoise/extractor_v2.py:8534-8538``
 _BUNDLE_CITE = re.compile(
     r"(?<![\w.])(?:tortoise/)?(?:projection/)?"
@@ -1387,20 +1387,28 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     `extractor_v2.py`) across `README.md`, both probes, and the `docs/00_index.md`
     row that is the bundle's entry point — 44 cites at this head.
 
-    Non-vacuity: against `main`'s documents 26 of the 44 cites red across five
-    rules (`sdk.py:12401` for the meta fold, `12682` for the capture path,
-    `11623` for the entry point, `edges.py:467` for the reference labels and
-    `2168-2192` for the writer) — the cited lines hold the #4716 re-key comments
-    instead of the symbols — and the four `extractor_v2.py:8278-8285` cites red on
-    the END bound alone (the range closes one line into the next block).
+    Non-vacuity: re-staling any LIVE cite reds this test (measured: putting
+    `00_index.md`'s fold cite back to a stale number reds it), and the red count
+    is re-measured per base rather than assumed. On `main`'s documents at
+    `0c7062af1` (the base of the #9917 repair, before the pins were re-derived)
+    17 of the 44 cites red across three rules (`sdk.py:12679` for the meta fold,
+    `12960` for the call that writes the references edge, `11851` for the entry
+    point) — those lines hold a supersession comment, an ORDER comment and a
+    counters line instead of the symbols. Earlier rounds recorded a HIGHER count
+    at earlier bases (26 of 44 red on `main` before #9850 re-derived the pins);
+    a stamp is only true of the commit it names, so re-measure before quoting one.
     The `extractor_v2.py` cites are correct at this head, so those rules cannot red
-    on `main`; they are the tripwire for the NEXT insertion above `8288`/`7912`/
-    `7804`, and they bite: with the README's `` `extractor_v2.py:8155` `` moved to
-    `7913`, `the vet flag` reds with `extractor_v2.py:7913 reads 'or
-    _value_gate_enabled())', which carries none of ['vet_enabled = (']`, while the
-    pre-fix sweep (no `extractor_v2` alternative) stayed green on the same text.
+    on `main`; they are the tripwire for the NEXT insertion above the live cites
+    (`extractor_v2.py:8047` the entry point, `:8124` the classify surface, `:8155`
+    the vet flag — the `8288`/`7912`/`7804` an earlier round named here are in no
+    bundle document at this head). They bite: with the README's
+    `` `extractor_v2.py:8155` `` moved to `7913` (measured at this branch's base
+    `0c7062af1`), `the vet flag` reds with `extractor_v2.py:7913
+    reads ':func:`_merge_flagged_contents` emits these and ``execute_embed``
+    probes', which carries none of ['vet_enabled = (']`, while the pre-fix sweep
+    (no `extractor_v2` alternative) stayed green on the same text.
     The index row's cites are pinned by the same sweep: re-staling `00_index.md`'s
-    `sdk.py:12679` to `12401` reds it, and before this leg nothing read that row.
+    `sdk.py:12738` to `12401` reds it, and before this leg nothing read that row.
     """
     result = _bundle_sweep(_BUNDLE_DOCS, _BUNDLE_SOURCES)
     fired, checked = result["fired"], result["checked"]
