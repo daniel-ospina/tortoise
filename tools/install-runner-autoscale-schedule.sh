@@ -47,6 +47,11 @@
 #   AUTOSCALE_PLATFORM         force one platform branch (systemd|cron|launchd) — test seam
 #   AUTOSCALE_HAS_SYSTEMD      0|1 override for the systemd PROBE only — test seam (see below)
 #   AUTOSCALE_HAS_CRON         0|1 override for the cron PROBE only — test seam (see below)
+#   AUTOSCALE_CRON_DAEMON      0|1 answer for "is a cron daemon running?" — test seam, and the
+#                              escape hatch for a box that runs cron in a way the probe cannot see
+#                              (a foreground cron in a minimal container). Unset = detect from
+#                              pgrep, then /proc, then ps; if NONE of those can look, the cron leg
+#                              REFUSES rather than assuming the daemon is up.
 #
 # ⛔ AUTOSCALE_PLATFORM vs the two PROBE seams — they are NOT interchangeable, and the difference
 # is testability, not convenience. `AUTOSCALE_PLATFORM` short-circuits `platform()` BEFORE the
@@ -191,13 +196,46 @@ has_cron() {
 # cron leg installs cleanly, prints "installed: cron entry -> …" and exits 0 on a box where the
 # entry never fires — the inert enforcer this file's header refuses (cycle 2 review, P2).
 #
-# `pgrep -x` matches the exact process name, so it cannot be fooled by a substring hit
-# (`cron-line-helper`). A `procps`-less box has no `pgrep`; there the binaries are all we can see,
-# and the install-time probe still checks the schedule, so an absent `pgrep` must NOT turn this into
-# a refusal — fail-closed is "we looked and it is not there", not "we could not look".
-cron_daemon_running() {
-  command -v pgrep >/dev/null 2>&1 || return 0
-  pgrep -x cron >/dev/null 2>&1 || pgrep -x crond >/dev/null 2>&1
+# ⛔ "WE COULD NOT LOOK" IS NOT "IT IS RUNNING". The first cut of this returned 0 (running)
+# whenever `pgrep` was absent, justified by "the install-time probe still checks the schedule" —
+# which is FALSE: `runner_autoscale.py` has no cron reference at all, it measures cores/memory/`gh`
+# and cannot see a daemon. And `pgrep` is `procps`, which `cron` does NOT depend on, so
+# `apt-get install cron` in a slim image yields `crontab` + a stopped daemon + no `pgrep` — exactly
+# the box this check exists for, where the gate would have been inert (second review, P1).
+#
+# So: `pgrep`, then `/proc` read with bash builtins (no procps needed), then `ps`; and if NONE of
+# them can look, that is unverifiable — refuse, per this file's own NEVER SILENT rule. An explicit
+# `AUTOSCALE_CRON_DAEMON` seam (0/1) exists for the hermetic suite and for an operator who knows
+# their box (a foreground cron in a minimal container, say).
+#
+# Prints a one-line REASON and returns 1 when the daemon is not verifiably running; returns 0 when
+# it is. `pgrep -x` matches the exact process name, so it cannot be fooled by a substring hit
+# (`cron-line-helper`).
+cron_daemon_problem() {
+  case "${AUTOSCALE_CRON_DAEMON:-}" in
+    1) return 0 ;;
+    0) echo "no cron daemon is running (AUTOSCALE_CRON_DAEMON=0)"; return 1 ;;
+  esac
+  if command -v pgrep >/dev/null 2>&1; then
+    if pgrep -x cron >/dev/null 2>&1 || pgrep -x crond >/dev/null 2>&1; then return 0; fi
+    echo "no cron/crond process is running"; return 1
+  fi
+  local d name
+  if [ -d /proc ]; then
+    for d in /proc/[0-9]*; do
+      [ -r "$d/comm" ] || continue
+      read -r name < "$d/comm" 2>/dev/null || continue
+      case "$name" in cron|crond) return 0 ;; esac
+    done
+    echo "no cron/crond process is running (read from /proc; pgrep is not installed)"; return 1
+  fi
+  local procs
+  if procs="$(ps -eo comm= 2>/dev/null)"; then
+    case " $procs " in *" cron "*|*" crond "*) return 0 ;; esac
+    echo "no cron/crond process is running (read from ps)"; return 1
+  fi
+  echo "cannot determine whether a cron daemon is running (no pgrep, no /proc, no ps)"
+  return 1
 }
 
 platform() {
@@ -459,7 +497,15 @@ status() {
       if crontab -l 2>/dev/null | grep -F "$LABEL-cron" >/dev/null; then
         echo "installed: cron entry present"; crontab -l 2>/dev/null | grep -F "$LABEL-cron"
         # ⛔ INSTALLED IS NOT ARMED: with the daemon down the entry never fires (see `has_cron`).
-        cron_daemon_running || { echo "WARNING: no cron daemon is running — the entry will not fire"; armed=0; }
+        if cron_daemon_problem > /dev/null; then
+          echo "installed: cron entry present"; crontab -l 2>/dev/null | grep -F "$LABEL-cron"
+          # ⛔ INSTALLED IS NOT ARMED: with the daemon down the entry never fires, and an
+          # unverifiable reading (no pgrep, no /proc, no ps) must not read as "armed" either
+          # (see `cron_daemon_problem`).
+        else
+          echo "installed: cron entry present"; crontab -l 2>/dev/null | grep -F "$LABEL-cron"
+          echo "WARNING: $(cron_daemon_problem) — the entry will not fire"; armed=0
+        fi
       else echo "NOT installed (no $LABEL-cron in crontab)"; armed=0; fi ;;
     launchd)
       local plist="$AGENTS_DIR/$PLIST_LABEL.plist"
@@ -506,7 +552,9 @@ case "$MODE" in
     case "$PLATFORM" in
       systemd) echo "--- $UNIT_DIR/$LABEL.service"; render_systemd_service
                echo "--- $UNIT_DIR/$LABEL.timer"; render_systemd_timer ;;
-      cron)    cron_line || exit 2 ;;
+      cron)    echo "# cron entry"
+               cron_daemon_problem >/dev/null || echo "# WARNING: $(cron_daemon_problem) — an install here would be REFUSED"
+               cron_line || exit 2 ;;
       launchd) render_plist ;;
       *) echo "REFUSED: no systemd, no cron — a schedule here would never fire" >&2; exit 2 ;;
     esac
@@ -561,8 +609,8 @@ CRON_LINE=""
 # installer prints "installed" and exits 0: the inert enforcer the header refuses (cycle 2 review,
 # P2). Checked HERE, with the other pre-write gates, so the "a refusal writes NOTHING" promise
 # holds — the same placement rule the period gate above follows.
-[ "$PLATFORM" = cron ] && { cron_daemon_running || {
-  echo "REFUSED: cron is installed but no cron daemon is running, so an entry here would never fire." >&2
+[ "$PLATFORM" = cron ] && { cron_daemon_problem >/dev/null || {
+  echo "REFUSED: an entry here would never fire — $(cron_daemon_problem)." >&2
   echo "         Start the daemon (systemctl start cron/crond), or run tools/runner_autoscale.py from the fleet's controller loop." >&2
   exit 2
 }; }

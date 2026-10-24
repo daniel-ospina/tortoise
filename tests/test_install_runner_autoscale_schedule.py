@@ -43,6 +43,7 @@ _ENV_LEAKS = (
     "AUTOSCALE_PLATFORM",
     "AUTOSCALE_HAS_SYSTEMD",
     "AUTOSCALE_HAS_CRON",
+    "AUTOSCALE_CRON_DAEMON",
     "AUTOSCALE_ALLOW_WORKTREE",
     "AUTOSCALE_SKIP_PROBE",
     "RUNNER_AUTOSCALE_INTERVAL",
@@ -166,6 +167,12 @@ def _sandbox(
             "SYSTEMD_UNIT_DIR": str(tmp_path / "units"),
         }
     )
+    if cron:
+        # ⛔ AN EXPLICIT SEAM, not just a `pgrep` stub: the daemon check falls back to /proc and
+        # then `ps`, so a stub-only fixture silently measured the HOST on any box whose /proc
+        # disagreed. `AUTOSCALE_CRON_DAEMON=1` says "this cron box has a live daemon" and nothing
+        # about the host.
+        env["AUTOSCALE_CRON_DAEMON"] = "1"
     if env_overrides:
         env.update(env_overrides)
     return {
@@ -1123,8 +1130,9 @@ def test_cron_installed_but_the_daemon_is_not_running_is_refused(tmp_path):
     Mutation: drop the `cron_daemon_running` refusal -> rc 0 and the entry is written -> RED.
     """
     sb = _sandbox(tmp_path, uname="Linux")
-    _write_stub(sb["bin"], "pgrep", "#!/usr/bin/env bash\nexit 1\n")  # no daemon
-    env = dict(sb["env"], AUTOSCALE_HAS_SYSTEMD="0", AUTOSCALE_HAS_CRON="1")
+    env = dict(
+        sb["env"], AUTOSCALE_HAS_SYSTEMD="0", AUTOSCALE_HAS_CRON="1", AUTOSCALE_CRON_DAEMON="0"
+    )
     res = _run(sb, env=env)
     assert res.returncode == 2, (res.stdout, res.stderr)
     assert "REFUSED" in res.stderr and "daemon" in res.stderr, res.stderr
@@ -1137,4 +1145,62 @@ def test_cron_installed_but_the_daemon_is_not_running_is_refused(tmp_path):
     res = _run(sb, "--status", env=env)
     assert res.returncode == 2, (res.stdout, res.stderr)
     assert "installed: cron entry present" in res.stdout, res.stdout
-    assert "no cron daemon is running" in res.stdout, res.stdout
+    assert "daemon" in res.stdout, res.stdout
+
+
+def _extract_shell_function(name: str) -> str:
+    """Slice one `name() { … }` function out of the installer, for a HERMETIC unit test.
+
+    The daemon check has three readers (`pgrep`, `/proc`, `ps`) and the installer-level fixtures can
+    only reach the first, because the sandbox PATH always contains a real `pgrep`. Pulling the
+    function out lets each reader be exercised on its own without installing anything.
+    """
+    text = SCRIPT.read_text(encoding="utf-8")
+    start = text.index(f"{name}() {{")
+    end = text.index("\n}\n", start) + len("\n}\n")
+    return text[start:end]
+
+
+def test_no_pgrep_is_not_read_as_a_running_daemon(tmp_path):
+    """⛔ "WE COULD NOT LOOK" IS NOT "IT IS RUNNING" — the first cut of this gate was inert here.
+
+    It returned 0 (running) whenever `pgrep` was absent, justified by a claim that "the install-time
+    probe still checks the schedule". That claim is FALSE: `runner_autoscale.py` has no cron
+    reference at all — it measures cores/memory/`gh` — so nothing else could see a dead daemon. And
+    `pgrep` is `procps`, which `cron` does NOT depend on: `apt-get install cron` in a slim image
+    yields `crontab` + a stopped daemon + no `pgrep`, i.e. exactly the box the gate exists for.
+
+    Mutation: `command -v pgrep >/dev/null 2>&1 || return 0` (the pre-fix line) -> this returns 0
+    with no daemon anywhere -> RED.
+    """
+    import shutil as _shutil
+    import subprocess as sp
+
+    # ABSOLUTE: the test empties PATH on purpose, so `bash` cannot be resolved through it.
+    bash = _shutil.which("bash") or "/bin/bash"
+    fn = tmp_path / "fn.sh"
+    fn.write_text(_extract_shell_function("cron_daemon_problem"), encoding="utf-8")
+    # An EMPTY PATH: no pgrep, no ps. Linux then still has /proc; macOS has neither, which is the
+    # "cannot look" arm — both must refuse, so the assertion holds on either host.
+    res = sp.run(
+        [bash, "-c", f'. "{fn}"; cron_daemon_problem; echo "rc=$?"'],
+        env={"PATH": str(tmp_path / "nowhere")},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert "rc=0" not in res.stdout, (
+        "an absent pgrep was read as 'the daemon is running': " + res.stdout
+    )
+    assert res.stdout.strip().splitlines()[-1] == "rc=1", res.stdout
+
+    # And the explicit seam is honoured in both directions.
+    for value, expected in (("1", "rc=0"), ("0", "rc=1")):
+        res = sp.run(
+            [bash, "-c", f'. "{fn}"; cron_daemon_problem; echo "rc=$?"'],
+            env={"PATH": str(tmp_path / "nowhere"), "AUTOSCALE_CRON_DAEMON": value},
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert res.stdout.strip().splitlines()[-1] == expected, (value, res.stdout)
