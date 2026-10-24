@@ -587,6 +587,15 @@ CITES: dict[str, tuple[str, str]] = {
                          "plan it is on |"),
     "n2_rename": (BETA, "| `graph_delete`, `graph_restore`, `graph_list`, "
                         "`graph_set_name` | → rows 30–33 `*_memory_graph*`. |"),
+    "n2_update": (BETA, "| 30 | `update_memory_graph` | **The one partial update a "
+                          "memory graph has** — rename it, or set/clear its "
+                          "session-recording override. A graph is created with its "
+                          "fields; this is the single place they change | "
+                          "`graph_set_recording` (recording only) | builder |"),
+    "n2_list": (BETA, "| 31 | `list_memory_graphs` | List the account's memory graphs "
+                        "| — | admin, builder |"),
+    "n2_restore": (BETA, "| 33 | `restore_memory_graph` | Undo a recoverable delete. "
+                           "**Refuses on a purged graph** | — | builder |"),
     "n2_keys": (BETA, "| `graph_key_ids`, `graph_active_key_count` | 2 | Console "
                       "diagnostics. Both fold into `list_keys`. |"),
     "n2_recording": (BETA, "| ~~`graph_set_recording`~~ (SDK method) | 1 | **Discarded "
@@ -775,10 +784,13 @@ OVERRIDE: dict[str, tuple[str, str]] = {
     "migrate_orgs_to_registry": (DISCARDED, "maintenance"),
     # N2
     "graph_delete": ("delete_memory_graph", "n2_rename"),
-    "graph_restore": ("restore_memory_graph", "n2_rename"),
-    "graph_list": ("list_memory_graphs", "n2_rename"),
-    "graph_set_name": ("update_memory_graph", "n2_rename"),
-    "graph_set_recording": ("update_memory_graph", "n2_recording"),
+    # #4282 phase 2.3 landed these three targets and retired the four names they
+    # absorbed (`graph_list`, `graph_restore`, `graph_set_name`,
+    # `graph_set_recording` — see `tortoise/sdk_retired.py`). The rows are now
+    # UNCHANGED because each method IS its own target.
+    "list_memory_graphs": (UNCHANGED, "n2_list"),
+    "restore_memory_graph": (UNCHANGED, "n2_restore"),
+    "update_memory_graph": (UNCHANGED, "n2_update"),
     "graph_key_ids": ("list_keys", "n2_keys"),
     "graph_active_key_count": ("list_keys", "n2_keys"),
     "graph_count": ("list_memory_graphs", "n2_count"),
@@ -812,7 +824,6 @@ TENSIONS: list[tuple[str, str, str]] = [
     ("get_historical_knowledge", "`check_confidence`", "t_r3"),
     ("list_sources", "`graph_overview`", "t_r6"),
     ("test_guard", "`graph_overview`", "t_r6"),
-    ("graph_set_recording", "kept, inside the control-plane block", "t_n2"),
     # The beta row 258 splits W8: reads go to `list_sources`; the canonical W8 row keeps
     # `get_source_reliability` on `manage_source_trust`. Part A carries beta's read.
     ("get_source_reliability", "`manage_source_trust`", "t_w8"),
@@ -834,9 +845,9 @@ TENSION_CITES: dict[str, tuple[str, str]] = {
                     "`summarize_structure`, `check_structure`, `audit`, "
                     "`validate_domain`, `dream_health_check`, `dream_health_state`, "
                     "`test_guard` |"),
-    "t_n2": (CANON, "| N2 | `graph` | `graph_list`, `graph_count`, `graph_delete`, "
-                    "`graph_restore`, `trash_graphs`, `graph_set_name`, "
-                    "`graph_set_recording`, `graph_key_ids`, "
+    "t_n2": (CANON, "| N2 | `graph` | `list_memory_graphs`, `graph_count`, "
+                    "`graph_delete`, `restore_memory_graph`, `trash_graphs`, "
+                    "`update_memory_graph`, `graph_key_ids`, "
                     "`graph_active_key_count` |"),
     "t_w8": (CANON, "| W8 | `manage_source_trust` | #14 | `assess_source`, "
                     "`set_source_tier`, `get_source_reliability`, `backfill_sources` | "
@@ -856,7 +867,7 @@ PHANTOMS: list[tuple[str, str, str]] = [
     ("recall_legs", "retrieval_legs", "r3"),
     ("stale", "stale_points", "r6_aliases"),
     ("count_memory_graphs", "graph_count", "p_graph_count"),
-    ("set_memory_graph_name", "graph_set_name", "p_set_name"),
+    ("set_memory_graph_name", "update_memory_graph", "p_set_name"),
     ("set_memory_graph_backend", "", "p_set_name"),
     ("index_sources", "index_directory", "w4_rename"),
     ("withdraw_knowledge", "", "p_withdraw"),

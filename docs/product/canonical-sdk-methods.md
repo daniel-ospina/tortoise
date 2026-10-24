@@ -146,7 +146,7 @@ Operator/admin surfaces. **Not** part of the agent-facing read/write guarantee.
 | # | Namespace | Members |
 |---|---|---|
 | N1 | `org` | `org_create`, `org_get`, `org_list`, `org_update`, `org_delete`, `migrate_orgs_to_registry` |
-| N2 | `graph` | `graph_list`, `graph_count`, `graph_delete`, `graph_restore`, `trash_graphs`, `graph_set_name`, `graph_set_recording`, `graph_key_ids`, `graph_active_key_count` |
+| N2 | `graph` | `list_memory_graphs`, `graph_count`, `graph_delete`, `restore_memory_graph`, `trash_graphs`, `update_memory_graph`, `graph_key_ids`, `graph_active_key_count` |
 | N3 | `membership` | `membership_create`, `membership_get`, `membership_list`, `membership_update_role`, `membership_delete` |
 | N4 | `apikey` | `apikey_create`, `apikey_list`, `apikey_revoke`, `apikey_verify` |
 | N5 | `invitation` | `invitation_create`, `invitation_list`, `invitation_get_by_token`, `invitation_get_by_id`, `invitation_accept`, `invitation_revoke`, `cleanup_expired_invitations`, `sweep_invite_ghost_memberships` |
@@ -293,7 +293,7 @@ We have been wrong about this twice already, so the blockers are recorded explic
 | `promote_point` ↔ `update_point(status='live')` | promote also promotes incident operators, under reviewer gating |
 | `capture_session` ↔ `commit_session` | local extraction vs extractor-v2 + Layer-1 POST |
 | `provenance` ↔ `get_provenance_chain` | different edge chains: who-decided vs extracted-from |
-| `list_graphs` ↔ `graph_list` | raw DB graph names vs control-plane rows — **same problem as the tool layer's `get_entity`** |
+| `list_graphs` ↔ `list_memory_graphs` | raw DB graph names vs control-plane rows — **same problem as the tool layer's `get_entity`** |
 | `compute_confidence` ↔ `get_confidence` | eager run vs lazy read — both write (below) |
 | control-plane CRUD families | different labels, validation and audit per family |
 
@@ -357,7 +357,7 @@ Found while building this list. None is fixed here — this document changes no 
    `docs/product/canonical-mcp-tools.md`. What remains is the METHOD-name half (a name beginning
    `get_`/`compute_` that writes), which the rename pass below owns.
 2. **The control plane writes on first use.** Every registry-backed read (`org_list`,
-   `graph_list`, `apikey_list`, `membership_list`, `invitation_list`, and others) calls into
+   `list_memory_graphs`, `apikey_list`, `membership_list`, `invitation_list`, and others) calls into
    a registry helper that on a cold handle issues `CREATE INDEX` statements. Idempotent, but
    a read that writes.
 3. **Five registry `sdk_method` values resolve to no method on `TortoiseSDK`** — their
@@ -517,7 +517,7 @@ justified as one.
 | The control-plane cold-handle write | approval of a fix, or an explicit exemption for operator-only surfaces |
 | Five phantom `sdk_method` registry values | folded into #4035's class of defect |
 | 26 memory-facing groups vs the approved 23 tools | whether the SDK mirrors the tool list 1:1 or stays a superset |
-| `list_graphs` vs `graph_list` | a naming decision — raw DB names vs control-plane rows |
+| `list_graphs` vs `list_memory_graphs` | a naming decision — raw DB graph names vs control-plane rows |
 | `ulid`, `close`, `test_guard` | whether utilities belong on the public surface at all |
 
 ## Sequencing

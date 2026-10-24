@@ -738,7 +738,7 @@ def test_patch_rename_custom_graph(spine_env):
     assert r.status_code == 200, r.text
     assert r.json() == {"graph_id": g["graph_id"], "name": "renamed-bot"}
     assert _node_name(sdk, tid, g["graph_id"]) == "renamed-bot"
-    listed = {x["graph_id"]: x for x in sdk.graph_list(tid)}
+    listed = {x["graph_id"]: x for x in sdk.list_memory_graphs(tid)}
     assert listed[g["graph_id"]]["name"] == "renamed-bot"
     # The rename is display-only: id/kind/namespace are untouched.
     assert listed[g["graph_id"]]["kind"] == "custom"
@@ -752,13 +752,13 @@ def test_patch_rename_default_graph_via_literal(spine_env):
     token = _mint_key(sdk, tid, scopes=["team:manage"])
     h = {"Authorization": f"Bearer {token}"}
     node_id = _default_node_id(sdk, tid)
-    ns_before = {x["graph_id"]: x for x in sdk.graph_list(tid)}[node_id]["namespace"]
+    ns_before = {x["graph_id"]: x for x in sdk.list_memory_graphs(tid)}[node_id]["namespace"]
     r = tc.patch(f"/v1/graphs/default?org_id={tid}",
                  json={"name": "My Memory"}, headers=h)
     assert r.status_code == 200, r.text
     assert r.json() == {"graph_id": "default", "name": "My Memory"}
     assert _node_name(sdk, tid, node_id) == "My Memory"
-    listed = {x["graph_id"]: x for x in sdk.graph_list(tid)}
+    listed = {x["graph_id"]: x for x in sdk.list_memory_graphs(tid)}
     assert listed[node_id]["name"] == "My Memory"
     assert listed[node_id]["kind"] == "default"
     # Namespace is the data-plane key — a rename must NEVER move it (the

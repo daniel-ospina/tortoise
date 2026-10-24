@@ -3413,7 +3413,7 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # #3540 ruling B: 82 -> 81 (two per-source switches retired into ONE
     # consolidated tool — the surface SHRANK, which is the ruling's point).
     assert live["mcp"] == manifest["counts"]["tools"] == 81
-    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 150
+    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 149
 
 
 def test_the_compliance_check_is_RED_on_todays_gap(capsys):

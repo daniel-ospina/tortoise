@@ -1095,7 +1095,7 @@ def create_client(monkeypatch):
 
 def _graph_names(db_path: str, org_id: str) -> list[str]:
     return [g["name"] for g in
-            TortoiseSDK(db_path=db_path, namespace="registry").graph_list(org_id)]
+            TortoiseSDK(db_path=db_path, namespace="registry").list_memory_graphs(org_id)]
 
 
 class TestCreateGraphWithPacks:
