@@ -6518,8 +6518,11 @@ def _resolve_point_supersede(ref: str, search: dict,
     So the leg is **frame-EDGE-trimmed token EQUALITY** (see
     ``_span_contains`` for why every tolerant shape was rejected): after
     dropping the non-load-bearing frame words at each end of both sequences the
-    two must be EQUAL, carry the same negation and condition markers, and name
-    the same subject. An addition ANYWHERE the trim does not reach — including a
+    two must be EQUAL and name the same subject. There is no negation gate and
+    no condition gate — a negator and a condition marker are LOAD-BEARING
+    (``_EDGE_TRIMMABLE`` never removes them), so they sit inside the compared
+    core and the equality test decides them (see the round-5 paragraph below).
+    An addition ANYWHERE the trim does not reach — including a
     tail clause, which is the measured drift's shape — refuses and fails open.
     ``SUPERSEDE_REF_MIN_TOKENS`` keeps a generic short ref from matching half
     the graph, and a unique match is required: 0 candidates and any 2+
@@ -6580,8 +6583,9 @@ def _resolve_point_supersede(ref: str, search: dict,
     return matches[0]
 
 
-# #8503: the supersede-ref recall leg's one bound. Ordered containment is a
-# boolean test (no threshold to tune); this floor keeps a short generic ref
+# #8503: the supersede-ref recall leg's one bound. The leg itself is an
+# EQUALITY test (frame-edge-trimmed token equality) — a boolean, so there is no
+# ratio and no threshold to tune; this floor keeps a short generic ref
 # ("the lease decision") from matching half the graph and keeps the
 # never-guess property testable.
 SUPERSEDE_REF_MIN_TOKENS = 5
@@ -6700,11 +6704,13 @@ def _span_contains(ref_tokens: list[str], prior_tokens: list[str]) -> bool:
 def _supersede_pronouns(text: str) -> frozenset[str]:
     """The entity-carrying pronouns a claim names (empty when it names none).
 
-    `_FRAME_STOPWORDS` strips pronouns from the containment tokens, so
-    containment is blind to "we ship" becoming "they ship" — a different
-    subject. Presence is not the test: the measured drift PREFIXES "We" to a
-    prior that states no subject, and refusing that would undo the fix. Only a
-    substitution — pronouns on BOTH sides, and different — is refused.
+    `_FRAME_STOPWORDS` strips pronouns from the compared CORE (`_EDGE_TRIMMABLE`
+    keeps them trimmable at an edge, so a pronoun at an edge never reaches the
+    core), so equality alone is blind to "we ship" becoming "they ship" — a
+    different subject. Presence is not the test: the measured drift PREFIXES
+    "We" to a prior that states no subject, and refusing that would undo the
+    fix. Only a substitution — pronouns on BOTH sides, and different — is
+    refused.
     """
     return frozenset(tok for tok in _supersede_span_tokens(text)
                      if tok in _ENTITY_PRONOUNS)

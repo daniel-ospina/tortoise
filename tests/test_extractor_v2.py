@@ -6535,9 +6535,11 @@ class TestOperatorSemantics2552:
         alone, so ONE differing content token was free: an entity swap, a
         changed number, a flipped role order or a changed scope word all
         scored ≥0.85 and terminalized a live belief on the prior (no
-        un-supersede API exists). Ordered containment + set-equal negation is
-        the shape that cannot cross them; each pair below is one that
-        `distinguishing_difference` refuses to even FOLD.
+        un-supersede API exists). Frame-edge-trimmed token EQUALITY is the
+        shape that cannot cross them — a negator, a condition, a connective and
+        a date are never trimmed, so they sit inside the compared core and are
+        decided by equality rather than by a separate gate; each pair below is
+        one that `distinguishing_difference` refuses to even FOLD.
         """
         def resolves(ref: str, prior: str) -> bool:
             return v2._resolve_point_supersede(
@@ -7040,3 +7042,125 @@ class TestOperatorSelectionRules:
         assert "ONE MITIGATES PER PAIR" in shared
         # the half that names WHY a sibling point is also a src
         assert "The SRC of a MITIGATES is ANY point" in shared
+
+
+# ── #8503, the DELIVERABLE's own claims — the artifact's layer ─────────────
+#
+# A fresh-context review of PR #9873 found three defects, all in the
+# documentation/attribution layer rather than the executable change, and all
+# three are the SAME shape: a summary that states more than the measurement.
+# They are pinned here because the evidence doc IS the deliverable of #8503 —
+# the executable change ships 5/14, so the attribution is the product, and an
+# attribution nobody pins re-stales the moment a section is edited.
+#
+# (1) the bundle was not registered in `docs/00_index.md` (AGENTS.md's
+#     Documentation Filing Protocol step 3, the #9110-review-P2 precedent): a
+#     reader routing by the documented entry point could not find it at all;
+# (2) the verdict banner inferred "no edge_missing is an extractor-side drop"
+#     from "no operator drop was logged", while the doc's own §3.2b/§3.2e put
+#     the SUPERSEDE row's edge_missing in the replace channel — an
+#     extractor-side refusal — i.e. the two-mechanism conflation #8503 was
+#     filed on, reproduced in the artifact meant to end it;
+# (3) the `_resolve_point_supersede` docstring claimed an acceptance gate the
+#     shipped leg does not have (same negation + condition markers), which a
+#     maintainer would "restore" as a second predicate the same docstring
+#     calls dead code.
+_EVIDENCE_8503 = Path(__file__).resolve().parent.parent / "docs" / "evidence" / "8503"
+_INDEX_00 = Path(__file__).resolve().parent.parent / "docs" / "00_index.md"
+
+
+def _flat(text: str) -> str:
+    return " ".join(text.split())
+
+
+class TestEvidence8503Claims:
+    def test_the_bundle_is_registered_in_the_docs_index(self):
+        """Filing rule AND figure rule (the #9110 review-P2 pin's shape).
+
+        A missing row is the review-P2 omission; two rows is an index that
+        names the same artifact twice; a row citing figures the document does
+        not establish is worse than no row, because it is an index entry a
+        reader trusts.
+        """
+        rows = [line for line in _INDEX_00.read_text(encoding="utf-8").splitlines()
+                if line.startswith("|") and "docs/evidence/8503/README.md" in line]
+        assert len(rows) == 1, (
+            "expected exactly one docs/00_index.md row naming "
+            f"docs/evidence/8503/README.md, found {len(rows)}")
+        row = rows[0]
+        for artifact in (
+            "docs/evidence/8503/before-run.json",
+            "docs/evidence/8503/mutation_arm.py",
+            "w2b-operator-2026-10-24-8503-a.json",
+            "w2b-operator-2026-10-24-8503-b.json",
+            "w2b-operator-2026-10-24-8503-preleg.json",
+        ):
+            assert artifact in row, f"the docs/00_index.md row does not cite {artifact}"
+        # the figures the document actually establishes — and NOT the one the
+        # criterion asks for. The row must publish the miss, not just the gain.
+        assert "5/14" in row and "NOT the 14/14" in row, (
+            "the index row must publish 5/14 and say it is NOT the 14/14 the "
+            "criterion asks for — a row that reads as a gain is the over-claim "
+            "this pin exists to prevent")
+        assert "7/15 → 11/15" in row, "the row must carry the endpoint-recall figure"
+        assert "does NOT make every `edge_missing` a selection miss" in row, (
+            "the row must keep the banner's bound: the operator-drop zero does "
+            "not make every edge_missing a selection miss")
+
+    def test_the_banner_does_not_infer_every_edge_missing_is_an_extractor_drop(self):
+        """The banner must state what was measured, not what it implies.
+
+        `operator_drops = 0` is a measurement of the OPERATOR PASS. The
+        SUPERSEDE row's `edge_missing` is assigned by the same document
+        (§3.2b/§3.2e) to `_resolve_point_supersede` — an extractor-side
+        refusal — so "so no edge_missing is an extractor-side drop" is false,
+        and a lane reading the banner would hunt a prompt fix for a row whose
+        repair the doc itself says needs a semantic resolver.
+        """
+        flat = _flat((_EVIDENCE_8503 / "README.md").read_text(encoding="utf-8"))
+        # the two over-claiming sentences must be GONE, not softened
+        assert "so no `edge_missing` is an extractor-side drop" not in flat
+        assert "each `edge_missing` is a **selection** miss" not in flat
+        # the scoped claim replaces it, and names the pass it measured
+        assert "logged no OPERATOR-PASS drop in any run" in flat, (
+            "the banner must scope the zero to the OPERATOR PASS")
+        assert "does NOT make every `edge_missing` a selection miss" in flat
+        # two-sided: the honest accounting §3.2e owns is still the summary,
+        # and it still assigns the SUPERSEDE row to the resolver.
+        assert "the SUPERSEDE row is the resolver" in flat, (
+            "§3.2e must still state the SUPERSEDE row's class — the pin is on "
+            "the banner agreeing with it, not on deleting the classification")
+
+    def test_the_supersede_leg_documentation_matches_the_shipped_predicate(self):
+        """No negation gate and no condition gate exist; the doc must say so.
+
+        Both are LOAD-BEARING (``_EDGE_TRIMMABLE`` never removes them), so
+        they sit inside the compared core and equality decides them. A
+        docstring promising a separate predicate invites a maintainer to
+        restore dead code — in the direction that FOLDS a negated claim, which
+        terminalizes a live belief with no un-supersede API.
+        """
+        doc = _flat(v2._resolve_point_supersede.__doc__)
+        assert "carry the same negation and condition markers" not in doc, (
+            "the docstring claims a negation/condition gate the leg does not have")
+        assert "no negation gate" in doc, (
+            "the docstring must state the absence positively, not leave it to "
+            "a reader's inference")
+        # the code side of the same claim: no marker set is consulted by the
+        # predicate, so a reader who restores one is restoring dead code.
+        import inspect
+        span_src = inspect.getsource(v2._span_contains)
+        assert "_NEGATION_MARKERS" not in span_src and "_CONDITION_MARKERS" not in span_src
+        assert "_EDGE_TRIMMABLE" in span_src, (
+            "the leg's one predicate is the frame-edge trim — if that moves, "
+            "this pin must be re-derived rather than silently kept")
+        assert "containment is blind" not in _flat(v2._supersede_pronouns.__doc__)
+        # the floor's own comment must describe the EQUALITY test, not a
+        # containment test the leg no longer performs.
+        module_src = Path(v2.__file__).read_text(encoding="utf-8")
+        floor_comment = module_src[:module_src.index("SUPERSEDE_REF_MIN_TOKENS = 5")]
+        tail = floor_comment[floor_comment.rindex("# #8503:"):]
+        assert "Ordered containment is a" not in tail, (
+            "the SUPERSEDE_REF_MIN_TOKENS comment still describes containment")
+        assert "EQUALITY test" in tail, (
+            "the comment must name the equality test the leg actually performs")

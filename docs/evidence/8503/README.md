@@ -20,9 +20,10 @@ and all three exit **EVIDENCE VALID**.
 > 14/14 the criterion asks for. This PR does not claim a gain on the criterion number.**
 > What it does establish, on committed artifacts: (a) **endpoint recall rose 7/15 → 11/15**
 > planted edges with both anchors present (11–13 on the fixed-tree receipts, 7 on the pre-fix
-> probe) — the systematic part, upstream of the edge; (b) **the extractor logged no operator drop in any run**, so no
-> `edge_missing` is an extractor-side drop (that zero is NOT a clean bill for the write path —
-> a commit-seam or a failed snapshot is invisible to it, §1); (c) row-level churn is
+> probe) — the systematic part, upstream of the edge; (b) **the extractor logged no OPERATOR-PASS drop in any run**
+> — and that is the whole of the zero: it is NOT a clean bill for the write path (a commit-seam or a
+> failed snapshot is invisible to it, §1) and it does NOT make every `edge_missing` a selection miss,
+> because the SUPERSEDE row's is a refusal in the replace channel (§3.2b, §3.2e); (c) row-level churn is
 > two-way and inside sampling noise — **2** rows flipped red→green in BOTH fixed-tree runs
 > (`wp04_aurora_perf_op_02`, `wp05_retro_writeup_op_01`), **1** flipped green→red in both
 > (`wp07_bluepeak_followup_op_03`), and counting a flip in *at least one* run gives 5 up and 2
@@ -186,12 +187,14 @@ carries an issue id but not an outcome that carries a command and a clock time.
 
 ### 3.2 Operator selection — the `edge_missing` half
 
-With `operator_drops = 0` in every run **that carries the field**, each `edge_missing` is a
-**selection** miss — the
-model had both claims and wired no operator between them. That inference is bounded by the
-commit-seam blind spot named in §1: the operator pass dropped nothing in these runs, but a
-commit-layer drop is not observable from a receipt, so it is *not excluded*, only unobserved.
-Three distinct sub-mechanisms were measured:
+`operator_drops = 0` in every run **that carries the field**. That is a statement about the
+OPERATOR PASS and nothing wider: in the rows §3.2e classes as selection misses the model had both
+claims and wired no operator between them. Two bounds apply. The commit-seam blind spot named in
+§1 (a commit-layer drop is not observable from a receipt, so it is *not excluded*, only
+unobserved). And the replace channel, which the SUPERSEDE row's `edge_missing` carries — an
+extractor-side refusal this section does not own (§3.2b). §3.2e's row-by-row accounting is the
+only summary; the sub-sections below are the mechanisms behind it — (a) is the one this PR FIXED
+and so is not in the residual, (b)–(d) are the residual classes §3.2e counts.
 
 **(a) kind selection — a displaced theory wired as IMPL, not NAND.** `wp05_retro_writeup_op_01`
 (`NEGATE`) was `edge_missing` because the mapper emitted `IMPL` from the root-cause claim to
@@ -313,7 +316,7 @@ every injected regression detected). The first cut of this script only re-read t
 constant — true by construction, and it would have passed with every pin deleted — so it was
 rewritten in review:
 
-```
+```text
 1. operator-selection rules (the real pins run under mutation)
   [DETECTED] S2_TMPL: assistant-asserted claims are licensed
   [DETECTED] S2_TMPL: an asserting question carries its claim
@@ -480,7 +483,6 @@ the note exists for) behind a vacuous `not in` assertion, and a residual account
 of 9 misses per run while omitting `SUPPORTS`. Round 7 found the last two unclassified refusal
 sites (`non-dict retraction ref`, `empty retraction ref`), which let a run whose retractions were
 all refused ship the "no supersede refusal" note.
-
 
 ## 6. Reproduction
 
