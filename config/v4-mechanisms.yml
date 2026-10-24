@@ -559,8 +559,11 @@ mechanisms:
       `tortoise/**/*.py` (a script, a migration, a console session) would not be
       seen, a statement ASSEMBLED at runtime is REFUSED as unverifiable rather
       than read as absent — an f-string / `+` / `%` / `.format` / `.format_map` /
-      `.join` / `+=`, a statement SPLIT across operands (no single literal holds
-      it), and any name, attribute, subscript or tuple target BOUND to an
+      `.join` / `+=`, a statement SPLIT across operands at ANY point — the
+      keyword boundary included, since the operands are JOINED in source order
+      before the statement is looked for, and a half carried by a name is folded
+      in too (no single literal holds it) — and any name, attribute, subscript or
+      tuple target BOUND to an
       incomplete one (`AnnAssign`, walrus, `for` target, a CLASS-BODY binding used
       as `Cls.name` — including a tuple target, a subscript target and a NESTED
       class `Outer.Inner.name`, or a class body that GUARDS its binding with
@@ -580,10 +583,26 @@ mechanisms:
       scan reaches is stated as EXAMPLES rather than as a closed list — a fragment
       whose keyword lives entirely outside the scanned module (handed in by a
       helper or a default argument), a lookup resolved dynamically
-      (`globals()["X"]`, `getattr(obj, name)`), a runtime SUBSTITUTION this scan
-      does not model (`.replace`, `string.Template.substitute`) or a keyword SPLIT
-      between the two words (`"CREATE " + "CONSTRAINT …"`) — both measured to read
-      as absent, and both tracked for a hardened detector in #9901 — and, for a
+      (`globals()["X"]`, `getattr(obj, name)`), and a runtime SUBSTITUTION this
+      scan does not model (`.replace`, `string.Template.substitute`) — measured to
+      read as absent, and tracked for a hardened detector in #9901. A split at the
+      KEYWORD boundary was one of these and no longer is: the operands are joined
+      in source order, following bound names ACROSS modules (a `HEAD = "CREATE "`
+      in one file and the rest here), and the concatenation is matched, so
+      `"CREATE " + "CONSTRAINT pt UNIQUE NODE Point"` is refused rather than read
+      as absent; a name bound TWICE and concatenated (which value wins is a
+      runtime decision) is refused too — one level deep: when the ambiguous
+      name's own candidate is ANOTHER ambiguous name (`s = u` where `u` is bound
+      twice) the expansion stops, and that shape is one of the residuals below.
+      A half supplied through a SUBSTITUTION SLOT (`.format`, `%`, `format_map`)
+      or a MAPPING carrier is refused by the coarser rule "the literals here spell
+      BOTH words", because there no single text holds them adjacently and the
+      source-order join is not what the runtime sends. NOT reached, and named here
+      rather than assumed away: a NESTED ambiguity as above, a `bytes` literal
+      (this scan reads `str`), and a renamed re-export hop in the join's binding
+      map (the TAINT follows it, the join does not) — measured, all three; all
+      three are recorded with #9901's scope comments (6386915231, 6387173470).
+      And, for a
       MATCH, whether the string is a statement or an explanatory MENTION of the DDL
       spelling (docstrings are skipped; any other string that spells the statement
       out reds and must be reworded). It is the reachable surface the claim lives

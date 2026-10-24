@@ -1784,6 +1784,132 @@ DDL_FRAGMENT = re.compile(
 )
 
 
+#: How many bindings deep the assembled-text join follows a NAME. A fragment
+#: split at the KEYWORD boundary can be carried by names as easily as by adjacent
+#: literals (`_A = "CREATE "; _B = _A`), and following a chain is cheap — three
+#: is beyond any spelling the repo uses while still bounded.
+_MAX_RESOLVE_DEPTH = 3
+
+
+#: The two words every constraint statement must contain. An assembly form whose
+#: literals BETWEEN THEM spell both — in whatever order, across operands, a
+#: substitution slot, a mapping's values or another module — can build a statement
+#: even when no single literal matches `DDL` and the operands' joined text is not
+#: what the runtime sends (measured: `"{}CONSTRAINT pt UNIQUE NODE Point".format(
+#: "CREATE ")` and `"".join(D.values())` with the halves in a dict both read as
+#: ABSENT). Sound over-approximation: `CREATE` and `CONSTRAINT` are what any such
+#: statement is split at, and no ordinary string carries both.
+_CREATE_WORD = re.compile(r"CREATE", re.IGNORECASE)
+#: No leading `\b`: a substitution slot puts the word straight after the slot
+#: (`"%sCONSTRAINT …" % "CREATE "`), where a boundary test misses it — measured.
+_CONSTRAINT_WORD = re.compile(r"CONSTRAINT", re.IGNORECASE)
+
+
+def _splits_a_keyword(
+    node: ast.expr,
+    bindings: dict[str, ast.expr],
+    aliases: tuple[dict[str, str], dict[str, str]],
+    rebound: dict[str, list[str]] | None = None,
+) -> bool:
+    """Do the literals here spell BOTH halves, wherever they sit?
+
+    `DDL` needs the two words ADJACENT, and the operand join only covers the order
+    the runtime concatenates — neither sees a keyword supplied through a
+    substitution slot (`.format`, `%`, `format_map`) or a mapping carrier, where
+    the words are present but never adjacent in one text. This is the coarse
+    check for those: both words present anywhere in the form's literals (bound
+    names folded in) is unverifiable, whatever the runtime order turns out to be.
+    """
+    texts = list(_ddl_fragments(node))
+    for child in ast.walk(node):
+        if not isinstance(child, (ast.Name, ast.Attribute, ast.Subscript)):
+            continue
+        keys = _use_keys(child, aliases)
+        if not (keys & set(bindings) or keys & set(rebound or {})):
+            # Not bound to anything this scan resolves: no text of its own. Skipping
+            # here is what keeps the pin's cost linear on the real tree — calling
+            # `_assembled_text` for every Name made it take minutes.
+            continue
+        texts.append(_assembled_text(child, bindings, 0, aliases))
+    # Only KEYWORD-SIZED literals count: an ordinary prose or SQL string that
+    # happens to mention both words is not a split, and the coarse rule reds the
+    # pin on the real tree if it reads whole messages (`record_projection.py`,
+    # `cache_projection.py` — measured). A half of a statement is short.
+    def short(texts: list[str]) -> str:
+        return "".join(text for text in texts if len(text) <= 80)
+
+    if not (_CREATE_WORD.search(short(texts)) or _CONSTRAINT_WORD.search(short(texts))):
+        # Neither word is present in what this expression already resolves, so no
+        # amount of ambiguous-name expansion can form a statement: skip it. Without
+        # this guard the expansion below made the pin take minutes on the real tree.
+        return False
+    # A name bound TWICE contributes no text through `bindings`, so its candidate
+    # VALUES are expanded here — recursively, because `x += s` makes `x` ambiguous
+    # through `s`, which is ambiguous itself. Measured: without the expansion, a name
+    # carrying the CONSTRAINT half next to a literal `CREATE ` half read as ABSENT in
+    # eight spellings (`"CREATE " + s`, an f-string, `%`, `.format`,
+    # `.join([...])`, `x += s`, function scope).
+    for child in ast.walk(node):
+        if not isinstance(child, (ast.Name, ast.Attribute, ast.Subscript)):
+            continue
+        for key in set(_use_keys(child, aliases)) & set(rebound or {}):
+            texts.extend(rebound[key])
+    joined = short(texts)
+    return bool(_CREATE_WORD.search(joined) and _CONSTRAINT_WORD.search(joined))
+
+
+#: Names the interpreter binds itself; never a constraint fragment, and rebound in
+#: ordinary code (`if __name__ == "__main__":`), so they are not ambiguity.
+_INTERPRETER_BOUND = frozenset({
+    "__name__", "__file__", "__doc__", "__package__", "__spec__", "__loader__",
+    "__builtins__", "__path__", "__annotations__",
+})
+
+
+def _ambiguous_names(
+    node: ast.expr,
+    rebound: dict[str, list[str]],
+    aliases: tuple[dict[str, str], dict[str, str]],
+    bindings: dict[str, ast.expr] | None = None,
+) -> list[str]:
+    """Bound-twice keys this expression reads — which value won is a runtime fact.
+
+    `bindings` deliberately drops such a key, so the join contributes no text and
+    the fragment loop sees only literals: measured, `if flag: d = "CREATE " … else:
+    d = "x"` followed by `d + "CONSTRAINT pt UNIQUE NODE Point"` read as ABSENT.
+    A name we cannot pick is unverifiable wherever it is CONCATENATED, so this is
+    reported rather than resolved — the same fail-closed polarity as taint.
+    """
+    hits: list[str] = []
+    for child in ast.walk(node):
+        if not isinstance(child, (ast.Name, ast.Attribute, ast.Subscript)):
+            continue
+        if not set(_use_keys(child, aliases)) & set(rebound):
+            continue
+        if isinstance(child, ast.Name) and child.id in _INTERPRETER_BOUND:
+            # The interpreter binds these itself (`__name__` is the module's own
+            # name and is documented nowhere as a DDL half); they are rebound and
+            # concatenated in ordinary code, and reporting them reds the pin on a
+            # tree with no constraint at all (measured: `tortoise/__init__.py`).
+            continue
+        # "Bound twice" alone is every ordinary loop variable (`for name, path in
+        # …`), and reporting those reds the pin on a tree holding no constraint at
+        # all (measured: `__init__.py`, `__main__.py`). The key is unverifiable only
+        # when SUBSTITUTING any candidate value, next to the literals the same
+        # expression carries, would form a constraint statement.
+        keys = set(_use_keys(child, aliases)) & set(rebound)
+        fragments = "".join(_ddl_fragments(node))
+        forms = any(
+            DDL.search(text + fragments)
+            for key in keys
+            for text in rebound[key]
+        )
+        if not forms:
+            continue
+        hits.append(ast.unparse(child))
+    return sorted(set(hits))
+
+
 def _ddl_fragments(node: ast.expr) -> list[str]:
     """Every string literal inside `node`, however deeply nested.
 
@@ -1798,6 +1924,78 @@ def _ddl_fragments(node: ast.expr) -> list[str]:
         n.value for n in ast.walk(node)
         if isinstance(n, ast.Constant) and isinstance(n.value, str)
     ]
+
+
+def _assembled_text(
+    node: ast.expr,
+    bindings: dict[str, ast.expr],
+    depth: int = 0,
+    aliases: tuple[dict[str, str], dict[str, str]] = ({}, {}),
+) -> str:
+    """The literal text `node` carries, **in SOURCE order**, following bound names.
+
+    `_ddl_fragments` answers "which literals are in here"; this answers "what
+    will the runtime send", and the difference is the whole fail-open #9884's
+    review found. A statement can be split at the KEYWORD boundary —
+    `"CREATE " + "CONSTRAINT pt UNIQUE NODE Point"` — where neither operand
+    contains a spelling `DDL` or `DDL_FRAGMENT` recognises, so the fragment loop
+    below reports nothing and the pin reads the constraint as ABSENT while it
+    ships. Joining the operands is what makes the statement visible again.
+
+    Two properties the fragments list cannot supply:
+
+    * **ORDER.** `ast.walk` is breadth-first, so `("CREATE " + "CONSTRAINT ") + "x"`
+      yields `["x", "CREATE ", "CONSTRAINT "]` — joined in that order it matches
+      nothing. The literals are ordered by (line, column), i.e. the order Python
+      concatenates them; the parser merges implicit adjacency into one Constant,
+      which keeps the whole span, so that case needs no handling here.
+    * **NAMES.** `_D = "CREATE "; _C = "CONSTRAINT …"; g.query(_D + _C)` carries no
+      literal inside the `+` at all. `bindings` maps a binding key (the same
+      spelling :func:`_use_keys` produces) to the bound expression, so a name is
+      replaced by the text it was bound to — one constant-folding pass, capped at
+      :data:`_MAX_RESOLVE_DEPTH`.
+
+    An AMBIGUOUS key (bound twice to different values) is absent from `bindings`
+    by construction, so a rebinding is never resolved to whichever value happened
+    to win — it simply contributes no text, and the fragment loop and the taint
+    rule do NOT cover it when the halves split a keyword (measured: neither literal
+    matches `DDL` or `DDL_FRAGMENT`), so `ddl_scan` refuses an ambiguous binding
+    whose any value carries constraint text, and `+=` joins the target's PREVIOUS
+    candidate texts with the appended one — so `x = "CREATE "; x += s` is refused
+    whether `s` is a literal, a name, or a name bound twice.
+
+    What it does NOT reach is an ambiguity NESTED inside another ambiguity's
+    candidate: `u = "CONSTRAINT pt UNIQUE NODE "` (rebound in one branch) then
+    `s = u` / `s = "y"` (rebound again) and `g.query("CREATE " + s)` reads as
+    absent — measured, one level deeper than the candidate expansion goes. That
+    shape, a `bytes` literal and a renamed re-export hop in the join's binding map
+    are the residuals named in the registry row and in #9901's scope comment.
+    """
+    entries: list[tuple[tuple[int, int, int], str]] = []
+    nodes = list(ast.walk(node))
+    covered: set[int] = set()
+    for child in nodes:  # outer-first (BFS), so a resolved name covers its own parts
+        if id(child) in covered:
+            continue
+        if isinstance(child, ast.Constant) and isinstance(child.value, str):
+            entries.append(((child.lineno, child.col_offset, 0), child.value))
+            continue
+        if not isinstance(child, (ast.Name, ast.Attribute, ast.Subscript)):
+            continue
+        bound = next(
+            (bindings[k] for k in sorted(_use_keys(child, aliases)) if k in bindings),
+            None,
+        )
+        if bound is None or depth >= _MAX_RESOLVE_DEPTH:
+            continue
+        inner = _assembled_text(bound, bindings, depth + 1, aliases)
+        if not inner:
+            continue
+        entries.append(((child.lineno, child.col_offset, 0), inner))
+        for part in ast.walk(child):
+            covered.add(id(part))
+    entries.sort(key=lambda item: item[0])
+    return "".join(text for _, text in entries)
 
 
 def _incomplete_ddl(value: ast.expr | None) -> bool:
@@ -1990,6 +2188,66 @@ def ddl_scan(root: Path) -> tuple[list[str], list[str], list[str]]:
                 changed = True
         tree_taint = set().union(*file_taint.values())
 
+    #: Binding key -> bound expression, for the assembled-text join — TREE-WIDE,
+    #: for the same reason the taint is: a statement split at the keyword boundary
+    #: can keep each half in a DIFFERENT module (`HEAD = "CREATE "` here,
+    #: `TAIL = "CONSTRAINT …"` there, `g.query(H + T + "Point")`), and a per-file
+    #: map resolves neither, so the constraint reads as ABSENT while it ships
+    #: (measured, #9884 review). A key bound TWICE to different values is dropped —
+    #: which one wins is decided at runtime, so resolving to either would be a
+    #: guess — and its values are kept in `rebound_values` so a rebinding whose
+    #: halves are constraint text is refused rather than trusted to the fragment
+    #: loop, which does not see it (measured, below).
+    all_bindings: dict[str, ast.expr] = {}
+    rebound_values: dict[str, list[ast.expr]] = {}
+    for _, tree in trees:
+        for target, value in _bound_pairs(tree):
+            if value is None:
+                continue
+            for key in _binding_keys(target):
+                if key in all_bindings:
+                    if ast.dump(all_bindings[key]) != ast.dump(value):
+                        rebound_values.setdefault(
+                            key, [all_bindings[key]]
+                        ).append(value)
+                else:
+                    all_bindings[key] = value
+    for key in rebound_values:
+        all_bindings.pop(key, None)
+    #: Rebound key -> the TEXT of each candidate value, for the keys whose
+    #: candidates carry constraint vocabulary. Computed ONCE: the taint is tree-wide
+    #: by design, so on the real tree `rebound_values` holds hundreds of ordinary
+    #: loop variables (`for name, path in …`) and testing each one per node made the
+    #: pin take minutes. A key whose values never mention CREATE/CONSTRAINT cannot
+    #: form a statement, so it is dropped here rather than at every node.
+    rebound_texts: dict[str, list[str]] = {}
+    for key, values in rebound_values.items():
+        texts = [_assembled_text(v, all_bindings) for v in values]
+        if any(
+            _CREATE_WORD.search(text) or _CONSTRAINT_WORD.search(text)
+            for text in texts
+        ):
+            rebound_texts[key] = texts
+    rebound_values = rebound_texts
+    tree_bindings = (all_bindings, rebound_texts)
+
+    # The docstring of `_assembled_text` used to say the fragment loop and the taint
+    # rule "remain the guard" for an ambiguous key. Measured: they do not when the
+    # rebinding carries a keyword HALF (`d = "CREATE "` in one branch, something
+    # else in the other, then `d + "CONSTRAINT … Point"`) — neither literal matches
+    # `DDL` or `DDL_FRAGMENT`, and `d` is not tainted. So an ambiguous key whose
+    # ANY bound value is a constraint fragment or statement is refused, instead of
+    # being resolved to whichever value happened to win.
+    for key, texts in sorted(rebound_texts.items()):
+        for text in texts:
+            if DDL.search(text) or DDL_FRAGMENT.search(text):
+                assembled.append(
+                    f"an ambiguous binding `{key.split(':', 1)[1]}` is bound to "
+                    "constraint text in one branch and something else in another — "
+                    "which value wins is a runtime decision, so this is unverifiable"
+                )
+                break
+
     for rel, tree in trees:
         aliases = _import_aliases(tree)
         docstrings = {
@@ -2003,6 +2261,7 @@ def ddl_scan(root: Path) -> tuple[list[str], list[str], list[str]]:
         #: unverifiable — the label may be supplied at the use site. Tree-wide, so
         #: a fragment bound in another module is covered too (see above).
         tainted = tree_taint
+        bindings = tree_bindings[0]
 
         for node in ast.walk(tree):
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -2012,7 +2271,13 @@ def ddl_scan(root: Path) -> tuple[list[str], list[str], list[str]]:
                     found.append(f"{rel}: {match.group(0).strip()}")
                 continue
             fragments: list[str] = []
+            #: The expression whose PARTS the runtime concatenates, when this node is
+            #: one of the assembly forms. `None` for every other node, so the join
+            #: below can never fire on an ordinary call that merely happens to have
+            #: string arguments (`foo(_D, _C)` assembles nothing).
+            assembling: ast.expr | None = None
             if isinstance(node, ast.JoinedStr):
+                assembling = node
                 fragments = [
                     v.value for v in node.values
                     if isinstance(v, ast.Constant) and isinstance(v.value, str)
@@ -2022,16 +2287,66 @@ def ddl_scan(root: Path) -> tuple[list[str], list[str], list[str]]:
                 # holds no complete statement in either literal, so the word is
                 # what makes it reportable — an assembled statement must never
                 # read as absent.
+                assembling = node
                 fragments = _ddl_fragments(node)
             elif isinstance(node, ast.AugAssign):
+                # `d = "CREATE "; d += "CONSTRAINT pt UNIQUE NODE Point"` — the
+                # FIRST literal is not a fragment (it holds half a keyword) and `d`
+                # is not yet tainted, so neither guard fires and the constraint read
+                # as ABSENT (measured). The check is the JOIN of what the target
+                # holds with what is appended, which is what the runtime sends.
+                assembling = node.value
                 fragments = _ddl_fragments(node.value)
                 if set(_binding_keys(node.target)) & tainted:
                     assembled.append(f"{rel}: `{ast.unparse(node.target)}` += …")
+                else:
+                    # The target is ALWAYS ambiguous after `+=` (it was bound by the
+                    # `=` before), so `bindings` never holds it and
+                    # `_assembled_text(node.target)` is empty — measured: with only
+                    # that lookup, `x = "CREATE "; x += s` read as absent whether `s`
+                    # was a literal, a name, or itself ambiguous. What the runtime
+                    # appends to is one of the target's PREVIOUS candidate values, so
+                    # those are what must be joined with the appended text.
+                    prev = list(rebound_texts.get(f"name:{getattr(node.target, 'id', '')}", ()))
+                    prev += list(
+                        rebound_texts.get(f"expr:{ast.unparse(node.target)}", ())
+                    )
+                    if not prev:
+                        prev = [_assembled_text(node.target, bindings, 0, aliases)]
+                    # The appended value can be ambiguous too (`x += s` where `s`
+                    # was bound twice), so its candidate texts stand in for it —
+                    # measured: joining only its resolved text left that spelling
+                    # ABSENT.
+                    appended = list(
+                        rebound_texts.get(f"name:{getattr(node.value, 'id', '')}", ())
+                    ) or [_assembled_text(node.value, bindings, 0, aliases)]
+                    seam = next(
+                        (
+                            match
+                            for match in (DDL.search(text + tail) for text in prev for tail in appended)
+                            if match
+                        ),
+                        None,
+                    )
+                    for name in _ambiguous_names(
+                        node, rebound_values, aliases, bindings
+                    ):
+                        assembled.append(
+                            f"{rel}: `{name}` is bound twice and is `+=` — which "
+                            "value the runtime appends to cannot be decided here, "
+                            "so this is unverifiable"
+                        )
+                    if seam:
+                        assembled.append(
+                            f"{rel}: `{ast.unparse(node.target)}` += … assembles "
+                            f"a constraint statement: {seam.group(0).strip()}"
+                        )
             elif (
                 isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)
                 and node.func.attr in _ASSEMBLY_ATTRS
             ):
+                assembling = node
                 fragments = _ddl_fragments(node)
             for fragment in fragments:
                 statement = False
@@ -2045,6 +2360,44 @@ def ddl_scan(root: Path) -> tuple[list[str], list[str], list[str]]:
                     assembled.append(
                         f"{rel}: a constraint fragment with no statement in it "
                         f"({fragment.strip()[:60]!r})"
+                    )
+            # THE OPERANDS JOINED, in the order the runtime concatenates them.
+            # A split at the KEYWORD boundary — `"CREATE " + "CONSTRAINT pt UNIQUE
+            # NODE Point"`, `"CREATE CONS" + "TRAINT …"`, or the same held by two
+            # names — leaves NO operand carrying a spelling either `DDL` or
+            # `DDL_FRAGMENT` recognises, so every check above is silent and the
+            # constraint reads as ABSENT while it ships (the fail-open review cycle
+            # 11 measured on this branch). The keyword is exactly what such a
+            # statement is split AT, so the fragment loop cannot be fixed by adding
+            # the bare word to `DDL_FRAGMENT`: that taints `_CYPHER_RESERVED`, a
+            # regex and every ordinary Cypher `CREATE` (measured: false positives on
+            # the real tree). Joining is the NARROW spelling — it fires only when the
+            # parts actually form a constraint statement.
+            if assembling is not None:
+                for name in _ambiguous_names(
+                    assembling, rebound_values, aliases, bindings
+                ):
+                    assembled.append(
+                        f"{rel}: `{name}` is bound twice and is concatenated — "
+                        "which value the runtime concatenates cannot be decided "
+                        "here, so this is unverifiable"
+                    )
+            if assembling is not None and _splits_a_keyword(
+                assembling, bindings, aliases, rebound_values
+            ):
+                assembled.append(
+                    f"{rel}: {ast.unparse(assembling)[:70]!r} carries BOTH keyword "
+                    "halves of a constraint statement (a substitution slot, a "
+                    "mapping value or an operand) — the runtime text cannot be "
+                    "resolved here, so this is unverifiable"
+                )
+            if assembling is not None and not any(DDL.search(f) for f in fragments):
+                seam = DDL.search(_assembled_text(assembling, bindings, 0, aliases))
+                if seam:
+                    assembled.append(
+                        f"{rel}: a constraint statement SPLIT across operands — no "
+                        f"single literal holds it, their concatenation does: "
+                        f"{seam.group(0).strip()}"
                     )
             # A USE of a name bound to an incomplete statement — the label is
             # supplied HERE, which a static scan cannot resolve. `Load` only: a
@@ -2086,6 +2439,14 @@ def test_the_ddl_scan_sees_every_form_that_could_name_a_label(tmp_path) -> None:
     while a `Point` constraint shipped — the exact false PASS it exists to stop.
     Each of those three is a fixture below, so no reduction of the allow-list
     back to `Name` targets can pass this test again.
+
+    The `keyword_split*` fixtures are cycle 11's finding, and they are the ones
+    `split_keyword` was mistaken for: a statement split at the KEYWORD boundary
+    contains no spelling that either single-literal pattern sees, so the pin read
+    it as ABSENT while `atomic_point_write`'s own note claimed exactly that shape
+    was refused. Each of them reds on the pre-join scan (proven by disabling the
+    join and by disabling name resolution: the first reds `keyword_split`, the
+    second `keyword_split_fstring`).
     """
     forms = {
         "literal": (
@@ -2174,6 +2535,75 @@ def test_the_ddl_scan_sees_every_form_that_could_name_a_label(tmp_path) -> None:
             'g.query("GRAPH.CONSTRAINT " + "CREATE pt UNIQUE NODE Point")\n',
             True,
             False,  # no SINGLE literal holds the statement — that is the point
+        ),
+        # A split AT THE KEYWORD BOUNDARY — the shape review cycle 11 found absent
+        # while `atomic_point_write`'s own note claimed "a statement SPLIT across
+        # operands" is refused. Neither operand matches `DDL` OR `DDL_FRAGMENT`,
+        # so every check fired on a single literal was silent and the constraint
+        # read as ABSENT while it shipped. `split_keyword` above does NOT cover
+        # this: its first operand matches `DDL_FRAGMENT` through the
+        # `GRAPH\.CONSTRAINT` alternative, which is exactly the spelling that
+        # happened to work. Each fixture below reds on the pre-join scan.
+        "keyword_split": (
+            'g.query("CREATE " + "CONSTRAINT pt UNIQUE NODE Point")\n',
+            True,
+            False,
+        ),
+        "keyword_split_reverse": (
+            'g.query("CONSTRAINT" + " CREATE pt UNIQUE NODE Point")\n',
+            True,
+            False,
+        ),
+        "keyword_split_midword": (
+            # The split lands INSIDE the keyword: neither `CREATE CONS` nor
+            # `TRAINT …` is a spelling the single-literal patterns can see.
+            'g.query("CREATE CONS" + "TRAINT pt UNIQUE NODE Point")\n',
+            True,
+            False,
+        ),
+        "keyword_split_three_parts": (
+            # Nested operands, so the join must be SOURCE-ordered: `ast.walk`
+            # yields these breadth-first (`["NODE Point", "CREATE ", "CONSTRAINT"]`),
+            # which joined in walk order matches nothing.
+            'g.query(("CREATE " + "CONSTRAINT ") + "pt UNIQUE NODE Point")\n',
+            True,
+            False,
+        ),
+        "keyword_split_fstring": (
+            # The same split with the first part carried by a NAME inside an
+            # f-string, so neither adjacency nor a single literal is enough.
+            '_P = "CREATE "\ng.query(f"{_P}CONSTRAINT pt UNIQUE NODE Point")\n',
+            True,
+            False,
+        ),
+        "keyword_split_names": (
+            # No literal sits inside the `+` at all: both operands are names.
+            '_D = "CREATE "\n_C = "CONSTRAINT pt UNIQUE NODE Point"\n'
+            'g.query(_D + _C)\n',
+            True,
+            False,
+        ),
+        "keyword_split_in_collection": (
+            'P = ["CREATE ", "CONSTRAINT pt UNIQUE NODE Point"]\n'
+            'g.query("".join(P))\n',
+            True,
+            False,
+        ),
+        "cypher_create_is_not_a_constraint": (
+            # The CONTROL for the join: an ordinary Cypher write split at the same
+            # place must NOT be refused — joining operands must catch constraint
+            # statements, not every `CREATE` (the over-blocking direction that
+            # made a bare-keyword test unusable on the real tree).
+            'g.query("CREATE " + "(m:Point {id: 1})")\n',
+            False,
+            False,
+        ),
+        "add_constraint_is_not_a_graph_constraint": (
+            # The other control: `ADD CONSTRAINT … CHECK` is a column check. Both
+            # halves are here so the join cannot call it a graph constraint.
+            'g.query("ALTER TABLE t " + "ADD CONSTRAINT c CHECK (x > 0)")\n',
+            False,
+            False,
         ),
         "class_attr_use": (
             'class Ddl:\n'
@@ -2471,8 +2901,104 @@ def test_the_ddl_scan_sees_every_form_that_could_name_a_label(tmp_path) -> None:
         "an attribute-target binding used through another receiver was not "
         "refused (`OBJ._ddl` vs the `self._ddl` binding)"
     )
+    # A keyword split whose HALVES live in DIFFERENT modules: `HEAD = "CREATE "`
+    # in the carrier, appended here. `bindings` was per-file, so the join resolved
+    # neither half and the constraint read as ABSENT (measured, #9884 review).
+    (tmp_path / "pkg" / "carrier.py").write_text(
+        'HEAD = "CREATE "\nTAIL = "CONSTRAINT pt UNIQUE NODE "\n', encoding="utf-8"
+    )
+    (tmp_path / "pkg" / "__init__.py").write_text(
+        'from .carrier import HEAD, TAIL\n', encoding="utf-8"
+    )
+    for spelling in (
+        'from pkg import HEAD as H, TAIL as T\ng.query(H + T + "Point")\n',
+        'from pkg import HEAD, TAIL\ng.query(HEAD + TAIL + "Point")\n',
+        'import pkg.carrier as c\ng.query(c.HEAD + c.TAIL + "Point")\n',
+    ):
+        (tmp_path / "user.py").write_text(spelling, encoding="utf-8")
+        _, _, assembled = ddl_scan(tmp_path)
+        assert assembled, (
+            f"a keyword split with its halves in another module was not refused "
+            f"({spelling.splitlines()[0]!r}) — the join must see the whole tree"
+        )
+    # A binding made TWICE, one branch carrying the keyword half: which value wins
+    # is a runtime fact, and neither literal matches the fragment pattern, so the
+    # fragment loop and the taint rule both stay silent (measured).
+    (tmp_path / "pkg" / "carrier.py").unlink(missing_ok=True)
+    (tmp_path / "pkg" / "__init__.py").unlink(missing_ok=True)
+    (tmp_path / "user.py").write_text(
+        'import os\nif os.name:\n    d = "CREATE "\nelse:\n    d = "x"\n'
+        'g.query(d + "CONSTRAINT pt UNIQUE NODE Point")\n',
+        encoding="utf-8",
+    )
+    _, _, assembled = ddl_scan(tmp_path)
+    assert assembled, (
+        "a name bound twice in different branches, concatenated with a constraint "
+        "half, was not refused — an ambiguous binding is not an absence"
+    )
+    # `x += s`: the target is ambiguous BY CONSTRUCTION after `+=`, and the
+    # appended value can be a name or itself ambiguous. Measured three spellings —
+    # a literal, a name, and a name bound twice — each read ABSENT while only the
+    # `=`-then-`+=` literal form was pinned.
+    for spelling in (
+        'x = "CREATE "\nx += "CONSTRAINT pt UNIQUE NODE Point"\ng.query(x)\n',
+        's = "CONSTRAINT pt UNIQUE NODE Point"\nx = "CREATE "\nx += s\ng.query(x)\n',
+        'import os\nif os.name:\n    s = "CONSTRAINT pt UNIQUE NODE "\n'
+        'else:\n    s = "x"\nx = "CREATE "\nx += s\ng.query(x + "Point")\n',
+    ):
+        (tmp_path / "user.py").write_text(spelling, encoding="utf-8")
+        _, _, assembled = ddl_scan(tmp_path)
+        assert assembled, (
+            f"`+=` with a name-carried half was not refused ({spelling!r})"
+        )
+    # The same through `+=`, where the FIRST literal is only half a keyword so the
+    # `+=` taint rule does not fire either.
+    (tmp_path / "user.py").write_text(
+        'd = "CREATE "\nd += "CONSTRAINT pt UNIQUE NODE Point"\ng.query(d)\n',
+        encoding="utf-8",
+    )
+    _, _, assembled = ddl_scan(tmp_path)
+    assert assembled, (
+        "`d = \"CREATE \"; d += \"CONSTRAINT …\"` was not refused — the join of "
+        "what the target holds with what is appended is what the runtime sends"
+    )
+    # A keyword half supplied through a SUBSTITUTION SLOT or a MAPPING carrier: the
+    # two words are both present but never adjacent in one text, so neither `DDL`
+    # nor the source-order join sees them and the constraint read as ABSENT
+    # (measured). The coarse rule is "the literals here spell BOTH halves".
+    for spelling in (
+        'g.query("{}CONSTRAINT pt UNIQUE NODE Point".format("CREATE "))\n',
+        'g.query("{h}CONSTRAINT pt UNIQUE NODE Point".format(h="CREATE "))\n',
+        'g.query("{h}CONSTRAINT pt UNIQUE NODE Point".format_map({"h": "CREATE "}))\n',
+        'g.query("%sCONSTRAINT pt UNIQUE NODE Point" % "CREATE ")\n',
+        'g.query("%(h)sCONSTRAINT pt UNIQUE NODE Point" % {"h": "CREATE "})\n',
+        'D = {"a": "CREATE ", "b": "CONSTRAINT pt UNIQUE NODE "}\n'
+        'g.query("".join(D.values()) + "Point")\n',
+        'D = {"a": "CREATE ", "b": "CONSTRAINT pt UNIQUE NODE "}\n'
+        'g.query(D["a"] + D["b"] + "Point")\n',
+    ):
+        (tmp_path / "user.py").write_text(spelling, encoding="utf-8")
+        _, _, assembled = ddl_scan(tmp_path)
+        assert assembled, (
+            f"a keyword half supplied through a slot or a mapping was not refused "
+            f"({spelling.splitlines()[0]!r})"
+        )
+    # …and the coarse rule must not fire on ordinary text, or it reds the pin on a
+    # tree with no constraint at all.
+    for benign in (
+        'g.query("MATCH (m:{label}) RETURN m".format(label="Point"))\n',
+        'g.query("ALTER TABLE t ADD CONSTRAINT c CHECK (x > 0)")\n',
+        'g.query("CREATE TABLE t (id int)")\n',
+        'print("could not CREATE a CONSTRAINT on the graph")\n',
+    ):
+        (tmp_path / "user.py").write_text(benign, encoding="utf-8")
+        _, _, assembled = ddl_scan(tmp_path)
+        assert assembled == [], (
+            f"ordinary text was refused as a constraint ({benign!r}): {assembled}"
+        )
+    (tmp_path / "user.py").unlink()
     for stray in ("pkg/carrier.py", "pkg/__init__.py", "user.py"):
-        (tmp_path / stray).unlink()
+        (tmp_path / stray).unlink(missing_ok=True)
     (tmp_path / "carrier.py").unlink(missing_ok=True)
     (tmp_path / "user.py").unlink(missing_ok=True)
     # A docstring is excluded from `found` too: nothing executes it.
