@@ -42,7 +42,7 @@ from tortoise.projection.edges import (
     _VALID_EDGE_PREDICATES,
     RECORD_ADDRESSABLE_EDGE_LABELS,
     RECORD_CARRIED_STRUCTURAL_RELS,
-    SOURCE_TARGETED_ABOUT_RELS,
+    SOURCE_ENDPOINT_CANONICAL_RELS,
     STRUCTURAL_EDGE_LANE_PREDICATES,
     SUPERSEDE_TRANSFERRED_RELS,
     structural_edge_record_carrier,
@@ -57,12 +57,17 @@ from tortoise.sdk import TortoiseSDK
 #: generic leg below.
 ABOUT_RELS = frozenset({
     "aboutSubject", "aboutObject", "aboutEvent", "aboutPoint",
+    # `aboutDocument` is in here because the about MINT is the only verb that can
+    # journal it between epistemic endpoints (`create_edge` type-checks its target
+    # and a document is always a `:Source`, which the fold cannot address).
+    "aboutDocument",
 })
 ABOUT_TARGETS = {
     "aboutSubject": "subject",
     "aboutObject": "object",
     "aboutEvent": "event",
     "aboutPoint": "p2",
+    "aboutDocument": "p2",
 }
 
 
@@ -352,26 +357,27 @@ def test_the_lane_is_classified_per_relation_and_the_partition_is_total():
     """Carried, or declared uncarried with a reason — nothing in between.
 
     ⛔ NOT a tautology, deliberately. `RECORD_CARRIED_STRUCTURAL_RELS` is a
-    LITERAL and `SOURCE_TARGETED_ABOUT_RELS` is a second literal; this leg is
+    LITERAL and `SOURCE_ENDPOINT_CANONICAL_RELS` is a second literal; this leg is
     what makes adding a predicate to either mint a red test rather than a silent
     widening, and what keeps the ledger honest about the two families that are in
     the lane but can never be journaled.
     """
     assert (frozenset(STRUCTURAL_EDGE_LANE_PREDICATES)
-            == RECORD_CARRIED_STRUCTURAL_RELS | SOURCE_TARGETED_ABOUT_RELS), (
-        "the carried/uncarried partition no longer covers the lane's write set: "
-        f"unclassified={sorted(frozenset(STRUCTURAL_EDGE_LANE_PREDICATES) - RECORD_CARRIED_STRUCTURAL_RELS - SOURCE_TARGETED_ABOUT_RELS)} "
-        f"stale={sorted((RECORD_CARRIED_STRUCTURAL_RELS | SOURCE_TARGETED_ABOUT_RELS) - frozenset(STRUCTURAL_EDGE_LANE_PREDICATES))}")
-    assert not (RECORD_CARRIED_STRUCTURAL_RELS & SOURCE_TARGETED_ABOUT_RELS)
+            == RECORD_CARRIED_STRUCTURAL_RELS), (
+        "the carried set no longer covers the lane's write set: "
+        f"uncarried={sorted(frozenset(STRUCTURAL_EDGE_LANE_PREDICATES) - RECORD_CARRIED_STRUCTURAL_RELS)} "
+        f"stale={sorted(RECORD_CARRIED_STRUCTURAL_RELS - frozenset(STRUCTURAL_EDGE_LANE_PREDICATES))}")
     assert (STRUCTURAL_EDGE_LANE_PREDICATES
             == _VALID_EDGE_PREDICATES | _VALID_ABOUT_EDGE_PREDICATES)
     for rel in RECORD_CARRIED_STRUCTURAL_RELS:
         assert structural_edge_record_carrier(rel) == "record", rel
-    for rel in SOURCE_TARGETED_ABOUT_RELS:
-        assert structural_edge_record_carrier(rel) is None, (
-            f"`{rel}` targets a :Source, which the pass-2b sweep cannot address — "
-            "claiming a record carrier for it would green a family both rebuild "
-            "routes still lose")
+    # ⛔ The Source-canonical subset is NAMED, not excluded: measured, both are
+    # journaled when their endpoints are epistemic (`create_edge` type-checks only
+    # `aboutDocument`; `create_about_edge` type-checks neither), so excluding them
+    # from the ledger was wrong in both directions (peer review, cycle 4).
+    assert SOURCE_ENDPOINT_CANONICAL_RELS <= RECORD_CARRIED_STRUCTURAL_RELS
+    for rel in SOURCE_ENDPOINT_CANONICAL_RELS:
+        assert structural_edge_record_carrier(rel) == "record", rel
     assert structural_edge_record_carrier("IMPL") is None
     assert structural_edge_record_carrier("CONTAINS") is None
 
@@ -381,11 +387,8 @@ def test_the_record_carrier_set_covers_the_class_4_families():
     for rel in ("ownedBy", "hasPart", "dependsOn", "wasDerivedFrom", "references",
                 "managedBy", "authoredBy", "memberOf", "participatesIn",
                 "aboutSubject", "aboutObject", "aboutEvent", "aboutPoint",
-                "aboutAction"):
+                "aboutAction", "aboutDocument", "aboutSource"):
         assert rel in RECORD_CARRIED_STRUCTURAL_RELS, rel
-    # ...and the two whose contract target is a :Source are NOT claimed.
-    assert "aboutDocument" not in RECORD_CARRIED_STRUCTURAL_RELS
-    assert "aboutSource" not in RECORD_CARRIED_STRUCTURAL_RELS
 
 
 def test_every_carried_predicate_actually_journals(edge_sdk):
@@ -442,7 +445,26 @@ def test_a_source_targeted_about_edge_is_declined_and_its_family_is_not_claimed(
             if r["edge_type"] == "aboutDocument"] == []
     assert any("NOT addressable by the `DirectEdgeCreated` replay fold" in r.message
                for r in caplog.records), [r.message for r in caplog.records]
-    assert structural_edge_record_carrier("aboutDocument") is None
+    # The PREDICATE is carried (the producer exists); this WRITE was declined.
+    assert structural_edge_record_carrier("aboutDocument") == "record"
+
+
+def test_an_aboutSource_between_epistemic_endpoints_IS_journaled(edge_sdk):
+    """The ledger's honesty leg for a peer-review finding (cycle 4).
+
+    `create_edge` type-checks only `aboutDocument`'s target, and
+    `create_about_edge` type-checks none — so `aboutSource` (and
+    `aboutDocument`) between two epistemic endpoints really is journaled, which
+    is why excluding them from the carried set was wrong. The DECLINE belongs to
+    the `:Source`-endpoint case, not to the predicate.
+    """
+    sdk, journal = edge_sdk
+    ids = _world(sdk)
+    assert sdk._get_proj().create_edge(ids["p1"], ids["p2"], "aboutSource") is True
+    [rec] = [r for r in _direct_edges(journal)
+             if r["edge_type"] == "aboutSource"]
+    assert (rec["source_label"], rec["target_label"]) == ("Point", "Point")
+    assert structural_edge_record_carrier("aboutSource") == "record"
 
 
 # ════════════════════════════════════════════════════════════════════════════

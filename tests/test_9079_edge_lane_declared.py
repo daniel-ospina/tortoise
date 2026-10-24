@@ -36,11 +36,12 @@ for the argument. Its measured legs:
   journals a flat `DirectEdgeCreated` per written edge, so `rebuild_all`
   re-creates `ownedBy`/`hasPart`/`dependsOn`/`wasDerivedFrom`/`references` — the
   `edges: 0` measurement this file used to record is FIXED, not blessed. TWO
-  exceptions stay declared: `SOURCE_TARGETED_ABOUT_RELS` (`aboutDocument`,
-  `aboutSource`), whose contract target is a `:Source` and is therefore never
-  addressable by the fold's `EPISTEMIC_LABELS`/`p.id` sweep, and — per WRITE only
-  — a `:Source`-anchored `references` and a self-edge. All are declined at the
-  mint and disclosed once, with the reason (`RECORD_ADDRESSABLE_EDGE_LABELS`,
+  exception stays declared per WRITE: `SOURCE_ENDPOINT_CANONICAL_RELS` (`aboutDocument`,
+  `aboutSource`), whose CANONICAL target is a `:Source` and is therefore declined
+  per write by the fold's `EPISTEMIC_LABELS`/`p.id` sweep (the predicates
+  themselves ARE journaled between epistemic endpoints) — as is a
+  `:Source`-anchored `references` and a self-edge. All are declined at the mint
+  and disclosed once, with the reason (`RECORD_ADDRESSABLE_EDGE_LABELS`,
   `04-projection.md` §3).
 
 ⛔ WHAT THIS SUITE DOES **NOT** CLAIM:
@@ -85,7 +86,7 @@ from tortoise.projection.edges import (
     _VALID_ABOUT_EDGE_PREDICATES,
     _VALID_EDGE_PREDICATES,
     DERIVABLE_STRUCTURAL_RELS,
-    SOURCE_TARGETED_ABOUT_RELS,
+    SOURCE_ENDPOINT_CANONICAL_RELS,
     STRUCTURAL_EDGE_LANE_PREDICATES,
     STRUCTURAL_EDGE_WRITE_LANE,
     structural_edge_carrier,
@@ -900,18 +901,16 @@ def test_the_lane_states_its_carrier_per_relation():
     # can write is journaled as `DirectEdgeCreated` at the mint, so the record
     # half is TOTAL where the snapshot half is partial. A predicate added to
     # either mint must appear here too, because this reads the lane's own set.
-    for rel in STRUCTURAL_EDGE_LANE_PREDICATES - SOURCE_TARGETED_ABOUT_RELS:
+    for rel in STRUCTURAL_EDGE_LANE_PREDICATES:
         assert structural_edge_record_carrier(rel) == "record", (
             f"`{rel}` is writable by this lane but the record half does not "
             "claim it — the producer and the declaration have drifted"
         )
-    # The two whose CONTRACT target is a `:Source`: the fold cannot address it,
-    # so the ledger must NOT claim them (that would green a family both rebuild
-    # routes still lose every time).
-    for rel in SOURCE_TARGETED_ABOUT_RELS:
-        assert structural_edge_record_carrier(rel) is None, (
-            f"`{rel}` targets a :Source, which pass-2b cannot address"
-        )
+    # The two whose CANONICAL target is a `:Source` are carried TOO (the
+    # producer journals them between epistemic endpoints — measured); what is
+    # declined is the per-WRITE `:Source` endpoint, which `RECORD_ADDRESSABLE_EDGE_LABELS`
+    # owns and the class-4 suite pins.
+    assert SOURCE_ENDPOINT_CANONICAL_RELS <= STRUCTURAL_EDGE_LANE_PREDICATES
     assert structural_edge_record_carrier("IMPL") is None, (
         "IMPL is `create_direct_edge`'s family, not this lane's — claiming it "
         "here would make the declaration wider than the code"
@@ -970,7 +969,7 @@ def test_the_lane_and_its_argument_are_recorded():
     for phrase in (
         "WHAT THIS LANE CLAIMS, PER RELATION",
         "record-carried",
-        "NOT carried, and named",
+        "Carried per write, and one shape DECLINED",
         "WHAT THIS LANE DOES NOT COVER",
         "`references` KEEPS ITS OWN SHAPE",
     ):

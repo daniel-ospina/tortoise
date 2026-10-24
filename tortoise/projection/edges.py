@@ -788,12 +788,13 @@ def source_change_notices(g, source_refs, current_versions: dict[str, str] | Non
 #     and `rebuild_all` restores each one (they used to report `edges: 0`), and
 #     the record's `relation` table gains one row each — the same family, one
 #     carrier, both routes.
-#   * **NOT carried, and named** — `SOURCE_TARGETED_ABOUT_RELS`
-#     (`aboutDocument`, `aboutSource`): their contract target is a `:Source`,
-#     which the pass-2b sweep (`EPISTEMIC_LABELS` on `p.id`) cannot address, so
-#     those writes are declined at the mint and warned once. Carrying them needs
-#     a FOLD change (a url-keyed Source branch), not a producer — a separate
-#     behaviour, declared in `04-projection.md` §3 and doc 08 §R5.
+#   * **Carried per write, and one shape DECLINED** —
+#     `SOURCE_ENDPOINT_CANONICAL_RELS` (`aboutDocument`, `aboutSource`): the
+#     producer journals both when their endpoints are epistemic (measured), and
+#     declines their CANONICAL shape — a `:Source` endpoint, which the pass-2b
+#     sweep (`EPISTEMIC_LABELS` on `p.id`) cannot address — warning once. Making
+#     that shape addressable needs a FOLD change (a url-keyed Source branch), not
+#     a producer: `#9834`, declared in `04-projection.md` §3 and doc 08 §R5.
 #
 #     ⚠️ Per-WRITE caveats, not per-relation ones: a `references` whose SOURCE is
 #     a `:Source` (the `link_source_to_entity` shape) is declined the same way,
@@ -880,11 +881,12 @@ def structural_edge_carrier(rel: str) -> str | None:
     answers the RECORD half. Read the two together; a `None` here reads "no
     snapshot carrier", never "nothing carried it".
 
-    ⚠️ And do NOT read the sibling as "every predicate the lane can write is
-    carried": it answers `None` for `SOURCE_TARGETED_ABOUT_RELS`
-    (`aboutDocument`, `aboutSource`), whose contract target is a `:Source` and is
-    therefore never addressable by the fold. The ledger's two literals are what
-    partition the lane's write set — this pair of functions answers per carrier.
+    ⚠️ And do NOT read the sibling as "every write is carried": it answers
+    `"record"` for the whole lane write set (`RECORD_CARRIED_STRUCTURAL_RELS`),
+    while the EMISSION is per write and declines a `:Source` endpoint —
+    `SOURCE_ENDPOINT_CANONICAL_RELS` names the two predicates whose canonical
+    shape that hits (`aboutDocument`, `aboutSource`). The function answers per
+    CARRIER; the decline is `_record_addressable`'s, warned once.
 
     DERIVED from ``DERIVABLE_STRUCTURAL_RELS`` — the one set the replay engines
     read — rather than a second hand-maintained table, so adding a rel to that
@@ -907,45 +909,50 @@ RECORD_ADDRESSABLE_EDGE_LABELS = frozenset(
     {"Point", "Subject", "Object", "Event"})
 
 #: The structural predicates this lane now JOURNALS a `DirectEdgeCreated` for
-#: (#9553 class 4). A LITERAL, not `frozenset(STRUCTURAL_EDGE_LANE_PREDICATES)`:
-#: derived from the write set, every assertion about it would be a tautology —
-#: the drift test compares the two, so adding a predicate to either mint must
-#: classify it here, by hand, as carried or not.
+#: (#9553 class 4) — the whole lane write set, as a LITERAL: derived from
+#: `STRUCTURAL_EDGE_LANE_PREDICATES`, every assertion about it would be a
+#: tautology, so the drift test compares the two and adding a predicate to either
+#: mint must classify it here, by hand.
 #:
-#: ⛔ THE EXCLUSIONS ARE THE POINT (:data:`SOURCE_TARGETED_ABOUT_RELS`). A
-#: predicate whose CONTRACT target is a `:Source` has NO addressable endpoint at
-#: all — not "a subset of its writes" like `references` — so claiming it carried
-#: would make the ledger green for a family both rebuild routes still lose every
-#: time. That is why it is excluded here AND warned at the write.
+#: ⛔ "CARRIED" IS A PRODUCER STATEMENT, NOT A PROMISE ABOUT EVERY WRITE. The
+#: emission is per WRITE and declines an endpoint the replay fold cannot address
+#: (`:data:`RECORD_ADDRESSABLE_EDGE_LABELS` — a `:Source`, or a node whose value
+#: is not its `id`), warning once per relation. Which predicates that hits most
+#: is named in :data:`SOURCE_ENDPOINT_CANONICAL_RELS`.
 RECORD_CARRIED_STRUCTURAL_RELS = frozenset({
-    # create_edge's structural predicates, all of which take epistemic endpoints
-    # in practice (a Point, Subject, Object or Event on each side).
     "performs", "produces", "uses", "authoredBy", "ownedBy", "managedBy",
     "hasMember", "holdsRole", "memberOf", "reportsTo", "participatesIn",
     "hasPart", "related", "dependsOn", "references", "wasDerivedFrom",
-    # The about* family whose target label is epistemic. `aboutAction` targets a
-    # Point; `aboutDocument`/`aboutSource` do not (see the set below).
     "aboutSubject", "aboutObject", "aboutEvent", "aboutPoint", "aboutAction",
+    "aboutDocument", "aboutSource",
 })
 
-#: Lanes predicates whose CONTRACT endpoint is a `:Source`, i.e. **never**
-#: journaled by this lane (#9553 class 4's second stated gap):
-#:   * `aboutDocument` — `create_edge` REFUSES a non-document :Source target and
-#:     `create_about_edge`'s canonical target is a document `:Source`;
-#:   * `aboutSource` — a provenance `:Source` target by definition.
-#: The fold addresses endpoints by sweeping `EPISTEMIC_LABELS` on `p.id`; a
-#: `:Source` is url-keyed and outside it. Carrying them needs a FOLD change (a
-#: url-keyed Source branch in pass-2b), which is a different behaviour from this
-#: producer — so they are declared uncarried here, warned at every write, and
-#: named in `04-projection.md` §3 / `08-hosted-prerequisites.md` §R5.
-SOURCE_TARGETED_ABOUT_RELS = frozenset({"aboutDocument", "aboutSource"})
+#: The lane predicates whose CANONICAL target is a `:Source`, and which are
+#: therefore usually declined at the write — NAMED, and deliberately NOT excluded
+#: from :data:`RECORD_CARRIED_STRUCTURAL_RELS`, because the exclusion was
+#: measurably wrong in both directions and a peer review caught it:
+#:
+#:   * `create_edge` type-checks ONLY `aboutDocument`'s target
+#:     (`about_document_target_reason`), so an `aboutSource` between two
+#:     epistemic endpoints IS journaled and record-carried (measured);
+#:   * `create_about_edge` type-checks none, so `aboutDocument` between two
+#:     Points is journaled too (measured).
+#:
+#: So these two are carried exactly like every other predicate, and their
+#: CANONICAL shape (`(Point)-[:aboutDocument]->(a document :Source)`) is declined
+#: per write with the reason. Making that shape addressable is a FOLD change (a
+#: url-keyed `:Source` branch in pass-2b) — `#9834`.
+#:
+#: `TAGGED` is the ONE family with no carrier at all: no record `tag` table for
+#: `relation.tgt_key`'s composite FK, and `_sync_tags` reaches neither this lane
+#: nor this producer (nor a warning) — declared in `04-projection.md` §3 and
+#: doc 08 §R5.
+SOURCE_ENDPOINT_CANONICAL_RELS = frozenset({"aboutDocument", "aboutSource"})
 
-assert SOURCE_TARGETED_ABOUT_RELS <= STRUCTURAL_EDGE_LANE_PREDICATES
-assert not (SOURCE_TARGETED_ABOUT_RELS & RECORD_CARRIED_STRUCTURAL_RELS)
-assert (STRUCTURAL_EDGE_LANE_PREDICATES
-        == RECORD_CARRIED_STRUCTURAL_RELS | SOURCE_TARGETED_ABOUT_RELS), (
-    "every predicate this lane can write must be classified: carried, or "
-    "declared uncarried with a reason — a new one must not be silently either")
+assert STRUCTURAL_EDGE_LANE_PREDICATES == RECORD_CARRIED_STRUCTURAL_RELS, (
+    "every predicate this lane can write must be carried by the producer — a new "
+    "one needs the emission classified, not silently left out")
+assert SOURCE_ENDPOINT_CANONICAL_RELS <= RECORD_CARRIED_STRUCTURAL_RELS
 
 
 def structural_edge_record_carrier(rel: str) -> str | None:
@@ -957,15 +964,15 @@ def structural_edge_record_carrier(rel: str) -> str | None:
     `record_projection` materialises as a `relation` row (the descriptor is
     §4.4's canonical shape, shared with `DirectEdgeRepoint`).
 
-    ``None`` — either not a predicate this lane writes, or one of
-    :data:`SOURCE_TARGETED_ABOUT_RELS` (whose contract target the fold cannot
-    address at all).
+    ``None`` — not a predicate this lane writes.
 
-    ⚠️ The answer is per RELATION, and the emission is per WRITE: a write whose
-    endpoint is not :data:`RECORD_ADDRESSABLE_EDGE_LABELS` (a `:Source` —
-    `references` is the live case) is DECLINED at the mint and warned once, so
-    `"record"` here means "the lane carries this relation for the endpoints the
-    record can address", not "every instance of it is carried".
+    ⚠️ Per RELATION, and the emission is per WRITE: a write whose endpoint is not
+    :data:`RECORD_ADDRESSABLE_EDGE_LABELS` (a `:Source`; a node whose value is not
+    its `id`) is DECLINED at the mint and warned once. `"record"` therefore means
+    "the producer carries this relation for the endpoints the record can
+    address", not "every instance of it is carried" — and
+    :data:`SOURCE_ENDPOINT_CANONICAL_RELS` names the two whose canonical shape is
+    always declined.
     """
     return "record" if rel in RECORD_CARRIED_STRUCTURAL_RELS else None
 
@@ -973,15 +980,13 @@ def structural_edge_record_carrier(rel: str) -> str | None:
 #: The structural rels `TortoiseSDK.supersede_point`'s 2b leg MOVES from the old
 #: point to the successor live. Mirrored from the writer's own
 #: `sdk.SUPERSEDE_STRUCTURAL_RELS` (the single source of truth the MCP dry-run
-#: preview also imports) rather than restated from prose, and pinned equal by
+#: preview also imports) and pinned equal by
 #: `tests/test_9553_class4_structural_edge_records.py::test_the_supersede_transfer_set_matches_the_writer`.
 #:
 #: ⛔ WHY IT LIVES HERE. `rebuild_all`'s `DirectEdgeCreated` fold must not skip a
 #: creation whose endpoint was superseded UNLESS a supersede actually MOVED that
-#: edge — otherwise a rebuild drops an edge live still holds (`dependsOn`,
-#: `ownedBy`, …: the 2b leg never touches them, so live keeps them at the OLD
-#: point). The fold cannot import `tortoise.sdk` (cycle), so the set is mirrored
-#: here and drift-pinned.
+#: edge — and leg 2b moves only the OUTGOING side. The fold cannot import
+#: `tortoise.sdk` (cycle), so the set is mirrored and drift-pinned.
 SUPERSEDE_TRANSFERRED_RELS = frozenset({
     "aboutSubject", "aboutObject", "aboutAction", "aboutEvent",
     "aboutPoint", "aboutDocument", "extractedFrom", "wasDerivedFrom",

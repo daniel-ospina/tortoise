@@ -317,17 +317,20 @@ closed at both layers:
   > turns — R4's pinned `point.search_keys` refusal, not an edge defect (the Point
   > never reaches the record, so its edges have no endpoint).
   >
-  > **UNCARRIED, named** (`RECORD_CARRIED_STRUCTURAL_RELS` /
-  > `SOURCE_TARGETED_ABOUT_RELS` partition the lane's write set, and
-  > `structural_edge_record_carrier` answers per relation):
-  > `TAGGED` (no record `tag` table to key `relation.tgt_key` on — a schema
-  > decision); a `:Source`-anchored `references` (`link_source_to_entity`; the fold
-  > sweeps `EPISTEMIC_LABELS` on `p.id` and a `:Source` is url-keyed and outside it
-  > — per-WRITE); and `aboutDocument`/`aboutSource`, whose CONTRACT target is a
-  > `:Source` and is therefore NEVER addressable (per-RELATION — carrying them
-  > needs a url-keyed `:Source` branch in the fold, a different behaviour — **#9834**). A
-  > self-edge is skipped (the fold's `E2E-11.6`) and, like every other decline,
-  > WARNed once rather than dropped in silence.
+  > **What is and is not carried.** `RECORD_CARRIED_STRUCTURAL_RELS` is the
+  > lane's WHOLE write set (23 predicates, asserted at import), because the
+  > producer journals each one when its endpoints are addressable — including
+  > `aboutDocument`/`aboutSource`, which ARE journaled between epistemic endpoints
+  > (measured; `create_edge` type-checks only `aboutDocument`, `create_about_edge`
+  > type-checks neither). The per-WRITE decline is the `:Source` endpoint: the fold
+  > sweeps `EPISTEMIC_LABELS` on `p.id` and a `:Source` is url-keyed, so
+  > `SOURCE_ENDPOINT_CANONICAL_RELS` (`aboutDocument`, `aboutSource`) and a
+  > `:Source`-anchored `references` (`link_source_to_entity`) are declined and
+  > WARNed once; making a `:Source` addressable is a FOLD change — **#9834**. A
+  > self-edge is skipped (the fold's `E2E-11.6`) and warns the same way. The one
+  > family with NO carrier at all is `TAGGED` (no record `tag` table to key
+  > `relation.tgt_key` on — a schema decision), and it is silent: `_sync_tags`
+  > reaches neither the lane nor this producer.
   >
   > ⚠️ **Supersede.** The `DirectEdgeCreated` fold's superseded-endpoint skip is gated on what the supersede
   > DID to that edge, not on the rel type (`_supersede_took_this_edge`): `IMPL`/`NAND` are moved in both
