@@ -22,12 +22,12 @@ the corrected reading:
    ``run_s2`` (S2.1, ``:7972``), ``_run_vet_pass`` (S2.2, ``:8001``),
    ``kind_classifier.classify_items``/``_apply_classify_kinds`` (S2.3,
    ``:8017``), ``search_graph`` (S3, ``:8033``), ``run_s4`` (the gap filler,
-   ``:8054``), and ``execute_embed`` (S5+S6, ``:8253``). Line numbers re-derived
-   at the merge-up of ``origin/main`` ``ce581e9c5``, which moved ``sdk.py``
-   under the cites again while this branch was open (the merge before this one
-   numbers were right at their own head): the symbol is authoritative and the
-   line is a convenience, which is how the pin's earlier numbers went stale
-   here. So the capstone drives
+   ``:8054``), and ``execute_embed`` (S5+S6, ``:8253``). The SYMBOL is
+   authoritative and the line is a convenience — the pin resolves the numbers
+   this file prints against the tree, so a moved line is self-detecting rather
+   than silently stale. (No derivation head is named here on purpose: the
+   stamps such a sentence used to name re-staled the moment `main` moved, and a
+   claim that can only re-stale is not worth keeping.) So the capstone drives
    the REAL entry point — it does not compose the step functions, which the
    issue explicitly forbids.
 2. **``docs/evidence/7949-capstone/`` did not exist and still does not exist as
