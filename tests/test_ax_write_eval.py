@@ -1213,11 +1213,12 @@ def _results_row(doc: str, number: int) -> str:
     (#9695 review, measured). A pin earns its place only by failing on the thing
     it heads, so scope it.
 
-    `number` appears in TWO tables — the input list (3 cells: `| 9 |
-    contradicting claim | truth-vs-relevance |`) and the results table (7 cells,
-    the one carrying counts and findings). Taking the first match would pin the
-    WRONG ROW and silently assert against the input list, so pick the row with
-    the most cells; that is the results row by construction.
+    `number` appears in TWO tables — the input list (`| 9 | contradicting
+    claim | truth-vs-relevance |`, 4 pipe characters) and the results table (`| 9
+    | contradicting claim | 2 | 2 | 7 Point · 1 Event | **no NAND** — …`, 7 pipe
+    characters, the one carrying counts and findings). Taking the first match would
+    pin the WRONG ROW and silently assert against the input list, so pick the row
+    with the most pipe characters; that is the results row by construction.
 
     Returns "" when no such row exists, which fails the caller's assertion rather
     than the extraction — a deleted row must read as "the row no longer says it",
