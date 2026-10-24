@@ -2022,24 +2022,32 @@ _CHATGPT_BLOCKS = ("Add the Tortoise connector", "Install the Tortoise skills",
 # proves where a block STARTS, never that it belongs to this arm, so a sibling arm
 # inserted between two titles would otherwise be swallowed by the slice — and its
 # copy would satisfy the pins for a card that lost them (#9895 review). It is a
-# SECOND net, not the same one as `_ARM_BOUNDARY`: a sibling arm written inline
-# (`...) : wizardConnectHarness === 'codex' ? (` on a copy line) opens no line, so
-# only this count sees it; a sibling arm whose condition is not a harness selector
-# is seen only by the boundary count.
+# SECOND net, overlapping `_ARM_BOUNDARY` but not identical to it: it sees a sibling
+# arm written INLINE whose condition is a harness selector, and it sees one whose
+# branch is parenthesised (`) : (`, no `?`).
 _ARM_SELECTOR = "wizardConnectHarness ==="
 
-# An arm-boundary CONTINUATION token: a closing bracket that OPENS A LINE, followed
-# by the `:` of a ternary chain (`) : wizardKeyless ? (`, `) : (` for a parenthesised
-# nested ternary). The LINE POSITION is the discriminator, not the spelling: the raw
-# two characters also occur mid-sentence in rendered copy — "a paid plan (Plus or
-# higher): ready" — where counting them reds a correct card with a "sibling arm"
-# diagnosis, i.e. it teaches the next editor to delete the guard (reproduced in
-# review, #9895). A line-leading closing bracket is a structural fact about the
-# SOURCE, not a shape read of a condition: no copy line in the card starts with `)`
-# or `}`. LIMIT, stated: a boundary written inline, on a line that starts with copy,
-# is not counted here — `_ARM_SELECTOR` is the net for that case, and the terminator
-# below is bound by its own clause check.
-_ARM_BOUNDARY = re.compile(r"^[ \t]*[)}][ \t]*:", re.MULTILINE)
+# An arm-boundary CONTINUATION token, read BY POSITION and never by the shape of a
+# condition. Two shapes count:
+#   * a closing bracket that OPENS A LINE, followed by the `:` of a ternary chain
+#     (`) : wizardKeyless ? (`, `) : (` for a parenthesised nested ternary);
+#   * a MID-LINE one that continues a ternary on the same line (`>a</WizardBlock>
+#     ) : wizardDesktop ? (` written on one line) — the `?` after the colon is what
+#     distinguishes it from prose.
+# What must NOT count is the raw two characters: they occur mid-sentence in rendered
+# copy — "a paid plan (Plus or higher): ready" — where counting them reds a correct
+# card with a "sibling arm" diagnosis, i.e. it teaches the next editor to delete the
+# guard (reproduced in review, #9895).
+# LIMIT, stated: a mid-line boundary whose branch is PARENTHESISED and carries no
+# `?` (an inline `) : (` nested ternary) is not counted here — a mid-line `): (` is
+# a real prose shape ("the plan floor (Plus or higher): (see pricing)"), and the
+# card uses the inline `{cond ? a : b}` form nowhere. `_ARM_SELECTOR` catches that
+# boundary whenever its condition names a harness; the LIMIT note in the shape test
+# states the residual gap.
+_ARM_BOUNDARY = re.compile(
+    r"^[ \t]*[)}][ \t]*:"                  # a continuation token that opens a line
+    r"|[)}][ \t]*:[^\n]*\?[ \t]*[(<]",     # a mid-line one continuing a ternary
+    re.MULTILINE)
 
 
 def _arm_boundaries(text: str, start: int, end: int) -> list[str]:
@@ -2162,9 +2170,12 @@ def _chatgpt_block(main: str, index: int) -> str:
 
     Two further requirements bound a slice, because a unique title only says where a
     block STARTS: each slice must hold exactly one `_ARM_SELECTOR` (the card's own),
-    and no line-leading `_ARM_BOUNDARY` continuation token except the last block's
-    own terminator. Both are stated as assertions with their own message, so a
-    boundary that moves is reported by name rather than silently widening a slice.
+    and no `_ARM_BOUNDARY` continuation token (line-leading, or mid-line continuing a
+    ternary) except the last block's own terminator. The token scan for block 1 starts
+    at the card's own selector, so the plan note and caption — card content that
+    belongs to no slice — are covered too. Both requirements are stated as assertions
+    with their own message, so a boundary that moves is reported by name rather than
+    silently widening a slice.
 
     The LAST block ends at the card's own terminator (`_KEYLESS_BRANCH`), which must
     start its own clause — a quoted copy of it, mid-line, would truncate the slice.
@@ -2215,7 +2226,10 @@ def _chatgpt_block(main: str, index: int) -> str:
     # which the adjacent-line check above pins to that terminator. Any extra one is an
     # arm boundary whose copy would be pinned as if it were the card's.
     expected = 0 if index + 1 < len(_CHATGPT_BLOCKS) else 1
-    found = _arm_boundaries(main, start_pos, end_pos)
+    # Block 1 is scanned from the card's own selector, not from its title: the plan
+    # note and caption between them belong to the card but to no block SLICE, so a
+    # boundary wedged there would otherwise be inside no net at all (#9895 review).
+    found = _arm_boundaries(main, arm_at if index == 0 else start_pos, end_pos)
     assert len(found) == expected, (
         f"an arm boundary sits inside block {index + 1} of the chatgpt card "
         f"({len(found)} continuation tokens, expected {expected}): a sibling arm or "
@@ -2375,6 +2389,25 @@ def test_9660_the_chatgpt_card_slices_red_on_a_moved_or_duplicated_title():
         _chatgpt_block(
             good.replace(">a</WizardBlock>", ">a</WizardBlock>\n} : (\n  <p>x</p>\n"), 0)
 
+    # A boundary written INLINE — on a copy line, not opening one — is counted too
+    # when it continues a ternary (`? (` after the colon). Neither net covered this
+    # shape before review: the token count wanted a line start, and `_ARM_SELECTOR`
+    # only sees a condition that names a harness, so a `) : wizardDesktop ? (` inside
+    # a copy line swallowed a sibling arm silently (reproduced in review, #9895).
+    with pytest.raises(AssertionError, match="an arm boundary sits inside block 1"):
+        _chatgpt_block(
+            good.replace(">a</WizardBlock>",
+                         ">a</WizardBlock>) : wizardDesktop ? (\n  <p>sibling</p>\n"), 0)
+
+    # …and so is one wedged between the card's SELECTOR and its first title: the plan
+    # note and caption sit in no block SLICE, so the scan for block 1 starts at the
+    # selector. Without that, this boundary was inside no net at all (#9895 review).
+    with pytest.raises(AssertionError, match="an arm boundary sits inside block 1"):
+        _chatgpt_block(
+            good.replace(
+                '? (\n  <WizardBlock title="Add',
+                '? (\n  ) : wizardDesktop ? (\n  <WizardBlock title="Add'), 0)
+
     # The ordering law reds on inverted copy and passes on correct copy — proved on
     # synthetic blocks, because the real file can only ever show the passing case.
     _assert_org_pick_precedes_authorize(
@@ -2425,15 +2458,17 @@ def test_9660_chatgpt_is_a_live_onboarding_journey_not_a_docs_dead_end():
     #    the card's own terminator. Those three titles appear exactly once in
     #    main.jsx and only on this card — and a unique title says only where a block
     #    STARTS, so THREE structural facts bound each slice, and each reds on its own
-    #    name: the slice holds exactly one harness selector (a sibling arm written
-    #    inline is caught only there), no line-leading continuation token (`) :` or
-    #    `) : (`-style; a sibling arm carries one, and its condition need not be a
-    #    harness selector), and for the last block the terminator starts its own
-    #    clause (a quoted copy of it is refused rather than truncating the slice).
+    #    name: the slice holds exactly one harness selector, no continuation token
+    #    (`) :` / `) : (` opening a line, or continuing a ternary mid-line; a sibling
+    #    arm carries one, and its condition need not be a harness selector), and for
+    #    the last block the terminator starts its own clause (a quoted copy of it is
+    #    refused rather than truncating the slice). Block 1's scan starts at the
+    #    card's selector, so the plan note and caption — card content in no slice —
+    #    are covered as well.
     #    No comment is stripped and no ternary's condition is matched — that is what
-    #    two earlier designs got wrong; the token is read by POSITION (it opens a
-    #    line), never by spelling, so ordinary copy such as "a paid plan (Plus or
-    #    higher): ready" is not mistaken for a boundary.
+    #    two earlier designs got wrong; the token is read by POSITION, never by
+    #    spelling, so ordinary copy such as "a paid plan (Plus or higher): ready" is
+    #    not mistaken for a boundary.
     #    `test_9660_the_chatgpt_card_slices_red_on_a_moved_or_duplicated_title`
     #    proves a moved, reordered or duplicated boundary actually reds, and that
     #    prose does not.
@@ -2554,7 +2589,8 @@ def test_9660_the_recipe_carriers_use_one_casing_for_the_tenant_noun():
     SCOPE, exactly as coded. All four carriers (`main.jsx`, `harnesses.js`,
     `docs.html`, `tortoise/onboarding/SKILL.md`) get the three phrase assertions and
     the capital-present assertion. `docs.html` ADDITIONALLY gets a window scan across
-    its whole ChatGPT section (heading to `</section>`) for the word " organization".
+    its whole ChatGPT section — the `<h4 id="chatgpt">` heading to the next
+    `<div class="card">`, both edges asserted — for the word " organization".
     None of them is scanned wholesale: each legitimately writes the lowercase noun
     elsewhere (docs.html says "An organization account gets an isolated graph"; the
     others use it in other phrasings), so a whole-file scan would red on correct copy.
@@ -2580,18 +2616,23 @@ def test_9660_the_recipe_carriers_use_one_casing_for_the_tenant_noun():
             # Scanned OUTRIGHT, not by pattern: the three-phrase list below cannot
             # see a phrasing it does not name, and review found two such lines in
             # this very recipe. The window is the WHOLE ChatGPT section — its heading
-            # and steps 1-2 included — and the anchor is asserted, not reached by a
-            # bare `index()`.
+            # and every step included — and BOTH edges are asserted, not reached by a
+            # bare `index()`: the page has no `</section>` (its recipes live in
+            # `<div class="card">` blocks), so an unasserted end silently ran the scan
+            # to end-of-file and would accuse this recipe of any later lowercase
+            # mention (#9895 review).
             raw = (root / rel).read_text(encoding="utf-8")
             anchor = '<h4 id="chatgpt">'
             assert anchor in raw, (
                 "the docs page's ChatGPT section heading moved — this scan is scoped "
                 "to it, so the pin cannot be applied blind")
             section = raw[raw.index(anchor):]
-            close = section.find("</section>")
-            if close != -1:
-                section = section[:close]
-            recipe = " ".join(re.sub(r"<[^>]+>", " ", section).split())
+            close = section.find('<div class="card">')
+            assert close != -1, (
+                "the docs page's card structure changed — the end of the ChatGPT "
+                "section cannot be bounded, so this scan could not be scoped to the "
+                "recipe and is refused rather than widened to the whole page")
+            recipe = " ".join(re.sub(r"<[^>]+>", " ", section[:close]).split())
             assert " organization" not in recipe, (
                 "docs.html lowercases the tenant noun inside the ChatGPT recipe; the "
                 "recipe copy capitalises it (`Organization`), so one card must not "
@@ -2749,11 +2790,20 @@ def test_9660_the_keyless_recipe_is_bounded_to_its_row_not_the_list():
         _assert_recipe_row_order(
             "Claude key-less card row", _list_recipe_block(markup, anchor))
 
-    # The list edges are still asserted: a row that left the list, and an anchor
-    # with no list at all, are reported by name rather than by a bare ValueError.
+    # EVERY edge is asserted and each is exercised here — a bound that is asserted
+    # but never tested is a branch nobody would notice going dead (#9895 review).
     with pytest.raises(AssertionError, match="no longer inside an ordered list"):
         _list_recipe_block(f"<p>{anchor}</p>", anchor)
     with pytest.raises(AssertionError, match="no longer appears"):
         _list_recipe_block(page([pick_row]), "Pick the Organization you are onboarding")
     with pytest.raises(AssertionError, match="lost its closing tag"):
         _list_recipe_block(f'<ol className="wizard-fields">\n  <li>{anchor}</li>\n', anchor)
+    # …a row that left the list, opening AFTER its own `</ol>`…
+    with pytest.raises(AssertionError, match="closes after its own list"):
+        _list_recipe_block(f'<ol className="wizard-fields"><li>a</li></ol>\n<li>{anchor}</li>', anchor)
+    # …and an anchor whose nearest `<li` belongs to a row OUTSIDE the list that holds
+    # the pick (an orphan row above it), so the two bounds disagree.
+    with pytest.raises(AssertionError, match="no longer inside a list item"):
+        _list_recipe_block(
+            f'<li>an orphan row</li>\n<ol className="wizard-fields">\n  {anchor}\n</ol>',
+            anchor)
