@@ -292,11 +292,52 @@ PLIST
 }
 
 cron_line() {
-  local minutes=$(( INTERVAL / 60 )); [ "$minutes" -lt 1 ] && minutes=1
-  local sched
-  if [ "$minutes" -lt 60 ]; then sched="*/$minutes * * * *"
-  elif [ $(( minutes % 60 )) -eq 0 ] && [ $(( minutes / 60 )) -le 23 ]; then sched="0 */$(( minutes / 60 )) * * *"
-  else sched="0 * * * *"; fi
+  # ⛔ CEILING, not truncation. `INTERVAL/60` turned a 90-second interval into `*/1` — the finest
+  # cron can express, i.e. 60s, which fires TIGHTER than the operator asked (1.5x). Cron's
+  # granularity is one minute, so rounding up is the only way to keep the "never more often than
+  # requested" rule that the cadence choice below rests on.
+  local minutes=$(( (INTERVAL + 59) / 60 )); [ "$minutes" -lt 1 ] && minutes=1
+  local sched="" eff="" d
+  # ⛔ `*/N` IS NOT A PERIOD UNLESS N DIVIDES THE FIELD'S RANGE, and cron has no other way to say
+  # "every N". `*/45` on the minute field fires at :00 and :45 only, so a 45-minute interval really
+  # ran 45 then 15 minutes apart; `*/58` ran 58 then 2 (measured by --dry-run). That is an average
+  # cadence ~2x the request — the "a tighter loop only hammers the API" failure the INTERVAL floor
+  # above exists to prevent, and it is INVISIBLE in the rendered line.
+  #
+  # The same trap sits in the HOUR field: `*/5 * * *` fires at 00:00 and 05:00, then 00:00 again —
+  # gaps of 5h and 19h — so hours are restricted to the divisors of 24 for the same reason.
+  #
+  # So: pick the CLOSEST PERIOD AT OR ABOVE the request (never tighter than asked), and SAY SO on
+  # stderr when cron cannot express it exactly. Firing less often than configured is a visible,
+  # bounded loss of freshness; firing more often is the unbounded API hammering this guards.
+  if [ "$minutes" -le 30 ]; then
+    for d in 1 2 3 4 5 6 10 12 15 20 30; do
+      if [ "$d" -ge "$minutes" ]; then sched="*/$d * * * *"; eff=$d; break; fi
+    done
+  fi
+  if [ -z "$sched" ]; then
+    local h=$(( (minutes + 59) / 60 )); [ "$h" -lt 1 ] && h=1
+    for d in 1 2 3 4 6 8 12; do
+      if [ "$d" -ge "$h" ]; then sched="0 */$d * * *"; eff=$(( d * 60 )); break; fi
+    done
+    if [ -z "$sched" ]; then
+      # ⛔ THERE IS NO FAITHFUL CRON EXPRESSION LONGER THAN 12h. The hour field's `*/N` is only a
+      # period when N divides 24, so the largest real period is 12h; the old fallback here was
+      # `0 0 * * *` — DAILY, i.e. SHORTER than a request of anything over 24h, which is exactly the
+      # over-firing this function refuses, and it printed a NOTE claiming the opposite (found by
+      # VGATE on this very change). Cron's day-of-month `*/N` is not a period either (it restarts
+      # at every month boundary). So REFUSE — fail closed, like the >= 60s floor — rather than
+      # silently promise a rate the entry does not deliver.
+      echo "REFUSED: cron cannot schedule a ${minutes}-minute period without firing MORE often" >&2
+      echo "         than requested (cron periods must divide a day; 12h is the longest)." >&2
+      echo "         Use an interval <= 12h, or a systemd/launchd host." >&2
+      return 2
+    fi
+  fi
+  if [ "$(( eff * 60 ))" -ne "$INTERVAL" ]; then
+    echo "NOTE: cron cannot express ${INTERVAL}s — the entry fires every ${eff} min," \
+         "never more often than requested (round 11 review: '*/45' fired 45 then 15)." >&2
+  fi
   printf '%s %s; cd %s && %s %s%s >> %s 2>&1 # %s\n' \
     "$sched" "$CRON_ENV" "$REPO" "$PYTHON" "$INSTALLED" "$ARGV_TAIL" "$LOG" "$LABEL-cron"
 }
@@ -342,6 +383,12 @@ status() {
     fi
   else
     echo "run-copy: MISSING ($INSTALLED) — the schedule would run nothing"
+    # ⛔ THE COMPLEMENT OF THE COMMENT ABOVE: `armed` must be cleared here too. The timer/plist/
+    # cron entry can be present while its TARGET is gone (a reaped worktree, a half-copy, a
+    # `--uninstall` that removed only the copy), and this is one of the two states this file
+    # names in prose as "the schedule would run nothing". Leaving `armed=1` reported that state as
+    # exit 0 to the caller that gates on it (round 11 review, P1).
+    armed=0
   fi
   # ⛔ "LOADED" IS NOT "RUNNABLE". One READ-ONLY pass of the RUNNING copy, with the interpreter and
   # environment the schedule itself uses. This is the only check that can tell an armed schedule
@@ -370,7 +417,10 @@ status() {
         echo "enabled: $(systemctl is-enabled "$LABEL.timer" 2>&1)"
         echo "active:  $(systemctl is-active "$LABEL.timer" 2>&1)"
         systemctl list-timers "$LABEL.timer" --all --no-pager 2>/dev/null | sed -n '1,2p'
-        [ -f "$svc" ] || echo "WARNING: $svc is missing — the timer activates nothing"
+        # ⛔ A TIMER WITH NOTHING TO ACTIVATE IS THE OTHER INERT STATE, and a WARNING on stdout is
+        # not a verdict: `armed` stayed 1 and `--status` returned 0 on a schedule that fires into
+        # a missing unit (round 11 review, P1).
+        [ -f "$svc" ] || { echo "WARNING: $svc is missing — the timer activates nothing"; armed=0; }
       else
         echo "NOT installed (no $tmr)"; armed=0
       fi ;;
@@ -389,7 +439,13 @@ status() {
   esac
   # A schedule that is installed but cannot measure is a FAILURE of --status, not a note: the
   # caller (a human, or a bring-up script) must be able to gate on it. So is "nothing is armed".
-  [ "$probe_rc" = "2" ] && return 2
+  #
+  # ⛔ ANY non-zero probe is a failure, not just the tool's own exit 2. The line above has already
+  # printed "this schedule would fire and do NOTHING" — a crash (exit 1: uncaught exception, a
+  # truncated interpreter, a panic) is the most inert outcome there is, and propagating only `2`
+  # let it read green (round 11 review, P1). `AUTOSCALE_SKIP_PROBE=1` is the explicit opt-out and
+  # leaves probe_rc at 0, so it is unaffected.
+  [ "$probe_rc" = "0" ] || return 2
   [ "$armed" = "0" ] && return 2
   return 0
 }
@@ -417,7 +473,7 @@ case "$MODE" in
     case "$PLATFORM" in
       systemd) echo "--- $UNIT_DIR/$LABEL.service"; render_systemd_service
                echo "--- $UNIT_DIR/$LABEL.timer"; render_systemd_timer ;;
-      cron)    cron_line ;;
+      cron)    cron_line || exit 2 ;;
       launchd) render_plist ;;
       *) echo "REFUSED: no systemd, no cron — a schedule here would never fire" >&2; exit 2 ;;
     esac
@@ -457,6 +513,13 @@ case "$PLATFORM" in
      echo "         Install one, or run tools/runner_autoscale.py from the fleet's controller loop." >&2
      exit 2 ;;
 esac
+# ⛔ THE SAME RULE FOR A PERIOD CRON CANNOT DELIVER. `cron_line` refuses an interval whose real
+# cadence would be SHORTER than requested (anything above 12h), and the header promises a refusal
+# writes NOTHING — which was a half-truth while the runnable copy was refreshed before the refusal
+# (VGATE round 2). Resolve the cron entry HERE, before the probe and before any write, so the
+# promise holds on every refusal path.
+CRON_LINE=""
+[ "$PLATFORM" = cron ] && { CRON_LINE="$(cron_line)" || exit 2; }
 # ⛔ "INSTALLED" MUST MEAN "IT WILL DO SOMETHING". One READ-ONLY pass with the pinned interpreter,
 # BEFORE anything is written. Exit 2 is the tool's own UNMEASURABLE verdict (no `gh` on PATH, no
 # memory reading, unreadable pool) — a schedule armed in that state fires every INTERVAL into a
@@ -502,7 +565,7 @@ case "$PLATFORM" in
     echo "installed: $UNIT_DIR/$LABEL.{service,timer} (active, every ${INTERVAL}s, changed=$changed)"
     systemctl list-timers "$LABEL.timer" --no-pager 2>/dev/null | sed -n '1,2p' ;;
   cron)
-    line="$(cron_line)"
+    line="$CRON_LINE"
     if crontab -l 2>/dev/null | grep -qF "$LABEL-cron"; then
       cur="$(crontab -l 2>/dev/null | grep -F "$LABEL-cron")"
       if [ "$cur" = "$line" ]; then echo "installed (unchanged): cron entry present"; exit 0; fi
@@ -518,6 +581,17 @@ case "$PLATFORM" in
     want="$(render_plist)"
     if [ "$want" = "$(cat "$plist" 2>/dev/null || true)" ]; then
       echo "installed (unchanged): $plist"
+      # ⛔ "UNCHANGED" IS NOT "LOADED". An agent unloaded out of band (a reboot that dropped the
+      # GUI session, a `launchctl bootout`, a login-item cleanup) left the plist byte-identical, so
+      # this branch skipped the bootstrap and the load check below exited 1 — on EVERY re-run —
+      # while printing "run without --status to load", which is precisely the invocation that just
+      # failed. The installer's own promise is that re-running converges; the systemd leg
+      # (`systemctl start`) and the cron leg (rewrite) both do (round 11 review, P2).
+      if ! launchctl list 2>/dev/null | grep -qF "$PLIST_LABEL"; then
+        launchctl bootstrap "gui/$(id -u)" "$plist" \
+          || { echo "ERROR: $PLIST_LABEL is not loaded and could not be bootstrapped" >&2; exit 1; }
+        echo "re-armed: $PLIST_LABEL was not loaded; bootstrapped from the unchanged plist"
+      fi
     else
       printf '%s\n' "$want" > "$plist" || exit 1
       plutil -lint "$plist" >/dev/null 2>&1 || { echo "ERROR: rendered plist does not lint" >&2; exit 1; }
