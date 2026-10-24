@@ -2179,12 +2179,26 @@ def test_the_step1_eval_evidence_doc_selects_core_not_tier1():
     silent-drop class, reached through the early return rather than through
     `_selection_relevant`.
 
-    Mutation check: removing the CORE_ALSO entry fails the second assert.
+    Mutation check: removing the CORE_ALSO entry fails the FIRST assert
+    (`surfaces == ["core"]`); dropping the pin from `core` fails the
+    non-vacuity clause below. Both are stated there because a mutation claim
+    that lives only in prose has no artifact to check it against.
     """
     r = _sel(["docs/ax/how-to-use-tortoise-step1-eval.md"])
     assert r["surfaces"] == ["core"], r
     assert "test_ax_write_eval.py" in r["test_files"], r
     assert r["full"] is False, r
+
+    # Non-vacuous: the same selection loses the pin the moment its `core`
+    # registration is dropped, so the assertion above is not satisfied by
+    # whatever file the docs-only early return happens to carry.
+    stripped = copy.deepcopy(load_manifest())
+    stripped["surfaces"]["core"] = [
+        t for t in stripped["surfaces"]["core"] if t != "test_ax_write_eval.py"
+    ]
+    assert "test_ax_write_eval.py" not in select(
+        ["docs/ax/how-to-use-tortoise-step1-eval.md"], "pull_request", stripped
+    )["test_files"]
 
 
 def test_extractor_tooling_change_selects_core_and_ep_not_tier1():
