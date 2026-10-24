@@ -26,16 +26,23 @@ observed, not inferred from source.
 
 The chosen shape is **(a) DECLARED**, and the lane states its claim **per
 relation** rather than globally (`structural_edge_carrier`, derived from
-`DERIVABLE_STRUCTURAL_RELS`). Read the block above `STRUCTURAL_EDGE_WRITE_LANE`
-for the argument. Its two measured legs:
+`DERIVABLE_STRUCTURAL_RELS`; and `structural_edge_record_carrier`, derived from
+the lane's own write set). Read the block above `STRUCTURAL_EDGE_WRITE_LANE`
+for the argument. Its measured legs:
 
 * `DERIVABLE_STRUCTURAL_RELS` are snapshot-carried — replay resurrects them from
   the endpoint Point's immutable record (`entities._upsert_point_edges`);
-* every other allowlisted predicate has **no replay carrier**: measured at this
-  head, `rebuild_all` over a journal holding such edges reports `edges: 0` and
-  the edges are gone. **This lane discloses that gap; it does not bless it** —
-  the gap is on `origin/main` today, undeclared, and the carrier belongs to the
-  record-store work (`#7879`), not to a declaration child.
+* the lane's predicates are **now record-carried too** (#9553 class 4): the mint
+  journals a flat `DirectEdgeCreated` per written edge, so `rebuild_all`
+  re-creates `ownedBy`/`hasPart`/`dependsOn`/`wasDerivedFrom`/`references` — the
+  `edges: 0` measurement this file used to record is FIXED, not blessed. TWO
+  exception stays declared per WRITE: `SOURCE_ENDPOINT_CANONICAL_RELS` (`aboutDocument`,
+  `aboutSource`), whose CANONICAL target is a `:Source` and is therefore declined
+  per write by the fold's `EPISTEMIC_LABELS`/`p.id` sweep (the predicates
+  themselves ARE journaled between epistemic endpoints) — as is a
+  `:Source`-anchored `references` and a self-edge. All are declined at the mint
+  and disclosed once, with the reason (`RECORD_ADDRESSABLE_EDGE_LABELS`,
+  `04-projection.md` §3).
 
 ⛔ WHAT THIS SUITE DOES **NOT** CLAIM:
 * it does not claim `_EdgeHandlers` holds only this lane's writers. The
@@ -50,9 +57,9 @@ for the argument. Its two measured legs:
   writes it property-free and a later `link_source_to_*` `MERGE` cannot repair
   it (`#5213` option 3, §9.6, `tests/test_references_boundary_5213.py`);
   `test_the_references_edge_is_still_written_bare` asserts THAT shape.
-* it does not claim durability for the relations this lane emits no carrier for
-  (above) — the engine's `DirectEdgeCreated` fold could carry them, and this verb
-  emits nothing.
+* it does not claim EVERY INSTANCE of a relation is carried. The record carrier
+  is per-relation AND per-write: a `:Source`-anchored `references` (the
+  `link_source_to_entity` shape) is still uncarried and says so at the write.
 
 ⚠️ What is NOT acceptable, and what these tests exist to prevent: "fixing" this
 by making `create_edge` tolerate a refusal, or by treating the lane as a bypass
@@ -79,9 +86,11 @@ from tortoise.projection.edges import (
     _VALID_ABOUT_EDGE_PREDICATES,
     _VALID_EDGE_PREDICATES,
     DERIVABLE_STRUCTURAL_RELS,
+    SOURCE_ENDPOINT_CANONICAL_RELS,
     STRUCTURAL_EDGE_LANE_PREDICATES,
     STRUCTURAL_EDGE_WRITE_LANE,
     structural_edge_carrier,
+    structural_edge_record_carrier,
 )
 
 #: The lane's declared verbs — the two edge mints plus `create_edge`'s three
@@ -103,11 +112,13 @@ SNAPSHOT_CARRIED = frozenset({
     "aboutSubject", "aboutObject", "aboutEvent", "aboutPoint",
     "aboutDocument",
 })
-#: No carrier is EMITTED from this lane, so a rebuild drops these edges. The
-#: name says "emitted", not "exists": the replay engine has a carrier
-#: (`DirectEdgeCreated` + its pass-2b fold) and emitting that record restores
-#: them — what is missing is the emission from this projection verb.
-NO_CARRIER_EMITTED = frozenset({
+#: These predicates have no SNAPSHOT carrier — the endpoint Point's immutable
+#: record (`DERIVABLE_STRUCTURAL_RELS`) does not hold the link, so
+#: `entities._upsert_point_edges` cannot resurrect it. ⛔ NOT "no carrier at
+#: all" any more (#9553 class 4): the lane journals a `DirectEdgeCreated` for
+#: every edge it writes, so the RECORD half is `structural_edge_record_carrier`
+#: below — the two halves answer different questions and both must be read.
+NO_SNAPSHOT_CARRIER = frozenset({
     "performs", "produces", "uses", "authoredBy", "ownedBy", "managedBy",
     "hasMember", "holdsRole", "memberOf", "reportsTo",
     "participatesIn", "hasPart", "related", "dependsOn", "references",
@@ -855,12 +866,12 @@ def test_the_lane_states_its_carrier_per_relation():
         "`aboutPoint` is the ONLY predicate the about mint adds to the generic "
         "verb's set; a new one must be classified into a carrier half below"
     )
-    assert set(STRUCTURAL_EDGE_LANE_PREDICATES) == SNAPSHOT_CARRIED | NO_CARRIER_EMITTED, (
+    assert set(STRUCTURAL_EDGE_LANE_PREDICATES) == SNAPSHOT_CARRIED | NO_SNAPSHOT_CARRIER, (
         "the pinned partition no longer covers the predicates this lane can "
-        f"write: uncovered={sorted(set(STRUCTURAL_EDGE_LANE_PREDICATES) - SNAPSHOT_CARRIED - NO_CARRIER_EMITTED)} "
-        f"stale={sorted((SNAPSHOT_CARRIED | NO_CARRIER_EMITTED) - set(STRUCTURAL_EDGE_LANE_PREDICATES))}"
+        f"write: uncovered={sorted(set(STRUCTURAL_EDGE_LANE_PREDICATES) - SNAPSHOT_CARRIED - NO_SNAPSHOT_CARRIER)} "
+        f"stale={sorted((SNAPSHOT_CARRIED | NO_SNAPSHOT_CARRIER) - set(STRUCTURAL_EDGE_LANE_PREDICATES))}"
     )
-    assert not (SNAPSHOT_CARRIED & NO_CARRIER_EMITTED)
+    assert not (SNAPSHOT_CARRIED & NO_SNAPSHOT_CARRIER)
 
     assert (set(STRUCTURAL_EDGE_LANE_PREDICATES) & DERIVABLE_STRUCTURAL_RELS
             == SNAPSHOT_CARRIED), (
@@ -876,14 +887,33 @@ def test_the_lane_states_its_carrier_per_relation():
         "this lane (`create_about_edge`); its answer must never fall through "
         "the partition because the generic verb does not accept it"
     )
-    for rel in NO_CARRIER_EMITTED:
+    for rel in NO_SNAPSHOT_CARRIER:
         assert structural_edge_carrier(rel) is None, (
-            f"`{rel}` is classified as emitting no carrier, but the lane claims "
-            "a replay carrier for it"
+            f"`{rel}` is classified as needing no snapshot carrier, but the lane "
+            "claims a snapshot carrier for it"
         )
     assert structural_edge_carrier("references") is None, (
         "`references` is the relation the issue names as the counter-example to "
-        "a global answer; it must keep its no-carrier-from-here classification"
+        "a global answer; it must keep its no-SNAPSHOT-carrier classification"
+    )
+    # ── the RECORD half (#9553 class 4) ──────────────────────────────────────
+    # Same per-relation discipline, the other carrier: every predicate this lane
+    # can write is journaled as `DirectEdgeCreated` at the mint, so the record
+    # half is TOTAL where the snapshot half is partial. A predicate added to
+    # either mint must appear here too, because this reads the lane's own set.
+    for rel in STRUCTURAL_EDGE_LANE_PREDICATES:
+        assert structural_edge_record_carrier(rel) == "record", (
+            f"`{rel}` is writable by this lane but the record half does not "
+            "claim it — the producer and the declaration have drifted"
+        )
+    # The two whose CANONICAL target is a `:Source` are carried TOO (the
+    # producer journals them between epistemic endpoints — measured); what is
+    # declined is the per-WRITE `:Source` endpoint, which `RECORD_ADDRESSABLE_EDGE_LABELS`
+    # owns and the class-4 suite pins.
+    assert SOURCE_ENDPOINT_CANONICAL_RELS <= STRUCTURAL_EDGE_LANE_PREDICATES
+    assert structural_edge_record_carrier("IMPL") is None, (
+        "IMPL is `create_direct_edge`'s family, not this lane's — claiming it "
+        "here would make the declaration wider than the code"
     )
 
 
@@ -930,9 +960,16 @@ def test_the_lane_and_its_argument_are_recorded():
     # `"declared"` alone is satisfied by the module docstring, and `#9124` /
     # `#9079` each appear more than once. These co-exist only if the
     # DECLARATION paragraph is present.
+    # ⚠️ RE-CUT at #9553 class 4, deliberately and visibly: the lane now journals
+    # its edges, so the phrase that recorded the OLD claim ("does NOT claim
+    # durability for them") is replaced by the two that record the NEW one — the
+    # carrier exists, and the residual gaps are NAMED rather than implied. The
+    # remaining phrases are unchanged; `MEASURED at` is still required, because
+    # the ledger must still say what was measured, not what was assumed.
     for phrase in (
         "WHAT THIS LANE CLAIMS, PER RELATION",
-        "This lane does NOT claim durability for them",
+        "record-carried",
+        "Carried per write, and one shape DECLINED",
         "WHAT THIS LANE DOES NOT COVER",
         "`references` KEEPS ITS OWN SHAPE",
     ):
@@ -941,14 +978,14 @@ def test_the_lane_and_its_argument_are_recorded():
             "decision #9195 requires recorded has been deleted or reworded out "
             "from under this pin"
         )
-    assert "MEASURED at" in block, (
-        "the carrier gap is asserted, not measured — the lane must record the "
-        "measurement that produced it (a rebuild drops these edges)"
+    assert "MEASURED at" in block or "MEASURED after this landed" in block, (
+        "the carrier claim is asserted, not measured — the lane must record the "
+        "measurement behind it (which edges a rebuild restores)"
     )
     assert "DirectEdgeCreated" in block, (
-        "the declaration must name the replay machinery that DOES exist for "
-        "these edges, so the gap is stated as the EMISSION from this door and "
-        "not as a missing replay engine"
+        "the declaration must name the replay machinery that carries these "
+        "edges, so the claim is traceable to the record type rather than to "
+        "this comment"
     )
     assert "#5213" in block and "#7879" in block, (
         "the declaration must cite the `references` boundary (#5213) and where "

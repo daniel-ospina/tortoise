@@ -2761,6 +2761,54 @@ def test_the_pglite_harness_runs_on_a_projection_only_change(tmp_path):
     assert _gate_outputs(["docs/README.md"], tmp_path).get("pglite") == "false"
 
 
+def test_every_pglite_suite_entry_names_a_file_that_exists():
+    """A stale `suites` entry silently blanks the harness's tail (#9707).
+
+    `validate.mjs` reads each entry with `readFileSync` INSIDE the loop but
+    OUTSIDE its `try`, so one name that does not resolve throws ENOENT
+    uncaught: the process exits on a node stack trace, that suite never runs,
+    the drill blocks BELOW the loop never execute, and every suite listed
+    after the bad entry stops running with it.
+
+    Falsifier (measured on the #9707 head `c142e3318`): its merge commit
+    renumbered the MIGRATION to `20261023000002_…sql` and the four textual
+    references with it, but the suite FILE on disk stayed
+    `20261023000001_blog_author_backfill_atomic.sql` while the `suites` entry
+    became `…0002_…`. 23 of 24 entries resolved; `schema-drill` died with
+    `ENOENT … supabase/tests/20261023000002_blog_author_backfill_atomic.sql`
+    and 16 suites after it never ran.
+
+    A PATH assertion, deliberately — not a content grep. That is the one shape
+    the defect is invisible to: `git grep blog_author_backfill_atomic` matches
+    every textual reference, but the test file's own NAME is not text in any
+    file, so the wrong path was the only hit the grep could not see.
+    """
+    harness = (REPO_ROOT / "supabase" / "tests" / "pglite" / "validate.mjs"
+               ).read_text(encoding="utf-8")
+    suite_list = re.search(r"^const suites = \[(.*?)^\];", harness, re.S | re.M)
+    assert suite_list is not None, (
+        "the explicit `suites` list is gone from validate.mjs — this test "
+        "measures nothing (harness wiring moved, re-point it)")
+    entries = re.findall(r"'([^']+\.sql)'", suite_list.group(1))
+    assert entries, "the `suites` list parsed to nothing — the pin is vacuous"
+
+    tests_dir = REPO_ROOT / "supabase" / "tests"
+    missing = [e for e in entries if not (tests_dir / e).is_file()]
+    assert not missing, (
+        "the PGlite harness's explicit `suites` list names file(s) that do not "
+        f"exist under {tests_dir}: {missing}. `readFileSync` runs outside the "
+        "loop's `try`, so one stale name aborts the whole harness and silently "
+        "skips every suite listed after it")
+
+    # The fix has TWO halves: the name is right, and a future stale name fails
+    # with a named one-line error instead of a node stack trace that reads as
+    # "the harness is broken" rather than "this entry is stale".
+    assert "const missingSuites = suites.filter" in harness, (
+        "validate.mjs lost its fail-closed pre-flight over the `suites` list, "
+        "so a future stale entry aborts the harness with an uncaught ENOENT "
+        "and takes every later suite down with it")
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # R5 / #9553 — class 3: the OPERATOR's own topology
 # ════════════════════════════════════════════════════════════════════════════

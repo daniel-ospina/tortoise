@@ -109,8 +109,9 @@ this module is additive and never moves a number out of ``content``/``quote``.
   ``drop_reason`` from the closed :data:`DROP_REASONS` set). Deterministic: no
   clock, no network, no process-global locale (design §6/T8).
 * :func:`normalize_money_props` — the S5 call pattern, mirroring
-  ``_valid_iso_date`` in ``extractor_v2.py``: returns ``None`` and *appends a
-  warning* rather than guessing.
+  ``_valid_iso_date`` in ``extractor_v2.py``: returns ``None`` and *reports*
+  the abstention (a per-value ``warnings`` line, or a ``drops`` count for a
+  caller that reports once per run) rather than guessing.
 * Every ``verbatim`` is a **byte-exact substring of the source text**, so the
   value is recoverable from what was stored (design §6/T1) — normalize-then-
   lose-the-source is the silent-corruption path this exists to prevent.
@@ -128,10 +129,25 @@ write path is a behaviour change on the live extraction lane and needs its own
 review, not a rider on this one. (The older blocking reason — writing
 undeclared props would set off the projection's "not declared" drift warning
 on every rebuild, design §7.1 — no longer applies.)
+
+Route (2) of the two `#2817` records as legal is now WIRED, at the capture
+write seam rather than in ``execute_embed``: ``sdk._extract_session_v2`` calls
+:func:`normalize_money_props` on each point's stored ``content`` and hands the
+result to ``create_point``. Its abstentions ride the ``drops`` sink and are
+reported ONCE per capture (the receipt is not a function of how many points
+mentioned a number), and they are counted on every point — created or
+resolved to an existing canonical — so identical content yields the same
+receipt either way. Deriving in ``pt_entry`` stays illegal because
+``Payload.points`` is ``list[commit_schema.Point]`` and that model is
+``extra="forbid"`` — one typed amount would refuse the whole session's commit.
+The seam derives from ``content``, never the 200-char ``quote``: a value
+straddling that cut would type the truncated prefix with a ``verbatim`` that
+still passes the §6/T1 substring check.
 """
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -697,14 +713,20 @@ def normalize_money(text: str) -> Normalization:
                 amount_minor, currency, minor_unit_exponent=exponent,
                 verbatim=verbatim, as_of=as_of))
         except MoneyValueError as exc:
-            # Unreachable by construction TODAY — every refusal money_props can
-            # raise is pre-empted above (the anchor is a table member, the
-            # exponent IS the table's, ``no_minor_unit`` returns early, the
-            # amount is an int, ``verbatim`` is non-empty by ``_NUM``'s grammar,
-            # ``asOf`` comes from the asserted-date shape). Kept explicit, like
-            # the int() guard below, because ``money.py`` is a LIVE contract that
-            # tightened once already (#8976): a Layer-1 refusal must land on an
-            # abstention, never on an unhandled exception.
+            # REACHABLE, and load-bearing. `money_props` refuses a value the
+            # store cannot hold — an `amountMinor` outside the store's INTEGER
+            # domain is the measured case (`money._validate_amount_minor` →
+            # `numeric_domain.numeric_alteration_reason`, #4647) — and a
+            # Layer-1 refusal must land on an abstention, never on an
+            # unhandled exception: at the capture seam that exception costs the
+            # whole point and reports the capture `ok=False` (the #2817 review
+            # P1). The other refusals are pre-empted above (the anchor is a
+            # table member, the exponent IS the table's, `no_minor_unit`
+            # returns early, `verbatim` is non-empty by `_NUM`'s grammar,
+            # `asOf` comes from the asserted-date shape) and the `int()` guard
+            # is just above — this branch is the one that stays live because
+            # `money.py` is a LIVE contract that tightened twice already
+            # (#8976, then the store domain).
             return _drop("refused_by_layer1", str(exc))
 
     if not props:
@@ -718,20 +740,58 @@ def normalize_money(text: str) -> Normalization:
 
 
 def normalize_money_props(text: str, *,
-                          warnings: list[str] | None = None) -> dict | None:
+                          warnings: list[str] | None = None,
+                          warn_on: Iterable[str] | None = None,
+                          drops: dict[str, int] | None = None) -> dict | None:
     """The S5 call pattern: props, or ``None`` + a warning (never a guess).
 
     Mirrors ``_valid_iso_date``'s posture in ``extractor_v2.py``: a caller
     that cannot type the value drops it and says so, so an abstention is
     visible in the payload instead of being silent.
+
+    ``warn_on`` narrows WHICH drop reasons the caller reports (``None`` =
+    every reason, the default). It never changes the derivation — only the
+    channel noise — and it exists because the reason vocabulary is not
+    uniform in consequence: ``no_currency_anchor`` is the design's named
+    abstention (§6/T3: ``"1.234,56 last quarter"`` types nothing and IS worth
+    reporting), while ``no_candidate`` and ``not_an_iso4217_code`` fire on
+    ordinary business prose (``"ISO 9001"``, ``"SOC 2"``, ``"Q3 target 30
+    KPI"``) and on every numberless sentence. A caller that writes one value
+    per point therefore passes a narrowed set rather than drowning the
+    warnings channel — a drop it does not report is still a drop, never a
+    guess: nothing is typed on either path.
+
+    ``warn_on`` must be a subset of :data:`DROP_REASONS`; an unknown name is
+    refused up front, because a typo in a closed vocabulary would otherwise
+    silently disable the warning it was meant to configure (and validate
+    BEFORE deriving, so a typo cannot hide behind a typed value).
+
+    ``drops`` is the AGGREGATING sink (#2817 review F1): it counts each
+    reported drop BY REASON (``warn_on`` still decides what counts as
+    reported) instead of naming the point. A caller that writes one value per
+    point passes this rather than ``warnings`` so its receipt carries ONE
+    summary line per call — at most one bucket per closed-set reason, however
+    many points it wrote — instead of one line per point. The two sinks are
+    independent: a caller may pass either or both, ``warn_on`` filters both,
+    and neither changes the derivation (a counted drop is still a drop, never
+    a guess).
     """
+    wanted = DROP_REASONS if warn_on is None else frozenset(warn_on)
+    unknown = wanted - DROP_REASONS
+    if unknown:
+        raise ValueError(
+            f"warn_on: unknown drop reason(s) {sorted(unknown)!r} — the closed "
+            f"set is {sorted(DROP_REASONS)!r}")
     result = normalize_money(text)
     if result.typed:
         return result.props
-    if warnings is not None:
-        warnings.append(
-            f"value-normalizer: no typed money value ({result.drop_reason}) "
-            f"for {result.detail!r} — prose only")
+    if result.drop_reason in wanted:
+        if drops is not None:
+            drops[result.drop_reason] = drops.get(result.drop_reason, 0) + 1
+        if warnings is not None:
+            warnings.append(
+                f"value-normalizer: no typed money value "
+                f"({result.drop_reason}) for {result.detail!r} — prose only")
     return None
 
 

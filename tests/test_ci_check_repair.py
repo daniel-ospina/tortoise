@@ -960,6 +960,16 @@ def test_installer_refuses_to_pin_a_schedule_to_an_ephemeral_worktree(tmp_path):
     stub_log = tmp_path / "launchctl.log"
     for name, body in (
         ("uname", "#!/usr/bin/env bash\necho Darwin\n"),
+        # #8392 (`fa40084d0`) added the `gh` precondition to the install path —
+        # the only commit that ever touched it (`git log -S "no usable 'gh'"`);
+        # #9118 hit that refusal as PRE-EXISTING on a host with no `gh` in
+        # /usr/bin, which is why the stub is needed here and why its citation
+        # is #8392 and not #9118 (#9089 review). On the MAIN
+        # checkout the launcher EXISTS (so the refuse branch below is not
+        # taken), which means the controlled PATH has to satisfy that guard —
+        # otherwise the install returns 2 for a reason this test does not
+        # assert. The stub is resolved, never executed.
+        ("gh", "#!/usr/bin/env bash\nexit 0\n"),
         ("launchctl", '#!/usr/bin/env bash\nprintf "launchctl %s\\n" "$*" '
                       '>> "$STUB_LOG"\nexit 0\n'),
         ("plutil", "#!/usr/bin/env bash\nexit 0\n"),

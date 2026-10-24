@@ -362,8 +362,11 @@ test('#2936: every shipped WizardPromptCard reports its copy through the one bea
   // step renders FOUR cards (the two config-writing blocks, the Codex Desktop
   // TOML block, and the Claude connector leaves' workflows block).
   const cards = wizardPromptCardElements(mainJsx)
-  assert.equal(cards.length, 4,
-    `the wizard renders 4 prompt cards — found ${cards.length}; a new card must be given an ` +
+  // #9660 owner ruling added the ChatGPT surface's first-job card, so the count
+  // is five (two config-writing blocks, the Codex Desktop TOML block, the Claude
+  // connector leaves' workflows block, and ChatGPT's).
+  assert.equal(cards.length, 5,
+    `the wizard renders 5 prompt cards — found ${cards.length}; a new card must be given an ` +
     'onCopied (or it copies without any attribution, which is #2936)')
   const sections = new Set()
   for (const card of cards) {
@@ -1564,11 +1567,13 @@ test('#2865: the live connect step makes the two Claude leaves key-less OAuth', 
   // a key-less leaf opens on the CONNECTOR block — no "1 Get your API key"
   // step. #3218's numbered prompt block still follows it, so the arm is a
   // fragment wrapping (connector → prompt), never a key block.
-  assert.match(connect, /\{wizardKeyless \? \(\s*(?:<>\s*)?<WizardBlock step=\{1\} title=\{procedureTitle\}>/,
+  assert.match(connect, /: wizardKeyless \? \(\s*(?:<>\s*)?<WizardBlock step=\{1\} title=\{procedureTitle\}>/,
     'a key-less OAuth leaf opens on the connector block, never a key block')
   assert.match(connect, /\{procedureTail && \(\s*<WizardBlock step=\{2\} title=\{procedureTailTitle\}>/,
     '#3218: the prompt hand-off keeps its own numbered block on the key-less leaf too')
-  // the recipe: connector name + canonical URL + sign-in → Authorize → org
+  // the recipe: connector name + canonical URL + sign-in → Organization choice →
+  // Authorize (that order — the consent page disables Authorize until the org
+  // chooser has a value, tortoise/oauth.py)
   const oauth = slice("} else if (wizardKeyless) {", '\n\n                      return (',
                       'live OAuth branch')
   assert.match(oauth, /Add custom connector/,
@@ -1635,7 +1640,9 @@ test('#2865: a user holding a key does NOT get a key row on a key-less OAuth lea
   // "unconditionally key-less") — the key-less single block never renders
   // keyDisplayRow, the pills, or the step-2 gate, so a held key cannot leak in.
   const connect = connectStep()
-  const i = connect.indexOf('{wizardKeyless ? (')
+  // #9660: the ChatGPT arm renders BEFORE the key-less Claude arm, so the
+  // ternary now opens with a negation — the marker names both halves.
+  const i = connect.indexOf(': wizardKeyless ? (')
   assert.ok(i > -1, 'the key-less branch exists')
   // review cycle 2 (P2-3): assert the end index before slicing (lost-marker
   // contract — a dropped/renamed Desktop arm must fail, not widen to EOF).

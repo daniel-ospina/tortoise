@@ -12,12 +12,6 @@
         "ai-review-gate"
       ]
     ],
-    "ai-review-gate-tests": [
-      [
-        "ci.yml",
-        "ai-review-gate-tests"
-      ]
-    ],
     "attach": [
       [
         "attach-tortoise-domain.yml",
@@ -28,24 +22,6 @@
       [
         "prod-csp-monitor.yml",
         "audit"
-      ]
-    ],
-    "availability-record": [
-      [
-        "ci.yml",
-        "availability-record"
-      ]
-    ],
-    "availability-watchdog": [
-      [
-        "ci.yml",
-        "availability-watchdog"
-      ]
-    ],
-    "backup-driver-scripts": [
-      [
-        "ci.yml",
-        "backup-driver-scripts"
       ]
     ],
     "build": [
@@ -144,22 +120,10 @@
         "deploy-api"
       ]
     ],
-    "deploy-bypass-report": [
-      [
-        "ci.yml",
-        "deploy-bypass-report"
-      ]
-    ],
     "deploy-dashboard": [
       [
         "deploy-pages.yml",
         "deploy-dashboard"
-      ]
-    ],
-    "deploy-health-gate": [
-      [
-        "ci.yml",
-        "deploy-health-gate"
       ]
     ],
     "docs": [
@@ -198,12 +162,6 @@
       [
         "registry-backup-cron.yml",
         "drive"
-      ]
-    ],
-    "entrypoint-guards": [
-      [
-        "ci.yml",
-        "entrypoint-guards"
       ]
     ],
     "evals": [
@@ -290,10 +248,10 @@
         "monitor"
       ]
     ],
-    "orphan-bound-gate": [
+    "ops-harnesses": [
       [
         "ci.yml",
-        "orphan-bound-gate"
+        "ops-harnesses"
       ]
     ],
     "packaging-smoke": [
@@ -418,16 +376,16 @@
         "repair"
       ]
     ],
+    "repo-harnesses": [
+      [
+        "ci.yml",
+        "repo-harnesses"
+      ]
+    ],
     "schema-drill": [
       [
         "ci.yml",
         "schema-drill"
-      ]
-    ],
-    "sigpipe-guard": [
-      [
-        "ci.yml",
-        "sigpipe-guard"
       ]
     ],
     "smoke": [
@@ -543,7 +501,7 @@
       ]
     ]
   },
-  "gate_digest": "2f3c77328a08664a2c83a3ec9b0b666a8aa07f8dc2a03510f58b7fa7ca538fa0",
+  "gate_digest": "3c0ecd04ba161a18caf50dc15ce89a2f3ff4f03188fd8878fb88f6059f8dbde0",
   "live_checked_at": "2026-09-29T02:35:26Z",
   "live_observed_contexts": [
     "ai-review-gate",
@@ -567,5 +525,5 @@
     "test-isolation"
   ],
   "settings_home_consistent": false,
-  "verified_at": "2026-10-23T10:38:06Z"
+  "verified_at": "2026-10-23T18:03:02Z"
 }

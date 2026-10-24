@@ -1,5 +1,17 @@
 -- ============================================================================
--- Migration 20261022000001: IndexNow submission stamp on blog_posts — #9680
+-- Migration 20261026000001: IndexNow submission stamp on blog_posts — #9680
+--
+-- ⚠️ RENUMBERED from 20261022000001 (#9849). That prefix was claimed twice — this
+-- file (landed second, d883dd8e8) and
+-- 20261022000001_record_session_capture_redactions_integer.sql (landed first,
+-- c4bdc3e70) — and two files at one version abort `supabase db push` outright
+-- (#1235). NEITHER file had ever run: prod's newest applied version was
+-- 20261018000001 when the collision was measured (the drift gate's own report on
+-- main@5e5dabbc5), so this is a pure forward renumber of unapplied DDL, which is
+-- what `.github/scripts/check-migration-append-only` exempts and
+-- `check-migration-drift` prescribes. Content below is unchanged apart from this
+-- header. The destination sorts after this tree's maximum prefix (20261025000001)
+-- because the append-only bound requires that — not because of today's date.
 --
 -- IndexNow (#9680) notifies Bing / Yandex / Seznam / Naver / Amazon / Yep when an
 -- article is published. ⛔ It does NOT reach Google — Google does not consume

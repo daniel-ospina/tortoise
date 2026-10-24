@@ -289,6 +289,84 @@ closed at both layers:
   where the producer lives: the rest of the point-property set (`about*`,
   `TAGGED`) and the structural predicates whose `DirectEdgeCreated` fold works
   but has **no producer**.
+  > **Updated #9553 (R5 class 4).** The structural predicates now HAVE their
+  > producer: the edge lane's two mints (`projection/edges.py::create_edge` and
+  > `create_about_edge`, plus `create_edge`'s three typed wrappers) journal §4.4's
+  > flat `DirectEdgeCreated` — `{src, tgt, edge_type, source_label,
+  > target_label}` — through `TortoiseSDK._record_structural_edge`, which the
+  > projection reaches via `_bind_structural_edge_recorder` (`_get_proj`, beside
+  > `_bind_journal`, and only when a journal exists). Nothing new is invented: the
+  > record type, the pass-2b fold and the `RelationUpsert` all predate it; the
+  > labels are additive for the RECORD (`relation.src_label`/`tgt_label` are bound
+  > values and each label resolves through its own key column) and ignored by the
+  > fold. TWO gates sit in front of the emission, both load-bearing: a REPLAY never
+  > journals (`projection.replay_window_open()` — `apply()`/`rebuild_all` re-wire
+  > about links through this very mint on the SDK's BOUND projection, so without it
+  > a recovery write would append to the append-only journal and write back the
+  > endpoints it resolved at replay time), and an endpoint the fold cannot address
+  > (`Source`; a non-`id`-valued node) is declined rather than half-journaled.
+  >
+  > **Measured.** PGlite (`supabase/tests/pglite/validate.mjs`) is the record
+  > route's CI gate: `PointAdded` + `SubjectAdded` + the descriptor ⇒ exactly one
+  > `relation` row `Point/p1 -> Subject/team-x` (the Subject filed by NAME), and
+  > idempotent on re-replay. On a local throwaway Postgres + FalkorDB the whole
+  > family set was measured 1:1:1 across live / journal-rebuild / record-rebuild
+  > (`ownedBy`, `dependsOn`, `hasPart`, `wasDerivedFrom`, `references`, bare
+  > `aboutObject`); `relation` goes from 0 rows for each to one. A
+  > `capture_session` leaves `aboutObject`/`extractedFrom` short by the captured
+  > turns — R4's pinned `point.search_keys` refusal, not an edge defect (the Point
+  > never reaches the record, so its edges have no endpoint).
+  >
+  > **What is and is not carried.** `RECORD_CARRIED_STRUCTURAL_RELS` is the
+  > lane's WHOLE write set (23 predicates, asserted at import), because the
+  > producer journals each one when its endpoints are addressable — including
+  > `aboutDocument`/`aboutSource`, which ARE journaled between epistemic endpoints
+  > (measured; `create_edge` type-checks only `aboutDocument`, `create_about_edge`
+  > type-checks neither). The per-WRITE decline is the `:Source` endpoint: the fold
+  > sweeps `EPISTEMIC_LABELS` on `p.id` and a `:Source` is url-keyed, so
+  > `SOURCE_ENDPOINT_CANONICAL_RELS` (`aboutDocument`, `aboutSource`) and a
+  > `:Source`-anchored `references` (`link_source_to_entity`) are declined and
+  > REPORTED through the package's one skip reporter (`projection._log_identity_skip`,
+  > `absent_is_ordinary=False, drops_record=True` — so the skip is COUNTED, not just
+  > logged); making a `:Source` addressable is a FOLD change — **#9834**. A
+  > self-edge is skipped (the fold's `E2E-11.6`) and warned once per relation at the
+  > recorder. The one
+  > family with no RECORD carrier is `TAGGED` (no record `tag` table to key
+  > `relation.tgt_key` on — a schema decision); a JOURNAL rebuild DOES restore it
+  > from the Point's `tags` property (`_sync_tags`, measured), and it is silent:
+  > `_sync_tags` reaches neither the lane nor this producer.
+  >
+  > ⚠️ **Supersede.** The `DirectEdgeCreated` fold's superseded-endpoint skip is gated on what the supersede DID
+  > to that edge (`_supersede_took_this_edge`), because each of its three shapes was a live ≠ rebuild divergence
+  > until the gate learned it: (1) DIRECTION — leg 2a (`IMPL`/`NAND`) moves both ways and always journals a
+  > repoint, while leg 2b moves only the OUTGOING side, so an incoming edge must be replayed; (2) ORDER — an edge
+  > minted at an already-superseded id was never moved by the supersede, so the gate compares the creation's
+  > journal seq with the supersede's and replays it; (3) THE DELETE-LEG'S BLIND SPOT — a replayed post-supersede
+  > creation is exempted from the 2b repoint delete-leg (which cleans pass-2's resurrection and cannot tell the
+  > two apart) by `(src, edge_type, RESOLVED target node)`, while the successor-side transfer still runs. Residuals:
+  > (a) `wasDerivedFrom`/`aboutAction` are moved live but not derivable, so 2b journals no repoint for them and the
+  > journal route loses them after a supersede; (b) the RECORD keeps EVERY moved structural rel at the
+  > pre-supersede point (a 2b descriptor carries `src=old_id` and the record's `DirectEdgeRepoint` is a plain
+  > upsert) — pre-dating this producer for `extractedFrom`/`EntityLinked`, newly visible for the rest — **#9836**.
+  >
+  > ⚠️ One uncarried writer is OUTSIDE this lane and stays open:
+  > `sdk.backfill_about_entities` mints about edges through `_create_about_edges` →
+  > `wire_about_link` (a bare MERGE) with no record and no `aboutEntities` snapshot
+  > prop, so neither carrier restores them — **#9833**.
+  >
+  > ⚠️ **One RECORD-side residual the producer cannot reach — `idx` (#9844), measured.** A
+  > `DirectEdgeCreated` descriptor carries no `idx`, so the record defaults it to `0`, while
+  > `relation`'s conflict key includes `idx` and an operator's own `hasPart`/`IMPL`/`NAND` rows
+  > carry `idx = enumerate(inputs)`. Mint the edge an operator's record already carries at
+  > `idx >= 1` (`create_operator("composedOf", a, [b])`, then
+  > `create_edge("hasPart", op, b)`) and the LIVE graph is unchanged — the `MERGE` is
+  > property-agnostic, so it dedups onto the `idx=1` edge and mints no new edge — while the
+  > record route computes `(op, b, hasPart, 0)` beside the existing `(op, b, hasPart, 1)`: two
+  > rows for one edge, the record RICHER than the graph. The producer cannot fix it (the mint
+  > takes no property parameter, §9.6, and cannot read the `idx` the existing edge carries), so
+  > the fix is a record-layer rule with its own test — insert only when the
+  > `(org, graph, rel_type, src, tgt)` triple is absent, for this family only — filed as
+  > **#9844**.
 * **It does not approve `#7879`'s scope.** Scope and Plan carry human gates.
 * **It adds no migration-safety surface** (owner scope ruling, 2026-10-10).
 * **It changes no public surface.** No MCP tool and no public SDK method is added,

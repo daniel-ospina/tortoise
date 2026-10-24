@@ -69,7 +69,7 @@ const here = dirname(fileURLToPath(import.meta.url))
 const snapshot = JSON.parse(readFileSync(join(here, 'wizardPrompts.snapshot.json'), 'utf8'))
 
 // Harnesses with a live wizard surface (chatgpt renders on none — #2698).
-const HARNESSES = ['pi', 'cursor', 'claude', 'codex', 'claude-desktop', 'claude-web']
+const HARNESSES = ['pi', 'cursor', 'claude', 'codex', 'claude-desktop', 'claude-web', 'chatgpt']
 // #3430: the ONE config block still rendered (Codex Desktop). The per-harness
 // universal commands for agent-driven harnesses were deleted — they reached no
 // user, and pinning them let the suite assert a claim the product stopped making.
@@ -86,6 +86,11 @@ const REQUIRED_SURFACES = [
   'claude/1', 'claude/2',
   'codex/1', 'codex/2',
   'claude-desktop/2', 'claude-web/2',
+  // #9660 owner ruling: the ChatGPT journey renders both its first-job prompt
+  // and the shared verify/file body, so both are pinned. Listing it here is
+  // what makes a REGRESSION loud: dropping the surface again fails this test
+  // instead of silently returning '' like before.
+  'chatgpt/1', 'chatgpt/2',
 ]
 
 // ── 1. The rendered snapshot ───────────────────────────────────────────────

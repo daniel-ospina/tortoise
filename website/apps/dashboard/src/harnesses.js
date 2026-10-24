@@ -49,6 +49,46 @@ export const SERVED_SKILLS_ORIGIN = 'https://app.premiselabs.co'
 // can reach the REAL skill instead of a prose rendering of one.
 export const servedSkillUrl = (name) => `${SERVED_SKILLS_ORIGIN}/skills/${name}/SKILL.md`
 
+// #9660 owner ruling: the ChatGPT journey installs the skills instead of pasting
+// them, because (verified in the live ChatGPT uploader) an upload is the only
+// hand-off that (a) works at all — a file named `SKILL.md` is the ONLY accepted
+// `.md` name, so several skills cannot ship as several `SKILL.md` downloads — and
+// (b) is one-time rather than re-read every chat.
+//
+// ⛔ ONBOARDING IS NOT ONE OF THEM (#4365). `tortoise-onboarding` is a one-time
+// setup FLOW, not a reusable capability: it is READ at its served URL and never
+// copied into a skills namespace — a rule its own first screen states, and one
+// #4365 recorded as an owner decision. Installing it here would ship a document
+// whose banner forbids its own install, permanently, into every chat.
+//
+// The archives are `.skill` files (a zip whose single entry is
+// `<name>/SKILL.md`): each downloads under its own filename, and several can be
+// picked in ONE upload. They are built from the SERVED copies under
+// `public/skills/<name>/SKILL.md` and published by the DOCS origin under
+// `website/skills/`, because the dashboard's `public/` tree carries the
+// documents, not the archives, and duplicating the zips into it would be a
+// second artifact to keep in step. The deploy stages that directory but excludes
+// `*.md` at any depth, so only the `.skill` files (~21 KB in total) are published
+// from it — by design, since the documents are served from the app origin.
+//
+// The card lives on the APP origin, so these links are cross-origin, which means
+// browsers IGNORE the `download` attribute on them. The download is therefore
+// the docs origin's decision, not the markup's: `website/_headers` pins
+// `/skills/*.skill` to `application/octet-stream` +
+// `Content-Disposition: attachment`, so the response saves under the archive's
+// own name instead of depending on how the host guesses an unknown extension.
+export const DOCS_ORIGIN = 'https://tortoise.premiselabs.co'
+export const skillArchiveUrl = (name) => `${DOCS_ORIGIN}/skills/${name}.skill`
+//: The three REUSABLE skills the ChatGPT journey installs, in reading order —
+//: the same three the shell installer ships (#4365: onboarding is delivered as
+//: instructions, never installed). Kept in step with
+//: `tools/build_skill_archives.py` (SKILL_NAMES) by tests/test_onboarding_variants.py,
+//: which reads BOTH lists and fails on any divergence, and by the archive test,
+//: which fails if an archive is stale or `tortoise-onboarding` reappears here.
+export const SKILL_ARCHIVE_NAMES = Object.freeze([
+  'how-to-use-tortoise', 'tortoise-decide', 'tortoise-file-finding',
+])
+
 // #1701: the skills-as-prompt body shared by every filesystem-less harness
 // that therefore has no local skills to install — Claude Web, Claude Desktop
 // (#2827) and ChatGPT. ONE constant so the user-facing prompts can never
@@ -194,7 +234,7 @@ export const HARNESS_STEPS = (harness, key) => ({
     'Add custom connector and name it "Tortoise"',
     { label: 'Server URL', code: CANONICAL_MCP_URL, copy: CANONICAL_MCP_URL },
     'No API key is needed — leave Request headers empty.',
-    'Sign in to Tortoise when Claude opens the authorization page and click Authorize, then pick your Organization.',
+    'Sign in to Tortoise when Claude opens the authorization page: pick the Organization you are onboarding — the page names it, or asks you to choose when your account can use more than one — then click Authorize.',
     'Paste the prompt below into a Claude Web chat — it gives Claude the Tortoise workflows:',
     '(Claude connects from its own cloud — the authorization lives with Anthropic, not on your machine. No local skills on web — the prompt gives Claude the workflows.)',
   ],
@@ -207,14 +247,35 @@ export const HARNESS_STEPS = (harness, key) => ({
     { label: 'Install session capture (the sessionEnd hook):', code: 'tortoise install cursor', copy: 'tortoise install cursor' },
     "Session capture is opt-in on this machine and IDE-ONLY: without `export TORTOISE_CAPTURE=1` the sessionEnd hook files nothing to Tortoise Cloud (a credential alone never enables capture, #3615); with it, local desktop-editor sessions are captured, but CURSOR CLOUD AGENT sessions are not — Cursor's docs: 'Cloud agents have no editor-lifetime session boundary. sessionEnd is tied to the IDE session, not a cloud agent chat.'",
   ],
+  // #9660: the Developer-mode prerequisite is GONE from OpenAI's flow — and the
+  // card therefore no longer mentions it at all. Read off the live UI (Plus
+  // account, 2026-10-23): the connector is created from `Plugins → Add → Add
+  // custom MCP server`, and Settings carries no Developer-mode toggle
+  // (`/settings/connectors` redirects to `/settings/plugins-settings`;
+  // `Security and login` holds MFA, active sessions, Security history, Login
+  // connections, Lockdown mode and app CSP, not a Developer-mode switch). The
+  // creation dialog has NO "Scan Tools" button: `Add custom MCP server` →
+  // Name/Description → Connection (Server URL | Tunnel) → Authentication (OAuth |
+  // No authentication | OAuth or no auth) → risk acknowledgement → `Create as a
+  // plugin`. The OAuth grant is a separate `Connect` on the installed plugin's
+  // detail page. Developer mode survives only as the RESULT (a created plugin's
+  // Version field reads `dev mode`), never as a step.
+  //
+  // #9660 second fix: the onboarding hand-off is now ChatGPT's own Skills surface
+  // (`chatgpt.com/skills → Add → Upload from your computer`, which accepts a
+  // `.zip`/`.skill`/`SKILL.md` up to 25 MB — verified by uploading the served
+  // tortoise-onboarding SKILL.md, which installed as `tortoise onboarding` and
+  // rendered its frontmatter description). Uploading installs it ONCE for every
+  // chat; pasting the 66 KB document was per-chat. Paste stays as the one-line
+  // alternative.
   chatgpt: [
-    'Enable Developer mode: chatgpt.com → Settings → Security and login → Developer mode (Plus/Pro/Business/Enterprise/Education).',
-    'Open chatgpt.com/plugins → the + button → create a Developer-mode app.',
-    { label: 'MCP server URL', code: CHATGPT_MCP_URL, copy: CHATGPT_MCP_URL },
-    "Choose OAuth — ChatGPT discovers Tortoise's authorization server (no API key needed).",
-    'Scan Tools — sign in to Tortoise when prompted and click Authorize.',
-    'The tortoise_* tools appear (Developer mode); write actions ask for confirmation in chat.',
-    'Paste the prompt below into a ChatGPT chat — it gives ChatGPT the Tortoise workflows.',
+    'Open chatgpt.com/plugins → the Add button → Add custom MCP server.',
+    'Fill in the dialog: Name = Tortoise, leave Description empty (or write your own), leave Connection on Server URL, leave Authentication on OAuth, skip Icon.',
+    { label: 'Server URL — paste this into the dialog', code: CHATGPT_MCP_URL, copy: CHATGPT_MCP_URL },
+    'Now tick "I understand and want to continue" and click Create as a plugin.',
+    'Open chatgpt.com/settings/plugins-settings → Tortoise → View details → Connect, then confirm Connect Tortoise in the dialog it opens. Sign in to Tortoise, pick the Organization you are onboarding — the page names it, or asks you to choose when your account can use more than one — then click Authorize. That Organization is the one the connector writes to.',
+    'Install the Tortoise skills once — on tortoise.premiselabs.co/docs#chatgpt download the three files (how-to-use-tortoise, tortoise-decide, tortoise-file-finding), then open chatgpt.com/skills → Add → Upload from your computer and pick them together. To update one, upload that file again and choose Replace existing. Rather not install? Paste the document below into one chat instead.',
+    'The tortoise_* tools follow that connection — if they do not appear, re-open chatgpt.com/settings/plugins-settings and check Tortoise shows as connected, then ask the chat which tools it can call. Write actions ask for confirmation in chat.',
   ],
 })[harness]
 
@@ -233,7 +294,10 @@ export const HARNESS_INTRO = {
   // #2328: Desktop variant intro (no terminal).
   codexDesktop: 'Edit ~/.codex/config.toml (create it if missing) — Codex Desktop and the CLI share this file. Copy the block, paste it in, then fully quit and reopen Codex Desktop:',
   pi: 'Paste this into your Pi agent:',
-  chatgpt: 'Start a new chat at chatgpt.com and paste the prompt below — that conversation becomes your connected agent. ChatGPT has no local skills — the prompt gives it the Tortoise workflows.',
+  // #9660: the workflows now arrive as installed ChatGPT skills, so the paste
+  // below is the FALLBACK rather than the default hand-off. (The onboarding
+  // DOCUMENT is not one of them — #4365: it is read at its served URL.)
+  chatgpt: 'Start a new chat at chatgpt.com — the Tortoise skills you installed above give it the workflows. (If you skipped the install, paste the prompt below instead.)',
 }
 
 export const HARNESS_NAMES = {
@@ -508,7 +572,7 @@ chmod +x .claude/hooks/session-start.sh .claude/hooks/session-end.sh .claude/hoo
   // issue (Anthropic's "Request headers" field is beta and absent on many
   // accounts). The `key` argument is kept so every caller keeps one signature.
   'claude-desktop': () =>
-    `Tortoise — Claude Desktop (OAuth, no API key)\nClaude Desktop reaches a remote MCP server through the Connectors UI:\n1. Open Claude Desktop → Settings → Connectors → Add custom connector.\n2. Name: Tortoise\n3. Server URL: ${CANONICAL_MCP_URL}\n4. Leave Request headers empty — no API key is needed. Claude opens\n   Tortoise's sign-in page on the first connection: sign in, click Authorize,\n   then pick the Organization you're onboarding.\n5. Start a new chat and paste the Tortoise workflows prompt — it gives Claude\n   the Tortoise workflows. Then say "Set up Tortoise" so the agent calls\n   tortoise_health to verify, and click "I've connected it — Continue" in the\n   dashboard connect step (the click only advances — the connection itself is\n   confirmed by your agent's first successful write).`,
+    `Tortoise — Claude Desktop (OAuth, no API key)\nClaude Desktop reaches a remote MCP server through the Connectors UI:\n1. Open Claude Desktop → Settings → Connectors → Add custom connector.\n2. Name: Tortoise\n3. Server URL: ${CANONICAL_MCP_URL}\n4. Leave Request headers empty — no API key is needed. Claude opens\n   Tortoise's sign-in page on the first connection: sign in, pick the\n   Organization you're onboarding (the page names it, or asks you to choose when\n   your account can use more than one), then click Authorize.\n5. Start a new chat and paste the Tortoise workflows prompt — it gives Claude\n   the Tortoise workflows. Then say "Set up Tortoise" so the agent calls\n   tortoise_health to verify, and click "I've connected it — Continue" in the\n   dashboard connect step (the click only advances — the connection itself is\n   confirmed by your agent's first successful write).`,
   'claude-web': () => {
     const base = WORKFLOWS_PROMPT
     // The session-filing paragraph is gated on HARNESS_CAPTURE_SUPPORT — the
@@ -771,7 +835,8 @@ export const HARNESS_ORDER = ['claude', 'claude-desktop', 'claude-web', 'codex',
 // Codex hid its CLI/Desktop split behind an in-body toggle (#2328). Codex had
 // the better shape; this lifts it to every multi-surface harness:
 //
-//   level 1 — the HARNESS (the product you use): Claude | Codex | Cursor | Pi
+//   level 1 — the HARNESS (the product you use):
+//             Claude | Codex | Cursor | Pi | ChatGPT
 //   level 2 — the SURFACE you connect (only when there is a real choice):
 //             Claude → Code, Desktop, Web;  Codex → CLI, Desktop
 //
@@ -780,8 +845,15 @@ export const HARNESS_ORDER = ['claude', 'claude-desktop', 'claude-web', 'codex',
 // keyed exactly as before — this is a UI grouping, not a vocabulary change
 // (DE2E-5's 7-harness contract is untouched). CODEX_DESKTOP_COMMAND is a bare
 // function, not a per-harness map: it serves the one manual leaf (#3430).
-// ChatGPT stays out: it has no Claude/Codex-style surface split and its
-// Developer-mode path is not reachable from the dashboard chooser (#2698).
+// ChatGPT was excluded here (#2698) on the grounds that its connector path was
+// not reachable from the chooser and the public docs page was its only carrier.
+// #9660 OWNER RULING (2026-10-23) — REVERSES that exclusion: ChatGPT Web is a
+// supported onboarding journey in its own right (signup → org → pick harness →
+// connect → install skills → first job). The old justification was that the
+// public docs page was its only carrier (#4836); the owner directed that the
+// flow must NOT dead-end cloud users in a docs page, so `chatgpt` joins the
+// chooser as a single-choice family (family id == leaf id, like Cursor/Pi) and
+// the docs row stays the reference copy for the same steps.
 // #2865: Claude's Desktop/Web surfaces ARE key-less OAuth (HARNESS_OAUTH) and
 // stay here, so every role can reach them — including members.
 export const HARNESS_FAMILIES = Object.freeze([
@@ -804,6 +876,8 @@ export const HARNESS_FAMILIES = Object.freeze([
   }),
   Object.freeze({ id: 'cursor', name: 'Cursor', surfaces: Object.freeze([]) }),
   Object.freeze({ id: 'pi', name: 'Pi', surfaces: Object.freeze([]) }),
+  // #9660 owner ruling: ChatGPT is a first-class journey (single-choice family).
+  Object.freeze({ id: 'chatgpt', name: 'ChatGPT', surfaces: Object.freeze([]) }),
 ])
 
 // The leaf id a surface click selects: single-surface families ARE their
@@ -863,6 +937,17 @@ export function preferredSurface(family, current) {
 // `tests/test_onboarding_endpoints.py::test_cross_surface_harness_vocab_contract`
 // (the JS side declares the exceptions; the server side owns the vocabulary,
 // so the set is not restated here where it could drift).
+// #9660 owner ruling made `chatgpt` a LIVE chooser leaf, but its alias stays
+// `null`: its copy beacons remain INERT because widening the value set means
+// adding a member to the server's session vocabulary, and #1701 recorded that
+// ChatGPT never files a session (`supports_capture=false`) so the vocabulary
+// must not carry a value nothing can send. The two are separable — the leaf is
+// reachable, the beacon emits nothing — and `analyticsHarnessOf`'s null rule is
+// what the cross-surface contract pins as the ONE deliberate exclusion.
+// Widening it would be a REOPEN of #1701, not a refactor.
+// NOTE: keep this docstring OUTSIDE the literal — tests/test_onboarding_endpoints
+// parses the object body by splitting on commas, so prose in here would be read
+// as alias entries.
 export const HARNESS_ANALYTICS_ALIASES = Object.freeze({
   codexDesktop: 'codex',
   chatgpt: null,
@@ -894,15 +979,23 @@ export function analyticsHarnessOf(leaf) {
 // an instruction document, not an installed skill) is the agent-side
 // self-adjudication source.
 //
-// chatgpt is key-less/OAuth (HARNESS_OAUTH) and has NO dashboard surface:
-// #2698 deleted its tab and #2912's families exclude it. Its live carrier is
-// the public setup docs page (#4836): website/docs.html#chatgpt.
+// chatgpt is key-less/OAuth (HARNESS_OAUTH) and is a live dashboard surface
+// since the #9660 owner ruling (2026-10-23), which reversed the #2698/#2912
+// exclusion: the connect step renders the same verified connector recipe the
+// public setup docs page carries (website/docs.html#chatgpt), then the three
+// `.skill` installs (#4365: onboarding is read, not installed), then the
+// paste-able first job.
 //
 // Contract (DE2E-5), and where each clause is now pinned:
-//   • every harness reaching a connected state verifiable via tortoise_health —
-//     pinned on the RENDERED step-2 prompt for all six non-chatgpt harnesses
-//     (harnesses.test.js; the workflows prompt is asserted too, but it embeds
-//     that same step-2 text, so it is a restatement, not second coverage);
+//   • every harness reaching a connected state verifiable through an ADVERTISED
+//     tool — pinned on the RENDERED step-2 prompt for all SEVEN harnesses
+//     (harnesses.test.js). Six of them call `tortoise_health` (still answered on
+//     `get_tool`); chatgpt cannot, because its grant is built from `tools/list`
+//     and retired names are not advertised there, so its body names
+//     `tortoise_overview(section="health")` (wizardPrompts.js
+//     ADVERTISED_VERIFY_FILE_STEP_TEXT / the legacy list). The workflows prompt is
+//     asserted too, but it embeds
+//     that same step-2 text, so it is a restatement, not second coverage;
 //   • the key never lands in a project-scoped/committable config (env-var
 //     indirection) — pinned on the rendered prompt, never on a literal (the
 //     test key is itself `tt_`-prefixed, so "contains tt_" proves nothing).

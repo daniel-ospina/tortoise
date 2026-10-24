@@ -208,6 +208,36 @@ def _try_decrypt_with_chain(blob: bytes, keys: tuple[bytes, ...]) -> bytes:
     raise ValueError("Backup decryption failed — no decrypt key available")
 
 
+def decrypt_backup_with_rotation(blob: bytes, key: bytes | None = None) -> bytes:
+    """Decrypt with the active key, then the #2318 candidate chain.
+
+    The ONE definition of "this artifact may be older than the current key" for
+    the BACKUP artifact families — the graph archives (:func:`restore_backup`)
+    and the record (:mod:`tortoise.record_backup`) BOTH call this, so a second
+    family cannot quietly implement only the first half (#9601 review, P1; the
+    graph path was migrated at review cycle 11, P3 — it had still been inlining
+    its own copy, which made the "one definition" claim false for the
+    load-bearing family). A bare :func:`decrypt_backup` resolves the ACTIVE key
+    only, so after a ``TORTOISE_BACKUP_KEY`` rotation every retained artifact
+    encrypted under the rotated-out key stops restoring — and, reported as
+    tamper, at the exact moment the artifact is needed.
+
+    ⚠️ NOT the whole tree: the export/import pair
+    (:func:`tortoise.export.open_payload`,
+    :mod:`tortoise.hosted_api`'s import verifier) keeps calling the bare
+    primitive on purpose — its key is identified by a fingerprint carried IN the
+    artifact header (an explicit key, not a rotating env key), so a candidate
+    chain there would authenticate a different key than the artifact declares.
+
+    Raises ``ValueError`` (the primitive's own class, so callers keep their
+    wrong-key/tamper arm) when NO candidate authenticates.
+    """
+    candidates = _decrypt_candidate_keys(key)
+    if not candidates:
+        raise ValueError("Backup decryption failed — no decrypt key available")
+    return _try_decrypt_with_chain(blob, candidates)
+
+
 def encrypt_backup(data: bytes, key: bytes | None = None) -> bytes:
     """Encrypt backup payload. Returns magic || nonce(12) || ciphertext."""
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -3192,21 +3222,23 @@ def restore_backup(
         )
 
     try:
-        payload = json.loads(decrypt_backup(blob, key=key))
+        # ⛔ THE SHARED ROTATION DEFINITION, not an inlined copy (#9601 review
+        # cycle 11, P3). This arm used to repeat `decrypt_backup` → on
+        # `ValueError` → `_decrypt_candidate_keys` → `_try_decrypt_with_chain`
+        # by hand: the same rule in a second place, so a change to the rotation
+        # chain landed in :func:`decrypt_backup_with_rotation` and silently did
+        # not reach the graph restore path — the failure the helper's docstring
+        # says it exists to prevent. The chain's order is the helper's (an
+        # explicit key first), and the wrapper keeps this path's own message.
+        payload = json.loads(decrypt_backup_with_rotation(blob, key=key))
     except ValueError as e:
         # #661: sweep archives encrypt with REGISTRY_STREAM_KEY, user-facing
-        # backups with TORTOISE_BACKUP_KEY — try the FULL candidate chain
-        # (#2318: both roles' active + retained-previous keys, deduped) before
-        # failing, so both restore paths accept both archive types AND archives
-        # encrypted under a rotated-out key stay decryptable during the overlap
-        # window.
-        candidates = _decrypt_candidate_keys(key)
-        if not candidates:
-            raise ValueError(f"Cannot restore: {e}") from e
-        try:
-            payload = json.loads(_try_decrypt_with_chain(blob, candidates))
-        except ValueError:
-            raise ValueError(f"Cannot restore: {e}") from e
+        # backups with TORTOISE_BACKUP_KEY — the helper tries the FULL candidate
+        # chain (#2318: both roles' active + retained-previous keys, deduped)
+        # before failing, so both restore paths accept both archive types AND
+        # archives encrypted under a rotated-out key stay decryptable during the
+        # overlap window.
+        raise ValueError(f"Cannot restore: {e}") from e
     if not isinstance(payload, dict) or payload.get("format") != DUMP_FORMAT:
         raise ValueError("Decrypted payload is not a tortoise logical dump")
     # Authenticated graph isolation (defense in depth beyond the plaintext

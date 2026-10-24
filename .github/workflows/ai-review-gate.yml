@@ -27,7 +27,8 @@ name: ai-review-gate
 # because no server-side step acted on the conclusion this check produced.
 #
 # ⚠️ QUALIFIED BY #3091 — this check is required, its HARNESS is not.
-# `ai-review-gate-tests` (which runs .github/scripts/ai-review-gate.test.sh) is
+# `AI review gate shell harness` step of ci.yml's `repo-harnesses` job (which
+# runs .github/scripts/ai-review-gate.test.sh) is
 # NOT a required context, and because this workflow is `pull_request_target`, a
 # PR that weakens it is evaluated by the BASE revision: with a recorded marker it
 # can merge while that harness is red-but-unrequired, after which the weakened

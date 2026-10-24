@@ -46,17 +46,68 @@
 #
 # ⚠️ THE DECLARED SET IS NOT READ FROM ONE DESIGN DOCUMENT — and that is part of
 # the finding. #4894 (the issue this one names as its dependency, "the v4
-# write-path design of record") does **NOT** enumerate these seven mechanisms;
-# it names the raw/narrative-out change and a salience gate, and no list. The
-# seven are declared across a cross-referenced PAIR of documents, not one
-# authority: four in `EXTRACTOR-V4-ARCHITECTURE.md` (vet, source_dedup,
-# near_dup_merge, span_link), four in `STORAGE-ARCHITECTURE.md` (span_link,
-# embed_gate, sufficiency_router, fanout_cap — span_link is declared in both),
-# and one in `packs/dev/manifest.yaml` (embed_gate, its policy source). The
-# seven NAMES below come from #5064's own O/I/T indicator (1), each with its
-# declaring document and a filed tracking issue. Making the set a single
-# registry is the fix; `declared_in:` records where each row's declaration
-# actually lives.
+# write-path design of record") does **NOT** enumerate these mechanisms; it
+# names the raw/narrative-out change and a salience gate, and no list. They are
+# declared across a cross-referenced PAIR of documents, not one authority, and
+# every one of the eight names at least one of them. Four name BOTH
+# (`near_dup_merge`, `span_link`, `fanout_cap`, `state_value_carve_out`); `vet`
+# and `source_dedup` name `EXTRACTOR-V4-ARCHITECTURE.md` only; `embed_gate` names
+# `STORAGE-ARCHITECTURE.md` only, plus its policy source in
+# `packs/dev/manifest.yaml`; `sufficiency_router` names
+# `STORAGE-ARCHITECTURE.md` at two declaration sites (§12.4, §12.5) — counted
+# once, because the marker convention is per-document. Each row carries every
+# declaring document it knows, and `membership_errors` requires a marker in EACH
+# scanned one while refusing a marker in a document the row does not name.
+# ⚠️ What it compares is MARKED declarations, and the residual follows from that
+# rather than from a list of cases: an UNMARKED prose declaration is invisible in
+# every shape — a mechanism declared with no row at all (this issue's own
+# starting defect: the design documents it and the gate never sees it), and a
+# restatement of a mechanism whose row exists, whether the document is named by
+# the row or not. Marking is the convention that makes the comparison possible,
+# so the enumeration is only as complete as the reader who writes it — the
+# residual the gate's own docstring states.
+#
+# ⭐ WHAT "MARKED" ACTUALLY BUYS. The gate compares MARKERS, so what it
+# enforces is: every declared mechanism the registry knows about carries its
+# marker in EACH scanned document its row names, and no scanned document marks a
+# mechanism its row omits. Position inside the document is a CONVENTION the gate
+# cannot check — prose cannot be parsed for "this paragraph declares the
+# mechanism" — so a marker moved away from its declaration while the passage is
+# deleted keeps the gate green. Every cited section below carries its marker AT
+# the site (re-checked when a row is added or a document is restructured); that
+# is a discipline, not a verdict.
+#
+# ⭐ MEMBERSHIP IS A GATE, NOT A HAND-PINNED TUPLE. Seven of these rows came from
+# #5064's own O/I/T indicator (1); `state_value_carve_out` came from the
+# enumeration #5064's Scope section names as its first deliverable ("enumerate
+# every mechanism the v4 design declares") and is recorded on #5064's 2026-10-13
+# E2 comment — *"mark the omission explicit in the registry this issue builds"*.
+# ⚠️ That is the whole point of the exercise: a hand-written list cannot prove it
+# is complete, which is how a declared mechanism (this one) stayed unregistered
+# while the seven-entry gate stayed green. So every mechanism this registry knows
+# about carries a `<!-- v4-mechanism: <id> -->` marker in each scanned document
+# (`docs/architecture/**/*.md`, recursive) that its row names, and
+# `membership_errors()` in the gate fails closed in BOTH directions — a marker
+# with no row, and a row with no marker — AND holds each row to its OWN declared
+# documents: every scanned document a row names must carry its marker (a marker
+# elsewhere does not stand in for it), a marker in a document the row omits is
+# refused, and a row that names NO SCANNED document is refused as unverifiable.
+# ⚠️ A row that names no document AT ALL (`declared_in: []`) is a different
+# verdict, and it is `gate_errors`' — the shape rule says "declares no declaring
+# document" and this membership rule stays SILENT about it, so one defect draws
+# one message. Placement INSIDE the
+# document is the convention described above, which the gate cannot read. See the
+# gate's docstring for the rule and its stated limits.
+#
+# ⚠️ ONE DECLARING SOURCE IS OUTSIDE THE GATE'S SCANNED SURFACE, and it is named
+# here rather than assumed covered: `packs/dev/manifest.yaml` (`embed_gate`'s
+# policy source) is YAML, and the marker convention is a markdown-comment
+# convention over `docs/architecture/**/*.md`. A row that declares such a source
+# must ALSO declare a scanned document carrying its marker — `membership_errors`
+# refuses a row whose every declaring document is outside the surface, because
+# an unfindable declaration must not read as a marked one. So the "every
+# declaring source" claim covers the DOCUMENTS; the pack's own declaration site
+# is checked by nobody and is listed here so that limit is legible.
 #
 # ⛔ NOT IN SCOPE — the substrate refactor, any change to the extraction/write
 # path, and indicator (2)'s "generate the design document from the registry"
@@ -66,14 +117,17 @@
 #
 # Mapping to #5064's own symptom table: #5005 vet · #5012 source dedup ·
 # #5006 near-dup MERGE · #5007 span link · #5008 embed gate · #5009 sufficiency
-# router · #5010 fan-out cap.
+# router · #5010 fan-out cap · #2453 the verbatim state-value carve-out
+# (`state_value_carve_out`; #5064's Verification Checklist names it as one of
+# the three write-path behaviours to verify, and its omission from the compact
+# render is tracked at #9775).
 
 version: 1
 
-# The declared set is CLOSED: exactly these seven ids, in this order (#5064
-# O/I/T indicator 1). The gate pins the tuple, so a mechanism can neither be
-# silently dropped from nor reordered within the registry without the gate
-# saying so.
+# The declared set is CLOSED: exactly these eight ids, in this order (#5064
+# O/I/T indicator 1, plus the enumeration's first deliverable). The gate pins
+# the tuple, so a mechanism can neither be silently dropped from nor reordered
+# within the registry without the gate saying so.
 mechanisms:
   - id: vet
     name: "S2.2 VET — adversarial candidate review (validity + coverage)"
@@ -111,6 +165,7 @@ mechanisms:
     name: "near-duplicate MERGE (Jev-arbitrated, D12/O4)"
     declared_in:
       - docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md  # §16.4; decision D12
+      - docs/architecture/STORAGE-ARCHITECTURE.md       # §14.1 O4, the owner ruling
     state: not-implemented
     tracking_issue: 5006
     # #5010 as #5064 summarises it: the adopted fan-out cap has no
@@ -174,8 +229,7 @@ mechanisms:
   - id: sufficiency_router
     name: "sufficiency router + escalation write-back"
     declared_in:
-      - docs/architecture/STORAGE-ARCHITECTURE.md  # §12.4 the router
-      - docs/architecture/STORAGE-ARCHITECTURE.md  # §12.5 the escalation write-back
+      - docs/architecture/STORAGE-ARCHITECTURE.md  # §12.4 the router, §12.5 the escalation write-back
     state: not-implemented
     tracking_issue: 5009
     note: >-
@@ -196,7 +250,8 @@ mechanisms:
   - id: fanout_cap
     name: "connection fan-out cap (200)"
     declared_in:
-      - docs/architecture/STORAGE-ARCHITECTURE.md  # §11.5
+      - docs/architecture/STORAGE-ARCHITECTURE.md       # §11.5, the hub measurement
+      - docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md  # §13.8 "the cap is the design" (§15 restates the answer)
     state: implemented
     code:
       - tortoise/fanout.py
@@ -208,3 +263,50 @@ mechanisms:
     note: >-
       `PER_ENTITY_FANOUT_CAP = 200` (owner, 2026-09-23), consumed by the
       assembly slices.
+
+  - id: state_value_carve_out
+    name: "verbatim state/operational values — the carve-out a filter MUST carry"
+    declared_in:
+      - docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md  # §7, the narrower-than-it-looks carve-out (#2453)
+      - docs/architecture/STORAGE-ARCHITECTURE.md       # §7, the two-class retain table
+    state: not-implemented
+    tracking_issue: 9775
+    note: >-
+      The MECHANISM is the guarantee: a state value or a decision-relevant
+      operational value (a measurement, deadline, threshold/TTL, version or
+      count) survives extraction VERBATIM, so any mechanical filter must carry
+      the carve-out rather than drop it. ⚠️ The state is `not-implemented` on
+      purpose, and naming the halves is the whole point of the row:
+      WHAT EXISTS — the prompt-side carve-out. `STATE_VALUE_CARVE_OUT`
+      (`tortoise/extractor_v2.py`) is rendered into S1 (`_granularity_text`) and
+      S2/S4 (`_render_master_core_only`, `_render_master_verbose`), and
+      `VALUE_FIDELITY_RULE` rides the S2/S4 `{anti_routine}` slot via
+      `_s2s4_rules()` — never S1, never the master render (a code fact the
+      `SEAMS:` comment above `SHORT_SESSION_FACT_RULE` states;
+      `tests/test_extractor_v4_citation_rot.py` pins the never-S1 half, and
+      `tests/test_extractor_v2.py` pins the render). The FILTER side is
+      mechanical and is NOT what this row records as absent:
+      `tortoise/value_gate.py::identifier_only` is the SELECTION predicate
+      that drops identifier-like residues (`#4899`), and the EMBED gate reuses
+      the same rule set (row `embed_gate`). WHAT DOES NOT — (a) there is no
+      mechanical enforcement of the GUARANTEE: VERBATIM SURVIVAL is prompt-only
+      (#2453's own closing records this), and the strict-verbatim measurement is
+      38/77 = 49.4% on the flags-on arm against a 49/90 = 54.4% committed
+      baseline (#5064 comment 2026-10-13, #7949 E2);
+      (b) `_render_master_compact` — selected by the documented
+      `TORTOISE_EXTRACTOR_PROMPT=compact` opt-in — appends no
+      `STATE_VALUE_CARVE_OUT` at all, so one render path silently drops the
+      guarantee. ⚠️ The omission is MEASURED, not read off a comment: the
+      comment above the compact render's hint blocks
+      (`tortoise/extractor_v2.py:1162`) only excludes them from the SHUFFLE
+      ("only the kind vocabulary randomizes") and then emits a FILTERED
+      `MEMORY GRANULARITY` block, so it neither says nor implies that the
+      carve-out is dropped —
+      `test_the_compact_render_omits_the_carve_out_the_row_records` is the
+      evidence, and the code comment that would say why does not exist yet. ⚠️ The row records the OMISSION,
+      not a justification for it: whether the compact render is deliberately out
+      of the carve-out's scope is #9775's decision, and the code-side comment
+      that decision would need does not exist yet — do not read "deliberately"
+      into this row. A row marked `implemented`
+      would make the prompt text read as the guarantee — the exact
+      declared-implies-present defect this registry exists to catch.

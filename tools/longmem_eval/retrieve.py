@@ -131,6 +131,9 @@ from tortoise.retrieval import (
     assemble_context as _assemble_context,
 )
 from tortoise.retrieval import (
+    assemble_session_context as _assemble_session_context,
+)
+from tortoise.retrieval import (
     dedup_pool as _dedup_pool,
 )
 from tortoise.retrieval import (
@@ -368,6 +371,22 @@ def vector_search(sdk: TortoiseSDK, query: str, limit: int) -> list[tuple[str, f
 #: temporal-reasoning questions (9/18 TR losses were reader refusals under
 #: ~40k-token floods despite sr@5=1.0). Knob-exposed via ``--tr-top-k``.
 DEFAULT_TR_TOP_K = 12
+
+#: #2976: TR session-COMPLETION budget (the granularity half). An admitted
+#: session must be the WHOLE session the oracle serves, not the fragments
+#: retrieval happened to surface — the measured evidence is that even the arm
+#: which DID admit the gold converted only 6/22 because it handed the reader
+#: 624 tokens of fragments against the oracle's ~5 012 median. One session is
+#: ~1 700 whitespace-tokens on this corpus, so ~5 sessions fill the 8 000-token
+#: reader budget: the run seeds the ranked session head and injects up to
+#: ``TOTAL`` of their remaining verbatim turn points (``SESSIONS`` seeds,
+#: ``PER_SESSION`` each, discovered within the first ``WINDOW`` pool items).
+#: All four are knobs — the defaults are the arm's stated configuration, never
+#: a ceiling (the product constants stay the C4 re-injection defaults).
+DEFAULT_TR_SESSION_COMPLETION_TOTAL = 60
+DEFAULT_TR_SESSION_COMPLETION_SESSIONS = 5
+DEFAULT_TR_SESSION_COMPLETION_PER_SESSION = 12
+DEFAULT_TR_SESSION_COMPLETION_WINDOW = 40
 
 
 # ── R5 (#1544): TR-constraint detection ─────────────────────────────────────
@@ -850,6 +869,113 @@ def annotate_pool_additions(hits: list[dict], props: dict, dates: list[str],
     return annotated
 
 
+def _tr_complete_sessions(
+        sdk: TortoiseSDK, pool: list[dict], dates: list[str], *,
+        seed_window: int, seed_sessions: int, total_cap: int,
+        per_session_cap: int,
+) -> tuple[list[dict], dict[str, Any]]:
+    """#2976 granularity half: expand seeded sessions to their full turns.
+
+    WHY: admission alone is not enough. `applied-rerank` did admit the gold on
+    21/55 questions and still converted only 6/52, because it handed the
+    reader 624 tokens of *fragments* while the oracle hands it ~5 000 tokens
+    of whole sessions. A session that is admitted must therefore be admitted
+    COMPLETE — the oracle's win is not its ranker, it is that it serves whole
+    sessions.
+
+    Mechanism (all existing product primitives, no new graph contract):
+    :func:`tortoise.session_reinjection.seeded_sessions` picks the session
+    head in rank order (label-free — the trigger is RANK, never a mark), and
+    :func:`tortoise.session_reinjection.source_session_chunk_pass` fetches
+    each seeded session's remaining verbatim TURN points (the product's own
+    episodic material) in ONE bounded graph pass, capped per session and in
+    total. The fetched material is annotated on the SAME surface as the base
+    pool (:func:`annotate_pool_additions`) and spliced IMMEDIATELY AFTER the
+    session's last base hit, so the session reads as one contiguous block.
+
+    Unlike the C4 re-injection merge this does NOT reorder sessions: it only
+    completes the ones the base ranking already put in the head, which is
+    what makes "admitted session" mean "whole session". Fail-open: any
+    failure returns the ORIGINAL pool and a report with ``ok=False`` (never a
+    partial splice, never an exception into the measurement).
+    """
+    from tortoise import session_reinjection as _sr
+
+    report: dict[str, Any] = {
+        "on": True, "applied": False, "seeded": 0, "injected": 0,
+        "dropped_by_cap": 0, "total_cap_hit": False, "sessions": 0,
+        "ok": False,
+    }
+    if not pool:
+        report["ok"] = True
+        return pool, report
+    try:
+        seeds = _sr.seeded_sessions(
+            pool, window=seed_window, limit=seed_sessions,
+            admitted=_has_claim_text)
+        report["seeded"] = len(seeds)
+        if not seeds:
+            report["ok"] = True
+            return pool, report
+        proj = sdk._get_proj()
+        fetch = _sr.source_session_chunk_pass(
+            proj, [s.point_id for s in seeds],
+            pool_ids={h["id"] for h in pool},
+            per_session_cap=per_session_cap, total_cap=total_cap,
+        )
+        report["ok"] = bool(fetch.get("ok"))
+        report["dropped_by_cap"] = int(fetch.get("dropped_by_cap") or 0)
+        report["total_cap_hit"] = bool(fetch.get("total_cap_hit"))
+        added: dict[str, list[dict]] = {}
+        ids = [r["id"] for rows in (fetch.get("by_session") or {}).values()
+               for r in rows]
+        if report["ok"] and ids:
+            props = point_props_for_hits(proj, ids)
+            turn_ids = [p.get("source_turn_id") for p in props.values()
+                        if p.get("source_turn_id")]
+            spk = _speaker_for_turns(proj, turn_ids)
+            for p in props.values():
+                if not p.get("speaker") and p.get("source_turn_id"):
+                    p["speaker"] = spk.get(p["source_turn_id"], "")
+            raw = [{"id": pid,
+                    "content": (props.get(pid) or {}).get("content", "")}
+                   for pid in ids]
+            by_id = {h["id"]: h for h in annotate_pool_additions(
+                raw, props, dates, match_source="session")}
+            for sid, rows in (fetch.get("by_session") or {}).items():
+                group = [by_id[r["id"]] for r in rows if r["id"] in by_id]
+                if group:
+                    added[sid] = group
+        if not added:
+            return pool, report
+        # Splice each session's material right after its LAST base hit, so a
+        # session block is complete and contiguous; base order is otherwise
+        # untouched (a session with no fetched material keeps its hits where
+        # they were).
+        last_index: dict[str, int] = {}
+        for i, h in enumerate(pool):
+            sid = h.get("session_id") or ""
+            if sid in added:
+                last_index[sid] = i
+        merged: list[dict] = []
+        for i, h in enumerate(pool):
+            merged.append(h)
+            sid = h.get("session_id") or ""
+            if added and last_index.get(sid) == i:
+                merged.extend(added.pop(sid))
+        report["sessions"] = len(last_index)
+        report["injected"] = len(merged) - len(pool)
+        report["applied"] = bool(report["sessions"])
+        return merged, report
+    except Exception:  # noqa: BLE001, RUF100
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "#2976 TR session completion failed — keeping the original pool "
+            "(fail-open)", exc_info=True)
+        report["ok"] = False
+        return pool, report
+
+
 def _mark_bands(ranks: list[int]) -> dict[str, int]:
     """#1947: marked-hit rank bands over the deduped pool — the
     ``pool_depth`` diagnostic's histogram. Bands are the semantically
@@ -1249,6 +1375,34 @@ def retrieve_for_question(
     # questions IGNORE it and keep the pinned ``tr_top_k`` item cap (R5
     # flood control is never silently undone). None = env default.
     context_item_cap: int | None = None,
+    # #2976: TR SESSION-LEVEL admission — tri-state (True/False explicit,
+    # None = env ``TORTOISE_LME_TR_SESSION_ADMISSION``; only 1/true/yes/on
+    # enables — fail-safe OFF, the #1745 default decision). When ON, TR
+    # questions replace the ``tr_top_k`` ITEM cap with the TOKEN budget as
+    # the binding bound and admit evidence at the SESSION grain
+    # (``retrieval.assemble_session_context``): the measured defect is that
+    # the 12-item cap admits ~97 tokens of ~8-token fragments — 1.2% of the
+    # 8000-token budget — while the gold sits at pool ranks 41–120, so the
+    # reader window is both too SMALL and too FRAGMENTED to answer.
+    # ``tr_session_completion`` (below) is the granularity half: it expands
+    # the declared sessions to their full verbatim material before
+    # admission, so an admitted session is evidence rather than a fragment.
+    tr_session_admission: bool | None = None,
+    # #2976: TR session COMPLETION — tri-state (True/False explicit, None =
+    # env ``TORTOISE_LME_TR_SESSION_COMPLETION``; fail-safe OFF). When ON
+    # (requires ``tr_session_admission``), the seeded sessions' remaining
+    # verbatim turn material is fetched in one bounded graph pass
+    # (``session_reinjection.source_session_chunk_pass``) and spliced after
+    # the session's own pool hits, so the session admitted by the block walk
+    # is the WHOLE session the oracle serves — not the few fragments that
+    # happened to be retrieved. ``tr_session_completion_total`` /
+    # ``tr_session_completion_window`` / ``tr_session_completion_sessions``
+    # bound it (items, seed window, seed sessions).
+    tr_session_completion: bool | None = None,
+    tr_session_completion_total: int | None = None,
+    tr_session_completion_window: int | None = None,
+    tr_session_completion_sessions: int | None = None,
+    tr_session_completion_per_session: int | None = None,
     # C2 (#1745): evidence-mark boost — OFF by default in code (the plan's
     # default decision: ON only for the re-validation run via
     # ``TORTOISE_LME_EVIDENCE_BOOST`` or ``evidence_boost=True``).
@@ -1557,6 +1711,30 @@ def retrieve_for_question(
         _ass_env = (os.environ.get("TORTOISE_LME_EVIDENCE_ASSEMBLY")
                     or "")
         evidence_assembly_on = _ass_env.strip().lower() in _ASSEMBLY_TRUTHY
+    # #2976: TR SESSION-LEVEL admission + completion (fail-safe OFF, the
+    # #1745 default decision — explicit flag > env > OFF). Resolved here, once
+    # per question, so the off path pays two bools and stays byte-identical.
+    if tr_session_admission is not None:
+        tr_session_admission_on = tr_session_admission
+    else:
+        from .rerank import _TRUTHY as _SA_TRUTHY
+        tr_session_admission_on = (
+            (os.environ.get("TORTOISE_LME_TR_SESSION_ADMISSION") or "")
+            .strip().lower() in _SA_TRUTHY)
+    if tr_session_completion is not None:
+        tr_session_completion_on = tr_session_completion
+    else:
+        from .rerank import _TRUTHY as _SC_TRUTHY
+        tr_session_completion_on = (
+            (os.environ.get("TORTOISE_LME_TR_SESSION_COMPLETION") or "")
+            .strip().lower() in _SC_TRUTHY)
+    # a completion pass without session admission would reorder nothing the
+    # reader sees (the item cap still binds) — refuse the incoherent pair
+    # loudly rather than silently measuring a no-op arm.
+    if tr_session_completion_on and not tr_session_admission_on:
+        raise ValueError(
+            "tr_session_completion requires tr_session_admission — completing "
+            "sessions while the 12-item cap still binds measures nothing")
     # R1: pool-depth headroom — a monopolizing session's points must not
     # crowd other sessions out BEFORE dedup runs (E2E-1).
     # R5 (D4): TR questions fetch the point+event union (E2E-4's "no
@@ -2336,6 +2514,56 @@ def retrieve_for_question(
         "tr_excluded": bool(is_tr),
     }
     context_candidates = pool
+    # #2976: the GRANULARITY half. Complete the seeded sessions to their full
+    # verbatim turn material BEFORE admission, so the session the block walk
+    # admits is the whole session (the oracle's win) rather than the few
+    # fragments retrieval happened to surface. Runs on the FINAL pool, at the
+    # same point C4 re-injection does, and never touches the recall surface
+    # above (``ret["hits"]`` stays the ranked pool).
+    tr_session_completion_stats: dict[str, Any] = {
+        "on": tr_session_completion_on,
+        "applied": False,
+        "tr_excluded": not is_tr,
+    }
+    if tr_session_completion_on and is_tr and pool:
+        from .rerank import _env_int as _sc_env_int
+        _sc_total = (tr_session_completion_total
+                     if tr_session_completion_total is not None
+                     else _sc_env_int(
+                         "TORTOISE_LME_TR_SESSION_COMPLETION_TOTAL",
+                         DEFAULT_TR_SESSION_COMPLETION_TOTAL))
+        _sc_window = (tr_session_completion_window
+                      if tr_session_completion_window is not None
+                      else _sc_env_int(
+                          "TORTOISE_LME_TR_SESSION_COMPLETION_WINDOW",
+                          DEFAULT_TR_SESSION_COMPLETION_WINDOW))
+        _sc_sessions = (tr_session_completion_sessions
+                        if tr_session_completion_sessions is not None
+                        else _sc_env_int(
+                            "TORTOISE_LME_TR_SESSION_COMPLETION_SESSIONS",
+                            DEFAULT_TR_SESSION_COMPLETION_SESSIONS))
+        _sc_per = (tr_session_completion_per_session
+                   if tr_session_completion_per_session is not None
+                   else _sc_env_int(
+                       "TORTOISE_LME_TR_SESSION_COMPLETION_PER_SESSION",
+                       DEFAULT_TR_SESSION_COMPLETION_PER_SESSION))
+        # ⛔ Complete the READER-CONTEXT candidate list, NOT the pool. `pool`
+        # is the pinned retrieval surface (`ret["hits"] == the deduped pool`,
+        # R1 #1540) and every pool-derived metric below — ranked_ids,
+        # evidence_retrieved@k, match_source_counts@k, the C5 temporal
+        # aggregate verdict — is computed from it. Rebinding `pool` here made
+        # all of them count material the completion pass INJECTED rather than
+        # anything retrieval retrieved, and made the arm's `gold_in_pool`
+        # denominator a different pool than its sibling arms.
+        _completed, tr_session_completion_stats = _tr_complete_sessions(
+            sdk, pool, dates,
+            seed_window=_sc_window, seed_sessions=_sc_sessions,
+            total_cap=_sc_total, per_session_cap=_sc_per)
+        tr_session_completion_stats["tr_excluded"] = False
+        tr_session_completion_stats["total_cap"] = _sc_total
+        tr_session_completion_stats["seed_window"] = _sc_window
+        tr_session_completion_stats["seed_sessions"] = _sc_sessions
+        context_candidates = _completed
     if evidence_assembly_on and not is_tr and pool:
         # the eval injects its read-time mark provider (dataset-derived marks
         # — the same provider apply_evidence_boost uses), so the verbatim /
@@ -2354,11 +2582,30 @@ def retrieve_for_question(
             "verbatim_refs_kept": _pkg_stats["verbatim_refs_kept"],
             "value_first_packages": _pkg_stats["value_first_packages"],
         }
-    context_points = _assemble_context(
-        context_candidates, top_k=effective_top_k,
-        max_context_tokens=max_context_tokens,
-        question_date=question_date,
-        context_item_cap=eff_item_cap)
+    tr_session_admission_stats: dict[str, Any] = {
+        "on": tr_session_admission_on,
+        "applied": False,
+        "tr_excluded": not is_tr,
+    }
+    if tr_session_admission_on and is_tr:
+        # #2976 ADMISSION half: the TOKEN budget binds and the SESSION is the
+        # admission unit. The ``tr_top_k`` ITEM cap is deliberately NOT passed
+        # — it is the defect (12 items ≈ 97 tokens = 1.2% of the budget).
+        _sa_stats: dict[str, Any] = {}
+        context_points = _assemble_session_context(
+            context_candidates,
+            max_context_tokens=max_context_tokens,
+            question_date=question_date,
+            stats=_sa_stats)
+        tr_session_admission_stats = {
+            "on": True, "applied": True, "tr_excluded": False,
+            **_sa_stats}
+    else:
+        context_points = _assemble_context(
+            context_candidates, top_k=effective_top_k,
+            max_context_tokens=max_context_tokens,
+            question_date=question_date,
+            context_item_cap=eff_item_cap)
     # R5 (D6): TR context renders time-ascending — after truncation the
     # context list is stable-sorted by session_date (dated first, undated
     # last, stable within a date = retrieval order preserved). Recall
@@ -2621,6 +2868,15 @@ def retrieve_for_question(
         # zeroed shape).
         "session_reinjection": reinjection_on,
         "session_reinjection_stats": session_reinjection_stats,
+        # #2976: the TR session-LEVEL admission arm (the TOKEN budget binds;
+        # the SESSION is the admission unit) and its completion half (an
+        # admitted session is completed to its whole verbatim material).
+        # Always present on the hybrid path so the off arm's zeroed shape
+        # keeps the A/B reconstructable per question (the #2513 convention).
+        "tr_session_admission": tr_session_admission_on,
+        "tr_session_admission_stats": tr_session_admission_stats,
+        "tr_session_completion": tr_session_completion_on,
+        "tr_session_completion_stats": tr_session_completion_stats,
         # C5 (#2521, #2513): the aggregative-intent coverage-check arm —
         # the resolved tri-state bool (explicit flag / env; fail-safe OFF),
         # always present so the A/B arms are reconstructable even when the

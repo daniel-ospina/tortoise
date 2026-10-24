@@ -9,7 +9,7 @@
 // Exit:  0 = all migrations applied + all assertions passed; 1 = any failure.
 import { PGlite } from '@electric-sql/pglite';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -33,6 +33,77 @@ function applyPostRenameVocabulary(sql) {
     .replace(/\buq_graphs_team_name_active\b/g, 'uq_graphs_org_name_active')
     .replace(/\bcurrent_team_id\b/g, 'current_org_id')
     .replace(/\bteam_id\b/g, 'org_id');
+}
+
+// ── Split a migration file into its TOP-LEVEL statements ────────────────────
+// A per-statement apply (`psql -f`, autocommit per statement) executes them one
+// at a time and can STOP between any two. The 20261023000002 drill reproduces
+// that by replaying them one at a time and checking the trigger after EVERY
+// prefix, so the splitter must be faithful: comments are carried with their
+// statement, and a dollar-quoted `DO $$ … $$` body (which itself contains `;`)
+// must count as ONE statement — that is the property the drill asserts.
+function splitTopLevelStatements(sql) {
+  const out = [];
+  let buf = '';
+  let i = 0;
+  while (i < sql.length) {
+    const ch = sql[i];
+    const two = sql.slice(i, i + 2);
+    if (two === '--') {
+      const nl = sql.indexOf('\n', i);
+      const end = nl === -1 ? sql.length : nl + 1;
+      buf += sql.slice(i, end);
+      i = end;
+      continue;
+    }
+    if (two === '/*') {
+      const close = sql.indexOf('*/', i + 2);
+      const end = close === -1 ? sql.length : close + 2;
+      buf += sql.slice(i, end);
+      i = end;
+      continue;
+    }
+    if (ch === "'") {
+      // single-quoted literal — '' is an escaped quote, not a terminator
+      let j = sql.indexOf("'", i + 1);
+      if (j === -1) throw new Error('unterminated single-quoted literal');
+      while (sql[j + 1] === "'") j = sql.indexOf("'", j + 2);
+      if (j === -1) throw new Error('unterminated single-quoted literal');
+      buf += sql.slice(i, j + 1);
+      i = j + 1;
+      continue;
+    }
+    if (ch === '"') {
+      const close = sql.indexOf('"', i + 1);
+      if (close === -1) throw new Error('unterminated quoted identifier');
+      buf += sql.slice(i, close + 1);
+      i = close + 1;
+      continue;
+    }
+    if (ch === '$') {
+      const m = /^\$[A-Za-z_0-9]*\$/.exec(sql.slice(i));
+      if (m) {
+        const tag = m[0];
+        const close = sql.indexOf(tag, i + tag.length);
+        if (close === -1) throw new Error(`unterminated dollar-quoted block ${tag}`);
+        buf += sql.slice(i, close + tag.length);
+        i = close + tag.length;
+        continue;
+      }
+    }
+    if (ch === ';') {
+      out.push(buf);
+      buf = '';
+      i += 1;
+      continue;
+    }
+    buf += ch;
+    i += 1;
+  }
+  if (buf.trim()) out.push(buf);
+  // A chunk of nothing but whitespace/comments is not a statement.
+  return out.filter((chunk) =>
+    chunk.replace(/--[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '').trim().length > 0);
 }
 
 const db = new PGlite();
@@ -245,6 +316,52 @@ for (const f of files) {
                 '2026-02-02T00:00:00Z', '2026-02-02T00:00:00Z');
       `);
     }
+    if (f === '20261023000002_blog_author_backfill_atomic.sql') {
+      // #1383 repair: the forward migration carries the SAME two backfill
+      // passes, and on this database 20261021000001 already ran them — so
+      // without this seed, deleting either pass from the repair leaves the
+      // whole harness green and the repair's coverage is vacuous. Rows are
+      // seeded AFTER 20261021000001 applied (this hook runs immediately before
+      // this file), which is also the shape a real re-run sees.
+      //
+      //  * anon       — the RETIRED default plus its own updated_at and audit
+      //                 columns: only this migration can rewrite it, and its
+      //                 timestamp proves the trigger was disabled across the
+      //                 rewrite;
+      //  * null-image — already carries the real author with no avatar, which
+      //                 ONLY pass 2 can fill (pass 1's guard is 'Tortoise team');
+      //  * named      — a deliberately different author WITH an image, so an
+      //                 over-broad AUTHOR guard (either pass) reds. It cannot
+      //                 red on pass 2's image clause: its author is not
+      //                 'Daniel Ospina', so the author conjunct excludes it
+      //                 however the image clause is written;
+      //  * custom-image — the SHIPPED author with a deliberately DIFFERENT
+      //                 avatar. That is the only shape pass 2's
+      //                 `AND author_image_url IS NULL` protects, and the only
+      //                 row that reds if that conjunct is deleted.
+      await db.exec(`
+        INSERT INTO public.blog_posts
+          (slug, title, author, status, created_at, updated_at, created_by, reviewed_by)
+        VALUES ('1383b-preseed-anon', '1383b preseed anon', 'Tortoise team', 'draft',
+                '2026-03-03T00:00:00Z', '2026-03-03T00:00:00Z',
+                'agent-seeded', 'owner-seeded');
+        INSERT INTO public.blog_posts
+          (slug, title, author, author_image_url, status, created_at, updated_at)
+        VALUES ('1383b-preseed-null-image', '1383b preseed null image',
+                'Daniel Ospina', NULL, 'draft',
+                '2026-04-04T00:00:00Z', '2026-04-04T00:00:00Z');
+        INSERT INTO public.blog_posts
+          (slug, title, author, author_image_url, status, created_at, updated_at)
+        VALUES ('1383b-preseed-named', '1383b preseed named', 'Someone Else',
+                'https://example.com/someone-else.jpg', 'draft',
+                '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+        INSERT INTO public.blog_posts
+          (slug, title, author, author_image_url, status, created_at, updated_at)
+        VALUES ('1383b-preseed-custom-image', '1383b preseed custom image',
+                'Daniel Ospina', 'https://example.com/custom.jpg', 'draft',
+                '2026-06-06T00:00:00Z', '2026-06-06T00:00:00Z');
+      `);
+    }
     await db.exec(sql);
     console.log(`✓ migration ${f}`);
   } catch (e) {
@@ -392,6 +509,13 @@ const suites = [
   // here never runs, and "the suite exists" is then mistaken for "the suite
   // passes". Add the entry in the same commit as the file.
   '20261021000001_blog_author_identity.sql',
+  // #1383 repair — the backfill re-landed FORWARD as ONE statement (the merged
+  // 20261021000001 carries it as four top-level statements, where a
+  // per-statement apply can commit the DISABLE and stop). Its rows are seeded
+  // immediately before it applies; the ATOMICITY shape is drilled below.
+  // NOTE: this list is EXPLICIT, not a glob — add the entry in the same commit
+  // as the file.
+  '20261023000002_blog_author_backfill_atomic.sql',
   '20260827000002_user_identity_profile.sql',
   '20260901000001_graphs_and_key_scopes.sql',  // C1 #2110
   '20260906000001_graphs_deleted_at.sql',  // #2304
@@ -425,6 +549,16 @@ const suites = [
   // is not named here never runs, and "the suite exists" is then mistaken for
   // "the suite passes". Add the entry in the same commit as the file.
   '20261012000001_record_schema.sql',  // #7968
+  // #9554 (R6) — the record's TENANCY POSTURE: the application role's attributes
+  // and grants, the `*_app_tenant` policies (USING **and** WITH CHECK), a
+  // cross-tenant read returning 0 rows as that role, and the two documented
+  // failure directions of a missing `app.current_org_id` (silent on read, loud
+  // on write). Runs after the schema suite because it re-seeds its own tenants
+  // and purges them through `purge_org_record` at the end. NOTE: this list is
+  // EXPLICIT, not a glob — a suite file that is not named here never runs, and
+  // "the suite exists" is then mistaken for "the suite passes". Add the entry in
+  // the same commit as the file.
+  '20261022000001_record_tenancy_posture.sql',  // #9554
   // #4550 — `recover_team_key`'s cap count AND revoke-target scan exclude
   // EXPIRED-but-unrevoked rows, driven against the REAL function. NOTE: this
   // list is EXPLICIT, not a glob — a suite file that is not named here never
@@ -447,6 +581,31 @@ const suites = [
   // whose counts those rows could move.
   '20261015000001_postgres_storage_footprint.sql',  // #4492
 ];
+
+// ── Fail CLOSED on a stale `suites` entry (PR #9707 review ISSUE 1) ─────────
+// The `readFileSync` in the loop below sits INSIDE the loop but OUTSIDE its
+// `try`, so a single entry naming a file that does not exist throws ENOENT
+// UNCAUGHT: the process exits on a node stack trace, every suite listed after
+// the bad entry silently stops running, and the drill blocks further down this
+// file never execute at all.
+//
+// Measured on the pre-fix tree at `c142e3318`: the entry
+// `20261023000002_blog_author_backfill_atomic.sql` was added to this list while
+// the suite FILE on disk was still `…0001_…`, so `schema-drill` died with
+// `ENOENT … supabase/tests/20261023000002_blog_author_backfill_atomic.sql` and
+// 16 existing suites plus both #1383 drills went dark behind that stack trace.
+//
+// A PATH assertion is the only check that can see this class: a content grep
+// for the filename finds every reference EXCEPT the one encoded as a path —
+// which is exactly the one that was wrong.
+const missingSuites = suites.filter((s) => !existsSync(`${TESTS_DIR}/${s}`));
+if (missingSuites.length > 0) {
+  console.error(`✗ the explicit \`suites\` list names files that do not exist under ${TESTS_DIR}:`);
+  for (const s of missingSuites) console.error(`    ${s}`);
+  console.error('  (the list is EXPLICIT, not a glob — one stale name disables this suite AND every later one)');
+  process.exit(1);
+}
+
 for (const suite of suites) {
   const sql = readFileSync(`${TESTS_DIR}/${suite}`, 'utf8');
   console.log(`\nRunning test suite ${suite}...`);
@@ -1092,6 +1251,227 @@ try {
     + '(Session/sess1 -> Point/p1), and re-replays idempotently');
 } catch (e) {
   console.error(`✗ #9553 R5/CONTAINS FAILED:\n  ${e.message.split('\n').slice(0, 6).join('\n  ')}`);
+  process.exit(1);
+}
+
+// ── #9553 (R5 class 4): a STRUCTURAL edge lands a `relation` row ──────────
+//
+// The structural predicates (`ownedBy`, `hasPart`, `dependsOn`,
+// `wasDerivedFrom`, `references`, the bare `about*`) had a working
+// `DirectEdgeCreated` fold and NO PRODUCER: the edge lane wrote a bare MERGE
+// and journaled nothing, so both rebuild routes lost the topology. The producer
+// now emits §4.4's flat descriptor WITH `source_label`/`target_label`, because
+// `relation.src_label`/`tgt_label` are bound VALUES and each label resolves its
+// endpoint through its own key column — a `Subject` keys `name`, so a
+// descriptor naming only `Point` would resolve an absent endpoint and land
+// NOTHING, silently. That is what the key assertion below measures: the row
+// must file the SUBJECT by its NAME, not by the journal id.
+//
+// The segment is built from the SHARED fixture's own records (its `PointAdded`
+// and `SubjectAdded`) plus the descriptor the producer emits, so this leg
+// cannot drift from the record shapes the rest of the suite replays.
+try {
+  const tenant = ['9553c4-org', '9553c4-graph'];
+  await db.exec(`
+    INSERT INTO public.organizations (id, name, graph_name)
+      VALUES ('9553c4-org', '9553c4-org', 'org_9553c4-org');
+    INSERT INTO public.graphs (id, org_id, name, namespace)
+      VALUES ('9553c4-graph', '9553c4-org', '9553c4-graph',
+              'org_9553c4-org_9553c4-graph');
+  `);
+  const fixture = join(HERE, '..', 'fixtures', 'record_projection_journal.jsonl');
+  const all = readFileSync(fixture, 'utf8').split('\n').filter((l) => l.trim());
+  // Matched on the COMPACT spelling the fixture file uses (no space after the
+  // colon) — a pretty-printed assumption here would silently find nothing and
+  // turn this leg into the skip it refuses to be.
+  const subjectRecord = all.find(
+    (l) => l.includes('"type":"SubjectAdded"') && l.includes('"id":"sub1"'));
+  const pointRecord = all.find(
+    (l) => l.includes('"type":"PointAdded"') && l.includes('"id":"p1"'));
+  if (!subjectRecord || !pointRecord) {
+    throw new Error('the shared fixture no longer carries SubjectAdded sub1 and '
+      + 'PointAdded p1 — this leg would prove nothing, and a silent skip reads '
+      + 'as a pass');
+  }
+  // The descriptor the PRODUCER writes (TortoiseSDK._record_structural_edge).
+  // Restated here on purpose: this leg is the record route's gate, so it must
+  // consume the shape the producer emits rather than derive it from the same
+  // code the producer runs.
+  const descriptor = JSON.stringify({
+    type: 'DirectEdgeCreated',
+    ts: '2026-10-24T00:00:00Z',
+    event_id: 'ev-c4-ownedby',
+    projection_version: 2,
+    id: 'p1->sub1:ownedBy',
+    src: 'p1',
+    tgt: 'sub1',
+    edge_type: 'ownedBy',
+    source_label: 'Point',
+    target_label: 'Subject',
+  });
+  const segment = join(tmpdir(), `9553c4-${process.pid}.jsonl`);
+  writeFileSync(segment, `${pointRecord}\n${subjectRecord}\n${descriptor}\n`);
+  const emitted = JSON.parse(execFileSync(
+    'python3',
+    ['-c', PROJECTION_PY, join(REPO_ROOT, 'tortoise', 'record_projection.py'),
+     segment, ...tenant],
+    { encoding: 'utf8' },
+  ));
+  if (!emitted.plan.some((x) => x.sql.startsWith('INSERT INTO public.relation'))) {
+    throw new Error('the segment emitted NO relation statement at all — the '
+      + 'DirectEdgeCreated carrier stopped materialising (#9553 R5 class 4)');
+  }
+  const applySegment = async () => {
+    await db.exec('BEGIN');
+    for (const statement of emitted.plan) {
+      await db.query(statement.sql, statement.params);
+    }
+    await db.exec('COMMIT');
+  };
+  const readOwnedBy = async () => db.query(
+    `SELECT rel_type, src_label, src_key, tgt_label, tgt_key, idx
+       FROM public.relation
+      WHERE org_id = $1 AND graph_id = $2 AND rel_type = 'ownedBy'`,
+    tenant);
+  await applySegment();
+  const first = await readOwnedBy();
+  if (first.rows.length !== 1) {
+    const diag = await db.query(
+      `SELECT
+         (SELECT count(*) FROM public.point
+            WHERE org_id = $1 AND graph_id = $2 AND node_key = 'p1')     AS point_row,
+         (SELECT count(*) FROM public.subject
+            WHERE org_id = $1 AND graph_id = $2 AND id = 'sub1')         AS subject_by_id,
+         (SELECT count(*) FROM public.subject
+            WHERE org_id = $1 AND graph_id = $2 AND node_key = 'team-x') AS subject_by_name,
+         (SELECT count(*) FROM public.node_identity
+            WHERE org_id = $1 AND graph_id = $2
+              AND node_label = 'Subject' AND node_key = 'team-x')        AS subject_identity`,
+      tenant);
+    throw new Error(
+      `expected exactly 1 ownedBy relation row, got ${first.rows.length} — the `
+      + 'descriptor landed no row (an ABSENT endpoint: the Point/Subject record '
+      + `rows or their node_identity rows are missing). endpoints: ${JSON.stringify(diag.rows[0])}`);
+  }
+  const row = first.rows[0];
+  const got = `${row.src_label}/${row.src_key} -> ${row.tgt_label}/${row.tgt_key} idx=${row.idx}`;
+  const want = 'Point/p1 -> Subject/team-x idx=0';
+  if (got !== want) {
+    throw new Error(
+      `the ownedBy row is ${got}, expected ${want} — a `
+      + '`source_label`/`target_label` the record does not honour would file the '
+      + 'endpoint under the wrong label (or land nothing), which is the silently '
+      + 'empty shape this family exists to prevent');
+  }
+  await applySegment();
+  const second = await readOwnedBy();
+  if (second.rows.length !== 1) {
+    throw new Error(
+      `a second replay produced ${second.rows.length} ownedBy rows (expected 1) `
+      + '— the relation upsert is not idempotent for this family');
+  }
+  unlinkSync(segment);
+  console.log('✓ #9553: a structural `ownedBy` edge lands one `relation` row '
+    + '(Point/p1 -> Subject/team-x, the Subject filed by its NAME), and '
+    + 're-replays idempotently');
+} catch (e) {
+  console.error(`✗ #9553 R5/class-4 FAILED:\n  ${e.message.split('\n').slice(0, 6).join('\n  ')}`);
+  process.exit(1);
+}
+
+// ── #1383/20261023000002: the backfill repair is ONE statement, and it repairs ─
+//
+// Two drills, because the two claims are different:
+//
+//  A ATOMICITY — the property the merged 20261021000001 lacks. Its backfill is
+//    four top-level statements (DISABLE / UPDATE / UPDATE / ENABLE) among the
+//    file's others, so a per-statement apply (`psql -f`, autocommit per
+//    statement) that stops between any two of them can commit the DISABLE and
+//    never reach the ENABLE, leaving `blog_posts_set_updated_at` off for every
+//    blog write afterwards — silently. This drill therefore replays the file
+//    the way that apply does, ONE TOP-LEVEL STATEMENT AT A TIME, and requires
+//    the trigger to be ENABLED after EVERY prefix: that is the invariant (no
+//    stop point leaves it off), and a prefix alone is not enough — the merged
+//    file's FIRST statement is an ADD COLUMN, so stopping there proves nothing.
+//    Red as soon as a prefix leaves it disabled; green only when the whole
+//    backfill is one statement.
+//
+//  B REPAIR — the forward migration must converge a database that IS in that
+//    damaged state (the live project may be, if the out-of-band apply of
+//    20261021000001 truncated): trigger DISABLED, and rows the backfill never
+//    reached. The damaged state is constructed explicitly and then the
+//    migration text is executed over it.
+const BACKFILL_MIGRATION = '20261023000002_blog_author_backfill_atomic.sql';
+const BACKFILL_SQL = readFileSync(`${MIG_DIR}/${BACKFILL_MIGRATION}`, 'utf8');
+const readTriggerState = async () => {
+  const r = await db.query(`SELECT tgenabled FROM pg_trigger
+     WHERE tgname = 'blog_posts_set_updated_at'
+       AND tgrelid = 'public.blog_posts'::regclass`);
+  return r.rows[0] ? r.rows[0].tgenabled : undefined;
+};
+
+try {
+  const statements = splitTopLevelStatements(BACKFILL_SQL);
+  for (let n = 1; n <= statements.length; n += 1) {
+    await db.exec(statements[n - 1]);
+    const state = await readTriggerState();
+    if (state !== 'O') {
+      console.error(
+        `✗ #1383: after TOP-LEVEL STATEMENT ${n} of ${statements.length}, `
+        + `tgenabled=${state} (disabled). A per-statement apply that stops here — `
+        + 'a lock timeout, a dropped connection, a Ctrl-C — commits the DISABLE and '
+        + 'leaves updated_at frozen for every blog write afterwards, silently. The '
+        + 'whole backfill must be ONE statement (a DO block) so no stop point exists:');
+      console.error(`  offending prefix ends with: ${JSON.stringify(statements[n - 1].trim().slice(-160))}`);
+      process.exit(1);
+    }
+  }
+  console.log(
+    `✓ #1383: the backfill repair is ${statements.length} top-level statement(s) — `
+    + 'no stop point of a per-statement apply leaves the trigger disabled');
+} catch (e) {
+  console.error(`✗ #1383 prefix drill FAILED:\n  ${e.message.split('\n').slice(0, 4).join('\n  ')}`);
+  process.exit(1);
+}
+
+try {
+  // Construct the damaged state a truncated apply of 20261021000001 leaves:
+  // the DISABLE committed, and a row the backfill never reached.
+  await db.exec(`
+    ALTER TABLE public.blog_posts DISABLE TRIGGER blog_posts_set_updated_at;
+    INSERT INTO public.blog_posts
+      (slug, title, author, status, created_at, updated_at)
+    VALUES ('1383b-repair-anon', '1383b repair anon', 'Tortoise team', 'draft',
+            '2026-05-05T00:00:00Z', '2026-05-05T00:00:00Z');
+  `);
+  const damaged = await readTriggerState();
+  if (damaged !== 'D') {
+    throw new Error(`the drill could not construct the damaged state (tgenabled=${damaged}) — it would prove nothing`);
+  }
+  await db.exec(BACKFILL_SQL);
+  const state = await readTriggerState();
+  const row = (await db.query(`SELECT author, author_image_url, updated_at
+     FROM public.blog_posts WHERE slug = '1383b-repair-anon'`)).rows[0] || {};
+  if (state !== 'O') {
+    throw new Error(`the repair left tgenabled=${state} — the truncated-apply state is NOT converged`);
+  }
+  if (row.author !== 'Daniel Ospina'
+      || row.author_image_url !== 'https://tortoise.premiselabs.co/blog/author-daniel-ospina.jpg') {
+    throw new Error(`the repair did not complete the backfill: ${JSON.stringify(row)}`);
+  }
+  const stamp = row.updated_at instanceof Date
+    ? row.updated_at.toISOString() : String(row.updated_at);
+  if (!stamp.startsWith('2026-05-05')) {
+    throw new Error(
+      `the repair BUMPED updated_at (${stamp}) — the backfill ran with the trigger `
+      + 'enabled, so a repaired post would print "Updated <today>" and open the '
+      + '30-minute no-cache window');
+  }
+  await db.exec(`DELETE FROM public.blog_posts WHERE slug = '1383b-repair-anon';`);
+  console.log('✓ #1383: the repair converges a truncated apply (trigger re-enabled, '
+    + 'backfill completed, updated_at preserved)');
+} catch (e) {
+  console.error(`✗ #1383 forward-repair drill FAILED:\n  ${e.message.split('\n').slice(0, 4).join('\n  ')}`);
   process.exit(1);
 }
 

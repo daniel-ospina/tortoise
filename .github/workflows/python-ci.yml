@@ -3440,6 +3440,7 @@ jobs:
           # attribution every captured leg gets (`pytest-attribution.sh`).
           timeout -s INT -k 10 12m stdbuf -oL python -m pytest \
             tests/test_9078_record_written_by_production_path.py \
+            tests/test_9664_capstone_connector_to_record.py \
             -v --timeout=300 -p no:cacheprovider -r fEs \
             --junitxml="$SCRATCH/junit.xml" -o junit_family=xunit1 \
             2>&1 | tee "$SCRATCH/pytest.log"

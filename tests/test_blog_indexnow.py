@@ -54,6 +54,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 WEBSITE = REPO_ROOT / "website"
 POSTS_FUNCTION = WEBSITE / "functions" / "blog" / "api" / "posts" / "[[path]].ts"
 INDEXNOW_MODULE = WEBSITE / "functions" / "blog" / "_shared" / "indexnow.ts"
+ADMIN_NOTIFY_MODULE = WEBSITE / "functions" / "blog" / "api" / "notify-publish.ts"
+PATCH_HANDLER = WEBSITE / "functions" / "blog" / "api" / "posts" / "[[path]].ts"
 DEPLOY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "deploy-pages.yml"
 
 SITE = "https://tortoise.premiselabs.co"
@@ -101,6 +103,7 @@ for (const c of cases) {
     status: c.status,
     created_by: c.agent || 'blog-indexnow-test',
     body: 'body text',
+    hold_for_review: c.holdForReview === undefined ? false : c.holdForReview,
     indexnow_submitted_at: c.lastSubmittedAt === undefined ? null : c.lastSubmittedAt,
   };
   const submissions = [];
@@ -134,7 +137,17 @@ for (const c of cases) {
         if (c.stateNoRow) return Response.json([]);
         return Response.json([{ indexnow_submitted_at: row.indexnow_submitted_at }]);
       }
-      if (method === 'GET') return Response.json([{ ...row }]);
+      if (method === 'GET') {
+        // HONOUR `select=` the way PostgREST does. A stub that always answers every
+        // column hides the fact that the pre-read and the trigger are ONE change:
+        // drop `hold_for_review` from the select at api/posts and `post.hold_for_review`
+        // is `undefined`, killing the hold-clear arm silently while every case stays
+        // green (same hazard the admin driver's projectRow was written against).
+        const m = /[?&]select=([^&]*)/.exec(u);
+        if (!m) return Response.json([{ ...row }]);
+        const fields = new Set(decodeURIComponent(m[1]).split(',').map((f) => f.trim()).filter(Boolean));
+        return Response.json([Object.fromEntries(Object.entries(row).filter(([k]) => fields.has(k)))]);
+      }
       if (method === 'POST') {
         const body = JSON.parse(String(init.body));
         Object.assign(row, body);
@@ -233,6 +246,42 @@ CASES: dict[str, dict] = {
     },
     # Published → draft. Same isolation.
     "unpublish_legacy": {"status": "published", "steps": [{"status": "draft"}]},
+    # Published but HELD → the hold is cleared. No status change, but the URL
+    # stops 404ing, so this IS a publish transition (#9803): it must submit. The
+    # case that reds if the trigger tests `resultStatus` alone.
+    "hold_cleared_while_published": {
+        "status": "published",
+        "holdForReview": True,
+        "lastSubmittedAt": None,
+        "steps": [{"hold_for_review": False}],
+    },
+    # Published but HELD → a title edit that leaves the hold in place. Still a
+    # zero, and the case pins the `&& patch.hold_for_review === false` conjunct:
+    # without it a title edit on a held row submits a URL that still 404s.
+    "edit_while_published_held": {
+        "status": "published",
+        "holdForReview": True,
+        "lastSubmittedAt": None,
+        "steps": [{"title": "renamed while held"}],
+    },
+    # Published and live → a hold-clear patch (the hold is already clear). Still a
+    # zero, and THIS is what pins `post.hold_for_review !== false`: drop that
+    # conjunct and this patch fires`, because `patch.hold_for_review === false`
+    # alone is satisfied.
+    "hold_cleared_while_live": {
+        "status": "published",
+        "holdForReview": False,
+        "lastSubmittedAt": None,
+        "steps": [{"hold_for_review": False}],
+    },
+    # Published and live → a title edit. Still a zero: `becameLive` must not
+    # widen into "any published row notifies".
+    "edit_while_published_live": {
+        "status": "published",
+        "holdForReview": False,
+        "lastSubmittedAt": None,
+        "steps": [{"title": "renamed again"}],
+    },
     # Draft → draft.
     "draft_edit": {"status": "draft", "steps": [{"title": "still drafting"}]},
     # Draft → published → edit → unpublish → published, all within one day.
@@ -515,6 +564,115 @@ def test_the_operator_table_documents_every_shape_and_loses_no_row() -> None:
     )
 
 
+def test_the_admin_endpoints_logs_are_documented_and_balanced() -> None:
+    """The same pin, for the module #9803 added beside this one.
+
+    The table above is the runbook's discovery mechanism and the console operator
+    is told to grep it; the admin endpoint emits three `[indexnow]` lines of its
+    own. Deleting its `console.warn`s (a plausible "the 503 already says it"
+    edit) leaves every behavioural case green, because they assert status, result
+    and submissions — so the balance and the doc rows are the only pin there is.
+
+    Read from the SOURCE, both directions: every `console.*` call must parse as an
+    `[indexnow]` shape, and every parsed shape must appear in the operator table.
+    """
+    source = ADMIN_NOTIFY_MODULE.read_text(encoding="utf-8")
+    calls = len(re.findall(r"console\.\w+\(", source))
+    heads = [
+        m.group(1).split("${", 1)[0].rstrip(": ")
+        for m in re.finditer(r"console\.\w+\(\s*`\[indexnow\] ([^`]+)`", source)
+        if m.group(1).split("${", 1)[0].rstrip(": ")
+    ]
+    assert len(heads) == calls, (
+        f"{calls} console calls but {len(heads)} parsed [indexnow] shapes in "
+        f"{ADMIN_NOTIFY_MODULE.name} — a log line is written in a form this test cannot "
+        f"read, so it is not actually pinned: {sorted(heads)}"
+    )
+    assert len(heads) == 3, (
+        f"expected the three documented admin-path shapes, got {sorted(heads)} — adding "
+        "a log line means the operator doc gains a row"
+    )
+    doc = (REPO_ROOT / "docs" / "blog-authoring.md").read_text(encoding="utf-8").replace("\\|", "|")
+    missing = sorted(s for s in heads if s not in doc)
+    assert missing == [], (
+        "docs/blog-authoring.md's IndexNow table omits admin-path log shapes: "
+        f"{missing} — the operator cannot act on a line the runbook does not describe"
+    )
+
+
+def test_the_patch_preread_selects_the_hold_column() -> None:
+    """The pre-read and the trigger are ONE change. The predicate is
+    NULL-permissive (`post.hold_for_review !== false`), deliberately — a NULL row
+    is not public — so dropping the column from the SELECT reads `undefined`,
+    which the predicate ACCEPTS. The hold-clear arm then silently stops firing and
+    no behavioural case can see it: the pair has to be pinned in the source.
+    """
+    src = PATCH_HANDLER.read_text(encoding="utf-8")
+    selects = re.findall(r"select=id,status,created_by,body[^&`]*", src)
+    assert selects, "the PATCH pre-read must name its columns explicitly"
+    assert all("hold_for_review" in s for s in selects), (
+        f"the PATCH pre-read must select hold_for_review — the trigger is two columns: {selects}"
+    )
+
+
+def test_the_migration_pointer_names_the_migration_that_owns_the_column() -> None:
+    """The comment that routes a reader from the COLUMN to the migration must resolve
+    AND resolve to the migration that actually owns the column.
+
+    The module's only explanation of where `indexnow_submitted_at` comes from is a
+    prose pointer naming a migration file. A rename is invisible to every other
+    check here — no import, no test and no config reads that string — so a stale
+    pointer leaves a reader (or a `git grep` for the column) at a path that does
+    not exist, which answers the question with a wrong file rather than with
+    nothing. That happened: the owning migration was renumbered forward
+    (20261022000001 → 20261026000001) and this pointer kept the old version.
+
+    ⛔ Existence alone is not enough, and that is the trap this test is shaped
+    around — the repo's old version now belongs to an UNRELATED migration
+    (`20261022000001_record_session_capture_redactions_integer.sql`), so a pointer
+    retargeted to any *other* real migration would still "resolve" while being
+    just as misdirecting. So the owner is DERIVED, not assumed: exactly one
+    migration may carry `indexnow_submitted_at`, and the module must name it.
+
+    Falsifiable by construction and non-vacuous — it renames nothing itself, it
+    compares the pointer against the tree, so the pre-rename source reds (the old
+    basename no longer exists) and the corrected pointer passes. Each failure is a
+    different edit: delete the sentence → the owner is unnametered; point it at a
+    sibling migration → it is not the owner; keep the old basename → it does not
+    exist.
+    """
+    source = INDEXNOW_MODULE.read_text(encoding="utf-8")
+    named = set(re.findall(r"\b(\d{14}_[A-Za-z0-9_]+\.sql)\b", source))
+    assert named, (
+        "the module no longer names the migration that owns its dedupe column — the "
+        "column→file route a reader greps for is gone, which is as misleading as a stale one"
+    )
+
+    migrations = {p.name: p for p in (REPO_ROOT / "supabase" / "migrations").glob("*.sql")}
+    dangling = sorted(named - set(migrations))
+    assert dangling == [], (
+        f"the module points at migration files that do not exist: {dangling} — a renamed "
+        "migration must be followed here, or the pointer sends a reader to a different "
+        "migration that happens to hold the old version"
+    )
+
+    owners = {
+        name
+        for name, path in migrations.items()
+        if "indexnow_submitted_at" in path.read_text(encoding="utf-8")
+    }
+    assert len(owners) == 1, (
+        f"exactly one migration must own blog_posts.indexnow_submitted_at, found "
+        f"{sorted(owners)} — the pointer below names ONE file, so a split owner means "
+        "the reader is sent to half the truth"
+    )
+    owner = next(iter(owners))
+    assert named & owners, (
+        f"the pointer names {sorted(named)} but the column's owning migration is {owner} "
+        "— naming another existing migration is not what redeems a stale pointer"
+    )
+
+
 # ── V1: the key file is served from the site root ──────────────────────────
 def test_v1_the_key_file_is_served_at_the_site_root(results) -> None:
     """The key file exists, is named after the key, and carries ONLY the key.
@@ -604,7 +762,14 @@ def test_v3_no_submission_without_a_transition_and_never_twice_in_a_day(results)
     The issue's V3 expectation is "1 submission total, not 3" for that sequence;
     the zero cases are what make the same test discriminate on both axes.
     """
-    for name in ("edit_while_published_legacy", "unpublish_legacy", "draft_edit"):
+    for name in (
+        "edit_while_published_legacy",
+        "edit_while_published_live",
+        "edit_while_published_held",
+        "hold_cleared_while_live",
+        "unpublish_legacy",
+        "draft_edit",
+    ):
         res = results[name]
         assert res["statuses"] and all(s < 400 for s in res["statuses"]), (
             f"{name}: the PATCHes themselves must still succeed: {res['statuses']}"
@@ -626,6 +791,24 @@ def test_v3_no_submission_without_a_transition_and_never_twice_in_a_day(results)
     # the #7751 shape one layer down.
     assert _logs_matching(sequence, "skipped (submitted "), (
         f"a window-suppressed re-publish must log why: {sequence['logs']}"
+    )
+
+
+def test_clearing_a_hold_on_a_published_row_submits(results) -> None:
+    """The mirror transition (#9803). No status changes, but the URL stops
+    answering 404 — so nothing being submitted is the defect: a row can become
+    public and never be announced.
+
+    The row has NEVER been submitted, so the 24h window cannot explain the
+    expected one submission; and the companion zero case
+    (``edit_while_published_live``) is what keeps the fix from widening into
+    "every PATCH on a published row notifies".
+    """
+    res = results["hold_cleared_while_published"]
+    assert res["statuses"] == [200], res["statuses"]
+    assert len(res["submissions"]) == 1, (
+        f"expected ONE submission after the hold was cleared, got "
+        f"{len(res['submissions'])}: {_submitted_urls(res)}"
     )
 
 

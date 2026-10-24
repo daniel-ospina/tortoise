@@ -18,6 +18,7 @@ import {
   HARNESS_NAMES,
   MCP_URL,
   ONBOARDING_INSTRUCTIONS_URL,
+  servedSkillUrl,
   SKILLS_INSTALL_URL,
   SKILLS_LIST,
   WORKFLOWS_PROMPT,
@@ -28,11 +29,40 @@ import {
 // connector leaves via wizardWorkflowsText. It must never be re-typed inline.
 export const ONBOARDING_INSTRUCTIONS = `Onboarding is instructions, not a skill — read and follow them at ${ONBOARDING_INSTRUCTIONS_URL}.`
 
-// #2827: the verify/file step every harness shares — step 2 for pi/cursor, the
-// only body for the two filesystem-less leaves, and appended to the workflows
-// prompt. Without it a connector user never calls tortoise_health /
-// tortoise_create_point, so onboarding never auto-completes.
+// #2827: the verify/file step every CONFIG-WRITING harness shares — step 2 for
+// pi/cursor/claude/codex, the only body for the two filesystem-less Claude
+// leaves, and appended to the workflows prompt. Without it a connector user
+// never calls tortoise_health / tortoise_create_point, so onboarding never
+// auto-completes.
 export const WIZARD_STEP2_TEXT = `Call tortoise_health to verify the connection, then tortoise_create_point to file my first memory.\nDocs: https://tortoise.premiselabs.co/docs`
+
+// #9660 review: ChatGPT is the ONE harness whose tools arrive as a GRANT built
+// from `tools/list`, so it cannot call `tortoise_health` at all — that name is
+// RETIRED and `_RetiredToolTransform` strips retired names from `list_tools`
+// while still serving them on `get_tool` (tortoise/mcp_server.py;
+// tortoise/tool_registry.py retires it in favour of
+// `tortoise_overview(section="health")`). Shipping the shared body to a
+// grant-based client asks it for a call it can never make, so the verify half of
+// its first job fails or reports a missing tool.
+//
+// POLARITY: the ADVERTISED call is the DEFAULT and the legacy name is the
+// EXCEPTION, listed by name. That direction is what keeps the next harness safe
+// — a new leaf whose branch calls verifyFileStepText() without being registered
+// below gets the call every client can actually make, and the JS guard reds
+// until someone classifies it. The other polarity (default = legacy) would hand
+// a future grant-based harness a retired name silently, which is this very bug.
+export const ADVERTISED_VERIFY_FILE_STEP_TEXT = `Call tortoise_overview(section="health") to verify the connection, then tortoise_create_point to file my first memory.\nDocs: https://tortoise.premiselabs.co/docs`
+
+//: The leaves that write a config file (or run the installer) and therefore see
+//: the RETIRED name answered on `get_tool`. #2827's shared body is correct for
+//: them, and only for them.
+export const LEGACY_VERIFY_HARNESSES = Object.freeze([
+  'pi', 'cursor', 'claude', 'codex', 'claude-desktop', 'claude-web',
+])
+
+export const verifyFileStepText = (harness) => (
+  LEGACY_VERIFY_HARNESSES.includes(harness) ? WIZARD_STEP2_TEXT : ADVERTISED_VERIFY_FILE_STEP_TEXT
+)
 
 export function wizardPromptText(harness, step, key, mode) {
   // #2865: the keyed URL comes from harnesses.js — a third hardcoded copy
@@ -59,10 +89,10 @@ export function wizardPromptText(harness, step, key, mode) {
   // the four config-writing prompts below inline it, and the two Claude
   // connector leaves (Claude Desktop/Web — which never ran the installer and
   // have no skills directory) get it in the workflows prompt body
-  // (wizardWorkflowsText). ChatGPT has NO surface in this chooser (#2912's
-  // HARNESS_FAMILIES excludes it — #2698 had already deleted its flat tab),
-  // so it has no delivery path in THIS wizard at all. Its LIVE carrier is the
-  // public setup docs page (#4836): website/docs.html#chatgpt.
+  // (wizardWorkflowsText). #9660 OWNER RULING (2026-10-23) reverses the earlier
+  // "ChatGPT has NO surface in this chooser" state: chatgpt is a live
+  // single-choice family, so it gets its own prompt below and the served docs
+  // row (website/docs.html#chatgpt) is its reference copy, not its only carrier.
   // One constant (harnesses.js) for the URL, one (ONBOARDING_INSTRUCTIONS) for
   // the sentence.
   const onboardingInstructions = ONBOARDING_INSTRUCTIONS
@@ -100,6 +130,26 @@ export function wizardPromptText(harness, step, key, mode) {
   // wizardWorkflowsText below.
   if (harness === 'claude-desktop' || harness === 'claude-web') {
     if (step === 2) return WIZARD_STEP2_TEXT
+  }
+  // #9660 owner ruling: ChatGPT Web. Its connector is added in ChatGPT's own
+  // UI (the dashboard cannot do it), and its skills arrive as `.skill` uploads,
+  // so the prompt's job is the FIRST JOB — read the method it just installed,
+  // follow the onboarding instructions, then verify + file the first memory.
+  // No key line: HARNESS_OAUTH, and a connector surface never carries one.
+  if (harness === 'chatgpt') {
+    // #2361 anchor: the live wizard copy says "memory"/"memories", never the
+    // node word — the ratchet in overview.test.js scans this file (comments
+    // included), and the node word is the WRONG mental model for the user
+    // anyway: to them the graph holds memories.
+    // The skill is installable, and a user may skip the install (nothing on the
+    // card forces it), so this sentence may not assert that it is installed — a
+    // skipper would copy a first job that tells its agent to read a file it does
+    // not have. The served document is named as the fallback instead.
+    // The verify call is `tortoise_overview(section="health")`, NOT the retired
+    // `tortoise_health`: a tool-grant client builds its grant from `tools/list`,
+    // which does not advertise retired names (see ADVERTISED_VERIFY_FILE_STEP_TEXT).
+    if (step === 1) return `You have Tortoise connected over MCP (the tortoise_* tools).\nRead the how-to-use-tortoise skill before your first write — it is the source of truth for how to add memories, the links between them, and when to use which. If it is not installed, read it at ${servedSkillUrl('how-to-use-tortoise')} first.\n${onboardingInstructions}\n${verifyFileStepText('chatgpt')}`
+    if (step === 2) return verifyFileStepText('chatgpt')
   }
   return ''
 }

@@ -217,7 +217,18 @@ def _build_server_env(db_path: str, jwks_url: str, *, bare: bool) -> dict:
                 "STRIPE_WEBHOOK_SECRET", "STRIPE_PRICE_IDS",
                 "GITHUB_CLIENT_ID"):
         env[var] = ""
-    for var in ("TORTOISE_AUDIT_DSN", "RESEND_API_KEY", "BILLING_NOTIFY_TO",
+    for var in ("TORTOISE_AUDIT_DSN",
+                # #9548: the Postgres record's arming DSN. This harness runs the
+                # FULL production app, and arming is presence-based — an inherited
+                # value would make a "hermetic" e2e run write journal_event/point
+                # rows into the REAL record. Blank (never popped) for the same
+                # reason as the neighbours below, and because a shell that
+                # already carries one (a sourced `.env`, a runbook step) has it
+                # exported before pytest starts. ⚠️ Not `.env.example`: its
+                # `TORTOISE_RECORD_DSN` line is a commented placeholder, so
+                # following it does NOT export anything.
+                "TORTOISE_RECORD_DSN",
+                "RESEND_API_KEY", "BILLING_NOTIFY_TO",
                 "POSTHOG_API_KEY", "POSTHOG_HOST", "TELEGRAM_BOT_TOKEN",
                 "TELEGRAM_CHAT_ID", "DR_ISSUES_PAT", "R2_ACCOUNT_ID",
                 "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET",

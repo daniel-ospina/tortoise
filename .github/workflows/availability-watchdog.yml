@@ -38,8 +38,9 @@
 # rather than going quiet.
 #
 # Operator runbook: docs/infra-runbook.md → "Out-of-band availability watchdog".
-# Harness: .github/scripts/availability-watchdog.test.sh (CI job
-# availability-watchdog; stubs curl/gh/flyctl, no network).
+# Harness: .github/scripts/availability-watchdog.test.sh (step
+# `Availability watchdog state machine (#2850)` of the `ops-harnesses` CI job;
+# stubs curl/gh/flyctl, no network).
 #
 # TWO PRODUCTION TARGETS (#3628): the Fly API probe above, plus a SECOND,
 # DEDICATED step for the Cloudflare Pages auth surface (`GET /auth/start`).

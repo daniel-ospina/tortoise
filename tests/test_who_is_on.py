@@ -390,6 +390,37 @@ exec {real} "$@"
         self.assertEqual(self._branch_refs(out_who), self._branch_refs(out_gate),
                          f"holder sets differ:\nwho={out_who}\ngate={out_gate}")
 
+    def test_an_empty_claim_is_listed_but_never_a_holder(self):
+        """#6108 (reopened 2026-10-24): an EMPTY CLAIM is a REPORT, not a block.
+
+        The gate demotes a local branch that is 0 commits ahead of `origin/main` with no
+        live owner, no uncommitted work and no live claim ref. This verb must still LIST
+        it — reaping the branch is a human, evidence-based action, and a row that vanished
+        would hide the thing that needs cleaning up. So the answer is "nobody is a holder"
+        WITH the empty branch named, in the weak-signal section.
+        """
+        origin = self.tmp / "remotes" / "acme" / "example.git"
+        origin.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-q", "--bare", str(origin)],
+                       check=True, capture_output=True, text=True, env=self._env())
+        self._git(self.repo, "remote", "set-url", "origin", str(origin))
+        self._git(self.repo, "update-ref", "refs/remotes/origin/main", "refs/heads/main")
+        self._git(self.repo, "push", "-q", "origin", "refs/heads/main:refs/heads/main")
+        self.local_branch(f"fix/{ISSUE}-empty", ahead=0)
+        rc, out = self.run_tool(ISSUE)
+        self.assertEqual(rc, 0, out)
+        # LISTED — the report half.
+        self.assertIn(f"fix/{ISSUE}-empty", out)
+        self.assertIn("EMPTY-CLAIM", out)
+        # ...and NOT a holder: the weak section says so explicitly.
+        self.assertIn("WEAK SIGNALS", out)
+        self.assertIn("none of these make", out)
+        # The gate agrees on the same input — the parity these two verbs promise.
+        rc_gate, out_gate = self.run_tool(ISSUE, tool=GATE)
+        self.assertEqual(rc_gate, 0, out_gate)
+        self.assertIn("VERDICT: CLEAN", out_gate)
+        self.assertIn("EMPTY-CLAIM", out_gate)
+
     def test_worktree_uncommitted_state_is_shown_for_local_holder(self):
         self.local_branch(f"fix/{ISSUE}-health")
         wt = self.add_worktree("health", f"fix/{ISSUE}-health")

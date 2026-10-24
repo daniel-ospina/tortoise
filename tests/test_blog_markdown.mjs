@@ -1034,6 +1034,33 @@ console.log("the shipped avatar exists, and is the URL the migration backfills (
     migration.includes(`'Daniel Ospina'`),
     "the migration's author default matches the renderer's DEFAULT_AUTHOR",
   );
+
+  // The FORWARD repair (20261023000002) writes both literals a SECOND time, and
+  // on a database in the damaged state it is its copy — not the frozen
+  // migration's — that reaches the rows. Checking only the frozen file left the
+  // URL the repair actually writes unverified against DEFAULT_AUTHOR_IMAGE_URL:
+  // a typo there would be green in every harness suite (those assert the same
+  // literal against itself) and 404 the avatar on exactly the repaired posts.
+  const repair = readFileSync(
+    new URL("../supabase/migrations/20261023000002_blog_author_backfill_atomic.sql", import.meta.url),
+    "utf8",
+  );
+  // Every WRITE is checked, not "the string appears somewhere": the file writes
+  // the URL twice (both passes), so a single `includes` stays green while one of
+  // the two — the one a damaged database actually gets — is a typo.
+  const written = [...repair.matchAll(/author_image_url\s*=\s*'([^']+)'/g)].map((m) => m[1]);
+  assert(
+    written.length >= 2,
+    `the repair writes the avatar in BOTH passes (found ${written.length}; the per-write check below is vacuous below 2)`,
+  );
+  assert(
+    written.every((url) => url === DEFAULT_AUTHOR_IMAGE_URL),
+    `EVERY avatar URL the repair writes is the renderer's constant (found ${JSON.stringify(written)})`,
+  );
+  assert(
+    repair.includes(`'Daniel Ospina'`),
+    "the repair migration's author literal matches the renderer's DEFAULT_AUTHOR",
+  );
 }
 
 console.log("the apply RECIPE is the atomic one (#1383 — `psql -f` is not one transaction)");

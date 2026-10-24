@@ -14,7 +14,7 @@ import { errorMessage, headerUpgradeEligible, nudgeRoute, shouldNudgeUpgrade } f
 // card, the usage bar, and the at/near-limit nudge). Pure, node --test
 // unit-tested (nodeUsage.test.js).
 import { nextUpgradePlan, nodeBarColor, nodeNudge, nodeUsage, nodeUsageText } from './nodeUsage.js'
-import { CANONICAL_MCP_URL, CAPTURE_OPT_IN_LINE, HARNESS_CAPTURE_REQUIRES_OPT_IN, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, CODEX_DESKTOP_COMMAND, analyticsHarnessOf, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
+import { CANONICAL_MCP_URL, CAPTURE_OPT_IN_LINE, HARNESS_CAPTURE_REQUIRES_OPT_IN, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, CODEX_DESKTOP_COMMAND, SKILL_ARCHIVE_NAMES, analyticsHarnessOf, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface, skillArchiveUrl } from './harnesses.js'
 // #4880/#4365: the wizard's agent-facing copy is a RENDERED value the guards
 // assert — main.jsx is JSX and cannot be imported by `node --test`, so parsing
 // it as source is the mechanism that produced five false greens.
@@ -8525,6 +8525,21 @@ function claimIntentInFlight() {
     }
   }
 
+  // #9660 polish: the connect-step sentence embeds this ("…, created <date>)").
+  // `toLocaleString()` renders as `23/10/2026, 17:03:35` — an ambiguous day/month
+  // order in most of the world and seconds nobody needs in running copy. The
+  // table columns keep the full form; the SENTENCE takes a stable, unambiguous
+  // one (`23 Oct 2026`), built from explicit parts so it does not drift with the
+  // viewer's locale.
+  const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+  function fmtDateShort(iso) {
+    if (!iso) return '—'
+    const d = new Date(iso)
+    if (Number.isNaN(d.getTime())) return iso
+    return `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`
+  }
+
   function fmtTime(iso) {
     if (!iso) return '—'
     try {
@@ -9094,7 +9109,7 @@ function claimIntentInFlight() {
       <p className="dim small">
         Your organization already has an API key
         {connectGate.existing && connectGate.existing.key_prefix
-          ? <> (<code>{connectGate.existing.key_prefix}</code>, created {fmtTime(connectGate.existing.created_at)})</>
+          ? <> (<code>{connectGate.existing.key_prefix}</code>, created {fmtDateShort(connectGate.existing.created_at)})</>
           : null}{' '}
         — its value can&apos;t be shown here: keys are displayed once, when they are created.
       </p>
@@ -9716,7 +9731,7 @@ function claimIntentInFlight() {
                         // Anthropic's "Request headers" field, which is exactly
                         // the population #2865 exists for. The shape is lifted
                         // from the shipped chatgpt recipe (server URL → sign-in →
-                        // Authorize → org chooser) and needs NO key, so it
+                        // Organization choice → Authorize) and needs NO key, so it
                         // renders for members as well as owner/admins.
                         const web = wizardHarness === 'claude-web'
                         procedureTitle = `Add the ${displayName} connector`
@@ -9737,8 +9752,8 @@ function claimIntentInFlight() {
                             </p>
                             <ol className="wizard-fields">
                               <li>{web ? 'Claude' : 'Claude Desktop'} opens Tortoise&apos;s sign-in page on the first connection — sign in.</li>
+                              <li>Pick the Organization you&apos;re onboarding — the page names it, or asks you to choose when your account can use more than one.</li>
                               <li>Click <strong>Authorize</strong>.</li>
-                              <li>Pick the Organization you&apos;re onboarding.</li>
                             </ol>
                             <p className="wizard-note">
                               The <code>tortoise_*</code> tools appear once you authorize. The authorization belongs to your Tortoise account — remove the Tortoise connector any time in {web ? 'claude.ai' : 'Claude Desktop'} → Settings → Connectors.{web ? ' Claude connects from Anthropic\u2019s cloud — nothing is stored on a local machine.' : ''}
@@ -9802,7 +9817,71 @@ function claimIntentInFlight() {
                               an empty "1 Get your API key" would promise an
                               action that does not exist there; with no key there
                               is no procedure block to show either. */}
-                          {wizardKeyless ? (
+                          {wizardConnectHarness === 'chatgpt' ? (
+                            /* #9660 owner ruling (2026-10-23): ChatGPT Web is a
+                               first-class journey, not a docs hand-off. Three
+                               numbered blocks so the order is visible: the
+                               connector is added in ChatGPT's own UI (the
+                               dashboard cannot do it), the skills are
+                               INSTALLED (one upload, one-time — the paste-only
+                               path re-read a document every chat), and the
+                               last block is the first job, which is the one
+                               thing the user actually wants from connecting.
+                               No key block: this leaf is key-less OAuth. */
+                            <>
+                              <p className="wizard-caption">
+                                Two minutes, all inside ChatGPT — no API key and nothing to install on this machine.
+                              </p>
+                              <p className="wizard-note">
+                                Custom connectors need a paid ChatGPT plan (<strong>Plus</strong> or higher).
+                              </p>
+                              <WizardBlock step={1} title="Add the Tortoise connector">
+                                <p className="wizard-caption">
+                                  Open <code>chatgpt.com/plugins</code> → <strong>Add</strong> (top right) → <strong>Add custom MCP server</strong>, then fill in:
+                                </p>
+                                <ul className="wizard-fields">
+                                  <li>Name: <strong>Tortoise</strong></li>
+                                  <li>Connection: <strong>Server URL</strong></li>
+                                  <li>Server URL: <code>{CANONICAL_MCP_URL}</code>
+                                    <button type="button" className="ghost small" style={{ marginLeft: '0.5rem' }}
+                                      onClick={(e) => copyInline(e, CANONICAL_MCP_URL, 'Copy URL')}>Copy URL</button>
+                                  </li>
+                                  <li>Authentication: <strong>OAuth</strong> (the default)</li>
+                                  <li>Icon: optional — skip it</li>
+                                </ul>
+                                <p className="wizard-caption">
+                                  Tick <strong>I understand and want to continue</strong>, then click <strong>Create as a plugin</strong>. Now open
+                                  {' '}<code>chatgpt.com/settings/plugins-settings</code> → <strong>Tortoise</strong> → <strong>View details</strong> → <strong>Connect</strong>,
+                                  then confirm <strong>Connect Tortoise</strong> in the dialog it opens. Sign in to Tortoise, pick the Organization
+                                  you are onboarding — the page names it, or asks you to choose when your account can use more than one —
+                                  then click <strong>Authorize</strong>. That Organization is the one the connector writes to.
+                                </p>
+                              </WizardBlock>
+                              <WizardBlock step={2} title="Install the Tortoise skills">
+                                <p className="wizard-caption">
+                                  One-time — after this they apply to every chat. Download the three files:
+                                </p>
+                                <ul className="wizard-fields">
+                                  {SKILL_ARCHIVE_NAMES.map((name) => (
+                                    <li key={name}>
+                                      <a href={skillArchiveUrl(name)} download>{name}.skill</a>
+                                    </li>
+                                  ))}
+                                </ul>
+                                <p className="wizard-caption">
+                                  Then open <code>chatgpt.com/skills</code> → <strong>Add</strong> → <strong>Upload from your computer</strong> and select all three files together.
+                                </p>
+                                <p className="wizard-note">
+                                  To update one later, upload that file again and choose <strong>Replace existing</strong>. Pack and taxonomy changes need no update — your agent reads those from Tortoise.
+                                </p>
+                              </WizardBlock>
+                              <WizardBlock step={3} title="Give it its first job">
+                                <p className="wizard-caption">{WIZARD_CAPTIONS.workflows}</p>
+                                <WizardPromptCard text={wizardPromptText('chatgpt', 1, '', 'included')} label={WIZARD_CAPTIONS.workflowsLabel}
+                                  onCopied={() => wizardBeacon(wizardConnectHarness, 'prompt')} />
+                              </WizardBlock>
+                            </>
+                          ) : wizardKeyless ? (
                             /* #2865: a key-less OAuth leaf renders NO "1 Get
                                your API key" block — its recipe needs no
                                credential, so that step would promise an action
@@ -10660,10 +10739,13 @@ function claimIntentInFlight() {
                 <h2>New API key</h2>
                 <p className="dim">Copy this key now — it is shown once only.</p>
                 <code className="key-value">{newKeyReveal}</code>
+                {/* #9660 polish: `key-expiry` makes the lifetime its own line —
+                    inline it shared a line with the key box and read as part of
+                    the key (see index.css's .key-expiry rule). */}
                 {newKeyExpiresAt ? (
-                  <span className="dim">expires {fmtExpiryDate(newKeyExpiresAt)}</span>
+                  <span className="dim key-expiry">expires {fmtExpiryDate(newKeyExpiresAt)}</span>
                 ) : (
-                  <span className="dim">never expires</span>
+                  <span className="dim key-expiry">never expires</span>
                 )}
                 <div className="new-key-actions">
                   <button onClick={copyNewKey}>{keyCopied ? 'Copied ✓' : 'Copy'}</button>

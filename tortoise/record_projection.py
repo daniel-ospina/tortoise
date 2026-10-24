@@ -146,6 +146,10 @@ __all__ = [
     "JOURNAL_EVENT_TYPES",
     "PACKAGED_MIGRATIONS",
     "RECORD_MUTATIONS",
+    "ROLE_POSTURE_SQL",
+    "TENANT_GUC",
+    "TENANT_GUC_SQL",
+    "TENANT_SCOPE_SQL",
     "THE_RECORD_TABLES",
     "RecordProjectionError",
     "RefusedJournalOperation",
@@ -155,6 +159,7 @@ __all__ = [
     "refused_props_names",
     "replay",
     "replay_plan",
+    "scope_connection",
     "snake",
     "table_columns",
     "to_dollar_placeholders",
@@ -205,6 +210,112 @@ RECORD_MIGRATIONS: tuple[str, ...] = (
     # reader must see it or `_split_properties` would refuse every narrative
     # column and the projection would write nothing while reporting success.
     "20261023000001_record_session_narrative.sql",
+    # The tenancy boundary itself (#9554, epic #7879): the app role, its table
+    # grants and the tenant GUC. It contributes NO column and no refusal — and
+    # it is listed anyway, per the registry rule above. Leaving it out was the
+    # 1-of-8 gap the #9600 review cycle 1 measured: the wheel ships it
+    # (`pyproject.toml`'s `*_record_*.sql` glob matches) and
+    # `tests/test_9231_record_migrations_trigger.py` reds on the omission, so
+    # the registry is the tuple or it is nothing.
+    "20261025000001_record_tenancy_role_and_guc.sql",
+)
+
+#: The tenancy GUC every record RLS policy reads (`*_read_org`, `*_app_tenant`).
+#: One name, one definition: the record migrations read it and
+#: :data:`TENANT_GUC_SQL` is the only place production code sets it. The two
+#: halves are compared in `tests/test_record_tenancy_guc.py`, because a renamed
+#: GUC makes every policy read NULL — which is zero rows and no error.
+TENANT_GUC = "app.current_org_id"
+
+#: The ONE statement that establishes the record's tenant on a connection.
+#: `is_local` is the third argument and is deliberately `true` — transaction
+#: scoped, never session scoped (R6). A session `SET` is the failure mode, not
+#: the mechanism: on the shared pooler's transaction mode (:6543) session state
+#: does not survive between transactions, so the same code would silently read
+#: zero rows; on session mode (:5432, R1's DSN today) it would survive onto a
+#: pooled connection reused by the NEXT tenant, which returns another tenant's
+#: rows instead. Transaction-local is correct under both, so the DSN can move
+#: without a code change. Bound as a parameter: an org id is never interpolated
+#: into SQL.
+TENANT_GUC_SQL = f"SELECT set_config('{TENANT_GUC}', %s, true)"
+
+#: The OTHER half of the same guarantee, on the same round trip (#9600 review
+#: cycle 2, P2): the GUC read-back says the tenant took effect, and this says the
+#: CONNECTED ROLE cannot bypass the policies that read it. Both are needed for
+#: RLS to be the boundary rather than a decoration, and neither implies the
+#: other — a `postgres`/`service_role` DSN sets the GUC perfectly, reads it back
+#: perfectly, and evaluates no policy at all.
+#:
+#: Four ways to bypass, all measured on the connection itself rather than
+#: inferred from the DSN string:
+#:
+#: 1. `rolsuper` — a superuser bypasses RLS unconditionally;
+#: 2. `rolbypassrls` — `service_role`'s attribute, and the trap the decision
+#:    document names;
+#: 3. MEMBERSHIP in any of the above. Policy applicability follows
+#:    `has_privs_of_role`, so `GRANT service_role TO tortoise_record_app` makes
+#:    `*_service_role_all USING (true)` apply to the app role while
+#:    `rolbypassrls` still reads `false` (measured on `postgres:16.15`; the
+#:    migration header and the posture suite both pin it). Asserted as
+#:    `'USAGE'`, not `'MEMBER'`, because `NOINHERIT` (or a `WITH INHERIT FALSE`
+#:    grant) makes the policies inapplicable and `USAGE` false — the two agree.
+#:    Generic over every bypassing role, so no role name has to exist for
+#:    the check to run — `pg_has_role(current_user, 'service_role', 'USAGE')`
+#:    would raise on a plain Postgres that has no such role;
+#: 4. TABLE OWNERSHIP (or membership of the owning role). Owners bypass RLS
+#:    unless `FORCE ROW LEVEL SECURITY` is set, which is exactly why the
+#:    `postgres` DSN in R1's documented pre-change shape was rejected — it is
+#:    the owner of every record table (`THE_RECORD_TABLES` — ten, since #9555).
+#:
+#: `current_setting(...)` keeps the GUC read-back and the role posture in ONE
+#: statement rather than two round trips, so the seam executes exactly TWO
+#: statements outside the plan: the `set_config` prologue (`TENANT_GUC_SQL`) and
+#: this verify (`TENANT_SCOPE_SQL`). Both are tenant-context statements, not
+#: record mutations, and a caller that filters on `current_setting` keeps seeing
+#: every non-plan statement the seam issues. The org id and the table names
+#: travel as bind parameters.
+
+#: The ROLE POSTURE half of `TENANT_SCOPE_SQL` below, on its own, so the SAME four
+#: predicates decide "does this connection bypass RLS?" on every path that asks
+#: — the tenant scope (which REQUIRES non-bypassing) and R9's backup (which
+#: REQUIRES bypassing, one of the three purposes R6 names). Two copies of these
+#: predicates would be two answers to one question, and the backup's copy would
+#: be the one nobody re-reads: #9801 is exactly that failure — a backup verb
+#: connected as the app role, counted ZERO rows under the `*_app_tenant`
+#: policies, and reported the record as EMPTY.
+_ROLE_POSTURE_SELECT = (
+    "       r.rolsuper OR r.rolbypassrls "
+    "       OR EXISTS (SELECT 1 FROM pg_roles g "
+    "                   WHERE g.oid <> r.oid "
+    "                     AND (g.rolsuper OR g.rolbypassrls) "
+    "                     AND pg_has_role(r.oid, g.oid, 'USAGE')) "
+    "       OR EXISTS (SELECT 1 FROM pg_class c "
+    "                    JOIN pg_namespace n ON n.oid = c.relnamespace "
+    "                   WHERE n.nspname = 'public' "
+    "                     AND c.relname = ANY(%s) "
+    "                     AND (c.relowner = r.oid "
+    "                          OR pg_has_role(r.oid, c.relowner, 'USAGE'))) "
+    "       AS bypassing "  # named so a mapping-shaped row (RealDict) can be read
+)
+
+#: The posture ALONE: ``(role, bypassing)`` for ``current_user``, with no GUC in
+#: the statement. For a caller whose obligation is the OPPOSITE of the scope's —
+#: R9's ``pg_dump``/``pg_restore``, which R6 names as a legitimate bypass purpose
+#: because a backup must see every tenant. ``role`` is selected so a refusal can
+#: NAME the role instead of blaming the data (#9801). Takes ONE bind parameter:
+#: the table set, exactly like :data:`TENANT_SCOPE_SQL`.
+ROLE_POSTURE_SQL = (
+    "SELECT r.rolname AS role, "
+    + _ROLE_POSTURE_SELECT
+    + "  FROM pg_roles r "
+    " WHERE r.rolname = current_user"
+)
+
+TENANT_SCOPE_SQL = (
+    f"SELECT current_setting('{TENANT_GUC}', true) AS tenant, "
+    + _ROLE_POSTURE_SELECT
+    + "  FROM pg_roles r "
+    " WHERE r.rolname = current_user"
 )
 
 #: Where the schema lives when this module is INSTALLED rather than checked out.
@@ -1707,11 +1818,44 @@ def _nested_node_carrier(record: Mapping[str, Any],
 #: edges are carried by their OWN declarations, not this one:
 #: `_POINT_PROPERTY_RELATIONS` (class 1, `extractedFrom`) and
 #: `_OPERATOR_RELATION_RECORDS` (class 3 — the operator's `IMPL`/`NAND`/`hasPart`,
-#: its reverse `INPUT`, and the canonical `mitigated_by` mirror). What stays
-#: missing is the rest of the point-property set (`about*`, `TAGGED`) and the
-#: structural predicates `ownedBy`/`hasPart`/`dependsOn`/`references` and
-#: friends, which have a working `DirectEdgeCreated` fold and NO producer
-#: (class 4 — a producer-side change in `sdk.py`, not a projection one).
+#: its reverse `INPUT`, and the canonical `mitigated_by` mirror).
+#:
+#: The STRUCTURAL predicates (`ownedBy`/`hasPart`/`dependsOn`/`wasDerivedFrom`,
+#: `references`, the bare `about*` mints) are class 4, and they are carried by the
+#: `DirectEdgeCreated` descriptor this module already handles below — the missing
+#: half was the PRODUCER, not this fold. Since `#9553` the structural-edge lane's
+#: two mints journal that record (`projection/edges.py::_record_structural_edges`
+#: ← `TortoiseSDK._record_structural_edge`), so those edges land a `relation` row
+#: with `source_label`/`target_label` naming the endpoints' tables. What stays
+#: missing is NAMED, not implied:
+#:   * `tags` → `TAGGED`: the target is a `:Tag` node and `NODE_TABLES` has no
+#:     `tag` table, so the record holds no `(Tag, key)` identity for
+#:     `relation.tgt_key`'s composite FK to point at — a schema decision, not a
+#:     projection one;
+#:   * a `:Source`-anchored `references` (`link_source_to_entity`): the replay
+#:     fold addresses endpoints by sweeping `EPISTEMIC_LABELS` on `p.id`, and a
+#:     `:Source` is url-keyed and outside it. The lane therefore DECLINES to
+#:     journal such a write and WARNs once, with the reason, rather than filing a
+#:     record the journal route cannot replay (`projection/edges.py`,
+#:     `RECORD_ADDRESSABLE_EDGE_LABELS`).
+#:   * `about*` when no `EntityLinked` record exists is now carried by the bare
+#:     `create_about_edge` mint, on the same `DirectEdgeCreated` route.
+#:   * ⚠️ **THE `idx` RESIDUAL (#9844), measured, not inferred.** A
+#:     `DirectEdgeCreated` descriptor carries no `idx`, so
+#:     `_relation_coordinates` defaults it to `0` — while `relation`'s conflict key
+#:     INCLUDES `idx` and an operator's own `hasPart`/`IMPL`/`NAND` rows carry
+#:     `idx = enumerate(inputs)`. Mint the edge the operator's record already
+#:     carries at `idx >= 1` and the record gains a SECOND row for ONE graph edge
+#:     (measured: `create_operator("composedOf", a, [b])` then
+#:     `create_edge("hasPart", op, b)` leaves the LIVE graph unchanged at two rows
+#:     — the `MERGE` is property-agnostic and dedups onto the `idx=1` edge — while
+#:     the record route computes `(op, b, hasPart, 0)` beside `(op, b, hasPart, 1)`).
+#:     The PRODUCER cannot fix it (the mint takes no property parameter, §9.6, and
+#:     cannot read the `idx` the existing edge carries), so the fix belongs to this
+#:     layer and needs its own test: insert only when no row already exists for the
+#:     `(org, graph, rel_type, src, tgt)` triple, for the `DirectEdgeCreated` family
+#:     only, so `DirectEdgeRepoint` and the re-linking families are untouched.
+#:     Filed as **#9844**.
 _ENVELOPE_RELATIONS: tuple[tuple[str, str, str, str, str], ...] = (
     ("PointAdded", "contains_session", "CONTAINS", "Session", "Point"),
     ("OperatorAdded", "contains_session", "CONTAINS", "Session", "Point"),
@@ -3047,6 +3191,94 @@ class ReplayReport:
                 f"record mutations ({len(self.no_effects)} declared no-op)")
 
 
+def _apply_tenant_scope(cursor: Any, org_id: str) -> None:
+    """Set the tenant GUC transaction-locally, then VERIFY the whole scope.
+
+    Two properties, one place, because a caller that had to remember either
+    would eventually remember only one:
+
+    - the connection IS scoped to ``org_id`` — the read-back (#9600 review
+      cycle 1): a ``set_config(..., true)`` on an autocommit connection, a
+      renamed GUC, or a pooler that dropped the context sets nothing, and on an
+      `UPDATE`/`DELETE`-only plan that is a silent zero-row success;
+    - the connection's ROLE cannot bypass the policies that read it (#9600
+      review cycle 2): a bypassing DSN satisfies every other check and
+      evaluated no tenancy predicate at all.
+
+    Raises :class:`RecordProjectionError` on either, BEFORE a single plan
+    statement — or, on the read path, a single row — is touched. A failure here
+    is a misconfiguration to refuse, not a degraded mode to continue in.
+    """
+    cursor.execute(TENANT_GUC_SQL, (org_id,))
+    # One round trip for both halves: the GUC read-back and the role posture.
+    cursor.execute(TENANT_SCOPE_SQL, (list(THE_RECORD_TABLES),))
+    row = cursor.fetchone()
+    if not row:
+        raise RecordProjectionError(
+            "the record's scope could not be verified — the read-back returned "
+            "no row, so neither the tenant GUC nor the connecting role's "
+            "posture could be read. An unverifiable role is not a verified "
+            "one: refusing rather than assuming the connection is "
+            "non-bypassing (RLS is the record's tenancy boundary, R6 / epic "
+            "#7879, and #9600 review cycle 2)")
+    # The row is positional on a plain cursor and mapping-shaped on a
+    # `RealDict` one — `read_record_view` advertises both shapes (its `_rows()`
+    # handles `Mapping`), so unpacking this by index alone would raise
+    # `KeyError: 0` on the read door before its first SELECT. Both columns are
+    # aliased (`tenant`, `bypassing`) so the mapping form is readable.
+    if isinstance(row, Mapping):
+        applied, bypassing = row["tenant"], row["bypassing"]
+    else:
+        applied, bypassing = row[0], row[1]
+    if str(applied) != str(org_id):
+        raise RecordProjectionError(
+            f"the tenant GUC {TENANT_GUC!r} is {applied!r} after setting it to "
+            f"{org_id!r} — refusing to apply the plan unscoped. A "
+            "transaction-local set does nothing on a connection in autocommit "
+            "mode, and an UPDATE/DELETE gated only by RLS USING would then "
+            "affect ZERO rows without raising (#9600 review cycle 1)")
+    if bypassing is None:
+        raise RecordProjectionError(
+            "the connecting role's posture could not be read (no pg_roles row "
+            "for current_user) — refusing rather than assuming it is "
+            "non-bypassing. RLS is the record's tenancy boundary (R6, epic "
+            "#7879), and an unverifiable role is not a verified one (#9600 "
+            "review cycle 2)")
+    if bypassing is not False:
+        raise RecordProjectionError(
+            "the record's connection runs as a role that BYPASSES RLS — "
+            "superuser, BYPASSRLS, a member of such a role, or the owner of a "
+            "record table. RLS is this record's tenancy boundary (R6, epic "
+            "#7879), so every read and write on that connection would cross "
+            "tenants with the policies never evaluated. Arm "
+            "TORTOISE_RECORD_DSN with tortoise_record_app "
+            '(docs/infra-runbook.md -> "The record\'s connecting role"); '
+            "refusing rather than applying a replay that cannot be scoped "
+            "(#9600 review cycle 2)")
+
+
+def scope_connection(conn: Any, org_id: str) -> Any:
+    """The R6 tenant scope on ``conn`` — for the WRITE door and the READ door.
+
+    ``replay()`` and ``cache_projection.read_record_view()`` are the record's two
+    doors and they share ONE DSN (``TORTOISE_RECORD_DSN``). The prologue lived
+    only on the write door, so an ARMED reconciler WOULD have read ZERO rows
+    from every record table — the policies treat a missing GUC as "no rows",
+    never as an error — landing every cache key ``extra_in_cache`` with
+    ``missing_in_cache = 0`` — the chokepoint-violation / second-writer
+    signature, not a lag — and WOULD have exited ``3`` ("divergence
+    OBSERVED") on a coherent pair. That is the counterfactual, not an observed
+    event: R1 has not armed the DSN. A wrong verdict from the one observer §17.2 relies on is
+    worse than no verdict, so BOTH doors install the scope through this ONE
+    function (#9600 review cycle 2, P1).
+
+    Returns the cursor it used, so a caller continues on the same handle.
+    """
+    cursor = conn.cursor()
+    _apply_tenant_scope(cursor, org_id)
+    return cursor
+
+
 def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
            graph_id: str, start_seq: int = 1,
            position: bool = True) -> ReplayReport:
@@ -3092,10 +3324,67 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
     ``position=seq is not None`` and layer 1 is populated by production traffic,
     not only by a replay. ``True`` (the default) keeps every caller that
     predates the parameter byte-identical.
+
+    THE TENANT GUC (R6). The FIRST statement executed is
+    :data:`TENANT_GUC_SQL` — ``set_config('app.current_org_id', $1, true)`` —
+    carrying the SAME ``org_id`` the plan is about to project. That is the whole
+    mechanism by which RLS can be the record's tenancy boundary rather than a
+    decoration, and it is placed HERE rather than in a caller for one reason:
+    the org id the policies compare against and the org id written into the rows
+    are then one value, so they cannot disagree in silence (test-design surface
+    S2). Two properties follow, and both are pinned in
+    ``tests/test_record_tenancy_guc.py``:
+
+    - it is TRANSACTION-LOCAL (``is_local=true``), so it neither survives the
+      transaction nor depends on a session surviving a pooler — a session ``SET``
+      under transaction pooling reads as NULL, which the ``USING`` predicates
+      turn into zero rows rather than an error;
+    - it runs AFTER the plan is materialized, so the totality guarantee is
+      untouched: an undeclared record type still raises having executed no
+      statement at all.
+
+    ⚠️ WRITE ON ``true``. A caller-supplied ``conn`` in autocommit mode makes
+    ``set_config(..., true)`` set nothing, and the read-back below REFUSES it
+    (`tenant GUC … is <not your org> after setting it to <org>`) before a
+    single plan statement. The observed value is the empty string on an
+    autocommit connection (the set is reported but does not persist) and NULL
+    when the context was dropped entirely (a pooler) — so the `WITH CHECK` predicates are never reached
+    on that shape. That is deliberate and it is the point of the read-back:
+    a NULL GUC is loud on `INSERT` and SILENT on an `UPDATE`/`DELETE`-only
+    plan, which would affect zero rows and report success (#9600 review cycle
+    1). The seam's own connections are not in autocommit
+    (``_default_connect`` never turns it on), so the live path is unaffected.
+
+    ⛔ VERIFIED, NOT ASSUMED (#9600 review cycle 1, P2). Executing the prologue
+    is not the same event as the GUC being in force, and the failure mode of
+    the gap is SILENT in one shape: every plan statement's ``INSERT`` carries a
+    ``WITH CHECK`` that raises under a NULL GUC, but an `UPDATE`/`DELETE` is
+    gated by ``USING`` alone and simply affects 0 rows — so a patch- or
+    delete-only record (reachable with ``position=False``, which has no
+    ``journal_event`` insert left to fail) would be dropped while this function
+    returned an APPLIED report. The prologue is therefore read back
+    (``current_setting(..., true)``) and a mismatch RAISES: an autocommit
+    connection, a renamed GUC, or a pooler that dropped the transaction-local
+    set can never be mistaken for a successful replay.
+
+    ⛔ AND THE ROLE IS VERIFIED, NOT ASSUMED (#9600 review cycle 2, P2). A
+    correct GUC on a connection that BYPASSES the policies is the one shape in
+    which every check passes and the boundary is not there: `postgres` (the
+    table owner, and R1's documented pre-change DSN shape) or `service_role`
+    reads and writes every tenant's rows while the report says APPLIED. The
+    scope (:func:`scope_connection`) therefore refuses a connection whose
+    ``current_user`` is superuser, ``BYPASSRLS``, a member of either, or the
+    owner of a record table — see :data:`TENANT_SCOPE_SQL`. Arming the record
+    with the wrong DSN now fails closed on the first write instead of silently
+    turning RLS off.
     """
     plan = replay_plan(records, org_id=org_id, graph_id=graph_id,
                        start_seq=start_seq, position=position)
-    cursor = conn.cursor()
+    # The tenant, before anything it scopes. NOT part of `plan`: the plan stays
+    # the pure journal→record declaration, and this statement is the session
+    # context the plan is applied in — plus the role gate that decides whether
+    # the context can mean anything at all.
+    cursor = scope_connection(conn, org_id)
     for statement in plan:
         cursor.execute(statement.sql, statement.params)
     report = ReplayReport(events=len(records), statements=0)

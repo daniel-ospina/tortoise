@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-page="company">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -54,15 +54,28 @@
       padding: 2rem;
     }
 
+    /* Hit-testing follows VISIBILITY. The full-screen overlay must never
+       swallow clicks when invisible (#744), but a VISIBLE beat has to receive
+       wheel/touch itself: it is the beat's own box that carries
+       `overflow-y: auto` on a short viewport, and a gesture over text that
+       passes through to the document is consumed by the ScrollTrigger scrub
+       instead — the clipped content never moves. The script toggles `.pe-on`
+       from the scrubbed opacity; same pattern as website/product.html. */
+    .beat.pe-on { pointer-events: auto; }
+
     /* Interactive beats: the fixed full-screen overlays must never swallow
-       clicks when invisible — only their interactive children get pointer
-       events (#744). Beats without interactive children inherit
-       pointer-events: none from .beat. */
+       clicks when invisible — and must not leave a HIT TARGET behind either.
+       `opacity: 0` does NOT affect hit-testing, so an always-on child rule
+       (`#beat-tortoise a`, an injectable form) lets a click on the hero screen
+       follow the closing pitch's "Learn More" link to the product site, or
+       focus an invisible email field (#744; #881 is the same fix on
+       website/product.html). Hit-testing therefore follows VISIBILITY for the
+       beat and for everything inside it — `pointer-events` inherits, so no
+       per-child rule is needed. `#beat-cta { pointer-events: none }` stays as
+       the explicit default and `#beat-cta.pe-on` re-enables it, because an id
+       selector out-ranks `.beat.pe-on`. */
     #beat-cta { pointer-events: none; }
-    /* The label is interactive: `for="waitlist-email"` makes a click on it
-       focus the field, so it needs pointer events like the form itself. */
-    #beat-cta form, #beat-cta a, #beat-cta button, #beat-cta .cta-label { pointer-events: auto; }
-    #beat-tortoise a { pointer-events: auto; }
+    #beat-cta.pe-on { pointer-events: auto; }
 
     #beat-hero { opacity: 1; }
 
@@ -102,27 +115,35 @@
     .beat p strong { color: var(--text); font-weight: 400; }
     .beat p em { color: var(--accent); font-style: normal; }
 
-    /* Tortoise reveal */
-    #beat-tortoise h2 {
-      font-family: var(--serif);
-      font-size: clamp(1.4rem, 3vw, 2rem);
-      color: var(--text);
-      text-align: center;
+    /* Tortoise reveal — the closing pitch is this section's heading (<h2>), so
+       the outline runs h1 -> h2 -> h3 instead of skipping a level. It reads as
+       prose, not a headline: same size/colour/face as the beat above.
+       (`font-family` is stated here rather than inherited: an `h2` has no rule
+       of its own in this file, so it would inherit `body`'s mono anyway — the
+       declaration keeps the face explicit if a heading rule is ever added.) */
+    #beat-tortoise .tortoise-pitch {
+      font-family: var(--mono);
+      font-size: clamp(1.15rem, 2.2vw, 1.5rem);
       font-weight: 400;
-      line-height: 1.4;
+      line-height: 1.5;
+      color: var(--text);
+      max-width: 760px;
+      margin: 0 auto;
+      text-align: center;
     }
-    #beat-tortoise h2 span { color: var(--accent); }
 
-    /* Learn more CTA below the Tortoise reveal */
+    /* Learn more CTA below the Tortoise reveal. The button reads as the same
+       control as tortoise.premiselabs.co's CTAs */
     #beat-tortoise .cta-start {
       display: inline-block;
       margin-top: 2rem;
       background: var(--accent);
       color: var(--bg);
       border: none;
-      padding: 0.85rem 2rem;
+      border-radius: 8px;
+      padding: 0.9rem 2rem;
       font-family: var(--mono);
-      font-size: 0.95rem;
+      font-size: 1rem;
       font-weight: 600;
       text-decoration: none;
       cursor: pointer;
@@ -265,10 +286,15 @@
       #scroll-wrapper { height: 800vh; }
     }
 
-    /* Short viewports: #beat-cta is a fixed full-height beat — allow the
-       form stack to scroll instead of clipping the email input / links */
+    /* Short viewports: these are fixed full-height beats with no scroll of
+       their own — allow the stack to scroll instead of clipping it. #beat-cta
+       carries the email form and links; #beat-tortoise carries the closing
+       pitch plus the page's only route to the product front page, and
+       `justify-content: center` would cut it at BOTH viewport edges. The
+       overflow box only helps if the beat can RECEIVE the gesture, which is
+       what `.beat.pe-on` above provides while it is visible. */
     @media (max-height: 520px) {
-      #beat-cta { justify-content: flex-start; overflow-y: auto; }
+      #beat-cta, #beat-tortoise { justify-content: flex-start; overflow-y: auto; }
     }
 
     /* Subtle fade at bottom edges */
@@ -301,14 +327,14 @@
 
   <div id="scroll-wrapper">
     <section id="beat-hero" class="beat">
-      <h1>The primary function of memory is not <span>recall</span>, but <span>learning</span>.</h1>
+      <h1>The primary function of memory is not recall, but <span>reasoning &amp; learning</span>.</h1>
     </section>
     <section id="beat-origin" class="beat">
       <p style="color: var(--text); font-size: clamp(1.15rem, 2.2vw, 1.5rem); line-height: 1.5;">Humans update their <span style="color: var(--accent);">world models</span> too slowly.<br>Agents forget them halfway through a session.<br><br>We made them persistent — unlocking better decisions, learning, and collaboration.</p>
     </section>
     <section id="beat-tortoise" class="beat">
-      <h2><span>Tortoise</span> — a memory system where agents learn.</h2>
-      <a href="https://tortoise.premiselabs.co" class="cta-start">Learn more →</a>
+      <h2 class="tortoise-pitch">Tortoise equips your agents with a logical model that maps how your business and projects work. They can reason through trade-offs, understand the context beyond a task, adapt to new evidence, and pursue goals without constant supervision. A full cognitive layer with agent memory, reasoning, and learning.</h2>
+      <a href="https://tortoise.premiselabs.co" class="cta-start">Learn More →</a>
     </section>
     <section id="beat-lab" class="beat">
       <h3><strong>Premise Labs</strong></h3>
@@ -471,6 +497,16 @@
     /* ── Content beats (opacity scrubbed to scroll) ── */
     const beats = ['beat-hero', 'beat-origin', 'beat-tortoise', 'beat-lab', 'beat-cta'];
 
+    /* Hit-testing follows visibility (`website/product.html` does the same):
+       an invisible full-screen beat stays click-through (#744), and a visible
+       one takes pointer events so its `overflow-y: auto` short-viewport escape
+       hatch can actually be scrolled — the document's own scroll is consumed
+       by ScrollTrigger, so a gesture that passes through moves the sequence,
+       not the clipped beat. */
+    const syncPE = (el) => {
+      el.classList.toggle('pe-on', parseFloat(gsap.getProperty(el, 'opacity')) > 0.05);
+    };
+
     const beatSpan = 0.11;
     const gapSpan = 0.015;
     const step = beatSpan + gapSpan;
@@ -481,6 +517,8 @@
       const peak = start + beatSpan;
 
       if (i === 0) {
+        // Starts visible (CSS opacity: 1) — hit-testable from load.
+        el.classList.add('pe-on');
         // Pulse independently, kill on scroll
         const pulse = gsap.to('#scroll-hint', {
           opacity: 0.4, y: 6, duration: 1.5, yoyo: true, repeat: -1, ease: 'power1.inOut'
@@ -497,6 +535,7 @@
         });
         gsap.to(el, {
           opacity: 0, y: -20,
+          onUpdate: () => syncPE(el),
           scrollTrigger: {
             trigger: '#scroll-wrapper',
             start: '1% top',
@@ -514,6 +553,7 @@
         { opacity: 0, y: 20 },
         {
           opacity: 1, y: 0,
+          onUpdate: () => syncPE(el),
           scrollTrigger: {
             trigger: '#scroll-wrapper',
             start: `${fadeInStart * 100}% top`,
@@ -527,6 +567,7 @@
         const fadeOutStart = i === 1 ? 0.20 : peak;
         gsap.to(el, {
           opacity: 0, y: -20,
+          onUpdate: () => syncPE(el),
           scrollTrigger: {
             trigger: '#scroll-wrapper',
             start: `${fadeOutStart * 100}% top`,

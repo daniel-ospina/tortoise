@@ -1,0 +1,248 @@
+---
+title: "x86_64 CI runners — the fallback pool's second architecture (#5215)"
+type: operations
+domain: platform
+doc_status: live
+subjects.team: epistemic-team
+aboutSubjects: ci-runner-pool, ci-headroom-guards
+aboutObjects: tortoise, tools/install-ci-runner-x64.sh, scripts/ci_runner_gate.sh
+created: 2026-10-22
+updated: 2026-10-23
+---
+
+# x86_64 CI runners — the fallback pool's second architecture
+
+Operator runbook for the `pi-runner-x64-*` self-hosted Actions runners. They exist to add
+capacity to the SAME fallback pool the five ARM64 runners serve, without renaming a job,
+changing a `runs-on:`, or narrowing which jobs may use the ARM64 pool (#5215).
+
+## The finding: ARM64 was never a requirement
+
+Every pool-eligible job in this repo asks for a **label**, never an architecture:
+
+| `runs-on:` | count | who claims it |
+| --- | --- | --- |
+| `ubuntu-latest` | 83 | GitHub-hosted **and** (while the fallback is engaged) the self-hosted pool |
+| `ubuntu-24.04` | 5 | **GitHub-hosted only** — pinned on purpose (`test-slow`, `workflow-lint`, `finding-provenance` ×2, `mirror-images`) |
+
+The architecture labels are **derived by GitHub from the host at registration** and cannot be
+set by hand: the ARM64 VMs register `self-hosted, Linux, ARM64, self-hosted-arm64, ubuntu-latest`,
+and this box registers `self-hosted, Linux, X64, self-hosted-x64, ubuntu-latest`. So:
+
+- `ARM64`/`X64` are **ornaments** — no job matches on them, and none can (a `runs-on` naming
+  either would have to name `self-hosted` too, which the repo forbids: `.github/workflows/python-ci.yml:1556`
+  is "Do NOT change it back to `ubuntu-latest`, and never to `self-hosted`", and the reason is
+  recorded at `:1544-1546` — a `self-hosted` pin removes the GitHub-hosted half of the race, so
+  during a hosted outage the required leg WAITS and "the aggregate stays pending — not answered
+  yet" instead of being answered by the pool).
+- `ubuntu-latest` is a **custom label** on the pool. `scripts/ci_runner_gate.sh:289`
+  (`fallback_on`) attaches it, `:290` (`fallback_off`) detaches it.
+- The ARM64-ness is an accident of the first runner's hardware (OrbStack VMs on an
+  Apple-Silicon Mac — `mirror-images.yml:92` records `orbctl run -m pi-runner uname -m` →
+  `aarch64`). No workflow depends on an arm64 binary, container image, or wheel: the only
+  arch-sensitive job in the repo (`mirror-images`) copies a **manifest list** and is pinned to
+  a hosted label for an unrelated reason (a fresh egress IP).
+
+**Contradiction test.** The recorded decision is that the local pool is **fallback-only**
+(`scripts/ci_runner_gate.sh:1-30`: jobs landing on local hardware compete with the agent fleet
+and the Tortoise graph — a local pytest run crashed FalkorDB, 178 restarts, 2026-10-12). Nothing
+here reverses it: the installer does not bake `ubuntu-latest` in at registration. `--fallback
+auto` (the default) reads the ARM64 pool's own state and attaches the fallback label to these
+runners **only if that pool is carrying it right now**; `--fallback on|off` overrides explicitly,
+and an unreadable state is a refusal (exit 2), never a guess. The gate's state stays the source
+of truth for when the pool serves CI. What changes is only *which architecture* may serve the
+fallback — which the decision never specified. The separate decision that pins five legs to
+`ubuntu-<version>` (the pool is ~2x slower and killed `test-slow` at its watchdog, #6897/#7867)
+is untouched: these runners deliberately **do not** claim any `ubuntu-<version>` label.
+
+## What is installed
+
+| | |
+| --- | --- |
+| Runner names | `pi-runner-x64-1`, `pi-runner-x64-2` |
+| Labels | `self-hosted`, `Linux`, `X64` (host-derived) + `self-hosted-x64` (custom, this arch's own) + `ubuntu-latest` while the fallback is engaged |
+| Directories | `/opt/gh-runner-x64` (instance 1), `/opt/gh-runner-x64-2` (instance 2) |
+| Service units | `actions.runner.daniel-ospina-tortoise.pi-runner-x64-<N>.service` (system mode, **enabled**) |
+| Version | pinned to the pool's `2.337.0`, tarball sha256 pinned in the installer |
+| Concurrency | one job per runner instance (that is how the Actions agent works) |
+
+## Sizing — why 2, not 1 and not 4
+
+Measured on a real job on this box (2026-10-22, `legal-e2e`, job `119852676052`): a single
+`python` process saturates one core (99.3%) with `apt` at 46% alongside, i.e. **~1.0–1.5 cores
+per concurrent job**, plus the per-job docker/FalkorDB it starts. Measured at install time:
+8 vCPU, load 0.30–1.78, 85–94% idle, 74–80 GB free, ~9 GB memory available.
+
+| count | cores for CI | cores left for agent lanes (8 total) | verdict |
+| --- | --- | --- | --- |
+| 1 | ~1.5 | ~6.5 | works, leaves measured headroom unused while 120+ runs queue |
+| **2** | **~3** | **~5** | **chosen** — doubles local capacity, keeps a wide margin for the lanes |
+| 4 | ~6 | ~2 | refused by the installer's guard: would starve the lanes |
+
+The installer encodes this as a **capacity guard** on CPU — `CORES_PER_RUNNER=2` +
+`CORES_RESERVED_FOR_AGENT_LANES=2`, checked after fork headroom and disk in the harness's own
+order. On this box `--count 4` refuses with *"4 runners need 4x2 cores + 2 reserved for agent
+lanes = 10, this box has 8"*. This is a bound on **this box's CPU**, not a cap on the agent
+lanes — no lane limit is set anywhere.
+
+The CPU guard is a capacity bound; **the memory leg is not** — it reads `MemAvailable`
+(`/proc/meminfo`), so it IS a live-load reading and it can refuse on a busy box (measured
+2026-10-22: 6G available refused `--count 2`, which needs 8G). That is deliberate fail-closed —
+two runners starting into 6G would OOM-kill the lanes' FalkorDB — but state it for what it is: of
+the four legs (forks, disk, cpu, memory), memory is the one whose reading moves with load. Every
+sizing unit is env-overridable (`CI_RUNNER_{CORES_PER_RUNNER,CORES_RESERVED,DISK_PER_RUNNER_GB,
+DISK_RESERVE_GB,MEM_PER_RUNNER_GB,MEM_RESERVE_GB,FORKS_PER_RUNNER}`) so a bound can
+be exercised on its own; such a value that is present and unparseable is refused as a usage
+error (exit 1), never coerced to zero. The two HOST readings (`CI_RUNNER_FORK_CAP`,
+`CI_RUNNER_NCPU` — pins for `ulimit -u` and the core count) are read, not sized, and an
+unparseable one is a GUARD refusal (exit 2), the same class as an unreadable headroom bound.
+
+## Recreate from scratch / after a reboot
+
+The runner is a **systemd service**, enabled at install, so a reboot needs no human step.
+Verify only:
+
+```bash
+systemctl is-enabled actions.runner.daniel-ospina-tortoise.pi-runner-x64-1.service   # enabled
+systemctl is-active  actions.runner.daniel-ospina-tortoise.pi-runner-x64-1.service   # active
+tools/install-ci-runner-x64.sh --status                                              # + the repo-side view
+```
+
+If a runner is gone (box rebuilt, disk lost, runner deleted), re-create it — this is the whole
+procedure, and it is idempotent: an already-configured dir is reused, and the systemd unit is
+re-INSTALLED only when `/etc/systemd/system/<unit>` is absent (`svc.sh install` runs
+conditionally), then STARTED. Re-running therefore recovers a stopped service and a missing unit;
+it does not call `systemctl enable` — the enable happened at the original install, and a unit that
+was explicitly disabled by hand stays disabled until someone enables it):
+
+```bash
+tools/install-ci-runner-x64.sh --count 2            # what was run here
+# → fallback: ENGAGED on the ARM64 pool now → labels=self-hosted-x64,ubuntu-latest
+tools/install-ci-runner-x64.sh --count 2 --dry-run  # plan + headroom arithmetic only
+```
+
+On the day this was recorded the gate was in fallback mode (all five ARM64 runners carried
+`ubuntu-latest`), so the new runners were registered with it too — which is why they took jobs
+within twenty seconds. That is a **state read, not a default**: with GitHub-hosted healthy the
+same command registers `self-hosted-x64` only, and the gate attaches the fallback label when it
+falls back.
+
+- `--count N` → `tools/install-ci-runner-x64.sh:479` (the scale loop) · the two mode blocks the
+  paragraphs below cite: `install` `:301` (arch refusal dies at `:306`) and `uninstall` `:354` ·
+  guards at `:301-350` (forks `:309`, disk `:329`, cpu/memory `:336`) · sha256 pin + registration
+  at `:490-500` (verify `:490`, token `:493`, one argv `:498-499`, `config.sh` `:500`) · systemd
+  install/start at `:510-512` · label resolution at `:177-219` (`fallback_engaged` `:181`,
+  `resolve_labels` `:192`) · `repair` `:241` · `--print-labels` `:274`.
+- `--count` is validated ONCE, before the mode dispatch, for EVERY mode (`:145-149`): a
+  `--count 0 --uninstall` is a usage error (exit 1), not a silent no-op that reports success
+  having deregistered nothing.
+- **`--uninstall` deletes only what it can PROVE is a runner install, and only after its unit is
+  gone** (`:353-462`; the proof is `is_runner_install` at `:173`, which accepts `.runner` or
+  `bin/Runner.Listener` — a lone `config.sh` is NOT proof): one of those must exist in the directory, every target is validated BEFORE the first
+  deletion, and every removal token is minted BEFORE the first deletion — so a refusal in any of
+  those phases leaves every directory untouched, never a half-uninstalled set. `CI_RUNNER_BASE` is
+  operator input, so "a directory exists at this path" is not evidence of a runner — the earlier
+  gate was exactly that, and `CI_RUNNER_BASE=/opt --uninstall` would have run `sudo rm -rf /opt`.
+  A validation refusal is exit 2 and nothing is removed. A target whose systemd unit cannot be
+  removed (`svc.sh uninstall` fails while the unit is still installed, or the unit is installed and
+  the directory has no `svc.sh`), **or whose `config.sh remove` fails**, is **left intact,
+  registration and all**, and reported (exit 3): the unit would otherwise survive pointing at a
+  deleted working directory, and a still-registered runner would lose the only local record that a
+  retry — and `--status` — can read, so `--uninstall` reported a clean removal while exiting 0.
+- **Exit codes** (`:53-66`; `--help` prints the same block): `0` ok · `1` usage · `2` guard
+  refused — headroom, arch, an undecidable fallback, or an uninstall target that is not provably
+  a runner, with nothing downloaded or registered, so re-run with a smaller `--count` · `3`
+  operation failed — download, sha256 verify, extract, token mint, `config.sh`, `svc.sh` (including
+  a unit removal that failed, whose target directory is then left intact, or a deregistration that
+  failed, likewise left intact), a tool missing from PATH, or a failed remote read.
+- `--print-labels` answers BEFORE the arch and headroom guards, so the label invariant is
+  checkable on any host (including the Apple-Silicon dev box and the ARM64 pool runners); the
+  arch refusal still governs every INSTALL — and only an install (`:301`, the `MODE = install`
+  block; the refusal itself dies at `:306`). `--status`, `--repair-labels` and `--print-labels` are
+  **not** gated by the host's architecture: they reach only `gh`, download nothing and run no local
+  binary, so a runner can be inspected or relabelled from any host.
+
+  ⚠️ **`--uninstall` is only HALF arch-free, and that matters when decommissioning.** The arch guard
+  does not refuse it, but the deregistration step is `./config.sh remove`, and the runner package's
+  own `config.sh` execs the listener for that verb — `./bin/Runner.Listener "$@"` — and that binary
+  is the x64 ELF the tarball extracts into the runner directory. On a foreign arch the exec fails
+  ("Exec format error"), the unit has already been removed (deliberately, first), and the runner
+  stays REGISTERED: the box is left half-decommissioned, and the failure is reported as exit 3 with
+  the captured `config.sh` output in the warning. So to remove a runner from a non-x86_64 host: let
+  it remove the unit, then deregister from an x86_64 host or delete the runner through the API.
+  (Measured on an unpacked `actions-runner-linux-x64` tarball, whose `config.sh:76-81` is that exec;
+  the version is a measurement detail, and the installed file is `$RUNNER_BASE/config.sh`.) (The
+  guard used to sit above the uninstall block too, which refused decommissioning on exactly the
+  ARM64 hosts the fallback pool runs on; `CI_RUNNER_ARCH` remains the seam if a host's arch must be
+  asserted by hand.)
+- `--fallback auto|on|off` decides whether `ubuntu-latest` is attached (auto follows the ARM64
+  pool). `--print-labels` answers "which labels would a runner get" without touching a guard,
+  token or the network — that is the seam the label invariant is tested through. `--repair-labels`
+  re-applies the label set to already-registered runners: the repair for residual 1, needing no
+  re-download and no re-registration.
+- Requires: `gh` authenticated with admin on the repo (mints the registration and removal tokens),
+  `curl`/`tar`/`sha256sum` for the pinned tarball, `sudo` for the system units — and `gh`, `unzip`
+  and `docker` **on the runner's own PATH**, because the lane jobs need them (#9018: a pool runner
+  missing them fails with exit 2, a false red rather than a queue delay). The installer warns
+  about a missing job tool instead of silently installing a runner that will redden CI.
+- Removing: `tools/install-ci-runner-x64.sh --uninstall --count 2` (deregisters, then deletes
+  the dirs; `--dry-run` first).
+
+## Verify it is actually serving
+
+```bash
+gh api repos/daniel-ospina/tortoise/actions/runners \
+  --jq '.runners[]|select(.name|startswith("pi-runner-x64"))|{name,status,busy,labels:[.labels[].name]}'
+```
+
+A queued job proves nothing on its own — the artifact is the **job detail naming the runner**:
+
+```bash
+gh api "repos/daniel-ospina/tortoise/actions/runs/<RUN>/jobs?per_page=100&filter=all" \
+  --jq '.jobs[]|select(.runner_name|test("x64"))|[.id,.name,.status,.conclusion,.runner_name]|@tsv'
+```
+
+Recorded on 2026-10-22 (queue: 75 tortoise + 48 agent-infra runs waiting, 5/5 ARM64 runners busy):
+
+| run | job | job id | result | runner |
+| --- | --- | --- | --- | --- |
+| 39787188701 | `test-isolation` | 119853473239 | success | `pi-runner-x64-1` |
+| 39787188701 | `license-surface` | 119853473352 | success | `pi-runner-x64-1` |
+| 39787791937 | `sigpipe-guard` | 119855408820 | success | `pi-runner-x64-1` |
+| 39786848662 | `legal-e2e` | 119852676052 | success | `pi-runner-x64-1` |
+| 39786088684 | `test (c)` | 119851988988 | success | `pi-runner-x64-2` |
+
+## Known residuals
+
+The installer's invariants are pinned by `tests/test_ci_runner_x64_install.py` (registered in
+`config/ci-surfaces.yml`'s `core` surface AND in `carve_out:`, which is the URI-unset leg it
+belongs to). It drives the script as a subprocess in a hermetic env — a temp base dir, a stub
+`gh`, no network — and every case runs on any host and any architecture; there is no skip path.
+
+1. **A stamped runner now HEALS on the next gate tick — #2327 is FIXED; what remains is when the
+   gate re-runs, and the manual re-sync.** The pre-#2327 gate rewrote the labels of *every* runner
+   it could enumerate, which is what stamped `self-hosted-arm64` onto an x86 box and dropped
+   `self-hosted-x64` — a false architecture claim a future arch-specific job could be routed into,
+   with nothing in the API distinguishing it from an ARM64 box. `daniel-ospina/agent-infra#2327`
+   landed as PR #2338 (gate commit `63b768f6d`, on `agent-infra` `main`): `managed_ids`
+   (`scripts/ci_runner_gate.sh:187`) selects only runners carrying a pool marker, `labels_for`
+   (`:212`) derives each body from THAT runner's own GitHub host label (`ARM64`/`X64`), and the
+   legacy `self-hosted-arm64` stamp is deliberately NOT consulted — so an already-stamped x86
+   runner is repaired rather than re-stamped. `ubuntu-latest` is the only label the gate owns and
+   the only one it toggles (`fallback_on`/`fallback_off` `:289-290`).
+
+   ⛔ **The trigger is still the next gate TICK, not the next transition, and that is the part that
+   stays a risk.** The gate re-applies labels when `mode != want || prev != want` (`:379`), and
+   `current_mode` (`:292`) counts *any* runner carrying `ubuntu-latest` as `local` — while these
+   runners carry that label the gate cannot read `github`, so on a day GitHub-hosted is healthy it
+   runs `fallback_off`, which post-#2327 strips `ubuntu-latest` from an x64 runner and emits
+   `{self-hosted-x64}` (plus any custom label that runner already carried, which the gate never
+   removes — `labels_for` `:218-233`). `tools/install-ci-runner-x64.sh --repair-labels` re-applies this arch's
+   marker and syncs the fallback label to the gate's state by hand, with no re-registration.
+2. **The pool is still the slower class for long legs.** These runners are not pinned off the
+   fast matrix (`test (a)…(i)`), so a 20m watchdog leg can still be killed here if this box
+   turns out slower than hosted under load. That is the #6897 measurement, unchanged; the
+   version-pinned hosted legs stay pinned.
+3. **`ubuntu-latest` remains ambiguous by design.** Any job asking for it can land on
+   GitHub-hosted, an ARM64 runner, or one of these — that ambiguity is what the fallback is
+   for, and why the five legs that need a specific class are version-pinned.

@@ -83,7 +83,7 @@ def _local_preview_servers() -> None:
 # #2698: ChatGPT is key-less OAuth — deliberately NOT a wizard harness choice.
 # #2912: level 1 = the harness family, level 2 = the surface (only Claude and
 # Codex have one).
-WIZARD_HARNESS_FAMILIES = ["Claude", "Codex", "Cursor", "Pi"]
+WIZARD_HARNESS_FAMILIES = ["Claude", "Codex", "Cursor", "Pi", "ChatGPT"]
 WIZARD_CLAUDE_SURFACES = ["Claude Code", "Claude Desktop", "Claude Web"]
 WIZARD_CODEX_SURFACES = ["Codex CLI", "Codex Desktop"]
 
@@ -486,9 +486,11 @@ def test_first_timer_wizard_human_steps(page: Page) -> None:
     _seed_cookie(page, "u-onb")
     cap = _wire(page, key_rows=[DURABLE_ROW])
     _walk_to_connect(page)
-    # #2865: the chooser is no longer owner/admin-only — a member reaches the 4
-    # harness families (the OAuth leaves need no mint).
-    assert page.locator(".harness-family").count() == 4, \
+    # #2865: the chooser is no longer owner/admin-only — a member reaches every
+    # harness family (the OAuth leaves need no mint). #9660 added the ChatGPT
+    # family, so this is FIVE; the count is asserted against the rendered row
+    # rather than derived, so a family disappearing is a failure here.
+    assert page.locator(".harness-family").count() == 5, \
         "members must reach the harness chooser (#2865 removed the role gate)"
     # #2912 (test-review P2): the member LEDE, measured rather than inferred.
     # The default Claude Code leaf is KEYED, so the member paste lede stays.
@@ -966,8 +968,8 @@ def test_owner_connect_step_mints_never_expiring_key_in_flow(page: Page) -> None
     cap = _wire(page, role="owner")
     _walk_to_connect(page)
 
-    # #2698/#2912 shipped chooser: 4 families at the top level, ChatGPT
-    # (key-less OAuth) filtered out.
+    # #2698/#2912 shipped chooser: every family at the top level; #9660 added
+    # ChatGPT (key-less OAuth) as the fifth.
     family_names = page.locator(".harness-family").all_inner_texts()
     assert family_names == WIZARD_HARNESS_FAMILIES, f"connect-step family row drifted: {family_names}"
     # Level 2: Claude expands to its three surfaces; the default is Claude Code.
@@ -1378,7 +1380,8 @@ def test_member_without_key_reaches_keyless_claude_connectors(
     _walk_to_connect(page)
 
     # (a) The chooser itself is reachable for a member — the #2865 gate change.
-    expect(page.locator(".harness-family")).to_have_count(4, timeout=10_000)
+    # Five families since #9660 added ChatGPT.
+    expect(page.locator(".harness-family")).to_have_count(5, timeout=10_000)
     expect(page.get_by_role("button", name="Claude", exact=True)).to_be_visible(timeout=5_000)
 
     # Level 1 → level 2: Claude is already the active family; pick the surface.

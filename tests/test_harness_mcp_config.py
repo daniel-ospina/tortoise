@@ -98,11 +98,6 @@ class TestHostedHttpShapes:
             cfg = _harness_mcp_config("claude", "tt_testkey", api_url)
             assert cfg["mcpServers"]["tortoise"]["url"] == ENDPOINT
 
-    def test_all_harness_keys_emitted(self):
-        for harness in ("claude", "codex", "cursor", "pi"):
-            cfg = _harness_mcp_config(harness, "tt_testkey", "https://api.premiselabs.co")
-            assert cfg, f"empty config for {harness}"
-
 
 class TestWizardCopyParity:
     """#981-contract follow-up: the CLI hosted config must match the dashboard
@@ -714,7 +709,7 @@ class TestDocsPageAndSkillConfig:
     ROW_HEADINGS = ("<h4>Claude Code</h4>", "<h4>Cursor", "<h4>Pi",
                     "<h4>Codex CLI</h4>", "<h4>Codex Desktop (no terminal)</h4>",
                     "<h4>Claude Desktop</h4>", "<h4>Claude Web</h4>",
-                    '<h4 id="chatgpt">ChatGPT (Developer mode)</h4>')
+                    '<h4 id="chatgpt">ChatGPT</h4>')
 
     def test_quickstart_cloud_teaches_the_http_shape_indirectly(self):
         """#4674: the cloud quickstart taught `streamable-http` plus a literal
@@ -886,20 +881,21 @@ class TestDocsPageAndSkillConfig:
         return found[0]
 
     def test_4836_docs_page_is_the_live_chatgpt_carrier(self):
-        """#4836: ChatGPT has no dashboard CHOOSER/connect surface (#2912's 4-family
-        chooser keeps it out; #2698 deleted the flat tab first). It is not absent
-        from the dashboard — the LIVE Memory-sources capture panel lists it as
-        unsupported-with-a-reason — but nothing there carries its onboarding
-        instructions, so the public docs page does. That page is the surface that
-        already CLAIMED to describe ChatGPT
-        connection. That claim was false ("the dashboard's ChatGPT tab") and must
-        not come back.
+        """#4836: the public docs page carries the ChatGPT journey end-to-end.
 
-        The row is the JOURNEY a ChatGPT user performs, so the assertions below
-        are per-step: a `/docs#chatgpt` visitor has to reach a verified
-        connection, not just a URL. Dropping a step, or replacing one with a
-        claim that is false for ChatGPT (a pasted key, an unnamed plan set),
-        must fail here rather than ship.
+        The premise this file was written against is HISTORY now: ChatGPT used to
+        have no dashboard CHOOSER/connect surface (#2912's 4-family chooser kept
+        it out; #2698 deleted the flat tab first), so the docs page was the only
+        carrier — and it CLAIMED a "the dashboard's ChatGPT tab" that never
+        existed. That claim was false and must not come back.
+
+        #9660 makes ChatGPT a live chooser leaf with its own connect card, so the
+        docs row and the card are two renderings of ONE journey. This test keeps
+        pinning the docs row as the journey a ChatGPT user performs, because it is
+        the page the served onboarding document links to; a `/docs#chatgpt`
+        visitor has to reach a verified connection, not just a URL. Dropping a
+        step, or replacing one with a claim that is false for ChatGPT (a pasted
+        key, an unnamed plan set), must fail here rather than ship.
         """
         canonical = self._dashboard_constant("CANONICAL_MCP_URL")
         instructions_url = self._dashboard_constant("ONBOARDING_INSTRUCTIONS_URL")
@@ -928,22 +924,108 @@ class TestDocsPageAndSkillConfig:
             "the ChatGPT row must carry the ordered procedure the user performs")
         steps = row.split("<ol>", 1)[1].split("</ol>", 1)[0]
         for step in (
-            "Security and login",   # 1 — where the Developer-mode toggle lives
-            "(Plus / Pro / Business / Enterprise / Education)",  # 1 — plan set
-            "chatgpt.com/plugins",  # 2 — the Developer-mode app entry point
-            "Scan Tools",           # 4 — OAuth enrolment
-            "Authorize",            # 4 — consent (key-less connect completes here)
-            "paste it into that chat",  # 7 — the hand-off to the agent
-            "to verify the connection",  # 8 — the row names the verification hand-off
-            "file your first memory",  # 8 — the journey's outcome
-            "plan-dependent",       # 8 — which tools appear is plan-dependent
+            "chatgpt.com/plugins",       # 1 — the surface the connector is created on
+            "Add custom MCP server",     # 1 — the real entry point (#9660)
+            "Create as a plugin",        # 2 — the creation dialog's primary button
+            "settings/plugins-settings",  # 3 — where the installed plugin + its Connect live
+            "View details",              # 3 — the observed control on the plugin row
+            "Connect",                   # 3 — the OAuth grant is a SEPARATE act
+            "Connect Tortoise",          # 3 — the consent dialog between Connect and Authorize
+            "Authorize",                 # 3 — consent (key-less connect completes here)
+            "pick the Organization you are onboarding",  # 3 — the MULTI-org chooser (oauth.py)
+                                       #     hides the named-org line and keeps
+                                       #     Authorize disabled until it is picked
+            "chatgpt.com/skills",        # 4 — the Skills surface the archives install on
+            "Install the Tortoise skills",  # 4 — the hand-over is an INSTALL, not a paste
+            "Upload from your computer", # 4 — ChatGPT's own Skills surface is the hand-off
+            "Replace existing",          # 4 — the only update path a user-owned snapshot has
+            "select all three files",   # 4 — one pick installs the set (verified: multi-select)
+            "verifies the connection",  # 5 — the row names the verification hand-off
+            "files your first memory",   # 5 — the journey's outcome
+            "plan-dependent",            # 5 — which tools appear is plan-dependent
         ):
             assert step in steps, (
                 f"the ChatGPT row must keep step {step!r} — a /docs#chatgpt "
                 "visitor follows this list to a verified connection (#4836)")
-        assert steps.count("<li>") == 8, (
-            "the ChatGPT procedure is 8 steps; if you deliberately changed the "
+        # #9660 owner ruling (copy): the row is a list of ACTIONS. The graph and
+        # pack material is context — the user has nothing to do at connect time —
+        # so it lives below the list, not as steps 5 and 6 of a procedure. Pin the
+        # structure: exactly 5 top-level steps, and the field list nested inside
+        # step 2 (the creation form is ONE modal, so it reads as one step).
+        nested = re.search(r"<ul>.*?</ul>", steps, re.S)
+        assert nested, (
+            "step 2 must render the dialog as a FIELD LIST — it is a single modal "
+            "with Name/Description/Connection/Server URL/Authentication/Icon")
+        for field in ("<strong>Name</strong>", "<strong>Description</strong>",
+                      "<strong>Connection</strong>", "<strong>Server URL</strong>",
+                      "<strong>Authentication</strong>", "<strong>Icon</strong>"):
+            assert field in nested.group(0), (
+                f"the dialog field list must name {field} — these are the fields "
+                "OpenAI's 'Add custom MCP server' modal actually shows (#9660)")
+        top_level = re.sub(r"<ul>.*?</ul>", "", steps, flags=re.S)
+        assert top_level.count("<li>") == 5, (
+            "the ChatGPT procedure is 5 steps; if you deliberately changed the "
             "journey, update this count and the per-step literals together")
+        # #9660 owner ruling (copy): the plan floor is a CLAIM about OpenAI's
+        # product, so it is stated on BOTH surfaces — the docs row is the
+        # reference copy the served document points at, and a Free-plan visitor
+        # who reads only it must learn why the Add button is absent.
+        assert "paid ChatGPT plan" in row and "Plus" in row, (
+            "the ChatGPT row must warn that custom connectors need a paid "
+            "ChatGPT plan (Plus or higher)")
+        # #9660: the hand-over is a `.skill` ARCHIVE per skill, not a `SKILL.md`
+        # download. The uploader enforces the filename — a file named
+        # `tortoise-file-finding.md` is refused ("Choose a .zip, .skill, or
+        # SKILL.md file") — so several `SKILL.md` downloads collide in the user's
+        # Downloads folder and the renamed copies cannot be uploaded at all.
+        # This pins card → artifact: every href must name an archive that exists,
+        # and no `download="SKILL.md"` link may come back, because that shape
+        # instructs the user to do something the uploader rejects.
+        #
+        # #4365: THREE archives, and `tortoise-onboarding` is not one of them. The
+        # row briefly handed over a fourth, so a ChatGPT user uploaded a document
+        # whose own first screen says it is never installed as a skill — and the
+        # agent reading it was told both "never a skill" and "install this as a
+        # skill". The served document is still linked from this row (it is read,
+        # not installed), so the reachability claim is unaffected.
+        hrefs = re.findall(r'href="(/skills/[^"]+\.skill)"', steps)
+        assert len(hrefs) == 3, (
+            f"step 4 must hand over one .skill archive per REUSABLE skill, and no "
+            f"archive for the onboarding instructions (got {hrefs})")
+        assert "/skills/tortoise-onboarding.skill" not in hrefs, (
+            "the onboarding document must never ship as an installable archive "
+            "(#4365: it is delivered as instructions)")
+        for href in hrefs:
+            on_disk = (REPO_ROOT / "website" / href.lstrip("/"))
+            assert on_disk.is_file(), (
+                f"the card links {href} but {on_disk.relative_to(REPO_ROOT)} does "
+                "not exist — run uv run python tools/build_skill_archives.py")
+        assert "download=\"SKILL.md\"" not in steps, (
+            "a download=\"SKILL.md\" link collides with the other three skills "
+            "and the renamed file is REJECTED by the uploader (#9660)")
+        # #9660: the Developer-mode PREREQUISITE is gone from OpenAI's flow, and
+        # the creation dialog has no "Scan Tools" button. Both were in this row
+        # and both were unasserted-against (the literals below pinned the STALE
+        # copy as required), so a user hunted a toggle that no longer exists and
+        # looked for a button that was never there. Read off a signed-in Plus
+        # account on 2026-10-23 — `/settings/connectors` redirects to
+        # `/settings/plugins-settings`, `Security and login` carries MFA /
+        # sessions / Lockdown mode / app-CSP and no Developer-mode switch, and the
+        # plugin's Version field reads `dev mode` (the RESULT of the flow, never a
+        # step). The owner then ruled the mention OUT of user copy entirely, so
+        # the bare token is a failure here too. Screenshots are attached to the
+        # PR; a re-add of any literal below means the card has gone back.
+        for stale in (
+            "Security and login",
+            "Scan Tools",
+            "Developer mode",
+            "(Plus / Pro / Business / Enterprise / Education)",
+            "the <strong>+</strong> button",
+            "Developer-mode app",
+        ):
+            assert stale not in steps, (
+                f"the ChatGPT row must not send the user to {stale!r} — it is not "
+                "in OpenAI's current connector flow (#9660, observed live)")
         # The row must NOT name a RETIRED tool: `tortoise_health` is absent from
         # `tools/list` (#3883), so a tool-grant client like ChatGPT cannot call
         # it — naming it would claim a verification step ChatGPT cannot perform.
@@ -963,9 +1045,10 @@ class TestDocsPageAndSkillConfig:
             f"the ChatGPT row must teach the canonical connector URL {canonical}")
         assert f"<code>{canonical}/</code>" not in steps, (
             "the ChatGPT row must not teach the slashed form (CANONICAL_MCP_URL)")
-        assert "no trailing slash" in steps, (
-            "the row must state the URL exactly — the connector form is the "
-            "canonical endpoint, not the slashed config-file form")
+        # The VALUE above is the substance; the copy no longer explains the slash
+        # (owner ruling, #9660 — the server rstrips it, so it is not a failure a
+        # reader needs to avoid). No assertion on that wording: it is copy style,
+        # and the owner reviews copy directly.
         # The carrier LINKS the SERVED instructions document (the reach claim is
         # that a user can open it), and it is the same constant the dashboard
         # serves — a second hard-coded copy on a static page is only safe while
@@ -1022,7 +1105,11 @@ class TestDocsPageAndSkillConfig:
             "here so a shape change names the reason instead of raising "
             "IndexError out of the slice below")
         steps = row.split("<ol>", 1)[1].split("</ol>", 1)[0]
-        row_norm = self._copy_norm(steps)
+        # #9660 owner ruling (copy): the graph and pack material is CONTEXT, not
+        # a step — the user has nothing to do at connect time — so it sits below
+        # the ordered list. These claims are therefore asserted against the whole
+        # ROW; a card that dropped them entirely still fails here.
+        row_norm = self._copy_norm(row)
 
         # ── which graph ────────────────────────────────────────────────────
         # The discovery tool named must be a REAL, ACTIVE, read-risk tool: a
@@ -1030,7 +1117,7 @@ class TestDocsPageAndSkillConfig:
         # exists for (#9660's plan-dependent write-tool finding), so naming a
         # write/admin tool would prescribe a call that cannot be made.
         from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
-        assert "tortoise_list_graphs" in steps, (
+        assert "tortoise_list_graphs" in row, (
             "the row must name the graph-discovery tool — a connector carries no "
             "graph of its own, so the user has to see what exists before writing")
         active = {t.name: t for t in TOOL_REGISTRY}
@@ -1047,7 +1134,7 @@ class TestDocsPageAndSkillConfig:
         # teaches must be one the tool really accepts: a card that names an
         # `overview(section=…)` value the handler rejects sends the agent into a
         # validation error at the one moment it is trying to orient itself.
-        assert 'section="graphs"' in steps, (
+        assert 'section="graphs"' in row, (
             "the row must name the advertised overview(section=\"graphs\") form")
         assert "tortoise_overview" in active, (
             "the row names the advertised overview tool, so it must stay active")
@@ -1192,7 +1279,7 @@ class TestDocsPageAndSkillConfig:
         assert "default graph" in row_norm, (
             "the row must state that an UNNAMED call lands on the organization's "
             "DEFAULT graph — that is the connector's actual behaviour (#9340)")
-        assert "graph</code> argument" in steps, (
+        assert "graph</code> argument" in row, (
             "the row must state that a call CAN be pointed at another graph of "
             "the same organization, now that #9340 landed it")
 
@@ -1255,7 +1342,7 @@ class TestDocsPageAndSkillConfig:
             "the row names the five starter packs; DEFAULT_STARTER_PACKS is the "
             f"owner of that set: {DEFAULT_STARTER_PACKS}")
         for ns in DEFAULT_STARTER_PACKS:
-            assert f"<code>{ns}</code>" in steps, (
+            assert f"<code>{ns}</code>" in row, (
                 f"the row must name the starter pack {ns!r}: a new organization's "
                 "default graph holds pack_state.DEFAULT_STARTER_PACKS (#318)")
         # …and the seeding is what keeps that true. Each provisioning path is
@@ -1405,14 +1492,18 @@ class TestDocsPageAndSkillConfig:
         # The row is a procedure a visitor follows top to bottom (#9660), so the
         # one instruction that needs a live conversation — ask the agent to call
         # the graph-discovery tool — must come AFTER the chat is opened and the
-        # instructions document is pasted: before that there is no agent to ask.
+        # workflows reached it (installed as a ChatGPT skill, or pasted into the
+        # chat): before that there is no agent to ask.
         # The ordering is about the CONVERSATION, not about whether a graph
         # exists — `hosted_api.agent_signup` creates the `kind='default'` graph
         # at org creation, so a graph is listable from signup. What the user
         # cannot know before the write is WHICH graph the write landed in, and
         # reading the graph back is what answers it.
+        handoff = "Install the Tortoise skills"
+        assert handoff in steps, (
+            "the row must keep the workflows hand-off step (#9660)")
         for call in ('section="graphs"', "tortoise_packs_list"):
-            assert steps.index("paste it into that chat") < steps.index(call), (
+            assert row.index(handoff) < row.index(call), (
                 f"the {call} call must be asked of the agent AFTER the chat "
                 "exists and the document is pasted — before that the instruction "
                 "is not actionable in place, which defeats the point of an "
@@ -1457,11 +1548,16 @@ class TestDocsPageAndSkillConfig:
         assert re.search(r"^/docs\.html\s+/docs(\s+\d+)?\s*$", redirects, re.M), (
             "the carrier URL's path must keep resolving to docs.html")
         assert "chatgpt.com/plugins" in note, (
-            "§2's note must keep naming the ChatGPT Developer-mode path")
+            "§2's note must keep naming the ChatGPT connector surface")
         assert "ChatGPT tab" not in note, (
             "§2's note must not name the retired dashboard ChatGPT tab")
-        assert "no ChatGPT surface in the dashboard chooser" in note, (
-            "§2's note must state there is no ChatGPT chooser surface")
+        # #9660 OWNER RULING (2026-10-23): the chooser carries a ChatGPT surface
+        # now, so §2 must say so instead of the (now false) exclusion.
+        assert "no ChatGPT surface in the dashboard chooser" not in note, (
+            "§2's note still claims ChatGPT is absent from the dashboard chooser — "
+            "the #9660 owner ruling added it")
+        assert "dashboard's connect step (the ChatGPT" in note, (
+            "§2's note must name the dashboard ChatGPT surface a user now takes")
         # The document ITSELF is what a ChatGPT agent receives, so the key
         # prohibition has to travel with it — not only on the human-facing page
         # (docs.html), whose warning the pasted document never carries.
@@ -1518,7 +1614,13 @@ class TestDocsPageAndSkillConfig:
     def test_skill_does_not_teach_streamable_type(self):
         skill = self.SKILL.read_text(encoding="utf-8")
         assert '"type": "streamable-http"' not in skill
-        assert 'use `"http"`' in skill, "skill must state the canonical type value"
+        # The POSITIVE half, scoped to the skill (the docs' positive half is
+        # `test_docs_hosted_json_blocks_use_env_indirection_and_canonical_type`,
+        # which PARSES each block). Without this line nothing asserts that the
+        # served document still teaches the canonical value at all.
+        assert '"type": "http"' in skill, (
+            "SKILL.md must state the canonical `\"type\": \"http\"` value — a "
+            "Claude Code entry with no type is read as stdio and skipped")
 
     def test_skill_cursor_and_pi_rows_omit_type(self):
         skill = self.SKILL.read_text(encoding="utf-8")
@@ -1529,14 +1631,11 @@ class TestDocsPageAndSkillConfig:
             row = skill.split(start_h, 1)[1].split(end_h, 1)[0]
             assert '"type"' not in row, f"{start_h}: remote config must omit `type`"
 
-    # ── cross-surface agreement (issue #3145 verification checklist) ───
-
-    def test_docs_and_skill_agree_on_canonical_type(self):
-        docs = self.DOCS.read_text(encoding="utf-8")
-        skill = self.SKILL.read_text(encoding="utf-8")
-        assert '"type": "http"' in docs
-        for name, surface in (("docs.html", docs), ("SKILL.md", skill)):
-            assert '"type": "streamable-http"' not in surface, f"{name} still teaches streamable-http"
+    # `docs` + `skill` agreement on the canonical type is owned by
+    # `test_docs_mcp_section_has_no_streamable_type` + the parsing check above
+    # (docs) and `test_skill_does_not_teach_streamable_type` (skill, both
+    # directions); a third copy that re-checked both surfaces against the same
+    # string added no coverage (#9660 review: it is one failure counted twice).
 
 
 class TestCaptureInstallSeam:
@@ -1894,3 +1993,377 @@ class TestCommittedRepoMcpJson:
                             f"variable a client exports, so {value!r} is unset "
                             f"in practice and expands to an empty value"
                         )
+
+
+# The ChatGPT arm's SELECTOR. `main.jsx` opens the card's ternary with it, and
+# every copy assertion in the chatgpt journey test below has to be bound to the
+# arm it opens (#9660 review).
+_CHATGPT_ARM_MARKER = "wizardConnectHarness === 'chatgpt'"
+
+# The arm's END: the NEXT harness arm's ternary terminator. Anchored on the
+# arm-SHAPED terminator (`) : <name> ?`) rather than on the bare identifier —
+# `wizardKeyless` also names a const, an `else if (wizardKeyless)` node branch
+# BEFORE this arm and a nav-button label AFTER every arm, so a bare
+# `find("wizardKeyless")` answers a question nobody asked (#9660 review, P1) — and
+# the match must BE the key-less one, so a sibling arm inserted in between cannot
+# be swallowed (#9660 review, P3: blacklisting one identifier spelling missed
+# `) : wizardDesktop ? (` and `) : wizardKeyless && wizardExtra ? (`).
+_ARM_TERMINATOR = re.compile(r"\)\s*:\s*([A-Za-z_$][\w$.]*)\s*(\?|&&|\|\||===|!==)")
+
+
+def _anchor(text: str, needle: str, what: str) -> int:
+    """`text.find(needle)`, asserted — never a bare `ValueError` from `.index()`.
+
+    Every offset this file derives from a source literal routes through here, so a
+    moved heading reports *which* anchor went missing instead of dying as
+    `ValueError: substring not found` naming nothing (#9660 review, P3).
+    """
+    position = text.find(needle)
+    assert position != -1, (
+        f"{what}: the anchor {needle!r} no longer appears — the copy this pin "
+        "reads is gone, or it moved behind different text. Update the anchor.")
+    return position
+
+
+def _chatgpt_arm_bounds(main: str) -> tuple[int, int]:
+    """(start, end) of the ChatGPT connect card inside `main.jsx` source.
+
+    `start` is the first character AFTER the arm's opening selector; `end` is the
+    start of the `) : wizardKeyless ? (` terminator — the key-less Claude arm that
+    follows the chatgpt one. Extracted (and unit-tested on synthetic source by
+    `test_9660_the_chatgpt_arm_bounds_red_on_a_wrong_shape`) because the two ways
+    this can go wrong are silent, not loud:
+
+    * an anchor keyed on the bare identifier also matches a nav-button label far
+      below every arm, which makes the ordering claim and the slice pass from the
+      WRONG position — moving the chatgpt card after the key-less branch, the
+      exact regression the claim names, then stays green;
+    * an arm whose end simply runs to the next terminator swallows any sibling
+      arm inserted in between, so `after()` can be satisfied by another harness's
+      copy while this card lost it. The end is therefore taken from the first
+      arm-SHAPED terminator and REQUIRED to be the key-less one, which reds on a
+      sibling however it is spelled.
+
+    Both raise `AssertionError` naming what moved — never a bare `ValueError` from
+    `str.index`.
+    """
+    branch = main.find(_CHATGPT_ARM_MARKER)
+    assert branch != -1, (
+        "the chatgpt connect arm is gone from main.jsx — the selector "
+        f"{_CHATGPT_ARM_MARKER!r} no longer appears, so every copy assertion in "
+        "the journey test would be judging some other arm. Restore the arm or "
+        "update this guard with it.")
+    start = branch + len(_CHATGPT_ARM_MARKER)
+    terminator = _ARM_TERMINATOR.search(main, start)
+    assert terminator is not None, (
+        "the chatgpt arm's end anchor is gone from main.jsx: the connect step no "
+        "longer offers a `) : wizardKeyless ? (` branch after the chatgpt one. "
+        "The chatgpt card must come BEFORE the key-less one — chatgpt is key-less "
+        "too, so ordering decides which copy it gets. Update this guard.")
+    assert (terminator.group(1), terminator.group(2)) == ("wizardKeyless", "?"), (
+        "the first arm after the chatgpt card is not the key-less one "
+        f"({terminator.group(0).strip()!r}) — a SIBLING arm sits between them, and "
+        "every copy assertion below would be satisfied from it while the chatgpt "
+        "card lost the copy")
+    end = terminator.start()
+    assert "wizardConnectHarness ===" not in main[start:end], (
+        "a second harness branch sits between the chatgpt card and the key-less "
+        "one — every copy assertion below would be satisfied from that SIBLING "
+        "arm while the chatgpt card lost the copy")
+    return start, end
+
+
+def _inside(main: str, marker: str, start: int, end: int) -> int:
+    """Position of `marker` INSIDE the arm `[start, end)`, with a message.
+
+    Bounded on both sides: `find` alone accepts a marker that survives only in a
+    sibling branch, which is the false green this bound exists to kill.
+    """
+    position = main.find(marker, start)
+    assert position != -1, (
+        f"the chatgpt card no longer renders {marker!r} — the copy this test "
+        "pins is gone, or it now lives outside the card")
+    assert position < end, (
+        f"{marker!r} is rendered by a SIBLING harness branch, not the chatgpt "
+        "card — the copy this test pins is not in the arm it names")
+    return position
+
+
+def test_9660_the_chatgpt_arm_bounds_red_on_a_wrong_shape():
+    """#9660 review, non-vacuity: the arm guards must RED on each wrong shape.
+
+    `_chatgpt_arm_bounds` is what makes every copy assertion in the journey test
+    arm-bound, and it cannot be proven by asserting over the real `main.jsx` —
+    that file is the CORRECT shape, so a guard returning "whatever is there"
+    passes. Each case below is synthetic source carrying one plausible defect.
+    """
+    # A correct shape: the card, then the key-less terminator, then a nav-button
+    # use of the SAME identifier further down (`{busy ? 'x' : (wizardKeyless`).
+    good = (
+        "{wizardConnectHarness === 'chatgpt' ? (\n"
+        "  <p>card</p>\n"
+        ") : wizardKeyless ? (\n"
+        "  <p>keyless</p>\n"
+        "{wizardConnectBusy ? 'Checking…' : (wizardKeyless\n"
+    )
+    start, end = _chatgpt_arm_bounds(good)
+    assert "<p>card</p>" in good[start:end] and "<p>keyless</p>" not in good[start:end], (
+        "the arm must stop at the multi-line terminator, not run down to the "
+        "key-less branch or the nav-button use of the identifier")
+    assert _inside(good, "<p>card</p>", start, end) == good.index("<p>card</p>")
+
+    # The regression the ordering claim names: the card MOVED AFTER the key-less
+    # branch. A bare-identifier anchor finds the nav-button label below and calls
+    # that the end, so the old helper stayed green here.
+    moved = (
+        "{wizardConnectHarness === 'codex' ? (\n"
+        "  <p>other</p>\n"
+        ") : wizardKeyless ? (\n"
+        "  <p>keyless</p>\n"
+        ") : wizardConnectHarness === 'chatgpt' ? (\n"
+        "  <p>card</p>\n"
+        "{busy ? 'Checking…' : (wizardKeyless\n"
+    )
+    with pytest.raises(AssertionError, match="must come BEFORE the key-less one"):
+        _chatgpt_arm_bounds(moved)
+
+    # The key-less ternary deleted outright: the anchor names that, too.
+    with pytest.raises(AssertionError, match="end anchor is gone"):
+        _chatgpt_arm_bounds(
+            "{wizardConnectHarness === 'chatgpt' ? (\n  <p>card</p>\n")
+
+    # A SIBLING harness arm inserted between the card and the key-less branch:
+    # the arm must not swallow it, or its copy satisfies the pins.
+    sibling = (
+        "{wizardConnectHarness === 'chatgpt' ? (\n"
+        "  <p>card</p>\n"
+        ") : wizardConnectHarness === 'codex' ? (\n"
+        "  <p>other</p>\n"
+        ") : wizardKeyless ? (\n"
+    )
+    with pytest.raises(AssertionError, match="SIBLING arm"):
+        _chatgpt_arm_bounds(sibling)
+
+    # …and the same guard under the TWO spellings a blacklist of
+    # `wizardConnectHarness ===` missed (#9660 review, P3): a differently-named
+    # sibling arm, and a REFINEMENT of the key-less one. Both keep a terminator
+    # in the arm, so an end anchor that only looks for `: wizardKeyless ?` in the
+    # text would return a region that includes the sibling.
+    for spelling in (") : wizardDesktop ? (\n  <p>other</p>\n",
+                    ") : wizardKeyless && wizardExtra ? (\n  <p>other</p>\n"):
+        widened = (
+            "{wizardConnectHarness === 'chatgpt' ? (\n"
+            "  <p>card</p>\n"
+            + spelling
+            + ") : wizardKeyless ? (\n"
+        )
+        with pytest.raises(AssertionError, match="SIBLING arm"):
+            _chatgpt_arm_bounds(widened)
+
+    # …and `after()` itself is bounded at the far end: a marker that only exists
+    # in the sibling branch is not the chatgpt card's copy.
+    with pytest.raises(AssertionError, match="SIBLING harness branch"):
+        _inside(good, "<p>keyless</p>", start, end)
+    with pytest.raises(AssertionError, match="no longer renders"):
+        _inside(good, "<p>absent</p>", start, end)
+
+
+def test_9660_chatgpt_is_a_live_onboarding_journey_not_a_docs_dead_end():
+    """#9660 OWNER RULING (2026-10-23): the dashboard's connect step must offer
+    ChatGPT as a first-class journey.
+
+    Before this, a signed-up ChatGPT user reached the harness chooser and found
+    no ChatGPT option at all (#2698 deleted its tab; #2912's four-family chooser
+    excluded it), so the flow dead-ended and the public docs page was their only
+    carrier. The owner directed that the flow itself must carry the journey:
+    pick ChatGPT → connect → install the skills → first job, with the smallest
+    number of user acts.
+
+    The assertions read the RENDERED branch in main.jsx (the surface a user
+    actually gets) plus the two modules that feed it, and they pin exactly the
+    facts verified in the real ChatGPT UI on 2026-10-23 — the field list, the
+    primary button, the connection surface, and the plan floor. A reworded
+    owner fails here instead of shipping a journey that no longer matches the
+    product it describes.
+    """
+    root = Path(__file__).resolve().parent.parent
+    main = (root / "website" / "apps" / "dashboard" / "src" / "main.jsx").read_text(
+        encoding="utf-8")
+    harnesses = (root / "website" / "apps" / "dashboard" / "src" / "harnesses.js"
+                 ).read_text(encoding="utf-8")
+
+    # 1. The chooser carries it (the exclusion this ruling reverses).
+    assert "Object.freeze({ id: 'chatgpt', name: 'ChatGPT', surfaces: Object.freeze([]) })" in harnesses, (
+        "the ChatGPT family must be in HARNESS_FAMILIES — without it the connect "
+        "step has no ChatGPT option and the flow dead-ends in the docs page")
+    assert "HARNESSES = ['pi', 'cursor', 'claude', 'codex', 'claude-desktop', 'claude-web', 'chatgpt']" in (
+        root / "website" / "apps" / "dashboard" / "scripts" / "gen-wizard-prompts-snapshot.mjs"
+    ).read_text(encoding="utf-8"), (
+        "the snapshot generator must cover chatgpt, or its prompts can change "
+        "with no pinned diff and no failing test (#4880)")
+
+    # 2. The connect step renders its own branch, ahead of the Claude key-less
+    #    one it would otherwise fall into (that branch's copy is Claude-specific).
+    #    TWO source facts are pinned — the branch exists, and it ends where the
+    #    key-less one begins — and both are enforced by `_chatgpt_arm_bounds`
+    #    (above), which names what moved instead of raising a bare ValueError.
+    #    Everything else below is a COPY fact, asserted by presence INSIDE the
+    #    chatgpt arm and nowhere else: `after()` is bounded at BOTH ends, since a
+    #    marker that survives only in a sibling branch is not this card's copy.
+    #    That makes the arm's end a real dependency, so a reflow of the next
+    #    ternary branch reds this on purpose while a reformat that keeps it reds
+    #    nothing — the guard reads the SELECTOR as a ternary terminator, not a
+    #    spelling, and `test_9660_the_chatgpt_arm_bounds_red_on_a_wrong_shape`
+    #    proves each wrong shape actually fails (#4880: a guard deciding from the
+    #    SHAPE of the source is defeated by a source of a different shape).
+    arm_start, arm_end = _chatgpt_arm_bounds(main)
+
+    def after(marker: str) -> int:
+        """Position of `marker` inside the chatgpt arm — bounded at both ends."""
+        return _inside(main, marker, arm_start, arm_end)
+
+    # 3. The three blocks, in the order the user performs them.
+    titles = ["Add the Tortoise connector", "Install the Tortoise skills",
+              "Give it its first job"]
+    positions = [after(t) for t in titles]
+    assert positions == sorted(positions), (
+        "the ChatGPT journey is connect → install → first job; the blocks must "
+        "render in that order")
+    # 4. The connector facts verified in the live UI. Anchored to the MARKUP a
+    #    user reads, not to bare words: `Connect` alone matches the identifier
+    #    `wizardConnectHarness` on the branch line itself, so it would survive the
+    #    deletion of the OAuth-grant step it is meant to protect (found in review,
+    #    #9660).
+    for fact in ("chatgpt.com/plugins", "Add custom MCP server", "Create as a plugin</strong>",
+                 "settings/plugins-settings", "View details</strong>",
+                 "<strong>Connect</strong>", "Connect Tortoise</strong>", "Authorize</strong>"):
+        after(fact)
+    # …and the GRANT is a sequence, so its controls must be in order: View
+    # details → Connect → Connect Tortoise → Authorize. Each is a separate click
+    # in the live UI (2026-10-23): Connect opens ChatGPT's consent dialog, whose
+    # primary button is `Connect Tortoise`; only then does the Tortoise consent
+    # page offer Authorize. An earlier card folded all three into "Connect, sign
+    # in … Authorize" and left a user staring at a dialog no step had told them
+    # to expect — deleting either middle act reds this.
+    grant = [after(m) for m in ("View details</strong>", "<strong>Connect</strong>",
+                                "Connect Tortoise</strong>", "Authorize</strong>")]
+    assert grant == sorted(grant), (
+        "the OAuth grant reads View details → Connect → Authorize; the card must "
+        "render them in that order")
+    # …and the Organization act survives on BOTH consent shapes. The consent page
+    # has two: with ONE selectable org it NAMES the org (oauth.py
+    # `consent_preview`, `len(orgs) == 1`), and with several it renders a
+    # CHOOSER, hides the named-org line and keeps Authorize disabled until one is
+    # picked (the `len(orgs) > 1` memberships path + the page script). Copy that
+    # says only "check the name the consent page shows" points at text that is
+    # not on screen for a multi-org account — the same class of defect as the
+    # unnamed consent dialog — so the pick is pinned, not merely described.
+    #
+    # AND IT COMES BEFORE `Authorize`: on the chooser branch the button is
+    # disabled until a value is picked (`disableAuthorize()`, then the select's
+    # onchange re-enables it), so "click Authorize, then pick" names an inert
+    # control. The two offsets are compared, not just their presence.
+    chooser_line = after("or asks you to choose when your account can use more than one")
+    assert chooser_line < after("Authorize</strong>"), (
+        "the card picks the Organization AFTER Authorize — on a multi-Organization "
+        "account that button is disabled until the chooser has a value")
+    # 5. The skill hand-off is an INSTALL of the real archives, not a prose
+    #    rendering: the branch must map over the archive names and link them.
+    #    The server URL is bound to the ChatGPT ARM (not "somewhere after the
+    #    branch"): the card uses the constant twice — the visible URL and the
+    #    Copy button — so an unbound slice passed even with a re-typed literal on
+    #    screen (#9660 review). `in arm` subsumes the branch-wide presence check
+    #    this used to carry, so that one is gone rather than kept as dead weight.
+    arm = main[arm_start:arm_end]
+    assert "CANONICAL_MCP_URL" in arm, (
+        "the card's Server URL must come from the constant, not a re-typed literal")
+    assert "https://api.premiselabs.co/mcp" not in arm, (
+        "the ChatGPT arm re-types the server URL — read it from CANONICAL_MCP_URL")
+    after("SKILL_ARCHIVE_NAMES.map")
+    after("skillArchiveUrl(name)")
+    after("Upload from your computer")
+    after("Replace existing")
+    # 6. The first-job prompt is rendered as a COPYABLE card, from the prompt
+    #    module (never re-typed inline).
+    after("wizardPromptText('chatgpt', 1")
+    # 7. The plan floor the owner asked for — a claim, so it is pinned with the
+    #    evidence behind it (a Plus account had the Plugins surface).
+    plan_line = main[after("paid ChatGPT plan"):].splitlines()[0]
+    assert "Plus" in plan_line, (
+        "the plan warning must name the floor (Plus or higher), not just "
+        "say the plan is paid")
+
+
+def test_9660_the_org_choice_precedes_authorize_on_the_other_three_surfaces():
+    """#9660: the ChatGPT recipe renders on four surfaces, and the CARD is pinned
+    by `test_9660_chatgpt_is_a_live_onboarding_journey_not_a_docs_dead_end`. This
+    covers the other three — the docs row, the wizard step, and the served
+    document an agent reads aloud — because the same journey shipped wrong on all
+    four at once, and each rendering is edited by a different hand.
+
+    WHY ORDER, NOT PRESENCE. `tortoise/oauth.py` reveals the consent page's two
+    shapes: with one Organization it names it and Authorize is live, and with
+    several it hides that line, shows a "Choose an org…" chooser and calls
+    `disableAuthorize()`, re-enabling the button only from the chooser's onchange.
+    So "click Authorize, and check the Organization … if it offers a chooser, pick
+    one" tells a multi-Organization user to click a disabled control. A presence
+    assertion cannot see that; two offsets can.
+    """
+    root = Path(__file__).resolve().parent.parent
+    main = (root / "website/apps/dashboard/src/main.jsx").read_text(encoding="utf-8")
+    harnesses = (root / "website/apps/dashboard/src/harnesses.js").read_text(
+        encoding="utf-8")
+    docs = (root / "website/docs.html").read_text(encoding="utf-8")
+    skill = (root / "tortoise/onboarding/SKILL.md").read_text(encoding="utf-8")
+
+    def step_line(text: str, needle: str) -> str:
+        for line in text.splitlines():
+            if needle in line:
+                return line
+        raise AssertionError(f"no wizard step contains {needle!r} — moved or reworded")
+
+    def span(text: str, start_needle: str, end_needle: str) -> str:
+        """`text` from its first `start_needle` to the next `end_needle`.
+
+        ROW-level on purpose. A whole-list slice takes the block's FIRST
+        `Organization`/`Authorize`, so an unrelated mention earlier in the same
+        list satisfies the order while the step that matters is inverted — a
+        false green demonstrated in review (#9660).
+        """
+        start = text.find(start_needle)
+        assert start != -1, f"the copy block starting {start_needle!r} moved or was reworded"
+        end = text.find(end_needle, start)
+        assert end != -1, f"the copy block starting {start_needle!r} lost its end"
+        return text[start:end]
+
+    # The Claude key-less carriers describe the SAME consent page and the same
+    # three acts: the chooser is a property of the page, not of ChatGPT
+    # (docs/oauth-mcp.md). They shipped the same inversion, so they are judged
+    # here too rather than left to a comment.
+    blocks = [
+        ("Claude key-less card list", span(main, "Pick the Organization you&apos;re onboarding", "</ol>")),
+        ("claude-web step", step_line(harnesses, "Claude opens the authorization page")),
+        ("Claude Desktop snippet",
+         span(harnesses, "'claude-desktop': () =>", "'claude-web': () =>")),
+        ("wizard step", step_line(harnesses, "confirm Connect Tortoise in the dialog")),
+        ("docs row", span(docs, "chatgpt.com/settings/plugins-settings", "</li>")),
+        ("served document",
+         span(skill, "#1701 — ChatGPT is a 7th harness",
+              "installing the three reusable skills")),
+    ]
+    for label, block in blocks:
+        # Squash markdown/JSX wrapping so a phrase split across source lines is
+        # still the phrase a reader sees (the served note wraps mid-sentence).
+        flat = " ".join(block.replace("> ", " ").split())
+        assert "asks you to choose" in flat, (
+            f"the {label} describes the consent page's single-Organization shape "
+            "only — a second-org user meets a chooser (tortoise/oauth.py)")
+        org = flat.find("Organization")
+        authorize = flat.find("Authorize")
+        assert -1 not in (org, authorize), (
+            f"the {label} no longer names both acts — Organization={org}, "
+            f"Authorize={authorize}")
+        assert org < authorize, (
+            f"the {label} puts the Organization choice AFTER Authorize; on a "
+            "multi-Organization account Authorize is disabled until a choice is "
+            "made, so the copy names an inert control")
