@@ -2442,14 +2442,14 @@ def _route_table() -> dict[tuple[str, str], frozenset[str]]:
 #     attribute (`getattr(obj, name)`) is invisible (permissive, the harmless
 #     direction), and a common name — an attribute (`list`, `.delete`) or a
 #     builtin — makes two unrelated sites adjacent (measured: `MCP tortoise_search`
-#     reaches `hosted_backup.py::BackupStorage.list` in 2 hops through nothing but
-#     the repeated name `list`). Function-local ASSIGNMENT targets no longer do:
+#     reaches `hosted_backup.py::BackupStorage.list` in 2 hops, the last of which is
+#     nothing but the repeated name `list`). Function-local ASSIGNMENT targets no longer do:
 #     since the `#9817` fix they are not symbol definitions at all (see
 #     `_symbol_index`), and that class was the one that produced a WRONG attribution
 #     rather than an extra hop. ⚠️ The NAME of a nested `def`/`class` is still a
 #     symbol — what the local-class rule drops is its BODY's assignments, and the
 #     class node itself stays (both directions are pinned in
-#     `test_a_class_defined_inside_a_function_is_not_a_symbol`) — so this residual
+#     `test_a_local_class_body_is_not_a_source_of_symbols`) — so this residual
 #     is about local VARIABLES, not about every local definition.
 #     The budget and the pinned rate are what keep the residue small; the arm
 #     still does not prove a call graph.
@@ -2470,10 +2470,15 @@ def _route_table() -> dict[tuple[str, str], frozenset[str]]:
 #     the largest share of the (row, table-door) pairs, and three such substitutions
 #     are refused at a uniform 3 (rows 22/24's reach cells swapped, rows 28-31's
 #     backup doors swapped, and row 28's verb changed to the sibling `GET` that dumps
-#     nothing) — but only TWO of them discriminate 5 from 3: the backup swap is
-#     already refused at 5, because row 31's swapped cell is 7 hops (and under the
-#     shipped predicate row 29's is 5 against that reader's 4-hop exception) — the
-#     per-door figures are in the `_DOOR_REACH_HOPS` note below.
+#     nothing) — but at `3f2f48932` only TWO of them discriminate 5 from 3: the
+#     backup swap is already refused at 5, because row 31's swapped cell is 7 hops
+#     (and under the shipped predicate row 29's is 5 against that reader's 4-hop
+#     exception) — the per-door figures are in the `_DOOR_REACH_HOPS` note below.
+#     ⚠️ **The 5-versus-3 comparison above is made at THAT commit, against its own
+#     pre-`#9817` index**: under the current index all three are refused even at a
+#     uniform 5 (the four substituted backup cells are 11, 12, `None`, `None`), so a
+#     lane that re-measures at HEAD and finds no discrimination there has not
+#     refuted it.
 #     The SHIPPED predicate — the exceptions in `_DISTANCE_EXCEPTIONS`
 #     included — accepts the rate the arm below pins (`_ACCEPTED_PAIRS_AT_THIS_HEAD`
 #     over the derived population), because a rate restated in prose is a count
@@ -2606,7 +2611,7 @@ def _symbol_index() -> tuple[dict[str, frozenset[str]], dict[str, frozenset[str]
     `test_the_door_attribution_refuses_a_door_that_reaches_another_reader`.
     A local CLASS body is a weaker case, measured separately: it supplies extra
     hop CANDIDATES and moves no accepted pair at all — which is why it needed a
-    pin of its own (`test_a_class_defined_inside_a_function_is_not_a_symbol`)
+    pin of its own (`test_a_local_class_body_is_not_a_source_of_symbols`)
     rather than resting on the two ceilings. A class whose body is walked from a
     function carries `in_function` through unchanged.
     Values of a local assignment are still REACHED from the enclosing function
@@ -2869,8 +2874,12 @@ def test_the_door_attribution_refuses_a_door_that_reaches_another_reader():
     )
 
 
-def test_a_class_defined_inside_a_function_is_not_a_symbol():
+def test_a_local_class_body_is_not_a_source_of_symbols():
     """The `in_function` flag reaches a class BODY, and only the local one is dropped.
+
+    ⚠️ The class NAME is NOT what this arm forbids: a class defined inside a
+    function remains a symbol (pinned below), which is why the arm is named for the
+    BODY — what must not be indexed is that body's assignments.
 
     `_symbol_index`'s `ClassDef` branch used to hard-code `in_function=False`, so a
     class defined INSIDE a function had its own body indexed as if it were
@@ -2995,10 +3004,14 @@ def test_the_attribution_predicate_does_not_swallow_the_whole_table():
     """The bound above is only a check if the predicate still DISCRIMINATES.
 
     The REJECTED `_DOOR_REACH_HOPS = 5` accepted roughly two fifths of the
-    (row, table-door) pairs *as the table stood then* — and two of the three
-    substitutions that keep a REAL tool in a cell stayed green under it (the
-    backup-doors swap was ALREADY refused at 5, on row 31's 7-hop cell; the
-    per-door figures are in the `_DOOR_REACH_HOPS` note). (The figure is stated as
+    (row, table-door) pairs — 170 of 418 — against the PRE-`#9817` index that stood
+    when it was rejected (measured at `3f2f48932`, the commit that wrote the old
+    wording; ⚠️ the population is 418 pairs at BOTH commits, so the difference from
+    today's 52 is the index, not the table) — and at THAT index two of the three
+    substitutions that keep a REAL tool in a cell stayed green under it: the
+    backup-doors swap was ALREADY refused at 5, on row 31's 7-hop cell (under the
+    CURRENT index all three are refused even at 5; the per-door figures are in the
+    `_DOOR_REACH_HOPS` note). (The figure is stated as
     a proportion on purpose: the population has grown since, and a percentage
     restated against a fixed denominator is the rot this file retires.) A bound is not a proof, so the acceptance RATE is
     pinned as its own number: the predicate may accept, over the table's own
