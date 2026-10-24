@@ -532,12 +532,12 @@ def test_the_supersede_transfer_set_matches_the_writer():
     and pinned here, so a rel added to the writer's transfer cannot silently
     stop being skipped on replay (or start being skipped when it is not moved).
     """
-    from tortoise.projection import _supersede_moved_rels
+    from tortoise.projection import SUPERSEDE_DIRECT_RELS, _supersede_moved_rels
     from tortoise.sdk import SUPERSEDE_STRUCTURAL_RELS
 
     assert frozenset(SUPERSEDE_STRUCTURAL_RELS) == SUPERSEDE_TRANSFERRED_RELS
-    assert (_supersede_moved_rels()
-            == frozenset({"IMPL", "NAND"}) | SUPERSEDE_TRANSFERRED_RELS)
+    assert frozenset({"IMPL", "NAND"}) == SUPERSEDE_DIRECT_RELS
+    assert _supersede_moved_rels() == SUPERSEDE_DIRECT_RELS | SUPERSEDE_TRANSFERRED_RELS
 
 
 def test_a_supersede_does_not_drop_a_structural_edge_the_live_graph_kept(edge_sdk):
@@ -568,3 +568,62 @@ def test_a_supersede_does_not_drop_a_structural_edge_the_live_graph_kept(edge_sd
     assert outgoing(ids["p1"]) == live_old, (
         "a rebuild dropped an edge the live graph still holds at the superseded "
         "point — the fold's supersede skip was applied to a rel supersede never moves")
+
+
+def test_a_supersede_does_not_drop_an_INCOMING_structural_edge(edge_sdk):
+    """Leg 2b moves only what is OUTGOING from the superseded point.
+
+    `(other)-[aboutPoint]-> old` is never moved by a supersede, so live keeps it
+    at the old point — a rel-type-only gate skipped it and the rebuild lost it
+    (measured: live `p2->p1 = ['aboutPoint']`, rebuild `[]`).
+    """
+    sdk, _journal = edge_sdk
+    ids = _world(sdk)
+    proj = sdk._get_proj()
+    assert proj.create_about_edge(ids["event"], ids["p1"], "aboutPoint") is True
+    successor = sdk.create_point("claim", "incoming successor", pointKind="statement")
+    sdk.supersede_point(ids["p1"], successor["id"])
+
+    def incoming(pid: str) -> set[str]:
+        return {row[0] for row in proj.g.query(
+            "MATCH ()-[r]->(:Point {id:$p}) RETURN type(r)",
+            params={"p": pid}).result_set}
+
+    live = incoming(ids["p1"])
+    # (`CORRECTS` is the supersede's own successor edge, pointing IN as well.)
+    assert "aboutPoint" in live, live
+    proj.rebuild_all(str(_journal.parent), confirm_destructive=True)
+    assert incoming(ids["p1"]) == live, (
+        "a rebuild dropped an INCOMING edge the live graph keeps at the "
+        "superseded point — leg 2b moves outgoing edges only")
+
+
+def test_an_edge_minted_AT_a_superseded_point_is_replayed(edge_sdk):
+    """The gate is an ORDERING test, not a rel-type one.
+
+    `create_edge`/`create_about_edge` have no terminal-endpoint guard (unlike
+    `create_direct_edge`'s #2422 refusal), so an edge can be minted at an
+    already-superseded id. It is kept live at the old point, journaled as a plain
+    creation, and supersede never moves it (it did not exist then) — so a gate
+    that skipped on `src in succ` alone dropped it (measured: live kept it,
+    rebuild lost it, no repoint descriptor anywhere).
+    """
+    sdk, _journal = edge_sdk
+    ids = _world(sdk)
+    proj = sdk._get_proj()
+    successor = sdk.create_point("claim", "post-supersede successor", pointKind="statement")
+    sdk.supersede_point(ids["p1"], successor["id"])
+    # ...minted AFTER the supersede, at the now-terminal id.
+    assert proj.create_edge(ids["p1"], ids["p2"], "dependsOn") is True
+
+    def outgoing(pid: str) -> set[str]:
+        return {row[0] for row in proj.g.query(
+            "MATCH (:Point {id:$p})-[r]->() RETURN type(r)",
+            params={"p": pid}).result_set}
+
+    live = outgoing(ids["p1"])
+    assert "dependsOn" in live, live
+    proj.rebuild_all(str(_journal.parent), confirm_destructive=True)
+    assert outgoing(ids["p1"]) == live, (
+        "a rebuild dropped an edge minted AFTER its point was superseded — the "
+        "supersede never moved it, so the creation must be replayed")

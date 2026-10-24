@@ -780,8 +780,11 @@ def source_change_notices(g, source_refs, current_versions: dict[str, str] | Non
 #     `authoredBy`, `memberOf`, `hasMember`, `holdsRole`, `reportsTo`,
 #     `participatesIn`, `hasPart`, `performs`, `produces`, `uses`,
 #     `wasDerivedFrom`, `references`, plus the epistemic-targeted `about*`:
-#     `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutAction` —
-#     the last five are snapshot-carried TOO, and the bare mint needed this half). MEASURED after this landed: mint them live
+#     `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutAction`).
+#     ⚠️ Of those five, the FIRST FOUR are snapshot-carried as well; `aboutAction`
+#     is NOT (`DERIVABLE_STRUCTURAL_RELS` omits it, and the snapshot cascade has no
+#     `aboutAction` entry) — the RECORD half is its only carrier, which is exactly
+#     why it is named in the supersede residual below. MEASURED after this landed: mint them live
 #     and `rebuild_all` restores each one (they used to report `edges: 0`), and
 #     the record's `relation` table gains one row each — the same family, one
 #     carrier, both routes.

@@ -4662,37 +4662,75 @@ def _prewipe_synthetic_write_scope(reason: str):
 _NO_FOLD_LANE = contextlib.nullcontext()
 
 
+#: The DIRECT edge types a supersede moves live — leg 2a, which covers BOTH
+#: directions (its two branches query the edge in each orientation) and ALWAYS
+#: journals a `DirectEdgeRepoint` for the new endpoint.
+SUPERSEDE_DIRECT_RELS = frozenset({"IMPL", "NAND"})
+
+
 def _supersede_moved_rels() -> frozenset[str]:
-    """The edge types a SUPERSEDE **MOVES live** — the only ones its guard may skip.
+    """Every edge type a supersede MOVES live — the ones the guard inspects.
 
     Read by the `DirectEdgeCreated` fold's superseded-endpoint guard (`#9553`).
-    That guard's premise is *"supersede already transferred this edge LIVE, and
-    journaled its own `DirectEdgeRepoint` descriptor for the NEW endpoint"*, so it
-    may only skip a creation for rels a supersede actually moves:
+    Two families, with DIFFERENT shapes, and the differences are what the caller
+    has to encode (`_supersede_took_this_edge`):
 
-      * `IMPL`/`NAND` — leg 2a transfers them and emits the repoint
-        unconditionally;
-      * `SUPERSEDE_TRANSFERRED_RELS` — leg 2b's `structural_rels` loop moves them.
+      * `SUPERSEDE_DIRECT_RELS` (`IMPL`/`NAND`) — leg 2a, BOTH directions, and it
+        always journals a repoint ⇒ a superseded endpoint on either side means the
+        edge was moved;
+      * `SUPERSEDE_TRANSFERRED_RELS` — leg 2b, which queries only the OUTGOING
+        side of the superseded point ⇒ it moves an outgoing edge and NOTHING
+        ELSE. An INCOMING edge (`(other)-[aboutPoint]-> old`) is never moved, live
+        keeps it at the old point, and skipping its creation would drop it
+        (measured: `p2 -[aboutPoint]-> p1`, supersede p1 → live keeps it,
+        rebuild lost it).
 
-    ⛔ Every OTHER rel is untouched by a supersede, so its creation must still be
-    replayed at the old endpoint — skipping it is how a rebuild dropped an edge
-    live still held (`dependsOn`, `ownedBy`, …, #9553 class 4).
-
-    ⚠️ RESIDUAL, stated where the gate is (`wasDerivedFrom`/`aboutAction`): those
-    two are MOVED live by 2b but are not derivable, so 2b emits NO repoint
-    descriptor for them. Skipping their creation keeps the `E2E-11.6`
-    no-dead-point invariant (no phantom at the old point) at the price of losing
-    the edge on the journal route; the RECORD route keeps its pre-supersede row.
+    ⚠️ RESIDUAL, stated here (`wasDerivedFrom`/`aboutAction`): those two are moved
+    by 2b but are not derivable, so 2b journals no repoint for them. A
+    pre-supersede creation is still skipped (keeping the `E2E-11.6` no-dead-point
+    invariant rather than minting a phantom at the old point) at the price of
+    losing the edge on the journal route; the record keeps its pre-supersede row.
     Closing that needs a repoint descriptor for non-derivable structural rels AND
-    a delete-old leg on the record side — a separate behaviour, filed as its own
-    issue.
+    a delete-old leg on the record side — **#9836**.
 
-    Late import: `tortoise.projection.edges` imports THIS module (the same
-    reason `_structural_edge_write_scope` imports late).
+    Late import: `tortoise.projection.edges` imports THIS module (the same reason
+    `_structural_edge_write_scope` imports late).
     """
     from .edges import SUPERSEDE_TRANSFERRED_RELS
 
-    return frozenset({"IMPL", "NAND"}) | SUPERSEDE_TRANSFERRED_RELS
+    return SUPERSEDE_DIRECT_RELS | SUPERSEDE_TRANSFERRED_RELS
+
+
+def _supersede_took_this_edge(etype, ev_seq, src, tgt, succ, supersede_last) -> bool:
+    """Did a supersede MOVE this recorded edge away from the endpoints it names?
+
+    An ORDERING test, not a rel-type one, and the ordering is the whole point
+    (a peer review found both halves the hard way):
+
+      * leg 2a moves `IMPL`/`NAND` in BOTH directions and always journals a
+        repoint ⇒ `src in succ or tgt in succ` is enough;
+      * leg 2b moves only what is OUTGOING from the superseded point, at supersede
+        time. So a structural rel is moved iff `src in succ` **and the creation
+        PRECEDED the supersede** — a creation minted at the already-superseded id
+        is accepted live (`create_edge`/`create_about_edge` have no terminal-endpoint
+        guard, unlike `create_direct_edge`'s `#2422` refusal), is kept live at the
+        dead point, and must be replayed rather than skipped.
+
+    Skipping a creation the supersede did NOT move leaves an edge live holds
+    missing from the rebuild — the defect this gate exists to prevent, in both
+    directions.
+    """
+    if etype in SUPERSEDE_DIRECT_RELS:
+        return src in succ or tgt in succ
+    if etype not in _supersede_moved_rels():
+        return False
+    if src not in succ:
+        return False
+    superseded_at = supersede_last.get(src)
+    if superseded_at is None:                     # a supersede this pass did not keep
+        return True
+    # ...and only if it existed when the supersede ran (journal order).
+    return ev_seq < superseded_at[0]
 
 
 def _fold_lane_for_event(seq: int, event_source):
@@ -14838,7 +14876,10 @@ class FalkorProjection(
                 # #8499 / A10 #1048: the plain direct-edge BASE creation —
                 # deferred to the pass-2b sweep (see its declaration and the
                 # fold there for why it must precede the repoint leg).
-                direct_edge_created_events.append(ev)
+                # #9553: the journal SEQ rides along, because the supersede guard
+                # inside that fold is an ORDERING property, not a rel-type one
+                # (a creation AFTER its own supersede was never moved by it).
+                direct_edge_created_events.append((seq, ev))
             elif t == "DirectEdgeRepoint":
                 # #2423: supersede's 2a-DIRECT transfer emits a flat
                 # DirectEdgeRepoint descriptor {src, tgt, edge_type, attrs}
@@ -16175,7 +16216,7 @@ class FalkorProjection(
             # hardcoded :Point match would silently drop every Object↔Object
             # direct edge — the SAME defect the repoint leg's direct branch
             # carried until #8622 widened it with this identical sweep.
-            for ev in direct_edge_created_events:
+            for ev_seq, ev in direct_edge_created_events:
                 etype = ev.get("edge_type")
                 src, tgt = ev.get("src"), ev.get("tgt")
                 if (not isinstance(src, str) or not isinstance(tgt, str)
@@ -16189,7 +16230,8 @@ class FalkorProjection(
                     # Phantom self-edge: never re-create (E2E-11.6 no-self
                     # contract — the same guard the repoint leg applies).
                     continue
-                if (src in succ or tgt in succ) and etype in _supersede_moved_rels():
+                if _supersede_took_this_edge(etype, ev_seq, src, tgt, succ,
+                                             supersede_last):
                     # A SUPERSEDED endpoint OF A RELATION SUPERSEDE ACTUALLY MOVED.
                     #
                     # ⛔ THE GATE IS THE PREMISE (#9553). This guard's argument is

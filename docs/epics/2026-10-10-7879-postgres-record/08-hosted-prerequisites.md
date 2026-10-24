@@ -454,11 +454,17 @@ there are THREE:
    url-keyed `:Source` branch in pass-2b), which is a different behaviour from this producer; the ledger
    therefore does NOT claim them. That fold work is **#9834** (with `TAGGED`).
 
-They are not silent: `structural_edge_record_carrier` answers the record half per relation, the ledger's two
-literals are asserted to partition the lane's write set, and `_record_structural_edges` warns once per relation
-with the endpoint labels and the reason. A SELF-EDGE is skipped for the fold's own `E2E-11.6` reason and warns
-the same way — the mint did write the live self-loop, so a silent skip would be a live ≠ rebuild divergence with
-no diagnostic.
+**Families 2 and 3 are not silent**: `structural_edge_record_carrier` answers the record half per relation, the
+ledger's two literals are asserted to partition the lane's write set, and `_record_structural_edges` warns once
+per relation with the endpoint labels and the reason. A SELF-EDGE is skipped for the fold's own `E2E-11.6`
+reason and warns the same way — the mint did write the live self-loop, so a silent skip would be a live ≠
+rebuild divergence with no diagnostic.
+
+⛔ **`TAGGED` (family 1) IS silent, and that is stated rather than papered over**: `_sync_tags` writes it with
+bare MERGEs, reaches neither the lane nor this producer, and has no warning — `structural_edge_record_carrier`
+answers `None` for it only because "not a lane predicate" and "carried" are different questions it does not
+distinguish. It is named here (and in the `relation` row above) so a reader meets it, not because a write would
+tell them.
 
 ⚠️ **One uncarried writer is outside this lane and stays open**: `sdk.backfill_about_entities` mints
 `aboutSubject`/`aboutObject`/`aboutEvent`/`aboutDocument` through `_create_about_edges` → `wire_about_link` (a
@@ -466,16 +472,25 @@ bare MERGE), journaling nothing and setting no `aboutEntities` snapshot prop —
 It is a different door (not `create_edge`/`create_about_edge`) and is filed as **#9833** rather than folded
 into this change.
 
-⚠️ **A supersede is now handled correctly for these predicates, and one residual is named.** The
-`DirectEdgeCreated` fold used to skip EVERY creation whose endpoint had been superseded, on the premise
-that a supersede had moved the edge and journaled a `DirectEdgeRepoint`. That premise holds only for the
-rels a supersede actually moves (`IMPL`/`NAND` and `SUPERSEDE_TRANSFERRED_RELS`), so with a producer the
-skip made a rebuild DROP an edge live still held (measured: `dependsOn`/`ownedBy` live at the old point,
-`rebuild_all` → gone). The gate is now `_supersede_moved_rels()`. Residual, stated: `wasDerivedFrom` and
-`aboutAction` are MOVED live by supersede 2b but are not derivable, so 2b journals no repoint for them —
-the journal route still loses them after a supersede (live: successor; rebuild: absent; record: the
-pre-supersede row). Closing that needs a repoint descriptor for non-derivable structural rels AND a
-delete-old leg on the record side — **#9836**.
+⚠️ **Supersede: the skip is an ORDERING test, not a rel-type test, and both halves were found in review.**
+The `DirectEdgeCreated` fold used to skip EVERY creation whose endpoint had been superseded, on the premise that
+a supersede had moved the edge and journaled a `DirectEdgeRepoint`. That premise is a property of *what the
+supersede did to this edge*, so the gate now asks exactly that (`_supersede_took_this_edge`):
+
+* `IMPL`/`NAND` — leg 2a moves them in BOTH directions and always journals a repoint ⇒ either superseded
+  endpoint means "moved";
+* every other moved rel — leg 2b moves only what is OUTGOING from the superseded point, at supersede time ⇒ it
+  is skipped only when the superseded point is the SOURCE **and the creation preceded the supersede** (the
+  journal seq is compared). An incoming edge (`p2 -[aboutPoint]-> old`) is never moved, and an edge MINTED at an
+  already-superseded id (`create_edge`/`create_about_edge` have no terminal-endpoint guard, unlike
+  `create_direct_edge`'s #2422 refusal) is kept live at the old point — both must be replayed, and were being
+  dropped.
+
+Measured across 16 combinations (rel × direction × before/after supersede): 14 agree live↔rebuild. The two that
+do not are the residual: `wasDerivedFrom` and `aboutAction` are MOVED live by 2b but are not derivable, so 2b
+journals no repoint for them (live: successor; journal rebuild: absent; record: the pre-supersede row). Closing
+that needs a repoint descriptor for non-derivable structural rels AND a delete-old leg on the record side —
+**#9836**.
 
 **Decision needed:** none in principle; the `about*` stored-vs-derived ruling is already made (owner,
 2026-09-23: *"keep them for now, we optimise with users"*) and **KEEP** is the instruction — this item

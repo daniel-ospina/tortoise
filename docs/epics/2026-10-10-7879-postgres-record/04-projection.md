@@ -329,11 +329,14 @@ closed at both layers:
   > self-edge is skipped (the fold's `E2E-11.6`) and, like every other decline,
   > WARNed once rather than dropped in silence.
   >
-  > ⚠️ **Supersede.** The `DirectEdgeCreated` fold's superseded-endpoint skip is gated on the rels a
-  > supersede actually MOVES (`_supersede_moved_rels`: `IMPL`/`NAND` + `SUPERSEDE_TRANSFERRED_RELS`),
-  > because for every other structural predicate a supersede leaves the edge at the old point and the
-  > skip was dropping it on every rebuild. Residual: `wasDerivedFrom`/`aboutAction` move live with no
-  > repoint descriptor, so the journal route still loses them after a supersede — **#9836**.
+  > ⚠️ **Supersede.** The `DirectEdgeCreated` fold's superseded-endpoint skip is gated on what the supersede
+  > DID to that edge, not on the rel type (`_supersede_took_this_edge`): `IMPL`/`NAND` are moved in both
+  > directions by leg 2a (which always journals a repoint), while every other moved rel is moved by 2b
+  > OUTGOING-only and only at supersede time — so the skip requires the superseded point to be the SOURCE and
+  > the creation to PRECEDE the supersede (journal seq compared). Without that, a rebuild dropped edges live
+  > still held, in two shapes review found: an INCOMING edge to the superseded point, and an edge minted at an
+  > already-superseded id. Residual: `wasDerivedFrom`/`aboutAction` move live with no repoint descriptor, so the
+  > journal route still loses them after a supersede — **#9836**.
   >
   > ⚠️ One uncarried writer is OUTSIDE this lane and stays open:
   > `sdk.backfill_about_entities` mints about edges through `_create_about_edges` →
