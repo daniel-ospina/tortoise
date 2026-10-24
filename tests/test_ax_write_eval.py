@@ -334,7 +334,9 @@ def test_undeclared_kind_is_distinguished_from_a_declared_but_wrong_kind():
     kinds = {row["item"]: row["verdict"] for row in result["item_rows"]}
     assert kinds["Dana"] == "KIND-UNDECLARED"
     assert kinds["churn figure"] == "KIND"
-    # `observation` is a DECLARED legacy point kind — the finding must say so
+    # `observation` is a DECLARED §5 CORE point kind — the finding must say so.
+    # It is NOT legacy (kind_status("Point", "observation") == "CORE"); what the
+    # state-centric ruling corrects is that a claim reads better as `statement`.
     message = next(f["finding"] for f in result["findings"] if "churn figure" in f["finding"])
     assert "declared, but not the kind" in message
 

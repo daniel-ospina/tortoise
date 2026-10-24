@@ -188,7 +188,7 @@ steps are decisions rather than rules.
 
 ### Instrument limitations and corrections, stated rather than hidden
 
-This section exists because **seven rounds of fresh-context review found the
+This section exists because **eight rounds of fresh-context review found the
 instrument lying about its own subject** — each round also found the sentences
 below still quoting the pre-fix causes — and the numbers above are what remains
 after every fix. The corrections are recorded, not quietly absorbed: a
@@ -358,7 +358,7 @@ correctly, and the class row above is 0). The list numbering above is left as
 the source of record: rendering these as one ordered list would need every
 prefix to start at 1, which the cross-references to correction numbers rule out.
 
-**Correction 30: `owned by` declared only ONE end, so the other was ungraded.**
+**Round 8 — correction 30: `owned by` declared only ONE end, so the other was ungraded.**
 Correction 29 required an edge item to declare `endpoints` and refused one that
 declared neither — but it graded whichever sides were present. `owned by`
 declared `to: [Subject]` and no `from`, so `_edge_fits` constrained only `to`
