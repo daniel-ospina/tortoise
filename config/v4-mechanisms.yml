@@ -339,12 +339,13 @@ mechanisms:
       ~0.95 bar, a readable union) re-checks every pair inside the mechanism:
       the verdict is necessary and never sufficient, and a refused pair falls
       through to ADD with both claims surviving.
-      ⚠️ The OTHER half of the ordering is still not a row here and is NOT
-      silently assumed: the against-store exact dedup's fourth precondition —
-      an ATOMIC write (`create_point(dedup=True)` is a check-then-CREATE with
-      no uniqueness constraint on `Point`; EXTRACTOR-V4-ARCHITECTURE.md §4.2) —
-      is unimplemented and has no registry row and no tracking issue in this
-      closed set — it NOW HAS BOTH: row `atomic_point_write` (#9879).
+      ⚠️ The OTHER half of the ordering is registered too, and NOT as an edge
+      here: the against-store exact dedup's fourth precondition — an ATOMIC write
+      (`create_point(dedup=True)` is a check-then-CREATE with no uniqueness
+      constraint on `Point`; EXTRACTOR-V4-ARCHITECTURE.md §4.2) — is
+      `not-implemented` and uncoupled from this row, with its OWN row
+      (`atomic_point_write`) and tracking issue (#9879). Until this lane it had
+      neither, which is the state the row now records as past.
 
   - id: against_priors_consolidation
     name: "S3 / D-d — the against-priors consolidation classifier (ADD · UPDATE · NOOP · DELETE)"

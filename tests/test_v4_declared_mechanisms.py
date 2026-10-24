@@ -1424,26 +1424,45 @@ def test_the_atomic_write_absence_is_pinned_to_the_schema() -> None:
     (so the row's state is still the truth). The day one is added, this reds and
     the row must flip — the same polarity as the carve-out's render pin.
 
+    ⚠️ IT READS STRING VALUES, NOT PHYSICAL LINES. A line-oriented scan cannot see
+    DDL split across source lines — and that is this repo's own house style
+    (`event_store.py`'s GRAPH.CONSTRAINT call is a wrapped literal). Parsing the
+    module and scanning each `str` constant folds implicit concatenation, so
+    `"… UNIQUE "  "NODE Point …"` on two lines is read as the ONE statement it is.
+    (Reproduced before applying: a wrapped probe file left a line-oriented scan
+    green.)
+
     ⚠️ The scan covers BOTH constraint spellings this repo's DDL vocabulary names
     (`CONSTRAINT CREATE`, the graph form, and `CREATE CONSTRAINT`, the form
     `tests/test_9079_event_writers_journal.py` lists): a pin that knew only one
     order would stay green on the other. Its SCOPE is stated, not universal —
     `tortoise/**/*.py` is where a write path creates constraints; one created
     from a script or a console session is out of this scan's reach, and the row's
-    note says so.
+    note says so. An UNPARSABLE source under `tortoise/` is a violation rather
+    than a skip: a constraint inside it would be invisible, and every module in
+    the package must parse anyway.
     """
+    ddl = re.compile(
+        r"(?i)(?:CONSTRAINT\s+CREATE|CREATE\s+(?:OR\s+REPLACE\s+)?CONSTRAINT)[^;]{0,300}"
+    )
     constraints: list[str] = []
+    unparsable: list[str] = []
     for path in sorted((ROOT / "tortoise").rglob("*.py")):
+        rel = path.relative_to(ROOT).as_posix()
         try:
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeError):  # unreadable is not absent
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+        except (OSError, UnicodeError, SyntaxError, ValueError):
+            unparsable.append(rel)
             continue
-        for match in re.finditer(
-            r"(?i)(?:CONSTRAINT\s+CREATE|CREATE\s+(?:OR\s+REPLACE\s+)?CONSTRAINT)[^\n]*", text
-        ):
-            constraints.append(
-                f"{path.relative_to(ROOT).as_posix()}: {match.group(0).strip()}"
-            )
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                for match in ddl.finditer(node.value):
+                    constraints.append(f"{rel}: {match.group(0).strip()}")
+    assert unparsable == [], (
+        "a source under tortoise/ could not be parsed, so a constraint written "
+        "in it is INVISIBLE to this pin — that is not the same as its absence: "
+        f"{unparsable}"
+    )
     assert any("UNIQUE" in c.upper() for c in constraints), (
         "no UNIQUE graph constraint exists anywhere in tortoise/ — the contrast "
         "this check rests on (the capability is already used) is gone: "
