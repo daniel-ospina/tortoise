@@ -146,10 +146,14 @@ def _run(argv, *, capture: bool = False):
     return ""
 
 
-# ── the predicate, in one home ─────────────────────────────────────────────
+# ── the predicate: one rule, two readings ──────────────────────────────────
 #
-# `_do_upgrade` (one document the operator named) and `_do_upgrade_all` (a
-# corpus sweep) answer the SAME question, so they share one definition. The
+# `_do_upgrade` (one document the operator named) reads `_document_is_pending`;
+# the corpus sweep reads its Cypher mirror `_discover_pending_documents`, because
+# it asks the question of the whole graph in one query. They are NOT one code
+# path — the parity test below (`test_python_rule_and_cypher_twin_agree`) is what
+# keeps them arm-for-arm, and a divergence is therefore a red test rather than a
+# silent skew. The
 # sweep additionally refuses to treat an entirely unmarked document as pending
 # unless the operator opts in (`--include-unstamped`) — see
 # `test_upgrade_all_discovers_the_legacy_capture_marker` (the transcript-left-
@@ -161,10 +165,10 @@ def _run(argv, *, capture: bool = False):
 def test_pending_predicate_boundaries():
     """The rule, pinned at its boundaries.
 
-    Term 3 is what makes the *legacy shape* pending: the pre-D10 capture writer
+    Arm 1 is what makes the *legacy shape* pending: the pre-D10 capture writer
     stored ``doc_status='captured'`` **and** ``needs_extraction=false`` (its
     default), so a rule that let the stored ``false`` win would leave the exact
-    backlog this fix exists for invisible. Term 2 is the matching
+    backlog this fix exists for invisible. Arm 2 is the matching
     non-over-reach: a completion record must not be re-discovered forever.
     """
     from tortoise.ingest import _document_is_pending
