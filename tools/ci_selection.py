@@ -1677,6 +1677,28 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # entry) it is a cost/home fix rather than a hole fix, which is
              # stated so the polarity is not misread later.
              "docs/evidence/7949-capstone/",
+             # #9695: the Step-1 eval's EVIDENCE DOC
+             # (`docs/ax/how-to-use-tortoise-step1-eval.md`) publishes every
+             # measured number of that eval — the aggregate headline, all ten
+             # per-input P0/P1 rows, the class census and every `kind` ×N
+             # multiplier — and the only thing that re-derives them from the
+             # committed `runs/*/score.json` records is
+             # `tests/test_ax_write_eval.py`, registered on `core` only.
+             #
+             # MEASURED before this entry (`select()` in-process):
+             # `select(["docs/ax/how-to-use-tortoise-step1-eval.md"])` →
+             # `surfaces=[]`, `full=False`, 63 files, pin ABSENT. `docs/` is a
+             # flat NON_PYTHON_PREFIXES entry and `_is_non_code_doc` recognises
+             # four exact paths, so the changed list comes back empty and
+             # select() takes the docs-only early return — tier-1 smoke, which
+             # does not carry the pin. A one-file PR could therefore re-cut the
+             # headline to any number and merge with the guard that re-measures
+             # it NEVER RUN: the #1349/#3332/#3616 class, reached through the
+             # early return rather than `_selection_relevant`, and the same
+             # shape recorded for `docs/evidence/7950-capstone/` above.
+             # Pinned by tests/test_ci_selection.py::
+             # test_the_step1_eval_evidence_doc_selects_core_not_tier1.
+             "docs/ax/how-to-use-tortoise-step1-eval.md",
              # `tools/` is a flat NON_PYTHON_PREFIXES entry too, so the checker was
              # swallowed by the same early return; its pins are `core`-registered
              # and hermetic, so `core` is the right lane (the shape

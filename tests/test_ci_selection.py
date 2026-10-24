@@ -2159,6 +2159,34 @@ def test_ax_write_eval_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_the_step1_eval_evidence_doc_selects_core_not_tier1():
+    """The evidence doc must not be editable without the pin that re-derives it.
+
+    #9695 review P1 — the OTHER half of the entry above, and the one the doc
+    itself exposes: `docs/ax/how-to-use-tortoise-step1-eval.md` publishes every
+    measured number of the Step-1 eval — the aggregate headline, all ten
+    per-input P0/P1 rows, the class census and every `kind` ×N multiplier — and
+    the only file that re-derives them from the committed `runs/*/score.json`
+    records is `tests/test_ax_write_eval.py`, registered on `core` only.
+
+    MEASURED before the CORE_ALSO entry (`select()` in-process):
+    `select(["docs/ax/how-to-use-tortoise-step1-eval.md"])` → `surfaces=[]`,
+    `full=False`, 63 files, pin ABSENT. `docs/` is a flat NON_PYTHON_PREFIXES
+    entry and `_is_non_code_doc` recognises four exact paths, so the changed
+    list came back empty and `select()` took the docs-only early return. A
+    one-file PR could therefore re-cut the headline to any number and merge with
+    the guard that re-measures it never having run — the #1349/#3332/#3616
+    silent-drop class, reached through the early return rather than through
+    `_selection_relevant`.
+
+    Mutation check: removing the CORE_ALSO entry fails the second assert.
+    """
+    r = _sel(["docs/ax/how-to-use-tortoise-step1-eval.md"])
+    assert r["surfaces"] == ["core"], r
+    assert "test_ax_write_eval.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
 def test_extractor_tooling_change_selects_core_and_ep_not_tier1():
     # #2786 review P2: `tools/probe_extractor.py` (the classification prompt put
     # in front of the model) and `tools/calibration_harness.py` (the harness whose
