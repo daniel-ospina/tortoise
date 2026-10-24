@@ -1109,8 +1109,8 @@ def test_the_not_established_section_quotes_the_s5_operator_counts_the_log_measu
 # `extractor_v2.py` — the three sources the bundle prints numbers for), in all
 # FOUR documents a reader is sent into: the README, both probes, and the
 # `docs/00_index.md` row that is the entry point to this bundle (only THAT row —
-# the index routes ~200 other rows, and another epic's `sdk.py` cite must not be
-# told to add a phrase for a line it is not about). A bare `:NNNN`
+# the index routes 142 table rows, and another epic's
+# `sdk.py` cite must not be told to add a phrase for a line it is not about). A bare `:NNNN`
 # continuation (the docs write `` `extractor_v2.py:7912` and `:7932` ``) is NOT a
 # cite this leg can resolve, because the file is named only once for several
 # numbers; the README's bare `` `symbol` `:NNN` `` step table is owned by
@@ -1135,14 +1135,15 @@ _BUNDLE_SOURCES = {
     "extractor_v2": _REPO / "tortoise/extractor_v2.py",
 }
 
-# `docs/00_index.md` is a shared router of ~200 rows, so only the paragraph that
-# names this bundle is swept: another epic's row citing `sdk.py` must not red the
-# #7949 pin (it would be told to add a phrase for a line it is not about).
+# `docs/00_index.md` is a shared router of 142 table rows, so only the ROW (the
+# line) that names this bundle is swept: another epic's row citing `sdk.py` must
+# not red the #7949 pin (it would be told to add a phrase for a line it is not
+# about). The paragraph is the wrong unit — the whole §5 table is ONE paragraph.
 _BUNDLE_PARAGRAPH_FILTER = {
     "docs/00_index.md": re.compile(r"#7949"),
 }
 
-# `tortoise/sdk.py:12487`, ``tortoise/projection/edges.py:2424-2450``, `edges.py:468`,
+# `tortoise/sdk.py:12487`, ``tortoise/projection/edges.py:2424-2449``, `edges.py:468`,
 # ``tortoise/extractor_v2.py:8288-8292``
 _BUNDLE_CITE = re.compile(
     r"(?<![\w.])(?:tortoise/)?(?:projection/)?"
@@ -1156,7 +1157,8 @@ _BUNDLE_CITE = re.compile(
 # vanishing into the exclusion.
 _BUNDLE_HISTORICAL = {
     r"no longer\s+resolve": (
-        "sdk.py:12401", "sdk.py:12682", "edges.py:467", "edges.py:2168-2192"),
+        "sdk.py:12401", "sdk.py:12682", "edges.py:467", "edges.py:2168-2192",
+        "tortoise/extractor_v2.py:8278-8285"),
     r"SUPERSEDED and its file is gone": ("sdk.py:12196",),
 }
 
@@ -1191,7 +1193,7 @@ _BUNDLE_RULES = (
      "span", ("contains", "_DERIVATION_ANCHOR_SET = _anchor_on_create(")),
     ("the references writer", "edges",
      ("link_source_to_event",), ("def link_source_to_event(",), "method-span",
-     None),
+     ("exact", ")")),
     # `extractor_v2.py` — the surfaces whose ABSENCE is #9116. Two cites per
     # surface: the block it EMITS (the `result[...] = {` assignment, a range)
     # and the FLAG computed earlier (a single line). The surface rule comes
@@ -1289,7 +1291,8 @@ def _bundle_missing(kind: str, anchors, source_lines, start: int, end,
                 missing.append(
                     f"an end line carrying {token!r} (it reads {got.strip()!r})")
         return missing
-    # method-span: the def is HERE, and the range must not run into the next one
+    # method-span: the def is HERE, the range must not run into the next `def`,
+    # and the cited END is a claim too (it must read what the rule says it reads).
     assert kind == "method-span", kind
     if not source_lines[start - 1].lstrip().startswith(anchors[0]):
         return [anchors[0]]
@@ -1298,6 +1301,13 @@ def _bundle_missing(kind: str, anchors, source_lines, start: int, end,
          if re.match(r" {0,4}def ", source_lines[i])), len(source_lines))
     if stop >= next_def:
         return [f"a range ending at {stop}, which runs past the next def at {next_def}"]
+    if end and end_spec:
+        how, token = end_spec
+        got = source_lines[stop - 1]
+        if how == "exact" and got.strip() != token:
+            return [f"an end line reading {token!r} (it reads {got.strip()!r})"]
+        if how == "contains" and token not in got:
+            return [f"an end line carrying {token!r} (it reads {got.strip()!r})"]
     return []
 
 
@@ -1329,18 +1339,21 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     skipped: dict[str, list[str]] = {}
     for doc_name, doc_path in _BUNDLE_DOCS:
         text = doc_path.read_text(encoding="utf-8")
+        doc_lines = text.splitlines()
         paragraphs = _paragraph_spans(text)
+        scope = _BUNDLE_PARAGRAPH_FILTER.get(doc_name)
         for match in _BUNDLE_CITE.finditer(text):
             paragraph = next((s, e) for s, e in paragraphs
                              if s <= match.start() < e)
-            scope = _BUNDLE_PARAGRAPH_FILTER.get(doc_name)
-            if scope and not scope.search(text[paragraph[0]:paragraph[1]]):
+            line_no = text.count("\n", 0, match.start()) + 1
+            # a scoped document is swept ROW by row: only the row (line) that
+            # names this bundle is ours, not the whole markdown-table paragraph.
+            if scope and not scope.search(doc_lines[line_no - 1]):
                 continue
             marker = _bundle_historical(text[paragraph[0]:paragraph[1]])
             if marker:
                 skipped.setdefault(marker, []).append(match.group(0))
                 continue
-            line_no = text.count("\n", 0, match.start()) + 1
             source, start, end = match.group(1), int(match.group(2)), match.group(3)
             rule = _bundle_rule(source, text[paragraph[0]:paragraph[1]],
                                 paragraph[0], match.start())

@@ -130,7 +130,9 @@ itself.
 probe's `E3_RULE` and in the S2.2/S2.3 cause strings were re-derived — and those strings RENDER into
 a log. The frozen `capstone-measured-e0fc940b.log` therefore still carries the cites **as-of its own
 stamp** (`sdk.py:12401`, `sdk.py:12682`, `edges.py:467`, `edges.py:2168-2192`), which no longer
-resolve on `main`. That is deliberate: a scored log is a measurement record and the bundle's rule is
+resolve on `main` — and it renders `tortoise/extractor_v2.py:8278-8285`, whose END was already one
+line long at that stamp (`8284` closes the block; `8285` opens the next one) and is corrected to
+`8278-8284` here, not in the log. That is deliberate: a scored log is a measurement record and the bundle's rule is
 that a row moves only by RE-RUNNING the probe and removing the file it replaces, never by editing a
 number in place. Read this README (and the probes it pins) for CURRENT cites; read the log for the
 numbers measured at `e0fc940b5`. A re-run under a new `<new-head8>` is the supersede path.
@@ -275,7 +277,7 @@ derivation target labels are `_DERIVATION_REFERENCES_LABELS` (`edges.py:468`: `E
 `Document`). ⛔ **The two directions are not interchangeable**, and the first stamp of this bundle
 got one of them backwards: `extractedFrom` points FROM the derived node
 (`(Point)-[:extractedFrom]->(GraphEvent|Event)`), while `references` points AT it
-(`(Source)-[:references]->(Event|Document)` — `link_source_to_event`, `edges.py:2424-2450`,
+(`(Source)-[:references]->(Event|Document)` — `link_source_to_event`, `edges.py:2424-2449`,
 reached from the capture path at `sdk.py:12768` (`proj.link_source_to_event(source_key,
 event_id)`)). So the rule now applied — printed in the log,
 applied by one Cypher query per label — is:

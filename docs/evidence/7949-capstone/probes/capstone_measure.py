@@ -146,7 +146,7 @@ ANCHOR_OUT = ("extractedFrom",)
 
 #: The relationship type that points AT a derived node: ``(Source)-[:references]
 #: ->(Event|Document)``, written by ``_EdgeHandlers.link_source_to_event``
-#: (``tortoise/projection/edges.py:2424-2450``, ``MERGE (s)-[r:references]->(e)
+#: (``tortoise/projection/edges.py:2424-2449``, ``MERGE (s)-[r:references]->(e)
 #: ON CREATE SET r.sourceVersion = s.contentHash``) and reached from the capture
 #: path at ``tortoise/sdk.py:12768`` (``proj.link_source_to_event(source_key,
 #: event_id)`` — ``(Source)-[:references]->(sessionCaptured Event)``). The anchor
@@ -162,7 +162,7 @@ E3_RULE = (
     "interchangeable: extractedFrom points FROM the derived node at its source "
     "((Point)-[:extractedFrom]->(GraphEvent|Event)), while references points AT "
     "the derived node ((Source)-[:references]->(Event|Document) — "
-    "tortoise/projection/edges.py:2424-2450 link_source_to_event, reached from "
+    "tortoise/projection/edges.py:2424-2449 link_source_to_event, reached from "
     "the capture path at tortoise/sdk.py:12768 "
     "(proj.link_source_to_event(source_key, event_id))). The anchor is a "
     "property of the "
