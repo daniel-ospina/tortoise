@@ -6467,8 +6467,8 @@ def _unsettleable_magnitudes(comment: str) -> list[str]:
       rule's, not this one's.) `_MAGNITUDE_SUBJECT` accepts the
       typographic (`walk’s cost`) and plural (`walks' cost`) possessives too, so those
       red for the same reason. The qualifier set is phase words only
-      (`first`/`second`/`third`/`left`/`right`/`top`/`bottom`); `upper`/`lower`/`other`
-      are share adjectives. Stated costs of the tightening, both measured rather than
+      (`first`/`second`/`third`/`left`/`right`/`top`/`bottom`/`last`/`final`);
+      `upper`/`lower`/`other` are share adjectives. Stated costs of the tightening, both measured rather than
       discovered later: `the upper half of the walk` reds (a phase sentence with a share
       adjective), and so does any possessive on the divided thing, measurement or not
       (`the second half of the run's output`).
@@ -6764,6 +6764,30 @@ def test_the_gate_walk_magnitude_ratios_recompute_from_the_rows_they_name():
         "a stated percentage 1.3 points off its own row passes, so the tolerance admits "
         f"a materially wrong figure rather than the rounding it exists for: {drift}"
     )
+
+    # ⛔ …and the BARE-percentage sweep must hold on EVERY prose site in this file, not
+    # only on the one paragraph this arm points it at (`#9528` re-review round 5). The
+    # sweep ran on `_unsettleable_magnitudes.__doc__` alone, so the defect class this
+    # branch exists to close could be re-inserted into the module docstring and into this
+    # arm's OWN docstring with a full green run — measured, before this leg existed.
+    for site, text in (
+        ("the module docstring", __doc__ or ""),
+        (
+            "this arm's own docstring",
+            inspect.getdoc(test_the_gate_walk_magnitude_ratios_recompute_from_the_rows_they_name)
+            or "",
+        ),
+        (
+            "the `_unsettleable_magnitudes` docstring",
+            inspect.getdoc(_unsettleable_magnitudes) or "",
+        ),
+    ):
+        rot = [finding for finding in _magnitude_ratio_findings(text) if "free to rot" in finding]
+        assert not rot, (
+            f"{site} states a percentage outside any recomputed claim row, so it is free "
+            f"to rot: {rot} — a prose site no arm reads is where this branch's own defect "
+            "class lives"
+        )
 
     # The bare-percentage sweep must close every spelling, not one of them: a rotated
     # figure re-spelt `43%` / `43 per cent` / `43 pct` sat outside every row and was
