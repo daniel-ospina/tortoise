@@ -2221,6 +2221,64 @@ def test_the_public_capture_path_writes_the_epistemic_layer(capture_sdk,
         conn.close()
 
 
+def test_the_public_subject_door_writes_the_semantic_layers_subject_half(
+        monkeypatch, tenant, tmp_path):
+    """#9893 — `subject` receives a row from the PUBLIC door, not a probe.
+
+    The epic's acceptance names **Subjects** alongside Objects, and the semantic
+    layer's Subject half had no end-to-end leg at all: the only end-to-end
+    record test asserted `object`, and a capture never emits `SubjectAdded`, so
+    a broken producer would leave the suite green (#9893 measured `subject | 0`
+    after the whole file ran against a real `postgres:16`).
+
+    This is the exact mirror of the `object` assertion above, and the mirror is
+    the point: `assert subjects` FIRST and unconditionally, because without it
+    `0 >= 0` is satisfiable by a door that journaled nothing — the pre-fix world
+    reading as a pass. Then the row count must cover the records the journal
+    actually carried.
+
+    The FALSIFIER was observed red: deleting the `SubjectAdded` dispatch from
+    `record_projection.RECORD_MUTATIONS` reds this leg (`subject` gets no row)
+    rather than skipping it, and the non-vacuity guard alone reds it if the
+    producer stops journaling. Recorded in the PR body.
+    """
+    conn = _record_db()
+    try:
+        _ensure_record_schema(conn)
+        _seed_tenant(conn, tenant)
+        # The WRITER connects as the app role, exactly as `_capture` does; the
+        # superuser handle stays with the seeding/assertion connection.
+        monkeypatch.setenv(record_writer.RECORD_DSN_ENV,
+                           _app_role_dsn(os.environ[RECORD_DB_ENV]))
+        journal_path = tmp_path / "subject-journal.jsonl"
+        sdk = TortoiseSDK(str(tmp_path / "subject-graph.db"),
+                          event_log_path=str(journal_path))
+        before = dict(monitoring.record_write_failure_counts())
+        with use_record_tenant(*tenant):
+            created = sdk.create_subject("Acme Corp",
+                                         subjectKind="organization")
+        lost = (monitoring.record_write_failure_counts().get("write_failed", 0)
+                - before.get("write_failed", 0))
+
+        assert created, "the public subject door returned no id"
+        assert lost == 0, (
+            "the subject door's record write failed — `SubjectAdded` is a "
+            "declared `NodeSnapshot` on `subject`, so the row must land")
+
+        records = _journal_records(journal_path)
+        subjects = [r for r in records if r.get("type") == "SubjectAdded"]
+        assert subjects, (
+            "the public subject door emitted no SubjectAdded record, so the "
+            f"semantic-layer Subject claim would be vacuous — journal types: "
+            f"{sorted({r.get('type') for r in records})}")
+        rows = _count(conn, "subject", tenant)
+        assert rows >= len(subjects), (
+            f"the record holds {rows} Subject row(s) for the "
+            f"{len(subjects)} SubjectAdded record(s) the journal carried")
+    finally:
+        conn.close()
+
+
 def test_a_merge_through_its_producer_leaves_the_losers_out_of_the_record(
         monkeypatch, tenant, tmp_path):
     """#9892 — `PointsMerged` projects, and the record stops resurrecting a merge.
