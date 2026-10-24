@@ -12,6 +12,10 @@ Ready-to-use integrations that connect popular tools to the Tortoise epistemic g
 
 - **[Twenty CRM](crm/twenty/)** — Self-hosted open-source CRM. Bridge script pushes meeting notes to contacts and meeting data to Tortoise.
 
+### Agent tooling
+
+- **[CLI extraction](cli-extraction/)** — Extract durable claims from captured session turns into tiered graph Points using local CLI models (Claude Code / Codex / GLM). Subscription-based, no provider API keys; blind-benchmarked across models and thinking depths.
+
 ## Architecture
 
 ```

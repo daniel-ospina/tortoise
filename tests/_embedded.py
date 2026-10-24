@@ -518,6 +518,16 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # list in config/ci-surfaces.yml (the two are one set in two homes;
     # tests/test_ci_selection.py pins the equality).
     "test_4521_revise_point_embedding",
+    # CLI-extraction lane (#9915): `TestWriterContract` executes the real
+    # writer script against the real in-repo SDK on per-test `TORTOISE_DB_PATH`
+    # embedded stores in namespace `cliex-contract` — a non-guard-passing
+    # namespace, so a URI-set run would redirect those constructions onto the
+    # shared `tortoise_test_matrix` instance (the #5084 cross-lane pollution
+    # class) and certify a lane the suite does not target. Registered with the
+    # ``carve_out`` list in config/ci-surfaces.yml (the two are one set in two
+    # homes; tests/test_ci_selection.py pins the equality) and DECLARED in
+    # tests/test_markers.py::test_no_redirect_stems_registry_exact.
+    "test_cli_extraction",
 )
 
 _HAS_FALKOR: bool | None = None
