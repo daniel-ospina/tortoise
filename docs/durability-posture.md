@@ -642,7 +642,9 @@ source of truth for a test session's created-graph ownership).
 
 **The gate matches a CLAIM SHAPE, not durability claims in general.** It fires on
 a `log`/`journal`/`jsonl`/`event stream` bound to `source of truth` / `is [the]
-truth`; a *mechanism promise* — e.g. a managed store "provides AOF durability" —
+truth` / `is [the|a|an|our|its|their|your] durab(le|ility)` (the three families
+spelled out where the gate's roots are described, above); a *mechanism promise* —
+e.g. a managed store "provides AOF durability" —
 does not match it, and is corrected by hand (`docs/infra-runbook.md` §1 did this
 under **#2968**). That seam is not this gate's to close: the general binding from
 a written claim to the system it describes is **#5063**.
@@ -795,21 +797,30 @@ a written claim to the system it describes is **#5063**.
   `is [the|a|an|our|its|their|your] durab(le|ility)`. Every site below fails that
   SHAPE — and **not** because "store" is a different noun: `is the truth store`
   bound to a `journal` subject *would* match the middle alternation, as measured.
-  The blindness is POSITION: *truth* sits with no `is` copula AFTER the subject,
-  an adverb interrupts the predicate, or the copula is FRONTED (an interrogative
-  `Is this log a JOURNAL — a durable … truth set`, where the `is` precedes the
-  subject). Measured 2026-10-24 on `92b364e8b` and re-checked on the merged base
-  `9296a4e85`, all still live:
+  The blindness is the SHAPE, in three measured forms: *truth* sits with no `is`
+  copula after the subject (`appended to the truth store`, `rebuild retains the
+  truth`, bare `TRUTH`); an adverb interrupts the predicate (`is still the
+  truth`); or the copula predicates a NOUN and durability survives only inside an
+  em-dash gloss (`Is this log a JOURNAL — a durable, replayable truth set`),
+  where the determiner slot takes `a` and the pattern needs `durab` next.
+  **De-fronting that last one does not fix it — measured: the same sentence with
+  `is` in front of `log` is still a miss, and only re-phrasing so that durability
+  is the direct predicate matches** — so a widened pattern must handle the gloss
+  form, not the word order. (No positive example is quoted here on purpose: a
+  matching sentence in this doc is itself a wrapped hit, which is the measurement
+  the gate's `"0 anywhere"` claim rests on.) Measured 2026-10-24 on `92b364e8b` and re-checked on
+  the merged base `9296a4e85`, all still live:
   `projection/entities.py` (*Restore verbatim — the journal is still the truth*:
   `still` defeats the predicate); `log.py`'s `EventLog` rubric (*Is this log a
-  JOURNAL — a durable, replayable truth set*: the copula is fronted, so the
-  subject→predicate order the pattern requires is reversed);
+  JOURNAL — a durable, replayable truth set*: the copula predicates `a JOURNAL`
+  and durability is an adjective in the gloss, never the predicate);
   `projection/edges.py` (*a recovery write that appended to the truth store*: no
-  `is`); `commit_ops.py` (*event stays journaled (rebuild retains the truth)*);
-  `sdk.py` (*the journal — the TRUTH — never recorded*; *the journal (TRUTH)*).
+  `is`); `commit_ops.py` (*rebuild retains the truth*, in an f-string that splits
+  the phrase around it);
+  `sdk.py` (*the journal — the TRUTH — never* recorded; *the journal (TRUTH)*).
   **The OPPOSITE claim is also present and must stay green** — the gate's
   silence there is correct, not a hole: the `no`/`needs no` truth-store negation
-  (`projection/__init__.py`, `mcp_auth.py`, `mcp_server.py`), `__main__.py`'s *a
+  (`projection/__init__.py`, `mcp_auth.py`, `mcp_server.py`), `__main__.py`'s *A
   SCRATCH journal, not a truth set*, and `projection/__init__.py`'s *a message
   that promised a journal would tell an operator a truth store is bound when
   none is*. **And the `truth store` phrase is mostly NOT this claim**: §17.1's
@@ -817,12 +828,12 @@ a written claim to the system it describes is **#5063**.
   the truth store (Postgres)*, and `onboarding/state.py`'s *the record is the
   truth store* all name the **record**, whose authority is #9557's — the
   distinction this document draws, not a restatement of the claim it deletes. A
-  sweep that reworded those would damage it. **A green gate run therefore does not mean no restatement: it means
-  none in the gate's wording.** **Not fixed by #9864, deliberately** — that
-  change is `fix(main)` for the two claims the gate *catches* (#9695 is red on
-  them), so its job is to be minimal — and not a blind sweep either: `tortoise/`
-  also uses *truth* for the legitimate replay-ORDER axis (*the derived store
-  must never lead the TRUTH*), which the rule above does not forbid, so the
+  sweep that reworded those would damage it. **A green gate run therefore does
+  not mean no restatement: it means none in the gate's wording.** **Not fixed
+  here, deliberately** — the sweep is #9867's, not this entry's — and not a blind
+  sweep either: `tortoise/`
+  also uses *truth* for the legitimate replay-ORDER axis (*the derived store must
+  never lead the truth*, §17.1), which the rule above does not forbid, so the
   widened pattern and the per-site reword have to land as ONE change or the
   pattern reds a correct sentence. #9867 carries the candidates that need a
   per-site read before they can be called restatements: `record_writer.py`'s *a
@@ -832,5 +843,5 @@ a written claim to the system it describes is **#5063**.
   deliberately excludes that family and the line break puts `exists — the
   append-only journal` on the next line — so this is the join-SCOPE hole, not a
   pattern hole, and it is the strongest case here, the one #9867 must decide;
-  and `sdk.py`'s *the journaled payload is
-  the whole truth of this write*.
+  and `sdk.py`'s *whole truth of this write* (said of the journaled payload,
+  across a comment break).
