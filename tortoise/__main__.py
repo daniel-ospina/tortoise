@@ -11866,7 +11866,8 @@ def main(argv: list[str] | None = None) -> int:
     ss.add_argument("--session-dir", default=None,
                     help="Pi session directory (default: ~/.pi/agent/sessions)")
     ss.add_argument("--cursor-dir", default=None,
-                    help="Cursor store directory (default: ~/.tortoise/store-sync)")
+                    help="Cursor store directory (default: <spool-parent>/store-sync, "
+                         "the same directory both health-line readers open)")
     ss.add_argument("--file", action="append", default=None,
                     help="Sync only this session file (repeatable). A single "
                          "--file also narrows the SPOOL half to that session "

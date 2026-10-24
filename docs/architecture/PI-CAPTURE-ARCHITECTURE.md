@@ -183,21 +183,22 @@ including on the branch where the window holds no shippable turn yet.
 
 The status seam exists because the one production caller spawns the worker with
 `stdio: "ignore"`, so `sweep-status.json` is the only place its outcome survives.
-But a **retained** batch and a **refused** shrunk window both exit 0 with no
-`errors[]`, so the worker's own verdict is *true* for a sweep that delivered
-**nothing**: `ok` meant "structurally able to run", and the line read
-`capture: OK` over a backstop a rotated key, an exhausted quota, a 429/5xx outage
-or a dead session's `/compact` had silently dead-ended. The turns were safe
-(the cursor did not move); the only user-visible surface was lying.
+But a **retained** batch exits 0 with no `errors[]`, so the worker's own verdict is
+*true* for a sweep that delivered **nothing**: `ok` meant "structurally able to
+run", and the line read `capture: OK` over a backstop a rotated key, an exhausted
+quota or a 429/5xx outage had silently dead-ended. The turns were safe (the cursor
+did not move); the only user-visible surface was lying.
 
 So the verdict is composed from what the log half actually did:
 
 | Condition | `ok` | `withheld` token | Where it lands |
 |---|---|---|---|
 | nothing held back (shipped / up-to-date / awaiting a turn) | `true` | — | `capture: OK` |
-| a window refused as shrunk | `false` | `window_shrunk` | `capture: …, store-sync FAILED (window_shrunk)` |
-| a batch the server retained (401/403/407/402/409/429/5xx) | `false` | `http_<status>` | `capture: …, store-sync FAILED (http_401)` |
+| a batch the server retained (401/403/407/402/429/5xx) | `false` | `http_<status>` | `capture: …, store-sync FAILED (http_401)` |
 | a retained batch with **no** status (a transport failure — DNS, refused connection, timeout) | `false` | the transport reason as the worker reported it (sanitised only where it is written to the status file) | `capture: …, store-sync FAILED (fetch failed)` |
+| a window refused as shrunk (`window_shrunk`) | `true` | — (the `shrunk` count is on `stdout`/`--json`) | `capture: OK` |
+| a `409` ("already in flight — a concurrent producer writing the SAME turns") | `true` | — | `capture: OK` |
+| turns DEAD-LETTERED and crossed (a permanent 4xx) | `true` | — | `capture: …, N store-sync dead-lettered` |
 | the log half never ran (`worker_status`) | `false` | — | its own not-run reason, not "withheld" |
 
 The token comes from the worker's per-file `action: "failed"` outcome: its integer
@@ -205,13 +206,34 @@ The token comes from the worker's per-file `action: "failed"` outcome: its integ
 derived once and rendered by BOTH legs from the same read; `main` also prints it
 on `stderr` (a count that only exists under `--json` is a count nobody reads), and
 the process **exit code follows the verdict** so a caller that ignores the file is
-still told. `--dry-run` is unaffected — it never writes the status.
+still told. `--dry-run` writes **no** status (a plan is not an outcome, and
+overwriting a real failure with a plan was a bug once) — but its exit code does
+follow the verdict, so a plan that would be refused is not reported as success.
+
+**Two refusals are deliberately NOT failures, and the skip is PER FILE.**
+`window_shrunk` refuses ONE dead file by design (shipping the shorter window would
+let the turn store hard-delete past it) and the unproven refusal writes no cursor
+row, so the same file is refused on every sweep for as long as it exists — 55 of
+292 real session files carry a `compaction`. Failing the sweep for that would paint
+a PERMANENT red over a backstop working exactly as designed, and a permanent red is
+how a line stops being read. `409` is the worker's own benign retain. But because
+the skip is per file, an ACTIONABLE refusal in the same sweep still wins: a box
+carrying both a compacted session and a rotated key reports `http_401`, not the
+thing nobody can fix. **The known cost, stated rather than hidden:** a box whose
+ONLY withheld state is a compacted refusal reports `capture: OK` while that one
+dead session's turns do not ship — the refusal is the recorded remainder on #3515
+(monotone window across `/compact`), and surfacing it as its own count segment
+needs the same change on both legs (`_with_store_sync_terms` and
+`captureHealthLine`), which is that fix's job, not a `FAILED` verdict's.
 
 **One refusal is NOT on this path.** A file with no readable session id is pushed
 to the worker's `errors[]`, so `run_worker` already returns `ok: false` and the
 withheld rule never runs for it; its reason is `no_header_id`, derived from the
 error token by `_reason_token`. `withheld` exists for the refusals that leave
-`errors[]` EMPTY — which is why they used to report `OK`.
+`errors[]` EMPTY — which is why they used to report `OK`. Dead-lettered turns are
+likewise disclosed by their own COUNT term on the line, never silently: the verdict
+is not failed for them because a crossed file is already reported, and failing the
+sweep as well would report one loss twice.
 
 The store is **one directory, derived one way**: the CLI's own default is now
 `<spool-parent>/store-sync` (it used to be `$HOME/.tortoise/store-sync`), which is
@@ -219,19 +241,27 @@ where both health-line readers look and where the extension already passed
 `--cursor-dir`. A `$HOME` default made a manual sweep's verdict invisible AND gave
 it a SECOND cursor over the same files — re-reading from 0 and re-shipping turns
 the extension's cursor already covered, under the documented
-`TORTOISE_CAPTURE_SPOOL_DIR` override. The status temp file is now per-process
+`TORTOISE_CAPTURE_SPOOL_DIR` override. The CLI's status temp is per-process
 (`sweep-status.json.tmp.<pid>`): the CLI and the extension's `noteFailure` share
 that directory, and one shared temp name let a failure record be published away by
-a concurrent healthy write — a lost update that reads `capture: OK`.
+a concurrent healthy write — a lost update that reads `capture: OK`. The published
+name is unchanged for both readers, so nothing can mistake a temp for the status.
+The extension's own writer still uses the shared name (`tortoise-capture.ts` is
+the pinned install seam, and moving its bytes for this would tell every installed
+box the contract changed); that residual is extension-vs-extension only — two Pi
+processes starting together can swap which FAILED *reason* is shown, never clear
+the failure.
 
 Tests: `test_a_RETAINED_batch_is_not_reported_OK`,
-`test_a_REFUSED_shrunk_window_is_not_reported_OK`,
+`test_a_shrunk_REFUSAL_does_not_fail_the_sweep_but_an_ACTIONABLE_one_still_wins`,
+`test_a_BENIGN_409_does_not_fail_the_sweep`,
 `test_the_default_cursor_dir_is_BESIDE_the_spool_like_both_readers`,
-`test_the_status_temp_path_is_PER_PROCESS`. Each fails with its fix reverted:
-the `withheld`/`ok`/exit-code assertions (two rows), the persisted status
-landing at the spool-derived path instead of `$HOME` (it drives `main`, not the
-helper), and the two pids' temp names surviving a refused rename (it drives
-`write_sweep_status`, so reverting the WRITER reds it, not just the helper).
+`test_the_status_temp_path_is_PER_PROCESS`. Each fails with its fix reverted, and for
+the last two the REVERTED WRITER is what reds them (not the helper): the
+`withheld`/`ok`/exit-code assertions, the per-file skip ORDER (mixed sweep →
+`http_401`), the persisted status landing at the spool-derived path instead of
+`$HOME` (it drives `main`), and the two pids' temp names surviving a refused rename
+(it drives `write_sweep_status`).
 
 ---
 

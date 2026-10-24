@@ -1065,12 +1065,21 @@ def test_a_RETAINED_batch_is_not_reported_OK(server, tmp_path):
     ]
 
 
-def test_a_REFUSED_shrunk_window_is_not_reported_OK(server, tmp_path):
-    """A dead session whose ``/compact`` shortened its window is REFUSED on every
-    sweep — deliberately, because shipping the shorter window lets the turn store
-    hard-delete past it. The refusal is permanent (the file never grows again, and
-    an unproven refusal writes no cursor row), so those turns never ship through
-    either lane, and the line said ``capture: OK``.
+def test_a_shrunk_REFUSAL_does_not_fail_the_sweep_but_an_ACTIONABLE_one_still_wins(
+    server, tmp_path
+):
+    """A ``/compact`` refusal must not paint a permanent red — and must never HIDE
+    an actionable refusal made in the same sweep.
+
+    Refusing the shorter window is the design (shipping it would let the turn store
+    hard-delete past it), and the unproven refusal writes no cursor row, so the same
+    dead file is refused on EVERY sweep for as long as it exists — 55 of 292 real
+    session files carry a `compaction`. Failing the sweep for that would make the
+    health line permanently red on a backstop that is working exactly as designed
+    (and `store-sync.ts` documents 409 as benign for the same reason: "already in
+    flight"). But the skip must be PER FILE: a rotated key on the same box is the
+    thing a user can act on, and a sweep that reported the unfixable `window_shrunk`
+    instead would hide it on every sweep, forever.
     """
     _session_file(tmp_path, "a.jsonl", [
         _header("sid-shrink"),
@@ -1095,16 +1104,47 @@ def test_a_REFUSED_shrunk_window_is_not_reported_OK(server, tmp_path):
         fh.write(_message("u3", "c1", "user", "five") + "\n")
         fh.write(_message("a3", "u3", "assistant", "six") + "\n")
 
+    # (1) The shrunk refusal ALONE: the count is reported, the verdict is not failed.
     shrunk_proc, second = _run_sync(tmp_path, server=server)
     assert second["log"]["shrunk"] == 1, second["log"]
     assert second["log"]["shipped"] == 0
-    assert second["log"]["withheld"] == "window_shrunk"
-    assert second["ok"] is False
-    assert shrunk_proc.returncode == 1, "the exit code follows the verdict here too"
+    assert second["log"].get("withheld") is None, (
+        "a designed refusal of one dead file is not the backstop being inert"
+    )
+    assert second["ok"] is True
+    assert shrunk_proc.returncode == 0
+
+    # (2) The SAME sweep, with a rotated key: the actionable refusal must win.
+    _session_file(tmp_path, "b.jsonl", [
+        _header("sid-rotated"),
+        _message("v1", None, "user", "this one a user can fix"),
+    ])
+    server.status = 401
+    mixed_proc, mixed = _run_sync(tmp_path, server=server)
+    assert mixed["log"]["shrunk"] >= 1, mixed["log"]
+    assert mixed["log"]["withheld"] == "http_401", mixed["log"]
+    assert mixed["ok"] is False
+    assert mixed_proc.returncode == 1
 
     status = json.loads((tmp_path / "cursor" / "sweep-status.json").read_text())
     assert status["ok"] is False
-    assert status["reason"] == "window_shrunk", status
+    assert status["reason"] == "http_401", status
+
+
+def test_a_BENIGN_409_does_not_fail_the_sweep(server, tmp_path):
+    """``409`` is the worker's own documented-benign retain: "already in flight —
+    a concurrent producer writing the SAME turns". A fleet box produces it
+    routinely, and a permanent ``store-sync FAILED (http_409)`` would be false."""
+    _session_file(tmp_path, "a.jsonl", [
+        _header("sid-409"),
+        _message("u1", None, "user", "already being filed by the hook"),
+    ])
+    server.status = 409
+    proc, receipt = _run_sync(tmp_path, server=server)
+    assert receipt["log"]["files"][0]["action"] == "failed"
+    assert receipt["log"].get("withheld") is None, "409 is benign, not withheld"
+    assert receipt["ok"] is True
+    assert proc.returncode == 0
 
 
 def test_the_default_cursor_dir_is_BESIDE_the_spool_like_both_readers(monkeypatch, tmp_path):

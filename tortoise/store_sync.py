@@ -340,27 +340,45 @@ def run_sweep(
     return receipt
 
 
+#: Refusals that are NOT the backstop being inert, so they must not fail the
+#: sweep. ``window_shrunk`` refuses ONE dead file by design (shipping the shorter
+#: window would let the turn store hard-delete past it), and its refusal writes no
+#: cursor row, so the same file is refused on every sweep for as long as it exists
+#: — 55 of 292 real session files carry a `compaction`. Failing the sweep for it
+#: would paint a PERMANENT red over a backstop that is working exactly as designed,
+#: which is how a health line stops being read.
+#: ``http_409`` is the worker's own benign case: "already in flight — a concurrent
+#: producer writing the SAME turns", which a fleet box produces routinely.
+_BENIGN_REFUSALS = frozenset({"window_shrunk", "http_409"})
+
+
 def _withheld_token(log: dict) -> str | None:
-    """Why the log half HELD BACK turns it could not ship (``None``: it held none).
+    """Why the log half HELD BACK turns it could not deliver (``None``: it held none).
 
     A not-run reason is its own verdict (``worker_status``) and is not "withheld",
-    so it is not re-labelled here. A file is reported as withheld when the worker
-    recorded a ``failed`` outcome for it: a shrunk-window REFUSAL, a file with no
-    readable session id, or a batch the server retained (whose ``status`` names
-    the code — ``http_402``, ``http_429``, …).
+        so it is not re-labelled here.
+
+    A file is withheld when the worker recorded a ``failed`` outcome for it — the
+    batch was RETAINED (401/402/403/407/429/5xx, whose ``status`` names the code)
+    or refused as shrunk. Benign refusals are skipped, but the SKIP is per-file and
+    the loop keeps looking: an ACTIONABLE refusal (a rotated key, an exhausted
+    quota, an outage) must win over an unfixable one on the same box, or the line
+    would report the thing nobody can act on and hide the thing they can.
     """
     if not log or log.get("worker_status"):
         return None
-    if int(log.get("shrunk") or 0) > 0:
-        return "window_shrunk"
     for outcome in log.get("files") or []:
         if not isinstance(outcome, dict) or outcome.get("action") != "failed":
             continue
         status = outcome.get("status")
         if isinstance(status, int) and status > 0:
-            return f"http_{status}"
-        reason = outcome.get("reason")
-        return str(reason) if reason else "withheld"
+            token = f"http_{status}"
+        else:
+            reason = outcome.get("reason")
+            token = str(reason) if reason else "withheld"
+        if token in _BENIGN_REFUSALS:
+            continue
+        return token
     return None
 
 
