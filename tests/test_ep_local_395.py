@@ -883,9 +883,11 @@ def test_compute_confidence_read_never_stamps_updated_at():
 # The AC5 WALL leg is a RUNAWAY ceiling, never an added-wait detector (see
 # `_ac5_wall_budget` for why it cannot be one). Both numbers are calibrated
 # against measurements, not picked: the multiple covers the population's
-# worst recorded wall/cpu ratio (2.53 s wall / ~0.87 s CPU = 2.9x — #9474's
-# table), and the floor covers a pass whose non-CPU time is daemon service
-# rather than compute.
+# worst recorded wall/cpu ratio (2.53 s wall / ~0.87 s CPU = 2.9x — the
+# 2.53 s is measured, #9474's table records WALL only, so the CPU half is
+# this pass's own measured cost and the PAIRING is the inference; see
+# `_ac5_wall_budget`), and the floor covers a pass whose non-CPU time is
+# daemon service rather than compute.
 _AC5_WALL_FLOOR_S = 2.5
 _AC5_WALL_MULTIPLE = 4.0
 
@@ -897,17 +899,24 @@ def _ac5_wall_budget(cpu: float) -> float:
     process `elapsed - cpu` is *contention plus every blocking wait*, and no
     wall-derived instrument can separate the two, so a bound tight enough to
     red a 1 s lock regression also reds a healthy pass on a starved host —
-    the #9015 / #9331 flake this test exists to close. The recorded
-    population already contains a healthy starved reading of 2.53 s wall
-    over ~0.87 s of CPU, i.e. 1.66 s of legitimate non-CPU time, which is
-    itself above AC5's ≤1 s budget: any wall bound tighter than that
-    re-flakes. AC5's ≤1 s is therefore enforced by the `cpu < 1.2`
-    assertion, which no amount of contention can flake; this ceiling only
-    catches a pass that has become RUNAWAY (wall ≈ 2x+ its own CPU) or that
-    replaced compute with wait (which *drops* `cpu`, so the CPU leg reds
-    it). At cpu ≈ 0.87 — the measured cost of this pass — the ceiling is
-    ≈ 3.48 s, so roughly 1.9 s of added pure wait still passes GREEN; that
-    is the documented width of this guard, not an accident of the constant.
+    the #9015 / #9331 flake this test exists to close. The population
+    already contains a healthy starved 2.53 s wall reading (#9474's table),
+    which carries ≥ 1.33 s of non-CPU time even if the pass had consumed the
+    LARGEST cpu the CPU leg permits (2.53 - 1.2) — above AC5's ≤1 s budget,
+    so any wall bound tighter than that re-flakes. AC5's ≤1 s is therefore
+    enforced by the `cpu < 1.2` assertion, which no amount of contention can
+    flake; this ceiling only catches a pass that has become RUNAWAY (wall
+    ≈ 2x+ its own CPU).
+
+    ⛔ AND A CPU *DROP* PASSES THE CPU LEG: `cpu < 1.2` is an UPWARD-only
+    bound, so the replace-compute-with-wait shape is NOT caught by it. That
+    shape lands here only once wall exceeds the FLOOR — `max(2.5, ~0)` — so
+    a wait-shaped regression that keeps wall under ≈ 2.5 s is invisible to
+    this test, exactly as the added-lock case is. At cpu ≈ 0.87 — the
+    measured cost of this pass — the ceiling is ≈ 3.48 s, so ~1.6-1.7 s of
+    added pure wait still passes GREEN against the 1.79-1.88 s wall measured
+    here (~1.9-2.1 s against the 1.34-1.52 s control below); that is the
+    documented width of this guard, not an accident of the constant.
 
     `time.process_time()` is PROCESS-scoped, and the embedded lane's engine
     is a separate `redislite`/`falkordblite` daemon, so the graph
@@ -931,8 +940,12 @@ def test_ac5_wall_budget_contract():
     wall/cpu ratio (2.53 s wall / 0.87 s CPU = 2.9x) or a healthy starved
     pass reds, and BELOW the 5.0 s runaway cap it replaced across the CPU
     range the assertion itself enforces (`cpu < 1.2`) or it is the looser
-    bound. Both legs are mutation-sensitive: dropping the multiple to 2.5x
-    reds the first assertion, raising it to 4.5x reds the second.
+    bound. The FLOOR is pinned too, because it is what decides the
+    cheap-pass case: at `cpu -> 0` the ceiling collapses to the floor, and a
+    floor below the population's legitimate non-CPU time re-flakes the same
+    way a too-small multiple does. Every leg is mutation-sensitive: the
+    multiple at 2.5x reds the first assertion and at 4.5x the second; a
+    floor of 0.5 s reds the third; 4.0x / 2.5 s is the green baseline.
     """
     assert _AC5_WALL_MULTIPLE * 0.87 > 2.53, (
         "the multiple must cover the population's worst recorded wall/cpu "
@@ -941,11 +954,21 @@ def test_ac5_wall_budget_contract():
     assert _AC5_WALL_MULTIPLE * 1.2 < 5.0, (
         "the ceiling must stay strictly below the 5.0 s runaway cap it "
         "replaced over the whole enforced CPU range (cpu < 1.2)")
-    # The floor binds only for a pass cheaper than 0.625 s of CPU, which is
-    # what keeps a fast-but-daemon-bound pass off a sub-second wall bound.
-    assert _ac5_wall_budget(0.10) == _AC5_WALL_FLOOR_S
-    assert _ac5_wall_budget(0.87) == pytest.approx(3.48)
-    assert _ac5_wall_budget(1.19) < 5.0
+    assert _AC5_WALL_FLOOR_S > 2.53 - 1.2, (
+        "the floor must exceed the population's worst legitimate non-CPU "
+        "time (2.53 s wall carrying >= 1.33 s of non-CPU even at the "
+        "largest cpu the CPU leg permits) or a cheap daemon-bound pass is "
+        "held to a sub-second wall bound and #9015/#9331 re-flake")
+    # The floor binds for a pass cheaper than 0.625 s of CPU, which is what
+    # keeps a fast-but-daemon-bound pass off a sub-second wall bound.
+    assert _ac5_wall_budget(0.10) == _AC5_WALL_FLOOR_S, (
+        "the floor must bind for a cpu-cheap pass")
+    assert _ac5_wall_budget(0.87) == pytest.approx(3.48), (
+        "the ceiling at this pass's measured cpu (~0.87 s) is 4 x cpu, not "
+        "the floor — the documented ~3.5 s threshold")
+    assert _ac5_wall_budget(1.19) < 5.0, (
+        "the ceiling must stay below the 5.0 s cap up to the largest cpu "
+        "the CPU leg permits")
 
 
 def test_ac5_interactive_latency_zone():
@@ -969,25 +992,34 @@ def test_ac5_interactive_latency_zone():
 
     So: `process_time` carries the AC5 budget (unchanged at 1.2 s — the ≤1s
     budget plus the #1273 margin, which is NOT relaxed here; only the
-    quantity it is read from changes, and on an idle box the two are the
-    same number), and the WALL reading is bounded RELATIVE to the work the
+    quantity it is read from changes — and the CPU reading is 0.57-0.66x of
+    the wall reading even on an UNLOADED host (daemon service is not in it:
+    measured 1.34-1.52 s wall against 0.856-0.870 s cpu below), so
+    `cpu < 1.2` permits wall up to ≈ 2.1 s. That offset is the client-half
+    limit of a process-scoped clock, not a relaxation anyone chose), and the
+    WALL reading is bounded RELATIVE to the work the
     pass actually did (`max(2.5, 4 x cpu)`), never absolutely. The 4x
     multiple is measured, not picked: four passes over one warm graph on a
     4-CPU box at loadavg 13.8 gave wall/cpu 2.09/2.13/2.22/1.99.
 
-    ⛔ WHAT THE WALL LEG DOES **NOT** DO (corrected in review, cycle 4). It
-    is a RUNAWAY ceiling, not an added-wait detector: at cpu ~0.87 it
-    tolerates ~1.9 s of added pure wait (ceiling ~3.48 s against a natural
-    wall of 1.79-1.88 s here), so a lock or blocking call of that magnitude
-    passes green. It cannot be tightened without re-flaking: `elapsed - cpu`
-    is contention PLUS every blocking wait, and the population already holds
-    a healthy starved reading of 2.53 s wall over ~0.87 s CPU — 1.66 s of
-    legitimate non-CPU time, itself above AC5's ≤1 s budget. AC5 is enforced
-    by the `cpu < 1.2` leg instead, which contention cannot flake; what the
-    wall leg adds is (a) a runaway cap, and (b) a red on the
-    replace-compute-with-wait shape, which drops `cpu` and so trips the CPU
-    leg. See `_ac5_wall_budget`, and `test_ac5_wall_budget_contract` for the
-    pinned calibration window.
+    ⛔ WHAT THE WALL LEG DOES **NOT** DO (corrected in review, cycles 4-5).
+    It is a RUNAWAY ceiling, not an added-wait detector: at cpu ~0.87 it
+    tolerates ~1.6-1.7 s of added pure wait (ceiling ~3.48 s against the
+    1.79-1.88 s wall measured here; ~1.9-2.1 s against the 1.34-1.52 s
+    control below), so a lock or blocking call of that magnitude passes
+    green. It cannot be tightened without re-flaking: `elapsed - cpu` is
+    contention PLUS every blocking wait, and the population's 2.53 s wall
+    reading carries >= 1.33 s of non-CPU time even at the largest cpu the
+    CPU leg permits (1.2 s) — above AC5's <= 1 s budget. AC5 is enforced by
+    the `cpu < 1.2` leg instead, which contention cannot flake. Note what
+    that does NOT buy: `cpu < 1.2` is an UPWARD-only bound, so a cpu DROP
+    passes it — the replace-compute-with-wait shape is caught here only once
+    wall exceeds the ceiling's FLOOR, i.e. above ~2.5 s wall, and a
+    wait-shaped regression below that is invisible to this test, exactly as
+    the added-lock case is. So the wall leg's real contribution is (a) a
+    runaway cap and (b) a floor guard on cheap passes. See
+    `_ac5_wall_budget`, and `test_ac5_wall_budget_contract` for the pinned
+    calibration window.
 
     Why not #9015's recommended option 2 (best-of-N wall)? Because it does
     not separate code from box here either: the four passes above were all
@@ -1019,10 +1051,12 @@ def test_ac5_interactive_latency_zone():
             f"local EP took {cpu:.2f}s of CPU ({elapsed:.2f}s wall, "
             f"loadavg {os.getloadavg()[0]:.1f}) — interactive budget is ≤1s")
         # RUNAWAY ceiling only — NOT an added-wait detector (see the
-        # docstring and `_ac5_wall_budget`: at this cpu it tolerates ~1.9 s
-        # of added wait, because legitimate non-CPU time on a starved host
-        # already reaches 1.66 s and a tighter bound re-flakes #9015/#9331).
-        # AC5's ≤1s is enforced by the `cpu < 1.2` assertion above.
+        # docstring and `_ac5_wall_budget`: at this cpu it tolerates
+        # ~1.6-1.7 s of added wait, since the population's 2.53 s wall
+        # reading carries >= 1.33 s of non-CPU time even at cpu = 1.2 and a
+        # tighter bound re-flakes #9015/#9331). AC5's ≤1s is enforced by the
+        # `cpu < 1.2` assertion above — which is UPWARD-only, so it does not
+        # catch a cpu drop either.
         wall_budget = _ac5_wall_budget(cpu)
         assert elapsed < wall_budget, (
             f"local EP spent {elapsed:.2f}s wall for {cpu:.2f}s of CPU — "
