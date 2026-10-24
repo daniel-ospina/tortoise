@@ -622,7 +622,10 @@ def test_an_edge_minted_AT_a_superseded_point_is_replayed(edge_sdk):
     proj = sdk._get_proj()
     successor = sdk.create_point("claim", "post-supersede successor", pointKind="statement")
     sdk.supersede_point(ids["p1"], successor["id"])
-    assert proj.create_edge(ids["p1"], ids["p2"], "dependsOn") is True
+    # ⚠️ A MOVED rel (`aboutSubject`, in `SUPERSEDE_TRANSFERRED_RELS`), NOT a rel a
+    # supersede never touches: an unmoved rel returns before the ordering arm runs,
+    # so the leg would pass with the arm deleted and pin nothing (measured).
+    assert proj.create_edge(ids["p1"], ids["subject"], "aboutSubject") is True
 
     def outgoing(pid: str) -> set[str]:
         return {row[0] for row in proj.g.query(
@@ -630,7 +633,7 @@ def test_an_edge_minted_AT_a_superseded_point_is_replayed(edge_sdk):
             params={"p": pid}).result_set}
 
     live = outgoing(ids["p1"])
-    assert "dependsOn" in live, live
+    assert "aboutSubject" in live, live
     proj.rebuild_all(str(_journal.parent), confirm_destructive=True)
     assert outgoing(ids["p1"]) == live, (
         "a rebuild dropped an edge minted AFTER its point was superseded — the "
@@ -671,3 +674,34 @@ def test_a_reasserted_edge_survives_the_repoint_delete_leg(edge_sdk):
     assert outgoing(successor["id"]) == live_succ, (
         "the successor-side transfer was lost — the exemption must guard the "
         "DELETE only, never the transfer")
+
+
+def test_a_reasserted_edge_to_the_SUCCESSOR_survives_the_delete_only_leg(edge_sdk):
+    """The `delete_only` (no-self-edge-guard) descriptor's delete leg has the
+    same blind spot as its normal sibling, one branch away (peer review, cycle 6).
+
+    The descriptor exists when the structural target IS the successor
+    (`supersede_point`'s own no-self-edge guard), and its delete also cannot tell
+    pass-2's resurrection from an edge the creation fold replayed at the old
+    point. Measured before the guard: live kept the re-assertion, `rebuild_all`
+    lost it.
+    """
+    sdk, _journal = edge_sdk
+    ids = _world(sdk)
+    proj = sdk._get_proj()
+    # `aboutPoint` between two Points: the supersede below makes p2 the successor
+    # and the edge already terminates there, which is the delete_only shape.
+    proj.create_about_edge(ids["p1"], ids["p2"], "aboutPoint")
+    sdk.supersede_point(ids["p1"], ids["p2"])
+    proj.create_about_edge(ids["p1"], ids["p2"], "aboutPoint")
+
+    def outgoing(pid: str) -> set[str]:
+        return {row[0] for row in proj.g.query(
+            "MATCH (:Point {id:$p})-[r]->() RETURN type(r)",
+            params={"p": pid}).result_set}
+
+    live = outgoing(ids["p1"])
+    assert "aboutPoint" in live, live
+    proj.rebuild_all(str(_journal.parent), confirm_destructive=True)
+    assert outgoing(ids["p1"]) == live, (
+        "the delete_only leg removed a re-asserted edge the live graph keeps")
