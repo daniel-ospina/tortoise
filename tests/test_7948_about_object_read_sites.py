@@ -2443,10 +2443,15 @@ def _route_table() -> dict[tuple[str, str], frozenset[str]]:
 #     direction), and a common name — an attribute (`list`, `.delete`) or a
 #     builtin — makes two unrelated sites adjacent (measured: `MCP tortoise_search`
 #     reaches `hosted_backup.py::BackupStorage.list` in 2 hops through nothing but
-#     the repeated name `list`). Function-LOCAL names no longer do: they are not
-#     symbol definitions at all since the `#9817` fix (see `_symbol_index`), and
-#     that class was the one that produced a WRONG attribution rather than an extra
-#     hop. The budget and the pinned rate are what keep the residue small; the arm
+#     the repeated name `list`). Function-local ASSIGNMENT targets no longer do:
+#     since the `#9817` fix they are not symbol definitions at all (see
+#     `_symbol_index`), and that class was the one that produced a WRONG attribution
+#     rather than an extra hop. ⚠️ The NAME of a nested `def`/`class` is still a
+#     symbol — what the local-class rule drops is its BODY's assignments, and the
+#     class node itself stays (both directions are pinned in
+#     `test_a_class_defined_inside_a_function_is_not_a_symbol`) — so this residual
+#     is about local VARIABLES, not about every local definition.
+#     The budget and the pinned rate are what keep the residue small; the arm
 #     still does not prove a call graph.
 #   * **A door that ENTERS the shared search path is attributed to the readers
 #     that path touches — measured, not merely possible.**
@@ -2461,12 +2466,15 @@ def _route_table() -> dict[tuple[str, str], frozenset[str]]:
 #   * **`_DOOR_REACH_HOPS` is a BOUND, and the number is a MEASUREMENT, not a
 #     guess — the first one was WRONG and a review caught it.** A uniform budget
 #     of 5 attributed every row of the table as it stood then, so it looked safe;
-#     measured against substitutions that keep a REAL tool in the cell it accepted
-#     it swallowed the largest share of the (row, table-door) pairs, and three such
-#     substitutions stayed GREEN (rows 22/24's reach cells swapped, rows 28-31's
-#     backup doors swapped, and row 28's verb changed to the sibling `GET` that
-#     dumps nothing). At a uniform 3 hops the same sweep accepts far less and all
-#     three red; the SHIPPED predicate — the exceptions in `_DISTANCE_EXCEPTIONS`
+#     measured against substitutions that keep a REAL tool in the cell, it accepted
+#     the largest share of the (row, table-door) pairs, and three such substitutions
+#     are refused at a uniform 3 (rows 22/24's reach cells swapped, rows 28-31's
+#     backup doors swapped, and row 28's verb changed to the sibling `GET` that dumps
+#     nothing) — but only TWO of them discriminate 5 from 3: the backup swap is
+#     already refused at 5, because row 31's swapped cell is 7 hops (and under the
+#     shipped predicate row 29's is 5 against that reader's 4-hop exception) — the
+#     per-door figures are in the `_DOOR_REACH_HOPS` note above.
+#     The SHIPPED predicate — the exceptions in `_DISTANCE_EXCEPTIONS`
 #     included — accepts the rate the arm below pins (`_ACCEPTED_PAIRS_AT_THIS_HEAD`
 #     over the derived population), because a rate restated in prose is a count
 #     that rots: this sentence still read 63/340 = 18.5 % after the table grew.
@@ -2499,8 +2507,8 @@ def _route_table() -> dict[tuple[str, str], frozenset[str]]:
 #: grew. The denominator is 19 rows x 22 doors at this head.)
 #: ⚠️ **The figures an earlier wording here carried were re-measured, not merely
 #: re-labelled.** It reported `16.5 %` for a uniform 5 and `15.6 %` for a uniform 3,
-#: and justified the tighter number with three substitutions that stayed green at 5
-#: and red at 3 (rows 22/24's reach cells swapped, rows 28-31's backup doors
+#: and justified the tighter number with three substitutions it said stayed green
+#: at 5 and red at 3 (rows 22/24's reach cells swapped, rows 28-31's backup doors
 #: swapped, row 28's verb changed). At `3f2f48932` — the commit that wrote that
 #: sentence — the figures reproduce **against that commit's own, still-defective index** (it
 #: had no `in_function` flag at all, so function locals were symbols): uniform
@@ -2510,21 +2518,23 @@ def _route_table() -> dict[tuple[str, str], frozenset[str]]:
 #: the "roughly two fifths" the arm BELOW states). ⚠️ The index matters: the
 #: CURRENT sweep above, locals excluded, applied to that same tree measures
 #: 24/34/42/52 and a shipped 36 — the difference is the defect, not the tree.
-#: The DISCRIMINATION the old wording claimed was TRUE there, and the per-DOOR
-#: distances are what show it, not a per-cell minimum. Measured there, per door and
-#: per CELL — a swapped DOOR changes every cell that carries it, so the backup swap
-#: is FOUR cells (rows 28/29 carry `POST /v1/backups`, rows 30/31 its `restore`
-#: sibling), not the two the old wording named: row 24's reader via row 22's two
-#: doors 5, 5; row 22's reader via row 24's three doors 3, 4, 4; rows 28/29 via
-#: `POST /v1/backups/restore` 5, 5; rows 30/31 via `POST /v1/backups` 5, 7; row
+#: The DISCRIMINATION the old wording claimed was only PARTLY true there, and the
+#: per-DOOR distances are what show it, not a per-cell minimum. Measured there, per
+#: door and per CELL — a swapped DOOR changes every cell that carries it, so the
+#: backup swap is FOUR cells (rows 28/29 carry `POST /v1/backups`, rows 30/31 its
+#: `restore` sibling), not the two the old wording named: row 24's reader via row
+#: 22's two doors 5, 5; row 22's reader via row 24's three doors 3, 4, 4; rows 28/29
+#: via `POST /v1/backups/restore` 5, 5; rows 30/31 via `POST /v1/backups` 5, 7; row
 #: 28's verb `GET` 5. **Every one of those cells is refused at a uniform 3** —
 #: row 22's because two of its three substituted doors sit at 4, since the arm
 #: refuses a CELL when ANY of its doors exceeds the budget (so the leading `3` is
-#: one green door inside a refused cell, never a green cell) — while at a uniform
-#: 5 all of them are accepted except row 31's 7-hop cell, refused there as well.
-#: What changed is that the local-symbol fix removes the collisions those
-#: substitutions were exploiting: under the current index all three are REFUSED
-#: even at a uniform 5.
+#: one green door inside a refused cell, never a green cell). ⚠️ **So only two of
+#: the three substitutions discriminate 5 from 3**: at a uniform 5 the backup swap
+#: is ALREADY refused, on row 31's 7-hop cell (and, with the exceptions on, on row
+#: 29's 5-hop cell against that reader's 4-hop budget) — its green cells are rows
+#: 28/29/30 only. What changed is that the local-symbol fix removes the collisions
+#: those substitutions were exploiting: under the current index all three are
+#: REFUSED even at a uniform 5.
 #: The budget stays at 3 — it is a bound, and nothing here depends on the old
 #: rates.
 _DOOR_REACH_HOPS = 3
@@ -2836,6 +2846,15 @@ def test_the_door_attribution_refuses_a_door_that_reaches_another_reader():
         "this probe's door does not resolve, so `not _door_reaches(...)` below would be "
         "vacuous — a door that is not in the index never reaches anything (measured: a "
         "renamed tool yields frozenset() and refuses every reader)"
+    )
+    # The READER needs the same guard as the door: a reader id that no longer
+    # resolves is absent from the index, `_door_distance` answers `None`, and the
+    # `not _door_reaches(...)` assertion below passes while testing nothing.
+    assert "hosted_backup.py::_COUNT_ALL_EDGES_QUERY" in _symbol_index()[1], (
+        "the probe reader `hosted_backup.py::_COUNT_ALL_EDGES_QUERY` is not a node in "
+        "the symbol index, so the assertion below would pass on a reader that cannot "
+        "be reached because it no longer exists — re-point the pin at the renamed "
+        "constant rather than letting it go silent"
     )
     assert not _door_reaches("MCP tortoise_search", "hosted_backup.py::_COUNT_ALL_EDGES_QUERY"), (
         "the search door is attributed to `hosted_backup.py::_COUNT_ALL_EDGES_QUERY` "
