@@ -2080,10 +2080,14 @@ def test_the_public_capture_path_writes_the_record(capture_sdk, monkeypatch,
     * **semantic** — `object` only, asserted against the objects the capture
       actually emitted (counted from the journal, so the claim is non-vacuous
       either way: a capture that emits no Object record must produce no Object
-      row). The layer's **Subject** half is a SEPARATE leg below, because a
-      capture never emits `SubjectAdded` (#9893) — this sentence used to claim
-      `subject` here, which was false of the product and is the claim that let
-      the half go unguarded.
+      row). The layer's **Subject** half is a SEPARATE leg below: this sentence
+      used to claim `subject` here, which was never true of this leg, and this
+      file's capture lane is its deterministic `TORTOISE_SESSION_LLM_MOCK`
+      payload, whose one entity classifies as an Object (`core:strategy`) — so
+      a `subject` assertion against THIS capture would be vacuous (#9893). A
+      capture CAN emit `SubjectAdded` (the v2 lane routes any payload entity of
+      a declared Subject kind to `create_entity("subject", …)`); it is this
+      lane's payload, not the product, that produces none.
     * **procedural** — a VIEW, never a table ("the procedural layer owns no
       table", migration 4): `object_current_status` folds the `object` rows.
 
@@ -2230,9 +2234,10 @@ def test_the_public_subject_door_writes_the_semantic_layers_subject_half(
 
     The epic's acceptance names **Subjects** alongside Objects, and the semantic
     layer's Subject half had no end-to-end leg at all: the only end-to-end
-    record test asserted `object`, and a capture never emits `SubjectAdded`, so
-    a broken producer would leave the suite green (#9893 measured `subject | 0`
-    after the whole file ran against a real `postgres:16`).
+    record test asserted `object`, and this file's capture lane emits no
+    Subject-classified entity, so the half could not be covered from the
+    capture leg (#9893 measured `subject | 0` after the whole file ran against
+    a real `postgres:16`).
 
     This is the exact mirror of the `object` assertion above, and the mirror is
     the point: `assert subjects` FIRST and unconditionally, because without it
@@ -2240,16 +2245,25 @@ def test_the_public_subject_door_writes_the_semantic_layers_subject_half(
     reading as a pass. Then the row count must cover the records the journal
     actually carried.
 
-    The FALSIFIER was observed red, and the shape matters: replacing
-    `RECORD_MUTATIONS["SubjectAdded"]` with a `NoRecordEffect` reds this leg at
-    the count (`the record holds 0 Subject row(s) for the 1 SubjectAdded
-    record(s)`). DELETING the dispatch instead reds EARLIER, at the
-    `write_failed` delta below, because an undeclared record type is refused
-    (`UnknownJournalRecordType`) — both are red and neither is a skip, but the
-    two failures are different assertions, so a lane reproducing the falsifier
-    should use the `NoRecordEffect` form and read the count. The non-vacuity
-    guard alone reds it if the producer stops journaling. Recorded in the PR
-    body.
+    The FALSIFIER was observed red, and the SHAPE matters — three edits, three
+    different reds. Only the FIRST is measured; the other two are derived from
+    the code and are stated as such rather than claimed as runs:
+
+    * MEASURED — replacing `RECORD_MUTATIONS["SubjectAdded"]` with a
+      `NoRecordEffect` reds at the COUNT ("the record holds 0 Subject row(s)
+      for the 1 SubjectAdded record(s)") — this is the form the PR recorded;
+    * DERIVED — deleting the key alone reaches no assertion at all:
+      `record_projection` asserts `set(RECORD_MUTATIONS) ==
+      set(JOURNAL_EVENT_TYPES)` at import, so the whole module fails at
+      COLLECTION. Only a two-edit deletion (both the dict and the type set)
+      surfaces as `UnknownJournalRecordType`, counted as `write_failed`, and
+      reds at the `lost == 0` delta below;
+    * BY CONSTRUCTION — a producer that journals nothing leaves NO journal file
+      (the SDK creates `event_log_path` lazily), so the `journal_path.exists()`
+      guard reads that as an empty record list and `assert subjects` fires with
+      `journal types: []`.
+
+    None of the three skips. Recorded in the PR body.
     """
     conn = _record_db()
     try:
@@ -2276,7 +2290,12 @@ def test_the_public_subject_door_writes_the_semantic_layers_subject_half(
             "the subject door's record write failed — `SubjectAdded` is a "
             "declared `NodeSnapshot` on `subject`, so the row must land")
 
-        records = _journal_records(journal_path)
+        # The SDK creates the journal LAZILY, so a producer that journals
+        # nothing leaves no file at all; read that as an empty record list so
+        # the non-vacuity guard below is the thing that fires with a readable
+        # diagnostic, instead of `_journal_records` raising FileNotFoundError.
+        records = (_journal_records(journal_path)
+                   if journal_path.exists() else [])
         subjects = [r for r in records if r.get("type") == "SubjectAdded"]
         assert subjects, (
             "the public subject door emitted no SubjectAdded record, so the "
