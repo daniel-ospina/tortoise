@@ -992,3 +992,111 @@ def test_run_carries_operator_edge_audit_dimension(tmp_path, monkeypatch):
             < receipt["operator_audit"]["planted"])
     assert (receipt["operator_audit"]["operators_provenanced"]
             == receipt["operator_audit"]["operators_total"] > 0)
+
+
+# ── #8503: attributing an `edge_missing` verdict ───────────────────────────
+#
+# An `edge_missing` verdict (both endpoints present, no qualifying edge) has
+# TWO mechanisms that need different fixes: the model never FORMED the edge
+# (operator selection) or the seam DROPPED one it did emit (a write-path bug).
+# The receipts carried no extraction warnings at all, so a reader could not
+# tell them apart. The block below is the discriminator; these tests pin both
+# directions, because a filter that matched everything would answer "some
+# warnings" rather than "no drop".
+
+
+def test_operator_drop_warnings_names_a_seam_drop():
+    results = [{
+        "session_id": "wp01_quarry_debug",
+        "extraction_warnings": [
+            "operator dropped: src/dst did not resolve to an emitted "
+            "point/event ('X' → 'Y')",
+            "value-normalizer: 5 point(s) carried an amount that was not typed",
+        ],
+    }]
+    drops = runner.operator_drop_warnings(results)
+    assert drops["total"] == 1
+    assert drops["operator_drops"] == 1
+    assert drops["supersede_refusals"] == 0
+    assert list(drops["by_session"]) == ["wp01_quarry_debug"]
+    assert "operator dropped" in drops["by_session"]["wp01_quarry_debug"][0]
+
+
+def test_operator_drop_warnings_separates_the_replace_channel():
+    """#8503: a supersede refusal is NOT an operator drop.
+
+    The first cut of this classifier matched "is not expressible in the
+    Layer-1 payload" and counted wp02's three ENTITY-lifecycle notices plus
+    wp07's two supersede refusals as five operator drops — attributing
+    selection misses to the operator pass, which had dropped nothing. The two
+    classes answer different questions and are counted separately.
+    """
+    results = [{
+        "session_id": "wp07_bluepeak_followup",
+        "extraction_warnings": [
+            "entity 'all-at-once rollout' lifecycle=superseded with no "
+            "supersedes ref is not expressible in the Layer-1 payload",
+            "entity 'per-service flags' supersedes='all-at-once rollout' does "
+            "not resolve to an S3 search result — recorded without a graph id",
+            "point supersedes='We ship the lease fix' matches no S3 prior — "
+            "skipped (fail-open)",
+        ],
+    }]
+    drops = runner.operator_drop_warnings(results)
+    assert drops["operator_drops"] == 0
+    assert drops["supersede_refusals"] == 3
+    assert drops["total"] == 3
+
+
+def test_operator_drop_warnings_ignores_benign_extraction_warnings():
+    """Zero is a MEASUREMENT (#8503): "the extractor logged no drop".
+
+    The real receipt's sessions log value-span, slot-binding and search_keys
+    warnings — none of them a drop. A marker set that counted those would
+    attribute every ``edge_missing`` to the write path.
+    """
+    results = [{
+        "session_id": "wp01_quarry_debug",
+        "extraction_warnings": [
+            "value-bearing point 'X' resolved verbatim in turn 8, but the "
+            "quoted text carries no value",
+            "entity 'lumen auth' lifecycle='changed' is not expressible",
+            "point 'Maya owns the pre-deploy check': search_keys capped at 4",
+            "MITIGATES target edge materialized (#2552 mint-before-wire)",
+            "operator endpoint minted (#2552 mint-before-wire): IMPL dst",
+            "NAND direction canonicalized (#909 — new-claim-attacks-existing)",
+        ],
+    }]
+    assert runner.operator_drop_warnings(results) == {
+        "total": 0, "operator_drops": 0, "supersede_refusals": 0,
+        "by_session": {}}
+
+
+def test_receipt_carries_extraction_warnings_and_drop_attribution():
+    report = _completed_report()
+    report["session_results"] = [{
+        "session_id": "wp01_quarry_debug",
+        "emitted": True,
+        "macro": {"survived": 1, "total": 2},
+        "strict": {"survived": 1, "total": 2},
+        "leaked": {"leaked": 0, "total": 0},
+        "quotes": {"grounded": 0, "total": 0},
+        "provenance": {"accurate": 1, "total": 1},
+        "memory_point_count": 3,
+        "operator_counts": {"IMPL": 2},
+        "extraction_warnings": ["operator dropped: src/dst did not resolve"],
+        "unit_detail": {},
+    }]
+    report["operator_audit"] = {
+        "planted": 15, "edge_correct": 2, "content_ok": 7,
+        "operators_total": 27, "operators_provenanced": 27,
+        "drop_warnings": runner.operator_drop_warnings(
+            report["session_results"]),
+        "results": {},
+    }
+    receipt = runner.build_receipt(report)
+    assert receipt["session_results"][0]["extraction_warnings"] == [
+        "operator dropped: src/dst did not resolve"]
+    assert receipt["operator_audit"]["drop_warnings"]["total"] == 1
+    # a receipt that carries them still validates
+    assert runner.validate_receipt(receipt) == []

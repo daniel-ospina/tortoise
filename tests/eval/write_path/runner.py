@@ -1419,6 +1419,11 @@ def run_benchmark(
             )
             result["operator_counts"] = snapshot["operator_counts"]
             result["capture_ok"] = capture.get("ok")
+            # #8503: the extractor's OWN warnings, per session. The receipts
+            # carried none, so an ``edge_missing`` verdict could not be
+            # attributed between "the edge was never formed" and "the seam
+            # dropped it" (the two mechanisms #8503 refuses to conflate).
+            result["extraction_warnings"] = list(capture.get("warnings") or [])
             session_results.append(result)
         if ep_pass:
             try:
@@ -1447,6 +1452,12 @@ def run_benchmark(
                     )
                     refreshed["operator_counts"] = snap["operator_counts"]
                     refreshed["capture_ok"] = result["capture_ok"]
+                    # #8503: the warnings belong to the CAPTURE, not to the
+                    # re-grade — carry them through the EP-pass refresh so a
+                    # completed run never loses the attribution it just
+                    # measured.
+                    refreshed["extraction_warnings"] = result.get(
+                        "extraction_warnings", [])
                     fresh.append(refreshed)
                 session_results = fresh
             except Exception as exc:
@@ -1511,6 +1522,18 @@ def run_benchmark(
                     s.get("operators_provenanced", 0)
                     for s in surfaces_by_session.values()
                 )
+                # #8503: carry the extractor's own drop warnings beside the
+                # verdicts, so an `edge_missing` row is ATTRIBUTABLE from the
+                # receipt (never formed by the model vs dropped by the seam).
+                operator_audit["drop_warnings"] = operator_drop_warnings(
+                    session_results)
+                if operator_audit["drop_warnings"]["operator_drops"] == 0:
+                    notes.append(
+                        "operator drops (#8503): the extractor logged NO "
+                        "operator/edge drop in any session — every "
+                        "edge_missing verdict in this receipt is the model "
+                        "not forming the edge (operator selection), not the "
+                        "write path dropping one")
                 for result in session_results:
                     sid = result["session_id"]
                     owned = [
@@ -1710,7 +1733,7 @@ def extractor_identity() -> dict:
 
 
 def operator_audit_notes(audit: dict | None, posture: str) -> list[str]:
-    """The operator-audit note(s) for a run report (#2514/#2552/#4807).
+    """The operator-audit note(s) for a run report (#2514/#2552/#4807/#8503).
 
     The m2-echo-lane caveat — "the m2 echo lane has no product relation
     extraction, so its edge score is not comparable with the llm lane's and is
@@ -1776,6 +1799,72 @@ def operator_audit_notes(audit: dict | None, posture: str) -> list[str]:
         "layer-2 WIRE fix closed"
     )
     return notes
+
+
+# #8503: the extractor's operator/edge DROP warnings. An ``edge_missing``
+# verdict (both endpoints present, no qualifying edge) has two possible
+# mechanisms and they need different fixes: the model never FORMED the edge
+# (selection) or the seam DROPPED an edge the model did emit (a write-path
+# bug). The receipts carried no extraction warnings at all, so a reader could
+# not tell them apart — which is exactly the ambiguity #8503 was filed on.
+#
+# TWO classes, counted separately, because they answer different questions
+# (a first cut merged them and attributed five ENTITY-lifecycle notices as
+# "operator drops" — the exact false attribution this block exists to
+# prevent):
+#   * OPERATOR drops — an operator the model emitted did not reach the graph
+#     (unknown op_type, an unresolved src/dst, an unminted entity endpoint, a
+#     MITIGATES whose declared target IMPL is absent).
+#   * SUPERSEDE refusals — the point/entity replace channel dropped a record
+#     (a `supersedes` ref that resolved to nothing, an entity lifecycle the
+#     Layer-1 payload cannot express). This is the #8503 `SUPERSEDE` row's
+#     mechanism, and it is NOT an operator drop: the operator pass never ran.
+# Everything else the extractor warns about (value spans, slot binding,
+# search_keys) is neither.
+_OPERATOR_DROP_MARKERS = (
+    "operator dropped:",
+    "operator with unknown op_type",
+    "endpoint NOT minted",
+    "MITIGATES target edge not emitted",
+)
+_SUPERSEDE_REFUSAL_MARKERS = (
+    "point supersedes=",
+    "does not resolve to an S3 search result",
+    "is not expressible in the Layer-1 payload",
+)
+
+
+def operator_drop_warnings(session_results: list[dict]) -> dict:
+    """Attribute ``edge_missing``: which sessions had a seam-level drop (#8503).
+
+    Returns ``{"total": int, "operator_drops": int, "supersede_refusals":
+    int, "by_session": {sid: [warning, ...]}}``. ``operator_drops == 0`` on a
+    session is a MEASURED statement, not a default: the operator pass logged no
+    drop, so every ``edge_missing`` there is the model never forming the edge —
+    the selection mechanism, not the write path. A non-zero
+    ``supersede_refusals`` names the replace-channel drop instead.
+    """
+    by_session: dict[str, list[str]] = {}
+    total = operator_drops = supersede_refusals = 0
+    for result in session_results:
+        sid = result.get("session_id")
+        hits: list[str] = []
+        for w in result.get("extraction_warnings") or []:
+            if not isinstance(w, str):
+                continue
+            if any(marker in w for marker in _OPERATOR_DROP_MARKERS):
+                operator_drops += 1
+            elif any(marker in w for marker in _SUPERSEDE_REFUSAL_MARKERS):
+                supersede_refusals += 1
+            else:
+                continue
+            hits.append(w)
+        if hits:
+            by_session[sid] = hits
+            total += len(hits)
+    return {"total": total, "operator_drops": operator_drops,
+            "supersede_refusals": supersede_refusals,
+            "by_session": by_session}
 
 
 def _safe_metrics(session_results: list[dict]) -> dict:
@@ -1991,6 +2080,10 @@ def build_receipt(report: dict, *, justification: str | None = None) -> dict:
                 "provenance": r["provenance"],
                 "memory_points": r["memory_point_count"],
                 "operator_counts": r.get("operator_counts", {}),
+                # #8503: the extractor's own warnings, so the operator verdicts
+                # are attributable from the receipt alone.
+                "extraction_warnings": list(
+                    r.get("extraction_warnings") or []),
                 "planted_operators": [
                     {k: d.get(k) for k in ("id", "expected_kind", "verdict",
                                           "edge_correct", "forms_found")}
@@ -2021,6 +2114,13 @@ def build_receipt(report: dict, *, justification: str | None = None) -> dict:
             # retrievable memory layer (eventId-stamped).
             "operators_total": audit.get("operators_total"),
             "operators_provenanced": audit.get("operators_provenanced"),
+            # #8503: the drop attribution — `total == 0` is a measurement that
+            # no operator was dropped at the seam, which is what turns an
+            # `edge_missing` verdict into a selection finding instead of an
+            # unexplained miss.
+            "drop_warnings": audit.get(
+                "drop_warnings", {"total": 0, "operator_drops": 0,
+                                  "supersede_refusals": 0, "by_session": {}}),
             # #9077 (E4): the PER-EDGE evidence the epic's closing rule asks
             # for — every planted edge either wired+persisted or carrying a
             # named cause, each wired edge carrying its pre/post-commit

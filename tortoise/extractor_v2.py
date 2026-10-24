@@ -464,6 +464,14 @@ OPERATOR_SEMANTICS_RULE = (
     "  and the older claim is dst — NAND points AT what it refutes. An explicit\n"
     "  negation in a later turn ('the flag did not cause the duplicates') marks\n"
     "  THAT later claim as the attacker. Never put the claim under attack first.\n"
+    "- A THEORY THE CONVERSATION DISPLACES IS THE CLAIM UNDER ATTACK (#8503):\n"
+    "  in a retrospective or incident review, the finding that explains what\n"
+    "  really happened (the root cause, the evidence that settled it) REFUTES\n"
+    "  the theory an earlier turn recorded — 'the initial investigation blamed\n"
+    "  the search index' is dst, the root-cause claim is src. A finding does\n"
+    "  not IMPL the theory it displaced: never wire IMPL (support) between a\n"
+    "  root cause and the theory it refuted — that is a truth attack\n"
+    "  (ONTOLOGY §3.1 'A contradicts B'), so its kind is NAND.\n"
     "- RISK/RELEVANCE CLAIMS ARE DURABLE POINTS: a risk or concern claim\n"
     "  ('clock skew between regions can make lease expiry unsafe') is its OWN\n"
     "  point — never fuse it into the point/event for the action that later\n"
@@ -477,13 +485,33 @@ OPERATOR_SEMANTICS_RULE = (
     "  (w_eff = w * (1 - strength) — a graded dampener, NEVER a refutation.\n"
     "  A direct point-to-point refutation is NAND territory (a separate\n"
     "  operator), not a stronger MITIGATES).\n"
+    "- ONE MITIGATES PER PAIR (#8503): the graph holds each claim as its OWN\n"
+    "  point, so when two points express the same action (a decision and the\n"
+    "  implementation detail that carries it out) or two express the same risk\n"
+    "  (an incident report and the named risk it exposes), emit a MITIGATES\n"
+    "  for EACH pair the action actually bears on — a dampener wired to one\n"
+    "  pair leaves the other edge at full relevance. The operators array\n"
+    "  takes several entries; do not pick one pair and drop the rest.\n"
+    "  The SRC of a MITIGATES is ANY point carrying the action's warrant —\n"
+    "  the decision that chose it, the forecast of what it absorbs ('a\n"
+    "  ten-minute TTL cache will absorb nearly all of the repeat traffic'),\n"
+    "  or the safeguard that keeps it correct ('invalidate the cache entry on\n"
+    "  a write'). Each such claim is a separate point, so each gets its own\n"
+    "  dampener against the claim it bears on; wiring only the decision\n"
+    "  leaves the forecast and the safeguard unexpressed.\n"
     "- POINT-LEVEL SUPERSEDE (cross-session reversal — F2): when a new point\n"
     "  REPLACES a claim or decision from an EARLIER session, set its\n"
     "  \"supersedes\" to the existing point's id or EXACT content copied from\n"
     "  the graph search results — the write path folds a point-level CORRECTS\n"
     "  supersession (the old point is marked outdated). Same-session\n"
     "  reversals are state/validity semantics — never a point supersede.\n"
-    "  Never invent an id or content: resolve against the search results only."
+    "  Never invent an id or content: resolve against the search results only.\n"
+    "  An ENTITY-level supersede is NOT this channel: an entity\n"
+    "  \"lifecycle\": \"superseded\" (or an entity's own \"supersedes\") has no\n"
+    "  write-path form, so it produces NO reversal edge — the edge exists\n"
+    "  only when a statement POINT states the replacement and that point's\n"
+    "  \"supersedes\" names the earlier decision. If the reversal matters,\n"
+    "  say it as a point; an entity lifecycle alone records nothing."
 )
 
 
@@ -1733,6 +1761,13 @@ But STRIP, DON'T DROP the durable claim they carry:
 - An operational/environment lesson is a durable BELIEF — keep the
   cause-effect ("the bash tool kills child processes when it returns",
   "backgrounded processes do not survive tool-call return"), drop the episode.
+- An operational OUTCOME that EVIDENCES a claim is a durable claim too (#8503):
+  a rollback that restored traffic, a chaos run that showed no duplicates, a
+  deploy that held. Keep the outcome AND its measured effect ("traffic
+  normalized within thirteen minutes", "every batch was claimed exactly once
+  after the expiry"); strip the mechanics around it (the command run, the
+  clock time, the batch/shard id). The outcome is what makes the claim behind
+  it believable, so dropping it drops the evidence, not the noise.
 - Process chatter with NO durable claim is dropped ("I'll fix both now",
   "let me verify X").
 What survives is what changes the world model — including how we work.
@@ -1775,8 +1810,28 @@ SEARCH KEYS (E3): emit 2-4 `search_keys` — paraphrases/synonyms a
 questioner might use, plus the verbatim value tokens ("27:12",
 "five-K time"). The fact is findable when asked with different words.
 
-USER VS ASSISTANT (E3): an assistant suggestion/proposal is NOT a user
-fact — do not emit it as a statement point unless the user confirmed it.
+USER VS ASSISTANT (E3) — the SPEAKER is not a filter on CLAIMS: a Point
+carries no speaker at all (it is derived from the source turn at read time),
+so a claim the ASSISTANT asserts is recorded exactly like one the user
+asserts — a diagnosis, a hypothesis ("the sidebar feature is the prime
+suspect"), a derived conclusion, an estimate ("a ten-minute TTL cache will
+absorb nearly all of the repeat traffic"), or a proposed direction is a
+statement Point of its own. A hypothesis the graph can later NAND is a
+BELIEF, and only a Point carries one: dropping an assistant-asserted claim
+because the assistant spoke it deletes beliefs, not chatter. What IS excluded
+is the assistant's PROCESS CHATTER and BARE OFFERS ("I'll fix that now",
+"let me verify X", "want me to also …") — those assert nothing. A
+USER-PERSONAL-STATE fact (personal best, schedule, preference) belongs to the
+USER: never emit one attributed to, or invented by, the assistant.
+A QUESTION THAT ASSERTS A CLAIM CARRIES THAT CLAIM: "what about services
+with no owner row, they will fall through any ownership-based router?"
+asserts the fall-through; "maintenance windows are the other classic noise
+source, do you want ember to auto-suppress?" asserts the noise source. Emit
+the asserted claim as its own Point — the interrogative frame is not a
+disqualifier. Likewise a HYPOTHESIS UNDER INVESTIGATION (a prime suspect, a
+leading theory, "the spike correlates with the Oct 5 release") is a belief
+that changes what gets tested next: emit it as a Point and let the graph
+carry its confidence — speculation is not a NOOP when it steers a decision.
 
 OUTPUT CONTRACT — ONE JSON object and NOTHING else:
 {date_anchor}{output_contract}
@@ -2745,8 +2800,16 @@ Rules:
 - SEARCH KEYS (E3): emit 2-4 `search_keys` — paraphrases/synonyms a
   questioner might use, plus the verbatim value tokens ("27:12",
   "five-K time"). The fact is findable when asked with different words.
-- USER VS ASSISTANT (E3): an assistant suggestion/proposal is NOT a user
-  fact — do not emit it as a statement point unless the user confirmed it.
+- USER VS ASSISTANT (E3) — the SPEAKER is not a filter on CLAIMS: emit a
+  claim the ASSISTANT asserts (diagnosis, hypothesis, derived conclusion,
+  estimate, proposed direction) as a statement Point exactly like a user
+  claim — a Point carries no speaker, and a hypothesis is a belief. Exclude
+  only PROCESS CHATTER and BARE OFFERS ("I'll fix that now", "want me to …"),
+  which assert nothing. Never attribute a USER-PERSONAL-STATE fact to the
+  assistant. A QUESTION THAT ASSERTS A CLAIM carries it ("they will fall
+  through any ownership-based router?"), and a HYPOTHESIS UNDER
+  INVESTIGATION ("the sidebar feature is the prime suspect") is a belief
+  that steers the next test — emit both as Points.
 - OPERATOR REFERENCING: operator src/dst MUST be the EXACT content of a point
   or event emitted in THIS output (copy verbatim, no paraphrasing). If an
   endpoint has no point yet, CREATE the point first. NEVER use an entity name
@@ -6431,7 +6494,25 @@ def _resolve_point_supersede(ref: str, search: dict,
     search — which ran BEFORE this capture's writes — makes the point
     supersede CROSS-SESSION by construction (the #2552 F2 decision:
     same-session reversals are state/validity semantics, never a CORRECTS
-    record)."""
+    record).
+
+    #8503 RECALL LEG (the drift the exact leg refuses): the ref is the model
+    COPYING a prior point out of the search results, and a long copy drifts
+    by a lead-in word — measured on the #2514 corpus, wp07's ref reads "We
+    ship the lease fix all-at-once behind a single global kill flag" for the
+    wp06 prior "Ship the lease fix all-at-once behind a single global kill
+    flag rather than a week of per-shard canary". Exact equality refused it,
+    so the CORRECTS edge — the ONLY licensed carrier of a cross-session
+    decision reversal — was dropped on a quoting slip, which is what the
+    receipt's `point supersedes=… matches no S3 prior` warning names.
+    A UNIQUE prior containing ``SUPERSEDE_REF_OVERLAP`` of the ref's content
+    tokens now resolves, under the SAME never-guess discipline: 0 candidates
+    and >1 EQUAL-BEST candidates still fail open. The band is deliberately
+    stricter than the endpoint-anchor band (0.45 in the write-path grader)
+    and floor-guarded, because a wrong CORRECTS corrupts a live belief: it
+    marks a point superseded that nobody superseded, which is the one
+    failure mode a recall leg must never introduce.
+    """
     ref = (ref or "").strip()
     if not ref or ref in ("null", "None"):
         return None
@@ -6444,6 +6525,20 @@ def _resolve_point_supersede(ref: str, search: dict,
     matches = [p for p in points
                if _norm(str(p.get("content") or "")) == norm]
     if not matches:
+        drifted = _supersede_band_candidates(ref, points)
+        if len(drifted) == 1:
+            prior = drifted[0][1]
+            warnings.append(
+                f"point supersedes={ref[:60]!r} resolved by the #8503 "
+                f"recall band ({drifted[0][0]:.2f} of the ref's content "
+                f"tokens are in the prior) — the ref drifted from the "
+                f"prior's exact text ('{str(prior.get('content'))[:60]}')")
+            return prior
+        if len(drifted) > 1:
+            warnings.append(f"point supersedes={ref[:60]!r} is ambiguous "
+                            f"({len(drifted)} equally-close priors) — "
+                            "skipped (never guess)")
+            return None
         warnings.append(f"point supersedes={ref[:60]!r} matches no S3 prior "
                         "— skipped (fail-open)")
         return None
@@ -6452,6 +6547,64 @@ def _resolve_point_supersede(ref: str, search: dict,
                         f"({len(matches)} priors) — skipped (never guess)")
         return None
     return matches[0]
+
+
+# #8503: the supersede-ref recall band's two bounds. 0.85 keeps the lead-in /
+# lead-out drift class (a paraphrase of one clause) and refuses a ref that only
+# shares a subject. The 5-token floor keeps a short ref ("the lease decision")
+# from matching half the graph, and keeps the *never-guess* property testable.
+SUPERSEDE_REF_OVERLAP = 0.85
+SUPERSEDE_REF_MIN_TOKENS = 5
+
+
+def _supersede_ref_tokens(text: str) -> set[str]:
+    """Content tokens of a supersede ref / prior content, for the band leg.
+
+    Sentence punctuation is stripped per token: a copied ref routinely differs
+    from its prior only by a trailing '.' or a quote mark, and a token that is
+    equal but for punctuation is the same token — the exact leg above is where
+    character equality is required.
+    """
+    out: set[str] = set()
+    for raw in _norm(text).split():
+        tok = raw.strip(".,;:!?\"'()[]{}")
+        if tok and tok not in _FRAME_STOPWORDS:
+            out.add(tok)
+    return out
+
+
+def _supersede_band_candidates(ref: str,
+                               points: list[dict]) -> list[tuple[float, dict]]:
+    """Priors whose content carries ``SUPERSEDE_REF_OVERLAP`` of ``ref``.
+
+    Returns the EQUAL-BEST candidates (coverage given by the ref, so a long
+    prior is not penalised for carrying extra claims — the ref is the short
+    side of a copy). A negation-polarity mismatch refuses the candidate: the
+    ref and the prior must agree on whether the claim is negated, or the
+    "reversal" would mark a positive claim superseded by a negated one.
+    """
+    ref_tokens = _supersede_ref_tokens(ref)
+    if len(ref_tokens) < SUPERSEDE_REF_MIN_TOKENS:
+        return []
+    ref_neg = _negation_markers(ref)
+    scored: list[tuple[float, dict]] = []
+    for p in points:
+        content = str(p.get("content") or "")
+        cand = _supersede_ref_tokens(content)
+        if not cand:
+            continue
+        shared = ref_tokens & cand
+        if len(shared) < _MIN_OVERLAP_TOKENS:
+            continue
+        if bool(ref_neg) != bool(_negation_markers(content)):
+            continue
+        coverage = len(shared) / len(ref_tokens)
+        if coverage >= SUPERSEDE_REF_OVERLAP:
+            scored.append((coverage, p))
+    if not scored:
+        return []
+    best = max(c for c, _ in scored)
+    return [(c, p) for c, p in scored if c == best]
 
 
 def _supersession_records(entity_refs: list[dict], search: dict,

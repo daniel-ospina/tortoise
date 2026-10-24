@@ -6478,6 +6478,50 @@ class TestOperatorSemantics2552:
                        for s in r2["supersessions"])
         assert any("ambiguous" in w for w in r2["warnings"])
 
+    def test_supersede_ref_drift_resolves_through_the_recall_band(self):
+        """#8503: a drifted COPY resolves; a paraphrase still never guesses.
+
+        Measured on the #2514 corpus: wp07 emitted a point-level `supersedes`
+        whose ref differed from the wp06 prior by two lead-in words ("We ship
+        the lease fix…" vs "Ship the lease fix…"), and the exact-only rule
+        dropped the CORRECTS edge — the only licensed carrier of a
+        cross-session decision reversal. The band resolves that drift under
+        the SAME never-guess discipline: uniqueness required, ambiguity
+        refused, polarity mismatch refused, and a ref too short (or too
+        unlike) to be a copy still fails open.
+        """
+        old = ("Ship the lease fix all-at-once behind a single global kill "
+               "flag rather than a week of per-shard canary")
+        pts = [{"id": "pt_1", "content": old, "kind": "statement"}]
+        # 1) the measured drift: lead-in words + truncated tail → resolves
+        r = v2._resolve_point_supersede(
+            "We ship the lease fix all-at-once behind a single global kill flag",
+            {"points": pts}, warnings=[])
+        assert r is not None and r["id"] == "pt_1"
+        # 2) two EQUAL-BEST priors refuse (never guess). A near-tie is not a
+        # tie: the band returns only the top-scoring candidates, so a unique
+        # winner that is genuinely closer still resolves.
+        twin = [{"id": "pt_2", "content": old, "kind": "statement"},
+                {"id": "pt_1", "content": old, "kind": "statement"}]
+        w: list[str] = []
+        assert v2._resolve_point_supersede(
+            "We ship the lease fix all-at-once behind a single global kill "
+            "flag", {"points": twin}, warnings=w) is None
+        assert any("ambiguous" in x for x in w), w
+        # 3) a ref that is NOT the prior's copy still fails open
+        w = []
+        assert v2._resolve_point_supersede(
+            "we should ship per-service flags for the next rollout instead",
+            {"points": pts}, warnings=w) is None
+        assert any("matches no S3 prior" in x for x in w), w
+        # 4) polarity: a negated ref never matches a positive prior
+        assert v2._resolve_point_supersede(
+            "We never ship the lease fix all-at-once behind a single global "
+            "kill flag", {"points": pts}, warnings=[]) is None
+        # 5) the floor: a short ref is not a copy of anything
+        assert v2._resolve_point_supersede(
+            "the lease decision", {"points": pts}, warnings=[]) is None
+
     def test_point_supersede_self_ref_skipped(self):
         """op_04 self guard: a ref resolving to the point ITSELF (same id)
         is skipped with a warning — a self-CORRECTS would poison the graph."""
@@ -6737,3 +6781,91 @@ class TestMintConsolidation4716:
         assert r["noops"], "the fold must be recorded"
         assert r["noops"][0]["point_id"] == "pt_prior_content_1"
         assert r["noops"][0]["content"] == prior
+
+
+# ── #8503: operator SELECTION — the rules that decide what a claim is and
+# which operator KIND the mapper picks. The planted-operator corpus measured
+# 5/14 (2026-10-24) with two named loss mechanisms; 5 of the 8 planted
+# endpoints spoken on an ASSISTANT turn were never emitted as a Point while 18
+# of the 20 user-turn endpoints were, and the one displaced-theory edge was
+# wired IMPL instead of NAND. These pin the rules that produced those losses,
+# so a future prompt edit cannot silently revert them.
+class TestOperatorSelectionRules:
+    def test_assistant_asserted_claims_are_licensed_not_excluded(self):
+        """An assistant-asserted claim is a BELIEF, not chatter (#8503).
+
+        The pre-#8503 rule ("an assistant suggestion/proposal is NOT a user
+        fact — do not emit it as a statement point unless the user confirmed
+        it") was scoped for USER-PERSONAL-STATE facts and read by the mapper
+        as a blanket ban on assistant turns: measured 5 of 8 assistant-turn
+        planted endpoints never emitted vs 2 of 20 user-turn ones. A Point
+        carries NO speaker (E3: derived from the source turn at read time), so
+        the blanket form deleted beliefs — including the hypothesis a later
+        NAND attacks.
+        """
+        for tmpl in (v2.S2_TMPL, v2.S4_TMPL):
+            assert "USER VS ASSISTANT" in tmpl
+            assert "the SPEAKER is not a filter on CLAIMS" in tmpl
+            # the rule that produced the loss must be GONE, not just softened
+            assert "do not emit it as a statement point unless the user" \
+                " confirmed it" not in tmpl
+            # and the exclusion is scoped to what asserts nothing
+            assert "BARE OFFERS" in tmpl
+            # a user-personal-state fact still belongs to the user alone
+            assert "USER-PERSONAL-STATE" in tmpl
+
+    def test_displaced_theory_is_a_nand_attacker_never_an_impl(self):
+        """A retrospective's finding REFUTES the theory it displaced (#8503).
+
+        The measured `wp05_retro_writeup_op_01` NEGATE edge graded
+        `edge_missing` because the mapper emitted IMPL from the root-cause
+        claim to the theory it refuted. The shared S2/S4 rule block now names
+        that kind error, so both mapping stages carry it.
+        """
+        shared = v2._s2s4_rules()
+        assert "A THEORY THE CONVERSATION DISPLACES" in shared
+        assert "never wire IMPL" in shared
+        # the block reaches BOTH rendered prompts (one source, all stages)
+        assert "A THEORY THE CONVERSATION DISPLACES" in v2.render_s2_prompt()
+        assert "A THEORY THE CONVERSATION DISPLACES" in v2.render_s4_prompt(
+            "a story", {"entities": [], "events": [], "points": []},
+            {"entities": [], "events": [], "points": [], "operators": []})
+
+    def test_operational_outcome_that_evidences_a_claim_is_durable(self):
+        """A rollback that restored traffic is EVIDENCE, not mechanics (#8503).
+
+        The two user-turn endpoints that were never emitted were both
+        operational OUTCOMES (the rollback/traffic-normalized claim and the
+        chaos-run result). The value filter's strip-don't-drop rule covered a
+        decision carrying an issue id but not an outcome carrying a command
+        and a clock time.
+        """
+        assert "An operational OUTCOME that EVIDENCES a claim" in v2.S2_TMPL
+        assert "Keep the outcome AND its measured effect" in v2.S2_TMPL
+        # the pre-existing strip-don't-drop rule it extends is untouched
+        assert "STRIP, DON'T DROP" in v2.S2_TMPL
+
+    def test_entity_supersede_is_not_the_reversal_channel(self):
+        """An entity lifecycle supersede writes NO edge (#8503).
+
+        The measured cross-session `wp07_bluepeak_followup_op_04` SUPERSEDE
+        graded `edge_missing` while the receipt's own warnings showed the
+        mapper expressing the reversal as an entity lifecycle
+        ("'per-service flags' supersedes='all-at-once rollout' does not resolve
+        to an S3 search result", "lifecycle=superseded … is not expressible in
+        the Layer-1 payload"). The only licensed channel is the point-level
+        `supersedes`; the rule now says the entity form is inert.
+        """
+        shared = v2._s2s4_rules()
+        assert "An ENTITY-level supersede is NOT this channel" in shared
+        assert "POINT-LEVEL SUPERSEDE" in shared
+
+    def test_one_mitigates_per_action_pair(self):
+        """Two points expressing one action need two dampeners (#8503).
+
+        Both measured MITIGATES misses had the right action in the graph as
+        two points (the decision and its implementation) and the mapper wired
+        the dampener to the other one. The rule now asks for one MITIGATES per
+        pair rather than an arbitrary choice between them.
+        """
+        assert "ONE MITIGATES PER PAIR" in v2._s2s4_rules()
