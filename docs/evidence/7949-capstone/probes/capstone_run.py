@@ -23,7 +23,7 @@ the corrected reading:
    ``kind_classifier.classify_items``/``_apply_classify_kinds`` (S2.3,
    ``:8017``), ``search_graph`` (S3, ``:8033``), ``run_s4`` (the gap filler,
    ``:8054``), and ``execute_embed`` (S5+S6, ``:8253``). The SYMBOL is
-   authoritative and the line is a convenience — the three FILE-NAMED cites
+   authoritative and the line is a convenience — the two FILE-NAMED cites
    above are resolved against the tree by the bundle's pin (the eight bare step
    cites are pinned only where the README's step table repeats the same
    numbers, so tree drift shows up there), and no line here is claimed to be
