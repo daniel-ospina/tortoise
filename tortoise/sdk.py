@@ -22435,9 +22435,11 @@ class TortoiseSDK:
             construction and are excluded, see _review_add) are surfaced as
             suggested connections: {from, to, suggested_relation: "IMPL",
             reason, similarity}. Suggestions only — nudge, don't enforce
-            (design principle 4). A shared ``session:`` ref is capture
+            (design principle 4). A shared ``session:`` ref — the session
+            Source's identity, ``session:<session_id>`` — is capture
             provenance, not co-authorship of one document, so it does NOT
-            exclude a pair.
+            exclude a pair; nor does a Source whose url is corrupt (a legacy
+            list-valued url), which contributes nothing.
             Scope: ``scope`` (topic text or Point id) narrows the candidate
             pool via hybrid retrieval; None = whole graph, capped at
             REVIEW_ADD_POOL_CAP most-recently-updated non-terminal,
@@ -22803,42 +22805,47 @@ class TortoiseSDK:
             f"  AND {_current_status_clause('n.status')} "
             "  AND (n.outdated IS NULL OR n.outdated = false) "
             "OPTIONAL MATCH (n)-[:extractedFrom]->(src:Source) "
-            "RETURN n.id, n.content, n.status, n.updatedAt, "
-            "       collect(CASE WHEN src IS NULL "
-            # Session provenance is NOT document provenance, so it never
-            # enters the set: ``_extract_session_v2`` stamps EVERY point it
-            # mines with ONE ref (``session:{session_id}``), so a single
-            # capture call shares a Source across a whole conversation — a
-            # 200-point capture over 20 documents would intersect on it and
-            # an unqualified intersection empties mode=add on the whole
-            # capture-built corpus. Three signals, because they are set by
-            # different writers over time: the url prefix IS the MERGE
-            # identity (durable across replay); ``sourceKind`` and
-            # ``is_episodic`` are stamped by ``_mint_source_stub``
-            # (projection/edges.py) and the session-source migration, and
-            # cover a session Source stored under a MIGRATED url that no
-            # longer starts with ``session:``.
-            "                     OR coalesce(src.sourceKind, '') = 'agentSession' "
-            "                     OR coalesce(src.is_episodic, false) = true "
-            "                     OR src.url STARTS WITH 'session:' "
-            "                    THEN null ELSE src.url END)",
+            "RETURN n.id, n.content, n.status, n.updatedAt, collect(src.url)",
         ).result_set
         pool = {}
-        for pid, content, status, updated_at, document_sources in rows:
+        for pid, content, status, updated_at, sources in rows:
             content = content or ""
             if content.startswith("[MITIGATION]"):
                 continue  # mitigation bookkeeping — not a standalone claim
+            # Point→Source is many-to-many (ontology §3.3, #3263), so collect,
+            # never a single url. Keep the DOCUMENT sources only: session
+            # provenance is NOT document provenance, so it never enters the
+            # set — ``_extract_session_v2`` stamps EVERY point it mines with
+            # ONE ref (``session:{session_id}``), so a single capture call
+            # shares a Source across a whole conversation and intersecting on
+            # it would skip every pair on the flagship capture route.
+            #
+            # ``session:`` PREFIX in Python — not a Cypher string operator,
+            # and not the ``sourceKind``/``is_episodic`` flags:
+            #   * the prefix IS the session identity: ``derive_session_source_url``
+            #     (file_indexer.py) is the one derivation every writer and the
+            #     session-source migration use (``_canonical_url``), so a
+            #     migrated session node's url still starts with ``session:``;
+            #   * ``sourceKind='agentSession'`` is not — the indexer stamps the
+            #     classifier's kind on per-FILE ``corpus://`` permalinks
+            #     (``source_kind_for_classifier``), so a transcript file is an
+            #     ``agentSession`` Source though it is one document;
+            #   * ``is_episodic=true`` is not — the capture commit stamps it on
+            #     every EXTERNAL source of ``payload.sources`` (hosted_api.py
+            #     step 4) and ``backfill_is_episodic.py`` statement 4 on EVERY
+            #     Source reachable from a session point. Keying on either flag
+            #     silently disabled the exclusion on the corpus #9914 targets.
+            # A non-string url (a :Source minted before #3263 can hold an
+            # ARRAY) is unhashable and is no identity, so it contributes
+            # nothing — fail OPEN, like every other missing provenance here,
+            # and never let corrupt data crash a read-only review.
+            document_sources = {u for u in (sources or [])
+                                if isinstance(u, str) and u
+                                and not u.startswith("session:")}
             pool[pid] = {"id": pid, "content": content,
                           "status": status or "draft",
                           "updated_at": updated_at or "",
-                          # Point→Source is many-to-many (ontology §3.3,
-                          # #3263), so collect, never a single url. Holds the
-                          # DOCUMENT-kind sources only (the query drops
-                          # session ones, and collect keeps their nulls):
-                          # mode=add skips pairs that SHARE one — see the
-                          # same-source exclusion in _review_add.
-                          "document_sources": {u for u in (document_sources or [])
-                                               if u}}
+                          "document_sources": document_sources}
         if not scope:
             # Whole-graph scan: cap at the most-recently-updated points so
             # the O(n²) pairwise pass stays bounded (REVIEW_ADD_POOL_CAP).

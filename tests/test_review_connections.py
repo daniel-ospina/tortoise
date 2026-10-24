@@ -215,6 +215,106 @@ def test_add_document_source_still_excludes_a_session_tagged_pair(
     assert len(pairs) == 2, f"expected the 2 cross-document pairs, got {result['add']}"
 
 
+def test_add_tolerates_a_list_valued_source_url(sdk_factory, tmp_path):
+    """A legacy Source whose `url` is a LIST must not break the read.
+
+    ``_link_source``'s docstring records that pre-#3263 code silently MERGEd
+    ONE Source whose ``url`` was an ARRAY, and that fix only stopped NEW ones
+    — so such nodes exist in populated graphs. Classifying the session
+    prefix in Cypher (``src.url STARTS WITH 'session:'``) made the engine
+    TYPE-CHECK every url and the whole pool query raised
+    ``ResponseError: Type mismatch: expected String or Null but was List``,
+    which is NOT inside a try: one legacy node disabled the hygiene surface
+    for every caller. A non-comparable url is not an identity, so it must
+    fail OPEN — the pair is still suggested.
+    """
+    sdk = sdk_factory(tmp_path)
+    p1 = sdk.create_point("statement", "kubernetes rollout plan")
+    p2 = sdk.create_point("statement", "kubernetes deployment guide")
+    sdk._get_proj().g.query(
+        "MERGE (s:Source {url: $url}) "
+        "WITH s MATCH (n:Point) WHERE n.id IN $ids "
+        "MERGE (n)-[:extractedFrom]->(s)",
+        params={"url": ["doc://a.md", "doc://b.md"],
+                "ids": [p1["id"], p2["id"]]})
+    result = sdk.review_connections(
+        mode="add",
+        similarity_fn=_sim({(p1["id"], p2["id"]): 0.9}),
+    )
+    pairs = {frozenset((e["from"], e["to"])) for e in result["add"]}
+    assert pairs == {frozenset((p1["id"], p2["id"]))}, (
+        f"a list-valued source url was not failed-open; got {result['add']}")
+
+
+def _link_to_source(sdk, points, url, **props):
+    """Wire points to a Source with the given url + props (raw write)."""
+    set_clause = " ".join(f"SET s.{k} = ${k}" for k in props)
+    sdk._get_proj().g.query(
+        "MERGE (s:Source {url: $url}) " + set_clause + " "
+        "WITH s MATCH (n:Point) WHERE n.id IN $ids "
+        "MERGE (n)-[:extractedFrom]->(s)",
+        params={"url": url, "ids": [p["id"] for p in points], **props})
+
+
+def test_add_excludes_pairs_from_one_corpus_permalink_file(
+        sdk_factory, tmp_path):
+    """``sourceKind='agentSession'`` is NOT a session marker on its own: the
+    indexer stamps it on per-FILE corpus permalinks, which are one document.
+
+    ``_index_process_unit`` mints ``corpus://<corpus>/<path>`` with the
+    classifier's kind, and ``session_source_migration``'s docstring names
+    that keyed population as explicitly distinct from the session node. Two
+    sections of ONE such file are near-duplicates of one document, so the
+    exclusion must still fire — keying it on the kind flag would silently
+    stop excluding them.
+    """
+    sdk = sdk_factory(tmp_path)
+    p1 = sdk.create_point("statement", "deployment section intro")
+    p2 = sdk.create_point("statement", "deployment section details")
+    p3 = sdk.create_point("statement", "deployment runbook elsewhere")
+    permalink = "corpus://ops/docs/transcript-notes.md"
+    _link_to_source(sdk, [p1, p2], permalink, sourceKind="agentSession")
+    _link_to_source(sdk, [p3], "doc://other.md", sourceKind="document")
+    result = sdk.review_connections(
+        mode="add",
+        similarity_fn=_sim({
+            (p1["id"], p2["id"]): 1.0,   # one file — must be excluded
+            (p1["id"], p3["id"]): 0.8,
+            (p2["id"], p3["id"]): 0.8,
+        }),
+    )
+    pairs = {frozenset((e["from"], e["to"])) for e in result["add"]}
+    assert frozenset((p1["id"], p2["id"])) not in pairs, (
+        "a per-file corpus permalink was treated as a capture session — the "
+        f"document exclusion stopped firing; got {result['add']}")
+    assert len(pairs) == 2, f"expected the 2 cross-document pairs, got {result['add']}"
+
+
+def test_add_excludes_pairs_from_one_episodic_transcript_file(
+        sdk_factory, tmp_path):
+    """``is_episodic=true`` is NOT a session marker on its own: the hosted
+    narrative writer stamps it on the transcript DOCUMENT Source, which is
+    one document per ``doc_<sha256(session:captured_at)>``.
+
+    Keying the exclusion on the flag would silently stop excluding the
+    sections of one transcript from each other.
+    """
+    sdk = sdk_factory(tmp_path)
+    p1 = sdk.create_point("statement", "deployment section intro")
+    p2 = sdk.create_point("statement", "deployment section details")
+    doc = "doc_aa11"
+    _link_to_source(sdk, [p1, p2], doc,
+                    sourceKind="document", documentKind="transcript",
+                    is_episodic=True)
+    result = sdk.review_connections(
+        mode="add",
+        similarity_fn=_sim({(p1["id"], p2["id"]): 1.0}),
+    )
+    assert result["add"] == [], (
+        "an episodic transcript DOCUMENT was treated as a capture session — "
+        f"its same-document pair leaked in: {result['add']}")
+
+
 def test_add_one_sided_source_is_not_same_source(sdk_factory, tmp_path):
     """The exclusion needs a SHARED source — a pair where only ONE point has
     a Source is still suggested (fail OPEN: a missing provenance never hides
@@ -239,9 +339,9 @@ def test_add_scoped_pool_keeps_the_source_exclusion(
     silent no-op for every scoped call.
 
     ``_review_pool`` builds the scoped branch by copying the row dict minus
-    ``updated_at``; a copy that also dropped ``sources`` would make every
-    scoped ``mode=add`` skip the exclusion (or raise ``KeyError``) while the
-    whole-graph tests stay green.
+    ``updated_at``; a copy that also dropped ``document_sources`` would make
+    every scoped ``mode=add`` skip the exclusion (or raise ``KeyError``)
+    while the whole-graph tests stay green.
     """
     sdk = sdk_factory(tmp_path)
     doc = "doc://scoped.md"
