@@ -30,9 +30,9 @@ extends: docs/epics/1402-eval-battery/03-scope.md (the APPROVED scope), 01-align
 
 The epic-workflow was already run to completion for this epic in August 2026. All six stage
 artifacts are committed, the scope and plan human gates were passed, decomposition was
-MECE-verified, and 10 of 12 children closed on 2026-08-18 (9 of them labelled `implemented`;
-#1407 closed with `scoped`/`planned`). Re-running Align →
-Research → Scope would regenerate docs that already exist and contradict an owner-approved basis.
+MECE-verified, and 10 of 12 children closed on 2026-08-18 (9 of them labelled `implemented`; #1407
+closed with `scoped`/`planned`). Re-running Align → Research → Scope would regenerate docs that
+already exist and contradict an owner-approved basis.
 
 ### Contradiction test (per AGENTS.md, run FIRST)
 
@@ -81,9 +81,10 @@ All commands run against `origin/main` @ `df0d0888b` (2026-10-22).
 | "no children" | `05-decompose.md` — MECE-verified; **11 child issues #1406–#1416 + capstone #1419** (12 wiring rows) |
 | pipeline never ran | `06-verify.md` — `Status: READY`, `Review Gates: 12/12 passed`, `Coherence: 0 issues`, `Artifacts: 5/5` |
 
-**Child state (verified via `gh issue view`):** #1406, #1407, #1408, #1409, #1410, #1411, #1412, #1413,
-#1414, #1415 — **CLOSED** (2026-08-18, labels `implemented`/`planned`). #1416 (battery execution +
-verdict) and #1419 (capstone) — **OPEN**, both re-labelled `not-launch-relevant` on 2026-10-10.
+**Child state (verified via `gh issue view`):**
+
+- #1406, #1407, #1408, #1409, #1410, #1411, #1412, #1413, #1414, #1415 — **CLOSED** (2026-08-18, labels `implemented`/`planned`).
+- #1416 (battery execution + verdict) and #1419 (capstone) — **OPEN**, both re-labelled `not-launch-relevant` on 2026-10-10.
 
 **Code that exists:** `battery/` — 95 tracked files (runner, 6 arm adapters, 5 probe modules, 6 streams,
 4 differential legs, parity leg, report/verdict assembler, exposure + liveness, golds), **57 battery test
