@@ -1280,8 +1280,8 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # instrument, so weakening a rule had to be the one diff that ran
              # its pins. Same #1349/#3332/#3616 silent-drop class as the entries
              # above; MEASURED before this entry: `--changed-files
-             # tools/ax_write_eval.py` -> surfaces=[], full=False, 59 tier-1
-             # files, test_ax_write_eval.py ABSENT. Pinned by
+             # tools/ax_write_eval.py` -> surfaces=[], full=False,
+             # test_ax_write_eval.py ABSENT. Pinned by
              # tests/test_ci_selection.py::test_ax_write_eval_tool_change_selects_core_not_tier1.
              "tools/ax_write_eval.py",
              # #7814 review P2: the queue-reconcile schedule installer owns
