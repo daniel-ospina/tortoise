@@ -2502,15 +2502,20 @@ def _route_table() -> dict[tuple[str, str], frozenset[str]]:
 #: and justified the tighter number with three substitutions that stayed green at 5
 #: and red at 3 (rows 22/24's reach cells swapped, rows 28/30's REST doors swapped,
 #: row 28's verb changed). At `3f2f48932` — the commit that wrote that sentence —
-#: this same sweep measures uniform 2/3/4/5 = 26/59/90/170 of 418 and the shipped
-#: predicate 69, so `16.5 %` reproduces there (69/418) and `15.6 %` reproduces on
-#: NO index (a uniform 3 was 59/418 = 14.1 %, and the uniform-5 rate was two
-#: fifths, which the note above already states correctly). The DISCRIMINATION it
-#: claimed was TRUE there — those three substitutions do resolve at 3/5/5/5/5 hops
-#: against a uniform 5 and are refused at 3. What changed is that the local-symbol
-#: fix removes the collisions those substitutions were exploiting: under the
-#: current index all three are REFUSED even at a uniform 5. The budget stays at 3 —
-#: it is a bound, and nothing here depends on the old rates.
+#: the figures reproduce **against that commit's own, still-defective index** (it
+#: had no `in_function` flag at all, so function locals were symbols): uniform
+#: 2/3/4/5 = 26/59/90/170 of 418 and the shipped predicate 69, which is why
+#: `16.5 %` (69/418) reproduces there and `15.6 %` reproduces on NO index (a
+#: uniform 3 was 59/418 = 14.1 %, and the uniform-5 rate was two fifths, which the
+#: note above already states correctly). ⚠️ The index matters: the CURRENT sweep
+#: above, locals excluded, applied to that same tree measures 24/34/42/52 and a
+#: shipped 36 — the difference is the defect, not the tree. The DISCRIMINATION the
+#: old wording claimed was TRUE there — those three substitutions do resolve at
+#: 3/5/5/5/5 hops against a uniform 5 and are refused at 3. What changed is that
+#: the local-symbol fix removes the collisions those substitutions were
+#: exploiting: under the current index all three are REFUSED even at a uniform 5.
+#: The budget stays at 3 — it is a bound, and nothing here depends on the old
+#: rates.
 _DOOR_REACH_HOPS = 3
 
 #: Readers whose door chain is legitimately LONGER than `_DOOR_REACH_HOPS`,
@@ -2855,14 +2860,18 @@ def test_a_class_defined_inside_a_function_is_not_a_symbol():
         "this pin rather than deleting it — it is the positive half of the pair."
     )
 
-    # …and the body of a class local to a FUNCTION must not be.
-    assert not defs.get("_fields_"), (
-        "a function-local class body is indexed as a symbol again: `_fields_` "
-        "resolves to "
-        f"{sorted(defs.get('_fields_', ()))}, whose only definition in the tree "
-        "is `_StatFS`, a class defined INSIDE `index_walk._getmntinfo_table` — so "
-        "`in_function` is not propagating into the `ClassDef` branch and a local "
-        "class's attributes become reachable bare names (`_symbol_index`)."
+    # …and the body of a class local to a FUNCTION must not be. ⚠️ Node-id precise,
+    # like the `__slots__` arm below and for the same reason: the NAME may also be
+    # defined at module level (as `__slots__` routinely is), and a whole-tree
+    # `not defs.get(name)` would then red on a legitimate module-level definition
+    # while blaming `in_function` propagation.
+    assert "index_walk.py::_getmntinfo_table._StatFS._fields_" not in defs.get("_fields_", set()), (
+        "a function-local class body is indexed as a symbol again — "
+        "`index_walk.py::_getmntinfo_table._StatFS._fields_` is a definition node, and "
+        "`_StatFS` is a class defined INSIDE `_getmntinfo_table`, so `in_function` is "
+        "not propagating into the `ClassDef` branch and a local class's attributes "
+        "become reachable bare names (`_symbol_index`). `_fields_` now resolves to "
+        f"{sorted(defs.get('_fields_', ()))}."
     )
     assert "projection/__init__.py::journal_epistemic_existence._Node.__slots__" not in defs.get(
         "__slots__", set()
@@ -3054,18 +3063,26 @@ def test_every_customer_callable_row_reaches_a_declared_door():
             hops = _distance_budget(reader)
             distance = _door_distance(door, reader)
             if distance is None or distance > hops:
-                reached = (
-                    f"was not found within the {_DISTANCE_SEARCH_CAP}-hop search cap"
-                    if distance is None
-                    else f"needs {distance} references"
-                )
+                if distance is None:
+                    shortfall = (
+                        f"is not found within the {_DISTANCE_SEARCH_CAP}-hop search cap. "
+                        "This arm cannot tell 'no chain' from 'a chain longer than it "
+                        "looked', so the fix is to raise `_DISTANCE_SEARCH_CAP` (and "
+                        "re-derive the pinned figures) or to shorten the chain. ⛔ A "
+                        "`_DISTANCE_EXCEPTIONS` entry cannot help: it raises the "
+                        "reader's BUDGET, and the search stops at the cap before any "
+                        "budget is consulted."
+                    )
+                else:
+                    shortfall = (
+                        f"needs {distance} references and this row's budget is {hops}, so "
+                        "it is not a door to THIS reader (if the chain is legitimately "
+                        "longer now, give the reader an entry in `_DISTANCE_EXCEPTIONS` "
+                        "with the reason, rather than loosening the budget for every row)."
+                    )
                 broken.append(
-                    f"{label} — {door} exists but {reached} to reach `{reader}`, and this "
-                    f"row's budget is {hops} — the door is not a door to THIS reader, so "
-                    "the blast-radius count would be counted from the wrong tool "
-                    "(if the chain is legitimately longer now, give the reader an entry in "
-                    "`_DISTANCE_EXCEPTIONS` with the reason, rather than loosening the budget "
-                    "for every row)"
+                    f"{label} — {door} exists but {shortfall} The blast-radius count would "
+                    "be counted from the wrong tool."
                 )
 
     # A predicate that silently stops resolving its entries turns this arm green
