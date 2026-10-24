@@ -4755,6 +4755,16 @@ class _EntityHandlers:
         signal (a mis-named object in the event, or a kind that drifted) — it
         is emitted at the kind's #1934 enforcement level rather than
         swallowed.
+
+        ⚠️ **#3590 narrowed when that signal can fire.** The report rides on the
+        resolved ID: an explicit target whose name resolves to no single live
+        entity is not folded AND is not reported here, because the resolver
+        (`entity_identity.resolve_fold_name`) already recorded it as a
+        ``unregistered-reference`` / ``ambiguous-entity-name`` non-fold. So a
+        name that matches TWO carriers (the #8864 shape) — which the pre-#3590
+        name-keyed probe used to report — now produces the resolver's record
+        instead of a ``status_fold_unapplied`` violation. An id-less legacy
+        carrier is likewise unreported for the same reason.
         """
         index = _status_fold_index()
         from tortoise.status_folds import builtin_fold_status
@@ -4793,9 +4803,12 @@ class _EntityHandlers:
             return out
 
         if declared:
-            # The explicit target is REPORTED on a miss; an `about_entities`
-            # target is folded silently (see the docstring). `name` wins when
-            # it is also present in the list — one write, one report.
+            # The explicit target is REPORTED on a miss — as long as it has a
+            # resolved id to miss on (#3590): an unresolved name was already
+            # recorded by `resolve_fold_name`, and `_targets()` drops it rather
+            # than reporting twice. An `about_entities` target is folded
+            # silently (see the docstring). `name` wins when it is also present
+            # in the list — one write, one report.
             targets = _targets()
             # #2729 review P2: the event-kind key is form-widened (namespaced
             # AND bare), so two packs that declare the same bare event name

@@ -152,8 +152,18 @@ def test_a_rename_journals_on_the_stable_id_and_survives_replay(sdk):
     assert [rec["id"] for rec in renames] == [oid], (
         "the rename record must carry the STABLE id, not the new name")
 
+    # ⛔ MUTATE LIVE STATE FIRST, so the assertions below can only pass if the
+    # rebuild actually replayed. Measured: with a no-op `rebuild_all` the
+    # previous "rebuild then assert the graph" form left all five tests GREEN,
+    # because after a clean live write the live graph already IS the expected
+    # post-replay state. `live-drift` exists nowhere in the journal, so only a
+    # real rebuild removes it and restores the journaled name.
+    proj.g.query("MATCH (o:Object {id:$id}) SET o.name='live-drift'",
+                 params={"id": oid})
     proj.rebuild_all(str(events), confirm_destructive=True)
 
+    assert _name_ids(proj, "Object", "live-drift") == [], (
+        "the rebuild did not replay — the unjournaled live drift survived")
     assert _name_ids(proj, "Object", "Acme Renamed") == [oid], (
         "the rename did not survive replay — `rebuild != live`")
     assert _name_ids(proj, "Object", "Acme") == [], (
@@ -184,13 +194,23 @@ def test_delete_then_recreate_the_same_name_yields_two_entities(sdk):
 
     # …and replay agrees with live. The DELETE is an `EntityMutated op=delete`,
     # so exactly one Object survives — the second incarnation, holding the name.
-    # Asserted on the GRAPH's whole Object set, not on a set rebuilt from the
-    # ids this test already knows: `{holders[0]} | {first} == {first,
-    # holders[0]}` is a restatement of the inequality asserted above and would
-    # pass no matter what replay did.
+    #
+    # ⛔ As in test 3, LIVE STATE IS MUTATED FIRST: `live-drift` is in no journal
+    # record, so only a real rebuild can remove it. Without this the assertions
+    # are satisfied by the live graph itself and a no-op `rebuild_all` passes
+    # them (measured). The Object COUNT is asserted too — a resurrected phantom
+    # third node would otherwise satisfy every membership check.
+    proj.g.query("MATCH (o:Object {id:$id}) SET o.name='live-drift'",
+                 params={"id": holders[0]})
     proj.rebuild_all(str(events), confirm_destructive=True)
+
     all_objects = {r[0] for r in proj.g.query(
         "MATCH (o:Object) RETURN o.id").result_set}
+    assert len(all_objects) == 1, (
+        f"replay left {len(all_objects)} Objects — resurrection or a phantom: "
+        f"{all_objects}")
+    assert _name_ids(proj, "Object", "live-drift") == [], (
+        "the rebuild did not replay — the unjournaled live drift survived")
     assert holders[0] in all_objects, (
         "replay lost the surviving incarnation — burial")
     assert first not in all_objects, (

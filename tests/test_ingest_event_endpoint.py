@@ -1933,9 +1933,10 @@ def test_subject_array_status_is_reported_once(sdk):
 
 # ── The shared-name branch (#8864/#8902): the fold no longer keys on `name` ──
 #
-# `_upsert_subject`/`_upsert_object` key the MERGE on the record's own `id` once
-# a name has 2+ carriers (`_name_holder_count > 1`, #8864/#8902), so a bundle
-# item naming a shared name MINTS a node on its own id instead of merging onto a
+# `_upsert_subject`/`_upsert_object` key the MERGE on the record's own `id`
+# unconditionally (#3590; #8864 had already done so once a name had 2+
+# carriers), so a bundle item naming a shared name MINTS a node on its own id
+# instead of merging onto a
 # holder. Both halves of the bundle-local endpoint guard change with it, and
 # each direction was measured against the merged head before these pins existed.
 

@@ -8261,10 +8261,10 @@ def journal_epistemic_existence(events) -> dict:
     reports a single first-materialization seq, so a re-creation (or a
     collapse-driven burial) leaves them disagreeing. For the NAME-keyed labels
     (Object, Subject) the disagreement is structural: ``_upsert_object`` /
-    ``_upsert_subject`` MERGE the NODE by ``name`` while a name identifies
-    exactly ONE carrier, and by the record's own ``id`` once it is carried by
-    TWO OR MORE (#8864, ``_name_holder_count``) — so a shared name no longer
-    re-ids anything, and the node table is many-to-many either way: no
+    ``_upsert_subject`` MERGE the NODE by the record's own ``id`` (#3590 — the
+    name key is gone for every name, where #8864 had already stopped it being a
+    key once a name was carried by TWO OR MORE) — so a shared name never re-ids
+    anything, and the node table is many-to-many either way: no
     id-keyed map can answer existence. Every one of the four epistemic labels
     is therefore
     modelled by SIMULATING the graph's node table (``nodes`` below) and
@@ -8751,9 +8751,9 @@ def journal_object_surviving_keys(
     the Point/Operator leg of `journal_first_materialization`; it additionally
     accounts for the sweep's position after the deletes.
 
-    The Object graph MERGEs by NAME (`_upsert_object`) while that name has ONE
-    carrier, and by the record's own `id` once it has TWO OR MORE (#8864,
-    `_name_holder_count`): a name-MERGE over several carriers stamped one id
+    The Object graph MERGEs by the record's own `id` (`_upsert_object`, #3590:
+    the name key is retired for every name — #8864 had already stopped it being
+    a key once a name was carried by TWO OR MORE): a name-MERGE over several carriers stamped one id
     onto all of them, so a shared name stopped being a key at all. The model
     therefore maps each name to the SET of ids carrying it, and a registration
     of a shared name ADDS a carrier instead of replacing the earlier one — a
