@@ -615,6 +615,37 @@ def test_the_patch_preread_selects_the_hold_column() -> None:
     )
 
 
+def test_the_migration_pointer_names_a_file_that_exists() -> None:
+    """The comment that routes a reader from the COLUMN to the migration must resolve.
+
+    The module's only explanation of where `indexnow_submitted_at` comes from is a
+    prose pointer naming a migration file. A rename is invisible to every other
+    check here — no import, no test and no config reads that string — so a stale
+    pointer leaves a reader (or a `git grep` for the column) at a path that does
+    not exist, which answers the question with a wrong file rather than with
+    nothing. That happened: the owning migration was renumbered forward
+    (20261022000001 → 20261026000001) and this pointer kept the old version.
+
+    Falsifiable by construction and non-vacuous: it renames nothing itself, it
+    only compares the pointer against the tree, so the pre-rename source reds and
+    the corrected pointer passes. The pointer set must also be NON-EMPTY —
+    deleting the sentence is the other way to make the assertion above trivial.
+    """
+    source = INDEXNOW_MODULE.read_text(encoding="utf-8")
+    named = set(re.findall(r"\b(\d{14}_[A-Za-z0-9_]+\.sql)\b", source))
+    assert named, (
+        "the module no longer names the migration that owns its dedupe column — the "
+        "column→file route a reader greps for is gone, which is as misleading as a stale one"
+    )
+    migrations = {p.name for p in (REPO_ROOT / "supabase" / "migrations").glob("*.sql")}
+    dangling = sorted(named - migrations)
+    assert dangling == [], (
+        f"the module points at migration files that do not exist: {dangling} — a renamed "
+        "migration must be followed here, or the pointer sends a reader to a different "
+        "migration that happens to hold the old version"
+    )
+
+
 # ── V1: the key file is served from the site root ──────────────────────────
 def test_v1_the_key_file_is_served_at_the_site_root(results) -> None:
     """The key file exists, is named after the key, and carries ONLY the key.
