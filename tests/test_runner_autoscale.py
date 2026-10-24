@@ -1137,6 +1137,42 @@ def test_a_launchd_host_without_svc_sh_is_unknown_never_offline(env):
     assert e.restarted() == []
 
 
+def test_a_scoped_sudo_DENIAL_is_not_mistaken_for_a_failed_restart(env):
+    """⛔ THE REGEX MUST KNOW SUDO'S ACTUAL WORDS, or the destructive half reopens.
+
+    `_SUDO_REFUSED` first listed `password is required|not in the sudoers|a terminal is required|
+    no tty present|no askpass|command not allowed`. The CANONICAL denial is none of those: sudo says
+
+        Sorry, user tester is not allowed to execute '…' as root on host.
+
+    and `command not allowed` — the wording that WAS listed — is `doas`, not sudo. So a command-
+    scoped sudoers that resolves a different path (`/usr/bin/systemctl` vs a rule for
+    `/bin/systemctl`), a rule for `start` but not `restart`, or a `nosuid` mount all landed on
+    `failed` -> skip `wait_online` -> `register(..., replace=True)`: re-registering a runner that
+    was never restarted, the exact destructive action the classification exists to prevent.
+
+    Mutation: drop the `Sorry, user … is not allowed to execute` alternative -> `failed` and a
+    `--replace` re-registration -> RED.
+    """
+    e = env(
+        pool=[("r1", "offline", False, "self-hosted-x64")],
+        installs=[("gh-runner-x64-1", "r1")],
+        service="systemd",
+        sudo_fails=True,
+    )
+    e.sudo = _exe(
+        e.bin / "sudo",
+        "#!/usr/bin/env bash\n"
+        'shift\n'
+        "echo \"Sorry, user tester is not allowed to execute '$*' as root on host.\" >&2\n"
+        "exit 1\n",
+    )
+    rec = e.record()
+    assert rec["unverified_cause"] == "no-restart-primitive", rec
+    assert rec["_rc"] == 2, rec
+    assert e.config() == "", f"a sudo DENIAL must never re-register: {e.config()}"
+
+
 def test_a_command_scoped_sudoers_still_repairs(env):
     """⛔ THE FIX FOR THE REFUSED-ESCALATION CASE MUST NOT DELETE A WORKING REPAIR.
 

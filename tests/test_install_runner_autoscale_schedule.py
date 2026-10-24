@@ -44,6 +44,7 @@ _ENV_LEAKS = (
     "AUTOSCALE_HAS_SYSTEMD",
     "AUTOSCALE_HAS_CRON",
     "AUTOSCALE_CRON_DAEMON",
+    "AUTOSCALE_PROC_DIR",
     "AUTOSCALE_ALLOW_WORKTREE",
     "AUTOSCALE_SKIP_PROBE",
     "RUNNER_AUTOSCALE_INTERVAL",
@@ -104,8 +105,14 @@ def _sandbox(
         "launchctl",
         "#!/usr/bin/env bash\n"
         'printf "%s\\n" "launchctl $*" >> "$STUB_LOG/launchctl.log"\n'
-        '[ "${1:-}" = "list" ] && echo "501 0 com.tortoise.runner-autoscale"\n'
-        "exit 0\n",
+        'case "${1:-}" in\n'
+        # LOADED unless a bootout has removed it: the installer now VERIFIES the label is gone
+        # after `--uninstall`, so a stub that always lists it makes a real uninstall read as failed
+        # (and a stub that never lists it would make the verification vacuous).
+        '  list) [ -f "$STUB_LOG/unloaded" ] || echo "501 0 com.tortoise.runner-autoscale" ;;\n'
+        '  bootout) : > "$STUB_LOG/unloaded" ;;\n'
+        '  bootstrap) rm -f "$STUB_LOG/unloaded" ;;\n'
+        "esac\nexit 0\n",
     )
     _write_stub(bindir, "plutil", "#!/usr/bin/env bash\nexit 0\n")
     _write_stub(
@@ -119,7 +126,13 @@ def _sandbox(
             "crontab",
             "#!/usr/bin/env bash\n"
             'STORE="$STUB_LOG/crontab.txt"\n'
-            'if [ "${1:-}" = "-l" ]; then [ -f "$STORE" ] && cat "$STORE"; exit 0; fi\n'
+            # A real `crontab -l` on a box that never had one prints "no crontab for <user>" and
+            # exits 1 — the BENIGN failure the installer must tolerate. Modelling it as a bare
+            # `exit 0` (the old shape) meant the absent-vs-unreadable distinction was never
+            # exercised by any cron case.
+            'if [ "${1:-}" = "-l" ]; then\n'
+            '  if [ -f "$STORE" ]; then cat "$STORE"; exit $?; fi\n'
+            '  echo "no crontab for tester" >&2; exit 1; fi\n'
             # ⛔ write-then-rename: the installer pipelines `crontab -l` INTO `crontab -`, so a stub
             # that truncated STORE on open would empty the file before the left side read it (a
             # fixture race, not a product bug — the real crontab installs a temp copy atomically).
@@ -200,14 +213,14 @@ def _run(sb: dict, *args: str, env: dict | None = None) -> subprocess.CompletedP
     )
 
 
-def _systemd_stubs(sb: dict, *, active: str = "active") -> None:
+def _systemd_stubs(sb: dict, *, active: str = "active", enabled: str = "enabled") -> None:
     _write_stub(
         sb["bin"],
         "systemctl",
         "#!/usr/bin/env bash\n"
         'printf "%s\\n" "systemctl $*" >> "$STUB_LOG/systemctl.log"\n'
         'case "$1" in\n'
-        '  is-active) echo "' + active + '" ;; is-enabled) echo enabled ;;\n'
+        '  is-active) echo "' + active + '" ;; is-enabled) echo "' + enabled + '" ;;\n'
         "  *) exit 0 ;;\n"
         "esac\nexit 0\n",
     )
@@ -1093,7 +1106,9 @@ def test_a_large_crontab_does_not_corrupt_the_install_or_the_status(tmp_path):
         "crontab",
         "#!/usr/bin/env bash\n"
         'STORE="$STUB_LOG/crontab.txt"\n'
-        'if [ "${1:-}" = "-l" ]; then [ -f "$STORE" ] || exit 1; cat "$STORE"; exit $?; fi\n'
+        'if [ "${1:-}" = "-l" ]; then\n'
+        '  if [ -f "$STORE" ]; then cat "$STORE"; exit $?; fi\n'
+        '  echo "no crontab for tester" >&2; exit 1; fi\n'
         'if [ "${1:-}" = "-" ]; then cat > "$STORE.new"; mv "$STORE.new" "$STORE"; exit 0; fi\n'
         "exit 0\n",
     )
@@ -1180,11 +1195,15 @@ def test_no_pgrep_is_not_read_as_a_running_daemon(tmp_path):
     bash = _shutil.which("bash") or "/bin/bash"
     fn = tmp_path / "fn.sh"
     fn.write_text(_extract_shell_function("cron_daemon_problem"), encoding="utf-8")
-    # An EMPTY PATH: no pgrep, no ps. Linux then still has /proc; macOS has neither, which is the
-    # "cannot look" arm — both must refuse, so the assertion holds on either host.
+    # ⛔ THE /proc ARM MUST NOT MEASURE THE HOST. An empty PATH removes `pgrep` and `ps`, but the
+    # `/proc` reader is PATH-independent — so on any box that ACTUALLY RUNS cron this asserted the
+    # opposite of the truth (`rc=0`), i.e. it was green only where the feature is not in use.
+    # `AUTOSCALE_PROC_DIR` points the reader at an empty dir instead.
+    empty_proc = tmp_path / "empty-proc"
+    empty_proc.mkdir()
     res = sp.run(
         [bash, "-c", f'. "{fn}"; cron_daemon_problem; echo "rc=$?"'],
-        env={"PATH": str(tmp_path / "nowhere")},
+        env={"PATH": str(tmp_path / "nowhere"), "AUTOSCALE_PROC_DIR": str(empty_proc)},
         capture_output=True,
         text=True,
         timeout=60,
@@ -1198,9 +1217,140 @@ def test_no_pgrep_is_not_read_as_a_running_daemon(tmp_path):
     for value, expected in (("1", "rc=0"), ("0", "rc=1")):
         res = sp.run(
             [bash, "-c", f'. "{fn}"; cron_daemon_problem; echo "rc=$?"'],
-            env={"PATH": str(tmp_path / "nowhere"), "AUTOSCALE_CRON_DAEMON": value},
+            env={
+                "PATH": str(tmp_path / "nowhere"),
+                "AUTOSCALE_PROC_DIR": str(empty_proc),
+                "AUTOSCALE_CRON_DAEMON": value,
+            },
             capture_output=True,
             text=True,
             timeout=60,
         )
         assert res.stdout.strip().splitlines()[-1] == expected, (value, res.stdout)
+
+
+# ── cycle 3 review: the destruction path and the three inert states ──────────────────────────
+_USER_CRONTAB = "MAILTO=ops\n0 2 * * * /usr/local/bin/backup.sh\n"
+
+
+def _cron_env(sb: dict) -> dict:
+    return dict(sb["env"], AUTOSCALE_HAS_SYSTEMD="0", AUTOSCALE_HAS_CRON="1")
+
+
+def _unreadable_crontab(sb: dict) -> None:
+    """A `crontab` whose -l FAILS for a non-benign reason, and whose write still works."""
+    _write_stub(
+        sb["bin"],
+        "crontab",
+        "#!/usr/bin/env bash\n"
+        'STORE="$STUB_LOG/crontab.txt"\n'
+        'if [ "${1:-}" = "-l" ]; then echo "crontab: permission denied" >&2; exit 1; fi\n'
+        'if [ "${1:-}" = "-" ]; then cat > "$STORE.new"; mv "$STORE.new" "$STORE"; exit 0; fi\n'
+        "exit 0\n",
+    )
+
+
+def test_a_failed_crontab_read_never_overwrites_the_users_crontab(tmp_path):
+    """⛔ THE DESTRUCTIVE HALF OF `|| true` ON A READ: the user's whole crontab, replaced.
+
+    Both cron branches fed `crontab -l 2>/dev/null || true` straight into `crontab -`, so a read
+    that failed for any reason other than "no crontab yet" (permissions, a held/locked crontab, no
+    spool dir) produced an EMPTY string — indistinguishable from "the user has no crontab" — and
+    the write then replaced MAILTO and every nightly job with just our line, printing
+    `installed: cron entry -> …` and exiting 0 over the loss. The comment claiming "the `|| true`
+    is on the READS only; the final write stays fatal" was exactly backwards.
+
+    Mutation: restore `{ crontab -l 2>/dev/null || true; echo "$line"; } | crontab -` -> the user's
+    entries are gone (store == our line alone) and rc is 0 -> RED.
+    """
+    sb = _sandbox(tmp_path, uname="Linux")
+    sb["crontab_store"].write_text(_USER_CRONTAB, encoding="utf-8")
+    _unreadable_crontab(sb)
+    env = _cron_env(sb)
+
+    res = _run(sb, env=env)
+    assert res.returncode == 2, (res.stdout, res.stderr)
+    assert "REFUSED" in res.stderr and "permission denied" in res.stderr, res.stderr
+    assert sb["crontab_store"].read_text(encoding="utf-8") == _USER_CRONTAB, "the install ate the crontab"
+    assert not (sb["install"] / "runner_autoscale.py").exists(), "refusal wrote the run-copy"
+
+    # `--uninstall` is the same destructive write, and must refuse the same way.
+    res = _run(sb, "--uninstall", env=env)
+    assert res.returncode == 2, (res.stdout, res.stderr)
+    assert sb["crontab_store"].read_text(encoding="utf-8") == _USER_CRONTAB, "the uninstall ate the crontab"
+
+    # `--status` must not claim a schedule is armed/absent from a read it could not make.
+    res = _run(sb, "--status", env=env)
+    assert res.returncode == 2, (res.stdout, res.stderr)
+    assert "NOT verifiable" in res.stdout, res.stdout
+
+
+def test_systemd_reinstall_reenables_a_timer_disabled_out_of_band(tmp_path):
+    """⛔ "UNITS UNCHANGED" IS NOT "STILL ENABLED" — the systemd twin of the launchd bug fixed here.
+
+    `sudo -n systemctl enable` sat INSIDE `if [ "$changed" = 1 ]`, and the only other call was
+    `systemctl start`. So a re-run whose unit files are byte-identical (i.e. every run after the
+    first) never enabled the timer: on a box where it had been disabled out of band — `systemctl
+    disable --now` to pause the guard, a preset reset — install printed "installed … (active)" and
+    exited 0, and the schedule was silently gone at the next reboot.
+
+    Mutation: move `enable` back inside the `changed` branch -> the second run makes no enable call
+    -> RED.
+    """
+    sb = _sandbox(tmp_path, uname="Linux")
+    _systemd_stubs(sb)
+    env = dict(sb["env"], AUTOSCALE_PLATFORM="systemd")
+    assert _run(sb, env=env).returncode == 0
+    # units are byte-identical now, and the timer has been disabled out of band.
+    _systemd_stubs(sb, enabled="disabled")
+    res = _run(sb, env=env)
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    calls = (sb["log"] / "systemctl.log").read_text(encoding="utf-8")
+    assert calls.count("systemctl enable runner-autoscale.timer") == 2, calls
+
+
+def test_status_fails_when_the_timer_is_not_enabled(tmp_path):
+    """A DISABLED TIMER IS INERT AT THE NEXT BOOT, and `--status` called it armed.
+
+    `is-active` is true for a disabled timer that is currently running, so it reported exit 0 on a
+    schedule already doomed. Install now enables on every run, so the two must agree.
+
+    Mutation: drop the `is-enabled` check -> rc 0 for a disabled timer -> RED.
+    """
+    sb = _sandbox(tmp_path, uname="Linux")
+    _systemd_stubs(sb)
+    env = dict(sb["env"], AUTOSCALE_PLATFORM="systemd")
+    assert _run(sb, env=env).returncode == 0
+    _systemd_stubs(sb, enabled="disabled")
+    res = _run(sb, "--status", env=env)
+    assert res.returncode == 2, (res.stdout, res.stderr)
+    assert "enabled: disabled" in res.stdout, res.stdout
+    assert "not enabled" in res.stdout, res.stdout
+
+
+def test_uninstall_fails_when_the_agent_stays_loaded(tmp_path):
+    """⛔ "DELETED THE PLIST" IS NOT "STOPPED THE AGENT".
+
+    `launchctl bootout … || true` swallowed a failed boot-out ("Operation not permitted" from
+    outside the GUI session, a disabled login item), then removed the plist and printed
+    `removed: com.tortoise.runner-autoscale` with exit 0 — while the LOADED agent kept firing every
+    INTERVAL, and `--status` afterwards reported NOT installed because it only checks the plist. The
+    install path has exactly this "wrote != loaded" verification; the uninstall path had none.
+
+    Mutation: drop the post-`rm` `launchctl list` check -> rc 0 with the agent still loaded -> RED.
+    """
+    sb = _sandbox(tmp_path)
+    assert _run(sb).returncode == 0
+    _write_stub(
+        sb["bin"],
+        "launchctl",
+        "#!/usr/bin/env bash\n"
+        'printf "%s\\n" "launchctl $*" >> "$STUB_LOG/launchctl.log"\n'
+        'case "${1:-}" in\n'
+        '  list) echo "501 0 com.tortoise.runner-autoscale" ;;\n'
+        '  bootout) echo "Boot-out failed: 1: Operation not permitted" >&2; exit 1 ;;\n'
+        "esac\nexit 0\n",
+    )
+    res = _run(sb, "--uninstall")
+    assert res.returncode == 1, (res.stdout, res.stderr)
+    assert "STILL LOADED" in res.stderr, res.stderr
