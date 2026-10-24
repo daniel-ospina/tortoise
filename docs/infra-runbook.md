@@ -370,6 +370,236 @@ fly releases -a tortoise-y4mjjq
 fly deploy --image $(fly releases -a tortoise-y4mjjq --json | jq -r '.[1].ImageRef') -a tortoise-y4mjjq
 ```
 
+## 3.5 The record's backup, and the drill that proves it restores (#9557 / R9)
+
+**The Postgres record is the system of record**, so its durability is Postgres's own backup.
+`docs/durability-posture.md` owns the *posture*; this section is the *procedure*. The mechanism is
+`tortoise/record_backup.py` and its one trigger is the `record-backup` verb — the graph sweeps
+(`backup_sweep.py`, `hosted_backup.py`, `selfhost_backup.py`) copy the **graph** and are not this.
+
+```bash
+# backup only — dump -> encrypt -> upload to R2 under record-backups/.
+# The DSN comes from the ENVIRONMENT. Prefer the env vars: an argument
+# is readable by every local user via `ps` and lands in shell history.
+#
+# ⛔ THE BACKUP HAS ITS OWN DSN, AND IT IS NOT THE RECORD'S (#9801). The record
+# connects as `tortoise_record_app` (NOBYPASSRLS, R6), which is right for every
+# read the product makes and WRONG here: a backup must see every tenant. Point
+# TORTOISE_RECORD_BACKUP_DSN at a role that bypasses RLS (the table owner /
+# `postgres`, or `service_role`) and keep TORTOISE_RECORD_DSN as the app role.
+# Unset, the verb falls back to TORTOISE_RECORD_DSN — and when that DSN names the
+# app role, it fails closed with a sentence naming the role, not an "empty
+# record" (a deployment whose record DSN already bypasses RLS keeps working
+# unchanged — the fallback is checked, not refused on sight).
+TORTOISE_RECORD_BACKUP_DSN=... python -m tortoise record-backup
+
+# backup + RESTORE DRILL — restore into a scratch record and compare per-table row counts
+TORTOISE_RECORD_BACKUP_DSN=... TORTOISE_RECORD_SCRATCH_DSN=... \
+  python -m tortoise record-backup --reset-scratch
+```
+
+Exit codes (a scheduler's only signal):
+
+| code | meaning |
+|---|---|
+| `0` | backup published — and in drill mode, the restore **verified** against the source |
+| `1` | the run **could not be completed** (pg_dump/pg_restore non-zero, a transport failure). What that means depends on the **failure class**, not the mode: a failure **after** the artifact was published raises `RecordRestoreFailed` and names the artifact id — the record IS backed up and only the restore is **NOT proven**: retry, and if it keeps failing check preconditions 4-5 (the scratch target's schema and the tenancy rows its foreign keys reference): a missing parent row never clears on a retry. **Any other** exit-1 failure (a dump, encrypt or upload failure, in either mode) means **nothing was published** — the record is NOT backed up |
+| `2` | could not run: no/malformed DSN, R2 unavailable, psycopg2 absent, a **pooler** DSN (the source's or the drill's **scratch** one — both are refused before anything is dumped), a **source role that cannot bypass RLS** (`TORTOISE_RECORD_BACKUP_DSN` names the app role, **or** it is unset *and* its `TORTOISE_RECORD_DSN` fallback resolves to the app role — #9801), a missing/malformed `TORTOISE_BACKUP_KEY`, a populated scratch target, an **empty** record to drill, an artifact whose **integrity, shape pin or decryption does not verify**, or a `--keep` below 1. No verdict was produced — never read as green, and never retry blindly: these are configuration faults. ⚠️ **A permanent fault found AFTER the upload (the likeliest: a stale scratch credential) still exits `2`, but the artifact is already durable** — the drill publishes before it resets and restores, so the verb names the published `backup_id` and says the record IS backed up, instead of claiming nothing was backed up |
+| `3` | the drill **ran** and the restored record disagrees with its source — an incident, with the tables named |
+
+Every configuration fault is `2`, deliberately: a pooler DSN, a missing `psycopg2` and a missing
+`TORTOISE_BACKUP_KEY` are fixed by editing a config, so a scheduler reading them as `1` would retry a
+permanent fault forever — minting a fresh artifact (and, on a keyless box, a fresh plaintext dump)
+on every attempt. `1` is reserved for "it was attempted and did not happen — try again".
+
+⚠️ **`1` in drill mode is not "the record has no backup".** The drill cuts and publishes the
+artifact *before* it restores, so a failure after that point leaves a complete, checksummed object
+in `record-backups/`: the record is backed up, the restore is unproven. The verb says which of the two
+it means on stderr, and the drill's own exit-1 class (`RecordRestoreFailed`) names the published
+`backup_id` — so an alert rule should read the sentence, not assume an outage.
+
+⚠️ **`2` in drill mode is not "the record has no backup" either.** The drill uploads before it
+resets and restores, so a permanent configuration fault found on the scratch side (a rotated
+credential is the usual one) exits `2` with a complete artifact already in `record-backups/`. The
+verb names that artifact's `backup_id` and says the record IS backed up — so, as with `1`, read the
+sentence rather than inferring an outage from the code. Do **not** re-run the dump to "replace" the
+artifact: fix the configuration the message names first.
+
+⚠️ **A `0` in backup-only mode is not a durability claim.** The verb prints
+`NOT PROVEN RESTORABLE` in that mode on purpose: the posture asks for *"a backup whose artifact is
+proven restorable"*, and only the drill mode proves it. Run the drill on a schedule of its own.
+
+### Preconditions (each one is a measured failure, not a preference)
+
+1. **The DIRECT connection string, not the pooler.** A transaction-mode pooler discards session
+   state between transactions; a dump through it can be silently short. The verb refuses a pooler
+   host or port 6543 (exit 2) rather than producing an artifact nobody can trust.
+
+2. **A role that BYPASSES RLS — not the record's app role (#9801).** R6 arms the record as
+   `tortoise_record_app` (`NOBYPASSRLS`, not the table owner) and names the database-level
+   backup/restore as one of exactly **three** purposes a bypassing role may serve. Both legs of this
+   verb need it, for different reasons:
+   - the **drill's** `count(*)` per table returns **0** under the `*_app_tenant` policies, because
+     this connection never sets `app.current_org_id` and the R6 migration chose *silent reads* (a
+     missing GUC returns NULL, so rows vanish instead of raising). Pre-#9801 that surfaced as
+     *"the record is EMPTY"* — a misdiagnosis that sends an operator to the data while the fault is
+     the role;
+   - `pg_dump`'s `row_security = off` default is an **error**, not a filtered read, for a
+     `NOBYPASSRLS` role, so backup-only mode produced no artifact at all.
+
+   The verb therefore resolves its DSN from `TORTOISE_RECORD_BACKUP_DSN` (falling back to
+   `TORTOISE_RECORD_DSN` only when that variable is unset) and refuses a connection whose role does
+   not bypass RLS, naming the role and this variable (exit 2 — a config edit, so retrying cannot
+   clear it). A *set but blank* `TORTOISE_RECORD_BACKUP_DSN` is refused rather than fallen back:
+   that is the shape a cron line takes when its environment is gone, and falling back would run the
+   backup as the app role.
+
+3. **R2 + `TORTOISE_BACKUP_KEY`**, the same credentials the graph sweep uses — one bucket, one key,
+   so a deployment that backs up graphs needs nothing new.
+4. **The drill's scratch target carries the record's schema** (apply `supabase/migrations`). The
+   artifact is **data-only** on purpose: the schema's one home is the migrations, and a
+   schema-carrying artifact cannot restore into a migrated target at all (`pg_restore` refuses
+   `relation "node_identity" already exists` — measured 2026-10-22).
+5. **The scratch target carries the tenancy rows the record's foreign keys reference** —
+   `organizations(id)`, and `graphs(org_id, id)`. These are the control plane, not the record. A
+   target without them is refused by the FK, which is the correct direction: a record dangling from
+   missing tenancy is not a record. (Do **not** work around it with
+   `session_replication_role = replica`.)
+6. **The scratch target's record tables are EMPTY.** A restore into a populated record is refused —
+   it is not a drill, and `pg_restore` would either fail halfway on a duplicate key or overwrite
+   live data. A successful drill **leaves them populated**, so a *scheduled* drill needs
+   `--reset-scratch` (below); without it the first run succeeds and every later run is refused as
+   "the target record is NOT empty".
+
+### `--reset-scratch` — what makes a scheduled drill repeatable
+
+With `--reset-scratch`, the verb `TRUNCATE`s the record's **own ten tables** on the scratch DSN
+only, in one statement, **after the artifact has been downloaded and verified** (integrity, table
+set, column pin, decryption) and before `pg_restore`. It is
+opt-in because an automatic truncate would destroy the leftover state of a RED drill — the evidence
+an operator needs — with nothing to show for it; for the same reason every step that can refuse on
+the **artifact** (integrity, manifest shape, table set, column pin, decryption) runs before it, so a
+drill refused for a bad artifact leaves the last run's evidence in place. The **target** side is not
+covered by that guarantee: `restore_record_backup` re-counts the scratch and writes the payload file
+before `pg_restore` runs, and a failure there happens after the truncate — a narrow residual
+(one successful connect wide), named here rather than promised away. It
+can never touch the record itself: a scratch DSN equal to the source is refused first, and no
+`CASCADE` is used, so the tenancy rows the FKs need (`organizations`, `graphs`) are left alone.
+
+### What the comparison tolerates, and why
+
+The record is a **live** system of record, and it is not append-only: it takes rows in and it ages
+them out (`record_projection` emits `DELETE` for `delete`/`merge` journal ops, and the erasure RPC
+removes all ten tables). The artifact is cut from a snapshot taken after the manifest's row counts,
+so rows committed in that gap are legitimately in the artifact and not in the count. The drill
+therefore compares each table against the window `[min(before, after), max(before, cut, after)]`,
+where `before` is the pre-dump count, `cut` is a count taken immediately **before `pg_dump` starts**,
+and `after` is a re-count taken once the dump has finished: below the floor is **loss** (rows that
+existed before the dump did not come back), above the ceiling is a restore carrying rows no source
+read ever observed (duplication or a corrupt artifact). The ceiling is the **largest read the drill
+takes OUTSIDE the dump**, not one endpoint: rows can land after `before` and age out before `after`,
+so a healthy artifact may legitimately carry more than either endpoint shows — an endpoint ceiling
+refused that artifact with a sentence the run had already disproved by measuring the higher number.
+Comparing exactly against a pre-dump count — the earlier behaviour — red a perfectly healthy backup
+on any record with continuous writes, and a drill that reds every day on a healthy backup removes
+the one falsifier this exists for. The report names a table that moved with both bounds, e.g.
+`journal_event: source=512 restored=512 (source moved to 515 by the end of the dump)`.
+
+⚠️ **`cut` is not the artifact's snapshot count, and no arithmetic over these three reads is.** The
+artifact's snapshot instant falls *inside* the dump, between the `cut` read and the `after` read, so a
+row inserted in that gap and deleted before `after` is in the artifact and in none of the three reads:
+it lands above the ceiling and reds a healthy artifact with exit `3`. That is the one residual this
+bound cannot see; closing it needs the count read from the same snapshot `pg_dump` reads
+(`pg_export_snapshot` + `pg_dump --snapshot`), which is tracked in **#9795**, not implemented. So on a
+live record, read the table lines in the report before treating a single exit-3 run as an outage.
+
+The artifact's OWN `row_counts` are **never a baseline and never a bound**: the number is measured
+just before the dump, so it is the drill's own reading of the source, not an independent claim.
+Comparing it against a ceiling built from the same reading was a check that could never fire — the
+runbook used to list a refusal no run could produce — so it is gone. What decides the verdict is the
+comparison of the **restored** counts against the source reads; a manifest that inflates its own
+number neither refuses a healthy run nor rescues a short restore (the drill reds with the table
+named). Comparing the claim against the pre-dump count was a false incident on every live record
+(#9601 review cycle 2).
+
+### Retention
+
+A successful run prunes `record-backups/` to the newest **14** artifacts (`--keep`). The prune only
+removes objects whose manifest it could read and whose `format` it recognises; anything it cannot
+attribute is left alone, because a prune that guesses deletes the only copy of something it did not
+understand. It deletes under the **path the manifest was read at**, never under the `backup_id` the
+file declares about itself — a hand-edited or duplicated id would otherwise redirect the deletion
+onto the artifact the policy had just decided to keep. The prune runs **after** the artifact is durable and is best-effort: a failed listing or
+delete logs a warning and the run still exits `0` (the backup happened) — a prune failure must never
+be reported as "the record is NOT backed up". It runs on exit `0` only, so a persistently red drill
+also stops retention; `--reset-scratch` is what keeps the scheduled drill on the `0` path.
+
+⚠️ **The exit-`2` case is the one to watch, because it is the likeliest.** A drill publishes its
+artifact *before* it resets and restores, so any post-publish refusal — the commonest being a **populated scratch
+target because `--reset-scratch` was dropped from the cron line** — mints a new artifact and then
+returns without pruning. That grows `record-backups/` by one full encrypted dump per run, without
+bound, while the exit table reads as "no verdict" rather than as "retention has stopped". If the drill
+has been `2` for more than `--keep` runs, count what is there with the bucket tool you already have
+(`aws s3 ls --endpoint-url "https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com" --region auto
+"s3://$R2_BUCKET/record-backups/"` — the endpoint is DERIVED from `R2_ACCOUNT_ID`, so without it
+the CLI addresses AWS and answers with an auth error that reads as "the bucket is empty"); the
+reset is the repair, and it returns the job to the pruning path.
+
+### Schedule — NOT YET DEPLOYED, and that is the current loss window
+
+The verb is the caller; no cron currently invokes it, so **the record has no automatic archive yet**
+and its loss window is whatever an operator's manual run makes it (i.e. unbounded). The line to add
+is one job, alongside the graph sweep's `registry-backup-cron.yml`:
+
+```cron
+17 3 * * *   python -m tortoise record-backup --reset-scratch
+```
+
+All three DSNs are read from the environment, so the job's command line carries no password — and the
+BACKUP one is **`TORTOISE_RECORD_BACKUP_DSN`**, not the app-role `TORTOISE_RECORD_DSN` (#9801): a
+backup must see every tenant, and the record's own app role (`NOBYPASSRLS`) is refused with exit `2`
+by design. A job armed with only `TORTOISE_RECORD_DSN` **whose record role is the app role
+therefore exits `2` on every run and publishes nothing** — loud, but never a working archive. (A
+record DSN that already bypasses RLS is still accepted through the fallback; the gate checks the
+ROLE, not which variable supplied it.) The three are:
+
+| variable | what it is |
+|---|---|
+| `TORTOISE_RECORD_BACKUP_DSN` | the **backup** connection: the DIRECT string, as a role that **bypasses RLS** (the table owner / `postgres`, or `service_role`). **This is the one the job needs.** |
+| `TORTOISE_RECORD_SCRATCH_DSN` | the drill's empty scratch target (direct, not the pooler) |
+| `TORTOISE_RECORD_DSN` | the record's own app-role DSN. Used only as a FALLBACK when the backup DSN is unset — and when it names the app role the run fails closed with a refusal naming the role, rather than backing up as the app role (a record DSN that already bypasses RLS is accepted: the gate checks the ROLE, not the variable) |
+
+Once that job exists the loss window is its cadence (one day, for a daily line); until it does, do not
+restate the record's loss window as anything smaller. The drill's own cadence can be slower than the
+backup's — a weekly drill is enough to keep the artifact proven.
+
+### Measured drill (2026-10-22) — what actually ran
+
+Executed end to end against a real `postgres:17`, a **real** `pg_dump`/`pg_restore`, the real
+`supabase/migrations` schema, and the real encrypt/upload/download/decrypt path (in-memory storage):
+
+```text
+verdict: RESTORED            row_total: 56
+node_identity 8/8   journal_event 40/40   source 1/1   event 1/1   session 1/1
+object 1/1   subject 1/1   point 1/1   relation 2/2
+```
+
+Falsifiers observed **red** in the same session (a green drill that cannot red proves nothing):
+
+| falsifier | observed |
+|---|---|
+| `journal_event` forced short | `the restored record does not match its source: journal_event (source 40 → restored 0)` |
+| one byte flipped in the stored artifact | `artifact integrity check failed (sha256 mismatch)` — **before** `pg_restore` ran |
+| restore target already populated | `the target record is NOT empty (event=1, journal_event=40, …)` |
+| drill over an EMPTY record | `the record is EMPTY — every count would match an empty scratch database` (exit `2`, no verdict: nothing ran) |
+| a schema-carrying dump restored into a migrated target | `pg_restore: error: … relation "node_identity" already exists` — the measured reason the artifact is data-only |
+| a target without the tenancy parents | `violates foreign key constraint "node_identity_org_id_fkey"` — the fail-closed direction |
+
+⚠️ **Not yet run against the hosted Supabase record.** That drill needs a scratch Supabase project
+and the project's direct DSN; it is the remaining operational step, and until it is done this row's
+claim is *"the artifact restores into Postgres, verified per table"*, not *"the hosted record has
+been restored"*.
+
 ## 4. Health Check
 
 ```bash
@@ -1490,10 +1720,10 @@ on a `*/5 * * * *` cron **intent** (measured delivery is ~15 min; see §7.5a).
 
 - **Workflow:** `.github/workflows/availability-watchdog.yml` (schedule `*/5 * * * *` + `workflow_dispatch`)
 - **Logic + limits:** `.github/scripts/availability-watchdog.sh`
-- **Harness (runs in CI job `availability-watchdog`):** `bash .github/scripts/availability-watchdog.test.sh`
+- **Harness (CI: the `Availability watchdog state machine (#2850)` step of `ops-harnesses`):** `bash .github/scripts/availability-watchdog.test.sh`
 - **Independent liveness check (#4573):** `.github/workflows/availability-liveness.yml` (its OWN schedule,
   `*/30`) + `.github/scripts/availability-liveness.sh`, harness `bash .github/scripts/availability-liveness.test.sh`
-  (same CI job). It is a separate workflow on purpose — see §7.8a.
+  (the `Availability pager liveness check (#4573)` step of the same CI job). It is a separate workflow on purpose — see §7.8a.
 
 **Two production targets (#3628).** The watchdog now drives TWO surfaces, as two
 steps of the same job: the Fly API probe (§7.1a) and the Cloudflare Pages auth
@@ -2583,6 +2813,14 @@ whole reason this path exists.
 # 1. Arm and read the record scope FIRST — a restore writes what the record
 #    holds for exactly this (org_id, graph_id), so read it before you wipe:
 #      export TORTOISE_RECORD_DSN='postgresql://…'          # or --record-dsn
+#    ⛔ That DSN is the APP ROLE (`tortoise_record_app`), not `postgres`: this verb
+#    READS the record through the read door, which refuses a bypassing role. A
+#    `postgres`/`service_role` DSN here exits 2 (UNAVAILABLE — no verdict, and
+#    nothing written) with "the record is unreadable (RecordProjectionError)".
+#    That message names no role and is the SAME text as a real outage, so read
+#    the exception TYPE as the discriminator: `RecordProjectionError` is a
+#    refusal (fix the DSN), a driver `OperationalError` is an outage (see
+#    "The record's connecting role").
 #
 # 2. Restore. --cache-graph is REQUIRED and has no default (see below).
 python -m tortoise record-restore \
@@ -2771,6 +3009,334 @@ not put them in this section, where they would rot.
 | RESEND_FROM_EMAIL | ✅ (single managed sender identity — #1136; default `noreply@premiselabs.co`) | — | ✅ |
 | BILLING_FROM_EMAIL | optional (distinct billing sender override — #1136) | — | ✅ |
 | BILLING_NOTIFY_TO | ✅ (ops inbox for billing email) | — | ✅ |
+| TORTOISE_RECORD_DSN | — (**not on Fly yet** — the secret is the operator's act; absent ⇒ `NOT_ARMED` and the record writes nothing). Setting it **arms the Postgres record** (epic #7879 R1) via GitHub secret → Fly ⚠️ Its **user must be `tortoise_record_app`** (R6, #9554), never `postgres`/`service_role` — see [The record's connecting role](#the-records-connecting-role-r6-decision-2026-10-22-9554) below | — (the record is a Supabase Postgres project, not FalkorDB) | ✅ **declared, value NOT created yet** — the operator act is [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548) (no such GitHub secret exists today; the ✅ is the *home* the deploy reads, not a provisioned value) |
+
+### Arming the Postgres record — `TORTOISE_RECORD_DSN` (epic #7879 R1, #9548)
+
+**What the variable is.** The Postgres record's own connection string, read by
+`tortoise/record_writer.py` (`RECORD_DSN_ENV`). The seam is **presence-based**:
+unset or blank ⇒ `NOT_ARMED` ⇒ *zero statements, no connection attempt, no
+exception* — the record path is inert and capture is byte-identical to a
+deployment that never had it. That is why an unstaged name is invisible instead
+of broken: nothing goes red, the record simply never receives a row
+(`docs/epics/2026-10-10-7879-postgres-record/08-hosted-prerequisites.md` §A8).
+
+**The value.** The project's **pooler** DSN — the same HOST/port/query shape `.env.example`
+documents for `TORTOISE_AUDIT_DSN`. ⚠️ Copy that block's *host* shape, not its USER:
+`TORTOISE_AUDIT_DSN`'s block shows `postgres.<project-ref>`, and that user is the table owner —
+the one role this record must never connect as (see the ⛔ below). And `.env.example`'s own
+`TORTOISE_RECORD_DSN` line is a **commented, non-pooler `localhost` placeholder**: it is not the
+shape either.
+`postgresql://tortoise_record_app.<project-ref>:<urlencoded-password>@aws-0-<region>.pooler.supabase.com:5432/postgres?sslmode=require&connect_timeout=5`.
+⛔ **The user is R6's application role, `tortoise_record_app` — never `postgres` and never
+`service_role`.** Both bypass row-level security, which is the record's tenancy boundary, so that DSN
+would make §4's *"rows scoped by tenant via row-level security"* false for the only path that writes
+customer data. The role, its grants and its login credential are
+[The record's connecting role](#the-records-connecting-role-r6-decision-2026-10-22-9554) below.
+⚠️ **URL-encode the password** (`@`, `:`, `#`, `/` and `?` are DSN delimiters): a
+raw `p@ss:word` does not fail — it parses into a *different* host/user, and
+`record_dsn()` cannot catch it beyond the scheme check, so the failure surfaces as
+`circuit_open` / `write_failed` writes rather than as a configuration error.
+§4 of `docs/architecture/STORAGE-ARCHITECTURE.md` decides **one project with
+tenant-scoped rows**, so this is the existing Supabase project — *not* a second
+database per team (refused on cost grounds).
+
+**Provisioning — one operator act, then the deploy does the rest.**
+
+```bash
+# 1. the value's ONLY home (never a file, never a shell history):
+gh secret set TORTOISE_RECORD_DSN --repo daniel-ospina/tortoise   # paste the pooler DSN
+# 2. any deploy stages it (push to main, or: gh workflow run deploy-hosted.yml)
+# 3. confirm the machine carries it — NAME only, never the value:
+fly secrets list -a tortoise-y4mjjq | grep -E '^TORTOISE_RECORD_DSN'
+```
+
+**Verify it is ARMED, not merely set** — a set variable that reaches an
+unreachable or misconfigured database is the one failure this cannot show you.
+
+⛔ **There is NO `/metrics` route on the hosted app — do not go looking for one.**
+The listener on **9090** is the dedicated liveness listener
+(`monitoring.start_health_listener` → `_HealthzHandler`), which answers `/healthz`
+and returns **404 for every other path** (§6.9 item 2); `serve_health` — the only
+server with a `/metrics` route — is started by the standalone
+`tortoise health-server` CLI, which is not a `fly.toml` process, and it could not
+co-bind 9090 anyway. So
+`fly ssh console -a tortoise-y4mjjq -C "curl -s localhost:9090/metrics | grep record_write_failures"`
+prints **nothing in every state** — armed-and-writing, armed-and-refusing, and
+unarmed alike (`curl -s` prints the 404 body, `grep` matches none of it). An
+empty grep is **not** a passing reading: it is the silent `NOT_ARMED` class this
+section exists to close, one layer up. Hosted `GET /health` (8000) does not carry
+the counter either.
+
+**Two reads that DO exist on this deployment.**
+
+1. **The failure log line** — every WARN-level non-write is logged with its reason
+   (`tortoise/record_writer.py`: `malformed_dsn` / `no_tenant` / `circuit_open` /
+   `write_failed`), and this needs no auth. ⚠️ **TWO readings are not in this
+   grep.** (a) The `no_durable_journal` decline — logged at **DEBUG**, under a
+   *different* prefix (`the record write was declined (no_durable_journal)`,
+   `record_writer.py`), because it is the healthy M2 path and not a failure.
+   (b) The once-per-window `position_unproven` WARN — `no layer-1 position row
+   for this record (position_unproven)` (`record_writer.py`), emitted when the
+   journal append **SUCCEEDED** but the seam could not prove the record's position —
+   so the **live** pass writes no layer-1 position row (**a later replay re-numbers the
+   SAME journal and heals it**, which is why this is a warning and not an outage).
+   It is a real non-write under the OTHER prefix,
+   it repeats at most once per window, and it is exactly the line that item 2's
+   `record_position_unproven` counter is counting — grepping only the
+   `did not happen` prefix for it returns nothing.
+   ⛔ **`no_journal` and `seam_unimportable` ARE in it**, so do not dismiss them
+   as "the SDK, not the seam": `tortoise/sdk.py::_record_write_failure` emits the
+   **identical** prefix (`the record write did not happen (%s)`) — an armed
+   deployment that logs one wrote **nothing**, and a reader told to skip those
+   lines would skip the signal this section exists to expose:
+
+   ```bash
+   fly logs -a tortoise-y4mjjq | grep "the record write did not happen"
+   ```
+
+2. **The counters** — `monitoring.metrics()`, read INSIDE the process that writes
+   the rows: the authenticated MCP tool `tortoise_overview(section="health")` on
+   the app's `/mcp` mount, which serves `monitoring.metrics()` from the same
+   process that writes the rows (the retired name `tortoise_health` still answers
+   as an alias), so `record_write_failures` (a `{reason: count}` dict),
+   `record_non_journal_skips` and `record_position_unproven` are the live shape.
+   ⛔ Do **not** substitute a
+   `fly ssh console -C "python3 -c 'import tortoise.monitoring; …'"` one-liner:
+   the counters are in-process memory, so a fresh interpreter answers **0**
+   unconditionally — a worse false pass than the 404 above.
+
+**The SQL half, read honestly.** Capture one session, then on the record project:
+
+```sql
+select count(*) from journal_event;  -- >0 after a capture THAT JOURNALED one
+select count(*) from point;          -- >0 when the capture added points
+```
+
+⚠️ A pure **`capture_session` capture can legitimately add NO row**: its extracted
+records go through the M2 lane, whose log is `_InMemoryEventLog` — *not* a journal
+by design — so the seam DECLINES the write (`durable=False`,
+`record_writer.write_live_record`) and counts it on
+`record_non_journal_skips{reason="no_durable_journal"}`, never on the failure
+counter (#9231: a decline loses nothing, so a replay owes nothing). The
+row-producing path is a **durable journal lane** — the per-graph SDK writes whose
+journal lives under `TORTOISE_EVENT_LOG_BASE_DIR=/data/events` (`fly.toml`). So a
+`0` here means *"this capture took the non-durable lane"*, not *"the record is
+broken"*; the seam reads above are what decide.
+
+**The pass bar is NOT "the counter is 0".** These readings are expected on an
+armed deployment, and none of them is a failure of *arming*:
+
+- `record_non_journal_skips{reason="no_durable_journal"}` **grows** — that is the
+  M2 capture lane declining, by design (above).
+- `record_write_failures{reason="write_failed"}` **may grow by the one named
+  #9264 refusal**: a `session` record whose `capture_redactions` is an integer into
+  a `jsonb` column is refused with `DatatypeMismatch` and **counted**
+  (`08-hosted-prerequisites.md` §A8). That disagreement is **FIXED in the tree**
+  (#9264, closed by `20261022000001_record_session_capture_redactions_integer.sql`,
+  which narrows the column to `integer` and deletes the tolerance pin) — but the
+  migration reaches the project only when **R2** lands it (`supabase-deploy.yml`,
+  `workflow_dispatch`), so this is a **migration-ordering** baseline, not an open
+  bug: expected while R2 is unapplied, and a **real arming failure** once it is.
+- `record_position_unproven` **may be non-zero** — a DURABLE journal whose append
+  could not prove the record's position writes no layer-1 row (a replay heals
+  it). It is the one key that says *"layer 1 is behind the journal by N
+  records"*; it is **not** a write failure and must not be read as one, but it
+  must not be silently ignored either.
+
+So the bar has **two parts, and BOTH are required**:
+
+1. **Something must have APPEARED.** ⛔ **An all-empty reading is NOT a pass.**
+   When the seam is unarmed, `write_live_record` returns *before counting
+   anything* — nothing on either counter, nothing in the WARN log — which is
+   **byte-identical** to a healthy zero. So **read both counters BEFORE the
+   capture and again after**: presence and growth are the *difference* between
+   the two reads, never an absolute count (a `write_failed` left from earlier in
+   the process's life is not this capture's reading). After the capture, require
+   at least one reading **before** you interpret anything: any reason on
+   `record_write_failures`, any reason on `record_non_journal_skips`,
+   a non-zero delta on `record_position_unproven`, or a new `journal_event` / `point` row
+   on the record project. ⚠️ **The capture that proves presence must be a
+   JOURNALING one** (a per-graph SDK write whose journal lives under
+   `TORTOISE_EVENT_LOG_BASE_DIR=/data/events`). A `capture_session` capture cannot
+   prove it: its records take the M2 lane, where `write_live_record` returns at
+   its `if not durable` branch — **before any tenant resolution, before the
+   breaker, before a socket is opened** — so it grows
+   `record_non_journal_skips{no_durable_journal}` even when the DSN is armed
+   against nothing, and would satisfy this item on a deployment that can never
+   reach Postgres. The bullets above say what the two expected reasons mean; for
+   any other reason, its counting site in the code is the authoritative statement
+   of what it means.
+
+   **If nothing appeared at all, do not conclude the record is healthy.** An
+   empty reading has more than one cause and does not say which; take the
+   journaling capture above and read again before drawing a conclusion.
+2. **No unexpected failure.** *Then*: **no growth in a reason other than the
+   documented #9264 `write_failed` refusals, and none at all for `no_tenant` /
+   `malformed_dsn` / `circuit_open`.** ⚠️ **That `write_failed` exemption is
+   BOUNDED**: it covers only the #9264 `DatatypeMismatch` refusals that recipe 1
+   actually shows, and only until the R2 migration above is applied — afterwards
+   **every** `write_failed` is unexpected — and a new `journal_event` / `point` row must still appear.
+   The R1-without-R2 state writes nothing and counts only `write_failed`, so it
+   satisfies item 1's *any reason* clause and the exemption above — **a
+   deployment that writes no row at all is not passing this bar, whatever the
+   reason breakdown says.** Those three are always a fail-and-fix:
+`no_tenant` = the request carried no tenant, **or** a tenant that was not a full
+org/graph pair, `malformed_dsn` = the value does **not start with**
+`postgresql://` / `postgres://` (`record_dsn()` does no parsing beyond that
+scheme check, so every other malformation surfaces as `circuit_open` /
+`write_failed` instead), `circuit_open` = a recent
+connect FAILED (wrong host/password, project paused, network) — i.e. the
+"set but unreachable" state this section exists to catch. All of them are logged
+(recipe 1) and counted (recipe 2), never raised — an armed write that did not
+happen lands in those two channels rather than in a red deploy, which is exactly
+why the two recipes above are the verification and the deploy status is not.
+
+   ⚠️ **The `no_tenant` arm is BOUND to the proving capture, not to the process.**
+   `no_tenant` is ALSO the designed outcome for a credential that names no graph:
+   an org-wide / session / legacy / OAuth key, the self-host registry lane
+   (`record_writer.record_tenant_for` returns `None` by design), and the
+   onboarding-seed and background-indexing surfaces (`hosted_api._bind_record_tenant`)
+   — all documented as the fail-closed direction (#9188/#9192), not a regression.
+   These counters are **process-global**, so a before/after delta also covers
+   whatever else the process served: ordinary traffic on a healthy armed
+   deployment can grow `no_tenant` with nothing wrong. So make the capture
+   **graph-bound** — its own writes cannot land in `no_tenant` — and attribute any
+   `no_tenant` growth inside the window to a specific request through recipe 1's
+   log line rather than to the capture. Growth with no log line to attribute it
+   to is a fail-and-fix; the route is never `TORTOISE_RECORD_SINGLE_TENANT`, which
+   the #9192 cross-tenant note below forbids.
+
+⛔ **Do NOT put it in `fly.toml`'s `[env]`.** A DSN carries a password, so a
+versioned `[env]` entry is a committed credential; and a Fly **secret** shadows
+`[env]`, so the versioned value would not even be what the app reads. The
+provenance gate refuses the `fly-toml-env` route for exactly this name
+(`.github/scripts/fly-managed-secrets.txt`).
+
+⛔ **Do NOT set `TORTOISE_RECORD_SINGLE_TENANT`** (nor the
+`TORTOISE_RECORD_ORG_ID`/`TORTOISE_RECORD_GRAPH_ID` pair) on this app. The hosted
+lane is **multi-tenant** and carries its tenant **per request**, which always
+wins; env is process-global, so the pair is only correct on a single-graph
+deployment. Unset is the fail-closed default: the pair is then IGNORED. Setting
+it here would either be refused (`no_tenant`, if the declaration is absent) or
+file every tenant's rows under one graph (#9192) — a well-formed row under the
+wrong organisation, which nothing downstream can detect.
+
+**Related, and out of scope here:** landing the record's *schema* on the project
+is R2 (`supabase-deploy.yml`, `workflow_dispatch` only); the two
+schema↔producer disagreements are R4 — #9264's is **fixed in the tree**
+(`20261022000001`, live on the project once R2 applies it) and the one remaining
+tolerance is `point.search_keys` — and **the record's own backup is
+`record-backup`** (R9, §3.5): it reads this **same** `TORTOISE_RECORD_DSN` but
+**refuses a pooler host** (`record_backup.require_direct_dsn`, exit 2), because a
+dump/restore session loses its session state through a transaction pooler and the
+artifact can come out silently short — so invoke it with
+`--record-dsn <direct DSN>` (`db.<project-ref>.supabase.co:5432`), never the
+pooler value §"The value" prescribes for the app.
+
+### The record's connecting role (R6 decision, 2026-10-22, #9554)
+
+The Postgres record's tenancy boundary is **row-level security**, and it is enforceable only if the
+application path connects as a role that does not bypass it. The role, the policies and the reason
+are decided in
+[`docs/epics/2026-10-10-7879-postgres-record/09-record-tenancy-decision.md`](epics/2026-10-10-7879-postgres-record/09-record-tenancy-decision.md);
+this section is the **operator procedure** that goes with it.
+
+**The split.** Migration `20261025000001_record_tenancy_role_and_guc.sql` creates the role
+(`NOLOGIN NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE`) and grants it the record tables'
+`SELECT/INSERT/UPDATE/DELETE` — except the append-only `public.journal_event`, which is
+`SELECT`/`INSERT` **only, by design** (the audit trail's single deletion path is a GUC the boundary
+role must not be able to reach; the posture suite pins the narrow grant) — `USAGE` on
+`public.relation_id_seq` (the IDENTITY sequence — a table
+`INSERT` grant does **not** confer `nextval`, and without it every `relation` insert raises
+`permission denied for sequence relation_id_seq` and aborts the whole replay transaction), plus a
+`*_app_tenant` policy on each. It ships **no password** — a credential in a migration is a secret
+in git, re-minted on every deploy.
+
+**1. Give the role a login credential, once, out of band** (SQL editor as `postgres`; `\password`
+keeps the plaintext out of the statement and off the logs):
+
+```sql
+ALTER ROLE tortoise_record_app LOGIN;
+\password tortoise_record_app      -- psql; or set it from the dashboard/your password manager
+```
+
+**2. Arm the DSN** (R1) with that role — for the shared pooler this is
+`<role>.<project-ref>` as the user:
+
+```text
+TORTOISE_RECORD_DSN=postgresql://tortoise_record_app.<ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres?sslmode=require
+```
+
+**Why not `postgres`.** The `postgres` user is the **table owner**: owners bypass RLS (unless
+`FORCE ROW LEVEL SECURITY` is set) and a superuser bypasses it regardless, so that DSN would make
+§4's *"rows scoped by tenant via row-level security"* false for the only path that writes customer
+data — while every RLS artifact stayed in place looking true. `service_role` is `BYPASSRLS` for the
+same reason. Both remain correct for what needs them: schema, the **database-level** backup/restore
+(R9 — `pg_dump`/`pg_restore` of the Postgres record, which must use the **direct** connection, never
+the pooler), and the org-erasure RPC. ⚠️ **Not `tortoise record-restore` (R8)**: that verb is not a
+`pg_dump` — it *reads* the record through the read door (`cache_projection.read_record_view()`), so
+the role gate refuses a bypassing DSN exactly as it does for the write path. Its DSN is the app
+role; see §9.
+
+**3. Pooler mode does not change the answer.** Port `5432` is the shared pooler in **session** mode,
+`6543` is **transaction** mode. `record_projection.replay()` sets the tenant GUC
+**transaction-locally** (`set_config('app.current_org_id', $1, true)`) as the first statement of the
+write, so it never depends on a session surviving a pooler: moving the DSN between modes needs no
+code change. ⚠️ A **session** `SET` would be wrong in both directions — dropped between transactions
+on `6543` (a silent zero-row read) and carried onto a pooled connection reused by the next tenant on
+`5432` (another tenant's rows).
+
+**If a record read ever returns nothing**, check `current_setting('app.current_org_id')` first: a
+missing GUC reads as **zero rows and no error**, while an unscoped **write** raises `42501`. The
+asymmetry is deliberate and pinned in
+`supabase/tests/20261022000001_record_tenancy_posture.sql`. `record_projection.replay()` now also
+**reads the GUC back** immediately after setting it and refuses the replay on a mismatch (#9600
+review cycle 1), so a connection whose transaction-local set did nothing cannot report a successful
+write: without that read-back a patch/delete-only plan would simply affect zero rows. The **read
+door** (`cache_projection.read_record_view()`, i.e. `tortoise record-reconcile`) installs the same
+scope before its first `SELECT` (#9600 review cycle 2) — before that an ARMED reconciler would have read zero rows under the
+app-role DSN and reported every cache key `extra_in_cache` with `missing_in_cache = 0` — the
+chokepoint-violation / second-writer signature, not a projection lag — i.e. `exit 3` on a
+coherent pair.
+
+**⛔ NEVER GRANT `tortoise_record_app` MEMBERSHIP IN `service_role`, `postgres`, or any role that
+carries a permissive policy.** Policy applicability follows `has_privs_of_role`, so membership makes
+that role's policies apply to this one — including `service_role`'s `*_service_role_all USING (true)`
+— measured on `postgres:16.15`: after `GRANT svc TO app` (the default `WITH INHERIT TRUE`) the app
+role saw 2 rows across 2 tenants while `rolbypassrls` still read `false`. Setting `NOINHERIT` on the
+role, or granting `WITH INHERIT FALSE`, does stop that policy from applying — which is exactly why
+the guard asserts `pg_has_role(…, 'USAGE')` rather than `'MEMBER'` — but neither is something to rely
+on, because `INHERIT` is the default on both sides. The boundary is therefore the grants **and** the absence of membership; a role that was
+flipped or granted membership must be corrected as an operator, and the migration fails closed when
+the applying role cannot re-assert the attributes.
+
+**The code checks all four bypasses on both record doors' connections, and refuses.**
+`record_projection.scope_connection()` is what both record doors (the write path and
+`tortoise record-reconcile`) call. ⚠️ One reader is outside them and is NOT gated:
+`tortoise/record_read.py` takes a caller-supplied connection and installs no scope (#9555's
+outstanding read arm), so it is neither refused nor tenant-scoped under this migration. On each connection it sets the tenant GUC transaction-locally,
+reads it back, and — on the same statement — refuses the connection when `current_user` is a
+superuser, is `BYPASSRLS`, is a **member** of either, or **owns** a record table. So a DSN naming
+`postgres` or `service_role` (or `tortoise_record_app` after a mistaken `GRANT`) does not silently
+write and read across tenants with the policies unevaluated: the first write or read raises, and
+the operator fixes the DSN.
+The same refusal covers BOTH read verbs — `tortoise record-reconcile` and `tortoise
+record-restore` (R8) — because both read through `read_record_view`. Both fail the SAME way on a
+wrong-role DSN, and it is the FIRST thing they do: `scope_connection` raises inside the read, the
+verb wraps it as `RestoreUnavailable`/its reconcile equivalent, and both exit **2** (UNAVAILABLE
+— no verdict, nothing written) with `the record is unreadable (RecordProjectionError)`. ⚠️ They
+never reach the *empty source* refusal (`refuse_unrestorable_source`, exit 3) or the divergence
+verdict (exit 3): those are what a correctly-roled but EMPTY record would produce. Read the
+exception TYPE as the discriminator — `RecordProjectionError` is a role/scope refusal (fix the
+DSN); a driver `OperationalError` in the same message is a transient outage.
+⚠️ Note `-m tortoise record-restore` behaves as described here, and "read-only" here means
+**read-only with respect to the RECORD**: the verb never writes the record — it reads it through
+`read_record_view` — but it **REBUILDS the cache graph** from what it read (it WIPES the target
+graph before rebuilding), so on a graph it is the destructive operation the guard above is about.
+That is also why the scope check is the FIRST thing the verb does: the read phase is refused on a
+wrong-role DSN **before** the wipe runs, so a mis-scoped restore touches nothing. The
+R8 drill's `--limit` and `--allow-empty` flags apply to a run that HAS read a record.
 
 ### Runtime Config (non-secret)
 

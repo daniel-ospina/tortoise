@@ -144,7 +144,9 @@ jobs:
         #
         # The logic lives in .github/scripts/welcome-e2e-monitor.sh so it can be
         # TESTED (.github/scripts/welcome-e2e-monitor.test.sh, run by the
-        # availability-watchdog CI lane). The #3064 round-2 review found the
+        # `ops-harnesses` CI job's `Welcome-e2e auto-file monitor (#2706/#2850)`
+        # step — formerly the standalone `availability-watchdog` lane, #9598).
+        # The #3064 round-2 review found the
         # inline version deduped on TITLE ALONE — on this PUBLIC repo any
         # external account could open an issue with our title and be adopted as
         # the state carrier. The script carries the same author guard the

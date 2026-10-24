@@ -120,13 +120,19 @@ export interface AuditIdentity {
  * "clear hold" is its own action).
  */
 export async function publishPost(post: BlogPostRow, identity: AuditIdentity): Promise<BlogPostRow> {
-  return updatePost(post.id, {
+  const updated = await updatePost(post.id, {
     status: 'published',
     published_at: new Date().toISOString(),
     published_by: identity.userId,
     reviewed_by: null,
     reviewed_at: null,
   });
+  // #9803: the drafts-queue one-click Publish is the OTHER publish entry point in
+  // this console, and it never passes through the editor form's save. Without
+  // this line the whole agent-draft queue publishes unsubmitted. The endpoint
+  // re-checks "live" itself, so a held row answers 409 and nothing is submitted.
+  if (updated.slug) void notifyPublished(updated.slug);
+  return updated;
 }
 
 /** Unpublish: status → draft, clears review state, drops stale review notes. */
@@ -181,7 +187,13 @@ export async function archivePost(post: BlogPostRow): Promise<BlogPostRow> {
 
 /** Clear hold_for_review (E2E-2 after-clear step — post goes public everywhere). */
 export async function clearHoldPost(post: BlogPostRow): Promise<BlogPostRow> {
-  return updatePost(post.id, { hold_for_review: false });
+  const updated = await updatePost(post.id, { hold_for_review: false });
+  // #9803, the MIRROR of the publish guard: clearing the hold on an already-
+  // published post is the transition that makes its URL live, so it is the
+  // event worth submitting. The endpoint re-checks "live" itself (a held post
+  // answers 409), so firing here on a draft is a no-op by construction.
+  if (updated.status === 'published' && updated.slug) void notifyPublished(updated.slug);
+  return updated;
 }
 
 // ── Input sanitization (mirrors the agent API zod surface) ────────────────
@@ -349,6 +361,11 @@ export async function purgePostCache(slug: string): Promise<void> {
         credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ slug }),
+        // Bounded for the same reason as the notification below, against this
+        // function's own queue (`purgeInFlight`): a request that never settles
+        // would keep its slot, and every later purge for that slug would queue
+        // behind it and never run.
+        signal: AbortSignal.timeout(15_000),
       });
     } catch {
       // fail-open — purge is best-effort correctness, never blocks the write
@@ -357,6 +374,68 @@ export async function purgePostCache(slug: string): Promise<void> {
     }
   })();
   purgeInFlight.set(key, run);
+  return run;
+}
+
+// ── IndexNow on publish (#9803) ───────────────────────────────────────────
+// Best-effort, server-side only (admin-gated /blog/api/notify-publish). The
+// editor writes status directly to Supabase, so it bypasses the agent API's
+// publish transition — which was the ONLY place IndexNow fired. This is the
+// editor's seam onto the same submission path: the endpoint re-reads the row
+// with the service role and refuses an unpublished slug (409), so the browser
+// cannot nominate a URL.
+//
+// Triggered by the THREE console write paths that can make a row publishable:
+// the editor form's publish save (`save.ts`, including "publish again"), the
+// drafts-queue one-click Publish (`publishPost`), and clearing a hold
+// (`clearHoldPost`). Fail-open: a notification never blocks or fails a save.
+//
+// Repeat calls are SERIALISED, not dropped. The pair that makes dropping visible
+// is queue-Publish-then-clear-hold: the first submission is refused 409
+// `not_live` (the row is held), and the clear-hold is the transition that
+// actually makes it live — returning the in-flight promise would leave that
+// publish unsubmitted with nothing logged. Dedupe buys nothing here anyway: the
+// endpoint re-checks the row and the 24h window server-side.
+let notifyInFlight = new Map<string, Promise<void>>();
+
+export async function notifyPublished(slug: string): Promise<void> {
+  if (!slug) return;
+  const key = slug;
+  const previous = notifyInFlight.get(key) ?? Promise.resolve();
+  const run = previous.then(async () => {
+    try {
+      // #3501/#4171: no token to attach — the HttpOnly `__Host-session` cookie
+      // rides along on this same-origin request, and the app-origin /blog/api
+      // proxy attaches the server-minted credential upstream.
+      const res = await fetch('/blog/api/notify-publish', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ slug }),
+        // Bounded like the server's own reads (3s row + 5s window): without this
+        // one request that never settles keeps its slot in `notifyInFlight`, and
+        // every later notification for that slug queues behind it and never runs.
+        signal: AbortSignal.timeout(15_000),
+      });
+      // The endpoint answers with an OUTCOME, and an outcome nobody reads is not
+      // an improvement on a boolean: every arm other than `submitted` is
+      // surfaced, so "why was my publish not submitted?" has an answer in the
+      // console as well as in the server log. Not a toast: a skipped
+      // notification is normal (the 24h window), and a publish never fails here.
+      const body = (await res.json().catch(() => ({}))) as { result?: string; error?: string };
+      const result = body.result ?? (res.ok ? "unknown" : body.error ?? `http-${res.status}`);
+      if (result !== 'submitted') {
+        console.warn(`[indexnow] ${slug}: ${result}`);
+      }
+    } catch {
+      // fail-open — a missed notification is never a failed publish
+    } finally {
+      // only the LAST request in the chain clears the slot; an earlier one
+      // finishing must not delete a successor's entry
+      if (notifyInFlight.get(key) === run) notifyInFlight.delete(key);
+    }
+  });
+  notifyInFlight.set(key, run);
   return run;
 }
 

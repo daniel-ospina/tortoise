@@ -1482,6 +1482,21 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # class. Pinned by
              # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
              "supabase/migrations/20261023000001_record_session_narrative.sql",
+             # #9554 / PR #9600 review cycle 1 (P2): the TENANCY POSTURE migration —
+             # the app role, its grants (including `relation_id_seq`'s USAGE) and
+             # the `*_app_tenant` policies, one per record table (ten, since
+             # #9555's `session_narrative`). It sorts outside the
+             # `2026101200000` prefix and `supabase/` is a NON_PYTHON_PREFIX, so a
+             # migration-only edit (dropping a `WITH CHECK`, flipping `is_local`,
+             # re-adding `BYPASSRLS`, removing the sequence grant) selected NO
+             # surface: `tests/test_record_tenancy_guc.py` — the suite that reads
+             # this migration's TEXT and pins it — did not run on the change that
+             # DEFINES the boundary. (The PGlite posture suite is NOT the gap: it
+             # is selected by the workflow's own `supabase/migrations/` prefix
+             # output and runs on every migration edit. The PYTHON pin is what
+             # had no entry.) Pinned by
+             # tests/test_ci_selection.py::test_the_tenancy_migration_selects_the_posture_pins.
+             "supabase/migrations/20261025000001_record_tenancy_role_and_guc.sql",
              # Re-stated at the migration pair, NOT replaced by it (#9638 review
              # P1): the DOC side is an independent member of this set. The
              # #9555/R7 entry above was inserted over this path, so a
@@ -1653,6 +1668,20 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # and hermetic, so `core` is the right lane (the shape
              # `tools/lane_stash.py` above takes).
              "tools/e1_e2_census_check.py",
+             # #9080 (#9089 review): the capstone gate itself
+             # (`tools/capstone_verdict_check.py`) — the closing rule for epic
+             # #7949 — owns `tests/test_7949_capstone_verdict_check.py`, which is
+             # registered `core`. Without this row a GATE-ONLY diff came back
+             # `surfaces=[], full=False`: the pin ran only because it also sits in
+             # the `tier1` curated list, so `core` — the surface the comment in
+             # `config/ci-surfaces.yml` names as its home — was nominal, and one
+             # `tier1` edit would have dropped the pin silently (measured before
+             # this entry: `select(['tools/capstone_verdict_check.py'])` →
+             # surfaces=[], pin present only via tier1). Same shape and remedy as
+             # `tools/e1_e2_census_check.py` above, and the same polarity note:
+             # this is a cost/home fix, not a hole fix. Pinned by
+             # tests/test_ci_selection.py::test_the_capstone_gate_change_selects_core_not_tier1.
+             "tools/capstone_verdict_check.py",
              # #4030: `supabase/config.toml` is the committed LOCAL-stack config,
              # and every env var it resolves by `env(NAME)` substitution must be
              # declared in `.env.example` — the guard for that pair
@@ -1718,6 +1747,20 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_ci_selection.py::test_journal_growth_guard_runs_on_a_tool_or_probe_change.
              "tools/journal_growth.py",
              "docs/evidence/5612-journal-growth/probes/",
+             # ⛔ NO `docs/evidence/7949-capstone/probes/` ROW. #9080 did add
+             # one, and it was DEAD: `"docs/evidence/7949-capstone/"` above is
+             # the whole bundle prefix and matching is `path.startswith()`, so
+             # a narrower prefix inside it can never admit a path the broader
+             # one does not. Measured (2026-10-20, `select()` in-process): with
+             # the narrow row deleted, a probe-only diff still returns
+             # `surfaces=['core']` and carries
+             # tests/test_7949_capstone_verdict_check.py — the broad row is what
+             # makes the probe select `core`, and it landed with #9076. A dead
+             # row is not harmless: it reads as the reason a path is covered, so
+             # the next lane re-adds it and the real reason (the broad row) goes
+             # unexamined. Pinned by
+             # tests/test_ci_selection.py::test_no_core_also_entry_is_shadowed_by_a_parent_prefix
+             # and ::test_7949_capstone_probe_change_selects_core_not_tier1.
              # #5612: `tests/test_journal_growth.py` hard-codes the CORPUS's
              # shape (`records == 39`, 29 distinct types), so an edit to the
              # fixture alone must select `core` too — it sits under

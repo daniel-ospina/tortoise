@@ -398,8 +398,8 @@ SELECT tests.assert(
   (SELECT count(*) FROM pg_policies
    WHERE schemaname='public'
      AND tablename IN ('node_identity','journal_event','source','event','session',
-                       'object','subject','point','relation')) = 18,
-  '7968: every new table carries the org-read policy and the service_role policy');
+                       'object','subject','point','relation')) = 27,
+  '7968: every new table carries the org-read policy, the service_role policy and (R6) the app role''s tenant policy');
 
 -- auth.rsuperuser-only: SET ROLE then read with a DIFFERENT org GUC -> nothing.
 SET ROLE service_role;
@@ -450,12 +450,11 @@ SELECT tests.assert(
                         'session_narrative_service_role_all')) = 2,
   '9555: the narrative home carries the org-read and service_role policies');
 
--- R6 (#9554) creates `tortoise_record_app`, and its migration does NOT exist in
--- this tree yet, so the harness applies ALL migrations with the role absent:
--- the migration's guarded block is a no-op BY DESIGN here and the assertion is
--- `0 = 0`. It is written as an equality rather than a hardcoded 0 so the SAME
--- line becomes meaningful the moment R6 lands (then both sides are 1) — and it
--- reds if the policy appears without the role, or the role without the policy.
+-- R6 (#9554) creates `tortoise_record_app`, and that migration IS in this tree:
+-- the harness applies ALL migrations in order, so the role exists and both sides
+-- of this equality are 1. It stays an equality rather than a hardcoded 1 on
+-- purpose — it reds if the policy appears without the role, or the role without
+-- the policy, which a literal would not.
 SELECT tests.assert(
   (SELECT count(*) FROM pg_policies
    WHERE schemaname = 'public' AND tablename = 'session_narrative'

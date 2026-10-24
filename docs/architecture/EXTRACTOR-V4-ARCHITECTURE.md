@@ -138,7 +138,7 @@ Production graph: **~25,000 quota nodes in 3–4 active days** (~27 per emitting
 
 **The problem it solves:** extraction **rephrases**. A `Point` is the model's rendering of what was said, not what was said. During the LongMemEval work, **raw facts were being deformed** — and that deformation is silently baked into the belief layer, where nothing downstream can detect it.
 
-**The layer:** the **minimal verbatim span** each `Point` was derived from, kept **verbatim in Postgres (the owner's *"supabase"* = the DATABASE, not the object bucket)**, not in the graph, and **linked to the `Point`/`Object` it supports**. Distinct from the other three by granularity and purpose:
+**The layer:** the **minimal verbatim span** each `Point` was derived from, kept **verbatim in Postgres (the owner's *"supabase"* = the DATABASE, not the object bucket)**, not in the graph, and **linked to the `Point`/`Object` it supports**. Distinct from the other three by granularity and purpose: <!-- v4-mechanism: span_link -->
 
 | layer | what it is | granularity | purpose |
 |---|---|---|---|
@@ -201,7 +201,7 @@ Production graph: **~25,000 quota nodes in 3–4 active days** (~27 per emitting
 
 #### 2.4.1 ⭐ Why the LINK is the load-bearing half — and the pattern has a name (2026-09-24)
 
-**Owner, 2026-09-24:** *"do we vectorise the source or link to it?"* **Both — but the order is the decision, and the link comes first.**
+**Owner, 2026-09-24:** *"do we vectorise the source or link to it?"* **Both — but the order is the decision, and the link comes first.** <!-- v4-mechanism: span_link -->
 
 The mechanism is **parent-document retrieval** / **small-to-big**: *embed the small units; keep the parent by ID with no vector; fetch it by walking up.* The field converges on **link, not embed** — a parent is stored by ID **without** embedding, because the reference is what the reader needs, not a second copy of the thing. *(Databricks: "search children, return parents".)*
 
@@ -565,7 +565,7 @@ unfirable (block at the top of §10).
 >
 > *"S2 sounds ok, but seems like it just needs a counter filter (Jev doing adversarial review), so we have step S2.1 LLM entities list and S2.2 jev"*
 
-**Jev, asked to FALSIFY, not confirm.** Two **levels**, and they are different shapes — one is many cheap decisions, the other is a single batch verdict.
+**Jev, asked to FALSIFY, not confirm.** Two **levels**, and they are different shapes — one is many cheap decisions, the other is a single batch verdict. <!-- v4-mechanism: vet -->
 
 #### Level 1 — per-candidate (many, cheap, evaluated in parallel)
 
@@ -751,7 +751,7 @@ A four-way audit of the write path found **FOUR distinct dedups at FOUR differen
 | **D-c** | **vs store, raw content hash** | `sdk.py:12412` (`_find_point_by_content`; the shared predicate builder is `_dedup_match_clauses`, `:12364`) | ✅ |
 | **D-d** | **semantic** | `:3021+` | ✅ |
 
-**⇒ `S0a NORMALIZE + HASH → S0b SOURCE DEDUP` is genuinely absent, and it is the largest single volume lever available.** Catching the same conversation firehose twice is a **whole-narrative** save, not a claim-level one — and since **S0 is already mechanical and free**, this costs nothing to add.
+**⇒ `S0a NORMALIZE + HASH → S0b SOURCE DEDUP` is the largest single volume lever available, and it is mechanical and free: `tortoise/source_identity.py` is its implementation (`normalize_source_url`, `resolve_source_key`), wired in `projection/entities.py` and acceptance-tested by `tests/test_source_dedup_registration.py`, which is why `config/v4-mechanisms.yml` carries it as `implemented`.** Catching the same conversation firehose twice is a **whole-narrative** save, not a claim-level one. What stays absent is narrower than the step: **D-a above is still URL-keyed**, and resolving a spelling to the `:Source` that owns its identity is not hashing the narrative. <!-- v4-mechanism: source_dedup -->
 
 #### The five correctness constraints
 
@@ -1051,7 +1051,7 @@ Points X, Y, Z   ← the reasons. Carry "why".
 
 v3's **E2** requires state-value facts be preserved verbatim (*"personal best 5K time = 27:12, as of <date>"*) rather than filtered as "counts are noise." `STATE_VALUE_CARVE_OUT` in `_granularity_text()` is the code anchor for exactly this.
 
-**⇒ Any mechanical filter MUST carry this carve-out, or it will drop the facts users care about most.** See `STORAGE-ARCHITECTURE.md` §7 for the low-cost storage question.
+**⇒ Any mechanical filter MUST carry this carve-out, or it will drop the facts users care about most.** See `STORAGE-ARCHITECTURE.md` §7 for the low-cost storage question. <!-- v4-mechanism: state_value_carve_out -->
 
 #### ✅ The carve-out MUST cover decision-relevant numbers
 
@@ -1690,7 +1690,7 @@ From migration `e9b2c7d1f3a4_drop_entity_memory_links.py` (2026-05-26):
 | **S5 CONNECT — two sets, within-batch *and* to-graph** (D6) | LLM does **within-batch only**, max 2, backwards; **to-graph is mechanical** (ANN + entity join) | ⚠️ **A direct challenge to D6** — D6 is the decision that stands; the challenge is evidence for the owner, **not** a change we may make. |
 | **S3 MATCH → AND ATTACH** | entity resolution is a **join key**, and the link rows were deleted as pure storage cost | ✅ **consistent** — and it says our attach step should cost little. |
 | **minting an `Object` per entity** | entities are extracted to **link facts** (*"Extract anything that could help link related facts together"*) and kept in a mapping table | ⚠️ **The strongest available support for the `^the <X>` finding.** Their entity extraction *purpose* is linking; ours has become node creation. |
-| **connection fan-out** | bounded everywhere, with a timeout that drops an arm | ✅ **The cap is the design** — `PER_ENTITY_FANOUT_CAP = 200` (`tortoise/fanout.py`), consumed by `assembly.py` / `subgraph.py`. The cap sits above the current worst hub (123), so it binds nothing today and cannot lose data now. |
+| **connection fan-out** | bounded everywhere, with a timeout that drops an arm | ✅ **The cap is the design** — `PER_ENTITY_FANOUT_CAP = 200` (`tortoise/fanout.py`), consumed by `assembly.py` / `subgraph.py`. The cap sits above the current worst hub (123), so it binds nothing today and cannot lose data now. <!-- v4-mechanism: fanout_cap --> |
 
 **⇒ The three questions below: question 1 is OPEN; question 2 resolves to a STORED edge; question 3 resolves to a hard fan-out cap of `PER_ENTITY_FANOUT_CAP = 200`:**
 
@@ -1711,7 +1711,7 @@ From migration `e9b2c7d1f3a4_drop_entity_memory_links.py` (2026-05-26):
 
 ## 15. Open questions
 
-**Cross-batch connection — by LLM or mechanically — is open** (§13.8). The other two questions this document raises are answered by the design: **hard fan-out caps apply** (200, `PER_ENTITY_FANOUT_CAP`, §13.8 question 3), and **`aboutObject` is a STORED edge**, not a derived join (§13.8 question 2, §16) — the one remaining unknown, *are those tools ever called?*, cannot be answered pre-launch and is therefore deferred.
+**Cross-batch connection — by LLM or mechanically — is open** (§13.8). The other two questions this document raises are answered by the design: **hard fan-out caps apply** (200, `PER_ENTITY_FANOUT_CAP`, §13.8 question 3), and **`aboutObject` is a STORED edge**, not a derived join (§13.8 question 2, §16) — the one remaining unknown, *are those tools ever called?*, cannot be answered pre-launch and is therefore deferred. <!-- v4-mechanism: fanout_cap -->
 
 ---
 
@@ -1737,7 +1737,7 @@ reached, and of the review cycles that followed, is in
 
 ### 16.4 ⭐ O4 applied — what "merge near-duplicates" means here, bounded by the evidence
 
-**Owner ruling:** *"yes we can merge near duplicate claims. maybe we can have jev with the claim and the narrative/raw data/both arbiter that."*
+**Owner ruling:** *"yes we can merge near duplicate claims. maybe we can have jev with the claim and the narrative/raw data/both arbiter that."* <!-- v4-mechanism: near_dup_merge -->
 
 **Design, as bounded by the research (research §16.3 — `STORAGE-ARCHITECTURE.md`):**
 

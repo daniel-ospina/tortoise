@@ -574,8 +574,8 @@ explicitly (`permissions: issues: write`). Without it every incident POST/close
 would 401 while the job could still look green.
 
 **Regression harness:** `bash .github/scripts/registry-cron.test.sh` (CI: the
-`backup-driver-scripts` job in `.github/workflows/ci.yml`, gated on the
-`registry-cron*` + cron/ci workflow surface). It stubs `aws`/`curl`/`date` and
+`Backup driver state taxonomy (#2796)` step of the `repo-harnesses` job in
+`.github/workflows/ci.yml`, formerly the `backup-driver-scripts` job, gated on the `registry-cron*` + cron/ci workflow surface). It stubs `aws`/`curl`/`date` and
 asserts all five states, the unmeasurable-pool rule, the 0-team envelope, the
 stuck/unverifiable lock, unclassifiable-status and missing-token failsafes,
 redaction (DSN/header/prefix/quoted/newline-split shapes and the

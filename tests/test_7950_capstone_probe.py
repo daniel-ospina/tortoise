@@ -29,9 +29,11 @@ import ast
 import importlib.util as _ilu
 import re
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
+from tortoise import record_projection as _rp
 from tortoise.cache_projection import RecordNode, RecordView
 from tortoise.reconciliation import reconcile_views
 
@@ -171,6 +173,22 @@ def _migration_list(path: Path, name: str) -> list[str]:
     raise AssertionError(f"{path} no longer defines {name}")
 
 
+def _module_constant(path: Path, name: str):
+    """Any module-level literal constant, read with `ast`.
+
+    Same reason as :func:`_migration_list`: the probes that matter here cannot
+    be imported for their constants — two of them import `psycopg2` at module
+    scope — and a pin must not need a DB driver to read a string.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if any(getattr(target, "id", None) == name for target in node.targets):
+            return ast.literal_eval(node.value)
+    raise AssertionError(f"{path} no longer defines {name}")
+
+
 def test_every_probe_applies_the_record_migrations_the_shipped_read_uses():
     """The probes cannot silently apply a schema the projection has moved past.
 
@@ -197,6 +215,160 @@ def test_every_probe_applies_the_record_migrations_the_shipped_read_uses():
             "record_projection.RECORD_MIGRATIONS — the probe would apply a "
             "different record schema than the projection writes against"
         )
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# The CONNECTING ROLE — the probe is refused by the gate it must run behind
+# ════════════════════════════════════════════════════════════════════════════
+#
+# #9600 review (Finding 1). This probe connects as `postgres` — the DSN the
+# bootstrap uses to apply the migrations, so `postgres` is the SUPERUSER and the
+# OWNER of every record table. R6 (#9554) installed `scope_connection()` on both
+# shipped record doors, and it refuses exactly that: superuser, `BYPASSRLS`, a
+# member of either, or a record-table owner. So step 1 of the probe
+# (`rp.replay`) raised `RecordProjectionError: … BYPASSES RLS` before a single
+# plan statement and the probe was dead as an evidence artifact.
+#
+# Nothing reddened: this file read the probe's CONSTANTS and never executed it.
+# The three pins below are what makes the harness's own connectivity checkable
+# without a Postgres.
+
+
+class _RecordingCursor:
+    """Records every statement, and answers the two the scope issues.
+
+    ``scope_connection()`` sets the tenant GUC and then verifies BOTH halves on
+    one statement (`TENANT_SCOPE_SQL`: the GUC read-back and the role posture).
+    Answering those two is what lets `count(*)` be reached at all, so a probe
+    that never scoped would fail here rather than pass quietly.
+    """
+
+    description: ClassVar[list] = []
+
+    def __init__(self, conn: _RecordingConnection) -> None:
+        self._conn = conn
+
+    def execute(self, sql, params=None) -> None:
+        self._conn.executed.append((sql, None if params is None else list(params)))
+        self._conn.last_sql = sql
+
+    def fetchone(self):
+        if self._conn.last_sql == _rp.TENANT_SCOPE_SQL:
+            # (tenant, bypassing) — the probe runs as the app role once `SET
+            # ROLE` has landed, so the posture is False.
+            return (self._conn.guc, False)
+        return (7,)
+
+
+class _RecordingConnection:
+    def __init__(self, guc: str = "cap7950-org") -> None:
+        self.executed = []
+        self.last_sql = None
+        self.guc = guc
+        self.commits = 0
+        self.closed = 0
+
+    def cursor(self):
+        return _RecordingCursor(self)
+
+    def commit(self) -> None:
+        self.commits += 1
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+class _FakePsycopg2:
+    """The two attributes the probe uses, and nothing else."""
+
+    def __init__(self, conn=None, raises: BaseException | None = None) -> None:
+        self._conn = conn if conn is not None else _RecordingConnection()
+        self._raises = raises
+        self.dsns: list = []
+
+    def connect(self, dsn):
+        self.dsns.append(dsn)
+        if self._raises is not None:
+            raise self._raises
+        return self._conn
+
+
+def test_the_probe_takes_on_the_role_the_tenancy_migration_creates():
+    """One role name, two files: a rename on either side must red HERE.
+
+    The probe hardcodes the role because it cannot import the migration, and the
+    migration cannot read a constant. Splitting the name across a `.sql` and a
+    `.py` with no pin is the drift `RECORD_MIGRATIONS` above is pinned against —
+    and the failure is silent in the worst direction: the probe `SET ROLE`s to a
+    role that does not exist, and the run dies on step 1 with a permission error
+    that reads like an environment fault.
+    """
+    app_role = _module_constant(_PROBE, "APP_ROLE")
+    migration = (_REPO_ROOT / "supabase" / "migrations"
+                 / "20261025000001_record_tenancy_role_and_guc.sql").read_text()
+    assert app_role == "tortoise_record_app", app_role
+    assert f"'CREATE ROLE {app_role} '" in migration, (
+        f"the tenancy migration no longer creates {app_role!r} — the probe's "
+        "`SET ROLE` would name a role that does not exist"
+    )
+    assert f"'ALTER ROLE {app_role} '" in migration, (
+        "the tenancy migration no longer governs the probe's role attributes"
+    )
+
+
+def test_record_connection_sets_the_app_role_and_commits_it():
+    """`SET ROLE` is undone by a ROLLBACK, so it must be committed to stick."""
+    fake = _FakePsycopg2()
+    conn = _PROBE_MODULE.record_connection(fake)
+    assert conn is fake._conn
+    assert conn.executed[0] == ("SET ROLE tortoise_record_app", None), conn.executed
+    assert conn.commits == 1, "the role was never committed, so it is not in force"
+    assert conn.closed == 0
+
+
+def test_a_failed_set_role_leaves_no_half_scoped_connection():
+    """A connection that could not take the role must not be handed back."""
+    conn = _RecordingConnection()
+
+    class _Refusing(_FakePsycopg2):
+        def connect(self, dsn):
+            return conn
+
+    fake = _Refusing()
+
+    def _boom(sql, params=None):
+        raise RuntimeError("permission denied to set role")
+
+    conn.cursor = lambda: type("C", (), {"execute": staticmethod(_boom)})()
+    with pytest.raises(RuntimeError, match="permission denied"):
+        _PROBE_MODULE.record_connection(fake)
+    assert conn.closed == 1, "a half-scoped connection was leaked"
+
+
+def test_the_row_counts_are_read_under_the_tenant_scope():
+    """⛔ The `set_config(..., true)` prologue is TRANSACTION-LOCAL (#9600).
+
+    `replay()` sets it inside the caller's transaction and the caller commits, so
+    by the time the probe counts rows the scope is gone. Under the app role a
+    NULL GUC is not an error — the policies return ZERO rows — so an unscoped
+    count reports `CHAIN STOP: the record holds no nodes` on a record the replay
+    filled one line earlier. The first statement must therefore be the scope,
+    not a bare `SELECT count(*)`.
+    """
+    conn = _RecordingConnection(guc=_PROBE_MODULE.ORG)
+    counts = _PROBE_MODULE.record_row_counts(
+        conn, org_id=_PROBE_MODULE.ORG, graph_id=_PROBE_MODULE.GRAPH)
+    first_sql = conn.executed[0][0]
+    assert first_sql == _rp.TENANT_GUC_SQL, (
+        "the row counts ran before the tenant scope — under the app role every "
+        f"count would read 0. First statement was: {first_sql!r}"
+    )
+    assert conn.executed[1][0] == _rp.TENANT_SCOPE_SQL, conn.executed[1][0]
+    assert set(counts) == set(_PROBE_MODULE.COUNTED_TABLES), counts
+    assert all(v == 7 for v in counts.values()), counts
+    scoped = [sql for sql, _ in conn.executed
+              if sql.startswith("SELECT count(*)")]
+    assert len(scoped) == len(_PROBE_MODULE.COUNTED_TABLES), scoped
 
 
 def test_placeholder_maps_cannot_see_a_field_mutation():

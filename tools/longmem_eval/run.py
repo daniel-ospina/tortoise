@@ -141,6 +141,10 @@ from .retrieve import (
     DEFAULT_MAX_CHUNKS_PER_SESSION,
     DEFAULT_REINJECTION_TOTAL_ITEMS,
     DEFAULT_RETRIEVAL_BUDGET_MS,
+    DEFAULT_TR_SESSION_COMPLETION_PER_SESSION,
+    DEFAULT_TR_SESSION_COMPLETION_SESSIONS,
+    DEFAULT_TR_SESSION_COMPLETION_TOTAL,
+    DEFAULT_TR_SESSION_COMPLETION_WINDOW,
     DEFAULT_TR_TOP_K,
     EVAL_RETRIEVAL_BUDGET_MS,
     GATE_MARKER_TTL_MIN,
@@ -1585,6 +1589,17 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
     _temporal_leg_on = (
         (os.environ.get("TORTOISE_LME_TEMPORAL_LEG") or "").strip().lower()
         in _TRUTHY)
+    # #2976: the TR session-admission / completion arms are env-only from the
+    # harness (the sibling #2976 temporal-leg precedent), so the fingerprint
+    # reads the env. CONDITIONAL presence: OFF leaves both keys ABSENT, so the
+    # default fingerprint stays byte-identical and an armed checkpoint can
+    # never be resumed with the arm OFF (key-union in _fingerprint_diffs).
+    _tr_session_admission_on = (
+        (os.environ.get("TORTOISE_LME_TR_SESSION_ADMISSION") or "")
+        .strip().lower() in _TRUTHY)
+    _tr_session_completion_on = (
+        (os.environ.get("TORTOISE_LME_TR_SESSION_COMPLETION") or "")
+        .strip().lower() in _TRUTHY)
     return {
         "git_sha": git_sha(),
         "python": sys.version.split()[0],
@@ -1701,6 +1716,32 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
              _env_float("TORTOISE_LME_TEMPORAL_LEG_WEIGHT",
                         DEFAULT_TEMPORAL_LEG_WEIGHT) if _temporal_leg_on
              else None),
+            # #2976: the TR session-admission arm — conditional presence ONLY
+            # when it resolves ON (the default fingerprint stays
+            # byte-identical), and the FOUR completion budgets are stamped with
+            # it because they change WHICH material is injected, hence what the
+            # reader sees: a TOTAL=20 checkpoint must not resume under TOTAL=60
+            # (the temporal_leg_limit precedent immediately above).
+            ("tr_session_admission",
+             True if _tr_session_admission_on else None),
+            ("tr_session_completion",
+             True if _tr_session_completion_on else None),
+            ("tr_session_completion_total",
+             _env_int("TORTOISE_LME_TR_SESSION_COMPLETION_TOTAL",
+                      DEFAULT_TR_SESSION_COMPLETION_TOTAL)
+             if _tr_session_completion_on else None),
+            ("tr_session_completion_window",
+             _env_int("TORTOISE_LME_TR_SESSION_COMPLETION_WINDOW",
+                      DEFAULT_TR_SESSION_COMPLETION_WINDOW)
+             if _tr_session_completion_on else None),
+            ("tr_session_completion_sessions",
+             _env_int("TORTOISE_LME_TR_SESSION_COMPLETION_SESSIONS",
+                      DEFAULT_TR_SESSION_COMPLETION_SESSIONS)
+             if _tr_session_completion_on else None),
+            ("tr_session_completion_per_session",
+             _env_int("TORTOISE_LME_TR_SESSION_COMPLETION_PER_SESSION",
+                      DEFAULT_TR_SESSION_COMPLETION_PER_SESSION)
+             if _tr_session_completion_on else None),
         ) if v is not None}),
     }
 
@@ -5508,6 +5549,33 @@ def run_evaluation(
             "tr_top_k": tr_top_k,
             "tr_date_weight": tr_date_weight,
             "tr_events": tr_events,
+            # #2976: the TR session-admission arm (token budget binds, the
+            # SESSION is the admission unit) + its completion half — recorded
+            # verbatim so an arm's number always carries its configuration.
+            "tr_session_admission": (
+                (os.environ.get("TORTOISE_LME_TR_SESSION_ADMISSION") or "")
+                .strip().lower() in _TRUTHY),
+            "tr_session_completion": (
+                (os.environ.get("TORTOISE_LME_TR_SESSION_COMPLETION") or "")
+                .strip().lower() in _TRUTHY),
+            # #2976: the completion budgets are part of the configuration — a
+            # completion number that does not carry its injection budgets cannot
+            # be reconstructed (and cannot be compared with another run). The
+            # key names are IDENTICAL to the fingerprint's (the sibling
+            # temporal_leg contract): a hand cross-check between the two records
+            # must not silently find nothing.
+            "tr_session_completion_total": _tr_completion_budget(
+                "TORTOISE_LME_TR_SESSION_COMPLETION_TOTAL",
+                DEFAULT_TR_SESSION_COMPLETION_TOTAL),
+            "tr_session_completion_window": _tr_completion_budget(
+                "TORTOISE_LME_TR_SESSION_COMPLETION_WINDOW",
+                DEFAULT_TR_SESSION_COMPLETION_WINDOW),
+            "tr_session_completion_sessions": _tr_completion_budget(
+                "TORTOISE_LME_TR_SESSION_COMPLETION_SESSIONS",
+                DEFAULT_TR_SESSION_COMPLETION_SESSIONS),
+            "tr_session_completion_per_session": _tr_completion_budget(
+                "TORTOISE_LME_TR_SESSION_COMPLETION_PER_SESSION",
+                DEFAULT_TR_SESSION_COMPLETION_PER_SESSION),
             "retrieval_config": {
                 "hybrid_budget_ms": (retrieval_budget_ms
                                       if retrieval_budget_ms is not None
@@ -5532,6 +5600,16 @@ def run_evaluation(
         workers=workers,
         dataset_fingerprint=dataset_fingerprint,
     )
+
+
+def _tr_completion_budget(name: str, default: int) -> int | None:
+    """#2976: a completion budget for the methodology record — ``None`` when the
+    arm is OFF (an inert knob is not recorded, the ``reinjection_total_cap``
+    precedent), the resolved value when it is ON."""
+    if (os.environ.get("TORTOISE_LME_TR_SESSION_COMPLETION") or "") \
+            .strip().lower() not in _TRUTHY:
+        return None
+    return _env_int(name, default)
 
 
 #: #1785 (P2-7): whether the parallel report.py's ``build_report`` has

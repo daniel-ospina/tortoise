@@ -1506,6 +1506,369 @@ def assemble_context(
     return selected
 
 
+#: #2976: the hit field that names a hit's SESSION on the retrieval/annotation
+#: surface (the eval ingest and the product's session-projection both write
+#: it). ``DEFAULT_SESSION_ADMISSION_INDEX`` is the fallback identity — the
+#: ``[session N]`` integer the rendering already prints — used when the string
+#: id is absent.
+DEFAULT_SESSION_ADMISSION_KEY = "session_id"
+DEFAULT_SESSION_ADMISSION_INDEX = "lme_session_index"
+
+
+def _session_admission_key(
+        h: dict, *, session_key: str = DEFAULT_SESSION_ADMISSION_KEY,
+        index_key: str = DEFAULT_SESSION_ADMISSION_INDEX,
+) -> tuple[str, object]:
+    """The session identity a hit is admitted under (#2976).
+
+    Precedence: the string session id → the ``[session N]`` integer index →
+    the hit's OWN id (a singleton). The last case is the honest fallback, not
+    a merge: two hits with no session identity must never be grouped as one
+    "session" (that would fabricate a block whose material belongs to
+    different conversations).
+    """
+    sid = h.get(session_key)
+    if isinstance(sid, str) and sid.strip():
+        return ("session", sid.strip())
+    idx = h.get(index_key)
+    if isinstance(idx, int) and not isinstance(idx, bool) and idx >= 0:
+        return ("index", idx)
+    # Object identity, NOT ``h.get("id")``: a hit with no id would otherwise
+    # share the key ``("hit", None)`` with every other id-less hit, fusing
+    # unrelated conversations into one "session" — exactly what this function's
+    # docstring forbids. ``id(h)`` makes each identity-less hit its own
+    # singleton for the life of the object.
+    return ("hit", id(h))
+
+
+def session_blocks(
+        pool: list[dict], *,
+        session_key: str = DEFAULT_SESSION_ADMISSION_KEY,
+        index_key: str = DEFAULT_SESSION_ADMISSION_INDEX,
+        admit: Callable[[dict], bool] | None = None,
+) -> list[list[dict]]:
+    """Group a RANKED pool into SESSION blocks — the #2976 admission unit.
+
+    The oracle ceiling (#2976) answers 42/52 where the shipped reader answers
+    0/52, and the difference is not a better ranker: the oracle serves whole
+    **sessions**, while the shipped window serves ~8-token fragments scattered
+    across many sessions. Admission is therefore made at the SESSION grain —
+    the unit whose co-presence the temporal-reasoning benchmark actually
+    requires (an interval needs both dated instances; an ordering needs both
+    sides of the comparison).
+
+    Ordering is deterministic and rank-derived, never score-derived:
+
+    * blocks appear in the order of their BEST (lowest-index) member's pool
+      rank — the first block is the one containing the top-ranked hit;
+    * inside a block, the pool's own order is preserved, so a session's
+      material keeps the semantic ranking as its intra-session order.
+
+    ``admit`` is the caller's reader-admission predicate (the #2978
+    ``_has_claim_text`` in practice). A hit it refuses never OPENS a block: a
+    session whose only retrieved hit renders decorations only must not consume
+    an admission slot (#2978's skip-not-starve rule, lifted to the session
+    grain).
+    """
+    order: list[tuple[str, object]] = []
+    groups: dict[tuple[str, object], list[dict]] = {}
+    for h in pool:
+        if admit is not None and not admit(h):
+            continue
+        key = _session_admission_key(h, session_key=session_key,
+                                     index_key=index_key)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(h)
+    return [groups[key] for key in order]
+
+
+def assemble_session_context(
+        pool: list[dict], *,
+        max_context_tokens: int,
+        question_date: str | None = None,
+        breadth_share: float = 0.5,
+        item_cap: int | None = None,
+        byte_cap: int | None = None,
+        session_key: str = DEFAULT_SESSION_ADMISSION_KEY,
+        index_key: str = DEFAULT_SESSION_ADMISSION_INDEX,
+        stats: dict | None = None,
+) -> list[dict]:
+    """Session-granular, TOKEN-budgeted reader context (#2976).
+
+    THE DEFECT. ``assemble_context`` bounds the reader window by BOTH an item
+    cap and a token budget, and on the LongMemEval temporal lane the ITEM cap
+    binds: 12 items is ~2 000 of the configured 8 000 tokens, so ~75% of the
+    budget is never spent and evidence at pool ranks 41–120 never enters the
+    window. #2976 measures the consequence — the gold is retrieved (54/55
+    questions) and never admitted, and the reader refuses 98.2% of the time.
+
+    THE RULE — BREADTH FIRST, THEN DEPTH. Admission is two-phase on purpose,
+    and the order is a MEASURED choice (#2976, this lane's own probe):
+
+    1. **Breadth** — walk the pool in RANK order admitting one hit at a time
+       until ``breadth_share`` of the token budget is spent. Rank order is what
+       puts the two anchor instances of an ordering question into the window
+       (spread across sessions); admitting whole sessions FIRST instead
+       concentrates the budget on the top two sessions and *displaces* gold
+       that the plain rank walk had reached — measured on qid
+       ``gpt4_59149c77``: whole-block-first admitted 2 → 1 gold hits while
+       spending 31 items on 7 sessions.
+    2. **Depth** — with the remaining budget, complete the sessions the
+       breadth pass TOUCHED, in the order of their FIRST ADMITTED breadth hit
+       (not their best pool rank: ``_try_admit`` is skip-and-continue, so the
+       two orders differ whenever the breadth budget refuses a session's
+       best-ranked hit), admitting each session's remaining pool hits as one
+       contiguous block. This is the half that makes an admitted session mean
+       *the whole session* (the oracle's advantage: it serves whole sessions,
+       not fragments), and the half that a point-level window can never
+       provide.
+
+    A session that does not fit the remaining budget is SKIPPED, never
+    terminal — a later (cheaper) session keeps its chance, the same
+    skip-not-starve semantics ``assemble_context`` uses for oversized hits.
+
+    ``item_cap`` stays available but is deliberately NOT the default: a caller
+    that passes it re-imposes an item bound on top of the budget (this is what
+    the historical ``tr_top_k=12`` did). ``None`` means the token budget is the
+    only volume bound — also the field's pattern (Hindsight trims a token
+    budget, not a fixed K; see
+    ``docs/research/2026-09-11-decisions-2952-2976-competitor-evidence.md``).
+
+    Token accounting is IDENTICAL to ``assemble_context`` (per-block whitespace
+    words + the once-prepended ``Current Date:`` header, × 1.1 markup), so
+    ``stats["words_used"]`` matches what ``render_context`` will emit and
+    ``estimate_tokens(render_context(...))`` equals the assembly's own
+    accounting. ``byte_cap`` keeps its ``assemble_context`` meaning: a hit (or
+    a depth block) is dropped whole rather than split.
+
+    ``stats`` (optional out-dict) reports the session-grain census —
+    ``sessions_available`` / ``sessions_admitted`` / ``session_block_sizes`` /
+    which bound dropped what (one counter per refusal class, plus
+    ``stopped_by``) — so a measurement can tell "no session had any material"
+    from "the budget was the binding constraint". That distinction is what
+    #2976 turns on.
+
+    ``stopped_by`` follows ``assemble_context``'s polarity: it names a bound
+    only when that bound actually DROPPED a session block (precedence byte →
+    token → item). A cap that was merely REACHED — the pool ended exactly on
+    it — reports ``None``, because a caller tunes the knob it is told fired.
+    """
+    if max_context_tokens < 1:
+        raise ValueError("max_context_tokens must be >= 1, got "
+                         f"{max_context_tokens!r}")
+    if not 0.0 < breadth_share <= 1.0:
+        raise ValueError("breadth_share must be in (0, 1], got "
+                         f"{breadth_share!r}")
+    if item_cap is not None and item_cap < 1:
+        raise ValueError(f"item_cap must be >= 1, got {item_cap!r}")
+    if byte_cap is not None and byte_cap < 1:
+        raise ValueError(f"byte_cap must be >= 1, got {byte_cap!r}")
+    header_words = (len(f"Current Date: {question_date}".split())
+                    if question_date else 0)
+    header_bytes = (len(f"Current Date: {question_date}".encode()) + 2) \
+        if question_date else 0
+    breadth_budget = max(1, int(max_context_tokens * breadth_share))
+
+    selected: list[dict] = []
+    selected_ids: set = set()
+
+    def _tok(h: dict) -> object:
+        """Selection identity: the hit id when it has one, else object identity.
+
+        An ``id``-less hit put ``None`` into ``selected_ids``, so every later
+        id-less hit read as "already selected" and the depth pass silently
+        completed NOTHING while the census reported no cap dropping anything —
+        the reader got the breadth prefix and the drop counters all read 0.
+        """
+        hid = h.get("id")
+        return hid if hid is not None else id(h)
+    words = header_words
+    bytes_used = header_bytes
+    block_sizes: list[int] = []
+
+    def _try_admit(h: dict, *, budget: int) -> str:
+        """Admit one hit whole-or-not-at-all under the CURRENT bounds.
+
+        Returns the REFUSAL CLASS ("" when admitted) so the caller can count
+        each bound separately: folding a byte-ceiling refusal into the token
+        counter made ``stopped_by`` name ``token_cap`` while the byte ceiling
+        was what kept material out — the mislabel this census exists to
+        prevent.
+        """
+        nonlocal words, bytes_used
+        if not _has_claim_text(h):
+            return "no_claim_text"
+        block = _render_block(h)
+        cost = len(block.split())
+        if int((words + cost) * 1.1) > budget:
+            return "token_cap"
+        block_bytes = len(block.encode("utf-8")) + 2
+        if byte_cap is not None and bytes_used + block_bytes > byte_cap:
+            return "byte_cap"
+        selected.append(h)
+        selected_ids.add(_tok(h))
+        words += cost
+        bytes_used += block_bytes
+        return ""
+
+    # ── phase 1: BREADTH (rank order, the historical window, extended) ──
+    # A breadth refusal is recorded with the bound that refused it, but it is
+    # only a DROP if the depth pass does not put the hit back: the breadth phase
+    # is deliberately capped at ``breadth_share``, so it refuses routinely and
+    # depth then re-admits those hits from the same session blocks. Counting the
+    # refusal at phase-1 time reported ``stopped_by="token_cap"`` on windows
+    # where the budget never bound (depth recovered everything) — the false
+    # positive this census exists to prevent. The counters are DERIVED from the
+    # final selection, below.
+    breadth_refused: list[tuple[str, object]] = []
+    breadth_admitted = 0
+    breadth_item_cap_cut = False
+    for h in pool:
+        if item_cap is not None and len(selected) >= item_cap:
+            # the item bound actually CUT the pool only if a pool item is still
+            # unexamined (a pool that ended at the bound dropped nothing)
+            breadth_item_cap_cut = True
+            break
+        refusal = _try_admit(h, budget=breadth_budget)
+        if not refusal:
+            breadth_admitted += 1
+        elif refusal in ("token_cap", "byte_cap"):
+            breadth_refused.append((refusal, _tok(h)))
+    # ── phase 2: DEPTH (complete the sessions breadth touched, whole-or-skip) ──
+    # The session MEMBERSHIP comes from :func:`session_blocks` (ONE grouping
+    # implementation, so the assembler and the tested primitive cannot drift),
+    # but the VISIT ORDER is first-admitted-breadth-rank — NOT session_blocks'
+    # best-pool-rank order. The two differ because ``_try_admit`` is
+    # skip-and-continue: a session's best-ranked hit can be refused by the
+    # breadth budget while a later hit of the same session is admitted after
+    # another session's. Visiting by best-pool-rank would then complete a
+    # DIFFERENT session than this docstring promises whenever the depth budget
+    # binds — which is the measured case.
+    breadth_hits = list(selected)
+    # FIRST ADMITTED breadth rank per session — the order the depth pass
+    # visits them in. `session_blocks` alone orders by BEST POOL rank, and the
+    # two differ: `_try_admit` is skip-and-continue, so a session's best-ranked
+    # hit can be refused by the budget while a later hit of the same session is
+    # admitted after another session's. Visiting by best-pool-rank would then
+    # complete a DIFFERENT session than the documented rule promises whenever
+    # the depth budget binds (the measured case: 7 749 of 8 000 tokens).
+    first_breadth_rank: dict[tuple[str, object], int] = {}
+    for i, h in enumerate(breadth_hits):
+        first_breadth_rank.setdefault(
+            _session_admission_key(h, session_key=session_key,
+                                   index_key=index_key), i)
+    blocks = session_blocks(pool, session_key=session_key,
+                            index_key=index_key, admit=_has_claim_text)
+    blocks.sort(key=lambda b: first_breadth_rank.get(
+        _session_admission_key(b[0], session_key=session_key,
+                               index_key=index_key), len(pool)))
+    depth_dropped_by_item_cap = 0
+    depth_dropped_by_token_cap = 0
+    depth_dropped_by_byte_cap = 0
+    depth_admitted = 0
+    depth_by_session: dict[tuple[str, object], list[dict]] = {}
+    for block in blocks:
+        key = _session_admission_key(block[0], session_key=session_key,
+                                     index_key=index_key)
+        if key not in first_breadth_rank:
+            continue
+        extra = [h for h in block if _tok(h) not in selected_ids]
+        if not extra:
+            continue
+        # whole-session-or-skip: a session's remaining material is admitted as
+        # ONE block or not at all, so a completed session is never half
+        # completed.
+        rendered = [_render_block(h) for h in extra]
+        cost = sum(len(b.split()) for b in rendered)
+        block_bytes = sum(len(b.encode("utf-8")) + 2 for b in rendered)
+        if item_cap is not None and len(selected) + len(extra) > item_cap:
+            depth_dropped_by_item_cap += 1
+            continue
+        if int((words + cost) * 1.1) > max_context_tokens:
+            depth_dropped_by_token_cap += 1
+            continue
+        if byte_cap is not None and bytes_used + block_bytes > byte_cap:
+            depth_dropped_by_byte_cap += 1
+            continue
+        depth_by_session[key] = extra
+        for h in extra:
+            selected.append(h)
+            selected_ids.add(_tok(h))
+        words += cost
+        bytes_used += block_bytes
+        depth_admitted += 1
+        block_sizes.append(len(extra))
+    # ── output order: rank order, with each session's depth block adjacent to
+    # that session's LAST breadth hit (the completed session reads as one
+    # contiguous unit, while the breadth window keeps its rank order) ──
+    last_breadth_index: dict[tuple[str, object], int] = {}
+    for i, h in enumerate(breadth_hits):
+        last_breadth_index[_session_admission_key(
+            h, session_key=session_key, index_key=index_key)] = i
+    ordered: list[dict] = []
+    for i, h in enumerate(breadth_hits):
+        ordered.append(h)
+        key = _session_admission_key(h, session_key=session_key,
+                                     index_key=index_key)
+        if last_breadth_index.get(key) == i and key in depth_by_session:
+            ordered.extend(depth_by_session[key])
+    # A breadth refusal that depth did NOT put back is a real drop (derived
+    # here, after the depth pass, so a recovered hit is never counted).
+    breadth_dropped_by_token_cap = sum(
+        1 for cls, tok in breadth_refused
+        if cls == "token_cap" and tok not in selected_ids)
+    breadth_dropped_by_byte_cap = sum(
+        1 for cls, tok in breadth_refused
+        if cls == "byte_cap" and tok not in selected_ids)
+    if stats is not None:
+        # `stopped_by` names the bound that ACTUALLY dropped a block, and each
+        # drop class keeps its own counter: reporting an item-cap drop as a
+        # token-cap drop is exactly the mislabel this census exists to prevent
+        # (the #2976 argument is "the ITEM cap binds and the token budget is
+        # unused" — a census that cannot say `item_cap` cannot support it).
+        # ONLY a bound that actually dropped something can be `stopped_by`: a
+        # cap that was merely REACHED (the depth pass landing exactly on it, or
+        # the pool ending there) dropped nothing, and reporting it would make
+        # the field the #2976 argument rests on produce a false positive. The
+        # BREADTH token budget is a drop counter too — omitting it reported
+        # `None` ("no bound dropped anything") on windows where it refused
+        # candidates, which is why it is consulted alongside the depth caps.
+        stopped_by = (
+            "byte_cap" if (depth_dropped_by_byte_cap
+                           or breadth_dropped_by_byte_cap) else
+            "token_cap" if (depth_dropped_by_token_cap
+                             or breadth_dropped_by_token_cap)
+            else "item_cap" if (depth_dropped_by_item_cap or breadth_item_cap_cut)
+            else None)
+        stats.update({
+            "items_selected": len(selected),
+            "breadth_items": breadth_admitted,
+            "breadth_budget_tokens": breadth_budget,
+            "sessions_available": len(blocks),
+            "sessions_admitted": len({_session_admission_key(
+                h, session_key=session_key, index_key=index_key)
+                for h in selected}),
+            "sessions_completed": depth_admitted,
+            "session_block_sizes": block_sizes,
+            "bytes_used": bytes_used,
+            "words_used": words,
+            "dropped_by_breadth_bound": (breadth_dropped_by_token_cap
+                                          + breadth_dropped_by_byte_cap),
+            "dropped_by_breadth_token_cap": breadth_dropped_by_token_cap,
+            "dropped_by_breadth_byte_cap": breadth_dropped_by_byte_cap,
+            "breadth_item_cap_cut": breadth_item_cap_cut,
+            "dropped_sessions_by_item_cap": depth_dropped_by_item_cap,
+            "dropped_sessions_by_token_cap": depth_dropped_by_token_cap,
+            "dropped_sessions_by_byte_cap": depth_dropped_by_byte_cap,
+            "byte_cap": byte_cap,
+            "stopped_by": stopped_by,
+        })
+    return ordered
+
+
+
 def render_context(hits: list[dict], *, question_date: str | None = None) -> str:
     """Render annotated hits as the reader-facing context text.
 
