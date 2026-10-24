@@ -1051,8 +1051,9 @@ _BOUNDARY_MATRIX = [
     # them and `ON MATCH SET o.id=$id` re-id'd them ALL, so a 1:1
     # `(label,name) -> id` carrier answered EXISTS for the ids the graph had
     # already re-id'd away — the reported fail-open. That collapse is FIXED
-    # (#8864): `_name_holder_count` makes a name held by 2+ carriers stop being
-    # the MERGE key, so this registration keys on its OWN id and `matrix-third`
+    # (#8864 made a 2+-carrier name stop being the MERGE key; #3590 retired the
+    # name key for EVERY name, so this registration keys on its OWN id and
+    # `matrix-third`
     # becomes a THIRD carrier instead of stamping its id onto the other two.
     # `_MATRIX_ID` therefore SURVIVES and the belief folds — on the graph and
     # on both reference folds, which is why this row is now ACCEPTED. The node
@@ -1358,8 +1359,9 @@ def test_boundary_matrix_reference_and_graph_agree(
 def test_shared_name_keeps_every_carrier_in_the_surviving_map():
     """#8864 read-side: a name carried by 2+ nodes keeps EVERY carrier.
 
-    `_upsert_object` keys the MERGE on `id` once a name has more than one
-    carrier (``_name_holder_count``), so registering another carrier of a
+    `_upsert_object` keys the MERGE on `id` unconditionally (#3590; #8864 had
+    already done so once a name had more than one carrier), so registering
+    another carrier of a
     shared name no longer evicts the earlier ones. The journal-END map must
     say the same thing, because `apply()` / `rebuild` / `recover_from_log` /
     `backup.restore` refuse an `ObjectSuperseded` whose target it calls dead

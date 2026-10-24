@@ -60,7 +60,6 @@ from .commit_ops import OBJECT_TERMINAL_STATUSES as _OBJECT_TERMINAL_STATUSES
 # `_update_entity`. Imported so neither surface re-literals the vocabulary.
 from .commit_ops import SUBJECT_STATUS_VALUES as _SUBJECT_STATUS_VALUES
 from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
-from .ids import entity_name_id as _entity_name_id
 from .ids import ulid
 # #2817: the S5 money derivation (prose → typed value). Module scope because the
 # capture seam's `warn_on` narrowing below is derived from the CLOSED
@@ -4986,10 +4985,12 @@ def _iso_date10(value: object) -> str:
     return "" if date == _UNDATED_SENTINEL[:10] else date
 
 
-# #1516: entity ids minted by _entity_name_id / create_entity are PREFIXED
-# (label[:3] + '-' + sha256[:26], e.g. ``sub-<hex26>`` / ``obj-<hex26>``).
-# These are IDs, not names — a guard that only recognizes bare ULIDs treats
-# them as names and runs the stub-creating keyword fallback.
+# #1516: the LEGACY entity ids (label[:3] + '-' + sha256[:26], e.g.
+# ``sub-<hex26>`` / ``obj-<hex26>``) — the derived spelling #3590 RETIRED — are
+# still RECOGNISED here. The recogniser is retained deliberately: a value of
+# that shape is an id, not a name, and a graph written before the change may
+# still carry one. Nothing MINTS this shape any more (#3590 R1: identity is an
+# opaque id minted once, never a function of the name).
 #
 # #3586: the digest spelling is deliberately NOT pinned to ``{26}``/lowercase.
 # An opaque id's spelling is a property of the MINTER, not of the value, so a
@@ -5009,10 +5010,12 @@ def _iso_date10(value: object) -> str:
 # are NOT interchangeable, and widening this one is not free: its consumer
 # (`_check_refs`) fails the WHOLE bundle closed on a hit, so a digest it newly
 # rejects is a previously-valid ref that stops ingesting. Keep it pinned to the
-# shapes the minting surfaces actually emit — a bare ULID, or
-# ``label[:3]-<sha256[:26]>`` (`_entity_name_id`). A spelling no minter can
-# produce (``pr-<hex16>``) cannot shadow a real node, so rejecting it buys no
-# safety and breaks a live ingest.
+# shapes a graph can actually carry: a bare ULID (what every minter emits after
+# #3590) or the legacy ``label[:3]-<sha256[:26]>`` spelling (no minter produces
+# it any more; it is recognised so a pre-change graph's ids are still treated as
+# ids rather than as names). A spelling no writer can produce (``pr-<hex16>``)
+# cannot shadow a real node, so rejecting it buys no safety and breaks a live
+# ingest.
 _ENTITY_ID_RE = re.compile(r"^[a-z]{2,8}-[0-9a-f]{16,64}$", re.IGNORECASE)
 _CANONICAL_ENTITY_ID_RE = re.compile(r"^[a-z]{2,3}-[0-9a-f]{26}$")
 
@@ -5021,8 +5024,8 @@ def _is_entity_id(s: str) -> bool:
     """Return True if *s* is shaped like an entity handle (an opaque id), not
     a name: a bare ULID (canonical or Crockford) OR ``prefix-<hex digest>``.
 
-    NOT a provenance test (#3586): a minted id and a legacy
-    ``obj-<sha26(name)>`` alias are shape-identical, so shape alone cannot say
+    NOT a provenance test (#3586): a minted ULID and a legacy
+    ``obj-<sha26(name)>`` alias are both opaque strings, so shape alone cannot say
     which node — if any — a value addresses. Callers that need that answer MUST
     resolve the value first (``_wire_about_value`` does) and use this predicate
     only for the negative case: may an UNRESOLVED value be resolve-or-minted as
@@ -5036,9 +5039,10 @@ def _is_entity_id(s: str) -> bool:
 
 
 def _is_canonical_entity_id(s: str) -> bool:
-    """Return True if *s* is shaped like an id the minting surfaces EMIT — a
-    bare ULID or ``label[:3]-<sha256[:26]>`` (``_entity_name_id``) — and so
-    could address (and shadow) a real node.
+    """Return True if *s* is shaped like an id a node can CARRY — a bare ULID
+    (#3590's only minted shape) or the legacy ``label[:3]-<sha256[:26]>``
+    derived spelling (recognised, never minted) — and so could address (and
+    shadow) a real node.
 
     The HARD-REJECTION predicate (``_check_refs`` fails the whole bundle closed
     on a hit). Do NOT widen it to anticipate a future id format: that trades a
@@ -18916,20 +18920,18 @@ class TortoiseSDK:
         raise on a partially-mutated graph.
 
         ⛔ ``merges`` and the three axes are LOAD-BEARING and they are read from
-        the node the write will actually LAND ON, not from "any holder". Since
-        #8864/#8902 the fold picks its merge key from the carrier count
-        (``merge_key = "id" if name_is_shared else "name"``), so:
+        the node the write will actually LAND ON, not from "any holder". #3590
+        made the CREATE a resolve-or-mint (``entity_identity.resolve_or_mint``),
+        so there are exactly three shapes:
 
-          * **one carrier (or none)** — the merge is keyed on NAME, so the item
-            lands on that holder (or mints) and the holder's axes decide; a
-            declared status is dropped by ``ON CREATE``-only status writes;
-          * **2+ carriers** — the merge is keyed on the record's own ``id``,
-            which for every ingest entity item IS ``ids.entity_name_id(label,
-            name)``. When a carrier already holds that canonical id the item
-            still lands on it (``ON MATCH``), so THAT node's axes decide — not
-            the other carriers'; when no carrier holds it, the item MINTS a
-            node on its own id and inherits NO holder axis, and its declared
-            status is what gets stored.
+          * **no carrier** — the item MINTS a fresh opaque id, inherits NO
+            holder axis, and its declared status is what gets stored;
+          * **one carrier** — the item RESOLVES to that holder (idempotent
+            re-mention), so THAT node's axes decide; a declared status is
+            dropped by the ``ON CREATE``-only status write;
+          * **2+ carriers** — the create REFUSES
+            (``AmbiguousEntityName``); no carrier is the target and no holder
+            axis applies.
 
         Reading the axes from "any carrier" or from "none of them" both fail:
         the first over-rejects (another carrier's terminal status is not the
@@ -18975,16 +18977,13 @@ class TortoiseSDK:
         ).result_set
         if not rows:
             return False, None, None, None, 0, False, None
-        # The node the item lands on: the sole carrier, or — once the name is
-        # shared — the carrier that already holds the deterministic id the fold
-        # merges on. No such carrier ⇒ the item MINTS and no holder axis applies.
-        canonical = _entity_name_id(label, name)
-        target = (
-            rows[0] if len(rows) <= 1
-            else next((r for r in rows if r[0] == canonical), None)
-        )
-        if target is None:
+        # #3590: the node the item lands on. A shared name has NO target — the
+        # create refuses rather than picking one, so no holder axis applies (the
+        # previous "the carrier holding the derived canonical id" answer existed
+        # only because the id was a function of the name).
+        if len(rows) > 1:
             return True, None, None, None, len(rows), False, None
+        target = rows[0]
         # All three axes in ONE pass (#7925 review round 4 — an early return per
         # axis made a holder that matched two of them report only the first, so
         # e.g. an operator-shaped holder with an array status lost the operator
@@ -19281,32 +19280,18 @@ class TortoiseSDK:
             if key not in holders:
                 holders[key] = self._entity_name_holders(elabel, name)
             return holders[key]
-        # ADOPTION / RENAME map (#7925 review round 5). Step 3 writes every
-        # entity item, and a bundle item naming a holder MERGEs onto it: when
-        # that holder's stored id is NOT the deterministic
-        # `entity_name_id(label, name)` (a legacy/foreign id — `create_event`'s
-        # `aboutSubject` mints `:Subject {id:'Gamma'}`, `_upsert_*`'s `ON MATCH
-        # id=coalesce($id, s.id)` rewrites it), the SAME write re-addresses the
-        # node to the canonical id. Every connection endpoint still naming the
-        # PRE-write id is then dead by step 4 — `create_operator`/
-        # `create_direct_edge` key on `id`, so the bundle aborts with the earlier
-        # items committed (measured: one connection whose endpoint is that id,
-        # any route, either side → `Phase2Error … does not exist`, point
-        # committed, carrier already renamed). Phase 1 refuses it here, which is
-        # this route's stated posture for a shape whose failure mode is a
-        # partial mutation.
+        # ADOPTION / RENAME map (#7925 review round 5) — RETIRED by #3590.
+        # It existed because step 3's entity write RE-ADDRESSED a holder: an
+        # item naming a holder whose stored id was not the deterministic
+        # `entity_name_id(label, name)` moved that node onto the canonical id,
+        # killing every connection endpoint still naming the pre-write id. With
+        # an opaque minted id there is no canonical id to move to: the create
+        # RESOLVES the name to the holder's own id (or mints a fresh one), so no
+        # node's id changes during step 3 and there is nothing to map. The
+        # connection guard below still reads `_renamed`; it is empty by
+        # construction, and that emptiness is now the ASSERTED property —
+        # a future writer that does re-address a holder must fill it here.
         _renamed: dict[tuple[str, str], str] = {}
-        for _item in bundle.get("entities") or []:
-            if not isinstance(_item, dict):
-                continue
-            _rl = _ENTITY_ITEM_LABELS.get(
-                str(_item.get("type") or "").strip().lower())
-            _rn = _item.get("name")
-            if _rl not in ("Subject", "Object") or not isinstance(_rn, str):
-                continue
-            _rh = _name_holders(_rl, _rn)
-            if _rh[5] and _rh[6] and _rh[6] != _entity_name_id(_rl, _rn):
-                _renamed[(_rl, _rh[6])] = _entity_name_id(_rl, _rn)
         # (#7925 review P2; scope corrected in review round 4) A status the
         # direct-edge terminal check cannot EVALUATE must be refused at the
         # ITEM, not only on the graph-read legs: the `:Object`/`:Event` writers
@@ -19635,13 +19620,27 @@ class TortoiseSDK:
                 #     `create_direct_edge` wrote the edge this guard refused).
                 # Comparing (label, name) got both of these backwards.
                 if v in local:
-                    # The node this item lands on: the merge target when it
-                    # merges (a name-keyed merge ADOPTS the existing node and
-                    # REWRITES its id to the canonical one, so the pre-write id
-                    # is what an external ref still names), else the canonical
-                    # id the item mints.
+                    # The node this item lands on. #3590: the create either
+                    # RESOLVES to the single live holder (id unchanged) or mints
+                    # a fresh id — and a shared name has no target at all, so no
+                    # landing id can be computed for it (the write refuses that
+                    # item; the connection is left to the per-item refusal).
                     _h = _name_holders(ep_label, ep_name)
-                    lid = _h[6] or _entity_name_id(ep_label, ep_name)
+                    if _h[6] is None:
+                        if _h[0]:
+                            # 2+ live carriers: the create REFUSES this item
+                            # (`AmbiguousEntityName`), so it has no landing id.
+                            # The per-item refusal reports it; this guard must
+                            # not invent a target.
+                            continue
+                        # No carrier: the item MINTS. Two minting refs naming
+                        # the SAME name resolve to ONE node (the first create
+                        # makes the holder, the second resolves to it), so the
+                        # name is still a valid endpoint-collision key here —
+                        # it is the node's landing identity, not an id.
+                        lid = f"mint\x00{ep_name}"
+                    else:
+                        lid = _h[6]
                 else:
                     lid = (node_info.get(v) or {}).get("id")
                 if not isinstance(lid, str) or not lid:
@@ -34114,91 +34113,36 @@ class TortoiseSDK:
         # cover the `create_source` lane — that lane reaches this funnel with
         # `label = "Source"`, so the branch never executes for it;
         # `create_source`'s own strip is what covers it.
-        # (#2194) Journal ObjectRegistered on FIRST canonical registration
-        # only — probe the deterministic canonical id + name
-        # (obj-<sha26(name)>) before apply. The name conjunct hardens against
-        # a cross-name sha-digest collision (would otherwise fail-closed on a
-        # genuinely new registration). A row = canonical re-mention (MERGE by
-        # name, ON MATCH — the #1350 clobber guard keeps status; journaling
-        # again would double-register). The #7936 `_stub` conjunct restates
-        # the precondition honestly: since the event name-stub now carries the
-        # canonical id (#7936), id+name alone can no longer distinguish a
-        # registered node from an unregistered stub — every name-stub would
-        # HIT and the registration would silently stop being journaled.
-        # `_event_plain_merge` marks its stubs `_stub=true` ON CREATE and
-        # `_upsert_object`/`_upsert_subject` REMOVE it (SET NULL) on adoption,
-        # so the probe counts ONLY nodes whose canonical registration was
-        # journaled. No row = fresh create OR #1155/#7936 stub adoption (a
-        # marked name-stub, or a pre-#7936 random-ulid stub the id conjunct
-        # already misses — either way the canonical registration is genuinely
-        # new) → journal after apply. Probe failure
-        # → warning + fail-open-to-journal (a duplicate line is replay-safe;
-        # a skip would silently re-open the node-loss bug). Accepted
-        # divergences (only-on-create mandate): re-mention prop mutations and
-        # pre-#2194-history re-mentions are live-only / never registered —
-        # byte-identity holds for the first canonical registration. Deletes
-        # are NOT journaled (_delete_entity is a bare graph delete — the
-        # journal vocabulary cannot represent deletion): a deleted canonical
-        # Object resurrects on the next rebuild, and delete→recreate mints a
-        # second "first registration" whose replay first-wins over the live
-        # incarnation (pinned as accepted by tests 14-15; #2296 scope hook).
-        _journal_object_registration = False
-        _journal_subject_registration = False
-        # Truthy-name gate mirrors _upsert_object's persistence predicate (it
-        # no-ops on falsy names) — a falsy-name create must not mint a
-        # phantom ObjectRegistered line (junk-line journal growth on a no-op
-        # path). The event-type conjunct mirrors the rebuild dispatcher: pass
-        # 1b replays ONLY the literal "ObjectRegistered" (projection/
-        # __init__.py pass-1b dispatch), so a future label==Object event_type
-        # must never journal a line replay cannot fold (a no-row probe on a
-        # non-OR type would otherwise emit an unreplayable registration).
-        if (label == "Object" and self._event_log_path
-                and event.get("name") and event.get("type") == "ObjectRegistered"):
-            try:
-                _journal_object_registration = not proj.g.query(
-                    "MATCH (o:Object {id:$cid, name:$name}) "
-                    "WHERE coalesce(o._stub, false) = false RETURN o.id",
-                    params={"cid": id_val, "name": event["name"]},
-                ).result_set
-            except Exception:
-                # Fail-open to journaling: a duplicate registration line is
-                # replay-safe; a silent skip would re-open the node-loss bug.
-                _logger.warning(
-                    "ObjectRegistered existence probe failed for %s — "
-                    "journaling optimistically (id=%s)",
-                    event.get("name"), id_val)
-                _journal_object_registration = True
-        # (#2295) Subject mirror of the #2194 Object block above — same probe-
-        # gated first-registration design (Subjects ride the same generic
-        # _create_entity funnel and had the identical durability hole: SDK-
-        # created Subjects were live-graph-only, so a journaled-SDK Subject
-        # vanished silently on rebuild_all — no fold vocabulary to warn).
-        # Keep in sync with the Object block above (label constant, probe
-        # node letter, event-type literal, flag name differ; everything else
-        # is byte-identical). Subjects have no fold/sweep — the round-trip
-        # byte-identity tests are the only guard. Accepted divergences mirror
-        # the Object block's: re-mention prop mutations + pre-#2295-history
-        # re-mentions are live-only; deletes are NOT journaled (_delete_entity
-        # is a bare graph delete) — a deleted Subject resurrects on the next
-        # rebuild, and delete→recreate mints a second "first registration"
-        # whose replay first-wins (pinned as accepted by tests 9a/9b; #2296
-        # scope hook).
-        if (label == "Subject" and self._event_log_path
-                and event.get("name") and event.get("type") == "SubjectAdded"):
-            try:
-                _journal_subject_registration = not proj.g.query(
-                    "MATCH (s:Subject {id:$cid, name:$name}) "
-                    "WHERE coalesce(s._stub, false) = false RETURN s.id",
-                    params={"cid": id_val, "name": event["name"]},
-                ).result_set
-            except Exception:
-                # Fail-open to journaling: a duplicate registration line is
-                # replay-safe; a silent skip would re-open the node-loss bug.
-                _logger.warning(
-                    "SubjectAdded existence probe failed for %s — "
-                    "journaling optimistically (id=%s)",
-                    event.get("name"), id_val)
-                _journal_subject_registration = True
+        # (#2194/#2295/#3590) EMIT the registration on every Object/Subject
+        # create — no "first registration only" probe.
+        #
+        # The probe existed to avoid a duplicate ``ObjectRegistered`` on a
+        # re-mention, and it could only be honest because the id was a FUNCTION
+        # of the name: "the node already carries this canonical id and is not a
+        # stub" was the same question as "this name was already registered".
+        # With a MINTED id (or an adopted explicit one) the two questions come
+        # apart — a node can exist under this id with NO registration line (a
+        # raw/foreign writer's node, or a connector stub) and the probe then
+        # HITS, so the registration is never journaled and `rebuild_all`
+        # DESTROYS a live node. That is the live-without-durable class this
+        # epic removes, so the safe answer is the plan's S2 step 3 ruling
+        # (#3590 D9/P1-D): emit on every create.
+        #
+        # Cost, stated: the journal grows with CREATE-CALL count, not entity
+        # count (an `onboarding.seed` re-run, an `extract_session_v2` loop, a
+        # `/v1/objects` re-POST and a connector re-sync each append one
+        # duplicate line). Duplicate registrations are REPLAY-IDEMPOTENT — the
+        # fold's `MERGE` is id-keyed and `createdAt` adopts on FIRST write
+        # (`coalesce(n.createdAt, $ca)`), so replay is first-wins exactly as
+        # `test_duplicate_registration_lines_replay_idempotently` pins.
+        _journal_object_registration = bool(
+            label == "Object" and self._event_log_path
+            and event.get("name")
+            and event.get("type") == "ObjectRegistered")
+        _journal_subject_registration = bool(
+            label == "Subject" and self._event_log_path
+            and event.get("name")
+            and event.get("type") == "SubjectAdded")
         if ((_journal_object_registration or _journal_subject_registration)
                 and event.get("createdAt") is None):
             # (#2194/#2295) Synthesize createdAt BEFORE apply ONLY on the
@@ -34626,6 +34570,56 @@ class TortoiseSDK:
         # handling are unchanged.
         return self._emit_event(_ENTITY_MUTATION_RECORD_TYPE, **record)
 
+    def _refuse_ambiguous_rename(self, id_val: str, new_name: str) -> None:
+        """Refuse a rename onto a name a DIFFERENT live entity already holds.
+
+        #3590 R2 + D3: the name is a mutable natural key, and a natural key that
+        two live entities both hold is ambiguous — every later by-name resolve
+        refuses (`entity_identity` route-then-refuse) and the name is
+        create-poisoned with no by-name repair path. The write is therefore
+        refused, before anything is written.
+
+        The check is scoped to the identity labels the TARGET actually carries
+        (`Object`/`Subject` — the two labels whose ``name`` is a natural key), so
+        a Point/Event/Document rename is unaffected: their identity is their
+        `id`/`eventId`/`url`, and their `name` is not a key at all.
+        """
+        from .entity_identity import live_name_holder_ids
+        from .exceptions import NameAlreadyHeld
+        g = self._get_proj().g
+        rows = g.query(
+            "MATCH (n) WHERE n.id = $id AND (n:Object OR n:Subject) "
+            "RETURN DISTINCT labels(n)",
+            params={"id": id_val}).result_set
+        for row in rows:
+            labels = row[0] if isinstance(row[0], list) else [row[0]]
+            for label in labels:
+                if label not in ("Object", "Subject"):
+                    continue
+                holders = [h for h in live_name_holder_ids(g, label, new_name)
+                           if h and str(h) != str(id_val)]
+                if holders:
+                    raise NameAlreadyHeld(label, new_name, holders, id_val)
+
+    def _entity_identity_for(self, label: str, name: str, *,
+                             explicit_id: str | None = None) -> str:
+        """The id a create must write: the live holder's, or a freshly MINTED one.
+
+        #3590 R1/R2 (the model change): identity is an opaque id minted once at
+        creation; ``name`` is a mutable natural key, never the identity. So a
+        create resolves the name to its single LIVE holder (the #452 idempotent
+        re-mention) and otherwise MINTS — it never derives an id from the name
+        (``obj-<sha26(name)>``), which is what made a rename mint a second entity
+        and a delete+re-create resurrect the first one.
+
+        Raises :class:`~tortoise.entity_identity.AmbiguousEntityName` when two or
+        more LIVE entities already hold the name: a create may not pick one for
+        the caller (route-then-refuse, R8).
+        """
+        from .entity_identity import resolve_or_mint
+        return resolve_or_mint(self._get_proj().g, label, name,
+                               explicit_id=explicit_id)[0]
+
     @_declares_apply_first_write_lane("_update_entity")
     def _update_entity(self, id_val: str, *, _reserved_supplied: tuple = (), **props) -> dict:
         # #2296 review: `_reserved_supplied` is the set of reserved names the
@@ -35028,6 +35022,26 @@ class TortoiseSDK:
         # return through it (the re-key guard is kept general and defensively
         # covers `eventId` should that ban ever be lifted).
         post_write_id = id_val
+        # ── #3590 / #3377: a rename is a JOURNALED mutation on the stable id ──
+        # The graph write below applies `name` like any other prop, and the
+        # `EntityMutated` record now carries it (the classifier returns `op=rename`
+        # for a name-bearing write), so a rename survives replay instead of being
+        # reverted by `rebuild_all`. Two properties make that safe, and both are
+        # checked HERE, before any label is written:
+        #
+        # 1. R2 — the name is a mutable NATURAL KEY, so moving it moves a
+        #    property, never an identity. The `EntityMutated` fold is id-keyed
+        #    and `_fold_object_superseded` no longer falls back to matching by
+        #    name (that fallback — and the legacy id synthesis that fed it — are
+        #    retired in this change), so a rename can no longer drop a supersede
+        #    record on replay. That fallback was the ONLY recorded reason the
+        #    rename record was withheld (#4769).
+        # 2. The rename may not create ambiguity: two LIVE entities holding one
+        #    name makes every later by-name create/read refuse, and there is no
+        #    by-name repair path. Refused with `NameAlreadyHeld` BEFORE the loop,
+        #    so a refusal leaves the graph untouched.
+        if isinstance(props.get("name"), str) and props["name"].strip():
+            self._refuse_ambiguous_rename(id_val, props["name"])
         for label, prop in _CANONICAL_ENTITY_ID_PROPS:
             # #4649: a canonical label's identity is an OR-SET, not one key.
             # `_CANONICAL_ENTITY_ID_PROPS` is the PRIMARY key; a label may also
@@ -35150,117 +35164,6 @@ class TortoiseSDK:
                 #     overwrites the typed Vectorf32 the upsert created
                 #     (`properties(n)` returns a vector as a plain list;
                 #     re-applying it would demote it and break the vector leg).
-                if "name" in props:
-                    # ── #3377 DEFERRED (#4769) ───────────────────────────────
-                    # A write that changes `name` must NOT be journaled YET.
-                    # This is a VERIFIED regression, not a hypothetical:
-                    # `_fold_object_superseded` falls back to matching by NAME
-                    # for legacy id-less records (#2164 ISSUE-B), and that fold
-                    # is DEFERRED to a sweep that runs AFTER this inline one
-                    # (deliberately — it is an unconditional SET that must follow
-                    # every Object-creation event). Journaling a rename therefore
-                    # renames the node in pass 1b, BEFORE the sweep, so the name
-                    # branch stops matching and a legacy id-less supersede is
-                    # DROPPED: live and `apply()` keep status='superseded' while
-                    # `rebuild_all` returns the object status='live'. Pre-#3377
-                    # the name never changed at replay, so the match held —
-                    # journalling the rename INTRODUCES the regression.
-                    #
-                    # So the rename half of this lane is RETURNED TO OPEN, and
-                    # #4769 lands rename journalling TOGETHER WITH the structural
-                    # sweep-ordering fix rather than before it (three review
-                    # rounds each found a different defect at that same boundary).
-                    #
-                    # The graph write still happens — only the journal record is
-                    # withheld — and the withhold is LOUD, so this is a declared
-                    # deferral, never the silent loss this lane exists to fix.
-                    rest = {k: v for k, v in props.items() if k != "name"}
-                    keys = list(rest)
-                    # #4649: the OR-SET, and the write and its read-back are ONE
-                    # statement — the form the generic branch below already uses.
-                    # They MUST NOT be split into a write followed by a separate
-                    # MATCH: a url-keyed :Source is addressed BY `url`, and `url`
-                    # is a writable prop, so a second query matching the ORIGINAL
-                    # url runs AFTER the SET and misses the re-keyed node — the
-                    # write lands, NO `EntityMutated` record is emitted, and
-                    # `rebuild_all` silently reverts the `url` (a live≠replay
-                    # divergence with no fold-miss warning, because there is no
-                    # record to miss). MATCHing first and reading
-                    # `properties(n)` after the SET binds the node by its
-                    # PRE-write key while the returned values are post-write.
-                    applied = None
-                    matched_prop = None
-                    for match_prop in id_keys:
-                        applied = proj.g.query(
-                            f"MATCH (n:{label} {{{match_prop}:$id}}) "
-                            "SET n += $props "
-                            "RETURN [k IN $keys | properties(n)[k]] AS vals",
-                            params={"id": id_val, "props": props, "keys": keys},
-                        )
-                        # A miss mutates nothing, so there is nothing to warn
-                        # about (an `update_entity("no-such-id", name=...)` must
-                        # not cry wolf). A result row means the write landed on
-                        # THIS branch's node. Do NOT add `count(n)`: beside
-                        # `properties(n)` it becomes a grouping key, so a miss
-                        # would yield no row and a duplicate-id match one row PER
-                        # GROUP.
-                        if applied.result_set:
-                            matched_prop = match_prop
-                            break
-                    matched = matched_prop is not None
-                    if isinstance(props.get(matched_prop), str):
-                        # The matched key is one this write rewrote, so the node
-                        # no longer lives at `id_val` (a non-str value means the
-                        # key was cleared, leaving nothing to resolve).
-                        post_write_id = props[matched_prop]
-
-                    # Journal everything the write changed EXCEPT `name`. The
-                    # reason `name` is withheld — it moves the node before the
-                    # deferred name-keyed supersede sweep runs — simply does NOT
-                    # apply to the other keys, so withholding the whole map
-                    # would leave #3312 open for the ordinary call
-                    # `update_entity(id, name=..., status=...)`, silently
-                    # reverting the status on rebuild.
-                    if matched and rest:
-                        vals = list(applied.result_set[0][0])
-                        if len(vals) != len(keys):
-                            _logger.error(
-                                "state arity mismatch for %s %r: %d keys "
-                                "vs %d values — journalling the shorter "
-                                "of the two",
-                                label, id_val, len(keys), len(vals))
-                        # `rest` carries no `name`, so the classifier can
-                        # never return `rename` here — it is `restatus` or
-                        # `revise`, both implemented.
-                        self._journal_entity_mutation(
-                            label, id_val,
-                            classify_entity_mutation_op(rest),
-                            state=dict(zip(keys, vals, strict=False)),
-                        )
-
-                    if matched:
-                        # #2296 residual, deliberately NOT promised away here: if
-                        # this label's CREATION was never journaled (an `Object`
-                        # minted by `_connect_issue_objects`' bare live MERGE,
-                        # which emits no record), `rebuild_all` does not merely
-                        # revert the `name`, it DESTROYS the node. The warning
-                        # below therefore claims only what the deferred rename
-                        # does — it does not promise the node or its siblings
-                        # survive.
-                        # Warn on EVERY occurrence, not once per process: this
-                        # class recurs, and a one-shot net would leave the
-                        # second and later reverts silent — the exact failure
-                        # mode this lane exists to remove.
-                        _logger.warning(
-                            "update_entity: the `name` change is NOT journaled "
-                            "— #3377's rename journalling is deferred to #4769 "
-                            "(journalling it breaks a legacy name-keyed "
-                            "ObjectSuperseded on replay: the rename moves the "
-                            "node's name before the deferred supersede sweep "
-                            "matches on it). THE `name` WILL BE REVERTED BY "
-                            "`rebuild_all`."
-                        )
-                    continue
                 keys = list(props)
                 res = None
                 # #4649: OR-SET — primary identity key first, then the label's
@@ -35400,12 +35303,16 @@ class TortoiseSDK:
                     f"{', '.join(sorted(_SUBJECT_STATUS_VALUES))}"
                 )
             node = self._create_entity(
-                "Subject", _entity_name_id("Subject", name),
+                "Subject",
+                self._entity_identity_for("Subject", name,
+                                          explicit_id=_server_id),
                 _entity_door_props("subjectKind", name, props),
                 "SubjectAdded", is_episodic=is_episodic)
         elif t == "object":
             node = self._create_entity(
-                "Object", _entity_name_id("Object", name),
+                "Object",
+                self._entity_identity_for("Object", name,
+                                          explicit_id=_server_id),
                 _entity_door_props("objectKind", name, props),
                 "ObjectRegistered", is_episodic=is_episodic)
         elif t == "event":
@@ -35538,6 +35445,17 @@ class TortoiseSDK:
                     # journaled in `targets` and all of them are written, so an
                     # arbitrary backend row order can never be pinned (review
                     # P2-3 at 2b9626072).
+                    # #3590 (D9): REGISTER what the event references, then the
+                    # cascade resolves a real entity instead of minting a
+                    # name-id stub in the fold. The projection never mints (a
+                    # fold-time mint is not replay-deterministic), so a bare
+                    # name reaching it must already have a minted id — and this
+                    # door is the one surface that can JOURNAL the mint.
+                    # Registering under the DECLARED label (not "whatever the
+                    # cascade finds first") keeps `aboutObject="Acme"` on the
+                    # Object arm instead of silently becoming `aboutSubject`.
+                    if _tlabel in ("Subject", "Object"):
+                        self.create_entity(_tlabel.lower(), _val)
                     _link, _internal = proj.resolve_about_link(_val)
                     if _link is not None:
                         about_links.append(_link)
@@ -38337,17 +38255,30 @@ class TortoiseSDK:
                     repo = None
                     issue_number = None
                     url = None
-                if not oid:
-                    # Deterministic hash (builtin hash() is salted per-process →
-                    # would create duplicate Objects on every run).
-                    oid = f"{key.rstrip('s')}_{hashlib.sha256(name.encode()).hexdigest()[:8]}"
                 okind = "pr" if key == "prs" else "issue"
+                if not oid:
+                    # #3590: NEVER derive an id from the name. The old
+                    # `{kind}_{sha256(name)[:8]}` was a name-derived identity:
+                    # a rename minted a second Object and a delete+re-create
+                    # resurrected the first one. Resolve the single LIVE holder
+                    # (an idempotent re-index) or MINT an opaque id — and route
+                    # it through the SDK create door, so the registration is
+                    # JOURNALED and `rebuild_all` reproduces the node (the raw
+                    # MERGE below journals nothing).
+                    from .entity_identity import resolve_or_mint
+                    oid, _created = resolve_or_mint(proj.g, "Object", name)
+                    self._create_entity(
+                        "Object", oid,
+                        {"name": name, "objectKind": okind, "repo": repo,
+                         "issue_number": issue_number, "url": url},
+                        "ObjectRegistered")
                 # #3574: store the name VERBATIM — never `name[:200]`.
                 #
-                # `name` IS the Object's identity: `_upsert_object` MERGEs on
-                # it, `_fold_object_superseded` MATCHes it, and the canonical
-                # id (`_entity_name_id` → `obj-<sha26(name)>`) is derived from
-                # the FULL name. This was the only writer applying a 200-char
+                # `name` is the Object's natural key and the value every
+                # by-name reader matches (#3590 demoted it from identity to
+                # natural key; it is no longer an id input, and the derived
+                # `obj-<sha26(name)>` id is retired). This was the only writer
+                # applying a 200-char
                 # cap, so a GitHub title > 200 chars (the session-indexing
                 # lane's stock input — titles run to 256) landed under a name
                 # no other name-keyed writer or reader could match:
@@ -38375,10 +38306,14 @@ class TortoiseSDK:
                     # the doors above, one layer out. The kind belongs to the
                     # fold's ON CREATE arm; a re-index refreshes the fields it
                     # legitimately owns and touches nothing else.
+                    # #3590: `o.name` is ON CREATE only. A name is a mutable
+                    # natural key, so moving it is a JOURNALED rename
+                    # (`EntityMutated op=rename`) — a connector re-index must not
+                    # rewrite it live-only, which would replay differently.
                     "MERGE (o:Object {id:$oid}) "
                     "ON CREATE SET o.objectKind=$okind, o.name=$name, o.repo=$repo, "
                     "o.issue_number=$issue_number, o.url=$url "
-                    "ON MATCH SET o.name=$name, o.repo=$repo, "
+                    "ON MATCH SET o.repo=$repo, "
                     "o.issue_number=$issue_number, o.url=$url",
                     params={"oid": oid, "name": name, "okind": okind,
                             "repo": repo, "issue_number": issue_number, "url": url},

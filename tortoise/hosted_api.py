@@ -92,6 +92,7 @@ from tortoise.config import _resolve_event_log_path
 from tortoise.embed_metering import (  # #4488: pure-ASGI encode-work flusher
     EmbedMeteringMiddleware as _EmbedMeteringMiddleware,
 )
+from tortoise.entity_identity import resolve_fold_name  # #3590 fold-side name resolution
 from tortoise.env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 from tortoise.file_indexer import (  # #4005 shared identity primitives
     derive_session_source_url,
@@ -16370,14 +16371,21 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 continue
             # P2-4 (#1272 review): entity creation runs in step 6, AFTER this
             # event wiring — a MATCH-only Object lookup silently dropped the
-            # edge for NEW entities. MERGE creates the :Object on demand
-            # (consistent with step 6's MERGE-by-name semantics).
-            proj.g.query(
-                "MATCH (e:Event {eventId:$eid}) "
-                "MERGE (o:Object {name:$name}) "
-                "MERGE (e)-[:aboutObject]->(o)",
-                params={"eid": ev.id, "name": name},
-            )
+            # edge for NEW entities, so the write resolved-or-minted on demand.
+            # ⛔ #3590: it RESOLVES now and never mints here. A fold-time mint
+            # is not replay-deterministic (`rebuild != live` by construction),
+            # and an id may not be derived from a name — the projection is not
+            # the minter (D9). Step 6 registers the entity with a real minted
+            # id, so the reference resolves once that has run; an unresolved
+            # reference is left unwired rather than fabricating a node.
+            _resolved = resolve_fold_name(proj.g, "Object", name,
+                                          context="session-commit aboutObject")
+            if _resolved:
+                proj.g.query(
+                    "MATCH (e:Event {eventId:$eid}), (o:Object {id:$oid}) "
+                    "MERGE (e)-[:aboutObject]->(o)",
+                    params={"eid": ev.id, "oid": _resolved},
+                )
 
     # ── 4. Source bridge: the session Source (#4005 — the canonical
     # ``session:<session_id>`` identity ONTOLOGY §4.6 registers, the SAME url

@@ -217,6 +217,121 @@ def live_name_holder_ids(g, label: str, name: str, *,
                             name_props=name_props)
 
 
+#: One lock per ``(label, name)`` for the CREATE-side resolve-or-mint
+#: (:func:`resolve_or_mint`). The resolve is check-then-act and D2 legalises
+#: same-name coexistence, so no unique index can close the race — the lock
+#: closes it WITHIN A PROCESS. The registry is module-level (mirroring
+#: ``sdk._source_merge_locks``), so two processes can still each see zero live
+#: holders and each mint; that residual is named in the issue and is bounded by
+#: the pre-beta premise (no production Object/Subject graph).
+_holder_locks: dict[tuple, threading.Lock] = {}
+_holder_locks_guard = threading.Lock()
+
+
+def _holder_lock(label: str, name: str) -> threading.Lock:
+    with _holder_locks_guard:
+        lock = _holder_locks.get((label, name))
+        if lock is None:
+            lock = _holder_locks[(label, name)] = threading.Lock()
+        return lock
+
+
+def resolve_or_mint(g, label: str, name: str, *,
+                    explicit_id: str | None = None) -> tuple[str, bool]:
+    """The CREATE-side resolver: ``(id, created)``. Never derives from the name.
+
+    ``#3590`` R1/R2: an entity's durable identity is an opaque id minted ONCE at
+    creation; ``name`` is a mutable natural key. So a create either
+
+    * resolves to the **single live holder** of ``name`` (``created=False``) —
+      the idempotent re-mention (#452) — or
+    * **mints** a fresh opaque id (``created=True``) when no live entity holds
+      the name. A terminal holder does not block a create: it is a different
+      incarnation, and re-using its id would be id reuse (R5).
+
+    Two or more LIVE holders is not a choice a create may make for the caller:
+    it refuses with :class:`AmbiguousEntityName` (route-then-refuse, R8), so a
+    duplicate-name graph is never create-poisoned by picking one.
+
+    ``explicit_id`` wins outright — an explicit-id channel (a connector's
+    ``github-issue-{repo}-{n}``, ``_server_id``) supplies the identity, which is
+    exactly what an opaque-id model allows and what ``add_object(id=…)``
+    promises. It is never a name derivation.
+
+    Called ONLY from a write surface that can JOURNAL the mint (the SDK's
+    ``create_entity`` and ``EventAPI``'s registration emitters). The projection
+    never mints: a fold-time mint is not replay-deterministic, so it would make
+    ``rebuild != live`` by construction.
+    """
+    _require_identity_label(label)
+    if explicit_id:
+        return str(explicit_id), True
+    with _holder_lock(label, name):
+        holders = live_name_holder_ids(g, label, name)
+        if len(holders) > 1:
+            raise AmbiguousEntityName(label, name,
+                                      [h for h in holders if h])
+        if holders and holders[0]:
+            return str(holders[0]), False
+        # Zero live holders, or one LIVE holder that carries no id (a legacy /
+        # foreign row) — that row cannot be addressed, so it cannot BE the
+        # identity: mint.
+        from .ids import ulid
+        return ulid(), True
+
+
+def resolve_fold_name(g, label: str, name: str, *,
+                      context: str = "") -> str | None:
+    """Resolve a NAME to one live id **for a fold** — never mints, never guesses.
+
+    #3590 D9: the projection is not the minter. A fold-time mint cannot be
+    journaled, so replay would mint a different id and ``rebuild != live`` by
+    construction — the exact defect the whole change exists to remove. So a
+    record that references an entity by NAME resolves to the single LIVE holder
+    and otherwise is left unfolded:
+
+    * one live holder -> its id (the edge/link is wired on that id);
+    * two or more live holders -> ``ambiguous-name`` recorded, nothing folded;
+    * no live holder (or only a terminal/id-less one) -> ``unregistered-
+      reference`` recorded, nothing folded.
+
+    Both refusal shapes are NON-exempt: a journal record that references an
+    entity the journal never registered is a producer bug (#3590 R8), and the
+    run must fail on it rather than silently drop the link. The remedy is on the
+    producer: register what you reference before referencing it (D9) — the SDK
+    doors do exactly that, so this path is reached only by a producer that did
+    not.
+    """
+    holders = live_name_holder_ids(g, label, name)
+    ids = [str(h) for h in holders if h]
+    if len(holders) == 1 and ids:
+        return ids[0]
+    from tortoise.projection.nonfolded import (
+        SHAPE_AMBIGUOUS_ENTITY_NAME,
+        SHAPE_UNREGISTERED_REFERENCE,
+        record_non_folded,
+    )
+    shape = (SHAPE_AMBIGUOUS_ENTITY_NAME if len(holders) > 1
+             else SHAPE_UNREGISTERED_REFERENCE)
+    # ``nonfolded.record_non_folded(shape, **fields)`` takes the R8 vocabulary
+    # (label / candidates / detail) — NOT the identity module's positional
+    # ``(label, name, candidate_ids, shape=)``. Passing ``name=``/``ids=``/
+    # ``context=`` raised a TypeError INSIDE the fold (after a rebuild has
+    # already wiped the graph), i.e. the fail-closed path crashed instead of
+    # recording. Verified against ``nonfolded.NonFoldedEvent``'s fields.
+    record_non_folded(shape, label=label, candidates=tuple(ids),
+                      detail=f"name={name!r}" + (
+                          f" context={context}" if context else ""))
+    logger.warning(
+        "entity-identity: a journal record references %s %r by NAME and it "
+        "resolves to %d live id-carrying holder(s) %s — NOT folding it. The "
+        "projection never mints an id (a fold-time mint is not replay-"
+        "deterministic); the producer must register what it references "
+        "(#3590 D9).%s", label, name, len(ids), ids,
+        f" context={context}" if context else "")
+    return None
+
+
 def _require_name_properties(name_props: tuple) -> tuple:
     """The name properties a coordinate may be matched against, validated."""
     props = tuple(name_props)
