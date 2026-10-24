@@ -883,27 +883,74 @@ def test_compute_confidence_read_never_stamps_updated_at():
 
 def test_ac5_interactive_latency_zone():
     """AC5 — interactive local EP completes well under the 1s budget for a
-    40-claim zone (embedded; generous bound to stay CI-stable)."""
+    40-claim zone (embedded).
+
+    THE BUDGET IS MEASURED IN **CPU** TIME, NOT WALL CLOCK (#9015 / #9474).
+    The bound was wall clock, and on a contended host wall clock is a
+    measurement of the BOX, not of the pass: the same tree reds or greens
+    with no code change, at a different number every run. Measured here
+    (4 CPUs, loadavg 13.8, a four-pass repeat over one warm graph on the
+    lane's host):
+    wall 1.79/1.81/1.84/1.88 s against **CPU 0.90/0.87/0.86/0.84 s** — i.e.
+    a wall/CPU ratio of 2.0-2.2x that is pure scheduling contention, and the
+    population cost is the same shape (main 1.24-1.34 s, four unrelated PRs
+    1.22/1.25/1.33/2.53 s — #9474's table). A fixed absolute wall bound
+    cannot separate a genuine regression from a starved box, and the
+    miss-landing-inside-its-own-noise is what makes it a population blocker
+    rather than a cosmetic flake (#9331: the failure text embeds a
+    measurement, so the rail can never match it against main).
+
+    So: `process_time` carries the budget (unchanged at 1.2 s — the ≤1s AC5
+    budget plus the #1273 margin, which is NOT relaxed here; only the
+    quantity it is read from changes, and on an idle box the two are the
+    same number), and the WALL reading is bounded RELATIVE to the work the
+    pass actually did (`max(2.5, 4 x cpu)`), never absolutely. That relative
+    guard is what keeps a wait-shaped regression detectable: a change that
+    turns the pass into blocking I/O or a lock wait burns no CPU, so a
+    CPU-only assertion would report it green. It is also strictly tighter
+    than the 5.0 s absolute runaway cap it replaces — `cpu < 1.2` above
+    gives `4 x cpu < 4.8 s`, so the relative bound can never be the looser
+    one. The 4x multiple is measured, not picked: four passes over one warm
+    graph on a 4-CPU box at loadavg 13.8 gave wall/cpu 2.09/2.13/2.22/1.99.
+
+    Why not #9015's recommended option 2 (best-of-N wall)? Because it does
+    not separate code from box here either: the four passes above were all
+    the SAME cost in CPU (0.90/0.87/0.86/0.84 s) and all equally slow in
+    wall — the cost is per-pass CPU, so the best of three is the best of
+    three identical contendings, not the pass's own cost. CPU time is the
+    quantity #9474's "Suggested fix" names ("measure CPU time / call count
+    instead of wall clock"); #9015 is the record of the flake this closes.
+    """
     import time
     with _fresh_sdk() as sdk:
         zone = _chain(sdk, 40, prefix="lat-")
         for cid in zone:
             sdk.set_point_baseline(cid, 1, 1)  # #344: calibrated graph
         assert sdk._dirty_roots
-        t0 = time.perf_counter()
+        w0, c0 = time.perf_counter(), time.process_time()
         result = sdk.compute_confidence()
-        elapsed = time.perf_counter() - t0
+        elapsed = time.perf_counter() - w0
+        cpu = time.process_time() - c0
         assert result["converged"] is True
         assert len(result["confidences"]) >= 39
         # O/IT indicator 1: interactive local EP ≤ 1s for 10-50 claim zones.
         # Profiling (graph-scripts/profile_395_local_ep.py) measured the 20-
         # claim local run at ~270ms; the 40-claim zone converges in ~10 iters.
         # PR #1273 (code review, conf 65): the old <5.0s bound did not enforce
-        # the acceptance criterion — tighten to the ≤1s budget with a small CI
-        # flake margin (1.2s); 5.0s stays only as a runaway hard cap.
-        assert elapsed < 1.2, (
-            f"local EP took {elapsed:.2f}s — interactive budget is ≤1s")
-        assert elapsed < 5.0, f"local EP took {elapsed:.2f}s — hard cap"
+        # the acceptance criterion — tighten to the ≤1s budget with a margin
+        # (1.2s), read from CPU time per the docstring above.
+        assert cpu < 1.2, (
+            f"local EP took {cpu:.2f}s of CPU ({elapsed:.2f}s wall, "
+            f"loadavg {os.getloadavg()[0]:.1f}) — interactive budget is ≤1s")
+        # …and the pass must not become WAITING: wall is bounded against the
+        # CPU the pass actually consumed, so a wait-shaped regression (lock,
+        # blocking I/O — no CPU burned) still reds. Floor 2.5s so a trivial
+        # pass is not held to a sub-second wall on a starved box.
+        wall_budget = max(2.5, 4.0 * cpu)
+        assert elapsed < wall_budget, (
+            f"local EP spent {elapsed:.2f}s wall for {cpu:.2f}s of CPU — "
+            f"the pass is waiting, not computing (bound {wall_budget:.2f}s, "
+            f"loadavg {os.getloadavg()[0]:.1f})")
 
 
 # ── AC8: run-depth semantic ─────────────────────────────────────────────
