@@ -616,11 +616,13 @@ durability authority, so the text inherited whatever the nearest comment
 believed. The fix is **deletion, not reconciliation**: the three contradicting
 journal-authority statements are removed, and no other file in the gate's
 contract surfaces carries the claim **in a wording the gate can see**; the
-restatements in wordings it is blind to are enumerated under *Open items*, not
-silently tolerated. The durability-scoped
+restatements in wordings it is blind to are enumerated under *Open items* — or
+named there as unclassified candidates, where a per-site read is still owed
+(#9867) — not silently tolerated. The durability-scoped
 gate in `tests/test_durability_posture.py` fails the build if a
 `log`/`journal`/`jsonl`/`event stream` is bound to `source of truth` — or to
-`is [the] truth` — outside this file.
+`is [the] truth` — or to `is [the|a|an|our|its|their|your] durab(le|ility)` —
+outside this file.
 
 **The gate's roots are the contract surfaces plus `graph-scripts/` (#4308).**
 The owner's §6 root list (`tortoise/`, the five docs, README) left the two
@@ -791,16 +793,20 @@ a written claim to the system it describes is **#5063**.
   on is a `log`/`journal`/`jsonl`/`event stream` within 40 chars of `source of
   truth` (either order), or of `is [the] truth`, or of
   `is [the|a|an|our|its|their|your] durab(le|ility)`. Every site below fails that
-  SHAPE — and **not** because "store" is a different noun: the journal bound to
-  `is the truth store` *would* match the middle alternation, as measured. The
-  blindness is POSITION: *truth* sits with no `is` copula near it, or an adverb
-  interrupts the predicate. Measured 2026-10-24 on `92b364e8b`, all still live:
+  SHAPE — and **not** because "store" is a different noun: `is the truth store`
+  bound to a `journal` subject *would* match the middle alternation, as measured.
+  The blindness is POSITION: *truth* sits with no `is` copula AFTER the subject,
+  an adverb interrupts the predicate, or the copula is FRONTED (an interrogative
+  `Is this log a JOURNAL — a durable … truth set`, where the `is` precedes the
+  subject). Measured 2026-10-24 on `92b364e8b` and re-checked on the merged base
+  `9296a4e85`, all still live:
   `projection/entities.py` (*Restore verbatim — the journal is still the truth*:
-  `still` defeats the predicate); `log.py`'s `EventLog` rubric (*a durable,
-  replayable truth set*: durability attributed with no predicate at all);
+  `still` defeats the predicate); `log.py`'s `EventLog` rubric (*Is this log a
+  JOURNAL — a durable, replayable truth set*: the copula is fronted, so the
+  subject→predicate order the pattern requires is reversed);
   `projection/edges.py` (*a recovery write that appended to the truth store*: no
   `is`); `commit_ops.py` (*event stays journaled (rebuild retains the truth)*);
-  `sdk.py` (*the journal — the TRUTH never recorded*; *the journal (TRUTH)*).
+  `sdk.py` (*the journal — the TRUTH — never recorded*; *the journal (TRUTH)*).
   **The OPPOSITE claim is also present and must stay green** — the gate's
   silence there is correct, not a hole: the `no`/`needs no` truth-store negation
   (`projection/__init__.py`, `mcp_auth.py`, `mcp_server.py`), `__main__.py`'s *a
@@ -822,7 +828,7 @@ a written claim to the system it describes is **#5063**.
   per-site read before they can be called restatements: `record_writer.py`'s *a
   per-record source of truth already exists — the append-only journal*, which
   the gate WOULD match once the paragraph is joined (`source of truth` →
-  `journal` is 38 characters) and misses only because the wrapped scan
+  `journal` is 34 characters) and misses only because the wrapped scan
   deliberately excludes that family and the line break puts `exists — the
   append-only journal` on the next line — so this is the join-SCOPE hole, not a
   pattern hole, and it is the strongest case here, the one #9867 must decide;
