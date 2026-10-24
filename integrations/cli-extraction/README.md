@@ -16,7 +16,7 @@ read-only, and it is documented here rather than glossed.
 
 ## How it works
 
-```
+```text
 capture (per-turn hook, #3963)      codex://threads/<id>#message=<id>
         │                                   │
         ▼                                   ▼
