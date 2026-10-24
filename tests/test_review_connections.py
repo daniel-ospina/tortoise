@@ -114,6 +114,38 @@ def test_add_does_not_suggest_connected_pairs(sdk_factory, tmp_path):
     assert result["add"] == []
 
 
+def test_add_excludes_same_source_pairs(sdk_factory, tmp_path):
+    """Same-source pairs are never suggested — shared provenance is not a
+    missing connection.
+
+    Consecutive sections of one document are near-duplicates by
+    construction (0.89+ cosine — the band embeddings.py reserves for
+    near-duplicates) and crowd the add queue on a mined corpus, so they are
+    excluded even ABOVE threshold, while cross-source pairs at a lower
+    similarity are still suggested.
+    """
+    sdk = sdk_factory(tmp_path)
+    doc = "doc://same-corpus.md"
+    p1 = sdk.create_point("statement", "deployment section intro",
+                          extractedFrom=doc)
+    p2 = sdk.create_point("statement", "deployment section details",
+                          extractedFrom=doc)
+    p3 = sdk.create_point("statement", "deployment runbook elsewhere",
+                          extractedFrom="doc://other-corpus.md")
+    result = sdk.review_connections(
+        mode="add",
+        similarity_fn=_sim({
+            (p1["id"], p2["id"]): 1.0,   # same source — the HIGHEST score
+            (p1["id"], p3["id"]): 0.8,   # cross-source — lower score
+            (p2["id"], p3["id"]): 0.8,
+        }),
+    )
+    add = result["add"]
+    assert len(add) == 2, f"expected the 2 cross-source pairs, got {add}"
+    # The 1.0-similarity same-source pair must NOT be among them.
+    assert all({e["from"], e["to"]} != {p1["id"], p2["id"]} for e in add)
+
+
 def test_add_below_threshold_excluded(sdk_factory, tmp_path):
     """Pairs below the similarity threshold are not suggested."""
     sdk = sdk_factory(tmp_path)

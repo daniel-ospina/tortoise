@@ -22430,9 +22430,12 @@ class TortoiseSDK:
         mode=add: find relevant-but-MISSING connections. Pairs of Points that
             are semantically related (embedding cosine similarity above
             ``similarity_threshold``) but NOT yet connected (no shared
-            operator, no direct edge) are surfaced as suggested connections:
-            {from, to, suggested_relation: "IMPL", reason, similarity}.
-            Suggestions only — nudge, don't enforce (design principle 4).
+            operator, no direct edge — and not extracted from the same
+            Source: same-source pairs are near-duplicates by construction and
+            are excluded, see _review_add) are surfaced as suggested
+            connections: {from, to, suggested_relation: "IMPL", reason,
+            similarity}. Suggestions only — nudge, don't enforce (design
+            principle 4).
             Scope: ``scope`` (topic text or Point id) narrows the candidate
             pool via hybrid retrieval; None = whole graph, capped at
             REVIEW_ADD_POOL_CAP most-recently-updated non-terminal,
@@ -22797,16 +22800,22 @@ class TortoiseSDK:
             "WHERE n.is_operator = false "
             f"  AND {_current_status_clause('n.status')} "
             "  AND (n.outdated IS NULL OR n.outdated = false) "
-            "RETURN n.id, n.content, n.status, n.updatedAt",
+            "OPTIONAL MATCH (n)-[:extractedFrom]->(src:Source) "
+            "RETURN n.id, n.content, n.status, n.updatedAt, collect(src.url)",
         ).result_set
         pool = {}
-        for pid, content, status, updated_at in rows:
+        for pid, content, status, updated_at, sources in rows:
             content = content or ""
             if content.startswith("[MITIGATION]"):
                 continue  # mitigation bookkeeping — not a standalone claim
             pool[pid] = {"id": pid, "content": content,
                           "status": status or "draft",
-                          "updated_at": updated_at or ""}
+                          "updated_at": updated_at or "",
+                          # Point→Source is many-to-many (ontology §3.3,
+                          # #3263), so collect, never a single url. mode=add
+                          # skips pairs that SHARE a source — see the
+                          # same-source exclusion in _review_add.
+                          "sources": {u for u in (sources or []) if u}}
         if not scope:
             # Whole-graph scan: cap at the most-recently-updated points so
             # the O(n²) pairwise pass stays bounded (REVIEW_ADD_POOL_CAP).
@@ -22908,6 +22917,19 @@ class TortoiseSDK:
                 continue
             if frozenset((a, b)) in connected:
                 continue  # already connected — nothing to suggest
+            # Same-source pairs are excluded: two Points extracted from ONE
+            # document or session are near-duplicates by construction —
+            # consecutive sections of a file sit in the 0.89+ band
+            # embeddings.py reserves for near-duplicates and clear any add
+            # threshold — so on a mined corpus they crowd the suggestion
+            # queue with pairs that can never be a useful *connection*:
+            # they already share provenance. Measured on a ~7.7k-point
+            # corpus: add-mode suggestions were dominated by 1.00-similarity
+            # pairs from the identical doc_…md source, and mode=add was
+            # effectively unusable at scale. A shared source is not a
+            # relationship an agent needs to be told to add.
+            if pool[a]["sources"] & pool[b]["sources"]:
+                continue  # same extractedFrom — provenance, not a connection
             try:
                 score = float(s)
             except (TypeError, ValueError):
