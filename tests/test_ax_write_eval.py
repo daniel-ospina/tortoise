@@ -1202,6 +1202,31 @@ def test_every_committed_run_record_names_its_input_and_its_writes():
         )
 
 
+def _results_row(doc: str, number: int) -> str:
+    """The RESULTS-table line for row `number`, never the whole document.
+
+    Two pins in this file were whole-document containments, and each phrase also
+    occurs elsewhere in the doc: `**no NAND**` in the P0 failure-class row, and
+    the correction run's undeclared-kind count in the aggregate sentence just
+    below the table. So neither containment could fail on the row it names — the
+    row 9 mutation `**no NAND**` -> `**one NAND**` left the suite green
+    (#9695 review, measured). A pin earns its place only by failing on the thing
+    it heads, so scope it.
+
+    `number` appears in TWO tables — the input list (3 cells: `| 9 |
+    contradicting claim | truth-vs-relevance |`) and the results table (7 cells,
+    the one carrying counts and findings). Taking the first match would pin the
+    WRONG ROW and silently assert against the input list, so pick the row with
+    the most cells; that is the results row by construction.
+
+    Returns "" when no such row exists, which fails the caller's assertion rather
+    than the extraction — a deleted row must read as "the row no longer says it",
+    not as an error in the test.
+    """
+    candidates = re.findall(rf"^\| {number} \|.*$", doc, re.M)
+    return max(candidates, key=lambda row: row.count("|"), default="")
+
+
 def test_the_reported_totals_match_the_committed_records():
     """The report's headline must be a function of the records, not of memory.
 
@@ -1638,9 +1663,10 @@ def test_the_documented_failure_classes_reconcile_with_the_committed_records():
         f"the contradicting-claim run carries {contradicting_nands} NAND "
         f"operator(s) — results row 9's '**no NAND**' would be false"
     )
-    assert "**no NAND**" in doc, (
+    row9 = _results_row(doc, 9)
+    assert "**no NAND**" in row9, (
         "results row 9's '**no NAND**' — the finding the whole input exists to "
-        "demonstrate — is gone from the doc"
+        f"demonstrate — is gone from the doc; row 9 reads: {row9!r}"
     )
 
     # The census ENUMERATION is prose, so its `×N` multipliers drifted unpinned
