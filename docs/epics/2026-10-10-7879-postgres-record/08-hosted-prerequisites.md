@@ -123,8 +123,10 @@ per journal record type, totality as a registry property, idempotence by stateme
 **read from the migrations on disk** rather than restated (`RECORD_MIGRATIONS`,
 `tortoise/record_projection.py:170`; `table_columns()`, `refused_props_names()`).
 
-`PointsMerged` and `EntityMutated op=rename` are **declared refusals**, and `ConfidenceChanged` is a
-**`NoRecordEffect`** — the EP carve-out in executable form (`04-projection.md` §1).
+`EntityMutated op=rename` is the remaining **declared refusal** (`PointsMerged` was one until
+`#9892`: it projects now — one hard delete per loser, the graph fold's own `DETACH DELETE`),
+and `ConfidenceChanged` is a **`NoRecordEffect`** — the EP carve-out in executable form
+(`04-projection.md` §1).
 
 ### A3. The write path — **EXISTS, WIRED, and measured working end-to-end**
 

@@ -2212,6 +2212,79 @@ def test_the_public_capture_path_writes_the_epistemic_layer(capture_sdk,
         conn.close()
 
 
+def test_a_merge_through_its_producer_leaves_the_losers_out_of_the_record(
+        monkeypatch, tenant, tmp_path):
+    """#9892 — `PointsMerged` projects, and the record stops resurrecting a merge.
+
+    The merge had exactly ONE producer (`tortoise/api.py::merge_points`), which
+    emits no `op`, while the registry declared the type as an `OpDispatch`
+    refusal keyed on `op: "merge"`. So on the live door the refusal never
+    fired for the real payload: the write failed generically, counted
+    `write_failed`, and left BOTH Points in `public.point` — a record-sourced
+    rebuild then resurrected the merged-away Point AND its edges (measured:
+    the record view held 3 points / 4 relations against the journal replay's
+    2 / 2).
+
+    Three claims, and the last one is the one that made the defect durable:
+    the merge's own `journal_event` POSITION row lands too, so a later replay
+    can see the record was consumed.
+    """
+    from tortoise.api import EventAPI, provenance
+    from tortoise.log import EventLog
+
+    conn = _record_db()
+    try:
+        _ensure_record_schema(conn)
+        _seed_tenant(conn, tenant)
+        monkeypatch.setenv(record_writer.RECORD_DSN_ENV,
+                           _app_role_dsn(os.environ[RECORD_DB_ENV]))
+        log_path = tmp_path / "merge-journal.jsonl"
+        api = EventAPI(EventLog(str(log_path)), initiated_by="extractor",
+                       agent_id="merge-leg")
+        prov = provenance("doc.txt", [0, 10], "quote", extracted_by="leg@0")
+
+        before = dict(monitoring.record_write_failure_counts())
+        with use_record_tenant(*tenant):
+            keep = api.add_point("the first claim", prov)
+            loser = api.add_point("the second claim", prov)
+            api.add_operator("IMPL", [loser, keep], prov)
+            api.merge_points(keep_id=keep, merge_ids=[loser])
+        lost = (monitoring.record_write_failure_counts().get("write_failed", 0)
+                - before.get("write_failed", 0))
+
+        assert lost == 0, (
+            "the merge's record write failed — `PointsMerged` is declared to "
+            "project (one delete per `merge_ids` entry), so a failure here is "
+            "the refusal coming back")
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT node_key FROM public.point WHERE org_id=%s "
+                "AND graph_id=%s", tenant)
+            keys = {row[0] for row in cur.fetchall()}
+            cur.execute(
+                "SELECT count(*) FROM public.relation WHERE org_id=%s "
+                "AND graph_id=%s AND (src_key=%s OR tgt_key=%s)",
+                (*tenant, loser, loser))
+            loser_edges = int(cur.fetchone()[0])
+            cur.execute(
+                "SELECT count(*) FROM public.journal_event WHERE org_id=%s "
+                "AND graph_id=%s AND event_type='PointsMerged'", tenant)
+            merge_positions = int(cur.fetchone()[0])
+        assert keep in keys, "the survivor's row must stay"
+        assert loser not in keys, (
+            "the merged-away Point is still in the record — a record-sourced "
+            "rebuild would resurrect it")
+        assert loser_edges == 0, (
+            f"{loser_edges} relation row(s) still name the merged-away Point; "
+            "the graph's `DETACH DELETE` drops them, so the record's cascade "
+            "must too")
+        assert merge_positions == 1, (
+            "the merge consumed no `journal_event` position row — a replay "
+            "could not even see that the record was consumed")
+    finally:
+        conn.close()
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # 9. The TENANT on the REST/hosted lane — carried by value, resolved once
 # ════════════════════════════════════════════════════════════════════════════
