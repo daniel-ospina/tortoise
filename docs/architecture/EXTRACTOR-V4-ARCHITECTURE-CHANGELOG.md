@@ -947,12 +947,14 @@ convention is per-document, not per-section), so `membership_errors` holds the n
 ones.
 
 **The most valuable thing the enumeration found: `near_dup_detect` is a guard whose declared PLACEMENT does not
-exist.** `_boundary` is real and tested (`fold_allowed` and the `*_differs` wrappers resolve to it), but every shipped
-call site is reached from INSIDE the post-gate consolidation pass (`classify_consolidation`, called from
-`execute_embed`) or from the capture seam (`dedup_classify.rephrase_hit`, which FOLDS and DETACH-DELETEs). In
-`extract_session_v2`, `apply_vet` runs BEFORE `execute_embed` — so the design's pre-gate `S2.2a-β` site does not
-exist, which §4.2's own *"The order is inverted"* already records and `#5087` owns the code half. The row says so in
-its note rather than letting `implemented` read as "the pre-gate step ships".
+exist.** `_boundary` is real and tested (its wrappers are `distinguishing_difference`, `_difference`, `fold_allowed`
+and `supersede_allowed`), but the three call-site families are the post-gate consolidation pass
+(`classify_consolidation`, called from `execute_embed`), the capture seam (`dedup_classify.rephrase_hit`, which FOLDS
+and DETACH-DELETEs), and the temporal counting lane (`temporal_aggregation._restatement`, which has no in-product
+caller today — its consumer is `tools/longmem_eval/`). In `extract_session_v2`, `apply_vet` runs BEFORE
+`execute_embed` — so the design's pre-gate `S2.2a-β` site does not exist, which §4.2's own *"The order is inverted"*
+already records and `#5087` owns the code half. The row says so in its note rather than letting `implemented` read as
+"the pre-gate step ships".
 
 **Drift is now checked in one structure, not only by convention.** §4.2's audit table is a mechanism enumeration a
 prose document can be read for, so `test_the_four_audited_dedups_each_have_a_row` parses it and compares it to the

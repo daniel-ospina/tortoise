@@ -264,14 +264,23 @@ mechanisms:
       that survives it (`vet_gate.OUTCOMES`, S2.2b — row `vet`) · execute the
       FUSION (row `near_dup_merge`, S3).
       ⚠️ WHAT EXISTS IS THE GUARD, NOT ITS DECLARED PLACEMENT — and the row must
-      not be read the other way. `_boundary` is the mechanical pair comparison
-      and `fold_allowed` plus the `*_differs` wrappers are its public shape (they
-      resolve to `_boundary`), but every shipped call site is reached from INSIDE
-      the post-gate pass or from the capture seam. Measured: the wrappers are
-      called from the consolidation classifier (`classify_consolidation`, which
-      runs inside `execute_embed`) and from `dedup_classify.rephrase_hit` (the
-      capture seam, which FOLDS and DETACH-DELETEs — see #9437); in
-      `extract_session_v2` `apply_vet` runs BEFORE `execute_embed`, so the
+      not be read the other way. `_boundary` is the mechanical pair comparison;
+      its public shape is the wrapper family `distinguishing_difference`,
+      `_difference`, `fold_allowed` and `supersede_allowed` (all four resolve to
+      `_boundary`), plus the `_entity_names`/`MergePlan` machinery in
+      `near_dup_merge.py`. Measured — and there are THREE call-site families, not
+      one:
+      (1) the post-gate consolidation pass: `classify_consolidation` (which runs
+      inside `execute_embed`) calls the guard on the paraphrases it folds;
+      (2) the capture seam: `dedup_classify.rephrase_hit` calls `fold_allowed`
+      and then FOLDS and DETACH-DELETEs the loser (see #9437);
+      (3) the temporal counting lane: `temporal_aggregation._restatement` calls
+      `fold_allowed` when deciding whether two events are one restatement, which
+      moves `count_distinct_events`' `n_events`. ⚠️ That module has no in-product
+      `tortoise/` caller today (its consumer is `tools/longmem_eval/`), so it is
+      a shipped-MODULE site, not a shipped-write-path one — but it is a real
+      consumer of the guard's semantics and a lane changing the guard must see it.
+      In `extract_session_v2` `apply_vet` runs BEFORE `execute_embed`, so the
       design's pre-gate `S2.2a-β` SITE does not exist. §4.2's own "The order is
       inverted" records exactly that, and #5087 owns the code half.
       ⚠️ So `implemented` here means "the mechanical DETECT + never-across guard
