@@ -870,7 +870,6 @@ declaration"*, while §4.0/§4.1 declare **EIGHT** (and §4.4 covers all eight),
 *"not a ninth declaration"*. Both are corrected in the design document; a guard now reds if that subsection states a
 spelled or numeric step count other than §4.0's canonical one, or a `… declaration` ordinal other than the next one.
 
-
 ## 2026-10-23 — §4.2's `S0a/S0b` verdict was stale in both directions
 
 The four-way dedup audit's closing sentence said *"`S0a NORMALIZE + HASH → S0b SOURCE DEDUP` is genuinely absent"*. That
@@ -881,3 +880,96 @@ is the part that is still absent. The passage now states the design in the prese
 measurement history lives here rather than in the design document (#8542's rule). `config/v4-mechanisms.yml` carries
 `source_dedup` as `implemented` and its declaration marker sits on this passage, so a stale
 verdict there would be a row saying "shipped" anchored to a document saying "absent".
+
+## 2026-10-24 — D12/O4's FUSION landed: the flagged verdict finally has a consumer (#5006)
+
+`config/v4-mechanisms.yml` recorded `near_dup_merge` as `state: not-implemented, tracking_issue: 5006` while
+`EXTRACTOR-V4-ARCHITECTURE.md` §4.2 named **three** sites for the near-duplicate concern — DETECT the pair
+(`_boundary`, S2.2a-β), record the VERDICT (`vet_gate.OUTCOMES`' `MERGE`, S2.2b), execute the FUSION (S3) — and the
+third had no implementation. `vet_gate.py`'s own docstring was the honest record of it: *"nothing consumes it yet: no
+code routes a `MERGE` verdict to S3"*. #9424 had already landed the REFUSAL half (a fold that would drop an
+attachment is not taken); what was missing is the authorised alternative for exactly that pair.
+
+**What landed.** `tortoise/near_dup_merge.py` is the fusion: ONE survivor (the prior, its claim **byte-identical** —
+never fused), the **union** of both sides' attachments written onto it, and the losing document's provenance kept as
+a `(Session)-[:CONTAINS]->(Point)` edge with its own quote on the merge record. `extract_session_v2` routes the VET
+`MERGE` verdicts (`_merge_flagged_contents`, matched by normalised content, not by VET's index-shaped item ids) into
+`execute_embed`'s consolidation pass; `classify_consolidation` gained the fifth `MERGE` outcome the design always had.
+The fusion runs in `capture_session` through `apply_merge_union`: the `aboutObject` union edges go through the
+journaled `link_entity` writer, so they replay (`#3664`). The losing document's provenance edge
+(`(Session)-[:CONTAINS]->(Point)`) is the same raw, unjournaled write the `#2104` fold uses — durable through the
+`:Session` snapshot rather than the journal (`#3947`, `#3722` scope) — and an id-less `Object` stub stays a
+live-only `MERGE` (`#1727`). What is guaranteed is that no edge is *lost*; what is not is that every one of them
+replays.
+
+**Why the bar is 0.95 and not the NOOP band's 0.45.** §16.4's evidence (*"practical thresholds cluster at ~0.95"*;
+*"a false merge costs MORE than keeping near-duplicates"*) plus `#9424`'s split: a mid-band paraphrase pair is still
+REFUSED and still goes to `ADD` — both claims survive. The fusion only makes the near-IDENTICAL pair admissible.
+
+**The verdict is necessary and never sufficient.** The mechanical ladder (§16.4's never-across guard, the bar, a
+readable union) is re-checked inside the mechanism. With no arbiter injected there are no `MERGE` verdicts, so the
+mechanism is **inert** — the same injected-seam posture VET ships with — and the registry row says `implemented` on
+the strength of `tests/test_near_dup_merge_5006.py` driving the real classifier, the real write path and a real
+graph, not on a flag flip. A false `contained` counter (counting the ATTEMPT rather than the edge) was found and
+fixed by that battery before landing.
+
+**Review round 2 — three residual gaps, all closed by measurement.** (1) The verdict key was content-only: `MERGE` is
+a legal outcome for `entities`/`events`/`points` alike and `_item_text` is `name or content` for all three, so an
+event's text — or an entity's name — that normalised to a point's could authorise a fusion of a Point the arbiter
+never marked. `_merge_flagged_contents` now keeps only the `points` section (a row with no readable section
+contributes nothing), and `test_a_verdict_on_another_SECTION_does_not_authorise_a_point_merge` pins it. (2) The
+id-less `Object`-stub branch of `apply_merge_union` counted the ATTEMPT (`linked += 1` with no read-back) while the
+`CONTAINS` branch beside it counted the EDGE — reachable whenever the survivor is absent, and the one place `linked`
+would stop being a measurement; it is now `MERGE … RETURN count(*)` like its sibling. (3) The ONE production
+invocation of the fusion (`capture_session`'s merge block) was reached by no test — a mutation deleting it stayed
+green. `TestTheCapturePathExecutesTheFusion` now drives the real capture write path (the S1–S5 extraction stubbed,
+since `MERGE` needs an injected arbiter `capture_session` has no seam for) and asserts on the graph: the survivor
+carries the candidate-only attachment, `(Session)-[:CONTAINS]->(Point)` exists, and no second Point was minted.
+
+## 2026-10-24 — the declared set became an ENUMERATION: 8 rows → 13 (`#5064`)
+
+`config/v4-mechanisms.yml` carried eight mechanisms. §4.2's FOUR-DEDUP AUDIT table declares four dedups by name
+(`D-a`..`D-d`) and **only `D-a` had a row**; §4.1's step list declares `S2.2a-α EXACT DEDUP` and `S2.2a-β NEAR-DUP
+DETECT` and neither was registered (only the S3 FUSION was); §4.2's *"the against-store exact dedup has FOUR
+preconditions"* paragraph declares the fourth — an ATOMIC write — and says it does not exist, and the registry's own
+`near_dup_merge` note recorded that it had **no row and no tracking issue**; §4.3 G3 / §4.4 declare a per-step
+FAILURE POLICY and §4.4 states its own status (*"a SPEC, not a description of what runs"*). Five declared mechanisms,
+no row for any of them — the first deliverable `#5064`'s Scope section names.
+
+**What landed in the registry.** `exact_dedup` (`D-b`+`D-c`, one mechanism at two keys — `dedup_classify.exact_hit_id`
+for the in-capture leg; the design's `D-b` within-batch leg is an INLINE `_norm`-keyed dict inside `execute_embed` and
+`D-c` is `sdk._find_point_by_content`, a METHOD, so both are named in the note rather than anchored — and the three
+legs do not share one equality notion), `near_dup_detect` (`extractor_v2._boundary`), `against_priors_consolidation`
+(`D-d`, `extractor_v2.classify_consolidation`), `atomic_point_write` (**`not-implemented`**, tracking `#9879` — filed
+because a declared precondition with nobody tracking it is the defect), `failure_policy` (**`not-implemented`**,
+tracking `#5087`, the code half the design itself names). The marker convention is per-DOCUMENT and requires
+"at least one" — `span_link`, `fanout_cap` and `sufficiency_router` mark two sites each — while a row citing several
+sections of one document may be marked at only one, so `membership_errors` holds the new rows exactly as it holds the
+old ones.
+
+**The most valuable thing the enumeration found: `near_dup_detect` is a guard whose declared PLACEMENT does not
+exist.** `_boundary` is real and tested (its wrappers are `distinguishing_difference`, `_difference`, `fold_allowed`
+and `supersede_allowed`), but the FOUR call-site families are the post-gate consolidation pass
+(`classify_consolidation`, called from `execute_embed`), the capture seam (`dedup_classify.rephrase_hit` — which
+returns only the `(canonical_id, overlap)` verdict and does no graph I/O; the SDK's seam then FOLDS and DETACH-DELETEs), the temporal counting lane (`temporal_aggregation._restatement`; that COUNTING LANE has no
+in-product `tortoise/` caller today — its consumer is `tools/longmem_eval/`), and the mining/ingest apply-first path
+(`SDK._dedup_content_candidates`, a shipped write path reached from `mining.py` and from the public `SDK.mine_corpus`
+→ `mining.mine_corpus_with_sdk`, whose `content_dedup` defaults to True — the parameter is the miner's, not
+`SDK.mine_corpus`'s — which WIRES a draft-to-draft IMPL on the guard's verdict).
+In `extract_session_v2`, `apply_vet` runs BEFORE
+`execute_embed` — so the design's pre-gate `S2.2a-β` site does not exist, which §4.2's own *"The order is inverted"*
+already records and `#5087` owns the code half. The row says so in its note rather than letting `implemented` read as
+"the pre-gate step ships".
+
+**Drift is now checked in one structure, not only by convention.** §4.2's audit table is a mechanism enumeration a
+prose document can be read for, so `test_the_four_audited_dedups_each_have_a_row` parses it and compares it to the
+registry BOTH ways — a fifth audited dedup with no row reds, and a mapping entry for a withdrawn one reds. The
+marker convention remains what covers every other declaration, and an UNMARKED prose declaration is still invisible
+(the residual #9778 states, unchanged and restated in the registry header). Two absence claims are pinned to the
+code rather than to their notes: the degraded S3 render still instructing *"assume everything is new"*
+(`failure_policy`), and no UNIQUE constraint naming `Point` while one already exists for another label
+(`atomic_point_write`).
+
+**What this does NOT do.** No mechanism was implemented — recording the absences is the output. `sufficiency_router`
+(`#5009`) and `state_value_carve_out` (`#9775`) stay `not-implemented`, so `#5064`'s Target 3 (the attached symptoms
+stop reproducing) is still open; the substrate half is done and should not be redone.

@@ -121,10 +121,12 @@ narrowed PRIMARY exception — an author-set prior is a non-reconstructible inpu
 per journal record type, totality as a registry property, idempotence by statement shape
 (`INSERT … ON CONFLICT (org_id, graph_id, node_key) DO UPDATE`), and the property→column decision
 **read from the migrations on disk** rather than restated (`RECORD_MIGRATIONS`,
-`tortoise/record_projection.py:169`; `table_columns()`, `refused_props_names()`).
+`tortoise/record_projection.py:172`; `table_columns()`, `refused_props_names()`).
 
-`PointsMerged` and `EntityMutated op=rename` are **declared refusals**, and `ConfidenceChanged` is a
-**`NoRecordEffect`** — the EP carve-out in executable form (`04-projection.md` §1).
+`EntityMutated op=rename` is the remaining **declared refusal** (`PointsMerged` was one until
+`#9892`: it projects now — one hard delete per loser, the graph fold's own `DETACH DELETE`),
+and `ConfidenceChanged` is a **`NoRecordEffect`** — the EP carve-out in executable form
+(`04-projection.md` §1).
 
 ### A3. The write path — **EXISTS, WIRED, and measured working end-to-end**
 
@@ -156,7 +158,7 @@ raised) and §17.1-correct (record after the append, before the cache fold).
 
 ### A5. Embeddings — **durable today, not searchable, and that is not a defect**
 
-`embedding jsonb` on `source` (`…01:175`), `event` (`…01:233`), `point` (`…03:66`). **No migration and no module uses `pgvector`** — `grep -riE 'pgvector|vector\('` over all 71
+`embedding jsonb` on `source` (`…01:175`), `event` (`…01:233`), `point` (`…03:66`). **No migration and no module uses `pgvector`** — `grep -riE 'pgvector|vector\('` over all 72
 migrations returns **0**, and `git grep -il pgvector -- 'tortoise/*'` is **0**. The word itself
 appears in prose only — e.g. this document, §12.1c's open question, this epic's
 `03-schema.md`, and the competitor notes. So the record is a **durability carrier** for vectors, not a retrieval index — which is
@@ -243,7 +245,7 @@ first. `TORTOISE_RECORD_SINGLE_TENANT` is deliberately staged nowhere and a test
 `push` trigger on `supabase/**` runs the drift checks, not the apply — so the record tables will
 land on the next dispatch
 whether or not R1 has happened. Two couplings to respect: the record reader is **name-gated** on
-`RECORD_MIGRATIONS` (`record_projection.py:169`, no glob) so a **new** `.sql` is invisible to the
+`RECORD_MIGRATIONS` (`record_projection.py:172`, no glob) so a **new** `.sql` is invisible to the
 image until its name is added there; and `deploy-hosted.yml` deliberately does **not** trigger on
 `supabase/migrations/**` for that reason.
 **What it blocks:** any write at all; and a schema change that silently no-ops in the image.
@@ -560,8 +562,9 @@ exactly this question and the tree cannot answer it today.
 `8767b1c8b` measurement **there was no dedicated table for it** — the text was carried as data, in the
 `point.content` column and in the layer-1 `journal_event.payload` mirror of the record that wrote it
 (see below) — `grep -riE 'narrative|raw_turn|raw_text|transcript'` over all
-65 migrations returned **0** (at this head, 71 migrations, the same command matches it on 43 lines — 7 in `20261025000001_record_tenancy_role_and_guc.sql` (R6's grants and
-tenant policy for that very table) and 36 in `20261023000001_record_session_narrative.sql` — the table this
+65 migrations returned **0** (at this head, 72 migrations, the same command matches it on 62 lines — 7 in `20261025000001_record_tenancy_role_and_guc.sql` (R6's grants and
+tenant policy for that very table), 36 in `20261023000001_record_session_narrative.sql` and 19 in
+`20261024000001_record_session_narrative_carrier.sql` — the table this
 item's DECIDED block adds);
 `public.session` carries `turn_count` and **no turns**. §9.1 is explicit
 that *"the narrative is not something we're suggesting to store in the graph (same as raw) but store
@@ -591,7 +594,7 @@ write order.
 
 | column | carrier (§3: PRIMARY iff the journal carries it) |
 |---|---|
-| `narrative` | the commit's `story_arc` ⚠️ **— no journal carrier exists yet, see below** |
+| `narrative` | the commit's `story_arc`, carried by `SessionNarrated` — the record #9555's follow-up added to the layer-1 commit path (see the ✅ block below; when this table landed the class was *PRIMARY-WITHOUT-CARRIER*, and the journal was extended, which is what that block records) |
 | `summary` | the same record's `summary`, projected ONLY alongside the narrative (the capture's own session `:Source` sets `summary` to the transcript's first utterance, which is not the narrative) |
 | `capture_redactions` | `SessionRecorded.capture_redactions` (`#4911`) — **integer**, because a count is not an envelope. It lands: the carrier's `session.capture_redactions` was narrowed to `integer` by `20261022000001` (`#9264`, fixed — see the `session` record row in §A2), so the `SessionRecorded` that carries this count reaches the record instead of being refused; a count this column cannot hold is still written as NO count, never a 0 or a coerced shape |
 | `turn_count` | `SessionRecorded.turn_count` |
@@ -625,9 +628,44 @@ statement shapes, order-independence, the reader reading the record only) plus t
 independence, the negative count, the `authenticated` write refusal, and a cross-tenant read returning
 nothing). Both were shown to redden under a mutation (RLS disabled; the count CHECK removed).
 
-**⚠️ What does NOT land here, stated so the item is not over-claimed (this is R7's remainder):**
+**✅ R7's REMAINDER LANDED (#9555, follow-up).** Both items below were the
+item's own remainder and both are now built. The original text is kept beneath
+them, because a stale "does not land here" note is how the next lane rebuilds
+work that already exists.
 
-1. **The narrative has NO journal carrier in this tree.** `story_arc` is written to the *graph* by the
+1. **The narrative's journal carrier EXISTS.** `hosted_api._execute_commit_writes`
+   journals `SessionNarrated` (`record_projection.NARRATIVE_RECORD_TYPE`, declared
+   `NoRecordEffect` — §9.1 keeps the narrative outside the graph) right after the
+   raw-Cypher MERGE it describes, carrying `sessionId` + `story_arc` + `summary`.
+   Its record effect is the SHAPE-KEYED secondary projection, so the write path is
+   still ONE path (`sdk._emit_event` → the live door → `record_projection.replay`):
+   a record was added, no writer was.
+2. **A caller serves from the record.** `tortoise/record_text.py` composes
+   `record_read` for §9.4's fetch, and `python -m tortoise record-text` is its
+   operator verb (exit `0` served / `3` readable-and-absent / `2` no verdict —
+   the 3-versus-2 split exists because a tenancy-filtered read returns 0 rows
+   SILENTLY, so an unreadable SCOPE must never be reported as an absent SESSION).
+   ⛔ The hosted ask/answer path's own verbatim fetch is NOT wired and is not
+   claimed: it is an MCP/SDK SURFACE change, which `AGENTS.md` puts behind
+   Daniel's approval.
+3. **Measured, not asserted — with the ARMING stated, because a leg that skips
+   everywhere defends nothing:** `tests/test_9555_narrative_carrier.py` (carrier,
+   projection, §9.4 fetch, and the verb's exit codes run AS THE APP ROLE) arms in
+   CI's `test-record-postgres` job, which asserts zero skips.
+   `tests/test_9555_narrative_cache_rebuild.py` — the derived cache DESTROYED and
+   rebuilt from the record alone, narrative and redaction count identical across
+   the wipe — needs **both** a record Postgres and a FalkorDB, and **no CI job
+   arms both** (the armed record job provisions no cache, and every FalkorDB job
+   sets no record DSN), so it runs only on a manually-armed lane. Measured there,
+   on a throwaway `postgres:16` plus a private lane FalkorDB: that file is **1
+   test, 0 skipped** (`--collect-only` is the authority — it is one leg, and one
+   is what it takes to destroy and rebuild the cache), and the two files together
+   are 23, 0 skipped. ⛔ The gap is named rather than papered over: until a job arms both,
+   a regression in the record→cache narrative restore would merge green.
+
+**⚠️ THE ORIGINAL REMAINDER, kept verbatim so the two statements above stay checkable:**
+
+1. **The narrative had NO journal carrier in this tree.** `story_arc` is written to the *graph* by the
    layer-1 commit's raw Cypher (`hosted_api.py`'s document/event MERGEs) and raw Cypher is not a
    journal record (§17.1's unjournalled-writer ledger), so a live capture lands
    `turn_count` and `capture_redactions` (both carriers are `SessionRecorded`, which reaches the record
@@ -640,8 +678,9 @@ nothing). Both were shown to redden under a mutation (RLS disabled; the count CH
    verb (R8, `#9556`) and into the ask/answer verbatim path is where D7's end-to-end measurement runs,
    and the production record DSN is still unarmed (R1, `#9548`).
 
-So the **home, the projection and the record-only reader** land here; D7's measurement does not close
-with this change, and #9555 stays open on (1) and (2).
+So the **home, the projection and the record-only reader** landed in #9638; D7's measurement did not
+close with that change, and #9555 stayed open on (1) and (2) — both of which have since landed, as the
+✅ block above states.
 
 ### R8 — A restore path from the record: an operator verb and a drill · **M** · code + ops · **BLOCKER**
 
@@ -944,7 +983,7 @@ both `rebuild_from_record` and backup-module lines still return the stated count
 
 ⚠️ **Re-measured 2026-10-22 (#9555): the third command is no longer 0.** The block above stands as
 what was run at `8767b1c8b`; at this head the same `narrative|raw_turn|raw_text|transcript` grep
-returns **43 lines, all in `20261025000001_record_tenancy_role_and_guc.sql` (7) and `20261023000001_record_session_narrative.sql` (36)** — R7's table, the tenth
+returns **62 lines, all in** `20261025000001_record_tenancy_role_and_guc.sql` (7), `20261023000001_record_session_narrative.sql` (36) and `20261024000001_record_session_narrative_carrier.sql` (19) — R7's table, the tenth
 record table (§A1). The other commands were re-run at this head and still return the counts the
 block states, with the one exception below (`app.current_org_id`).
 
@@ -953,11 +992,16 @@ The block's `grep -rn 'app.current_org_id' --include=*.py tortoise/ tools/ → 0
 pre-R6 reading. R6's tenancy boundary now ships the GUC, so the same grep returns
 **2 lines at `ff6379eb2`** — `tortoise/record_projection.py:227` (`TENANT_GUC =
 "app.current_org_id"`) and its docstring at `:3269`, the offsets `c5cbcbb4f` (R6's tenancy boundary)
-introduced — and **5 lines at this head**: `54a3e7abe` (R9's backup role must BYPASS RLS) added three
-`tortoise/record_backup.py` mentions *and* moved the projection's two to `:228` and `:3296`. The
+introduced — and **8 lines at this head**: `54a3e7abe` (R9's backup role must BYPASS RLS) added three
+`tortoise/record_backup.py` mentions, and #9555 (R7's narrative fetch) added three more —
+`tortoise/record_text.py` ×2 and `tortoise/__main__.py` ×1. ⛔ The sites are named by CONTENT and
+NOT by offset: the projection's two have moved on every change that touched that file (this note
+listed `:227`/`:3269`, then `:228`/`:3296`, then `:230`/`:3359`, and #9555's own registry entry moved
+them again) — a third offset in a note whose next sentence says the offsets are unusable is how a
+census note starts certifying a line nobody can find. The
 setter is `TENANT_GUC_SQL`, `set_config('app.current_org_id', $1, true)`, installed by
 `record_projection.scope_connection()` before the first plan statement of both record doors. The
-sites are named by CONTENT rather than by offset because the offset has already moved twice, and the
+sites are named by CONTENT rather than by offset because the offsets move on every edit, and the
 count carries its tree because a bare count re-stales on the next main-side edit — that is the
 failure this note exists to close. That is why the row above reads *"RLS as the tenancy boundary —
 SHIPPED"* while this census line still says zero; the census measured `8767b1c8b`, and

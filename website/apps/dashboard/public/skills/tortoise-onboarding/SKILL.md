@@ -125,7 +125,10 @@ mode → teach-human fallback).
 > Add custom MCP server → fill the dialog: Name `Tortoise`, Connection
 > **Server URL**, Server URL `https://api.premiselabs.co/mcp`, Authentication
 > **OAuth** → tick **I understand and want to continue** → **Create as a
-> plugin** → connect the plugin), and then receives the Tortoise workflows by
+> plugin** → **Connect** on the plugin and confirm **Connect Tortoise** →
+> sign in → pick the Organization you are onboarding (the page names it, or
+> asks you to choose when your account can use more than one — that is the one it writes
+> to) → **Authorize**), and then receives the Tortoise workflows by
 > installing the three reusable skills (chatgpt.com/skills → Add → Upload from
 > your computer) or by pasting them into one chat. This document itself is NOT
 > one of them — read it here, at the served URL above, or paste it into one

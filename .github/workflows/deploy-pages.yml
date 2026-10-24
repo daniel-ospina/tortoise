@@ -672,6 +672,202 @@ jobs:
           fi
           echo "✅ every internal path is absent at ORIGIN (cache-bypassing) and at the EDGE, on both hosts"
 
+      # ── #9680: the IndexNow surfaces must be SERVED, not merely shipped ──
+      # A submission the endpoint cannot verify is worse than no submission: it
+      # answers 403 and the article reaches nobody, silently, from a vendor we do
+      # not watch. #7751 is the measurement of the alternative — the tracker
+      # recorded IndexNow as shipped while `/<key>.txt` answered 404 for weeks and
+      # nothing failed.
+      #
+      # ⛔ BLOCKING on purpose, and this is the ONLY place it can be: the read-only
+      # blog suite (`verify-blog`) is `continue-on-error: true`, so a red there is
+      # a red job on a green run — a signal, not a gate. A check that cannot fail
+      # anything is the #7751 failure one level up.
+      #
+      # The body is compared BYTE-EXACTLY against the key the submitter SENDS
+      # (`_shared/indexnow.ts`), not against `website/<key>.txt`: the desync that
+      # breaks ownership is what we send against what we serve. `$(cat …)` alone
+      # would HIDE a trailing newline (command substitution strips it), so the byte
+      # count is asserted too — one newline answers 403 to every submission.
+      - name: Post-deploy — the IndexNow key file and notify route are live (#9680)
+        if: always()
+        run: |
+          # Anchored, and the value is validated: an EXAMPLE of the constant quoted
+          # above it in a comment (`e.g. INDEXNOW_KEY = "…"`) must not be what this
+          # reads. A failure here says EXTRACTOR fault — blaming the deployed site
+          # would send an operator to debug a deploy that is fine.
+          # ⛔ `|| true` is REQUIRED here, not defensive noise. GitHub Actions runs a
+          # `run:` body under `bash --noprofile --norc -eo pipefail`, so a `sed | head`
+          # whose input file is absent (a failed checkout under `if: always()`) makes
+          # the PIPELINE exit 2 and `set -e` kills the step — before the
+          # `EXTRACTOR fault` diagnosis below can print, which is the one situation
+          # that diagnosis was written for.
+          KEY=$(sed -nE 's/^export const INDEXNOW_KEY[[:space:]]*=[[:space:]]*"([A-Za-z0-9-]+)".*/\1/p' \
+                  website/functions/blog/_shared/indexnow.ts 2>/dev/null | head -1 || true)
+          case "$KEY" in
+            "")
+              echo '::error::EXTRACTOR fault: no `export const INDEXNOW_KEY = "…"` on ONE line in website/functions/blog/_shared/indexnow.ts. Nothing about the deployed site was checked — restore the constant to that shape.'
+              exit 1 ;;
+            *[!a-f0-9]*)
+              echo '::error::EXTRACTOR fault: INDEXNOW_KEY resolved to a value that is not lowercase hex — the extractor matched something else (an example in a comment, a renamed constant). Nothing about the deployed site was checked.'
+              exit 1 ;;
+          esac
+          if [ "${#KEY}" -ne 32 ]; then
+            echo "::error::EXTRACTOR fault: INDEXNOW_KEY is ${#KEY} characters, not the 32 lowercase hex the issue pins. Nothing about the deployed site was checked."
+            exit 1
+          fi
+          url="https://tortoise.premiselabs.co/$KEY.txt"
+          # #4050/#9680: the ORIGIN leg needs a per-run nonce. This host is the shared
+          # Pages project and its static assets are edge-cached (`s-maxage: 7d` — the
+          # leak probe above measures it), so a plain GET can be answered by the
+          # PREVIOUS deployment's copy: 200, text/plain, the exact 32 bytes, from a
+          # deploy that no longer contains the file. Every assertion below would then
+          # pass on attempt 1 and certify nothing, and the break would surface only
+          # when the cache expires — the weeks-latency shape this step exists to
+          # prevent. `$RANDOM` alone can repeat across runs, so the run id + epoch pin
+          # uniqueness per run. NEVER drop `?cb=`.
+          nonce="${GITHUB_RUN_ID:-local}-$(date +%s)-$RANDOM"
+          origin_url="$url?cb=$nonce"
+          # Per-run scratch dir rather than fixed `/tmp/indexnow-*` paths: the test
+          # harness executes this block VERBATIM, so on a fleet host two lanes
+          # running it at once would share those files and could read each other's
+          # 32 bytes — a false PASS in exactly the arm that compares the body (#5084).
+          D="${RUNNER_TEMP:-/tmp}/indexnow-$$"
+          mkdir -p "$D"
+          : > "$D/key.body"
+          : > "$D/key.hdr"
+          : > "$D/key.err"
+          : > "$D/edge.body"
+          code=000 edge=000 cache=""
+          for attempt in $(seq 1 10); do
+            code=000 edge=000 cache=""
+            curl_rc=0
+            # `-D` so content-type and the cache status are read from the RESPONSE
+            # rather than assumed; `|| curl_rc=$?` because bash -e would otherwise
+            # abort the step on the first transport blip and skip the retries (the
+            # trap the sign-in probe above documents).
+            code=$(curl -sS -o "$D/key.body" -D "$D/key.hdr" \
+                        -w '%{http_code}' -m 20 "$origin_url" 2>"$D/key.err") || curl_rc=$?
+            [ "$curl_rc" -ne 0 ] && code="curl-failed(rc=$curl_rc)"
+            # ONE process (awk), never a `grep | tail | tr | awk` pipeline. Under
+            # `pipefail` a `grep` that finds no `cf-cache-status:` line exits 1 — the
+            # state a transport blip leaves the `-D` file in — and `set -e` would
+            # abort the step on attempt ONE, before the retry can run and with no
+            # `::error::` printed. awk exits 0 on no match, so "no header" is DATA.
+            cache=$(awk 'tolower($1) == "cf-cache-status:" { v = tolower($2); gsub(/\r/, "", v) } END { print v }' \
+                      "$D/key.hdr" 2>/dev/null)
+            # Leg 2 — the EXACT URL the IndexNow endpoint is handed (canonical, no
+            # nonce). The origin leg proves the deployment contains the file; this
+            # one proves the edge does not hand the endpoint something else.
+            edge_rc=0
+            edge=$(curl -sS -o "$D/edge.body" -w '%{http_code}' -m 20 "$url" 2>/dev/null) || edge_rc=$?
+            [ "$edge_rc" -ne 0 ] && edge="curl-failed(rc=$edge_rc)"
+            # The WHOLE predicate decides the break, not just the status. Two
+            # DIRECTIONALLY OPPOSITE false verdicts are avoided this way, and they
+            # are worth naming because neither is the obvious one:
+            #   * breaking only on `code = 200` does NOT notice a stopped deploy —
+            #     the previous deployment also answers 200 with the correct body, so
+            #     the nonce (leg 1) is what defeats that, not this predicate;
+            #   * what THIS buys is the other direction: a transient bad 200 (an
+            #     error document at 200, a cache rule pinning an HTML copy) is not
+            #     accepted on the first attempt, it is retried — so a propagation
+            #     blip does not red the deploy falsely.
+            if [ "$code" = "200" ] && [ "$cache" != "hit" ] \
+               && grep -qi '^content-type:[[:space:]]*text/plain' "$D/key.hdr" \
+               && [ "$(wc -c < "$D/key.body" | tr -d ' ')" = "${#KEY}" ] \
+               && [ "$(cat "$D/key.body")" = "$KEY" ] \
+               && [ "$edge" = "200" ] \
+               && [ "$(wc -c < "$D/edge.body" | tr -d ' ')" = "${#KEY}" ] \
+               && [ "$(cat "$D/edge.body")" = "$KEY" ]; then
+              break
+            fi
+            [ "$attempt" -lt 10 ] && sleep 10
+          done
+          # awk again, for the same pipefail reason: `grep | head | tr` aborts the
+          # step when the header file is empty, bypassing the `case` arm below that
+          # exists to say "is not text/plain".
+          ctype=$(awk 'tolower($1) == "content-type:" { sub(/^[^:]*:[[:space:]]*/, ""); gsub(/\r/, ""); print; exit }' \
+                    "$D/key.hdr" 2>/dev/null)
+          body_len=$(wc -c < "$D/key.body" | tr -d ' ')
+          edge_len=$(wc -c < "$D/edge.body" 2>/dev/null | tr -d ' ')
+          echo "$url -> origin $code (cache ${cache:-unknown}) | ${ctype:-no content-type} | $body_len bytes (the key is ${#KEY} bytes) | edge $edge / $edge_len bytes"
+          if [ "$code" != "200" ]; then
+            echo "::error::$url answered $code at ORIGIN — the IndexNow key file is not served by the deployment ($nonce), so the endpoint cannot fetch the proof of host ownership and answers 403 to every submission (#9680)."
+            exit 1
+          fi
+          if [ "$cache" = "hit" ]; then
+            echo "::error::$url was answered from CACHE (cf-cache-status: HIT) even with the per-run nonce — the deployment was never read, so nothing about it was verified. Check the zone's cache rule for query strings (#4050/#9680)."
+            exit 1
+          fi
+          case "$ctype" in
+            *text/plain*) ;;
+            *) echo "::error::$url is not text/plain (${ctype:-none}) — the endpoint reads the body as the key."; exit 1 ;;
+          esac
+          if [ "$body_len" != "${#KEY}" ] || [ "$(cat "$D/key.body")" != "$KEY" ]; then
+            echo "::error::$url must contain the key and NOTHING else: $body_len bytes, want ${#KEY}. Body follows — a trailing newline, a BOM or an error page all break ownership:"
+            od -c "$D/key.body" | head -3
+            exit 1
+          fi
+          if [ "$edge" != "200" ]; then
+            echo "::error::$url answered $edge at the EDGE — the substrate the endpoint fetches is not serving the key file, even though origin has it."
+            exit 1
+          fi
+          if [ "$edge_len" != "${#KEY}" ] || [ "$(cat "$D/edge.body")" != "$KEY" ]; then
+            echo "::error::$url serves ${edge_len} bytes at the EDGE, want ${#KEY} — origin is correct, so a cache rule is serving a different copy:"
+            od -c "$D/edge.body" | head -3
+            exit 1
+          fi
+
+          # The console's submission route (#9803). It fails OPEN by design — a
+          # missed notification must never fail a publish — so a route that stopped
+          # shipping is SILENT: one line in a browser console, and no publish would
+          # submit anything. The status alone is not evidence either: a path with no
+          # Function behind it answers 405 here (measured), so the admin gate's own
+          # `{"error":"unauthorized"}` is what is asserted.
+          : > "$D/gate.body"
+          gate=000
+          for attempt in $(seq 1 5); do
+            gate=$(curl -sS -o "$D/gate.body" -w '%{http_code}' -m 20 \
+                     -X POST https://tortoise.premiselabs.co/blog/api/notify-publish \
+                     -H 'Content-Type: application/json' -d '{}' 2>/dev/null) || gate=000
+            if [ "$gate" = "401" ] && grep -q '"unauthorized"' "$D/gate.body" 2>/dev/null; then
+              break
+            fi
+            [ "$attempt" -lt 5 ] && sleep 10
+          done
+          gate_body=$(cat "$D/gate.body" 2>/dev/null || true)
+          echo "notify-publish -> $gate $gate_body"
+          if [ "$gate" != "401" ] || ! printf '%s' "$gate_body" | grep -q '"unauthorized"'; then
+            # Two DIFFERENT 503s reach here, and neither means "the route is gone".
+            # Naming them is the difference between an operator re-running the job
+            # and an operator hunting a deleted Function (the #3485 class: a
+            # provider blip must never be reported as an absent route).
+            # The status is part of the subject, not only the body: an empty or
+            # HTML 503 body is the common shape, and keying on the body alone let it
+            # fall through to the arm that blames the route.
+            case "$gate|$gate_body" in
+              503*'"unavailable"'*)
+                echo "::error::could not verify /blog/api/notify-publish — the admin gate answered 503 unavailable (session store / admin lookup outage, #3485). NOT a missing route; re-run the job and nothing about the route is disproven." ;;
+              503*'"not_configured"'*)
+                echo "::error::/blog/api/notify-publish answered 503 not_configured — a required Pages binding is missing on the premise-labs project, so the route cannot answer anything (this one IS a config fault)." ;;
+              # ANY other 503 (an edge/platform 503, an empty body, an HTML error
+              # page) is the same #3485 class: nothing about the route is disproven,
+              # and calling it "did not refuse an anonymous caller" would send the
+              # operator hunting a deleted Function. The sibling app-origin step
+              # already handles this shape this way.
+              503*)
+                echo "::error::could not verify /blog/api/notify-publish — the answer was ${gate%|*} (body: ${gate_body:-<empty>}), which is an outage, not a missing route (#3485). Re-run the job; nothing about the route is disproven." ;;
+              *)
+                echo "::error::/blog/api/notify-publish did not refuse an anonymous caller with the admin gate (status $gate, body: ${gate_body:-<empty>}) — the console's publish would submit nothing, and nothing else would say so." ;;
+            esac
+            exit 1
+          fi
+          # ⛔ The app-origin hop the console also crosses is asserted in
+          # `deploy-dashboard`, NOT here — see the #9680 step in that job. Keeping
+          # it here inverted #2691: a dashboard-side break would red the unrelated
+          # marketing deploy, and this job has no `needs:` on that one by design.
+          echo "✅ the IndexNow key file serves the key alone; /blog/api/notify-publish is live and admin-gated at the marketing origin"
+
   # ── Dashboard (app.premiselabs.co → tortoise-dashboard Pages) ──────────
   # #1112: wire the dashboard into CI — closes #1086 + #1109 (two
   # stale-bundle incidents caused by the manual-only deploy.sh). Since #3775
@@ -1092,6 +1288,78 @@ jobs:
             exit 1
           fi
           echo "✅ missing assets 404 (non-HTML), real bundle serves, / and /team serve the shell, unknown path 404"
+
+      # ── #9680: the app-origin hop the publish console ACTUALLY crosses ──
+      # The console does not POST the marketing origin: it calls
+      # `/blog/api/notify-publish` on THIS origin and the BFF proxy
+      # (`website/apps/dashboard/functions/blog/api/[[path]].ts`) forwards it upstream.
+      # A route that stopped shipping is silent from the server side — one line
+      # in a browser console, and no publish would submit anything — so it is
+      # asserted here.
+      #
+      # ⛔ HERE, not in the marketing `deploy` job. `app.premiselabs.co` is THIS
+      # job's Pages project, and the two jobs carry no `needs:` between them on
+      # purpose: a step guarding one surface must not sit in the other surface's
+      # job, because that blocks the unrelated marketing deploy for a dashboard
+      # break (#2691, pinned by
+      # `tests/test_pages_bindings.py::test_the_onboarding_parity_check_guards_
+      # the_dashboard_job_only`).
+      #
+      # ⛔ WHAT THIS PROVES, precisely: the same-origin proxy route EXISTS and
+      # its own SESSION gate answers. It is NOT the admin gate — the proxy
+      # returns `{"error":"not_signed_in"}` at its cookie check, BEFORE any
+      # upstream call — so an anonymous probe cannot observe the handler from
+      # this origin at all. The admin gate is asserted on the marketing hop,
+      # where it IS reachable anonymously.
+      #
+      # Asserting the BODY, not just the status, is what separates this route from
+      # every other refusal this host can produce. Measured (2026-10-22): with the
+      # route deleted the POST is answered 405 with an EMPTY body, and a GET is an
+      # honest 404 (#3523) — so a status-only check would red there too; a 401 for
+      # the WRONG reason is what it would accept. The 200-with-HTML arm is kept as
+      # hardening: a widened SPA fallback is a shape this host has produced before
+      # (#3048 probes exactly that).
+      - name: Post-deploy — the app-origin IndexNow proxy answers its session gate (#9680)
+        if: always()
+        run: |
+          # Per-run scratch dir, same reason as the marketing-origin step: the test
+          # harness executes this block verbatim, so fixed `/tmp` paths are shared by
+          # every lane running the suite on this host (#5084).
+          D="${RUNNER_TEMP:-/tmp}/indexnow-proxy-$$"
+          mkdir -p "$D"
+          : > "$D/proxy.body"
+          proxy=000
+          for attempt in $(seq 1 5); do
+            proxy=000
+            # `|| proxy=000` because bash -e would abort on the first transport
+            # blip and never reach the retry; a recorded 000 is a FAILURE, never
+            # a pass.
+            proxy=$(curl -sS -o "$D/proxy.body" -w '%{http_code}' -m 20 \
+                      -X POST https://app.premiselabs.co/blog/api/notify-publish \
+                      -H 'Content-Type: application/json' -d '{"slug":"not-a-post"}' 2>/dev/null) || proxy=000
+            if [ "$proxy" = "401" ] && grep -q '"not_signed_in"' "$D/proxy.body" 2>/dev/null; then
+              break
+            fi
+            [ "$attempt" -lt 5 ] && sleep 10
+          done
+          proxy_body=$(cat "$D/proxy.body" 2>/dev/null || true)
+          echo "app-origin notify-publish -> $proxy $proxy_body"
+          if [ "$proxy" = "401" ] && printf '%s' "$proxy_body" | grep -q '"not_signed_in"'; then
+            echo "✅ the app-origin proxy route exists and answers its session gate (the admin gate itself is asserted on the marketing hop)"
+            exit 0
+          fi
+          # Fail closed, but never blame the route for what it is not: a 503 is
+          # the proxy's OWN `session_store_unavailable` (#3485 — a provider blip
+          # must not read as a missing route), and 000 is a transport failure.
+          case "$proxy" in
+            000)
+              echo "::error::could not verify app.premiselabs.co/blog/api/notify-publish — no response completed after 5 attempts. NOT evidence the route is gone; re-run the job." ;;
+            503)
+              echo "::error::could not verify app.premiselabs.co/blog/api/notify-publish — the proxy answered 503 (${proxy_body:-no body}), which is its session-store-unavailable path, NOT a missing route. Re-run the job." ;;
+            *)
+              echo "::error::app-origin /blog/api/notify-publish did not answer the proxy's session gate (status $proxy, body: ${proxy_body:-none}) — the console's IndexNow call would not reach the handler, and only the browser console would say so." ;;
+          esac
+          exit 1
 
   # ── Post-deploy verification: legal pages E2E suite (#677) ───────────
   #

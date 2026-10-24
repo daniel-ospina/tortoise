@@ -272,10 +272,12 @@ def _get_org_sdk() -> TortoiseSDK:
 #      another workspace must read as "not reachable from this workspace",
 #      never as a hit: an unfiltered list plus an unchecked argument is a plain
 #      IDOR (a token for workspace A naming workspace B's graph).
-#   2. **A soft-deleted graph stops resolving.** `graph_list` omits deleted
-#      rows, so the next call after a delete refuses instead of falling back
-#      to the default graph — a live connection must never keep reading a
-#      graph the user deleted.
+#   2. **A soft-deleted graph stops resolving.** The reader is not trusted to
+#      filter — the Supabase lane omits deleted rows while the selfhost registry
+#      lane still carries a `status='deleted'` row — so the reachable set applies
+#      the status filter in BOTH lanes, and the next call after a delete refuses
+#      instead of falling back to the default graph: a live connection must never
+#      keep reading a graph the user deleted.
 
 from tortoise.tool_registry import (  # noqa: E402, I001
     GRAPH_ARGUMENT_DESCRIPTION as _GRAPH_ARGUMENT_DESCRIPTION,
@@ -353,7 +355,7 @@ def _active(rows: list[dict], org_id: str) -> list[dict]:
 
     Two filters, both load-bearing:
 
-    * **the workspace** — `graph_list(org_id)` is already org-scoped, but this
+    * **the workspace** — `list_memory_graphs(org_id)` is already org-scoped, but this
       does not TRUST the reader: a row that declares a different ``org_id`` is
       dropped here, so a future reader change (or any row that slips into an
       org-scoped read) cannot turn this resolver into the IDOR the decision
@@ -376,7 +378,7 @@ def _active(rows: list[dict], org_id: str) -> list[dict]:
 def reachable_graph_rows(org_id: str, *, sdk: TortoiseSDK | None = None) -> list[dict]:
     """The ACTIVE graphs of `org_id` — the only set a `graph` argument may name.
 
-    `graph_list` is the control-plane reader (Supabase `graphs` table / selfhost
+    `list_memory_graphs` is the control-plane reader (Supabase `graphs` table / selfhost
     registry Graph nodes). The `status` filter here is what carries the
     tombstone guarantee into the registry lane, whose rows may still be present
     with a deleted status.
@@ -386,7 +388,7 @@ def reachable_graph_rows(org_id: str, *, sdk: TortoiseSDK | None = None) -> list
     if not org_id:
         return []
     reader = sdk if sdk is not None else _get_org_sdk()
-    rows = reader.graph_list(org_id)
+    rows = reader.list_memory_graphs(org_id)
     return _active(rows, org_id) if isinstance(rows, list) else []
 
 
@@ -429,7 +431,7 @@ def resolve_graph_target(org_id: str, ref: str, *,
     for row in reachable:
         if ref == row.get("graph_id"):
             return row
-    # 2. namespace — the storage spelling `graph_list` returns, so a caller
+    # 2. namespace — the storage spelling `list_memory_graphs` returns, so a caller
     #    that read it from `tortoise_list_graphs` can pass it straight back.
     for row in reachable:
         if row.get("namespace") and ref == row["namespace"]:
@@ -539,7 +541,7 @@ def use_graph_target(plan: dict | None) -> dict | None:
     `_get_org_sdk()` opens that graph through the SAME seam — no second way to
     open a graph, and every tool benefits without a per-tool change.
 
-    The resolved DEFAULT graph deliberately sets nothing: `graph_list` returns
+    The resolved DEFAULT graph deliberately sets nothing: `list_memory_graphs` returns
     the workspace namespace for it, and opening that by graph name would be a
     second, subtly different construction of the graph the untouched path
     already opens. "default" therefore means byte-identical behaviour — and a

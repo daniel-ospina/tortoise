@@ -3960,10 +3960,17 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("ignore-holder", out)
 
     def test_zero_ahead_branch_still_blocks_the_branch_surface(self):
-        # #6108 is UNTOUCHED. The deleted artifact-verifier used to demote a
-        # CLAIM whose named branch existed with 0 commits ahead; deleting the
-        # prose path must not make the BRANCH surface start ignoring one. The
-        # branch here IS the tip of main — zero commits of its own.
+        # #6108 (REOPENED 2026-10-24): a 0-ahead branch is demoted ONLY when every mechanical
+        # piece of holder evidence is absent. This fixture has NO `origin/main`, so the
+        # distance read fails — and an UNREADABLE reading is not an empty claim, so the ref
+        # keeps BLOCKING (the run even says so: `UNREADABLE … NOT treated as an empty
+        # claim`). The demotion direction is pinned by
+        # `test_a_zero_ahead_clean_unowned_unclaimed_branch_is_advisory`; this test pins the
+        # fail-closed half, which is why it must not be deleted as "the old behaviour".
+        #
+        # The deleted artifact-verifier used to demote a CLAIM whose named branch existed
+        # with 0 commits ahead; deleting the prose path must not make the BRANCH surface
+        # start ignoring one. The branch here IS the tip of main — zero commits of its own.
         branch = f"fix/{ISSUE}-zero-ahead"
         _git(self.repo, "branch", branch)
         ahead = subprocess.run(
@@ -5164,8 +5171,16 @@ class CollisionPreflightTest(unittest.TestCase):
         # ⛔ THE P1-B GUARD, and the mutation the test above cannot catch: if the
         # arm were non-strict (plain ancestry), this branch — created at
         # origin/main's tip, no commits of its own — is trivially "an ancestor
-        # of main" and would be demoted. It must BLOCK, because a branch named
-        # after the issue IS the claim.
+        # of main" and would be demoted by the ancestry arm. The assertion below is
+        # that it is NOT demoted as "merged into origin/main".
+        #
+        # ⚠️ Since #6108 was reopened (2026-10-24) it can ALSO be demoted, by the
+        # EMPTY-CLAIM leg — and it still BLOCKS here, for a reason that is the leg's own
+        # contract: `setUp`'s `origin` is an `https://github.com/…` URL, so the claim
+        # registry read fails, an unreadable registry is LIVE, and the ref is kept blocking.
+        # That is the fail-closed posture that makes the window this test was written for
+        # (`git worktree add`, no commit yet) safe on any box whose claim registry cannot be
+        # read — the demotion needs a POSITIVE "no claim" answer, never an absent one.
         _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
         _git(self.repo, "branch", f"fix/{ISSUE}-fresh")
         self.gh_fixtures(closed_prs=[])
@@ -5182,14 +5197,16 @@ class CollisionPreflightTest(unittest.TestCase):
         # discoverable only by running `git rev-list --count origin/main..<b>`
         # BY HAND afterwards. The count is now in the hit line.
         #
-        # ⛔ THE COUNT IS REPORTED, NOT ACTED ON, and this test pins BOTH halves.
-        # The tempting follow-up — demote `ahead == 0` to non-blocking — was
-        # implemented and REFUSED: it reddened 8 tests that pin the decision
-        # (`test_branch_created_at_main_tip_with_no_commits_still_blocks`,
-        # `test_fresh_branch_behind_main_at_a_merged_head_blocks_without_first_parent`,
-        # `test_unresolvable_main_tip_never_downgrades`, ...). A future edit that
-        # starts DEMOTING 0-ahead refs reddens here as well, which is the point:
-        # the count informs the reader, it does not decide for them.
+        # ⛔ THE COUNT IS REPORTED ON EVERY BLOCKING HIT, and this test pins that half.
+        # The other half — that a 0-ahead ref is demoted — is #6108 REOPENED (2026-10-24)
+        # and is pinned in both directions by the EMPTY-CLAIM matrix
+        # (`test_a_zero_ahead_clean_unowned_unclaimed_branch_is_advisory` for the
+        # demotion; `..._one_commit_ahead_still_blocks`, `..._with_uncommitted_work_still
+        # _blocks`, `..._with_a_live_process_in_its_worktree_still_blocks`,
+        # `..._with_a_live_claim_ref_still_blocks` and
+        # `test_an_unreadable_distance_blocks_a_zero_ahead_branch_as_UNREADABLE` for the
+        # refusals). This fixture keeps blocking because its claim registry is unreadable
+        # (`setUp`'s origin is an https URL), which is itself one of the refusals.
         _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
         _git(self.repo, "branch", f"fix/{ISSUE}-empty")
         self.gh_fixtures(closed_prs=[])
@@ -7613,6 +7630,512 @@ class CollisionPreflightTest(unittest.TestCase):
                       self.row(out, "remote branches"))
         self.assertNotIn("ADVISORY", self.hit(out, f"origin/feat/{ISSUE}-noregistry"))
         self.assertNotEqual(rc, 0, out)
+
+    # ── #6108, REOPENED 2026-10-24: the EMPTY CLAIM ────────────────────────────
+    #
+    # THE MEASURED DEFECT. `refs/heads/feat/9567-tm` was 0 commits ahead / 121 behind
+    # `origin/main` — a branch a lane created and never used — and it froze #9567 (a
+    # P0-blocker) permanently: every agent's pre-flight refused, for every agent, with no
+    # dismissal path. `fix/9097-protocol-precedence` (0/75) froze an open P1 the same way.
+    # #6108 asked for exactly this demotion in 2026-09; it was REFUSED then because a lane
+    # between `git worktree add` and its first commit is ALSO 0 ahead, and demoting that
+    # would let two lanes write to one branch (#4256). The owner reopened it with the
+    # narrow condition: demote ONLY when every mechanical piece of holder evidence is
+    # also absent.
+    #
+    # ⛔ THE MATRIX BELOW IS THE CONTRACT, ONE TEST PER CELL:
+    #
+    #     (a) 0 ahead, clean, unowned, unclaimed        -> ADVISORY, exit 0, STILL PRINTED
+    #     (b) >=1 commit ahead                          -> BLOCKING (unchanged)
+    #     (c) 0 ahead BUT uncommitted work in a worktree -> BLOCKING
+    #     (c2) 0 ahead BUT a live pi process in it      -> BLOCKING (the #6108 window)
+    #     (c3) 0 ahead BUT a live claim ref             -> BLOCKING
+    #     (d) any reading that fails (distance / status)-> BLOCKING, reported UNREADABLE
+    #
+    # ⛔ EVERY FIXTURE ASSERTS ITSELF against the shipped readers (`_ahead_behind`), so a
+    # fixture that silently stopped being 0-ahead could not make a demotion test pass for
+    # the wrong reason — the same rule the #9806 fixtures follow.
+
+    def empty_branch(self, branch: str) -> str:
+        """A LOCAL branch at `origin/main`'s tip: 0 commits of its own.
+
+        The bare origin is REQUIRED: without it the claim-registry read
+        (`git ls-remote origin refs/claims/issue-N`) fails, an unreadable registry is
+        LIVE, and the demotion tests would pass or fail for a reason that has nothing to
+        do with the rule (the same trap `StaleHolderTests`' docstring records).
+        """
+        self.bare_origin()
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "refs/heads/main")
+        _git(self.repo, "push", "-q", "origin", "refs/heads/main:refs/heads/main")
+        _git(self.repo, "branch", branch)
+        mod = _tool_module()
+        counts = mod._ahead_behind("git", str(self.repo), f"refs/heads/{branch}", 60)
+        self.assertIsNotNone(counts, "the fixture branch's distance from main is unreadable")
+        ahead, _behind = counts
+        self.assertEqual(ahead, 0, f"the empty-claim fixture is {ahead} ahead, not 0")
+        return f"refs/heads/{branch}"
+
+    def commit_on(self, branch: str) -> str:
+        """ONE commit of its own on `branch`, built with `commit-tree` so the checked-out
+        tree is never touched (the fixture's `main` stays where it is)."""
+        base = self._git_out("rev-parse", f"refs/heads/{branch}").strip()
+        tree = self._git_out("rev-parse", f"{base}^{{tree}}").strip()
+        sha = subprocess.run(
+            ["git", "commit-tree", tree, "-p", base, "-m", f"work on {branch}"],
+            cwd=self.repo, check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        _git(self.repo, "update-ref", f"refs/heads/{branch}", sha)
+        return sha
+
+    def test_a_zero_ahead_clean_unowned_unclaimed_branch_is_advisory(self):
+        """(a) THE MEASURED CASE: 0 ahead, nothing dirty, no owner, no claim.
+
+        It must be CLEAN **and** the row must still be PRINTED — "reported, does not
+        block, never silently dropped" is the whole contract, because reaping the branch
+        is a separate, evidence-based action this gate deliberately does not take.
+        """
+        self.gh_fixtures(closed_prs=[])
+        branch = f"fix/{ISSUE}-empty"
+        ref = self.empty_branch(branch)
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        line = self.hit(out, ref)
+        self.assertIn("0 commit(s) ahead", line)
+        self.assertIn("ADVISORY", line)
+        self.assertIn("EMPTY-CLAIM", line)
+        # The BASIS is printed, so the demotion is auditable rather than implied.
+        self.assertIn("no worktree is checked out on it", line)
+        self.assertIn(f"no `refs/claims/issue-{ISSUE}` on origin", line)
+        # ...and the measurement is reported on the surface row too.
+        self.assertIn("1 0-ahead local branch(es) judged as EMPTY CLAIMS, 1 demoted", out)
+        self.assertIn("reported, non-blocking", self.row(out, "local branches"))
+
+    def test_a_branch_one_commit_ahead_still_blocks(self):
+        """(b) The dangerous direction: real WIP is never demoted.
+
+        ONE commit, so the count cannot be confused with the empty fixture's 0.
+        """
+        self.gh_fixtures(closed_prs=[])
+        branch = f"fix/{ISSUE}-one-ahead"
+        ref = self.empty_branch(branch)
+        self.commit_on(branch)
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        line = self.hit(out, ref)
+        self.assertIn("1 commit(s) ahead", line)
+        self.assertNotIn("ADVISORY", line)
+        self.assertNotIn("EMPTY-CLAIM", line)
+
+    def test_a_zero_ahead_branch_with_uncommitted_work_still_blocks(self):
+        """(c) A lane's UNCOMMITTED work is work, even with nothing committed.
+
+        This is the shape a plain "0 ahead ⇒ advisory" rule would have freed — the
+        fail-open the narrow condition exists to prevent.
+        """
+        self.gh_fixtures(closed_prs=[])
+        branch = f"fix/{ISSUE}-empty-dirty"
+        ref = self.empty_branch(branch)
+        wt = self.checked_out_worktree(branch, f"empty-dirty-{ISSUE}")
+        (wt / "wip.txt").write_text("unsaved work\n")
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("ADVISORY", self.hit(out, ref))
+        self.assertIn("the worktree has uncommitted work",
+                      self.row(out, "local branches"))
+        self.assertIn("kept blocking by a live owner or claim",
+                      self.row(out, "local branches"))
+
+    def test_a_zero_ahead_branch_with_a_live_process_in_its_worktree_still_blocks(self):
+        """(c2) THE #6108 WINDOW: a lane between `git worktree add` and its first commit.
+
+        The checkout is CLEAN and the branch is 0 ahead — the exact shape the reopened
+        rule touches — and what keeps it blocking is the live `pi` process standing in it.
+
+        ⛔ WHAT THIS DOES **NOT** PROVE: a checkout created BEFORE the lane's process starts
+        (a controller running `git worktree add`, then dispatching) has no process in it yet
+        and is demoted by `test_a_worktree_record_on_a_zero_ahead_branch_is_advisory_too` —
+        that is the stated PREPARE-THEN-DISPATCH residual in `judge_empty`. The mechanism
+        that holds such an issue is the CLAIM REF, and
+        `test_a_zero_ahead_branch_with_a_live_claim_ref_still_blocks` is the test that pins
+        it. So this test proves the ALREADY-RUNNING case; it must not be read as proof that
+        #4256's "two lanes, one branch" cannot happen in the pre-start window.
+        """
+        self.gh_fixtures(closed_prs=[])
+        branch = f"fix/{ISSUE}-empty-busy"
+        ref = self.empty_branch(branch)
+        wt = self.checked_out_worktree(branch, f"empty-busy-{ISSUE}")
+        fake_bin = self.tmp / "fakebin-empty"
+        fake_bin.mkdir(exist_ok=True)
+        # ⛔ A COPY OF A REAL BINARY, NOT A SHELL SCRIPT: `fleet_state.pi_processes`
+        # matches `basename(argv[0]) == "pi"`, and the kernel rewrites argv[0] to the
+        # interpreter for a `#!` script (the trap the stale-holder test documents).
+        #
+        # ⛔ AND IT IS INVOKED BY NAME THROUGH `PATH`, so argv[0] is exactly `pi`. Launched
+        # as an absolute path, its first token is 60+ characters in the `command` column,
+        # and `ps`'s default output width truncates that column — the census then reads a
+        # basename that is not `pi` and the lane is invisible (`fleet_state.pi_processes`
+        # passes `-ww` for exactly this reason; a test must not depend on its fixture's
+        # path length to be seen).
+        pi = fake_bin / "pi"
+        shutil.copy("/bin/sleep", pi)
+        env = {**os.environ, "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}"}
+        proc = subprocess.Popen(["pi", "120"], cwd=str(wt), env=env,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            self._wait_for_pi_cwd(wt)
+            rc, out = self.run_tool()
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("ADVISORY", self.hit(out, ref))
+        self.assertIn("live pi process standing in it", self.row(out, "local branches"))
+
+    def test_a_zero_ahead_branch_with_a_live_claim_ref_still_blocks(self):
+        """(c3) A CLAIMED issue is not free, whatever the branch contains.
+
+        This is #6108's own reasoning ("never read a lane that has CLAIMED an issue as
+        free") applied in the one dimension that is actually about the claim.
+        """
+        self.gh_fixtures(closed_prs=[])
+        branch = f"fix/{ISSUE}-empty-claimed"
+        ref = self.empty_branch(branch)
+        self.live_claim(int(time.time()) + 3600)
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("ADVISORY", self.hit(out, ref))
+        self.assertIn("is a LIVE claim", self.row(out, "local branches"))
+
+    def test_a_worktree_record_on_a_zero_ahead_branch_is_advisory_too(self):
+        """The measured block named BOTH rows for one claim — so both must answer the same.
+
+        Demoting the branch alone would leave #9567 un-dispatchable through the worktree
+        row; that is why `judge_empty` runs on both surfaces.
+
+        ⚠️ THIS IS THE PREPARE-THEN-DISPATCH WINDOW, ASSERTED ON PURPOSE. The checkout is
+        clean, registered, and has nothing running in it, so every mechanical signal this
+        gate can read agrees with "abandoned" — and the owner's decision distinguishes by
+        DIRT (a dirty checkout blocks; a clean one does not). A flow that creates the
+        checkout before dispatching is therefore held by `refs/claims/issue-<N>`, not by the
+        checkout: see `judge_empty`'s STATED RESIDUALS. If that trade is ever revisited,
+        THIS is the test that has to change, and the residual note with it.
+        """
+        self.gh_fixtures(closed_prs=[])
+        branch = f"fix/{ISSUE}-empty-wt"
+        ref = self.empty_branch(branch)
+        wt = self.checked_out_worktree(branch, f"empty-wt-{ISSUE}")
+        self.assertTrue((wt / "seed.txt").exists(), "the worktree must be checked out")
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("ADVISORY", self.hit(out, ref))
+        wt_line = self.hit(out, str(wt), surface="local worktrees")
+        self.assertIn("ADVISORY", wt_line)
+        self.assertIn("EMPTY-CLAIM", wt_line)
+        self.assertIn("no live pi process and no uncommitted work", wt_line)
+
+    def test_a_generated_branch_worktree_still_blocks_on_its_path(self):
+        """⛔ #3611 MUST NOT BE REOPENED BY THE EMPTY LEG (review finding, 2026-10-24).
+
+        A bot-minted branch is not a lane's claim, and the module promises that "a bot-minted
+        name is not evidence about the PATH either" — so a worktree record reached by its
+        PATH alone keeps BLOCKING. The empty leg therefore runs only when the record's BRANCH
+        names this issue (`branch_hit`); the branch surface never even considers a generated
+        ref (`_is_generated_branch` skips it), and the two surfaces must not disagree.
+
+        The fixture makes the demotion ELIGIBLE on every other axis (0 ahead, clean checkout,
+        no process, a readable claim registry with no claim), so without the `branch_hit`
+        guard this record would be ADVISORY and the run would exit 0.
+        """
+        self.gh_fixtures(closed_prs=[])
+        # A readable claim registry: without it the run would block for an unrelated reason
+        # (an unreadable registry is LIVE) and this test would pass vacuously.
+        self.empty_branch("feat/9999-unrelated-base")
+        _git(self.repo, "branch", f"mergify/merge-queue/{ISSUE}bad001")
+        wt = self.checked_out_worktree(f"mergify/merge-queue/{ISSUE}bad001",
+                                       f"{ISSUE}-queue-wt")
+        self.assertTrue((wt / "seed.txt").exists(), "the worktree must be checked out")
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        line = self.hit(out, str(wt), surface="local worktrees")
+        self.assertNotIn("ADVISORY", line)
+        self.assertNotIn("EMPTY-CLAIM", line)
+
+    def test_an_unreadable_distance_blocks_a_zero_ahead_branch_as_UNREADABLE(self):
+        """(d) A failed READ is not an empty claim.
+
+        The distance is the one datum the rule rests on, so when `rev-list --count`
+        cannot answer, the ref keeps BLOCKING and the report says `UNREADABLE` — a
+        missing measurement must never read as "free" (the rule that made #1185 refuse).
+        """
+        self.gh_fixtures(closed_prs=[])
+        branch = f"fix/{ISSUE}-empty-nodistance"
+        ref = self.empty_branch(branch)
+        stub = _write_exec(self.tmp / "git-stub-no-distance-2", GIT_STUB_NO_DISTANCE)
+        rc, out = self.run_tool(git_bin=stub,
+                                env_extra={"REAL_GIT": shutil.which("git")})
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        line = self.hit(out, ref)
+        self.assertNotIn("ADVISORY", line)
+        self.assertIn("UNREADABLE", line)
+        self.assertIn("NOT treated as an empty claim", line)
+        self.assertIn("NOT demoted on an unreadable measurement",
+                      self.row(out, "local branches"))
+        self.assertIn("0 demoted", self.row(out, "local branches"))
+
+    def test_a_missing_worktree_directory_keeps_the_claim_blocking(self):
+        """(d) STATED RESIDUAL: absence is not evidence of death.
+
+        `_worktree_liveness` documents why a registered worktree whose directory is gone
+        is NOT demoted (a `mv` keeps a worktree working through its absolute `gitdir:`),
+        and the owner read then cannot run `git status` in it. So the ref stays blocking
+        and is reported UNREADABLE — the gate reports, it never reaps.
+        """
+        self.gh_fixtures(closed_prs=[])
+        branch = f"fix/{ISSUE}-empty-moved"
+        ref = self.empty_branch(branch)
+        wt = self.checked_out_worktree(branch, f"empty-moved-{ISSUE}")
+        shutil.rmtree(wt)
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("ADVISORY", self.hit(out, ref))
+        self.assertIn("not on disk", self.row(out, "local branches"))
+        # ⛔ AND THE READING IS NAMED AS A FAILED READ, on BOTH surfaces (review finding
+        # 2026-10-24). The first version derived "was this unreadable?" by matching the
+        # basis TEXT against a set — but the owner reader PREFIXES the basis with the
+        # checkout's path, so the two could never be equal and the `UNREADABLE` wording
+        # was silently lost (the verdict was still fail-closed, which is why nothing else
+        # caught it). These two assertions are what pin the tri-state the readers return.
+        branch_line = self.hit(out, ref)
+        self.assertIn("UNREADABLE", branch_line,
+                      "the branch row must say the read FAILED, not merely that it blocked")
+        self.assertIn("NOT treated as an empty claim", branch_line)
+        wt_line = self.hit(out, str(wt), surface="local worktrees")
+        self.assertIn("UNREADABLE", wt_line)
+        self.assertNotIn("ADVISORY", wt_line)
+
+    def test_an_empty_claim_is_revalidated_at_the_moment_of_the_gate(self):
+        """The rule is COMPUTED per run, never cached from a previous answer.
+
+        Same branch, two runs: CLEAN while it is empty, COLLISION the moment a commit
+        lands on it. A cached verdict (or a cached `ahead` count) would answer the second
+        run with the first run's reading — the stale-flag class this whole change is
+        about.
+        """
+        self.gh_fixtures(closed_prs=[])
+        branch = f"fix/{ISSUE}-empty-then-work"
+        ref = self.empty_branch(branch)
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("ADVISORY", self.hit(out, ref))
+        self.commit_on(branch)
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("1 commit(s) ahead", self.hit(out, ref))
+        self.assertNotIn("ADVISORY", self.hit(out, ref))
+
+    def test_a_zero_ahead_remote_ref_is_never_an_empty_claim(self):
+        """CONDITION 1's scope, pinned in the direction that matters (review, 2026-10-24).
+
+        A remote-tracking ref is a FETCH CACHE: `refs/remotes/origin/x` is 0 ahead of
+        `origin/main` whenever the last fetch saw it at main's tip, which says nothing
+        about the branch that exists on the remote right now (#7693's class). Deleting the
+        `refs/heads/` guard left the ENTIRE suite green — verified — while shipping exactly
+        that, so this test exists to make the scope testable: the ref must stay BLOCKING
+        and must not be reported as an empty claim.
+        """
+        self.gh_fixtures(closed_prs=[])
+        # A readable registry and a real bare origin, so the run cannot block for a reason
+        # that has nothing to do with this ref (see `empty_branch`).
+        self.empty_branch(f"fix/{ISSUE}-remote-base")
+        main_tip = self._git_out("rev-parse", "refs/heads/main").strip()
+        ref = f"refs/remotes/origin/fix/{ISSUE}-cached"
+        _git(self.repo, "update-ref", ref, main_tip)
+        mod = _tool_module()
+        counts = mod._ahead_behind("git", str(self.repo), ref, 60)
+        self.assertIsNotNone(counts)
+        self.assertEqual(counts[0], 0, "the fixture remote ref must be 0 ahead")
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        line = self.hit(out, ref)
+        self.assertNotIn("EMPTY-CLAIM", line)
+        self.assertNotIn("ADVISORY", line)
+        # And it is a BLOCKING row, not merely an absent demotion.
+        self.assertIn("0 commit(s) ahead", line)
+        self.assertIn("(number)", line)
+
+    def test_an_unreadable_process_census_is_never_no_owner(self):
+        """CONDITION 3's fail-closed arm: a census that cannot ANSWER is not "nobody there".
+
+        Flipping this arm to "no owner" left the whole suite green (verified in review),
+        which would have made the PR's headline safety claim untested. Called at the
+        decision level because the census is a subprocess read that no CLI fixture can fail
+        on demand.
+        """
+        self.empty_branch(f"fix/{ISSUE}-census-error")
+        holder = self.stale_holder()
+        mod = _tool_module()
+        with mock.patch.object(mod.fleet_state, "pi_processes",
+                               return_value=([], "ps: cannot execute")):
+            empty, basis, unreadable = holder.judge_empty(
+                f"refs/heads/fix/{ISSUE}-census-error", (0, 120))
+        self.assertFalse(empty, "an unanswered census must never demote")
+        self.assertTrue(unreadable, "the reading failed, and the report must say so")
+        self.assertIn("could not be read", basis)
+        self.assertIn("UNREGISTERED checkout", basis)
+        self.assertEqual(holder.empty_unmeasured, [basis],
+                         "an unreadable reading belongs under `unmeasured`, not `kept`")
+        self.assertEqual(holder.empty_kept, [])
+
+    def test_a_live_pi_whose_cwd_cannot_be_read_is_never_no_owner(self):
+        """⛔ THE CENSUS'S OWN BLIND SPOT (review, 2026-10-24).
+
+        `fleet_state.process_cwds` SKIPS a pid whose cwd it cannot resolve and reports no
+        error — correct for a pid that has exited, a fail-open for a pid that is alive
+        (hidepid, a removed directory, an `lsof` placeholder). Taken as a complete census,
+        "no cwd matched" reads as "no live owner" about a lane the reader could not see.
+        A LIVE unresolved pid therefore makes the empty test UNREADABLE, and this pins it:
+        without the gap check the demotion below is `True`.
+        """
+        self.empty_branch(f"fix/{ISSUE}-census-gap")
+        holder = self.stale_holder()
+        mod = _tool_module()
+        with mock.patch.object(mod.fleet_state, "pi_processes",
+                               return_value=([{"pid": os.getpid()}], "")), \
+             mock.patch.object(mod.fleet_state, "process_cwds", return_value=({}, "")):
+            empty, basis, unreadable = holder.judge_empty(
+                f"refs/heads/fix/{ISSUE}-census-gap", (0, 120))
+        self.assertFalse(empty, "an unresolvable-cwd census must never demote")
+        self.assertTrue(unreadable)
+        self.assertIn("could not resolve the cwd", basis)
+        self.assertIn(str(os.getpid()), basis,
+                      "the refusal must name WHICH process it could not read")
+
+    def test_a_failed_git_status_in_the_worktree_reads_UNREADABLE(self):
+        """CONDITION 3's other fail-closed arm: a dirt read that fails is not "clean".
+
+        The worktree record exists and its directory exists, so the `isdir` guard does not
+        apply — and `git status` then fails, which must NOT be read as an empty tree. The
+        fixture breaks the checkout's `.git` pointer, which is a real git failure (rc 128),
+        not a stubbed one.
+        """
+        self.gh_fixtures(closed_prs=[])
+        branch = f"fix/{ISSUE}-empty-broken-git"
+        ref = self.empty_branch(branch)
+        wt = self.checked_out_worktree(branch, f"empty-broken-{ISSUE}")
+        (wt / ".git").write_text("gitdir: /nonexistent/gitdir-for-this-test\n")
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        line = self.hit(out, ref)
+        self.assertNotIn("ADVISORY", line)
+        self.assertIn("UNREADABLE", line)
+        self.assertIn("git status` in the worktree failed", self.row(out, "local branches"))
+
+    def test_a_pruned_moved_checkout_with_a_live_lane_is_not_demoted(self):
+        """⛔ THE LIST IS NOT THE WORLD (review finding, reproduced end to end).
+
+        A lane whose checkout was MOVED and whose stale registration was then PRUNED has no
+        worktree record at all, so `_name_matched_owner` answers "no worktree is checked out
+        on it" — and before `_unregistered_checkout_owner` the ref was DEMOTED while a live
+        `pi` stood in the moved tree writing it (`VERDICT: CLEAN`, exit 0). That is the
+        #4256 direction this rule must never open.
+
+        It is not demoted now, and the reason is named: the moved checkout's `gitdir:` is
+        gone with its registration, so its branch cannot be NAMED — an unreadable reading,
+        which blocks by construction.
+        """
+        self.gh_fixtures(closed_prs=[])
+        branch = f"fix/{ISSUE}-empty-pruned"
+        ref = self.empty_branch(branch)
+        wt = self.checked_out_worktree(branch, f"empty-pruned-{ISSUE}")
+        proc = self._start_fake_pi(wt)
+        moved = self.tmp / f"moved-away-{ISSUE}"
+        try:
+            self._wait_for_pi_cwd(wt)
+            os.rename(wt, moved)
+            self._wait_for_pi_cwd(moved)
+            # The registration now points at a path that no longer exists, so this is the
+            # module's OWN advice for a dead record — and it is what erases the last trace.
+            _git(self.repo, "worktree", "prune")
+            rc, out = self.run_tool()
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        line = self.hit(out, ref)
+        self.assertNotIn("ADVISORY", line)
+        self.assertNotIn("EMPTY-CLAIM", line)
+        self.assertIn("UNREADABLE", line)
+        self.assertIn("UNREGISTERED checkout", line)
+
+    def test_a_live_lane_in_ANOTHER_repository_is_not_a_claim_on_this_one(self):
+        """PRECISION ARM: a foreign checkout is not a holder of this repository's refs.
+
+        A clone has its OWN `refs/heads/*`: a lane on `fix/N` in a clone is not a lane on
+        this checkout's `fix/N`, and reading it as one would block every issue in every
+        repo on a box where some other repository happens to carry the same branch name —
+        the over-block that gets a gate turned off. So the probe asks each unregistered
+        `pi` cwd for its `--git-common-dir` and skips anything that is not THIS repository's
+        (removing that comparison turns this test red: the clone's branch name matches).
+        """
+        self.gh_fixtures(closed_prs=[])
+        branch = f"fix/{ISSUE}-empty-elsewhere"
+        ref = self.empty_branch(branch)
+        clone = self.tmp / f"unregistered-{ISSUE}"
+        subprocess.run(["git", "clone", "-q", str(self.bare_origin()), str(clone)],
+                       check=True, capture_output=True, text=True)
+        _git(clone, "config", "user.email", "test@example.com")
+        _git(clone, "config", "user.name", "Test")
+        _git(clone, "switch", "-q", "-c", branch, "origin/main")
+        head = subprocess.run(
+            ["git", "-C", str(clone), "symbolic-ref", "--short", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        self.assertEqual(head, branch, "the fixture checkout must be on the judged branch")
+        proc = self._start_fake_pi(clone)
+        try:
+            self._wait_for_pi_cwd(clone)
+            rc, out = self.run_tool()
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        line = self.hit(out, ref)
+        self.assertIn("ADVISORY", line)
+        self.assertNotIn("UNREGISTERED checkout", line)
+
+    def stale_holder(self):
+        mod = _tool_module()
+        return mod.StaleHolder("git", str(self.repo), ISSUE, 60, [])
+
+    def _start_fake_pi(self, cwd: Path) -> subprocess.Popen:
+        """A process the census will see as `pi`, standing in `cwd` (see test (c2) above).
+
+        A COPY OF A REAL BINARY invoked by NAME through `PATH`: a `#!` script would carry
+        the interpreter as argv[0], and an absolute path would put the matcher at the mercy
+        of the `ps` column width.
+        """
+        fake_bin = self.tmp / "fakebin-empty"
+        fake_bin.mkdir(exist_ok=True)
+        pi = fake_bin / "pi"
+        if not pi.exists():
+            shutil.copy("/bin/sleep", pi)
+        env = {**os.environ, "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}"}
+        return subprocess.Popen(["pi", "120"], cwd=str(cwd), env=env,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     # ── helpers ─────────────────────────────────────────────────────────────
 

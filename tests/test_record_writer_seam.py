@@ -314,10 +314,17 @@ def test_an_undeclared_record_type_raises_and_executes_no_statement() -> None:
 
 
 def test_a_refused_operation_raises_and_executes_no_statement() -> None:
-    """A DECLARED refusal is a failure, not a skip — through the seam too."""
+    """A DECLARED refusal is a failure, not a skip — through the seam too.
+
+    The refusal named here is `EntityMutated op=rename` — `PointsMerged` used
+    to carry this leg, and since #9892 it projects (one delete per loser),
+    so it can no longer stand in for a refusal. `rename` is the remaining
+    declared refusal (`#3377`/`#4769`: no writer produces it, and on the record
+    side a rename MOVES the canonical key of Object/Subject).
+    """
     conn = FakeConnection()
-    refused = [{"type": "PointsMerged", "ts": "T", "op": "merge",
-                "keep_id": "p1", "merge_ids": ["p2"]}]
+    refused = [{"type": "EntityMutated", "ts": "T", "id": "o1",
+                "label": "Object", "op": "rename", "name": "n2"}]
 
     with pytest.raises(rw.RecordWriteError) as excinfo:
         _armed(conn).write(refused, org_id=ORG, graph_id=GRAPH)

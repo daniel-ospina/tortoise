@@ -242,8 +242,14 @@ def test_9660_the_docs_origin_actually_publishes_the_archives():
 
     * `website/skills/` is a NEW top-level entry, and the Pages deploy refuses
       to upload an UNCLASSIFIED one (`check_pages_upload_root.py`, run as a
-      preflight). Flipping it to `excluded` would leave the whole suite green
-      while every archive link 404s.
+      preflight). The gap is the COMBINED edit: classifying it `excluded`
+      *together with* a matching `--exclude='/skills/'` in the deploy step keeps
+      `test_pages_bindings.py`'s
+      `test_every_top_level_entry_under_website_is_classified` green — that test
+      only requires the table and the rsync excludes to AGREE, not that `skills`
+      stays public — while every archive link 404s. (A bare flip to `excluded`
+      is caught there: `excluded != staged` for an entry with no matching
+      exclude.)
     * an unknown extension has no MIME mapping, and the dashboard's links are
       cross-origin, where browsers ignore `download` — so `/skills/*.skill`
       must be served as an attachment. Without the rule the file's behaviour
@@ -509,6 +515,36 @@ def test_4365_served_document_sends_chatgpt_to_a_path_that_exists():
             "(#9660)")
     assert "Add custom MCP server" in skill, (
         "the served document must name the real connector entry point (#9660)")
+    # #9660: the grant is three clicks, and the middle one opens a dialog the user
+    # has to answer. The note said "connect the plugin", which left the consent
+    # dialog between Connect and Authorize unmentioned — the live run stopped
+    # there until it was answered (2026-10-23).
+    assert "Connect Tortoise" in skill, (
+        "the served document must name the consent dialog's button, not just "
+        "'connect the plugin' — the grant does not complete without it")
+    # …and the ORGANIZATION act survives on BOTH consent shapes. The consent page
+    # NAMES the organization only when the account has one selectable org; with
+    # several it renders a chooser, hides the named-org line and leaves Authorize
+    # disabled until one is picked (tortoise/oauth.py `consent_preview`, the
+    # `len(orgs) > 1` memberships path). "Check the name" alone therefore points
+    # at text a multi-org account never sees — the same class of defect as the
+    # unnamed consent dialog — so the pick is pinned here (#9660 review).
+    assert "pick the Organization you are onboarding" in skill, (
+        "the served document must keep the multi-org act: the consent page shows "
+        "a CHOOSER (and no named organization) when the account has more than "
+        "one selectable org, and Authorize stays disabled until one is picked")
+    # …and the pick must be placed BEFORE Authorize: on the chooser branch the
+    # button is disabled until a value is chosen (tortoise/oauth.py
+    # `disableAuthorize()`, re-enabled only by the select's onchange), so
+    # "click Authorize, then pick" names an inert control. Bounded to the ChatGPT
+    # NOTE: measured over the whole document, any bolded `**Authorize**` elsewhere
+    # would red this with a message blaming the ChatGPT recipe (#9660 review).
+    note_at = skill.index("#1701 — ChatGPT is a 7th harness")
+    note = skill[note_at:skill.index("installing the three reusable skills", note_at)]
+    assert note.index("pick the Organization") < note.index("**Authorize**"), (
+        "the served document's ChatGPT recipe must pick the Organization before "
+        "Authorize — an agent reads this list aloud to a user who cannot see "
+        "which control is disabled")
     assert "ChatGPT tab" not in skill, (
         "the served document must not name the retired dashboard ChatGPT tab")
     # #9660 OWNER RULING (2026-10-23): the chooser DOES carry a ChatGPT

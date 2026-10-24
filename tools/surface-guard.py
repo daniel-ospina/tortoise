@@ -418,7 +418,9 @@ def main(argv: list[str]) -> int:
     # this gate (verified — `name: sdk:totally_new_and_unapproved` with an existing `method`
     # and `exemption: true` → exit 0, while the same method WITHOUT the row was refused), and
     # so did renaming a real SDK row. The derivation emits the name as `sdk:<method>` exactly
-    # (verified for all 150 rows), so that identity is enforced here, before the sets are
+    # (verified for EVERY row the derivation emits, whatever the surface count is —
+    # the check is generic over `sdk_rows`, so no number here can go stale), so that
+    # identity is enforced here, before the sets are
     # built. It SUBSUMES a duplicate-`method` check: two rows can only share a method if a
     # name is not its method (caught here) or a name repeats (caught above).
     sdk_rows = [r for r in rows if r["name"].startswith("sdk:")]

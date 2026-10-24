@@ -154,6 +154,14 @@ surfaces:
   # `__main__.py`-only diff (the #1349/#2938/#3154 silent-drop class). The file
   # is NOT in `carve_out:` — it rides in `test_files`.
   - test_9556_record_restore_verb.py
+  # #9555 (R7): §9.1's narrative CARRIER and §9.4's verbatim fetch. DUAL-
+  # REGISTERED with `core` for the #9556 reason exactly: `record_text.py` (the
+  # fetch composition, its exit codes, its scope proof) and its reader
+  # `record_read.py` match no SOURCE_PATTERN, while the operator verb lives in
+  # `tortoise/__main__.py` — an EXACT `api` SOURCE_PATTERN whose match REPLACES
+  # the `core` fallback, so one registration alone leaves the pins unexecuted
+  # on a diff touching the other half (the #1349/#2938/#3154 silent-drop class).
+  - test_9555_narrative_carrier.py
   # PR #9196 review P1: DUAL-REGISTERED with `core`, and THIS one IS
   # diff-carrying — the file is NOT in `carve_out:`, so it rides in
   # `test_files` for the surfaces `select()` matches. The S2 census pin
@@ -1439,6 +1447,23 @@ surfaces:
   # breaks them. `core` remains load-bearing for the other input,
   # `tortoise/record_writer.py`, which matches no SOURCE_PATTERN.
   - test_9192_tenant_armed_by_request.py
+  # #9664: DUAL-REGISTERED with `core` (below), for the same #2969/#9192 reason.
+  # `tortoise/mcp_auth.py` is an EXACT `SOURCE_PATTERNS["api"]` entry — the
+  # per-request tenant install the capstone drives, AND the module that produces
+  # the refusal text its unauthenticated leg asserts (`ERR_UNAUTHORIZED`, the
+  # `"Unauthorized: … Bearer …"` body) — so a middleware-only diff selects
+  # `api` and REPLACES the `core` fallback (`select()` adds `core` only in its
+  # `if not found:` branch; `CORE_ALSO` lists neither). `tortoise/supabase_control.py`
+  # (the control plane the fixture stubs) is the other `api` match.
+  # Measured on this entry's absence: `--changed-files tortoise/mcp_auth.py`
+  # yielded surfaces=['api'] with this file ABSENT — i.e. the one end-to-end pin
+  # of "an authenticated connector request reaches the record under the request's
+  # OWN tenant" would not run on the diff class that can break it, the
+  # #1349/#2938/#3154/#4367 silent-drop class. Keep BOTH arms: `core` is
+  # load-bearing for `record_writer.py` (no SOURCE_PATTERN), this one for the
+  # middleware diff. Pinned by
+  # `tests/test_ci_selection.py::test_9664_capstone_runs_on_the_middleware_diff_that_can_break_it`.
+  - test_9664_capstone_connector_to_record.py
   battery:
   - test_battery_arms.py
   # (removed a duplicate test_battery_derive_truth_leg.py entry here on the
@@ -1538,6 +1563,8 @@ surfaces:
   - test_vector_write_seam_4520.py
   core:
   - test_2351_claim_class.py
+  - test_9555_narrative_cache_rebuild.py
+  - test_9555_narrative_carrier.py
   - test_9583_openapi_read_only_claim.py
   # #9583: the `core` arm of the read-only-claim / lockstep pin. Half of the file asserts
   # the SERVED OpenAPI descriptions (`api`, above); the other half asserts that
@@ -1615,6 +1642,32 @@ surfaces:
   # FastMCP app over an embedded registry with planted credentials and spies on
   # `record_writer.write_records`, so it needs no graph and no URI.
   - test_9192_tenant_armed_by_request.py
+  # #9664 (the capstone): an authenticated CONNECTOR request (`POST /mcp`,
+  # `tools/call`) puts a Point in the Postgres RECORD, under the request's own
+  # tenant, and the identifier the client is handed reads it back. Registered
+  # `core` because `tortoise/record_writer.py` — the seam whose rows are asserted
+  # — matches no `SOURCE_PATTERN`, so a diff to it selects the `core` fallback and
+  # this file must be in that pool or the row-count assertion runs nowhere; its
+  # other subjects (`tortoise/mcp_server.py`, `tortoise/tool_registry.py`) are
+  # `SHARED_MODULES` and run the FULL matrix regardless (the `#6211` idiom — do
+  # not read this entry as covering those diffs). `.github/workflows/*.yml` is
+  # unclassified → FULL, so the workflow half also runs on its own diffs.
+  # DB-free for EIGHT of its ten legs (the surface, the verify-envelope check, the
+  # two description-matcher assertions, both description pins and the CI-wiring
+  # pin, plus the strict xfail). The other TWO need `TEST_RECORD_DB_URI`: the
+  # capstone's rows,
+  # and the unauthenticated refusal — which skips rather than guesses because it
+  # asserts that NO row was written, and without a database that assertion would
+  # be about nothing. Both are ARMED in the dedicated `test-record-postgres` job,
+  # which this file is wired into (pinned by its own
+  # `test_ci_runs_this_file_in_the_armed_record_job`, so deleting it from that
+  # job's `run:` cannot leave a green job). Same shape as the `#9551` entry above:
+  # the fast matrix keeps the surface/description/wiring legs, the armed job keeps
+  # the record. The `api` arm above covers the `tortoise/mcp_auth.py` /
+  # `tortoise/supabase_control.py` diff, which selects `api` and replaces this
+  # fallback; a `tortoise/mcp_server.py`/`tortoise/tool_registry.py` diff arrives
+  # as `SHARED_MODULES` (FULL matrix) and a `record_writer.py` diff lands here.
+  - test_9664_capstone_connector_to_record.py
   # #9190: `EventLog.append()` returns the record's journal position (the `seq`
   # `record_projection.replay_plan` keys `journal_event` on) and
   # `EventLog.position()` exposes the count. Same anchor as the #5612 entry
@@ -2197,7 +2250,14 @@ surfaces:
   # nothing verified on read what every writer pins shut. Pins
   # `tortoise/__main__.py::_resolve_config_path` + the `st_` token reader.
   - test_credential_store_mode_5109.py
+  # #4282 (phase 2.3): the memory-graph slice's own gate — the merged
+  # `update_memory_graph` (its sentinel must not clear an unmentioned field), the four
+  # retired names, and a source scan proving no tracked caller was left behind.
+  # Registered on `core` because the subject spans no single SOURCE_PATTERN module:
+  # `tortoise/sdk.py` and `tortoise/tool_registry.py` are both SHARED_MODULEs (a full
+  # matrix anyway), so `core` is the honest floor rather than a reach claim.
   - test_sdk_retirement.py
+  - test_4282_memory_graph_surface.py
   - test_record_schema_placement.py
   # #8882 (Phase 2 mechanics): the OFFLINE re-typing of a logical dump —
   # `tortoise/retype.py` matches no SOURCE_PATTERN, so a module-only change
@@ -3086,6 +3146,21 @@ surfaces:
   # `SOURCE_PATTERNS` row matches, so a selector edit lands in the unknown-path
   # fail-closed branch -> FULL matrix, where this pin runs too.
   - test_ci_selection_changed_files_9109.py
+  # #9790: the batch-review harness (`tools/batch_review.py`) — per-PR schema
+  # validation, the per-PR head/diff binding, and the fail-closed record refusals
+  # (no record for a result that fell out, for `issues`, without its own evidence
+  # comment, or at a head that drifted). REGISTERED because `--integrity` reds on any
+  # unregistered `tests/**/test_*.py` — which is exactly what the REQUIRED
+  # `manifest-integrity` job runs — and PR #9790 added the file without a row. `core`
+  # is where the file is CLASSIFIED, not where a `tools/`-only diff lands: `tools/` is a
+  # flat NON_PYTHON_PREFIXES entry and this tool matches no SOURCE_PATTERNS row, so such a
+  # diff is DROPPED (→ tier-1 smoke) unless the path is claimed — the claim is the
+  # `CORE_ALSO` entry for `tools/batch_review.py` in tools/ci_selection.py
+  # (#1349/#3332/#3616; pinned by
+  # test_ci_selection.py::test_batch_review_tool_change_selects_core_not_tier1). The file is
+  # hermetic: no `TORTOISE_DB_URI`, no
+  # network, no graph fixture, so it runs clean in the docker fast lane.
+  - test_batch_review.py
   # #6144: the required-status-check set is declared in THREE places — live
   # branch protection, `.mergify.yml`'s queue_conditions/merge_conditions, and
   # `.github/settings.yml`. Nothing read two of them: `.mergify.yml` stated the
@@ -3783,6 +3858,15 @@ surfaces:
   # `extractor_v2.py` is not a SHARED_MODULE, so a diff touching only it selects
   # `core` — unregistered, this guard would run in NO leg at all.
   - test_merge_fold_5006.py
+  # #5006: the FUSION half of the same ruling — `near_dup_merge` + the write
+  # path that unions both sides' attachments onto ONE survivor. Registered
+  # `core` for the same reason as its sibling above: its subjects are
+  # `extractor_v2.py` (not a SHARED_MODULE — a diff touching only it selects
+  # `core`, so unregistered this battery would run in NO leg at all) and
+  # `sdk.py`'s capture write path, which the `core` lane drives. It asserts
+  # reachability against a real graph, not embedded-only semantics, so it takes
+  # no `carve_out` slot and no `TEST_NO_REDIRECT_STEMS` mirror.
+  - test_near_dup_merge_5006.py
   - test_no_tests_imports_in_production.py
   - test_notify.py
   - test_notify_offloop_4456.py  # #4456: billing notify off-loop + never-raise in webhooks_stripe (dual: api)
@@ -6636,6 +6720,8 @@ push_extra: []
 # value moves or it is held, so an unchanged row keeps the figure it was given.
 durations_captured_at: "2026-10-21T09:30:00Z"
 durations:
+  test_4282_memory_graph_surface.py: 2.0  # unmeasured — new in #4282 (phase 2.3); no CI sweep has collected it, so it carries the flat default for an unmeasured file (the #2818/#3400/#9121 convention) rather than a local reading, which this map forbids as a SHARD-LAYOUT input. What the weight covers: 17 cases — 13 taking the derived `sdk` graph fixture (a team created and torn down per test; EMBEDDED locally, redirected by `tests/_embedded.py` to the docker/server lane under `TORTOISE_TEST_MODE=1` + `TORTOISE_DB_URI`, so the flat weight is the same either way) and 4 that need no graph (the retirement hint, the class check, the tool-name check, and one source scan of EVERY tracked `*.py` for retired call sites, deliberately wider than `tortoise/` because `graph-scripts/` held a live caller) — no Postgres, no network, no model. The row has to EXIST, not merely default: one more unweighted fast file moves the coverage ratio, and `--integrity`'s duration-coverage issue list is measured against the pool's own size. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
+  test_batch_review.py: 2.0  # unmeasured — new in #9790 (#3400/#4348 trap): a file ADDED BY A PR can never carry a CI junit measurement (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and not a dev-box reading (#2818/#3419, pinned by `tests/test_ci_selection.py::test_2818_new_file_row_carries_the_flat_default_until_a_sweep_collects_it`). MEASURED at this head, both states, because the difference is the whole point of the row: the `core` surface entry is manifest CLASSIFICATION only (#4348), so this file enters `fast_pool()` either way — at `2b26d9239` WITH the row the pool is 1021 files and 99 are unweighted = 0.903036 (922/1021); WITHOUT it 100 are = 0.902057 (921/1021) (`fast_pool(load_manifest())`, `ci_selection.py --integrity` rc 0). Treat that pair as a SNAPSHOT OF A MOVING DENOMINATOR, not a constant: the same figure read 1007 / 0.901688 before the previous `origin/main` merge and 1021 / 0.903036 here, because main keeps adding fast files — so `--integrity` is the authority and these numbers are only what it said at this head. Headroom is 3 unweighted files, not 1: 102 unweighted = 0.900098 still passes, 103 = 0.899119 reds the 0.90 floor, so a handful of new unweighted fast files — not one — is what triggers `duration_coverage_issues`. What the weight covers: DB-free and network-free — `plan_records`/`validate_answer`/`_diff_file_paths` over in-memory manifest dicts and a `tmp_path` diff cache, plus THREE subprocess seams: a stub `gh` standing in for the GitHub API in `prepare`, a stub `record-review.sh` the `record` command actually execs (asserting the planned argv and the fail-closed rc), and an injected normalizer standing in for `diff-normalize.py`. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_9572_discriminator_not_clobbered.py: 2.0  # unmeasured — new in #9572; no CI sweep has collected it, so it carries the flat default for an unmeasured file (the #2818/#3400/#9121 convention), NEVER a local reading: the map is a SHARD-LAYOUT input modelling CI. Surface: the identity-upsert discriminator (a bare re-create or a blank kind must not reset `subjectKind`/`objectKind`) across every door and caller layer that used to fabricate the default. MEASURED 2026-10-23 against `origin/main` dd0d9e3f6 (this file copied into a detached worktree there and run with THAT worktree's own `.venv`): **30 cases, 22 taking the `sdk` graph fixture, 26 FAIL pre-fix, 4 pass** — and **5 of the 26 fail BY IMPORT** (`tortoise.kind_fallbacks` ×4, `sdk._payload_entity_kind` ×1: the modules are new here). The 4 that pass pre-fix are over-fix guards, named rather than counted: `test_subject_first_create_still_defaults_to_other`, `test_object_first_create_still_defaults_to_other`, `test_subject_explicit_kind_still_updates`, `test_caller_supplied_props_still_apply_on_recreate`. ⛔ Do NOT measure the pre-fix half with the FIXING worktree's `.venv`: it is an editable install of the fix, so a module absent at base resolves back into the fix and the run reports **23 fail / 7 pass** instead (measured — the contamination is invisible except in the number, so a detached worktree needs its own `uv sync`). Five pins live at ROUTE level, all FAIL pre-fix: four in `test_hosted_api.py` (`/v1/subjects` and `/v1/objects`, each with a NAMED-kind re-create and a BLANK-kind re-create) and one in `test_commit_endpoint.py` (`/v1/sessions/commit`, the production capture door). Registration: `core` (the block above) PLUS `api` and `onboarding`, because these pins cover `_OrgSeedSurface` (`tortoise/hosted_api.py`) and `_SdkSeedSurface` (`tortoise/onboarding/selfhost.py`) and a SOURCE_PATTERNS match REPLACES the `core` fallback (pinned by `tests/test_ci_selection.py::test_the_9572_seed_surface_pins_are_selected_on_their_own_modules`). Lane: not an embedded fixture — the file is registered on `core` and is not in `TEST_NO_REDIRECT_STEMS` (`tests/_embedded.py`), so under `TORTOISE_TEST_MODE=1` + `TORTOISE_DB_URI` its explicit `TortoiseSDK(.../topic.db)` construction is redirected to the docker server (a socket, not an embedded DB). No Postgres, no network egress. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep has measured it.
   test_9340_graph_tool_argument.py: 2.0  # unmeasured — new in #9340; no CI sweep has collected it, so it carries the flat default for an unmeasured file (the #9121/#9192/#3400 convention) rather than a local reading, which this map forbids as a SHARD-LAYOUT input. Do NOT substitute a local timing: the file is DB-free and hermetic (58 collected cases, re-derived with `--collect-only` at this head rather than estimated: resolution tables over injected rows, the dispatch/threading and record-tenant seams, the handler-level graph-SELECTION checks (the ``graph`` an advertised tool actually reads) and `mcp._list_tools()` schema reads; the one session cost is the module's first `list_tools()` build, which the #3400 trap attributes to whichever test runs first). It has to exist as a ROW, not merely as a default: adding the file to the `api` surface without a weight puts one more unweighted fast file in the pool, and the coverage floor is measured against the pool's own size (`--integrity`'s `duration_coverage_issues`). `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_9555_session_narrative.py: 2.0  # unmeasured — new in #9555 (R7, §9.1's narrative home); no sweep has collected it, so it carries the flat `DEFAULT_FAST_WEIGHT` for an unmeasured file (the #2818/#3419/#9121 convention) rather than a local reading, which this map forbids as a SHARD-LAYOUT input. What the weight covers: DB-free and graph-free — it parses the record migrations on disk (`table_columns`/`RECORD_MUTATIONS`), builds statement plans in memory against a DB-API-shaped double, and reads no journal, no Postgres and no FalkorDB. It is registered HERE as well as in a surface list because the row IS the coverage numerator: without it the map fell to 892/992 = 89.92%, below `--integrity`'s 0.90 floor, and `tests/test_ci_selection.py::test_duration_coverage_guard_boundary_and_realistic` reds (the same zero-headroom trap the #9121/#9362 rows record). `tools/ci_timing.py --refresh-durations` replaces this from junit.
@@ -6854,7 +6940,7 @@ durations:
   test_served_skills_parity.py: 2.0  # unmeasured — new in #4643; no sweep has collected it, so it carries the flat default exactly as an absent key would (the #3419/#2788 rule). A local timing is deliberately NOT substituted: the weight is a SHARD-LAYOUT input, so only a measured CI junit value for the leg that carries the file models it. Refresh from the first post-merge main run that includes it.
   test_license_surface_consumer.py: 0.3
   test_7818_plan_record_5362.py: 2.0  # #7818/#5362: a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it takes the #3400 flat 2.0s default. Hermetic (one plan-doc read, no fixture/DB); refresh from the first post-merge run that includes it. Required for the durations half as well as the surface half (#4348 trap): without this row the durations coverage fell to 89.9% and `tools/ci_selection.py --integrity` red, which is how this row was found.
-  test_7949_capstone_measure.py: 2.0  # unmeasured — #9080 (#3400 trap): NEW in this PR, so no sweep has collected it and a new file's first weight is the flat `DEFAULT_FAST_WEIGHT`, not a dev-box reading (a weight is a SHARD-LAYOUT input). What it covers: the measurement probe's pure contract — bar parsing out of the frozen record, the verdict arithmetic, the table shape and the artifact checks — plus the probe's own honesty rules (the arm that is FORCED and read back, a witness that needs the pass to have DONE WORK, the E3 census's two anchor directions, the Point-denominator composition and the derivation figure over the writer class, the E3 row note's historical clause which must carry NO live count and NO typed ratio, the shipped log's two copies of that note agreeing byte-for-byte, the README's not-established bullet quoting the operator counts the log actually measured, and the one-scored-log rule with the newest chosen by `# generated:` stamp); DB-free, network-free, LLM-free; measured 2.3 s for 44 cases on this host 2026-10-23, deliberately NOT adopted as the weight — `test_the_durations_row_quotes_the_case_count_it_weights` pins the count so this note cannot describe a smaller file than ships. Refresh from the first post-merge sweep that includes it.
+  test_7949_capstone_measure.py: 2.0  # unmeasured — #9080 (#3400 trap): NEW in this PR, so no sweep has collected it and a new file's first weight is the flat `DEFAULT_FAST_WEIGHT`, not a dev-box reading (a weight is a SHARD-LAYOUT input). What it covers: the measurement probe's pure contract — bar parsing out of the frozen record, the verdict arithmetic, the table shape and the artifact checks — plus the probe's own honesty rules (the arm that is FORCED and read back, a witness that needs the pass to have DONE WORK, the E3 census's two anchor directions, the Point-denominator composition and the derivation figure over the writer class, the E3 row note's historical clause which must carry NO live count and NO typed ratio, the shipped log's two copies of that note agreeing byte-for-byte, the README's not-established bullet quoting the operator counts the log actually measured, and the one-scored-log rule with the newest chosen by `# generated:` stamp); DB-free, network-free, LLM-free; 46 cases (2.3 s measured for the first 44 on this host 2026-10-23; the 45th is the bundle's own cite-resolution leg, and the 46th the leg that keeps that sweep to the `#7949` row of `docs/00_index.md`, both added 2026-10-24), deliberately NOT adopted as the weight — `test_the_durations_row_quotes_the_case_count_it_weights` pins the count so this note cannot describe a smaller file than ships. Refresh from the first post-merge sweep that includes it.
   test_7949_capstone_verdict_check.py: 2.0  # unmeasured — #9080 (#3400 trap): this file is NEW in this PR, so no sweep has ever collected it (a file that never ran cannot appear in a junit artifact) and a new file's first weight is the flat 2.0s default, deliberately NOT "just pick a number" — a weight is a SHARD-LAYOUT input, so a local reading decides which files share a shard. Provenance only, NOT the weight: 111 tests (80 when the sum below was taken; the +23 are the #9089 reviews' bool-is-not-an-int, unhashable-criterion, README-citation and log-stamp regressions, the F3 malformed-pre-registration arms (each builds a throwaway repo, so those are subprocess-bound), the #9075-landing arms, the two V1/V3 vocabulary pins, the `--head`-tree pin, the unborn-HEAD pin, the deep-nesting pin and the V7/V10 measurement arms (including the absent-receipt shape) the later review rounds added, the probe-citation pin, and the #9080 measurement round's arms (the multi-artifact V7 declaration checks, the P1 citation pins, the REFUSED-is-not-RED vocabulary pin, and the corpus-spelling pin)), subprocess-bound (the `git cat-file`/`merge-base` ancestry assertions are not file scans like the `core`/`tier1` siblings), summed `testcase/@time` = 28.57-55.95s across runs at the PR head on 2026-10-20 (docker lane, `--junitxml`; wall 29.78-58.03s). The COUNT is re-derived with every revision (earlier revisions of this row quoted 40, 58, 70 and 75) and `test_the_durations_row_quotes_the_test_count_it_weights` pins it; the SUM is the CONTENDED shared host's reading (a quiet re-measure of the same file summed 4.10s), not a property of the file. Refresh from the first post-merge run that includes it — that refresh rewrites the weight and CLEARS this note. Do NOT drop the row without re-deriving the durations floor at that head.
   test_7950_capstone_probe.py: 2.0  # #7950: a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it takes the #3400 flat 2.0s default. MEASURED this turn: WITHOUT this row the durations coverage fell to 89.9% (760/845 fast files) and `tools/ci_selection.py --integrity` red — the surface entry alone does not cover it. The file is DB-free pure-function work, but it is NOT cheap: PR #9196 review P3 measured its 16 tests at 16.6–24.2s locally across runs, of which 14.3–19.3s is the S2 census pin this PR added (`test_the_s2_census_log_is_a_LIVE_measurement` re-tokenizes 241 `tortoise/` + 132 `tools/` files via `census_all(PROD_DIRS, TARGETS)`), so the flat default now under-states the file ~10x for the shard packer. The VALUE deliberately stays at the flat default: a weight is a shard-layout input and this row has no CI measurement yet (the #9003-review pin on the #2818 row states the rule — `tests/test_ci_selection.py::test_2818_new_file_row_carries_the_flat_default_until_a_sweep_collects_it`), so the number is the refresher's to write, not the branch's to hand-pick. Refresh from the first post-merge run that includes it.
   test_9556_record_restore_verb.py: 2.0  # unmeasured — new in #9556 (R8); a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it carries the header's flat `DEFAULT_FAST_WEIGHT` for an unmeasured file (the #2818/#3419 convention) rather than a dev-box reading, which this map forbids as a SHARD-LAYOUT input. MEASURED this turn: WITHOUT this row the durations coverage fell to 89.9% (892/992 fast files) and `tools/ci_selection.py --integrity` red — the two `surfaces:` registrations do NOT cover it, exactly the #7950 row's case directly above. What the weight covers: the file's whole collected set (42 pins / 43 collected cases when this note was written; `--collect-only` is the authority), source-structural pins plus a handful of LIVE cache-graph pins (`shared_proj` + a per-test `test_9556_*` graph) — locally ~6 s for the whole file, but the live half pays the session's first-fixture cost (#3400), so a local reading here would misstate a shard-layout input. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep collects it.
@@ -7793,6 +7879,23 @@ durations:
   # Entered LOW per the #2517/#4883 precedent for a newly-added file, so the
   # duration-coverage floor is not spent; the first post-merge push re-measures.
   test_9192_tenant_armed_by_request.py: 3.8  # ci-timing top-15 2026-10-20 (run 39467226356); was 2.0
+  # #9664 capstone connector→record. TEN tests: SEVEN DB-free (the surface, the
+  # two description-matcher assertions, both description pins, the verify-envelope
+  # check and the CI-wiring pin), ONE strict xfail (DB-free), and TWO that SKIP by
+  # name without `TEST_RECORD_DB_URI` (the capstone's rows and the unauthenticated
+  # refusal, which asserts no row was written). Measured 2026-10-24 on this host,
+  # DB-free — the lane whose wall clock this row's weight is for: "7 passed, 2
+  # skipped, 1 xfailed in 1.63s" (`TORTOISE_TEST_CARVE_OUT=1`, `TORTOISE_DB_URI`
+  # unset) and "7 passed, 2 skipped, 1 xfailed in 2.06s" (docker FalkorDB), so the
+  # 2.0 entry still holds. Armed against a throwaway `postgres:16`: "9 passed,
+  # 1 xfailed, 0 skipped" — its WALL CLOCK is deliberately not quoted as this
+  # row's weight: a dev venv carries `[embeddings]`, which the
+  # `test-record-postgres` job omits on purpose (`pip install -e
+  # '.[test,postgres]'`, measured there as "71s against 204s with the embedder
+  # installed"), and the embedder load dominates the capstone leg on a dev box.
+  # Entered LOW per the #2517/#4883 precedent for a newly-added file so the
+  # duration-coverage floor is not spent; the first post-merge push re-measures it.
+  test_9664_capstone_connector_to_record.py: 2.0
   test_5917_torn_tail_seal.py: 2.0
   test_longmem_costing.py: 0.2
   test_longmem_errors.py: 0.1
@@ -8004,6 +8107,7 @@ durations:
   test_never_across_fold_5080.py: 2.0  # unmeasured
   test_operator_alert.py: 3.8  # ci-timing top-15 2026-10-20 (run 39467226356); was 2.3
   test_merge_fold_5006.py: 2.0  # unmeasured — new in #5006; the weight is the flat default, not a measurement
+  test_near_dup_merge_5006.py: 2.0  # unmeasured — new in #5006 (the FUSION half); the weight is the flat default, not a measurement. Without this row the file packs at the same 2.0s but counts as UNCOVERED, dropping the repo-wide coverage floor (#3400) and redding manifest-integrity
   test_consumed_sdk_binding_3904.py: 2.0  # unmeasured — new in #3904. Without a row this file packs at the flat 2.0s default anyway, but it would count as UNCOVERED, dropping the repo-wide coverage floor (#3400) to 89.9% and redding the manifest-integrity gate. The 2.0 value is the default it would have received; it is a weight, not a measurement.
   bench/test_smoke_embedded.py: 38.6  # ci-timing top-15 2026-10-21 (run 39467226356): a single-test file cannot prove full coverage from a top-15 projection; the reading (28.9s) is a LOWER bound; kept 38.6
   test_about_edges.py: 3.0  # #9017 CI-junit 2026-10-18 (run 39165691659); was 6.2

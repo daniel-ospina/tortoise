@@ -196,6 +196,13 @@ _MINIMAL_RECORDS: dict[str, dict] = {
     "PointRevised": {"id": "p1", "new_content": "c2"},
     "OperatorAnnotated": {"id": "p1", "annotator_bias": 0.5},
     "PointRetracted": {"id": "p1"},
+    # #9892: the PRODUCER's shape (`api.py::merge_points`), which carries no
+    # `op` — the fixture that used to stand in for this type (in the refusal
+    # test) invented `op: "merge"`, a key no writer emits, so the declared
+    # refusal never fired for the only producer and the type was neither
+    # refused nor projected. A fixture that cannot be produced pins nothing.
+    "PointsMerged": {"keep_id": "p1", "merge_ids": ["p2"],
+                     "corrects": None},
     "PointSuperseded": {"id": "p1", "new_id": "p2",
                         # The real producer payload (#2423): the bi-temporal
                         # stamps the fold replays verbatim.
@@ -221,6 +228,15 @@ _MINIMAL_RECORDS: dict[str, dict] = {
                         "previousContentHash": "h1", "previousValidTo": "t0"},
     "DocumentCreated": {"id": "u1", "url": "u1"},
     "SessionRecorded": {"id": "sess1", "turn_count": 2, "is_episodic": True},
+    # #9555/R7: the narrative carrier's PRODUCER shape
+    # (`hosted_api._execute_commit_writes` → `sdk._emit_event("SessionNarrated",
+    # id=event_id, sessionId=, story_arc=, summary=, capturedAt=)`), not an
+    # invented one. It carries the narrative, so it DOES produce a statement
+    # through the shape-keyed secondary projection while declaring
+    # `NoRecordEffect` — see the branch in the totality test below.
+    "SessionNarrated": {"id": "e1", "sessionId": "sess1",
+                       "story_arc": "the session, told as prose",
+                       "summary": "one line"},
     "SessionDeleted": {"id": "sess1"},
     "EntityLinked": {"id": "p1", "source_label": "Point", "source_id": "p1",
                      "target_label": "Object", "target_id": "o1",
@@ -237,7 +253,7 @@ _MINIMAL_RECORDS: dict[str, dict] = {
 def test_there_is_a_minimal_record_for_every_declared_mutation():
     """The fixture below must not silently lag the registry."""
     assert set(_MINIMAL_RECORDS) == set(rp.JOURNAL_EVENT_TYPES) - {
-        "EntityMutated", "PointsMerged",
+        "EntityMutated",
     }
 
 
@@ -248,7 +264,21 @@ def test_each_declared_type_materializes_or_declares_a_no_effect(record_type):
     statements = rp.mutations_for(record, org_id="o", graph_id="g")
     effect = rp.RECORD_MUTATIONS[record_type].effect
     if isinstance(effect, rp.NoRecordEffect):
-        assert statements == []
+        # #9555/R7: a declared no-effect record can still carry a SECONDARY
+        # projection's payload — the §9.1 narrative home is shape-keyed on
+        # purpose (any producer carrying `story_arc` lands it, including one
+        # nobody listed in a type whitelist), so "no declared NODE effect" does
+        # not mean "no statements". Asserting `statements == []` unconditionally
+        # would force every future narrative carrier into the very whitelist
+        # #9555 removed.
+        if record.get("story_arc"):
+            assert statements, (
+                f"{record_type} carries the §9.1 narrative and produced no "
+                "statement — the shape-keyed secondary projection did not fire")
+            assert any(rp.NARRATIVE_TABLE in s.sql for s in statements), (
+                f"{record_type}'s statements do not touch {rp.NARRATIVE_TABLE}")
+        else:
+            assert statements == []
         # A declared no-op must say WHY. "No reason" is the silent skip.
         assert len(effect.reason) > 40, (
             f"{record_type} declares NoRecordEffect with a reason too thin to "
@@ -284,14 +314,120 @@ def test_entity_mutated_dispatches_on_op_and_refuses_undeclared_ops():
         rp.mutations_for({**base, "op": "levitate"}, org_id="o", graph_id="g")
 
 
-def test_points_merged_is_refused_not_approximated():
-    with pytest.raises(rp.RefusedJournalOperation) as excinfo:
-        rp.mutations_for(
-            {"type": "PointsMerged", "ts": "T", "op": "merge", "keep_id": "p1",
-             "merge_ids": ["p2"]},
-            org_id="o", graph_id="g",
-        )
-    assert "REFUSED" in str(excinfo.value)
+def test_points_merged_deletes_the_losers_and_leaves_the_survivor():
+    """#9892 — the merge's record mutation is the GRAPH fold's, and it fires.
+
+    The declared refusal this replaces (a) never fired for the only producer
+    (`api.py::merge_points` emits no `op`, so the record raised a generic "no
+    `op`" fold failure instead — the gap was misclassified, not declared), and
+    (b) described a mutation no code performs: `keep_id` is read nowhere in
+    `tortoise/` outside the record module, and the graph's `PointsMerged` arm is
+    one `DETACH DELETE` per `merge_ids` entry.
+
+    What the record must therefore emit per loser is the pair
+    `EntityMutated op=delete` emits — the `node_identity` parent (whose
+    composite FKs cascade the incident relation rows, the record's `DETACH`)
+    and then the node row.
+    """
+    statements = rp.mutations_for(
+        {"type": "PointsMerged", "ts": "T", "keep_id": "p1",
+         "merge_ids": ["p2", "p3"]},
+        org_id="o", graph_id="g",
+    )
+    assert len(statements) == 4, statements          # 2 per loser
+    assert statements[0].sql.startswith("DELETE FROM public.node_identity")
+    assert statements[1].sql.startswith("DELETE FROM public.point")
+    assert "p2" in statements[1].params
+    assert statements[2].sql.startswith("DELETE FROM public.node_identity")
+    assert statements[3].sql.startswith("DELETE FROM public.point")
+    assert "p3" in statements[3].params
+    # The survivor is NOT patched: no statement names it, so the record cannot
+    # invent a state the graph fold never writes.
+    assert not any("p1" in s.params for s in statements), statements
+    assert not any(s.sql.startswith("UPDATE") for s in statements), statements
+
+
+def test_points_merged_reads_the_nested_carrier_too():
+    """#325's nested shape is a SUPPORTED journal shape — the record too.
+
+    `_norm` splices `ev["point"]` over the envelope before the fold reads
+    `merge_ids`, and `tests/test_projection.py::test_falkor_apply_points_merged_
+    nested_format` pins that the graph deletes from it. A record that read only
+    the flat carrier would leave the loser in Postgres while the graph dropped
+    it — the two rebuild routes disagreeing, in silence.
+    """
+    flat = rp.mutations_for(
+        {"type": "PointsMerged", "ts": "T", "keep_id": "p1",
+         "merge_ids": ["p2"]}, org_id="o", graph_id="g")
+    nested = rp.mutations_for(
+        {"type": "PointsMerged", "ts": "T",
+         "point": {"keep_id": "p1", "merge_ids": ["p2"]}},
+        org_id="o", graph_id="g")
+    assert [s.params for s in flat] == [s.params for s in nested]
+    assert [s.sql for s in flat] == [s.sql for s in nested]
+
+
+def test_a_nested_carrier_wins_over_an_envelope_copy():
+    """`_norm` is `{**ev, **ev["point"]}` — the NESTED value wins.
+
+    A record read flat-first would delete by the envelope's `merge_ids` on a
+    journal whose `point` sub-dict says something else, while the graph deletes
+    by the nested one: two rebuilds, two different graphs, from one journal.
+    """
+    statements = rp.mutations_for(
+        {"type": "PointsMerged", "ts": "T",
+         "merge_ids": ["envelope-loser"],
+         "point": {"keep_id": "p1", "merge_ids": ["nested-loser"]}},
+        org_id="o", graph_id="g")
+    deleted = {s.params[-1] for s in statements
+               if s.sql.startswith("DELETE FROM public.point")}
+    assert deleted == {"nested-loser"}, deleted
+
+
+def test_points_merged_with_no_ids_is_the_folds_no_op():
+    """`merge_ids: []`/absent deletes nothing and does not raise.
+
+    The graph fold's arm is `for mid in ev.get("merge_ids") or []`, so an empty
+    merge is a 0-row no-op on both sides (`tests/test_projection.py` applies a
+    bare `{"type": "PointsMerged"}` and requires no error). A record that
+    refused it would fail a write the graph completes.
+    """
+    for record in ({"type": "PointsMerged", "ts": "T"},
+                   {"type": "PointsMerged", "ts": "T", "merge_ids": []},
+                   {"type": "PointsMerged", "ts": "T",
+                    "merge_ids": [None, 3]}):
+        assert rp.mutations_for(record, org_id="o", graph_id="g") == [], record
+
+
+def test_the_record_deletes_exactly_the_points_the_fold_removes():
+    """The parity pin, stated as the one question that matters.
+
+    Not "does the record emit a delete" — *does the record delete the same
+    points the graph fold's replay removes?* The graph side is
+    `projection.fold`, the in-memory fold every replay path is pinned against;
+    the record side is the key set its DELETE statements carry. A divergence
+    here is a record-sourced rebuild that resurrects a merged-away Point, which
+    is the data loss #9892 measured.
+    """
+    from tortoise.projection import fold
+
+    events = [
+        {"type": "PointAdded", "point": {"id": "a", "content": "A"}},
+        {"type": "PointAdded", "point": {"id": "b", "content": "B"}},
+        {"type": "PointAdded", "point": {"id": "c", "content": "C"}},
+        {"type": "PointsMerged", "keep_id": "a", "merge_ids": ["b", "c"]},
+    ]
+    surviving = set(fold(events))
+    merge = events[-1]
+    deleted = {
+        params[2]
+        for statement in rp.mutations_for(merge, org_id="o", graph_id="g")
+        for params in [statement.params]
+        if statement.sql.startswith("DELETE FROM public.point")
+    }
+    assert deleted == {"b", "c"}, deleted
+    assert surviving == {"a"}, surviving
+    assert surviving | deleted == {"a", "b", "c"}
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -300,9 +436,10 @@ def test_points_merged_is_refused_not_approximated():
 
 
 def _everything_records() -> list[dict[str, Any]]:
-    """One record per declared type — every type but the declared refusal
-    `PointsMerged`, which has its own leg — plus the `delete_only` leg of a
-    repoint. Five of the 30 carry `NoRecordEffect` (`EntityBindingRefused`,
+    """One record per declared type — every type the registry declares, since
+    #9892 removed the ONE that had no projecting leg (`PointsMerged`) — plus the
+    `delete_only` leg of a repoint. Five of the 30 carry `NoRecordEffect`
+    (`EntityBindingRefused`,
     `ConfidenceChanged`, `EdgeMessageChanged`, `IngestStarted`,
     `CalibrationRecorded`): their `mutations_for` is empty, which
     `test_each_declared_type_materializes_or_declares_a_no_effect` is the leg
@@ -1874,15 +2011,33 @@ def _producer_emit_vocabulary() -> set[str]:
     producers' half made executable, so a new `_emit_event("NewType", ...)`
     (or a new `_*_RECORD_TYPE = "NewType"` constant it is called with) reds the
     suite even before a fold arm or a torn-tail classification names it.
+
+    ⛔ THE CONSTANT MAP IS BUILT OVER THE WHOLE PACKAGE, NOT PER FILE, and that
+    is the difference between a census and a claim (PR #9862 review, P3). A
+    producer may DECLARE the constant in one module and CALL the emit in
+    another — #9555 does exactly that: `NARRATIVE_RECORD_TYPE = "SessionNarrated"`
+    lives in `record_projection.py` and the
+    `sdk._emit_event(NARRATIVE_RECORD_TYPE, ...)` call lives in `hosted_api.py`.
+    Two per-file scans pair the two halves in no file at all, so the type was
+    INVISIBLE here and a second carrier of that shape would be too. The emit
+    regex was already package-wide; the constant map now is as well.
     """
+    texts = {path: path.read_text(encoding="utf-8")
+             for path in sorted((REPO_ROOT / "tortoise").glob("*.py"))}
+
+    # Pass 1 — every `*_RECORD_TYPE` the package declares, as ONE vocabulary.
+    constants: dict[str, str] = {}
+    for text in texts.values():
+        for name, record_type in re.findall(
+                r'([A-Za-z_][A-Za-z0-9_]*_RECORD_TYPE)\s*=\s*"([A-Z][A-Za-z0-9_]*)"',
+                text):
+            constants[name] = record_type
+
+    # Pass 2 — every emit, resolved against that vocabulary.
     found: set[str] = set()
-    for path in sorted((REPO_ROOT / "tortoise").glob("*.py")):
-        text = path.read_text(encoding="utf-8")
+    for text in texts.values():
         found |= set(re.findall(
             r'(?:_emit_event|_emit)\(\s*"([A-Z][A-Za-z0-9_]*)"', text))
-        constants = dict(re.findall(
-            r'([A-Za-z_][A-Za-z0-9_]*_RECORD_TYPE)\s*=\s*"([A-Z][A-Za-z0-9_]*)"',
-            text))
         for name, record_type in constants.items():
             if re.search(r'(?:_emit_event|_emit)\(\s*' + re.escape(name) + r'\b',
                          text):
@@ -1896,6 +2051,15 @@ def test_every_type_a_producer_emits_has_a_record_mutation():
     # the types emitted only through a `_*_RECORD_TYPE` constant. A stale regex
     # would silently stop proving anything.
     assert {"EntityMutated", "BatchIdStamped"} <= emitted
+    # ⛔ THE CROSS-MODULE CONSTANT SHAPE, named so it cannot regress silently: the
+    # declaration and the emit live in two different files, which is precisely
+    # the case a per-file scan cannot see. Without this assertion the census is
+    # green over a producer it never found (PR #9862 review, P3).
+    assert rp.NARRATIVE_RECORD_TYPE in emitted, (
+        "`SessionNarrated` is declared in `record_projection.py` and emitted "
+        "in `hosted_api.py` — a per-file scan pairs the two halves in NO file, "
+        "so the census stopped seeing this producer (and would see none of "
+        "its shape)")
     assert len(emitted) >= 28, (
         f"the producer scan found only {len(emitted)} emit types — the regex "
         "went stale and this leg stopped proving anything"

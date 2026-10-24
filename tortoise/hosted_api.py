@@ -161,6 +161,14 @@ from tortoise.projection import (
     journal_mint_write_ahead,  # #3390: journal the intended name BEFORE the CREATE
 )
 from tortoise.quota import with_limit_contact  # #5425 refusal seam
+
+# #9555 / R7: the ONE spelling of §9.1's narrative carrier type. Its record home
+# is `public.session_narrative` and it materialises no node (§9.1: "not in the
+# graph, not a `Document` node, not a `Point`"), so the type lives with the
+# registry that projects it — a producer and a registry that spell a type
+# differently is the `create_document(type="SourceCreated")` class, which
+# journalled NOTHING.
+from tortoise.record_projection import NARRATIVE_RECORD_TYPE
 from tortoise.retention import RESTORE_WINDOW_HOURS as _RESTORE_WINDOW_HOURS  # #4179
 from tortoise.retrieval_metering import (  # #4489: pure-ASGI retrieval-work flusher
     RetrievalMeteringMiddleware as _RetrievalMeteringMiddleware,
@@ -15880,10 +15888,22 @@ def _commit_response(
     """§6.1 200 response body — commit_id = client_commit_id (stable per
     logical commit); duplicate:true ⇒ zero writes, zero write-ops billed
     (PL4); held non-empty ⇒ overflow (PL3), client-side, re-commit checks
-    the 50-ceiling only. warnings[] (#405): additive, warn-first domain
-    integrity violations — the commit WRITES anyway; present (possibly
-    empty) on every 200, deterministic per payload (idempotent re-commits
-    return the same warnings)."""
+    the 50-ceiling only.
+
+    ``warnings[]`` (#405): additive, warn-first — the commit WRITES anyway;
+    present (possibly empty) on every 200. TWO kinds ride the one key, and the
+    difference is why the field is not uniform per payload:
+
+    * the payload's DOMAIN integrity warnings, derived from the payload alone
+      — deterministic per payload, so an idempotent re-commit returns the
+      same ones;
+    * WRITE-TIME advisories (``temporal_not_applied``, #7819) — observed while
+      the writes ran (a dedup fold dropped on an already-terminal claim wrote
+      NOTHING). These are present only on the response to the call that
+      PERFORMED the write; a ``duplicate:true`` replay writes nothing, so
+      nothing can be dropped, and its ``warnings[]`` is exactly the payload's
+      domain warnings (see the inline note in ``commit_session``'s write
+      phase)."""
     return {
         "session_id": payload.session_id,
         "commit_id": payload.client_commit_id,
@@ -16049,6 +16069,18 @@ def _prevalidate_supersede_window(sdk, pr, *, now: str) -> None:
     - a freshly-minted successor's payload ``when`` (``create_point`` writes
       ``validFrom`` only for a truthy ``when``).
 
+    ⚠️ The first bullet holds for a NON-TERMINAL dedup target only. When the
+    target is a terminal claim, ``create_point`` DROPS the fold whole (#7819):
+    a payload carrying any ``_TEMPORAL_RESTAMP_PROPS`` member writes nothing, so
+    the re-keyed node's stored start is NOT overwritten. ``payload_when`` is
+    still this mirror's input in that case, which makes the check CONSERVATIVE —
+    it can compare an end against a start the writer will never write. Because
+    ``_succ_state``'s terminal pre-check then skips ``supersede_point`` anyway,
+    no inverted window can result (nothing is written, so nothing is refused
+    late); the residual is an over-refusal — a ``supersede_window_inverted`` 422
+    for an inversion that exists only in the mirror's model — and it is
+    deterministic, so it must be repaired in the payload, not retried.
+
     When the resolution would instead fall through to a clock this check cannot
     read before the write (a fresh node's future ``createdAt``, or
     ``supersede_point``'s own ``now``), NOTHING is refused here and the ``[5]``
@@ -16074,9 +16106,13 @@ def _prevalidate_supersede_window(sdk, pr, *, now: str) -> None:
     # sibling loops + the MCP preview's identical read).
     old_vfs = [r[0] for r in old_rows]
     # Mirror `create_point(dedup=True)`'s successor resolution AT THIS POINT in
-    # the write sequence. A match re-keys the write onto that node (and, with a
-    # truthy payload `when`, `update_point` overwrites its stored start); no
-    # match mints the content-addressed `supersede_id` with the payload `when`.
+    # the write sequence. A match re-keys the write onto that node and — for a
+    # NON-TERMINAL target — a truthy payload `when` overwrites its stored start
+    # through the dedup fold's `update_point` (#7819 DROPS that fold whole when
+    # the target is a terminal claim, so `payload_when` is then the mirror's
+    # model of a write that will not happen: conservative, never fail-open —
+    # `_succ_state` skips the supersede itself). No match mints the
+    # content-addressed `supersede_id` with the payload `when`.
     existing_id = sdk._find_point_by_content(
         pr.point.content, pointKind=pr.point.pointKind)
     payload_when = pr.point.when or None
@@ -16115,6 +16151,38 @@ def _prevalidate_supersede_window(sdk, pr, *, now: str) -> None:
     )
 
 
+def _narrative_carrier(story_arc, summary, *, session_id: str,
+                       event_id: str, captured_at) -> dict | None:
+    """The journal record that makes §9.1's narrative reach the RECORD, or None.
+
+    Returns the `**kwargs` for `sdk._emit_event(NARRATIVE_RECORD_TYPE, …)`, or
+    ``None`` when there is no narrative to carry. The gate is on the TEXT, not
+    on the commit: `story_arc` is ``""`` for a capture whose distillation
+    produced no narrative, and emitting then would put a journal line on the
+    record whose whole payload the narrative home refuses (a blank narrative is
+    not §9.1 prose) — one no-op record per such commit, forever.
+
+    Extracted from the commit path so the gate is TESTABLE without a graph: the
+    measured #9555 gap was a producer that did not exist, and a producer's
+    "nothing to carry" case is exactly the one a call-site-only pin cannot
+    reach (calling `_execute_commit_writes` needs a live projection).
+
+    ``id`` is the commit's content-addressed ``eventId`` — the same anchor the
+    `:Event` write uses — so a RE-RUN of the commit phase (the retry contract:
+    "retry with the same client_commit_id") re-states the same identity and the
+    replay's idempotent upsert lands the same row rather than a duplicate.
+    """
+    if not isinstance(story_arc, str) or not story_arc.strip():
+        return None
+    return {
+        "id": event_id,
+        "sessionId": session_id,
+        "story_arc": story_arc,
+        "summary": summary,
+        "capturedAt": captured_at,
+    }
+
+
 def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # noqa: F821
     """W-3 [5] — the graph write phase for an adjudicated (budget=ok) commit.
 
@@ -16136,6 +16204,14 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     now = datetime.now(UTC).isoformat()
     session_id = payload.session_id
     reconcile = plan.reconcile
+    # #7819: TRANSIENT write-time advisories this phase has to REPORT but that
+    # are not payload domain warnings — today the only one is
+    # `temporal_not_applied`, raised when `create_point`'s dedup branch DROPS a
+    # fold carrying a validity window because the content address resolves to a
+    # terminal claim. A dropped fold writes nothing, so without this the client
+    # gets a 200 whose `when` was silently not applied. The handler folds these
+    # into the response's `warnings[]` (#405's additive channel).
+    _write_advisories: list[dict] = []
     # #5363 (B): each supersede window is validated inside the points loop
     # below, PER ACTION and immediately BEFORE that action's successor is
     # minted — see `_prevalidate_supersede_window` for why the position in the
@@ -16276,6 +16352,48 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 "sid": session_id, "eid": event_id,
                 "srcpath": document_basename, "now": now},
     )
+
+    # ── 2b. THE NARRATIVE'S JOURNAL CARRIER (#9555 / R7, §9.1). ──────────────
+    # The MERGE above writes `s.story_arc` — §9.1's S1 narrative ("the connected
+    # prose form of a captured session") — by RAW CYPHER, and raw Cypher is not
+    # a journal record (§17.1's unjournalled-writer ledger). Measured for #9555:
+    # that left the record's narrative home, `public.session_narrative`, with its
+    # two COUNT columns filled and its two TEXT columns NULL on every live
+    # capture, because the shape-keyed projection that owns that home
+    # (`record_projection._narrative_statements`) reads `story_arc` off a RECORD
+    # and no producer ever journalled one. The record could therefore reproduce
+    # the rows but not the narrative — exactly the D7 gap (#9567).
+    #
+    # WHY THIS IS THE WHOLE FIX, AND WHY IT IS NOT A SECOND WRITER. The record
+    # write path is singular and unchanged: `sdk._emit_event` is the ONE journal
+    # seam, and its live door (`record_writer.write_live_record`) is the ONE
+    # boundary into Postgres, driving the ONE fold (`record_projection.replay`).
+    # This adds a RECORD, which is what a producer does; it adds no writer. What
+    # it states is the write that already landed one statement above, which is
+    # §17.1's APPLY-FIRST lane — the record describes the write's own stored
+    # result (`payload.story_arc` is what the MERGE wrote verbatim; nothing in
+    # the payload is read back from the node, and the write's failure is
+    # fail-closed above, so a record can never outlive a write that did not
+    # land).
+    #
+    # WHY A DEDICATED TYPE RATHER THAN `SourceCreated`/`EventRecorded`. §9.1
+    # places the narrative *outside* the graph — "not in the graph, not a
+    # `Document` node, not a `Point`" — so the carrier must materialise no node:
+    # a `SourceCreated` for the transcript `:Source` would ALSO write the
+    # `public.source` row, and `record_projection`'s `props` tail would land the
+    # prose on a record row that the graph node does not carry, i.e. a
+    # second, drifting data-shaped copy — the very defect R7 exists to remove.
+    # `SessionNarrated` declares `NoRecordEffect` and its record effect is the
+    # SHAPE-KEYED secondary projection, so the text has exactly ONE home.
+    #
+    # EMPTY IS AN ABSENCE, NOT A RECORD — see `_narrative_carrier`'s own
+    # docstring for why the gate is on the TEXT and not on the commit.
+    _carrier = _narrative_carrier(
+        payload.story_arc, payload.summary,
+        session_id=session_id, event_id=event_id,
+        captured_at=payload.captured_at)
+    if _carrier is not None:
+        sdk._emit_event(NARRATIVE_RECORD_TYPE, **_carrier)
 
     # ── 3. Event AgentSession (content-addressed eventId — MERGE anchor,
     # amendment §4.3 #3) — produces the Document. Written via raw Cypher:
@@ -16505,6 +16623,9 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 # a new point property.
                 session_id=session_id, **point_props,
             )
+            # #7819: a fold dropped because the target is terminal writes
+            # NOTHING — carry the advisory out so the receipt reports it.
+            _write_advisories.extend(_written.get("advisories") or [])
             # #1370: record the id the write RESOLVED to (the map the binder
             # reads). #4970: the SUCCESSOR may itself re-key (its content
             # already exists under another id) — supersede the prior with the
@@ -16647,6 +16768,8 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 # the same source-session attribution surface.
                 session_id=session_id, **point_props,
             )
+            # #7819: same drop, the plain-create leg.
+            _write_advisories.extend(_written.get("advisories") or [])
             # #1370: the id the write RESOLVED to. #4970: the graph id §5
             # CONTAINS and the supersede below must use — the pre-existing
             # node on a dedup re-key, the payload id otherwise.
@@ -16883,6 +17006,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         point_content_by_id=lambda pid: _point_content_by_id(
             payload, _commit_reverse_id_map.get(pid, pid)),
     )
+    return _write_advisories
 
 
 @app.post("/v1/sessions/commit")
@@ -17017,7 +17141,9 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
     # write proceeds). Phase B (wired-but-inactive in prod — no production
     # chain is 'block'): a block-severity warning rejects the commit.
     from tortoise.commit_schema import domain_block_warnings
-    warnings = result.warnings or []
+    # COPY: `_execute_commit_writes` appends the #7819 write-time advisories
+    # below, and the plan's own warning list must not be mutated by a write.
+    warnings = list(result.warnings or [])
     blocking = domain_block_warnings(warnings)
     if blocking:
         raise HTTPException(
@@ -17283,7 +17409,13 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
         # client retries with the same client_commit_id — safe by L1; the record
         # stays partial).
         try:
-            _execute_commit_writes(sdk, payload, plan)
+            # #7819: the phase returns its write-time advisories (a dedup fold
+            # dropped on a terminal claim wrote nothing) — they ride the same
+            # additive `warnings[]` channel as the payload's domain warnings, so
+            # a client sees that its `when` was not applied instead of a silent
+            # 200. They are NOT on the duplicate:true replay path (nothing is
+            # written there, so nothing is dropped).
+            warnings.extend(_execute_commit_writes(sdk, payload, plan) or [])
         except HTTPException:
             raise
         except InvertedSupersedeWindow as exc:
@@ -19152,7 +19284,7 @@ async def _membership_org(user_id: str, org_id: str) -> dict | None:
 def _graph_list_for(org_id: str) -> list[dict]:
     """One org's graph listing (#3718: blocking registry/PostgREST read).
 
-    The MODE BRANCH is here, not left to ``graph_list``'s own short-circuit:
+    The MODE BRANCH is here, not left to ``list_memory_graphs``'s own short-circuit:
     in Supabase mode ``_registry_anchor()`` would build (and eagerly attach)
     a FalkorDB handle BEFORE the callee ever consulted the mode, so the
     switcher — the first read every client makes — would need a live graph
@@ -19174,7 +19306,7 @@ def _graph_list_for(org_id: str) -> list[dict]:
     )
     if is_supabase_enabled():
         return graph_metadata(get_control_plane(), org_id)
-    return _registry_anchor().graph_list(org_id)
+    return _registry_anchor().list_memory_graphs(org_id)
 
 
 #: Orgs per off-loop submission when the switcher lists graphs, PER LANE
@@ -19285,13 +19417,13 @@ async def list_my_orgs(user: dict = Depends(get_current_user)):  # noqa: B008
     When EVERY membership is suspended there is nothing healthy to list →
     403 SUSPENDED with the appeal detail (#1853 lockdown preserved).
 
-    #765 (plan Task 8 reader inventory): graph_list resolves via the
+    #765 (plan Task 8 reader inventory): list_memory_graphs resolves via the
     mode-aware SDK (Supabase → teams.graph_name derivation via the seam;
     registry → Graph nodes). The mode branch that keeps this endpoint off the
     registry in Supabase mode is NOT the callee's short-circuit — it is the
     call-site branch in ``_graph_list_for`` (#3718), together with the
     lane-and-chunk choice made on the loop below, because ``_registry_anchor()``
-    binds eagerly and would be built before ``graph_list`` could consult the
+    binds eagerly and would be built before ``list_memory_graphs`` could consult the
     mode."""
     memberships = await _user_memberships(user["user_id"])
     resolved = []
@@ -19302,7 +19434,7 @@ async def list_my_orgs(user: dict = Depends(get_current_user)):  # noqa: B008
         resolved.append((m, org))
 
     # Suspended rows are excluded from graph resolution — they cannot be
-    # selected anyway, and graph_list must not observe the suspension stamp.
+    # selected anyway, and list_memory_graphs must not observe the suspension stamp.
     # #3718: the listing is a blocking registry/PostgREST read, and it used to
     # run per membership ON the loop. It now costs one OFF-LOOP submission per
     # chunk — ceil(N / the lane's chunk) submissions for N healthy orgs. (The
@@ -19357,6 +19489,12 @@ async def list_my_orgs(user: dict = Depends(get_current_user)):  # noqa: B008
         graphs_by_org.update(await offload(
             lambda chunk=chunk: {
                 org_id: _graph_list_for(org_id) for org_id in chunk},
+            # `op` is an OBSERVABILITY label naming the operation, not the SDK
+            # method it calls (its siblings are `data_sdk`, `org_sdk`, `query`):
+            # `tests/test_read_routes_loop_responsiveness.py` counts this exact
+            # label to prove the org-switcher fan-out stays chunked (#3718), so
+            # renaming it with the method it happens to call silently reds a pin
+            # that is about submission COUNT — and breaks metric continuity.
             op="graph_list"))
 
     out = []
@@ -20372,7 +20510,7 @@ async def create_org_graph(org_id: str, body: dict,
     async with _provision_lock(org_id):
         # Duplicate-active check INSIDE the lock (registry has no unique
         # index — P2 from review: the app check is the registry guard).
-        existing = _make_sdk(namespace="registry").graph_list(org_id)
+        existing = _make_sdk(namespace="registry").list_memory_graphs(org_id)
         if any(g["name"] == name and g.get("status") != "deleted"
                for g in existing):
             raise HTTPException(status_code=409, detail="Graph name already exists")
@@ -20442,7 +20580,7 @@ async def create_graph(body: dict, request: Request,
         raise HTTPException(status_code=404, detail="Unknown organization")
     await _provision_preflight(org)
     async with _provision_lock(org_id):
-        existing = _make_sdk(namespace="registry").graph_list(org_id)
+        existing = _make_sdk(namespace="registry").list_memory_graphs(org_id)
         if any(g["name"] == name and g.get("status") != "deleted"
                for g in existing):
             raise HTTPException(status_code=409, detail="Graph name already exists")
@@ -20640,7 +20778,7 @@ async def _apply_graph_recording_override(
             found = any(r[0] == graph_id and r[2] != "deleted" for r in rows)
         if not found:
             raise HTTPException(status_code=404, detail="Unknown graph")
-        written = sdk.graph_set_recording(org_id, graph_id, body.recording)
+        written = sdk.update_memory_graph(org_id, graph_id, recording=body.recording)
     if not written:
         raise HTTPException(status_code=404, detail="Unknown graph")
     return {"graph_id": graph_id, "recording": body.recording}
@@ -20780,17 +20918,17 @@ def _pack_entries_from_body(raw: object) -> list[dict] | None:
 
 
 def _registry_graph_list(org_id: str) -> list[dict]:
-    """Registry-lane ``graph_list`` in ONE worker hop — SDK construction
+    """Registry-lane ``list_memory_graphs`` in ONE worker hop — SDK construction
     included (#8648 review P1).
 
     ``_make_sdk`` is NOT free: in embedded mode it runs the keepalive anchor's
     probe query and, on a miss, an eager connect that holds the socket
     (#4660). Building the SDK on the loop and off-loading only the callee
-    (``to_thread(sdk.graph_list, …)``) left that blocking I/O on the event
+    (``to_thread(sdk.list_memory_graphs, …)``) left that blocking I/O on the event
     loop — the exact defect ``tests/test_read_routes_loop_responsiveness.py``
     pins.
     """
-    return _make_sdk(namespace="registry").graph_list(org_id)
+    return _make_sdk(namespace="registry").list_memory_graphs(org_id)
 
 
 async def _resolve_graph_data_namespace(org_id: str, graph_id: str) -> str | None:
@@ -20799,7 +20937,7 @@ async def _resolve_graph_data_namespace(org_id: str, graph_id: str) -> str | Non
     ``None`` = unknown / deleted / another team's graph (fail closed). The
     literal ``"default"`` resolves by KIND, not by id: in registry mode the
     default node carries a real gid as its id, while in Supabase mode the
-    derived default row's id IS the literal — reading the ``graph_list`` seam
+    derived default row's id IS the literal — reading the ``list_memory_graphs`` seam
     makes both lanes agree without a second resolution path.
     """
     try:
@@ -21274,7 +21412,7 @@ async def _apply_graph_rename(
     # name_active as the cross-worker DB backstop, whose violation is mapped
     # to the same 409 below (create-key parity: "HTTP 409" → 409, never 500).
     async with _provision_lock(org_id):
-        for row in sdk.graph_list(org_id):
+        for row in sdk.list_memory_graphs(org_id):
             if row.get("status") == "deleted":
                 continue
             if row.get("name") == name and row.get("graph_id") != target:
@@ -21287,7 +21425,7 @@ async def _apply_graph_rename(
                                         graph_id, name),
                     op="set_graph_name")
             else:
-                written = sdk.graph_set_name(org_id, graph_id, name)
+                written = sdk.update_memory_graph(org_id, graph_id, name=name)
         except Exception as _exc:
             if is_supabase_enabled() and "HTTP 409" in str(_exc):
                 raise HTTPException(
@@ -21737,7 +21875,7 @@ async def _restore_trash_graph_locked(request: Request, user: dict,
             restored = await asyncio.to_thread(
                 sb_restore, get_control_plane(), org_id, graph_id)
         else:
-            restored = await asyncio.to_thread(sdk.graph_restore, org_id,
+            restored = await asyncio.to_thread(sdk.restore_memory_graph, org_id,
                                                graph_id)
     except RuntimeError as e:
         # #2468: a concurrent create landing the freed name between the
@@ -21912,7 +22050,7 @@ async def list_graphs(org_id: str, user: dict = Depends(get_current_user)):  # n
         raise HTTPException(status_code=404, detail="Unknown organization")
     _ensure_not_suspended(org)
     sdk = _make_sdk(namespace="registry")
-    graphs = sdk.graph_list(org_id)
+    graphs = sdk.list_memory_graphs(org_id)
     from tortoise.supabase_control import (
         count_graph_keys,
         get_control_plane,

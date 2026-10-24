@@ -7884,7 +7884,7 @@ class TestProvisioningService:
             r = tc.post(f"/v1/organizations/{tid}/graphs", json={"name": "orphan-test"},
                         headers={"Authorization": f"Bearer {key['api_key']}"})
             assert r.status_code == 409, r.text
-            graphs = sdk.graph_list(tid)
+            graphs = sdk.list_memory_graphs(tid)
             assert not any(g["name"] == "orphan-test" for g in graphs), \
                 "graph minted despite key-cap failure — orphan!"
         finally:
@@ -7943,7 +7943,7 @@ class TestProvisioningService:
             finally:
                 monkeypatch.undo()
             # Graph rolled back (no node named doomed)
-            graphs = sdk.graph_list(tid)
+            graphs = sdk.list_memory_graphs(tid)
             assert not any(g["name"] == "doomed" for g in graphs), \
                 "graph survived a failed mint — orphan!"
             # No ACTIVE key minted by the caller survives: the failing
@@ -8025,7 +8025,7 @@ class TestGraphLifecycle:
         sdk, tid, tc = next(gen)
         try:
             delkey = _mint_caller_key(sdk, tid, scopes=["graphs:delete"])
-            default = next(g for g in sdk.graph_list(tid)
+            default = next(g for g in sdk.list_memory_graphs(tid)
                            if g["kind"] == "default")
             r = tc.delete(f"/v1/graphs/{default['graph_id']}?org_id={tid}",
                           headers={"Authorization":
@@ -8119,7 +8119,7 @@ class TestGraphLifecycle:
                 "status:'active'}) SET m.role='owner'",
                 params={"tid": tid},
             )
-            default = next(g for g in sdk.graph_list(tid)
+            default = next(g for g in sdk.list_memory_graphs(tid)
                            if g["kind"] == "default")
             # Legacy bound-default key (raw registry write — the pre-guard
             # artifact shape the capstone showed as a default-row "1").

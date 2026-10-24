@@ -55,11 +55,14 @@ def _kind() -> str:
     return f"k5361_{uuid.uuid4().hex[:12]}"
 
 
-def _plant(sdk, kind: str, valid_from=None, valid_to=None) -> str:
+def _plant(sdk, kind: str, valid_from=None, valid_to=None,
+           status: str = "live") -> str:
     """Create ONE Point under ``kind`` with the given raw window bounds.
 
     Bounds are written verbatim (including unparseable text); a ``None`` bound
-    is left unset so the read path sees honest absence.
+    is left unset so the read path sees honest absence. ``status`` defaults to
+    ``'live'``; a TERMINAL status is the #7819 case where the advertised repair
+    and the SDK's lifecycle guard meet.
 
     NOTE: the bound is set with an UN-scoped ``MATCH (n:Point {id:$id})``, so
     this helper is only safe while ids are unique. A test that needs colliding
@@ -69,8 +72,8 @@ def _plant(sdk, kind: str, valid_from=None, valid_to=None) -> str:
     _q(
         sdk,
         "CREATE (n:Point {id:$id, pointKind:$kind, content:'w', "
-        "is_operator:false, status:'live'})",
-        params={"id": pid, "kind": kind},
+        "is_operator:false, status:$status})",
+        params={"id": pid, "kind": kind, "status": status},
     )
     if valid_from is not None:
         _q(sdk, "MATCH (n:Point {id:$id}) SET n.validFrom = $v",
@@ -249,6 +252,100 @@ def test_documented_fix_repairs_the_window(sdk):
     sdk.update_point(pid, validTo="2031-06-01")
     ch = _check(sdk.audit(point_kinds=[kind]), "inverted_validity_window")
     assert ch is None or ch["count"] == 0, ch
+
+
+def test_documented_fix_does_not_prescribe_a_refused_call(sdk):
+    """#7819: on a TERMINAL point the advertised ``fix`` must not name a call
+    the SDK now refuses — and the finding itself must still be reported.
+
+    Value that makes it fail: the pre-#7819 ``fix`` text, which named
+    ``tortoise_update_point`` for EVERY row. Since #7819 `update_point` refuses
+    any temporal prop on a terminal claim, so that sentence prescribes a call
+    that always raises ``already terminal`` — an instrument that reports a HIGH
+    integrity failure and hands the operator an impossible repair.
+
+    The fixture reaches it BOTH ways: a ``retracted`` and a legacy
+    ``outdated=true`` point each carry a planted inverted window, so the sample
+    exists (the check must stay silent about neither — a dead predecessor is
+    exactly what #4021 damaged, and `get_historical_knowledge` walks those
+    nodes), while the string must say the window is frozen instead.
+
+    #7819 follow-up: the text must also name the right SCOPE. "Not repairable
+    through the SDK" is false — `update_entity`'s Point arms write caller props
+    with no lifecycle guard and no window validator (#9649) — so a fix that says
+    it hands the operator a second impossible statement (the first being the
+    post-#7819 `tortoise_update_point` prescription the assertions above ban).
+    Value that makes the scope assertions fail: the pre-fix text, which said
+    "through the SDK", never named ``tortoise_update_point``, and named no
+    residual issue. The final assertion proves the door the prose must not deny
+    really is open, so "name the door, not the SDK" is behaviour, not style.
+    """
+    kind = _kind()
+    pids = [
+        _plant(sdk, kind, valid_from="2030-06-01", valid_to="2020-06-01",
+               status="retracted"),
+        _plant(sdk, kind, valid_from="2030-06-01", valid_to="2020-06-01",
+               status="superseded"),
+    ]
+    # ...and the legacy flag, which is terminal with a NULL status.
+    flag_pid = _plant(sdk, kind, valid_from="2030-06-01", valid_to="2020-06-01")
+    _q(sdk, "MATCH (n:Point {id:$id}) SET n.status = null, n.outdated = true",
+       params={"id": flag_pid})
+    pids.append(flag_pid)
+
+    ch = _check(sdk.audit(point_kinds=[kind]), "inverted_validity_window")
+    assert ch is not None and ch["count"] == 3, ch
+    advertised = {s["node_id"]: s["fix"] for s in ch["samples"]}
+    for pid in pids:
+        fix = advertised[pid]
+        assert "tortoise_update_point(" not in fix, (
+            f"the fix PRESCRIBES a call #7819 refuses for a terminal point: "
+            f"{fix!r}")
+        assert "{'validTo'" not in fix, fix
+        assert "terminal" in fix, fix
+        # The scope is the DOOR's, never the SDK's (#9649 keeps the
+        # `update_entity` route open, measured below).
+        assert "through the SDK" not in fix, (
+            f"the fix claims SDK-wide unrepairability that update_entity "
+            f"contradicts (#9649): {fix!r}")
+        assert "tortoise_update_point" in fix, (
+            f"the fix does not name the door that refuses: {fix!r}")
+        assert "#9649" in fix, (
+            f"the fix does not name the still-open route it must not deny: "
+            f"{fix!r}")
+    # ...and the call it no longer advertises really is refused.
+    with pytest.raises(ValueError, match="already terminal"):
+        sdk.update_point(pids[0], validTo="2031-06-01")
+    # ...while the sibling door the prose must NOT deny still writes the
+    # window on that same dead claim. That is exactly why the fix names a door
+    # and not the SDK; if this ever starts raising, the SDK-wide claim became
+    # TRUE and the text is free to say so again (#9649).
+    sdk.update_entity(pids[0], validTo="2031-06-01")
+    assert sdk.get_point(pids[0])["validTo"] == "2031-06-01", (
+        "#9649: update_entity is believed to still re-stamp a dead claim's "
+        "window; if this door closed, revisit audit's terminal fix scope")
+
+
+def test_terminal_and_live_rows_get_their_own_repair(sdk):
+    """The branch, from both sides: one scan produces BOTH fix texts.
+
+    Value that makes it fail: a status-blind fix (one string for every row — the
+    pre-#7819 shape, or a blanket "not repairable" that would stop telling a
+    LIVE point how to repair itself). The fixture reaches it — one live and one
+    retracted point carry the same inverted window under one kind, so a single
+    audit call must emit the `tortoise_update_point` remedy for the live row and
+    the frozen-window statement for the dead one.
+    """
+    kind = _kind()
+    live_pid = _plant(sdk, kind, valid_from="2030-06-01", valid_to="2020-06-01")
+    dead_pid = _plant(sdk, kind, valid_from="2030-06-01", valid_to="2020-06-01",
+                      status="retracted")
+    ch = _check(sdk.audit(point_kinds=[kind]), "inverted_validity_window")
+    assert ch is not None and ch["count"] == 2, ch
+    by_id = {s["node_id"]: s["fix"] for s in ch["samples"]}
+    assert "tortoise_update_point" in by_id[live_pid], by_id[live_pid]
+    assert live_pid in by_id[live_pid], by_id[live_pid]
+    assert "tortoise_update_point(" not in by_id[dead_pid], by_id[dead_pid]
 
 
 # ── Rendering ─────────────────────────────────────────────────────

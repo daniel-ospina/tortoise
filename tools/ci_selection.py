@@ -1221,6 +1221,25 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # Pinned by
              # tests/test_ci_selection.py::test_record_wiring_check_tool_change_selects_core_not_tier1.
              "tools/record_wiring_check.py",
+             # #9790 review P1: tools/batch_review.py owns
+             # tests/test_batch_review.py (registered `core`), but `tools/` is a
+             # flat NON_PYTHON_PREFIXES entry and NO SOURCE_PATTERNS row matches
+             # the tool — so a tool-only change filtered to `changed == []`,
+             # took the docs-only early return and selected tier-1 smoke, where
+             # the guard is NOT registered. Measured before this entry:
+             # `select(["tools/batch_review.py"])` -> surfaces=[], full=False,
+             # test_batch_review.py absent. That is the #1349/#3332/#3616
+             # silent-drop class on the one diff that can break the guard: a
+             # follow-up that deletes `plan_records`'s manifest-head equality
+             # (`tools/batch_review.py::plan_records`) — the single line stopping a
+             # drifted outcome from minting a record — would have merged with
+             # the guard cases that pin it never running. The `core` row that
+             # registers the file is CLASSIFICATION only (#4348); it does not
+             # make a `tools/` path select `core`. CORE_ALSO (not
+             # TOOL_CARVEOUTS) because the suite is hermetic and the FastAPI-free
+             # core pool is the lowest-cost leg it can run in. Pinned by
+             # tests/test_ci_selection.py::test_batch_review_tool_change_selects_core_not_tier1.
+             "tools/batch_review.py",
              # #4174 review P1: the drift gate's suite (test_drift_guard.py) is
              # `core`-registered, but `tools/` is swallowed by
              # NON_PYTHON_PREFIXES and no SOURCE_PATTERNS entry matches
@@ -1482,6 +1501,16 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # class. Pinned by
              # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
              "supabase/migrations/20261023000001_record_session_narrative.sql",
+             # #9555 / PR #9862 review round 4: R7's CARRIER migration
+             # (`20261024000001`, `COMMENT ON` only). Measured: a diff touching
+             # ONLY this file selected `surfaces: []`, so
+             # `test_9555_session_narrative.py` — which reads this file's text and
+             # pins the schema's narrative claim by name — did not run on the one
+             # change that can make its pin false. No `2026101*` prefix applies
+             # (same reason as the tenancy row below: `supabase/` is a
+             # NON_PYTHON_PREFIX), so without this entry the arm is a silent drop
+             # of the #1349/#3332/#3616 class.
+             "supabase/migrations/20261024000001_record_session_narrative_carrier.sql",
              # #9554 / PR #9600 review cycle 1 (P2): the TENANCY POSTURE migration —
              # the app role, its grants (including `relation_id_seq`'s USAGE) and
              # the `*_app_tenant` policies, one per record table (ten, since

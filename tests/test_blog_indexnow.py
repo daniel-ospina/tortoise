@@ -31,9 +31,23 @@ re-implementing the rule in the mock.
 ⛔ WHAT THIS DOES NOT CLAIM. IndexNow does not reach Google (Google does not
 consume the protocol). Nothing here asserts, names or implies otherwise.
 
-V1 — the key file — is asserted from the repo, because that is where the fact
-lives: the deployed 200 cannot be observed before the deploy. The post-deploy
-check is the ``curl`` line in the IndexNow section of ``docs/blog-authoring.md``.
+V1 — the key file — is asserted from the repo here, because that is where the
+fact lives: the deployed 200 cannot be observed before the deploy. The DEPLOYED
+half is two blocking steps in ``.github/workflows/deploy-pages.yml``, each in
+the job that deploys the surface it speaks about:
+
+* ``deploy`` — "Post-deploy — the IndexNow key file and notify route are live
+  (#9680)" — the file those bytes are served from, plus
+  ``/blog/api/notify-publish`` at the marketing origin, whose admin gate
+  refuses an anonymous caller with ``{"error":"unauthorized"}``;
+* ``deploy-dashboard`` — "Post-deploy — the app-origin IndexNow proxy answers
+  its session gate (#9680)" — the hop the console actually calls. Its proxy
+  answers ``{"error":"not_signed_in"}`` at the cookie check, before any
+  upstream call, so an anonymous probe proves the ROUTE is there and says
+  nothing about the handler behind it.
+
+The ``curl`` in the IndexNow section of ``docs/blog-authoring.md`` is the manual
+spot check, not the gate.
 """
 
 from __future__ import annotations
@@ -612,6 +626,64 @@ def test_the_patch_preread_selects_the_hold_column() -> None:
     assert selects, "the PATCH pre-read must name its columns explicitly"
     assert all("hold_for_review" in s for s in selects), (
         f"the PATCH pre-read must select hold_for_review — the trigger is two columns: {selects}"
+    )
+
+
+def test_the_migration_pointer_names_the_migration_that_owns_the_column() -> None:
+    """The comment that routes a reader from the COLUMN to the migration must resolve
+    AND resolve to the migration that actually owns the column.
+
+    The module's only explanation of where `indexnow_submitted_at` comes from is a
+    prose pointer naming a migration file. A rename is invisible to every other
+    check here — no import, no test and no config reads that string — so a stale
+    pointer leaves a reader (or a `git grep` for the column) at a path that does
+    not exist, which answers the question with a wrong file rather than with
+    nothing. That happened: the owning migration was renumbered forward
+    (20261022000001 → 20261026000001) and this pointer kept the old version.
+
+    ⛔ Existence alone is not enough, and that is the trap this test is shaped
+    around — the repo's old version now belongs to an UNRELATED migration
+    (`20261022000001_record_session_capture_redactions_integer.sql`), so a pointer
+    retargeted to any *other* real migration would still "resolve" while being
+    just as misdirecting. So the owner is DERIVED, not assumed: exactly one
+    migration may carry `indexnow_submitted_at`, and the module must name it.
+
+    Falsifiable by construction and non-vacuous — it renames nothing itself, it
+    compares the pointer against the tree, so the pre-rename source reds (the old
+    basename no longer exists) and the corrected pointer passes. Each failure is a
+    different edit: delete the sentence → the owner is unnametered; point it at a
+    sibling migration → it is not the owner; keep the old basename → it does not
+    exist.
+    """
+    source = INDEXNOW_MODULE.read_text(encoding="utf-8")
+    named = set(re.findall(r"\b(\d{14}_[A-Za-z0-9_]+\.sql)\b", source))
+    assert named, (
+        "the module no longer names the migration that owns its dedupe column — the "
+        "column→file route a reader greps for is gone, which is as misleading as a stale one"
+    )
+
+    migrations = {p.name: p for p in (REPO_ROOT / "supabase" / "migrations").glob("*.sql")}
+    dangling = sorted(named - set(migrations))
+    assert dangling == [], (
+        f"the module points at migration files that do not exist: {dangling} — a renamed "
+        "migration must be followed here, or the pointer sends a reader to a different "
+        "migration that happens to hold the old version"
+    )
+
+    owners = {
+        name
+        for name, path in migrations.items()
+        if "indexnow_submitted_at" in path.read_text(encoding="utf-8")
+    }
+    assert len(owners) == 1, (
+        f"exactly one migration must own blog_posts.indexnow_submitted_at, found "
+        f"{sorted(owners)} — the pointer below names ONE file, so a split owner means "
+        "the reader is sent to half the truth"
+    )
+    owner = next(iter(owners))
+    assert named & owners, (
+        f"the pointer names {sorted(named)} but the column's owning migration is {owner} "
+        "— naming another existing migration is not what redeems a stale pointer"
     )
 
 
