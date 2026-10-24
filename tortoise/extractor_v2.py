@@ -464,6 +464,14 @@ OPERATOR_SEMANTICS_RULE = (
     "  and the older claim is dst — NAND points AT what it refutes. An explicit\n"
     "  negation in a later turn ('the flag did not cause the duplicates') marks\n"
     "  THAT later claim as the attacker. Never put the claim under attack first.\n"
+    "- A THEORY THE CONVERSATION DISPLACES IS THE CLAIM UNDER ATTACK (#8503):\n"
+    "  in a retrospective or incident review, the finding that explains what\n"
+    "  really happened (the root cause, the evidence that settled it) REFUTES\n"
+    "  the theory an earlier turn recorded — 'the initial investigation blamed\n"
+    "  the search index' is dst, the root-cause claim is src. A finding does\n"
+    "  not IMPL the theory it displaced: never wire IMPL (support) between a\n"
+    "  root cause and the theory it refuted — that is a truth attack\n"
+    "  (ONTOLOGY §3.1 'A contradicts B'), so its kind is NAND.\n"
     "- RISK/RELEVANCE CLAIMS ARE DURABLE POINTS: a risk or concern claim\n"
     "  ('clock skew between regions can make lease expiry unsafe') is its OWN\n"
     "  point — never fuse it into the point/event for the action that later\n"
@@ -477,13 +485,37 @@ OPERATOR_SEMANTICS_RULE = (
     "  (w_eff = w * (1 - strength) — a graded dampener, NEVER a refutation.\n"
     "  A direct point-to-point refutation is NAND territory (a separate\n"
     "  operator), not a stronger MITIGATES).\n"
+    "- ONE MITIGATES PER PAIR (#8503): the graph holds each claim as its OWN\n"
+    "  point, so when two points express the same action (a decision and the\n"
+    "  implementation detail that carries it out) or two express the same risk\n"
+    "  (an incident report and the named risk it exposes), emit a MITIGATES\n"
+    "  for EACH pair the action actually bears on — a dampener wired to one\n"
+    "  pair leaves the other edge at full relevance. The operators array\n"
+    "  takes several entries; do not pick one pair and drop the rest.\n"
+    "  The SRC of a MITIGATES is ANY point carrying the action's warrant —\n"
+    "  the decision that chose it, the forecast of what it absorbs ('a\n"
+    "  ten-minute TTL cache will absorb nearly all of the repeat traffic'),\n"
+    "  or the safeguard that keeps it correct ('invalidate the cache entry on\n"
+    "  a write'). Each such claim is a separate point, so each gets its own\n"
+    "  dampener against the claim it bears on; wiring only the decision\n"
+    "  leaves the forecast and the safeguard unexpressed.\n"
     "- POINT-LEVEL SUPERSEDE (cross-session reversal — F2): when a new point\n"
     "  REPLACES a claim or decision from an EARLIER session, set its\n"
     "  \"supersedes\" to the existing point's id or EXACT content copied from\n"
     "  the graph search results — the write path folds a point-level CORRECTS\n"
     "  supersession (the old point is marked outdated). Same-session\n"
     "  reversals are state/validity semantics — never a point supersede.\n"
-    "  Never invent an id or content: resolve against the search results only."
+    "  Never invent an id or content: resolve against the search results only.\n"
+    "  An ENTITY-level supersede is NOT this channel: it produces NO\n"
+    "  reversal edge. An entity's own \"supersedes\" (with any lifecycle\n"
+    "  other than \"superseded\") IS accepted — but on a SEPARATE channel,\n"
+    "  an ObjectSuperseded record that folds the superseded object, not a\n"
+    "  CORRECTS operator edge; the \"lifecycle\": \"superseded\" spelling is\n"
+    "  REFUSED either way (with a ref: direction ambiguous; with none:\n"
+    "  nothing to express). The edge exists only\n"
+    "  when a statement POINT states the replacement and that point's\n"
+    "  \"supersedes\" names the earlier decision. So when the reversal must\n"
+    "  appear as this edge, say it as a point."
 )
 
 
@@ -1733,6 +1765,13 @@ But STRIP, DON'T DROP the durable claim they carry:
 - An operational/environment lesson is a durable BELIEF — keep the
   cause-effect ("the bash tool kills child processes when it returns",
   "backgrounded processes do not survive tool-call return"), drop the episode.
+- An operational OUTCOME that EVIDENCES a claim is a durable claim too (#8503):
+  a rollback that restored traffic, a chaos run that showed no duplicates, a
+  deploy that held. Keep the outcome AND its measured effect ("traffic
+  normalized within thirteen minutes", "every batch was claimed exactly once
+  after the expiry"); strip the mechanics around it (the command run, the
+  clock time, the batch/shard id). The outcome is what makes the claim behind
+  it believable, so dropping it drops the evidence, not the noise.
 - Process chatter with NO durable claim is dropped ("I'll fix both now",
   "let me verify X").
 What survives is what changes the world model — including how we work.
@@ -1775,8 +1814,28 @@ SEARCH KEYS (E3): emit 2-4 `search_keys` — paraphrases/synonyms a
 questioner might use, plus the verbatim value tokens ("27:12",
 "five-K time"). The fact is findable when asked with different words.
 
-USER VS ASSISTANT (E3): an assistant suggestion/proposal is NOT a user
-fact — do not emit it as a statement point unless the user confirmed it.
+USER VS ASSISTANT (E3) — the SPEAKER is not a filter on CLAIMS: a Point
+carries no speaker at all (it is derived from the source turn at read time),
+so a claim the ASSISTANT asserts is recorded exactly like one the user
+asserts — a diagnosis, a hypothesis ("the sidebar feature is the prime
+suspect"), a derived conclusion, an estimate ("a ten-minute TTL cache will
+absorb nearly all of the repeat traffic"), or a proposed direction is a
+statement Point of its own. A hypothesis the graph can later NAND is a
+BELIEF, and only a Point carries one: dropping an assistant-asserted claim
+because the assistant spoke it deletes beliefs, not chatter. What IS excluded
+is the assistant's PROCESS CHATTER and BARE OFFERS ("I'll fix that now",
+"let me verify X", "want me to also …") — those assert nothing. A
+USER-PERSONAL-STATE fact (personal best, schedule, preference) belongs to the
+USER: never emit one attributed to, or invented by, the assistant.
+A QUESTION THAT ASSERTS A CLAIM CARRIES THAT CLAIM: "what about services
+with no owner row, they will fall through any ownership-based router?"
+asserts the fall-through; "maintenance windows are the other classic noise
+source, do you want ember to auto-suppress?" asserts the noise source. Emit
+the asserted claim as its own Point — the interrogative frame is not a
+disqualifier. Likewise a HYPOTHESIS UNDER INVESTIGATION (a prime suspect, a
+leading theory, "the spike correlates with the Oct 5 release") is a belief
+that changes what gets tested next: emit it as a Point and let the graph
+carry its confidence — speculation is not a NOOP when it steers a decision.
 
 OUTPUT CONTRACT — ONE JSON object and NOTHING else:
 {date_anchor}{output_contract}
@@ -2745,8 +2804,16 @@ Rules:
 - SEARCH KEYS (E3): emit 2-4 `search_keys` — paraphrases/synonyms a
   questioner might use, plus the verbatim value tokens ("27:12",
   "five-K time"). The fact is findable when asked with different words.
-- USER VS ASSISTANT (E3): an assistant suggestion/proposal is NOT a user
-  fact — do not emit it as a statement point unless the user confirmed it.
+- USER VS ASSISTANT (E3) — the SPEAKER is not a filter on CLAIMS: emit a
+  claim the ASSISTANT asserts (diagnosis, hypothesis, derived conclusion,
+  estimate, proposed direction) as a statement Point exactly like a user
+  claim — a Point carries no speaker, and a hypothesis is a belief. Exclude
+  only PROCESS CHATTER and BARE OFFERS ("I'll fix that now", "want me to …"),
+  which assert nothing. Never attribute a USER-PERSONAL-STATE fact to the
+  assistant. A QUESTION THAT ASSERTS A CLAIM carries it ("they will fall
+  through any ownership-based router?"), and a HYPOTHESIS UNDER
+  INVESTIGATION ("the sidebar feature is the prime suspect") is a belief
+  that steers the next test — emit both as Points.
 - OPERATOR REFERENCING: operator src/dst MUST be the EXACT content of a point
   or event emitted in THIS output (copy verbatim, no paraphrasing). If an
   endpoint has no point yet, CREATE the point first. NEVER use an entity name
@@ -6431,7 +6498,58 @@ def _resolve_point_supersede(ref: str, search: dict,
     search — which ran BEFORE this capture's writes — makes the point
     supersede CROSS-SESSION by construction (the #2552 F2 decision:
     same-session reversals are state/validity semantics, never a CORRECTS
-    record)."""
+    record).
+
+    #8503 RECALL LEG (the drift the exact leg refuses): the ref is the model
+    COPYING a prior point out of the search results, and a long copy drifts
+    by a lead-in word — measured on the #2514 corpus, wp07's ref reads "We
+    ship the lease fix all-at-once behind a single global kill flag" for the
+    wp06 prior "Ship the lease fix all-at-once behind a single global kill
+    flag rather than a week of per-shard canary". Exact equality refused it,
+    so the CORRECTS edge — the ONLY licensed carrier of a cross-session
+    decision reversal — was dropped on a quoting slip, which is what the
+    receipt's `point supersedes=… matches no S3 prior` warning names.
+
+    ⛔ A COVERAGE RATIO IS THE WRONG SHAPE FOR THIS LEG, and the first cut of
+    this change proved it: dividing by the ref alone made ONE differing
+    content token free (6/7 = 0.857), so "report the latency regression to the
+    payments team" folded onto "…to the search team", a 30-second timeout
+    onto a 60-second one, and a `cause`/`effect` swap onto its inversion —
+    each of which `_boundary` (`distinguishing_difference`, above) refuses to
+    even FOLD, let alone supersede. A false CORRECTS terminalizes a live
+    belief and there is no un-supersede API to repair it.
+
+    So the leg is **frame-EDGE-trimmed token EQUALITY** (see
+    ``_span_contains`` for why every tolerant shape was rejected): after
+    dropping the non-load-bearing frame words at each end of both sequences the
+    two must be EQUAL and name the same subject. There is no negation gate and
+    no condition gate — a negator and a condition marker are LOAD-BEARING
+    (``_EDGE_TRIMMABLE`` never removes them), so they sit inside the compared
+    core and the equality test decides them (see the round-5 paragraph below).
+    An addition ANYWHERE the trim does not reach — including a
+    tail clause, which is the measured drift's shape — refuses and fails open.
+    ``SUPERSEDE_REF_MIN_TOKENS`` keeps a generic short ref from matching half
+    the graph, and a unique match is required: 0 candidates and any 2+
+    candidates still fail open with a named warning.
+
+    ⛔ CONTAINMENT ALONE IS NOT ENOUGH, and code review round 2 proved it with
+    three axes this tokenizer cannot see, because `_FRAME_STOPWORDS` includes
+    the connectives and the pronouns:
+      * a FRAME-WORD substitution ("tuesday AND wednesday" vs "tuesday OR
+        wednesday") is invisible to containment;
+      * a SUBJECT substitution ("WE ship" vs "THEY ship") is invisible too —
+        and pronouns carry an entity in this module's own model
+        (`_CONTENT_STOPWORDS = _FRAME_STOPWORDS - _ENTITY_PRONOUNS`);
+      * a DELETION of a qualifier only the prior carries (the ref truncated
+        before "once the canary passes in staging") CONTAINS in order, so an
+        unconditional claim would supersede a gated decision.
+    Round 5 then removed the separate gates entirely: with the load-bearing
+    words excluded from the trim, negation, conditions, connectives and dates
+    all sit INSIDE the compared core, so equality decides them and a second
+    predicate would be dead code. What remains is the trim, a pronoun-set check
+    that refuses a SUBSTITUTION but not an ADDITION, the length floor and the
+    uniqueness rule.
+    """
     ref = (ref or "").strip()
     if not ref or ref in ("null", "None"):
         return None
@@ -6444,6 +6562,21 @@ def _resolve_point_supersede(ref: str, search: dict,
     matches = [p for p in points
                if _norm(str(p.get("content") or "")) == norm]
     if not matches:
+        drifted = _supersede_band_candidates(ref, points)
+        if len(drifted) == 1:
+            prior = drifted[0]
+            warnings.append(
+                f"point-supersede recall band (#8503): ref {ref[:60]!r} is "
+                f"the same claim as {prior.get('id')!r} once frame words at "
+                f"its edges are disregarded "
+                f"('{str(prior.get('content'))[:60]}') — resolved to that "
+                "prior instead of failing open")
+            return prior
+        if len(drifted) > 1:
+            warnings.append(f"point supersedes={ref[:60]!r} is ambiguous "
+                            f"({len(drifted)} priors contain it) — "
+                            "skipped (never guess)")
+            return None
         warnings.append(f"point supersedes={ref[:60]!r} matches no S3 prior "
                         "— skipped (fail-open)")
         return None
@@ -6452,6 +6585,172 @@ def _resolve_point_supersede(ref: str, search: dict,
                         f"({len(matches)} priors) — skipped (never guess)")
         return None
     return matches[0]
+
+
+# #8503: the supersede-ref recall leg's one bound. The leg itself is an
+# EQUALITY test (frame-edge-trimmed token equality) — a boolean, so there is no
+# ratio and no threshold to tune; this floor keeps a short generic ref
+# ("the lease decision") from matching half the graph and keeps the
+# never-guess property testable.
+SUPERSEDE_REF_MIN_TOKENS = 5
+
+
+def _supersede_ref_tokens(text: str) -> list[str]:
+    """ORDERED content tokens of a supersede ref / prior content.
+
+    Order matters because the comparison is SEQUENCE EQUALITY (frame-edge
+    trimmed, see ``_span_contains``), not a bag of tokens: a role inversion, a
+    swapped pair or a recombination across two clauses all change the sequence
+    and therefore refuse without a separate gate. This tokenizer is NOT the
+    span test's input — it only feeds the LENGTH FLOOR, so frame words are
+    dropped here; the span test uses ``_supersede_span_tokens``, which keeps
+    them. Sentence punctuation is stripped per token — a copied ref routinely
+    differs from its prior by a trailing '.' or a quote mark.
+    """
+    out: list[str] = []
+    for raw in _norm(text).split():
+        tok = raw.strip(".,;:!?\"'()[]{}")
+        if tok and tok not in _FRAME_STOPWORDS:
+            out.append(tok)
+    return out
+
+
+def _supersede_span_tokens(text: str) -> list[str]:
+    """Punctuation-normalised tokens IN ORDER, frame words KEPT.
+
+    Different from ``_supersede_ref_tokens`` (which drops frame words for the
+    length floor): the span test needs the frame words, because a frame word's
+    ROLE can be load-bearing ("by 30 seconds" is not "to 30 seconds", "and" is
+    not "or") and dropping them made every frame-word substitution invisible
+    (code-review round 3). Sentence punctuation is stripped per token — a
+    copied ref routinely differs from its prior by a quote mark.
+    """
+    out: list[str] = []
+    for raw in _norm(text).split():
+        tok = raw.strip(".,;:!?\"'()[]{}")
+        if tok:
+            out.append(tok)
+    return out
+
+
+# #8503: the frame words that may be trimmed from an EDGE, which is a strictly
+# smaller set than `_FRAME_STOPWORDS`: a negator, a condition, a load-bearing
+# connective, a date and a clock unit all change what a claim asserts, and a
+# leading `If` (a frame word AND a condition marker) would otherwise be trimmed
+# away on both sides — an ungated claim then superseding a gated one
+# (review round 5). Pronouns stay trimmable because the measured drift prefixes
+# "We" to a subject-less prior, and `_supersede_pronouns` refuses the
+# substitution direction separately.
+# Temporal-scope adverbs are a load-bearing edge too and are in neither
+# `_DATE_WORDS` nor `_CLOCK_UNITS`, so they are named here: "…kill flag" must
+# not supersede "…kill flag now" (review round 5).
+_TEMPORAL_SCOPE = frozenset({
+    "now", "still", "already", "later", "soon", "currently", "previously",
+    "formerly", "anymore", "anon", "immediately", "eventually",
+})
+_EDGE_TRIMMABLE = (_FRAME_STOPWORDS
+                   - _NEGATION_MARKERS
+                   - _CONDITION_MARKERS
+                   - _CONNECTIVE_MEMBERS
+                   - _DATE_WORDS
+                   - _CLOCK_UNITS
+                   - _TEMPORAL_SCOPE)
+
+
+def _span_contains(ref_tokens: list[str], prior_tokens: list[str]) -> bool:
+    """True when the two token sequences agree except for FRAME words at the EDGES.
+
+    ⛔ This is deliberately NOT a containment test, and the reason is the whole
+    history of this leg. Three review rounds each found a hole in a tolerant
+    matcher, and every hole was a difference the tolerance could not see:
+
+      * a COVERAGE ratio folded every substituted content token (round 1);
+      * an ordered/contiguous span over frame-STRIPPED tokens folded an
+          exchanged connective, a substituted subject and a deleted qualifier,
+          and then a substituted preposition once frame words were kept inside
+          the span (rounds 2 and 3);
+      * allowing an ADDITIVE TAIL — which the measured drift needs, because the
+          model truncated "…rather than a week of per-shard canary" — folds any
+          trailing QUALIFIER the ref dropped ("…kill flag" over "…kill flag
+          after the staging canary passes", "…to 30 seconds" over "…to 30
+          seconds for the payments queue"). A trailing truncation is exactly
+          what this model does, so a tail-tolerant matcher is unsafe BY DESIGN,
+          and no closed-class vocabulary can enumerate every qualifier spelling.
+
+    So the leg is the narrowest rule that cannot corrupt a belief: drop the
+    NON-LOAD-BEARING frame words at each END of both sequences
+    (`_EDGE_TRIMMABLE` — articles, pronouns, prepositions) and require the
+    remainders to be EQUAL. A negator, a condition, a connective, a date or a
+    clock unit is NEVER trimmed, because each of those changes what the claim
+    asserts. Everything else (an added clause, a dropped
+    qualifier, a swapped connective or preposition, a changed number, entity or
+    scope) refuses, and the caller fails open with a named warning.
+
+    ⚠️ CONSEQUENCE, stated rather than buried: the measured wp07 drift is a
+    CONTENT-tail truncation, so this leg does NOT repair that row — it refuses
+    it. Repairing a truncated copy needs a semantic resolver (the Jev-shaped
+    seam the extractor-v4 architecture names as unbuilt) or a prompt that gets
+    the ref copied exactly; it is not something a string predicate should be
+    trusted with, because the failure mode is a live belief marked outdated
+    with no un-supersede API.
+    """
+    def _core(tokens: list[str]) -> list[str]:
+        i, j = 0, len(tokens)
+        while i < j and tokens[i] in _EDGE_TRIMMABLE:
+            i += 1
+        while j > i and tokens[j - 1] in _EDGE_TRIMMABLE:
+            j -= 1
+        return tokens[i:j]
+
+    core_ref, core_prior = _core(ref_tokens), _core(prior_tokens)
+    return bool(core_ref) and core_ref == core_prior
+
+
+def _supersede_pronouns(text: str) -> frozenset[str]:
+    """The entity-carrying pronouns a claim names (empty when it names none).
+
+    `_FRAME_STOPWORDS` strips pronouns from the compared CORE (`_EDGE_TRIMMABLE`
+    keeps them trimmable at an edge, so a pronoun at an edge never reaches the
+    core), so equality alone is blind to "we ship" becoming "they ship" — a
+    different subject. Presence is not the test: the measured drift PREFIXES
+    "We" to a prior that states no subject, and refusing that would undo the
+    fix. Only a substitution — pronouns on BOTH sides, and different — is
+    refused.
+    """
+    return frozenset(tok for tok in _supersede_span_tokens(text)
+                     if tok in _ENTITY_PRONOUNS)
+
+
+def _supersede_band_candidates(ref: str, points: list[dict]) -> list[dict]:
+    """Priors the ref is a faithful (drifted, never substituted) copy of.
+
+    Returns every candidate that passes; the CALLER resolves only when exactly
+    one does. Acceptance is deliberately boolean rather than a similarity
+    score: a ref whose frame-edge-trimmed token sequence must EQUAL the
+    prior's, naming the same subject, is either a copy of this prior or it is
+    not one. (Negation, conditions, connectives and dates need no separate
+    gate: they are LOAD-BEARING, `_EDGE_TRIMMABLE` never removes them, so they
+    are inside the compared core and equality decides them.) A score is what
+    let a substitution through in the first cut; a span tolerant of an additive
+    tail is what let a dropped qualifier through in the third.
+    """
+    ref_tokens = _supersede_ref_tokens(ref)
+    if len(ref_tokens) < SUPERSEDE_REF_MIN_TOKENS:
+        return []
+    ref_pron = _supersede_pronouns(ref)
+    out: list[dict] = []
+    for p in points:
+        content = str(p.get("content") or "")
+        # a SUBJECT substitution is a frame-word substitution too (see
+        # `_supersede_pronouns`: a one-sided pronoun is an addition and is
+        # allowed, two different ones are not).
+        cand_pron = _supersede_pronouns(content)
+        if ref_pron and cand_pron and ref_pron != cand_pron:
+            continue
+        if _span_contains(_supersede_span_tokens(ref),
+                          _supersede_span_tokens(content)):
+            out.append(p)
+    return out
 
 
 def _supersession_records(entity_refs: list[dict], search: dict,

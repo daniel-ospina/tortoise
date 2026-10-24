@@ -1,0 +1,3888 @@
+{
+ "run_id": "p8503diag-1792817835",
+ "db_uri": "docker://:@127.0.0.1:16403/tortoise_test_matrix",
+ "extractor_model": null,
+ "sessions": {
+  "wp01_quarry_debug": {
+   "capture_ok": true,
+   "mode": null,
+   "warnings": [
+    "value-bearing point 'The Halcyon archive re-ingest stalled at 62 percent because ' resolved verbatim in turn 8, but the quoted text carries no value \u2014 the span would address words that do not hold it, so it carries no source span (the value cannot be re-read verbatim)",
+    "value-bearing point 'The retry loop added in the batch runner bypassed the batch ' resolved verbatim in turn 5, but the quoted text carries no value \u2014 the span would address words that do not hold it, so it carries no source span (the value cannot be re-read verbatim)",
+    "value-bearing point 'The lease-table migration is additive \u2014 a new lease table wi' resolved verbatim in turn 23, but the quoted text carries no value \u2014 the span would address words that do not hold it, so it carries no source span (the value cannot be re-read verbatim)",
+    "value-normalizer: 5 point(s) carried an amount that was not typed \u2014 no_currency_anchor \u00d75 (prose only \u2014 each value is a drop, never a guess)"
+   ],
+   "payload_points": [],
+   "payload_operators": [],
+   "supersessions": [],
+   "stats": {
+    "entities": 11,
+    "events": 5,
+    "points": 24,
+    "operators": 5,
+    "operator_endpoints_minted": 0,
+    "tier_a_points": 0,
+    "noops": 0,
+    "deletions": 0,
+    "search_queries": 15,
+    "search_degraded": false,
+    "chain_notes": 0,
+    "supersessions": 0,
+    "elapsed_s": 30.8,
+    "chunks": 1,
+    "failed_chunks": 0,
+    "edus": 26,
+    "s4_merge": {
+     "s2_items": 36,
+     "s4_items": 9,
+     "merged_items": 45,
+     "corrected_by_s4": 0,
+     "verbatim_reemissions": 0,
+     "kept_from_s2": 36,
+     "added_by_s4": 9
+    },
+    "s4_delta": true,
+    "llm": {
+     "calls": 3,
+     "retries": 0,
+     "truncated": 0,
+     "deadline_aborts": 0,
+     "prompt_tokens": 27217,
+     "completion_tokens": 5807,
+     "cost_usd": 0.0,
+     "calls_without_cost": 3,
+     "calls_without_usage": 0,
+     "by_stage": {
+      "s1": {
+       "deepseek-direct": {
+        "deepseek-v4-flash": {
+         "calls": 1,
+         "prompt_tokens": 2747,
+         "completion_tokens": 512,
+         "cost_usd": 0.0,
+         "calls_without_cost": 1,
+         "calls_without_usage": 0,
+         "calls_without_tokens": 0,
+         "usage_present": true
+        }
+       }
+      },
+      "s2": {
+       "deepseek-direct": {
+        "deepseek-v4-flash": {
+         "calls": 1,
+         "prompt_tokens": 9581,
+         "completion_tokens": 4031,
+         "cost_usd": 0.0,
+         "calls_without_cost": 1,
+         "calls_without_usage": 0,
+         "calls_without_tokens": 0,
+         "usage_present": true
+        }
+       }
+      },
+      "s4": {
+       "deepseek-direct": {
+        "deepseek-v4-flash": {
+         "calls": 1,
+         "prompt_tokens": 14889,
+         "completion_tokens": 1264,
+         "cost_usd": 0.0,
+         "calls_without_cost": 1,
+         "calls_without_usage": 0,
+         "calls_without_tokens": 0,
+         "usage_present": true
+        }
+       }
+      }
+     },
+     "route_cost_overflows": 0,
+     "calls_without_tokens": 0
+    },
+    "recovery": {
+     "s2_out_tokens": 4031,
+     "s4_out_tokens": 1264
+    }
+   },
+   "operator_counts": {
+    "IMPL": 7,
+    "INPUT": 7
+   },
+   "points": [
+    {
+     "point_id": "pt_4fb15aae5383b53441386173d0ffa04b708931dd6738f22a72c722ce0f9d53",
+     "content": "The Halcyon archive re-ingest stalled at 62 percent because of a duplicate-processing race, not throughput or starvation"
+    },
+    {
+     "point_id": "pt_e48bf6b88f25a83acd7efb89d3a6be8612b88a13b4d0f8344d8210651d26a3",
+     "content": "The retry loop added in the batch runner bypassed the batch ownership check, so no lease rows existed and two workers could claim the same batch"
+    },
+    {
+     "point_id": "pt_ec8503a672ff7410c5c71de4560ea4d6ef1975b07f22c8049587b99f2fa5fb",
+     "content": "Each batch must claim a single-owner lease row before processing, and the claim is the only thing that can complete it"
+    },
+    {
+     "point_id": "pt_14e56f3f052033155cac7f9cf7b266e9b7437155753edd5092d7c642e4a579",
+     "content": "A distributed lock service is rejected; a simple lease row with an expiry is enough"
+    },
+    {
+     "point_id": "pt_d32d6ca55d3f3e2ed8fe31a881cb82aa25f9ea2b1406636d561bfc2efbeca9",
+     "content": "The lease row is keyed by batch id with a thirty-second expiry and a compare-and-swap update on completion"
+    },
+    {
+     "point_id": "pt_d31e06cc3e08c37c55ec6f3f49013669960709b97404bc07fef22d66d46404",
+     "content": "The losing worker retries the batch after a sixty-second backoff rather than dropping it, because losing the batch silently is how events are lost"
+    },
+    {
+     "point_id": "pt_b54341a493442f67336051bed96a06e4b771a94e60ec6567b06823765c3ad8",
+     "content": "An expired lease with no completion makes the batch claimable again, giving crash recovery for free"
+    },
+    {
+     "point_id": "pt_7840761d52169b0dd0b591468a32f1d399fa9f3b6c471288b9c2541aebf744",
+     "content": "The completion path needs the owner check; nothing else changes"
+    },
+    {
+     "point_id": "pt_4e44f8d44034f410ae096fde2ca5f2bf82360d5391d8710e84fdc4ff988953",
+     "content": "The lease change must ship before the October 15 freeze, with no scope creep"
+    },
+    {
+     "point_id": "pt_bd88477f0052f7f6cb11ff25f02b2efa6946e2851730bd8b2159d048f9fe14",
+     "content": "The wire queue processes batches of five thousand events each, and the lease round-trip budgets roughly a second per batch"
+    },
+    {
+     "point_id": "pt_a03d2a594cbb33634cb624e488958729509100447c3089b173a99249b91dbc",
+     "content": "The Halcyon re-ingest covers about twelve million events, or twenty-four hundred batches end to end"
+    },
+    {
+     "point_id": "pt_87169fef78c0a21a8bbd16bf6701f2cb25404186256232ae6b4dfce7124d69",
+     "content": "At a second per batch with four workers the re-ingest is about ten minutes of pure processing, well inside the maintenance window"
+    },
+    {
+     "point_id": "pt_f01f35ef5b810d20daf700c83361025aa33e11688b1e5c6e9a3dd9dc15aea5",
+     "content": "The backfill cutoff is fixed at September 30 so the re-ingest covers only the outage window and does not re-ingest events that already landed"
+    },
+    {
+     "point_id": "pt_47421353c37b31f6a262b3bc3329373ad69c3298578012da23ea98971e6325",
+     "content": "The backfill cutoff is added as a constant so the next backfill does not guess at it"
+    },
+    {
+     "point_id": "pt_43ad23480d88a96751447783781c6133363a86db59e157e6f62309b37ddd96",
+     "content": "The lease-table migration is additive \u2014 a new lease table with an index on batch id \u2014 and should land before Friday's 2am DB maintenance window to avoid interaction with the vacuum job"
+    },
+    {
+     "point_id": "pt_51e270ac17b06c10ef9dca6c8204032a60a6cebd5509ed3bfca192539c67ac",
+     "content": "Maya Chen owns the ingest queue service now, having taken it over when the old platform group split, and will be cc'd on the PR"
+    },
+    {
+     "point_id": "pt_775d8a25eacc72fe550760d862de30f9522845c0fef2381719754512c8292a",
+     "content": "Tomas is the escalation contact for queue internals if the stall recurs, rather than paging the whole team"
+    },
+    {
+     "point_id": "pt_79eacdb339a1bf93d1adf173c984a06747e40ded3be26e2f9006bd68f3b5ba",
+     "content": "The hydrate stage was audited and found clean, so the lease change is scoped to the wire queue"
+    },
+    {
+     "point_id": "pt_06f054445a5b88ef2ad2bce8f0fe31b356ad4c3123c5da001e855677670b3d",
+     "content": "The stall was in the wire stage, where four workers ran at full CPU while the queue depth barely moved"
+    },
+    {
+     "point_id": "pt_a1ee69c3988af4e30c931c629af798c168c4ade46b2e8f5add5fd288bfed20",
+     "content": "No lease rows existed at all while every worker was actively processing batches"
+    },
+    {
+     "point_id": "pt_e58b6c595b4e13dae1abfecb347f9fad01c87ad76f99727218fb10a517862e",
+     "content": "The staging cluster runs the latest release, so the stall is not a stale deploy artifact"
+    },
+    {
+     "point_id": "pt_1fc17eb54b87d267a345300c9ab55ecb99fa8e79e9d8f24d15f15b9b7a0e94",
+     "content": "Every worker was retrying the same handful of batches in a loop, visible in the logs"
+    },
+    {
+     "point_id": "pt_9d049d94b96b871f7814c9c86603efc51c774fe1f4aa6617a00822465be636",
+     "content": "Two workers grabbed the same batch twice from the ingest queue and each marked its own copy complete"
+    },
+    {
+     "point_id": "pt_bd6a7faff5d419ffc65c1b3cca80e2351f40e5c8d7c1f5f888a44f5ac20b0e",
+     "content": "The DB maintenance window is Friday at 2am"
+    }
+   ],
+   "operator_nodes": [
+    {
+     "point_id": "1a16c4617f2-121a97116f68",
+     "content": "",
+     "provenance_present": true,
+     "ep_updated": false,
+     "status": "live",
+     "point_kind": null,
+     "is_episodic": null,
+     "is_operator": true,
+     "event_id": "ev_3e050562f3dcc41d2a73bc0e7483b5c52252c55bfc3be1b294d11450b6c9d0"
+    },
+    {
+     "point_id": "1a16c461813-a2596d1221fb",
+     "content": "",
+     "provenance_present": true,
+     "ep_updated": false,
+     "status": "live",
+     "point_kind": null,
+     "is_episodic": null,
+     "is_operator": true,
+     "event_id": "ev_3e050562f3dcc41d2a73bc0e7483b5c52252c55bfc3be1b294d11450b6c9d0"
+    },
+    {
+     "point_id": "1a16c461824-59fa8d971e74",
+     "content": "",
+     "provenance_present": true,
+     "ep_updated": false,
+     "status": "live",
+     "point_kind": null,
+     "is_episodic": null,
+     "is_operator": true,
+     "event_id": "ev_3e050562f3dcc41d2a73bc0e7483b5c52252c55bfc3be1b294d11450b6c9d0"
+    },
+    {
+     "point_id": "1a16c461836-52582c46e9d2",
+     "content": "",
+     "provenance_present": true,
+     "ep_updated": false,
+     "status": "live",
+     "point_kind": null,
+     "is_episodic": null,
+     "is_operator": true,
+     "event_id": "ev_3e050562f3dcc41d2a73bc0e7483b5c52252c55bfc3be1b294d11450b6c9d0"
+    }
+   ],
+   "operator_edges": [
+    {
+     "op_id": "1a16c4617f2-121a97116f68",
+     "op_type": "IMPL",
+     "direction": "unidirectional",
+     "label": null,
+     "endpoints": {
+      "pt_4fb15aae5383b53441386173d0ffa04b708931dd6738f22a72c722ce0f9d53": 1,
+      "pt_e48bf6b88f25a83acd7efb89d3a6be8612b88a13b4d0f8344d8210651d26a3": 0
+     },
+     "source_id": "pt_e48bf6b88f25a83acd7efb89d3a6be8612b88a13b4d0f8344d8210651d26a3"
+    },
+    {
+     "op_id": "1a16c461813-a2596d1221fb",
+     "op_type": "IMPL",
+     "direction": "unidirectional",
+     "label": null,
+     "endpoints": {
+      "pt_e48bf6b88f25a83acd7efb89d3a6be8612b88a13b4d0f8344d8210651d26a3": 0,
+      "pt_a1ee69c3988af4e30c931c629af798c168c4ade46b2e8f5add5fd288bfed20": 1
+     },
+     "source_id": "pt_e48bf6b88f25a83acd7efb89d3a6be8612b88a13b4d0f8344d8210651d26a3"
+    },
+    {
+     "op_id": "1a16c461824-59fa8d971e74",
+     "op_type": "IMPL",
+     "direction": "unidirectional",
+     "label": null,
+     "endpoints": {
+      "pt_e48bf6b88f25a83acd7efb89d3a6be8612b88a13b4d0f8344d8210651d26a3": 0,
+      "pt_9d049d94b96b871f7814c9c86603efc51c774fe1f4aa6617a00822465be636": 1
+     },
+     "source_id": "pt_e48bf6b88f25a83acd7efb89d3a6be8612b88a13b4d0f8344d8210651d26a3"
+    },
+    {
+     "op_id": "1a16c461836-52582c46e9d2",
+     "op_type": "IMPL",
+     "direction": "unidirectional",
+     "label": null,
+     "endpoints": {
+      "pt_e58b6c595b4e13dae1abfecb347f9fad01c87ad76f99727218fb10a517862e": 1
+     },
+     "source_id": null
+    }
+   ],
+   "direct_edges": [],
+   "mitigations": [
+    {
+     "op_id": "1a16c4617f2-121a97116f68",
+     "point_id": "1a16c46184e-4ee2b8548a10",
+     "content": "[MITIGATION] Each batch must claim a single-owner lease row before processing, and the claim is the only thing that can complete it"
+    }
+   ],
+   "seconds": 60.5
+  },
+  "wp02_lumen_refactor": {
+   "capture_ok": true,
+   "mode": null,
+   "warnings": [
+    "entity 'lumen auth' lifecycle='changed' is not expressible in the Layer-1 payload \u2014 changed-ness is attribute/value state and must ride on points/events, not on an Object transition",
+    "entity 'the registry service' lifecycle='changed' is not expressible in the Layer-1 payload \u2014 changed-ness is attribute/value state and must ride on points/events, not on an Object transition",
+    "entity 'the admin settings page' lifecycle='changed' is not expressible in the Layer-1 payload \u2014 changed-ness is attribute/value state and must ride on points/events, not on an Object transition",
+    "MITIGATES target edge materialized (#2552 mint-before-wire): the declared target IMPL ('ev_86af60214a3afbce0c3a91d3676d3aead92e8' \u2192 'pt_f8ba8b3c65e8edafa6071b4033e897260d828') was not emitted as its own operator \u2014 added so the dampener has its target",
+    "MITIGATES target edge materialized (#2552 mint-before-wire): the declared target IMPL ('pt_9c654a764ef1342bc632b0fb0fa46cc218a8c' \u2192 'pt_f8ba8b3c65e8edafa6071b4033e897260d828') was not emitted as its own operator \u2014 added so the dampener has its target",
+    "value-normalizer: 2 point(s) carried an amount that was not typed \u2014 no_currency_anchor \u00d72 (prose only \u2014 each value is a drop, never a guess)"
+   ],
+   "payload_points": [],
+   "payload_operators": [],
+   "supersessions": [],
+   "stats": {
+    "entities": 11,
+    "events": 9,
+    "points": 24,
+    "operators": 5,
+    "operator_endpoints_minted": 0,
+    "tier_a_points": 1,
+    "noops": 0,
+    "deletions": 0,
+    "search_queries": 15,
+    "search_degraded": false,
+    "chain_notes": 0,
+    "supersessions": 0,
+    "elapsed_s": 28.2,
+    "chunks": 1,
+    "failed_chunks": 0,
+    "edus": 22,
+    "s4_merge": {
+     "s2_items": 45,
+     "s4_items": 2,
+     "merged_items": 47,
+     "corrected_by_s4": 0,
+     "verbatim_reemissions": 0,
+     "kept_from_s2": 45,
+     "added_by_s4": 2
+    },
+    "s4_delta": true,
+    "llm": {
+     "calls": 4,
+     "retries": 0,
+     "truncated": 0,
+     "deadline_aborts": 0,
+     "prompt_tokens": 28787,
+     "completion_tokens": 5840,
+     "cost_usd": 0.0,
+     "calls_without_cost": 4,
+     "calls_without_usage": 0,
+     "by_stage": {
+      "s1": {
+       "deepseek-direct": {
+        "deepseek-v4-flash": {
+         "calls": 1,
+         "prompt_tokens": 2482,
+         "completion_tokens": 584,
+         "cost_usd": 0.0,
+         "calls_without_cost": 1,
+         "calls_without_usage": 0,
+         "calls_without_tokens": 0,
+         "usage_present": true
+        }
+       }
+      },
+      "s2": {
+       "deepseek-direct": {
+        "deepseek-v4-flash": {
+         "calls": 1,
+         "prompt_tokens": 9388,
+         "completion_tokens": 4972,
+         "cost_usd": 0.0,
+         "calls_without_cost": 1,
+         "calls_without_usage": 0,
+         "calls_without_tokens": 0,
+         "usage_present": true
+        }
+       }
+      },
+      "s4": {
+       "deepseek-direct": {
+        "deepseek-v4-flash": {
+         "calls": 1,
+         "prompt_tokens": 16482,
+         "completion_tokens": 278,
+         "cost_usd": 0.0,
+         "calls_without_cost": 1,
+         "calls_without_usage": 0,
+         "calls_without_tokens": 0,
+         "usage_present": true
+        }
+       }
+      },
+      "resolve": {
+       "deepseek-direct": {
+        "deepseek-v4-flash": {
+         "calls": 1,
+         "prompt_tokens": 435,
+         "completion_tokens": 6,
+         "cost_usd": 0.0,
+         "calls_without_cost": 1,
+         "calls_without_usage": 0,
+         "calls_without_tokens": 0,
+         "usage_present": true
+        }
+       }
+      }
+     },
+     "route_cost_overflows": 0,
+     "calls_without_tokens": 0
+    },
+    "recovery": {
+     "s2_out_tokens": 4972,
+     "s4_out_tokens": 278
+    }
+   },
+   "operator_counts": {
+    "IMPL": 5,
+    "INPUT": 5
+   },
+   "points": [
+    {
+     "point_id": "pt_f8ba8b3c65e8edafa6071b4033e897260d828f72fb29a90a8627f89a1d189d",
+     "content": "lumen auth is migrating from team-scoped tokens to per-graph API keys so each graph gets its own credential and its own audit trail"
+    },
+    {
+     "point_id": "pt_cdc01293725665968127763fdb12c9fae53a986234cfe2b538c65ca8acf786",
+     "content": "The team signed off on the per-graph API key direction last Friday"
+    },
+    {
+     "point_id": "pt_3e45a675db6a94e1116038c0d79eda8f2ec4bad373ad169e1db2a227bc6cce",
+     "content": "A per-graph key encodes the graph id rather than the team id, so the registry can route a key back to its graph without a lookup"
+    },
+    {
+     "point_id": "pt_b46b037fc53d20005764b1dba6f72ea8e9c3be1df43110fbac9dcec682ddc3",
+     "content": "The platform standard is the tt_ prefix with a random 32-byte secret after it"
+    },
+    {
+     "point_id": "pt_4e6f5d7f3dd6b1d2e743ceb2c53a1c15a4dca99e6433a8a46f3b790d7576d0",
+     "content": "Every graph key starts with tt_ and nothing else in the system may mint that prefix"
+    },
+    {
+     "point_id": "pt_30fd1afaa9de5fd9b17da9d589130d90e9c8af6ce0ba9ac4b46d9e7039df7e",
+     "content": "Every graph key has a token lifetime of twenty-four hours with rotation on the boundary"
+    },
+    {
+     "point_id": "pt_982894b3a0472c60294b4af8b01371d03bca96db65fd00739b033c2343be6b",
+     "content": "Short-lived graph keys mean a leak is a one-day problem rather than a quarterly audit finding"
+    },
+    {
+     "point_id": "pt_ae7936f98259c2da5843788a424fb3a825553d5a902636d32a17a1be65614c",
+     "content": "Legacy team keys remain valid until the rotation window closes, but no new ones are minted from the day of the flip"
+    },
+    {
+     "point_id": "pt_be77b31584b84dc2ed9ef5a0df2daa2dd9ba05e0d17c15456878c3af06b5e8",
+     "content": "Forcing every team to rotate on day one would break the pilot"
+    },
+    {
+     "point_id": "pt_daeeeaf5ced4dbaa040168811412da3729eb1d9a260e2d45ab1d43f1514781",
+     "content": "Bluepeak Logistics is the pilot customer for the per-graph rollout; their integration team is small and they were already asking for scoped credentials"
+    },
+    {
+     "point_id": "pt_6233352b74ec99ba2bc756d5c6aa12923de572841e9321488327cfd54f5d37",
+     "content": "Priya owns the registry service, inherited with the data platform handoff"
+    },
+    {
+     "point_id": "pt_9d90c241c0dc2b3c294f389bd75e4db93b925ab504ae0f11af993323e4bb0a",
+     "content": "Priya will be looped into the interface review before the resolver is touched"
+    },
+    {
+     "point_id": "pt_6757d2d200659b0fcc342e45dfe0ae9a5896040f6db721c2a8dddb25ffbb3e",
+     "content": "The registry must move from a team-scoped resolver to a graph-scoped resolver"
+    },
+    {
+     "point_id": "pt_08c98009f90ff3eea68ef4aecd5eeff0d797cd2c0c99983c8f89f871f14994",
+     "content": "A revoked key presented mid-request fails closed with a 401 and no fallback to team scope"
+    },
+    {
+     "point_id": "pt_62fe53c2a63b603db0679347fa31a3ec0a0317f8b82e9ee3c868f1e5ca0e12",
+     "content": "A revoked key must be dead on the next request, otherwise the audit story falls apart"
+    },
+    {
+     "point_id": "pt_4578873084cfc60264bf44a56ad4628fec695d7d2d763215446dad03a54bd1",
+     "content": "Key usage events are kept for ninety days, same as the rest of the audit log"
+    },
+    {
+     "point_id": "pt_10764bebbdebfa24a8a9904ab9fcc33bd0706a27eaf25bea75c882441dac13",
+     "content": "Anything shorter than ninety days of key usage retention cannot answer the incident questions we get asked"
+    },
+    {
+     "point_id": "pt_01d871e08bf4baf73069b7d3fdfdb4a31dd7d0f4464d771a43196eec0b6b88",
+     "content": "The deploy is two-phase: phase one mints graph keys with enforcement off, phase two flips enforcement after the sandbox org runs on them for a week"
+    },
+    {
+     "point_id": "pt_9c654a764ef1342bc632b0fb0fa46cc218a8c6a1ef247d5a5bff26d9dbe751",
+     "content": "A single-commit flip across issuance, resolution, and enforcement was judged too risky"
+    },
+    {
+     "point_id": "pt_2d6186ce290e305c91821c61844e2660134be4a6caec27099876492012dbad",
+     "content": "The only remaining team-token assumption in lumen is the admin settings page, which renders the team token"
+    },
+    {
+     "point_id": "pt_1e22935c05e8dde4353325d3f1fa5bc0ede2bf30e528b5f082befefd55a45d",
+     "content": "The admin settings page will be replaced with a per-graph key table"
+    },
+    {
+     "point_id": "pt_ad965089ab34d1af56b6dc311899ad175a9a1b29d6451010a0893afa2779ba",
+     "content": "The next step is Priya's interface review, then the migration plan write-up"
+    },
+    {
+     "point_id": "pt_bc7beed198791104d61f16cd1fa10d9d993ed61c01ea8bf41486a4b624b2c0",
+     "content": "The quarterly demo is next Tuesday"
+    },
+    {
+     "point_id": "pt_c04c204186e8bcfffbb905265904ed5b27c5d1cdb0c30e4b42be3e1d6e6ecb",
+     "content": "The user's outdoor runs resumed now that the weather cleared; they ran outside both mornings"
+    }
+   ],
+   "operator_nodes": [
+    {
+     "point_id": "1a16c46f850-295165cc22c2",
+     "content": "",
+     "provenance_present": true,
+     "ep_updated": false,
+     "status": "live",
+     "point_kind": null,
+     "is_episodic": null,
+     "is_operator": true,
+     "event_id": "ev_ad3b221a2c87bc63b2e12fdba53b738323e4f63778ff53398c5b76bd991465"
+    },
+    {
+     "point_id": "1a16c46f864-d28c71d44c4a",
+     "content": "",
+     "provenance_present": true,
+     "ep_updated": false,
+     "status": "live",
+     "point_kind": null,
+     "is_episodic": null,
+     "is_operator": true,
+     "event_id": "ev_ad3b221a2c87bc63b2e12fdba53b738323e4f63778ff53398c5b76bd991465"
+    },
+    {
+     "point_id": "1a16c46f877-67b3561f9507",
+     "content": "",
+     "provenance_present": true,
+     "ep_updated": false,
+     "status": "live",
+     "point_kind": null,
+     "is_episodic": null,
+     "is_operator": true,
+     "event_id": "ev_ad3b221a2c87bc63b2e12fdba53b738323e4f63778ff53398c5b76bd991465"
+    }
+   ],
+   "operator_edges": [
+    {
+     "op_id": "1a16c46f850-295165cc22c2",
+     "op_type": "IMPL",
+     "direction": "unidirectional",
+     "label": null,
+     "endpoints": {
+      "pt_08c98009f90ff3eea68ef4aecd5eeff0d797cd2c0c99983c8f89f871f14994": 0,
+      "pt_62fe53c2a63b603db0679347fa31a3ec0a0317f8b82e9ee3c868f1e5ca0e12": 1
+     },
+     "source_id": "pt_08c98009f90ff3eea68ef4aecd5eeff0d797cd2c0c99983c8f89f871f14994"
+    },
+    {
+     "op_id": "1a16c46f864-d28c71d44c4a",
+     "op_type": "IMPL",
+     "direction": "unidirectional",
+     "label": null,
+     "endpoints": {
+      "pt_f8ba8b3c65e8edafa6071b4033e897260d828f72fb29a90a8627f89a1d189d": 1
+     },
+     "source_id": null
+    },
+    {
+     "op_id": "1a16c46f877-67b3561f9507",
+     "op_type": "IMPL",
+     "direction": "unidirectional",
+     "label": null,
+     "endpoints": {
+      "pt_f8ba8b3c65e8edafa6071b4033e897260d828f72fb29a90a8627f89a1d189d": 1,
+      "pt_9c654a764ef1342bc632b0fb0fa46cc218a8c6a1ef247d5a5bff26d9dbe751": 0
+     },
+     "source_id": "pt_9c654a764ef1342bc632b0fb0fa46cc218a8c6a1ef247d5a5bff26d9dbe751"
+    }
+   ],
+   "direct_edges": [],
+   "mitigations": [
+    {
+     "op_id": "1a16c46f864-d28c71d44c4a",
+     "point_id": "1a16c46f88a-ffcea5e75d60",
+     "content": "[MITIGATION] Every graph key has a token lifetime of twenty-four hours with rotation on the boundary"
+    },
+    {
+     "op_id": "1a16c46f877-67b3561f9507",
+     "point_id": "1a16c46f8a4-d25850de62a0",
+     "content": "[MITIGATION] The deploy is two-phase: phase one mints graph keys with enforcement off, phase two flips enforcement after the sandbox org runs on them for a week"
+    }
+   ],
+   "seconds": 57.3
+  },
+  "wp03_ember_design": {
+   "capture_ok": true,
+   "mode": null,
+   "warnings": [
+    "MITIGATES target edge materialized (#2552 mint-before-wire): the declared target IMPL ('pt_33097e62e1d533640d191100f8d442cc4f989' \u2192 'pt_8ffd2c547f7e2dffe935513015c7ec1d4cdb0') was not emitted as its own operator \u2014 added so the dampener has its target",
+    "value-normalizer: 1 point(s) carried an amount that was not typed \u2014 no_currency_anchor \u00d71 (prose only \u2014 each value is a drop, never a guess)"
+   ],
+   "payload_points": [],
+   "payload_operators": [],
+   "supersessions": [],
+   "stats": {
+    "entities": 16,
+    "events": 4,
+    "points": 17,
+    "operators": 5,
+    "operator_endpoints_minted": 0,
+    "tier_a_points": 0,
+    "noops": 0,
+    "deletions": 0,
+    "search_queries": 15,
+    "search_degraded": false,
+    "chain_notes": 0,
+    "supersessions": 0,
+    "elapsed_s": 33.5,
+    "chunks": 1,
+    "failed_chunks": 0,
+    "edus": 24,
+    "s4_merge": {},
+    "s4_delta": true,
+    "s4_delta_empty": 1,
+    "llm": {
+     "calls": 4,
+     "retries": 0,
+     "truncated": 0,
+     "deadline_aborts": 0,
+     "prompt_tokens": 28323,
+     "completion_tokens": 4944,
+     "cost_usd": 0.0,
+     "calls_without_cost": 4,
+     "calls_without_usage": 0,
+     "by_stage": {
+      "s1": {
+       "deepseek-direct": {
+        "deepseek-v4-flash": {
+         "calls": 1,
+         "prompt_tokens": 2540,
+         "completion_tokens": 614,
+         "cost_usd": 0.0,
+         "calls_without_cost": 1,
+         "calls_without_usage": 0,
+         "calls_without_tokens": 0,
+         "usage_present": true
+        }
+       }
+      },
+      "s2": {
+       "deepseek-direct": {
+        "deepseek-v4-flash": {
+         "calls": 1,
+         "prompt_tokens": 9476,
+         "completion_tokens": 4288,
+         "cost_usd": 0.0,
+         "calls_without_cost": 1,
+         "calls_without_usage": 0,
+         "calls_without_tokens": 0,
+         "usage_present": true
+        }
+       }
+      },
+      "s4": {
+       "deepseek-direct": {
+        "deepseek-v4-flash": {
+         "calls": 1,
+         "prompt_tokens": 15562,
+         "completion_tokens": 36,
+         "cost_usd": 0.0,
+         "calls_without_cost": 1,
+         "calls_without_usage": 0,
+         "calls_without_tokens": 0,
+         "usage_present": true
+        }
+       }
+      },
+      "resolve": {
+       "deepseek-direct": {
+        "deepseek-v4-flash": {
+         "calls": 1,
+         "prompt_tokens": 745,
+         "completion_tokens": 6,
+         "cost_usd": 0.0,
+         "calls_without_cost": 1,
+         "calls_without_usage": 0,
+         "calls_without_tokens": 0,
+         "usage_present": true
+        }
+       }
+      }
+     },
+     "route_cost_overflows": 0,
+     "calls_without_tokens": 0
+    },
+    "recovery": {
+     "s2_out_tokens": 4288,
+     "s4_out_tokens": 36
+    }
+   },
+   "operator_counts": {
+    "IMPL": 8,
+    "INPUT": 8
+   },
+   "points": [
+    {
+     "point_id": "pt_8ffd2c547f7e2dffe935513015c7ec1d4cdb09210ba7797024b0aa7356dd3c",
+     "content": "The ember pager fired twelve times per week on average last quarter"
+    },
+    {
+     "point_id": "pt_00d68cbe6cd508556a2d40a52bc445b19c77420c4b4c495dc03133d95e60ad",
+     "content": "Roughly a third of ember pages last quarter were not actionable"
+    },
+    {
+     "point_id": "pt_33097e62e1d533640d191100f8d442cc4f989d7cda5ce4e40bc9a8621873d3",
+     "content": "Roughly thirty percent of ember alerts are unactionable because the ownership lookup fails, forcing on-call to hunt for the right team"
+    },
+    {
+     "point_id": "pt_c87295e69dc939c9f79b2bcdebae2fe515942e3d12b6e28d9c5ec93616ab88",
+     "content": "The ember on-call load falls on whoever is in the ember on-call rotation, mostly the platform team"
+    },
+    {
+     "point_id": "pt_757406fe8aa46d13ffbb962ba713a84802d88f70d61bc4c2e2411e730c9b6a",
+     "content": "Tomas pulled double duty for three weeks in September while the team was understaffed"
+    },
+    {
+     "point_id": "pt_793c0035dd5b6eba9a688dad42b98ca3140b5d3eae6533af8bf595cd0fc892",
+     "content": "The ember redesign routes alerts by service ownership instead of by page group, with the lumen ownership table as the single source of truth for where an alert goes"
+    },
+    {
+     "point_id": "pt_2d7d6a137292393d1e4f3e978b806b6829a9df6f0f3cc5e29e55a8d4956629",
+     "content": "A service with no owner row falls to the default rotation and is flagged in the weekly ownership report, so no alert is silently dropped"
+    },
+    {
+     "point_id": "pt_d771e3f58424f479c3128c1fbc16e1f05669c8c5c05ab63cc0475a0ee505cb",
+     "content": "The target is to get the ember pager down to four actionable pages per week before the end of the quarter"
+    },
+    {
+     "point_id": "pt_0d64c63f7f15b190638612fe55b79dbbd6aa2ea687114757956bc79ce46dbf",
+     "content": "Routing alone cannot reach the four-page target, so noise must be cut at the source"
+    },
+    {
+     "point_id": "pt_60db1773dfcee4bda42c000e7dd96ccee2fa0f9d89cdce0c35496aaec5277d",
+     "content": "A severity preflight requires a real user impact statement before a page goes out; an alert that cannot state the impact is an incident log entry, not a page"
+    },
+    {
+     "point_id": "pt_60894ae7bb795c71d0aa0d6dbf38a3fa38e6918d5358ebc85b5f5250f3a85c",
+     "content": "Ember auto-suppresses alerts during declared maintenance windows, read from lumen where windows are already declared"
+    },
+    {
+     "point_id": "pt_65f2090fc05d7182baae5dc54a2153b75545f8006a81f3a85d32e2a0668e55",
+     "content": "Maintenance window declarations stay human-owned rather than automated: owners declare windows for their own services, and coverage has been solid since the SLO review"
+    },
+    {
+     "point_id": "pt_4539d0b8c1067201c1f67a8447d3a08fa320689b844af45ad7d67d6b1977a9",
+     "content": "The ownership-table migration is staged service by service over two sprints, starting with the ten noisiest services, re-checking pager load after each sprint"
+    },
+    {
+     "point_id": "pt_2d28e02411b8557ac8b664b8dad656db54d2cbab643efef37488f51de552a4",
+     "content": "The first cutover review is scheduled for October 2 with the whole on-call team"
+    },
+    {
+     "point_id": "pt_d39b7e37fa76f4bd434357e48543c2d54bb7285aba4964ae76ee3d18a077bd",
+     "content": "Tomas wants to watch the first two weeks of ownership-based routing before expanding"
+    },
+    {
+     "point_id": "pt_b7ef07f606dc290c9c095e0374a739392e5b0818e912ffcc9bafb179b33ea0",
+     "content": "Suppressed alerts still land in the morning digest so nothing disappears"
+    },
+    {
+     "point_id": "pt_c021ee8c566fe38b86ec923aea74f9a36dbe005a220712abdd45eadcd49a16",
+     "content": "Handling is blameless all around, with the intent that people page early rather than hide alerts"
+    }
+   ],
+   "operator_nodes": [
+    {
+     "point_id": "1a16c47bf19-913289585e41",
+     "content": "",
+     "provenance_present": true,
+     "ep_updated": false,
+     "status": "live",
+     "point_kind": null,
+     "is_episodic": null,
+     "is_operator": true,
+     "event_id": "ev_e8586e94bbbff5589f3298114d5176f3fef6c9e6393b6a202158136cf64acc"
+    },
+    {
+     "point_id": "1a16c47bf31-65fec6940dcf",
+     "content": "",
+     "provenance_present": true,
+     "ep_updated": false,
+     "status": "live",
+     "point_kind": null,
+     "is_episodic": null,
+     "is_operator": true,
+     "event_id": "ev_e8586e94bbbff5589f3298114d5176f3fef6c9e6393b6a202158136cf64acc"
+    },
+    {
+     "point_id": "1a16c47bf47-419976719400",
+     "content": "",
+     "provenance_present": true,
+     "ep_updated": false,
+     "status": "live",
+     "point_kind": null,
+     "is_episodic": null,
+     "is_operator": true,
+     "event_id": "ev_e8586e94bbbff5589f3298114d5176f3fef6c9e6393b6a202158136cf64acc"
+    },
+    {
+     "point_id": "1a16c47bf5d-2f0f904e7278",
+     "content": "",
+     "provenance_present": true,
+     "ep_updated": false,
+     "status": "live",
+     "point_kind": null,
+     "is_episodic": null,
+     "is_operator": true,
+     "event_id": "ev_e8586e94bbbff5589f3298114d5176f3fef6c9e6393b6a202158136cf64acc"
+    }
+   ],
+   "operator_edges": [
+    {
+     "op_id": "1a16c47bf19-913289585e41",
+     "op_type": "IMPL",
+     "direction": "unidirectional",
+     "label": null,
+     "endpoints": {
+      "pt_0d64c63f7f15b190638612fe55b79dbbd6aa2ea687114757956bc79ce46dbf": 1,
+      "pt_60db1773dfcee4bda42c000e7dd96ccee2fa0f9d89cdce0c35496aaec5277d": 0
+     },
+     "source_id": "pt_60db1773dfcee4bda42c000e7dd96ccee2fa0f9d89cdce0c35496aaec5277d"
+    },
+    {
+     "op_id": "1a16c47bf31-65fec6940dcf",
+     "op_type": "IMPL",
+     "direction": "unidirectional",
+     "label": null,
+     "endpoints": {
+      "pt_0d64c63f7f15b190638612fe55b79dbbd6aa2ea687114757956bc79ce46dbf": 1,
+      "pt_60894ae7bb795c71d0aa0d6dbf38a3fa38e6918d5358ebc85b5f5250f3a85c": 0
+     },
+     "source_id": "pt_60894ae7bb795c71d0aa0d6dbf38a3fa38e6918d5358ebc85b5f5250f3a85c"
+    },
+    {
+     "op_id": "1a16c47bf47-419976719400",
+     "op_type": "IMPL",
+     "direction": "unidirectional",
+     "label": null,
+     "endpoints": {
+      "pt_d771e3f58424f479c3128c1fbc16e1f05669c8c5c05ab63cc0475a0ee505cb": 1,
+      "pt_4539d0b8c1067201c1f67a8447d3a08fa320689b844af45ad7d67d6b1977a9": 0
+     },
+     "source_id": "pt_4539d0b8c1067201c1f67a8447d3a08fa320689b844af45ad7d67d6b1977a9"
+    },
+    {
+     "op_id": "1a16c47bf5d-2f0f904e7278",
+     "op_type": "IMPL",
+     "direction": "unidirectional",
+     "label": null,
+     "endpoints": {
+      "pt_8ffd2c547f7e2dffe935513015c7ec1d4cdb09210ba7797024b0aa7356dd3c": 1,
+      "pt_33097e62e1d533640d191100f8d442cc4f989d7cda5ce4e40bc9a8621873d3": 0
+     },
+     "source_id": "pt_33097e62e1d533640d191100f8d442cc4f989d7cda5ce4e40bc9a8621873d3"
+    }
+   ],
+   "direct_edges": [],
+   "mitigations": [
+    {
+     "op_id": "1a16c47bf5d-2f0f904e7278",
+     "point_id": "1a16c47bf72-4fa29faea220",
+     "content": "[MITIGATION] The ember redesign routes alerts by service ownership instead of by page group, with the lumen ownership table as the single source of truth for where an alert goes"
+    }
+   ],
+   "seconds": 50.8
+  },
+  "wp04_aurora_perf": {
+   "capture_ok": true,
+   "mode": null,
+   "warnings": [
+    "MITIGATES target edge materialized (#2552 mint-before-wire): the declared target IMPL ('pt_519512e1a73387ebd35f0a45d2060b4e0fbe4' \u2192 'pt_b5aeb9e20804414055601736cfb09f0ecb30e') was not emitted as its own operator \u2014 added so the dampener has its target",
+    "value-normalizer: 6 point(s) carried an amount that was not typed \u2014 no_currency_anchor \u00d76 (prose only \u2014 each value is a drop, never a guess)"
+   ],
+   "payload_points": [],
+   "payload_operators": [],
+   "supersessions": [],
+   "stats": {
+    "entities": 14,
+    "events": 4,
+    "points": 16,
+    "operators": 6,
+    "operator_endpoints_minted": 0,
+    "tier_a_points": 0,
+    "noops": 0,
+    "deletions": 0,
+    "search_queries": 15,
+    "search_degraded": false,
+    "chain_notes": 0,
+    "supersessions": 0,
+    "elapsed_s": 58.3,
+    "chunks": 1,
+    "failed_chunks": 0,
+    "edus": 20,
+    "s4_merge": {
+     "s2_items": 37,
+     "s4_items": 2,
+     "merged_items": 39,
+     "corrected_by_s4": 0,
+     "verbatim_reemissions": 0,
+     "kept_from_s2": 37,
+     "added_by_s4": 2
+    },
+    "s4_delta": true,
+    "llm": {
+     "calls": 4,
+     "retries": 0,
+     "truncated": 0,
+     "deadline_aborts": 0,
+     "prompt_tokens": 27894,
+     "completion_tokens": 5929,
+     "cost_usd": 0.0,
+     "calls_without_cost": 4,
+     "calls_without_usage": 0,
+     "by_stage": {
+      "s1": {
+       "deepseek-direct": {
+        "deepseek-v4-flash": {
+         "calls": 1,
+         "prompt_tokens": 2413,
+         "completion_tokens": 498,
+         "cost_usd": 0.0,
+         "calls_without_cost": 1,
+         "calls_without_usage": 0,
+         "calls_without_tokens": 0,
+         "usage_present": true
+        }
+       }
+      },
+      "s2": {
+       "deepseek-direct": {
+        "deepseek-v4-flash": {
+         "calls": 1,
+         "prompt_tokens": 9232,
+         "completion_tokens": 4969,
+         "cost_usd": 0.0,
+         "calls_without_cost": 1,
+         "calls_without_usage": 0,
+         "calls_without_tokens": 0,
+         "usage_present": true
+        }
+       }
+      },
+      "s4": {
+       "deepseek-direct": {
+        "deepseek-v4-flash": {
+         "calls": 1,
+         "prompt_tokens": 15383,
+         "completion_tokens": 456,
+         "cost_usd": 0.0,
+         "calls_without_cost": 1,
+         "calls_without_usage": 0,
+         "calls_without_tokens": 0,
+         "usage_present": true
+        }
+       }
+      },
+      "resolve": {
+       "deepseek-direct": {
+        "deepseek-v4-flash": {
+         "calls": 1,
+         "prompt_tokens": 866,
+         "completion_tokens": 6,
+         "cost_usd": 0.0,
+         "calls_without_cost": 1,
+         "calls_without_usage": 0,
+         "calls_without_tokens": 0,
+         "usage_present": true
+        }
+       }
+      }
+     },
+     "route_cost_overflows": 0,
+     "calls_without_tokens": 0
+    },
+    "recovery": {
+     "s2_out_tokens": 4969,
+     "s4_out_tokens": 456
+    }
+   },
+   "operator_counts": {
+    "IMPL": 8,
+    "INPUT": 8
+   },
+   "points": [
+    {
+     "point_id": "pt_797671c81ce5af00c15f1219899dcb5ab11c743a0d5e7a7c75faedc1702eb3",
+     "content": "The aurora dashboard load endpoint p95 hit 4.2 seconds yesterday afternoon, an order of magnitude past the customer-facing SLO"
+    },
+    {
+     "point_id": "pt_6aecb4d27d4f62c5068abadd70012e5049671cd953d440c31dd221020b2a88",
+     "content": "The p95 spike correlates with the October 5 release that added the related-memory sidebar"
+    },
+    {
+     "point_id": "pt_7bf2e37e6572544b014096a96268a527384c7ae76adc5a54c5cd1438e3e89e",
+     "content": "Before the October 5 release the aurora dashboard p95 was comfortably under a second"
+    },
+    {
+     "point_id": "pt_1f9dc3648c55944e883d40f8412eb78e22387f051af5c5dcf8edbef4faa414",
+     "content": "The related-memory sidebar fires one embedding lookup per visible memory row, so a page with forty rows issues forty separate calls"
+    },
+    {
+     "point_id": "pt_b5aeb9e20804414055601736cfb09f0ecb30ef07e4c68fed1865992bdba819",
+     "content": "The N+1 embedding calls are what blew up the p95: forty round-trips at even twenty milliseconds each is nearly a second before any ranking runs"
+    },
+    {
+     "point_id": "pt_13bdd2e7a3ae38939ecd79894d964b495b31a8b99dcfe785ecec8f8470dc25",
+     "content": "The embedding lookup should be batched into a single call per page instead of one call per row, since the embedding service supports a batch endpoint"
+    },
+    {
+     "point_id": "pt_519512e1a73387ebd35f0a45d2060b4e0fbe429a0ef6d5ad7f832195c130cd",
+     "content": "Embedding results should be cached in memory with a ten minute TTL and refreshed ahead of the next view, because the same dashboards are opened all day by the same account managers"
+    },
+    {
+     "point_id": "pt_18b97f61ba0ae601c3f50b8b0761ef8ff239c23783f1ae1b0a43b589655eea",
+     "content": "The dashboard serves about forty thousand load requests per day across all customers, with the sidebar firing on most of them"
+    },
+    {
+     "point_id": "pt_09aba87c3bff2ffb9758b4afdb4a19084ae06e520566134bd27cab957075d2",
+     "content": "The remediation should ship behind a flag that defaults off until the perf review signs off, so p95 can be compared before and after without a full rollout"
+    },
+    {
+     "point_id": "pt_35ad34763be28eebaec1778622ffee43914863bae11d4c358a7e726c42e0b5",
+     "content": "Felix runs the aurora dashboard perf review and owns the frontend budget"
+    },
+    {
+     "point_id": "pt_710d85292172e75604bd9d1e956cc91915d520ebf8d100ed680e2d3a629632",
+     "content": "Felix had flagged the related-memory sidebar as a risk in the design review, a warning that went unheeded and should have been listened to"
+    },
+    {
+     "point_id": "pt_cb579dae933773d5f6981cae424992f36fd7f7e1cdd973d0b74cfb152c9e93",
+     "content": "The cache entry for a team should be invalidated whenever a write lands in that team's graph; writes are rare compared to reads so invalidation traffic is tiny"
+    },
+    {
+     "point_id": "pt_0b8d0ec9ac28a8a569e540671cd7d0b7d4ff188516e70875d35527fa9d011d",
+     "content": "Write-triggered invalidation keeps the ten-minute TTL as a backstop rather than the primary consistency mechanism"
+    },
+    {
+     "point_id": "pt_850098ea24751834fca4344ffd06cc441d820003fcc8f87bffe23ab6b60cb8",
+     "content": "The remediation is expected to get the p95 back under 800 milliseconds, the number promised to the account teams"
+    },
+    {
+     "point_id": "pt_d329d23cf6d98649f7b45dccbe8a3eab370be0438040d635fd14b6c418d342",
+     "content": "The dashboard had been getting slower for months and nobody could point at one cause until this measurement"
+    },
+    {
+     "point_id": "pt_63fdfbeec9dc86d8c8614329117311e7de721c25ff7a2656a32f38e9fcf350",
+     "content": "The stale-related-items risk: cached related items can go stale if the underlying memory changes between refreshes"
+    }
+   ],
+   "operator_nodes": [
+    {
+     "point_id": "1a16c48edb5-92670ce1a77c",
+     "content": "",
+     "provenance_present": true,
+     "ep_updated": false,
+     "status": "live",
+     "point_kind": null,
+     "is_episodic": null,
+     "is_operator": true,
+     "event_id": "ev_fabde010dc9271668870d826c6ee4be7ea68a3f2cf223cf94dfe9648f8f1f2"
+    },
+    {
+     "point_id": "1a16c48edce-084f62322c8d",
+     "content": "",
+     "provenance_present": true,
+     "ep_updated": false,
+     "status": "live",
+     "point_kind": null,
+     "is_episodic": null,
+     "is_operator": true,
+     "event_id": "ev_fabde010dc9271668870d826c6ee4be7ea68a3f2cf223cf94dfe9648f8f1f2"
+    },
+    {
+     "point_id": "1a16c48ede7-d8761670bff6",
+     "content": "",
+     "provenance_present": true,
+     "ep_updated": false,
+     "status": "live",
+     "point_kind": null,
+     "is_episodic": null,
+     "is_operator": true,
+     "event_id": "ev_fabde010dc9271668870d826c6ee4be7ea68a3f2cf223cf94dfe9648f8f1f2"
+    },
+    {
+     "point_id": "1a16c48edfe-c8cf9bc8da07",
+     "content": "",
+     "provenance_present": true,
+     "ep_updated": false,
+     "status": "live",
+     "point_kind": null,
+     "is_episodic": null,
+     "is_operator": true,
+     "event_id": "ev_fabde010dc9271668870d826c6ee4be7ea68a3f2cf223cf94dfe9648f8f1f2"
+    }
+   ],
+   "operator_edges": [
+    {
+     "op_id": "1a16c48edb5-92670ce1a77c",
+     "op_type": "IMPL",
+     "direction": "unidirectional",
+     "label": null,
+     "endpoints": {
+      "pt_6aecb4d27d4f62c5068abadd70012e5049671cd953d440c31dd221020b2a88": 1,
+      "pt_b5aeb9e20804414055601736cfb09f0ecb30ef07e4c68fed1865992bdba819": 0
+     },
+     "source_id": "pt_b5aeb9e20804414055601736cfb09f0ecb30ef07e4c68fed1865992bdba819"
+    },
+    {
+     "op_id": "1a16c48edce-084f62322c8d",
+     "op_type": "IMPL",
+     "direction": "unidirectional",
+     "label": null,
+     "endpoints": {
+      "pt_1f9dc3648c55944e883d40f8412eb78e22387f051af5c5dcf8edbef4faa414": 0,
+      "pt_b5aeb9e20804414055601736cfb09f0ecb30ef07e4c68fed1865992bdba819": 1
+     },
+     "source_id": "pt_1f9dc3648c55944e883d40f8412eb78e22387f051af5c5dcf8edbef4faa414"
+    },
+    {
+     "op_id": "1a16c48ede7-d8761670bff6",
+     "op_type": "IMPL",
+     "direction": "unidirectional",
+     "label": null,
+     "endpoints": {
+      "pt_cb579dae933773d5f6981cae424992f36fd7f7e1cdd973d0b74cfb152c9e93": 1,
+      "pt_0b8d0ec9ac28a8a569e540671cd7d0b7d4ff188516e70875d35527fa9d011d": 0
+     },
+     "source_id": "pt_0b8d0ec9ac28a8a569e540671cd7d0b7d4ff188516e70875d35527fa9d011d"
+    },
+    {
+     "op_id": "1a16c48edfe-c8cf9bc8da07",
+     "op_type": "IMPL",
+     "direction": "unidirectional",
+     "label": null,
+     "endpoints": {
+      "pt_b5aeb9e20804414055601736cfb09f0ecb30ef07e4c68fed1865992bdba819": 1,
+      "pt_519512e1a73387ebd35f0a45d2060b4e0fbe429a0ef6d5ad7f832195c130cd": 0
+     },
+     "source_id": "pt_519512e1a73387ebd35f0a45d2060b4e0fbe429a0ef6d5ad7f832195c130cd"
+    }
+   ],
+   "direct_edges": [],
+   "mitigations": [
+    {
+     "op_id": "1a16c48edb5-92670ce1a77c",
+     "point_id": "1a16c48ee15-9bc55146a4fa",
+     "content": "[MITIGATION] The embedding lookup should be batched into a single call per page instead of one call per row, since the embedding service supports a batch endpoint"
+    },
+    {
+     "op_id": "1a16c48edfe-c8cf9bc8da07",
+     "point_id": "1a16c48ee35-ae3093833f98",
+     "content": "[MITIGATION] The cache entry for a team should be invalidated whenever a write lands in that team's graph; writes are rare compared to reads so invalidation traffic is tiny"
+    }
+   ],
+   "seconds": 77.5
+  },
+  "wp05_retro_writeup": {
+   "capture_ok": true,
+   "mode": null,
+   "warnings": [
+    "point 'Maya owns the pre-deploy check comparing partition weights a': search_keys capped at 4 (had 5)",
+    "chain 'ruleLifecycle' emitted 'rule' but its next step 'rationale' is missing \u2014 the chain is incomplete",
+    "value-normalizer: 3 point(s) carried an amount that was not typed \u2014 no_currency_anchor \u00d73 (prose only \u2014 each value is a drop, never a guess)"
+   ],
+   "payload_points": [],
+   "payload_operators": [],
+   "supersessions": [],
+   "stats": {
+    "entities": 14,
+    "events": 7,
+    "points": 13,
+    "operators": 2,
+    "operator_endpoints_minted": 0,
+    "tier_a_points": 0,
+    "noops": 0,
+    "deletions": 0,
+    "search_queries": 15,
+    "search_degraded": false,
+    "chain_notes": 0,
+    "supersessions": 0,
+    "elapsed_s": 22.5,
+    "chunks": 1,
+    "failed_chunks": 0,
+    "edus": 23,
+    "s4_merge": {
+     "s2_items": 34,
+     "s4_items": 2,
+     "merged_items": 36,
+     "corrected_by_s4": 0,
+     "verbatim_reemissions": 0,
+     "kept_from_s2": 34,
+     "added_by_s4": 2
+    },
+    "s4_delta": true,
+    "llm": {
+     "calls": 4,
+     "retries": 0,
+     "truncated": 0,
+     "deadline_aborts": 0,
+     "prompt_tokens": 27303,
+     "completion_tokens": 4501,
+     "cost_usd": 0.0,
+     "calls_without_cost": 4,
+     "calls_without_usage": 0,
+     "by_stage": {
+      "s1": {
+       "deepseek-direct": {
+        "deepseek-v4-flash": {
+         "calls": 1,
+         "prompt_tokens": 2462,
+         "completion_tokens": 586,
+         "cost_usd": 0.0,
+         "calls_without_cost": 1,
+         "calls_without_usage": 0,
+         "calls_without_tokens": 0,
+         "usage_present": true
+        }
+       }
+      },
+      "s2": {
+       "deepseek-direct": {
+        "deepseek-v4-flash": {
+         "calls": 1,
+         "prompt_tokens": 9368,
+         "completion_tokens": 3412,
+         "cost_usd": 0.0,
+         "calls_without_cost": 1,
+         "calls_without_usage": 0,
+         "calls_without_tokens": 0,
+         "usage_present": true
+        }
+       }
+      },
+      "s4": {
+       "deepseek-direct": {
+        "deepseek-v4-flash": {
+         "calls": 1,
+         "prompt_tokens": 14556,
+         "completion_tokens": 497,
+         "cost_usd": 0.0,
+         "calls_without_cost": 1,
+         "calls_without_usage": 0,
+         "calls_without_tokens": 0,
+         "usage_present": true
+        }
+       }
+      },
+      "resolve": {
+       "deepseek-direct": {
+        "deepseek-v4-flash": {
+         "calls": 1,
+         "prompt_tokens": 917,
+         "completion_tokens": 6,
+         "cost_usd": 0.0,
+         "calls_without_cost": 1,
+         "calls_without_usage": 0,
+         "calls_without_tokens": 0,
+         "usage_present": true
+        }
+       }
+      }
+     },
+     "route_cost_overflows": 0,
+     "calls_without_tokens": 0
+    },
+    "recovery": {
+     "s2_out_tokens": 3412,
+     "s4_out_tokens": 497
+    }
+   },
+   "operator_counts": {
+    "IMPL": 4,
+    "INPUT": 4
+   },
+   "points": [
+    {
+     "point_id": "pt_ca4716c92412904c32e8af274912eebedee2163cf1f5e96804510941f5fa72",
+     "content": "The root cause of the Bluepeak search outage was the config partition: the deploy shipped a config that split query traffic unevenly across the search shards and one shard saturated"
+    },
+    {
+     "point_id": "pt_6f98953dd655a7469157b13a3564bc5fda48774b583c74d8bdc8e735fe977d",
+     "content": "The initial investigation blamed the search index and chased a reindex for the first forty minutes; checking the config diff first is the faster diagnostic path"
+    },
+    {
+     "point_id": "pt_c6c89a98622bdb9b946cfe6ec6e2eed2607f253c7be61d0d59e6ddf5d49c31",
+     "content": "The search SLO is 99.9 percent and the month landed at 99.86, so the SLO was breached"
+    },
+    {
+     "point_id": "pt_0f6c44a15061314be5826e0cd97691e897c8071a1db53a5cb96ea4f4f0a88e",
+     "content": "Maya owns the pre-deploy check comparing partition weights against the shard capacity model, due November 2"
+    },
+    {
+     "point_id": "pt_165d135a911ce3fd4ac53fddbf00df3e05ee1e8b268a15b8c7b39a37788b28",
+     "content": "Diego owns surfacing the config diff in the deploy review, due November 9"
+    },
+    {
+     "point_id": "pt_e8ba9908f6e77e90742ca50c521b13ac6c4dbb9d24107ef37e55b0c87baf01",
+     "content": "Nora suggested both the pre-deploy partition check and the visible config diff follow-ups"
+    },
+    {
+     "point_id": "pt_508b129db73fd70387f62908f7eee2545fc441616c88f4b9d922d5971d5bf1",
+     "content": "The search team will run a shard capacity review before the end of the year, with Priya volunteering to lead it"
+    },
+    {
+     "point_id": "pt_0600e59d669d62ce6f8a2223b17608efc588eae5de20f34ecc0521cb4d4052",
+     "content": "Incident writeups are opt-out by default \u2014 the standing decision made after the August incident \u2014 so the whole company sees the timeline and follow-ups"
+    },
+    {
+     "point_id": "pt_9837c9471723cf5f10ed16e367d09ff6c09c5abca2f3623a2ee68e941e3df6",
+     "content": "The rollback went smoothly because the deploy tooling kept the previous config one click away"
+    },
+    {
+     "point_id": "pt_4681df7795bdfcc37c2f071423130b916ac0df2f2c43282144e5cbeb8aa86a",
+     "content": "The on-call stayed calm during the outage, which matters more than any tooling"
+    },
+    {
+     "point_id": "pt_c4a18f29b0b3285424ee85443fdadef52f8d05aff21f90c78fa8783cb47ffb",
+     "content": "Sam from customer engineering wrote the customer status updates with Aisha"
+    },
+    {
+     "point_id": "pt_dd737d7027f636ac68e6dc01d322b51610c571687e6ffd549cac229aadf01b",
+     "content": "Config-partition changes can silently unbalance shard traffic, so a pre-deploy capacity check and a visible config diff are the chosen mitigations"
+    },
+    {
+     "point_id": "pt_34f46d0f9f62667ba9d3fc3722fdf92ef14c3f96bfbddb15a9a051aa5c9e4c",
+     "content": "Keeping the previous config one click away in the deploy tooling is what made the rollback fast"
+    }
+   ],
+   "operator_nodes": [
+    {
+     "point_id": "1a16c4971df-42a4dc48897b",
+     "content": "",
+     "provenance_present": true,
+     "ep_updated": false,
+     "status": "live",
+     "point_kind": null,
+     "is_episodic": null,
+     "is_operator": true,
+     "event_id": "ev_c72e57636f6a1c1cd1fc65de37c2a652ced691927a9b20eacedd84897404e1"
+    },
+    {
+     "point_id": "1a16c4971f5-af09860bf5d8",
+     "content": "",
+     "provenance_present": true,
+     "ep_updated": false,
+     "status": "live",
+     "point_kind": null,
+     "is_episodic": null,
+     "is_operator": true,
+     "event_id": "ev_c72e57636f6a1c1cd1fc65de37c2a652ced691927a9b20eacedd84897404e1"
+    }
+   ],
+   "operator_edges": [
+    {
+     "op_id": "1a16c4971df-42a4dc48897b",
+     "op_type": "IMPL",
+     "direction": "unidirectional",
+     "label": null,
+     "endpoints": {
+      "pt_ca4716c92412904c32e8af274912eebedee2163cf1f5e96804510941f5fa72": 1,
+      "pt_6f98953dd655a7469157b13a3564bc5fda48774b583c74d8bdc8e735fe977d": 0
+     },
+     "source_id": "pt_6f98953dd655a7469157b13a3564bc5fda48774b583c74d8bdc8e735fe977d"
+    },
+    {
+     "op_id": "1a16c4971f5-af09860bf5d8",
+     "op_type": "IMPL",
+     "direction": "unidirectional",
+     "label": null,
+     "endpoints": {
+      "pt_ca4716c92412904c32e8af274912eebedee2163cf1f5e96804510941f5fa72": 1,
+      "pt_9837c9471723cf5f10ed16e367d09ff6c09c5abca2f3623a2ee68e941e3df6": 0
+     },
+     "source_id": "pt_9837c9471723cf5f10ed16e367d09ff6c09c5abca2f3623a2ee68e941e3df6"
+    }
+   ],
+   "direct_edges": [],
+   "mitigations": [],
+   "seconds": 33.6
+  },
+  "wp06_quarry_rollout": {
+   "capture_ok": true,
+   "mode": null,
+   "warnings": [
+    "event 'The chaos run confirmed scope independence: killing a lease-': slot object 'the lease-before-claim fix' (kind 'core:tool') does not resolve to an emitted entity \u2014 dropped (fail-closed: the write path binds emitted entities)",
+    "value-bearing point 'Maya drives the flip with the runbook open \u2014 one driver rath' resolved verbatim in turn 19, but the quoted text carries no value \u2014 the span would address words that do not hold it, so it carries no source span (the value cannot be re-read verbatim)",
+    "MITIGATES target edge materialized (#2552 mint-before-wire): the declared target IMPL ('pt_648b78f0b09243929f37098bb3c717e665eb3' \u2192 'pt_7ce3c23cacbc9b583dd023d192db27239e99b') was not emitted as its own operator \u2014 added so the dampener has its target",
+    "value-normalizer: 1 point(s) carried an amount that was not typed \u2014 no_currency_anchor \u00d71 (prose only \u2014 each value is a drop, never a guess)"
+   ],
+   "payload_points": [],
+   "payload_operators": [],
+   "supersessions": [],
+   "stats": {
+    "entities": 10,
+    "events": 5,
+    "points": 15,
+    "operators": 6,
+    "operator_endpoints_minted": 0,
+    "tier_a_points": 1,
+    "noops": 0,
+    "deletions": 0,
+    "search_queries": 15,
+    "search_degraded": false,
+    "chain_notes": 0,
+    "supersessions": 0,
+    "elapsed_s": 24.9,
+    "chunks": 1,
+    "failed_chunks": 0,
+    "edus": 22,
+    "s4_merge": {
+     "s2_items": 34,
+     "s4_items": 1,
+     "merged_items": 35,
+     "corrected_by_s4": 0,
+     "verbatim_reemissions": 0,
+     "kept_from_s2": 34,
+     "added_by_s4": 1
+    },
+    "s4_delta": true,
+    "llm": {
+     "calls": 4,
+     "retries": 0,
+     "truncated": 0,
+     "deadline_aborts": 0,
+     "prompt_tokens": 27178,
+     "completion_tokens": 4301,
+     "cost_usd": 0.0,
+     "calls_without_cost": 4,
+     "calls_without_usage": 0,
+     "by_stage": {
+      "s1": {
+       "deepseek-direct": {
+        "deepseek-v4-flash": {
+         "calls": 1,
+         "prompt_tokens": 2451,
+         "completion_tokens": 362,
+         "cost_usd": 0.0,
+         "calls_without_cost": 1,
+         "calls_without_usage": 0,
+         "calls_without_tokens": 0,
+         "usage_present": true
+        }
+       }
+      },
+      "s2": {
+       "deepseek-direct": {
+        "deepseek-v4-flash": {
+         "calls": 1,
+         "prompt_tokens": 9136,
+         "completion_tokens": 3618,
+         "cost_usd": 0.0,
+         "calls_without_cost": 1,
+         "calls_without_usage": 0,
+         "calls_without_tokens": 0,
+         "usage_present": true
+        }
+       }
+      },
+      "s4": {
+       "deepseek-direct": {
+        "deepseek-v4-flash": {
+         "calls": 1,
+         "prompt_tokens": 14769,
+         "completion_tokens": 258,
+         "cost_usd": 0.0,
+         "calls_without_cost": 1,
+         "calls_without_usage": 0,
+         "calls_without_tokens": 0,
+         "usage_present": true
+        }
+       }
+      },
+      "resolve": {
+       "deepseek-direct": {
+        "deepseek-v4-flash": {
+         "calls": 1,
+         "prompt_tokens": 822,
+         "completion_tokens": 63,
+         "cost_usd": 0.0,
+         "calls_without_cost": 1,
+         "calls_without_usage": 0,
+         "calls_without_tokens": 0,
+         "usage_present": true
+        }
+       }
+      }
+     },
+     "route_cost_overflows": 0,
+     "calls_without_tokens": 0
+    },
+    "recovery": {
+     "s2_out_tokens": 3618,
+     "s4_out_tokens": 258
+    }
+   },
+   "operator_counts": {
+    "IMPL": 7,
+    "NAND": 2,
+    "INPUT": 9
+   },
+   "points": [
+    {
+     "point_id": "pt_6a842264a7251e2ee64dc9a551c1e43a898e4d9e6a0020cb3414af15ef8b44",
+     "content": "The rollout shape for the lease-before-claim fix should be chosen on data, not on intuition"
+    },
+    {
+     "point_id": "pt_b77cb784f972064af2863d02b5ca833d3b63015d16f4157ee2c274b64f2e30",
+     "content": "The duplicate-processing race is scope-independent once the lease is held: rollout scope does not change the guarantee"
+    },
+    {
+     "point_id": "pt_5cc80395dc80081ba35992495d637986c890841f62cbdf603c4aa82600aa3f",
+     "content": "The lease CAS means only the owner can complete, so a second claim fails at compare-and-swap regardless of what toggles around it"
+    },
+    {
+     "point_id": "pt_d5349d2c7e056d80cb2383b9ef43aa0bef0086e74eb3da34a726350cef7523",
+     "content": "The race only re-enters when two workers can claim one batch, and the lease makes that impossible no matter how the rollout is done"
+    },
+    {
+     "point_id": "pt_7ce3c23cacbc9b583dd023d192db27239e99b2eafe84cf1bdd4af6b58939ee",
+     "content": "A mid-rollout flip glitch could re-enter the duplicate-processing race while the queue drains"
+    },
+    {
+     "point_id": "pt_648b78f0b09243929f37098bb3c717e665eb383a2aa5787e792574634d9777",
+     "content": "The original stall was a no-lease bug, not a flip bug"
+    },
+    {
+     "point_id": "pt_5faaff2cdb9797ddb8a4f42b10874a044d8dbca0134fcaa0b4f715ff1101d4",
+     "content": "The chaos harness kills workers but does not toggle flags, so the boundary case of two workers claiming one batch at the exact moment a region toggles must be proven explicitly"
+    },
+    {
+     "point_id": "pt_e8010814f2bb192871939471551f571b26b4dc7bc9982435e8bcd3c1e5fb0b",
+     "content": "Ship the lease fix all-at-once behind a single global kill flag rather than a week of per-shard canary watching"
+    },
+    {
+     "point_id": "pt_e29e5f05cd67e6295fb68e1bb16019bdc079e83084410f3b04de5c81b9e7bb",
+     "content": "One flag is one switch to pull, and the chaos run says the fix itself cannot re-race"
+    },
+    {
+     "point_id": "pt_957cedd29f7b9748805502dd47e564e0f3e0b044d9d52e2061eade9dbe2264",
+     "content": "The rollout watches the queue drain after the flip and pulls the flag on any regression"
+    },
+    {
+     "point_id": "pt_bf85a7306149d9d7e65308a86bcb258f5daf4f991c91c2a36b5c1bf18da654",
+     "content": "Maya drives the flip with the runbook open \u2014 one driver rather than a group-chat decision"
+    },
+    {
+     "point_id": "pt_a5882274c76d958219929d5e807ba4d7d31eca4731263bfe38cd34b830eae3",
+     "content": "The rollout cutoff stays September 30"
+    },
+    {
+     "point_id": "pt_1be597974e1107bdad881d2eee9be38e5dfca251f464f75aa7920556d55c40",
+     "content": "The lease migration already landed ahead of Friday's maintenance window"
+    },
+    {
+     "point_id": "pt_f562c1d0af79d7b0f95328b627347876a3641a43de2ebb1a7fa752afa84f73",
+     "content": "The lease fix must ship to the Halcyon queue before the October freeze"
+    },
+    {
+     "point_id": "pt_c1824b8bbb2bc21c9f8d010e398c146144a6066c3582f6a80872efb36cfdd2",
+     "content": "The user's shift ends at six, so if the flip lands today the runbook link must be in the channel"
+    }
+   ],
+   "operator_nodes": [
+    {
+     "point_id": "1a16c49f927-656871e20e38",
+     "content": "",
+     "provenance_present": true,
+     "ep_updated": false,
+     "status": "live",
+     "point_kind": null,
+     "is_episodic": null,
+     "is_operator": true,
+     "event_id": "ev_f81d77946b985c653c7dcac3ac2b8ad8f7c9b028a9fd3cd65c08279610308c"
+    },
+    {
+     "point_id": "1a16c49f93e-5078e80d597f",
+     "content": "",
+     "provenance_present": true,
+     "ep_updated": false,
+     "status": "live",
+     "point_kind": null,
+     "is_episodic": null,
+     "is_operator": true,
+     "event_id": "ev_f81d77946b985c653c7dcac3ac2b8ad8f7c9b028a9fd3cd65c08279610308c"
+    },
+    {
+     "point_id": "1a16c49f955-3fa933b4197b",
+     "content": "",
+     "provenance_present": true,
+     "ep_updated": false,
+     "status": "live",
+     "point_kind": null,
+     "is_episodic": null,
+     "is_operator": true,
+     "event_id": "ev_f81d77946b985c653c7dcac3ac2b8ad8f7c9b028a9fd3cd65c08279610308c"
+    },
+    {
+     "point_id": "1a16c49f96c-851785c52dcc",
+     "content": "",
+     "provenance_present": true,
+     "ep_updated": false,
+     "status": "live",
+     "point_kind": null,
+     "is_episodic": null,
+     "is_operator": true,
+     "event_id": "ev_f81d77946b985c653c7dcac3ac2b8ad8f7c9b028a9fd3cd65c08279610308c"
+    },
+    {
+     "point_id": "1a16c49f982-3ab39b455ea5",
+     "content": "",
+     "provenance_present": true,
+     "ep_updated": false,
+     "status": "live",
+     "point_kind": null,
+     "is_episodic": null,
+     "is_operator": true,
+     "event_id": "ev_f81d77946b985c653c7dcac3ac2b8ad8f7c9b028a9fd3cd65c08279610308c"
+    }
+   ],
+   "operator_edges": [
+    {
+     "op_id": "1a16c49f927-656871e20e38",
+     "op_type": "IMPL",
+     "direction": "unidirectional",
+     "label": null,
+     "endpoints": {
+      "pt_b77cb784f972064af2863d02b5ca833d3b63015d16f4157ee2c274b64f2e30": 1,
+      "pt_5cc80395dc80081ba35992495d637986c890841f62cbdf603c4aa82600aa3f": 0
+     },
+     "source_id": "pt_5cc80395dc80081ba35992495d637986c890841f62cbdf603c4aa82600aa3f"
+    },
+    {
+     "op_id": "1a16c49f93e-5078e80d597f",
+     "op_type": "IMPL",
+     "direction": "unidirectional",
+     "label": null,
+     "endpoints": {
+      "pt_b77cb784f972064af2863d02b5ca833d3b63015d16f4157ee2c274b64f2e30": 1,
+      "pt_d5349d2c7e056d80cb2383b9ef43aa0bef0086e74eb3da34a726350cef7523": 0
+     },
+     "source_id": "pt_d5349d2c7e056d80cb2383b9ef43aa0bef0086e74eb3da34a726350cef7523"
+    },
+    {
+     "op_id": "1a16c49f955-3fa933b4197b",
+     "op_type": "IMPL",
+     "direction": "unidirectional",
+     "label": null,
+     "endpoints": {
+      "pt_b77cb784f972064af2863d02b5ca833d3b63015d16f4157ee2c274b64f2e30": 1
+     },
+     "source_id": null
+    },
+    {
+     "op_id": "1a16c49f96c-851785c52dcc",
+     "op_type": "NAND",
+     "direction": "unidirectional",
+     "label": null,
+     "endpoints": {
+      "pt_7ce3c23cacbc9b583dd023d192db27239e99b2eafe84cf1bdd4af6b58939ee": 1,
+      "pt_648b78f0b09243929f37098bb3c717e665eb383a2aa5787e792574634d9777": 0
+     },
+     "source_id": "pt_648b78f0b09243929f37098bb3c717e665eb383a2aa5787e792574634d9777"
+    },
+    {
+     "op_id": "1a16c49f982-3ab39b455ea5",
+     "op_type": "IMPL",
+     "direction": "unidirectional",
+     "label": null,
+     "endpoints": {
+      "pt_7ce3c23cacbc9b583dd023d192db27239e99b2eafe84cf1bdd4af6b58939ee": 1,
+      "pt_648b78f0b09243929f37098bb3c717e665eb383a2aa5787e792574634d9777": 0
+     },
+     "source_id": "pt_648b78f0b09243929f37098bb3c717e665eb383a2aa5787e792574634d9777"
+    }
+   ],
+   "direct_edges": [],
+   "mitigations": [
+    {
+     "op_id": "1a16c49f982-3ab39b455ea5",
+     "point_id": "1a16c49f998-206b393faf98",
+     "content": "[MITIGATION] ev_63652d5d1c14d7a7299e5ceb843633aef14d92dd8833e96120d4d8e783866e"
+    }
+   ],
+   "seconds": 34.9
+  },
+  "wp07_bluepeak_followup": {
+   "capture_ok": true,
+   "mode": null,
+   "warnings": [
+    "entity 'the all-at-once rollout' lifecycle=superseded with no supersedes ref is not expressible in the Layer-1 payload \u2014 set supersedes=<existing id/name> for the supersession to ride payload['supersessions']",
+    "entity 'per-service flags' supersedes='all-at-once rollout' does not resolve to an S3 search result \u2014 recorded without a graph id",
+    "value-bearing point 'per-service flags change the reversibility model: each servi' resolved to turn 19 by the token-overlap band, not a verbatim anchor \u2014 it carries no source span (the value cannot be re-read verbatim)",
+    "MITIGATES target edge materialized (#2552 mint-before-wire): the declared target IMPL ('pt_ef39ddd3dfb8a2bb4b2404bf2130150f50685' \u2192 'pt_314a2d849a6ce5b9ce2cab99c916c2cf14682') was not emitted as its own operator \u2014 added so the dampener has its target"
+   ],
+   "payload_points": [],
+   "payload_operators": [],
+   "supersessions": [],
+   "stats": {
+    "entities": 9,
+    "events": 4,
+    "points": 18,
+    "operators": 5,
+    "operator_endpoints_minted": 0,
+    "tier_a_points": 0,
+    "noops": 0,
+    "deletions": 0,
+    "search_queries": 15,
+    "search_degraded": false,
+    "chain_notes": 0,
+    "supersessions": 0,
+    "elapsed_s": 23.7,
+    "chunks": 1,
+    "failed_chunks": 0,
+    "edus": 22,
+    "s4_merge": {
+     "s2_items": 34,
+     "s4_items": 1,
+     "merged_items": 35,
+     "corrected_by_s4": 0,
+     "verbatim_reemissions": 0,
+     "kept_from_s2": 34,
+     "added_by_s4": 1
+    },
+    "s4_delta": true,
+    "llm": {
+     "calls": 4,
+     "retries": 0,
+     "truncated": 0,
+     "deadline_aborts": 0,
+     "prompt_tokens": 28120,
+     "completion_tokens": 4701,
+     "cost_usd": 0.0,
+     "calls_without_cost": 4,
+     "calls_without_usage": 0,
+     "by_stage": {
+      "s1": {
+       "deepseek-direct": {
+        "deepseek-v4-flash": {
+         "calls": 1,
+         "prompt_tokens": 2481,
+         "completion_tokens": 449,
+         "cost_usd": 0.0,
+         "calls_without_cost": 1,
+         "calls_without_usage": 0,
+         "calls_without_tokens": 0,
+         "usage_present": true
+        }
+       }
+      },
+      "s2": {
+       "deepseek-direct": {
+        "deepseek-v4-flash": {
+         "calls": 1,
+         "prompt_tokens": 9252,
+         "completion_tokens": 3921,
+         "cost_usd": 0.0,
+         "calls_without_cost": 1,
+         "calls_without_usage": 0,
+         "calls_without_tokens": 0,
+         "usage_present": true
+        }
+       }
+      },
+      "s4": {
+       "deepseek-direct": {
+        "deepseek-v4-flash": {
+         "calls": 1,
+         "prompt_tokens": 15614,
+         "completion_tokens": 238,
+         "cost_usd": 0.0,
+         "calls_without_cost": 1,
+         "calls_without_usage": 0,
+         "calls_without_tokens": 0,
+         "usage_present": true
+        }
+       }
+      },
+      "resolve": {
+       "deepseek-direct": {
+        "deepseek-v4-flash": {
+         "calls": 1,
+         "prompt_tokens": 773,
+         "completion_tokens": 93,
+         "cost_usd": 0.0,
+         "calls_without_cost": 1,
+         "calls_without_usage": 0,
+         "calls_without_tokens": 0,
+         "usage_present": true
+        }
+       }
+      }
+     },
+     "route_cost_overflows": 0,
+     "calls_without_tokens": 0
+    },
+    "recovery": {
+     "s2_out_tokens": 3921,
+     "s4_out_tokens": 238
+    }
+   },
+   "operator_counts": {
+    "NAND": 4,
+    "IMPL": 4,
+    "INPUT": 8
+   },
+   "points": [
+    {
+     "point_id": "pt_c3e49329d4d9723d8cff4378dcadf86e2a8f8653eeff642fc90d835af33c08",
+     "content": "the global flag's cutover flip raced lease renewal, leaving a renewal window where two workers could claim one batch"
+    },
+    {
+     "point_id": "pt_33806bafdf8e953442f1d696e9c2b7935010d022191379f4a01500db8ef49a",
+     "content": "the global flag was toggled once at cutover and never touched after"
+    },
+    {
+     "point_id": "pt_4d81006f4ecc13e74dfdeecb38e58fe5621916ec42e23e800137a4b0fbe3fc",
+     "content": "the toggle was two hours before the first duplicate and the renewal stamps were clean with no overlap or double renewal"
+    },
+    {
+     "point_id": "pt_ef39ddd3dfb8a2bb4b2404bf2130150f50685058afdb5ec83d9df5df1ac51a",
+     "content": "clock skew between regions can make lease expiry unsafe: a lagging region renews after the owner's lease truly expired and its renewal can clobber a live lease in another region"
+    },
+    {
+     "point_id": "pt_d4cfdacc6344f56801761aed1acc73edfce96b0f587bd98b24f15ad4c48cc0",
+     "content": "the flag did not cause the duplicates; it had been stable for two hours before the anomaly"
+    },
+    {
+     "point_id": "pt_53b356be95f4c02e293ee18fd7ac0a098b2769a9ece17631f9c21650f0f8ea",
+     "content": "the Bluepeak region clock drifted eleven seconds, which is exactly the six-minute duplicate window on the hydrate queue"
+    },
+    {
+     "point_id": "pt_314a2d849a6ce5b9ce2cab99c916c2cf146827a2ba4cd90836300c06c6691a",
+     "content": "the lease behaved as designed under a drifted clock: expiry is compared against wall-clock time, so a lagging region's clock expired the lease early, a second worker claimed the batch, and the hydrate side saw the duplicate"
+    },
+    {
+     "point_id": "pt_3c3d36858e58b5c5fafd57425c665729b2170ff99bd5b21b0ef0732716d924",
+     "content": "the fix is not about the flag at all; a skew-tolerant lease needs a grace period on the expiry check so a lagging region cannot clobber a live lease"
+    },
+    {
+     "point_id": "pt_e7809bb2a7b6bd1ef7d6af0fd2573dd6b6f140514dd2d5ea1b6fb4204cc6f8",
+     "content": "eleven seconds is the worst logged inter-region skew, while the SLO review had assumed sub-second"
+    },
+    {
+     "point_id": "pt_02a8c51c547a70eef216ea5f99488238e1d0442f5d585bb809767a73fed027",
+     "content": "the lease expiry grace period is sized to thirty seconds, with any expiry landing inside the grace window logged internally"
+    },
+    {
+     "point_id": "pt_d791137c73aac0fc6ee7cf4a3fee14df2ef15baa116ee3286407da1c2d5c24",
+     "content": "the thirty-second grace bounds the skew hazard without making the lease lax"
+    },
+    {
+     "point_id": "pt_1166dabd98b04c0ce81860956d8f4f52268ad5d223b8a33947429ec5274d72",
+     "content": "the skew-tolerant lease grace period shipped to every region, so a lagging region's renewal can no longer clobber a live lease and the clock-skew risk is covered"
+    },
+    {
+     "point_id": "pt_011cb7376eb933c4ce3ce4668c341220b20f58bd0e00ab09c71797726078df",
+     "content": "the all-at-once rollout call is reversed for the next rollout: per-service flags replace the single global flag"
+    },
+    {
+     "point_id": "pt_72e7c473bd090b0bca5952dcfa82ba54a5ef55af730701ff5023f3a8fc7fee",
+     "content": "the global flag made one bad region a fleet-wide event and has been the single point of failure all along"
+    },
+    {
+     "point_id": "pt_e8653e93af00f25cfa29b83b9b6c946cb3baf0f0f99e49697c0e21ba7a0510",
+     "content": "per-service flags change the reversibility model: each service's flag is pulled independently rather than one fleet-wide switch"
+    },
+    {
+     "point_id": "pt_e152056e7ce5c7f4d042f34ad97c00e0e9481783155395d7d45f352272f4b8",
+     "content": "the skew fix ships with a hydrate queue re-run before the next rollout"
+    },
+    {
+     "point_id": "pt_2e7a0500017e0deb4f57a65b1b174a9a08a2889f6ebbac9bc2ffde8b2006f9",
+     "content": "Priya will track the grace-expiry log for a week"
+    },
+    {
+     "point_id": "pt_b2dc161d762f9fd3c2ead480833594ea3a012daca91e77addb3e9972d5d093",
+     "content": "the all-at-once rollout call had been second-guessed since it was made, before the Bluepeak anomaly"
+    }
+   ],
+   "operator_nodes": [
+    {
+     "point_id": "1a16c4aafb5-4fe8050101bd",
+     "content": "",
+     "provenance_present": true,
+     "ep_updated": false,
+     "status": "live",
+     "point_kind": null,
+     "is_episodic": null,
+     "is_operator": true,
+     "event_id": "ev_c6a86c6e37402fef604a7b36d43a30e186e9a287edb38fbcdb3a141cbafc03"
+    },
+    {
+     "point_id": "1a16c4aafcd-dbc8801f4fc5",
+     "content": "",
+     "provenance_present": true,
+     "ep_updated": false,
+     "status": "live",
+     "point_kind": null,
+     "is_episodic": null,
+     "is_operator": true,
+     "event_id": "ev_c6a86c6e37402fef604a7b36d43a30e186e9a287edb38fbcdb3a141cbafc03"
+    },
+    {
+     "point_id": "1a16c4aafe5-b2bc4f792b98",
+     "content": "",
+     "provenance_present": true,
+     "ep_updated": false,
+     "status": "live",
+     "point_kind": null,
+     "is_episodic": null,
+     "is_operator": true,
+     "event_id": "ev_c6a86c6e37402fef604a7b36d43a30e186e9a287edb38fbcdb3a141cbafc03"
+    },
+    {
+     "point_id": "1a16c4aaffa-af6a9e95d8f8",
+     "content": "",
+     "provenance_present": true,
+     "ep_updated": false,
+     "status": "live",
+     "point_kind": null,
+     "is_episodic": null,
+     "is_operator": true,
+     "event_id": "ev_c6a86c6e37402fef604a7b36d43a30e186e9a287edb38fbcdb3a141cbafc03"
+    }
+   ],
+   "operator_edges": [
+    {
+     "op_id": "1a16c4aafb5-4fe8050101bd",
+     "op_type": "NAND",
+     "direction": "unidirectional",
+     "label": null,
+     "endpoints": {
+      "pt_c3e49329d4d9723d8cff4378dcadf86e2a8f8653eeff642fc90d835af33c08": 1,
+      "pt_d4cfdacc6344f56801761aed1acc73edfce96b0f587bd98b24f15ad4c48cc0": 0
+     },
+     "source_id": "pt_d4cfdacc6344f56801761aed1acc73edfce96b0f587bd98b24f15ad4c48cc0"
+    },
+    {
+     "op_id": "1a16c4aafcd-dbc8801f4fc5",
+     "op_type": "NAND",
+     "direction": "unidirectional",
+     "label": null,
+     "endpoints": {
+      "pt_c3e49329d4d9723d8cff4378dcadf86e2a8f8653eeff642fc90d835af33c08": 1,
+      "pt_53b356be95f4c02e293ee18fd7ac0a098b2769a9ece17631f9c21650f0f8ea": 0
+     },
+     "source_id": "pt_53b356be95f4c02e293ee18fd7ac0a098b2769a9ece17631f9c21650f0f8ea"
+    },
+    {
+     "op_id": "1a16c4aafe5-b2bc4f792b98",
+     "op_type": "IMPL",
+     "direction": "unidirectional",
+     "label": null,
+     "endpoints": {
+      "pt_011cb7376eb933c4ce3ce4668c341220b20f58bd0e00ab09c71797726078df": 1,
+      "pt_72e7c473bd090b0bca5952dcfa82ba54a5ef55af730701ff5023f3a8fc7fee": 0
+     },
+     "source_id": "pt_72e7c473bd090b0bca5952dcfa82ba54a5ef55af730701ff5023f3a8fc7fee"
+    },
+    {
+     "op_id": "1a16c4aaffa-af6a9e95d8f8",
+     "op_type": "IMPL",
+     "direction": "unidirectional",
+     "label": null,
+     "endpoints": {
+      "pt_ef39ddd3dfb8a2bb4b2404bf2130150f50685058afdb5ec83d9df5df1ac51a": 0,
+      "pt_314a2d849a6ce5b9ce2cab99c916c2cf146827a2ba4cd90836300c06c6691a": 1
+     },
+     "source_id": "pt_ef39ddd3dfb8a2bb4b2404bf2130150f50685058afdb5ec83d9df5df1ac51a"
+    }
+   ],
+   "direct_edges": [],
+   "mitigations": [
+    {
+     "op_id": "1a16c4aaffa-af6a9e95d8f8",
+     "point_id": "1a16c4ab011-77764034e049",
+     "content": "[MITIGATION] the skew-tolerant lease grace period shipped to every region, so a lagging region's renewal can no longer clobber a live lease and the clock-skew risk is covered"
+    }
+   ],
+   "seconds": 46.7
+  }
+ },
+ "audit": {
+  "planted": 15,
+  "edge_correct": 3,
+  "content_ok": 7,
+  "results": {
+   "wp01_quarry_debug_op_01": {
+    "id": "wp01_quarry_debug_op_01",
+    "expected_kind": "SUPPORTS",
+    "verdict": "to_content_missing",
+    "edge_correct": false,
+    "edge_op_ids": [],
+    "matched": {
+     "from": [],
+     "to": []
+    },
+    "from_session": "wp01_quarry_debug",
+    "to_session": "wp01_quarry_debug",
+    "owner_session": "wp01_quarry_debug",
+    "endpoints": {
+     "from": [
+      {
+       "post_ref": "pt_9d049d94b96b871f7814c9c86603efc51c774fe1f4aa6617a00822465be636",
+       "pre_ref": "pt_9d049d94b96b871f7814c9c86603efc51c774fe1f4aa6617a00822465be636",
+       "remapped": false,
+       "resolves": true
+      }
+     ],
+     "to": []
+    },
+    "persisted": false,
+    "cause": "to_content_missing: no memory Point carries the to-anchor claim \u2014 the extractor emitted no claim for that endpoint (content-level miss, not an edge miss)"
+   },
+   "wp01_quarry_debug_op_02": {
+    "id": "wp01_quarry_debug_op_02",
+    "expected_kind": "MITIGATES",
+    "verdict": "edge_missing",
+    "edge_correct": false,
+    "edge_op_ids": [],
+    "matched": {
+     "from": [],
+     "to": []
+    },
+    "from_session": "wp01_quarry_debug",
+    "to_session": "wp01_quarry_debug",
+    "owner_session": "wp01_quarry_debug",
+    "endpoints": {
+     "from": [
+      {
+       "post_ref": "pt_d32d6ca55d3f3e2ed8fe31a881cb82aa25f9ea2b1406636d561bfc2efbeca9",
+       "pre_ref": "pt_d32d6ca55d3f3e2ed8fe31a881cb82aa25f9ea2b1406636d561bfc2efbeca9",
+       "remapped": false,
+       "resolves": true
+      }
+     ],
+     "to": [
+      {
+       "post_ref": "pt_4fb15aae5383b53441386173d0ffa04b708931dd6738f22a72c722ce0f9d53",
+       "pre_ref": "pt_4fb15aae5383b53441386173d0ffa04b708931dd6738f22a72c722ce0f9d53",
+       "remapped": false,
+       "resolves": true
+      }
+     ]
+    },
+    "persisted": false,
+    "cause": "edge_missing: both endpoint claims are present in the memory layer but no qualifying MITIGATES edge connects them \u2014 the edge was never emitted, or the commit dropped it"
+   },
+   "wp02_lumen_refactor_op_01": {
+    "id": "wp02_lumen_refactor_op_01",
+    "expected_kind": "MITIGATES",
+    "verdict": "from_content_missing",
+    "edge_correct": false,
+    "edge_op_ids": [],
+    "matched": {
+     "from": [],
+     "to": []
+    },
+    "from_session": "wp02_lumen_refactor",
+    "to_session": "wp02_lumen_refactor",
+    "owner_session": "wp02_lumen_refactor",
+    "endpoints": {
+     "from": [],
+     "to": []
+    },
+    "persisted": false,
+    "cause": "from_content_missing: no memory Point carries the from-anchor claim \u2014 the extractor emitted no claim for that endpoint (content-level miss, not an edge miss)"
+   },
+   "wp03_ember_design_op_01": {
+    "id": "wp03_ember_design_op_01",
+    "expected_kind": "MITIGATES",
+    "verdict": "edge_correct",
+    "edge_correct": true,
+    "forms_found": [
+     "mitigated_by(1a16c47bf72-4fa29faea220)"
+    ],
+    "edge_op_ids": [
+     "1a16c47bf5d-2f0f904e7278"
+    ],
+    "matched": {
+     "from": [],
+     "to": [
+      "pt_33097e62e1d533640d191100f8d442cc4f989d7cda5ce4e40bc9a8621873d3"
+     ]
+    },
+    "from_session": "wp03_ember_design",
+    "to_session": "wp03_ember_design",
+    "owner_session": "wp03_ember_design",
+    "endpoints": {
+     "from": [
+      {
+       "post_ref": "pt_793c0035dd5b6eba9a688dad42b98ca3140b5d3eae6533af8bf595cd0fc892",
+       "pre_ref": "pt_793c0035dd5b6eba9a688dad42b98ca3140b5d3eae6533af8bf595cd0fc892",
+       "remapped": false,
+       "resolves": true
+      }
+     ],
+     "to": [
+      {
+       "post_ref": "pt_33097e62e1d533640d191100f8d442cc4f989d7cda5ce4e40bc9a8621873d3",
+       "pre_ref": "pt_33097e62e1d533640d191100f8d442cc4f989d7cda5ce4e40bc9a8621873d3",
+       "remapped": false,
+       "resolves": true
+      }
+     ]
+    },
+    "persisted": true,
+    "cause": null
+   },
+   "wp03_ember_design_op_02": {
+    "id": "wp03_ember_design_op_02",
+    "expected_kind": "MITIGATES",
+    "verdict": "to_content_missing",
+    "edge_correct": false,
+    "edge_op_ids": [],
+    "matched": {
+     "from": [],
+     "to": []
+    },
+    "from_session": "wp03_ember_design",
+    "to_session": "wp03_ember_design",
+    "owner_session": "wp03_ember_design",
+    "endpoints": {
+     "from": [
+      {
+       "post_ref": "pt_2d7d6a137292393d1e4f3e978b806b6829a9df6f0f3cc5e29e55a8d4956629",
+       "pre_ref": "pt_2d7d6a137292393d1e4f3e978b806b6829a9df6f0f3cc5e29e55a8d4956629",
+       "remapped": false,
+       "resolves": true
+      }
+     ],
+     "to": []
+    },
+    "persisted": false,
+    "cause": "to_content_missing: no memory Point carries the to-anchor claim \u2014 the extractor emitted no claim for that endpoint (content-level miss, not an edge miss)"
+   },
+   "wp03_ember_design_op_03": {
+    "id": "wp03_ember_design_op_03",
+    "expected_kind": "MITIGATES",
+    "verdict": "to_content_missing",
+    "edge_correct": false,
+    "edge_op_ids": [],
+    "matched": {
+     "from": [],
+     "to": []
+    },
+    "from_session": "wp03_ember_design",
+    "to_session": "wp03_ember_design",
+    "owner_session": "wp03_ember_design",
+    "endpoints": {
+     "from": [
+      {
+       "post_ref": "pt_60894ae7bb795c71d0aa0d6dbf38a3fa38e6918d5358ebc85b5f5250f3a85c",
+       "pre_ref": "pt_60894ae7bb795c71d0aa0d6dbf38a3fa38e6918d5358ebc85b5f5250f3a85c",
+       "remapped": false,
+       "resolves": true
+      }
+     ],
+     "to": []
+    },
+    "persisted": false,
+    "cause": "to_content_missing: no memory Point carries the to-anchor claim \u2014 the extractor emitted no claim for that endpoint (content-level miss, not an edge miss)"
+   },
+   "wp04_aurora_perf_op_01": {
+    "id": "wp04_aurora_perf_op_01",
+    "expected_kind": "SUPPORTS",
+    "verdict": "to_content_missing",
+    "edge_correct": false,
+    "edge_op_ids": [],
+    "matched": {
+     "from": [],
+     "to": []
+    },
+    "from_session": "wp04_aurora_perf",
+    "to_session": "wp04_aurora_perf",
+    "owner_session": "wp04_aurora_perf",
+    "endpoints": {
+     "from": [
+      {
+       "post_ref": "pt_6aecb4d27d4f62c5068abadd70012e5049671cd953d440c31dd221020b2a88",
+       "pre_ref": "pt_6aecb4d27d4f62c5068abadd70012e5049671cd953d440c31dd221020b2a88",
+       "remapped": false,
+       "resolves": true
+      }
+     ],
+     "to": []
+    },
+    "persisted": false,
+    "cause": "to_content_missing: no memory Point carries the to-anchor claim \u2014 the extractor emitted no claim for that endpoint (content-level miss, not an edge miss)"
+   },
+   "wp04_aurora_perf_op_02": {
+    "id": "wp04_aurora_perf_op_02",
+    "expected_kind": "MITIGATES",
+    "verdict": "from_content_missing",
+    "edge_correct": false,
+    "edge_op_ids": [],
+    "matched": {
+     "from": [],
+     "to": []
+    },
+    "from_session": "wp04_aurora_perf",
+    "to_session": "wp04_aurora_perf",
+    "owner_session": "wp04_aurora_perf",
+    "endpoints": {
+     "from": [],
+     "to": [
+      {
+       "post_ref": "pt_b5aeb9e20804414055601736cfb09f0ecb30ef07e4c68fed1865992bdba819",
+       "pre_ref": "pt_b5aeb9e20804414055601736cfb09f0ecb30ef07e4c68fed1865992bdba819",
+       "remapped": false,
+       "resolves": true
+      }
+     ]
+    },
+    "persisted": false,
+    "cause": "from_content_missing: no memory Point carries the from-anchor claim \u2014 the extractor emitted no claim for that endpoint (content-level miss, not an edge miss)"
+   },
+   "wp04_aurora_perf_op_03": {
+    "id": "wp04_aurora_perf_op_03",
+    "expected_kind": "MITIGATES",
+    "verdict": "edge_missing",
+    "edge_correct": false,
+    "edge_op_ids": [],
+    "matched": {
+     "from": [],
+     "to": []
+    },
+    "from_session": "wp04_aurora_perf",
+    "to_session": "wp04_aurora_perf",
+    "owner_session": "wp04_aurora_perf",
+    "endpoints": {
+     "from": [
+      {
+       "post_ref": "pt_cb579dae933773d5f6981cae424992f36fd7f7e1cdd973d0b74cfb152c9e93",
+       "pre_ref": "pt_cb579dae933773d5f6981cae424992f36fd7f7e1cdd973d0b74cfb152c9e93",
+       "remapped": false,
+       "resolves": true
+      }
+     ],
+     "to": [
+      {
+       "post_ref": "pt_63fdfbeec9dc86d8c8614329117311e7de721c25ff7a2656a32f38e9fcf350",
+       "pre_ref": "pt_63fdfbeec9dc86d8c8614329117311e7de721c25ff7a2656a32f38e9fcf350",
+       "remapped": false,
+       "resolves": true
+      }
+     ]
+    },
+    "persisted": false,
+    "cause": "edge_missing: both endpoint claims are present in the memory layer but no qualifying MITIGATES edge connects them \u2014 the edge was never emitted, or the commit dropped it"
+   },
+   "wp05_retro_writeup_op_01": {
+    "id": "wp05_retro_writeup_op_01",
+    "expected_kind": "NEGATE",
+    "verdict": "edge_missing",
+    "edge_correct": false,
+    "edge_op_ids": [],
+    "matched": {
+     "from": [],
+     "to": []
+    },
+    "from_session": "wp05_retro_writeup",
+    "to_session": "wp05_retro_writeup",
+    "owner_session": "wp05_retro_writeup",
+    "endpoints": {
+     "from": [
+      {
+       "post_ref": "pt_ca4716c92412904c32e8af274912eebedee2163cf1f5e96804510941f5fa72",
+       "pre_ref": "pt_ca4716c92412904c32e8af274912eebedee2163cf1f5e96804510941f5fa72",
+       "remapped": false,
+       "resolves": true
+      },
+      {
+       "post_ref": "pt_e8ba9908f6e77e90742ca50c521b13ac6c4dbb9d24107ef37e55b0c87baf01",
+       "pre_ref": "pt_e8ba9908f6e77e90742ca50c521b13ac6c4dbb9d24107ef37e55b0c87baf01",
+       "remapped": false,
+       "resolves": true
+      },
+      {
+       "post_ref": "pt_dd737d7027f636ac68e6dc01d322b51610c571687e6ffd549cac229aadf01b",
+       "pre_ref": "pt_dd737d7027f636ac68e6dc01d322b51610c571687e6ffd549cac229aadf01b",
+       "remapped": false,
+       "resolves": true
+      }
+     ],
+     "to": [
+      {
+       "post_ref": "pt_6f98953dd655a7469157b13a3564bc5fda48774b583c74d8bdc8e735fe977d",
+       "pre_ref": "pt_6f98953dd655a7469157b13a3564bc5fda48774b583c74d8bdc8e735fe977d",
+       "remapped": false,
+       "resolves": true
+      }
+     ]
+    },
+    "persisted": false,
+    "cause": "edge_missing: both endpoint claims are present in the memory layer but no qualifying NEGATE edge connects them \u2014 the edge was never emitted, or the commit dropped it"
+   },
+   "wp05_retro_writeup_op_02": {
+    "id": "wp05_retro_writeup_op_02",
+    "expected_kind": "SUPPORTS",
+    "verdict": "from_content_missing",
+    "edge_correct": false,
+    "edge_op_ids": [],
+    "matched": {
+     "from": [],
+     "to": []
+    },
+    "from_session": "wp05_retro_writeup",
+    "to_session": "wp05_retro_writeup",
+    "owner_session": "wp05_retro_writeup",
+    "endpoints": {
+     "from": [],
+     "to": [
+      {
+       "post_ref": "pt_ca4716c92412904c32e8af274912eebedee2163cf1f5e96804510941f5fa72",
+       "pre_ref": "pt_ca4716c92412904c32e8af274912eebedee2163cf1f5e96804510941f5fa72",
+       "remapped": false,
+       "resolves": true
+      },
+      {
+       "post_ref": "pt_e8ba9908f6e77e90742ca50c521b13ac6c4dbb9d24107ef37e55b0c87baf01",
+       "pre_ref": "pt_e8ba9908f6e77e90742ca50c521b13ac6c4dbb9d24107ef37e55b0c87baf01",
+       "remapped": false,
+       "resolves": true
+      },
+      {
+       "post_ref": "pt_dd737d7027f636ac68e6dc01d322b51610c571687e6ffd549cac229aadf01b",
+       "pre_ref": "pt_dd737d7027f636ac68e6dc01d322b51610c571687e6ffd549cac229aadf01b",
+       "remapped": false,
+       "resolves": true
+      }
+     ]
+    },
+    "persisted": false,
+    "cause": "from_content_missing: no memory Point carries the from-anchor claim \u2014 the extractor emitted no claim for that endpoint (content-level miss, not an edge miss)"
+   },
+   "wp06_quarry_rollout_op_01": {
+    "id": "wp06_quarry_rollout_op_01",
+    "expected_kind": "SUPPORTS",
+    "verdict": "from_content_missing",
+    "edge_correct": false,
+    "edge_op_ids": [],
+    "matched": {
+     "from": [],
+     "to": []
+    },
+    "from_session": "wp06_quarry_rollout",
+    "to_session": "wp06_quarry_rollout",
+    "owner_session": "wp06_quarry_rollout",
+    "endpoints": {
+     "from": [],
+     "to": [
+      {
+       "post_ref": "pt_d5349d2c7e056d80cb2383b9ef43aa0bef0086e74eb3da34a726350cef7523",
+       "pre_ref": "pt_d5349d2c7e056d80cb2383b9ef43aa0bef0086e74eb3da34a726350cef7523",
+       "remapped": false,
+       "resolves": true
+      }
+     ]
+    },
+    "persisted": false,
+    "cause": "from_content_missing: no memory Point carries the from-anchor claim \u2014 the extractor emitted no claim for that endpoint (content-level miss, not an edge miss)"
+   },
+   "wp07_bluepeak_followup_op_02": {
+    "id": "wp07_bluepeak_followup_op_02",
+    "expected_kind": "NEGATE",
+    "verdict": "edge_correct",
+    "edge_correct": true,
+    "forms_found": [
+     "NAND"
+    ],
+    "edge_op_ids": [
+     "1a16c4aafb5-4fe8050101bd"
+    ],
+    "matched": {
+     "from": [
+      "pt_d4cfdacc6344f56801761aed1acc73edfce96b0f587bd98b24f15ad4c48cc0"
+     ],
+     "to": [
+      "pt_c3e49329d4d9723d8cff4378dcadf86e2a8f8653eeff642fc90d835af33c08"
+     ]
+    },
+    "from_session": "wp07_bluepeak_followup",
+    "to_session": "wp07_bluepeak_followup",
+    "owner_session": "wp07_bluepeak_followup",
+    "endpoints": {
+     "from": [
+      {
+       "post_ref": "pt_d4cfdacc6344f56801761aed1acc73edfce96b0f587bd98b24f15ad4c48cc0",
+       "pre_ref": "pt_d4cfdacc6344f56801761aed1acc73edfce96b0f587bd98b24f15ad4c48cc0",
+       "remapped": false,
+       "resolves": true
+      }
+     ],
+     "to": [
+      {
+       "post_ref": "pt_c3e49329d4d9723d8cff4378dcadf86e2a8f8653eeff642fc90d835af33c08",
+       "pre_ref": "pt_c3e49329d4d9723d8cff4378dcadf86e2a8f8653eeff642fc90d835af33c08",
+       "remapped": false,
+       "resolves": true
+      }
+     ]
+    },
+    "persisted": true,
+    "cause": null
+   },
+   "wp07_bluepeak_followup_op_03": {
+    "id": "wp07_bluepeak_followup_op_03",
+    "expected_kind": "MITIGATES",
+    "verdict": "edge_correct",
+    "edge_correct": true,
+    "forms_found": [
+     "mitigated_by(1a16c4ab011-77764034e049)"
+    ],
+    "edge_op_ids": [
+     "1a16c4aaffa-af6a9e95d8f8"
+    ],
+    "matched": {
+     "from": [
+      "pt_ef39ddd3dfb8a2bb4b2404bf2130150f50685058afdb5ec83d9df5df1ac51a"
+     ],
+     "to": []
+    },
+    "from_session": "wp07_bluepeak_followup",
+    "to_session": "wp07_bluepeak_followup",
+    "owner_session": "wp07_bluepeak_followup",
+    "endpoints": {
+     "from": [
+      {
+       "post_ref": "pt_ef39ddd3dfb8a2bb4b2404bf2130150f50685058afdb5ec83d9df5df1ac51a",
+       "pre_ref": "pt_ef39ddd3dfb8a2bb4b2404bf2130150f50685058afdb5ec83d9df5df1ac51a",
+       "remapped": false,
+       "resolves": true
+      },
+      {
+       "post_ref": "pt_3c3d36858e58b5c5fafd57425c665729b2170ff99bd5b21b0ef0732716d924",
+       "pre_ref": "pt_3c3d36858e58b5c5fafd57425c665729b2170ff99bd5b21b0ef0732716d924",
+       "remapped": false,
+       "resolves": true
+      },
+      {
+       "post_ref": "pt_1166dabd98b04c0ce81860956d8f4f52268ad5d223b8a33947429ec5274d72",
+       "pre_ref": "pt_1166dabd98b04c0ce81860956d8f4f52268ad5d223b8a33947429ec5274d72",
+       "remapped": false,
+       "resolves": true
+      }
+     ],
+     "to": [
+      {
+       "post_ref": "pt_ef39ddd3dfb8a2bb4b2404bf2130150f50685058afdb5ec83d9df5df1ac51a",
+       "pre_ref": "pt_ef39ddd3dfb8a2bb4b2404bf2130150f50685058afdb5ec83d9df5df1ac51a",
+       "remapped": false,
+       "resolves": true
+      }
+     ]
+    },
+    "persisted": true,
+    "cause": null
+   },
+   "wp07_bluepeak_followup_op_04": {
+    "id": "wp07_bluepeak_followup_op_04",
+    "expected_kind": "SUPERSEDE",
+    "verdict": "edge_missing",
+    "edge_correct": false,
+    "edge_op_ids": [],
+    "matched": {
+     "from": [],
+     "to": []
+    },
+    "from_session": "wp07_bluepeak_followup",
+    "to_session": "wp06_quarry_rollout",
+    "owner_session": "wp07_bluepeak_followup",
+    "endpoints": {
+     "from": [
+      {
+       "post_ref": "pt_011cb7376eb933c4ce3ce4668c341220b20f58bd0e00ab09c71797726078df",
+       "pre_ref": "pt_011cb7376eb933c4ce3ce4668c341220b20f58bd0e00ab09c71797726078df",
+       "remapped": false,
+       "resolves": true
+      },
+      {
+       "post_ref": "pt_e8653e93af00f25cfa29b83b9b6c946cb3baf0f0f99e49697c0e21ba7a0510",
+       "pre_ref": "pt_e8653e93af00f25cfa29b83b9b6c946cb3baf0f0f99e49697c0e21ba7a0510",
+       "remapped": false,
+       "resolves": true
+      }
+     ],
+     "to": [
+      {
+       "post_ref": "pt_e8010814f2bb192871939471551f571b26b4dc7bc9982435e8bcd3c1e5fb0b",
+       "pre_ref": "pt_e8010814f2bb192871939471551f571b26b4dc7bc9982435e8bcd3c1e5fb0b",
+       "remapped": false,
+       "resolves": true
+      }
+     ]
+    },
+    "persisted": false,
+    "cause": "edge_missing: both endpoint claims are present in the memory layer but no qualifying SUPERSEDE edge connects them \u2014 the edge was never emitted, or the commit dropped it"
+   }
+  },
+  "by_session": {
+   "wp01_quarry_debug": {
+    "planted": 2,
+    "edge_correct": 0,
+    "content_ok": 1,
+    "failures": [
+     {
+      "id": "wp01_quarry_debug_op_01",
+      "expected_kind": "SUPPORTS",
+      "verdict": "to_content_missing",
+      "edge_correct": false,
+      "edge_op_ids": [],
+      "matched": {
+       "from": [],
+       "to": []
+      },
+      "from_session": "wp01_quarry_debug",
+      "to_session": "wp01_quarry_debug",
+      "owner_session": "wp01_quarry_debug",
+      "endpoints": {
+       "from": [
+        {
+         "post_ref": "pt_9d049d94b96b871f7814c9c86603efc51c774fe1f4aa6617a00822465be636",
+         "pre_ref": "pt_9d049d94b96b871f7814c9c86603efc51c774fe1f4aa6617a00822465be636",
+         "remapped": false,
+         "resolves": true
+        }
+       ],
+       "to": []
+      },
+      "persisted": false,
+      "cause": "to_content_missing: no memory Point carries the to-anchor claim \u2014 the extractor emitted no claim for that endpoint (content-level miss, not an edge miss)"
+     },
+     {
+      "id": "wp01_quarry_debug_op_02",
+      "expected_kind": "MITIGATES",
+      "verdict": "edge_missing",
+      "edge_correct": false,
+      "edge_op_ids": [],
+      "matched": {
+       "from": [],
+       "to": []
+      },
+      "from_session": "wp01_quarry_debug",
+      "to_session": "wp01_quarry_debug",
+      "owner_session": "wp01_quarry_debug",
+      "endpoints": {
+       "from": [
+        {
+         "post_ref": "pt_d32d6ca55d3f3e2ed8fe31a881cb82aa25f9ea2b1406636d561bfc2efbeca9",
+         "pre_ref": "pt_d32d6ca55d3f3e2ed8fe31a881cb82aa25f9ea2b1406636d561bfc2efbeca9",
+         "remapped": false,
+         "resolves": true
+        }
+       ],
+       "to": [
+        {
+         "post_ref": "pt_4fb15aae5383b53441386173d0ffa04b708931dd6738f22a72c722ce0f9d53",
+         "pre_ref": "pt_4fb15aae5383b53441386173d0ffa04b708931dd6738f22a72c722ce0f9d53",
+         "remapped": false,
+         "resolves": true
+        }
+       ]
+      },
+      "persisted": false,
+      "cause": "edge_missing: both endpoint claims are present in the memory layer but no qualifying MITIGATES edge connects them \u2014 the edge was never emitted, or the commit dropped it"
+     }
+    ]
+   },
+   "wp02_lumen_refactor": {
+    "planted": 1,
+    "edge_correct": 0,
+    "content_ok": 0,
+    "failures": [
+     {
+      "id": "wp02_lumen_refactor_op_01",
+      "expected_kind": "MITIGATES",
+      "verdict": "from_content_missing",
+      "edge_correct": false,
+      "edge_op_ids": [],
+      "matched": {
+       "from": [],
+       "to": []
+      },
+      "from_session": "wp02_lumen_refactor",
+      "to_session": "wp02_lumen_refactor",
+      "owner_session": "wp02_lumen_refactor",
+      "endpoints": {
+       "from": [],
+       "to": []
+      },
+      "persisted": false,
+      "cause": "from_content_missing: no memory Point carries the from-anchor claim \u2014 the extractor emitted no claim for that endpoint (content-level miss, not an edge miss)"
+     }
+    ]
+   },
+   "wp03_ember_design": {
+    "planted": 3,
+    "edge_correct": 1,
+    "content_ok": 1,
+    "failures": [
+     {
+      "id": "wp03_ember_design_op_02",
+      "expected_kind": "MITIGATES",
+      "verdict": "to_content_missing",
+      "edge_correct": false,
+      "edge_op_ids": [],
+      "matched": {
+       "from": [],
+       "to": []
+      },
+      "from_session": "wp03_ember_design",
+      "to_session": "wp03_ember_design",
+      "owner_session": "wp03_ember_design",
+      "endpoints": {
+       "from": [
+        {
+         "post_ref": "pt_2d7d6a137292393d1e4f3e978b806b6829a9df6f0f3cc5e29e55a8d4956629",
+         "pre_ref": "pt_2d7d6a137292393d1e4f3e978b806b6829a9df6f0f3cc5e29e55a8d4956629",
+         "remapped": false,
+         "resolves": true
+        }
+       ],
+       "to": []
+      },
+      "persisted": false,
+      "cause": "to_content_missing: no memory Point carries the to-anchor claim \u2014 the extractor emitted no claim for that endpoint (content-level miss, not an edge miss)"
+     },
+     {
+      "id": "wp03_ember_design_op_03",
+      "expected_kind": "MITIGATES",
+      "verdict": "to_content_missing",
+      "edge_correct": false,
+      "edge_op_ids": [],
+      "matched": {
+       "from": [],
+       "to": []
+      },
+      "from_session": "wp03_ember_design",
+      "to_session": "wp03_ember_design",
+      "owner_session": "wp03_ember_design",
+      "endpoints": {
+       "from": [
+        {
+         "post_ref": "pt_60894ae7bb795c71d0aa0d6dbf38a3fa38e6918d5358ebc85b5f5250f3a85c",
+         "pre_ref": "pt_60894ae7bb795c71d0aa0d6dbf38a3fa38e6918d5358ebc85b5f5250f3a85c",
+         "remapped": false,
+         "resolves": true
+        }
+       ],
+       "to": []
+      },
+      "persisted": false,
+      "cause": "to_content_missing: no memory Point carries the to-anchor claim \u2014 the extractor emitted no claim for that endpoint (content-level miss, not an edge miss)"
+     }
+    ]
+   },
+   "wp04_aurora_perf": {
+    "planted": 3,
+    "edge_correct": 0,
+    "content_ok": 1,
+    "failures": [
+     {
+      "id": "wp04_aurora_perf_op_01",
+      "expected_kind": "SUPPORTS",
+      "verdict": "to_content_missing",
+      "edge_correct": false,
+      "edge_op_ids": [],
+      "matched": {
+       "from": [],
+       "to": []
+      },
+      "from_session": "wp04_aurora_perf",
+      "to_session": "wp04_aurora_perf",
+      "owner_session": "wp04_aurora_perf",
+      "endpoints": {
+       "from": [
+        {
+         "post_ref": "pt_6aecb4d27d4f62c5068abadd70012e5049671cd953d440c31dd221020b2a88",
+         "pre_ref": "pt_6aecb4d27d4f62c5068abadd70012e5049671cd953d440c31dd221020b2a88",
+         "remapped": false,
+         "resolves": true
+        }
+       ],
+       "to": []
+      },
+      "persisted": false,
+      "cause": "to_content_missing: no memory Point carries the to-anchor claim \u2014 the extractor emitted no claim for that endpoint (content-level miss, not an edge miss)"
+     },
+     {
+      "id": "wp04_aurora_perf_op_02",
+      "expected_kind": "MITIGATES",
+      "verdict": "from_content_missing",
+      "edge_correct": false,
+      "edge_op_ids": [],
+      "matched": {
+       "from": [],
+       "to": []
+      },
+      "from_session": "wp04_aurora_perf",
+      "to_session": "wp04_aurora_perf",
+      "owner_session": "wp04_aurora_perf",
+      "endpoints": {
+       "from": [],
+       "to": [
+        {
+         "post_ref": "pt_b5aeb9e20804414055601736cfb09f0ecb30ef07e4c68fed1865992bdba819",
+         "pre_ref": "pt_b5aeb9e20804414055601736cfb09f0ecb30ef07e4c68fed1865992bdba819",
+         "remapped": false,
+         "resolves": true
+        }
+       ]
+      },
+      "persisted": false,
+      "cause": "from_content_missing: no memory Point carries the from-anchor claim \u2014 the extractor emitted no claim for that endpoint (content-level miss, not an edge miss)"
+     },
+     {
+      "id": "wp04_aurora_perf_op_03",
+      "expected_kind": "MITIGATES",
+      "verdict": "edge_missing",
+      "edge_correct": false,
+      "edge_op_ids": [],
+      "matched": {
+       "from": [],
+       "to": []
+      },
+      "from_session": "wp04_aurora_perf",
+      "to_session": "wp04_aurora_perf",
+      "owner_session": "wp04_aurora_perf",
+      "endpoints": {
+       "from": [
+        {
+         "post_ref": "pt_cb579dae933773d5f6981cae424992f36fd7f7e1cdd973d0b74cfb152c9e93",
+         "pre_ref": "pt_cb579dae933773d5f6981cae424992f36fd7f7e1cdd973d0b74cfb152c9e93",
+         "remapped": false,
+         "resolves": true
+        }
+       ],
+       "to": [
+        {
+         "post_ref": "pt_63fdfbeec9dc86d8c8614329117311e7de721c25ff7a2656a32f38e9fcf350",
+         "pre_ref": "pt_63fdfbeec9dc86d8c8614329117311e7de721c25ff7a2656a32f38e9fcf350",
+         "remapped": false,
+         "resolves": true
+        }
+       ]
+      },
+      "persisted": false,
+      "cause": "edge_missing: both endpoint claims are present in the memory layer but no qualifying MITIGATES edge connects them \u2014 the edge was never emitted, or the commit dropped it"
+     }
+    ]
+   },
+   "wp05_retro_writeup": {
+    "planted": 2,
+    "edge_correct": 0,
+    "content_ok": 1,
+    "failures": [
+     {
+      "id": "wp05_retro_writeup_op_01",
+      "expected_kind": "NEGATE",
+      "verdict": "edge_missing",
+      "edge_correct": false,
+      "edge_op_ids": [],
+      "matched": {
+       "from": [],
+       "to": []
+      },
+      "from_session": "wp05_retro_writeup",
+      "to_session": "wp05_retro_writeup",
+      "owner_session": "wp05_retro_writeup",
+      "endpoints": {
+       "from": [
+        {
+         "post_ref": "pt_ca4716c92412904c32e8af274912eebedee2163cf1f5e96804510941f5fa72",
+         "pre_ref": "pt_ca4716c92412904c32e8af274912eebedee2163cf1f5e96804510941f5fa72",
+         "remapped": false,
+         "resolves": true
+        },
+        {
+         "post_ref": "pt_e8ba9908f6e77e90742ca50c521b13ac6c4dbb9d24107ef37e55b0c87baf01",
+         "pre_ref": "pt_e8ba9908f6e77e90742ca50c521b13ac6c4dbb9d24107ef37e55b0c87baf01",
+         "remapped": false,
+         "resolves": true
+        },
+        {
+         "post_ref": "pt_dd737d7027f636ac68e6dc01d322b51610c571687e6ffd549cac229aadf01b",
+         "pre_ref": "pt_dd737d7027f636ac68e6dc01d322b51610c571687e6ffd549cac229aadf01b",
+         "remapped": false,
+         "resolves": true
+        }
+       ],
+       "to": [
+        {
+         "post_ref": "pt_6f98953dd655a7469157b13a3564bc5fda48774b583c74d8bdc8e735fe977d",
+         "pre_ref": "pt_6f98953dd655a7469157b13a3564bc5fda48774b583c74d8bdc8e735fe977d",
+         "remapped": false,
+         "resolves": true
+        }
+       ]
+      },
+      "persisted": false,
+      "cause": "edge_missing: both endpoint claims are present in the memory layer but no qualifying NEGATE edge connects them \u2014 the edge was never emitted, or the commit dropped it"
+     },
+     {
+      "id": "wp05_retro_writeup_op_02",
+      "expected_kind": "SUPPORTS",
+      "verdict": "from_content_missing",
+      "edge_correct": false,
+      "edge_op_ids": [],
+      "matched": {
+       "from": [],
+       "to": []
+      },
+      "from_session": "wp05_retro_writeup",
+      "to_session": "wp05_retro_writeup",
+      "owner_session": "wp05_retro_writeup",
+      "endpoints": {
+       "from": [],
+       "to": [
+        {
+         "post_ref": "pt_ca4716c92412904c32e8af274912eebedee2163cf1f5e96804510941f5fa72",
+         "pre_ref": "pt_ca4716c92412904c32e8af274912eebedee2163cf1f5e96804510941f5fa72",
+         "remapped": false,
+         "resolves": true
+        },
+        {
+         "post_ref": "pt_e8ba9908f6e77e90742ca50c521b13ac6c4dbb9d24107ef37e55b0c87baf01",
+         "pre_ref": "pt_e8ba9908f6e77e90742ca50c521b13ac6c4dbb9d24107ef37e55b0c87baf01",
+         "remapped": false,
+         "resolves": true
+        },
+        {
+         "post_ref": "pt_dd737d7027f636ac68e6dc01d322b51610c571687e6ffd549cac229aadf01b",
+         "pre_ref": "pt_dd737d7027f636ac68e6dc01d322b51610c571687e6ffd549cac229aadf01b",
+         "remapped": false,
+         "resolves": true
+        }
+       ]
+      },
+      "persisted": false,
+      "cause": "from_content_missing: no memory Point carries the from-anchor claim \u2014 the extractor emitted no claim for that endpoint (content-level miss, not an edge miss)"
+     }
+    ]
+   },
+   "wp06_quarry_rollout": {
+    "planted": 1,
+    "edge_correct": 0,
+    "content_ok": 0,
+    "failures": [
+     {
+      "id": "wp06_quarry_rollout_op_01",
+      "expected_kind": "SUPPORTS",
+      "verdict": "from_content_missing",
+      "edge_correct": false,
+      "edge_op_ids": [],
+      "matched": {
+       "from": [],
+       "to": []
+      },
+      "from_session": "wp06_quarry_rollout",
+      "to_session": "wp06_quarry_rollout",
+      "owner_session": "wp06_quarry_rollout",
+      "endpoints": {
+       "from": [],
+       "to": [
+        {
+         "post_ref": "pt_d5349d2c7e056d80cb2383b9ef43aa0bef0086e74eb3da34a726350cef7523",
+         "pre_ref": "pt_d5349d2c7e056d80cb2383b9ef43aa0bef0086e74eb3da34a726350cef7523",
+         "remapped": false,
+         "resolves": true
+        }
+       ]
+      },
+      "persisted": false,
+      "cause": "from_content_missing: no memory Point carries the from-anchor claim \u2014 the extractor emitted no claim for that endpoint (content-level miss, not an edge miss)"
+     }
+    ]
+   },
+   "wp07_bluepeak_followup": {
+    "planted": 3,
+    "edge_correct": 2,
+    "content_ok": 3,
+    "failures": [
+     {
+      "id": "wp07_bluepeak_followup_op_04",
+      "expected_kind": "SUPERSEDE",
+      "verdict": "edge_missing",
+      "edge_correct": false,
+      "edge_op_ids": [],
+      "matched": {
+       "from": [],
+       "to": []
+      },
+      "from_session": "wp07_bluepeak_followup",
+      "to_session": "wp06_quarry_rollout",
+      "owner_session": "wp07_bluepeak_followup",
+      "endpoints": {
+       "from": [
+        {
+         "post_ref": "pt_011cb7376eb933c4ce3ce4668c341220b20f58bd0e00ab09c71797726078df",
+         "pre_ref": "pt_011cb7376eb933c4ce3ce4668c341220b20f58bd0e00ab09c71797726078df",
+         "remapped": false,
+         "resolves": true
+        },
+        {
+         "post_ref": "pt_e8653e93af00f25cfa29b83b9b6c946cb3baf0f0f99e49697c0e21ba7a0510",
+         "pre_ref": "pt_e8653e93af00f25cfa29b83b9b6c946cb3baf0f0f99e49697c0e21ba7a0510",
+         "remapped": false,
+         "resolves": true
+        }
+       ],
+       "to": [
+        {
+         "post_ref": "pt_e8010814f2bb192871939471551f571b26b4dc7bc9982435e8bcd3c1e5fb0b",
+         "pre_ref": "pt_e8010814f2bb192871939471551f571b26b4dc7bc9982435e8bcd3c1e5fb0b",
+         "remapped": false,
+         "resolves": true
+        }
+       ]
+      },
+      "persisted": false,
+      "cause": "edge_missing: both endpoint claims are present in the memory layer but no qualifying SUPERSEDE edge connects them \u2014 the edge was never emitted, or the commit dropped it"
+     }
+    ]
+   }
+  }
+ },
+ "diagnostics": {
+  "wp01_quarry_debug_op_01": {
+   "from": {
+    "session": "wp01_quarry_debug",
+    "anchor": "two workers grabbed the same batch twice from the ingest queue and each marked its own copy complete",
+    "candidates": [
+     {
+      "point_id": "pt_9d049d94b96b871f7814c9c86603efc51c774fe1f4aa6617a00822465be636",
+      "verbatim": true,
+      "band": true,
+      "content": "Two workers grabbed the same batch twice from the ingest queue and each marked its own copy complete"
+     },
+     {
+      "point_id": "pt_4fb15aae5383b53441386173d0ffa04b708931dd6738f22a72c722ce0f9d53",
+      "verbatim": false,
+      "band": false,
+      "content": "The Halcyon archive re-ingest stalled at 62 percent because of a duplicate-processing race, not throughput or starvation"
+     },
+     {
+      "point_id": "pt_e48bf6b88f25a83acd7efb89d3a6be8612b88a13b4d0f8344d8210651d26a3",
+      "verbatim": false,
+      "band": false,
+      "content": "The retry loop added in the batch runner bypassed the batch ownership check, so no lease rows existed and two workers could claim the same batch"
+     },
+     {
+      "point_id": "pt_ec8503a672ff7410c5c71de4560ea4d6ef1975b07f22c8049587b99f2fa5fb",
+      "verbatim": false,
+      "band": false,
+      "content": "Each batch must claim a single-owner lease row before processing, and the claim is the only thing that can complete it"
+     }
+    ]
+   },
+   "to": {
+    "session": "wp01_quarry_debug",
+    "anchor": "nothing prevents two workers from claiming one batch",
+    "candidates": [
+     {
+      "point_id": "pt_4fb15aae5383b53441386173d0ffa04b708931dd6738f22a72c722ce0f9d53",
+      "verbatim": false,
+      "band": false,
+      "content": "The Halcyon archive re-ingest stalled at 62 percent because of a duplicate-processing race, not throughput or starvation"
+     },
+     {
+      "point_id": "pt_e48bf6b88f25a83acd7efb89d3a6be8612b88a13b4d0f8344d8210651d26a3",
+      "verbatim": false,
+      "band": false,
+      "content": "The retry loop added in the batch runner bypassed the batch ownership check, so no lease rows existed and two workers could claim the same batch"
+     },
+     {
+      "point_id": "pt_ec8503a672ff7410c5c71de4560ea4d6ef1975b07f22c8049587b99f2fa5fb",
+      "verbatim": false,
+      "band": false,
+      "content": "Each batch must claim a single-owner lease row before processing, and the claim is the only thing that can complete it"
+     },
+     {
+      "point_id": "pt_14e56f3f052033155cac7f9cf7b266e9b7437155753edd5092d7c642e4a579",
+      "verbatim": false,
+      "band": false,
+      "content": "A distributed lock service is rejected; a simple lease row with an expiry is enough"
+     }
+    ]
+   }
+  },
+  "wp01_quarry_debug_op_02": {
+   "from": {
+    "session": "wp01_quarry_debug",
+    "anchor": "A lease row keyed by batch id with a thirty-second expiry and a compare-and-swap update on completion",
+    "candidates": [
+     {
+      "point_id": "pt_d32d6ca55d3f3e2ed8fe31a881cb82aa25f9ea2b1406636d561bfc2efbeca9",
+      "verbatim": false,
+      "band": true,
+      "content": "The lease row is keyed by batch id with a thirty-second expiry and a compare-and-swap update on completion"
+     },
+     {
+      "point_id": "pt_4fb15aae5383b53441386173d0ffa04b708931dd6738f22a72c722ce0f9d53",
+      "verbatim": false,
+      "band": false,
+      "content": "The Halcyon archive re-ingest stalled at 62 percent because of a duplicate-processing race, not throughput or starvation"
+     },
+     {
+      "point_id": "pt_e48bf6b88f25a83acd7efb89d3a6be8612b88a13b4d0f8344d8210651d26a3",
+      "verbatim": false,
+      "band": false,
+      "content": "The retry loop added in the batch runner bypassed the batch ownership check, so no lease rows existed and two workers could claim the same batch"
+     },
+     {
+      "point_id": "pt_ec8503a672ff7410c5c71de4560ea4d6ef1975b07f22c8049587b99f2fa5fb",
+      "verbatim": false,
+      "band": false,
+      "content": "Each batch must claim a single-owner lease row before processing, and the claim is the only thing that can complete it"
+     }
+    ]
+   },
+   "to": {
+    "session": "wp01_quarry_debug",
+    "anchor": "you have a duplicate-processing race",
+    "candidates": [
+     {
+      "point_id": "pt_4fb15aae5383b53441386173d0ffa04b708931dd6738f22a72c722ce0f9d53",
+      "verbatim": false,
+      "band": true,
+      "content": "The Halcyon archive re-ingest stalled at 62 percent because of a duplicate-processing race, not throughput or starvation"
+     },
+     {
+      "point_id": "pt_e48bf6b88f25a83acd7efb89d3a6be8612b88a13b4d0f8344d8210651d26a3",
+      "verbatim": false,
+      "band": false,
+      "content": "The retry loop added in the batch runner bypassed the batch ownership check, so no lease rows existed and two workers could claim the same batch"
+     },
+     {
+      "point_id": "pt_ec8503a672ff7410c5c71de4560ea4d6ef1975b07f22c8049587b99f2fa5fb",
+      "verbatim": false,
+      "band": false,
+      "content": "Each batch must claim a single-owner lease row before processing, and the claim is the only thing that can complete it"
+     },
+     {
+      "point_id": "pt_14e56f3f052033155cac7f9cf7b266e9b7437155753edd5092d7c642e4a579",
+      "verbatim": false,
+      "band": false,
+      "content": "A distributed lock service is rejected; a simple lease row with an expiry is enough"
+     }
+    ]
+   }
+  },
+  "wp02_lumen_refactor_op_01": {
+   "from": {
+    "session": "wp02_lumen_refactor",
+    "anchor": "Short-lived keys mean a leak is a one-day problem, not a quarterly audit finding",
+    "candidates": [
+     {
+      "point_id": "pt_f8ba8b3c65e8edafa6071b4033e897260d828f72fb29a90a8627f89a1d189d",
+      "verbatim": false,
+      "band": false,
+      "content": "lumen auth is migrating from team-scoped tokens to per-graph API keys so each graph gets its own credential and its own audit trail"
+     },
+     {
+      "point_id": "pt_cdc01293725665968127763fdb12c9fae53a986234cfe2b538c65ca8acf786",
+      "verbatim": false,
+      "band": false,
+      "content": "The team signed off on the per-graph API key direction last Friday"
+     },
+     {
+      "point_id": "pt_3e45a675db6a94e1116038c0d79eda8f2ec4bad373ad169e1db2a227bc6cce",
+      "verbatim": false,
+      "band": false,
+      "content": "A per-graph key encodes the graph id rather than the team id, so the registry can route a key back to its graph without a lookup"
+     },
+     {
+      "point_id": "pt_b46b037fc53d20005764b1dba6f72ea8e9c3be1df43110fbac9dcec682ddc3",
+      "verbatim": false,
+      "band": false,
+      "content": "The platform standard is the tt_ prefix with a random 32-byte secret after it"
+     }
+    ]
+   },
+   "to": {
+    "session": "wp02_lumen_refactor",
+    "anchor": "The current team tokens never expire, which is exactly how the leaked token stayed valid for weeks",
+    "candidates": [
+     {
+      "point_id": "pt_f8ba8b3c65e8edafa6071b4033e897260d828f72fb29a90a8627f89a1d189d",
+      "verbatim": false,
+      "band": false,
+      "content": "lumen auth is migrating from team-scoped tokens to per-graph API keys so each graph gets its own credential and its own audit trail"
+     },
+     {
+      "point_id": "pt_cdc01293725665968127763fdb12c9fae53a986234cfe2b538c65ca8acf786",
+      "verbatim": false,
+      "band": false,
+      "content": "The team signed off on the per-graph API key direction last Friday"
+     },
+     {
+      "point_id": "pt_3e45a675db6a94e1116038c0d79eda8f2ec4bad373ad169e1db2a227bc6cce",
+      "verbatim": false,
+      "band": false,
+      "content": "A per-graph key encodes the graph id rather than the team id, so the registry can route a key back to its graph without a lookup"
+     },
+     {
+      "point_id": "pt_b46b037fc53d20005764b1dba6f72ea8e9c3be1df43110fbac9dcec682ddc3",
+      "verbatim": false,
+      "band": false,
+      "content": "The platform standard is the tt_ prefix with a random 32-byte secret after it"
+     }
+    ]
+   }
+  },
+  "wp03_ember_design_op_01": {
+   "from": {
+    "session": "wp03_ember_design",
+    "anchor": "We route ember alerts by service ownership instead of by page group",
+    "candidates": [
+     {
+      "point_id": "pt_793c0035dd5b6eba9a688dad42b98ca3140b5d3eae6533af8bf595cd0fc892",
+      "verbatim": false,
+      "band": true,
+      "content": "The ember redesign routes alerts by service ownership instead of by page group, with the lumen ownership table as the single source of truth for where an alert goes"
+     },
+     {
+      "point_id": "pt_8ffd2c547f7e2dffe935513015c7ec1d4cdb09210ba7797024b0aa7356dd3c",
+      "verbatim": false,
+      "band": false,
+      "content": "The ember pager fired twelve times per week on average last quarter"
+     },
+     {
+      "point_id": "pt_00d68cbe6cd508556a2d40a52bc445b19c77420c4b4c495dc03133d95e60ad",
+      "verbatim": false,
+      "band": false,
+      "content": "Roughly a third of ember pages last quarter were not actionable"
+     },
+     {
+      "point_id": "pt_33097e62e1d533640d191100f8d442cc4f989d7cda5ce4e40bc9a8621873d3",
+      "verbatim": false,
+      "band": false,
+      "content": "Roughly thirty percent of ember alerts are unactionable because the ownership lookup fails, forcing on-call to hunt for the right team"
+     }
+    ]
+   },
+   "to": {
+    "session": "wp03_ember_design",
+    "anchor": "Roughly thirty percent of alerts are unactionable because the ownership lookup fails",
+    "candidates": [
+     {
+      "point_id": "pt_33097e62e1d533640d191100f8d442cc4f989d7cda5ce4e40bc9a8621873d3",
+      "verbatim": false,
+      "band": true,
+      "content": "Roughly thirty percent of ember alerts are unactionable because the ownership lookup fails, forcing on-call to hunt for the right team"
+     },
+     {
+      "point_id": "pt_8ffd2c547f7e2dffe935513015c7ec1d4cdb09210ba7797024b0aa7356dd3c",
+      "verbatim": false,
+      "band": false,
+      "content": "The ember pager fired twelve times per week on average last quarter"
+     },
+     {
+      "point_id": "pt_00d68cbe6cd508556a2d40a52bc445b19c77420c4b4c495dc03133d95e60ad",
+      "verbatim": false,
+      "band": false,
+      "content": "Roughly a third of ember pages last quarter were not actionable"
+     },
+     {
+      "point_id": "pt_c87295e69dc939c9f79b2bcdebae2fe515942e3d12b6e28d9c5ec93616ab88",
+      "verbatim": false,
+      "band": false,
+      "content": "The ember on-call load falls on whoever is in the ember on-call rotation, mostly the platform team"
+     }
+    ]
+   }
+  },
+  "wp03_ember_design_op_02": {
+   "from": {
+    "session": "wp03_ember_design",
+    "anchor": "A service with no owner row falls to the default rotation and we flag it in the weekly ownership report",
+    "candidates": [
+     {
+      "point_id": "pt_2d7d6a137292393d1e4f3e978b806b6829a9df6f0f3cc5e29e55a8d4956629",
+      "verbatim": false,
+      "band": true,
+      "content": "A service with no owner row falls to the default rotation and is flagged in the weekly ownership report, so no alert is silently dropped"
+     },
+     {
+      "point_id": "pt_8ffd2c547f7e2dffe935513015c7ec1d4cdb09210ba7797024b0aa7356dd3c",
+      "verbatim": false,
+      "band": false,
+      "content": "The ember pager fired twelve times per week on average last quarter"
+     },
+     {
+      "point_id": "pt_00d68cbe6cd508556a2d40a52bc445b19c77420c4b4c495dc03133d95e60ad",
+      "verbatim": false,
+      "band": false,
+      "content": "Roughly a third of ember pages last quarter were not actionable"
+     },
+     {
+      "point_id": "pt_33097e62e1d533640d191100f8d442cc4f989d7cda5ce4e40bc9a8621873d3",
+      "verbatim": false,
+      "band": false,
+      "content": "Roughly thirty percent of ember alerts are unactionable because the ownership lookup fails, forcing on-call to hunt for the right team"
+     }
+    ]
+   },
+   "to": {
+    "session": "wp03_ember_design",
+    "anchor": "they will fall through any ownership-based router",
+    "candidates": [
+     {
+      "point_id": "pt_8ffd2c547f7e2dffe935513015c7ec1d4cdb09210ba7797024b0aa7356dd3c",
+      "verbatim": false,
+      "band": false,
+      "content": "The ember pager fired twelve times per week on average last quarter"
+     },
+     {
+      "point_id": "pt_00d68cbe6cd508556a2d40a52bc445b19c77420c4b4c495dc03133d95e60ad",
+      "verbatim": false,
+      "band": false,
+      "content": "Roughly a third of ember pages last quarter were not actionable"
+     },
+     {
+      "point_id": "pt_33097e62e1d533640d191100f8d442cc4f989d7cda5ce4e40bc9a8621873d3",
+      "verbatim": false,
+      "band": false,
+      "content": "Roughly thirty percent of ember alerts are unactionable because the ownership lookup fails, forcing on-call to hunt for the right team"
+     },
+     {
+      "point_id": "pt_c87295e69dc939c9f79b2bcdebae2fe515942e3d12b6e28d9c5ec93616ab88",
+      "verbatim": false,
+      "band": false,
+      "content": "The ember on-call load falls on whoever is in the ember on-call rotation, mostly the platform team"
+     }
+    ]
+   }
+  },
+  "wp03_ember_design_op_03": {
+   "from": {
+    "session": "wp03_ember_design",
+    "anchor": "auto-suppress alerts during declared maintenance windows",
+    "candidates": [
+     {
+      "point_id": "pt_60894ae7bb795c71d0aa0d6dbf38a3fa38e6918d5358ebc85b5f5250f3a85c",
+      "verbatim": false,
+      "band": true,
+      "content": "Ember auto-suppresses alerts during declared maintenance windows, read from lumen where windows are already declared"
+     },
+     {
+      "point_id": "pt_8ffd2c547f7e2dffe935513015c7ec1d4cdb09210ba7797024b0aa7356dd3c",
+      "verbatim": false,
+      "band": false,
+      "content": "The ember pager fired twelve times per week on average last quarter"
+     },
+     {
+      "point_id": "pt_00d68cbe6cd508556a2d40a52bc445b19c77420c4b4c495dc03133d95e60ad",
+      "verbatim": false,
+      "band": false,
+      "content": "Roughly a third of ember pages last quarter were not actionable"
+     },
+     {
+      "point_id": "pt_33097e62e1d533640d191100f8d442cc4f989d7cda5ce4e40bc9a8621873d3",
+      "verbatim": false,
+      "band": false,
+      "content": "Roughly thirty percent of ember alerts are unactionable because the ownership lookup fails, forcing on-call to hunt for the right team"
+     }
+    ]
+   },
+   "to": {
+    "session": "wp03_ember_design",
+    "anchor": "Maintenance windows are the other classic noise source",
+    "candidates": [
+     {
+      "point_id": "pt_8ffd2c547f7e2dffe935513015c7ec1d4cdb09210ba7797024b0aa7356dd3c",
+      "verbatim": false,
+      "band": false,
+      "content": "The ember pager fired twelve times per week on average last quarter"
+     },
+     {
+      "point_id": "pt_00d68cbe6cd508556a2d40a52bc445b19c77420c4b4c495dc03133d95e60ad",
+      "verbatim": false,
+      "band": false,
+      "content": "Roughly a third of ember pages last quarter were not actionable"
+     },
+     {
+      "point_id": "pt_33097e62e1d533640d191100f8d442cc4f989d7cda5ce4e40bc9a8621873d3",
+      "verbatim": false,
+      "band": false,
+      "content": "Roughly thirty percent of ember alerts are unactionable because the ownership lookup fails, forcing on-call to hunt for the right team"
+     },
+     {
+      "point_id": "pt_c87295e69dc939c9f79b2bcdebae2fe515942e3d12b6e28d9c5ec93616ab88",
+      "verbatim": false,
+      "band": false,
+      "content": "The ember on-call load falls on whoever is in the ember on-call rotation, mostly the platform team"
+     }
+    ]
+   }
+  },
+  "wp04_aurora_perf_op_01": {
+   "from": {
+    "session": "wp04_aurora_perf",
+    "anchor": "The spike correlates with the October 5 release, the one that added the related-memory sidebar",
+    "candidates": [
+     {
+      "point_id": "pt_6aecb4d27d4f62c5068abadd70012e5049671cd953d440c31dd221020b2a88",
+      "verbatim": false,
+      "band": true,
+      "content": "The p95 spike correlates with the October 5 release that added the related-memory sidebar"
+     },
+     {
+      "point_id": "pt_797671c81ce5af00c15f1219899dcb5ab11c743a0d5e7a7c75faedc1702eb3",
+      "verbatim": false,
+      "band": false,
+      "content": "The aurora dashboard load endpoint p95 hit 4.2 seconds yesterday afternoon, an order of magnitude past the customer-facing SLO"
+     },
+     {
+      "point_id": "pt_7bf2e37e6572544b014096a96268a527384c7ae76adc5a54c5cd1438e3e89e",
+      "verbatim": false,
+      "band": false,
+      "content": "Before the October 5 release the aurora dashboard p95 was comfortably under a second"
+     },
+     {
+      "point_id": "pt_1f9dc3648c55944e883d40f8412eb78e22387f051af5c5dcf8edbef4faa414",
+      "verbatim": false,
+      "band": false,
+      "content": "The related-memory sidebar fires one embedding lookup per visible memory row, so a page with forty rows issues forty separate calls"
+     }
+    ]
+   },
+   "to": {
+    "session": "wp04_aurora_perf",
+    "anchor": "the sidebar feature is the prime suspect",
+    "candidates": [
+     {
+      "point_id": "pt_797671c81ce5af00c15f1219899dcb5ab11c743a0d5e7a7c75faedc1702eb3",
+      "verbatim": false,
+      "band": false,
+      "content": "The aurora dashboard load endpoint p95 hit 4.2 seconds yesterday afternoon, an order of magnitude past the customer-facing SLO"
+     },
+     {
+      "point_id": "pt_6aecb4d27d4f62c5068abadd70012e5049671cd953d440c31dd221020b2a88",
+      "verbatim": false,
+      "band": false,
+      "content": "The p95 spike correlates with the October 5 release that added the related-memory sidebar"
+     },
+     {
+      "point_id": "pt_7bf2e37e6572544b014096a96268a527384c7ae76adc5a54c5cd1438e3e89e",
+      "verbatim": false,
+      "band": false,
+      "content": "Before the October 5 release the aurora dashboard p95 was comfortably under a second"
+     },
+     {
+      "point_id": "pt_1f9dc3648c55944e883d40f8412eb78e22387f051af5c5dcf8edbef4faa414",
+      "verbatim": false,
+      "band": false,
+      "content": "The related-memory sidebar fires one embedding lookup per visible memory row, so a page with forty rows issues forty separate calls"
+     }
+    ]
+   }
+  },
+  "wp04_aurora_perf_op_02": {
+   "from": {
+    "session": "wp04_aurora_perf",
+    "anchor": "A ten-minute TTL cache will absorb nearly all of the repeat traffic",
+    "candidates": [
+     {
+      "point_id": "pt_797671c81ce5af00c15f1219899dcb5ab11c743a0d5e7a7c75faedc1702eb3",
+      "verbatim": false,
+      "band": false,
+      "content": "The aurora dashboard load endpoint p95 hit 4.2 seconds yesterday afternoon, an order of magnitude past the customer-facing SLO"
+     },
+     {
+      "point_id": "pt_6aecb4d27d4f62c5068abadd70012e5049671cd953d440c31dd221020b2a88",
+      "verbatim": false,
+      "band": false,
+      "content": "The p95 spike correlates with the October 5 release that added the related-memory sidebar"
+     },
+     {
+      "point_id": "pt_7bf2e37e6572544b014096a96268a527384c7ae76adc5a54c5cd1438e3e89e",
+      "verbatim": false,
+      "band": false,
+      "content": "Before the October 5 release the aurora dashboard p95 was comfortably under a second"
+     },
+     {
+      "point_id": "pt_1f9dc3648c55944e883d40f8412eb78e22387f051af5c5dcf8edbef4faa414",
+      "verbatim": false,
+      "band": false,
+      "content": "The related-memory sidebar fires one embedding lookup per visible memory row, so a page with forty rows issues forty separate calls"
+     }
+    ]
+   },
+   "to": {
+    "session": "wp04_aurora_perf",
+    "anchor": "The N+1 embedding calls are what blew up the p95",
+    "candidates": [
+     {
+      "point_id": "pt_b5aeb9e20804414055601736cfb09f0ecb30ef07e4c68fed1865992bdba819",
+      "verbatim": true,
+      "band": true,
+      "content": "The N+1 embedding calls are what blew up the p95: forty round-trips at even twenty milliseconds each is nearly a second before any ranking runs"
+     },
+     {
+      "point_id": "pt_797671c81ce5af00c15f1219899dcb5ab11c743a0d5e7a7c75faedc1702eb3",
+      "verbatim": false,
+      "band": false,
+      "content": "The aurora dashboard load endpoint p95 hit 4.2 seconds yesterday afternoon, an order of magnitude past the customer-facing SLO"
+     },
+     {
+      "point_id": "pt_6aecb4d27d4f62c5068abadd70012e5049671cd953d440c31dd221020b2a88",
+      "verbatim": false,
+      "band": false,
+      "content": "The p95 spike correlates with the October 5 release that added the related-memory sidebar"
+     },
+     {
+      "point_id": "pt_7bf2e37e6572544b014096a96268a527384c7ae76adc5a54c5cd1438e3e89e",
+      "verbatim": false,
+      "band": false,
+      "content": "Before the October 5 release the aurora dashboard p95 was comfortably under a second"
+     }
+    ]
+   }
+  },
+  "wp04_aurora_perf_op_03": {
+   "from": {
+    "session": "wp04_aurora_perf",
+    "anchor": "Invalidate the cache entry for a team whenever a write lands in that team's graph",
+    "candidates": [
+     {
+      "point_id": "pt_cb579dae933773d5f6981cae424992f36fd7f7e1cdd973d0b74cfb152c9e93",
+      "verbatim": false,
+      "band": true,
+      "content": "The cache entry for a team should be invalidated whenever a write lands in that team's graph; writes are rare compared to reads so invalidation traffic is tiny"
+     },
+     {
+      "point_id": "pt_797671c81ce5af00c15f1219899dcb5ab11c743a0d5e7a7c75faedc1702eb3",
+      "verbatim": false,
+      "band": false,
+      "content": "The aurora dashboard load endpoint p95 hit 4.2 seconds yesterday afternoon, an order of magnitude past the customer-facing SLO"
+     },
+     {
+      "point_id": "pt_6aecb4d27d4f62c5068abadd70012e5049671cd953d440c31dd221020b2a88",
+      "verbatim": false,
+      "band": false,
+      "content": "The p95 spike correlates with the October 5 release that added the related-memory sidebar"
+     },
+     {
+      "point_id": "pt_7bf2e37e6572544b014096a96268a527384c7ae76adc5a54c5cd1438e3e89e",
+      "verbatim": false,
+      "band": false,
+      "content": "Before the October 5 release the aurora dashboard p95 was comfortably under a second"
+     }
+    ]
+   },
+   "to": {
+    "session": "wp04_aurora_perf",
+    "anchor": "stale related items if the underlying memory changes between refreshes",
+    "candidates": [
+     {
+      "point_id": "pt_63fdfbeec9dc86d8c8614329117311e7de721c25ff7a2656a32f38e9fcf350",
+      "verbatim": false,
+      "band": true,
+      "content": "The stale-related-items risk: cached related items can go stale if the underlying memory changes between refreshes"
+     },
+     {
+      "point_id": "pt_797671c81ce5af00c15f1219899dcb5ab11c743a0d5e7a7c75faedc1702eb3",
+      "verbatim": false,
+      "band": false,
+      "content": "The aurora dashboard load endpoint p95 hit 4.2 seconds yesterday afternoon, an order of magnitude past the customer-facing SLO"
+     },
+     {
+      "point_id": "pt_6aecb4d27d4f62c5068abadd70012e5049671cd953d440c31dd221020b2a88",
+      "verbatim": false,
+      "band": false,
+      "content": "The p95 spike correlates with the October 5 release that added the related-memory sidebar"
+     },
+     {
+      "point_id": "pt_7bf2e37e6572544b014096a96268a527384c7ae76adc5a54c5cd1438e3e89e",
+      "verbatim": false,
+      "band": false,
+      "content": "Before the October 5 release the aurora dashboard p95 was comfortably under a second"
+     }
+    ]
+   }
+  },
+  "wp05_retro_writeup_op_01": {
+   "from": {
+    "session": "wp05_retro_writeup",
+    "anchor": "The config partition was the root cause",
+    "candidates": [
+     {
+      "point_id": "pt_ca4716c92412904c32e8af274912eebedee2163cf1f5e96804510941f5fa72",
+      "verbatim": false,
+      "band": true,
+      "content": "The root cause of the Bluepeak search outage was the config partition: the deploy shipped a config that split query traffic unevenly across the search shards and one shard saturated"
+     },
+     {
+      "point_id": "pt_e8ba9908f6e77e90742ca50c521b13ac6c4dbb9d24107ef37e55b0c87baf01",
+      "verbatim": false,
+      "band": true,
+      "content": "Nora suggested both the pre-deploy partition check and the visible config diff follow-ups"
+     },
+     {
+      "point_id": "pt_dd737d7027f636ac68e6dc01d322b51610c571687e6ffd549cac229aadf01b",
+      "verbatim": false,
+      "band": true,
+      "content": "Config-partition changes can silently unbalance shard traffic, so a pre-deploy capacity check and a visible config diff are the chosen mitigations"
+     },
+     {
+      "point_id": "pt_6f98953dd655a7469157b13a3564bc5fda48774b583c74d8bdc8e735fe977d",
+      "verbatim": false,
+      "band": false,
+      "content": "The initial investigation blamed the search index and chased a reindex for the first forty minutes; checking the config diff first is the faster diagnostic path"
+     }
+    ]
+   },
+   "to": {
+    "session": "wp05_retro_writeup",
+    "anchor": "The initial investigation blamed the search index",
+    "candidates": [
+     {
+      "point_id": "pt_6f98953dd655a7469157b13a3564bc5fda48774b583c74d8bdc8e735fe977d",
+      "verbatim": true,
+      "band": true,
+      "content": "The initial investigation blamed the search index and chased a reindex for the first forty minutes; checking the config diff first is the faster diagnostic path"
+     },
+     {
+      "point_id": "pt_ca4716c92412904c32e8af274912eebedee2163cf1f5e96804510941f5fa72",
+      "verbatim": false,
+      "band": false,
+      "content": "The root cause of the Bluepeak search outage was the config partition: the deploy shipped a config that split query traffic unevenly across the search shards and one shard saturated"
+     },
+     {
+      "point_id": "pt_c6c89a98622bdb9b946cfe6ec6e2eed2607f253c7be61d0d59e6ddf5d49c31",
+      "verbatim": false,
+      "band": false,
+      "content": "The search SLO is 99.9 percent and the month landed at 99.86, so the SLO was breached"
+     },
+     {
+      "point_id": "pt_0f6c44a15061314be5826e0cd97691e897c8071a1db53a5cb96ea4f4f0a88e",
+      "verbatim": false,
+      "band": false,
+      "content": "Maya owns the pre-deploy check comparing partition weights against the shard capacity model, due November 2"
+     }
+    ]
+   }
+  },
+  "wp05_retro_writeup_op_02": {
+   "from": {
+    "session": "wp05_retro_writeup",
+    "anchor": "We rolled the config back to the previous partition at 12:40pm and traffic normalized within thirteen minutes",
+    "candidates": [
+     {
+      "point_id": "pt_ca4716c92412904c32e8af274912eebedee2163cf1f5e96804510941f5fa72",
+      "verbatim": false,
+      "band": false,
+      "content": "The root cause of the Bluepeak search outage was the config partition: the deploy shipped a config that split query traffic unevenly across the search shards and one shard saturated"
+     },
+     {
+      "point_id": "pt_6f98953dd655a7469157b13a3564bc5fda48774b583c74d8bdc8e735fe977d",
+      "verbatim": false,
+      "band": false,
+      "content": "The initial investigation blamed the search index and chased a reindex for the first forty minutes; checking the config diff first is the faster diagnostic path"
+     },
+     {
+      "point_id": "pt_c6c89a98622bdb9b946cfe6ec6e2eed2607f253c7be61d0d59e6ddf5d49c31",
+      "verbatim": false,
+      "band": false,
+      "content": "The search SLO is 99.9 percent and the month landed at 99.86, so the SLO was breached"
+     },
+     {
+      "point_id": "pt_0f6c44a15061314be5826e0cd97691e897c8071a1db53a5cb96ea4f4f0a88e",
+      "verbatim": false,
+      "band": false,
+      "content": "Maya owns the pre-deploy check comparing partition weights against the shard capacity model, due November 2"
+     }
+    ]
+   },
+   "to": {
+    "session": "wp05_retro_writeup",
+    "anchor": "The config partition was the root cause",
+    "candidates": [
+     {
+      "point_id": "pt_ca4716c92412904c32e8af274912eebedee2163cf1f5e96804510941f5fa72",
+      "verbatim": false,
+      "band": true,
+      "content": "The root cause of the Bluepeak search outage was the config partition: the deploy shipped a config that split query traffic unevenly across the search shards and one shard saturated"
+     },
+     {
+      "point_id": "pt_e8ba9908f6e77e90742ca50c521b13ac6c4dbb9d24107ef37e55b0c87baf01",
+      "verbatim": false,
+      "band": true,
+      "content": "Nora suggested both the pre-deploy partition check and the visible config diff follow-ups"
+     },
+     {
+      "point_id": "pt_dd737d7027f636ac68e6dc01d322b51610c571687e6ffd549cac229aadf01b",
+      "verbatim": false,
+      "band": true,
+      "content": "Config-partition changes can silently unbalance shard traffic, so a pre-deploy capacity check and a visible config diff are the chosen mitigations"
+     },
+     {
+      "point_id": "pt_6f98953dd655a7469157b13a3564bc5fda48774b583c74d8bdc8e735fe977d",
+      "verbatim": false,
+      "band": false,
+      "content": "The initial investigation blamed the search index and chased a reindex for the first forty minutes; checking the config diff first is the faster diagnostic path"
+     }
+    ]
+   }
+  },
+  "wp06_quarry_rollout_op_01": {
+   "from": {
+    "session": "wp06_quarry_rollout",
+    "anchor": "every batch was claimed exactly once after the expiry",
+    "candidates": [
+     {
+      "point_id": "pt_6a842264a7251e2ee64dc9a551c1e43a898e4d9e6a0020cb3414af15ef8b44",
+      "verbatim": false,
+      "band": false,
+      "content": "The rollout shape for the lease-before-claim fix should be chosen on data, not on intuition"
+     },
+     {
+      "point_id": "pt_b77cb784f972064af2863d02b5ca833d3b63015d16f4157ee2c274b64f2e30",
+      "verbatim": false,
+      "band": false,
+      "content": "The duplicate-processing race is scope-independent once the lease is held: rollout scope does not change the guarantee"
+     },
+     {
+      "point_id": "pt_5cc80395dc80081ba35992495d637986c890841f62cbdf603c4aa82600aa3f",
+      "verbatim": false,
+      "band": false,
+      "content": "The lease CAS means only the owner can complete, so a second claim fails at compare-and-swap regardless of what toggles around it"
+     },
+     {
+      "point_id": "pt_d5349d2c7e056d80cb2383b9ef43aa0bef0086e74eb3da34a726350cef7523",
+      "verbatim": false,
+      "band": false,
+      "content": "The race only re-enters when two workers can claim one batch, and the lease makes that impossible no matter how the rollout is done"
+     }
+    ]
+   },
+   "to": {
+    "session": "wp06_quarry_rollout",
+    "anchor": "the lease makes that impossible no matter how we roll out",
+    "candidates": [
+     {
+      "point_id": "pt_d5349d2c7e056d80cb2383b9ef43aa0bef0086e74eb3da34a726350cef7523",
+      "verbatim": false,
+      "band": true,
+      "content": "The race only re-enters when two workers can claim one batch, and the lease makes that impossible no matter how the rollout is done"
+     },
+     {
+      "point_id": "pt_6a842264a7251e2ee64dc9a551c1e43a898e4d9e6a0020cb3414af15ef8b44",
+      "verbatim": false,
+      "band": false,
+      "content": "The rollout shape for the lease-before-claim fix should be chosen on data, not on intuition"
+     },
+     {
+      "point_id": "pt_b77cb784f972064af2863d02b5ca833d3b63015d16f4157ee2c274b64f2e30",
+      "verbatim": false,
+      "band": false,
+      "content": "The duplicate-processing race is scope-independent once the lease is held: rollout scope does not change the guarantee"
+     },
+     {
+      "point_id": "pt_5cc80395dc80081ba35992495d637986c890841f62cbdf603c4aa82600aa3f",
+      "verbatim": false,
+      "band": false,
+      "content": "The lease CAS means only the owner can complete, so a second claim fails at compare-and-swap regardless of what toggles around it"
+     }
+    ]
+   }
+  },
+  "wp07_bluepeak_followup_op_02": {
+   "from": {
+    "session": "wp07_bluepeak_followup",
+    "anchor": "The flag did not cause the duplicates, it had been stable for two hours before the anomaly",
+    "candidates": [
+     {
+      "point_id": "pt_d4cfdacc6344f56801761aed1acc73edfce96b0f587bd98b24f15ad4c48cc0",
+      "verbatim": false,
+      "band": true,
+      "content": "the flag did not cause the duplicates; it had been stable for two hours before the anomaly"
+     },
+     {
+      "point_id": "pt_c3e49329d4d9723d8cff4378dcadf86e2a8f8653eeff642fc90d835af33c08",
+      "verbatim": false,
+      "band": false,
+      "content": "the global flag's cutover flip raced lease renewal, leaving a renewal window where two workers could claim one batch"
+     },
+     {
+      "point_id": "pt_33806bafdf8e953442f1d696e9c2b7935010d022191379f4a01500db8ef49a",
+      "verbatim": false,
+      "band": false,
+      "content": "the global flag was toggled once at cutover and never touched after"
+     },
+     {
+      "point_id": "pt_4d81006f4ecc13e74dfdeecb38e58fe5621916ec42e23e800137a4b0fbe3fc",
+      "verbatim": false,
+      "band": false,
+      "content": "the toggle was two hours before the first duplicate and the renewal stamps were clean with no overlap or double renewal"
+     }
+    ]
+   },
+   "to": {
+    "session": "wp07_bluepeak_followup",
+    "anchor": "the flip must have raced the lease renewal when the region cut over",
+    "candidates": [
+     {
+      "point_id": "pt_c3e49329d4d9723d8cff4378dcadf86e2a8f8653eeff642fc90d835af33c08",
+      "verbatim": false,
+      "band": true,
+      "content": "the global flag's cutover flip raced lease renewal, leaving a renewal window where two workers could claim one batch"
+     },
+     {
+      "point_id": "pt_33806bafdf8e953442f1d696e9c2b7935010d022191379f4a01500db8ef49a",
+      "verbatim": false,
+      "band": false,
+      "content": "the global flag was toggled once at cutover and never touched after"
+     },
+     {
+      "point_id": "pt_4d81006f4ecc13e74dfdeecb38e58fe5621916ec42e23e800137a4b0fbe3fc",
+      "verbatim": false,
+      "band": false,
+      "content": "the toggle was two hours before the first duplicate and the renewal stamps were clean with no overlap or double renewal"
+     },
+     {
+      "point_id": "pt_ef39ddd3dfb8a2bb4b2404bf2130150f50685058afdb5ec83d9df5df1ac51a",
+      "verbatim": false,
+      "band": false,
+      "content": "clock skew between regions can make lease expiry unsafe: a lagging region renews after the owner's lease truly expired and its renewal can clobber a live lease in another region"
+     }
+    ]
+   }
+  },
+  "wp07_bluepeak_followup_op_03": {
+   "from": {
+    "session": "wp07_bluepeak_followup",
+    "anchor": "a lagging region's renewal cannot clobber a live lease",
+    "candidates": [
+     {
+      "point_id": "pt_ef39ddd3dfb8a2bb4b2404bf2130150f50685058afdb5ec83d9df5df1ac51a",
+      "verbatim": false,
+      "band": true,
+      "content": "clock skew between regions can make lease expiry unsafe: a lagging region renews after the owner's lease truly expired and its renewal can clobber a live lease in another region"
+     },
+     {
+      "point_id": "pt_3c3d36858e58b5c5fafd57425c665729b2170ff99bd5b21b0ef0732716d924",
+      "verbatim": false,
+      "band": true,
+      "content": "the fix is not about the flag at all; a skew-tolerant lease needs a grace period on the expiry check so a lagging region cannot clobber a live lease"
+     },
+     {
+      "point_id": "pt_1166dabd98b04c0ce81860956d8f4f52268ad5d223b8a33947429ec5274d72",
+      "verbatim": false,
+      "band": true,
+      "content": "the skew-tolerant lease grace period shipped to every region, so a lagging region's renewal can no longer clobber a live lease and the clock-skew risk is covered"
+     },
+     {
+      "point_id": "pt_c3e49329d4d9723d8cff4378dcadf86e2a8f8653eeff642fc90d835af33c08",
+      "verbatim": false,
+      "band": false,
+      "content": "the global flag's cutover flip raced lease renewal, leaving a renewal window where two workers could claim one batch"
+     }
+    ]
+   },
+   "to": {
+    "session": "wp07_bluepeak_followup",
+    "anchor": "clock skew between regions can make lease expiry unsafe",
+    "candidates": [
+     {
+      "point_id": "pt_ef39ddd3dfb8a2bb4b2404bf2130150f50685058afdb5ec83d9df5df1ac51a",
+      "verbatim": true,
+      "band": true,
+      "content": "clock skew between regions can make lease expiry unsafe: a lagging region renews after the owner's lease truly expired and its renewal can clobber a live lease in another region"
+     },
+     {
+      "point_id": "pt_c3e49329d4d9723d8cff4378dcadf86e2a8f8653eeff642fc90d835af33c08",
+      "verbatim": false,
+      "band": false,
+      "content": "the global flag's cutover flip raced lease renewal, leaving a renewal window where two workers could claim one batch"
+     },
+     {
+      "point_id": "pt_33806bafdf8e953442f1d696e9c2b7935010d022191379f4a01500db8ef49a",
+      "verbatim": false,
+      "band": false,
+      "content": "the global flag was toggled once at cutover and never touched after"
+     },
+     {
+      "point_id": "pt_4d81006f4ecc13e74dfdeecb38e58fe5621916ec42e23e800137a4b0fbe3fc",
+      "verbatim": false,
+      "band": false,
+      "content": "the toggle was two hours before the first duplicate and the renewal stamps were clean with no overlap or double renewal"
+     }
+    ]
+   }
+  },
+  "wp07_bluepeak_followup_op_04": {
+   "from": {
+    "session": "wp07_bluepeak_followup",
+    "anchor": "per-service flags instead of one global flag",
+    "candidates": [
+     {
+      "point_id": "pt_011cb7376eb933c4ce3ce4668c341220b20f58bd0e00ab09c71797726078df",
+      "verbatim": false,
+      "band": true,
+      "content": "the all-at-once rollout call is reversed for the next rollout: per-service flags replace the single global flag"
+     },
+     {
+      "point_id": "pt_e8653e93af00f25cfa29b83b9b6c946cb3baf0f0f99e49697c0e21ba7a0510",
+      "verbatim": false,
+      "band": true,
+      "content": "per-service flags change the reversibility model: each service's flag is pulled independently rather than one fleet-wide switch"
+     },
+     {
+      "point_id": "pt_c3e49329d4d9723d8cff4378dcadf86e2a8f8653eeff642fc90d835af33c08",
+      "verbatim": false,
+      "band": false,
+      "content": "the global flag's cutover flip raced lease renewal, leaving a renewal window where two workers could claim one batch"
+     },
+     {
+      "point_id": "pt_33806bafdf8e953442f1d696e9c2b7935010d022191379f4a01500db8ef49a",
+      "verbatim": false,
+      "band": false,
+      "content": "the global flag was toggled once at cutover and never touched after"
+     }
+    ]
+   },
+   "to": {
+    "session": "wp06_quarry_rollout",
+    "anchor": "ship the lease fix all-at-once behind a single global kill flag",
+    "candidates": [
+     {
+      "point_id": "pt_e8010814f2bb192871939471551f571b26b4dc7bc9982435e8bcd3c1e5fb0b",
+      "verbatim": true,
+      "band": true,
+      "content": "Ship the lease fix all-at-once behind a single global kill flag rather than a week of per-shard canary watching"
+     },
+     {
+      "point_id": "pt_6a842264a7251e2ee64dc9a551c1e43a898e4d9e6a0020cb3414af15ef8b44",
+      "verbatim": false,
+      "band": false,
+      "content": "The rollout shape for the lease-before-claim fix should be chosen on data, not on intuition"
+     },
+     {
+      "point_id": "pt_b77cb784f972064af2863d02b5ca833d3b63015d16f4157ee2c274b64f2e30",
+      "verbatim": false,
+      "band": false,
+      "content": "The duplicate-processing race is scope-independent once the lease is held: rollout scope does not change the guarantee"
+     },
+     {
+      "point_id": "pt_5cc80395dc80081ba35992495d637986c890841f62cbdf603c4aa82600aa3f",
+      "verbatim": false,
+      "band": false,
+      "content": "The lease CAS means only the owner can complete, so a second claim fails at compare-and-swap regardless of what toggles around it"
+     }
+    ]
+   }
+  }
+ }
+}
