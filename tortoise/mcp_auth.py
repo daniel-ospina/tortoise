@@ -272,10 +272,12 @@ def _get_org_sdk() -> TortoiseSDK:
 #      another workspace must read as "not reachable from this workspace",
 #      never as a hit: an unfiltered list plus an unchecked argument is a plain
 #      IDOR (a token for workspace A naming workspace B's graph).
-#   2. **A soft-deleted graph stops resolving.** `list_memory_graphs` omits deleted
-#      rows, so the next call after a delete refuses instead of falling back
-#      to the default graph — a live connection must never keep reading a
-#      graph the user deleted.
+#   2. **A soft-deleted graph stops resolving.** The reader is not trusted to
+#      filter — the Supabase lane omits deleted rows while the selfhost registry
+#      lane still carries a `status='deleted'` row — so the reachable set applies
+#      the status filter in BOTH lanes, and the next call after a delete refuses
+#      instead of falling back to the default graph: a live connection must never
+#      keep reading a graph the user deleted.
 
 from tortoise.tool_registry import (  # noqa: E402, I001
     GRAPH_ARGUMENT_DESCRIPTION as _GRAPH_ARGUMENT_DESCRIPTION,

@@ -32333,10 +32333,10 @@ class TortoiseSDK:
         (mode-agnostic callers use either); any other id must match a real
         node exactly. Soft-deleted nodes (status='deleted') are NOT patchable
         — treated as unknown, exactly as both setters it replaces did. (The
-        tombstone FILTER lives on the readers that list rows —
-        ``hosted_api.list_graphs`` skips ``status='deleted'`` rows, while
-        ``list_memory_graphs`` deliberately returns them, which is why
-        ``graph_count`` was not folded into it.)
+        tombstone FILTER lives on the readers: ``hosted_api.list_graphs`` skips
+        ``status='deleted'`` rows, while ``list_memory_graphs`` returns them in
+        the selfhost registry lane — which is why ``graph_count`` was not folded
+        into it. In the Supabase lane that reader filters to active already.)
 
         Returns True when the node was found (the requested fields written),
         False on an unknown graph — callers map that to 404. At least one of

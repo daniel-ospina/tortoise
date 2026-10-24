@@ -20,7 +20,7 @@ related:
 
 # Canonical SDK method surface — an inventory, not the target
 
-**Read this for coverage, not for names.** This document is two things: an **inventory of all 150
+**Read this for coverage, not for names.** This document is two things: an **inventory of all 149
 methods that exist today**, placed in exactly one group, duplicates collapsed and gaps named; and an
 alongside that, an **earlier target sketch** (32 groups over 149 names).
 
@@ -42,10 +42,14 @@ owner-approved `docs/product/canonical-mcp-tools.md`.
 
 | | |
 |---|---|
-| Public methods on `TortoiseSDK` (parsed by `ast`, no leading underscore) | **150** |
-| Rows in `config/surface-manifest.yml` (`counts.sdk_public_methods`) | **150** |
+| Public methods on `TortoiseSDK` (parsed by `ast`, no leading underscore) | **149** |
+| Rows in `config/surface-manifest.yml` (`counts.sdk_public_methods`) | **149** |
 
-The two agree exactly. `TortoiseSDK.ask` and `TortoiseSDK.ask_assembled` were removed at
+The two agree exactly. The count moved 150 → 149 in #4282 phase 2.3, and the arithmetic is
+the migration's own shape rather than drift: four legacy names retired
+(`graph_list`, `graph_restore`, `graph_set_name`, `graph_set_recording`) for three
+canonical targets (`list_memory_graphs`, `restore_memory_graph`, `update_memory_graph`),
+because the two per-field setters fold into ONE partial update. `TortoiseSDK.ask` and `TortoiseSDK.ask_assembled` were removed at
 the SDK layer by #3849 (PR #3929) — the ask pipeline moved to `tortoise/ask_lane.py`, so
 the SDK exposes **no** `ask` method. Nothing is unaccounted for in the manifest.
 
@@ -330,7 +334,7 @@ public SDK/API surface?** Counts were derived by parsing source with `ast`, not 
 7. **Every retirement observed involved a warning or a parallel surface — never a silent rename.**
 8. **A raw escape hatch exists in the majority — 9/14**.
 
-**Where this lands for us.** 150 public methods on one flat class is ~5.5× the largest flat
+**Where this lands for us.** 149 public methods on one flat class is ~5.5× the largest flat
 surface observed (Pinecone's `Index`, 27). But the
 evidence does **not** say "delete 128 methods" — it says **namespace**, and it says
 **collapse the aliases**. The sketch above does exactly that: **32 groups over 149

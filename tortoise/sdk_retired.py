@@ -50,7 +50,8 @@ RETIRED_SDK_METHODS: dict[str, str] = {
     # `graph_set_name` → rows 30–33 `*_memory_graph*`). `graph_count` is NOT
     # here: its destination is `list_memory_graphs` too, but folding it is a
     # BEHAVIOUR change (it is a quota meter that excludes tombstoned graphs
-    # while `list_memory_graphs` returns them), not a rename — deferred.
+    # while the selfhost `list_memory_graphs` returns them), not a rename —
+    # deferred.
     "graph_list": "list_memory_graphs",
     # #4282 phase 2.3 — trash restore.
     "graph_restore": "restore_memory_graph",
