@@ -20,6 +20,12 @@ from tortoise.log import (  # noqa: E402, RUF100
     torn_record_may_revive_state,
 )
 
+# #9555/R7: read the narrative carrier's type off the registry, so this file's
+# exact-membership pin cannot drift from the constant the producer emits.
+from tortoise.record_projection import (
+    NARRATIVE_RECORD_TYPE as _NARRATIVE_RECORD_TYPE,
+)
+
 
 def _tmp(name):
     return os.path.join(tempfile.mkdtemp(prefix="tortoise_"), name)
@@ -572,6 +578,10 @@ def test_torn_tail_allowlist_holds_no_destructive_type():
         "BatchIdStamped", "IngestStarted", "CalibrationRecorded",
         "DedupeRecorded", "DedupeRejected", "EntityBindingRefused",
         "DirectEdgeCreated",
+        # #9555/R7: §9.1's narrative carrier — `_NO_PROJECTION_FOLD`, so a torn
+        # one is a graph no-op. Read off the registry rather than re-typed, so
+        # the literal cannot drift from the constant the producer emits.
+        _NARRATIVE_RECORD_TYPE,
     }) == TORN_TAIL_HARMLESS_EVENT_TYPES
     # Named terminal / removal / CLEARING types that would resurrect state if
     # tolerated. PointInvalidated / PointSuperseded are EP-terminal (a dropped

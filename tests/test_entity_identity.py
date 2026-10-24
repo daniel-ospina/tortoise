@@ -994,6 +994,18 @@ _ALLOWED_KEYED = {
         'self.g.query( "MATCH (o:Object {name:$name}), (e:Event {eventId:$eid}) " "MERGE (e)-[:uses]->(o)", params={"name": use_name, "eid": eid}, )': 1,
         'self.g.query( "MATCH (s:Subject {name: $name}), (e:Event {eventId: $eid}) " "MERGE (s)-[:participatesIn]->(e)", params={"name": subj, "eid": eid}, )': 1,
     },
+    'tortoise/near_dup_merge.py': {
+        # Twin of sdk.py's local `about_entities` claim loop (entry "E" below),
+        # and deliberately the SAME disposition. The merge attaches to every
+        # carrier of the name — id-less stub included — so a MERGE produces the
+        # attachment set capture WOULD have produced for that candidate.
+        # Routing this alone through `entity_identity.resolve_entity_id` would
+        # make a merge REFUSE where capture WRITES (two live same-name
+        # carriers), i.e. silently lose an attachment on the merged path only.
+        # That is why this site migrates WITH its twin (#3633), not ahead of it.
+        'rows = proj.g.query( "MATCH (o:Object {name:$n}) RETURN o.id", params={"n": _n}).result_set': 1,
+        'rows = proj.g.query( "MATCH (p:Point {id:$pid}), (o:Object {name:$n}) " "WHERE o.id IS NULL OR o.id = \'\' " "MERGE (p)-[:aboutObject]->(o) RETURN count(*)", params={"pid": point_id, "n": _n}).result_set': 1,
+    },
     'tortoise/sdk.py': {
         # E: the local `about_entities` claim loop (twin of hosted_api's) —
         # attaches to every carrier, id-less stub included; migration-gated.
