@@ -11,7 +11,7 @@ Concretely, this tool cannot emit a record (and `verify` cannot pass) unless
 EVERY recorded PR carries its own `head_sha`, its own `diff_sha256`, its own
 `verdict` and its own `findings[]` — echoed back from this run's manifest. There
 is no top-level verdict field in the answer schema, and a global one is rejected
-whole (see `_validate_answer`: an answer with a bare `{"verdict": "clean"}` makes
+whole (see `validate_answer`: an answer with a bare `{"verdict": "clean"}` makes
 every PR `malformed`, never "clean"). The reviewer's context is what is shared;
 the verdict is not.
 
@@ -58,6 +58,20 @@ rather than retrying.
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+# This is the same guard `tools/ci_selection.py` carries: the tool is a
+# direct-execution entry point, so it must fail with a readable
+# message on an older interpreter rather than an ImportError from a line below.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/batch_review.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/batch_review.py`"
+    )
+
 import argparse
 import hashlib
 import json
@@ -65,7 +79,6 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
