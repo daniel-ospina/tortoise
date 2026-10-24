@@ -1713,11 +1713,56 @@ DDL_FRAGMENT = re.compile(
 )
 
 
-#: How many bindings deep the assembled-text join follows a NAME. A fragment
-#: split at the KEYWORD boundary can be carried by names as easily as by adjacent
-#: literals (`_A = "CREATE "; _B = _A`), and following a chain is cheap — three
-#: is beyond any spelling the repo uses while still bounded.
-_MAX_RESOLVE_DEPTH = 3
+#: A RUNAWAY guard on the assembled-text join's name-following, not a reach limit:
+#: a fragment split at the KEYWORD boundary can be carried by names
+#: (`_A = "CREATE "; _B = _A; … g.query(_D + "CONSTRAINT …")`), and a chain of
+#: four used to be dropped SILENTLY — the text that hop carried vanished, no
+#: statement was found, and the pin read the constraint as ABSENT while it shipped
+#: (measured). So a chain is followed as far as the bindings go (a repeated key on
+#: one path is the cycle test), and this cap only stops a pathological file:
+#: reaching it is REPORTED as unverifiable, never read as an absence. Set above any
+#: chain the repo carries (measured: the deepest real chain resolves inside it, so
+#: the real tree reports nothing).
+_MAX_RESOLVE_DEPTH = 24
+
+
+#: A constraint WORD anywhere in a fragment — the GATE on the cannot-follow report.
+#: The bare word is deliberately NOT a taint rule (`_CYPHER_RESERVED` and every
+#: ordinary Cypher `CREATE` would red — measured, and why `DDL_FRAGMENT` names the
+#: PHRASE); here it only decides whether an UNRESOLVED hop is a constraint
+#: question at all, after every literal check has already come up empty.
+DDL_KEYWORD = re.compile(r"(?i)(?:\bCONSTRAINT\b|GRAPH\s*\.\s*CONSTRAINT)")
+
+
+def _carries_ddl_keyword(
+    node: ast.expr, bindings: dict[str, ast.expr], seen: frozenset[str] = frozenset()
+) -> bool:
+    """Is a constraint WORD reachable from `node`, through names, cycle-safely?
+
+    The gate on reporting a hop the join cannot follow. Reporting EVERY refused hop
+    unconditionally was measured on the real tree and rejected: a self-referential
+    binding (`url = url + "/x"`) is unresolvable in 73 unrelated assemblies, so the
+    pin reds on string building that has nothing to do with DDL — over-blocking,
+    not soundness. Conversely silence on a refused hop that DOES carry the word is
+    the fail-open the join exists to close, so the word is looked for through the
+    whole chain the join could not walk.
+
+    `seen` is the same cycle test :func:`_assembled_text` applies: a key may not
+    repeat along one path, which is the only thing that can actually loop.
+    """
+    for child in ast.walk(node):
+        if isinstance(child, ast.Constant) and isinstance(child.value, str):
+            if DDL_KEYWORD.search(child.value):
+                return True
+            continue
+        if not isinstance(child, (ast.Name, ast.Attribute, ast.Subscript)):
+            continue
+        key = _use_key(child) or ""
+        if key in seen or key not in bindings:
+            continue
+        if _carries_ddl_keyword(bindings[key], bindings, seen | {key}):
+            return True
+    return False
 
 
 def _ddl_fragments(node: ast.expr) -> list[str]:
@@ -1737,7 +1782,11 @@ def _ddl_fragments(node: ast.expr) -> list[str]:
 
 
 def _assembled_text(
-    node: ast.expr, bindings: dict[str, ast.expr], depth: int = 0
+    node: ast.expr,
+    bindings: dict[str, ast.expr],
+    depth: int = 0,
+    truncated: list[str] | None = None,
+    seen: frozenset[str] = frozenset(),
 ) -> str:
     """The literal text `node` carries, **in SOURCE order**, following bound names.
 
@@ -1759,13 +1808,31 @@ def _assembled_text(
     * **NAMES.** `_D = "CREATE "; _C = "CONSTRAINT …"; g.query(_D + _C)` carries no
       literal inside the `+` at all. `bindings` maps a binding key (the same
       spelling :func:`_use_key` produces) to the bound expression, so a name is
-      replaced by the text it was bound to — one constant-folding pass, capped at
-      :data:`_MAX_RESOLVE_DEPTH`.
+      replaced by the text it was bound to — one constant-folding pass, following
+      a name through as many bindings as it takes.
 
     An AMBIGUOUS key (bound twice to different values) is absent from `bindings`
     by construction, so a rebinding is never resolved to whichever value happened
     to win — it simply contributes no text, and the fragment loop and the taint
     rule remain the guard for that case.
+
+    A hop the join REFUSES to follow is NOT the same case as one it cannot resolve,
+    and both used to `continue` — so the text that hop carried vanished, the join
+    returned a shorter string, no statement was found, and the pin read the
+    constraint as ABSENT while it shipped (`_A = "CREATE "; _B = _A; _C = _B;
+    _D = _C; g.query(_D + "CONSTRAINT …")`, measured). Two things close that, and
+    the SECOND is what makes it safe:
+
+    * a chain is followed as far as the bindings go, not three hops, so the
+      measured shape resolves and the seam is FOUND (the strongest answer: the
+      statement is reported, not merely doubted);
+    * what still cannot be followed — a name repeating along the path (a cycle, the
+      only shape that can loop) or a chain past the runaway cap — is recorded in
+      `truncated` and the caller reports it as unverifiable. Reporting every
+      refused hop unconditionally was measured on the real tree and rejected: it
+      reds 240 unrelated assemblies (`url`, `parts`, f-string logging), which is
+      over-blocking, not soundness — the caller therefore gates it on a reachable
+      constraint word.
     """
     entries: list[tuple[tuple[int, int, int], str]] = []
     nodes = list(ast.walk(node))
@@ -1778,10 +1845,18 @@ def _assembled_text(
             continue
         if not isinstance(child, (ast.Name, ast.Attribute, ast.Subscript)):
             continue
-        bound = bindings.get(_use_key(child) or "")
-        if bound is None or depth >= _MAX_RESOLVE_DEPTH:
+        key = _use_key(child) or ""
+        bound = bindings.get(key)
+        if bound is None:
             continue
-        inner = _assembled_text(bound, bindings, depth + 1)
+        if key in seen or depth >= _MAX_RESOLVE_DEPTH:
+            # This IS a bound name and the join will not follow it — a CYCLE along
+            # this path, or the runaway cap — so the text it carries is unknown
+            # here. Recorded, never silently dropped.
+            if truncated is not None:
+                truncated.append(key)
+            continue
+        inner = _assembled_text(bound, bindings, depth + 1, truncated, seen | {key})
         if not inner:
             continue
         entries.append(((child.lineno, child.col_offset, 0), inner))
@@ -1929,15 +2004,20 @@ def ddl_scan(root: Path) -> tuple[list[str], list[str], list[str]]:
         #: Binding key -> bound expression, for the assembled-text join. A key bound
         #: TWICE to different values is dropped: which one wins is decided at
         #: runtime, so resolving to either would be a guess. `_bound_pairs` is the
-        #: same enumeration the taint rule walks, so the two cannot disagree about
-        #: which bindings exist.
+        #: same enumeration the taint rule walks, and the keys are the SAME widened
+        #: set (`_binding_keys` plus the class-qualified spellings), so the two
+        #: cannot disagree about which bindings exist OR about how they are spelled
+        #: — they used to: a class-body `kw = "CREATE "` was taint-keyed
+        #: `expr:Ddl.kw` and join-keyed only as `name:kw`, so the use site found no
+        #: binding, the join saw only the other operand, and a keyword-split
+        #: `Ddl.kw + "CONSTRAINT …"` read as ABSENT (measured).
         bindings: dict[str, ast.expr] = {}
         rebound: set[str] = set()
         pairs = _bound_pairs(tree)
         for target, value, augments in pairs:
             if value is None:
                 continue
-            for key in _binding_keys(target):
+            for key in (*_binding_keys(target), *class_keys.get(id(target), ())):
                 if augments:
                     # `k += rhs` — the accumulated expression is what a use site
                     # resolves to, so the pre-augment value is JOINED with the RHS
@@ -2051,12 +2131,40 @@ def ddl_scan(root: Path) -> tuple[list[str], list[str], list[str]]:
             # the real tree). Joining is the NARROW spelling — it fires only when the
             # parts actually form a constraint statement.
             if assembling is not None and not any(DDL.search(f) for f in fragments):
-                seam = DDL.search(_assembled_text(assembling, bindings))
+                truncated: list[str] = []
+                seam = DDL.search(_assembled_text(assembling, bindings, 0, truncated))
                 if seam:
                     assembled.append(
                         f"{rel}: a constraint statement SPLIT across operands — no "
                         f"single literal holds it, their concatenation does: "
                         f"{seam.group(0).strip()}"
+                    )
+                elif truncated and (
+                    any(DDL_KEYWORD.search(f) for f in fragments)
+                    or any(
+                        key in bindings
+                        and _carries_ddl_keyword(
+                            bindings[key], bindings, frozenset({key})
+                        )
+                        for key in truncated
+                    )
+                ):
+                    # The join met a binding it will NOT follow — a cycle on the path
+                    # (`url = url + "/x"`) or a chain past `_MAX_RESOLVE_DEPTH` — so
+                    # whether a statement is formed here is UNKNOWN. Measured before
+                    # this branch existed: `_A = "CREATE "; _B = _A; _C = _B;
+                    # _D = _C; g.query(_D + "CONSTRAINT …")` returned no `found` AND
+                    # no `assembled`, so the pin stayed green. The GATE is the
+                    # constraint word: an unresolvable hop in string building that
+                    # cannot be a constraint is not this pin's business (measured:
+                    # ungated, 73 unrelated assemblies red the real tree).
+                    assembled.append(
+                        f"{rel}: an assembly form here resolves through "
+                        f"{', '.join(sorted(set(truncated)))} — a binding this scan "
+                        "will not follow (a repeated binding on the path, or a chain "
+                        f"past {_MAX_RESOLVE_DEPTH} names) — and a constraint word is "
+                        "reachable from it, so a statement assembled here cannot be "
+                        "read as absent"
                     )
             # A USE of a name bound to an incomplete statement — the label is
             # supplied HERE, which a static scan cannot resolve. `Load` only: a
@@ -2117,6 +2225,17 @@ def test_the_ddl_scan_sees_every_form_that_could_name_a_label(tmp_path) -> None:
     nowhere. The first fixture reds while the `AugAssign` branch reads only the
     RHS; the second reds while the accumulated binding is dropped as a rebinding,
     because then the use site (`_A + "Point"`) resolves to nothing.
+
+    Four more fixtures pin the same fail-open one layer DOWN, in the join's own
+    bookkeeping: it dropped a hop it refused to follow (four bindings deep), it
+    keyed a class-body binding by a different spelling than the taint rule did
+    (`Ddl.kw` vs `name:kw`), and it could not follow a hop at all — each returning
+    no `found` AND no `assembled` on the head cycle 12 reviewed (`([], [], [])`,
+    measured). `keyword_split_cycle` pins the polarity for a hop that genuinely
+    cannot be followed, and `cycle_without_a_constraint_word` is its CONTROL: the
+    real tree is full of unresolvable cycles in ordinary string building
+    (`url = url + "/x"`, 73 assemblies), and refusing those would red the pin for
+    a question that is not about DDL at all.
     """
     forms = {
         "literal": (
@@ -2284,6 +2403,49 @@ def test_the_ddl_scan_sees_every_form_that_could_name_a_label(tmp_path) -> None:
             '_A += "CONSTRAINT pt UNIQUE NODE "\n'
             'g.query(_A + "Point")\n',
             True,
+            False,
+        ),
+        # The same fail-open one layer DOWN, in the join itself: it dropped the one
+        # thing it refused to resolve, keyed a binding by a different spelling than
+        # the taint rule did, and could not follow a hop at all. Each read as
+        # ABSENT on the head cycle 12 reviewed — measured `([], [], [])`, no
+        # `found` and no `assembled` — keeping the pin green while a `Point`
+        # constraint shipped.
+        "keyword_split_name_chain": (
+            # The keyword half is four bindings away. The join used to stop at three
+            # hops and `continue` — the same `continue` as "this is not a binding" —
+            # so the text vanished, nothing matched and nothing was reported.
+            '_A = "CREATE "\n_B = _A\n_C = _B\n_D = _C\n'
+            'g.query(_D + "CONSTRAINT pt UNIQUE NODE Point")\n',
+            True,
+            False,
+        ),
+        "keyword_split_class_attr": (
+            # The keyword half is a CLASS-BODY binding, USED as `Ddl.kw`. The taint
+            # rule keyed the binding `expr:Ddl.kw` while the join map held only
+            # `name:kw`, so the use site resolved nothing — the two disagreed about
+            # the KEY SPELLING while the comment above the fill claimed they could
+            # not disagree at all.
+            'class Ddl:\n    kw = "CREATE "\n\n'
+            'def c(g):\n    g.query(Ddl.kw + "CONSTRAINT pt UNIQUE NODE Point")\n',
+            True,
+            False,
+        ),
+        "keyword_split_cycle": (
+            # A hop the join cannot follow AT ALL (a name repeating on its path)
+            # whose chain does reach a constraint word: UNVERIFIABLE, never absent.
+            # The control below is the other half of that gate.
+            '_D = _D + "CONSTRAINT pt UNIQUE NODE Point"\ng.query(_D + "CREATE ")\n',
+            True,
+            False,
+        ),
+        "cycle_without_a_constraint_word": (
+            # The CONTROL for that gate: an unresolvable cycle in ordinary string
+            # building (`url = url + "/x"` is the real-tree shape, 73 of them) must
+            # NOT be refused, or the real-tree pin reds unrelated assemblies for a
+            # question that is not about DDL at all.
+            'x = x + "hello".upper()\ng.query(x + "world")\n',
+            False,
             False,
         ),
         "cypher_create_is_not_a_constraint": (

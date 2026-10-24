@@ -563,7 +563,15 @@ mechanisms:
       already held is joined with the right-hand side, so the two halves of a
       keyword split across the two statements are re-joined rather than read as
       one half), and a half carried by a name is folded
-      in too (no single literal holds it) — and any name, attribute, subscript or
+      in too however many bindings it takes (no single literal holds it), with a
+      class-body binding resolved under the SAME key the taint rule uses, so the
+      two cannot disagree about how a binding is spelled — and a hop the join
+      cannot follow at all (a repeated binding on a path, or a chain past its
+      runaway cap) is REFUSED as unverifiable whenever a constraint word is
+      reachable from it, never read as short; the same shape WITHOUT such a word
+      is left alone, because an unresolvable cycle in ordinary string building
+      (`url = url + "…"`) is not a constraint question — and any name, attribute,
+      subscript or
       tuple target BOUND to an
       incomplete one (`AnnAssign`, walrus, `for` target, a CLASS-BODY binding used
       as `Cls.name` — including a tuple target, a subscript target and a NESTED
