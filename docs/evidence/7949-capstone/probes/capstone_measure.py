@@ -1066,13 +1066,18 @@ def point_composition_line(composition: dict | None) -> str:
         f"itself, because a denominator filtered on the link cannot move when the "
         f"link is lost (measured on the superseded `8a8bbcba` run: the earlier "
         f"reading of this figure was 132/132 = 1.000000 while 9 Points sat in "
-        f"'other' — and that run's log is retrievable, not lost: superseding "
-        f"DELETES the TREE entry it replaces, never the history, so "
+        f"'other' — and that run's log is retained in HISTORY, not in the tree: "
+        f"superseding DELETES the TREE entry it replaces, never the history, so "
         f"`git show 6020cbd5f:docs/evidence/7949-capstone/capstone-measured-8a8bbcba.log` "
-        f"still yields it. What the deletion does cost is citability as a row's "
-        f"`evidence`, which V4 resolves against the TREE: the figure is "
-        f"provenance you can CHECK from the commit, not a file this bundle can "
-        f"hand you). TWO classes are "
+        f"yields it WHILE this branch's ref exists — and that ref is temporary. "
+        f"After the squash-merge a branch-only commit is unresolvable BY DESIGN "
+        f"(V11), and the route is the PR ref: `git fetch origin "
+        f"refs/pull/9823/head`, then that same `git show <sha>:<path>`. This "
+        f"bundle's README carries the figure too, so it does not depend on the "
+        f"retrieval. What the deletion does cost is "
+        f"citability as a row's `evidence`, which V4 resolves against the TREE: "
+        f"the figure is provenance you can CHECK from the commit, not a file this "
+        f"bundle can hand you). TWO classes are "
         f"STRUCTURALLY INCAPABLE of an extractedFrom link and are therefore NOT "
         f"in the denominator, with their anchored counts stated: turn rows carry "
         f"none BY CONSTRUCTION (_TURN_WRITE_CYPHER in _write_capture_turns, "
@@ -1113,6 +1118,18 @@ def e3_row_note(*, composition: dict | None, e3_result: dict, graph: str,
     ``git show 6020cbd5f:docs/evidence/7949-capstone/capstone-measured-8a8bbcba.log``
     (what it cannot be is a row's ``evidence``, which V4 resolves against the
     tree); the note does not restate them.
+
+    ⚠️ That recipe is REF-QUALIFIED, not durable, and it must say so.
+    ``6020cbd5f`` is BRANCH-ONLY — ``git for-each-ref --contains 6020cbd5f``
+    names this branch and its remote, never ``origin/main`` — and this repo
+    squash-merges, so once the branch ref is deleted the command above returns
+    ``fatal: bad object``. That is not an accident: V11 in
+    ``tools/capstone_verdict_check.py`` records it ("a squash-merged branch sha
+    NEVER reaches main"). The route that survives the merge is the PR ref —
+    ``git fetch origin refs/pull/9823/head``, whose history carries the commit,
+    then the same ``git show <sha>:<path>``. The README states the figures as
+    well, so a reader who cannot retrieve the log still has the number; what
+    this bundle cannot do is promise the retrieval outlives the branch.
     """
     block = composition or {}
     # NOTE the names: this is the WRITER class (claims + other), NOT the claims

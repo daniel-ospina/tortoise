@@ -13,7 +13,13 @@ aboutObjects: "#7949, #9080, #9075, #9076, #9077, #9073, #9116, #5199, #5333, #7
 
 **Measured at:** `027c8c1ab` on branch `feat/9080-tm` (2026-10-20, after merging `origin/main` at `78ef670d3`) — that
 is the stamp of the shipped REFUSAL log (`capstone.log`), and it is kept because the file is
-kept. The SCORED run below is stamped separately (**Scored at** `e0fc940b5`,
+kept. ⚠️ **`027c8c1ab` is branch-only too, and unlike the two scored stamps below there is no PR-ref
+rescue for it.** It is an ancestor of `feat/9080-tm` (the branch it names) and of no remote ref that
+survives — `git merge-base --is-ancestor 027c8c1ab origin/main` exits 1, and it is **not** reachable
+from `refs/pull/9823/head` either (checked; both `6020cbd5f` and `8a8bbcba2` are). So
+`git show 027c8c1ab:<path>` works only in a checkout that still carries that branch: it is a STAMP —
+a convenience, not a durable pointer. The RECORD does not depend on it: `capstone.log` is committed
+in this tree and is read as a file. The SCORED run below is stamped separately (**Scored at** `e0fc940b5`,
 2026-10-23T23:16:55Z), because it is a different artifact from a different program
 (`probes/capstone_measure.py`).
 
@@ -127,9 +133,22 @@ CONSTRUCTION (a denominator defined by the link it reports can only read `1.0000
 count in the historical claim, and the composition line now names where the `132/132` figure can be
 retrieved (`git show 6020cbd5f:docs/evidence/7949-capstone/capstone-measured-8a8bbcba.log`):
 superseding DELETES the tree entry, not the history — what it does cost is citability as a row's
-`evidence`, which V4 resolves against the tree. **No measured number moved** — neither corrected span
-carries a figure belonging to this run; only that explanatory clause is different, and the probe at
-this head (now `e3_row_note`) emits the corrected form.
+`evidence`, which V4 resolves against the tree.
+
+⚠️ **That retrieval is REF-QUALIFIED, not durable — and the earlier wording implied otherwise.**
+`6020cbd5f` is a **branch-only** commit: `git for-each-ref --contains 6020cbd5f` names this branch
+and its remote, never `origin/main` (`git merge-base --is-ancestor 6020cbd5f origin/main` exits 1).
+This repo squash-merges, so a branch-only commit is unresolvable **by design** the moment that ref is
+deleted — not by accident, and V11 in `tools/capstone_verdict_check.py` records exactly that ("a
+squash-merged branch sha NEVER reaches main"). While the branch exists the command above works;
+after the merge the route is the **PR ref** — `git fetch origin refs/pull/9823/head`, whose history
+carries the commit, then the same `git show <sha>:<path>` (verified for both `6020cbd5f` and
+`8a8bbcba2`). The figure is also stated in this README, so it does not depend on the retrieval at
+all.
+
+**No measured number moved** — neither corrected span carries a figure belonging to this run; only
+that explanatory clause is different, and the probe at this head (now `e3_row_note`) emits the
+corrected form.
 
 | session | ok | mode | extracted | edus | points | operators | search |
 |---|---|---|---|---|---|---|---|
@@ -403,7 +422,10 @@ probe on the same corpus has produced double-digit bare counts on one pass and z
 (6/50 in the shipped log; **0/59** at the superseded stamp `7c9c34d84`, whose log is not in the tree
 — retrievable with `git show 8a8bbcba2:docs/evidence/7949-capstone/capstone-measured-7c9c34d8.log`,
 because superseding DELETES the tree entry and not the history; what it costs is citability as a
-row's `evidence`, which V4 resolves against the tree).
+row's `evidence`, which V4 resolves against the tree. **That route is ref-qualified like the one
+above:** `8a8bbcba2` is branch-only, so after the squash-merge the same `git fetch origin
+refs/pull/9823/head` + `git show` applies; and the `0/59` figure is stated here, so it does not
+depend on the retrieval).
 So E1 needs the controlled design #9076 built — one extraction, both arms applied to the SAME
 candidate population (`assert_one_gate_population`) — pointed at `tests/eval/write_path` and made
 to persist. That is work, and it is recorded here rather than approximated by a ratio of two runs
