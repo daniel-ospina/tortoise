@@ -2583,7 +2583,7 @@ def test_the_gap_fits_the_bound_its_readers_apply(monkeypatch) -> None:
     head = live.error[:320]
     for pid in long_refused:
         assert str(pid) in head, f"pid {pid} fell outside the window on a long path"
-    assert "orphan" in head, "the remedy must survive a long pathlen too"
+    assert "reap the orphan" in head, "the remedy must survive a long pathlen too"
     assert "runnerprov-land-0123456789 (deleted)" in head, (
         "and the datum must keep the part that IDENTIFIES the directory — its tail")
 
@@ -2607,6 +2607,49 @@ def test_the_gap_fits_the_bound_its_readers_apply(monkeypatch) -> None:
         "the remedy must still be inside the first-cause cut when a real cmux arm follows it")
     for pid in long_refused:
         assert str(pid) in head, f"pid {pid} was pushed out by the cmux arm"
+
+    # ⛔ AND A CONTROL-LADEN PATH (review of #2401, fourth round). The cap is on the RENDERED form
+    # because `repr` expands each non-printable byte four-fold; the plain-path case above cannot see
+    # that, so BOTH regressions (dropping the `[:64]`, or re-capping the raw string) shipped green.
+    # This case is the only one that can fail on them.
+    ctl = {2510200 + i: "/tmp/wt-" + "\x01" * 40 + " (deleted)" for i in range(5)}
+    cwds.refused = ctl
+    monkeypatch.setattr(fs, "pi_processes", lambda: (
+        [{"pid": p, "ppid": 1} for p in ctl], ""))
+    live = fs.live_sessions()
+    ctl_arm = live.error.split("; cmux session store: ")[0]
+    assert len(ctl_arm) <= 320, (
+        f"a control-laden sample must not overrun the bound: {len(ctl_arm)} chars")
+    assert "reap the orphan" in ctl_arm[:320], (
+        "and the remedy must still be inside the window")
+
+    # ⛔ AND THE COUNTING CASE: more than five unresolved pids adds `(+N more)`, which has to be
+    # budgeted too (measured 324-326 chars for 8-digit pids before the remedy clause was shortened).
+    many = {2520000 + i: f"/tmp/cell-wt-many{i} (deleted)" for i in range(12)}
+    cwds.refused = many
+    monkeypatch.setattr(fs, "pi_processes", lambda: (
+        [{"pid": p, "ppid": 1} for p in many], ""))
+    live = fs.live_sessions()
+    many_arm = live.error.split("; cmux session store: ")[0]
+    # ⛔ AND THE SAMPLE MUST COME FROM THE NAMED SLICE (review of #2401, fourth round). With the
+    # refusal held only by pids OUTSIDE the five named, an all-pids scan printed `e.g. <path>` for a
+    # pid the message never names — an operator reaping the five would change nothing.
+    sparse = {2530000: "", 2530001: "", 2530002: "", 2530003: "", 2530004: ""}
+    sparse.update({2530005: "/tmp/cell-wt-the-one-that-matters (deleted)",
+                   2530006: "/tmp/cell-wt-also-matters (deleted)"})
+    cwds.refused = {k: v for k, v in sparse.items() if v}
+    monkeypatch.setattr(fs, "pi_processes", lambda: (
+        [{"pid": p, "ppid": 1} for p in sparse], ""))
+    live = fs.live_sessions()
+    sparse_arm = live.error.split("; cmux session store: ")[0]
+    assert "(+2 more)" in sparse_arm, "the omitted count is stated"
+    assert "the-one-that-matters" not in sparse_arm, (
+        "the datum must never belong to a pid the message does not name")
+
+    assert "(+7 more)" in many_arm, "the omitted count is still stated"
+    assert len(many_arm) <= 320, (
+        f"the counting case must fit the bound too: {len(many_arm)} chars")
+    assert "reap the orphan" in many_arm[:320]
 
 
 def test_the_plural_grammar_is_preferred_and_a_later_one_can_answer(monkeypatch) -> None:

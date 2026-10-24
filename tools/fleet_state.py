@@ -1327,11 +1327,11 @@ def _cmux_said(text: str) -> str:
 
     ⛔ THE BOUND IS ON THE RENDERED String, NOT ON ITS INPUT (review of #2401).
     Slicing the input to 200 and then calling ``repr`` produced up to **802**
-    characters — ``repr`` expands every non-printable character four-fold
-    (``\\x01`` → ``\\x01``, measured ``len == 802`` for 200 control bytes) — which is
-    2.5x the 320-char bound this message is read through, so an ANSI- or CR-laden
-    refusal would still overrun ``liveness_error`` and the persisted board cache.
-    ``_BOUND`` is therefore applied AFTER the repr.
+    characters, because ``repr`` escapes each non-printable byte as a four-character
+    ``\\xNN`` sequence (200 control bytes → 802 characters, measured) — which is 2.5x
+    the 320-char bound this message is read through, so an ANSI- or CR-laden refusal
+    would still overrun ``liveness_error`` and the persisted board cache.
+    ``_CMUX_SAID_BOUND`` is therefore applied AFTER the repr.
     """
     body = (text or "").strip()
     if not body:
@@ -1787,8 +1787,13 @@ def live_sessions() -> LiveSessions:
                 # bound. Measured against the real bound: this form keeps every pid,
                 # one raw path and the remedy inside 320.
                 pids_txt = ", ".join(str(p) for p in still_alive[:5])
+                # ⛔ THE DATUM MUST BELONG TO A PID THE MESSAGE NAMES (review of #2401, fourth
+                # round). Scanning all of `still_alive` while printing only the first five let an
+                # operator read `pid(s) … (+2 more)` and then be shown the path of the SEVENTH —
+                # reaping the five named ones would change nothing. The sample is drawn from the
+                # printed slice, so it always names one of them.
                 sample = next(
-                    (refused[p] for p in still_alive if p in refused), None
+                    (refused[p] for p in still_alive[:5] if p in refused), None
                 )
                 more = "" if len(still_alive) <= 5 else f" (+{len(still_alive) - 5} more)"
                 # ⛔ THE SAMPLE IS BOUNDED TOO, AND IT KEEPS ITS TAIL (review of #2401).
@@ -1808,6 +1813,8 @@ def live_sessions() -> LiveSessions:
                 if sample:
                     sample_txt = repr(sample)
                     if len(sample_txt) > 64:
+                        # The cut may land mid-escape for a control-laden path; it is bounded,
+                        # JSON-safe (the board cache is ensure_ascii) and always keeps the tail.
                         sample_txt = repr("…" + sample[-40:])[:64]
                 proc_error = (
                     f"live pi pid(s) {pids_txt}{more} have no ATTRIBUTABLE cwd"
@@ -1816,8 +1823,11 @@ def live_sessions() -> LiveSessions:
                         "placeholder)"
                         if sample_txt else ""
                     )
-                    + " — an unattributable lane means 'nobody holds it' is "
-                    "unprovable; reaping the orphan is the fix, not the gate"
+                    # ⛔ SHORT ON PURPOSE: the counting case (8-digit pids + `(+N more)` + a
+                    # 64-char sample) measured 324-326 characters against a 320-character cut
+                    # (review of #2401, fourth round), so this clause is the slack. Every word
+                    # removed here is a character the pids keep.
+                    + " — so 'nobody holds it' is unprovable; reap the orphan, not the gate"
                 )
         for cwd, pids in by_cwd.items():
             pids.sort()
