@@ -6765,10 +6765,8 @@ def test_the_gate_walk_magnitude_ratios_recompute_from_the_rows_they_name():
         f"a materially wrong figure rather than the rounding it exists for: {drift}"
     )
 
-    # ⛔ …and the BARE-percentage sweep must hold on EVERY prose site in this file, not
-    # only on the one paragraph this arm points it at (`#9528` re-review round 5). The
-    # ⛔ …and every OTHER shape `_magnitude_ratio_findings` can report must hold on every
-    # prose site in this file, not only on the paragraph this arm points it at (`#9528`
+    # ⛔ …and every shape `_magnitude_ratio_findings` can report must hold on EVERY prose
+    # site in this file, not only on the paragraph this arm points it at (`#9528`
     # re-review rounds 5-6). The sweep ran on `_unsettleable_magnitudes.__doc__` alone,
     # so the defect class this branch exists to close could be re-inserted into the module
     # docstring and into this arm's OWN docstring: measured, a bare percentage reds now,
