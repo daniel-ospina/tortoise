@@ -2506,12 +2506,18 @@ def _route_table() -> dict[tuple[str, str], frozenset[str]]:
 #: had no `in_function` flag at all, so function locals were symbols): uniform
 #: 2/3/4/5 = 26/59/90/170 of 418 and the shipped predicate 69, which is why
 #: `16.5 %` (69/418) reproduces there and `15.6 %` reproduces on NO index (a
-#: uniform 3 was 59/418 = 14.1 %, and the uniform-5 rate was two fifths, which the
-#: note above already states correctly). ⚠️ The index matters: the CURRENT sweep
-#: above, locals excluded, applied to that same tree measures 24/34/42/52 and a
-#: shipped 36 — the difference is the defect, not the tree. The DISCRIMINATION the
-#: old wording claimed was TRUE there — those three substitutions do resolve at
-#: 3/5/5/5/5 hops against a uniform 5 and are refused at 3. What changed is that
+#: uniform 3 was 59/418 = 14.1 %, and the uniform-5 rate was 170/418, which is
+#: the "roughly two fifths" the arm BELOW states). ⚠️ The index matters: the
+#: CURRENT sweep above, locals excluded, applied to that same tree measures
+#: 24/34/42/52 and a shipped 36 — the difference is the defect, not the tree.
+#: The DISCRIMINATION the old wording claimed was TRUE there, and the per-DOOR
+#: distances are what show it, not a per-cell minimum: the swapped cells of rows
+#: 22/24 resolve at 5, 5 (row 24's reader via row 22's two doors) and 3, 4, 4
+#: (row 22's reader via row 24's three doors); rows 28/30's REST doors at 5 / 5;
+#: row 28's verb at 5 — every door inside a uniform 5, and a cell is STILL
+#: refused at 3 because two of row 22's three substituted doors sit at 4 (the arm
+#: refuses a CELL when ANY of its doors exceeds the budget, so the leading `3` is
+#: one green door inside a refused cell, not a green cell). What changed is that
 #: the local-symbol fix removes the collisions those substitutions were
 #: exploiting: under the current index all three are REFUSED even at a uniform 5.
 #: The budget stays at 3 — it is a bound, and nothing here depends on the old
