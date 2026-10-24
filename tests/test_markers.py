@@ -59,6 +59,12 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # namespace PROD code resolves, the same `prod-coupled` class as the
     # test_agent_signup / test_dr_endpoints / test_billing entries below.
     "test_github_connect.py": {"registry": "prod-coupled"},
+    # #9852: the connector-journey test constructs an explicit SDK on a tmp_path
+    # db with the canonical `registry` namespace PROD code resolves (`quota.py` /
+    # `hosted_api.py` `_make_sdk(namespace="registry")`) — the same `prod-coupled`
+    # class as above. The db_path is per-test, so the per-path derivation isolates
+    # it; the literal must stay byte-for-byte.
+    "test_9664_capstone_connector_to_record.py": {"registry": "prod-coupled"},
     # 2026-08-28 merge-reconciliation: #1785/#1816 files use the 'registry'
     # literal (session/extraction tests) — routed so the markers gate passes
     # repo-wide.
