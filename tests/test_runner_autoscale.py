@@ -1123,6 +1123,38 @@ def test_a_launchd_host_without_svc_sh_is_unknown_never_offline(env):
     assert e.restarted() == []
 
 
+def test_systemd_escalation_that_cannot_run_is_unknown_never_a_replace(env):
+    """⛔ REFUSED ESCALATION IS rc 1, NOT 127 — so the systemd leg fell through to `--replace`.
+
+    `_run` returns 127 only when the command could not be SPAWNED (OSError), and the systemd branch
+    guarded on exactly that. But the shipped unit runs as `User=$(id -un)` and does NOT set
+    RUNNER_AUTOSCALE_NO_SUDO, so `sudo -n systemctl restart` is the default, and on a box without
+    passwordless sudo it exits 1 having run NOTHING ("sudo: a password is required" — the same
+    measurement the launchd branch records). Read as `failed`, the caller skips `wait_online` and
+    re-registers with `--replace`, invalidating the credentials of a runner that may be
+    reconnecting. The launchd leg was fixed for this; the systemd leg was not, and no fixture
+    exercised it (every systemd case sets RUNNER_AUTOSCALE_NO_SUDO=1).
+
+    Mutation: drop the `_sudo_prefix()` probe -> "restart r1: … rc=1", then a `--replace`
+    re-registration -> RED.
+    """
+    e = env(
+        pool=[("r1", "offline", False, "self-hosted-x64")],
+        installs=[("gh-runner-x64-1", "r1")],
+        service="systemd",
+        sudo_fails=True,
+    )
+    rec = e.record()
+    assert rec["_rc"] == 2, rec
+    assert rec["verdict"] == "unmeasurable", rec
+    assert rec["unverified_cause"] == "no-restart-primitive", rec
+    assert e.config() == "", f"nothing may be re-registered on an unknown state: {e.config()}"
+    # ⛔ And the restart must not be ATTEMPTED either: a `systemctl restart` that ran after a
+    # failed escalation would be a second false claim about a command that never executed.
+    assert e.restarted() == [], e.restarted()
+    assert any("cannot restart r1" in a for a in rec["actions"]), rec["actions"]
+
+
 def test_launchd_never_escalates_so_a_passwordless_sudo_gap_cannot_force_a_replace(env):
     """⛔ The shipped default is `sudo -n`, and a launchd agent is PER-USER: root cannot address
     `gui/<uid>`, and on a box without passwordless sudo `sudo -n` exits 1 without running

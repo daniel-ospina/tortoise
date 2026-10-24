@@ -600,6 +600,25 @@ def restart_runner(runner: LocalRunner) -> tuple[str, str]:
     """
     manager = service_manager()
     if manager == "systemd":
+        # ⛔ REFUSED ESCALATION IS rc 1, NOT 127 — so the `rc == 127` guard below never catches the
+        # case this repo already measured. The shipped unit runs as `User=$(id -un)` and does NOT
+        # set RUNNER_AUTOSCALE_NO_SUDO, so `sudo -n` is the default; on a box without passwordless
+        # sudo it exits 1 having run nothing ("sudo: a password is required" — measured on the dev
+        # box, and recorded in the launchd branch below). Read as `failed`, the caller skips
+        # `wait_online` and goes straight to `register(..., replace=True)`: it re-registers on the
+        # strength of an attempt that never happened, invalidating the credentials of a runner that
+        # may be reconnecting — the destructive half of F1, still present on systemd after it was
+        # fixed for launchd. Probe the escalation itself so "could not attempt" reads `unsupported`.
+        prefix = _sudo_prefix()
+        if prefix:
+            probe_rc, probe_out = _run([*prefix, "true"], timeout=30)
+            if probe_rc != 0:
+                return (
+                    "unsupported",
+                    f"cannot restart {runner.name}: '{' '.join(prefix)}' is unavailable "
+                    f"(rc={probe_rc} {probe_out[:120]}) — NOTHING was attempted, so it is not "
+                    "offline and nothing is re-registered",
+                )
         rc, out = _run(_systemctl(["restart", runner.unit]), timeout=180)
         # ⛔ COULD NOT BE INVOKED IS NOT "STILL OFFLINE". 127 is `_run`'s own code for "the command
         # did not run" (missing binary, refused escalation), which tells us NOTHING about the

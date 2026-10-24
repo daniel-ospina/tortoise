@@ -126,6 +126,13 @@ def _sandbox(
             "exit 0\n",
         )
         _write_stub(bindir, "cron", "#!/usr/bin/env bash\nexit 0\n")
+        # A cron DAEMON that is RUNNING, so the cron leg's liveness check (`cron_daemon_running`)
+        # sees what a cron-scheduled box sees. Mirrors the `cron` stub above and, like it, keeps
+        # the case hermetic: the sandbox PATH includes /usr/bin, where a REAL `pgrep` lives, so an
+        # unstubbed one makes these cases depend on whether the HOST happens to run cron (false on
+        # every systemd cell, true on a Mac). Override with an `exit 1` stub to simulate
+        # installed-but-no-daemon.
+        _write_stub(bindir, "pgrep", "#!/usr/bin/env bash\nexit 0\n")
     # `sha256sum` is deliberately NOT stubbed (stock macOS has no such binary) while `shasum` is —
     # the platform split the drift check has to survive. On Linux the real sha256sum wins the
     # resolver instead; either way the comparison must be a real one.
@@ -1016,3 +1023,118 @@ def test_help_prints_the_usage_block():
     )
     assert res.returncode == 0, res.stderr
     assert "USAGE" in res.stdout
+
+
+# ── cycle 2 review: the refusals that were still one branch over ─────────────────────────────
+def test_a_crashing_probe_is_refused_at_install_not_only_the_tools_own_exit_2(tmp_path):
+    """⛔ A CRASH IS THE MOST INERT OUTCOME, AND INSTALL ARMED IT ANYWAY.
+
+    `status()` already refused ANY non-zero probe (`[ "$probe_rc" = "0" ] || return 2`) and says so
+    in its own comment, but the INSTALL path propagated only the tool's own exit 2. So a tool that
+    dies with exit 1 (uncaught exception, truncated interpreter, a panic) installed cleanly,
+    printed "installed", wrote the plist — and `--status` on that same box immediately reported
+    `probe: FAILED (exit 1) — this schedule would fire and do NOTHING` and exited 2. Install and
+    status disagreeing about the same box, in the direction that arms an inert schedule.
+
+    Mutation: `if [ "$probe_rc" = "2" ]` (the pre-fix test) -> rc 0, run-copy + plist written -> RED.
+    """
+    sb = _sandbox(tmp_path)
+    crashing = _write_stub(
+        sb["bin"],
+        "py-crash",
+        "#!/usr/bin/env bash\n"
+        'case " $* " in *" --status "*) echo "Traceback (most recent call last):" >&2; exit 1 ;; esac\n'
+        "exit 0\n",
+    )
+    res = _run(sb, env=dict(sb["env"], AUTOSCALE_PYTHON=str(crashing)))
+    assert res.returncode == 2, (res.stdout, res.stderr)
+    assert "REFUSED" in res.stderr and "cannot MEASURE" in res.stderr, res.stderr
+    assert not (sb["install"] / "runner_autoscale.py").exists(), "refusal wrote the run-copy"
+    assert not (sb["agents"] / PLIST_NAME).exists(), "refusal wrote the plist"
+    # …and the documented escape hatch still arms it deliberately.
+    res = _run(sb, env=dict(sb["env"], AUTOSCALE_PYTHON=str(crashing), AUTOSCALE_SKIP_PROBE="1"))
+    assert res.returncode == 0, (res.stdout, res.stderr)
+
+
+def test_a_large_crontab_does_not_corrupt_the_install_or_the_status(tmp_path):
+    """⛔ `crontab -l | grep -qF` + `set -o pipefail` = the SIGPIPE bug fixed for launchd.
+
+    `grep -q` exits at the FIRST match, so a still-writing `crontab -l` takes SIGPIPE and the
+    pipeline reports 141 — which `if` reads as "no match". Two distinct harms follow:
+    `--status` reported an ARMED schedule as not installed (armed=0, exit 2), and a re-install
+    APPENDED a second identical line, firing the guard twice per period — the opposite of the
+    "re-running is safe on every sync" promise, and a doubling of the API traffic the >= 60s floor
+    exists to bound. The single-line fixture in the sibling cases cannot reach this: one line never
+    fills the pipe.
+
+    ⚠️ The SIZE that reproduces is host-dependent, so this case does not guess. Measured on the dev
+    box: 85 KB did NOT reproduce (`q=0`), 2.2 MB DID (`q=141`, 5/5). The fixture below is therefore
+    sized to force the SIGPIPE on any plausible buffer rather than to model "a busy crontab" — a
+    smaller one made this test PASS against the unfixed code (verified by mutation), i.e. vacuous.
+
+    Mutation: restore `grep -qF` at either site -> --status exits 2, and two installs leave 2
+    entries -> RED.
+    """
+    sb = _sandbox(tmp_path, uname="Linux")
+    # ⛔ THE DEFAULT STUB CANNOT REPRODUCE THIS: it ends `exit 0`, which MASKETS the writer's
+    # SIGPIPE — the pipeline reported 0 even with `grep -qF` in place, so the first version of this
+    # test passed against the unfixed code (caught by mutation, not by the suite). A real
+    # `crontab -l` is terminated BY the signal, so the stub must propagate `cat`'s status for the
+    # left-hand side of the pipeline to behave like the real thing.
+    _write_stub(
+        sb["bin"],
+        "crontab",
+        "#!/usr/bin/env bash\n"
+        'STORE="$STUB_LOG/crontab.txt"\n'
+        'if [ "${1:-}" = "-l" ]; then [ -f "$STORE" ] || exit 1; cat "$STORE"; exit $?; fi\n'
+        'if [ "${1:-}" = "-" ]; then cat > "$STORE.new"; mv "$STORE.new" "$STORE"; exit 0; fi\n'
+        "exit 0\n",
+    )
+    # Force the cron leg on a cell that has BOTH probes available: `has_systemd` reads
+    # /run/systemd/system, so on a real Linux cell the cron branch is otherwise unreachable.
+    env = dict(sb["env"], AUTOSCALE_HAS_SYSTEMD="0", AUTOSCALE_HAS_CRON="1")
+    assert _run(sb, env=env).returncode == 0
+    entries = sb["crontab_store"].read_text(encoding="utf-8").splitlines()
+    assert len(entries) == 1, entries
+    # Sized to force the SIGPIPE regardless of the pipe buffer (2.2 MB; see the docstring for why
+    # a smaller one is vacuous), keeping our own entry FIRST so `-q` matches immediately.
+    blob = entries + [f"0 3 * * * /usr/bin/true  # filler-{i}" for i in range(50_000)]
+    sb["crontab_store"].write_text("\n".join(blob) + "\n", encoding="utf-8")
+    # (a) --status must still see an ARMED schedule.
+    res = _run(sb, "--status", env=env)
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    assert "installed: cron entry present" in res.stdout, res.stdout
+    # (b) a re-install must CONVERGE, not append a duplicate entry.
+    assert _run(sb, env=env).returncode == 0
+    after = sb["crontab_store"].read_text(encoding="utf-8")
+    assert after.count("runner-autoscale-cron") == 1, after[-400:]
+
+
+def test_cron_installed_but_the_daemon_is_not_running_is_refused(tmp_path):
+    """⛔ A BINARY IS NOT A DAEMON: the cron leg was the one branch that could still be inert.
+
+    The systemd leg refuses on `is-active != active` and the launchd leg on a missing label, but the
+    cron leg checked only that the BINARIES exist. `crontab` present with `cron` installed and the
+    daemon stopped is the normal shape of a container/VM image without an init — and it is exactly
+    the shape that REACHES this leg, since `has_systemd` requires `/run/systemd/system`. It
+    installed cleanly, printed "installed: cron entry -> …" and exited 0 on a box where the entry
+    could never fire.
+
+    Mutation: drop the `cron_daemon_running` refusal -> rc 0 and the entry is written -> RED.
+    """
+    sb = _sandbox(tmp_path, uname="Linux")
+    _write_stub(sb["bin"], "pgrep", "#!/usr/bin/env bash\nexit 1\n")  # no daemon
+    env = dict(sb["env"], AUTOSCALE_HAS_SYSTEMD="0", AUTOSCALE_HAS_CRON="1")
+    res = _run(sb, env=env)
+    assert res.returncode == 2, (res.stdout, res.stderr)
+    assert "REFUSED" in res.stderr and "daemon" in res.stderr, res.stderr
+    assert not sb["crontab_store"].exists(), "refusal edited the crontab"
+    assert not (sb["install"] / "runner_autoscale.py").exists(), "refusal wrote the run-copy"
+    # The installed-but-inert state must also FAIL --status, not just the install.
+    sb["crontab_store"].write_text(
+        "*/5 * * * * /bin/true  # runner-autoscale-cron\n", encoding="utf-8"
+    )
+    res = _run(sb, "--status", env=env)
+    assert res.returncode == 2, (res.stdout, res.stderr)
+    assert "installed: cron entry present" in res.stdout, res.stdout
+    assert "no cron daemon is running" in res.stdout, res.stdout
