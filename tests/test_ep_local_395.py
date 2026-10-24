@@ -914,11 +914,16 @@ _AC5_QUIET_WALL_S = 3.0
 # one runnable task per CPU there is little to contend with, so the pass's wall
 # reading is its own.
 _AC5_QUIET_LOAD_RATIO = 1.0
-# A HANG detector, not a contention detector: 3x the worst wall measured on a
-# healthy pass under saturation (9.56 s at 30 workers / 4 CPUs). A wedged pass
-# blows past it; a starved one does not. The suite's own timeout is the outer
-# backstop, so this can stay generous without leaving a CI leg unbounded.
-_AC5_HANG_S = 30.0
+# A HANG detector, not a contention detector, and the number is set from the
+# TOP of the measured range rather than one lucky sample. Measured healthy walls
+# on this 4-CPU box (cpu 0.91-0.94 throughout, converged, 40 confidences):
+# 12 workers -> 3.07/3.38/4.27 s; 30 workers -> 7.25/9.56/8.89 s in one session
+# and 11.85 s in another (the spread is real, so the worst case is what counts);
+# 60 workers -> 15.15/15.30 s. Review measurement extended the range: 90 workers
+# -> 24-27 s. At 60 s a healthy pass would need roughly 50-60x oversubscription
+# to cross, which is a dead box rather than a busy one, while a genuinely hung
+# pass still reds. The suite's own timeout is the outer backstop.
+_AC5_HANG_S = 60.0
 
 
 def _ac5_effective_cpus() -> int:
@@ -927,9 +932,17 @@ def _ac5_effective_cpus() -> int:
     `os.cpu_count()` reports the HOST's CPUs, and `loadavg` is host-wide, so on
     a constrained container on a busy host the ratio can read "quiet" while the
     pass is genuinely starved — exactly the health-vs-starved confusion this
-    change exists to close. Both constraint mechanisms must be honoured: a
-    cgroup QUOTA (`cpu.max`) and a CPUSET pin (`sched_getaffinity`), because a
-    cpuset needs no quota. Every correction only ever REDUCES the count, which
+    change exists to close. Three mechanisms, all honoured:
+
+    - CPUSET pins (`sched_getaffinity`) — no quota required;
+    - a cgroup v2 QUOTA (`cpu.max`) on THIS process's cgroup and every ancestor
+      of it, because `CPUQuota=` is usually set on a service slice rather than
+      on the cgroup the process lands in (reading only the mount root misses
+      every systemd-scoped box — the root file often does not exist);
+    - the cgroup v1 pair (`cpu.cfs_quota_us` / `cpu.cfs_period_us`), same walk.
+
+    Every correction only ever REDUCES the count, and a fractional quota is
+    FLOORED (a 1.5-CPU quota is reported as 1, not 2), so the derived ratio
     overstates contention, which only ever selects the loose hang bound — the
     safe direction."""
     cpus = os.cpu_count() or 1
@@ -937,16 +950,46 @@ def _ac5_effective_cpus() -> int:
         cpus = max(1, min(cpus, len(os.sched_getaffinity(0))))
     except (AttributeError, OSError):
         pass
-    try:
-        with open("/sys/fs/cgroup/cpu.max", encoding="ascii") as fh:
-            quota, period = fh.read().split()[:2]
-        if quota != "max":
-            period = int(period)
-            if period > 0:
-                cpus = max(1, min(cpus, -(-int(quota) // period)))
-    except (OSError, ValueError):
-        pass
+    for quota, period in _ac5_cgroup_quotas():
+        try:
+            quota, period = int(quota), int(period)
+        except (TypeError, ValueError):
+            continue
+        if quota > 0 and period > 0:
+            cpus = max(1, min(cpus, quota // period))
     return cpus
+
+
+def _ac5_cgroup_quotas():
+    """Yield `(quota, period)` for this process's cgroup and each ancestor."""
+    try:
+        with open("/proc/self/cgroup", encoding="ascii") as fh:
+            rel = next(
+                (line.split("::", 1)[1].strip() for line in fh
+                 if line.startswith("0::")), "")
+    except OSError:
+        return
+    root = "/sys/fs/cgroup"
+    parts = [p for p in rel.split("/") if p]
+    # The process's own cgroup, then each ancestor up to the mount root.
+    for depth in range(len(parts), -1, -1):
+        base = root + ("/" + "/".join(parts[:depth]) if depth else "")
+        try:  # cgroup v2
+            with open(f"{base}/cpu.max", encoding="ascii") as fh:
+                quota, period = fh.read().split()[:2]
+            if quota != "max":
+                yield quota, period
+            continue
+        except (OSError, ValueError):
+            pass
+        try:  # cgroup v1 (a quota of -1 means unlimited; the caller skips it)
+            with open(f"{base}/cpu.cfs_quota_us", encoding="ascii") as fh:
+                quota = fh.read().strip()
+            with open(f"{base}/cpu.cfs_period_us", encoding="ascii") as fh:
+                period = fh.read().strip()
+            yield quota, period
+        except OSError:
+            continue
 
 
 def _ac5_wall_bound(load1_ratio: float, load5_ratio: float) -> float:
@@ -971,12 +1014,13 @@ def test_ac5_wall_bounds_contract():
       ("a 3 s pass must still fail") and only applies when the box has at most
       one runnable task per CPU. 3.0 s is not a margin — it is the criterion. A
       quiet-box pass measured 1.3-1.8 s wall.
-    - the HANG bound must clear the worst wall measured on a pass that was
-      HEALTHY under deliberate saturation (9.56 s at 30 workers, cpu 0.92 s,
-      converged, 40 confidences) by a wide margin, because it is a hang
-      detector and not a contention detector; and it must stay small enough
-      that a wedged pass is still bounded (it is floored here at 3x the
-      measured worst healthy wall, and capped at one minute).
+    - the HANG bound must clear the TOP of the measured healthy range by a
+      wide margin, because it is a hang detector and not a contention
+      detector. That range is 7.25-11.85 s at 30 workers, 15.15-15.30 s at 60
+      (cpu 0.91-0.94 throughout, converged, 40 confidences) and 24-27 s at 90
+      workers. The bound is therefore pinned above TWICE the 90-worker figure
+      (2 x 27 = 54 s) and at or below one minute, which also keeps it inside
+      the suite's own timeout backstop.
     - the CPU leg must remain the operative budget (`cpu < 1.2`), i.e. strictly
       tighter than both wall bounds.
     - the quiet gate must be a real gate, not always-true or always-false: a
@@ -985,11 +1029,16 @@ def test_ac5_wall_bounds_contract():
 
     THE RESIDUALS, stated where a future editor will meet them (they are also
     in `test_ac5_interactive_latency_zone` and in the scoping doc, §5):
-    - on a LOADED box a wall-shaped regression below the hang bound passes, and
-      `cpu < 1.2` is UPWARD-only, so a cpu DROP passes it too;
+    - on a LOADED box a wall-shaped regression below the hang bound passes;
+    - `cpu < 1.2` is UPWARD-only, so a cpu DROP (replace compute with wait)
+      passes the CPU leg — only the quiet-box wall leg can see it;
     - the gate reads a 1-to-5 minute average, so contention that begins INSIDE
-      the timed window is invisible to it and can still red the latency leg.
-    Both need a dedicated quiet lane to close; neither is closed by a tighter
+      the timed window is invisible to it and can still red the latency leg;
+    - even a genuinely QUIET box is not perfectly repeatable: the population's
+      own healthy readings include a 2.53 s pass against this 3.0 s bound
+      (1.19x headroom), and the causes — daemon service time, disk noise, CPU
+      steal — are invisible to `os.getloadavg()`.
+    All four need a dedicated quiet lane to close; none is closed by a tighter
     bound, which is what this contract exists to prevent.
     """
     assert _AC5_QUIET_WALL_S == 3.0, (
@@ -1001,13 +1050,17 @@ def test_ac5_wall_bounds_contract():
     assert 0 < _AC5_QUIET_LOAD_RATIO <= 2.0, (
         "the quiet gate must be a real gate: 0 never asserts the latency bound, "
         "and a large ratio asserts it on a saturated box")
-    assert _AC5_HANG_S > 3 * 9.56, (
-        "the hang bound must sit far outside contention's reach (the worst "
-        "healthy wall measured under saturation was 9.56 s) or it reds a "
-        "starved-but-healthy pass — the #9015/#9331 class this closes")
+    assert _AC5_HANG_S > 2 * 27.0, (
+        "the hang bound must sit far outside contention's reach: a healthy "
+        "pass reached 24-27 s of wall at 90 workers on 4 CPUs, so a bound at "
+        "or below twice that reds a starved-but-healthy pass — the "
+        "#9015/#9331 class this closes")
     assert _AC5_HANG_S <= 60.0, (
         "the hang bound must still bound a wedged pass — the suite's timeout is "
         "the outer backstop, not a substitute")
+    assert _ac5_effective_cpus() <= len(os.sched_getaffinity(0)), (
+        "the effective count must never exceed the process's own affinity — a "
+        "larger count understates contention and selects the tight bound")
     assert _AC5_HANG_S > _AC5_QUIET_WALL_S > 1.2, (
         "the CPU leg (`cpu < 1.2`) must stay the operative budget and the "
         "quiet bound the strict one — a wall bound at or below 1.2 s would "
@@ -1075,33 +1128,44 @@ def test_ac5_interactive_latency_zone():
     "the box is saturated".
     (b) A flat FIVE SECONDS is no safer, which is why it is not used: at 30
     workers on this box the same healthy passes took 7.25/9.56/8.89 s of wall
-    at cpu 0.92-0.94, so a 5.0 s flat cap reds them too. Any wall-derived
+    at cpu 0.92-0.94 (11.85 s in a second session), and 15.15/15.30 s at 60
+    workers — so a 5.0 s flat cap reds them too. Any wall-derived
     LATENCY bound reds on a loaded enough box; only a hang bound far outside
-    contention's reach survives, which is what the 30.0 s leg is.
+    contention's reach survives, which is what the 60.0 s leg is.
     (c) THEREFORE the latency criterion lives where wall is measurable. On a
     QUIET box (load per CPU <= 1.0 on both the 1-min and 5-min averages, in
     readings taken BEFORE and AFTER the pass — the 1-min average lags a box
     that has just been loaded, and a reading taken only afterwards misses a
     spike that began just before the window) wall clock IS this pass's own
-    latency, and the bound is 3.0 s — #9015/#9474's acceptance criterion
-    verbatim ("a 3 s pass must still fail"), with the quiet-box pass measured
-    at 1.3-1.8 s. Measured discrimination: inject `time.sleep(1.3)` inside the
-    timed window and it passes (wall ~2.6 s); inject `time.sleep(3.1)` and it
-    REDS on the quiet bound (wall 4.22 s). On a loaded box the same read is
-    the box, not the pass, so only the hang leg applies.
+    latency, and the bound is 3.0 s: the "a 3 s pass must still fail" clause of
+    #9015's acceptance criterion, which #9474 carries, with the quiet-box pass
+    measured at 1.3-1.8 s. ⚠️ That is ONE limb of a two-limb criterion —
+    #9015's acceptance is "passes reliably on a LOADED box WHILE still failing
+    on a genuine multi-x regression", and the loaded-box limb is deliberately
+    NOT asserted here (a wall bound tight enough to catch a 3 s pass on a
+    loaded box is the flake this change removes). So: the quiet-box limb is
+    met, the loaded-box limb is the residual below, and #9474 stays open on it.
+    Measured discrimination: inject `time.sleep(1.3)` inside the timed window
+    and it passes (wall ~2.6 s); inject `time.sleep(3.1)` and it REDS on the
+    quiet bound (wall 4.22-4.36 s). On a loaded box the same read is the box,
+    not the pass, so only the hang leg applies.
 
-    THE RESIDUALS, stated rather than papered over — all three need a
-    dedicated quiet lane, and none is closed by a tighter bound:
-    1. On a LOADED box a wall-shaped regression below 30 s passes, because it
-       cannot be distinguished from contention there.
+    THE RESIDUALS, stated rather than papered over — all four need a dedicated
+    quiet lane, and none is closed by a tighter bound:
+    1. On a LOADED box a wall-shaped regression below the hang bound passes,
+       because it cannot be distinguished from contention there.
     2. `cpu < 1.2` is UPWARD-only, so a cpu DROP (replace compute with wait)
        passes the CPU leg; only the quiet-box wall leg can see it.
     3. The gate is a 1-to-5 minute average, so contention that begins INSIDE
        the timed window is invisible to it and can still red the latency leg.
        So a starved box is *far less likely* to red on that leg, not unable to.
+    4. Even a quiet box is not perfectly repeatable: the population's own
+       healthy readings include a 2.53 s pass against the 3.0 s bound (1.19x
+       headroom), from causes `loadavg` cannot see (daemon service, disk noise,
+       CPU steal). That is the honest cost of #9015's 3 s clause.
 
-    What the hang leg still buys: it catches a genuine hang or live-lock, and
-    it is the only thing between a wedged pass and an unbounded CI leg. See
+    What the hang leg still buys: it catches a genuine hang or live-lock (60 s),
+    and it is the only thing between a wedged pass and an unbounded CI leg. See
     `_AC5_HANG_S`, `_AC5_QUIET_WALL_S` and `test_ac5_wall_bounds_contract`
     for the pinned calibration.
 
@@ -1162,8 +1226,10 @@ def test_ac5_interactive_latency_zone():
         # (2) Everywhere, a HANG bound. Not flat at any small number: a flat
         #     5.0 s cap was measured reding healthy passes at 30 workers
         #     (7.25/9.56/8.89 s wall, cpu 0.92-0.94), because any wall-derived
-        #     latency bound reds on a loaded enough box. The hang bound is 3x
-        #     the worst healthy wall measured, so only a wedged pass reaches it.
+        #     latency bound reds on a loaded enough box. The hang bound is
+        #     twice the worst healthy wall measured (24-27 s at 90 workers),
+        #     so only a wedged pass — or a box with ~50x oversubscription —
+        #     reaches it.
         # AC5's <=1s is enforced by the `cpu < 1.2` assertion above, which is
         # UPWARD-only, so a cpu DROP passes it too — that is why (1) exists.
         wall_bound = _ac5_wall_bound(
