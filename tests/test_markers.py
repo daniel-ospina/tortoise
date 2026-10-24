@@ -903,6 +903,16 @@ def test_no_redirect_stems_registry_exact():
         # carve-out member because the URI-unset leg is its natural home. Do not read this entry as
         # an embedded-construction claim: there is none to make.
         "test_ci_runner_x64_install",
+        # CLI-extraction lane (#9915): the suite's `TestWriterContract` builds
+        # per-test embedded SDKs from `TORTOISE_DB_PATH` in namespace
+        # `cliex-contract` — not guard-passing — so the load-bearing reason is
+        # the REDIRECT: a URI-set lane would flip those constructions onto the
+        # shared `tortoise_test_matrix` instance (#5084 class) and certify a
+        # lane the suite does not target. Registered in all three homes —
+        # config/ci-surfaces.yml `carve_out:`, the `core` surface row,
+        # TEST_NO_REDIRECT_STEMS and this declaration — so the pin reding on
+        # the addition is the pin working as designed.
+        "test_cli_extraction",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "

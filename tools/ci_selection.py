@@ -2017,7 +2017,17 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # `tests/eval/write_path/`). Both halves are asserted by
              # tests/test_ci_selection.py::
              # test_product_root_marker_guard_runs_on_a_legal_pages_only_diff.
-             "tests/e2e/test_legal_pages.py")
+             "tests/e2e/test_legal_pages.py",
+             # CLI-extraction lane (#9915): the flat `integrations/` prefix in
+             # NON_PYTHON_PREFIXES swallows the extractor, so an
+             # extractor-only diff comes back `changed=[]`, select() takes the
+             # early return and bypasses the `matched.add("core")` fallback —
+             # not one of the lane's guards (`tests/test_cli_extraction.py`,
+             # registered under `surfaces: core:` and `carve_out:`) would run
+             # on the very change that can break them (#6138-review-P1 class).
+             # Kept here so `_selection_relevant` claims it in `_keep_changed`
+             # and the core fallback stays alive.
+             "integrations/cli-extraction/extract_turns.py")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",

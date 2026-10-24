@@ -4793,6 +4793,19 @@ surfaces:
   # the URI-unset leg is its natural home. No `durations` row is needed: `fast_pool()` drops every
   # carve-out member, so registration here cannot move the durations coverage ratio.
   - test_ci_runner_x64_install.py
+
+  # CLI-extraction lane (#9915): the lane's guard suite. `TestWriterContract`
+  # executes the real static writer script against the real in-repo SDK on
+  # per-test `TORTOISE_DB_PATH` embedded stores in namespace `cliex-contract`
+  # — a non-guard-passing namespace, so on a docker lane the redirect would
+  # flip those constructions onto the shared `tortoise_test_matrix` instance
+  # (#5084 cross-lane pollution class). Registered here so the file is
+  # CLASSIFIED (integrity rglobs `tests/test_*.py` with no wildcard) and ALSO
+  # in `carve_out:` — the URI-unset carve-out job is its natural home. No
+  # `durations` row: `fast_pool()` drops every carve-out member. The extractor
+  # itself is kept in change-selection via `CORE_ALSO` (tools/ci_selection.py)
+  # so an extractor-only diff keeps the `core` fallback alive.
+  - test_cli_extraction.py
   ep:
   # #7951 (remaining doors) / review P1: DUAL-REGISTERED with `core` (below)
   # and the other exact-match surfaces. The write-door INVENTORY scans ALL of
@@ -6666,6 +6679,16 @@ carve_out:
 # tests/_embedded.TEST_NO_REDIRECT_STEMS (the pin is
 # tests/test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems).
 - test_ci_runner_x64_install.py
+# CLI-extraction lane (#9915): `TestWriterContract` builds a per-test embedded
+# SDK from `TORTOISE_DB_PATH` in namespace `cliex-contract` — not guard-passing
+# (`test*`/`tortoise_test*`/`test-*`, tests/test_markers.py) — so under a URI
+# lane the redirect would land those constructions on the shared
+# `tortoise_test_matrix` instance, the #5084 cross-lane pollution class.
+# Routed here so the URI-unset carve-out job runs it as designed; the stem is
+# mirrored in `tests/_embedded.TEST_NO_REDIRECT_STEMS` (the pin is
+# `test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems`) and
+# DECLARED in `tests/test_markers.py::test_no_redirect_stems_registry_exact`.
+- test_cli_extraction.py
 # #6884: modules that REQUIRE the docker lane — each one module-skips at import
 # when `TORTOISE_DB_URI` is not a usable URI — in the tier-2 PR legs that means
 # present and EMPTY (`URI=""`), not absent (`if not _is_db_uri(...): pytest.skip(...)`
