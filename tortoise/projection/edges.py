@@ -778,7 +778,7 @@ def source_change_notices(g, source_refs, current_versions: dict[str, str] | Non
 #
 #     ⛔ WHAT THAT DOES **NOT** COVER — measured, not inferred, and named here so
 #     the next reader meets it at the point of enforcement instead of
-#     discovering it. Four lanes are STILL live-only:
+#     discovering it. Five lanes are STILL live-only:
 #       1. **the typed wrappers and the node-property lane.**
 #          `_EdgeHandlers.create_owned_by`/`create_managed_by`/
 #          `create_authored_by` are `return self.create_edge(...)` on the
@@ -787,14 +787,41 @@ def source_change_notices(g, source_refs, current_versions: dict[str, str] | Non
 #          journal-backed): `sdk.create_object(name, "product", ownedBy=team)`
 #          journals no `DirectEdgeCreated`, live `ownedBy` count 1, post-rebuild
 #          **0**. This is the commonest `ownedBy` producer.
-#       2. **any endpoint that is a `:Source`.** The record IS emitted, but the
-#          fold's per-label id sweep covers `EPISTEMIC_LABELS`
-#          (`Point`/`Subject`/`Object`/`Event`) only, so the record is skipped at
-#          replay. MEASURED: `create_edge("references", point, source)` writes
-#          the carrier, live count 1, post-rebuild **0**; identical for
-#          `aboutSource`. `aboutSource`/`aboutDocument` targets are `:Source` by
-#          definition, so those two can NEVER be restored by this record without
-#          widening the fold.
+#       2. **any endpoint that is a `:Source`.** Two sub-cases, and they are NOT
+#          the same mechanism:
+#          * an ID-BEARING `:Source` (`create_source` writes
+#            `id = coalesce($id, $url)`) gets a record EMITTED, but the fold's
+#            per-label id sweep covers `EPISTEMIC_LABELS`
+#            (`Point`/`Subject`/`Object`/`Event`) only, so the record is skipped
+#            at replay. MEASURED: `create_edge("references", point, source)`
+#            writes the carrier, live count 1, post-rebuild **0**; identical for
+#            `aboutSource`. `aboutSource`/`aboutDocument` targets are `:Source`
+#            by definition, so those two can NEVER be restored by this record
+#            without widening the fold.
+#          * a URL-ONLY STUB (`_mint_source_stub` — what `_link_source` and the
+#            capture path mint) carries NO `id` at all, so the emission has no
+#            identity to name and writes **no record**. It is not silent: the
+#            source OR-set carries `by_url=True` precisely so such a stub
+#            RESOLVES, so the edge is minted LIVE with no carrier — and that is a
+#            data-loss signal, not an ordinary absent identity, so
+#            `sdk.create_edge` routes it through `projection._log_identity_skip`
+#            (`absent_is_ordinary=False, drops_record=True`). MEASURED:
+#            `link_source_to_entity` mints the stub, then
+#            `create_edge("references", <stub url>, <id>)` → live count 1, no
+#            `DirectEdgeCreated`, post-rebuild **0**, one reported skip.
+#          ⚠️ Three different mechanisms now share the visible outcome "not
+#          restored": record emitted + fold skips it (id-bearing `:Source`),
+#          record never written + REPORTED (url-only stub, here), and a
+#          deliberate record-free skip (bound 3). Do not collapse them.
+#          ⚠️ This bound also ABSORBS the source-migration re-point family, so it
+#          is not an uncarried case of its own: every relation in
+#          `session_source_migration.MOVABLE_SOURCE_RELS` (`extractedFrom`,
+#          `references`, `aboutSource`, `aboutDocument`, `wasDerivedFrom`,
+#          `produces`) is SOURCE-SIDE by ontology — each has a `:Source` endpoint
+#          — and `_move_out`/`_move_in` journal nothing. Because the fold's id
+#          sweep cannot resolve a `:Source`, the record is skipped at replay
+#          either way, so a live re-point cannot put the record AHEAD of the
+#          graph: both post-migration states resolve to "not restored".
 #       3. **a self-edge** (`src == tgt`). The door mints it live; the fold
 #          refuses to re-create one (`E2E-11.6` no-self contract), so live and
 #          replay disagree by design. Pre-existing, and the emission skips it

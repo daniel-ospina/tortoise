@@ -287,8 +287,16 @@ closed at both layers:
   hand-written graph; the row is absent-but-one rather than wrong.
   The remaining R5 classes are still **not** materialized and are named
   where the producer lives: the rest of the point-property set (`about*`,
-  `TAGGED`) and the structural predicates whose `DirectEdgeCreated` fold works
-  but has **no producer**.
+  `TAGGED`), and the structural predicates that no door CARRIES yet —
+  ⚠️ **not** "no producer": since **#9553** (R5 class 4) the public SDK door
+  (`sdk.create_edge` — the MCP tool `tortoise_create_edge` and the onboarding
+  seed) emits the `DirectEdgeCreated` descriptor the fold already handles, so
+  the uncarried set is now the MEASURED bounds rather than the whole family
+  (the typed-wrapper/node-property lane, a `:Source` endpoint both id-bearing
+  and url-only, self-edges, a later-superseded endpoint, and the other direct
+  `proj.create_edge` callers). The list lives at the point of enforcement in
+  `tortoise/projection/edges.py` and in
+  `tests/test_9553_class4_structural_edge_carrier.py`.
 * **It does not approve `#7879`'s scope.** Scope and Plan carry human gates.
 * **It adds no migration-safety surface** (owner scope ruling, 2026-10-10).
 * **It changes no public surface.** No MCP tool and no public SDK method is added,

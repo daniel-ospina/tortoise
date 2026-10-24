@@ -28,9 +28,11 @@ verb's resolver accepts an OR-set (`id` | `eventId` | `url`). Today `:Source`
 `id == url` and `:Event` `id == eventId`, so the two spellings coincide — the
 emission resolves the node `id` anyway so the record cannot silently become
 unresolvable if that widens. The parts that do NOT coincide are pinned as
-MEASURED BOUNDS at the bottom of this file (a `:Source` endpoint, and the
-node-property/typed-wrapper lane), because a bound asserted in prose is a bound
-nobody re-checks.
+MEASURED BOUNDS at the bottom of this file (`test_bound_*`: the typed-wrapper /
+node-property lane, an id-bearing `:Source` endpoint, a URL-only `:Source` stub
+that carries no `id` at all, a self-edge, and an edge at an endpoint that is
+later superseded), because a bound asserted in prose is a bound nobody
+re-checks.
 
 Offline: an embedded store (explicit `db_path`) plus a JSONL journal — no
 network, no provider spend.
@@ -185,13 +187,27 @@ def test_a_dedup_hit_still_emits(env):
     write landing and its record being appended (`create_direct_edge` states the
     same contract for this record type). A created-only gate would lose the edge
     from the log forever if the process died in that window.
+
+    ⛔ The premise has to be OBSERVABLE, or this test passes for a contract it
+    does not measure (#9553 review P2). `if created:` is the gate in `sdk.py`,
+    and for THIS verb `created` is not a creation flag: `_EdgeHandlers.
+    create_edge` returns `MERGE … RETURN count(*) > 0`, truthy on a dedup hit
+    too. So the second call must be shown to be a DEDUP — the edge count is
+    still 1 while its `created` flag is `True` — and both observations are
+    asserted here. Without the count, a regression that minted a PARALLEL edge
+    on the second call would leave this green too.
     """
     sdk, events = env
     team = sdk.create_subject("Team Atlas")
     widget = sdk.create_object("Widget Dedup", "product")
+    proj = sdk._get_proj()
 
     assert sdk.create_edge("ownedBy", widget["id"], team["id"])["created"] is True
+    assert _edge_count(proj, "ownedBy", widget["id"], team["id"]) == 1
     assert sdk.create_edge("ownedBy", widget["id"], team["id"])["created"] is True
+    assert _edge_count(proj, "ownedBy", widget["id"], team["id"]) == 1, (
+        "the second call minted a SECOND edge — the `MERGE` is not idempotent "
+        "here, so this test is not measuring a dedup hit at all")
     carriers = [
         e for e in _journal(events)
         if e.get("type") == "DirectEdgeCreated"
@@ -204,19 +220,25 @@ def test_a_dedup_hit_still_emits(env):
 
 # ── MEASURED BOUNDS — the lanes this emission does NOT reach ──────────────
 #
-# These three assert the CURRENT behaviour, not a requirement. Each one is a
+# These FIVE assert the CURRENT behaviour, not a requirement. Each one is a
 # live-only edge that a rebuild drops. They are tests (not prose) so that the
 # day the missing half lands, this file reds and the claim above it has to be
 # re-derived with the change rather than discovered later.
 
 
-def test_bound_a_source_endpoint_is_not_restored(env):
-    """BOUND: the record IS emitted, but the fold's id sweep covers
-    `EPISTEMIC_LABELS` only, so a `:Source` endpoint is skipped at replay.
+def test_bound_an_id_bearing_source_endpoint_is_not_restored(env):
+    """BOUND (1 of 2 for `:Source`): the record IS emitted, but the fold's id
+    sweep covers `EPISTEMIC_LABELS` only, so a `:Source` endpoint is skipped at
+    replay.
 
     `aboutSource`/`aboutDocument` targets are `:Source` by definition, so those
     two relations can never be restored by this record without widening the
     fold's sweep.
+
+    ⛔ The record's PRESENCE is asserted, not just its failure to restore: this
+    test's own docstring says the carrier is written, and a claim stated in
+    prose and unchecked in the test that states it is exactly the shape the
+    `url`-only stub below was missed through (#9553 review P2).
     """
     sdk, events = env
     team = sdk.create_subject("Team Atlas")
@@ -229,6 +251,16 @@ def test_bound_a_source_endpoint_is_not_restored(env):
     live = proj.g.query(
         "MATCH (s:Subject)-[r:references]->(t:Source) RETURN count(r)").result_set[0][0]
     assert live == 1
+    carriers = [
+        e for e in _journal(events)
+        if e.get("type") == "DirectEdgeCreated" and e.get("edge_type") == "references"
+    ]
+    assert carriers, (
+        "no `DirectEdgeCreated` was emitted for a `references` edge to an "
+        "ID-BEARING `:Source` (`create_source` writes `id = coalesce($id, "
+        "$url)`, so the emission has an id to name and MUST write a record) — "
+        "the failure mode this bound describes is 'the fold skips it', not "
+        "'nothing is journaled'")
     proj.rebuild_all(str(events), confirm_destructive=True)
     rebuilt = proj.g.query(
         "MATCH (s:Subject)-[r:references]->(t:Source) RETURN count(r)").result_set[0][0]
@@ -236,6 +268,66 @@ def test_bound_a_source_endpoint_is_not_restored(env):
         "the fold now restores a `:Source` endpoint — the emission's bound has "
         "been closed, so the claim in projection/edges.py and record_projection.py "
         "must be widened (and this bound test updated with it)")
+
+
+def test_bound_a_url_only_source_stub_emits_no_record_and_reports_it(env):
+    """BOUND (2 of 2 for `:Source`): a stub `:Source` minted by
+    `_mint_source_stub` carries NO `id` property, so the emission has no
+    identity to name and writes nothing — a DIFFERENT mechanism from the bound
+    above (record emitted, fold skips it) and from the self-edge (deliberate).
+
+    ⛔ The edge IS minted live: the source OR-set carries `by_url=True`
+    precisely so a url-only stub resolves. An edge minted live with nothing
+    journaled is a data-loss signal, not an ordinary absent identity — so the
+    skip must be REPORTED (`projection._log_identity_skip`,
+    `absent_is_ordinary=False, drops_record=True`) rather than dropped in
+    silence, which is what `#9553`'s review P2 found.
+    """
+    from tortoise.projection.nonfolded import collect_identity_skips
+
+    sdk, events = env
+    widget = sdk.create_object("Widget Stub Source", "product")
+    stub_url = "https://docs9553.example/url-only-stub"
+    # `_link_source` mints the `:Source` through `_mint_source_stub`, which
+    # writes sourceKind/title/canonicalUrl/urlAliases/contentHash/ingestedAt
+    # and NO `id`.
+    sdk.link_source_to_entity(stub_url, widget["id"], "Object")
+    proj = sdk._get_proj()
+    assert proj.g.query(
+        "MATCH (s:Source {url:$u}) RETURN s.id",
+        params={"u": stub_url}).result_set[0][0] is None, (
+        "the url-only stub now carries an `id` — re-derive this bound (the "
+        "emission WOULD write a record)")
+
+    with collect_identity_skips() as skips:
+        assert sdk.create_edge("references", stub_url, widget["id"])["created"] is True
+    live_by_url = proj.g.query(
+        "MATCH (s:Source {url:$u})-[r:references]->(t {id:$t}) RETURN count(r)",
+        params={"u": stub_url, "t": widget["id"]}).result_set[0][0]
+    assert live_by_url == 1, (
+        "the live write did not land — the rest of this test would be vacuous")
+    assert not [
+        e for e in _journal(events)
+        if e.get("type") == "DirectEdgeCreated"
+        and e.get("tgt") == widget["id"] and e.get("edge_type") == "references"
+    ], "a record was emitted for a stub with no `id` — re-derive this bound"
+    reported = [s for s in skips if "direct edge (SDK door)" in s.what]
+    assert reported, (
+        "the emission skipped an endpoint with no writable `id` in SILENCE — a "
+        "live-only edge with no carrier and no signal is indistinguishable at "
+        "runtime from the two DECLARED skips, and an operator cannot tell a "
+        "deliberate degrade from data loss")
+    assert all(s.drops_record for s in reported), (
+        "a skipped endpoint means NO record for an edge that IS in the live "
+        "graph, so the skip must be counted as a dropped RECORD, not as a "
+        "lost derived edge")
+
+    proj.rebuild_all(str(events), confirm_destructive=True)
+    assert proj.g.query(
+        "MATCH (s:Source {url:$u})-[r:references]->(t {id:$t}) RETURN count(r)",
+        params={"u": stub_url, "t": widget["id"]}).result_set[0][0] == 0, (
+        "a url-only `:Source` stub's edge now survives a rebuild — the bound in "
+        "projection/edges.py and record_projection.py must be closed with it")
 
 
 def test_bound_the_node_property_lane_emits_nothing(env):

@@ -39211,11 +39211,23 @@ class TortoiseSDK:
         # supply the anchor"), and a journaling convenience must not become a
         # second way to hand that verb a value.
         #
-        # Emitted on every minted edge, not on created-only, for the crash-window
-        # reason `create_direct_edge` records: a MERGE dedup-hit must still be
-        # able to close the window.
+        # Emitted on every WRITE that resolved its endpoints, not on
+        # "newly-created"-only, for the crash-window reason `create_direct_edge`
+        # records: a MERGE dedup-hit must still be able to close the window.
+        # ⛔ State what the gate below actually is (`if created:`), because the
+        # two sentences are NOT the same behaviour and the difference is one
+        # refactor from being a defect. `_EdgeHandlers.create_edge` returns
+        # `MERGE … RETURN count(*) > 0`, which is `True` on a dedup hit — a
+        # post-MERGE count sees 1 either way — so `created` means "both endpoints
+        # resolved and the statement ran", NOT "the edge is new". That is exactly
+        # why this gate closes the window. ⛔ `_EdgeHandlers.create_edge` MUST NOT
+        # grow `create_direct_edge`'s pre-count semantics (`created = (pre[0][0]
+        # == 0)`) without revisiting this gate: it would silently turn `if
+        # created:` into the created-only gate whose failure this emission
+        # exists to prevent — a crash between the MERGE and the append would
+        # then leave a live graph edge with no record, forever.
         #
-        # ⛔ TWO bounds, both measured, neither claimed away:
+        # ⛔ THREE bounds, all measured, none claimed away:
         #   * a SELF-EDGE (`src == tgt`) is minted live but no record is emitted:
         #     the fold refuses to re-create one (`E2E-11.6` no-self contract), so
         #     a record would only be dropped at replay. Live and replay disagree
@@ -39225,6 +39237,8 @@ class TortoiseSDK:
         #     fold sets attrs only for the keys the record carries — so passing
         #     `direction="out"` here would leave the same edge bare live and
         #     `{direction:'out'}` post-rebuild. Omitted so live and replay agree.
+        #   * an endpoint whose node carries NO writable `id` emits nothing, and
+        #     that one is REPORTED rather than dropped in silence (below).
         created = proj.create_edge(from_id, to_id, relation)  # validates relation
         if created:
             sources = proj._resolve_entity(
@@ -39232,14 +39246,41 @@ class TortoiseSDK:
             targets = proj._resolve_entity(
                 to_id, by_id=True, by_eventId=True)
             emitted: set[tuple[str, str]] = set()
+            # #9553 review P2: an endpoint with no writable `id` is NOT an
+            # ordinary absence, because the edge IS minted live — the projection
+            # verb resolved the SAME OR-set (source `id | eventId | url`, target
+            # `id | eventId`) a moment earlier. `continue`-ing in silence here
+            # leaves a live-only edge with no record and NO SIGNAL, which at
+            # runtime is indistinguishable from the two DECLARED skips (a record
+            # the fold drops, a self-edge it refuses). Reachable, not
+            # hypothetical: a `:Source` stub minted by `_mint_source_stub`
+            # (`projection/edges.py`) writes sourceKind/title/canonicalUrl/
+            # urlAliases/contentHash/ingestedAt and NO `id`, and the source arm
+            # passes `by_url=True` precisely so such a stub resolves — so
+            # `create_edge("references", <stub url>, <epistemic id>)` mints the
+            # edge and would journal nothing. Report it through the package's ONE
+            # skip reporter (`projection._log_identity_skip`, which the folds and
+            # the SDK's own row-writer already use) so an operator can tell a
+            # deliberate degrade from data loss.
+            from tortoise.projection import _log_identity_skip, _writable_id
             for s in sources:
                 src = (s.get("properties") or {}).get("id")
+                if not _writable_id(src):
+                    _log_identity_skip(
+                        "direct edge (SDK door) source endpoint", src,
+                        "id (record endpoint)",
+                        absent_is_ordinary=False, drops_record=True)
+                    continue
                 for t in targets:
                     tgt = (t.get("properties") or {}).get("id")
-                    if not isinstance(src, str) or not isinstance(tgt, str):
+                    if not _writable_id(tgt):
+                        _log_identity_skip(
+                            "direct edge (SDK door) target endpoint", tgt,
+                            "id (record endpoint)",
+                            absent_is_ordinary=False, drops_record=True)
                         continue
-                    if not src or not tgt or src == tgt:
-                        continue
+                    if src == tgt:
+                        continue  # the E2E-11.6 no-self bound, above
                     if (src, tgt) in emitted:
                         continue
                     emitted.add((src, tgt))
