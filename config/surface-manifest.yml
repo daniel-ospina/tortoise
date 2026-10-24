@@ -3390,11 +3390,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.create_direct_edge.
-  dependency: 'reached by no registered MCP tool; caller categories: engine'
+  dependency: 'reached by no registered MCP tool; caller categories: engine, other-tooling'
   lifecycle: active
   used_by: tooling, skill-docs, docs
   recommendation: review
-  reason: 'no MCP tool binds it; callers: engine'
+  reason: 'no MCP tool binds it; callers: engine, other-tooling'
   recommended_family: null
   proposed: false
   exemption: false
@@ -4513,11 +4513,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.link_source_to_entity.
-  dependency: 'reached by no registered MCP tool; caller categories: engine, tenant-rest'
+  dependency: 'reached by no registered MCP tool; caller categories: engine, other-tooling, tenant-rest'
   lifecycle: active
   used_by: tooling, docs
   recommendation: review
-  reason: 'no MCP tool binds it; callers: engine, tenant-rest'
+  reason: 'no MCP tool binds it; callers: engine, other-tooling, tenant-rest'
   recommended_family: null
   proposed: false
   exemption: false
@@ -5923,7 +5923,7 @@ rows:
   job: Public SDK method TortoiseSDK.traverse.
   dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
   lifecycle: active
-  used_by: tooling, skill-docs, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: review
   reason: no MCP tool binds it, and no caller outside tests was found
   recommended_family: null
