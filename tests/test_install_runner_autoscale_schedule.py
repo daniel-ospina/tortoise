@@ -23,6 +23,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "tools" / "install-runner-autoscale-schedule.sh"
 
@@ -77,6 +79,12 @@ def _sandbox(
     """
     bindir = tmp_path / "bin"
     bindir.mkdir(parents=True)
+    # `$SYSTEMD_UNIT_DIR` must EXIST, exactly as /etc/systemd/system does on every real systemd
+    # box. Without it `sudo tee` has nowhere to write, and the `sudo` stub below used to `exit 0`
+    # regardless — so the install reported "installed" having written nothing, and the fixture
+    # silently agreed. A sandbox that is missing a directory the real box always has is a false
+    # green, not a shortcut (round 11 review).
+    (tmp_path / "units").mkdir(parents=True, exist_ok=True)
     home = tmp_path / "home"
     home.mkdir()
     logdir = tmp_path / "log"
@@ -196,7 +204,10 @@ def _systemd_stubs(sb: dict, *, active: str = "active") -> None:
         '[ "${1:-}" = "-n" ] && shift\n'
         'printf "%s\\n" "sudo $*" >> "$STUB_LOG/sudo.log"\n'
         'case "$1" in cat) shift; [ -f "$1" ] && cat "$1"; exit 0 ;; esac\n'
-        'case "$1" in tee) shift; cat > "$1"; exit 0 ;; esac\n'
+        # `exit $?` — NOT `exit 0`: a tee whose write fails must fail the pipeline, because the
+        # installer treats a non-zero tee as "could not install the unit" and exits 1. Swallowing
+        # it made an unwritable unit directory look like a successful install.
+        'case "$1" in tee) shift; cat > "$1"; exit $? ;; esac\n'
         'exec "$@"\n',
     )
 
@@ -349,10 +360,13 @@ def test_launchd_plist_pins_home_state_path_and_gh(tmp_path):
 
 
 def test_launchd_install_writes_a_lintable_plist_and_verifies_it_is_loaded(tmp_path):
-    """Install writes, lints, bootstraps, and then CHECKS the agent is loaded.
+    """Install writes, lints, and bootstraps the agent.
 
-    Mutation: drop the `launchctl list | grep` verification -> an unloaded agent reports success
-    -> RED.
+    ⛔ The LOAD VERIFICATION is pinned by its own case below
+    (`test_launchd_install_fails_when_the_agent_is_not_loaded`), not here. This docstring used to
+    claim "drop the `launchctl list | grep` verification -> RED", which was FALSE: the stub always
+    lists the label, so dropping the check left every assertion here green (round 11 review, P2).
+    A mutation claim nobody executes is a comment nobody re-reads.
     """
     sb = _sandbox(tmp_path)
     res = _run(sb)
@@ -362,6 +376,98 @@ def test_launchd_install_writes_a_lintable_plist_and_verifies_it_is_loaded(tmp_p
     body = plist.read_text(encoding="utf-8")
     assert "<key>PATH</key>" in body and "<key>RUNNER_AUTOSCALE_GH</key>" in body, body
     assert "bootstrap" in sb["launchctl_log"].read_text(encoding="utf-8")
+
+
+def test_launchd_install_fails_when_the_agent_is_not_loaded(tmp_path):
+    """⛔ The load check is the ONLY thing between "wrote a plist" and "a job that will run".
+
+    A `launchctl bootstrap` that returns 0 is not proof the label is registered: a GUI session that
+    is not the caller's, a disabled login item, or a `bootout` racing the bootstrap all leave the
+    plist on disk and nothing loaded. Without the verification the installer reports success for an
+    agent that never fires (the inert-enforcer shape this file exists to refuse).
+
+    Mutation: drop the `launchctl list | grep` verification -> this install exits 0 -> RED.
+    """
+    sb = _sandbox(tmp_path)
+    # a `launchctl` that records the call and NEVER lists the label: whatever we bootstrap, the
+    # agent is not loaded.
+    _write_stub(
+        sb["bin"],
+        "launchctl",
+        "#!/usr/bin/env bash\n"
+        'printf "%s\\n" "launchctl $*" >> "$STUB_LOG/launchctl.log"\n'
+        "exit 0\n",
+    )
+    res = _run(sb)
+    assert res.returncode == 1, (res.stdout, res.stderr)
+    assert "not loaded" in res.stderr, res.stderr
+
+
+def test_launchd_reinstall_re_arms_an_agent_that_was_unloaded_out_of_band(tmp_path):
+    """⛔ "UNCHANGED" IS NOT "LOADED": re-running the installer must CONVERGE to a loaded agent.
+
+    An unload out of band (reboot that dropped the GUI session, a `bootout`, a login-item cleanup)
+    leaves the plist byte-identical, so the `unchanged` branch skipped the bootstrap and the load
+    check then exited 1 — on EVERY re-run — while printing "run without --status to load", which is
+    exactly the invocation that just failed. The systemd leg (`systemctl start`) and the cron leg
+    (rewrite) both re-arm; launchd has to as well.
+
+    Mutation: drop the re-arm bootstrap from the `unchanged` branch -> the second run exits 1
+    (`ERROR: ... is not loaded`) -> RED.
+    """
+    sb = _sandbox(tmp_path)
+    # A `launchctl` with STATE: `bootstrap` marks the agent loaded, `bootout` clears it, `list`
+    # reports the state. Without this the unchanged-re-run path cannot be reached at all.
+    _write_stub(
+        sb["bin"],
+        "launchctl",
+        "#!/usr/bin/env bash\n"
+        'printf "%s\\n" "launchctl $*" >> "$STUB_LOG/launchctl.log"\n'
+        'case "${1:-}" in\n'
+        '  list) [ -f "$STUB_LOG/loaded" ] && echo "501 0 com.tortoise.runner-autoscale"; exit 0 ;;\n'
+        '  bootstrap) : > "$STUB_LOG/loaded"; exit 0 ;;\n'
+        '  bootout) rm -f "$STUB_LOG/loaded"; exit 0 ;;\n'
+        "esac\nexit 0\n",
+    )
+    assert _run(sb).returncode == 0
+    log = sb["launchctl_log"].read_text(encoding="utf-8")
+    assert log.count("launchctl bootstrap") == 1, log
+
+    # out-of-band unload: the plist is untouched, the agent is gone.
+    (sb["log"] / "loaded").unlink()
+    res = _run(sb)
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    assert "unchanged" in res.stdout, res.stdout
+    assert "re-armed" in res.stdout, res.stdout
+    log = sb["launchctl_log"].read_text(encoding="utf-8")
+    assert log.count("launchctl bootstrap") == 2, log
+
+
+def test_systemd_install_fails_when_the_unit_cannot_be_written(tmp_path):
+    """⛔ A UNIT THAT WAS NOT WRITTEN MUST NOT BE REPORTED "installed".
+
+    The install writes the unit through `printf | sudo -n tee`, and treats a non-zero tee as "could
+    not install" (`|| exit 1`). That fail-closed edge is invisible to every other case here, because
+    the sandbox provides a writable `$SYSTEMD_UNIT_DIR` — and the `sudo` stub ends its tee branch
+    with `exit $?` precisely so this edge is reachable.
+
+    Mutation: end the stub's tee branch with `exit 0` (swallowing the write failure) -> the install
+    continues and reports success for units that do not exist -> RED. Verified.
+    """
+    sb = _sandbox(tmp_path, uname="Linux")
+    _systemd_stubs(sb)
+    # A path whose PARENT is a regular file: `tee` fails with ENOTDIR without needing chmod, so
+    # this holds even when the suite runs as root.
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory\n", encoding="utf-8")
+    env = dict(
+        sb["env"],
+        AUTOSCALE_PLATFORM="systemd",
+        SYSTEMD_UNIT_DIR=str(blocker / "units"),
+    )
+    res = _run(sb, env=env)
+    assert res.returncode == 1, (res.stdout, res.stderr)
+    assert "installed: " not in res.stdout, res.stdout
 
 
 def test_the_provisioner_is_pinned_for_the_timer_only_when_it_exists(tmp_path):
@@ -494,6 +600,102 @@ def test_cron_line_carries_the_path_and_home_the_job_needs(tmp_path):
     assert "HOME=" in line[0], f"cron needs HOME pinned too (gh credential): {line[0]}"
 
 
+@pytest.mark.parametrize(
+    ("interval", "want_sched", "want_note"),
+    [
+        ("600", "*/10 * * * *", False),  # the default: expressible exactly, no note
+        ("1800", "*/30 * * * *", False),
+        ("90", "*/2 * * * *", True),  # below one minute of cron granularity: round UP
+        ("1500", "*/30 * * * *", True),  # 25 min: NOT a divisor — this is the up-vs-down case
+        ("2700", "0 */1 * * *", True),  # 45 min: not a divisor of 60 -> hourly, never tighter
+        ("5400", "0 */2 * * *", True),  # 90 min -> every 2h
+        ("36000", "0 */12 * * *", True),  # 10h: `*/10` on the HOUR field is not a period either
+    ],
+)
+def test_cron_cadence_is_a_real_period_and_never_tighter_than_requested(
+    tmp_path, interval, want_sched, want_note
+):
+    """⛔ `*/N` IS NOT A PERIOD UNLESS N DIVIDES THE FIELD'S RANGE, and the old code assumed it was.
+
+    Measured by --dry-run before the fix (round 11 review, P2):
+
+      - 45 min -> `*/45 * * * *`, which fires at :00 and :45 only — 45 then 15 minutes apart, an
+        average 30-minute loop, i.e. TIGHTER than requested;
+      - 58 min -> `*/58` — 58 then 2 minutes apart;
+      - 90 s   -> `*/1` — every 60s, 1.5x the request (floor division on a sub-minute interval);
+      - the HOUR field has the same trap: `*/10 * * *` fires 00:00 and 10:00, then 00:00 again —
+        gaps of 10h and 14h, not a 10-hour period.
+
+    Over-firing is the unbounded harm the INTERVAL floor exists to prevent ("a tighter loop only
+    hammers the API"), and it is invisible in the rendered line, so the rule is: pick the closest
+    REAL period AT OR ABOVE the request and say so. Firing less often than configured is a
+    visible, bounded loss of freshness.
+
+    ⛔ THE 1500 (25 min) CASE IS THE ONE THAT PINS THE DIRECTION. Round-up and round-down only
+    differ for a request that is NOT a divisor of 60, and only below the first branch's 30-minute
+    ceiling — so a table of exact divisors (`*/10`, `*/30`, `*/2`) is green under BOTH rules and
+    proves nothing about which one is implemented. 25 min rounds UP to `*/30` (never tighter); a
+    round-down implementation renders `*/20`, which fires more often than asked.
+
+    Mutations: emit `*/$minutes` for any minutes < 60 -> 2700 renders `*/45` -> RED. Round DOWN to
+    the nearest divisor -> 1500 renders `*/20` -> RED. Keep `INTERVAL/60` floor division -> 90
+    renders `*/1` -> RED. (All three verified by applying them.)
+    """
+    sb = _sandbox(
+        tmp_path,
+        uname="Linux",
+        env_overrides={"AUTOSCALE_HAS_SYSTEMD": "0", "AUTOSCALE_HAS_CRON": "1"},
+    )
+    res = _run(sb, "--dry-run", env=dict(sb["env"], RUNNER_AUTOSCALE_INTERVAL=interval))
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    line = [ln for ln in res.stdout.splitlines() if f"{LABEL}-cron" in ln]
+    assert line, res.stdout
+    sched = " ".join(line[0].split()[:5])
+    assert sched == want_sched, (sched, want_sched, res.stdout)
+    assert ("NOTE: cron cannot express" in res.stderr) is want_note, (res.stderr, want_note)
+
+
+def test_cron_refuses_a_period_it_cannot_deliver(tmp_path):
+    """⛔ REFUSE, DON'T PROMISE: cron has no faithful period longer than 12 hours.
+
+    The hour field's `*/N` is a period only when N divides 24, so 12h is the longest real one. The
+    first version of this fix fell back to `0 0 * * *` — DAILY — for anything above it, which for a
+    25h request fires MORE often than asked (the harm this whole function refuses) while the NOTE
+    printed the opposite. VGATE caught it on the change that introduced it; cron's day-of-month
+    `*/N` is no escape either, because it restarts at every month boundary.
+
+    So the same fail-closed rule as the >= 60s floor applies at the long end: name the refusal and
+    write nothing. Firing less often than configured is a bounded, visible loss; firing more often
+    is the unbounded API hammering this guards.
+
+    Mutation: restore the `0 0 * * *` daily fallback -> 25h installs as a DAILY job -> RED.
+    """
+    sb = _sandbox(
+        tmp_path,
+        uname="Linux",
+        env_overrides={"AUTOSCALE_HAS_SYSTEMD": "0", "AUTOSCALE_HAS_CRON": "1"},
+    )
+    # 46800 = 13h (no divisor of 24 is >= 13) and 90000 = 25h (above a day at all).
+    for interval in ("46800", "90000"):
+        res = _run(sb, "--dry-run", env=dict(sb["env"], RUNNER_AUTOSCALE_INTERVAL=interval))
+        assert res.returncode == 2, (interval, res.stdout, res.stderr)
+        assert "REFUSED" in res.stderr and "MORE often" in res.stderr, (interval, res.stderr)
+    # the INSTALL refuses the same way, and arms nothing.
+    res = _run(sb, env=dict(sb["env"], RUNNER_AUTOSCALE_INTERVAL="90000"))
+    assert res.returncode == 2, (res.stdout, res.stderr)
+    assert "REFUSED" in res.stderr, res.stderr
+    assert not sb["crontab_store"].exists(), "a refused interval must write no cron entry"
+    # …and the EXIT line's promise ("refusal — nothing was written") must hold: no runnable copy
+    # either. It did not, while the cadence was resolved AFTER `install -m 0755` (VGATE round 2).
+    assert not (sb["install"] / "runner_autoscale.py").exists(), (
+        "a refused interval must not refresh the runnable copy — the header promises a refusal "
+        "writes nothing")
+    # …while the longest expressible period still installs (the boundary is 12h, not "refuse"):
+    res = _run(sb, "--dry-run", env=dict(sb["env"], RUNNER_AUTOSCALE_INTERVAL="43200"))
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    assert "0 */12 * * *" in res.stdout, res.stdout
+
+
 def test_cron_install_is_idempotent_and_survives_an_empty_crontab(tmp_path):
     """Re-installing with a changed interval must not exit 1 AFTER succeeding (pipefail)."""
     sb = _sandbox(
@@ -621,6 +823,56 @@ def test_status_fails_when_nothing_is_armed(tmp_path):
     # …and after an install, the same box is armed: the difference is the schedule, not the box.
     assert _run(sb).returncode == 0
     assert _run(sb, "--status").returncode == 0
+
+
+def test_status_fails_when_the_schedule_would_fire_and_do_nothing(tmp_path):
+    """⛔ THE THREE INERT STATES MUST ALL FAIL `--status`, not just "nothing is armed".
+
+    `armed` started at 1 and was only ever cleared by the entry-exists branches, so a PRESENT
+    entry whose TARGET was gone read as healthy — the exact state the file names in prose ("the
+    schedule would run nothing", "the timer activates nothing") and the caller is told to gate on:
+
+      1. the run-copy is GONE but the plist/timer/cron entry is present (a reaped worktree, a
+         half-copy, an `--uninstall` that removed only the copy);
+      2. the systemd `.timer` is armed but its `.service` is missing;
+      3. the probe CRASHES (exit 1) instead of returning the tool's own exit-2 verdict — the line
+         above already says "this schedule would fire and do NOTHING", and only `2` was propagated.
+
+    Measured all three as `rc 0` before the fix (round 11 review, P1).
+    Mutations: drop `armed=0` from the MISSING branch / from the service check; change
+    `[ "$probe_rc" = "0" ] || return 2` back to `= "2"` -> each is RED.
+    """
+    # (1) entry present, run-copy gone.
+    sb = _sandbox(tmp_path / "nocopy")
+    assert _run(sb).returncode == 0
+    (sb["install"] / "runner_autoscale.py").unlink()
+    res = _run(sb, "--status")
+    assert res.returncode == 2, (res.stdout, res.stderr)
+    assert "run-copy: MISSING" in res.stdout, res.stdout
+
+    # (2) the timer is armed but activates nothing.
+    sb = _sandbox(tmp_path / "systemd", uname="Linux")
+    _systemd_stubs(sb)
+    env = dict(sb["env"], AUTOSCALE_PLATFORM="systemd")
+    assert _run(sb, env=env).returncode == 0
+    (sb["units"] / f"{LABEL}.service").unlink()
+    res = _run(sb, "--status", env=env)
+    assert res.returncode == 2, (res.stdout, res.stderr)
+    assert "activates nothing" in res.stdout, res.stdout
+
+    # (3) the probe crashes (exit 1) rather than refusing with the tool's own exit 2.
+    sb = _sandbox(tmp_path / "crash")
+    _write_stub(
+        sb["bin"],
+        "py312_crash",
+        "#!/usr/bin/env bash\n"
+        'case " $* " in *" --json "*) echo "Traceback (most recent call last):" >&2; exit 1 ;; esac\n'
+        "exit 0\n",
+    )
+    assert _run(sb).returncode == 0  # install with the working interpreter
+    res = _run(sb, "--status", env=dict(sb["env"], AUTOSCALE_PYTHON=str(sb["bin"] / "py312_crash")))
+    assert res.returncode == 2, (res.stdout, res.stderr)
+    assert "probe: FAILED (exit 1)" in res.stderr, res.stderr
 
 
 def test_the_probe_runs_the_schedule_s_repo_and_pinned_environment(tmp_path):
