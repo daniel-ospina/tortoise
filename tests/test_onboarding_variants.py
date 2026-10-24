@@ -529,7 +529,7 @@ def test_4365_served_document_sends_chatgpt_to_a_path_that_exists():
     # `len(orgs) > 1` memberships path). "Check the name" alone therefore points
     # at text a multi-org account never sees — the same class of defect as the
     # unnamed consent dialog — so the pick is pinned here (#9660 review).
-    assert "pick the Organization you are onboarding" in skill, (
+    assert "pick the organization you are onboarding" in skill, (
         "the served document must keep the multi-org act: the consent page shows "
         "a CHOOSER (and no named organization) when the account has more than "
         "one selectable org, and Authorize stays disabled until one is picked")
@@ -541,7 +541,7 @@ def test_4365_served_document_sends_chatgpt_to_a_path_that_exists():
     # would red this with a message blaming the ChatGPT recipe (#9660 review).
     note_at = skill.index("#1701 — ChatGPT is a 7th harness")
     note = skill[note_at:skill.index("installing the three reusable skills", note_at)]
-    assert note.index("pick the Organization") < note.index("**Authorize**"), (
+    assert note.index("pick the organization") < note.index("**Authorize**"), (
         "the served document's ChatGPT recipe must pick the Organization before "
         "Authorize — an agent reads this list aloud to a user who cannot see "
         "which control is disabled")

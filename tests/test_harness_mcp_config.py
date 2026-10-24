@@ -932,7 +932,7 @@ class TestDocsPageAndSkillConfig:
             "Connect",                   # 3 — the OAuth grant is a SEPARATE act
             "Connect Tortoise",          # 3 — the consent dialog between Connect and Authorize
             "Authorize",                 # 3 — consent (key-less connect completes here)
-            "pick the Organization you are onboarding",  # 3 — the MULTI-org chooser (oauth.py)
+            "pick the organization you are onboarding",  # 3 — the MULTI-org chooser (oauth.py)
                                        #     hides the named-org line and keeps
                                        #     Authorize disabled until it is picked
             "chatgpt.com/skills",        # 4 — the Skills surface the archives install on
@@ -1995,177 +1995,162 @@ class TestCommittedRepoMcpJson:
                         )
 
 
-# The ChatGPT arm's SELECTOR. `main.jsx` opens the card's ternary with it, and
-# every copy assertion in the chatgpt journey test below has to be bound to the
-# arm it opens (#9660 review).
-_CHATGPT_ARM_MARKER = "wizardConnectHarness === 'chatgpt'"
+# The ChatGPT card's SELECTOR: without it the connect step has no ChatGPT branch
+# and a ChatGPT user gets no card at all, so it is pinned (the journey test below).
+_CHATGPT_SELECTOR = "wizardConnectHarness === 'chatgpt' ? ("
 
-# The arm's END: the NEXT harness arm's ternary terminator. Anchored on the
-# arm-SHAPED terminator (`) : <name> ?`) rather than on the bare identifier —
-# `wizardKeyless` also names a const, an `else if (wizardKeyless)` node branch
-# BEFORE this arm and a nav-button label AFTER every arm, so a bare
-# `find("wizardKeyless")` answers a question nobody asked (#9660 review, P1) — and
-# the match must BE the key-less one, so a sibling arm inserted in between cannot
-# be swallowed (#9660 review, P3: blacklisting one identifier spelling missed
-# `) : wizardDesktop ? (` and `) : wizardKeyless && wizardExtra ? (`).
-_ARM_TERMINATOR = re.compile(r"\)\s*:\s*([A-Za-z_$][\w$.]*)\s*(\?|&&|\|\||===|!==)")
+# The card's END: the key-less Claude branch that terminates the same ternary chain.
+_KEYLESS_BRANCH = "wizardKeyless ? ("
+
+# The card's three block titles. Each appears EXACTLY ONCE in `main.jsx` and only
+# in the ChatGPT arm, so they are what this test slices on: the boundaries are
+# content the card itself renders, not punctuation in the source around it.
+#
+# This replaced two earlier guards that tried to find the arm's END by reading the
+# surrounding JavaScript — first by the shape of the next ternary's condition, then
+# by the `) :` token with comments blanked. Both were the same mistake: a regex is
+# not a lexer, so each round found ordinary source it mis-read (a `) : \`x\` ?`, a
+# `//` inside copy opening a phantom block comment that blanked thousands of real
+# characters, a protocol-relative `href="//cdn"` hiding the terminator, a nested
+# ternary inside the card). The lesson is in the review record; the idiom here is
+# the cheap one: cut on strings the card renders.
+_CHATGPT_BLOCKS = ("Add the Tortoise connector", "Install the Tortoise skills",
+                   "Give it its first job")
 
 
-def _anchor(text: str, needle: str, what: str) -> int:
-    """`text.find(needle)`, asserted — never a bare `ValueError` from `.index()`.
+_ORG_CHOOSER = "or asks you to choose when your account can use more than one"
 
-    Every offset this file derives from a source literal routes through here, so a
-    moved heading reports *which* anchor went missing instead of dying as
-    `ValueError: substring not found` naming nothing (#9660 review, P3).
+
+def _assert_org_pick_precedes_authorize(block: str) -> None:
+    """The consent page disables Authorize until the Organization chooser has a value.
+
+    `tortoise/oauth.py` hides the named-org line and calls `disableAuthorize()` on
+    the `len(orgs) > 1` memberships branch; the select's onchange re-enables it. So
+    "click Authorize, then pick" names an inert control. Extracted from the journey
+    test so the law itself can be proved on synthetic copy — an inline assertion is
+    only ever exercised by the real file, which cannot show it would red.
     """
-    position = text.find(needle)
-    assert position != -1, (
-        f"{what}: the anchor {needle!r} no longer appears — the copy this pin "
-        "reads is gone, or it moved behind different text. Update the anchor.")
-    return position
+    at_org = block.find(_ORG_CHOOSER)
+    assert at_org != -1, (
+        "the card no longer tells the reader to pick the Organization when the "
+        "consent page offers a chooser — a multi-Organization account sees no "
+        "named organization, and Authorize stays disabled")
+    at_authorize = block.find("Authorize</strong>")
+    assert at_authorize != -1, "the card no longer names the Authorize button"
+    assert at_org < at_authorize, (
+        "the card picks the Organization AFTER Authorize — on a multi-Organization "
+        "account that button is disabled until the chooser has a value")
 
 
-def _chatgpt_arm_bounds(main: str) -> tuple[int, int]:
-    """(start, end) of the ChatGPT connect card inside `main.jsx` source.
+def _chatgpt_block(main: str, index: int) -> str:
+    """The text of the card's `index`-th block, sliced on the block titles.
 
-    `start` is the first character AFTER the arm's opening selector; `end` is the
-    start of the `) : wizardKeyless ? (` terminator — the key-less Claude arm that
-    follows the chatgpt one. Extracted (and unit-tested on synthetic source by
-    `test_9660_the_chatgpt_arm_bounds_red_on_a_wrong_shape`) because the two ways
-    this can go wrong are silent, not loud:
+    The boundaries are content the card itself renders, so a slice cannot span a
+    sibling arm: each title appears exactly once in `main.jsx` and only here. The
+    LAST block ends at the card's own terminator (`_KEYLESS_BRANCH`), which must
+    start its own clause — a quoted copy of it, mid-line, would truncate the slice.
 
-    * an anchor keyed on the bare identifier also matches a nav-button label far
-      below every arm, which makes the ordering claim and the slice pass from the
-      WRONG position — moving the chatgpt card after the key-less branch, the
-      exact regression the claim names, then stays green;
-    * an arm whose end simply runs to the next terminator swallows any sibling
-      arm inserted in between, so `after()` can be satisfied by another harness's
-      copy while this card lost it. The end is therefore taken from the first
-      arm-SHAPED terminator and REQUIRED to be the key-less one, which reds on a
-      sibling however it is spelled.
-
-    Both raise `AssertionError` naming what moved — never a bare `ValueError` from
-    `str.index`.
+    Every failure raises `AssertionError` naming what moved, never a bare
+    `ValueError` from `str.index`.
     """
-    branch = main.find(_CHATGPT_ARM_MARKER)
-    assert branch != -1, (
-        "the chatgpt connect arm is gone from main.jsx — the selector "
-        f"{_CHATGPT_ARM_MARKER!r} no longer appears, so every copy assertion in "
-        "the journey test would be judging some other arm. Restore the arm or "
-        "update this guard with it.")
-    start = branch + len(_CHATGPT_ARM_MARKER)
-    terminator = _ARM_TERMINATOR.search(main, start)
-    assert terminator is not None, (
-        "the chatgpt arm's end anchor is gone from main.jsx: the connect step no "
-        "longer offers a `) : wizardKeyless ? (` branch after the chatgpt one. "
-        "The chatgpt card must come BEFORE the key-less one — chatgpt is key-less "
-        "too, so ordering decides which copy it gets. Update this guard.")
-    assert (terminator.group(1), terminator.group(2)) == ("wizardKeyless", "?"), (
-        "the first arm after the chatgpt card is not the key-less one "
-        f"({terminator.group(0).strip()!r}) — a SIBLING arm sits between them, and "
-        "every copy assertion below would be satisfied from it while the chatgpt "
-        "card lost the copy")
-    end = terminator.start()
-    assert "wizardConnectHarness ===" not in main[start:end], (
-        "a second harness branch sits between the chatgpt card and the key-less "
-        "one — every copy assertion below would be satisfied from that SIBLING "
-        "arm while the chatgpt card lost the copy")
-    return start, end
+    positions = []
+    for title in _CHATGPT_BLOCKS:
+        seen = main.count(title)
+        assert seen == 1, (
+            f"the chatgpt card's block title {title!r} appears {seen} times in "
+            "main.jsx; this test slices on it, so it must stay unique to that card")
+        positions.append(main.index(title))
+    assert positions == sorted(positions), (
+        "the chatgpt card's blocks are out of order in main.jsx: the journey is "
+        f"connect → install → first job, but the titles render as {positions}")
+
+    start_pos = positions[index]
+    if index + 1 < len(_CHATGPT_BLOCKS):
+        return main[start_pos:positions[index + 1]]
+
+    # The last block runs to the card's terminator.
+    end_pos = main.find(_KEYLESS_BRANCH, start_pos)
+    assert end_pos != -1, (
+        f"the chatgpt card is no longer terminated by {_KEYLESS_BRANCH!r}: the card "
+        "is the last arm in the connect step, or the branch was renamed. The last "
+        "block cannot be bounded — update this guard with the shape that is there.")
+    line_start = main.rfind("\n", start_pos, end_pos) + 1
+    assert main[line_start:end_pos].strip() in (") :", "):"), (
+        "the key-less anchor does not start its own clause, so it is probably being "
+        f"QUOTED in the card's copy rather than ending the arm ({main[line_start:end_pos]!r}). "
+        "Re-pin the bound: a truncated slice can pass the pins vacuously.")
+    return main[start_pos:end_pos]
 
 
-def _inside(main: str, marker: str, start: int, end: int) -> int:
-    """Position of `marker` INSIDE the arm `[start, end)`, with a message.
-
-    Bounded on both sides: `find` alone accepts a marker that survives only in a
-    sibling branch, which is the false green this bound exists to kill.
-    """
-    position = main.find(marker, start)
-    assert position != -1, (
-        f"the chatgpt card no longer renders {marker!r} — the copy this test "
-        "pins is gone, or it now lives outside the card")
-    assert position < end, (
-        f"{marker!r} is rendered by a SIBLING harness branch, not the chatgpt "
-        "card — the copy this test pins is not in the arm it names")
-    return position
-
-
-def test_9660_the_chatgpt_arm_bounds_red_on_a_wrong_shape():
-    """#9660 review, non-vacuity: the arm guards must RED on each wrong shape.
-
-    `_chatgpt_arm_bounds` is what makes every copy assertion in the journey test
-    arm-bound, and it cannot be proven by asserting over the real `main.jsx` —
-    that file is the CORRECT shape, so a guard returning "whatever is there"
-    passes. Each case below is synthetic source carrying one plausible defect.
-    """
-    # A correct shape: the card, then the key-less terminator, then a nav-button
-    # use of the SAME identifier further down (`{busy ? 'x' : (wizardKeyless`).
+def test_9660_the_chatgpt_card_slices_red_on_a_moved_or_duplicated_title():
+    """The slices red on every way the card's own boundaries can move."""
     good = (
         "{wizardConnectHarness === 'chatgpt' ? (\n"
-        "  <p>card</p>\n"
-        ") : wizardKeyless ? (\n"
-        "  <p>keyless</p>\n"
-        "{wizardConnectBusy ? 'Checking…' : (wizardKeyless\n"
+        "  <WizardBlock title=\"Add the Tortoise connector\">a</WizardBlock>\n"
+        "  <WizardBlock title=\"Install the Tortoise skills\">b</WizardBlock>\n"
+        "  <WizardBlock title=\"Give it its first job\">c</WizardBlock>\n"
+        ") : wizardKeyless ? (\n  <p>keyless</p>\n"
     )
-    start, end = _chatgpt_arm_bounds(good)
-    assert "<p>card</p>" in good[start:end] and "<p>keyless</p>" not in good[start:end], (
-        "the arm must stop at the multi-line terminator, not run down to the "
-        "key-less branch or the nav-button use of the identifier")
-    assert _inside(good, "<p>card</p>", start, end) == good.index("<p>card</p>")
+    first = _chatgpt_block(good, 0)
+    assert "a</WizardBlock>" in first and "b</WizardBlock>" not in first
+    last = _chatgpt_block(good, 2)
+    assert "c</WizardBlock>" in last and "keyless" not in last
 
-    # The regression the ordering claim names: the card MOVED AFTER the key-less
-    # branch. A bare-identifier anchor finds the nav-button label below and calls
-    # that the end, so the old helper stayed green here.
-    moved = (
-        "{wizardConnectHarness === 'codex' ? (\n"
-        "  <p>other</p>\n"
-        ") : wizardKeyless ? (\n"
-        "  <p>keyless</p>\n"
-        ") : wizardConnectHarness === 'chatgpt' ? (\n"
-        "  <p>card</p>\n"
-        "{busy ? 'Checking…' : (wizardKeyless\n"
-    )
-    with pytest.raises(AssertionError, match="must come BEFORE the key-less one"):
-        _chatgpt_arm_bounds(moved)
+    # A duplicated title: the slice would judge the wrong block.
+    with pytest.raises(AssertionError, match="appears 2 times"):
+        _chatgpt_block(good + good, 0)
 
-    # The key-less ternary deleted outright: the anchor names that, too.
-    with pytest.raises(AssertionError, match="end anchor is gone"):
-        _chatgpt_arm_bounds(
-            "{wizardConnectHarness === 'chatgpt' ? (\n  <p>card</p>\n")
-
-    # A SIBLING harness arm inserted between the card and the key-less branch:
-    # the arm must not swallow it, or its copy satisfies the pins.
-    sibling = (
-        "{wizardConnectHarness === 'chatgpt' ? (\n"
-        "  <p>card</p>\n"
-        ") : wizardConnectHarness === 'codex' ? (\n"
-        "  <p>other</p>\n"
-        ") : wizardKeyless ? (\n"
-    )
-    with pytest.raises(AssertionError, match="SIBLING arm"):
-        _chatgpt_arm_bounds(sibling)
-
-    # …and the same guard under the TWO spellings a blacklist of
-    # `wizardConnectHarness ===` missed (#9660 review, P3): a differently-named
-    # sibling arm, and a REFINEMENT of the key-less one. Both keep a terminator
-    # in the arm, so an end anchor that only looks for `: wizardKeyless ?` in the
-    # text would return a region that includes the sibling.
-    for spelling in (") : wizardDesktop ? (\n  <p>other</p>\n",
-                    ") : wizardKeyless && wizardExtra ? (\n  <p>other</p>\n"):
-        widened = (
+    # EVERY other ordering of the three titles reds with a named error (and never
+    # a bare ValueError from `str.index`).
+    for order in ((1, 0, 2), (2, 1, 0), (0, 2, 1), (1, 2, 0), (2, 0, 1)):
+        # built from the PERMUTED order directly: an earlier version marked the
+        # titles and then restored them by source index, which cancelled out and
+        # left the loop a no-op that tested nothing (found in review)
+        shuffled = (
             "{wizardConnectHarness === 'chatgpt' ? (\n"
-            "  <p>card</p>\n"
-            + spelling
-            + ") : wizardKeyless ? (\n"
+            + "".join(
+                f'  <WizardBlock title="{_CHATGPT_BLOCKS[slot]}">{slot}</WizardBlock>\n'
+                for slot in order)
+            + ") : wizardKeyless ? (\n  <p>keyless</p>\n"
         )
-        with pytest.raises(AssertionError, match="SIBLING arm"):
-            _chatgpt_arm_bounds(widened)
+        with pytest.raises(AssertionError, match="out of order"):
+            _chatgpt_block(shuffled, 0)
 
-    # …and `after()` itself is bounded at the far end: a marker that only exists
-    # in the sibling branch is not the chatgpt card's copy.
-    with pytest.raises(AssertionError, match="SIBLING harness branch"):
-        _inside(good, "<p>keyless</p>", start, end)
-    with pytest.raises(AssertionError, match="no longer renders"):
-        _inside(good, "<p>absent</p>", start, end)
+    # The last block cannot run past the card: its terminator is pinned, and a
+    # quoted copy of it is refused rather than truncating the slice.
+    with pytest.raises(AssertionError, match="no longer terminated"):
+        _chatgpt_block(
+            "{wizardConnectHarness === 'chatgpt' ? (\n"
+            "  <WizardBlock title=\"Add the Tortoise connector\">a</WizardBlock>\n"
+            "  <WizardBlock title=\"Install the Tortoise skills\">b</WizardBlock>\n"
+            "  <WizardBlock title=\"Give it its first job\">c</WizardBlock>\n", 2)
+    with pytest.raises(AssertionError, match="does not start its own clause"):
+        _chatgpt_block(good.replace(") : wizardKeyless ? (", "<code>) : wizardKeyless ? (</code>"), 2)
+
+    # Source shapes that a regex mis-read bound correctly here, because nothing
+    # reads comments or ternaries: a `//` in copy, an unbalanced looking `/*`, a
+    # nested ternary, a protocol-relative URL, a comment quoting the branch name.
+    for inert in (
+        'href="//cdn.example/x"',
+        "<p>a /* b</p>",
+        "{a ? (\n    <p>x</p>\n  ) : (\n    <p>y</p>\n  )}",
+        "// route (`/auth/*`).",
+        "/* ends at wizardKeyless ? ( below */",
+    ):
+        src = good.replace("<WizardBlock title=\"Add the Tortoise connector\">",
+                           f"<WizardBlock title=\"Add the Tortoise connector\">{inert}")
+        block_text = _chatgpt_block(src, 0)
+        assert "a</WizardBlock>" in block_text and "keyless" not in block_text, inert
+
+    # The ordering law reds on inverted copy and passes on correct copy — proved on
+    # synthetic blocks, because the real file can only ever show the passing case.
+    _assert_org_pick_precedes_authorize(
+        f"pick the organization {_ORG_CHOOSER}; then <strong>Authorize</strong>")
+    with pytest.raises(AssertionError, match="picks the Organization AFTER Authorize"):
+        _assert_org_pick_precedes_authorize(
+            f"click <strong>Authorize</strong>; check {_ORG_CHOOSER}")
+    with pytest.raises(AssertionError, match="no longer tells the reader to pick"):
+        _assert_org_pick_precedes_authorize("click <strong>Authorize</strong>")
 
 
 def test_9660_chatgpt_is_a_live_onboarding_journey_not_a_docs_dead_end():
@@ -2202,112 +2187,124 @@ def test_9660_chatgpt_is_a_live_onboarding_journey_not_a_docs_dead_end():
         "the snapshot generator must cover chatgpt, or its prompts can change "
         "with no pinned diff and no failing test (#4880)")
 
-    # 2. The connect step renders its own branch, ahead of the Claude key-less
-    #    one it would otherwise fall into (that branch's copy is Claude-specific).
-    #    TWO source facts are pinned — the branch exists, and it ends where the
-    #    key-less one begins — and both are enforced by `_chatgpt_arm_bounds`
-    #    (above), which names what moved instead of raising a bare ValueError.
-    #    Everything else below is a COPY fact, asserted by presence INSIDE the
-    #    chatgpt arm and nowhere else: `after()` is bounded at BOTH ends, since a
-    #    marker that survives only in a sibling branch is not this card's copy.
-    #    That makes the arm's end a real dependency, so a reflow of the next
-    #    ternary branch reds this on purpose while a reformat that keeps it reds
-    #    nothing — the guard reads the SELECTOR as a ternary terminator, not a
-    #    spelling, and `test_9660_the_chatgpt_arm_bounds_red_on_a_wrong_shape`
-    #    proves each wrong shape actually fails (#4880: a guard deciding from the
-    #    SHAPE of the source is defeated by a source of a different shape).
-    arm_start, arm_end = _chatgpt_arm_bounds(main)
+    # 2. The card still exists, and its blocks are bounded on content the card
+    #    itself renders: the first two end at the NEXT block's title, the third at
+    #    the card's own terminator. Those three titles appear exactly once in
+    #    main.jsx and only on this card, so a slice cannot span a sibling harness
+    #    arm — the failure both earlier versions of this guard kept reintroducing.
+    #    Nothing here strips comments or matches a ternary's shape; the single
+    #    punctuation fact read is that the terminator starts its own clause (a
+    #    quoted copy of it mid-line is refused rather than truncating the slice).
+    #    `test_9660_the_chatgpt_card_slices_red_on_a_moved_or_duplicated_title`
+    #    proves a moved, reordered or duplicated boundary actually reds.
+    assert _CHATGPT_SELECTOR in main, (
+        "the chatgpt connect arm is gone from main.jsx — without the branch a "
+        "ChatGPT user gets no card in the connect step, and every pin below would "
+        "be judging some other arm")
+    connector, skills, first_job = (_chatgpt_block(main, i) for i in range(3))
+    # The CARD: from the plan note that frames it to the end of the last block.
+    # Bounded this way so the note cannot satisfy its pin from a sibling arm, and
+    # so the URL pin covers the whole card rather than one block.
+    card_from = main.index("paid ChatGPT plan")
+    first_at = main.index(_CHATGPT_BLOCKS[0])
+    last_at = main.index(_CHATGPT_BLOCKS[2])
+    last_end = last_at + len(first_job)
+    card = main[card_from:last_end]
+    assert "wizardConnectHarness ===" not in main[card_from:first_at], (
+        "another harness selector sits between the plan note and the chatgpt card's "
+        "blocks — the note has moved into a sibling arm")
 
-    def after(marker: str) -> int:
-        """Position of `marker` inside the chatgpt arm — bounded at both ends."""
-        return _inside(main, marker, arm_start, arm_end)
+    def in_block(block: str, marker: str) -> int:
+        """Position of `marker` inside `block` — presence is asserted, not assumed."""
+        position = block.find(marker)
+        assert position != -1, (
+            f"the chatgpt card no longer renders {marker!r} in the block this test "
+            "expects it in — the copy moved or was reworded")
+        return position
 
-    # 3. The three blocks, in the order the user performs them.
-    titles = ["Add the Tortoise connector", "Install the Tortoise skills",
-              "Give it its first job"]
-    positions = [after(t) for t in titles]
-    assert positions == sorted(positions), (
-        "the ChatGPT journey is connect → install → first job; the blocks must "
-        "render in that order")
-    # 4. The connector facts verified in the live UI. Anchored to the MARKUP a
-    #    user reads, not to bare words: `Connect` alone matches the identifier
+    # 3. The connector block carries the four acts the live UI requires, in the
+    #    order a user performs them: View details → Connect → the consent dialog's
+    #    **Connect Tortoise** → Authorize. Anchored to the MARKUP a user reads, not
+    #    to bare words: `Connect` alone matches the identifier
     #    `wizardConnectHarness` on the branch line itself, so it would survive the
-    #    deletion of the OAuth-grant step it is meant to protect (found in review,
-    #    #9660).
-    for fact in ("chatgpt.com/plugins", "Add custom MCP server", "Create as a plugin</strong>",
-                 "settings/plugins-settings", "View details</strong>",
-                 "<strong>Connect</strong>", "Connect Tortoise</strong>", "Authorize</strong>"):
-        after(fact)
-    # …and the GRANT is a sequence, so its controls must be in order: View
-    # details → Connect → Connect Tortoise → Authorize. Each is a separate click
-    # in the live UI (2026-10-23): Connect opens ChatGPT's consent dialog, whose
-    # primary button is `Connect Tortoise`; only then does the Tortoise consent
-    # page offer Authorize. An earlier card folded all three into "Connect, sign
-    # in … Authorize" and left a user staring at a dialog no step had told them
-    # to expect — deleting either middle act reds this.
-    grant = [after(m) for m in ("View details</strong>", "<strong>Connect</strong>",
-                                "Connect Tortoise</strong>", "Authorize</strong>")]
+    #    deletion of the OAuth-grant step it protects (found in review, #9660).
+    #    An earlier card folded all three into "Connect, sign in … Authorize" and
+    #    left a user staring at a dialog no step had told them to expect.
+    for fact in ("chatgpt.com/plugins", "Add custom MCP server",
+                 "Create as a plugin</strong>", "settings/plugins-settings",
+                 "View details</strong>", "<strong>Connect</strong>",
+                 "Connect Tortoise</strong>", "Authorize</strong>"):
+        in_block(connector, fact)
+    grant = [in_block(connector, m) for m in (
+        "View details</strong>", "<strong>Connect</strong>",
+        "Connect Tortoise</strong>", "Authorize</strong>")]
     assert grant == sorted(grant), (
-        "the OAuth grant reads View details → Connect → Authorize; the card must "
-        "render them in that order")
-    # …and the Organization act survives on BOTH consent shapes. The consent page
-    # has two: with ONE selectable org it NAMES the org (oauth.py
-    # `consent_preview`, `len(orgs) == 1`), and with several it renders a
-    # CHOOSER, hides the named-org line and keeps Authorize disabled until one is
-    # picked (the `len(orgs) > 1` memberships path + the page script). Copy that
-    # says only "check the name the consent page shows" points at text that is
-    # not on screen for a multi-org account — the same class of defect as the
-    # unnamed consent dialog — so the pick is pinned, not merely described.
+        "the OAuth grant reads View details → Connect → Connect Tortoise → "
+        "Authorize; the card must render them in that order")
+    # …and the Organization act survives on BOTH consent shapes. The page has two:
+    # with ONE selectable org it NAMES the org (oauth.py `consent_preview`,
+    # `len(orgs) == 1`), and with several it renders a CHOOSER, hides the named-org
+    # line and keeps Authorize disabled until one is picked (the
+    # `len(orgs) > 1` memberships path + the page script). Copy that says only
+    # "check the name the consent page shows" points at text that is not on screen
+    # for a multi-org account — the same class of defect as the unnamed consent
+    # dialog — so the pick is pinned, not merely described.
     #
-    # AND IT COMES BEFORE `Authorize`: on the chooser branch the button is
-    # disabled until a value is picked (`disableAuthorize()`, then the select's
-    # onchange re-enables it), so "click Authorize, then pick" names an inert
-    # control. The two offsets are compared, not just their presence.
-    chooser_line = after("or asks you to choose when your account can use more than one")
-    assert chooser_line < after("Authorize</strong>"), (
-        "the card picks the Organization AFTER Authorize — on a multi-Organization "
-        "account that button is disabled until the chooser has a value")
-    # 5. The skill hand-off is an INSTALL of the real archives, not a prose
-    #    rendering: the branch must map over the archive names and link them.
-    #    The server URL is bound to the ChatGPT ARM (not "somewhere after the
-    #    branch"): the card uses the constant twice — the visible URL and the
-    #    Copy button — so an unbound slice passed even with a re-typed literal on
-    #    screen (#9660 review). `in arm` subsumes the branch-wide presence check
-    #    this used to carry, so that one is gone rather than kept as dead weight.
-    arm = main[arm_start:arm_end]
-    assert "CANONICAL_MCP_URL" in arm, (
+    # AND IT COMES BEFORE `Authorize`: on the chooser branch the button is disabled
+    # until a value is picked (`disableAuthorize()`, then the select's onchange
+    # re-enables it), so "click Authorize, then pick" names an inert control.
+    for fact in ("the page names it", "or asks you to choose when your account can use "
+                 "more than one", "the connector writes to"):
+        in_block(connector, fact)
+    _assert_org_pick_precedes_authorize(connector)
+    # 4. The Server URL comes from the constant, and the card never re-types it:
+    #    asserted POSITIVELY (the constant is rendered) plus the negative, so
+    #    neither can pass vacuously on a slice that lost the connector block.
+    assert "{CANONICAL_MCP_URL}" in connector, (
         "the card's Server URL must come from the constant, not a re-typed literal")
-    assert "https://api.premiselabs.co/mcp" not in arm, (
-        "the ChatGPT arm re-types the server URL — read it from CANONICAL_MCP_URL")
-    after("SKILL_ARCHIVE_NAMES.map")
-    after("skillArchiveUrl(name)")
-    after("Upload from your computer")
-    after("Replace existing")
+    assert "https://api.premiselabs.co/mcp" not in card, (
+        "the ChatGPT card re-types the server URL — read it from CANONICAL_MCP_URL")
+    # 5. The skill hand-off is an INSTALL of the real archives, in its own block.
+    for fact in ("SKILL_ARCHIVE_NAMES.map", "skillArchiveUrl(name)",
+                 "Upload from your computer", "Replace existing"):
+        in_block(skills, fact)
     # 6. The first-job prompt is rendered as a COPYABLE card, from the prompt
-    #    module (never re-typed inline).
-    after("wizardPromptText('chatgpt', 1")
-    # 7. The plan floor the owner asked for — a claim, so it is pinned with the
-    #    evidence behind it (a Plus account had the Plugins surface).
-    plan_line = main[after("paid ChatGPT plan"):].splitlines()[0]
-    assert "Plus" in plan_line, (
-        "the plan warning must name the floor (Plus or higher), not just "
-        "say the plan is paid")
+    #    module (never re-typed inline), and the plan floor is named.
+    in_block(first_job, "wizardPromptText('chatgpt', 1")
+    # The plan floor sits in the card's frame, above the first block title, so it
+    # is asserted as a UNIQUE line rather than inside a block slice.
+    plan_lines = [line for line in card.splitlines() if "paid ChatGPT plan" in line]
+    assert len(plan_lines) == 1, (
+        "the ChatGPT card's plan note must appear exactly once in main.jsx")
+    assert "Plus" in plan_lines[0], (
+        "the plan warning must name the floor (Plus or higher), not just say the "
+        "plan is paid")
 
-
-def test_9660_the_org_choice_precedes_authorize_on_the_other_three_surfaces():
-    """#9660: the ChatGPT recipe renders on four surfaces, and the CARD is pinned
-    by `test_9660_chatgpt_is_a_live_onboarding_journey_not_a_docs_dead_end`. This
-    covers the other three — the docs row, the wizard step, and the served
-    document an agent reads aloud — because the same journey shipped wrong on all
-    four at once, and each rendering is edited by a different hand.
+def test_9660_the_org_choice_precedes_authorize_on_every_recipe_carrier():
+    """#9660: the connect recipes that drive the shared consent page, judged on ORDER
+    across seven copy blocks in four files (dashboard `main.jsx` and
+    `harnesses.js`, `website/docs.html`, `tortoise/onboarding/SKILL.md`).
 
     WHY ORDER, NOT PRESENCE. `tortoise/oauth.py` reveals the consent page's two
-    shapes: with one Organization it names it and Authorize is live, and with
-    several it hides that line, shows a "Choose an org…" chooser and calls
+    shapes: with one selectable Organization it names it and Authorize is live;
+    with several it hides that line, shows a "Choose an org…" chooser and calls
     `disableAuthorize()`, re-enabling the button only from the chooser's onchange.
     So "click Authorize, and check the Organization … if it offers a chooser, pick
-    one" tells a multi-Organization user to click a disabled control. A presence
-    assertion cannot see that; two offsets can.
+    one" tells such a user to click a disabled control. A presence assertion cannot
+    see that; two offsets can.
+
+    The chooser is a property of the PAGE, not of ChatGPT (`docs/oauth-mcp.md`), so
+    the Claude key-less carriers are judged here too — same three acts, same page,
+    and they shipped the same inversion.
+
+    Each block is bounded to the recipe it belongs to — one list row, one copy
+    string or template, one intro/note paragraph — and not to the whole file. The
+    bound is what makes the offsets mean anything: measured over a file or a whole
+    list, an unrelated mention of either act satisfies the order while the step
+    that matters is inverted (#9660 review).
+
+    The ChatGPT card is NOT here — it is pinned by
+    `test_9660_chatgpt_is_a_live_onboarding_journey_not_a_docs_dead_end`.
     """
     root = Path(__file__).resolve().parent.parent
     main = (root / "website/apps/dashboard/src/main.jsx").read_text(encoding="utf-8")
@@ -2321,6 +2318,28 @@ def test_9660_the_org_choice_precedes_authorize_on_the_other_three_surfaces():
             if needle in line:
                 return line
         raise AssertionError(f"no wizard step contains {needle!r} — moved or reworded")
+
+    def list_block(text: str, anchor: str) -> str:
+        """The `<ol>` that CONTAINS `anchor`, from `<ol` to its `</ol>`.
+
+        Anchored on the CONTAINER, not on the content: bounding from the anchor
+        itself lets a pick `<li>` hoisted out of the list widen the block to the
+        next list in the file, where the offsets stop describing the recipe
+        (#9660 review). Both edges are asserted, so a move is reported by name.
+        """
+        at = text.find(anchor)
+        assert at != -1, (
+            f"the Claude key-less recipe moved: {anchor!r} no longer appears, so "
+            "the list it belongs to cannot be bounded")
+        start = text.rfind("<ol", 0, at)
+        assert start != -1, f"{anchor!r} is no longer inside an ordered list"
+        end = text.find("</ol>", start)
+        assert end != -1, f"the ordered list holding {anchor!r} lost its closing tag"
+        block = text[start:end]
+        assert anchor in block, (
+            f"{anchor!r} is no longer inside the nearest ordered list — the copy "
+            "moved out of its list, so this block would be some earlier recipe's")
+        return block
 
     def span(text: str, start_needle: str, end_needle: str) -> str:
         """`text` from its first `start_needle` to the next `end_needle`.
@@ -2341,10 +2360,13 @@ def test_9660_the_org_choice_precedes_authorize_on_the_other_three_surfaces():
     # (docs/oauth-mcp.md). They shipped the same inversion, so they are judged
     # here too rather than left to a comment.
     blocks = [
-        ("Claude key-less card list", span(main, "Pick the Organization you&apos;re onboarding", "</ol>")),
+        ("Claude key-less card list",
+         list_block(main, "Pick the Organization you&apos;re onboarding")),
         ("claude-web step", step_line(harnesses, "Claude opens the authorization page")),
         ("Claude Desktop snippet",
          span(harnesses, "'claude-desktop': () =>", "'claude-web': () =>")),
+        ("Claude Desktop intro",
+         span(harnesses, "'claude-desktop': 'Open Claude Desktop", "'claude-web':")),
         ("wizard step", step_line(harnesses, "confirm Connect Tortoise in the dialog")),
         ("docs row", span(docs, "chatgpt.com/settings/plugins-settings", "</li>")),
         ("served document",
@@ -2356,10 +2378,16 @@ def test_9660_the_org_choice_precedes_authorize_on_the_other_three_surfaces():
         # still the phrase a reader sees (the served note wraps mid-sentence).
         flat = " ".join(block.replace("> ", " ").split())
         assert "asks you to choose" in flat, (
-            f"the {label} describes the consent page's single-Organization shape "
-            "only — a second-org user meets a chooser (tortoise/oauth.py)")
-        org = flat.find("Organization")
-        authorize = flat.find("Authorize")
+            f"the {label} no longer carries the chooser wording this pin looks "
+            "for ('asks you to choose'): the copy must tell a user that the page "
+            "asks them to pick when their account can use more than one "
+            "Organization (tortoise/oauth.py). If the sentence was reworded, "
+            "update BOTH the copy and this pin — do not drop the fact.")
+        # Case-insensitive: docs.html and the served document write
+        # "organization", the dashboard writes "Organization". The ORDER is the
+        # property; the house capitalisation belongs to each surface.
+        org = flat.lower().find("organization")
+        authorize = flat.lower().find("authorize")
         assert -1 not in (org, authorize), (
             f"the {label} no longer names both acts — Organization={org}, "
             f"Authorize={authorize}")

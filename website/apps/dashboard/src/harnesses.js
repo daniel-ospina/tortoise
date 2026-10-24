@@ -286,7 +286,7 @@ export const HARNESS_INTRO = {
   claude: 'Run these commands in your terminal:',
   // #2865: both Claude connector surfaces are key-less OAuth — the intro names
   // the sign-in, never a Bearer request header.
-  'claude-desktop': 'Open Claude Desktop → Settings → Connectors → Add custom connector, name it "Tortoise" and enter the Server URL. No API key is needed: Claude opens Tortoise\u2019s sign-in page on the first connection — sign in and click Authorize. (For local stdio servers only, advanced users can still edit ~/Library/Application Support/Claude/claude_desktop_config.json on macOS, or %APPDATA%\\Claude\\claude_desktop_config.json on Windows, from Settings → Developer in the app.)',
+  'claude-desktop': 'Open Claude Desktop → Settings → Connectors → Add custom connector, name it "Tortoise" and enter the Server URL. No API key is needed: Claude opens Tortoise\u2019s sign-in page on the first connection — sign in, pick the Organization you are onboarding (the page names it, or asks you to choose when your account can use more than one), then click Authorize. (For local stdio servers only, advanced users can still edit ~/Library/Application Support/Claude/claude_desktop_config.json on macOS, or %APPDATA%\\Claude\\claude_desktop_config.json on Windows, from Settings → Developer in the app.)',
   // #2361 review-r1 (UX-3): Claude Web had no intro — the copy button said
   // 'Copy prompt' but nothing explained where the prompt goes.
   'claude-web': 'Start a new chat at claude.ai (or the Claude web app) and paste the prompt below into it — that conversation becomes your connected agent.',
