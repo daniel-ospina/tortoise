@@ -1303,10 +1303,28 @@ def pi_processes() -> tuple[list[dict[str, Any]], str]:
     user's cwd is not readable, so including one would turn the whole store
     UNMEASURED on a box where some unrelated ``pi`` happens to run as root — the
     permanent-red-gate failure this fix exists to remove.
+
+    ⛔ ``-ww`` IS LOAD-BEARING, NOT COSMETIC (measured 2026-10-24). Without it this
+    ``procps`` build truncates the ``command=`` column to the OUTPUT WIDTH, and the width
+    it uses is ``COLUMNS`` when that variable is set and the terminal's width otherwise —
+    measured with ``COLUMNS=80`` inherited: every row cut to exactly 80 characters, 1966
+    without the cap. (With ``COLUMNS`` unset and stdout a pipe there is NO truncation here
+    — `procps-ng 4.0.4` does not fall back to 80 — so the hazard is specifically a
+    harness, a tmux pane, or a CI job that exports a narrow ``COLUMNS``, which is exactly
+    the environment a lane is dispatched from.)
+    The matcher below reads ``basename(argv[0])``, so a lane whose argv[0] is a PATH —
+    ``/long/checkout/…/pi``, a wrapper, a test fixture's copied binary — arrives as
+    ``/tmp/…/fakebin-empt`` and is INVISIBLE: the census answers "no pi process" about a
+    process it simply could not read, which is the fail-open direction for every
+    `liveness`/owner decision built on it (``StaleHolder._owner`` reads exactly that answer
+    to decide whether a worktree has a live owner). Measured on a fixture path of 57
+    characters; a real lane launched as ``nohup pi …`` is unaffected at a WIDE width,
+    which is why this went unnoticed. ``-ww`` makes the width unlimited, so the full
+    argv[0] — and therefore its basename — is what the matcher sees.
     """
-    out = _run(["ps", "-axo", "pid=,ppid=,uid=,command="], timeout=30)
+    out = _run(["ps", "-ww", "-axo", "pid=,ppid=,uid=,command="], timeout=30)
     if not out.strip():
-        return [], "`ps -axo pid=,ppid=,uid=,command=` produced nothing"
+        return [], "`ps -ww -axo pid=,ppid=,uid=,command=` produced nothing"
     return _pi_pids_from_ps(out), ""
 
 
