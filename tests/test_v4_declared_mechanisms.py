@@ -1818,21 +1818,31 @@ def _incomplete_ddl(value: ast.expr | None) -> bool:
     )
 
 
-def _bound_pairs(tree: ast.AST) -> list[tuple[ast.expr, ast.expr | None]]:
-    """`(target, value)` for every binding form — with tuple targets PAIRED UP.
+def _bound_pairs(tree: ast.AST) -> list[tuple[ast.expr, ast.expr | None, bool]]:
+    """`(target, value, augments)` for every binding form, tuple targets PAIRED UP.
 
     `_A, _B = "… UNIQUE NODE ", "Point"` binds two values, and the half that
     carries the keyword is `_A`; pairing the whole tuple target with the whole
     tuple value would find no `ast.Constant` and taint nothing. So a `Tuple`/
     `List` target whose value is a `Tuple`/`List` of the same LENGTH is paired
     element-wise; anything else is paired whole.
+
+    `augments` is True for an `ast.AugAssign`, and it is NOT decoration: `k += rhs`
+    does not REBIND `k`, it ACCUMULATES onto whatever `k` already held, so the
+    binding after it is `what k held` JOINED with `rhs` — never `rhs` alone. A
+    caller that takes the pair's value as the binding loses the half the statement
+    was split at (measured: `_A = "CREATE "` + `_A += "CONSTRAINT pt UNIQUE NODE
+    Point"` carried no spelling either single-literal pattern sees, and the
+    constraint read as ABSENT — fixture `keyword_split_augassign`).
     """
-    pairs: list[tuple[ast.expr, ast.expr | None]] = []
+    pairs: list[tuple[ast.expr, ast.expr | None, bool]] = []
     for node in ast.walk(tree):
+        augments = False
         if isinstance(node, ast.Assign):
             targets: list[ast.expr] = list(node.targets)
         elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
             targets = [node.target]
+            augments = isinstance(node, ast.AugAssign)
         elif isinstance(node, ast.NamedExpr):
             # `if (d := "… UNIQUE NODE "):` — a walrus IS a binding.
             targets = [node.target]
@@ -1840,7 +1850,7 @@ def _bound_pairs(tree: ast.AST) -> list[tuple[ast.expr, ast.expr | None]]:
             # `for d in ["… UNIQUE NODE "]:` — the loop target is bound to the
             # iterable's ELEMENTS, so the iterable is the value to inspect.
             targets = [node.target]
-            pairs.append((node.target, node.iter))
+            pairs.append((node.target, node.iter, False))
             continue
         else:
             continue
@@ -1851,10 +1861,28 @@ def _bound_pairs(tree: ast.AST) -> list[tuple[ast.expr, ast.expr | None]]:
                 and isinstance(value, (ast.Tuple, ast.List))
                 and len(target.elts) == len(value.elts)
             ):
-                pairs.extend(zip(target.elts, value.elts, strict=True))
+                pairs.extend(
+                    (elt_target, elt_value, augments)
+                    for elt_target, elt_value in zip(
+                        target.elts, value.elts, strict=True
+                    )
+                )
             else:
-                pairs.append((target, value))
+                pairs.append((target, value, augments))
     return pairs
+
+
+def _accumulated(prior: ast.expr, value: ast.expr, node: ast.expr) -> ast.BinOp:
+    """`prior + value` as an AST join, so an accumulation resolves like a `+`.
+
+    Positioned at `node` so :func:`_assembled_text`'s SOURCE ordering keeps the
+    pre-augment text ahead of the RHS — the join is a synthetic node and has no
+    position of its own, and an unpositioned root would sort as line 0.
+    """
+    joined = ast.BinOp(left=prior, op=ast.Add(), right=value)
+    joined.lineno = getattr(node, "lineno", 1)
+    joined.col_offset = getattr(node, "col_offset", 0)
+    return joined
 
 
 def ddl_scan(root: Path) -> tuple[list[str], list[str], list[str]]:
@@ -1906,10 +1934,21 @@ def ddl_scan(root: Path) -> tuple[list[str], list[str], list[str]]:
         bindings: dict[str, ast.expr] = {}
         rebound: set[str] = set()
         pairs = _bound_pairs(tree)
-        for target, value in pairs:
+        for target, value, augments in pairs:
             if value is None:
                 continue
             for key in _binding_keys(target):
+                if augments:
+                    # `k += rhs` — the accumulated expression is what a use site
+                    # resolves to, so the pre-augment value is JOINED with the RHS
+                    # instead of the key being dropped as a rebinding. An earlier
+                    # value this scan cannot resolve (`k` bound twice, or never
+                    # bound here) leaves the key unresolvable rather than
+                    # resolving to the RHS, which is only HALF the statement.
+                    prior = None if key in rebound else bindings.get(key)
+                    if prior is not None:
+                        bindings[key] = _accumulated(prior, value, target)
+                    continue
                 if key in bindings:
                     if ast.dump(bindings[key]) != ast.dump(value):
                         rebound.add(key)
@@ -1917,7 +1956,7 @@ def ddl_scan(root: Path) -> tuple[list[str], list[str], list[str]]:
                     bindings[key] = value
         for key in rebound:
             bindings.pop(key, None)
-        for target, value in pairs:
+        for target, value, _augments in pairs:
             if not _incomplete_ddl(value):
                 continue
             keys = _binding_keys(target)
@@ -1959,8 +1998,24 @@ def ddl_scan(root: Path) -> tuple[list[str], list[str], list[str]]:
                 assembling = node
                 fragments = _ddl_fragments(node)
             elif isinstance(node, ast.AugAssign):
-                assembling = node.value
-                fragments = _ddl_fragments(node.value)
+                # `_A += RHS` is an ACCUMULATION, so the text to look at is the
+                # ACCUMULATED one: `_A = "CREATE "` + `_A += "CONSTRAINT pt UNIQUE
+                # NODE Point"` leaves no operand carrying a spelling either
+                # single-literal pattern recognises, and reading only the RHS made
+                # a shipped constraint read as ABSENT (the fail-open review cycle
+                # 12 found in this branch's own fix, #5064). `bindings` already
+                # holds the join; the RHS alone is the fallback for an accumulator
+                # whose earlier value is unresolvable here.
+                accumulated = next(
+                    (
+                        bindings[key]
+                        for key in _binding_keys(node.target)
+                        if key in bindings
+                    ),
+                    None,
+                )
+                assembling = node.value if accumulated is None else accumulated
+                fragments = _ddl_fragments(assembling)
                 if set(_binding_keys(node.target)) & tainted:
                     assembled.append(f"{rel}: `{ast.unparse(node.target)}` += …")
             elif (
@@ -2051,6 +2106,17 @@ def test_the_ddl_scan_sees_every_form_that_could_name_a_label(tmp_path) -> None:
     was refused. Each of them reds on the pre-join scan (proven by disabling the
     join and by disabling name resolution: the first reds `keyword_split`, the
     second `keyword_split_fstring`).
+
+    The two `keyword_split_augassign*` fixtures are cycle 12's finding, and they
+    are the INTERSECTION of two families above, which neither covered: `+=`
+    accumulations were only fixtured with the keyword already in the first
+    assignment (the taint rule's case), and keyword splits only with `+`, an
+    f-string and `.join`. `_A = "CREATE "` + `_A += "CONSTRAINT pt UNIQUE NODE
+    Point"` therefore shipped a `Point` constraint past a GREEN pin — the row's
+    note named both the form and the split, and their crossing was implemented
+    nowhere. The first fixture reds while the `AugAssign` branch reads only the
+    RHS; the second reds while the accumulated binding is dropped as a rebinding,
+    because then the use site (`_A + "Point"`) resolves to nothing.
     """
     forms = {
         "literal": (
@@ -2190,6 +2256,33 @@ def test_the_ddl_scan_sees_every_form_that_could_name_a_label(tmp_path) -> None:
         "keyword_split_in_collection": (
             'P = ["CREATE ", "CONSTRAINT pt UNIQUE NODE Point"]\n'
             'g.query("".join(P))\n',
+            True,
+            False,
+        ),
+        "keyword_split_augassign": (
+            # The `+=` form CROSSED with the keyword split — the intersection the
+            # row's note named ("`.join` / `+=`, a statement SPLIT across operands
+            # at ANY point") and neither fixture family covered. `augassign` above
+            # does NOT cover it: its first assignment already carries the whole
+            # keyword, which the taint rule catches. Here `CREATE` sits in the
+            # assignment and `CONSTRAINT` in the AUGMENT, so neither an operand nor
+            # a single-literal pattern sees the statement and only the accumulated
+            # text does — read alone, the RHS made the constraint ABSENT.
+            '_A = "CREATE "\n'
+            '_A += "CONSTRAINT pt UNIQUE NODE Point"\n'
+            'g.query(_A)\n',
+            True,
+            False,
+        ),
+        "keyword_split_augassign_use": (
+            # The same accumulation with the LABEL still to come at the use site,
+            # which the augmented node cannot report on its own: the accumulation
+            # must stay RESOLVABLE (`bindings` keeps the join, rather than dropping
+            # the key as a rebinding) or `_assembled_text` at `g.query(_A + …)`
+            # contributes nothing and the constraint reads as ABSENT again.
+            '_A = "CREATE "\n'
+            '_A += "CONSTRAINT pt UNIQUE NODE "\n'
+            'g.query(_A + "Point")\n',
             True,
             False,
         ),

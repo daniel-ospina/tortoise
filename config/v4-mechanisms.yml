@@ -559,7 +559,10 @@ mechanisms:
       than read as absent — an f-string / `+` / `%` / `.format` / `.format_map` /
       `.join` / `+=`, a statement SPLIT across operands at ANY point — the
       keyword boundary included, since the operands are JOINED in source order
-      before the statement is looked for, and a half carried by a name is folded
+      before the statement is looked for (an `+=` ACCUMULATES: what the target
+      already held is joined with the right-hand side, so the two halves of a
+      keyword split across the two statements are re-joined rather than read as
+      one half), and a half carried by a name is folded
       in too (no single literal holds it) — and any name, attribute, subscript or
       tuple target BOUND to an
       incomplete one (`AnnAssign`, walrus, `for` target, a CLASS-BODY binding used
