@@ -343,18 +343,9 @@ class TestWriterScript(unittest.TestCase):
                         WRITER_SCRIPT.index("sdk.create_point"))
         self.assertIn("unknown claim kind", WRITER_SCRIPT)
 
-    def test_warning_tripwire_is_scoped_to_write_path_loggers(self):
-        # fatal = write-path warnings only; deployment noise is recorded
-        # (env_warnings), never fatal — otherwise a noisy-but-healthy
-        # deployment (pack-registry complaints on every create_point)
-        # could never write.
-        self.assertIn("_WRITE_PATH_LOGGERS", WRITER_SCRIPT)
-        self.assertIn("'tortoise.sdk'", WRITER_SCRIPT)
-        self.assertIn("env_warnings", WRITER_SCRIPT)
-
-    def test_never_force_promotes_non_live_points(self):
-        self.assertNotIn("status='live'", WRITER_SCRIPT)
-        self.assertIn("non_live", WRITER_SCRIPT)
+    # The warning-tripwire scoping and the non-live guarantee are pinned
+    # BEHAVIOURALLY (TestWriterValidation), not by substring search: a
+    # substring survives a real widening of _fatal and a real force-promote.
 
 
 class TestWriterValidation(unittest.TestCase):
@@ -458,6 +449,88 @@ class TestWriterValidation(unittest.TestCase):
         receipt = json.loads(self.captured_stdout.strip().splitlines()[-1])
         self.assertEqual(receipt["folded_onto_existing"], 1)
         self.assertNotIn("ep", receipt)
+
+    def test_non_live_hit_is_reported_and_never_force_promoted(self):
+        # The README's published guarantee: "Retracted points stay retracted.
+        # Dedup hits that are non-live are reported (non_live_hits) and never
+        # force-promoted; a rerun cannot resurrect a point an operator
+        # retracted." Behavioural, not a substring search: the fake SDK returns
+        # a NON-LIVE status and records the props it was handed.
+        #
+        # Mutation checks (both keep the old substring assertions green, which
+        # is why they are gone):
+        #   * `non_live.append(r['id'])` -> `pass`  loses non_live_hits
+        #   * adding `props['status'] = 'live'`     is a real promotion
+        # Each reds one of the two assertions below.
+        seen_props = []
+
+        class _RetractedSDK:
+            def __init__(self, **kw):
+                pass
+            def query(self, **kw):
+                return [{"id": "p1", "domain": "d", "status": "retracted"}]
+            def create_point(self, kind, content, **kw):
+                seen_props.append(dict(kw))
+                return {"id": "p1", "status": "retracted"}
+            def set_source_tier(self, url, tier):
+                pass
+            def get_source_reliability(self, url):
+                return {"url": url, "reliability": 0.9}
+            def compute_confidence(self, anchors=None, **kw):
+                return {"converged": True, "iterations": 1,
+                        "diagnostic": "no_factors", "truncated": False}
+            def close(self):
+                pass
+
+        self._exec([{"kind": "fact", "content": "already retracted"}],
+                   sdk_cls=_RetractedSDK)
+        receipt = json.loads(self.captured_stdout.strip().splitlines()[-1])
+        self.assertEqual(receipt["non_live_hits"], ["p1"])
+        self.assertEqual(receipt["written"], 1)
+        # the status is the SDK's decision, never the writer's: no status prop
+        self.assertEqual(len(seen_props), 1)
+        self.assertNotIn("status", seen_props[0])
+
+    def test_warning_tripwire_scoping_is_behavioural(self):
+        # fatal = write-path warnings ONLY; deployment noise is recorded
+        # (env_warnings), never fatal — otherwise a noisy-but-healthy
+        # deployment (pack-registry complaints on every create_point) could
+        # never write. Pinned by emitting from both kinds of logger.
+        # Mutation check: widening _fatal to every collected warning reds the
+        # first half; making it empty reds the second.
+        import logging
+
+        def _sdk(logger_name):
+            class _S:
+                def __init__(self, **kw):
+                    pass
+                def query(self, **kw):
+                    return [{"id": "p1", "domain": "d", "status": "live"}]
+                def create_point(self, kind, content, **kw):
+                    logging.getLogger(logger_name).warning("synthetic noise")
+                    return {"id": "p1", "status": "live"}
+                def set_source_tier(self, url, tier):
+                    pass
+                def get_source_reliability(self, url):
+                    return {"url": url, "reliability": 0.9}
+                def compute_confidence(self, anchors=None, **kw):
+                    return {"converged": True, "iterations": 1,
+                            "diagnostic": None, "truncated": False}
+                def close(self):
+                    pass
+            return _S
+
+        # environmental noise: recorded on the receipt, write still succeeds
+        self._exec([{"kind": "fact", "content": "noisy deployment"}],
+                   sdk_cls=_sdk("tortoise.pack_registry"))
+        receipt = json.loads(self.captured_stdout.strip().splitlines()[-1])
+        self.assertEqual(receipt["env_warnings"]["count"], 1)
+        self.assertNotIn("partial", receipt)
+        # the same warning from a write-path logger is fatal drift
+        with self.assertRaises(RuntimeError) as cm:
+            self._exec([{"kind": "fact", "content": "drifting writer"}],
+                       sdk_cls=_sdk("tortoise.projection"))
+        self.assertIn("possible silent drift", str(cm.exception))
 
     def test_after_zero_without_folds_is_drift_not_success(self):
         # create_point "succeeds" yet query() finds nothing under the source

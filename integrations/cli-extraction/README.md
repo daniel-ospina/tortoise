@@ -53,7 +53,7 @@ Outputs default to the state dir (`~/.tortoise/cli-extraction/`,
 |---|---|---|---|
 | `claude` | `claude` CLI on PATH (default); any wrapper via `TORTOISE_CLAUDE_AUTH` | the CLI's own login (or the wrapper's, e.g. a macOS Keychain token) | default; `--model claude-haiku-5-5 --effort high` |
 | `glm` | `claude-glm` wrapper → Claude Code CLI on Z.ai's Anthropic-compatible gateway | own `ZAI_API_KEY` (Z.ai GLM Coding Plan) | no OpenAI/Anthropic key needed; lowest input-token footprint |
-| `codex` | `codex exec --ephemeral --sandbox read-only` | Codex subscription | token events parsed from `--json` stream |
+| `codex` | `codex exec --ephemeral --sandbox read-only` | Codex subscription | known limitation (#9926): no token counts are recorded — the CLI nests usage under `payload.info.total_token_usage`, and the latch reads a flat `input_tokens`, so every codex receipt carries `"accounting": "incomplete"` with `null` counts |
 
 Engine acquisition: `claude`/`codex` are the official CLIs (`npm i -g
 @anthropic-ai/claude-code`, `npm i -g @openai/codex` or brew equivalents);
@@ -107,6 +107,9 @@ The transcript is captured user text and is treated as **data**, end to end:
 - **Usage accounting never fabricates numbers.** Unknown, negative-sentinel,
   boolean or fractional token values — and any unrecognized `*token*` key —
   keep the count `null` and flag the receipt `"accounting": "incomplete"`.
+  The codex lane currently records **no** counts at all for this reason (its
+  `--json` usage is nested, #9926) and says so on every receipt rather than
+  inventing them.
 - **Payload bytes are never mutated by parsing.** Only whole-line markdown
   fences are stripped; ``` sequences inside claim contents survive verbatim.
 - **Writes validate before they mutate.** Every claim (kind, content) is
@@ -139,7 +142,10 @@ The transcript is captured user text and is treated as **data**, end to end:
   warnings from the write-path loggers do.
 - **Retracted points stay retracted.** Dedup hits that are non-live are
   reported (`non_live_hits`) and never force-promoted; a rerun cannot
-  resurrect a point an operator retracted.
+  resurrect a point an operator retracted. Pinned behaviourally — the writer
+  is executed against an SDK that returns a non-live status and records the
+  props it is handed, so both "silently stop reporting" and "promote it"
+  red the suite.
 - **Idempotency, scoped precisely.** `dedup=True` keys on
   `(pointKind, content_hash)` — rerunning `write` with the SAME extraction
   file reports `new: 0`. A *reworded* claim (a fresh `run`) is new content
