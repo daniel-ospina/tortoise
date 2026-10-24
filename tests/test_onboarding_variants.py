@@ -218,7 +218,7 @@ def test_9660_skill_archive_holds_exactly_its_own_skill(name):
     source = PUBLIC_SKILLS / name / "SKILL.md"
     assert archive.is_file(), (
         f"missing skill archive: {archive} — run "
-        "python3 tools/build_skill_archives.py")
+        "uv run python tools/build_skill_archives.py")
     with zipfile.ZipFile(archive) as zf:
         entries = [i.filename for i in zf.infolist() if not i.is_dir()]
         assert entries == [f"{name}/SKILL.md"], (
@@ -227,7 +227,7 @@ def test_9660_skill_archive_holds_exactly_its_own_skill(name):
         payload = zf.read(f"{name}/SKILL.md")
     assert payload == source.read_bytes(), (
         f"stale archive: {archive.name} drifted from {source} — run "
-        "python3 tools/build_skill_archives.py")
+        "uv run python tools/build_skill_archives.py")
     declared = re.search(r"^name:\s*(\S+)\s*$",
                          payload.decode("utf-8").split("---")[1], re.M)
     assert declared and declared.group(1) == name, (

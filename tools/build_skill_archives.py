@@ -23,12 +23,22 @@ build step); `tests/test_onboarding_variants.py` fails if one drifts from its
 source `SKILL.md`.
 
 Usage:
-    python3 tools/build_skill_archives.py            # write changed archives
-    python3 tools/build_skill_archives.py --check    # exit 1 if any is stale
+    uv run python tools/build_skill_archives.py            # write changed archives
+    uv run python tools/build_skill_archives.py --check    # exit 1 if any is stale
 """
 from __future__ import annotations
 
 import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/build_skill_archives.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        "`uv run python tools/build_skill_archives.py`"
+    )
+
 import zipfile
 from pathlib import Path
 
@@ -122,7 +132,7 @@ def main(argv: list[str]) -> int:
     for name in stale:
         print(f"{'stale' if check else 'wrote'}: {archive_path(name).name}")
     if check and stale:
-        print("run: python3 tools/build_skill_archives.py", file=sys.stderr)
+        print("run: uv run python tools/build_skill_archives.py", file=sys.stderr)
         return 1
     if not stale:
         print(f"all {len(SKILL_NAMES)} archives are current")

@@ -881,20 +881,21 @@ class TestDocsPageAndSkillConfig:
         return found[0]
 
     def test_4836_docs_page_is_the_live_chatgpt_carrier(self):
-        """#4836: ChatGPT has no dashboard CHOOSER/connect surface (#2912's 4-family
-        chooser keeps it out; #2698 deleted the flat tab first). It is not absent
-        from the dashboard — the LIVE Memory-sources capture panel lists it as
-        unsupported-with-a-reason — but nothing there carries its onboarding
-        instructions, so the public docs page does. That page is the surface that
-        already CLAIMED to describe ChatGPT
-        connection. That claim was false ("the dashboard's ChatGPT tab") and must
-        not come back.
+        """#4836: the public docs page carries the ChatGPT journey end-to-end.
 
-        The row is the JOURNEY a ChatGPT user performs, so the assertions below
-        are per-step: a `/docs#chatgpt` visitor has to reach a verified
-        connection, not just a URL. Dropping a step, or replacing one with a
-        claim that is false for ChatGPT (a pasted key, an unnamed plan set),
-        must fail here rather than ship.
+        The premise this file was written against is HISTORY now: ChatGPT used to
+        have no dashboard CHOOSER/connect surface (#2912's 4-family chooser kept
+        it out; #2698 deleted the flat tab first), so the docs page was the only
+        carrier — and it CLAIMED a "the dashboard's ChatGPT tab" that never
+        existed. That claim was false and must not come back.
+
+        #9660 makes ChatGPT a live chooser leaf with its own connect card, so the
+        docs row and the card are two renderings of ONE journey. This test keeps
+        pinning the docs row as the journey a ChatGPT user performs, because it is
+        the page the served onboarding document links to; a `/docs#chatgpt`
+        visitor has to reach a verified connection, not just a URL. Dropping a
+        step, or replacing one with a claim that is false for ChatGPT (a pasted
+        key, an unnamed plan set), must fail here rather than ship.
         """
         canonical = self._dashboard_constant("CANONICAL_MCP_URL")
         instructions_url = self._dashboard_constant("ONBOARDING_INSTRUCTIONS_URL")
@@ -994,7 +995,7 @@ class TestDocsPageAndSkillConfig:
             on_disk = (REPO_ROOT / "website" / href.lstrip("/"))
             assert on_disk.is_file(), (
                 f"the card links {href} but {on_disk.relative_to(REPO_ROOT)} does "
-                "not exist — run python3 tools/build_skill_archives.py")
+                "not exist — run uv run python tools/build_skill_archives.py")
         assert "download=\"SKILL.md\"" not in steps, (
             "a download=\"SKILL.md\" link collides with the other three skills "
             "and the renamed file is REJECTED by the uploader (#9660)")
