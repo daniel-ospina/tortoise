@@ -1095,13 +1095,46 @@ def test_operator_drop_warnings_ignores_benign_extraction_warnings():
         "by_session": {}}
 
 
+def test_entity_name_collision_is_not_a_supersede_refusal():
+    """#8503 round 6: the refusal set must not swallow a notice that refuses nothing.
+
+    `entity '<x>' kind '<y>' is ambiguous across namespaces … created with the
+    explicit kind` CREATES the entity, so counting it as a replace-channel
+    refusal made a receipt assert a drop cause that did not exist. The markers
+    key on the resolver's own ambiguous forms only; this pin is what keeps a
+    future "broaden the marker" edit from restoring the false cause.
+    """
+    collision = (
+        "entity 'lumen auth' kind 'core:service' is ambiguous across "
+        "namespaces in the existing graph — created with the explicit kind "
+        "(link-before-create cannot disambiguate)")
+    collision_only = runner.operator_drop_warnings(
+        [{"session_id": "s", "extraction_warnings": [collision]}])
+    assert collision_only == {"total": 0, "operator_drops": 0,
+                             "supersede_refusals": 0, "by_session": {}}
+    # EVERY resolver ambiguity form counts — the point-supersede branch
+    # ("N priors contain it") as well as the lifecycle branch ("direction
+    # unclear"), or a receipt claims no refusal on a run that refused one.
+    for form in (
+        "entity 'x' lifecycle=superseded with supersedes='y' is ambiguous "
+        "(direction unclear) — supersession record skipped (never-guess)",
+        "point supersedes='r' is ambiguous (2 priors contain it) — skipped "
+        "(never guess)",
+        "point supersedes='r' is ambiguous (2 priors) — skipped (never guess)",
+    ):
+        refused = runner.operator_drop_warnings(
+            [{"session_id": "s", "extraction_warnings": [form]}])
+        assert refused["supersede_refusals"] == 1, form
+
+
 def test_run_note_never_claims_zero_drops_when_drops_exist():
     """#8503 round 5: the note's operator sentence tracks the operator count.
 
     The `elif supersede_refusals` branch was reachable with `operator_drops > 0`
     and still said "logged no operator drop" — a false statement in a shipped
-    receipt. Four combinations, all pinned: both zero, drops only, refusals
-    only, both non-zero.
+    receipt. Four combinations, all pinned, and every assertion is on a note
+    that must EXIST (an empty string once satisfied the drops-only check, which
+    is how the missing note survived a gate).
     """
     def notes_for(operator_drops: int, refusals: int) -> str:
         audit = {
@@ -1116,15 +1149,19 @@ def test_run_note_never_claims_zero_drops_when_drops_exist():
 
     both_zero = notes_for(0, 0)
     assert "logged no operator drop and no supersede refusal" in both_zero
-    # drops only: no zero-claim at all
-    assert "logged no operator drop" not in notes_for(2, 0)
+    # drops only: THE note must exist and name the drops (an empty string would
+    # satisfy a bare "not in" assertion — the vacuous pin review round 6 caught)
+    drops_only = notes_for(2, 0)
+    assert drops_only.strip(), "a run with drops must carry a drop note"
+    assert "logged no operator drop" not in drops_only
+    assert "2 drop warning(s)" in drops_only
     # refusals only: the operator sentence is truthful
     assert "the operator pass logged no drop" in notes_for(0, 3)
     # BOTH non-zero: must name the drops, never claim zero
     both = notes_for(2, 3)
     assert "logged no operator drop" not in both
     assert "2 drop warning(s)" in both
-    assert "3 supersede refusal(s)" in both
+    assert "3 refusal(s)" in both
 
 
 def test_recall_leg_success_warning_is_not_a_refusal():

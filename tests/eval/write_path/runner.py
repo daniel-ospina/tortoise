@@ -1751,16 +1751,25 @@ def operator_drop_notes(drops: dict) -> list[str]:
             "bill"
         ]
     if not refusals:
-        return []
+        # ⛔ THE DROPS-ONLY CASE IS THE ONE THIS NOTE EXISTS FOR: returning []
+        # here shipped a receipt with real operator drops and no drop note at
+        # all (review round 6).
+        return [
+            f"operator drops (#8503): the operator pass logged "
+            f"{operator_drops} drop warning(s) — an edge_missing may be a drop "
+            "at the operator pass rather than the model never forming the "
+            "edge; every line is carried in `extraction_warnings`"
+        ]
     operator_clause = (
         "the operator pass logged no drop, but"
         if not operator_drops
         else f"the operator pass logged {operator_drops} drop warning(s), and")
     return [
-        f"operator drops (#8503): {operator_clause} the replace channel logged "
-        f"{refusals} supersede refusal(s) — a refused replace record is an "
-        "extractor-side cause of a missing edge too, so an edge_missing on a "
-        "SUPERSEDE row may be the resolver rather than the model"
+        f"operator drops (#8503): {operator_clause} the replace/retraction "
+        f"channel logged {refusals} refusal(s) — a refused replace or "
+        "retraction record is an extractor-side cause of a missing edge too, "
+        "so an edge_missing on a SUPERSEDE row may be the resolver rather than "
+        "the model"
     ]
 
 
@@ -1881,7 +1890,17 @@ _SUPERSEDE_REFUSAL_MARKERS = (
     "matches no S3 prior",
     "is the point itself",
     "supersedes itself",
-    "is ambiguous",
+    # ⛔ NOT the bare "is ambiguous": `entity '<x>' kind '<y>' is ambiguous
+    # across namespaces … created with the explicit kind` REFUSES NOTHING (the
+    # entity is created), so the bare word reported a replace-channel drop for a
+    # successful write (review round 6). Only the resolver's own ambiguous forms.
+    # every resolver ambiguity form is `is ambiguous (<detail>)` — the entity
+    # name-collision notice is `is ambiguous across namespaces`, which refuses
+    # nothing (the entity IS created), so the parenthesised form is the
+    # discriminator. Both resolver branches (direction unclear, N priors) and
+    # the retraction branch are covered by it.
+    "is ambiguous (",
+    "matches no S3 prior or same-session point",
     "does not resolve to an S3 search result",
     "lifecycle=superseded with no supersedes ref",
 )

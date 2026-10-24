@@ -43,7 +43,7 @@ derives a corpus-level `operator_audit.drop_warnings` that separates the two cla
 | class | markers (refusal TAILS, never a shared prefix) | what a count means |
 |---|---|---|
 | **operator drops** | `operator dropped:`, `operator with unknown op_type`, `non-dict operator entry`, `endpoint NOT minted`, `MITIGATES target edge not emitted` | the operator pass refused an edge the model emitted |
-| **supersede refusals** | `matches no S3 prior`, `is the point itself`, `supersedes itself`, `is ambiguous`, `does not resolve to an S3 search result`, `lifecycle=superseded with no supersedes ref` | the replace channel dropped a CORRECTS/supersession record |
+| **supersede refusals** | `matches no S3 prior`, `is the point itself`, `supersedes itself`, `is ambiguous (`, `matches no S3 prior or same-session point`, `does not resolve to an S3 search result`, `lifecycle=superseded with no supersedes ref` | the replace channel dropped a CORRECTS/supersession record |
 
 Measured on the fixed tree: **`operator_drops = 0` in every run that carries the field** (the `preleg` receipt predates
 it and records only the pre-narrowing refusal class). ⚠️ The column counts
@@ -131,7 +131,9 @@ this issue's to re-bless.
 
 **What the committed artifacts support, and nothing more.** `before-run.json` = 3 (content_ok
 7); `...-8503-a.json` and `...-8503-b.json` = 5 and 5 (content_ok 11 and 11);
-`...-8503-preleg.json` = 5 (content_ok 13); the issue's own pre-fix receipt = 5. So the
+`...-8503-preleg.json` = 5 (content_ok 13); and the issue body itself reports 5 for its own
+pre-fix run (that receipt is cited by the issue but is NOT in the tree — `results/` holds only
+`7947-*`, so it is quoted, not verified). So the
 committed range on the fixed tree is **5–5 at the criterion number**, and `content_ok` 11–13
 against 7 before is the only movement the artifacts establish. Two further probe runs of this
 lane (not committed — the instrument is `probe`, not the runner) read 6 and 6, and two
@@ -249,9 +251,9 @@ Repairing it needs a **semantic** resolver — the Jev-shaped seam
 that gets the ref copied exactly. It is not something a string predicate should be trusted
 with, which is the conclusion four review rounds paid for.
 
-**(c) MITIGATES pair choice — a sibling point chosen as the dampener's src.**
-`wp01_quarry_debug_op_02` and `wp04_aurora_perf_op_03` have both endpoints present and a
-`MITIGATES` in the graph, wired to a *different* pair of the same argument: the mapper
+**(c) MITIGATES pair choice — a sibling point chosen as the dampener's src.** In the rows this
+names below, both endpoints are present and a `MITIGATES` is in the graph, wired to a *different*
+pair of the same argument: the mapper
 attaches the dampener to the **remedy decision** ("Cache the embedding results in memory
 with a ten minute TTL") rather than to the **forecast** ("a ten-minute TTL cache will absorb
 nearly all of the repeat traffic") or the **safeguard** ("invalidate the cache entry on a
@@ -263,12 +265,39 @@ now says every warrant point gets its own dampener; `wp04_aurora_perf_op_02` fli
 the single largest remaining bucket (3 rows) and it is a model-judgment limitation, not a
 rule gap.**
 
-**(d) `wp06_quarry_rollout_op_01` (SUPPORTS) and `wp03_ember_design_op_03`.** The last two
-misses are endpoints whose emitted paraphrase sits below the anchor band: the lease claim is
-present as "the duplicate-processing race cannot re-enter once the lease is held", the
-maintenance-window claim as "ember auto-suppresses alerts during declared maintenance
-windows". Both are *different claims* about the same subject, not distillations — the band is
-right to refuse them, and no mechanism change would make them the planted claim.
+**(d) the endpoint rows whose emitted paraphrase is a DIFFERENT claim.** `wp03_ember_design_op_03`
+targets "Maintenance windows are the other classic noise source"; the extractor emitted "Ember
+auto-suppresses alerts during declared maintenance windows", which states the remedy, not the
+noise source. `wp06_quarry_rollout_op_01` targets "the lease makes that impossible no matter how
+we roll out"; the extractor emitted "The duplicate-processing race cannot re-enter once the
+lease is held" (a close paraphrase the anchor band still refuses) and "The lease guarantee is
+scope-independent". The band is right to refuse these — they are different claims about the same
+subject, and no mechanism change would make them the planted one.
+
+**(e) THE RESIDUAL, ROW BY ROW — all nine misses of each run, not a sample.** The earlier
+summary counted 6 of 9 and omitted `SUPPORTS` entirely, which is the kind the issue's own
+closing bullet names; this is the complete accounting, recomputed from the committed receipts:
+
+| verdict class | run A (9 misses) | run B (9 misses) |
+|---|---|---|
+| `to_content_missing` | `wp01_quarry_debug_op_02`, `wp03_ember_design_op_03`, `wp06_quarry_rollout_op_01` | `wp01_quarry_debug_op_02`, `wp03_ember_design_op_02`, `wp03_ember_design_op_03` |
+| `edge_missing` — MITIGATES pair choice (c) | `wp03_ember_design_op_01`, `wp04_aurora_perf_op_03`, `wp07_bluepeak_followup_op_03` | `wp04_aurora_perf_op_03`, `wp07_bluepeak_followup_op_03` |
+| `edge_missing` — SUPPORTS (the mapper formed no IMPL between two present claims) | `wp01_quarry_debug_op_01`, `wp04_aurora_perf_op_01` | `wp04_aurora_perf_op_01`, `wp05_retro_writeup_op_02`, `wp06_quarry_rollout_op_01` |
+| `edge_missing` — SUPERSEDE (b) | `wp07_bluepeak_followup_op_04` | `wp07_bluepeak_followup_op_04` |
+
+So the residual is, per run: **MITIGATES 3 (A) / 2 (B) + SUPPORTS 2 (A) / 3 (B) + SUPERSEDE 1 + endpoint rows 3**,
+and the honest class statement is: *no `edge_missing` here is an operator-pass drop; the MITIGATES
+and SUPPORTS rows are the mapper choosing a different (or no) pair, the SUPERSEDE row is the
+resolver refusing a truncation, and the `to_content_missing` rows are endpoint recall.* The
+`SUPPORTS` class is the least understood of the four: the mapper emits `IMPL` edges in every one
+of these sessions, just not between the planted pair, and nothing in this PR fixes that — the
+prompt already asks for it.
+
+**Note on the row-level attributions above.** A row's verdict can differ between runs (this
+extractor is sampled), so a row named under one class in run A may sit under another in run B —
+`wp03_ember_design_op_02` is `to_content_missing` in B and correct in A, and
+`wp06_quarry_rollout_op_01` is `to_content_missing` in A and `edge_missing` in B. The table
+reports the verdict each receipt actually recorded; it does not harmonise them.
 
 ## 4. The mutation arm — does the gate fail when a mechanism regresses?
 
