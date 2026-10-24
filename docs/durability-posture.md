@@ -615,11 +615,22 @@ Three statements disagreed about whether the store or the journal was the
 durability authority, so the text inherited whatever the nearest comment
 believed. The fix is **deletion, not reconciliation**: the three contradicting
 journal-authority statements are removed, and no other file in the gate's
-contract surfaces carries the claim. Every remaining live restatement is
-enumerated under *Open items*, not silently tolerated. The durability-scoped
+contract surfaces carries the claim **in a wording the gate can see**; the
+restatements in wordings it is blind to are enumerated under *Open items* — or
+named there as unclassified candidates, where a per-site read is still owed
+(#9867) — not silently tolerated. The durability-scoped
 gate in `tests/test_durability_posture.py` fails the build if a
 `log`/`journal`/`jsonl`/`event stream` is bound to `source of truth` — or to
-`is [the] truth` — outside this file.
+`is [the] truth` — or to `is [the|a|an|our|its|their|your]? durab(le|ility)` —
+outside this file. Every bracket here marks an OPTIONAL slot, and the `?` on the
+determiner group states it outright: the bare `the log is durable` **is** a hit
+(pinned at `test_claim_regex_matches_the_original_defect_forms`), so reading that
+bracket as "exactly one determiner" would build a gate that fails open on that
+same bare form — the one narrowing the optional group closes. And the `source of truth` family is the
+one whose durability side needs NO log subject: `source of truth … durable`
+within the window fires on its own, which is how a *source of truth for
+durability* claim is caught; the two `is`-predicate families always require the
+log subject.
 
 **The gate's roots are the contract surfaces plus `graph-scripts/` (#4308).**
 The owner's §6 root list (`tortoise/`, the five docs, README) left the two
@@ -639,7 +650,11 @@ source of truth for a test session's created-graph ownership).
 
 **The gate matches a CLAIM SHAPE, not durability claims in general.** It fires on
 a `log`/`journal`/`jsonl`/`event stream` bound to `source of truth` / `is [the]
-truth`; a *mechanism promise* — e.g. a managed store "provides AOF durability" —
+truth` / `is [the|a|an|our|its|their|your]? durab(le|ility)` (the three families
+spelled out where the gate's roots are described, above; the determiner group is
+optional, so a bare `is durable` fires too, and on the `source of truth` side
+the `durab` arm needs no log subject at all); a *mechanism promise* —
+e.g. a managed store "provides AOF durability" —
 does not match it, and is corrected by hand (`docs/infra-runbook.md` §1 did this
 under **#2968**). That seam is not this gate's to close: the general binding from
 a written claim to the system it describes is **#5063**.
@@ -785,3 +800,89 @@ a written claim to the system it describes is **#5063**.
   The #2881 design round (§7) recommends reversing it to store-authoritative.
   This document states the store-authoritative rule the shipped code already
   implements; the row is the owner's to answer.
+- **#9867 — five sites (six wordings) the gate is BLIND to, plus the negation
+  shape it must never touch. This list is NOT claimed complete.** What the gate
+  fires on is a `log`/`journal`/`jsonl`/`event stream` within 40 chars of `source
+  of truth` (either order), or of `is [the] truth`, or of
+  `is [the|a|an|our|its|their|your]? durab(le|ility)` — the determiner group is
+  optional, so the bare `is durable` is a hit. **The `source of truth` family is
+  also the one whose durability side needs no log subject**: `source of truth …
+  durable` inside the window fires on its own — that is how *the source of truth
+  for durability claims* is caught, and a widened pattern that binds `durab` to
+  the log subject everywhere would drop it. The two `is`-predicate families do
+  require the log subject. Every site below fails that
+  SHAPE — and **not** because "store" is a different noun: `is the truth store`
+  bound to a `journal` subject *would* match the middle alternation, as measured.
+  The blindness comes in three measured forms: *truth* sits with no `is`
+  copula (`rebuild retains the truth`, bare `TRUTH`) — and for `appended to the
+  truth store` and the `f"(rebuild retains the truth)"` literal at
+  `commit_ops.py:1464` there is no log SUBJECT inside the window either (its
+  `:1469` sibling does carry `journaled`, which the `journal` alternation matches
+  because it has no trailing boundary), so a widening bound to the subject keeps
+  missing them; an adverb interrupts the predicate (`is still the
+  truth`); or the copula predicates a NOUN and durability survives only inside an
+  em-dash gloss (`Is this log a JOURNAL — a durable, replayable truth set`),
+  where the determiner slot takes `a` and the pattern needs `durab` next.
+  **De-fronting that last one does not fix it — measured: the same sentence with
+  `is` in front of `log` is still a miss, and only re-phrasing so that durability
+  is the direct predicate matches** — so a widened pattern must handle the gloss
+  form, not the word order. (The quotes below are the blind restatements
+  themselves, not positive examples quoted as live claims — and the reason is
+  **not** that this file cannot match the patterns: it does match them, and it
+  must (`test_canonical_doc_is_itself_a_claim_hit` requires this doc to carry the
+  authority statement). The reason is that this file is the one path BOTH
+  offender legs SKIP by name —
+  `test_no_durability_source_of_truth_claim_outside_the_canonical_doc`
+  and `test_no_wrapped_durability_claim_anywhere_in_the_scanned_roots` each
+  `continue` on `CANONICAL_DOC_REL` before scanning — so a hit written here is
+  unscanned and cannot move the repo-wide `0`, which is measured over the
+  NON-exempt roots. Two measured caveats keep that honest: the `record_writer.py`
+  sentence quoted below is reproduced with a different wrap than the source's,
+  so in this file it reads as a line-at-a-time hit; and this very paragraph
+  renders the bare form `the log is durable`, which matches too (line-at-a-time,
+  and again in the joined scan). Quoting a claim here is safe only because the
+  path is unscanned — never because the patterns are silent on it.)
+  Measured 2026-10-24 on `92b364e8b` and re-checked on
+  the merged base `9296a4e85`, all still live:
+  `projection/entities.py` (*Restore verbatim — the journal is still the truth*:
+  `still` defeats the predicate); `log.py`'s `EventLog` rubric (*Is this log a
+  JOURNAL — a durable, replayable truth set*: the copula predicates `a JOURNAL`
+  and durability is an adjective in the gloss, never the predicate);
+  `projection/edges.py` (*a recovery write that appended to the truth store*: no
+  `is` copula **and** no log subject inside the window — the nearest,
+  `journal-owning`, is on the previous line — i.e. form 1 plus a subject-free
+  nominal); `commit_ops.py` (*rebuild retains the truth*: contiguous on one source
+  line, `f"(rebuild retains the truth)"` at `:1464`, and a miss for form 1 —
+  `retains` is not a copula, and this occurrence has no log subject either; the
+  adjacent f-string literals split the surrounding SENTENCE, never the phrase,
+  which is why the f-string is not the cause);
+  `sdk.py` (*the journal — the TRUTH — never* recorded; *the journal (TRUTH)*).
+  **The OPPOSITE claim is also present and must stay green** — the gate's
+  silence there is correct, not a hole: the `no`/`needs no` truth-store negation
+  (`projection/__init__.py`, `mcp_auth.py`, `mcp_server.py`), `__main__.py`'s *A
+  SCRATCH journal, not a truth set*, and `projection/__init__.py`'s *a message
+  that promised a journal would tell an operator a truth store is bound when
+  none is*. **And the `truth store` phrase is mostly NOT this claim**: §17.1's
+  *every write goes to the truth store first*, the residency repair's *fetch from
+  the truth store (Postgres)*, and `onboarding/state.py`'s *the record is the
+  truth store* all name the **record**, whose authority is #9557's — the
+  distinction this document draws, not a restatement of the claim it deletes. A
+  sweep that reworded those would damage it. **A green gate run therefore does
+  not mean no restatement: it means none in the gate's wording.** **Not fixed
+  here, deliberately** — the sweep is #9867's, not this entry's — and not a blind
+  sweep either: `tortoise/`
+  also uses *truth* for the legitimate replay-ORDER axis (*the derived store must
+  never lead the truth*, §17.1), which the rule above does not forbid, so the
+  widened pattern and the per-site reword have to land as ONE change or the
+  pattern reds a correct sentence. #9867 carries the candidates that need a
+  per-site read before they can be called restatements: `record_writer.py`'s *a
+  per-record source of truth already exists — the append-only journal*, which
+  the gate WOULD match once the paragraph is joined (`source of truth` →
+  `journal` is 34 characters) and misses only because the wrapped scan
+  deliberately excludes that family and the line break puts `exists — the
+  append-only journal` on the next line — so this is the join-SCOPE hole, not a
+  pattern hole, and it is the ONLY site here whose answer a widened JOIN
+  changes. The one other candidate that looks like a wrap is `sdk.py`'s *the
+  journaled payload is the whole truth of this write*: it misses for the
+  PREDICATE (`is the whole truth`, not `is [the] truth`), and joining it would
+  not change that — the same reading applies to it with the break removed.

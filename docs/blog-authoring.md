@@ -299,6 +299,20 @@ KEY=$(grep -o 'INDEXNOW_KEY = "[a-f0-9]*"' website/functions/blog/_shared/indexn
 curl -sS -D- "https://tortoise.premiselabs.co/$KEY.txt"
 ```
 
+That command is a spot check, not the gate. `deploy-pages` asserts the deployed surface in two
+**blocking** post-deploy steps, each in the job that deploys the surface it speaks about. `deploy`
+(`Post-deploy — the IndexNow key file and notify route are live (#9680)`) asserts 200, `text/plain`,
+and a body byte-identical to the constant the submitter sends — a trailing newline answers 403 to
+every submission, so the byte count is compared, not just the text. It reads the file through a
+per-run nonce and refuses a `cf-cache-status: HIT` answer, so a cached copy of the previous
+deployment cannot satisfy it (#4050), and then reads the canonical URL the endpoint is handed, which
+is where the file has to be intact as well. It also asserts that `/blog/api/notify-publish` at the
+marketing origin still refuses an anonymous caller with its admin gate. `deploy-dashboard`
+(`Post-deploy — the app-origin IndexNow proxy answers its session gate (#9680)`) asserts the hop the
+console actually calls: that the app-origin proxy route exists and answers its own session gate. It is
+the route's presence that one proves, not the upstream handler — an anonymous call is refused at the
+cookie check, before anything is forwarded. No credential is needed and nothing is written.
+
 ### Backfilling the articles published before this existed
 
 Backfill is a **deliberate, one-off operator act** — one request, by hand, once the key file above is
