@@ -1054,8 +1054,8 @@ class _EdgeHandlers:
         per journaled link per rebuild, unbounded, built from the endpoints
         resolved AT REPLAY TIME (so any live↔replay drift becomes new durable
         truth). Measured before the guard: a journal of 4 records re-grew to 5, 6,
-        7 over three successive `rebuild_all` runs. The journal is the truth
-        store; a rebuild reads it and never extends it
+        7 over three successive `rebuild_all` runs. The journal is APPEND-ONLY; a
+        rebuild reads it and never extends it
         (`projection.replay_window_open`).
 
         ⛔ THE NEXT GATE IS THE FOLD'S OWN PROBE, not a guess. Pass-2b addresses a

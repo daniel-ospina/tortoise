@@ -4088,11 +4088,13 @@ def replay_window_open() -> bool:
     `event_store`'s replay leg) — so `> 0` means "inside a handle-only replay
     window", inherited by every nested scope.
 
-    ⛔ WHY A WRITE DOOR ASKS THIS AT ALL. The journal is the TRUTH store: a
+    ⛔ WHY A WRITE DOOR ASKS THIS AT ALL. The journal is APPEND-ONLY: a
     rebuild that appended to it would make the log a function of itself — one
     new `DirectEdgeCreated` per journaled link per rebuild, unbounded — and it
     would write back the endpoints it resolved AT REPLAY TIME, so any live↔replay
     drift becomes new durable truth. Recovery must read the log, never extend it.
+    (What this log is FOR is `docs/durability-posture.md`'s claim, not this
+    comment's.)
     """
     return _RAW_QUERY_CLOSED_DEPTH.get() > 0
 

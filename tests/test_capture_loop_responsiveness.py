@@ -1814,10 +1814,15 @@ def test_capture_graph_name_mirrors_the_sdk_mapping(monkeypatch):
                         lambda **kw: None)
 
     seen: list[str | None] = []
+    #: The double INSTANCE of the most recent open — `_opened` returns the
+    #: graph name, which is what the mapping parity loop pins, so the binds
+    #: `_get_proj` arms on that same instance need their own handle.
+    last_proj: list = []
 
     class _RecordingProj:
         def __init__(self, path=None, graph_name=None, **kw):
             seen.append(graph_name)
+            last_proj.append(self)
             self.graph_name = graph_name
 
         def _bind_journal(self, journal_path):
@@ -1832,9 +1837,23 @@ def test_capture_graph_name_mirrors_the_sdk_mapping(monkeypatch):
             """
             self.bound_journal = journal_path
 
+        def _bind_structural_edge_recorder(self, recorder):
+            """#9553 class 4 (R5): the SECOND contract `_get_proj` arms.
+
+            `_get_proj` binds this beside `_bind_journal`, for the same
+            reason — this projection is somebody's live cache — so a double
+            standing in for `FalkorProjection` must carry the same entry
+            point or `_get_proj` raises `AttributeError` before it can return
+            a graph name. Recording it (rather than ignoring it) is what lets
+            the mapping test below also pin the bind's CONDITION: `None` when
+            no journal is configured, the SDK's own producer when one is
+            (#9553's "conditional on the journal" rule, `sdk.py:_get_proj`).
+            """
+            self.bound_recorder = recorder
+
     monkeypatch.setattr(sdk_mod, "FalkorProjection", _RecordingProj)
 
-    def _opened(namespace=None, graph_name=None):
+    def _opened(namespace=None, graph_name=None, journal=None):
         sdk = sdk_mod.TortoiseSDK.__new__(sdk_mod.TortoiseSDK)
         sdk._proj = None
         sdk._db_uri = None
@@ -1845,8 +1864,9 @@ def test_capture_graph_name_mirrors_the_sdk_mapping(monkeypatch):
         # bare ``__new__`` stand-in must carry the attribute a real ``__init__``
         # always sets — ``None`` = journal-less, the unarmed lane this mapping
         # guard deliberately exercises.
-        sdk._event_log_path = None
+        sdk._event_log_path = journal
         seen.clear()
+        last_proj.clear()
         sdk._get_proj()
         return seen[-1]
 
@@ -2000,6 +2020,20 @@ def test_capture_graph_name_mirrors_the_sdk_mapping(monkeypatch):
     # divergence documented on `_data_graph_name` as unreachable (org_id is a DB
     # key) and benign (all falsy-id requests resolve to one graph).
     assert ha_mod._data_graph_name({"org_id": None}) == "tortoise"
+
+    # #9553 class 4 (R5): the structural-edge recorder is bound beside the
+    # journal, CONDITIONAL on one — the same rule the record's own write door
+    # applies (a record appended to a scratch buffer must not become a row,
+    # because nothing could ever replay it). Pinned here because ACCEPTING the
+    # call is not BINDING the right value: a double that only implemented the
+    # method would let `_get_proj` hand a journal-less projection the SDK's
+    # producer without reding anything.
+    assert _opened(namespace="team-001")
+    assert last_proj[-1].bound_recorder is None, (
+        "a journal-less projection must bind NO structural-edge recorder")
+    _opened(journal="x.jsonl")
+    assert callable(last_proj[-1].bound_recorder), (
+        "a journal-backed projection must bind the SDK's edge producer")
 
 
 def test_data_sdk_opens_the_graph_the_gate_keys_on(monkeypatch):
