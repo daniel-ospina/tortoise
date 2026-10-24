@@ -2151,7 +2151,9 @@ def test_ax_write_eval_tool_change_selects_core_not_tier1():
     therefore be the one PR that never ran the tests pinning it — the same
     #1349/#3332/#3616 silent-drop class as the entries beside it.
 
-    Mutation check: removing the CORE_ALSO entry fails the second assert.
+    Mutation check: removing the CORE_ALSO entry fails the FIRST assert
+    (`"core" in r["surfaces"]`); the docs-only early return then returns
+    `full: False` with no pin, so the later asserts pass unexercised.
     """
     r = _sel(["tools/ax_write_eval.py"])
     assert "core" in r["surfaces"], r
@@ -2180,18 +2182,21 @@ def test_the_step1_eval_evidence_doc_selects_core_not_tier1():
     `_selection_relevant`.
 
     Mutation check: removing the CORE_ALSO entry fails the FIRST assert
-    (`surfaces == ["core"]`); dropping the pin from `core` fails the
-    non-vacuity clause below. Both are stated there because a mutation claim
-    that lives only in prose has no artifact to check it against.
+    (`surfaces == ["core"]`); dropping the pin from `core` fails the SECOND
+    (`test_ax_write_eval.py` in `test_files`). The non-vacuity clause below
+    exists for that second one: it re-selects from a manifest copy with the pin
+    stripped from `core`, which proves the second assert turns on the `core`
+    registration alone (656 -> 655 files, pin gone).
     """
     r = _sel(["docs/ax/how-to-use-tortoise-step1-eval.md"])
     assert r["surfaces"] == ["core"], r
     assert "test_ax_write_eval.py" in r["test_files"], r
     assert r["full"] is False, r
 
-    # Non-vacuous: the same selection loses the pin the moment its `core`
-    # registration is dropped, so the assertion above is not satisfied by
-    # whatever file the docs-only early return happens to carry.
+    # Non-vacuous: the pin's presence turns on its `core` registration alone —
+    # strip that entry and the same selection loses the pin (656 -> 655 files).
+    # This makes the assert above a claim about `core` being the pin's ONLY
+    # home: a `tier1` dual-registration would keep it selected and red this.
     stripped = copy.deepcopy(load_manifest())
     stripped["surfaces"]["core"] = [
         t for t in stripped["surfaces"]["core"] if t != "test_ax_write_eval.py"
