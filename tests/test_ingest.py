@@ -1187,8 +1187,18 @@ def test_upgrade_on_already_extracted_is_noop():
     out = _tmp("graph.html")  # explicit, like the other call sites (#3717)
     args = ["ingest", str(t), "--db", db, "--log", log, "--out", out, "--upgrade",
             "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
-    with patch("sys.argv", args):
+    # The stored flag alone cannot discriminate this path (#5140 review round 10):
+    # a real upgrade also ENDS with `needs_extraction=false` via the completion
+    # SET, so asserting only the stored value stayed green when the pending rule
+    # was mutated to treat an explicit `false` as PENDING. The printed skip line
+    # is what distinguishes "skipped as already extracted" from "upgraded".
+    from io import StringIO
+    with patch("sys.argv", args), patch("sys.stdout", new_callable=StringIO) as _buf:
         _run_main(None)
+    printed = _buf.getvalue()
+    assert "doc already extracted, skipped" in printed, (
+        f"`--upgrade` did not take the already-extracted no-op path; output was:\n"
+        f"{printed}")
     # Doc stays extracted (no flip attempted on already-extracted)
     from tortoise.projection import FalkorProjection
     proj = FalkorProjection.from_uri(uri)

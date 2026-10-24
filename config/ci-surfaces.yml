@@ -3729,6 +3729,16 @@ surfaces:
   - test_index_restore.py
   - test_index_surfacing.py
   - test_indexes.py
+  # #5140: the pending-extraction default (`tortoise/ingest.py`'s
+  # `_document_is_pending` / `_discover_pending_documents`) and its
+  # Python↔Cypher parity grid. `tortoise/ingest.py` matches no SOURCE_PATTERN,
+  # so an ingest-only diff falls through to this `core` fallback — the same arm
+  # that owns the sibling `test_ingest.py` below. Docker lane (`_live_db`
+  # skipif, per-test `test_5140_*` graphs), so it is NOT in `carve_out:`.
+  # Registered at all because an unlisted file is a `manifest-integrity` red
+  # (#1262) AND runs in no leg (#1349/#2938) — without this row the 16 pins
+  # here, including the parity grid, would be green-by-absence.
+  - test_5140_pending_extraction.py
   - test_ingest.py
   - test_ingest_audit.py
   - test_ingest_bundle.py
