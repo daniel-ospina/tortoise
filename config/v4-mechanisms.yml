@@ -486,10 +486,18 @@ mechanisms:
       (`tortoise/extractor_v2.py`) is rendered into S1 (`_granularity_text`) and
       S2/S4 (`_render_master_core_only`, `_render_master_verbose`), and
       `VALUE_FIDELITY_RULE` rides the S2/S4 `{anti_routine}` slot via
-      `_s2s4_rules()` — never S1, never the master render (pinned by
-      `tests/test_extractor_v4_citation_rot.py`, and
-      `tests/test_extractor_v2.py` pins the render). ⚠️ It is pinned THERE and NOT
-      read off a comment: the `SEAMS:` comment above `SHORT_SESSION_FACT_RULE`
+      `_s2s4_rules()` — never S1, never a master render. Pinned, in three
+      places because each catches a different insertion: never-S1 by
+      `tests/test_extractor_v4_citation_rot.py`; the core-only render
+      byte-for-byte by `tests/test_extractor_v2.py`; and — added 2026-10-24,
+      because it was NOT pinned — the `VALUE_FIDELITY_RULE` text absent from all
+      three renders by
+      `tests/test_v4_declared_mechanisms.py::test_the_value_fidelity_rule_rides_the_s2s4_slot_and_no_master_render`,
+      which also asserts the rule still rides `_s2s4_rules()` so the absence cannot
+      pass by vacancy. Measured before that test: appending the rule to
+      `_render_master_verbose` (the DEFAULT render) shipped a second copy of the
+      instruction in one S2/S4 prompt with every gate green. ⚠️ It is pinned and
+      NOT read off a comment: the `SEAMS:` comment above `SHORT_SESSION_FACT_RULE`
       belongs to a different constant and names S1 as one of ITS seams, so citing
       it as authority for value-fidelity's never-S1 would say the opposite of what
       the row claims. The FILTER side is

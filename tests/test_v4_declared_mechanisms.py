@@ -1170,6 +1170,44 @@ def test_the_compact_render_omits_the_carve_out_the_row_records() -> None:
     )
 
 
+def test_the_value_fidelity_rule_rides_the_s2s4_slot_and_no_master_render() -> None:
+    """The row's `never S1, never the master render` claim, pinned in BOTH directions.
+
+    `tests/test_extractor_v4_citation_rot.py` pins never-S1 and
+    `tests/test_extractor_v2.py` byte-pins the CORE-ONLY master render, but the
+    DEFAULT master render (`_render_master_verbose`) was pinned by nothing, so a
+    lane appending the rule there shipped a SECOND copy of the same instruction
+    inside one S2/S4 prompt with every gate green (measured before this test:
+    484 passed). The row claimed the whole pair was pinned when only one half was.
+
+    So both halves are asserted here: the rule TEXT must ride the S2/S4
+    `{anti_routine}` slot, and it must be absent from all three master renders —
+    present-if-moved and absent-if-duplicated, neither passing by vacancy.
+    """
+    from tortoise import extractor_v2 as v2
+
+    master = v2.build_master_list()
+    rule = v2.VALUE_FIDELITY_RULE
+    assert rule in v2._s2s4_rules(master), (
+        "the S2/S4 rules block no longer carries VALUE_FIDELITY_RULE at the "
+        "`{anti_routine}` slot — that slot is the ONLY place the row says it "
+        "rides; restore it there before reading the absence claims below"
+    )
+    for name, render in (
+        ("S1 (`_granularity_text`)", v2._granularity_text),
+        ("core-only master", v2._render_master_core_only),
+        ("verbose master", v2._render_master_verbose),
+    ):
+        rendered = render(master)
+        assert rule not in rendered, (
+            f"{name} now carries VALUE_FIDELITY_RULE — it is already emitted by "
+            "`_s2s4_rules()`, so this is the same instruction twice in one "
+            "prompt (the `SEAMS:` comment on `SHORT_SESSION_FACT_RULE` forbids "
+            "exactly that for its own constant). Remove it there; do not narrow "
+            "this assertion"
+        )
+
+
 # ── THE ENUMERATION: the design's own mechanism lists are compared ───────────
 #
 # `DECLARED_IDS` is a PIN, and a pin can only hold a set somebody already wrote.
@@ -1203,13 +1241,21 @@ AUDITED_DEDUP_ROWS = {
 #: declaration in a different cell shape, and a pattern that required the pipe
 #: immediately after the id read that row as absent — measured: a fifth dedup in
 #: that shape left this check GREEN, which is the one drift it exists to see.
-AUDITED_DEDUP_ROW = re.compile(r"^\|\s*\*\*(D-[a-z])\*\*", re.MULTILINE)
+#: ⚠️ And the id class is NOT `[a-z]`: `D-E`, `D-e2` and `D-5` are the same
+#: declaration in another spelling, and a one-lowercase-letter class read them as
+#: absent too — measured on the real table: appending `| **D-E** | … |` left the
+#: drift check GREEN. The two readers share ONE id class so they cannot disagree
+#: about what counts as an id.
+_DEDUP_ID = r"D-[A-Za-z0-9_]+"
+AUDITED_DEDUP_ROW = re.compile(r"^\|\s*\*\*(" + _DEDUP_ID + r")\*\*", re.MULTILINE)
 
 #: Any id that LOOKS like a table-row declaration of a dedup, whatever the cell
 #: shape (`**D-a**`, `D-a`, `**D-a** (note)`). Used only to prove the reader above
 #: did not silently skip a row: an id this loose pattern finds and the strict one
 #: does not is an UNREADABLE ROW, which is a violation rather than a gap.
-AUDITED_DEDUP_ROW_LOOSE = re.compile(r"^\|[^|\n]*?\b(D-[a-z])\b", re.MULTILINE)
+AUDITED_DEDUP_ROW_LOOSE = re.compile(
+    r"^\|[^|\n]*?\b(" + _DEDUP_ID + r")\b", re.MULTILINE
+)
 
 
 def audited_dedups(doc: Path = V4_ARCH_DOC) -> list[str]:
@@ -1316,15 +1362,20 @@ def test_a_fifth_audited_dedup_with_no_row_is_refused(tmp_path) -> None:
         "| **D-b** | within-batch exact | `:1` | ✅ |\n"
         "| **D-c** | vs store | `:2` | ✅ |\n"
         "| **D-d** | semantic | `:3` | ✅ |\n"
-        "| **D-e** | a NEW key nobody registered | `:4` | ✅ |\n",
+        "| **D-e** | a NEW key nobody registered | `:4` | ✅ |\n"
+        # The same declaration in another ID SPELLING: an id class of one
+        # lowercase letter read `D-E` as absent (measured on the real table), so
+        # the fixture keeps a spelling the old class could not see.
+        "| **D-E** | a NEW key in the other spelling | `:5` | ✅ |\n",
         encoding="utf-8",
     )
     rows = {r["id"] for r in load_registry()["mechanisms"]}
     errors = audited_dedup_errors(doc, rows)
-    assert any("D-e" in e and "NO registry mechanism" in e for e in errors), (
-        "a declared dedup with no registry row was NOT refused — this is the "
-        f"declared-implies-present shape the gate exists for: {errors}"
-    )
+    for did in ("D-e", "D-E"):
+        assert any(did in e and "NO registry mechanism" in e for e in errors), (
+            f"{did}: a declared dedup with no registry row was NOT refused — this "
+            f"is the declared-implies-present shape the gate exists for: {errors}"
+        )
 
 
 def test_a_mapping_entry_the_design_no_longer_declares_is_refused(tmp_path) -> None:
@@ -1500,6 +1551,83 @@ _DOC_NODES = (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 _ASSEMBLY_ATTRS = {"format", "format_map", "join"}
 
 
+def _binding_keys(target: ast.expr) -> list[str]:
+    """Every name a binding TARGET writes, in one spelling a use can be keyed by.
+
+    The shapes the repo actually binds a DDL fragment with: a plain name
+    (`_DDL = …`), an ANNOTATED name (`_DDL: str = …`), an attribute or subscript
+    (`self._ddl = …`), and a tuple/list of any of those
+    (`_A, _B = "… NODE ", "Point"`). The spelling is shared with
+    :func:`_use_key`, so a binding and a use cannot disagree about WHICH name
+    they mean — an earlier name-only allow-list (`isinstance(target, ast.Name)`)
+    keyed neither `AnnAssign` nor an attribute target, so
+    `_D: str = "… UNIQUE NODE "` + `g.query(_D + _L)` passed the pin with the
+    constraint shipping (measured; the fixtures below cover each shape).
+
+    An empty list means the target is a shape this scan does not resolve; the
+    caller treats that as UNVERIFIABLE, never as clean.
+    """
+    if isinstance(target, ast.Name):
+        return [f"name:{target.id}"]
+    if isinstance(target, (ast.Attribute, ast.Subscript)):
+        return [f"expr:{ast.unparse(target)}"]
+    if isinstance(target, ast.Starred):
+        return _binding_keys(target.value)
+    if isinstance(target, (ast.Tuple, ast.List)):
+        keys: list[str] = []
+        for elt in target.elts:
+            keys.extend(_binding_keys(elt))
+        return keys
+    return []
+
+
+def _use_key(node: ast.expr) -> str | None:
+    """The same key for a USE of a bound name; `None` for anything else."""
+    if isinstance(node, ast.Name):
+        return f"name:{node.id}"
+    if isinstance(node, (ast.Attribute, ast.Subscript)):
+        return f"expr:{ast.unparse(node)}"
+    return None
+
+
+def _incomplete_ddl(value: ast.expr | None) -> bool:
+    """Is `value` a literal that STARTS a constraint and names no label yet?"""
+    if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
+        return False
+    match = DDL.search(value.value)
+    return bool(match) and not DDL_LABELLED.search(match.group(0))
+
+
+def _bound_pairs(tree: ast.AST) -> list[tuple[ast.expr, ast.expr | None]]:
+    """`(target, value)` for every binding form — with tuple targets PAIRED UP.
+
+    `_A, _B = "… UNIQUE NODE ", "Point"` binds two values, and the half that
+    carries the keyword is `_A`; pairing the whole tuple target with the whole
+    tuple value would find no `ast.Constant` and taint nothing. So a `Tuple`/
+    `List` target whose value is a `Tuple`/`List` of the same LENGTH is paired
+    element-wise; anything else is paired whole.
+    """
+    pairs: list[tuple[ast.expr, ast.expr | None]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            targets: list[ast.expr] = list(node.targets)
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            targets = [node.target]
+        else:
+            continue
+        value = node.value
+        for target in targets:
+            if (
+                isinstance(target, (ast.Tuple, ast.List))
+                and isinstance(value, (ast.Tuple, ast.List))
+                and len(target.elts) == len(value.elts)
+            ):
+                pairs.extend(zip(target.elts, value.elts, strict=True))
+            else:
+                pairs.append((target, value))
+    return pairs
+
+
 def ddl_scan(root: Path) -> tuple[list[str], list[str], list[str]]:
     """Every constraint-ish string, every unparsable source, every ASSEMBLED one.
 
@@ -1507,6 +1635,10 @@ def ddl_scan(root: Path) -> tuple[list[str], list[str], list[str]]:
     mention of one" — the scan cannot tell those apart and does not pretend to.
     `assembled` is the cannot-tell polarity: a statement whose label the scan
     cannot resolve, reported so it can never be read as an absence.
+
+    `unparsable` is the OTHER cannot-tell polarity: a source this scan could not
+    turn into a tree at all. Both are violations at the call site — an unreadable
+    file and a runtime-assembled statement are equally not an absence.
     """
     found: list[str] = []
     unparsable: list[str] = []
@@ -1514,7 +1646,14 @@ def ddl_scan(root: Path) -> tuple[list[str], list[str], list[str]]:
     for path in sorted(root.rglob("*.py")):
         rel = path.relative_to(root).as_posix()
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+            # The SAME encoding rules the interpreter applies (PEP 263 cookie, UTF-8
+            # BOM) — `_defined_names` reads its sources this way for the measured
+            # reason recorded there: a plain `read_text(encoding="utf-8")` refuses a
+            # legal `# -*- coding: latin-1 -*-` module, so a file Python imports
+            # happily would be reported as unreadable and the pin would red with a
+            # message claiming a constraint in it is INVISIBLE.
+            with tokenize.open(path) as fh:
+                tree = ast.parse(fh.read(), filename=rel)
         except (OSError, UnicodeError, SyntaxError, ValueError):
             unparsable.append(rel)
             continue
@@ -1525,21 +1664,21 @@ def ddl_scan(root: Path) -> tuple[list[str], list[str], list[str]]:
             and n.body and isinstance(n.body[0], ast.Expr)
             and isinstance(n.body[0].value, ast.Constant)
         }
-        tainted = {
-            target.id
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
-            and isinstance(node.value.value, str) and DDL.search(node.value.value)
-            and not DDL_LABELLED.search(DDL.search(node.value.value).group(0))
-            for target in node.targets
-            if isinstance(target, ast.Name)
-        }
-        bound_targets = {
-            id(t)
-            for n in ast.walk(tree)
-            if isinstance(n, (ast.Assign, ast.AugAssign))
-            for t in (n.targets if isinstance(n, ast.Assign) else [n.target])
-        }
+        #: Keys of names bound to an INCOMPLETE statement: whether the label is
+        #: supplied at the use site cannot be decided here, so a USE of one is
+        #: `assembled` and never an absence.
+        tainted: set[str] = set()
+        for target, value in _bound_pairs(tree):
+            if not _incomplete_ddl(value):
+                continue
+            keys = _binding_keys(target)
+            if keys:
+                tainted.update(keys)
+            else:  # a binding shape this scan cannot key is NOT clean
+                assembled.append(
+                    f"{rel}: `{ast.unparse(target)}` is bound to an incomplete "
+                    "DDL statement in a shape this scan does not resolve"
+                )
         for node in ast.walk(tree):
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 if id(node) in docstrings:
@@ -1563,8 +1702,8 @@ def ddl_scan(root: Path) -> tuple[list[str], list[str], list[str]]:
                     n.value for n in ast.walk(node.value)
                     if isinstance(n, ast.Constant) and isinstance(n.value, str)
                 ]
-                if isinstance(node.target, ast.Name) and node.target.id in tainted:
-                    assembled.append(f"{rel}: {node.target.id} += …")
+                if set(_binding_keys(node.target)) & tainted:
+                    assembled.append(f"{rel}: `{ast.unparse(node.target)}` += …")
             elif (
                 isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)
@@ -1577,14 +1716,19 @@ def ddl_scan(root: Path) -> tuple[list[str], list[str], list[str]]:
             for fragment in fragments:
                 for match in DDL.finditer(fragment):
                     assembled.append(f"{rel}: {match.group(0).strip()}")
+            # A USE of a name bound to an incomplete statement — the label is
+            # supplied HERE, which a static scan cannot resolve. `Load` only: a
+            # target is a binding, not a use, and `ctx` is the shape-independent
+            # test for that (the earlier `id(target)` allow-list had to name each
+            # binding form and so missed `AnnAssign` and every attribute target).
             if (
-                isinstance(node, ast.Name)
-                and node.id in tainted
-                and id(node) not in bound_targets
+                isinstance(node, (ast.Name, ast.Attribute, ast.Subscript))
+                and isinstance(node.ctx, ast.Load)
+                and _use_key(node) in tainted
             ):
                 assembled.append(
-                    f"{rel}: `{node.id}` carries an incomplete DDL statement "
-                    "and is used as a value"
+                    f"{rel}: `{ast.unparse(node)}` carries an incomplete DDL "
+                    "statement and is used as a value"
                 )
     return found, unparsable, sorted(set(assembled))  # the walk visits ancestors too
 
@@ -1599,9 +1743,19 @@ def test_the_ddl_scan_sees_every_form_that_could_name_a_label(tmp_path) -> None:
     the next conflict resolution. So the scan is driven over fixture files here:
     a literal statement (including implicit concatenation), every assembly form
     that was invisible in some earlier revision (`f-string`, `+`, `%`, `.format`,
-    `.format_map`, `.join`, `+=`), a docstring (never executed, so not a
-    statement), and a mention in ordinary text (reported, but the pin's message
-    tells the reader it may be prose).
+    `.format_map`, `.join`, `+=`), every BINDING SHAPE a fragment can be carried
+    by (a plain name, an annotated name, an attribute, a tuple target), a
+    docstring (never executed, so not a statement), and a mention in ordinary
+    text (reported, but the pin's message tells the reader it may be prose).
+
+    The binding-shape fixtures are the ones cycle 7's review found missing: the
+    taint allow-list accepted only a bare `ast.Name` target of a plain
+    `ast.Assign`, so `_D: str = "… UNIQUE NODE "` + `g.query(_D + _L)` (an
+    `AnnAssign`), `self.ddl = "…"` + `g.query(self.ddl + "Point")` (an attribute)
+    and `_A, _B = "… NODE ", "Point"` (a tuple target) all left the pin GREEN
+    while a `Point` constraint shipped — the exact false PASS it exists to stop.
+    Each of those three is a fixture below, so no reduction of the allow-list
+    back to `Name` targets can pass this test again.
     """
     forms = {
         "literal": (
@@ -1642,6 +1796,29 @@ def test_the_ddl_scan_sees_every_form_that_could_name_a_label(tmp_path) -> None:
         ),
         "augassign": (
             '_L = "Point"\nd = "CREATE CONSTRAINT pt UNIQUE NODE "\nd += _L\ng.query(d)\n',
+            True,
+            True,
+        ),
+        # The three binding SHAPES the name-only allow-list could not see. Each
+        # carries the DDL keyword in one literal and the label in another, so the
+        # Constant branch alone reports a fragment with no label and the pin would
+        # be green without the taint branch.
+        "annassign": (
+            '_D: str = "CREATE CONSTRAINT pt UNIQUE NODE "\n'
+            '_L = "Point"\ng.query(_D + _L)\n',
+            True,
+            True,
+        ),
+        "attribute": (
+            'class K:\n    def m(self):\n'
+            '        self.ddl = "CREATE CONSTRAINT pt UNIQUE NODE "\n'
+            '        g.query(self.ddl + "Point")\n',
+            True,
+            True,
+        ),
+        "tuple_target": (
+            '_A, _B = "CREATE CONSTRAINT pt UNIQUE NODE ", "Point"\n'
+            'g.query(_A + _B)\n',
             True,
             True,
         ),
@@ -1686,6 +1863,44 @@ def test_the_ddl_scan_sees_every_form_that_could_name_a_label(tmp_path) -> None:
     assert not found and not assembled, (found, assembled)
 
 
+def test_the_ddl_scan_refuses_a_source_it_cannot_read(tmp_path) -> None:
+    """An unreadable source is a VERDICT, never a silent skip.
+
+    `unparsable` is the scan's OTHER cannot-tell polarity, and nothing in the real
+    tree exercises it — so without this fixture `unparsable.append(rel)` could be
+    deleted and the pin would stay green on a partial read. A source that cannot
+    be turned into a tree may carry the very constraint the pin claims is absent,
+    so the failed read must be REPORTED, and because it was not read it must not
+    also be reported as a found constraint.
+
+    The third file is the control: a legal PEP 263 `latin-1` module (which a plain
+    `read_text(encoding="utf-8")` refuses) IS read, so `unparsable` means
+    "unreadable", not "not ASCII".
+    """
+    (tmp_path / "broken.py").write_bytes(
+        b'g.query("CREATE CONSTRAINT pt UNIQUE NODE Point")\ndef f(:\n'
+    )
+    (tmp_path / "latin.py").write_bytes(
+        b'# no coding cookie, and not valid UTF-8\nX = "caf\xe9"\n'
+        b'g.query("CREATE CONSTRAINT pt UNIQUE NODE Point")\n'
+    )
+    found, unparsable, assembled = ddl_scan(tmp_path)
+    assert found == [] and assembled == [], (found, assembled)
+    assert unparsable == ["broken.py", "latin.py"], unparsable
+    # The control: the SAME DDL in a module whose encoding IS declared.
+    (tmp_path / "cookie.py").write_bytes(
+        b"# -*- coding: latin-1 -*-\nX = 'caf\xe9'\n"
+        b'g.query("CREATE CONSTRAINT pt UNIQUE NODE Point")\n'
+    )
+    found, unparsable, assembled = ddl_scan(tmp_path)
+    assert unparsable == ["broken.py", "latin.py"], unparsable
+    assert found, (
+        "a legal PEP 263 `latin-1` module was not read — the scan went blind on "
+        "a file the interpreter imports happily, with no violation reported"
+    )
+    assert assembled == [], assembled
+
+
 def test_the_atomic_write_absence_is_pinned_to_the_schema() -> None:
     """The `atomic_point_write` row's absence claim, read off the SCHEMA.
 
@@ -1728,8 +1943,9 @@ def test_the_atomic_write_absence_is_pinned_to_the_schema() -> None:
     )
     assert assembled == [], (
         "a graph constraint is ASSEMBLED AT RUNTIME (f-string / `+` / `%` / "
-        ".format / .format_map / .join / `+=` / a name carrying an incomplete "
-        "statement), which this static scan cannot resolve — so whether it names "
+        ".format / .format_map / .join / `+=` / a name — plain, annotated, "
+        "attribute or tuple-bound — carrying an incomplete statement), which "
+        "this static scan cannot resolve — so whether it names "
         "Point is UNKNOWN, and an unknown is not an absence. Write the statement "
         "as a literal (implicit concatenation is fine), or extend this pin to "
         "resolve the label:\n  "
