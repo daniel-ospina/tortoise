@@ -194,12 +194,15 @@ def _run_ep_propagation(proj, api=None, *, label: str = "EP"):
 def _document_is_pending(needs_extraction, doc_status, *,
                          unmarked_is_pending: bool = True,
                          other_legacy_is_pending: bool = False) -> bool:
-    """#5140 P1: is this document Source awaiting extraction? ONE definition.
+    """#5140 P1: is this document Source awaiting extraction? ONE RULE, two readers.
 
-    ``_do_upgrade`` (one document the operator named) and ``_do_upgrade_all``
-    (a corpus sweep) answer the same question, so they read it here — the same
-    discipline the retrieval legs follow for ``documentKind`` (#5140 finding 1):
-    two paths that each spell the rule out drift apart.
+    ``_do_upgrade`` (one document the operator named) reads THIS function;
+    ``_do_upgrade_all`` (a corpus sweep) reads its Cypher twin
+    ``_discover_pending_documents``, which mirrors this arm order and nothing
+    else. They are NOT one call site: they agree because
+    ``test_python_rule_and_cypher_twin_agree`` walks the whole grid through both
+    readings and reds on any divergence. Edit one arm, edit the twin — the test
+    is what holds them together, not this sentence.
 
     D10 retired ``doc_status`` and left ``needs_extraction`` as the only stored
     signal — but it also moved the DEFAULT. Pre-D10 ``_do_upgrade`` read
