@@ -112,9 +112,14 @@ def test_two_creates_of_one_live_name_are_one_entity(sdk):
     client.create_entity("object", "Acme", objectKind="core:strategy",
                          is_episodic=False)
     first = _name_ids(proj, "Object", "Acme")
+    # ⛔ The length pin is what makes this test non-vacuous. Without it BOTH
+    # lists are `[]` when the create writes nothing, and `[] == []` passes —
+    # measured: stubbing `create_entity` to a no-op left this test GREEN.
+    assert len(first) == 1, first
     client.create_entity("object", "Acme", objectKind="core:strategy",
                          is_episodic=False)
     second = _name_ids(proj, "Object", "Acme")
+    assert len(second) == 1, second
     assert first == second, (first, second)
 
 
@@ -177,9 +182,18 @@ def test_delete_then_recreate_the_same_name_yields_two_entities(sdk):
         "the re-create reused the deleted entity's id — that is resurrection "
         "(#3590 R5: no id reuse)")
 
-    # …and replay agrees with live: the two incarnations are still two ids.
-    live = set(_name_ids(proj, "Object", "Acme")) | {first}
+    # …and replay agrees with live. The DELETE is an `EntityMutated op=delete`,
+    # so exactly one Object survives — the second incarnation, holding the name.
+    # Asserted on the GRAPH's whole Object set, not on a set rebuilt from the
+    # ids this test already knows: `{holders[0]} | {first} == {first,
+    # holders[0]}` is a restatement of the inequality asserted above and would
+    # pass no matter what replay did.
     proj.rebuild_all(str(events), confirm_destructive=True)
+    all_objects = {r[0] for r in proj.g.query(
+        "MATCH (o:Object) RETURN o.id").result_set}
+    assert holders[0] in all_objects, (
+        "replay lost the surviving incarnation — burial")
+    assert first not in all_objects, (
+        "replay resurrected the deleted incarnation — resurrection")
     assert set(_name_ids(proj, "Object", "Acme")) == {holders[0]}, (
         "replay changed which incarnation holds the name")
-    assert live == {first, holders[0]}, live

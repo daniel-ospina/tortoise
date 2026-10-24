@@ -7731,8 +7731,14 @@ _ENTITY_MUTATION_OPS: tuple[str, ...] = (
     "delete", "rename", "restatus", "revise", "supersede",  # fold arms exist
     "retract",                                       # recorded on #3299 — no arm yet
 )
-# FOLD capability, not producer reach: the `rename` arm is implemented and must
-# stay so, but the PRODUCER deliberately does not emit `rename` yet — see
+# FOLD capability, not producer reach. ⚠️ #3590 CHANGED THE PRODUCER HALF: the
+# SDK's `_update_entity` rename branch now EMITS `rename`, because a minted id
+# made a rename journalable (`EntityMutated op=rename` on the stable id) where
+# the derived name-id had to withhold it. So the historical note below is
+# HISTORY, not current state — the producer does emit `rename`.
+#
+# Historical (pre-#3590): the arm was implemented and had to stay so, while the
+# PRODUCER deliberately did not emit `rename` — it was withheld by
 # `sdk._update_entity`'s `name` branch. The arm applies `state`, so a raw/legacy
 # or future `rename` record folds ONLY if it carries the new name as
 # `state["name"]`; a record carrying just a top-level `name` unfolds and is

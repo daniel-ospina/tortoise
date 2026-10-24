@@ -24,7 +24,6 @@ from datetime import datetime, timezone
 # registers, or a node's IDENTITY is not a pure function of the journal (a
 # random stub id moved on every replay) and the reference fold cannot model
 # the stub at all.
-from tortoise.entity_identity import all_name_holder_ids
 from tortoise.ids import content_hash as _content_hash
 from tortoise.live import (
     decay_clause,  # #2490: rebuild folds decay terminal posteriors
@@ -66,47 +65,22 @@ from tortoise.vector_write import (
 logger = logging.getLogger(__name__)
 
 
-#: ``_name_holder_count`` DELEGATES to ``entity_identity.all_name_holder_ids``
-#: — that module owns both the label vocabulary (it is what
-#: ``_require_identity_label`` refuses on) and the name-holder predicate
-#: (``_name_predicate``). A second hand-written query here is how the fold's
-#: MERGE-key decision silently stops following the shared predicate — if
-#: ``_name_predicate`` ever gains case-folding or a second name spelling, the
-#: count and the identity probes would disagree. The same #2901 drift lesson
-#: that keeps the label tuple shared applies to the count itself.
+#: ⛔ The fold's MERGE-key decision used to live here: ``_name_holder_count``
+#: counted every carrier of a name (any status) so ``_upsert_object`` could
+#: choose between the ``name`` key (#7369) and the ``id`` key when 2+ carriers
+#: shared one name (#8864 — a name ``MERGE`` matched EVERY carrier and the
+#: ``ON MATCH`` write stamped ONE id onto ALL of them, so two entities then
+#: answered every ``MATCH (n {id:$x})`` read as one).
 #:
-#: See :func:`_name_holder_count` for why the count matters.
-def _name_holder_count(g, label: str, name: str) -> int:
-    """How many ``label`` nodes hold ``name`` — **any** status.
-
-    The two name-keyed labels MERGE by NAME (``MERGE (o:Object {name:$name})``,
-    #7369), so this count decides whether the name can serve as the MERGE key at
-    all. When it exceeds one, that pattern matches EVERY carrier and the
-    ``ON MATCH`` id write stamps ONE id onto ALL of them — duplicate-id
-    corruption (#8864): two distinct entities then answer every id-keyed read
-    (``MATCH (n {id:$x})``) as one.
-
-    ⛔ Count EVERY carrier, not only the LIVE ones. ``MERGE … {name:$name}``
-    matches terminal carriers too, so a ``status='superseded'`` twin is re-id'd
-    by the same ``ON MATCH`` clause — measured: one live + one superseded
-    carrier of a single name both come out carrying the incoming id. The
-    read-side predicate (``live._terminal_excluded``, as used by
-    ``entity_identity.resolve_entity_id``) is the WRONG count here precisely
-    because it excludes the terminal twin that participates in the corruption.
-    ``all_name_holder_ids`` is the ANY-status probe for exactly that reason.
-
-    Cost: one index seek — ``Object.name`` / ``Subject.name`` are range-indexed
-    (``_RANGE_INDEX_LABEL_PROPS``).
-
-    ⛔ This counts the GRAPH, so it sees every carrier the graph has —
-    explicit-id writers and connector writers included. #3590 removed the
-    fold-time NAME-STUB sources this helper was introduced to model
-    (``_event_plain_merge`` / ``_mint_subject_stub`` minted a node for a bare
-    mention): a fold never mints an id any more, and both labels MERGE on
-    ``id``, so the count no longer decides a MERGE-key branch. It is retained
-    for the read-side carrier models that still report same-name coexistence.
-    """
-    return len(all_name_holder_ids(g, label, name))
+#: **#3590 removed the branch, and the count with it.** Both labels now MERGE on
+#: ``id`` unconditionally, so no write path makes a key decision from a carrier
+#: count and the helper had no production caller left. The read-side models that
+#: still report same-name coexistence (``journal_epistemic_existence``,
+#: ``journal_object_surviving_keys``) build their own ``by_name`` maps from the
+#: journal and never called this. The ANY-status vs live-only distinction it
+#: documented is preserved where it still decides something:
+#: ``entity_identity.all_name_holder_ids`` is the ANY-status probe, and
+#: ``live._terminal_excluded`` is the read-side predicate — do not swap them.
 
 
 # #6239: live's TWO ``PointPromoted`` emitters are both gated on the Point's
@@ -4208,9 +4182,17 @@ class _EntityHandlers:
                 SHAPE_UNREGISTERED_REFERENCE,
                 record_non_folded,
             )
+            # ``nonfolded.record_non_folded`` takes ``(shape, **fields)`` where
+            # the fields are ``NonFoldedEvent``'s own — ``label``/``candidates``/
+            # ``detail``. There is a SECOND ``record_non_folded`` with a different
+            # signature (``entity_identity``'s ``(label, name, candidate_ids,
+            # shape=)``); passing this one ``name=``/``ids=``/``context=`` raises
+            # ``TypeError`` INSIDE the fold — i.e. after a rebuild has already
+            # wiped the graph, the fail-closed path crashes instead of recording.
             record_non_folded(SHAPE_UNREGISTERED_REFERENCE, label="Object",
-                              name=str(name or ""), ids=[],
-                              context="ObjectSuperseded without an id")
+                              candidates=(),
+                              detail=f"name={name!r} context=ObjectSuperseded "
+                                     "without an id")
             return (0, 0)
         result = self.g.query(
             "MATCH (o:Object {id:$id}) " + live,
@@ -4856,7 +4838,16 @@ class _EntityHandlers:
                 for target_kind, target_name in missed:
                     _emit_fold_violation(target_kind, event_kind, target_name)
         builtin_status = builtin_fold_status(event_kind)
-        if builtin_status is not None and name:
+        if builtin_status is not None and object_id:
+            # Guarded on the RESOLVED ID, not on `name` (#3590). A name is not an
+            # identity any more, so a name-keyed write here would move EVERY
+            # carrier's status — the harm class the identity change exists to
+            # remove. `object_id` is None in two reachable shapes: the event's
+            # `object` is a Document rather than an entity (the caller passes
+            # None deliberately), and an unresolved name (already recorded as a
+            # non-fold by the `resolve_fold_name` that produced the None).
+            # Guarding on `name` instead would issue this query with the literal
+            # string "None" as the id — a silent no-op that looks like a fold.
             # `toStringOrNull` (not `toLower` on the raw property) so a
             # payload-supplied non-string `objectKind` (an int, an array —
             # `create_entity(objectKind=...)`, `uses[].kind`) cannot raise
@@ -4873,7 +4864,7 @@ class _EntityHandlers:
                 "       OR NOT (toLower(toStringOrNull(o.objectKind)) IN $declared)) "
                 "  AND (o.status IS NULL OR NOT (o.status IN $excluded)) "
                 "SET o.status=$status",
-                params={"n": str(object_id), "status": builtin_status,
+                params={"n": object_id, "status": builtin_status,
                         "declared": sorted(index.kind_forms),
                         "excluded": excluded},
             )
