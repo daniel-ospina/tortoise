@@ -748,9 +748,9 @@ A four-way audit of the write path found **FOUR distinct dedups at FOUR differen
 | id | key | where | exists? |
 |---|---|---|---|
 | **D-a** | **source** | **URL only** | ⚠️ **URL-keyed only** — a content-hash is a provenance anchor (`#4005`), **not a dedup key** |
-| **D-b** | **within-batch exact** | `:3967-3969` | ✅ |
+| **D-b** | **within-batch exact** | `:3967-3969` | ✅ <!-- v4-mechanism: exact_dedup --> |
 | **D-c** | **vs store, raw content hash** | `sdk.py:12412` (`_find_point_by_content`; the shared predicate builder is `_dedup_match_clauses`, `:12364`) | ✅ |
-| **D-d** | **semantic** | `:3021+` | ✅ |
+| **D-d** | **semantic** | `:3021+` | ✅ <!-- v4-mechanism: against_priors_consolidation --> |
 
 **⇒ `S0a NORMALIZE + HASH → S0b SOURCE DEDUP` is the largest single volume lever available, and it is mechanical and free: `tortoise/source_identity.py` is its implementation (`normalize_source_url`, `resolve_source_key`), wired in `projection/entities.py` and acceptance-tested by `tests/test_source_dedup_registration.py`, which is why `config/v4-mechanisms.yml` carries it as `implemented`.** Catching the same conversation firehose twice is a **whole-narrative** save, not a claim-level one. What stays absent is narrower than the step: **D-a above is still URL-keyed**, and resolving a spelling to the `:Source` that owns its identity is not hashing the narrative. <!-- v4-mechanism: source_dedup -->
 
@@ -768,7 +768,7 @@ A four-way audit of the write path found **FOUR distinct dedups at FOUR differen
 
 | operation | site | who |
 |---|---|---|
-| **DETECT** the near-duplicate pair **+ apply the §16.4 never-across guard** | **`S2.2a-β`** | mechanical |
+| **DETECT** the near-duplicate pair **+ apply the §16.4 never-across guard** | **`S2.2a-β`** | mechanical <!-- v4-mechanism: near_dup_detect --> |
 | record the **VERDICT** `MERGE` for a pair that survives the guard | **`S2.2b VET`** | the Jev arbiter (`vet_gate.py:OUTCOMES`) |
 | execute the **FUSION** — the union of both sides' attachments | **`S3`** | the resolve/consolidation tail, after the gate |
 
@@ -799,7 +799,7 @@ S6  COMMIT
 1. **Key unification** — one hash, one normalization.
 2. **Sound-only** — applies only where the key is provably exact.
 3. **Union-merge** — merging **unions the attachments** (edges, provenance, sources).
-4. ⛔ **An ATOMIC write** — `create_point(dedup=True)` is a **check-then-CREATE**, and there is **no uniqueness constraint on `Point`**. **Two concurrent writers both see "absent" and both create.** **Nothing in the current write path closes that window**; the Postgres target's single transaction does.
+4. ⛔ **An ATOMIC write** — `create_point(dedup=True)` is a **check-then-CREATE**, and there is **no uniqueness constraint on `Point`**. **Two concurrent writers both see "absent" and both create.** **Nothing in the current write path closes that window**; the Postgres target's single transaction does. <!-- v4-mechanism: atomic_point_write -->
 
 **⛔ AND THE MERGE RULE IS NOT NEGOTIABLE — UNION THE ATTACHMENTS; NEVER LOSE EITHER SIDE'S EVIDENCE.** Near-duplicate claims **may** be merged, arbitrated by **Jev over the claim plus the narrative and raw data**, **on a high bar and only when nothing distinguishing is lost** (→ §16.4). **A merge never crosses a difference in a number, a name, a negation or a condition, and both sides' evidence survives.**
 
@@ -940,7 +940,7 @@ New entities + connections + **metadata**. The metadata includes **lifecycle eve
 
 **Why this direction:** the retry exists because the first narrative produced a poor *yield*, and *"a retry, not a loop"* means the replacement must **earn** acceptance. A tie is not an improvement, and a rule that kept the second on a tie would let the accepted keep-rate fall on a coin flip. **Invariant:** the metric and the comparison are fixed **before** the retry fires, and a re-narrate can never lower the accepted keep-rate. The losing arm's extraction is discarded **with** its narrative — the re-extraction supersedes it **inside the same run and the same transaction** (I3), so no run ever commits a mixture of the two narratives' items.
 
-**⚠️ This section is a SPEC, not a description of what runs.** The load-bearing instance is S3. `search_graph` degrades instead of raising (correct, `#3679`), but its renderer then tells the model **"no existing items available; assume everything is new"** (`_render_search_results`, `extractor_v2.py:2353` at `7d348d351`) — **the code implements the INVERTED policy**, and it is the duplication-manufacturing direction G3 names. The policy above requires the `HOLD` path; `#5087` (E1) is the code half.
+**⚠️ This section is a SPEC, not a description of what runs.** The load-bearing instance is S3. `search_graph` degrades instead of raising (correct, `#3679`), but its renderer then tells the model **"no existing items available; assume everything is new"** (`_render_search_results`, `extractor_v2.py:2353` at `7d348d351`) — **the code implements the INVERTED policy**, and it is the duplication-manufacturing direction G3 names. The policy above requires the `HOLD` path; `#5087` (E1) is the code half. <!-- v4-mechanism: failure_policy -->
 
 ---
 
