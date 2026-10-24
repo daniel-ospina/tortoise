@@ -932,7 +932,7 @@ class TestDocsPageAndSkillConfig:
             "Connect",                   # 3 — the OAuth grant is a SEPARATE act
             "Connect Tortoise",          # 3 — the consent dialog between Connect and Authorize
             "Authorize",                 # 3 — consent (key-less connect completes here)
-            "pick the organization you are onboarding",  # 3 — the MULTI-org chooser (oauth.py)
+            "pick the Organization you are onboarding",  # 3 — the MULTI-org chooser (oauth.py)
                                        #     hides the named-org line and keeps
                                        #     Authorize disabled until it is picked
             "chatgpt.com/skills",        # 4 — the Skills surface the archives install on
@@ -2365,12 +2365,13 @@ def test_9660_chatgpt_is_a_live_onboarding_journey_not_a_docs_dead_end():
 
 
 def test_9660_the_recipe_carriers_use_one_casing_for_the_tenant_noun():
-    """"organization" in body prose, on every carrier — one casing, guarded.
+    """The tenant noun is capitalised on every recipe carrier — one casing, guarded.
 
-    The review of #9660 found this applied to some carriers and not others, so the
-    same sentence rendered two ways. The ordered pins compare case-insensitively
-    (the ORDER is what they are about), which is exactly why the spelling needs its
-    own assertion: without one, a half-applied edit is invisible.
+    `docs/ONTOLOGY.md` spells the domain type `org:Organization`, and the dashboard's
+    own body prose capitalises it, so the capital is the house form in headings AND
+    prose; an earlier commit lowercased only the recipe sentences, which rendered the
+    same concept two ways. The ordered pins compare case-insensitively (the ORDER is
+    what they are about), so the casing needs its own assertion.
     """
     root = Path(__file__).resolve().parent.parent
     carriers = (
@@ -2380,18 +2381,20 @@ def test_9660_the_recipe_carriers_use_one_casing_for_the_tenant_noun():
         "tortoise/onboarding/SKILL.md",
     )
     for rel in carriers:
-        # JSX wraps mid-sentence, so compare on flattened text (and unescape the
-        # apostrophe the list item uses).
-        text = " ".join((root / rel).read_text(encoding="utf-8")
-                        .replace("&apos;", "'").split())
-        for capital in ("Organization you are onboarding", "Organization you're onboarding",
-                        "Organization is the one the connector writes to"):
-            assert capital not in text, (
-                f"{rel} capitalises the tenant noun in body prose ({capital!r}); every "
-                "recipe carrier writes 'organization' there. The capitalised form "
-                "belongs to UI headings, not to these sentences.")
-        assert any(lower in text for lower in (
-            "organization you are onboarding", "organization you're onboarding")), (
+        # Flatten for JSX line wrapping, unescape the list item's apostrophe, and
+        # drop inline markup: the neighbouring controls are written
+        # `<strong>Authorize</strong>`, so `<strong>Organization</strong>` must not
+        # slip past on markup alone.
+        raw = (root / rel).read_text(encoding="utf-8").replace("&apos;", "'")
+        text = " ".join(re.sub(r"<[^>]+>", " ", raw).split())
+        for lower in ("organization you are onboarding", "organization you're onboarding",
+                      "organization is the one the connector writes to"):
+            assert lower not in text, (
+                f"{rel} lowercases the tenant noun in body prose ({lower!r}); every "
+                "recipe carrier capitalises it (`docs/ONTOLOGY.md` names the type "
+                "org:Organization).")
+        assert any(capital in text for capital in (
+            "Organization you are onboarding", "Organization you're onboarding")), (
             f"{rel} no longer carries the Organization act at all — the sentence this "
             "pin exists for was removed or reworded")
 
@@ -2477,7 +2480,7 @@ def test_9660_the_org_choice_precedes_authorize_on_every_recipe_carrier():
     # here too rather than left to a comment.
     blocks = [
         ("Claude key-less card list",
-         list_block(main, "Pick the organization you&apos;re onboarding")),
+         list_block(main, "Pick the Organization you&apos;re onboarding")),
         ("claude-web step", step_line(harnesses, "Claude opens the authorization page")),
         ("Claude Desktop snippet",
          span(harnesses, "'claude-desktop': () =>", "'claude-web': () =>")),

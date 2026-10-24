@@ -454,7 +454,7 @@ test('#2865: the built dist ships the key-less OAuth Claude connector recipe', (
     `${entryName} must carry the canonical connector URL (${CANONICAL_MCP_URL})`)
   // The three beats of the live recipe. If any is missing the shipped board is
   // not the one under review — it is whatever `dist/` was last built from.
-  for (const probe of ['Add custom connector', 'Authorize', 'Pick the organization']) {
+  for (const probe of ['Add custom connector', 'Authorize', 'Pick the Organization']) {
     assert.ok(js.includes(probe),
       `${entryName} must carry the OAuth recipe beat ${JSON.stringify(probe)} — rebuild dist/`)
   }
