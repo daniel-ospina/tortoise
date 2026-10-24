@@ -185,7 +185,7 @@ though the receipt cannot witness them.
 | S1 NARRATE | ✅ | `stats.llm.by_stage.s1` calls = 7 |
 | S2.1 EXTRACT | ✅ | `stats.llm.by_stage.s2` calls = 7; `entities=77 events=38 points=141` |
 | S2.2 VET | ❌ **#9116** | the pass was ENABLED (`TORTOISE_VET=1`, forced in-process and read back), and its surface **exists**: `extract_session_v2` emits `result["vet"]` UNCONDITIONALLY at `tortoise/extractor_v2.py:8288-8292`. Whether it then DID work is not observable through the receipt — the missing surface is exactly the instrument — so this row does not claim it ran. It is dropped one layer UP, at the meta fold `tortoise/sdk.py:12487` (`"stats": out.get("stats") or {}` inside `_extract_session_v2`) — measured: 142 stats keys and 18 receipt keys inspected, `vet` in neither |
-| S2.3 CLASSIFY | ❌ **#9116** | same layer: `result["classify_later"]` is built at `extractor_v2.py:8278-8285` and dropped at the same fold, `tortoise/sdk.py:12487` |
+| S2.3 CLASSIFY | ❌ **#9116** | same layer: `result["classify_later"]` is built at `extractor_v2.py:8278-8284` and dropped at the same fold, `tortoise/sdk.py:12487` |
 | S3 RESOLVE | ✅ | `stats.search_queries=105 > 0` and `stats.search_degraded=false` on every session (a degraded search is not S3) |
 | S5 CONNECT | ✅ | the graph write: 433 derived nodes (`Point` 338, `Object` 50, `Event` 45); `stats.operator_endpoints_minted=0`; operator-shaped relationships `IMPL=57 INPUT=58 NAND=10` |
 | S6 COMMIT | ✅ | 338 `:Point` nodes persisted, 170 carrying the commit's `eventId` stamp, 358 `:GraphEvent`s |
@@ -614,7 +614,7 @@ number's resolution is checked against the tree when it is re-derived.)
 | S1 NARRATE | `run_s1` `:7948` | `stats["llm"]["by_stage"]["s1"]`, `story_arc` | ✅ (`story_arc` is off-receipt; `by_stage` carries it) |
 | S2.1 EXTRACT | `run_s2` `:7972` | `by_stage["s2"]`, item counts | ✅ (`embed_list` is off-receipt; `by_stage` carries it) |
 | S2.2 VET | `_run_vet_pass` `:8001` | `result["vet"]` — built at `extractor_v2.py:8288-8292`, DROPPED at the meta fold `sdk.py:12487` | ❌ **#9116** |
-| S2.3 CLASSIFY | `_apply_classify_kinds` `:8017` | `result["classify_later"]` — built at `extractor_v2.py:8278-8285`, dropped at the same fold | ❌ **#9116** |
+| S2.3 CLASSIFY | `_apply_classify_kinds` `:8017` | `result["classify_later"]` — built at `extractor_v2.py:8278-8284`, dropped at the same fold | ❌ **#9116** |
 | S3 RESOLVE | `search_graph` `:8033` | `result["search"]` | ❌ **#9116** — but `stats["search_queries"]`/`stats["search_degraded"]` ARE on it, which is how `capstone_measure.py` witnesses S3 |
 | S5 CONNECT | `execute_embed` `:8253` (+ `run_s4` `:8054` gap filler) | `stats["s4_merge"]` | ✅ (gap-filler counters) — `capstone_measure.py` uses the graph write + `stats["operator_endpoints_minted"]` |
 | S6 COMMIT | `execute_embed` payload | `result["payload"]` | ❌ **#9116** — the committed `:Point` nodes and their `eventId` stamps in the live graph are the witness `capstone_measure.py` uses |
