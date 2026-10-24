@@ -107,22 +107,22 @@ def stub_key(rel: str, target: dict):
 
 
 def _mint_subject_stub(g, name: str) -> None:
-    """MERGE the Subject stub live wiring's auto-detect fallback creates
-    (edges.py _create_about_edges) — single create path for live + replay so a
-    replayed descriptor mints a byte-identical stub to live wiring.
+    """RESOLVE (never mint) the Subject an about-edge names. #3590.
 
-    #7369: `name` IS the MERGE key, so an unwritable one aborts the replay
-    after the wipe. Skip rather than raise.
+    This helper used to write ``MERGE (s:Subject {name:$name}) ON CREATE SET
+    s.id=$name`` — a node whose id WAS its name. That is the third spelling of
+    one (label, name) identity the change retires: the projection never mints an
+    id (a fold-time mint is not replay-deterministic, so ``rebuild != live`` by
+    construction), and an id may not be derived from a name.
+
+    So a bare-name reference now resolves to the single LIVE holder and otherwise
+    stays unwired, with a structured non-folded record (``unregistered-
+    reference`` / ``ambiguous-entity-name``, both fail-closed). The remedy lives
+    on the producer — register what you reference before referencing it (D9);
+    the SDK doors do exactly that.
     """
-    from tortoise.projection import _log_identity_skip, _writable_id
-    if not _writable_id(name):
-        _log_identity_skip("Subject stub", name, "name (MERGE key)")
-        return
-    g.query(
-        "MERGE (s:Subject {name:$name}) "
-        "ON CREATE SET s.id=$name, s.subjectKind='other'",
-        params={"name": name},
-    )
+    from tortoise.entity_identity import resolve_fold_name
+    resolve_fold_name(g, "Subject", name, context="about-edge Subject")
 
 
 def _mint_source_stub(
