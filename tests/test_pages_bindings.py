@@ -3216,6 +3216,11 @@ case "$path" in
   *app.premiselabs.co*notify-publish)
     code="${STUB_PROXY_CODE}"; body="${STUB_PROXY_BODY}";;
   *tortoise.premiselabs.co*notify-publish)
+    if [ "${STUB_GATE_FAIL:-0}" != "0" ]; then
+      echo 'curl: (7) Failed to connect to host' >&2
+      printf '000'
+      exit 7
+    fi
     code="${STUB_GATE_CODE}"; body="${STUB_GATE_BODY}";;
   *.txt)
     if [ "$query" = "nonce" ]; then
@@ -3276,6 +3281,7 @@ def _run_indexnow_gate(
     edge_code: str = "",
     edge_body_mode: str = "",
     edge_fail: bool = False,
+    gate_fail: bool = False,
     zero: bool = False,
     bad_first: bool = False,
     cwd: Path | None = None,
@@ -3306,6 +3312,7 @@ def _run_indexnow_gate(
         "STUB_EDGE_CODE": edge_code,
         "STUB_EDGE_BODY_MODE": edge_body_mode,
         "STUB_EDGE_FAIL": "1" if edge_fail else "0",
+        "STUB_GATE_FAIL": "1" if gate_fail else "0",
         "STUB_ZERO": "1" if zero else "0",
         "STUB_BAD_FIRST": "1" if bad_first else "0",
     }
@@ -3489,9 +3496,10 @@ def test_the_indexnow_gate_passes_when_the_surface_is_correct(tmp_path) -> None:
     [
         ({"get_code": "404"}, "is not served by the deployment"),
         # A 5xx on the static key file is an outage, not a missing file (#3485).
-        # The needle is the arm's OWN continuation: "an origin/edge outage" alone is
-        # also produced by the marketing POST 5xx arm below.
-        ({"get_code": "520"}, "NOT evidence the key file is gone"),
+        # The needle must be a phrase of THIS arm: "NOT evidence the key file is
+        # gone" is also in the transport arm's message, so it could not see the
+        # outage arm being widened to swallow `5xx`.
+        ({"get_code": "520"}, "an origin/edge outage or rate limit"),
         ({"get_code": "429"}, "or rate limit"),
         ({"body_mode": "newline"}, "must contain the key and NOTHING else"),
         ({"body_mode": "other"}, "must contain the key and NOTHING else"),
@@ -3565,7 +3573,6 @@ def test_the_indexnow_gate_fails_for_each_broken_surface(tmp_path, argv: dict, n
         "NOT evidence the key file is gone",
         "an edge outage or rate limit",
         "an edge transport failure",
-        "or rate limit",
         "an outage, not a missing route",
         "admin lookup outage",
     }:
@@ -3594,7 +3601,7 @@ def test_the_indexnow_gate_fails_for_each_broken_surface(tmp_path, argv: dict, n
         # the proxy's own session-store path (#3485): could not verify, not "gone"
         (
             {"proxy_code": "503", "proxy_body": '{"error":"session_store_unavailable"}'},
-            "session-store-unavailable",  # unique: the 5xx arm below also says "could not verify"
+            "the proxy's session store",  # unique: the 5xx arm also says "could not verify"
         ),
         # A deterministic 500 is the one 5xx where "re-run" is not the answer.
         ({"proxy_code": "500", "proxy_body": "boom"}, "next suspect"),
@@ -3614,10 +3621,9 @@ def test_the_indexnow_proxy_gate_fails_for_each_broken_surface(
     assert "::error::" in out, out
     assert needle in out, out
     if "could not verify" in needle or needle in {
-        "session-store-unavailable",
+        "the proxy's session store",
         "next suspect",
-        "an origin/edge outage",
-        "an origin/edge outage or rate limit",
+        "or rate limit",
     }:
         assert "did not answer the proxy's session gate" not in out, out
     assert any("app.premiselabs.co" in c and c.endswith("notify-publish") for c in calls), calls
@@ -3806,6 +3812,20 @@ def test_the_indexnow_gate_diagnoses_an_unreachable_edge_instead_of_blaming_deli
     assert "at the EDGE" in out, out
     assert "not serving the key file" not in out, f"an outage blamed delivery: {out!r}"
     assert len(calls) > 1, f"the edge leg was never attempted: {calls}"
+
+
+def test_the_notify_hop_transport_failure_surfaces_curl_itself(tmp_path) -> None:
+    """The key-file arm prints `curl said: …`; the POST hops must not be quieter.
+
+    curl's stderr is the only datum that says WHY nothing completed (DNS, TLS, a
+    reset), and both POST legs were sending it to /dev/null.
+    """
+    rc, out, calls = _run_indexnow_gate(tmp_path, gate_fail=True)
+    assert rc == 1, out
+    assert "could not verify" in out, out
+    assert "curl: (7)" in out, f"curl's own diagnosis was discarded: {out!r}"
+    assert "did not refuse an anonymous caller" not in out, out
+    assert calls, "nothing was requested"
 
 
 def test_the_indexnow_gate_diagnoses_a_zero_status_as_an_outage(tmp_path) -> None:

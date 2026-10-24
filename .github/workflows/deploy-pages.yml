@@ -855,11 +855,12 @@ jobs:
           # Function behind it answers 405 here (measured), so the admin gate's own
           # `{"error":"unauthorized"}` is what is asserted.
           : > "$D/gate.body"
+          : > "$D/gate.err"
           gate=000
           for attempt in $(seq 1 5); do
             gate=$(curl -sS -o "$D/gate.body" -w '%{http_code}' -m 20 \
                      -X POST https://tortoise.premiselabs.co/blog/api/notify-publish \
-                     -H 'Content-Type: application/json' -d '{}' 2>/dev/null) || gate=000
+                     -H 'Content-Type: application/json' -d '{}' 2>"$D/gate.err") || gate=000
             if [ "$gate" = "401" ] && grep -q '"unauthorized"' "$D/gate.body" 2>/dev/null; then
               break
             fi
@@ -891,7 +892,7 @@ jobs:
               # it fell through to "did not refuse an anonymous caller", i.e. a blip
               # reported as a broken route — the arm's own comment forbids it.
               000*)
-                echo "::error::could not verify /blog/api/notify-publish — no response completed after 5 attempts (transport failure). NOT evidence the route is gone; re-run the job." ;;
+                echo "::error::could not verify /blog/api/notify-publish — no response completed after 5 attempts (transport failure); curl said: $(head -3 "$D/gate.err" 2>/dev/null | tr '\n' ' '). NOT evidence the route is gone; re-run the job." ;;
               # And the same for any 5xx the two named arms do not cover: 502/504
               # (edge cannot reach the Function) and Cloudflare's 520-522/524. The
               # app-origin step already treats the whole 5xx class this way; leaving
@@ -1370,6 +1371,7 @@ jobs:
           mkdir -p "$D"
           trap 'rm -rf "$D"' EXIT
           : > "$D/proxy.body"
+          : > "$D/proxy.err"
           proxy=000
           for attempt in $(seq 1 5); do
             proxy=000
@@ -1378,7 +1380,7 @@ jobs:
             # a pass.
             proxy=$(curl -sS -o "$D/proxy.body" -w '%{http_code}' -m 20 \
                       -X POST https://app.premiselabs.co/blog/api/notify-publish \
-                      -H 'Content-Type: application/json' -d '{"slug":"not-a-post"}' 2>/dev/null) || proxy=000
+                      -H 'Content-Type: application/json' -d '{"slug":"not-a-post"}' 2>"$D/proxy.err") || proxy=000
             if [ "$proxy" = "401" ] && grep -q '"not_signed_in"' "$D/proxy.body" 2>/dev/null; then
               break
             fi
@@ -1395,14 +1397,14 @@ jobs:
           # must not read as a missing route), and 000 is a transport failure.
           case "$proxy" in
             000)
-              echo "::error::could not verify app.premiselabs.co/blog/api/notify-publish — no response completed after 5 attempts. NOT evidence the route is gone; re-run the job." ;;
+              echo "::error::could not verify app.premiselabs.co/blog/api/notify-publish — no response completed after 5 attempts; curl said: $(head -3 "$D/proxy.err" 2>/dev/null | tr '\n' ' '). NOT evidence the route is gone; re-run the job." ;;
             503)
-              echo "::error::could not verify app.premiselabs.co/blog/api/notify-publish — the proxy answered 503 (${proxy_body:-no body}), which is its session-store-unavailable path, NOT a missing route. Re-run the job." ;;
+              echo "::error::could not verify app.premiselabs.co/blog/api/notify-publish — the answer was 503 (${proxy_body:-no body}), an outage (the proxy's session store, or the edge), NOT a missing route. Re-run the job." ;;
             # Any 5xx is the same class: an origin/edge outage, not the route
             # disappearing. 502/504 (origin down) and Cloudflare's 520-522/524 were
             # falling through to the arm that blames the route.
             429|5[0-9][0-9])
-              echo "::error::could not verify app.premiselabs.co/blog/api/notify-publish — the answer was $proxy (${proxy_body:-no body}), an origin/edge outage, NOT a missing route. Re-run the job; if it repeats, the proxy's own error path is the next suspect (a deterministic 500)." ;;
+              echo "::error::could not verify app.premiselabs.co/blog/api/notify-publish — the answer was $proxy (${proxy_body:-no body}), an origin/edge outage or rate limit, NOT a missing route. Re-run the job; if it repeats, the proxy's own error path is the next suspect (a deterministic 500)." ;;
             *)
               echo "::error::app-origin /blog/api/notify-publish did not answer the proxy's session gate (status $proxy, body: ${proxy_body:-none}) — the console's IndexNow call would not reach the handler, and only the browser console would say so." ;;
           esac
