@@ -13,13 +13,14 @@ aboutObjects: "#7949, #9080, #9075, #9076, #9077, #9073, #9116, #5199, #5333, #7
 
 **Measured at:** `027c8c1ab` on branch `feat/9080-tm` (2026-10-20, after merging `origin/main` at `78ef670d3`) — that
 is the stamp of the shipped REFUSAL log (`capstone.log`), and it is kept because the file is
-kept. ⚠️ **`027c8c1ab` is branch-only too, and unlike the two scored stamps below there is no PR-ref
-rescue for it.** It is an ancestor of `feat/9080-tm` (the branch it names) and of no remote ref that
-survives — `git merge-base --is-ancestor 027c8c1ab origin/main` exits 1, and it is **not** reachable
-from `refs/pull/9823/head` either (checked; both `6020cbd5f` and `8a8bbcba2` are). So
-`git show 027c8c1ab:<path>` works only in a checkout that still carries that branch: it is a STAMP —
-a convenience, not a durable pointer. The RECORD does not depend on it: `capstone.log` is committed
-in this tree and is read as a file. The SCORED run below is stamped separately (**Scored at** `e0fc940b5`,
+kept. ⚠️ **`027c8c1ab` is branch-only, and the honest statement of what that costs is narrower than
+"unrecoverable".** It is an ancestor of `feat/9080-tm` (the branch it names) — and, measured, of
+`refs/pull/9089/head` (`7c9c34d84`) as well — while `git merge-base --is-ancestor 027c8c1ab
+origin/main` exits 1. So which refs still carry it is a fact about the remote at lookup time, not a
+property of this document: a shallow or single-branch clone may not reach it, and no ref here is
+promised to outlive the branch deletions that follow a merge. That is why it is a STAMP — a
+convenience, not a durable pointer — and why the RECORD does not depend on it: `capstone.log` is
+committed in this tree and is read as a file. The SCORED run below is stamped separately (**Scored at** `e0fc940b5`,
 2026-10-23T23:16:55Z), because it is a different artifact from a different program
 (`probes/capstone_measure.py`).
 
