@@ -3502,7 +3502,9 @@ def test_the_health_line_is_the_SAME_STRING_on_both_legs_for_every_state(tmp_pat
     load-bearing and just as easy to spell differently on one leg.
 
     MUTATION THAT REDS THIS: reword any state on one leg (or drop the `, N
-    queued` from INACTIVE) → the two strings differ.
+    queued` from INACTIVE) → the two strings differ. The store-sync terms are in
+    the set for the same reason: the Pi leg appends them, so a Python leg that
+    does not reds this row instead of shipping a second spelling of one box.
     """
     import os
     import stat
@@ -3526,10 +3528,32 @@ def test_the_health_line_is_the_SAME_STRING_on_both_legs_for_every_state(tmp_pat
     unreadable = tmp_path / "unreadable"
     (unreadable / "entries").mkdir(parents=True)
 
+    # #3515 review (P2, parity-regression): the store-sync terms are part of the
+    # SAME pinned spelling, so the state the change was made for has to be in
+    # the compared set — otherwise both legs can disagree about a dead-lettered
+    # box while this row stays green. The sibling store is derived from the
+    # spool's PARENT on both legs, so it needs its own parent here.
+    sibling = tmp_path / "sibling"
+    sibling_spool = sibling / "spool"
+    sibling_spool.mkdir(parents=True)
+    store = sibling / "store-sync"
+    store.mkdir()
+    (store / "dead-letter.jsonl").write_text(
+        json.dumps({"path": "/s/a.jsonl", "reason": "HTTP 400", "at": 1}) + "\n"
+        + json.dumps({"path": "/s/b.jsonl", "reason": "HTTP 415", "at": 2}) + "\n",
+        encoding="utf-8",
+    )
+    (store / "sweep-status.json").write_text(
+        json.dumps({"version": 1, "ok": False, "reason": "node_unavailable",
+                    "shipped": 0}),
+        encoding="utf-8",
+    )
+
     cases = [("draining", draining, None),
              ("ok", filed, None),
              ("inactive", inactive, ""),
-             ("unreadable", unreadable, None)]
+             ("unreadable", unreadable, None),
+             ("sibling dead letters + failed sweep", sibling_spool, None)]
     unreadable.chmod(0o755)
     (unreadable / "entries").chmod(0o000)
     try:
@@ -3557,9 +3581,76 @@ def test_the_health_line_is_the_SAME_STRING_on_both_legs_for_every_state(tmp_pat
             "capture: OK (0 queued)",
             "capture: INACTIVE (no TORTOISE_API_KEY, 2 queued)",
             f"capture: UNREADABLE (cannot list {unreadable / 'entries'})",
+            "capture: OK (0 queued), 2 store-sync dead-lettered, "
+            "store-sync FAILED (node_unavailable)",
         ], py_lines
     finally:
         (unreadable / "entries").chmod(stat.S_IRWXU)
+
+
+def test_the_store_sync_terms_name_each_cause_and_never_invent_one(tmp_path):
+    """The store-sync suffix has to be TRUE, not merely present (#3515 review).
+
+    The Pi leg appends two terms to whichever SPOOL state it finds; the Python
+    leg must spell them identically — but a suffix that fires on a healthy
+    backstop would be the false-PASS mirror image of the silence it fixes. So
+    every absence case is asserted here too: no substrate, a sweep that
+    SUCCEEDED, and a status file that does not parse (unreadable is not failed).
+
+    MUTATION THAT REDS THIS: drop either term; render `FAILED ()` for a reasonless
+    failure; treat `ok: true` or a corrupt status as a failure; refuse to append
+    to a non-OK spool state.
+    """
+    from tortoise.capture_spool import capture_health_line
+
+    parent = tmp_path / "box"
+    spool = parent / "capture-spool"
+    spool.mkdir(parents=True)
+    store = parent / "store-sync"
+
+    assert capture_health_line(spool).line == "capture: OK (0 queued)", \
+        "no backstop substrates yet: nothing to add"
+
+    store.mkdir()
+    (store / "dead-letter.jsonl").write_text(
+        json.dumps({"path": "/s/a.jsonl", "reason": "HTTP 400", "at": 1}) + "\n",
+        encoding="utf-8",
+    )
+    assert capture_health_line(spool).line == (
+        "capture: OK (0 queued), 1 store-sync dead-lettered"
+    )
+
+    ok_sweep = json.dumps({"version": 1, "ok": True, "shipped": 3})
+    (store / "sweep-status.json").write_text(ok_sweep, encoding="utf-8")
+    assert capture_health_line(spool).line == (
+        "capture: OK (0 queued), 1 store-sync dead-lettered"
+    ), "a sweep that RAN and SUCCEEDED says nothing"
+
+    (store / "sweep-status.json").write_text("{not json", encoding="utf-8")
+    assert capture_health_line(spool).line == (
+        "capture: OK (0 queued), 1 store-sync dead-lettered"
+    ), "an unparseable status is not evidence of a failure"
+
+    (store / "sweep-status.json").write_text(
+        json.dumps({"version": 1, "ok": False, "reason": "node_too_old"}),
+        encoding="utf-8",
+    )
+    assert capture_health_line(spool).line == (
+        "capture: OK (0 queued), 1 store-sync dead-lettered, "
+        "store-sync FAILED (node_too_old)"
+    )
+
+    (store / "sweep-status.json").write_text(json.dumps({"ok": False}), encoding="utf-8")
+    assert capture_health_line(spool).line == (
+        "capture: OK (0 queued), 1 store-sync dead-lettered, store-sync FAILED"
+    ), "a reasonless failure is named without empty parentheses"
+
+    write_spool_entry(spool, _snapshot("suffix-draining"))
+    line = capture_health_line(spool)
+    assert line.state == "draining", "the terms never move the SPOOL's own state"
+    assert line.line == (
+        "capture: DRAINING (1 queued), 1 store-sync dead-lettered, store-sync FAILED"
+    )
 
 
 def test_the_drain_reports_a_BLOCKED_spool_on_its_own_stderr(tmp_path, monkeypatch,

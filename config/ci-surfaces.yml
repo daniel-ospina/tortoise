@@ -101,6 +101,17 @@ surfaces:
   # `tests/test_ci_selection.py::test_the_9572_seed_surface_pins_are_selected_on_their_own_modules`.
   - test_9572_discriminator_not_clobbered.py
   - test_9340_graph_tool_argument.py
+  # #3515 review P3: the store-sync guard drives `tortoise store-sync` — a
+  # `__main__.py` SUBCOMMAND — so the subparser and every flag it proves
+  # (`--exclude-session-id`, `--no-spool`, `--file`, `--dry-run`,
+  # `--max-files`) live in a file that is an EXACT `api` SOURCE_PATTERNS
+  # match. A match REPLACES the `core` fallback in `select()`, so an
+  # `__main__.py`-only diff selected `api` and NOT this guard (measured:
+  # `--changed-files tortoise/__main__.py` -> surfaces ['api'],
+  # test_store_sync_worker.py: False) — the same #1349/#2938 silent-drop
+  # class the rows beside this one document. The `core` row is the other
+  # half (a `tortoise/pi-hooks/` diff); BOTH are required.
+  - test_store_sync_worker.py
   - test_9583_openapi_read_only_claim.py
   # #9583: a served GET docstring IS the OpenAPI operation `description` a customer
   # reads, and `/v1/packs` advertised "read-only pack introspection" while its handler
@@ -4542,6 +4553,14 @@ surfaces:
   # for the very change it guards (neither this Python guard nor the
   # extension's `node --test` suite ran). Dual-registered with `onboarding`.
   - test_pi_capture_hooks.py
+  # #3515: the store-sync BACKSTOP — `tortoise/pi-hooks/store-sync.ts` +
+  # `cursor-store.ts`, driven through `tortoise store-sync` (a `__main__.py`
+  # subcommand) as a PROCESS. Same selection reasoning as the sibling directly
+  # above: `tortoise/pi-hooks/` matches no SOURCE_PATTERNS entry, so a
+  # worker-only change selects `core` via the `tortoise/` fallback, and this is
+  # the arm that runs BOTH this guard and the node suite. Dual-registered with
+  # `onboarding` (the install path a user's machine takes).
+  - test_store_sync_worker.py
   # #3512: this pins the RECORD of the Pi seam's home (the epic #1714 plan and
   # `tortoise/pi-hooks/README.md`) against the tree — the plan named
   # `tortoise/pi-extension/` for months while the artifact that ships lives at
@@ -5252,6 +5271,7 @@ surfaces:
   - test_onboarding_w6_capture_disclosure.py  # #2002 (W6): docker-lane first-capture disclosure + Settings view/delete (DE2E-11)
   - test_onboarding_w6_member_authz.py  # #2002 (W6): dual-auth member-authz on the Settings view/delete leg (lane-agnostic)
   - test_pi_capture_hooks.py
+  - test_store_sync_worker.py  # #3515: the store-sync backstop (spool + Pi log) and its per-file cursor
   - test_retention_promise.py  # #4179: website/privacy.html horizon + canonical-doc link
   - test_signup_form_safety.py
   # #3485/#3559: dual-registered with `api` (cross-surface registration is
@@ -8017,6 +8037,7 @@ durations:
   test_metering_unmetered.py: 60.0  # unmeasured — #4779: locally measured (50 tests, live docker FalkorDB: 42–111s across the review cycles, 275s under fleet load); no source leg of the sweep collected it — refresh from CI junit.
   test_operator_annotator_rebuild.py: 4.8
   test_pi_capture_hooks.py: 10.7  # ci-timing top-15 2026-10-20 (run 39467226356); was 10.4
+  test_store_sync_worker.py: 2.0  # unmeasured — new in #3515; no CI sweep has collected it, so it carries the flat default for an unmeasured file (the #2818/#3400/#9121 convention) rather than a local reading, which this map forbids as a SHARD-LAYOUT input. The row is REQUIRED, not cosmetic: the file is ADDED to the fast pool by the PR that introduces it, and the coverage floor is measured against the pool's own size (`--integrity`'s `duration_coverage_issues`) — at the parent commit the map sat at 905/1005 = 90.0498 % against the 0.90 floor, so one more unweighted fast file (906/1006 = 89.96 %) reds it with no headroom. What the weight covers: 22 DB-free cases — a real local HTTP collector, in-process `run_sweep` rows over a tmp spool, and ONE `node --test` subprocess that dominates the file but belongs to the harness it pins. `tools/ci_timing.py --refresh-durations` replaces this from junit once a sweep includes it.
   # #2120: measured locally on the carve-out lane (26 tests, ~6.2s): the plugin
   # artifact + installer + parser, one node --test subprocess, and one real
   # `tortoise install openclaw` CLI run into a temp HOME.
