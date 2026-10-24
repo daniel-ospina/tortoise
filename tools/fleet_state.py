@@ -1822,9 +1822,19 @@ def live_sessions() -> LiveSessions:
                 if sample:
                     sample_txt = repr(sample)
                     if len(sample_txt) > 64:
-                        # The cut may land mid-escape for a control-laden path; it is bounded,
-                        # JSON-safe (the board cache is ensure_ascii) and always keeps the tail.
-                        sample_txt = repr("…" + sample[-40:])[:64]
+                        # ⛔ THE CUT IS FROM THE HEAD, AND IT IS RE-RENDERED EACH TIME (review of
+                        # #2401, fifth round). `repr("…" + sample[-40:])[:64]` was a HEAD cut of the
+                        # RENDERED form, so the guarantee above did not hold in the case the cap
+                        # exists for: a control-laden path rendered four-fold past 64 characters
+                        # lost its SUFFIX — measured on the `ctl` fixture (40×`\x01` + ` (deleted)`),
+                        # whose `[:64]` kept `'…` and 61 escape characters and dropped ` (deleted)`,
+                        # the one part that says the directory is gone. Trimming the RAW suffix from
+                        # the head and re-rendering keeps the tail, bounds the rendered form (never
+                        # the raw one, which `repr` expands), and never lands the cut mid-escape.
+                        cut = sample[-40:]
+                        while cut and len(repr("…" + cut)) > 64:
+                            cut = cut[1:]
+                        sample_txt = repr("…" + cut)
                 proc_error = (
                     f"live pi pid(s) {pids_txt}{more} have no ATTRIBUTABLE cwd"
                     + (

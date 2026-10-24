@@ -2353,9 +2353,11 @@ def test_a_reaped_worktree_is_named_in_the_gap_not_hidden(monkeypatch) -> None:
         pass
 
     cwds = _Cwds()
-    # ⛔ AN INSTANCE ATTRIBUTE, NOT A CLASS ONE (review of #2401): a mutable class
-    # attribute trips ruff's RUF012, and the repo's own `python` leg runs
-    # `ruff check .` — so the datum test would have redded the tree it protects.
+    # AN INSTANCE ATTRIBUTE, NOT A CLASS ONE: `refused` is a per-test DATUM (one pid → the path
+    # that pid refused), not a constant every instance of `_Cwds` shares, and an instance
+    # attribute says so at the point the fixture is built. This is intent, not a gate: the
+    # `main` version was `ClassVar[dict[int, str]]`, which is lint-clean too — `ClassVar` is
+    # exactly what RUF012 asks for — so nothing here reds `ruff check .` either way.
     cwds.refused = {2559943: raw}
 
     monkeypatch.setattr(fs, "cmux_session_records", lambda: ([], "", "no cmux"))
@@ -2644,6 +2646,17 @@ def test_the_gap_fits_the_bound_its_readers_apply(monkeypatch) -> None:
         f"a control-laden sample must not overrun the bound: {len(ctl_arm)} chars")
     assert "reap the orphan" in ctl_arm[:320], (
         "and the remedy must still be inside the window")
+    # ⛔ AND THE CAP KEEPS THE TAIL IT PROMISES (review of #2401, fifth round). The cap used to be
+    # `repr("…" + sample[-40:])[:64]` — a HEAD cut of the RENDERED form — so this fixture kept 61
+    # escape characters and dropped ` (deleted)`, the suffix that says the directory is gone and
+    # the reason this message exists. Only the length was graded, so the loss shipped green.
+    assert " (deleted)" in ctl_arm, (
+        "the rendered sample must keep its TAIL — the suffix is what identifies the "
+        f"directory: {ctl_arm!r}")
+    rendered_sample = ctl_arm.split(" — e.g. ", 1)[1].split(" (a removed directory", 1)[0]
+    assert len(rendered_sample) <= 64, (
+        "and it is still bounded to the rendered 64-char cap, not left unbounded: "
+        f"{len(rendered_sample)} chars")
 
     # ⛔ AND THE COUNTING CASE: more than five unresolved pids adds `(+N more)`, which has to be
     # budgeted too (measured 324-326 chars for 8-digit pids before the remedy clause was shortened).
