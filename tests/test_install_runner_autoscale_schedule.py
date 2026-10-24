@@ -39,6 +39,8 @@ _ENV_LEAKS = (
     "AUTOSCALE_REPO_ROOT",
     "AUTOSCALE_SHA256",
     "AUTOSCALE_PLATFORM",
+    "AUTOSCALE_HAS_SYSTEMD",
+    "AUTOSCALE_HAS_CRON",
     "AUTOSCALE_ALLOW_WORKTREE",
     "AUTOSCALE_SKIP_PROBE",
     "RUNNER_AUTOSCALE_INTERVAL",
@@ -55,18 +57,23 @@ def _write_stub(bindir: Path, name: str, body: str) -> Path:
 
 
 def _sandbox(
-    tmp_path: Path, uname: str = "Darwin", *, cron: bool = True, platform: str | None = None
+    tmp_path: Path, uname: str = "Darwin", *, cron: bool = True, env_overrides: dict | None = None
 ) -> dict:
     """Throwaway repo/HOME/log + PATH stubs. Nothing here can touch the host.
 
-    ⛔ `platform` is the installer's own `AUTOSCALE_PLATFORM` test seam, and a test that
-    exercises a NON-default scheduler branch MUST pass it. Without it the branch is chosen by
-    `platform()`, which asks the REAL box: `has_systemd` reads `/run/systemd/system` and
-    `command -v systemctl`, so on a Linux cell the Linux+cron case silently rendered a
-    systemd unit and `has_cron` was never reached. That made these cases pass only on the
-    macOS box the fleet's lanes ran on and fail on the Linux CI runner — the assertion, not
-    the installer, was host-dependent (measured: `platform=systemd` in the `--dry-run` header
-    on cell-4, 4 cases RED in `test (a)/(b)/(e)/(i)`).
+    ⛔ `env_overrides` is for the installer's PROBE seams (`AUTOSCALE_HAS_SYSTEMD` /
+    `AUTOSCALE_HAS_CRON`), and a case that exercises a NON-default scheduler branch must use
+    those rather than `AUTOSCALE_PLATFORM`. Both are seams, but only the probes leave
+    `platform()`'s real `case "$(uname -s)"` dispatch under test: `AUTOSCALE_PLATFORM`
+    short-circuits `platform()` before the dispatch, so the branch it NAMES is covered and the
+    `Linux)` arm is not. Measured in review of PR #9685: on the `AUTOSCALE_PLATFORM` seam, two
+    mutations of the Linux arm (deleting `elif has_cron`, reordering the probes) survived a
+    fully green suite.
+
+    The branch also has to be FORCED rather than inherited from the box — `has_systemd` reads
+    `/run/systemd/system` and `command -v systemctl`, so an unforced Linux+cron case renders a
+    systemd unit on a systemd cell and calls it a pass. That was the original defect: 4 cases
+    RED in `test (a)/(b)/(e)/(i)` on Linux, green only on the macOS box they were written on.
     """
     bindir = tmp_path / "bin"
     bindir.mkdir(parents=True)
@@ -144,8 +151,8 @@ def _sandbox(
             "SYSTEMD_UNIT_DIR": str(tmp_path / "units"),
         }
     )
-    if platform is not None:
-        env["AUTOSCALE_PLATFORM"] = platform
+    if env_overrides:
+        env.update(env_overrides)
     return {
         "env": env,
         "bin": bindir,
@@ -415,6 +422,55 @@ def test_systemd_install_fails_when_the_timer_is_not_active(tmp_path):
 
 
 # ── the cron leg ────────────────────────────────────────────────────────────────────────────
+def test_platform_selection_on_linux_picks_what_the_box_really_has(tmp_path):
+    """`platform()`'s Linux arm is what makes or breaks the guard HERE, and it must be pinned
+    through the real dispatch — `AUTOSCALE_PLATFORM` would cover only the branch it names.
+
+    Both directions, because each fails differently (review of PR #9685: two mutations of this
+    arm survived a suite that leaned on `AUTOSCALE_PLATFORM`):
+
+      - systemd present                -> systemd  (the cell-4 shape. Choosing cron here installs
+                                        cleanly and never fires — the inert enforcer)
+      - systemd absent, cron installed -> cron     (delete `elif has_cron` and this resolves to
+                                        `none`, so the box REFUSES to install and loses its
+                                        schedule forever, with a green suite)
+      - neither                        -> none, REFUSED with nothing written
+
+    Mutations: drop `elif has_cron` -> case 2 exits 2 instead of rendering a cron line.
+    Swap the probe order -> case 1 renders a cron line instead of the timer.
+    """
+    sb = _sandbox(
+        tmp_path,
+        uname="Linux",
+        env_overrides={"AUTOSCALE_HAS_SYSTEMD": "1", "AUTOSCALE_HAS_CRON": "1"},
+    )
+    _systemd_stubs(sb)
+    res = _run(sb, "--dry-run")
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    assert "# platform=systemd" in res.stdout, res.stdout
+    assert f"--- {sb['units']}/{LABEL}.service" in res.stdout, res.stdout
+
+    sb = _sandbox(
+        tmp_path / "cronbox",
+        uname="Linux",
+        env_overrides={"AUTOSCALE_HAS_SYSTEMD": "0", "AUTOSCALE_HAS_CRON": "1"},
+    )
+    res = _run(sb, "--dry-run")
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    assert "# platform=cron" in res.stdout, res.stdout
+    assert f"{LABEL}-cron" in res.stdout, res.stdout
+
+    sb = _sandbox(
+        tmp_path / "bare",
+        uname="Linux",
+        env_overrides={"AUTOSCALE_HAS_SYSTEMD": "0", "AUTOSCALE_HAS_CRON": "0"},
+    )
+    res = _run(sb, "--dry-run")
+    assert res.returncode == 2, (res.stdout, res.stderr)
+    assert "REFUSED" in res.stderr, res.stderr
+    assert not (sb["install"] / "runner_autoscale.py").exists(), "a refused box was mutated"
+
+
 def test_cron_line_carries_the_path_and_home_the_job_needs(tmp_path):
     """cron runs with `/usr/bin:/bin` and the PASSWD home, so both must be pinned.
 
@@ -425,7 +481,12 @@ def test_cron_line_carries_the_path_and_home_the_job_needs(tmp_path):
 
     Mutation: drop `$CRON_ENV` from cron_line -> no PATH=/HOME= in the entry -> RED.
     """
-    sb = _sandbox(tmp_path, uname="Linux", cron=True, platform="cron")
+    sb = _sandbox(
+        tmp_path,
+        uname="Linux",
+        cron=True,
+        env_overrides={"AUTOSCALE_HAS_SYSTEMD": "0", "AUTOSCALE_HAS_CRON": "1"},
+    )
     res = _run(sb, "--dry-run")
     assert res.returncode == 0, (res.stdout, res.stderr)
     line = [ln for ln in res.stdout.splitlines() if f"{LABEL}-cron" in ln]
@@ -435,7 +496,12 @@ def test_cron_line_carries_the_path_and_home_the_job_needs(tmp_path):
 
 def test_cron_install_is_idempotent_and_survives_an_empty_crontab(tmp_path):
     """Re-installing with a changed interval must not exit 1 AFTER succeeding (pipefail)."""
-    sb = _sandbox(tmp_path, uname="Linux", cron=True, platform="cron")
+    sb = _sandbox(
+        tmp_path,
+        uname="Linux",
+        cron=True,
+        env_overrides={"AUTOSCALE_HAS_SYSTEMD": "0", "AUTOSCALE_HAS_CRON": "1"},
+    )
     first = _run(sb)
     assert first.returncode == 0, (first.stdout, first.stderr)
     assert f"{LABEL}-cron" in sb["crontab_store"].read_text(encoding="utf-8")
@@ -453,7 +519,12 @@ def test_cron_install_is_idempotent_and_survives_an_empty_crontab(tmp_path):
 def test_cron_uninstall_removes_only_its_own_line(tmp_path):
     """`--uninstall` on a crontab holding ONLY our line must report success, not
     "could not rewrite crontab" (the same pipefail shape)."""
-    sb = _sandbox(tmp_path, uname="Linux", cron=True, platform="cron")
+    sb = _sandbox(
+        tmp_path,
+        uname="Linux",
+        cron=True,
+        env_overrides={"AUTOSCALE_HAS_SYSTEMD": "0", "AUTOSCALE_HAS_CRON": "1"},
+    )
     assert _run(sb).returncode == 0
     store = sb["crontab_store"]
     store.write_text(
