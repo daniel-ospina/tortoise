@@ -3373,6 +3373,18 @@ def _run_indexnow_proxy(
     return r.returncode, r.stdout + r.stderr, calls
 
 
+def test_each_indexnow_step_cleans_up_its_scratch_dir() -> None:
+    """A per-run scratch dir that is never removed is a slow leak on a self-hosted
+    runner — and `$D` exists precisely to stop concurrent lanes sharing `/tmp`, so
+    leaving it behind undoes half of what it was added for."""
+    for code, name in (
+        (_step_code(INDEXNOW_PROBE), "deploy"),
+        (_dashboard_step_code(INDEXNOW_PROXY_PROBE), "deploy-dashboard"),
+    ):
+        assert 'D="${RUNNER_TEMP:-/tmp}/' in code, f"{name}: no per-run scratch dir"
+        assert 'trap \'rm -rf "$D"\' EXIT' in code, f"{name}: the scratch dir is never removed"
+
+
 def test_the_indexnow_gate_polls_and_is_blocking() -> None:
     """A gate that cannot fail anything is the #7751 defect one level up.
 
@@ -3475,7 +3487,9 @@ def test_the_indexnow_gate_passes_when_the_surface_is_correct(tmp_path) -> None:
 @pytest.mark.parametrize(
     "argv,needle",
     [
-        ({"get_code": "404"}, "at ORIGIN"),
+        ({"get_code": "404"}, "is not served by the deployment"),
+        # A 5xx on the static key file is an outage, not a missing file (#3485).
+        ({"get_code": "520"}, "an origin/edge outage"),
         ({"body_mode": "newline"}, "must contain the key and NOTHING else"),
         ({"body_mode": "other"}, "must contain the key and NOTHING else"),
         # The BODY TEXT is pinned separately from the byte COUNT, on both legs: a
@@ -3488,7 +3502,8 @@ def test_the_indexnow_gate_passes_when_the_surface_is_correct(tmp_path) -> None:
         ({"cache": "HIT"}, "was answered from CACHE"),
         # Leg 2 is what the endpoint actually fetches: origin-correct is not enough,
         # and BOTH of its halves are pinned (count and text).
-        ({"edge_code": "404"}, "at the EDGE"),
+        ({"edge_code": "404"}, "not serving the key file"),
+        ({"edge_code": "522"}, "an edge outage"),
         ({"edge_body_mode": "other"}, "at the EDGE"),
         ({"edge_body_mode": "other32"}, "at the EDGE"),
         ({"edge_body_mode": "newline"}, "at the EDGE"),
@@ -3497,8 +3512,10 @@ def test_the_indexnow_gate_passes_when_the_surface_is_correct(tmp_path) -> None:
         # A provider blip is NOT "the route is gone" (#3485) — the message must
         # say so, or the operator hunts a Function that was never deleted.
         (
+            # a phrase unique to THIS arm: the `503*` catch-all below would satisfy
+            # a bare "could not verify" even if this arm were deleted.
             {"gate_code": "503", "gate_body": '{"error":"unavailable","message":"try later"}'},
-            "could not verify",
+            "admin lookup outage",
         ),
         (
             {"gate_code": "503", "gate_body": '{"error":"not_configured"}'},
@@ -3512,7 +3529,7 @@ def test_the_indexnow_gate_passes_when_the_surface_is_correct(tmp_path) -> None:
         ({"gate_code": "503", "gate_body": ""}, "could not verify"),
         (
             {"gate_code": "503", "gate_body": "<html><body>503</body></html>"},
-            "could not verify",
+            "an outage, not a missing route",  # unique to the 503* catch-all
         ),
         # A transport failure never reached the route: it must not be reported as
         # "did not refuse an anonymous caller" (the blip-as-broken-route mistake).
@@ -3555,8 +3572,10 @@ def test_the_indexnow_gate_fails_for_each_broken_surface(tmp_path, argv: dict, n
         # the proxy's own session-store path (#3485): could not verify, not "gone"
         (
             {"proxy_code": "503", "proxy_body": '{"error":"session_store_unavailable"}'},
-            "could not verify",
+            "session-store-unavailable",  # unique: the 5xx arm below also says "could not verify"
         ),
+        # A deterministic 500 is the one 5xx where "re-run" is not the answer.
+        ({"proxy_code": "500", "proxy_body": "boom"}, "next suspect"),
         # ANY 5xx is the same class. An exact `503)` arm let 502/504 (origin down)
         # and Cloudflare's 520-522/524 fall through to the arm that blames the route.
         ({"proxy_code": "502", "proxy_body": "<html>bad gateway</html>"}, "could not verify"),

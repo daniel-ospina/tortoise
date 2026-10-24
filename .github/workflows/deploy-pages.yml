@@ -758,7 +758,7 @@ jobs:
             # abort the step on attempt ONE, before the retry can run and with no
             # `::error::` printed. awk exits 0 on no match, so "no header" is DATA.
             cache=$(awk 'tolower($1) == "cf-cache-status:" { v = tolower($2); gsub(/\r/, "", v) } END { print v }' \
-                      "$D/key.hdr" 2>/dev/null)
+                      "$D/key.hdr" 2>/dev/null || true)
             # Leg 2 — the EXACT URL the IndexNow endpoint is handed (canonical, no
             # nonce). The origin leg proves the deployment contains the file; this
             # one proves the edge does not hand the endpoint something else.
@@ -792,7 +792,8 @@ jobs:
           ctype=$(awk 'tolower($1) == "content-type:" { sub(/^[^:]*:[[:space:]]*/, ""); gsub(/\r/, ""); print; exit }' \
                     "$D/key.hdr" 2>/dev/null || true)
           # `|| true` for the same reason as the awk above: an absent file makes the
-          # REDIRECT fail, so `set -e` would abort before any of the messages below.
+          # REDIRECT fail (and `2>/dev/null` does NOT suppress that — it applies to
+          # wc, which never runs), so `set -e` would abort before the messages below.
           body_len=$(wc -c < "$D/key.body" 2>/dev/null | tr -d ' ' || true)
           edge_len=$(wc -c < "$D/edge.body" 2>/dev/null | tr -d ' ' || true)
           echo "$url -> origin $code (cache ${cache:-unknown}) | ${ctype:-no content-type} | $body_len bytes (the key is ${#KEY} bytes) | edge $edge / $edge_len bytes"
@@ -805,6 +806,10 @@ jobs:
             case "$code" in
               curl-failed*|000)
                 echo "::error::could not verify $url at ORIGIN — no response completed after 10 attempts (${code}); curl said: $(head -3 "$D/key.err" 2>/dev/null | tr '\n' ' '). This is a runner/edge transport failure, NOT evidence the key file is gone. Re-run the job." ;;
+              # A 5xx from the edge/origin is an outage, not the file going missing —
+              # the same #3485 inversion the POST hops below avoid with `5[0-9][0-9]`.
+              5[0-9][0-9])
+                echo "::error::could not verify $url at ORIGIN — the answer was $code, an origin/edge outage, NOT evidence the key file is gone. Re-run the job." ;;
               *)
                 echo "::error::$url answered $code at ORIGIN — the IndexNow key file is not served by the deployment ($nonce), so the endpoint cannot fetch the proof of host ownership and answers 403 to every submission (#9680)." ;;
             esac
@@ -830,6 +835,8 @@ jobs:
             case "$edge" in
               curl-failed*|000)
                 echo "::error::could not verify $url at the EDGE — no response completed after 10 attempts (${edge}); an edge transport failure, NOT evidence the key file is gone. Re-run the job." ;;
+              5[0-9][0-9])
+                echo "::error::could not verify $url at the EDGE — the answer was $edge, an edge outage, NOT evidence the key file is gone. Re-run the job." ;;
               *)
                 echo "::error::$url answered $edge at the EDGE — the substrate the endpoint fetches is not serving the key file, even though origin has it." ;;
             esac
