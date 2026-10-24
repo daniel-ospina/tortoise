@@ -652,8 +652,8 @@ def test_a_surface_that_says_the_pass_did_not_run_is_not_a_witness():
 
     `extract_session_v2` emits `result["vet"]` and `result["classify_later"]`
     UNCONDITIONALLY — on the FLAG-OFF arm and on the early-return path the block
-    is `{"enabled": False, "s2": {}, "union": {}}` (`:8160-8175`,
-    `:8524-8538`). An acceptance test of "a non-empty dict" therefore takes an OFF
+    is `{"enabled": False, "s2": {}, "union": {}}` (`:8459-8474`,
+    `:8823-8837`). An acceptance test of "a non-empty dict" therefore takes an OFF
     block as the witness for "the S2.2 VET pass RAN" and prints
     `step S2.2 WITNESSED … enabled=false, s2={}`. That is the hazard, not
     pedantry: the moment #9116 copies the sibling key at the meta fold — exactly
@@ -682,7 +682,7 @@ def test_a_surface_that_says_the_pass_did_not_run_is_not_a_witness():
     # The refusal names WHERE the OFF block was found, so a reader can tell
     # "absent" (the #9116 cause) from "present and off" (this cause).
     assert "receipt['vet']" in unobserved["S2.2"], unobserved["S2.2"]
-    assert "tortoise/sdk.py:12679" not in unobserved["S2.2"], unobserved["S2.2"]
+    assert "tortoise/sdk.py:12738" not in unobserved["S2.2"], unobserved["S2.2"]
 
 
 def test_the_witness_rule_requires_the_flag_and_a_pass_that_did_work():
@@ -708,20 +708,20 @@ def test_the_witness_rule_requires_the_flag_and_a_pass_that_did_work():
 def test_the_flag_alone_is_not_a_witness_and_has_its_own_cause():
     """`enabled: true` with zero activity is a NON-witness, and not #9116.
 
-    `extractor_v2.py:8155` computes `vet_enabled` (the FLAG) BEFORE the
-    `if not edus:` early return at `:8159`, whose surface is literally
-    `"vet": {"enabled": vet_enabled, "s2": {}, "union": {}}` (`:8175`); the
+    `extractor_v2.py:8454` computes `vet_enabled` (the FLAG) BEFORE the
+    `if not edus:` early return at `:8458`, whose surface is literally
+    `"vet": {"enabled": vet_enabled, "s2": {}, "union": {}}` (`:8474`); the
     VET passes themselves are gated on the LIST (`if vet_enabled and embed_list:`
-    `:8243`, `if vet_enabled and complete_list:` `:8365`). So the flag-ON +
+    `:8542`, `if vet_enabled and complete_list:` `:8664`). So the flag-ON +
     empty-list session emits `enabled: True` with empty counters and no pass ran —
     and a FAILED vet pass leaves the same shape (`_run_vet_pass` returns `{}` on
-    its fail-open path, `:8041-8044`).
+    its fail-open path, `:8340-8343`).
 
     The CLASSIFY pass is DIFFERENT CODE, so the cause is PER SURFACE:
-    `classify_later` is computed at `:8124`, its gates are
-    `if classify_later and embed_list:` (`:8255`) around `if items:` (`:8258`) and
-    `if classify_later and complete_list:` (`:8380`) around `if items:` (`:8390`),
-    and its fail-open `except` sits at `:8271` / `:8401`. A cause templated for the
+    `classify_later` is computed at `:8423`, its gates are
+    `if classify_later and embed_list:` (`:8554`) around `if items:` (`:8557`) and
+    `if classify_later and complete_list:` (`:8679`) around `if items:` (`:8689`),
+    and its fail-open `except` sits at `:8570` / `:8700`. A cause templated for the
     surface NAME while citing the VET lines told a reader of the classify block
     that the VET pass's gate idled it — false: an idle classify block comes from no
     embed list or no classify ITEMS, and `embed_list` is only its first gate
@@ -752,29 +752,29 @@ def test_the_flag_alone_is_not_a_witness_and_has_its_own_cause():
         # the LIST gate, and must NOT be attributed to the #9116 meta fold
         assert "`enabled` reads True" in cause, cause
         assert "never that the pass ran" in cause, cause
-        assert "tortoise/sdk.py:12679" not in cause, cause
+        assert "tortoise/sdk.py:12738" not in cause, cause
         assert "did NOT run" not in cause, cause
 
     # ── S2.2 cites the VET pass's own code … ──────────────────────────────
-    assert "tortoise/extractor_v2.py:8155" in vet_cause, vet_cause
-    assert ":8175" in vet_cause, vet_cause
+    assert "tortoise/extractor_v2.py:8454" in vet_cause, vet_cause
+    assert ":8474" in vet_cause, vet_cause
     assert "if vet_enabled and embed_list" in vet_cause, vet_cause
     assert "_run_vet_pass" in vet_cause, vet_cause
     # … and NOT the classify pass's flag or gates
-    for classify_cite in ("classify_later", "if classify_later", ":8124",
-                          ":8255", ":8258", ":8380", ":8390"):
+    for classify_cite in ("classify_later", "if classify_later", ":8423",
+                          ":8554", ":8557", ":8679", ":8689"):
         assert classify_cite not in vet_cause, (classify_cite, vet_cause)
 
     # ── S2.3 cites the CLASSIFY pass's own code … ─────────────────────────
-    assert "tortoise/extractor_v2.py:8124" in classify_cause, classify_cause
+    assert "tortoise/extractor_v2.py:8423" in classify_cause, classify_cause
     assert "if classify_later and embed_list" in classify_cause, classify_cause
-    assert ":8255" in classify_cause, classify_cause
-    assert ":8258" in classify_cause, classify_cause
+    assert ":8554" in classify_cause, classify_cause
+    assert ":8557" in classify_cause, classify_cause
     assert "if classify_later and complete_list" in classify_cause, classify_cause
-    assert ":8380" in classify_cause, classify_cause
+    assert ":8679" in classify_cause, classify_cause
     # … and NOT the VET pass's flag, pass function or gates
     for vet_cite in ("vet_enabled", "_run_vet_pass", "if vet_enabled",
-                     ":8155", ":8175", ":8243", ":8365", ":8041"):
+                     ":8454", ":8474", ":8542", ":8664", ":8340"):
         assert vet_cite not in classify_cause, (vet_cite, classify_cause)
 
     # Different text, so neither cause can stand in for the other: a version
@@ -828,8 +828,8 @@ def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
 
     The shipped constant said "the receipt's stats carries 20 keys" — a number
     nothing counted — and blamed `extract_session_v2`, which in fact BUILDS
-    `result["vet"]` (:8534-8538) and `result["classify_later"]` (:8524-8530). The
-    drop is the meta fold at `tortoise/sdk.py:12679` — the cite was `:12196` until
+    `result["vet"]` (:8833-8837) and `result["classify_later"]` (:8823-8829). The
+    drop is the meta fold at `tortoise/sdk.py:12738` — the cite was `:12196` until
     this round, which at this PR's base is a comment line 200 lines away, so the
     bundle was sending the #9116 fixer into unrelated code. Getting it wrong sends
     the next lane to the wrong file; getting the ARITHMETIC wrong sends it to a
@@ -845,11 +845,11 @@ def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
     assert "S2.2" not in observed
     cause = unobserved["S2.2"]
     assert f"inspected {len(stats)} stats key(s)" in cause, cause
-    assert "tortoise/sdk.py:12679" in cause, cause
-    assert "tortoise/extractor_v2.py:8534-8538" in cause, cause
+    assert "tortoise/sdk.py:12738" in cause, cause
+    assert "tortoise/extractor_v2.py:8833-8837" in cause, cause
     assert "tortoise/sdk.py:12196" not in cause, cause
     assert "20 keys" not in cause, cause
-    assert "tortoise/sdk.py:12679" in unobserved["S2.3"], unobserved["S2.3"]
+    assert "tortoise/sdk.py:12738" in unobserved["S2.3"], unobserved["S2.3"]
 
 
 def test_every_step_is_witnessed_or_given_a_cause():
@@ -1116,7 +1116,7 @@ def test_the_not_established_section_quotes_the_s5_operator_counts_the_log_measu
 # `docs/00_index.md` row that is the entry point to this bundle (only THAT row —
 # the index routes 142 table rows, and another epic's
 # `sdk.py` cite must not be told to add a phrase for a line it is not about). A bare `:NNNN`
-# continuation (the docs write `` `extractor_v2.py:8155` and `:8175` ``) is NOT a
+# continuation (the docs write `` `extractor_v2.py:8454` and `:8474` ``) is NOT a
 # cite this leg can resolve, because the file is named only once for several
 # numbers; the README's bare `` `symbol` `:NNN` `` step table is owned by
 # `test_7949_capstone_verdict_check.py`. `extractor_v2.py` was the first gap: its
@@ -1162,8 +1162,8 @@ def _bundle_in_scope(doc_name: str, line: str) -> bool:
     scope = _BUNDLE_ROW_FILTER.get(doc_name)
     return scope is None or bool(scope.search(line))
 
-# `tortoise/sdk.py:12679`, ``tortoise/projection/edges.py:2424-2449``, `edges.py:468`,
-# ``tortoise/extractor_v2.py:8534-8538``
+# `tortoise/sdk.py:12738`, ``tortoise/projection/edges.py:2424-2449``, `edges.py:468`,
+# ``tortoise/extractor_v2.py:8833-8837``
 _BUNDLE_CITE = re.compile(
     r"(?<![\w.])(?:tortoise/)?(?:projection/)?"
     r"(sdk|edges|extractor_v2)\.py:(\d+)(?:-(\d+))?")
@@ -1264,7 +1264,7 @@ def _bundle_rule(source: str, paragraph: str, base: int, cite_pos: int):
     """The rule whose naming phrase sits NEAREST this cite — distance, not order.
 
     A document names a line with the phrase right beside it (`` `vet_enabled` is
-    computed at `extractor_v2.py:8155` ``), so the closest phrase is the one that
+    computed at `extractor_v2.py:8454` ``), so the closest phrase is the one that
     names THIS cite. Table order cannot decide it: `docs/00_index.md`'s #7949 row
     names the CLASSIFY pass and then the VET flag on one line, and taking the first
     table match bound the VET cite to the classify phrase ~40 characters away (a
@@ -1395,12 +1395,12 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     the END bound alone (the range closes one line into the next block).
     The `extractor_v2.py` cites are correct at this head, so those rules cannot red
     on `main`; they are the tripwire for the NEXT insertion above `8288`/`7912`/
-    `7804`, and they bite: with the README's `` `extractor_v2.py:8155` `` moved to
+    `7804`, and they bite: with the README's `` `extractor_v2.py:8454` `` moved to
     `7913`, `the vet flag` reds with `extractor_v2.py:7913 reads 'or
     _value_gate_enabled())', which carries none of ['vet_enabled = (']`, while the
     pre-fix sweep (no `extractor_v2` alternative) stayed green on the same text.
     The index row's cites are pinned by the same sweep: re-staling `00_index.md`'s
-    `sdk.py:12679` to `12401` reds it, and before this leg nothing read that row.
+    `sdk.py:12738` to `12401` reds it, and before this leg nothing read that row.
     """
     result = _bundle_sweep(_BUNDLE_DOCS, _BUNDLE_SOURCES)
     fired, checked = result["fired"], result["checked"]

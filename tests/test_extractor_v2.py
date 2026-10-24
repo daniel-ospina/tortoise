@@ -6478,6 +6478,212 @@ class TestOperatorSemantics2552:
                        for s in r2["supersessions"])
         assert any("ambiguous" in w for w in r2["warnings"])
 
+    def test_supersede_leg_tolerates_frame_edges_only(self):
+        """#8503: the leg resolves a FRAME-edge drift and refuses a content one.
+
+        Four review rounds shaped this rule, and the fourth is why the leg is
+        no longer a containment test at all. A tolerant span folds a claim that
+        dropped a trailing QUALIFIER ("…kill flag" over "…kill flag after the
+        staging canary passes"), and a trailing truncation is exactly what this
+        model does — the measured wp07 ref is one. So the leg keeps only the
+        drift a string predicate can be trusted with: an EDGE made of frame
+        words. The measured truncation is REFUSED, and that is the documented
+        residual (§3.2b of the evidence doc) rather than a silent slot.
+        """
+        # 1) a frame-edge drift resolves: an article dropped at the head
+        assert v2._resolve_point_supersede(
+            "lease fix ships behind the canary flag at",
+            {"points": [{"id": "pt_1", "kind": "statement",
+                         "content": "The lease fix ships behind the canary "
+                                    "flag"}]}, warnings=[]) is not None
+        # 2) the MEASURED truncation does NOT resolve — the prior keeps a
+        # content tail ("rather than a week of per-shard canary") the ref lost
+        measured_prior = ("Ship the lease fix all-at-once behind a single "
+                          "global kill flag rather than a week of per-shard "
+                          "canary")
+        assert v2._resolve_point_supersede(
+            "We ship the lease fix all-at-once behind a single global kill flag",
+            {"points": [{"id": "pt_2", "kind": "statement",
+                         "content": measured_prior}]}, warnings=[]) is None
+        # 3) two candidates refuse even when both match (never guess)
+        twin = [{"id": "pt_a", "kind": "statement",
+                 "content": "The lease fix ships behind the canary flag"},
+                {"id": "pt_b", "kind": "statement",
+                 "content": "The lease fix ships behind the canary flag"}]
+        w: list[str] = []
+        assert v2._resolve_point_supersede(
+            "lease fix ships behind the canary flag at",
+            {"points": twin}, warnings=w) is None
+        assert any("ambiguous" in x for x in w), w
+        # 4) a ref that is not the prior's copy fails open
+        w = []
+        assert v2._resolve_point_supersede(
+            "we should ship per-service flags for the next rollout instead",
+            {"points": [{"id": "pt_3", "kind": "statement",
+                         "content": measured_prior}]}, warnings=w) is None
+        assert any("matches no S3 prior" in x for x in w), w
+        # 5) the floor: a short ref is not a copy of anything
+        assert v2._resolve_point_supersede(
+            "the lease decision",
+            {"points": [{"id": "pt_3", "kind": "statement",
+                         "content": measured_prior}]}, warnings=[]) is None
+
+    def test_supersede_band_refuses_every_substitution(self):
+        """#8503 code-review finding: the leg must not FOLD a substitution.
+
+        The first cut of the recall band divided by the ref's token count
+        alone, so ONE differing content token was free: an entity swap, a
+        changed number, a flipped role order or a changed scope word all
+        scored ≥0.85 and terminalized a live belief on the prior (no
+        un-supersede API exists). Frame-edge-trimmed token EQUALITY is the
+        shape that cannot cross them — a negator, a condition, a connective and
+        a date are never trimmed, so they sit inside the compared core and are
+        decided by equality rather than by a separate gate; each pair below is
+        one that `distinguishing_difference` refuses to even FOLD.
+        """
+        def resolves(ref: str, prior: str) -> bool:
+            return v2._resolve_point_supersede(
+                ref, {"points": [{"id": "pt_x", "content": prior,
+                                  "kind": "statement"}]}, warnings=[]) is not None
+
+        # a substituted NAMED ENTITY (two teams, two real regressions)
+        assert not resolves(
+            "report the latency regression to the payments team on the "
+            "incidents channel",
+            "report the latency regression to the search team on the "
+            "incidents channel")
+        # a substituted NUMBER (30s vs 60s)
+        assert not resolves(
+            "raise the batch writer timeout to 30 seconds and keep the "
+            "retry budget at 3",
+            "raise the batch writer timeout to 60 seconds and keep the "
+            "retry budget at 3")
+        # a ROLE INVERSION (cause/effect swapped, same content multiset)
+        assert not resolves(
+            "the pgbouncer restart caused the connection storm on every replica",
+            "the connection storm caused the pgbouncer restart on every replica")
+        # OPPOSITE negation (a negator is a frame word → containment cannot
+        # see it, so the polarity test must be SET equality, not presence)
+        assert not resolves(
+            "the cache is shared across the teams",
+            "the cache is not shared across the teams")
+        # a substituted SCOPE word in an otherwise identical sentence
+        assert not resolves(
+            "the retry budget must not exceed three attempts for the payments "
+            "queue",
+            "the retry budget must not stay below three attempts for the "
+            "payments queue")
+        # an exchanged CONNECTIVE (a frame word, invisible to containment):
+        # "tuesday and wednesday" is not "tuesday or wednesday"
+        assert not resolves(
+            "We ship the lease fix on tuesday and wednesday behind the canary "
+            "flag",
+            "We ship the lease fix on tuesday or wednesday behind the canary "
+            "flag")
+        # a DELETED gating qualifier: containment still holds, so the
+        # condition set must be compared — an ungated claim may not supersede
+        # a gated decision
+        assert not resolves(
+            "we ship the lease fix behind a kill flag",
+            "we ship the lease fix behind a kill flag once the canary passes "
+            "in staging")
+        # a DELETED condition where BOTH sides spell a hyphenated compound —
+        # the sub-token split of "all-at-once" yields the marker "once", which
+        # would make the comparison blind to the dropped clause (round 3)
+        assert not resolves(
+            "we ship the lease fix all-at-once behind a kill flag",
+            "we ship the lease fix all-at-once behind a kill flag once the "
+            "canary passes in staging")
+        # a SUBJECT substitution (pronouns carry an entity in this module's
+        # own model). One-sided presence is an ADDITION and stays allowed —
+        # the measured ref prefixes "We" to a prior that states no subject.
+        assert not resolves(
+            "We ship the lease fix behind the canary flag",
+            "They ship the lease fix behind the canary flag")
+        # a substituted PREPOSITION — a frame word whose role is load-bearing
+        # ("by 30 seconds" is not "to 30 seconds"). The span test keeps frame
+        # words INSIDE the span, so an exchange breaks it (round 3).
+        assert not resolves(
+            "raise the batch writer timeout by 30 seconds and keep the retry "
+            "budget at 3",
+            "raise the batch writer timeout to 30 seconds and keep the retry "
+            "budget at 3")
+        # a SUBJECT substitution written with PUNCTUATION around the pronoun —
+        # the pronoun set must be tokenised like everything else, or one quote
+        # mark restores the axis (round 3)
+        assert not resolves(
+            '"they" ship the lease fix behind the canary flag',
+            "we ship the lease fix behind the canary flag")
+        # OPPOSITE POLARITY above the token floor: the floor must not be what
+        # refuses it, or the polarity predicate is unpinned (round 3)
+        assert not resolves(
+            "we ship the lease fix behind the single global kill flag",
+            "we do not ship the lease fix behind the single global kill flag")
+        # and the FLOOR itself, isolated: a short ref whose core EQUALS the
+        # prior's still refuses (nothing else in the leg would)
+        assert not resolves(
+            "retry budget at 3",
+            "the retry budget at 3")
+        # a pronoun ref substituting a NAMED SUBJECT in the prior — the
+        # one-sided-pronoun allowance must not reach this (round 4)
+        assert not resolves(
+            "They can raise the batch writer timeout to 30 seconds",
+            "The payments team can raise the batch writer timeout to 30 seconds")
+        # a TRAILING QUALIFIER the ref dropped, spelled outside the condition
+        # vocabulary — this is why the leg is no longer a containment test
+        assert not resolves(
+            "Ship the lease fix all-at-once behind a single global kill flag",
+            "Ship the lease fix all-at-once behind a single global kill flag "
+            "after the staging canary passes")
+        assert not resolves(
+            "Raise the batch writer timeout to 30 seconds",
+            "Raise the batch writer timeout to 30 seconds for the payments "
+            "queue")
+        # a leading CONDITION is a frame word, so the edge trim must not
+        # remove it — an ungated claim may not supersede a gated decision
+        # (review round 5: without this case the condition predicate is
+        # unpinned and its removal leaves the whole suite green)
+        assert not resolves(
+            "we ship the lease fix all-at-once behind a single global kill flag",
+            "If we ship the lease fix all-at-once behind a single global kill "
+            "flag")
+        # a trailing DATE-SCOPE word is likewise not trimmable
+        assert not resolves(
+            "we ship the lease fix all-at-once behind a single global kill flag",
+            "we ship the lease fix all-at-once behind a single global kill flag "
+            "today")
+        # and a TRAILING TEMPORAL ADVERB — `now` is in neither `_DATE_WORDS`
+        # nor `_CLOCK_UNITS`, so without its own entry in `_TEMPORAL_SCOPE`
+        # this pair folds (review round 5's isolating case)
+        assert not resolves(
+            "we ship the lease fix all-at-once behind a single global kill flag",
+            "we ship the lease fix all-at-once behind a single global kill flag "
+            "now")
+        # THE CONTIGUITY DISCRIMINATOR (above the 5-token floor, every other
+        # gate neutral): the ref DROPS the prior's middle span
+        # ("rather than a week of per-shard canary" keeps only "rather than
+        # canary"), so it is an ordered subsequence but not a contiguous one.
+        # Contiguous-span refuses; the pre-tightening ordered test resolved.
+        # This is the only case in this pin that the tightening itself
+        # decides — the others are refused by the negation / condition /
+        # connective / pronoun gates or by the token floor.
+        assert not resolves(
+            "ship the lease fix all-at-once behind a single global kill flag "
+            "rather than canary",
+            "Ship the lease fix all-at-once behind a single global kill flag "
+            "rather than a week of per-shard canary")
+        # a ref taken from TWO clauses of one prior likewise refuses (here the
+        # 5-token floor and the negation-set gate also fire, so this case
+        # corroborates contiguity rather than isolating it)
+        assert not resolves(
+            "we ship the alpha runbook",
+            "we ship the alpha runbook and we do not ship the beta runbook")
+        # and the positive control: a FRAME-EDGE drift still resolves (an
+        # article dropped at the head and one added at the tail)
+        assert resolves(
+            "lease fix ships behind the canary flag at",
+            "The lease fix ships behind the canary flag")
+
     def test_point_supersede_self_ref_skipped(self):
         """op_04 self guard: a ref resolving to the point ITSELF (same id)
         is skipped with a warning — a self-CORRECTS would poison the graph."""
@@ -6737,3 +6943,227 @@ class TestMintConsolidation4716:
         assert r["noops"], "the fold must be recorded"
         assert r["noops"][0]["point_id"] == "pt_prior_content_1"
         assert r["noops"][0]["content"] == prior
+
+
+# ── #8503: operator SELECTION — the rules that decide what a claim is and
+# which operator KIND the mapper picks. The planted-operator corpus measured
+# 5/14 (2026-10-24) with two named loss mechanisms; 5 of the 8 planted
+# endpoints spoken on an ASSISTANT turn were never emitted as a Point while 18
+# of the 20 user-turn endpoints were, and the one displaced-theory edge was
+# wired IMPL instead of NAND. These pin the rules that produced those losses,
+# so a future prompt edit cannot silently revert them.
+class TestOperatorSelectionRules:
+    def test_assistant_asserted_claims_are_licensed_not_excluded(self):
+        """An assistant-asserted claim is a BELIEF, not chatter (#8503).
+
+        The pre-#8503 rule ("an assistant suggestion/proposal is NOT a user
+        fact — do not emit it as a statement point unless the user confirmed
+        it") was scoped for USER-PERSONAL-STATE facts and read by the mapper
+        as a blanket ban on assistant turns: measured 5 of 8 assistant-turn
+        planted endpoints never emitted vs 2 of 20 user-turn ones. A Point
+        carries NO speaker (E3: derived from the source turn at read time), so
+        the blanket form deleted beliefs — including the hypothesis a later
+        NAND attacks.
+        """
+        for tmpl in (v2.S2_TMPL, v2.S4_TMPL):
+            # whitespace-flattened: the two templates wrap the same rule at
+            # different columns, so a raw substring test would pin the WRAP
+            # rather than the rule.
+            flat = " ".join(tmpl.split())
+            assert "USER VS ASSISTANT" in flat
+            assert "the SPEAKER is not a filter on CLAIMS" in flat
+            # the rule that produced the loss must be GONE, not just softened
+            assert "do not emit it as a statement point unless the user" \
+                " confirmed it" not in flat
+            # and the exclusion is scoped to what asserts nothing
+            assert "BARE OFFERS" in flat
+            # an interrogative FRAME is not a disqualifier: the embedded claim
+            # counts (measured: two planted endpoints live in such turns)
+            assert "A QUESTION THAT ASSERTS A CLAIM" in flat
+            assert "HYPOTHESIS UNDER INVESTIGATION" in flat
+            # a user-personal-state fact still belongs to the user alone
+            assert "USER-PERSONAL-STATE" in flat
+
+    def test_displaced_theory_is_a_nand_attacker_never_an_impl(self):
+        """A retrospective's finding REFUTES the theory it displaced (#8503).
+
+        The measured `wp05_retro_writeup_op_01` NEGATE edge graded
+        `edge_missing` because the mapper emitted IMPL from the root-cause
+        claim to the theory it refuted. The shared S2/S4 rule block now names
+        that kind error, so both mapping stages carry it.
+        """
+        shared = v2._s2s4_rules()
+        assert "A THEORY THE CONVERSATION DISPLACES" in shared
+        assert "never wire IMPL" in shared
+        # the block reaches BOTH rendered prompts (one source, all stages)
+        assert "A THEORY THE CONVERSATION DISPLACES" in v2.render_s2_prompt()
+        assert "A THEORY THE CONVERSATION DISPLACES" in v2.render_s4_prompt(
+            "a story", {"entities": [], "events": [], "points": []},
+            {"entities": [], "events": [], "points": [], "operators": []})
+
+    def test_operational_outcome_that_evidences_a_claim_is_durable(self):
+        """A rollback that restored traffic is EVIDENCE, not mechanics (#8503).
+
+        The two user-turn endpoints that were never emitted were both
+        operational OUTCOMES (the rollback/traffic-normalized claim and the
+        chaos-run result). The value filter's strip-don't-drop rule covered a
+        decision carrying an issue id but not an outcome carrying a command
+        and a clock time.
+        """
+        assert "An operational OUTCOME that EVIDENCES a claim" in v2.S2_TMPL
+        assert "Keep the outcome AND its measured effect" in v2.S2_TMPL
+        # the pre-existing strip-don't-drop rule it extends is untouched
+        assert "STRIP, DON'T DROP" in v2.S2_TMPL
+
+    def test_entity_supersede_is_not_the_reversal_channel(self):
+        """An entity supersede writes NO operator edge — but it IS written (#8503).
+
+        The measured cross-session `wp07_bluepeak_followup_op_04` SUPERSEDE
+        graded `edge_missing` while the receipt's own warnings showed the
+        mapper expressing the reversal as an entity lifecycle
+        ("'per-service flags' supersedes='all-at-once rollout' does not resolve
+        to an S3 search result", "lifecycle=superseded … is not expressible in
+        the Layer-1 payload"). The CORRECTS edge is the point-level channel;
+        the entity form writes an ObjectSuperseded fold instead — which is why
+        the rule may not say the entity form "has no write-path form".
+
+        Code review round 7 (PR #9873): the first wording said exactly that,
+        and "an entity lifecycle alone records nothing", while the shipped
+        write path accepts an entity's own `supersedes` (any lifecycle but
+        `superseded`) into `payload["supersessions"]` → `apply_supersessions`
+        → ObjectSuperseded + `_fold_object_superseded`. A prompt that denies a
+        working channel invites the model to abandon the canonical entity
+        shape for every reversal — a regression in the recall this PR repairs.
+        """
+        shared = v2._s2s4_rules()
+        flat = " ".join(shared.split())
+        assert "An ENTITY-level supersede is NOT this channel" in flat
+        assert "POINT-LEVEL SUPERSEDE" in flat
+        # the false blanket claim must be GONE, not softened
+        assert "has no write-path form" not in flat
+        assert "entity lifecycle alone records nothing" not in flat
+        # and the true one stated: a separate, working channel, plus the
+        # spelling that really is refused.
+        assert "ObjectSuperseded" in flat
+        assert "SEPARATE channel" in flat
+        assert "REFUSED either way" in flat
+
+    def test_entity_supersede_is_refused_only_for_lifecycle_superseded(self):
+        """Two-sided: the refused spelling and the accepted one, pinned.
+
+        The rule now says `lifecycle="superseded"` is refused either way. That
+        is a claim about the write path, so it is pinned against the write
+        path: the same entity with `created` resolves to a supersession record,
+        and with `superseded` it does not (direction ambiguous / nothing to
+        express). Without this the rule and the collector can drift apart in
+        either direction.
+        """
+        search = {"entities": [{"id": "obj_old_flags",
+                                "name": "global rollout flag",
+                                "kind": "core:other"}],
+                  "events": [], "points": []}
+        accepted = v2.execute_embed(
+            {"entities": [{"name": "per-service flags",
+                            "kind": "core:other",
+                            "lifecycle": "created",
+                            "supersedes": "obj_old_flags"}],
+             "events": [], "points": [], "operators": []},
+            search, session_id="s1")
+        assert accepted["supersessions"] == [{
+            "superseded": "obj_old_flags",
+            "supersedes_by": "per-service flags",
+            "evidence": "entity lifecycle supersedes (conversation-driven)",
+        }], accepted["supersessions"]
+        refused = v2.execute_embed(
+            {"entities": [{"name": "per-service flags",
+                            "kind": "core:other",
+                            "lifecycle": "superseded",
+                            "supersedes": "obj_old_flags"}],
+             "events": [], "points": [], "operators": []},
+            search, session_id="s1")
+        assert refused["supersessions"] == [], refused["supersessions"]
+        assert any("is ambiguous (direction unclear)" in w
+                   for w in refused["warnings"]), refused["warnings"]
+
+    def test_one_mitigates_per_action_pair(self):
+        """Two points expressing one action need two dampeners (#8503).
+
+        Both measured MITIGATES misses had the right action in the graph as
+        two points (the decision and its implementation) and the mapper wired
+        the dampener to the other one. The rule now asks for one MITIGATES per
+        pair rather than an arbitrary choice between them.
+        """
+        shared = v2._s2s4_rules()
+        assert "ONE MITIGATES PER PAIR" in shared
+        # the half that names WHY a sibling point is also a src
+        assert "The SRC of a MITIGATES is ANY point" in shared
+
+
+# ── #8503, the DELIVERABLE's own claims — the artifact's layer ─────────────
+#
+# A fresh-context review of PR #9873 found three defects, all in the
+# documentation/attribution layer rather than the executable change, and all
+# three are the SAME shape: a summary that states more than the measurement.
+# They are pinned here because the evidence doc IS the deliverable of #8503 —
+# the executable change ships 5/14, so the attribution is the product, and an
+# attribution nobody pins re-stales the moment a section is edited.
+#
+# ⛔ TWO OF THE THREE PINS MOVED OUT OF THIS FILE (code-review round 9, P1).
+# This module is registered `core` AND is a `slow_files` member, so slow files
+# are subtracted from `tier1` — and a docs-only diff (the bundle README, the
+# index row) takes `select()`'s docs-only early return, which runs tier1 ONLY.
+# The bundle-registration pin and the verdict-banner pin therefore ran in NO
+# leg on the exact diff class that breaks them. They are file scans, so they
+# now live in `tests/test_evidence_8503_claims.py`, registered in BOTH `core`
+# and `tier1` (`docs/evidence/8503/` matches no CORE_ALSO entry).
+#
+# What stays HERE is (3): the `_resolve_point_supersede` docstring claimed an
+# acceptance gate the shipped leg does not have (same negation + condition
+# markers), which a maintainer would "restore" as a second predicate the same
+# docstring calls dead code — a pin on `tortoise/extractor_v2.py`'s own source,
+# correctly bound to a CODE diff (this file's lane), not to a doc one.
+def _flat(text: str) -> str:
+    return " ".join(text.split())
+
+
+class TestEvidence8503Claims:
+    def test_the_supersede_leg_documentation_matches_the_shipped_predicate(self):
+        """No negation gate and no condition gate exist; the doc must say so.
+
+        Both are LOAD-BEARING (``_EDGE_TRIMMABLE`` never removes them), so
+        they sit inside the compared core and equality decides them. A
+        docstring promising a separate predicate invites a maintainer to
+        restore dead code — in the direction that FOLDS a negated claim, which
+        terminalizes a live belief with no un-supersede API.
+        """
+        doc = _flat(v2._resolve_point_supersede.__doc__)
+        assert "carry the same negation and condition markers" not in doc, (
+            "the docstring claims a negation/condition gate the leg does not have")
+        assert "no negation gate" in doc, (
+            "the docstring must state the absence positively, not leave it to "
+            "a reader's inference")
+        # the code side of the same claim: no marker set is consulted by the
+        # predicate, so a reader who restores one is restoring dead code.
+        import inspect
+        span_src = inspect.getsource(v2._span_contains)
+        assert "_NEGATION_MARKERS" not in span_src and "_CONDITION_MARKERS" not in span_src
+        assert "_EDGE_TRIMMABLE" in span_src, (
+            "the leg's one predicate is the frame-edge trim — if that moves, "
+            "this pin must be re-derived rather than silently kept")
+        assert "containment is blind" not in _flat(v2._supersede_pronouns.__doc__)
+        # the floor's own comment must describe the EQUALITY test, not a
+        # containment test the leg no longer performs.
+        module_src = Path(v2.__file__).read_text(encoding="utf-8")
+        floor_comment = module_src[:module_src.index("SUPERSEDE_REF_MIN_TOKENS = 5")]
+        tail = floor_comment[floor_comment.rindex("# #8503:"):]
+        assert "Ordered containment is a" not in tail, (
+            "the SUPERSEDE_REF_MIN_TOKENS comment still describes containment")
+        assert "EQUALITY test" in tail, (
+            "the comment must name the equality test the leg actually performs")
+        # the tokenizer's own docstring is the OTHER half of the same rot: it
+        # argued for a contiguous-span design the leg no longer has.
+        tok_doc = _flat(v2._supersede_ref_tokens.__doc__)
+        assert "contiguous-span" not in tok_doc, (
+            "the tokenizer docstring still argues for a contiguous-span design")
+        assert "SEQUENCE EQUALITY" in tok_doc, (
+            "the tokenizer docstring must name the comparison that replaced it")
