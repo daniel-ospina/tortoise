@@ -247,3 +247,6 @@ File issues in the repo that owns the code:
 | **daniel-ospina/eldato** | El Dato app (eldato.com.mx): scanner, webapp, deals/offers, notifications, ads, SEO | El Dato product work |
 
 **Rule of thumb:** if the issue is about Tortoise code (this repo's `tortoise/` or `website/` dirs), file it here. If it's about agent tooling, file in agent-infra. If it's about Premise Labs ops (meetings/CRM), file in premise-labs.
+
+
+<!-- Automated fix for issue #9881: fix(record): the Postgres record refuses `EntityMutated op=rename` and still keys Object/Subject by name -->
