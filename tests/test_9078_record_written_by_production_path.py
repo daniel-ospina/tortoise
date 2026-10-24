@@ -2077,10 +2077,17 @@ def test_the_public_capture_path_writes_the_record(capture_sdk, monkeypatch,
       `public.record_event_stream`). The row is keyed on the ordinal
       `EventLog.append` reported (#9190), so the live write and a later replay
       give one record one number;
-    * **semantic** — `object` / `subject`, asserted against the objects the
-      capture actually emitted (counted from the journal, so the claim is
-      non-vacuous either way: a capture that emits no Object record must produce
-      no Object row);
+    * **semantic** — `object` only, asserted against the objects the capture
+      actually emitted (counted from the journal, so the claim is non-vacuous
+      either way: a capture that emits no Object record must produce no Object
+      row). The layer's **Subject** half is a SEPARATE leg below: this sentence
+      used to claim `subject` here, which was never true of this leg, and this
+      file's capture lane is its deterministic `TORTOISE_SESSION_LLM_MOCK`
+      payload, whose one entity classifies as an Object (`core:strategy`) — so
+      a `subject` assertion against THIS capture would be vacuous (#9893). A
+      capture CAN emit `SubjectAdded` (the v2 lane routes any payload entity of
+      a declared Subject kind to `create_entity("subject", …)`); it is this
+      lane's payload, not the product, that produces none.
     * **procedural** — a VIEW, never a table ("the procedural layer owns no
       table", migration 4): `object_current_status` folds the `object` rows.
 
@@ -2217,6 +2224,87 @@ def test_the_public_capture_path_writes_the_epistemic_layer(capture_sdk,
         _capture(capture_sdk, monkeypatch, tenant)
         assert _count(conn, "point", tenant) >= 1, (
             "the epistemic layer received no row from the capture")
+    finally:
+        conn.close()
+
+
+def test_the_public_subject_door_writes_the_semantic_layers_subject_half(
+        capture_sdk, monkeypatch, tenant):
+    """#9893 — `subject` receives a row from the PUBLIC door, not a probe.
+
+    The epic's acceptance names **Subjects** alongside Objects, and the semantic
+    layer's Subject half had no end-to-end leg at all: the only end-to-end
+    record test asserted `object`, and this file's capture lane emits no
+    Subject-classified entity, so the half could not be covered from the
+    capture leg (#9893 measured `subject | 0` after the whole file ran against
+    a real `postgres:16`).
+
+    This is the exact mirror of the `object` assertion above, and the mirror is
+    the point: `assert subjects` FIRST and unconditionally, because without it
+    `0 >= 0` is satisfiable by a door that journaled nothing — the pre-fix world
+    reading as a pass. Then the row count must cover the records the journal
+    actually carried.
+
+    The FALSIFIER was observed red, and the SHAPE matters — three edits, three
+    different reds. Only the FIRST is measured; the other two are derived from
+    the code and are stated as such rather than claimed as runs:
+
+    * MEASURED — replacing `RECORD_MUTATIONS["SubjectAdded"]` with a
+      `NoRecordEffect` reds at the COUNT ("the record holds 0 Subject row(s)
+      for the 1 SubjectAdded record(s)") — this is the form the PR recorded;
+    * DERIVED — deleting the key alone reaches no assertion at all:
+      `record_projection` asserts `set(RECORD_MUTATIONS) ==
+      set(JOURNAL_EVENT_TYPES)` at import, so the whole module fails at
+      COLLECTION. Only a two-edit deletion (both the dict and the type set)
+      surfaces as `UnknownJournalRecordType`, counted as `write_failed`, and
+      reds at the `lost == 0` delta below;
+    * BY CONSTRUCTION — a producer that journals nothing leaves NO journal file
+      (the SDK creates `event_log_path` lazily), so the `journal_path.exists()`
+      guard reads that as an empty record list and `assert subjects` fires with
+      `journal types: []`.
+
+    None of the three skips. Recorded in the PR body.
+    """
+    conn = _record_db()
+    try:
+        _ensure_record_schema(conn)
+        _seed_tenant(conn, tenant)
+        # The WRITER connects as the app role, exactly as `_capture` does; the
+        # superuser handle stays with the seeding/assertion connection.
+        monkeypatch.setenv(record_writer.RECORD_DSN_ENV,
+                           _app_role_dsn(os.environ[RECORD_DB_ENV]))
+        sdk, journal_path = capture_sdk()
+        before = dict(monitoring.record_write_failure_counts())
+        with use_record_tenant(*tenant):
+            created = sdk.create_subject("Acme Corp",
+                                         subjectKind="organization")
+        lost = (monitoring.record_write_failure_counts().get("write_failed", 0)
+                - before.get("write_failed", 0))
+
+        # The door returns a FLAT node (`_flat_entity_result`), so assert the
+        # key the message names — a bare truthiness check would pass on a node
+        # carrying no identity at all.
+        assert created.get("id"), (
+            f"the public subject door returned no id: {created!r}")
+        assert lost == 0, (
+            "the subject door's record write failed — `SubjectAdded` is a "
+            "declared `NodeSnapshot` on `subject`, so the row must land")
+
+        # The SDK creates the journal LAZILY, so a producer that journals
+        # nothing leaves no file at all; read that as an empty record list so
+        # the non-vacuity guard below is the thing that fires with a readable
+        # diagnostic, instead of `_journal_records` raising FileNotFoundError.
+        records = (_journal_records(journal_path)
+                   if journal_path.exists() else [])
+        subjects = [r for r in records if r.get("type") == "SubjectAdded"]
+        assert subjects, (
+            "the public subject door emitted no SubjectAdded record, so the "
+            f"semantic-layer Subject claim would be vacuous — journal types: "
+            f"{sorted({r.get('type') for r in records})}")
+        rows = _count(conn, "subject", tenant)
+        assert rows >= len(subjects), (
+            f"the record holds {rows} Subject row(s) for the "
+            f"{len(subjects)} SubjectAdded record(s) the journal carried")
     finally:
         conn.close()
 
