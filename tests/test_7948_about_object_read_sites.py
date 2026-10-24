@@ -248,9 +248,12 @@ WHAT THIS PINS
    `test_the_gate_walk_capture_reads_every_position_a_duration_is_written` +
    `test_the_gate_walk_anchors_name_the_commit_that_carries_the_figure` +
    `test_the_gate_walk_comment_asserts_no_unmeasured_magnitude` +
-   `test_the_narrow_gate_walk_rebuild_buys_nothing` — the six
+   `test_the_gate_walk_magnitude_ratios_recompute_from_the_rows_they_name` +
+   `test_the_narrow_gate_walk_rebuild_buys_nothing` — the listed
    `#9506`/`#9522`/`#9501` arms, and the only ones here about this instrument's OWN
-   prose rather than §13's. The third is the `#9522` capture arm: it replays the
+   prose rather than §13's. (No count: a bare number is the same claim in a third
+   alphabet, which is the defect this file removes from the census comment — an
+   enumerated list of names is checkable, a total is not.) The third is the `#9522` capture arm: it replays the
    removed figure
    through each of the three SYNTHETIC positions (docstring, trailing comment, `#` block
    above the `def`), then holds the LIVE function by containment (its docstring's first
@@ -331,8 +334,10 @@ WHAT THIS PINS
    is the claim that rots"* — which `_unframed_durations` cannot see, because it matches
    a NUMBER and a UNIT and a proportion spelled in words carries neither. So the
    sentence survived the guard written to delete exactly that
-   claim, and it did not reproduce: measured at this PR's base (`81f5594dc`, fresh
-   process, `_literal_files()` warm, two runs) the rebuild is 2.5–3.0 s of
+   claim, and it did not reproduce: measured at `81f5594dc` — the merge base when the
+   figures were taken; `main` has advanced since, so a `base` label would describe a
+   tree the measurement never saw (fresh process, `_literal_files()` warm, two runs) —
+   the rebuild is 2.5–3.0 s of
    `_narrow_gate_walk_sites`'s own 3.9–4.4 s — **over half the arm**, not a small
    fraction of it. (The first measurement belongs to a DIFFERENT tree, `69390341f`, and
    reads 1.70 s / 1.81 s of 3.35 s / 3.14 s; `#9549` changed the census universe between
@@ -6166,8 +6171,28 @@ _MAGNITUDE_WORDS = re.compile(
 #: something runs, not what share of a measured quantity it is. Measured by the
 #: `#9501` review: both red without this, on the walk's own vocabulary (`part` names one
 #: of the three passes).
+#:
+#: ⛔ The set is PHASES only (`#9528` review round 5, P1). `upper`, `lower` and `other`
+#: were in it and they are SHARE adjectives: with them here, one word retired the guard
+#: and `# the other half of the arm's cost` / `# the upper half of the arm` both read
+#: GREEN. Stated cost, not discovered later: `# the upper half of the walk` now REDs,
+#: and the remediation is one edit.
 _MAGNITUDE_POSITIONAL = re.compile(
-    r"\b(?:first|second|third|left|right|top|bottom|upper|lower|other)\s+$",
+    r"\b(?:first|second|third|left|right|top|bottom)\s+$",
+    re.IGNORECASE,
+)
+
+#: The TAIL that turns a positional `half` back into a SHARE (`#9528` review round 5,
+#: P1). The phase reading needs the divided thing named WITHOUT a possessive, so
+#: `# the second half of the walk` is a phase while `# the second half of the walk's
+#: cost` is a share of a measured quantity. Read off the TAIL and not from the subject
+#: slot, because that slot only swallows an ASCII `'s`: a typographic apostrophe
+#: (`walk’s cost`, what macOS and Word produce), a plural possessive (`walks' cost`) and
+#: a dropped apostrophe (`walk cost`) each leave the subject unmatched, and without this
+#: veto each of them kept the exemption.
+_MAGNITUDE_PHASE_SHARE_TAIL = re.compile(
+    r"^\s*(?:of\s+)?(?:the\s+|this\s+|that\s+|its\s+|their\s+|our\s+)?"
+    r"(?:\w+['’]s\b|\w+s'\s|\w+\s+(?:cost|work|time|runtime|wall[- ]?clock)\b)",
     re.IGNORECASE,
 )
 
@@ -6242,7 +6267,10 @@ def _unsettleable_magnitudes(comment: str) -> list[str]:
       `this`/`that` demonstrative (`# most of this file is parsed once` — the shapes the
       subject binding exists to keep green), a POSITIONAL share ("the second half of
       the walk", "the left half of the suite", "the second part of the walk" — a phase,
-      not a share), or a PERCENTAGE WITH NO SUBJECT AT ALL (a bare figure whose value
+      not a share, and GREEN only while the divided thing is named WITHOUT a possessive
+      and the qualifier is a PHASE word: `upper`, `lower` and `other` are share
+      adjectives, so `the upper half of the walk` and `the other half of the arm's cost`
+      are RED), or a PERCENTAGE WITH NO SUBJECT AT ALL (a bare figure whose value
       is written and whose object is not — written without a concrete number here, so
       this description is not itself a bare figure).
       That last cell is the stated PRICE OF THE BINDING rather than an oversight: the
@@ -6266,6 +6294,15 @@ def _unsettleable_magnitudes(comment: str) -> list[str]:
       ("the entire arm's cost") as much as a bare one, and on `half the arm` as
       much as `half of the arm` — the spellings an adjective-gated, `of`-gated list
       was green on, one of which is the exact sentence this chain produced.
+    * RED on a positional share whose divided thing is named with a POSSESSIVE: `the
+      second half of the walk's cost` is a share of a measurement, `the second half of
+      the walk` is a phase, and the possessive is read off the TAIL rather than inferred
+      from the subject slot — that slot only swallows an ASCII `'s`, so a typographic
+      apostrophe (`walk’s cost`), a plural possessive (`walks' cost`) and a dropped
+      apostrophe (`walk cost`) each ended the match at the noun and took the exemption.
+      The qualifier set is phase words only (`first`/`second`/`third`/`left`/`right`/
+      `top`/`bottom`); `upper`/`lower`/`other` are share adjectives. Stated cost of the
+      tightening: `the upper half of the walk` reds.
     """
     lines = comment.splitlines()
     found: list[str] = []
@@ -6280,11 +6317,23 @@ def _unsettleable_magnitudes(comment: str) -> list[str]:
             # A POSITIONAL `half` is a phase, not a share (`# the second half of the
             # walk re-reads the sources`) — the qualifier sits outside the match, so
             # this is a post-filter rather than a lookbehind of shifting width.
-            if _MAGNITUDE_POSITIONAL.search(window[: match.start()]) and re.match(
+            # The share NOUN's own extent, not the whole match: `_MAGNITUDE_WORDS` may
+            # swallow the subject too (`half of the walk's cost`), so the tail has to be
+            # taken after the noun or the veto reads the words that follow the share.
+            head = re.match(
                 r"(?:half|halves|most|part|parts|portion|portions|share|shares|"
                 r"fraction|fractions)\b",
                 match.group(),
                 re.IGNORECASE,
+            )
+            if (
+                head
+                and _MAGNITUDE_POSITIONAL.search(window[: match.start()])
+                # …and the divided thing must be named WITHOUT a possessive, or this is
+                # a share of a measurement wearing a phase's clothes.
+                and not _MAGNITUDE_PHASE_SHARE_TAIL.match(
+                    window[match.start() + head.end() :]
+                )
             ):
                 continue
             found.append(match.group(match.lastgroup))
@@ -6318,7 +6367,7 @@ _MAGNITUDE_RATIO_TOLERANCE_PP = 1.5
 #: The module docstring's base-anchored figures, which must be the SAME set the
 #: `81f5594dc` measurement row carries — the two prose sites state one measurement.
 _BASE_MEASUREMENT_PROSE = re.compile(
-    r"measured at this PR's base \(`(?P<sha>[0-9a-f]{7,40})`.*?the rebuild is "
+    r"measured at `(?P<sha>[0-9a-f]{7,40})`.*?the rebuild is "
     r"(?P<rlo>[0-9.]+)–(?P<rhi>[0-9.]+) s of\s+`_narrow_gate_walk_sites`'s own "
     r"(?P<alo>[0-9.]+)–(?P<ahi>[0-9.]+) s",
     re.DOTALL,
@@ -6556,7 +6605,8 @@ def test_the_gate_walk_magnitude_ratios_recompute_from_the_rows_they_name():
     base = _BASE_MEASUREMENT_PROSE.search(__doc__ or "")
     assert base is not None, (
         "the module docstring no longer states the base measurement in the form "
-        "`measured at this PR's base (`<sha>`, …) the rebuild is A–B s of "
+        "`measured at `<sha>` (…, the merge base when the figures were taken) the "
+        "rebuild is A–B s of "
         "`_narrow_gate_walk_sites`'s own C–D s`, so the two prose sites cannot be held "
         "to the same rows"
     )
@@ -7069,6 +7119,26 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
             "an unscoped `bulk`, an `\\w+th` ordinal shape, a bare `most of the time`, "
             "a bare `N x M`, a `factor of safety` or a positional `half` reds here and "
             "the diagnosis it prints describes a figure the sentence does not carry"
+        )
+
+    # ⛔ …and the SAME positional shape is a SHARE the moment the divided thing is named
+    # with a possessive, or the qualifier is a share adjective (`#9528` review round 5,
+    # P1 — every one of these measured GREEN before the tail veto, i.e. one word in front
+    # of the noun retired the guard). Both directions are pinned, because the fix for one
+    # is what reds the other: `# the upper half of the walk` is now RED on purpose.
+    for share in (
+        "# the other half of the arm's cost is the parse",
+        "# the upper half of the walk",
+        "# the second half of the walk's cost is the parse",
+        "# the second half of the walk’s cost is the parse",  # typographic apostrophe
+        "# the second half of the walks' cost is the parse",  # plural possessive
+        "# the second half of the walk cost is the parse",  # dropped apostrophe
+    ):
+        assert _unsettleable_magnitudes(share), (
+            f"{share!r} is a SHARE of a measured quantity wearing a phase's clothes — a "
+            "possessive on the divided thing (ASCII, typographic, plural or dropped) or a "
+            "share adjective is what separates it from `the second half of the walk`, and "
+            "without both constraints one word in front of the noun retires this guard"
         )
 
     # ⚠️ The PRODUCTIVE proportion spellings are closed, not only the adjectives in front
