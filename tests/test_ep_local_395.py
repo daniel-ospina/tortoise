@@ -940,7 +940,10 @@ def _ac5_effective_cpus(quotas=None) -> int:
       of it, because `CPUQuota=` is usually set on a service slice rather than
       on the cgroup the process lands in (reading only the mount root misses
       every systemd-scoped box — the root file often does not exist);
-    - the cgroup v1 pair (`cpu.cfs_quota_us` / `cpu.cfs_period_us`), same walk.
+    - the cgroup v1 pair (`cpu.cfs_quota_us` / `cpu.cfs_period_us`), walked
+      from the **cpu controller's own** `/proc/self/cgroup` line under the
+      controller's own mount — a v1-only host has no v2 line at all, and a
+      hybrid host mounts the two hierarchies in different places.
 
     Every correction only ever REDUCES the count, and a fractional quota is
     FLOORED (a 1.5-CPU quota is reported as 1, not 2), so the derived ratio
@@ -964,23 +967,49 @@ def _ac5_effective_cpus(quotas=None) -> int:
     return cpus
 
 
-def _ac5_cgroup_quotas(proc_cgroup: str | None = None, root: str | None = None):
-    """Yield `(quota, period)` for this process's cgroup and each ancestor.
+# The cgroup v1 cpu-controller mounts, in the order a Linux host carries them:
+# the combined controller directory (what v1 and hybrid hosts mount), the `cpu`
+# entry systemd leaves beside it (usually a symlink to the same directory), and
+# last the v2 root itself, where a v1 file can only exist in a test fixture.
+# The v1 pair is **never** under the unified mount: on a hybrid host the unified
+# hierarchy is `/sys/fs/cgroup/unified` while the controllers keep their own.
+_AC5_CGROUP_V1_ROOTS = (
+    "/sys/fs/cgroup/cpu,cpuacct",
+    "/sys/fs/cgroup/cpu",
+    "/sys/fs/cgroup",
+)
 
-    `proc_cgroup` / `root` are injectable so the WALK is testable against a
-    synthetic tree (`test_ac5_effective_cpus_is_quota_aware`); the defaults are
-    the live `/proc/self/cgroup` and the cgroup mount point."""
-    proc_cgroup = "/proc/self/cgroup" if proc_cgroup is None else proc_cgroup
-    root = "/sys/fs/cgroup" if root is None else root
+
+def _ac5_cgroup_paths(proc_cgroup: str) -> tuple[str, str]:
+    """The `(v2 unified, v1 cpu controller)` cgroup paths this process is in.
+
+    `/proc/self/cgroup` carries ONE LINE PER HIERARCHY, `<id>:<controllers>:<path>`,
+    and the two hierarchies this reader needs are different lines with different
+    paths. Deriving the v1 walk from the `0::` (unified) line — the shape this
+    reader first shipped — leaves the v1 arm unreachable on exactly the hosts
+    where it is the only quota source: a pure v1 host has no `0::` line at all,
+    and a hybrid host keeps the controllers under `cpu,cpuacct`. A missing
+    hierarchy is `""`, never an error."""
+    unified = v1_cpu = ""
     try:
         with open(proc_cgroup, encoding="ascii") as fh:
-            rel = next(
-                (line.split("::", 1)[1].strip() for line in fh
-                 if line.startswith("0::")), "")
+            lines = fh.read().splitlines()
     except OSError:
-        return
+        return "", ""
+    for line in lines:
+        hierarchy, _, rest = line.partition(":")
+        controllers, _, path = rest.partition(":")
+        path = path.strip()
+        if hierarchy.strip() == "0" and not controllers.strip():
+            unified = path
+        elif "cpu" in (name.strip() for name in controllers.split(",")):
+            v1_cpu = path
+    return unified, v1_cpu
+
+
+def _ac5_quota_walk(root: str, rel: str):
+    """Yield `(quota, period)` at `rel` under `root`, then for each ancestor."""
     parts = [p for p in rel.split("/") if p]
-    # The process's own cgroup, then each ancestor up to the mount root.
     for depth in range(len(parts), -1, -1):
         base = root + ("/" + "/".join(parts[:depth]) if depth else "")
         try:  # cgroup v2
@@ -999,6 +1028,57 @@ def _ac5_cgroup_quotas(proc_cgroup: str | None = None, root: str | None = None):
             yield quota, period
         except OSError:
             continue
+
+
+def _ac5_cgroup_quotas(
+    proc_cgroup: str | None = None,
+    root: str | None = None,
+    v1_roots: tuple[str, ...] | None = None,
+):
+    """Yield `(quota, period)` for this process's cgroup and each ancestor.
+
+    `proc_cgroup` / `root` / `v1_roots` are injectable so the WALK is testable
+    against a synthetic tree (`test_ac5_effective_cpus_is_quota_aware`,
+    `test_ac5_cgroup_v1_walk_is_reachable`); the defaults are the live
+    `/proc/self/cgroup`, the unified mount point and the v1 cpu-controller
+    mounts.
+
+    The two hierarchies are walked SEPARATELY because they are mounted
+    separately, and a missed quota fails in the UNSAFE direction: the divisor
+    stays at the host count, the load ratio reads "quiet" on a throttled box,
+    and a starved pass is asserted against the tight 3.0 s bound."""
+    proc_cgroup = "/proc/self/cgroup" if proc_cgroup is None else proc_cgroup
+    root = "/sys/fs/cgroup" if root is None else root
+    v1_roots = _AC5_CGROUP_V1_ROOTS if v1_roots is None else v1_roots
+    unified, v1_cpu = _ac5_cgroup_paths(proc_cgroup)
+    if unified:
+        yield from _ac5_quota_walk(root, unified)
+    if v1_cpu:
+        # The candidate mounts are ALTERNATIVES for one controller, not
+        # cumulative (`cpu` is normally a symlink to `cpu,cpuacct`), so the same
+        # quota is visible under more than one root: emit each quota once. The
+        # divisor takes a `min` anyway, so a duplicate could only be redundant.
+        seen: set[tuple[str, str]] = set()
+        for v1_root in v1_roots:
+            for entry in _ac5_quota_walk(v1_root, v1_cpu):
+                if entry not in seen:
+                    seen.add(entry)
+                    yield entry
+
+
+def _ac5_affinity_cpus() -> int | None:
+    """This process's affinity count, or `None` where the API does not exist.
+
+    `os.sched_getaffinity` is Linux-only (CPython: "Availability: Linux"), so a
+    test that calls it unguarded ERRORS on macOS/BSD — two errors in this file on
+    the platform its author measures on. `_ac5_effective_cpus` already tolerates
+    its absence (`contextlib.suppress`); the tests must not be stricter than the
+    code under test. Same guard as
+    `tests/test_ci_expected_manifests.py::test_...` uses for darwin."""
+    try:
+        return len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        return None
 
 
 def _ac5_worst_ratio(
@@ -1086,9 +1166,17 @@ def test_ac5_wall_bounds_contract():
     assert _AC5_HANG_S <= 60.0, (
         "the hang bound must still bound a wedged pass — the suite's timeout is "
         "the outer backstop, not a substitute")
-    assert _ac5_effective_cpus() <= len(os.sched_getaffinity(0)), (
-        "the effective count must never exceed the process's own affinity — a "
-        "larger count understates contention and selects the tight bound")
+    # The effective count is what the ratios are divided by, so it must never
+    # exceed the process's own affinity — a larger count understates contention
+    # and selects the tight bound. `os.sched_getaffinity` is LINUX-ONLY, so this
+    # bound is asserted only where the platform exposes it: an unguarded call
+    # here made the whole file error on macOS, the box these measurements were
+    # taken on.
+    affinity = _ac5_affinity_cpus()
+    if affinity is not None:
+        assert _ac5_effective_cpus() <= affinity, (
+            "the effective count must never exceed the process's own affinity — "
+            "a larger count understates contention and selects the tight bound")
     assert _AC5_HANG_S > _AC5_QUIET_WALL_S > 1.2, (
         "the CPU leg (`cpu < 1.2`) must stay the operative budget and the "
         "quiet bound the strict one — a wall bound at or below 1.2 s would "
@@ -1130,7 +1218,7 @@ def test_ac5_effective_cpus_is_quota_aware(tmp_path, monkeypatch):
     # loose hang bound; rounding up would keep the count above real capacity
     # and select the tight bound on a throttled pass.
     monkeypatch.setattr(os, "cpu_count", lambda: 8)
-    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(8)))
+    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(8)), raising=False)
     assert _ac5_effective_cpus([("200000", "100000")]) == 2
     assert _ac5_effective_cpus([("100000", "100000")]) == 1
     assert _ac5_effective_cpus([("150000", "100000")]) == 1, (
@@ -1148,9 +1236,9 @@ def test_ac5_effective_cpus_is_quota_aware(tmp_path, monkeypatch):
         "a zero period or a non-numeric token must be skipped, not raise")
     assert _ac5_effective_cpus([]) == 8
     # A cpuset pin tightens it on its own, with no quota at all.
-    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: {0, 1, 2})
+    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: {0, 1, 2}, raising=False)
     assert _ac5_effective_cpus([]) == 3
-    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(8)))
+    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(8)), raising=False)
 
     # The WALK. `CPUQuota=` normally sits on a service slice, not on the cgroup
     # the process lands in, so the process's own cgroup reading `max` must not
@@ -1169,15 +1257,71 @@ def test_ac5_effective_cpus_is_quota_aware(tmp_path, monkeypatch):
     assert list(_ac5_cgroup_quotas(str(proc_cgroup), str(root))) == [
         ("200000", "100000")], (
         "the quota on the service SLICE must be found by walking ancestors")
-    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(8)))
-    # …and the v1 pair is read from the same walk.
-    (root / "system.slice" / "cpu.max").unlink()
-    (root / "system.slice" / "cpu.cfs_quota_us").write_text("300000\n", encoding="ascii")
-    (root / "system.slice" / "cpu.cfs_period_us").write_text("100000\n", encoding="ascii")
-    assert list(_ac5_cgroup_quotas(str(proc_cgroup), str(root))) == [
-        ("300000", "100000")], "cgroup v1 quotas are read from the same walk"
     # A missing /proc/self/cgroup degrades to "no quota", never to an error.
     assert list(_ac5_cgroup_quotas(str(tmp_path / "absent"), str(root))) == []
+
+
+def test_ac5_cgroup_v1_walk_is_reachable(tmp_path, monkeypatch):
+    """A cgroup-v1 host's quota must be FOUND, or the divisor overstates capacity.
+
+    `/proc/self/cgroup` carries one line PER HIERARCHY, and the v1 cpu controller
+    has its own line and its own mount. A pure v1 host (RHEL/CentOS 7, older
+    k8s/Docker hosts, `systemd.unified_cgroup_hierarchy=0`) has **no** `0::`
+    line at all, so a walk derived from that line never leaves the mount root;
+    a hybrid host keeps the controllers under `cpu,cpuacct` while the unified
+    hierarchy sits at `/sys/fs/cgroup/unified`. Either way the v1 arm is
+    unreachable there, and the failure direction is the UNSAFE one: a missed
+    quota leaves the divisor at the host count, the ratio reads "quiet" on a
+    throttled box, and a starved pass is asserted against the tight 3.0 s
+    bound — the #9015/#9331 false red this reader exists to close.
+
+    The fixtures are v1-SHAPED (`N:cpu,cpuacct:/path`, no `0::` line for the pure
+    case), because that is what a v1 host actually writes. A synthetic `0::`
+    fixture under a v2-shaped root — the previous revision — cannot red the
+    deleted v1 arm, so it pinned a layout its own environment cannot produce.
+    """
+    root = tmp_path / "cgroup"
+    root.mkdir()
+    v1_root = root / "cpu,cpuacct"
+    lane = v1_root / "lane.service"
+    lane.mkdir(parents=True)
+    (lane / "cpu.cfs_quota_us").write_text("300000\n", encoding="ascii")
+    (lane / "cpu.cfs_period_us").write_text("100000\n", encoding="ascii")
+    # The mounts are alternatives, configured here where the live default list
+    # would point at the host's own /sys/fs/cgroup.
+    monkeypatch.setattr(
+        sys.modules[__name__], "_AC5_CGROUP_V1_ROOTS", (str(v1_root), str(root)))
+
+    # PURE v1: no unified line, quota under the controller's OWN mount.
+    proc_cgroup = tmp_path / "self_cgroup_v1"
+    proc_cgroup.write_text(
+        "4:cpu,cpuacct:/lane.service\n1:name=systemd:/legacy\n", encoding="ascii")
+    assert list(_ac5_cgroup_quotas(str(proc_cgroup), str(root))) == [
+        ("300000", "100000")], (
+        "a v1-only /proc/self/cgroup (no `0::` line) must still find the cpu "
+        "controller's quota under the controller's own mount")
+    # …and it reaches the DIVISOR: 8 host CPUs with a 3-CPU quota is 3, so the
+    # ratio is divided by real capacity rather than by the host's.
+    monkeypatch.setattr(os, "cpu_count", lambda: 8)
+    monkeypatch.setattr(
+        os, "sched_getaffinity", lambda pid: set(range(8)), raising=False)
+    assert _ac5_effective_cpus(
+        list(_ac5_cgroup_quotas(str(proc_cgroup), str(root)))) == 3, (
+        "a v1 quota must reach the divisor, or a throttled pass is measured "
+        "against the tight latency bound")
+
+    # HYBRID: a unified line that carries NO quota, plus the v1 line that does.
+    # The unified walk must not hide the v1 one (they are walked separately).
+    (root / "unified" / "system.slice").mkdir(parents=True)
+    proc_cgroup = tmp_path / "self_cgroup_hybrid"
+    proc_cgroup.write_text(
+        "0::/system.slice\n1:cpu,cpuacct:/lane.service\n", encoding="ascii")
+    assert list(_ac5_cgroup_quotas(str(proc_cgroup), str(root / "unified"))) == [
+        ("300000", "100000")]
+    # v1 writes -1 for "unlimited": reported by the walk, skipped by the divisor.
+    (lane / "cpu.cfs_quota_us").write_text("-1\n", encoding="ascii")
+    assert _ac5_effective_cpus(
+        list(_ac5_cgroup_quotas(str(proc_cgroup), str(root / "unified")))) == 8
 
 
 def test_ac5_worst_ratio_contract():
