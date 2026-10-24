@@ -147,12 +147,6 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # TORTOISE_DB_PATH to a tmp_path db) — the delenv IS the point, and the
     # fixture-param monkeypatch auto-restores at teardown (no lane leak).
     "test_attribution_actor.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],  # embedded lane via delenv (the test_billing pattern — db_path-pinned store, so the constructions never ride the URI)
-    # #9695: the eval instrument's "no graph at <path>" refusal is proven by
-    # pointing `_open` at a path that does NOT exist — the test must clear the URI
-    # first, or the docker-lane redirect would hand it a real server graph and the
-    # refusal would never be reached. The delenv IS the test's input; the
-    # fixture-param monkeypatch auto-restores (no lane leak).
-    "test_ax_write_eval.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     # #9852 landed the connector-journey test with the same embedded-lane force
     # (delenv the URI, then pin TORTOISE_DB_PATH to a tmp_path db) and no
     # declaration, which reddened test (e) for every PR. Declared rather than

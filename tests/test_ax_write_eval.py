@@ -1492,7 +1492,7 @@ def test_an_undeclared_kind_is_quoted_as_the_graph_wrote_it():
 
 
 def test_a_mistyped_db_path_is_refused_instead_of_scored_as_an_empty_graph(
-    tmp_path, monkeypatch
+    tmp_path,
 ):
     """A typo must not fabricate a total-failure record (#9695 review P2).
 
@@ -1501,8 +1501,13 @@ def test_a_mistyped_db_path_is_refused_instead_of_scored_as_an_empty_graph(
     whose content is "everything absent" — indistinguishable from an agent that
     wrote nothing. `setup.py` already refuses a target it cannot identify; the
     read side is where fabricated evidence would enter.
+
+    No lane control is needed: `_open` branches on its ARGUMENT, and the refusal
+    raises before it writes either env var, so the outcome is identical on the
+    embedded and the docker lane. (An earlier revision cleared `TORTOISE_DB_URI`
+    here; that mutation was inert and only existed to satisfy a guard it did not
+    actually need — round-9 review P2.)
     """
-    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     missing = tmp_path / "typo.db"
     with pytest.raises(SystemExit) as exc:
         axe._open(str(missing))
