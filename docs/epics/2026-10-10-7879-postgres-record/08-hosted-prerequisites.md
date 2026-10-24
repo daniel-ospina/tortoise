@@ -121,7 +121,7 @@ narrowed PRIMARY exception — an author-set prior is a non-reconstructible inpu
 per journal record type, totality as a registry property, idempotence by statement shape
 (`INSERT … ON CONFLICT (org_id, graph_id, node_key) DO UPDATE`), and the property→column decision
 **read from the migrations on disk** rather than restated (`RECORD_MIGRATIONS`,
-`tortoise/record_projection.py:169`; `table_columns()`, `refused_props_names()`).
+`tortoise/record_projection.py:170`; `table_columns()`, `refused_props_names()`).
 
 `PointsMerged` and `EntityMutated op=rename` are **declared refusals**, and `ConfidenceChanged` is a
 **`NoRecordEffect`** — the EP carve-out in executable form (`04-projection.md` §1).
@@ -243,7 +243,7 @@ first. `TORTOISE_RECORD_SINGLE_TENANT` is deliberately staged nowhere and a test
 `push` trigger on `supabase/**` runs the drift checks, not the apply — so the record tables will
 land on the next dispatch
 whether or not R1 has happened. Two couplings to respect: the record reader is **name-gated** on
-`RECORD_MIGRATIONS` (`record_projection.py:169`, no glob) so a **new** `.sql` is invisible to the
+`RECORD_MIGRATIONS` (`record_projection.py:170`, no glob) so a **new** `.sql` is invisible to the
 image until its name is added there; and `deploy-hosted.yml` deliberately does **not** trigger on
 `supabase/migrations/**` for that reason.
 **What it blocks:** any write at all; and a schema change that silently no-ops in the image.
