@@ -2185,8 +2185,10 @@ def test_cli_extraction_engine_change_selects_core_and_carve_out_leg():
     # on `test_files` here would be the wrong half of the contract.
     #
     # Mutation check (verified by dropping the CORE_ALSO entry in a REPL):
-    # select() then returns surfaces=[] , full=False and carve_out_run=False
-    # on the 64-file tier-1 smoke set, so asserts 2-5 below go RED.
+    # select() then returns surfaces=[], full=False and carve_out_run=False on
+    # the 64-file tier-1 smoke set, so asserts 2, 3 and 5 below go RED. Assert 1
+    # (`full is False`) survives and assert 4 is manifest-driven
+    # (`carve_out_files()` reads config/ci-surfaces.yml, not this selection).
     r = _sel(["integrations/cli-extraction/extract_turns.py"])
     assert r["full"] is False, r
     assert r["surfaces"] == ["core"], r

@@ -159,8 +159,15 @@ The transcript is captured user text and is treated as **data**, end to end:
   mid-loop prints a partial receipt (`{"partial": true, "made_ids": [...]}`)
   on stdout before raising, so already-created ids are never lost.
 
-Tests: `tests/test_cli_extraction.py` — run with
-`uv run pytest tests/test_cli_extraction.py`. It pins the
+Tests: `tests/test_cli_extraction.py` — run with the carve-out opt-in, the
+same way CI runs it (the default docker lane refuses a URI-less run, and
+`TestWriterContract` intends the embedded backend anyway):
+
+```bash
+env -u TORTOISE_DB_URI TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_cli_extraction.py -q
+```
+
+It pins the
 accounting/parser/selector/prompt-contract invariants, the engine-call
 hardening flags for **both** the claude and codex lanes (via fake
 executables: flags, stdin prompt, fresh scratch cwd), and the writer's

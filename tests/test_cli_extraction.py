@@ -482,8 +482,14 @@ class TestWriterValidation(unittest.TestCase):
             def close(self):
                 pass
 
-        self._exec([{"kind": "fact", "content": "already retracted"}],
-                   sdk_cls=_RetractedSDK)
+        # exit 0: the write SUCCEEDS — a non-live fold is reported, not fatal
+        code = 0
+        try:
+            self._exec([{"kind": "fact", "content": "already retracted"}],
+                       sdk_cls=_RetractedSDK)
+        except SystemExit as exc:
+            code = exc.code
+        self.assertEqual(code, 0)
         receipt = json.loads(self.captured_stdout.strip().splitlines()[-1])
         self.assertEqual(receipt["non_live_hits"], ["p1"])
         self.assertEqual(receipt["written"], 1)
