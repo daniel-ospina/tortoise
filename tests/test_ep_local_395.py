@@ -983,8 +983,10 @@ def test_ac5_interactive_latency_zone():
     lane's host):
     wall 1.79/1.81/1.84/1.88 s against **CPU 0.90/0.87/0.86/0.84 s** — i.e.
     a wall/CPU ratio of 2.0-2.2x that is pure scheduling contention, and the
-    population cost is the same shape (main 1.24-1.34 s, four unrelated PRs
-    1.22/1.25/1.33/2.53 s — #9474's table). A fixed absolute wall bound
+    population cost is the same shape (main 1.24-1.30 s — this lane's CI reads
+    1.24/1.27, #9474 records 1.26/1.30 — and four unrelated PRs at
+    1.22/1.25/1.33/2.53 s, #9474's table; the 1.34 s often quoted is PR #9658's
+    head, not main's). A fixed absolute wall bound
     cannot separate a genuine regression from a starved box, and the
     miss-landing-inside-its-own-noise is what makes it a population blocker
     rather than a cosmetic flake (#9331: the failure text embeds a
@@ -1047,9 +1049,15 @@ def test_ac5_interactive_latency_zone():
         # PR #1273 (code review, conf 65): the old <5.0s bound did not enforce
         # the acceptance criterion — tighten to the ≤1s budget with a margin
         # (1.2s), read from CPU time per the docstring above.
+        # The message carries only `<float>s` tokens: the rail's signature
+        # normaliser masks fractional numbers WITH a time unit, and a bare
+        # `loadavg 13.8` would survive it — a volatile token that makes this
+        # id's failure signature un-matchable against main's, which is exactly
+        # the #9331 block. Host context belongs in the log, not in the id.
+        print(f"[ac5] loadavg {os.getloadavg()[0]:.1f} (context only)")
         assert cpu < 1.2, (
-            f"local EP took {cpu:.2f}s of CPU ({elapsed:.2f}s wall, "
-            f"loadavg {os.getloadavg()[0]:.1f}) — interactive budget is ≤1s")
+            f"local EP took {cpu:.2f}s of CPU ({elapsed:.2f}s wall) — "
+            f"interactive budget is ≤1s")
         # RUNAWAY ceiling only — NOT an added-wait detector (see the
         # docstring and `_ac5_wall_budget`: at this cpu it tolerates
         # ~1.6-1.7 s of added wait, since the population's 2.53 s wall
@@ -1061,8 +1069,7 @@ def test_ac5_interactive_latency_zone():
         assert elapsed < wall_budget, (
             f"local EP spent {elapsed:.2f}s wall for {cpu:.2f}s of CPU — "
             f"the pass is runaway, not computing "
-            f"(ceiling {wall_budget:.2f}s, "
-            f"loadavg {os.getloadavg()[0]:.1f})")
+            f"(ceiling {wall_budget:.2f}s)")
 
 
 # ── AC8: run-depth semantic ─────────────────────────────────────────────

@@ -1818,6 +1818,12 @@ def test_capture_graph_name_mirrors_the_sdk_mapping(monkeypatch):
     #: graph name, which is what the mapping parity loop pins, so the binds
     #: `_get_proj` arms on that same instance need their own handle.
     last_proj: list = []
+    #: The SDK INSTANCE of the most recent open, for the same reason one level
+    #: up: the journal-backed branch must bind THAT object's producer, and
+    #: `callable(...)` alone would accept any callable (a lambda, another
+    #: method) — the double would be "bound" with the wrong producer while
+    #: every structural edge journaled through it.
+    last_sdk: list = []
 
     class _RecordingProj:
         def __init__(self, path=None, graph_name=None, **kw):
@@ -1855,6 +1861,7 @@ def test_capture_graph_name_mirrors_the_sdk_mapping(monkeypatch):
 
     def _opened(namespace=None, graph_name=None, journal=None):
         sdk = sdk_mod.TortoiseSDK.__new__(sdk_mod.TortoiseSDK)
+        last_sdk.append(sdk)
         sdk._proj = None
         sdk._db_uri = None
         sdk._db_path = ":memory:"
@@ -2032,8 +2039,9 @@ def test_capture_graph_name_mirrors_the_sdk_mapping(monkeypatch):
     assert last_proj[-1].bound_recorder is None, (
         "a journal-less projection must bind NO structural-edge recorder")
     _opened(journal="x.jsonl")
-    assert callable(last_proj[-1].bound_recorder), (
-        "a journal-backed projection must bind the SDK's edge producer")
+    assert last_proj[-1].bound_recorder == last_sdk[-1]._record_structural_edge, (
+        "a journal-backed projection must bind THE SDK's edge producer — not "
+        "merely some callable (bound methods compare by __func__/__self__)")
 
 
 def test_data_sdk_opens_the_graph_the_gate_keys_on(monkeypatch):
