@@ -950,8 +950,8 @@ old ones.
 **The most valuable thing the enumeration found: `near_dup_detect` is a guard whose declared PLACEMENT does not
 exist.** `_boundary` is real and tested (its wrappers are `distinguishing_difference`, `_difference`, `fold_allowed`
 and `supersede_allowed`), but the FOUR call-site families are the post-gate consolidation pass
-(`classify_consolidation`, called from `execute_embed`), the capture seam (`dedup_classify.rephrase_hit`, which FOLDS
-and DETACH-DELETEs), the temporal counting lane (`temporal_aggregation._restatement`; that COUNTING LANE has no
+(`classify_consolidation`, called from `execute_embed`), the capture seam (`dedup_classify.rephrase_hit` — which
+returns only the `(canonical_id, overlap)` verdict and does no graph I/O; the SDK's seam then FOLDS and DETACH-DELETEs), the temporal counting lane (`temporal_aggregation._restatement`; that COUNTING LANE has no
 in-product `tortoise/` caller today — its consumer is `tools/longmem_eval/`), and the mining/ingest apply-first path
 (`SDK._dedup_content_candidates`, a shipped write path reached from `mining.py` and from the public `SDK.mine_corpus`
 → `mining.mine_corpus_with_sdk`, whose `content_dedup` defaults to True — the parameter is the miner's, not

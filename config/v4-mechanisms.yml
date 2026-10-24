@@ -214,6 +214,11 @@ mechanisms:
     state: implemented
     code:
       - tortoise/dedup_classify.py
+      # legs (2) and (3) below live here, not in `dedup_classify` — listed so the
+      # row's `code:` is the set of files the mechanism is implemented in, not the
+      # set of files that happen to hold a resolvable symbol.
+      - tortoise/extractor_v2.py
+      - tortoise/sdk.py
     tests:
       - tests/test_capture_phase_d_dedup.py
     symbols:
@@ -244,9 +249,12 @@ mechanisms:
       `preconditions:` edge on this one, because that edge would force this row
       to `not-implemented` and so record legs that exist, with tests, as absent.
       ⚠️ The capture seam's paraphrase leg is scoped separately and is NOT read
-      as closed here: it enforces the BOUNDARY half of D12/O4 only, and the seam
-      that consumes a hit DETACH-DELETEs the folded node's `aboutObject` —
-      measured, tracked at #9437.
+      as closed here: `dedup_classify.rephrase_hit` returns only the verdict
+      (`(canonical_id, overlap)`) and does NO graph I/O — it is pure by its own
+      module docstring. The FOLD and the `DETACH DELETE` of the folded node's
+      `aboutObject` happen in the SDK's capture seam (`sdk.py`), which calls
+      `rephrase_hit`, then writes — measured, tracked at #9437. Attributing that
+      write to the pure helper would point a lane at a module with no write in it.
 
   - id: near_dup_detect
     name: "S2.2a-β NEAR-DUP DETECT — the pair + the §16.4 never-across guard (NO fusion)"
@@ -274,8 +282,9 @@ mechanisms:
       one:
       (1) the post-gate consolidation pass: `classify_consolidation` (which runs
       inside `execute_embed`) calls the guard on the paraphrases it folds;
-      (2) the capture seam: `dedup_classify.rephrase_hit` calls `fold_allowed`
-      and then FOLDS and DETACH-DELETEs the loser (see #9437);
+      (2) the capture seam: `dedup_classify.rephrase_hit` calls `fold_allowed` and
+      returns the hit — it is pure and does NO graph I/O. The SDK's capture seam
+      (`sdk.py`) then FOLDS and DETACH-DELETEs the loser (see #9437);
       (3) the temporal counting lane: `temporal_aggregation._restatement` calls
       `fold_allowed` when deciding whether two events are one restatement, which
       moves `count_distinct_events`' `n_events`. ⚠️ That COUNTING LANE has no

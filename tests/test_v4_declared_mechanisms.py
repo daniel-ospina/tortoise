@@ -1387,7 +1387,10 @@ def test_the_near_dup_three_sites_are_separately_registered() -> None:
         "the VERDICT site is not in the `vet` row's declared code, so the middle "
         "site of the three has no registry home"
     )
-    assert rows["exact_dedup"]["code"] == ["tortoise/dedup_classify.py"]
+    # `exact_dedup`'s own `code:` list is NOT asserted here: it is a fourth
+    # mechanism, so a change adding the file its second leg lives in would red a
+    # test named for these three sites, with no message pointing at the claim that
+    # actually broke.
 
 
 def test_the_failure_policy_absence_is_pinned_to_the_inverted_render() -> None:
@@ -1412,6 +1415,15 @@ def test_the_failure_policy_absence_is_pinned_to_the_inverted_render() -> None:
         "the render no longer marks the result DEGRADED, so the assertion above "
         "is not reading the degraded branch"
     )
+    # The ROW is checked, not only the code: the probe above proves the policy is
+    # INVERTED, so a row flipped to `implemented` beside it would publish the very
+    # "declared mechanism reads like a shipped one" this registry exists to stop —
+    # and only a state assertion can see that, because the probe itself stays green
+    # (MEASURED BEFORE THIS ASSERTION EXISTED: flipping only the row left the
+    # suite at 86 passed, so the flip was invisible).
+    row = {r["id"]: r for r in load_registry()["mechanisms"]}["failure_policy"]
+    assert row["state"] == NOT_IMPLEMENTED, row
+    assert row.get("tracking_issue") == 5087, row
 
 
 def test_the_atomic_write_absence_is_pinned_to_the_schema() -> None:
@@ -1432,6 +1444,16 @@ def test_the_atomic_write_absence_is_pinned_to_the_schema() -> None:
     (Reproduced before applying: a wrapped probe file left a line-oriented scan
     green.)
 
+    ⚠️ A STATEMENT ASSEMBLED AT RUNTIME IS REFUSED, NOT MISSED. Folding implicit
+    concatenation covers literals, but an f-string, a `+`, a `.format` or a
+    `"".join` can put the label in a VARIABLE, where no static scan can resolve it
+    (measured: `f"CREATE CONSTRAINT … UNIQUE NODE {_LABEL}"` left the constant-only
+    scan green). So a runtime-assembled DDL statement whose constant fragments
+    carry the keyword is itself a violation: it fails the pin as UNVERIFIABLE
+    rather than passing as absent. That is the third polarity this check needs —
+    absence, presence, and cannot-tell — because "cannot tell" is exactly what a
+    declared-and-absent mechanism must never be allowed to look like.
+
     ⚠️ The scan covers BOTH constraint spellings this repo's DDL vocabulary names
     (`CONSTRAINT CREATE`, the graph form, and `CREATE CONSTRAINT`, the form
     `tests/test_9079_event_writers_journal.py` lists): a pin that knew only one
@@ -1447,6 +1469,7 @@ def test_the_atomic_write_absence_is_pinned_to_the_schema() -> None:
     )
     constraints: list[str] = []
     unparsable: list[str] = []
+    assembled: list[str] = []
     for path in sorted((ROOT / "tortoise").rglob("*.py")):
         rel = path.relative_to(ROOT).as_posix()
         try:
@@ -1458,6 +1481,30 @@ def test_the_atomic_write_absence_is_pinned_to_the_schema() -> None:
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 for match in ddl.finditer(node.value):
                     constraints.append(f"{rel}: {match.group(0).strip()}")
+                continue
+            fragments: list[str] = []
+            if isinstance(node, ast.JoinedStr):
+                fragments = [
+                    v.value for v in node.values
+                    if isinstance(v, ast.Constant) and isinstance(v.value, str)
+                ]
+            elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+                fragments = [
+                    n.value for n in (node.left, node.right)
+                    if isinstance(n, ast.Constant) and isinstance(n.value, str)
+                ]
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in {"format", "join"}
+            ):
+                fragments = [
+                    n.value for n in ast.walk(node)
+                    if isinstance(n, ast.Constant) and isinstance(n.value, str)
+                ]
+            for fragment in fragments:
+                for match in ddl.finditer(fragment):
+                    assembled.append(f"{rel}: {match.group(0).strip()}")
     assert unparsable == [], (
         "a source under tortoise/ could not be parsed, so a constraint written "
         "in it is INVISIBLE to this pin — that is not the same as its absence: "
@@ -1478,6 +1525,17 @@ def test_the_atomic_write_absence_is_pinned_to_the_schema() -> None:
         "close #9879) instead of deleting this assertion:\n  "
         + "\n  ".join(point_constraints)
     )
+    assert assembled == [], (
+        "a graph constraint is ASSEMBLED AT RUNTIME (f-string / `+` / .format / "
+        "join), which this static scan cannot resolve — so whether it names Point "
+        "is UNKNOWN, and an unknown is not an absence. Write the statement as a "
+        "literal (implicit concatenation is fine), or extend this pin to resolve "
+        "the label:\n  "
+        + "\n  ".join(assembled)
+    )
+    row = {r["id"]: r for r in load_registry()["mechanisms"]}["atomic_point_write"]
+    assert row["state"] == NOT_IMPLEMENTED, row
+    assert row.get("tracking_issue") == 9879, row
 
 
 # ── MEMBERSHIP: the declared set is compared, not pinned by hand ─────────────
