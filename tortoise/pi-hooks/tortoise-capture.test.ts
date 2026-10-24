@@ -21,6 +21,7 @@ import {
   readdirSync,
   rmSync,
   symlinkSync,
+  statSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
@@ -48,6 +49,9 @@ import {
   backoffDelay,
   buildCapturePayload,
   captureHealthLine,
+  readSweepStatus,
+  recordSweepFailure,
+  countStoreSyncDeadLetters,
   captureKey,
   carriedWindow,
   clampAttempts,
@@ -154,15 +158,41 @@ const NO_CONFIG_PATH = "/nonexistent/tortoise-config.json";
  */
 let spoolSeq = 0;
 function tmpSpool(): string {
-  return mkdtempSync(join(tmpdir(), `tortoise-capture-spool-${process.pid}-${spoolSeq++}-`));
+  // The PARENT is per-instance as well, not just the spool. The store-sync
+  // store is DERIVED from the spool's parent (`join(dirname(spoolDir),
+  // "store-sync")`), so a spool sitting directly in `$TMPDIR` makes every row
+  // share `$TMPDIR/store-sync` — which is the machine's, not the test's, and is
+  // exactly the #3721 read (a stale `$TMPDIR/store-sync/dead-letter.jsonl`
+  // reds a row that asserts the clean shape).
+  const parent = mkdtempSync(join(tmpdir(), `tortoise-capture-${process.pid}-${spoolSeq++}-`));
+  const spool = join(parent, "spool");
+  mkdirSync(spool, { recursive: true });
+  return spool;
 }
 
+/**
+ * #3963/#3721, one layer deeper: `session_start` now also invokes the
+ * store-sync backstop, whose production branch is a DETACHED
+ * `spawn("tortoise", ["store-sync", …], { stdio: "ignore" })`. That child
+ * inherits `process.env` (so `TEST_ENV`/`NO_CONFIG_PATH` never reach it) and
+ * `child.unref()` lets it outlive the test run, so an un-injected seam makes a
+ * bare `node --test` read the developer's whole `~/.pi/agent/sessions`, write
+ * the REAL `~/.tortoise/store-sync/cursor.json`, and — where a credential is
+ * configured — POST real transcripts to the hosted API. Measured: 18 real
+ * spawns per run of this file before the sweep was sealed here.
+ *
+ * Every row that asserts on the sweep passes its own `sweepImpl`; this default
+ * is the seal that makes a row which does NOT care about the sweep unable to
+ * reach the spawn path at all.
+ */
 function hermeticDeps(fetchImpl: unknown, spoolDir: string = tmpSpool()) {
   return {
     fetchImpl: fetchImpl as never,
     env: TEST_ENV,
     configPath: NO_CONFIG_PATH,
     spoolDir,
+    // Sealed, not merely quiet: no test may reach a real CLI process.
+    sweepImpl: () => {},
   };
 }
 
@@ -843,6 +873,354 @@ test("session_start fires the install-probe with NO conversation content", async
   assert.equal(calls.length, 1);
   assert.match(calls[0].url, /\/v1\/sessions\/install-probe$/);
   assert.deepEqual(calls[0].body, { harness: "pi" });
+});
+
+test("#3515: session_start invokes the store-sync SWEEP once, excluding the live session", async () => {
+  const pi = mockPi();
+  const { fetchImpl } = mockFetch([{ ok: true }]);
+  const swept: Array<string | undefined> = [];
+  tortoiseCapture(pi as never, {
+    ...hermeticDeps(fetchImpl),
+    sweepImpl: (excludeSessionId) => swept.push(excludeSessionId),
+  });
+  await pi.handlers.session_start(undefined, mockCtx({ entries: [], sessionId: "sid-live" }) as never);
+  await new Promise((resolve) => setImmediate(resolve));
+  // Piece 5: the backstop over Pi's own log fires on start...
+  assert.equal(swept.length, 1, "exactly one sweep per session_start (no poller)");
+  // ...and it must NOT include the session that is live right now: filing it
+  // now makes the server skip extraction for every turn after this point.
+  assert.equal(swept[0], "sid-live");
+});
+
+test("#3515: a sweep that THROWS cannot break session_start", async () => {
+  const pi = mockPi();
+  const { fetchImpl } = mockFetch([{ ok: true }]);
+  tortoiseCapture(pi as never, {
+    ...hermeticDeps(fetchImpl),
+    sweepImpl: () => {
+      throw new Error("spawn failed");
+    },
+  });
+  // The sweep runs inside `setImmediate`, so a throw from it cannot reach the
+  // handler's own promise: asserting on that promise would pass even with NO
+  // guard (measured). The guard's real contract is "no UNCAUGHT exception", so
+  // this row watches the process-level surface instead.
+  const uncaught: unknown[] = [];
+  const onUncaught = (err: unknown): void => {
+    uncaught.push(err);
+  };
+  process.on("uncaughtException", onUncaught);
+  try {
+    await pi.handlers.session_start(undefined, mockCtx({ entries: [] }) as never);
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+  } finally {
+    process.off("uncaughtException", onUncaught);
+  }
+  assert.deepEqual(uncaught, [], "a throwing sweep must be caught, not escape into Pi");
+});
+
+// #3721/#3963, the third layer: the test suite itself must not sweep. The
+// production branch is a DETACHED `spawn("tortoise", ["store-sync", …])` that
+// inherits `process.env` and outlives the run, so a row that forgets to inject
+// `sweepImpl` reads the developer's real `~/.pi/agent/sessions`, rewrites their
+// real cursor store and can POST their real transcripts — invisible to every
+// assertion in this file (measured: 18 real spawns per run before the seal).
+// The shim `tortoise` below is the observer: if any code path reaches the
+// spawn, it writes a marker, and this row reds.
+test("#3515: hermetic test deps SEAL the sweep — a test can never spawn the real CLI", async () => {
+  if (process.platform === "win32") return; // the shim is a /bin/sh script
+  const dir = mkdtempSync(join(tmpdir(), "tortoise-capture-sweep-shim-"));
+  const marker = join(dir, "spawned");
+  writeFileSync(
+    join(dir, "tortoise"),
+    `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(marker)}\n`,
+    { mode: 0o755 },
+  );
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${dir}:${originalPath ?? ""}`;
+  try {
+    const pi = mockPi();
+    const { fetchImpl } = mockFetch([{ ok: true }]);
+    // The plain hermetic deps — NO row-local `sweepImpl`. This is what every
+    // `session_start` row in this file used to do.
+    tortoiseCapture(pi as never, hermeticDeps(fetchImpl));
+    await pi.handlers.session_start(undefined, mockCtx({ entries: [], sessionId: "sid-live" }) as never);
+    await settle();
+    // A detached child would start on its own clock; give it room to land.
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    assert.equal(
+      existsSync(marker),
+      false,
+      "hermeticDeps must inject `sweepImpl` — without it session_start spawns the REAL "
+        + "`tortoise store-sync`, which reads the developer's sessions, rewrites their real "
+        + "cursor store and can upload their transcripts",
+    );
+
+    // THE SECOND SEAL (#3515 review, ISSUE 3). `sessionStartLines` builds its
+    // deps BY HAND rather than from `hermeticDeps`, so it states the seal again
+    // — and only the site above was guarded. Removing the `sweepImpl: () => {}`
+    // at `sessionStartLines` left this whole file green while making **10 real
+    // `tortoise store-sync` spawns** per run, so the second seal was load-bearing
+    // with nothing holding it. Exercising the helper is the guard: it is the
+    // exact function whose deps drifted.
+    const viaHelper = await sessionStartLines(tmpSpool(), fetchImpl);
+    assert.ok(viaHelper.lines.length >= 0);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    assert.equal(
+      existsSync(marker),
+      false,
+      "sessionStartLines must ALSO inject `sweepImpl` — its deps are hand-written, so the "
+        + "hermeticDeps seal does not cover it and a dropped seal is invisible everywhere else",
+    );
+  } finally {
+    process.env.PATH = originalPath;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * Run ONE real sweep against a `tortoise` shim and return the status it left.
+ *
+ * The REAL spawn path on purpose: `hermeticDeps` injects `sweepImpl` precisely
+ * so no row can reach the real CLI (see the seal row above), and this helper is
+ * the one place that needs the spawn. PATH holds only a shim and the spool is a
+ * temp dir, so nothing real is read, written or uploaded.
+ */
+async function sweepWithShimDetail(
+  build: (storeDir: string) => string,
+): Promise<{ status: SweepStatus | undefined; storeDir: string; mode: number | undefined }> {
+  const dir = mkdtempSync(join(tmpdir(), "tortoise-capture-sweep-fail-"));
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${dir}:${originalPath ?? ""}`;
+  // A PRIVATE parent, not `tmpdir()`: the status file lands in the SPOOL ROOT's
+  // sibling `store-sync/`, and `tmpSpool()` shares one temp root with every
+  // other fixture — so a FAILED status written here would be read by every
+  // health-line row that follows (the same trap the dead-letter row documents,
+  // #3721).
+  const parent = mkdtempSync(join(tmpdir(), "tortoise-capture-sweep-status-"));
+  const spool = join(parent, "capture-spool");
+  mkdirSync(spool, { recursive: true });
+  const storeDir = join(parent, "store-sync");
+  // The shim is written AFTER the store path is known, so a row can have the
+  // "CLI" write its own status exactly where the extension will look — and it
+  // checks the ARGV it was called with. The spawn must NAME the store it writes
+  // to: without `--cursor-dir` the CLI defaults to `$HOME/.tortoise/store-sync`
+  // while both legs of the health line read `<spool-parent>/store-sync`, so under
+  // the documented `TORTOISE_CAPTURE_SPOOL_DIR` override the writer and the
+  // readers silently split (dead-letter count reads 0, the reason degrades to
+  // `exit_N`). The argv is the only place that shows, and nothing else asserts it.
+  writeFileSync(
+    join(dir, "tortoise"),
+    '#!/bin/sh\n'
+      + 'case " $* " in\n'
+      + `  *" --cursor-dir ${storeDir} "*) ;;\n`
+      + '  *) exit 9 ;;\n'
+      + 'esac\n'
+      + `${build(storeDir)}\n`,
+    { mode: 0o755 },
+  );
+  try {
+    const pi = mockPi();
+    const { fetchImpl } = mockFetch([]);
+    // `hermeticDeps` DEFAULTS its own `tmpSpool()`, so the spool must be passed
+    // or the extension writes its status into the shared temp root's sibling
+    // `store-sync/` — where every health-line row in this file would read it.
+    tortoiseCapture(pi as never, { ...hermeticDeps(fetchImpl, spool), sweepImpl: undefined });
+    await pi.handlers.session_start(
+      undefined,
+      mockCtx({ entries: [], sessionId: "sid-live" }) as never,
+    );
+    await settle();
+    // The child is DETACHED, so it lands on its own clock.
+    for (let i = 0; i < 50; i += 1) {
+      if (existsSync(join(storeDir, "sweep-status.json"))) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    // A row whose SHIM writes the status already has the file when the poll
+    // exits, but `close` may not have fired yet — and `close` is where the
+    // corroboration lives. Without this settle the positive control below would
+    // read the file BEFORE the code under test looked at it.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    // The mode is sampled HERE: the `finally` removes the tree, so a row cannot
+    // stat the directory after the helper returns.
+    let mode: number | undefined;
+    try {
+      mode = statSync(storeDir).mode & 0o777;
+    } catch {
+      mode = undefined;
+    }
+    return { status: readSweepStatus(storeDir), storeDir, mode };
+  } finally {
+    process.env.PATH = originalPath;
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(parent, { recursive: true, force: true });
+  }
+}
+
+async function sweepWithShim(
+  build: (storeDir: string) => string,
+): Promise<SweepStatus | undefined> {
+  return (await sweepWithShimDetail(build)).status;
+}
+
+/** ok/reason only: the record also carries `at`, which is asserted where it
+ *  matters rather than pinned to a wall clock. */
+function assertSweepFailure(status: SweepStatus | undefined, reason: string, why: string): void {
+  assert.ok(status, `${why} — no status file was written at all`);
+  assert.equal(status.ok, false, why);
+  assert.equal(status.reason, reason, why);
+}
+
+test("#3515: a sweep that fails is RECORDED, not just warned about", async () => {
+  if (process.platform === "win32") return; // the shim is a /bin/sh script
+  // The extension spawns with `stdio: "ignore"`, so the CLI's stderr — where
+  // every post-spawn failure is named — is discarded. Before this row, deleting
+  // the WHOLE `child.on(...)` failure listener left 128/128 green: the one line
+  // that connects a failing sweep to the health line had no discriminator, and
+  // the box printed `capture: OK` over an inert backstop.
+  assertSweepFailure(
+    await sweepWithShim(() => "exit 3"),
+    "exit_3",
+    "a non-zero sweep must reach the disk, because its stderr goes nowhere",
+  );
+});
+
+test("#3515: a COARSE stamp is still recognised as this sweep's own", async () => {
+  if (process.platform === "win32") return;
+  // The tolerance belongs to BOTH arms that compare a persisted `at` with our
+  // spawn stamp. Generation 13 gave it to the exit-0 arm only, so on a platform
+  // whose `at` resolves to a SECOND — or after a backwards clock step — a fast
+  // graceful failure stamped half a second before the comparison stopped being
+  // recognised as this sweep's, and the extension overwrote the CLI's
+  // `worker_missing` with `exit_1`: the generation-11 defect, reintroduced on the
+  // one platform the tolerance accepts as real.
+  assertSweepFailure(
+    await sweepWithShim((store) =>
+      `node -e 'const f=require("fs");f.mkdirSync(${JSON.stringify(store)},{recursive:true});`
+        + `f.writeFileSync(${JSON.stringify(join(store, "sweep-status.json"))},`
+        + `JSON.stringify({version:1,ok:false,reason:"worker_missing",`
+        + `at:Date.now()/1000-0.5}))'; exit 1`),
+    "worker_missing",
+    "a record half a second 'older' than our ms stamp is still this sweep's",
+  );
+});
+
+test("#3515: a STALE failure does not suppress this sweep's reason", async () => {
+  if (process.platform === "win32") return;
+  // The precedence rule is "a record from THIS sweep wins", and the `at`
+  // comparison is the only thing that makes that true. Without it, a failure
+  // recorded by any EARLIER sweep suppresses every later one forever — the line
+  // would report `worker_missing` long after `node` was fixed and the sweep was
+  // failing for a different reason.
+  const status = await sweepWithShim((store) =>
+    `node -e 'const f=require("fs");f.mkdirSync(${JSON.stringify(store)},{recursive:true});`
+      + `f.writeFileSync(${JSON.stringify(join(store, "sweep-status.json"))},`
+      + `JSON.stringify({version:1,ok:false,reason:"worker_missing",`
+      + `at:Date.now()/1000-3600}))'; exit 3`);
+  assertSweepFailure(
+    status,
+    "exit_3",
+    "an HOUR-old failure must be replaced by this sweep's own outcome",
+  );
+});
+
+test("#3515: exit 0 without a fresh status is NOT reported as healthy", async () => {
+  if (process.platform === "win32") return;
+  // Exit 0 is not proof the sweep RAN. The CLI's bookkeeping write is
+  // best-effort (`except OSError: pass`) and a `tortoise` on PATH that is not the
+  // shipped CLI exits 0 without sweeping — either way no record is written and
+  // the line keeps rendering the PREVIOUS verdict over a backstop that never ran.
+  // This is the only remaining silent-OK path the extension can detect from data
+  // it already holds.
+  assertSweepFailure(
+    await sweepWithShim(() => "exit 0"),
+    "exit_0_without_status",
+    "a zero exit that left no fresh status must not read as a working backstop",
+  );
+});
+
+test("#3515: a FRESH healthy status is not overwritten by the exit-0 check", async () => {
+  if (process.platform === "win32") return;
+  // THE POSITIVE CONTROL. The exit-0 corroboration fires when no fresh status
+  // landed — and every row that exercises it so far is a NEGATIVE one, so
+  // inverting the comparison (firing on a fresh healthy status) left the whole
+  // suite green. That inversion is not cosmetic: it OVERWRITES a healthy record
+  // and makes every working box print `store-sync FAILED (exit_0_without_status)`
+  // on every sweep.
+  const { status } = await sweepWithShimDetail((store) =>
+    `node -e 'const f=require("fs");f.mkdirSync(${JSON.stringify(store)},{recursive:true});`
+      + `f.writeFileSync(${JSON.stringify(join(store, "sweep-status.json"))},`
+      + `JSON.stringify({version:1,ok:true,shipped:2,at:Date.now()/1000}))'; exit 0`);
+  assert.ok(status, "the CLI's healthy status must survive");
+  assert.equal(status.ok, true, "a working sweep must not be reported as failed");
+  assert.equal(status.reason, undefined, "and must not acquire a failure reason");
+});
+
+test("#3515: exit 0 over a STALE healthy status is a failure, not a pass", async () => {
+  if (process.platform === "win32") return;
+  // The other side of the tolerance: it exists so a coarse-but-FRESH stamp is
+  // not misread as stale, and it must not be wide enough to accept a verdict
+  // from a PREVIOUS sweep. An hour-old `ok: true` plus a zero exit means this
+  // sweep wrote nothing, so the line would otherwise keep printing a health it
+  // did not observe.
+  assertSweepFailure(
+    await sweepWithShim((store) =>
+      `node -e 'const f=require("fs");f.mkdirSync(${JSON.stringify(store)},{recursive:true});`
+        + `f.writeFileSync(${JSON.stringify(join(store, "sweep-status.json"))},`
+        + `JSON.stringify({version:1,ok:true,at:Date.now()/1000-3600}))'; exit 0`),
+    "exit_0_without_status",
+    "a healthy verdict from an HOUR ago is not evidence about this sweep",
+  );
+});
+
+test("#3515: an EXISTING 0755 store directory is narrowed to 0700", async () => {
+  if (process.platform === "win32") return;
+  // `mkdirSync`'s `mode` applies only when it CREATES the directory. The other
+  // way this directory exists is an EARLIER generation of this extension, which
+  // made it 0755 — so without an explicit chmod the 0700 intent stayed unmet
+  // forever on every upgraded box, silently.
+  // The shim CREATES it 0755 first, which is what an older generation left
+  // behind; the extension's write must then narrow it.
+  const { mode } = await sweepWithShimDetail(
+    (store) => `mkdir -p ${store} && chmod 755 ${store} && exit 3`,
+  );
+  assert.equal(
+    mode,
+    0o700,
+    "a pre-existing 0755 store must be narrowed, not left world-readable",
+  );
+});
+
+test("#3515: the CLI's own diagnosis SURVIVES the extension's exit code", async () => {
+  if (process.platform === "win32") return;
+  // `close` fires AFTER the CLI's `main` has written its own reason and exited
+  // non-zero, so an unconditional write replaced `worker_missing` /
+  // `node_unavailable` / `no_receipt` with an opaque `exit_1` on every GRACEFUL
+  // failure — the whole product of this seam, thrown away on its commonest path.
+  // The shim below IS that sequence: write the named status, then fail.
+  const status = await sweepWithShim((store) =>
+    `node -e 'const f=require("fs");f.mkdirSync(${JSON.stringify(store)},{recursive:true});`
+      + `f.writeFileSync(${JSON.stringify(join(store, "sweep-status.json"))},`
+      + `JSON.stringify({version:1,ok:false,reason:"worker_missing",at:Date.now()/1000}))'; exit 1`);
+  assertSweepFailure(
+    status,
+    "worker_missing",
+    "the CLI named the failure; the extension must not rename it to `exit_1`",
+  );
+});
+
+test("#3515: a KILLED sweep is recorded with its SIGNAL, never as `exit_null`", async () => {
+  if (process.platform === "win32") return;
+  // A swept that the OOM killer or a box shutdown takes out is a realistic death
+  // of exactly this process, and it reports `code === null`. Reading only the
+  // exit code wrote the literal string `exit_null` — the reason thrown away
+  // precisely where the diagnosis matters.
+  assertSweepFailure(
+    await sweepWithShim(() => "kill -9 $$"),
+    "signal_SIGKILL",
+    "a killed sweep must name its SIGNAL, never the literal `exit_null`",
+  );
 });
 
 test("session_start resolves WITHOUT awaiting the probe (Pi awaits the handler at startup)", async () => {
@@ -2633,6 +3011,10 @@ async function sessionStartLines(
     env,
     configPath: NO_CONFIG_PATH,
     spoolDir: spool,
+    // This helper's deps are written out by hand rather than built from
+    // `hermeticDeps`, so the sweep seal has to be stated here too — otherwise
+    // every `sessionStartLines` caller fires the real detached spawn.
+    sweepImpl: () => {},
   });
   const lines: string[] = [];
   const original = console.log;
@@ -2867,6 +3249,105 @@ test("#2100: the per-box health line is present in every state", async () => {
   writeSpoolEntry(dir, snapshot("sess-h2"));
   assert.equal(captureHealthLine(dir, { apiKey: "tt_x" }).state, "draining");
   assert.equal(captureHealthLine(dir, { apiKey: "" }).state, "inactive");
+
+  // #3515 review: a store-sync DEAD LETTER is a permanent refusal whose cursor
+  // is CROSSED — those turns can never re-ship — and its only other surface is
+  // the worker's receipt, which this extension discards (`stdio: "ignore"`).
+  // The count therefore belongs on the one line a user sees per session.
+  //
+  // MUTATION THAT REDS THIS: drop the `countStoreSyncDeadLetters` suffix → the
+  // line reads `capture: OK (0 queued)` while two sessions are unrecoverable.
+  // A dedicated PARENT (never tmpdir() itself: the sibling path is derived from
+  // the spool's own directory, so polluting the shared temp root would leak the
+  // count into every other fixture).
+  const parent = mkdtempSync(join(tmpdir(), "tortoise-capture-health-"));
+  const withDrops = join(parent, "capture-spool");
+  mkdirSync(withDrops, { recursive: true });
+  mkdirSync(join(parent, "store-sync"), { recursive: true });
+  writeFileSync(
+    join(parent, "store-sync", "dead-letter.jsonl"),
+    `${JSON.stringify({ path: "/s/a.jsonl", reason: "HTTP 400", at: 1 })}\n`
+      + `${JSON.stringify({ path: "/s/b.jsonl", reason: "HTTP 415", at: 2 })}\n`,
+  );
+  assert.equal(countStoreSyncDeadLetters(join(parent, "store-sync")), 2);
+  const dropped = captureHealthLine(withDrops, { apiKey: "tt_x" });
+  assert.equal(
+    dropped.line,
+    "capture: OK (0 queued), 2 store-sync dead-lettered",
+    "a dead-lettered drop is named on the human line, not only in a receipt",
+  );
+  assert.equal(dropped.state, "ok", "the drop count must not change the SPOOL's state");
+  // The derivation is only hermetic if the PARENT is per-instance: two rows
+  // sharing `$TMPDIR` would share `$TMPDIR/store-sync`, which is the machine's.
+  //
+  // MUTATION THAT REDS THIS: make `tmpSpool()` an `mkdtemp` directly under
+  // `tmpdir()` → both parents are `tmpdir()` again.
+  assert.notEqual(
+    dirname(tmpSpool()),
+    dirname(tmpSpool()),
+    "each fixture spool has its own parent, so its derived store-sync store is its own",
+  );
+  // Derived from the SPOOL ROOT, never from `homedir()`: the default must not
+  // read the developer's real store (#3721 — the machine is not the code).
+  // `tmpSpool()` gives every row its own PARENT, so the derived sibling is the
+  // test's own empty `store-sync` and not a shared machine-level one.
+  assert.equal(
+    captureHealthLine(tmpSpool(), { apiKey: "tt_x" }).line,
+    "capture: OK (0 queued)",
+    "a sibling store that does not exist adds nothing",
+  );
+
+  // #3515 review (P2, fail-open): a sweep that RAN and FAILED must not read as a
+  // healthy box. `stdio: "ignore"` discards the CLI's own stderr, so without the
+  // persisted status the only line a user sees says `capture: OK` while the
+  // crash/kill recovery is inert — a dead backstop indistinguishable from a
+  // working one.
+  writeFileSync(
+    join(parent, "store-sync", "sweep-status.json"),
+    JSON.stringify({ version: 1, ok: false, reason: "node_unavailable", shipped: 0 }),
+  );
+  const failed = captureHealthLine(withDrops, { apiKey: "tt_x" });
+  assert.equal(
+    failed.line,
+    "capture: OK (0 queued), 2 store-sync dead-lettered, store-sync FAILED (node_unavailable)",
+    "a FAILED sweep is named on the human line with its reason",
+  );
+  assert.equal(failed.state, "ok", "the backstop's health is not the spool's state");
+  assertSweepFailure(
+    readSweepStatus(join(parent, "store-sync")),
+    "node_unavailable",
+    "a CLI-written status is read back verbatim",
+  );
+
+  // A status that says `ok` adds nothing — the line must not become noisy.
+  writeFileSync(
+    join(parent, "store-sync", "sweep-status.json"),
+    JSON.stringify({ version: 1, ok: true, shipped: 3 }),
+  );
+  assert.equal(
+    captureHealthLine(withDrops, { apiKey: "tt_x" }).line,
+    "capture: OK (0 queued), 2 store-sync dead-lettered",
+    "a healthy sweep must not add a suffix",
+  );
+
+  // A failure that happens BEFORE the CLI's own `main` (node cannot parse the
+  // worker) writes NO status, so the healthy `ok: true` written just above would
+  // SURVIVE and render `capture: OK` over a backstop that just died — the very
+  // silent death this seam exists to end. The extension is the only observer of
+  // the exit code, so it records the failure. Order matters here: the healthy
+  // status must already be on disk, or this row would only prove that a stale
+  // FAILED status gets replaced (which nothing depends on).
+  recordSweepFailure(join(parent, "store-sync"), "exit_1");
+  assert.equal(
+    captureHealthLine(withDrops, { apiKey: "tt_x" }).line,
+    "capture: OK (0 queued), 2 store-sync dead-lettered, store-sync FAILED (exit_1)",
+    "an exit-code failure OVERWRITES a stale healthy status the CLI could not update",
+  );
+  assertSweepFailure(
+    readSweepStatus(join(parent, "store-sync")),
+    "exit_1",
+    "the recorded failure is the one the line renders",
+  );
 
   // A HEALTH CHECK MUST NOT MUTATE WHAT IT DESCRIBES. `listSpoolEntries` (the
   // drain's scanner) REPAIRS as it reads: it records `corrupt_entry` discards

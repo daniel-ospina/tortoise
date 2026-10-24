@@ -13363,8 +13363,17 @@ _SESSION_CAPTURE_LANE_VALUES = frozenset({"hook", "store_sync"})
 # stored as a value no reader can interpret. 'unknown' is a LEGAL member: the
 # backfill/import lane admits a record with no client timestamp and records
 # this honestly, and the floor treats it as NOT passed.
+#
+# 'entry_timestamp' (#3515 piece 12, ADDED by the store-sync backstop): the
+# store-sync lane's clock is the JSONL entry's OWN ``timestamp`` field — a
+# genuinely different clock from both an mtime and an observation instant, and
+# the table's PRIMARY source for that lane. It needs its own member because
+# recording it as 'file_mtime' would state a provenance the value does not
+# have, and the floor's whole falsifiability property is that a source tells a
+# reader WHICH clock produced the number. Additive: every pre-existing value is
+# still accepted, and the plugin/CLI/backfill lanes are unchanged.
 _SESSION_CAPTURED_AT_SOURCE_VALUES = frozenset(
-    {"cli_observed", "file_mtime", "unknown"})
+    {"cli_observed", "entry_timestamp", "file_mtime", "unknown"})
 
 
 class SessionRequest(BaseModel):

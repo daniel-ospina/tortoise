@@ -1380,8 +1380,8 @@ class _EntityHandlers:
         # one of these lands on the document `:Source`). They are the same
         # undeclared-drop class as the line above and were found by reading what
         # that writer actually emits rather than what this declaration assumed:
-        # `needs_extraction` is read back by `ingest` (`coalesce(s.needs_extraction,
-        # false)`) as the extraction signal, and `authored_by`/`owned_by`/
+        # `needs_extraction` is read back by `ingest` RAW — absent is not
+        # `false`, #5140 — as the extraction signal, and `authored_by`/`owned_by`/
         # `managed_by`/`governing_agreement`/`document_knowledge_domain`/`createdAt`
         # are the document's own provenance metadata. Both spellings are listed
         # for the session/source pair because the document writer emits the
