@@ -427,8 +427,8 @@ and asserts exactly one `relation` row — `Point/p1 -> Subject/team-x`, i.e. th
 migrations plus a local FalkorDB, the same family set was measured end to end: live graph = journal-sourced
 rebuild = record-sourced rebuild, **1 : 1 : 1** for `ownedBy`, `dependsOn`, `hasPart`, `wasDerivedFrom`,
 `references` and the bare `aboutObject`, with `public.relation` going from **0 rows for every one of them** to
-one row each (the zero re-measured on the same harness before the change: `relation` = 3 rows total, `CONTAINS` 2
-+ `extractedFrom` 1). A `capture_session` on that harness leaves one residual mismatch — `aboutObject` and
+one row each (the zero re-measured on the same harness before the change: `relation` = 3 rows total, `CONTAINS` 2 and `extractedFrom` 1). A `capture_session` on that harness leaves one residual mismatch —
+`aboutObject` and
 `extractedFrom` short by the captured turns — and it is NOT this family: the captured Point itself never reaches
 the record, because its `search_keys` string meets `point.search_keys jsonb` (**R4**'s pinned
 `_SCHEMA_DISAGREEMENTS` entry, `tests/test_9078_…`), so the edges that Point carried have no endpoint to
@@ -490,9 +490,9 @@ learned it (`_supersede_took_this_edge`):
 Measured across 16 combinations (rel × direction × before/after supersede) plus the exists-and-is-re-asserted
 shape: everything agrees live↔rebuild except the residuals below.
 
-* **journal route, `wasDerivedFrom`/`aboutAction`** — MOVED live by 2b but not derivable, so 2b journals no
+- **journal route, `wasDerivedFrom`/`aboutAction`** — MOVED live by 2b but not derivable, so 2b journals no
   repoint: live has the edge at the successor, the journal rebuild has it nowhere.
-* **record route, EVERY moved structural rel** — a 2b repoint descriptor carries `src=old_id` and the record's
+- **record route, EVERY moved structural rel** — a 2b repoint descriptor carries `src=old_id` and the record's
   `DirectEdgeRepoint` is a plain upsert (`record_projection.py`), so `relation` keeps the row at the PRE-supersede
   point and never writes the successor: a record-sourced rebuild attaches those edges to the terminal point. ⚠️
   This pre-dates #9553 for the families class 1 (`extractedFrom`) and `EntityLinked` already carried — for those
@@ -501,7 +501,6 @@ shape: everything agrees live↔rebuild except the residuals below.
 
 Closing both needs the supersede move journaled for non-derivable rels AND the record taught to model a move
 (delete-old + write-successor): **#9836**, whose scope covers all eight moved rels.
-
 
 **Decision needed:** none in principle; the `about*` stored-vs-derived ruling is already made (owner,
 2026-09-23: *"keep them for now, we optimise with users"*) and **KEEP** is the instruction — this item

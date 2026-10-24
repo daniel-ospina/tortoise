@@ -16542,6 +16542,16 @@ class FalkorProjection(
                             # constrained to (old:Point{id:src}) — never a
                             # graph-wide pattern delete, never a descriptor-
                             # carried rid (internal ids die at rebuild).
+                            # ⛔ THE SAME BLIND SPOT AS THE NORMAL STRUCTURAL
+                            # DELETE-LEG (#9553): this descriptor exists when the
+                            # structural target IS the successor, and its delete
+                            # cannot tell pass-2's resurrection from an edge the
+                            # creation fold replayed at the old point. Live holds
+                            # that re-assertion, so the key is exempted the same
+                            # way (a peer review found this branch unguarded one
+                            # cycle after the sibling was fixed).
+                            if (src, etype, rows[0][0]) in replayed_at_terminal:
+                                continue
                             self.g.query(
                                 f"MATCH (old:Point {{id:$old}})-[r:{etype}]->(t) "
                                 f"WHERE ID(t) = $tid DELETE r",
