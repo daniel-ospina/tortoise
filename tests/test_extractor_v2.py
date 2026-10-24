@@ -7016,19 +7016,74 @@ class TestOperatorSelectionRules:
         assert "STRIP, DON'T DROP" in v2.S2_TMPL
 
     def test_entity_supersede_is_not_the_reversal_channel(self):
-        """An entity lifecycle supersede writes NO edge (#8503).
+        """An entity supersede writes NO operator edge — but it IS written (#8503).
 
         The measured cross-session `wp07_bluepeak_followup_op_04` SUPERSEDE
         graded `edge_missing` while the receipt's own warnings showed the
         mapper expressing the reversal as an entity lifecycle
         ("'per-service flags' supersedes='all-at-once rollout' does not resolve
         to an S3 search result", "lifecycle=superseded … is not expressible in
-        the Layer-1 payload"). The only licensed channel is the point-level
-        `supersedes`; the rule now says the entity form is inert.
+        the Layer-1 payload"). The CORRECTS edge is the point-level channel;
+        the entity form writes an ObjectSuperseded fold instead — which is why
+        the rule may not say the entity form "has no write-path form".
+
+        Code review round 7 (PR #9873): the first wording said exactly that,
+        and "an entity lifecycle alone records nothing", while the shipped
+        write path accepts an entity's own `supersedes` (any lifecycle but
+        `superseded`) into `payload["supersessions"]` → `apply_supersessions`
+        → ObjectSuperseded + `_fold_object_superseded`. A prompt that denies a
+        working channel invites the model to abandon the canonical entity
+        shape for every reversal — a regression in the recall this PR repairs.
         """
         shared = v2._s2s4_rules()
-        assert "An ENTITY-level supersede is NOT this channel" in shared
-        assert "POINT-LEVEL SUPERSEDE" in shared
+        flat = " ".join(shared.split())
+        assert "An ENTITY-level supersede is NOT this channel" in flat
+        assert "POINT-LEVEL SUPERSEDE" in flat
+        # the false blanket claim must be GONE, not softened
+        assert "has no write-path form" not in flat
+        assert "entity lifecycle alone records nothing" not in flat
+        # and the true one stated: a separate, working channel, plus the
+        # spelling that really is refused.
+        assert "ObjectSuperseded" in flat
+        assert "SEPARATE channel" in flat
+        assert "REFUSED either way" in flat
+
+    def test_entity_supersede_is_refused_only_for_lifecycle_superseded(self):
+        """Two-sided: the refused spelling and the accepted one, pinned.
+
+        The rule now says `lifecycle="superseded"` is refused either way. That
+        is a claim about the write path, so it is pinned against the write
+        path: the same entity with `created` resolves to a supersession record,
+        and with `superseded` it does not (direction ambiguous / nothing to
+        express). Without this the rule and the collector can drift apart in
+        either direction.
+        """
+        search = {"entities": [{"id": "obj_old_flags",
+                                "name": "global rollout flag",
+                                "kind": "core:other"}],
+                  "events": [], "points": []}
+        accepted = v2.execute_embed(
+            {"entities": [{"name": "per-service flags",
+                            "kind": "core:other",
+                            "lifecycle": "created",
+                            "supersedes": "obj_old_flags"}],
+             "events": [], "points": [], "operators": []},
+            search, session_id="s1")
+        assert accepted["supersessions"] == [{
+            "superseded": "obj_old_flags",
+            "supersedes_by": "per-service flags",
+            "evidence": "entity lifecycle supersedes (conversation-driven)",
+        }], accepted["supersessions"]
+        refused = v2.execute_embed(
+            {"entities": [{"name": "per-service flags",
+                            "kind": "core:other",
+                            "lifecycle": "superseded",
+                            "supersedes": "obj_old_flags"}],
+             "events": [], "points": [], "operators": []},
+            search, session_id="s1")
+        assert refused["supersessions"] == [], refused["supersessions"]
+        assert any("is ambiguous (direction unclear)" in w
+                   for w in refused["warnings"]), refused["warnings"]
 
     def test_one_mitigates_per_action_pair(self):
         """Two points expressing one action need two dampeners (#8503).
@@ -7164,3 +7219,10 @@ class TestEvidence8503Claims:
             "the SUPERSEDE_REF_MIN_TOKENS comment still describes containment")
         assert "EQUALITY test" in tail, (
             "the comment must name the equality test the leg actually performs")
+        # the tokenizer's own docstring is the OTHER half of the same rot: it
+        # argued for a contiguous-span design the leg no longer has.
+        tok_doc = _flat(v2._supersede_ref_tokens.__doc__)
+        assert "contiguous-span" not in tok_doc, (
+            "the tokenizer docstring still argues for a contiguous-span design")
+        assert "SEQUENCE EQUALITY" in tok_doc, (
+            "the tokenizer docstring must name the comparison that replaced it")

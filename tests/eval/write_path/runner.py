@@ -1528,7 +1528,7 @@ def run_benchmark(
                 operator_audit["drop_warnings"] = operator_drop_warnings(
                     session_results)
                 notes.extend(operator_drop_notes(
-                    operator_audit["drop_warnings"]))
+                    operator_audit["drop_warnings"], posture))
                 for result in session_results:
                     sid = result["session_id"]
                     owned = [
@@ -1727,7 +1727,7 @@ def extractor_identity() -> dict:
     }
 
 
-def operator_drop_notes(drops: dict) -> list[str]:
+def operator_drop_notes(drops: dict, posture: str) -> list[str]:
     """The drop-attribution note(s) for a run (#8503).
 
     ⛔ THE OPERATOR SENTENCE IS CONDITIONAL ON THE OPERATOR COUNT, ALWAYS. A
@@ -1735,9 +1735,27 @@ def operator_drop_notes(drops: dict) -> list[str]:
     drop" branch in an earlier cut (review round 5), so the wording is built
     from the two counts rather than from which branch was entered. Pure (no
     graph, no env) so every branch is unit-testable.
+
+    ⛔ AND ON THE LANE, because the count is only a measurement where the pass
+    RUNS. Every marker the classifier looks for is emitted by
+    ``tortoise/extractor_v2.py``, and the ``m2`` posture routes capture to the
+    M2 extractor, which never runs the product operator pass — so on that lane
+    the count is zero BY CONSTRUCTION and "an edge_missing is not an
+    EXTRACTOR-side drop" is an inference the measurement cannot make. Printing
+    it beside ``operator_audit_notes``' own m2 caveat ("no product relation
+    extraction … never a bar") shipped one receipt carrying two notes that
+    disagreed about what its zero meant (code-review round 7).
     """
     operator_drops = int(drops.get("operator_drops") or 0)
     refusals = int(drops.get("supersede_refusals") or 0)
+    if posture == "m2" and not operator_drops and not refusals:
+        return [
+            "operator drops (#8503): NOT MEASURED on the m2 echo lane — its "
+            "capture routes to the M2 extractor, which never runs the "
+            "product operator pass, so this zero (0 drops, 0 refusals) is "
+            "structural and says NOTHING about this receipt's edge_missing "
+            "rows; the m2 caveat below is the bound that applies"
+        ]
     if not operator_drops and not refusals:
         return [
             "operator drops (#8503): the EXTRACTOR logged no operator drop and "

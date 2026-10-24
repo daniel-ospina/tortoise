@@ -506,12 +506,16 @@ OPERATOR_SEMANTICS_RULE = (
     "  supersession (the old point is marked outdated). Same-session\n"
     "  reversals are state/validity semantics — never a point supersede.\n"
     "  Never invent an id or content: resolve against the search results only.\n"
-    "  An ENTITY-level supersede is NOT this channel: an entity\n"
-    "  \"lifecycle\": \"superseded\" (or an entity's own \"supersedes\") has no\n"
-    "  write-path form, so it produces NO reversal edge — the edge exists\n"
-    "  only when a statement POINT states the replacement and that point's\n"
-    "  \"supersedes\" names the earlier decision. If the reversal matters,\n"
-    "  say it as a point; an entity lifecycle alone records nothing."
+    "  An ENTITY-level supersede is NOT this channel: it produces NO\n"
+    "  reversal edge. An entity's own \"supersedes\" (with any lifecycle\n"
+    "  other than \"superseded\") IS accepted — but on a SEPARATE channel,\n"
+    "  an ObjectSuperseded record that folds the superseded object, not a\n"
+    "  CORRECTS operator edge; the \"lifecycle\": \"superseded\" spelling is\n"
+    "  REFUSED either way (with a ref: direction ambiguous; with none:\n"
+    "  nothing to express). The edge exists only\n"
+    "  when a statement POINT states the replacement and that point's\n"
+    "  \"supersedes\" names the earlier decision. So when the reversal must\n"
+    "  appear as this edge, say it as a point."
 )
 
 
@@ -6594,13 +6598,14 @@ SUPERSEDE_REF_MIN_TOKENS = 5
 def _supersede_ref_tokens(text: str) -> list[str]:
     """ORDERED content tokens of a supersede ref / prior content.
 
-    Order is the point: a contiguous-span test cannot cross a substituted
-    entity, a changed number, a changed scope word or a role inversion, nor a
-    recombination across two clauses, while a bag-of-tokens ratio silently
-    does all of them. Frame words are dropped here because this tokenizer only
-    feeds the LENGTH FLOOR; the span test uses ``_supersede_span_tokens``,
-    which keeps them. Sentence punctuation is stripped per token — a copied ref
-    routinely differs from its prior by a trailing '.' or a quote mark.
+    Order matters because the comparison is SEQUENCE EQUALITY (frame-edge
+    trimmed, see ``_span_contains``), not a bag of tokens: a role inversion, a
+    swapped pair or a recombination across two clauses all change the sequence
+    and therefore refuse without a separate gate. This tokenizer is NOT the
+    span test's input — it only feeds the LENGTH FLOOR, so frame words are
+    dropped here; the span test uses ``_supersede_span_tokens``, which keeps
+    them. Sentence punctuation is stripped per token — a copied ref routinely
+    differs from its prior by a trailing '.' or a quote mark.
     """
     out: list[str] = []
     for raw in _norm(text).split():
