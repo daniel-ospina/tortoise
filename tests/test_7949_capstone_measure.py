@@ -823,7 +823,7 @@ def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
 
     The shipped constant said "the receipt's stats carries 20 keys" — a number
     nothing counted — and blamed `extract_session_v2`, which in fact BUILDS
-    `result["vet"]` (:8288-8292) and `result["classify_later"]` (:8278-8285). The
+    `result["vet"]` (:8288-8292) and `result["classify_later"]` (:8278-8284). The
     drop is the meta fold at `tortoise/sdk.py:12487` — the cite was `:12196` until
     this round, which at this PR's base is a comment line 200 lines away, so the
     bundle was sending the #9116 fixer into unrelated code. Getting it wrong sends
@@ -1108,12 +1108,14 @@ def test_the_not_established_section_quotes_the_s5_operator_counts_the_log_measu
 # ⚠️ Coverage is every cite that NAMES ITS FILE (`sdk.py`, `edges.py`,
 # `extractor_v2.py` — the three sources the bundle prints numbers for), in all
 # FOUR documents a reader is sent into: the README, both probes, and the
-# `docs/00_index.md` row that is the entry point to this bundle. A bare `:NNNN`
+# `docs/00_index.md` row that is the entry point to this bundle (only THAT row —
+# the index routes ~200 other rows, and another epic's `sdk.py` cite must not be
+# told to add a phrase for a line it is not about). A bare `:NNNN`
 # continuation (the docs write `` `extractor_v2.py:7912` and `:7932` ``) is NOT a
 # cite this leg can resolve, because the file is named only once for several
 # numbers; the README's bare `` `symbol` `:NNN` `` step table is owned by
 # `test_7949_capstone_verdict_check.py`. `extractor_v2.py` was the first gap: its
-# 15 cites (`8288-8292`, `8278-8285`, `7928-7932`, `7912`, `7881`, `7781-7801`,
+# 15 cites (`8288-8292`, `8278-8284`, `7928-7932`, `7912`, `7881`, `7781-7801`,
 # `7804`) matched no pattern at all, so they were neither resolved nor reported
 # `unmatched` — the leg stayed green over numbers it never read. The index row
 # was the second: nothing but a hand re-derivation stood between it and the same
@@ -1131,6 +1133,13 @@ _BUNDLE_SOURCES = {
     "sdk": _REPO / "tortoise/sdk.py",
     "edges": _REPO / "tortoise/projection/edges.py",
     "extractor_v2": _REPO / "tortoise/extractor_v2.py",
+}
+
+# `docs/00_index.md` is a shared router of ~200 rows, so only the paragraph that
+# names this bundle is swept: another epic's row citing `sdk.py` must not red the
+# #7949 pin (it would be told to add a phrase for a line it is not about).
+_BUNDLE_PARAGRAPH_FILTER = {
+    "docs/00_index.md": re.compile(r"#7949"),
 }
 
 # `tortoise/sdk.py:12487`, ``tortoise/projection/edges.py:2424-2450``, `edges.py:468`,
@@ -1152,31 +1161,37 @@ _BUNDLE_HISTORICAL = {
 }
 
 # (label, source, phrases the DOCUMENT uses to name the line, what the line must
-#  carry, how to check it). No numbers: those are read out of the document.
+#  carry, how to check it, how the cited END must read). No numbers: those are read
+#  out of the document.
 #   line        — every anchor appears IN the cited line
 #   def         — the cited line, stripped, STARTS WITH the anchor
 #   span        — every anchor appears somewhere in the cited line or range
 #   method-span — the cited line is the `def`, and the range stays inside it
+# The end spec bounds a RANGE (`None` when the cite is a single line):
+#   ("exact", "}")     — the cited end line, stripped, is exactly this; a range
+#                        that grows one line past the block it names reds
+#   ("contains", tok)   — the cited end line carries this token
 _BUNDLE_RULES = (
     ("the meta fold S2.2/S2.3 are dropped at", "sdk",
      ('"stats": out.get', "meta fold", "same fold", "dropped at", "must target"),
-     ('"stats": out.get("stats")',), "line"),
+     ('"stats": out.get("stats")',), "line", None),
     ("the call that writes the references edge", "sdk",
      ("proj.link_source_to_event(",),
-     ("proj.link_source_to_event(",), "line"),
+     ("proj.link_source_to_event(",), "line", None),
     ("the capture path's turn writer", "sdk",
-     ("_TURN_WRITE_CYPHER",), ("_TURN_WRITE_CYPHER = (",), "line"),
+     ("_TURN_WRITE_CYPHER",), ("_TURN_WRITE_CYPHER = (",), "line", None),
     ("the entry point", "sdk",
-     ("_extract_session_v2",), ("def _extract_session_v2(",), "def"),
+     ("_extract_session_v2",), ("def _extract_session_v2(",), "def", None),
     ("the references target labels", "edges",
      ("_DERIVATION_REFERENCES_LABELS",),
-     ("_DERIVATION_REFERENCES_LABELS = frozenset",), "line"),
+     ("_DERIVATION_REFERENCES_LABELS = frozenset",), "line", None),
     ("the #5199 anchor expression and the set the writers concatenate", "edges",
      ("_anchor_on_create",),
      ("def _anchor_on_create(", "_DERIVATION_ANCHOR_SET = _anchor_on_create("),
-     "span"),
+     "span", ("contains", "_DERIVATION_ANCHOR_SET = _anchor_on_create(")),
     ("the references writer", "edges",
-     ("link_source_to_event",), ("def link_source_to_event(",), "method-span"),
+     ("link_source_to_event",), ("def link_source_to_event(",), "method-span",
+     None),
     # `extractor_v2.py` — the surfaces whose ABSENCE is #9116. Two cites per
     # surface: the block it EMITS (the `result[...] = {` assignment, a range)
     # and the FLAG computed earlier (a single line). The surface rule comes
@@ -1184,23 +1199,25 @@ _BUNDLE_RULES = (
     # neighbouring cite happens to share.
     ("the classify-later surface the extractor emits", "extractor_v2",
      ('result["classify_later"]', "result['classify_later']"),
-     ('result["classify_later"] = {',), "span"),
+     ('result["classify_later"] = {',), "span", ("exact", "}")),
     ("the vet surface the extractor emits", "extractor_v2",
      ('result["vet"]', "result['vet']"),
-     ('result["vet"] = {',), "span"),
+     ('result["vet"] = {',), "span", ("exact", "}")),
     ("the classify-later flag, computed before the passed step is reached",
      "extractor_v2", ("classify_later",),
-     ("classify_later = kind_classifier is not None",), "line"),
+     ("classify_later = kind_classifier is not None",), "line", None),
     ("the vet flag, computed before the pass is reached", "extractor_v2",
-     ("vet_enabled",), ("vet_enabled = (",), "line"),
+     ("vet_enabled",), ("vet_enabled = (",), "line", None),
     ("the vet pass's fail-open exception path", "extractor_v2",
      ("_run_vet_pass",),
-     ("except Exception as e:", "return embed_list, {}, ["), "span"),
+     ("except Exception as e:", "return embed_list, {}, ["), "span",
+     ("contains", '], {}')),
     ("the early-return block that emits both OFF surfaces", "extractor_v2",
      ("early-return path",),
-     ('"classify_later": {"enabled"', '"vet": {"enabled"'), "span"),
+     ('"classify_later": {"enabled"', '"vet": {"enabled"'), "span",
+     ("contains", '"vet": {"enabled"')),
     ("the extractor entry point", "extractor_v2",
-     ("extract_session_v2",), ("def extract_session_v2(",), "def"),
+     ("extract_session_v2",), ("def extract_session_v2(",), "def", None),
 )
 
 
@@ -1247,8 +1264,9 @@ def _bundle_rule(source: str, paragraph: str, base: int, cite_pos: int):
     return best[1] if best else None
 
 
-def _bundle_missing(kind: str, anchors, source_lines, start: int, end):
-    """[] when the cite resolves, else the anchors the cited lines do not carry."""
+def _bundle_missing(kind: str, anchors, source_lines, start: int, end,
+                    end_spec=None):
+    """[] when the cite resolves, else what the cited lines do not carry."""
     stop = int(end) if end else start
     if kind == "line":
         got = source_lines[start - 1]
@@ -1258,7 +1276,19 @@ def _bundle_missing(kind: str, anchors, source_lines, start: int, end):
         return [] if got.lstrip().startswith(anchors[0]) else [anchors[0]]
     if kind == "span":
         span = source_lines[start - 1:stop]
-        return [a for a in anchors if not any(a in ln for ln in span)]
+        missing = [a for a in anchors if not any(a in ln for ln in span)]
+        # A RANGE's end is a claim too: `8278-8284` that closes one line into the
+        # next block still carries its start anchor and would otherwise pass, so
+        # the end line has to read what the rule says it reads.
+        if end and end_spec:
+            how, token = end_spec
+            got = source_lines[stop - 1]
+            if how == "exact" and got.strip() != token:
+                missing.append(f"an end line reading {token!r} (it reads {got.strip()!r})")
+            elif how == "contains" and token not in got:
+                missing.append(
+                    f"an end line carrying {token!r} (it reads {got.strip()!r})")
+        return missing
     # method-span: the def is HERE, and the range must not run into the next one
     assert kind == "method-span", kind
     if not source_lines[start - 1].lstrip().startswith(anchors[0]):
@@ -1278,11 +1308,12 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     `extractor_v2.py`) across `README.md`, both probes, and the `docs/00_index.md`
     row that is the bundle's entry point — 44 cites at this head.
 
-    Non-vacuity: against `main`'s documents 22 of the 44 cites red across five
+    Non-vacuity: against `main`'s documents 26 of the 44 cites red across five
     rules (`sdk.py:12401` for the meta fold, `12682` for the capture path,
     `11623` for the entry point, `edges.py:467` for the reference labels and
     `2168-2192` for the writer) — the cited lines hold the #4716 re-key comments
-    instead of the symbols.
+    instead of the symbols — and the four `extractor_v2.py:8278-8285` cites red on
+    the END bound alone (the range closes one line into the next block).
     The `extractor_v2.py` cites are correct at this head, so those rules cannot red
     on `main`; they are the tripwire for the NEXT insertion above `8288`/`7912`/
     `7804`, and they bite: with the README's `` `extractor_v2.py:7912` `` moved to
@@ -1302,6 +1333,9 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
         for match in _BUNDLE_CITE.finditer(text):
             paragraph = next((s, e) for s, e in paragraphs
                              if s <= match.start() < e)
+            scope = _BUNDLE_PARAGRAPH_FILTER.get(doc_name)
+            if scope and not scope.search(text[paragraph[0]:paragraph[1]]):
+                continue
             marker = _bundle_historical(text[paragraph[0]:paragraph[1]])
             if marker:
                 skipped.setdefault(marker, []).append(match.group(0))
@@ -1314,11 +1348,11 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
             if rule is None:
                 unmatched.append(cite)
                 continue
-            label, _, _, anchors, kind = rule
+            label, _, _, anchors, kind, end_spec = rule
             fired.add(label)
             checked += 1
             missing = _bundle_missing(kind, anchors, source_lines[source],
-                                      start, end)
+                                      start, end, end_spec)
             if missing:
                 shown = source_lines[source][start - 1].strip()
                 failures.append(

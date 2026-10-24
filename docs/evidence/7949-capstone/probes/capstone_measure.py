@@ -55,7 +55,7 @@ literal — a run that cannot read a flag back as set REFUSES rather than printi
 claim nothing supports. They are still UNWITNESSABLE through
 ``capture_session``'s receipt, and the failure is ONE LAYER UP from where it was
 first attributed: ``extract_session_v2`` DOES build the surfaces
-(``result["classify_later"]`` at ``tortoise/extractor_v2.py:8278-8285`` and
+(``result["classify_later"]`` at ``tortoise/extractor_v2.py:8278-8284`` and
 ``result["vet"]`` at ``:8288-8292``); they are dropped at the meta fold,
 ``tortoise/sdk.py:12487`` (``"stats": out.get("stats") or {}`` inside
 ``_extract_session_v2`` — the sibling key is never copied). That is #9116, cited
@@ -1324,7 +1324,7 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
             f"from this one, so this run does not claim the pass ran. Its "
             f"surface EXISTS one layer down: extract_session_v2 emits "
             f"result['classify_later'] UNCONDITIONALLY at "
-            f"tortoise/extractor_v2.py:8278-8285. It "
+            f"tortoise/extractor_v2.py:8278-8284. It "
             f"is DROPPED at the same meta fold, tortoise/sdk.py:12487 "
             f"(\"stats\": out.get(\"stats\") inside _extract_session_v2). "
             f"Measured on this run: the same {stats_key_total} stats key(s) and "
