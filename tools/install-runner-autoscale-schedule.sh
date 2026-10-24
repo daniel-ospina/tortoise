@@ -183,6 +183,23 @@ has_cron() {
   command -v crontab >/dev/null 2>&1 && [ -n "$(command -v cron 2>/dev/null || command -v crond 2>/dev/null || ls /usr/sbin/cron 2>/dev/null)" ]
 }
 
+# Is a cron DAEMON live right now? `has_cron` answers a different question — WHICH scheduler this box
+# has, from binary presence — and the two are not the same: `crontab` plus an installed `cron` with
+# the daemon STOPPED is the normal shape of a container/VM image without an init, and it is exactly
+# the shape that reaches this leg (`has_systemd` requires `/run/systemd/system`). The systemd leg
+# refuses on `is-active != active` and the launchd leg on a missing label; without this check the
+# cron leg installs cleanly, prints "installed: cron entry -> …" and exits 0 on a box where the
+# entry never fires — the inert enforcer this file's header refuses (cycle 2 review, P2).
+#
+# `pgrep -x` matches the exact process name, so it cannot be fooled by a substring hit
+# (`cron-line-helper`). A `procps`-less box has no `pgrep`; there the binaries are all we can see,
+# and the install-time probe still checks the schedule, so an absent `pgrep` must NOT turn this into
+# a refusal — fail-closed is "we looked and it is not there", not "we could not look".
+cron_daemon_running() {
+  command -v pgrep >/dev/null 2>&1 || return 0
+  pgrep -x cron >/dev/null 2>&1 || pgrep -x crond >/dev/null 2>&1
+}
+
 platform() {
   # A TEST SEAM, like AUTOSCALE_PYTHON: `has_systemd` needs /run/systemd/system, which no
   # hermetic sandbox can create, so the systemd leg would otherwise be untestable on the macOS box
@@ -431,8 +448,18 @@ status() {
         echo "NOT installed (no $tmr)"; armed=0
       fi ;;
     cron)
-      if crontab -l 2>/dev/null | grep -qF "$LABEL-cron"; then
+      # `grep -F … >/dev/null`, never `grep -q`: `-q` exits at the FIRST match, so a still-writing
+      # `crontab -l` takes SIGPIPE and `set -o pipefail` reports 141 — which `if` reads as "no
+      # match". Whether it fires depends on the buffer and on how much `crontab -l` still has to
+      # write when `-q` exits, so it is not a rare shape: measured on the dev box, 85 KB did NOT
+      # reproduce and 2.2 MB DID (141, 5/5) — host-dependent, and unfixable by sizing. When it
+      # does, `--status` reported an armed schedule as NOT installed (armed=0, exit 2) and a
+      # re-install APPENDED a second identical line, firing the guard twice per period (cycle 2
+      # review, P2 — the same SIGPIPE bug fixed for launchd, one branch over).
+      if crontab -l 2>/dev/null | grep -F "$LABEL-cron" >/dev/null; then
         echo "installed: cron entry present"; crontab -l 2>/dev/null | grep -F "$LABEL-cron"
+        # ⛔ INSTALLED IS NOT ARMED: with the daemon down the entry never fires (see `has_cron`).
+        cron_daemon_running || { echo "WARNING: no cron daemon is running — the entry will not fire"; armed=0; }
       else echo "NOT installed (no $LABEL-cron in crontab)"; armed=0; fi ;;
     launchd)
       local plist="$AGENTS_DIR/$PLIST_LABEL.plist"
@@ -526,6 +553,19 @@ esac
 # promise holds on every refusal path.
 CRON_LINE=""
 [ "$PLATFORM" = cron ] && { CRON_LINE="$(cron_line)" || exit 2; }
+# ⛔ AND THE SAME RULE FOR A CRON ENTRY ON A BOX WITH NO CRON DAEMON. The systemd leg refuses on
+# `is-active != active` and the launchd leg on a missing label, but the cron leg checked only that
+# the BINARIES exist. `crontab` present with the daemon stopped is the normal shape of a container
+# or VM image without an init — and it is exactly the shape that REACHES this leg, because
+# `has_systemd` requires `/run/systemd/system`. Installed there, the entry never fires while the
+# installer prints "installed" and exits 0: the inert enforcer the header refuses (cycle 2 review,
+# P2). Checked HERE, with the other pre-write gates, so the "a refusal writes NOTHING" promise
+# holds — the same placement rule the period gate above follows.
+[ "$PLATFORM" = cron ] && { cron_daemon_running || {
+  echo "REFUSED: cron is installed but no cron daemon is running, so an entry here would never fire." >&2
+  echo "         Start the daemon (systemctl start cron/crond), or run tools/runner_autoscale.py from the fleet's controller loop." >&2
+  exit 2
+}; }
 # ⛔ "INSTALLED" MUST MEAN "IT WILL DO SOMETHING". One READ-ONLY pass with the pinned interpreter,
 # BEFORE anything is written. Exit 2 is the tool's own UNMEASURABLE verdict (no `gh` on PATH, no
 # memory reading, unreadable pool) — a schedule armed in that state fires every INTERVAL into a
@@ -536,7 +576,14 @@ CRON_LINE=""
 if [ "${AUTOSCALE_SKIP_PROBE:-0}" != "1" ]; then
   probe_out="$(probe "$TOOL")"
   probe_rc=$?
-  if [ "$probe_rc" = "2" ]; then
+  # ⛔ ANY NON-ZERO PROBE IS A REFUSAL, not just the tool's own exit 2. Exit 2 is the tool's
+  # UNMEASURABLE verdict, but a CRASH (exit 1: uncaught exception, a truncated interpreter, a
+  # panic) is the most inert outcome there is, and propagating only `2` armed the schedule and
+  # printed "installed" on a box where `--status` immediately reports `probe: FAILED (exit 1)` and
+  # exits 2 — install and status disagreeing about the same box, in the direction the sibling
+  # `status()` check already closed with `[ "$probe_rc" = "0" ] || return 2` (cycle 2 review, P2).
+  # `AUTOSCALE_SKIP_PROBE=1` is the explicit opt-out and never reaches here.
+  if [ "$probe_rc" != "0" ]; then
     echo "REFUSED: the guard cannot MEASURE on this box, so a schedule here would fire and do nothing." >&2
     echo "         probe said: $(printf '%s' "$probe_out" | tail -1)" >&2
     echo "         fix that reading (gh on PATH, memory readable), or AUTOSCALE_SKIP_PROBE=1 to arm it anyway." >&2
@@ -572,7 +619,7 @@ case "$PLATFORM" in
     systemctl list-timers "$LABEL.timer" --no-pager 2>/dev/null | sed -n '1,2p' ;;
   cron)
     line="$CRON_LINE"
-    if crontab -l 2>/dev/null | grep -qF "$LABEL-cron"; then
+    if crontab -l 2>/dev/null | grep -F "$LABEL-cron" >/dev/null; then
       cur="$(crontab -l 2>/dev/null | grep -F "$LABEL-cron")"
       if [ "$cur" = "$line" ]; then echo "installed (unchanged): cron entry present"; exit 0; fi
       { crontab -l 2>/dev/null | grep -vF "$LABEL-cron" || true; } | { cat; echo "$line"; } | crontab - \
@@ -596,11 +643,13 @@ case "$PLATFORM" in
       # ⛔ `grep -q` IS WRONG HERE, AND `set -o pipefail` MAKES IT A FALSE "NOT LOADED". `-q` exits
       # at the FIRST match, so a still-writing `launchctl list` takes SIGPIPE and the pipeline
       # reports 141 — which `!` reads as "the agent is not loaded" even when it is. A real
-      # `launchctl list` on a Mac with a few hundred jobs is 10-40 KB, well past the pipe buffer,
-      # so this is the COMMON case: every healthy re-run would bootstrap an already-loaded agent,
-      # the bootstrap would fail ("Bootstrap failed: 5"), and the installer would exit 1 with the
-      # opposite of the truth (cycle 2, P1). `-F ... >/dev/null` reads to EOF, so there is no
-      # SIGPIPE — the same shape the final verification below already uses.
+      # `launchctl list` on a busy Mac emits far more than one line, so this is not a rare shape:
+      # every healthy re-run would bootstrap an already-loaded agent, the bootstrap would fail
+      # ("Bootstrap failed: 5"), and the installer would exit 1 with the opposite of the truth
+      # (cycle 2, P1). The reproduction SIZE is host-dependent (measured on the analogous crontab
+      # read below: 85 KB did not reproduce, 2.2 MB did), so the fix is the SHAPE — read to EOF —
+      # and never a size budget. `-F ... >/dev/null` reads to EOF, so there is no SIGPIPE — the
+      # same shape the final verification below already uses.
       if ! launchctl list 2>/dev/null | grep -F "$PLIST_LABEL" >/dev/null; then
         launchctl bootstrap "gui/$(id -u)" "$plist" \
           || { echo "ERROR: $PLIST_LABEL is not loaded and could not be bootstrapped" >&2; exit 1; }
