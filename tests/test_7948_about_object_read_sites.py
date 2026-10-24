@@ -2500,9 +2500,9 @@ def _route_table() -> dict[tuple[str, str], frozenset[str]]:
 #: ⚠️ **The figures an earlier wording here carried were re-measured, not merely
 #: re-labelled.** It reported `16.5 %` for a uniform 5 and `15.6 %` for a uniform 3,
 #: and justified the tighter number with three substitutions that stayed green at 5
-#: and red at 3 (rows 22/24's reach cells swapped, rows 28/30's REST doors swapped,
-#: row 28's verb changed). At `3f2f48932` — the commit that wrote that sentence —
-#: the figures reproduce **against that commit's own, still-defective index** (it
+#: and red at 3 (rows 22/24's reach cells swapped, rows 28-31's backup doors
+#: swapped, row 28's verb changed). At `3f2f48932` — the commit that wrote that
+#: sentence — the figures reproduce **against that commit's own, still-defective index** (it
 #: had no `in_function` flag at all, so function locals were symbols): uniform
 #: 2/3/4/5 = 26/59/90/170 of 418 and the shipped predicate 69, which is why
 #: `16.5 %` (69/418) reproduces there and `15.6 %` reproduces on NO index (a
@@ -2511,15 +2511,20 @@ def _route_table() -> dict[tuple[str, str], frozenset[str]]:
 #: CURRENT sweep above, locals excluded, applied to that same tree measures
 #: 24/34/42/52 and a shipped 36 — the difference is the defect, not the tree.
 #: The DISCRIMINATION the old wording claimed was TRUE there, and the per-DOOR
-#: distances are what show it, not a per-cell minimum: the swapped cells of rows
-#: 22/24 resolve at 5, 5 (row 24's reader via row 22's two doors) and 3, 4, 4
-#: (row 22's reader via row 24's three doors); rows 28/30's REST doors at 5 / 5;
-#: row 28's verb at 5 — every door inside a uniform 5, and a cell is STILL
-#: refused at 3 because two of row 22's three substituted doors sit at 4 (the arm
-#: refuses a CELL when ANY of its doors exceeds the budget, so the leading `3` is
-#: one green door inside a refused cell, not a green cell). What changed is that
-#: the local-symbol fix removes the collisions those substitutions were
-#: exploiting: under the current index all three are REFUSED even at a uniform 5.
+#: distances are what show it, not a per-cell minimum. Measured there, per door and
+#: per CELL — a swapped DOOR changes every cell that carries it, so the backup swap
+#: is FOUR cells (rows 28/29 carry `POST /v1/backups`, rows 30/31 its `restore`
+#: sibling), not the two the old wording named: row 24's reader via row 22's two
+#: doors 5, 5; row 22's reader via row 24's three doors 3, 4, 4; rows 28/29 via
+#: `POST /v1/backups/restore` 5, 5; rows 30/31 via `POST /v1/backups` 5, 7; row
+#: 28's verb `GET` 5. **Every one of those cells is refused at a uniform 3** —
+#: row 22's because two of its three substituted doors sit at 4, since the arm
+#: refuses a CELL when ANY of its doors exceeds the budget (so the leading `3` is
+#: one green door inside a refused cell, never a green cell) — while at a uniform
+#: 5 all of them are accepted except row 31's 7-hop cell, refused there as well.
+#: What changed is that the local-symbol fix removes the collisions those
+#: substitutions were exploiting: under the current index all three are REFUSED
+#: even at a uniform 5.
 #: The budget stays at 3 — it is a bound, and nothing here depends on the old
 #: rates.
 _DOOR_REACH_HOPS = 3
@@ -2790,6 +2795,15 @@ def test_the_door_attribution_refuses_a_door_that_reaches_another_reader():
         "mcp_server.py::_preview_supersede",
         "sdk.py::TortoiseSDK.belief_timeline",
     ):
+        # The READER needs the guard too, not just the door: a reader id that no
+        # longer resolves is absent from the index, `_door_distance` returns
+        # `None`, and the assertion below passes while testing NOTHING — the same
+        # vacuity the door guard above closes, one operand over.
+        assert wrong in _symbol_index()[1], (
+            f"the probe reader `{wrong}` is not a node in the symbol index, so the "
+            "`not _door_reaches(...)` assertion below would pass on a reader that "
+            "cannot be reached because it does not exist"
+        )
         assert not _door_reaches("MCP tortoise_suggest_entry_points", wrong), (
             f"MCP `tortoise_suggest_entry_points` is attributed to `{wrong}`, which it "
             "does not reach — the door→reader predicate answers True too freely, so "
