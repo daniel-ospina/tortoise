@@ -6044,7 +6044,7 @@ _MAGNITUDE_QUALIFIER = r"(?:entire|whole|full|overall|complete|remaining|aforeme
 #: quantifier-then-article, and the two vocabularies are this file's single lists rather
 #: than a shape (`\w+\s+` would swallow `no such` and every innocent noun phrase).
 _MAGNITUDE_QUANTIFIER = r"(?:all|every|each|both|some|any|no)"
-_MAGNITUDE_ARTICLE = r"(?:the|this|that|these|those|its|their|our|his|her|your|my)"
+_MAGNITUDE_ARTICLE = r"(?:the|this|that|these|those|its|their|our|his|her|your|my|a|an)"
 
 #: The quantities a proportion claim is ABOUT — the arm, its cost, its work, in the
 #: plural too ("most of the walks pay the parse"), or an ANAPHOR standing in for one
@@ -6106,11 +6106,6 @@ _MAGNITUDE_SUBJECT = (
     rf"|(?:{_MAGNITUDE_ANAPHOR})\b)"
 )
 
-
-#: A multiplier slot — a DIGIT or a number WORD, so `4 times` cannot be green where
-#: `4x` reds and `three in four` cannot be green where `3 in 4` reds (cycle-3 review).
-_MAGNITUDE_NUMERAL = r"(?:\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten)"
-
 #: A magnitude asserted in WORDS — the form `_unframed_durations` cannot see, because
 #: it matches digits. Each alternative names a proportion without naming a number: the
 #: same unsettleable claim in a different alphabet.
@@ -6160,6 +6155,15 @@ _WORD_NUMERAL = (
     r"|ten|one|two|three|four|five|six|seven|eight|nine)"
 )
 
+#: A multiplier / ratio / multiple slot — a DIGIT or a number WORD, and the WORD is
+#: `_WORD_NUMERAL` rather than its own list, so a numeral cannot be closed in the
+#: percentage slot and open in the multiplicative one — which is exactly what happened:
+#: this slot stopped at `ten`, so `eleven times the walk`, `a factor of eleven`,
+#: `twentyfold the walk` and `three in eleven of the walks` were GREEN while their
+#: `ten` twins red (`#9528` re-review round 4). Declared here, AFTER `_WORD_NUMERAL`,
+#: because it now reads that vocabulary.
+_MAGNITUDE_NUMERAL = rf"(?:\d+(?:\.\d+)?|{_WORD_NUMERAL})"
+
 #: A percentage figure — a DIGIT or a number WORD — in every spelling the file
 #: closes. One constant serves both the word-form guard and the ratio arm's bare
 #: sweep, so a spelling cannot be closed in one and open in the other — including the
@@ -6189,7 +6193,8 @@ _MAGNITUDE_WORDS = re.compile(
     rf"(?:(?:small|large|tiny|negligible|modest|minor|major|significant|"
     rf"substantial|smallish)\s+)?"
     rf"(?:third|thirds|half|halves|quarter|quarters|fourths?|fifths?|sixths?|"
-    rf"sevenths?|eighths?|ninths?|tenths?|elevenths?|twelfths?|\w+teenths?|"
+    rf"sevenths?|eighths?|ninths?|tenths?|elevenths?|twelfths?|\d+(?:st|nd|rd|th)s?|"
+    rf"\w+teenths?|"
     rf"\w+tieths?|(?:hundred|thousand|million|billion|trillion)ths?|"
     rf"fraction|share|portion|part|proportion|percentage|percent|"
     rf"ratio|majority|minority|sliver|chunk))\s+(?:of|in)\s+{_MAGNITUDE_SUBJECT}"
@@ -6228,7 +6233,7 @@ _MAGNITUDE_WORDS = re.compile(
 #: GREEN. Stated cost, not discovered later: `# the upper half of the walk` now REDs,
 #: and the remediation is one edit.
 _MAGNITUDE_POSITIONAL = re.compile(
-    r"\b(?:first|second|third|left|right|top|bottom)\s+$",
+    r"\b(?:first|second|third|left|right|top|bottom|last|final)\s+$",
     re.IGNORECASE,
 )
 
@@ -6256,7 +6261,8 @@ _MAGNITUDE_MEASUREMENT_NOUNS = frozenset(
 #: phase sentence, differing from their GREEN twins only by a later clause's noun
 #: (`#9528` re-review). The price is stated: a possessive three words into the divided
 #: thing (`the entire first gate walk's cost`) is now GREEN, and the dropped-apostrophe
-#: spellings the file pins are all at positions 0-2.
+#: RED legs the file pins sit at position 1 — the multi-word spelling at position 2 is the
+#: STATED GREEN residual (`# the second half of the gate walk cost`), not an oversight.
 _MAGNITUDE_TAIL_WORDS = 3
 
 
@@ -6304,7 +6310,17 @@ def _MAGNITUDE_PHASE_SHARE_TAIL(tail: str) -> bool:
     if not head:
         return False
     rest = tail[head.end() :]
-    determiner = re.match(r"(?:the|this|that|these|those)\s+", rest, re.IGNORECASE)
+    # A QUANTIFIER can sit in front of the divided thing's determiner (`of all its cost`,
+    # `of both their runs`), and one strip layer could not consume both: the pronoun
+    # landed at position 1 and the whole share read GREEN (`#9528` re-review round 4).
+    quantifier = re.match(rf"(?:{_MAGNITUDE_QUANTIFIER})\s+", rest, re.IGNORECASE)
+    if quantifier:
+        rest = rest[quantifier.end() :]
+    determiner = re.match(
+        r"(?:the|this|that|these|those|a|an)\s+",
+        rest,
+        re.IGNORECASE,
+    )
     if determiner:
         rest = rest[determiner.end() :]
     words = re.findall(r"[\w’'-]+", rest)[: _MAGNITUDE_TAIL_WORDS]
@@ -6405,13 +6421,19 @@ def _unsettleable_magnitudes(comment: str) -> list[str]:
       are RED), or a PERCENTAGE WITH NO SUBJECT AT ALL (a bare figure whose value
       is written and whose object is not — written without a concrete number here, so
       this description is not itself a bare figure).
-      ⚠️ The phase exemption's NOUN set is closed too (`half|halves|most|part|parts|
-      portion|portions|share|shares|fraction|fractions`), so a positional qualifier in
-      front of a SHARE noun REDs: `# the first third of the walk` and
-      `# the last quarter of the run` are refused even though they name a phase, because
-      `third` and `quarter` are the share class this chain enumerates and admitting them
-      to the phase set would retire the guard for `# a third of the arm`. Stated cost,
-      pinned by a RED leg, and the remedy is one edit (`the first part of the walk`).
+      ⚠️ The phase exemption's NOUN set is closed to the PHASE-NEUTRAL nouns
+      (`half|halves|most|part|parts|portion|portions|share|shares|fraction|fractions`),
+      so a positional qualifier in front of a SHARE noun is refused:
+      `# the first third of the walk`, `# the last quarter of the run` and
+      `# the final quarter of the run` are refused
+      even though they name a phase, because a position plus a share noun is exactly the
+      shape of a share of a measurement (compare `# the first third of the arm's cost`,
+      which is RED for both reasons) and the guard cannot tell a phase of three from a
+      proportion — so it errs closed. Stated cost, pinned by RED legs, and the remedy is
+      one edit (`the first part of the walk`). ⚠️ The exemption was NOT protecting
+      `# a third of the arm`: that sentence has no positional qualifier, so it is
+      refused by the proportion rule itself — the earlier rationale here claimed
+      otherwise and was measured false (`#9528` re-review round 4).
       That last cell is the stated PRICE OF THE BINDING rather than an oversight: the
       `percent` alternative requires `of|in <subject>`, because a bare percentage is
       overwhelmingly an unpacked figure (a coverage or a share of something unnamed)
@@ -7321,6 +7343,14 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
         "# the second half of this cost is the parse",
         "# the second half of that work is the parse",
         "# the second half of these costs is the parse",
+        "# the second half of the costs is the parse",
+        "# the second half of a run re-reads the sources",
+        "# the second half of all the work re-reads the sources",
+        # ...and a positional `last`/`final` is a PHASE word, not a share adjective
+        # (`# the last half of the walk` was refused one word from its pinned twin; `#9528`
+        # re-review round 4).
+        "# the last half of the walk is the ungated pass",
+        "# the final half of the walk is the ungated pass",
         "# the second half of it is the parse",
         # ...and a possessive pronoun that owns something in a LATER clause is not a
         # possessive on the divided thing: scanning the whole tail window red this
@@ -7382,6 +7412,12 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
         "# the second half of their work is the parse",
         "# the second half of our total is the parse",
         "# the second half of its output is the parse",
+        # ...and a QUANTIFIER in front of that pronoun (`of all its cost`, `of both their
+        # runs`) defeated the strip one layer down — the same shape as the subject slot's
+        # quantifier layer, fixed the same way (`#9528` re-review round 4).
+        "# the second half of all its cost is the parse",
+        "# the second half of both their runs is the parse",
+        "# the second half of all our cost is the parse",
     ):
         assert _unsettleable_magnitudes(share), (
             f"{share!r} is a SHARE of a measured quantity wearing a phase's clothes — a "
@@ -7399,6 +7435,7 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
     for refused_in_theory_only in (
         "# the first third of the walk is the ungated pass",
         "# the last quarter of the run is the cache",
+        "# the final quarter of the run is the cache",
     ):
         assert _unsettleable_magnitudes(refused_in_theory_only), (
             f"{refused_in_theory_only!r} names a PHASE and is refused anyway — that is "
@@ -7455,6 +7492,24 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
         "# half of all runs pay the parse.",
         "# half of every run pays the parse.",
         "# the rebuild is half of all its cost.",
+        # ⚠️ The indefinite article is a determiner too: `# half of a run is the parse`
+        # shipped GREEN while `# half of runs pay the parse` red (`#9528` re-review
+        # round 4).
+        "# half of a run is the parse",
+        "# most of a walk is the parse",
+        # …and the DIGIT ordinal is the same claim in the other alphabet: the alphabetic
+        # morphology is closed (`-teenth`/`-tieth`/`hundredth`…), so `# a 10th of the arm`
+        # was GREEN beside `# a tenth of the arm` (`#9528` re-review round 4).
+        "# a 10th of the arm is the re-parse.",
+        "# a 3rd of the arm is the re-parse",
+        # …and the MULTIPLICATIVE slot stopped its numeral vocabulary at `ten` while the
+        # percentage slot knew the teens and tens — one numeral open in one predicate and
+        # closed in the other, the failure this file's "one constant serves both" rule
+        # exists to prevent. `_MAGNITUDE_NUMERAL` now reads `_WORD_NUMERAL`.
+        "# re-parsing is eleven times the walk",
+        "# the rebuild is a factor of eleven over the walk's work.",
+        "# the re-parse is twentyfold the walk",
+        "# three in eleven of the walks pay the parse.",
         # ⚠️ The DEMONSTRATIVE determiner (`#9528` re-review): `that`/`those` were
         # missing from the subject slot's determiner list, so ONE determiner swapped a
         # RED for a GREEN on the same sentence — the one-synonym-away fail-open, one
