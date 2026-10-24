@@ -352,6 +352,13 @@ _UNRESOLVED = {
     "_assert_lifecycle_guard",
     "_graph_presence",
     "_hop",
+    # #7819: the statement is the shared `live.LIFECYCLE_FANOUT_QUERY` constant,
+    # which this resolver reads only as a module-level string of the scanned
+    # file — so it reports '<unresolved>' here (the same call inside
+    # `_assert_lifecycle_guard` is reported the same way). By hand:
+    # `MATCH (n:Point {id:$id}) RETURN n.is_operator, n.status,
+    # coalesce(n.outdated, false)` — a read.
+    "_lifecycle_terminal_marker",
     "_window_closure",
     "expand_relationships",
     # f-string interpolates a computed fragment (`{_label}`, `{relationship_type}`,
