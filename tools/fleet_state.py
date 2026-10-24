@@ -1326,6 +1326,24 @@ def cmux_session_records() -> tuple[list[dict[str, Any]], str, str]:
 _CMUX_SAID_BOUND = 200
 
 
+def _bounded_repr(text: str, bound: int = _CMUX_SAID_BOUND) -> str:
+    r"""``repr(text)`` bounded to ``bound`` characters WITHOUT splitting an escape.
+
+    ⛔ A HEAD CUT OF A RENDERED STRING LANDS MID-ESCAPE (review of #9887, fourth round).
+    ``repr("\x01" * 50)[:200]`` ends ``…\x01\x0`` — a sequence that never existed, in the
+    persisted cause, which is the same ``repr``-expansion defect class the bound exists
+    for, one layer down. The RAW text is trimmed from the TAIL and re-rendered instead:
+    the head is what a reader needs from a refusal, and a whole character can never be
+    half-written.
+    """
+    if len(repr(text)) <= bound:
+        return repr(text)
+    cut = text[:bound]
+    while cut and len(repr(cut)) > bound:
+        cut = cut[:-1]
+    return repr(cut)
+
+
 def _cmux_said(text: str) -> str:
     """One short, quotable rendering of what a cmux grammar SAID, for a cause.
 
@@ -1349,12 +1367,12 @@ def _cmux_said(text: str) -> str:
     try:
         data = json.loads(body)
     except Exception:
-        return repr(first)[:_CMUX_SAID_BOUND]
+        return _bounded_repr(first)
     if isinstance(data, dict) and (data.get("code") or data.get("message")):
-        return repr(
+        return _bounded_repr(
             f"{data.get('code') or '?'}: {data.get('message') or ''}".strip()
-        )[:_CMUX_SAID_BOUND]
-    return repr(first)[:_CMUX_SAID_BOUND]
+        )
+    return _bounded_repr(first)
 
 
 def pi_processes() -> tuple[list[dict[str, Any]], str]:
@@ -1797,18 +1815,24 @@ def live_sessions() -> LiveSessions:
                 # raw path and the remedy inside 320.
                 # ⛔ BUT 320 IS NOT THE BUDGET IN EVERY READER (review of #2401, fifth
                 # round), so do not read the line above as "an operator always sees the
-                # datum". The harness cuts the COMPOSED reason, and the claim gate puts
-                # 217 characters of its own prose in front of this arm — measured:
-                # `collision_preflight._board_can_answer`'s `… an unmeasured pid is not a
-                # dead owner (tried: ` plus `_holder_gate_note`'s `claim gate: the FLEET
-                # BOARD could not answer — ` and ` (comment prose is not read, #8175)`.
-                # 320 - 217 leaves this arm **103** characters, inside which the pid list
-                # survives (label + five 8-digit pids + `(+N more)` = 92) and the DATUM AND
-                # REMEDY DO NOT — the recorded line ends mid-word. That static prose in
-                # front of a cause whose only job is to carry a datum is the budget bug,
-                # tracked as #9900; until it shrinks, the composed path names the pids to
-                # reap and nothing else. `test_the_gap_fits_the_bound_its_readers_apply`
-                # pins exactly that, against the composed string and not against this one.
+                # datum". The harness cuts the COMPOSED reason, and the claim gate puts its
+                # own prose IN FRONT of this arm — measured 181 characters:
+                # `_holder_gate_note`'s `claim gate: the FLEET BOARD could not answer — `
+                # plus `_board_can_answer`'s `the board's live-session store could not be
+                # read, … an unmeasured pid is not a dead owner (tried: `. (The gate's own
+                # ` (comment prose is not read, #8175)` sits AFTER the cause, so it costs it
+                # nothing — tallying the whole wrapper would over-state the cost by 36 and
+                # under-state the budget by the same, which is the arithmetic error the
+                # fourth review round caught here.) 320 - 181 leaves this arm **139**
+                # characters. Measured inside them, on the counting fixture: every named pid
+                # survives (the last of five 8-digit pids ends at 259), the datum is cut after
+                # `e.g. '/tmp/cell-wt-many` — so its ` (deleted)` suffix, the part that says
+                # the directory is GONE, does not — and the remedy does not appear at all.
+                # That static prose in front of a cause whose only job is to carry a datum is
+                # the budget bug, tracked as #9900; until it shrinks, the composed record is
+                # the pids plus a folder prefix. `test_the_gap_fits_the_bound_its_readers_apply`
+                # composes the note with the gate's OWN functions and pins exactly that, so a
+                # change to its wording re-measures instead of passing quietly.
                 pids_txt = ", ".join(str(p) for p in still_alive[:5])
                 # ⛔ THE DATUM MUST BELONG TO A PID THE MESSAGE NAMES (review of #2401, fourth
                 # round). Scanning all of `still_alive` while printing only the first five let an

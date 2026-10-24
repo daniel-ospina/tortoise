@@ -17,6 +17,7 @@ exists, and each is chosen so it can FAIL on a regression:
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 import stat
@@ -2475,6 +2476,18 @@ def test_a_guest_cli_error_object_is_not_a_session_store(monkeypatch) -> None:
     # that catches it.
     assert len(fs._cmux_said("\x01" * 200)) <= fs._CMUX_SAID_BOUND
     assert len(fs._cmux_said("\\" * 200)) <= fs._CMUX_SAID_BOUND
+    # ⛔ AND THE CUT NEVER SPLITS AN ESCAPE (review of #9887, fourth round). A head slice
+    # of the RENDERED form ended `…\x01\x0` — a sequence that never existed, written into
+    # the persisted cause by the very function whose job is to make that cause readable.
+    # `literal_eval` is the assertion: a rendered form that cannot be parsed back is a
+    # truncated one. Red on `repr(first)[:_CMUX_SAID_BOUND]` for n >= 50.
+    for n in (50, 59, 200):
+        said = fs._cmux_said("\x01" * n)
+        # raises ValueError if the cut landed inside `\xNN` — which is the whole point
+        rendered = ast.literal_eval(said)
+        assert rendered and set(rendered) == {"\x01"}, (
+            f"a {n}-byte control payload must render as a WHOLE literal: {said[-12:]!r}")
+        assert len(said) <= fs._CMUX_SAID_BOUND
     assert fs._cmux_said("usage.invalid: --all needs a value") == (
         "'usage.invalid: --all needs a value'"), "a plain cause is untouched"
 
@@ -2523,7 +2536,9 @@ def test_a_store_on_STDERR_is_a_cause_never_an_answer(monkeypatch) -> None:
     assert recs == [] and source == "", (
         "a store on stderr is not an answer, however well-formed")
     assert "printed nothing on stdout" in err
-    assert "ws-1" not in source
+    assert "ws-1" in err, (
+        "the datum belongs to the CAUSE: the store WAS read, and it was named — on the "
+        "stream that cannot answer, so the refusal carries it and the answer does not")
 
 
 def test_whitespace_stdout_does_not_shadow_a_stderr_cause(monkeypatch) -> None:
@@ -2546,6 +2561,28 @@ def test_whitespace_stdout_does_not_shadow_a_stderr_cause(monkeypatch) -> None:
     assert "session socket unavailable" in err, (
         "the stderr cause must not be shadowed by a whitespace-only stdout")
     assert "no output" not in err, "and the label must not claim stderr was empty"
+
+
+def _collision_preflight():
+    """`tools/collision_preflight.py`, loaded by path — the CLAIM GATE's own composition.
+
+    The harness records the gate's sentence, not this module's, so the budget the gap
+    message has to fit is decided in THAT file. Calling the producers keeps the arithmetic
+    here honest when their wording changes — a literal copy of the prose cannot (review of
+    #9887, fourth round).
+    """
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[1] / "tools" / "collision_preflight.py"
+    name = "_collision_preflight_for_gap_budget"
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec and spec.loader, f"cannot load {path}"
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_the_gap_fits_the_bound_its_readers_apply(monkeypatch) -> None:
@@ -2689,31 +2726,54 @@ def test_the_gap_fits_the_bound_its_readers_apply(monkeypatch) -> None:
     # ⛔ AND THE BOUND THAT ACTUALLY BITES IS THE COMPOSED ONE (review of #9887, third round).
     # Everything above grades `live.error` against 320, but the harness never records this arm on
     # its own: `refresh-candidates.sh:2342` writes the CLAIM GATE's reason through `cut -c1-320`,
-    # and that reason wraps this arm in the gate's own prose — `_board_can_answer`'s
-    # `… (tried: <this>)` (collision_preflight.py:5076) plus `_holder_gate_note`'s
-    # `claim gate: the FLEET BOARD could not answer — ` and ` (comment prose is not read, #8175)`
-    # (:5660) — 217 characters, leaving 103. Asserting `len(live.error) <= 320` therefore proved
-    # nothing about the reader it was written for. What is TRUE today, and what this pins: inside
-    # those 103 characters the message still names EVERY pid an operator has to reap (the last of
-    # five 8-digit pids plus `(+7 more)` ends at 92). What is NOT true, and is tracked as #9900:
-    # the datum and the remedy are cut there, so the composed record is a pid list. If #9900
-    # shrinks the gate's prose, this assertion keeps holding and the two below start applying —
-    # re-measure rather than assume.
-    holder_gate_prose = (
-        "claim gate: the FLEET BOARD could not answer — "
-        "the board's live-session store could not be read, so NO lane's liveness is "
-        "measurable — an unmeasured pid is not a dead owner (tried: "
-    )
-    holder_gate_tail = ") (comment prose is not read, #8175)"
-    assert len(holder_gate_prose) + len(holder_gate_tail) == 217, (
-        "the gate's own prose is 217 chars — re-measure #9900's budget if this moves")
-    composed = (holder_gate_prose + many_arm + holder_gate_tail)[:320]
+    # and that reason wraps this arm in the gate's own prose — so the cause's budget is what is in
+    # front of it, not 320. Asserting `len(live.error) <= 320` therefore proved nothing about the
+    # reader the message was written for.
+    # ⛔ AND IT IS COMPOSED FROM THE PRODUCERS, NOT FROM A COPY OF THEIR PROSE (review of #9887,
+    # fourth round). A literal copy stays green when the gate's wording changes — which is the
+    # one event this arithmetic has to survive — so the note is built by the gate itself:
+    # `_board_can_answer` (a `liveness-unmeasured` orphan carrying this cause) into
+    # `_holder_gate_note`. Both live in `tools/collision_preflight.py` and are called here, not
+    # quoted.
+    claim_gate = _collision_preflight()
+    note = claim_gate._holder_gate_note(claim_gate.HolderRead(
+        measured=False,
+        source="unreadable board",
+        unanswerable=claim_gate._board_can_answer({
+            "reconciliation": {
+                "registry_measured": True,
+                "github_measured": True,
+                "open_issues_truncated": False,
+                "liveness_error": many_arm,
+            },
+            "index": {"issues": {}},
+            "lanes": [],
+            "orphans": [{"kind": "liveness-unmeasured"}],
+        }),
+    ))
+    # Only what is IN FRONT of the cause costs it anything: the gate's trailing
+    # ` (comment prose is not read, #8175)` sits after the 320-char cut and costs zero.
+    offset = note.index(many_arm)
+    recorded = note[:320]
+    assert 320 - offset == 139, (
+        f"the gate puts {offset} chars in front of this cause, so the harness's 320-char "
+        f"cut leaves it {320 - offset} — re-measure the numbers in `live_sessions`' comment "
+        f"(and #9900) against THIS, not against a tally of the gate's whole wrapper")
+    # What IS guaranteed, in the reader that matters: every pid an operator has to reap is
+    # inside the recorded 320 (the last of the five 8-digit pids ends at 259).
     for pid in sorted(many)[:5]:
-        assert str(pid) in composed, (
+        assert str(pid) in recorded, (
             f"pid {pid} fell out of the COMPOSED first cause the harness records")
-    assert "orphan" not in composed, (
-        "NOT a guarantee: the remedy is outside the composed cut today (#9900) — if this "
-        "starts failing, the gate's prose shrank and the assertion should be inverted")
+    # What is NOT — tracked as #9900, and pinned so it cannot pass silently for a guarantee: the
+    # ` (deleted)` suffix (the part that says the directory is GONE) and the remedy are outside
+    # the cut. When #9900 shrinks the gate's prose, THESE flip and must become positive
+    # assertions rather than be deleted.
+    assert " (deleted)" not in recorded, (
+        "the datum's identifying suffix is outside the composed cut today (#9900) — if this "
+        "starts failing, the gate's prose shrank and this assertion should be inverted")
+    assert "orphan" not in recorded, (
+        "the remedy is outside the composed cut today (#9900) — invert, do not delete, once "
+        "the composed budget grows")
 
 
 def test_the_plural_grammar_is_preferred_and_a_later_one_can_answer(monkeypatch) -> None:
