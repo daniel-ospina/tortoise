@@ -89,11 +89,24 @@ case "${1:-}" in -h|--help) usage; exit 0 ;; esac
 # ⛔ A LINKED WORKTREE IS EPHEMERAL: it is deleted when its PR merges, so a timer pinned to
 # .worktrees/<branch>/… installs cleanly, runs for a few hours, then fails forever with
 # "No such file or directory" — a schedule that reports installed and can never fire.
+# ⛔ THE COMPARISON IS PHYSICAL. `REPO` comes from bash's LOGICAL `pwd`, which preserves the path
+# as it was typed (symlinked components and all), while `git rev-parse --git-common-dir` answers
+# with the PHYSICAL one. Compared as raw strings, a MAIN checkout reached through any symlinked
+# component — macOS `/tmp` -> `/private/tmp`, a symlinked home or deploy dir — is indistinguishable
+# from a linked worktree, so the installer REFUSED it with "run from a linked worktree" while it
+# was in fact exactly what it asked for, and nothing was ever installed on such a box. The refusal
+# also names a remedy ("land this change, then re-run from the main checkout") that was already
+# followed. Measured: one real `git init` checkout is accepted at /tmp/symtest/real/repo and
+# refused at /tmp/symtest/link/real/repo. `pwd -P` also drops a trailing slash, which the same
+# string compare treated as a second worktree.
+_physical() { ( cd "${1:-.}" 2>/dev/null && pwd -P ) || printf '%s' "${1:-}"; }
+_REPO_PHYS="$(_physical "$REPO")"
+[ -n "$_REPO_PHYS" ] || _REPO_PHYS="$REPO"
 _common="$(git -C "$REPO" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
 case "$_common" in
   */.git)
-    _main="${_common%/.git}"
-    if [ -d "$_main" ] && [ "$_main" != "$REPO" ] && [ "${AUTOSCALE_ALLOW_WORKTREE:-0}" != "1" ]; then
+    _main="$(_physical "${_common%/.git}")"
+    if [ -d "$_main" ] && [ "$_main" != "$_REPO_PHYS" ] && [ "${AUTOSCALE_ALLOW_WORKTREE:-0}" != "1" ]; then
       echo "ERROR: run from a linked worktree ($REPO)." >&2
       echo "       The schedule runs the code on MAIN, because a worktree is reaped with its PR." >&2
       echo "       Land this change, then re-run from the main checkout;" >&2
@@ -433,7 +446,7 @@ cron_line() {
 # measure this shell's repo and pool against a timer that serves another, and it would pass on a
 # box that is inert BECAUSE of a pin (round 10 review, P3).
 probe() {
-  local target="$1"
+  local target="$1" py="${2:-$PYTHON}"
   local -a penv=(
     "HOME=$HOME"
     "PATH=$GH_DIR:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -442,7 +455,29 @@ probe() {
   [ -n "${GH_BIN:-}" ] && penv+=("RUNNER_AUTOSCALE_GH=$GH_BIN")
   [ -n "$PROVISIONER" ] && penv+=("RUNNER_AUTOSCALE_PROVISIONER=$PROVISIONER")
   # shellcheck disable=SC2086  # $ARGV_TAIL is a deliberate word-split argv tail (" --repo o/n")
-  env "${penv[@]}" "$PYTHON" "$target" $ARGV_TAIL --json --status 2>&1
+  env "${penv[@]}" "$py" "$target" $ARGV_TAIL --json --status 2>&1
+}
+
+# ── the interpreter the INSTALLED schedule pins ────────────────────────────────────────────────
+# ⛔ THE SCHEDULE'S INTERPRETER, NOT THIS SHELL'S. The installer RENDERS `$PYTHON` into the unit
+# (`ExecStart=`), the plist (`ProgramArguments[0]`) and the cron entry, chosen by the >= 3.12 floor
+# AT INSTALL TIME. `--status` used to re-resolve it and probe with whatever THIS shell found, so
+# the two could disagree and the probe still passed: install pins `$REPO/.venv/bin/python` and the
+# `.venv` is later reaped, and every fire executes a missing binary while `--status` prints
+# `probe: OK` and exits 0 — the exact "installed but will never fire" state this function exists
+# to catch. Reads the pin back out of the installed artifact; empty when there is none to read
+# (cron, whose entry is prose rather than a structured unit, and the not-installed case).
+pinned_interpreter() {
+  local svc="$UNIT_DIR/$LABEL.service" plist="$AGENTS_DIR/$PLIST_LABEL.plist" py=""
+  if [ -f "$svc" ]; then
+    py="$(sed -n 's/^ExecStart=\([^ ]*\).*/\1/p' "$svc" 2>/dev/null | head -1)"
+    [ -n "$py" ] && { printf '%s' "$py"; return 0; }
+  fi
+  if [ -f "$plist" ]; then
+    py="$(awk '/<key>ProgramArguments<\/key>/{seen=1; next} seen && /<string>/{gsub(/^[^<]*<string>|<\/string>[^<]*$/, ""); print; exit}' "$plist" 2>/dev/null)"
+    [ -n "$py" ] && { printf '%s' "$py"; return 0; }
+  fi
+  return 0
 }
 
 # ── status: "installed" is not "will fire" ────────────────────────────────────────────────────
@@ -480,10 +515,26 @@ status() {
   # tool's own UNMEASURABLE verdict (no `gh`, no memory reading, unreadable pool) — reported here
   # as a FAILED probe, and returned as exit 2 so a script can act on it. AUTOSCALE_SKIP_PROBE=1
   # skips it (the install's probe seam, same default).
+  # ⛔ AND IT MUST BE THE INTERPRETER THE SCHEDULE PINS, or the probe measures a box state the
+  # timer does not have. A pinned interpreter that is GONE is reported as the inert state it is,
+  # never silently replaced by whatever this shell resolves.
+  local probe_py="$PYTHON" pinned
+  pinned="$(pinned_interpreter)"
+  if [ -n "$pinned" ]; then
+    echo "interpreter: pinned $pinned (this shell resolved $PYTHON)"
+    if [ ! -x "$pinned" ]; then
+      echo "WARNING: the pinned interpreter $pinned is MISSING — every fire would fail" >&2
+      armed=0
+    fi
+    # An EXPLICIT `AUTOSCALE_PYTHON` is the operator's own decision (and the probe seam the
+    # suite drives), so it is what the probe runs. Otherwise probe with the pin, because that is
+    # the binary the timer will actually execute.
+    [ -n "${AUTOSCALE_PYTHON:-}" ] || probe_py="$pinned"
+  fi
   local probe_rc=0
   if [ -f "$INSTALLED" ] && [ "${AUTOSCALE_SKIP_PROBE:-0}" != "1" ]; then
     local probe_out
-    probe_out="$(probe "$INSTALLED")"
+    probe_out="$(probe "$INSTALLED" "$probe_py")"
     probe_rc=$?
     if [ "$probe_rc" = "0" ]; then
       echo "probe: OK (exit 0) — $(printf '%s' "$probe_out" | tail -1 | cut -c1-200)"

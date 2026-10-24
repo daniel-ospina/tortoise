@@ -1610,3 +1610,42 @@ def test_no_ceiling_override_flag_exists():
     assert proc.returncode == 0, proc.stderr
     for forbidden in ("--ceiling", "--max-runners", "--force", "--ignore-memory"):
         assert forbidden not in proc.stdout, f"{forbidden} would bypass the measured ceiling"
+
+
+def test_a_FAILED_restart_is_MEASURED_before_anything_is_re_registered(env):
+    """⛔ `failed` IS NOT "STILL OFFLINE", AND RE-REGISTERING WITH `--replace` IS DESTRUCTIVE.
+
+    `failed` is assigned to ANY non-zero restart rc that is neither 127 nor a recognised sudo
+    refusal — an AppArmor/SELinux policy denial, a sudo plugin error, a timeout. The pass used to
+    fold that into `state = "offline"` WITHOUT reading the pool, then log "still offline after
+    restart" (a measurement it never took) and re-register with `--replace`, which deletes the
+    registration of a runner that was already back and keeps running with now-invalid credentials
+    until its next job. `wait_online` is the measurement; a runner that came back on its own must
+    be seen coming back, not replaced.
+
+    Mutation: restore `... if restart_state == "ok" else "offline"` -> the pool is never read, the
+    runner is re-registered with --replace -> RED.
+    """
+    e = env(
+        pool=[("r1", "offline", False, "self-hosted-x64")],
+        installs=[("gh-runner-x64-1", "r1")],
+        service="systemd",
+    )
+    # A `failed` restart (rc 1, no sudo wording, not 127) whose effect LANDED anyway: the runner
+    # is back in the pool. This is the case the unmeasured fold destroyed.
+    e.systemctl = _exe(
+        e.bin / "systemctl",
+        "#!/usr/bin/env bash\n"
+        'printf "%s\\n" "$*" >> "${SYSTEMCTL_LOG:-/dev/null}"\n'
+        'case "$1" in\n'
+        '  restart) unit="${2:-}"; unit="${unit#actions.runner.}"; unit="${unit%.service}"\n'
+        '           printf "%s" "${unit##*.}" > "${RESTART_MARKER:-/dev/null}"; exit 1 ;;\n'
+        "  *) exit 0 ;;\n"
+        "esac\n",
+    )
+    rec = e.record()
+    assert "--replace" not in e.config(), (
+        "re-registered with --replace a runner it never measured as offline: " + e.config()
+    )
+    assert any("came back online after restart" in a for a in rec.get("actions", [])), rec
+    assert not any("still offline after restart" in a for a in rec.get("actions", [])), rec

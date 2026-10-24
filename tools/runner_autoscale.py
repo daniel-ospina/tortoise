@@ -1018,9 +1018,16 @@ def converge(
             # --replace) a registration that may be reconnecting and picking up a job — the one
             # destructive action this file promises never to take blindly. Stop the PASS: the box
             # state is unknown from here, so no fill decision may be taken on a stale count.
-            state = (
-                wait_online(repo, c["name"], wait_s, poll) if restart_state == "ok" else "offline"
-            )
+            # ⛔ MEASURE IT, DO NOT ASSUME IT — whichever way the restart returned. `failed` is
+            # any non-zero rc that is neither 127 nor a recognised sudo refusal (an AppArmor/
+            # SELinux policy denial, a sudo plugin error, a timeout), and it is NOT evidence the
+            # runner is still offline: the restart may have taken effect anyway, or the runner may
+            # be reconnecting on its own. Folding it to "offline" skipped the pool read entirely
+            # while the log below still claimed "still offline after restart" — a measurement this
+            # pass never took — and re-registered with `--replace`, invalidating the credentials of
+            # a listener that was already back. `wait_online` IS that measurement: one pool read
+            # when it is already online, bounded by wait_s (default 60s) when it is not.
+            state = wait_online(repo, c["name"], wait_s, poll)
             if state == "online":
                 record["actions"].append(f"{c['name']} came back online after restart")
                 continue
