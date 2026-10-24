@@ -577,5 +577,5 @@ mechanisms:
       steps its own direction and transaction boundary. Those are per-step
       policies of THIS mechanism, not eight more mechanisms, and a row per step
       would turn the registry into a pipeline-step list — the scope line the
-      design draws in §4.0 (*"The step list is the SHAPE, not a complete
-      specification"*).
+      design draws at the head of §4.3 (*"The step list is the SHAPE, not a
+      complete specification"*).

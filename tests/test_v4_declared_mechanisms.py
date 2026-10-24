@@ -1474,63 +1474,45 @@ def test_the_failure_policy_absence_is_pinned_to_the_inverted_render() -> None:
     assert row.get("tracking_issue") == 5087, row
 
 
-def test_the_atomic_write_absence_is_pinned_to_the_schema() -> None:
-    """The `atomic_point_write` row's absence claim, read off the SCHEMA.
+# ── THE DDL SCAN, as a function so it can be TESTED ─────────────────────────
+#
+# The pin below is only as good as the scan's reach, and reach is exactly what
+# four review cycles found missing (physical lines -> string constants ->
+# runtime-assembled forms). A branch no test reaches is a guard that cannot be
+# SEEN to fail, so the scan is a plain function over a ROOT and each of its
+# polarities has a fixture below: a literal statement, every assembly form, a
+# docstring (never executed), and a mention in ordinary text.
 
-    The declaration is *"there is no uniqueness constraint on `Point`"*, and the
-    thing that would falsify it is a constraint, not a paragraph. Two facts are
-    asserted together: the capability is used in this repository (so the absence
-    is a decision, not an impossibility), and no UNIQUE constraint names a Point
-    (so the row's state is still the truth). The day one is added, this reds and
-    the row must flip — the same polarity as the carve-out's render pin.
+#: `CONSTRAINT CREATE` (the graph form) or `CREATE CONSTRAINT`, up to the end of
+#: the statement-ish span.
+DDL = re.compile(
+    r"(?i)(?:CONSTRAINT\s+CREATE|CREATE\s+(?:OR\s+REPLACE\s+)?CONSTRAINT)[^;]{0,300}"
+)
 
-    ⚠️ IT READS STRING VALUES, NOT PHYSICAL LINES. A line-oriented scan cannot see
-    DDL split across source lines — and that is this repo's own house style
-    (`event_store.py`'s GRAPH.CONSTRAINT call is a wrapped literal). Parsing the
-    module and scanning each `str` constant folds implicit concatenation, so
-    `"… UNIQUE "  "NODE Point …"` on two lines is read as the ONE statement it is.
-    (Reproduced before applying: a wrapped probe file left a line-oriented scan
-    green.)
+#: A constraint statement that names its label is COMPLETE — reassembling it adds
+#: nothing, so `_DDL = "… NODE GraphEvent"` + `g.query(_DDL)` is a statement this
+#: scan fully saw and must not be called unverifiable.
+DDL_LABELLED = re.compile(r"(?i)\bNODE\s+[A-Za-z_]\w*")
 
-    ⚠️ A STATEMENT ASSEMBLED AT RUNTIME IS REFUSED, NOT MISSED. Folding implicit
-    concatenation covers literals, but an f-string, a `+`, a `.format` or a
-    `"".join` can put the label in a VARIABLE, where no static scan can resolve it
-    (measured: `f"CREATE CONSTRAINT … UNIQUE NODE {_LABEL}"` left the constant-only
-    scan green). So a runtime-assembled DDL statement whose constant fragments
-    carry the keyword is itself a violation: it fails the pin as UNVERIFIABLE
-    rather than passing as absent. That is the third polarity this check needs —
-    absence, presence, and cannot-tell — because "cannot tell" is exactly what a
-    declared-and-absent mechanism must never be allowed to look like.
+#: The `CODE:` docstring exclusion + the taint rule: a name bound to an
+#: INCOMPLETE keyword-carrying literal (`… UNIQUE NODE ` with no label yet).
+_DOC_NODES = (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+_ASSEMBLY_ATTRS = {"format", "format_map", "join"}
 
-    ⚠️ The scan covers BOTH constraint spellings this repo's DDL vocabulary names
-    (`CONSTRAINT CREATE`, the graph form, and `CREATE CONSTRAINT`, the form
-    `tests/test_9079_event_writers_journal.py` lists): a pin that knew only one
-    order would stay green on the other. Its SCOPE is stated, not universal —
-    `tortoise/**/*.py` is where a write path creates constraints; one created
-    from a script or a console session is out of this scan's reach, and the row's
-    note says so. An UNPARSABLE source under `tortoise/` is a violation rather
-    than a skip: a constraint inside it would be invisible, and every module in
-    the package must parse anyway.
 
-    ⚠️ A HIT IS "A CONSTRAINT, OR A MENTION OF ONE" AND THE MESSAGE SAYS SO. A
-    string that spells the statement out while explaining why it is NOT created
-    is indistinguishable from one that runs it (measured: an explanatory constant
-    red the pin with "flip the row", which is the wrong instruction). DOCSTRINGS
-    are excluded — they are never executed — and every other hit is reported as
-    "a statement or a mention, this scan cannot tell which", with both remedies.
+def ddl_scan(root: Path) -> tuple[list[str], list[str], list[str]]:
+    """Every constraint-ish string, every unparsable source, every ASSEMBLED one.
+
+    Returns `(found, unparsable, assembled)`. `found` is "a constraint, OR a
+    mention of one" — the scan cannot tell those apart and does not pretend to.
+    `assembled` is the cannot-tell polarity: a statement whose label the scan
+    cannot resolve, reported so it can never be read as an absence.
     """
-    ddl = re.compile(
-        r"(?i)(?:CONSTRAINT\s+CREATE|CREATE\s+(?:OR\s+REPLACE\s+)?CONSTRAINT)[^;]{0,300}"
-    )
-    #: A constraint statement that names its label is COMPLETE — reassembling it
-    #: adds nothing, so `_DDL = "… NODE GraphEvent"` + `g.query(_DDL)` is a
-    #: statement this scan fully saw and must not be called unverifiable.
-    labelled = re.compile(r"(?i)\bNODE\s+[A-Za-z_]\w*")
-    constraints: list[str] = []
+    found: list[str] = []
     unparsable: list[str] = []
     assembled: list[str] = []
-    for path in sorted((ROOT / "tortoise").rglob("*.py")):
-        rel = path.relative_to(ROOT).as_posix()
+    for path in sorted(root.rglob("*.py")):
+        rel = path.relative_to(root).as_posix()
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
         except (OSError, UnicodeError, SyntaxError, ValueError):
@@ -1539,20 +1521,16 @@ def test_the_atomic_write_absence_is_pinned_to_the_schema() -> None:
         docstrings = {
             id(n.body[0].value)
             for n in ast.walk(tree)
-            if isinstance(n, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            if isinstance(n, _DOC_NODES)
             and n.body and isinstance(n.body[0], ast.Expr)
             and isinstance(n.body[0].value, ast.Constant)
         }
-        # Names bound to an INCOMPLETE keyword-carrying literal (`… UNIQUE NODE `
-        # with the label not yet attached). A use of such a name is a statement
-        # whose label this scan cannot resolve — the `_DDL += _LABEL` shape, which
-        # no expression-form rule would catch.
         tainted = {
             target.id
             for node in ast.walk(tree)
             if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
-            and isinstance(node.value.value, str) and ddl.search(node.value.value)
-            and not labelled.search(ddl.search(node.value.value).group(0))
+            and isinstance(node.value.value, str) and DDL.search(node.value.value)
+            and not DDL_LABELLED.search(DDL.search(node.value.value).group(0))
             for target in node.targets
             if isinstance(target, ast.Name)
         }
@@ -1566,8 +1544,8 @@ def test_the_atomic_write_absence_is_pinned_to_the_schema() -> None:
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 if id(node) in docstrings:
                     continue
-                for match in ddl.finditer(node.value):
-                    constraints.append(f"{rel}: {match.group(0).strip()}")
+                for match in DDL.finditer(node.value):
+                    found.append(f"{rel}: {match.group(0).strip()}")
                 continue
             fragments: list[str] = []
             if isinstance(node, ast.JoinedStr):
@@ -1590,14 +1568,14 @@ def test_the_atomic_write_absence_is_pinned_to_the_schema() -> None:
             elif (
                 isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)
-                and node.func.attr in {"format", "format_map", "join"}
+                and node.func.attr in _ASSEMBLY_ATTRS
             ):
                 fragments = [
                     n.value for n in ast.walk(node)
                     if isinstance(n, ast.Constant) and isinstance(n.value, str)
                 ]
             for fragment in fragments:
-                for match in ddl.finditer(fragment):
+                for match in DDL.finditer(fragment):
                     assembled.append(f"{rel}: {match.group(0).strip()}")
             if (
                 isinstance(node, ast.Name)
@@ -1608,7 +1586,122 @@ def test_the_atomic_write_absence_is_pinned_to_the_schema() -> None:
                     f"{rel}: `{node.id}` carries an incomplete DDL statement "
                     "and is used as a value"
                 )
-    assembled = sorted(set(assembled))  # the walk visits ancestors too
+    return found, unparsable, sorted(set(assembled))  # the walk visits ancestors too
+
+
+def test_the_ddl_scan_sees_every_form_that_could_name_a_label(tmp_path) -> None:
+    """The SCAN's own polarities, one fixture each — the pin is only as wide as this.
+
+    The pin below reads the real tree, so nothing in `tortoise/` exercises the
+    cannot-tell branch: measured, replacing `assembled` with `[]` left the whole
+    suite green (87 passed) while a runtime-assembled `Point` constraint sailed
+    past — the exact fail-open this branch was added to close, unguarded against
+    the next conflict resolution. So the scan is driven over fixture files here:
+    a literal statement (including implicit concatenation), every assembly form
+    that was invisible in some earlier revision (`f-string`, `+`, `%`, `.format`,
+    `.format_map`, `.join`, `+=`), a docstring (never executed, so not a
+    statement), and a mention in ordinary text (reported, but the pin's message
+    tells the reader it may be prose).
+    """
+    forms = {
+        "literal": (
+            'g.query("GRAPH.CONSTRAINT CREATE pt UNIQUE "\n'
+            '        "NODE Point PROPERTIES 1 h")\n',
+            False,
+            True,
+        ),
+        "fstring": (
+            '_L = "Point"\ng.query(f"CREATE CONSTRAINT pt UNIQUE NODE {_L} PROPERTIES 1 h")\n',
+            True,
+            True,
+        ),
+        "plus": (
+            '_L = "Point"\ng.query("CREATE CONSTRAINT pt UNIQUE NODE " + _L)\n',
+            True,
+            True,
+        ),
+        "percent": (
+            '_L = "Point"\ng.query("CREATE CONSTRAINT pt UNIQUE NODE %s" % _L)\n',
+            True,
+            True,
+        ),
+        "dot_format": (
+            '_L = "Point"\ng.query("CREATE CONSTRAINT pt UNIQUE NODE {}".format(_L))\n',
+            True,
+            True,
+        ),
+        "format_map": (
+            '_L = "Point"\ng.query("CREATE CONSTRAINT pt UNIQUE NODE {l}".format_map({"l": _L}))\n',
+            True,
+            True,
+        ),
+        "join": (
+            '_L = "Point"\ng.query("".join(["CREATE CONSTRAINT pt UNIQUE NODE ", _L]))\n',
+            True,
+            True,
+        ),
+        "augassign": (
+            '_L = "Point"\nd = "CREATE CONSTRAINT pt UNIQUE NODE "\nd += _L\ng.query(d)\n',
+            True,
+            True,
+        ),
+        "docstring": (
+            'def f():\n    """Do not issue GRAPH.CONSTRAINT CREATE: a UNIQUE NODE Point '
+            'constraint would serialise writers."""\n',
+            False,
+            False,  # a docstring is never executed, so it is not even a mention
+        ),
+        "mention": (
+            'NOTE = "Do not issue GRAPH.CONSTRAINT CREATE: a UNIQUE NODE Point '
+            'constraint would serialise writers."\n',
+            False,
+            True,
+        ),
+    }
+    for name, (source, is_assembled, is_found) in forms.items():
+        probe = tmp_path / f"{name}.py"
+        probe.write_text(source, encoding="utf-8")
+        found, unparsable, assembled = ddl_scan(tmp_path)
+        assert unparsable == [], (name, unparsable)
+        if is_assembled:
+            assert assembled, (
+                f"the {name} form assembled a constraint statement and the scan "
+                "did not refuse it — that is the fail-open this branch exists for"
+            )
+        else:
+            assert not assembled, (name, assembled)
+        # EVERY executable form is still SEEN: a refusal must never replace a report.
+        assert bool(found) is is_found, (
+            f"the {name} form reports found={bool(found)}, expected {is_found} — "
+            "refusing a form as assembled must not hide that a constraint "
+            "spelling is present, and a docstring is not a statement at all"
+        )
+        probe.unlink()
+    # A docstring is excluded from `found` too: nothing executes it.
+    (tmp_path / "doc.py").write_text(
+        'def f():\n    """GRAPH.CONSTRAINT CREATE x UNIQUE NODE Point PROPERTIES 1 h"""\n',
+        encoding="utf-8",
+    )
+    found, _, assembled = ddl_scan(tmp_path)
+    assert not found and not assembled, (found, assembled)
+
+
+def test_the_atomic_write_absence_is_pinned_to_the_schema() -> None:
+    """The `atomic_point_write` row's absence claim, read off the SCHEMA.
+
+    The declaration is *"there is no uniqueness constraint on `Point`"*, and the
+    thing that would falsify it is a constraint, not a paragraph. Two facts are
+    asserted together: the capability is used in this repository (so the absence
+    is a decision, not an impossibility), and no UNIQUE constraint names a Point
+    (so the row's state is still the truth). The day one is added, this reds and
+    the row must flip — the same polarity as the carve-out's render pin.
+
+    The SCAN itself is `ddl_scan` above, and each of its polarities is proven by
+    `test_the_ddl_scan_sees_every_form_that_could_name_a_label` — a real tree has
+    no runtime-assembled constraint in it, so without that fixture the
+    cannot-tell branch would be unreachable and could be deleted silently.
+    """
+    constraints, unparsable, assembled = ddl_scan(ROOT / "tortoise")
     assert unparsable == [], (
         "a source under tortoise/ could not be parsed, so a constraint written "
         "in it is INVISIBLE to this pin — that is not the same as its absence: "
