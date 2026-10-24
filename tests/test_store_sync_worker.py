@@ -23,6 +23,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import types
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -1024,3 +1025,142 @@ def test_an_up_to_date_file_is_skipped_without_a_second_full_read():
     assert 'action === "skip"' in cheap and "continue;" in cheap, (
         "the cheap skip branch (no full read) is missing"
     )
+
+
+# ── the sweep's VERDICT: "delivered nothing" must never read OK ────────
+
+def test_a_RETAINED_batch_is_not_reported_OK(server, tmp_path):
+    """401/403/407 are RETAINED on purpose (crossing the cursor would destroy the
+    sessions), and a retained batch exits 0 with no ``errors[]`` — so the worker's
+    own verdict is TRUE for a sweep that delivered NOTHING.
+
+    That made ``capture: OK`` the only user-visible report over a backstop that a
+    rotated/expired key had silently dead-ended: the turns are safe, but nothing
+    ships, indefinitely. The verdict must carry it, the exit code must follow it,
+    and the status file the extension spawns against must name the code.
+    """
+    _session_file(tmp_path, "a.jsonl", [
+        _header("sid-retained"),
+        _message("u1", None, "user", "must survive a 401"),
+    ])
+    server.status = 401
+    proc, receipt = _run_sync(tmp_path, server=server)
+    assert receipt["log"]["shipped"] == 0
+    assert receipt["log"]["files"][0]["action"] == "failed"
+    assert receipt["log"]["withheld"] == "http_401", receipt["log"]
+    assert receipt["ok"] is False, "a sweep that shipped nothing, holding turns, is not OK"
+    assert proc.returncode == 1, "and the exit code must follow the verdict"
+
+    status = json.loads((tmp_path / "cursor" / "sweep-status.json").read_text())
+    assert status["ok"] is False
+    assert status["reason"] == "http_401", status
+
+    # The turns are SAFE (the cursor was retained): a later accepted run ships them.
+    server.status = 200
+    _, later = _run_sync(tmp_path, server=server)
+    assert later["log"]["shipped"] == 1
+    assert later["ok"] is True, "a sweep that delivered is OK again"
+    assert [t["content"] for t in server.sessions[-1]["conversation"]] == [
+        "must survive a 401"
+    ]
+
+
+def test_a_REFUSED_shrunk_window_is_not_reported_OK(server, tmp_path):
+    """A dead session whose ``/compact`` shortened its window is REFUSED on every
+    sweep — deliberately, because shipping the shorter window lets the turn store
+    hard-delete past it. The refusal is permanent (the file never grows again, and
+    an unproven refusal writes no cursor row), so those turns never ship through
+    either lane, and the line said ``capture: OK``.
+    """
+    _session_file(tmp_path, "a.jsonl", [
+        _header("sid-shrink"),
+        _message("u1", None, "user", "one"),
+        _message("a1", "u1", "assistant", "two"),
+        _message("u2", "a1", "user", "three"),
+        _message("a2", "u2", "assistant", "four"),
+    ])
+    _, first = _run_sync(tmp_path, server=server)
+    assert first["log"]["shipped"] == 1
+    assert first["ok"] is True
+
+    # Pi rewrote the tree: a /compact entry cuts the kept window to u3..a3,
+    # which is SHORTER than what the store already holds for this session.
+    path = tmp_path / "sessions" / "a.jsonl"
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({
+            "type": "compaction", "id": "c1", "parentId": "a2",
+            "timestamp": "2026-10-23T10:00:02.000Z",
+            "firstKeptEntryId": "u3",
+        }) + "\n")
+        fh.write(_message("u3", "c1", "user", "five") + "\n")
+        fh.write(_message("a3", "u3", "assistant", "six") + "\n")
+
+    shrunk_proc, second = _run_sync(tmp_path, server=server)
+    assert second["log"]["shrunk"] == 1, second["log"]
+    assert second["log"]["shipped"] == 0
+    assert second["log"]["withheld"] == "window_shrunk"
+    assert second["ok"] is False
+    assert shrunk_proc.returncode == 1, "the exit code follows the verdict here too"
+
+    status = json.loads((tmp_path / "cursor" / "sweep-status.json").read_text())
+    assert status["ok"] is False
+    assert status["reason"] == "window_shrunk", status
+
+
+def test_the_default_cursor_dir_is_BESIDE_the_spool_like_both_readers(monkeypatch, tmp_path):
+    """A manual ``tortoise store-sync`` with no ``--cursor-dir`` must not write to
+    ``$HOME``.
+
+    Both health-line readers derive the store as ``<spool-parent>/store-sync``
+    (``capture_spool._store_sync_dir``, and the Pi leg's ``dirname(spoolDir)``),
+    and the extension spawns its sweep with exactly that ``--cursor-dir``. A
+    ``$HOME`` default therefore made a manual sweep's FAILED verdict invisible
+    (the line kept the previous one) AND gave the manual run a SECOND cursor over
+    the same files, re-reading them from 0 and re-shipping turns the extension's
+    cursor already covered.
+    """
+    from tortoise import capture_spool, store_sync
+
+    monkeypatch.setenv("TORTOISE_CAPTURE_SPOOL_DIR", str(tmp_path / "root" / "spool"))
+    assert store_sync.default_cursor_dir() == tmp_path / "root" / "store-sync"
+    assert store_sync.default_cursor_dir() == capture_spool._store_sync_dir(
+        capture_spool.spool_dir()
+    )
+    # The helper being right is not the claim: the WIRING is. Drive `main` with no
+    # `--cursor-dir` and prove the status lands where both readers look — the old
+    # `$HOME` default wrote it somewhere no reader opens, and this assertion is
+    # the one that reds.
+    monkeypatch.setattr(store_sync, "worker_path", lambda: tmp_path / "missing-worker.ts")
+    args = _main_args(tmp_path / "unused")
+    args.cursor_dir = None
+    assert store_sync.main(args) == 1, "a failed manual sweep exits non-zero"
+    landed = tmp_path / "root" / "store-sync" / "sweep-status.json"
+    assert landed.exists(), "the verdict must land BESIDE the spool, not under $HOME"
+    assert json.loads(landed.read_text())["reason"] == "worker_missing"
+
+
+def test_the_status_temp_path_is_PER_PROCESS(tmp_path, monkeypatch):
+    """The CLI and the extension's ``noteFailure`` write the same directory.
+
+    With one shared ``sweep-status.json.tmp``, a permanent failure recorded by
+    one could be published away by the other's healthy payload — a lost update
+    that reads ``capture: OK``. The WRITER is what must be pinned: a successful
+    write renames the temp away, so the rename is refused on purpose to leave the
+    name behind and show which one was used.
+    """
+    from tortoise import store_sync
+
+    def refuse_replace(self, target):
+        raise OSError("rename refused (so the temp name is observable)")
+
+    monkeypatch.setattr(type(tmp_path), "replace", refuse_replace, raising=False)
+    assert store_sync._status_tmp_path(tmp_path).name == f"sweep-status.json.tmp.{os.getpid()}"
+    receipt = {"ok": True, "log": {"errors": [], "shipped": 0}}
+    for pid in (111, 222):
+        monkeypatch.setattr(store_sync, "os", types.SimpleNamespace(getpid=lambda p=pid: p))
+        store_sync.write_sweep_status(receipt, tmp_path)
+    survivors = sorted(p.name for p in tmp_path.iterdir())
+    assert survivors == [
+        "sweep-status.json.tmp.111",
+        "sweep-status.json.tmp.222",
+    ], f"two writers must never share a temp name: {survivors}"

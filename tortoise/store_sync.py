@@ -79,7 +79,27 @@ def default_session_dir() -> Path:
 
 
 def default_cursor_dir() -> Path:
-    return Path.home() / ".tortoise" / "store-sync"
+    """Where the backstop keeps its cursor — BESIDE the spool, never under ``HOME``.
+
+    Derived from the spool root's PARENT (``<spool-parent>/store-sync``) because
+    that is where EVERY other party already looks: ``capture_spool._store_sync_dir``
+    reads the status file and the dead-letter count there, and the Pi extension
+    spawns its sweep with exactly that ``--cursor-dir``. A ``~/.tortoise`` default
+    made a manual ``tortoise store-sync`` write its cursor and its verdict where
+    neither health-line reader looks — so a failed manual sweep's verdict was
+    invisible (the line kept rendering the previous one), AND the manual run's
+    cursor was a SECOND cursor over the same files, re-reading them from 0 and
+    re-shipping turns the extension's cursor already covered.
+
+    ``$HOME`` remains only the fallback for a spool root that cannot be derived —
+    the point is that both parties derive ONE directory, from one input.
+    """
+    try:
+        from tortoise.capture_spool import _store_sync_dir, spool_dir
+
+        return _store_sync_dir(spool_dir())
+    except Exception:  # a broken spool derivation must not disarm the sweep
+        return Path.home() / ".tortoise" / "store-sync"
 
 
 def _parse_receipt(stdout: str) -> dict[str, Any] | None:
@@ -303,7 +323,45 @@ def run_sweep(
     # Gate on the worker's OWN verdict, not on a key that also carries a count.
     if receipt["log"] is not None and receipt["log"].get("ok") is False:
         receipt["ok"] = False
+    # A batch the server RETAINED and a window REFUSED as shrunk both exit 0 with
+    # no ``errors[]``, so the worker's own verdict is TRUE for a sweep that
+    # delivered nothing. That made ``capture: OK`` the report over an inert
+    # backstop — the false PASS this seam exists to end, one level down: a
+    # rotated/expired key (401/403/407 are retained on purpose — crossing the
+    # cursor would destroy the sessions), an exhausted quota (402), a 429/5xx
+    # outage, or a dead session whose ``/compact`` shortened its window forever.
+    # The turns are SAFE either way (the cursor did not move); what must not
+    # happen is the only user-visible surface calling that healthy.
+    if receipt["log"] is not None and receipt["log"].get("ok") is not False:
+        withheld = _withheld_token(receipt["log"])
+        if withheld:
+            receipt["log"]["withheld"] = withheld
+            receipt["ok"] = False
     return receipt
+
+
+def _withheld_token(log: dict) -> str | None:
+    """Why the log half HELD BACK turns it could not ship (``None``: it held none).
+
+    A not-run reason is its own verdict (``worker_status``) and is not "withheld",
+    so it is not re-labelled here. A file is reported as withheld when the worker
+    recorded a ``failed`` outcome for it: a shrunk-window REFUSAL, a file with no
+    readable session id, or a batch the server retained (whose ``status`` names
+    the code — ``http_402``, ``http_429``, …).
+    """
+    if not log or log.get("worker_status"):
+        return None
+    if int(log.get("shrunk") or 0) > 0:
+        return "window_shrunk"
+    for outcome in log.get("files") or []:
+        if not isinstance(outcome, dict) or outcome.get("action") != "failed":
+            continue
+        status = outcome.get("status")
+        if isinstance(status, int) and status > 0:
+            return f"http_{status}"
+        reason = outcome.get("reason")
+        return str(reason) if reason else "withheld"
+    return None
 
 
 def _session_id_from_filename(path: str) -> str | None:
@@ -374,6 +432,24 @@ def _reason_token(errors: list[Any]) -> str | None:
     return text
 
 
+def _status_tmp_path(target: Path) -> Path:
+    """The status write's temp path — UNIQUE PER PROCESS.
+
+    TWO writers share this directory: this CLI, and the extension's own
+    ``noteFailure`` (a detached sweep that never got as far as running). Both
+    used the plain name ``sweep-status.json.tmp``, so the rename of one could
+    publish the OTHER's payload: the extension records ``{ok: false,
+    reason: "cli_missing"}``, a concurrent sweep's healthy write lands on the
+    same temp, and the rename publishes the healthy content — the permanent
+    failure is DROPPED and the line reads ``capture: OK``. The mirror interleave
+    makes this side's ``replace`` raise ``ENOENT`` (swallowed, by contract) and
+    the exit-0 corroboration then reports a hole on a box that swept fine.
+    The pid is the same discriminator ``cursor-store.ts`` already uses for
+    ``cursor.json``.
+    """
+    return target / f"sweep-status.json.tmp.{os.getpid()}"
+
+
 def write_sweep_status(receipt: dict, cursor_dir: Path | str | None) -> None:
     """Persist the last sweep's outcome where a caller that DISCARDED our output can read it.
 
@@ -407,7 +483,7 @@ def write_sweep_status(receipt: dict, cursor_dir: Path | str | None) -> None:
         # comma-delimited field: a free-form sentence there duplicated the line's
         # own "no TORTOISE_API_KEY" and put an unquoted em-dash clause inside a
         # comma-separated list. The full text is still on stderr and in --json.
-        reason = log.get("worker_status") or _reason_token(errors)
+        reason = log.get("worker_status") or log.get("withheld") or _reason_token(errors)
         if not reason and receipt.get("ok") is False:
             spool = receipt.get("spool") or {}
             reason = spool.get("error") if isinstance(spool, dict) else None
@@ -434,7 +510,7 @@ def write_sweep_status(receipt: dict, cursor_dir: Path | str | None) -> None:
             "shipped": log.get("shipped", 0),
             "at": time.time(),
         }
-        tmp = target / "sweep-status.json.tmp"
+        tmp = _status_tmp_path(target)
         tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
         # `write_text` uses the umask (0644), while the extension writes the
         # same file 0600 — so the SAME filename carried two modes, and the
@@ -486,6 +562,13 @@ def main(args) -> int:
                   "(the next run re-ships)", file=sys.stderr)
         if log.get("worker_status"):
             print(f"store-sync: log half not run — {log.get('detail', log.get('worker_status'))}",
+                  file=sys.stderr)
+        if log.get("withheld"):
+            # The human path must name it too: the production caller discards
+            # stdout, and a withheld batch that is only visible under `--json`
+            # is a batch nobody is told about.
+            print(f"store-sync: withheld — {log['withheld']} "
+                  "(cursor retained; the turns ship when the server accepts them)",
                   file=sys.stderr)
         if receipt.get("spool"):
             print(f"store-sync: spool — {receipt['spool']}", file=sys.stderr)
