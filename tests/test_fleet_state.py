@@ -2840,15 +2840,17 @@ def test_pi_processes_reads_the_untruncated_command_column(monkeypatch) -> None:
     assert argv[:2] == ["ps", "-ww"]
 
 
-def test_pi_processes_sees_a_real_long_path_lane() -> None:
+def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
     """End-to-end MATCHER coverage: a real process named `pi` under a long path is found.
 
-    ⚠️ THIS TEST DOES NOT PIN THE TRUNCATION FIX — `test_pi_processes_reads_the_untruncated
-    _command_column` above does (its subject is the ARGV sent to `ps`). This one is the
-    consumer-side half: the shipped reader must return a live lane whose argv[0] is a path,
-    which is the shape a wrapper/cell launch produces. Whether THIS box's `ps` truncates at
-    80 columns varies (measured both ways on 2026-10-24), so a green here is not evidence
-    about `-ww`; it is evidence that the matcher sees a real path-named lane at all.
+    ⛔ AND IT PINS THE TRUNCATION FIX, which the first version of this test did not (review,
+    2026-10-24). The truncation is driven by the OUTPUT WIDTH — `COLUMNS` when the
+    environment carries one, the terminal width otherwise — so a box with a wide terminal
+    shows nothing and a green here proved nothing about `-ww`. This test SETS
+    `COLUMNS=80` (measured: every `ps` row cut to exactly 80 characters, 1966 uncapped),
+    which reproduces the hazard deterministically: the fixture lane's argv[0] is ~59
+    characters, so without `-ww` the `command=` column is cut before its basename and the
+    census cannot see a live lane. Verified red with the flag removed.
 
     A copy of a real binary (never a `#!` script — the kernel rewrites argv[0] to the
     interpreter, which `_pi_pids_from_ps` documents). SKIPS where `sleep` is unavailable
@@ -2863,6 +2865,9 @@ def test_pi_processes_sees_a_real_long_path_lane() -> None:
     if not os.path.exists(sleep_bin):
         pytest.skip(f"no `sleep` binary at {sleep_bin} for the fixture lane")
     long_dir = Path(tempfile.mkdtemp(prefix="pi-census-" + "x" * 40))
+    # ⛔ The narrow width is the FIXTURE, not the environment: without this the test
+    # measures whatever terminal the suite happens to run under.
+    monkeypatch.setenv("COLUMNS", "80")
     try:
         pi = long_dir / "pi"
         shutil.copy(sleep_bin, pi)

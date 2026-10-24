@@ -7943,6 +7943,200 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("1 commit(s) ahead", self.hit(out, ref))
         self.assertNotIn("ADVISORY", self.hit(out, ref))
 
+    def test_a_zero_ahead_remote_ref_is_never_an_empty_claim(self):
+        """CONDITION 1's scope, pinned in the direction that matters (review, 2026-10-24).
+
+        A remote-tracking ref is a FETCH CACHE: `refs/remotes/origin/x` is 0 ahead of
+        `origin/main` whenever the last fetch saw it at main's tip, which says nothing
+        about the branch that exists on the remote right now (#7693's class). Deleting the
+        `refs/heads/` guard left the ENTIRE suite green — verified — while shipping exactly
+        that, so this test exists to make the scope testable: the ref must stay BLOCKING
+        and must not be reported as an empty claim.
+        """
+        self.gh_fixtures(closed_prs=[])
+        # A readable registry and a real bare origin, so the run cannot block for a reason
+        # that has nothing to do with this ref (see `empty_branch`).
+        self.empty_branch(f"fix/{ISSUE}-remote-base")
+        main_tip = self._git_out("rev-parse", "refs/heads/main").strip()
+        ref = f"refs/remotes/origin/fix/{ISSUE}-cached"
+        _git(self.repo, "update-ref", ref, main_tip)
+        mod = _tool_module()
+        counts = mod._ahead_behind("git", str(self.repo), ref, 60)
+        self.assertIsNotNone(counts)
+        self.assertEqual(counts[0], 0, "the fixture remote ref must be 0 ahead")
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        line = self.hit(out, ref)
+        self.assertNotIn("EMPTY-CLAIM", line)
+        self.assertNotIn("ADVISORY", line)
+        # And it is a BLOCKING row, not merely an absent demotion.
+        self.assertIn("0 commit(s) ahead", line)
+        self.assertIn("(number)", line)
+
+    def test_an_unreadable_process_census_is_never_no_owner(self):
+        """CONDITION 3's fail-closed arm: a census that cannot ANSWER is not "nobody there".
+
+        Flipping this arm to "no owner" left the whole suite green (verified in review),
+        which would have made the PR's headline safety claim untested. Called at the
+        decision level because the census is a subprocess read that no CLI fixture can fail
+        on demand.
+        """
+        self.empty_branch(f"fix/{ISSUE}-census-error")
+        holder = self.stale_holder()
+        mod = _tool_module()
+        with mock.patch.object(mod.fleet_state, "pi_processes",
+                               return_value=([], "ps: cannot execute")):
+            empty, basis, unreadable = holder.judge_empty(
+                f"refs/heads/fix/{ISSUE}-census-error", (0, 120))
+        self.assertFalse(empty, "an unanswered census must never demote")
+        self.assertTrue(unreadable, "the reading failed, and the report must say so")
+        self.assertIn("could not be read", basis)
+        self.assertIn("UNREGISTERED checkout", basis)
+        self.assertEqual(holder.empty_unmeasured, [basis],
+                         "an unreadable reading belongs under `unmeasured`, not `kept`")
+        self.assertEqual(holder.empty_kept, [])
+
+    def test_a_live_pi_whose_cwd_cannot_be_read_is_never_no_owner(self):
+        """⛔ THE CENSUS'S OWN BLIND SPOT (review, 2026-10-24).
+
+        `fleet_state.process_cwds` SKIPS a pid whose cwd it cannot resolve and reports no
+        error — correct for a pid that has exited, a fail-open for a pid that is alive
+        (hidepid, a removed directory, an `lsof` placeholder). Taken as a complete census,
+        "no cwd matched" reads as "no live owner" about a lane the reader could not see.
+        A LIVE unresolved pid therefore makes the empty test UNREADABLE, and this pins it:
+        without the gap check the demotion below is `True`.
+        """
+        self.empty_branch(f"fix/{ISSUE}-census-gap")
+        holder = self.stale_holder()
+        mod = _tool_module()
+        with mock.patch.object(mod.fleet_state, "pi_processes",
+                               return_value=([{"pid": os.getpid()}], "")), \
+             mock.patch.object(mod.fleet_state, "process_cwds", return_value=({}, "")):
+            empty, basis, unreadable = holder.judge_empty(
+                f"refs/heads/fix/{ISSUE}-census-gap", (0, 120))
+        self.assertFalse(empty, "an unresolvable-cwd census must never demote")
+        self.assertTrue(unreadable)
+        self.assertIn("could not resolve the cwd", basis)
+        self.assertIn(str(os.getpid()), basis,
+                      "the refusal must name WHICH process it could not read")
+
+    def test_a_failed_git_status_in_the_worktree_reads_UNREADABLE(self):
+        """CONDITION 3's other fail-closed arm: a dirt read that fails is not "clean".
+
+        The worktree record exists and its directory exists, so the `isdir` guard does not
+        apply — and `git status` then fails, which must NOT be read as an empty tree. The
+        fixture breaks the checkout's `.git` pointer, which is a real git failure (rc 128),
+        not a stubbed one.
+        """
+        self.gh_fixtures(closed_prs=[])
+        branch = f"fix/{ISSUE}-empty-broken-git"
+        ref = self.empty_branch(branch)
+        wt = self.checked_out_worktree(branch, f"empty-broken-{ISSUE}")
+        (wt / ".git").write_text("gitdir: /nonexistent/gitdir-for-this-test\n")
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        line = self.hit(out, ref)
+        self.assertNotIn("ADVISORY", line)
+        self.assertIn("UNREADABLE", line)
+        self.assertIn("git status` in the worktree failed", self.row(out, "local branches"))
+
+    def test_a_pruned_moved_checkout_with_a_live_lane_is_not_demoted(self):
+        """⛔ THE LIST IS NOT THE WORLD (review finding, reproduced end to end).
+
+        A lane whose checkout was MOVED and whose stale registration was then PRUNED has no
+        worktree record at all, so `_name_matched_owner` answers "no worktree is checked out
+        on it" — and before `_unregistered_checkout_owner` the ref was DEMOTED while a live
+        `pi` stood in the moved tree writing it (`VERDICT: CLEAN`, exit 0). That is the
+        #4256 direction this rule must never open.
+
+        It is not demoted now, and the reason is named: the moved checkout's `gitdir:` is
+        gone with its registration, so its branch cannot be NAMED — an unreadable reading,
+        which blocks by construction.
+        """
+        self.gh_fixtures(closed_prs=[])
+        branch = f"fix/{ISSUE}-empty-pruned"
+        ref = self.empty_branch(branch)
+        wt = self.checked_out_worktree(branch, f"empty-pruned-{ISSUE}")
+        proc = self._start_fake_pi(wt)
+        moved = self.tmp / f"moved-away-{ISSUE}"
+        try:
+            self._wait_for_pi_cwd(wt)
+            os.rename(wt, moved)
+            self._wait_for_pi_cwd(moved)
+            # The registration now points at a path that no longer exists, so this is the
+            # module's OWN advice for a dead record — and it is what erases the last trace.
+            _git(self.repo, "worktree", "prune")
+            rc, out = self.run_tool()
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        line = self.hit(out, ref)
+        self.assertNotIn("ADVISORY", line)
+        self.assertNotIn("EMPTY-CLAIM", line)
+        self.assertIn("UNREADABLE", line)
+        self.assertIn("UNREGISTERED checkout", line)
+
+    def test_a_live_lane_in_ANOTHER_repository_is_not_a_claim_on_this_one(self):
+        """PRECISION ARM: a foreign checkout is not a holder of this repository's refs.
+
+        A clone has its OWN `refs/heads/*`: a lane on `fix/N` in a clone is not a lane on
+        this checkout's `fix/N`, and reading it as one would block every issue in every
+        repo on a box where some other repository happens to carry the same branch name —
+        the over-block that gets a gate turned off. So the probe asks each unregistered
+        `pi` cwd for its `--git-common-dir` and skips anything that is not THIS repository's
+        (removing that comparison turns this test red: the clone's branch name matches).
+        """
+        self.gh_fixtures(closed_prs=[])
+        branch = f"fix/{ISSUE}-empty-elsewhere"
+        ref = self.empty_branch(branch)
+        clone = self.tmp / f"unregistered-{ISSUE}"
+        subprocess.run(["git", "clone", "-q", str(self.bare_origin()), str(clone)],
+                       check=True, capture_output=True, text=True)
+        _git(clone, "config", "user.email", "test@example.com")
+        _git(clone, "config", "user.name", "Test")
+        _git(clone, "switch", "-q", "-c", branch, "origin/main")
+        head = subprocess.run(
+            ["git", "-C", str(clone), "symbolic-ref", "--short", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        self.assertEqual(head, branch, "the fixture checkout must be on the judged branch")
+        proc = self._start_fake_pi(clone)
+        try:
+            self._wait_for_pi_cwd(clone)
+            rc, out = self.run_tool()
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        line = self.hit(out, ref)
+        self.assertIn("ADVISORY", line)
+        self.assertNotIn("UNREGISTERED checkout", line)
+
+    def stale_holder(self):
+        mod = _tool_module()
+        return mod.StaleHolder("git", str(self.repo), ISSUE, 60, [])
+
+    def _start_fake_pi(self, cwd: Path) -> subprocess.Popen:
+        """A process the census will see as `pi`, standing in `cwd` (see test (c2) above).
+
+        A COPY OF A REAL BINARY invoked by NAME through `PATH`: a `#!` script would carry
+        the interpreter as argv[0], and an absolute path would put the matcher at the mercy
+        of the `ps` column width.
+        """
+        fake_bin = self.tmp / "fakebin-empty"
+        fake_bin.mkdir(exist_ok=True)
+        pi = fake_bin / "pi"
+        if not pi.exists():
+            shutil.copy("/bin/sleep", pi)
+        env = {**os.environ, "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}"}
+        return subprocess.Popen(["pi", "120"], cwd=str(cwd), env=env,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
     # ── helpers ─────────────────────────────────────────────────────────────
 
     def _wait_for_pi_cwd(self, wt: Path, timeout: float = 10.0) -> None:
