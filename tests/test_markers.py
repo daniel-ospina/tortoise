@@ -59,6 +59,15 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # namespace PROD code resolves, the same `prod-coupled` class as the
     # test_agent_signup / test_dr_endpoints / test_billing entries below.
     "test_github_connect.py": {"registry": "prod-coupled"},
+    # #9664 capstone connector (the ChatGPT onboarding journey): the test builds
+    # the REAL HTTP app against `TortoiseSDK(namespace="registry")` so the
+    # tenancy resolver and the record seam read the SAME control-plane namespace
+    # production resolves — the literal IS the namespace PROD code resolves, the
+    # `prod-coupled` class exactly like test_github_connect above. A `test_*`
+    # rename would seed a different graph than the code under test reads. The
+    # module landed without this declaration, which reds this gate on `main`
+    # (measured 2026-10-24, the `test-slow (c)` shard).
+    "test_9664_capstone_connector_to_record.py": {"registry": "prod-coupled"},
     # 2026-08-28 merge-reconciliation: #1785/#1816 files use the 'registry'
     # literal (session/extraction tests) — routed so the markers gate passes
     # repo-wide.
