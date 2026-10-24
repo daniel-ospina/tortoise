@@ -6052,7 +6052,7 @@ _MAGNITUDE_QUALIFIER = r"(?:entire|whole|full|overall|complete|remaining|aforeme
 #: err in; both are listed with the other residuals in `#9531`.
 _MAGNITUDE_SUBJECT = (
     rf"(?:(?:the\s+|this\s+|these\s+)?(?:{_MAGNITUDE_QUALIFIER}\s+)?"
-    r"(?:\w+(?:[- ]\w+)*'s\s+)?"
+    r"(?:\w+(?:[- ]\w+)*['’]s\s+|\w+(?:[- ]\w+)*s'\s+)?"
     r"(?:arms?|costs?|wall[- ]?clocks?|runs?|suites?|totals?|works?|budgets?|walks?)\b"
     r"|(?:it|its|itself|them|their)\b|this\s+one|that\s+one)"
 )
@@ -6190,11 +6190,56 @@ _MAGNITUDE_POSITIONAL = re.compile(
 #: (`walk’s cost`, what macOS and Word produce), a plural possessive (`walks' cost`) and
 #: a dropped apostrophe (`walk cost`) each leave the subject unmatched, and without this
 #: veto each of them kept the exemption.
-_MAGNITUDE_PHASE_SHARE_TAIL = re.compile(
-    r"^\s*(?:of\s+)?(?:the\s+|this\s+|that\s+|its\s+|their\s+|our\s+)?"
-    r"(?:\w+['’]s\b|\w+s'\s|\w+\s+(?:cost|work|time|runtime|wall[- ]?clock)\b)",
-    re.IGNORECASE,
+#: The nouns that make a dropped apostrophe a MEASUREMENT (`walk cost`): a bare
+#: measurement noun right after the divided thing is the only way to spell the share
+#: without punctuation.
+_MAGNITUDE_MEASUREMENT_NOUNS = frozenset(
+    {"cost", "costs", "work", "time", "runtime", "wall-clock", "wallclock"}
 )
+
+#: How many words of the tail are scanned for the possessive. The divided thing is a
+#: noun phrase (`the gate walk's cost`), not a sentence, so a possessive past this
+#: window is not one about THIS share.
+_MAGNITUDE_TAIL_WORDS = 6
+
+
+def _MAGNITUDE_PHASE_SHARE_TAIL(tail: str) -> bool:
+    """Does the text AFTER a positional share noun name a MEASUREMENT (`#9528` P1)?
+
+    `# the second half of the walk` is a PHASE; `# the second half of the walk's cost`
+    is a SHARE of a measurement wearing a phase's clothes. The possessive is read HERE,
+    off the tail, and in CODE rather than one regex, for two measured reasons:
+
+    * the subject slot (`_MAGNITUDE_SUBJECT`) only swallows a single-word ASCII `'s`,
+      so a typographic apostrophe (`walk’s cost`, what macOS and Word produce), a plural
+      possessive (`walks' cost`) and a dropped apostrophe (`walk cost`) leave it
+      unmatched;
+    * it also accepts a MULTI-WORD possessive (`the gate walk's cost`), so a one-token
+      tail check was GREEN on `# the second half of the whole arm's cost` and on every
+      `the gate walk's cost` spelling — the same one-word-retires-the-guard shape, moved
+      from the adjective slot to the divided-thing slot.
+
+    The determiner is consumed as a determiner, not as the divided thing: without that,
+    `# the second half of the work re-reads the sources` read RED because `the` stood in
+    for the share's subject and `work` looked like a dropped-apostrophe measurement —
+    the documented-GREEN parallel of `the second half of the walk re-reads the sources`.
+    """
+    head = re.match(r"\s*of\s+", tail, re.IGNORECASE)
+    if not head:
+        return False
+    rest = tail[head.end() :]
+    determiner = re.match(r"(?:the|this|that|its|their|our)\s+", rest, re.IGNORECASE)
+    if determiner:
+        rest = rest[determiner.end() :]
+    words = re.findall(r"[\w’'-]+", rest)[: _MAGNITUDE_TAIL_WORDS]
+    for position, word in enumerate(words):
+        lowered = word.lower()
+        if lowered.endswith(("'s", "’s")) or lowered.endswith("s'"):
+            return True
+        # a dropped apostrophe: the measurement noun right after the divided thing
+        if position > 0 and lowered in _MAGNITUDE_MEASUREMENT_NOUNS:
+            return True
+    return False
 
 
 def _unsettleable_magnitudes(comment: str) -> list[str]:
@@ -6214,8 +6259,7 @@ def _unsettleable_magnitudes(comment: str) -> list[str]:
 
     - `69390341f` (the `#9516` merge): rebuild 1.70 s / 1.81 s, arm 3.35 s / 3.14 s,
       ungated 10.81 s / 9.90 s.
-    - `81f5594dc` (this PR's base, `#9549`): rebuild 2.50 s / 3.00 s, arm 3.90 s /
-      4.40 s. `#9549` changed the census universe, so these absolute times are NOT the
+    - `81f5594dc` (`#9549`; the merge base when the figures were taken): rebuild 2.50 s / 3.00 s, arm 3.90 s / 4.40 s. `#9549` changed the census universe, so these absolute times are NOT the
       ones above; the direction (over half the arm) is the same on both trees.
 
     Read against the ARM the comment sits in, the rebuild is **over half** of it, not a
@@ -6297,12 +6341,26 @@ def _unsettleable_magnitudes(comment: str) -> list[str]:
     * RED on a positional share whose divided thing is named with a POSSESSIVE: `the
       second half of the walk's cost` is a share of a measurement, `the second half of
       the walk` is a phase, and the possessive is read off the TAIL rather than inferred
-      from the subject slot — that slot only swallows an ASCII `'s`, so a typographic
-      apostrophe (`walk’s cost`), a plural possessive (`walks' cost`) and a dropped
-      apostrophe (`walk cost`) each ended the match at the noun and took the exemption.
-      The qualifier set is phase words only (`first`/`second`/`third`/`left`/`right`/
-      `top`/`bottom`); `upper`/`lower`/`other` are share adjectives. Stated cost of the
-      tightening: `the upper half of the walk` reds.
+      from the subject slot — that slot only swallowed an ASCII `'s` on a single word.
+      The tail read (rather than a one-token pattern) is what closes the MULTI-WORD
+      case, which a one-token veto was GREEN on: `the second half of the control arm's
+      cost`, `the second half of the gate walk's cost`. (A `whole arm` spelling is
+      exempt for a different reason — `_framed` treats `whole arm` as a framing
+      marker, so that sentence states its own frame and the exemption is the framing
+      rule's, not this one's.) `_MAGNITUDE_SUBJECT` accepts the
+      typographic (`walk’s cost`) and plural (`walks' cost`) possessives too, so those
+      red for the same reason. The qualifier set is phase words only
+      (`first`/`second`/`third`/`left`/`right`/`top`/`bottom`); `upper`/`lower`/`other`
+      are share adjectives. Stated costs of the tightening, both measured rather than
+      discovered later: `the upper half of the walk` reds (a phase sentence with a share
+      adjective), and so does any possessive on the divided thing, measurement or not
+      (`the second half of the run's output`).
+    * GREEN residual, named so it is a stated limit and not a false PASS: a dropped
+      apostrophe on a MULTI-WORD divided thing (`the second half of the gate walk cost`)
+      matches nothing at all — `_MAGNITUDE_SUBJECT` needs either a possessive or a bare
+      measurement noun immediately after the determiner — so it stays GREEN, and the
+      phrase carries a figure only if a number is also written. Pinned as a GREEN leg
+      with that note, so a later widening reds here and has to update this bullet.
     """
     lines = comment.splitlines()
     found: list[str] = []
@@ -6331,9 +6389,7 @@ def _unsettleable_magnitudes(comment: str) -> list[str]:
                 and _MAGNITUDE_POSITIONAL.search(window[: match.start()])
                 # …and the divided thing must be named WITHOUT a possessive, or this is
                 # a share of a measurement wearing a phase's clothes.
-                and not _MAGNITUDE_PHASE_SHARE_TAIL.match(
-                    window[match.start() + head.end() :]
-                )
+                and not _MAGNITUDE_PHASE_SHARE_TAIL(window[match.start() + head.end() :])
             ):
                 continue
             found.append(match.group(match.lastgroup))
@@ -7103,6 +7159,13 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
         "# the second half of the walk re-reads the sources",
         "# the left half of the suite is unused",
         "# the second part of the walk is the ungated pass",
+        "# the first half of the work is the ungated pass",
+        # ...and the STATED RESIDUAL (#9528 review round 6): a dropped apostrophe on a
+        # MULTI-WORD divided thing matches nothing — no possessive to bound the subject
+        # and no bare measurement noun right after the determiner — so it stays GREEN.
+        # Widening `_MAGNITUDE_SUBJECT` to see it must red this leg and update the
+        # docstring's residual bullet in the same change.
+        "# the second half of the gate walk cost is the parse",
         # a proportion bound to something that is not a measured quantity:
         "# e.g. 3 in 4 cases",
         "# most of these modules are run in the suite",
@@ -7133,6 +7196,16 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
         "# the second half of the walk’s cost is the parse",  # typographic apostrophe
         "# the second half of the walks' cost is the parse",  # plural possessive
         "# the second half of the walk cost is the parse",  # dropped apostrophe
+        # ...and the MULTI-WORD divided thing, which a one-token tail veto was GREEN on:
+        # the possessive sits one word further out, which is the whole reason the tail
+        # is read in code rather than matched against a single token.
+        "# the second half of the control arm's cost is the parse",
+        "# the second half of the gate walk's cost is the parse",
+        "# the second half of the gate walk’s cost is the parse",
+        "# the second half of the gate walks' cost is the parse",
+        # ...and a possessive on a NON-measurement: the stated cost of the rule, not a
+        # shape it is trying to catch, and it is a share of a thing either way.
+        "# the second half of the run's output is the parse",
     ):
         assert _unsettleable_magnitudes(share), (
             f"{share!r} is a SHARE of a measured quantity wearing a phase's clothes — a "
