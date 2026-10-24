@@ -2534,10 +2534,16 @@ _DISTANCE_EXCEPTIONS: dict[str, tuple[int, str]] = {
     ),
 }
 
-#: How far the search itself may walk. Deliberately above every budget in play, so
-#: a `None` means UNREACHABLE rather than "further than we looked" — the message
-#: distinguishes the two, and a short search cap would report a long chain as no
-#: chain at all.
+#: How far the search itself may walk. Above every BUDGET in play (3, plus the
+#: two exceptions whose budgets are 4 and 5) — which is NOT the same as above
+#: every CHAIN, and the difference is measured, not assumed: at this head
+#: `MCP tortoise_search` reaches `hosted_backup.py::_independent_counts` and
+#: `_DUMP_EDGE_PAGE_QUERY` in 13 hops and `_COUNT_ALL_EDGES_QUERY` in 14, so
+#: `_door_distance` returns `None` for them at this cap. **`None` therefore means
+#: "not found within `_DISTANCE_SEARCH_CAP` hops", never "unreachable"**, and
+#: every message that consumes the value says which of the two it is — a short
+#: cap reports a long chain as no chain at all, so a caller must not read `None`
+#: as proof of absence.
 _DISTANCE_SEARCH_CAP = 12
 
 
@@ -2564,10 +2570,16 @@ def _symbol_index() -> tuple[dict[str, frozenset[str]], dict[str, frozenset[str]
     middle hops are the locals `ids` and `edges` in functions that have nothing
     to do with each other (`#9720` added the `ids` local, which shortened the
     same collision from 5 hops to 4 and took the accepted count from 69 pairs
-    to 70). The relation's own note claims it "can miss a bad door; it cannot
-    invent reach" — this was reach invented, so locals are excluded here and
-    the negative probe for that exact pair lives in
+    to 70). The relation's own note now states what the code enforces: a
+    repeated ATTRIBUTE or builtin name can still buy a hop (`list`, `.delete`),
+    while a repeated function-LOCAL name no longer resolves — and the local
+    class was the one that produced a WRONG attribution rather than an extra
+    hop, so locals are excluded here and the negative probe for that exact pair
+    lives in
     `test_the_door_attribution_refuses_a_door_that_reaches_another_reader`.
+    A class whose body is walked from a function carries `in_function` through
+    unchanged, and `test_a_class_defined_inside_a_function_is_not_a_symbol`
+    pins both halves of that.
     Values of a local assignment are still REACHED from the enclosing function
     (`mentions` walks every `Assign` value), so dropping the target nodes loses
     no real reference.
@@ -2678,7 +2690,13 @@ def _door_entry_ids(door: str) -> frozenset[str]:
 
 @functools.cache
 def _door_distance(door: str, reader: str) -> int | None:
-    """Shortest reference distance from `door` to `reader`; `None` = unreachable.
+    """Shortest reference distance from `door` to `reader`; `None` = NOT FOUND
+    within `_DISTANCE_SEARCH_CAP` hops.
+
+    ⚠️ `None` is a TRUNCATION, not a proof of absence — a chain longer than the
+    cap reports `None` exactly like one that does not exist (measured at this
+    head: `_COUNT_ALL_EDGES_QUERY` is 14 hops against a cap of 12), which is why
+    the two are never conflated in a message.
 
     Returns the DISTANCE rather than a boolean so the failure can say how far the
     chain actually is — "needs 4 references, budget is 3" is actionable, "not
@@ -2745,6 +2763,16 @@ def test_the_door_attribution_refuses_a_door_that_reaches_another_reader():
 
     # …and a door that exists but is on another surface path must not be
     # attributed to a reader it does not reach.
+    # ⚠️ This door needs the SAME non-vacuity guard as `MCP tortoise_search`
+    # below: `_door_entry_ids` yields `frozenset()` for a handler that no longer
+    # resolves, `_door_distance` then returns `None`, and every `not
+    # _door_reaches(...)` in the loop would pass while testing nothing.
+    assert _door_entry_ids("MCP tortoise_suggest_entry_points"), (
+        "this probe's door does not resolve, so the `not _door_reaches(...)` loop "
+        "below would be vacuous — a door that is not in the index never reaches "
+        "anything (measured: a renamed tool yields frozenset() and refuses every "
+        "reader)"
+    )
     for wrong in (
         "mcp_server.py::_preview_supersede",
         "sdk.py::TortoiseSDK.belief_timeline",
@@ -2767,7 +2795,9 @@ def test_the_door_attribution_refuses_a_door_that_reaches_another_reader():
     # `_DUMP_EDGE_PAGE_QUERY` are 13 and `_COUNT_ALL_EDGES_QUERY` 14 (all beyond the
     # 12-hop `_DISTANCE_SEARCH_CAP`, so `_door_distance` reports `None` for them —
     # "further than we looked", not "unreachable"), and `restore_graph` /
-    # `_restore_copy_settled` are unreachable at any cap. (Other `hosted_backup.py`
+    # `_restore_copy_settled` are unreachable AT CAP 24 (the cap was raised for
+    # that measurement) — "unreachable" is not claimed for caps beyond it. (Other
+    # `hosted_backup.py`
     # symbols ARE reachable at 2-3 hops through ATTRIBUTE names — `list`, `delete` —
     # which is the relation's declared permissive direction: a repeated identifier
     # can buy a hop, so only the pair the door is FOR is pinned here. If it reds,
@@ -2784,6 +2814,66 @@ def test_the_door_attribution_refuses_a_door_that_reaches_another_reader():
         "(`ids`/`edges`) through a function-LOCAL assignment, so any file that reuses "
         "a common variable name becomes reachable from any door. Locals must not be "
         "symbol definitions (`_symbol_index`)."
+    )
+
+
+def test_a_class_defined_inside_a_function_is_not_a_symbol():
+    """The `in_function` flag reaches a class BODY, and only the local one is dropped.
+
+    `_symbol_index`'s `ClassDef` branch used to hard-code `in_function=False`, so a
+    class defined INSIDE a function had its own body indexed as if it were
+    module-level: `index_walk.py::_getmntinfo_table._StatFS._fields_` and
+    `projection/__init__.py::journal_epistemic_existence._Node.__slots__` were
+    registered under the BARE names `_fields_` / `__slots__`, so a same-named
+    assignment anywhere resolved to them — the same defect class as #9817's local
+    variables, one nesting level down. The flag now propagates.
+
+    ⚠️ **Why this needs its own arm.** Nothing else in the file can catch that
+    branch: the two ceilings (`_ACCEPTED_PAIRS_AT_THIS_HEAD`,
+    `_WORST_ROW_AT_THIS_HEAD`) are `<=` and this change moves NO pair (measured —
+    the accepted total is unchanged), so reverting `in_function=in_function` to
+    `in_function=False` leaves every other arm green. Both directions are pinned
+    here: the local class body is gone, AND a module-level `Class.ATTR` constant
+    is still indexed, so the arm cannot be satisfied by deleting the whole
+    `ClassDef` branch either.
+    """
+    defs, _ = _symbol_index()
+
+    # A module-level `Enum`'s member is an `Assign` with a value at
+    # `in_function=False` — it must SURVIVE (dropping class bodies wholesale would
+    # also make §13's constant rows unattributable).
+    assert "alert_store.py::ResolveOutcome.RESOLVED" in defs.get("RESOLVED", set()), (
+        "the module-level `Class.ATTR` constant `ResolveOutcome.RESOLVED` is no "
+        "longer a symbol — the `ClassDef` branch must still index a class body "
+        "whose class is NOT local. Present in `_symbol_index`'s output: "
+        f"{sorted(defs.get('RESOLVED', ()))}. If `ResolveOutcome` moved, re-point "
+        "this pin rather than deleting it — it is the positive half of the pair."
+    )
+
+    # …and the body of a class local to a FUNCTION must not be.
+    assert not defs.get("_fields_"), (
+        "a function-local class body is indexed as a symbol again: `_fields_` "
+        "resolves to "
+        f"{sorted(defs.get('_fields_', ()))}, whose only definition in the tree "
+        "is `_StatFS`, a class defined INSIDE `index_walk._getmntinfo_table` — so "
+        "`in_function` is not propagating into the `ClassDef` branch and a local "
+        "class's attributes become reachable bare names (`_symbol_index`)."
+    )
+    assert "projection/__init__.py::journal_epistemic_existence._Node.__slots__" not in defs.get(
+        "__slots__", set()
+    ), (
+        "the function-local `_Node` class body is indexed again — "
+        "`journal_epistemic_existence._Node.__slots__` is a definition node, so a "
+        "bare `__slots__` anywhere resolves to it (`in_function` must carry into "
+        "the `ClassDef` branch with its value UNCHANGED)."
+    )
+    # The class ITSELF is still a symbol — only its body's assignments are dropped.
+    # Stated so the arm above cannot be greened by dropping local nested defs too.
+    assert "projection/__init__.py::journal_epistemic_existence._Node" in defs.get("_Node", set()), (
+        "the local `_Node` CLASS is no longer a symbol — a nested `def`/`class` "
+        "is still indexed whether or not it is inside a function; only its body's "
+        "`Assign` targets are local. Present: "
+        f"{sorted(defs.get('_Node', ()))}"
     )
 
 
@@ -2959,7 +3049,11 @@ def test_every_customer_callable_row_reaches_a_declared_door():
             hops = _distance_budget(reader)
             distance = _door_distance(door, reader)
             if distance is None or distance > hops:
-                reached = "does not reach it at all" if distance is None else f"needs {distance} references"
+                reached = (
+                    f"was not found within the {_DISTANCE_SEARCH_CAP}-hop search cap"
+                    if distance is None
+                    else f"needs {distance} references"
+                )
                 broken.append(
                     f"{label} — {door} exists but {reached} to reach `{reader}`, and this "
                     f"row's budget is {hops} — the door is not a door to THIS reader, so "
