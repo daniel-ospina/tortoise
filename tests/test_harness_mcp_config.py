@@ -932,7 +932,7 @@ class TestDocsPageAndSkillConfig:
             "Connect",                   # 3 — the OAuth grant is a SEPARATE act
             "Connect Tortoise",          # 3 — the consent dialog between Connect and Authorize
             "Authorize",                 # 3 — consent (key-less connect completes here)
-            "pick the Organization you are onboarding",  # 3 — the MULTI-org chooser (oauth.py)
+            "pick the organization you are onboarding",  # 3 — the MULTI-org chooser (oauth.py)
                                        #     hides the named-org line and keeps
                                        #     Authorize disabled until it is picked
             "chatgpt.com/skills",        # 4 — the Skills surface the archives install on
@@ -2074,6 +2074,10 @@ def _chatgpt_block(main: str, index: int) -> str:
         f"the chatgpt card is no longer terminated by {_KEYLESS_BRANCH!r}: the card "
         "is the last arm in the connect step, or the branch was renamed. The last "
         "block cannot be bounded — update this guard with the shape that is there.")
+    assert "wizardConnectHarness ===" not in main[start_pos:end_pos], (
+        "another harness arm sits between the last chatgpt block and the card's "
+        "terminator, so the slice for that block spans a sibling arm — the copy "
+        "pinned inside it could then be satisfied by the wrong card")
     line_start = main.rfind("\n", start_pos, end_pos) + 1
     assert main[line_start:end_pos].strip() in (") :", "):"), (
         "the key-less anchor does not start its own clause, so it is probably being "
@@ -2115,6 +2119,18 @@ def test_9660_the_chatgpt_card_slices_red_on_a_moved_or_duplicated_title():
         )
         with pytest.raises(AssertionError, match="out of order"):
             _chatgpt_block(shuffled, 0)
+
+    # A sibling arm wedged between the LAST title and the terminator is refused:
+    # the slice would otherwise span it, and the copy pinned inside could be
+    # satisfied by the wrong card.
+    with pytest.raises(AssertionError, match="another harness arm sits between"):
+        _chatgpt_block(
+            "{wizardConnectHarness === 'chatgpt' ? (\n"
+            "  <WizardBlock title=\"Add the Tortoise connector\">a</WizardBlock>\n"
+            "  <WizardBlock title=\"Install the Tortoise skills\">b</WizardBlock>\n"
+            "  <WizardBlock title=\"Give it its first job\">c</WizardBlock>\n"
+            ") : wizardConnectHarness === 'codex' ? (\n  <p>sibling</p>\n"
+            ") : wizardKeyless ? (\n  <p>keyless</p>\n", 2)
 
     # The last block cannot run past the card: its terminator is pinned, and a
     # quoted copy of it is refused rather than truncating the slice.
@@ -2202,9 +2218,10 @@ def test_9660_chatgpt_is_a_live_onboarding_journey_not_a_docs_dead_end():
         "ChatGPT user gets no card in the connect step, and every pin below would "
         "be judging some other arm")
     connector, skills, first_job = (_chatgpt_block(main, i) for i in range(3))
-    # The CARD: from the plan note that frames it to the end of the last block.
-    # Bounded this way so the note cannot satisfy its pin from a sibling arm, and
-    # so the URL pin covers the whole card rather than one block.
+    # The CARD slice: the plan note that frames the card, to the end of the last
+    # block. Two uses — it bounds the plan-note pin, and the assertion below that
+    # no other harness selector sits between the note and the first block. (The
+    # re-typed-URL pin runs on the ARM, below.)
     card_from = main.index("paid ChatGPT plan")
     first_at = main.index(_CHATGPT_BLOCKS[0])
     last_at = main.index(_CHATGPT_BLOCKS[2])
@@ -2282,6 +2299,38 @@ def test_9660_chatgpt_is_a_live_onboarding_journey_not_a_docs_dead_end():
     assert "Plus" in plan_lines[0], (
         "the plan warning must name the floor (Plus or higher), not just say the "
         "plan is paid")
+
+def test_9660_the_recipe_carriers_use_one_casing_for_the_tenant_noun():
+    """"organization" in body prose, on every carrier — one casing, guarded.
+
+    The review of #9660 found this applied to some carriers and not others, so the
+    same sentence rendered two ways. The ordered pins compare case-insensitively
+    (the ORDER is what they are about), which is exactly why the spelling needs its
+    own assertion: without one, a half-applied edit is invisible.
+    """
+    root = Path(__file__).resolve().parent.parent
+    carriers = (
+        "website/apps/dashboard/src/main.jsx",
+        "website/apps/dashboard/src/harnesses.js",
+        "website/docs.html",
+        "tortoise/onboarding/SKILL.md",
+    )
+    for rel in carriers:
+        # JSX wraps mid-sentence, so compare on flattened text (and unescape the
+        # apostrophe the list item uses).
+        text = " ".join((root / rel).read_text(encoding="utf-8")
+                        .replace("&apos;", "'").split())
+        for capital in ("Organization you are onboarding", "Organization you're onboarding",
+                        "Organization is the one the connector writes to"):
+            assert capital not in text, (
+                f"{rel} capitalises the tenant noun in body prose ({capital!r}); every "
+                "recipe carrier writes 'organization' there. The capitalised form "
+                "belongs to UI headings, not to these sentences.")
+        assert any(lower in text for lower in (
+            "organization you are onboarding", "organization you're onboarding")), (
+            f"{rel} no longer carries the Organization act at all — the sentence this "
+            "pin exists for was removed or reworded")
+
 
 def test_9660_the_org_choice_precedes_authorize_on_every_recipe_carrier():
     """#9660: the connect recipes that drive the shared consent page, judged on ORDER
@@ -2364,7 +2413,7 @@ def test_9660_the_org_choice_precedes_authorize_on_every_recipe_carrier():
     # here too rather than left to a comment.
     blocks = [
         ("Claude key-less card list",
-         list_block(main, "Pick the Organization you&apos;re onboarding")),
+         list_block(main, "Pick the organization you&apos;re onboarding")),
         ("claude-web step", step_line(harnesses, "Claude opens the authorization page")),
         ("Claude Desktop snippet",
          span(harnesses, "'claude-desktop': () =>", "'claude-web': () =>")),
@@ -2387,9 +2436,9 @@ def test_9660_the_org_choice_precedes_authorize_on_every_recipe_carrier():
             "Organization (tortoise/oauth.py). If the sentence was reworded, "
             "update BOTH the copy and this pin — do not drop the fact.")
         # Compared case-insensitively so the pin tracks the ORDER, not the
-        # spelling — but every surface writes "Organization": it is the product's
-        # own noun (the dashboard uses it for the tenant throughout), not the
-        # consent page's control, whose placeholder is "Choose an org…".
+        # spelling — and the spelling itself is guarded by
+        # `test_9660_the_recipe_carriers_use_one_casing_for_the_tenant_noun`, so a
+        # half-applied edit cannot pass here silently.
         org = flat.lower().find("organization")
         authorize = flat.lower().find("authorize")
         assert -1 not in (org, authorize), (

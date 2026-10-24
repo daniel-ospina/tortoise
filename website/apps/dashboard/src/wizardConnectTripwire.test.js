@@ -1583,7 +1583,7 @@ test('#2865: the live connect step makes the two Claude leaves key-less OAuth', 
     'the Server URL is the canonical connector constant (matches the PRM resource)')
   assert.match(oauth, /sign in/, 'the recipe has a sign-in step')
   assert.match(oauth, /<strong>Authorize<\/strong>/, 'the recipe has an Authorize step')
-  assert.match(oauth, /Pick the Organization/, 'the recipe has an org chooser step')
+  assert.match(oauth, /Pick the organization/, 'the recipe has an org chooser step')
   assert.match(oauth, /Leave <strong>Request headers<\/strong> empty/,
     'the recipe tells the user the header field is empty, not required')
   assert.match(oauth, /wizardWorkflowsText\('', 'included'\)/,

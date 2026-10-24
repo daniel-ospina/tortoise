@@ -234,7 +234,7 @@ export const HARNESS_STEPS = (harness, key) => ({
     'Add custom connector and name it "Tortoise"',
     { label: 'Server URL', code: CANONICAL_MCP_URL, copy: CANONICAL_MCP_URL },
     'No API key is needed — leave Request headers empty.',
-    'Sign in to Tortoise when Claude opens the authorization page: pick the Organization you are onboarding — the page names it, or asks you to choose when your account can use more than one — then click Authorize.',
+    'Sign in to Tortoise when Claude opens the authorization page: pick the organization you are onboarding — the page names it, or asks you to choose when your account can use more than one — then click Authorize.',
     'Paste the prompt below into a Claude Web chat — it gives Claude the Tortoise workflows:',
     '(Claude connects from its own cloud — the authorization lives with Anthropic, not on your machine. No local skills on web — the prompt gives Claude the workflows.)',
   ],
@@ -273,7 +273,7 @@ export const HARNESS_STEPS = (harness, key) => ({
     'Fill in the dialog: Name = Tortoise, leave Description empty (or write your own), leave Connection on Server URL, leave Authentication on OAuth, skip Icon.',
     { label: 'Server URL — paste this into the dialog', code: CHATGPT_MCP_URL, copy: CHATGPT_MCP_URL },
     'Now tick "I understand and want to continue" and click Create as a plugin.',
-    'Open chatgpt.com/settings/plugins-settings → Tortoise → View details → Connect, then confirm Connect Tortoise in the dialog it opens. Sign in to Tortoise, pick the Organization you are onboarding — the page names it, or asks you to choose when your account can use more than one — then click Authorize. That Organization is the one the connector writes to.',
+    'Open chatgpt.com/settings/plugins-settings → Tortoise → View details → Connect, then confirm Connect Tortoise in the dialog it opens. Sign in to Tortoise, pick the organization you are onboarding — the page names it, or asks you to choose when your account can use more than one — then click Authorize. That organization is the one the connector writes to.',
     'Install the Tortoise skills once — on tortoise.premiselabs.co/docs#chatgpt download the three files (how-to-use-tortoise, tortoise-decide, tortoise-file-finding), then open chatgpt.com/skills → Add → Upload from your computer and pick them together. To update one, upload that file again and choose Replace existing. Rather not install? Paste the document below into one chat instead.',
     'The tortoise_* tools follow that connection — if they do not appear, re-open chatgpt.com/settings/plugins-settings and check Tortoise shows as connected, then ask the chat which tools it can call. Write actions ask for confirmation in chat.',
   ],
@@ -286,7 +286,7 @@ export const HARNESS_INTRO = {
   claude: 'Run these commands in your terminal:',
   // #2865: both Claude connector surfaces are key-less OAuth — the intro names
   // the sign-in, never a Bearer request header.
-  'claude-desktop': 'Open Claude Desktop → Settings → Connectors → Add custom connector, name it "Tortoise" and enter the Server URL. No API key is needed: Claude opens Tortoise\u2019s sign-in page on the first connection — sign in, pick the Organization you are onboarding (the page names it, or asks you to choose when your account can use more than one), then click Authorize. (For local stdio servers only, advanced users can still edit ~/Library/Application Support/Claude/claude_desktop_config.json on macOS, or %APPDATA%\\Claude\\claude_desktop_config.json on Windows, from Settings → Developer in the app.)',
+  'claude-desktop': 'Open Claude Desktop → Settings → Connectors → Add custom connector, name it "Tortoise" and enter the Server URL. No API key is needed: Claude opens Tortoise\u2019s sign-in page on the first connection — sign in, pick the organization you are onboarding (the page names it, or asks you to choose when your account can use more than one), then click Authorize. (For local stdio servers only, advanced users can still edit ~/Library/Application Support/Claude/claude_desktop_config.json on macOS, or %APPDATA%\\Claude\\claude_desktop_config.json on Windows, from Settings → Developer in the app.)',
   // #2361 review-r1 (UX-3): Claude Web had no intro — the copy button said
   // 'Copy prompt' but nothing explained where the prompt goes.
   'claude-web': 'Start a new chat at claude.ai (or the Claude web app) and paste the prompt below into it — that conversation becomes your connected agent.',
@@ -572,7 +572,7 @@ chmod +x .claude/hooks/session-start.sh .claude/hooks/session-end.sh .claude/hoo
   // issue (Anthropic's "Request headers" field is beta and absent on many
   // accounts). The `key` argument is kept so every caller keeps one signature.
   'claude-desktop': () =>
-    `Tortoise — Claude Desktop (OAuth, no API key)\nClaude Desktop reaches a remote MCP server through the Connectors UI:\n1. Open Claude Desktop → Settings → Connectors → Add custom connector.\n2. Name: Tortoise\n3. Server URL: ${CANONICAL_MCP_URL}\n4. Leave Request headers empty — no API key is needed. Claude opens\n   Tortoise's sign-in page on the first connection: sign in, pick the\n   Organization you're onboarding (the page names it, or asks you to choose when\n   your account can use more than one), then click Authorize.\n5. Start a new chat and paste the Tortoise workflows prompt — it gives Claude\n   the Tortoise workflows. Then say "Set up Tortoise" so the agent calls\n   tortoise_health to verify, and click "I've connected it — Continue" in the\n   dashboard connect step (the click only advances — the connection itself is\n   confirmed by your agent's first successful write).`,
+    `Tortoise — Claude Desktop (OAuth, no API key)\nClaude Desktop reaches a remote MCP server through the Connectors UI:\n1. Open Claude Desktop → Settings → Connectors → Add custom connector.\n2. Name: Tortoise\n3. Server URL: ${CANONICAL_MCP_URL}\n4. Leave Request headers empty — no API key is needed. Claude opens\n   Tortoise's sign-in page on the first connection: sign in, pick the\n   organization you're onboarding (the page names it, or asks you to choose when\n   your account can use more than one), then click Authorize.\n5. Start a new chat and paste the Tortoise workflows prompt — it gives Claude\n   the Tortoise workflows. Then say "Set up Tortoise" so the agent calls\n   tortoise_health to verify, and click "I've connected it — Continue" in the\n   dashboard connect step (the click only advances — the connection itself is\n   confirmed by your agent's first successful write).`,
   'claude-web': () => {
     const base = WORKFLOWS_PROMPT
     // The session-filing paragraph is gated on HARNESS_CAPTURE_SUPPORT — the

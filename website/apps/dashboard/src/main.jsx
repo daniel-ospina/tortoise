@@ -9752,7 +9752,7 @@ function claimIntentInFlight() {
                             </p>
                             <ol className="wizard-fields">
                               <li>{web ? 'Claude' : 'Claude Desktop'} opens Tortoise&apos;s sign-in page on the first connection — sign in.</li>
-                              <li>Pick the Organization you&apos;re onboarding — the page names it, or asks you to choose when your account can use more than one.</li>
+                              <li>Pick the organization you&apos;re onboarding — the page names it, or asks you to choose when your account can use more than one.</li>
                               <li>Click <strong>Authorize</strong>.</li>
                             </ol>
                             <p className="wizard-note">
@@ -9852,9 +9852,9 @@ function claimIntentInFlight() {
                                 <p className="wizard-caption">
                                   Tick <strong>I understand and want to continue</strong>, then click <strong>Create as a plugin</strong>. Now open
                                   {' '}<code>chatgpt.com/settings/plugins-settings</code> → <strong>Tortoise</strong> → <strong>View details</strong> → <strong>Connect</strong>,
-                                  then confirm <strong>Connect Tortoise</strong> in the dialog it opens. Sign in to Tortoise, pick the Organization
+                                  then confirm <strong>Connect Tortoise</strong> in the dialog it opens. Sign in to Tortoise, pick the organization
                                   you are onboarding — the page names it, or asks you to choose when your account can use more than one —
-                                  then click <strong>Authorize</strong>. That Organization is the one the connector writes to.
+                                  then click <strong>Authorize</strong>. That organization is the one the connector writes to.
                                 </p>
                               </WizardBlock>
                               <WizardBlock step={2} title="Install the Tortoise skills">
