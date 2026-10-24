@@ -9,21 +9,22 @@ aboutSubjects: Tortoise extractor v4
 aboutObjects: "#8503, #7949, #2552, #3679, #2514, #9077, EXTRACTOR-V4-ARCHITECTURE.md"
 ---
 
-# `#8503` — planted operator edges: 3/14 → 5/14, with every remaining miss attributed
+# `#8503` — planted operator edges: 5/14, every remaining miss attributed, and the mechanisms behind them
 
 **Measured at:** `a999be41e` (the lane's base) with the fix in the working tree, 2026-10-24.
 E4's own gate (`tools/operator_receipt_check.py`) is the acceptance instrument; the
 receipts this document cites are `tests/eval/write_path/receipts/w2b-operator-2026-10-24-8503-{a,b}.json`
 and both exit **EVIDENCE VALID**.
 
-> **Verdict: 5/14 in-14, up from 3/14 on the same instrument, and NOT the 14/14 the issue's
-> `edge_correct` criterion asks for.** The part that is systematic is upstream of the edge:
-> **endpoint recall rose 7/15 → 11/15 planted edges with both anchors present** across every
-> run of the fixed tree, and **the extractor logged no operator drop in any run** — so no
-> remaining `edge_missing` is an extractor-side drop. (That zero is NOT a clean bill for the
-> write path: a commit-seam drop is not observable from a receipt — §1, blind spot.) The
-> edge number itself sits inside this extractor's run-to-run variance (§5), which is why it
-> is reported as a distribution and not as a point estimate.
+> **Verdict: 5/14 in-14 — the SAME number the issue's own pre-fix run measured, and NOT the
+> 14/14 the criterion asks for. This PR does not claim a gain on the criterion number.**
+> What it does establish, on committed artifacts: (a) **endpoint recall rose 7/15 → 11/15**
+> planted edges with both anchors present, on every run of the fixed tree — the systematic
+> part, upstream of the edge; (b) **the extractor logged no operator drop in any run**, so no
+> `edge_missing` is an extractor-side drop (that zero is NOT a clean bill for the write path —
+> a commit-seam or a failed snapshot is invisible to it, §1); (c) three rows flipped red→green
+> in every run and three flipped green→red, i.e. the edge number is inside this extractor's
+> sampling variance (§5). The deliverable is the ATTRIBUTION, not a moved needle.
 
 ---
 
@@ -40,7 +41,7 @@ derives a corpus-level `operator_audit.drop_warnings` that separates the two cla
 | class | markers (refusal TAILS, never a shared prefix) | what a count means |
 |---|---|---|
 | **operator drops** | `operator dropped:`, `operator with unknown op_type`, `endpoint NOT minted`, `MITIGATES target edge not emitted` | the operator pass refused an edge the model emitted |
-| **supersede refusals** | `matches no S3 prior`, `is ambiguous`, `does not resolve to an S3 search result`, `is not expressible in the Layer-1 payload` | the replace channel dropped a CORRECTS/supersession record |
+| **supersede refusals** | `matches no S3 prior`, `is the point itself`, `supersedes itself`, `is ambiguous`, `does not resolve to an S3 search result`, `lifecycle=superseded with no supersedes ref` | the replace channel dropped a CORRECTS/supersession record |
 
 Measured on the fixed tree: **`operator_drops = 0` in every run.** Two defects in this
 discriminator were found in review and fixed before merge:
@@ -61,8 +62,17 @@ to read produces no warnings at all. The run note says so verbatim; the receipts
 here predate that wording (their note still reads "not the write path dropping one") — the
 counts are unchanged and the corrected note is what the shipped code emits.
 
-**`supersede_refusals` is 5–7 per run** — the replace channel is systematically refusing
-references. One of those refusals was the `SUPERSEDE` row's real mechanism (§3.2b).
+**`supersede_refusals`: 2 (receipt A) and 4 (receipt B)** — and the way to read that number
+is a lesson in itself. The receipts RECORD 6 and 7, because they were produced before review
+round 2 narrowed two markers: `is not expressible in the Layer-1 payload` also matches the
+`lifecycle='changed'` notice, which drops no `supersedes` ref at all (a changed entity's
+record is still appended), and the self-supersede refusal (`is the point itself`) matched no
+marker at all after round 1 removed the prefix form. Re-classifying the receipts' stored
+`extraction_warnings` with the shipped markers gives **2 / 4**, of which one (run A) and two (run B) are
+entity refs that did not resolve (the wp07 `all-at-once rollout` case — the `SUPERSEDE` row's
+real mechanism, §3.2b) and the rest are superseded-with-no-ref notices. The replace channel
+refuses a *little*, not systematically; the earlier "5–7 per run" reading was the classifier
+over-counting by ~3×.
 
 ## 2. The measurement — 15 planted edges, 14 in the criterion
 
@@ -89,10 +99,26 @@ original corpus run), so the criterion denominator is **14**.
 
 | arm | `edge_correct` (in-14) | `content_ok` /15 | `operator_drops` | `distractor_leakage` |
 |---|---|---|---|---|
-| BEFORE (unmodified tree, 1 run) | **3** | 7 | 0 | — |
+| BEFORE (unmodified tree, 1 diagnostic run — `before-run.json`) | **3** | 7 | — | — |
 | BEFORE (the issue's own run, 2026-10-24T04:25Z) | **5** | — | not carried | — |
 | AFTER run A | **5** | 11 | 0 | 1 |
 | AFTER run B | **5** | 11 | 0 | 0 |
+
+**Provenance of the BEFORE column, stated rather than implied.** `before-run.json` (committed
+beside this file) is a DIAGNOSTIC PROBE artifact, not a runner receipt: it drives the same
+seven sessions through the same `TortoiseSDK.capture_session` at the base commit and replays
+`grading.grade_planted_operators`, but it carries no receipt schema and no `verdict`. It
+grades all **15** edges (the AFTER receipts grade 15 and the criterion drops wp02, so 3/15
+and 3/14 are the same measurement). The issue's own pre-fix run is a third artifact, a real
+receipt, and reads **5/14** — which is why this document does not claim a gain at the
+criterion number. The probe exists because no pre-fix receipt at the base commit does.
+
+⚠️ **Both committed receipts carry `verdict: regression` / `failure_origin: gate_regression`**
+(salient survival 0.511 / 0.500 against the blessed baseline). "EVIDENCE VALID" means the
+receipt is a valid E4 artifact, NOT that the benchmark passed — the gate holds the two apart
+on purpose. The pre-fix operator receipt (`...-2026-10-19.json`) also reads `regression`, so
+this is a stale family-wide baseline rather than a regression this PR caused, and it is not
+this issue's to re-bless.
 
 Two further diagnostic runs of the fixed tree (same instrument, prompt set slightly
 narrower — before the supersede band landed) read **6** and **6** `edge_correct` with
@@ -238,6 +264,7 @@ rewritten in review:
   [DETECTED] leg OFF: the same ref is DROPPED again (the mutation is real)
              and the drop is named: point supersedes='We ship the lease fix all-at-once behind a single global kil' matches no S3 prior — skipped (fail-open)
   [DETECTED] a leg that folds EVERY prior is caught by the same pin
+  [DETECTED] restoring the COVERAGE RATIO is caught by the negative pin (the predicate is pinned, not just described)
 
 3. edge_missing attribution (operator drop vs supersede refusal)
   [DETECTED] shipped classifier separates the classes AND ignores the recall leg's success line
@@ -251,7 +278,8 @@ MUTATION ARM: every injected regression was detected by its pin.
 Section 1 now calls `tests/test_extractor_v2.py::TestOperatorSelectionRules` itself; section 2
 replays the **actual strings the after-run receipt recorded**, so the drift resolves with no
 LLM in the loop, and adds the SAFETY direction (a leg that folds every prior must red the
-same pin); section 3 re-injects the two attribution defects this review found.
+same pin); section 3 re-injects the attribution defects both review rounds found, and the
+coverage-ratio shape is re-injected as a fourth arm in section 2.
 
 ## 5. What did NOT move, and the honest limits of this measurement
 
@@ -278,7 +306,7 @@ same pin); section 3 re-injects the two attribution defects this review found.
 * **Leakage did not regress**: `distractor_leakage_per_run` 1 and 0 after, against a design
   tolerance of 1 — the wider claim licence did not turn into routine-aside leakage.
 
-### 5.1 What the review round changed (and what it caught)
+### 5.1 What the review rounds changed (and what they caught)
 
 Six findings were raised against the first cut and all six were fixed before merge. Two were
 **data-integrity** defects in the new supersede leg, and they are the reason the leg is
@@ -294,6 +322,28 @@ mutation-arm section and a missing negative test; both are now real (§4, and
 The lesson worth keeping: a recall leg on a belief-corrupting write must be a **predicate**,
 not a threshold. "Is this ref a copy of this prior, or not" has a shape; "is it 0.85 similar"
 does not, and the difference is a live belief terminalized with no un-supersede API.
+
+**Round 2** found the predicate was still blind on three axes, because `_FRAME_STOPWORDS`
+holds the connectives AND the pronouns: an exchanged connective ("tuesday **and** wednesday"
+vs "tuesday **or** wednesday"), a substituted subject ("**we** ship" vs "**they** ship"), and
+a DELETED gating qualifier (a ref truncated before "once the canary passes in staging") all
+contained in order. All three are now closed with predicates the module already had —
+`_connective_swap`, a pronoun-set check that refuses a substitution but not an addition (the
+measured ref prefixes "We" to a prior with no subject), and condition-marker equality —
+and `test_supersede_band_refuses_every_substitution` pins each one. Round 2 also caught two
+honesty defects in this document and one in the classifier: the refusal count over-read by
+~3× (§1), the headline claimed a gain its own table does not support (§ above), and the
+receipts' `verdict` (`regression` — against a baseline that is stale fleet-wide, the pre-fix
+receipt reads the same) was never stated. The mutation arm now also re-injects the
+coverage-ratio shape, so the predicate is pinned rather than merely described.
+
+**Round 3** found the condition predicate itself spoofable: `_condition_markers` reads whole
+tokens AND their word-parts (deliberately, for the fold path), and the sub-token split of
+"all-at-once" yields the marker `once` — so when both sides spelled that compound, a ref that
+had DROPPED a genuine "once the canary passes in staging" clause compared equal and resolved.
+The leg now uses `_supersede_condition_markers`, which matches whole tokens only (a marker
+cannot be minted from inside a compound; every refusal this loses is still a refusal), and the
+compound case is pinned alongside the plain one.
 
 ## 6. Reproduction
 

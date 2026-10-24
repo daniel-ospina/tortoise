@@ -6515,16 +6515,33 @@ def _resolve_point_supersede(ref: str, search: dict,
     even FOLD, let alone supersede. A false CORRECTS terminalizes a live
     belief and there is no un-supersede API to repair it.
 
-    So the leg is **ordered containment**, which cannot cross a substitution
-    by construction: the ref's content tokens must appear IN ORDER inside the
-    prior's content tokens (a different number, entity, scope word or a role
-    inversion breaks containment) AND the two must carry the SAME negation
-    markers (a negator is a frame word, so containment alone would fold "the
-    cache is shared" onto "the cache is not shared"). Additions in the PRIOR
-    are allowed — that is exactly the measured drift — and are not a
-    substitution. ``SUPERSEDE_REF_MIN_TOKENS`` keeps a generic short ref from
-    matching half the graph, and a unique match is required: 0 candidates and
-    any 2+ candidates still fail open with a named warning.
+    So the leg is **ordered containment**, which cannot cross a substituted
+    CONTENT token by construction: the ref's content tokens must appear IN
+    ORDER inside the prior's content tokens (a different number, entity, scope
+    word or a role inversion breaks containment) AND the two must carry the
+    SAME negation markers. Additions in the PRIOR are allowed — that is
+    exactly the measured drift — and are not a substitution.
+    ``SUPERSEDE_REF_MIN_TOKENS`` keeps a generic short ref from matching half
+    the graph, and a unique match is required: 0 candidates and any 2+
+    candidates still fail open with a named warning.
+
+    ⛔ CONTAINMENT ALONE IS NOT ENOUGH, and code review round 2 proved it with
+    three axes this tokenizer cannot see, because `_FRAME_STOPWORDS` includes
+    the connectives and the pronouns:
+      * a FRAME-WORD substitution ("tuesday AND wednesday" vs "tuesday OR
+        wednesday") is invisible to containment;
+      * a SUBJECT substitution ("WE ship" vs "THEY ship") is invisible too —
+        and pronouns carry an entity in this module's own model
+        (`_CONTENT_STOPWORDS = _FRAME_STOPWORDS - _ENTITY_PRONOUNS`);
+      * a DELETION of a qualifier only the prior carries (the ref truncated
+        before "once the canary passes in staging") CONTAINS in order, so an
+        unconditional claim would supersede a gated decision.
+    All three are closed with predicates this module already owns —
+    ``_connective_swap`` (non-empty = a load-bearing connective was exchanged),
+    a pronoun-set check that refuses a SUBSTITUTION but not an ADDITION (the
+    measured ref prefixes "We" to a prior that states no subject), and
+    ``_condition_markers`` (set equality = the same gating) — none of which
+    costs the measured drift its resolution.
     """
     ref = (ref or "").strip()
     if not ref or ref in ("null", "None"):
@@ -6601,19 +6618,55 @@ def _tokens_contain_in_order(ref_tokens: list[str],
     return all(tok in remaining for tok in ref_tokens)
 
 
+def _supersede_condition_markers(text: str) -> frozenset[str]:
+    """Condition/qualifier markers matched on WHOLE tokens only.
+
+    `_condition_markers` (the fold predicate) reads whole tokens AND their
+    word-parts, deliberately: an over-read only ever refuses a fold. For the
+    supersede leg the same over-read is unsafe in the OTHER direction — it
+    makes a real condition invisible, because the sub-token split of
+    "all-at-once" yields the marker `once`, so a ref that DROPPED a genuine
+    "once the canary passes in staging" clause compared EQUAL to its prior
+    whenever both sides spelled the compound (code-review round 3). Matching
+    whole tokens cannot produce a marker from inside a compound, and every
+    refusal this loses is still a refusal, which is the safe direction here.
+    """
+    whole = frozenset(
+        _deaccent(t) for t in _guard_tokens(text)
+        if _deaccent(t) in _CONDITION_MARKERS)
+    flat = _flat_words(text)
+    return whole | frozenset(p for p in _CONDITION_PHRASES if p in flat)
+
+
+def _supersede_pronouns(text: str) -> frozenset[str]:
+    """The entity-carrying pronouns a claim names (empty when it names none).
+
+    `_FRAME_STOPWORDS` strips pronouns from the containment tokens, so
+    containment is blind to "we ship" becoming "they ship" — a different
+    subject. Presence is not the test: the measured drift PREFIXES "We" to a
+    prior that states no subject, and refusing that would undo the fix. Only a
+    substitution — pronouns on BOTH sides, and different — is refused.
+    """
+    return frozenset(tok for tok in _norm(text).split()
+                     if tok in _ENTITY_PRONOUNS)
+
+
 def _supersede_band_candidates(ref: str, points: list[dict]) -> list[dict]:
     """Priors the ref is a faithful (drifted, never substituted) copy of.
 
     Returns every candidate that passes; the CALLER resolves only when exactly
     one does. Acceptance is deliberately boolean rather than a similarity
-    score: a ref that must be an ordered subsequence with matching negation is
-    either a copy of this prior or it is not one, and a score is what let a
-    substitution through in the first cut.
+    score: a ref that must be an ordered subsequence with matching negation,
+    no exchanged connective and an identical condition set is either a copy of
+    this prior or it is not one, and a score is what let a substitution
+    through in the first cut.
     """
     ref_tokens = _supersede_ref_tokens(ref)
     if len(ref_tokens) < SUPERSEDE_REF_MIN_TOKENS:
         return []
     ref_neg = _negation_markers(ref)
+    ref_cond = _supersede_condition_markers(ref)
+    ref_pron = _supersede_pronouns(ref)
     out: list[dict] = []
     for p in points:
         content = str(p.get("content") or "")
@@ -6621,6 +6674,20 @@ def _supersede_band_candidates(ref: str, points: list[dict]) -> list[dict]:
         # and mean opposite things ("not exceed" vs "not stay below"), and a
         # negator is a frame word so containment cannot see it.
         if _negation_markers(content) != ref_neg:
+            continue
+        # a DELETION of a gating qualifier still contains in order — an
+        # unconditional claim must not supersede a gated decision.
+        if _supersede_condition_markers(content) != ref_cond:
+            continue
+        # a load-bearing CONNECTIVE is a frame word, so containment is blind
+        # to "and" -> "or"; the module's own swap predicate is not.
+        if _connective_swap(ref, content):
+            continue
+        # a SUBJECT substitution is a frame-word substitution too (see
+        # `_supersede_pronouns`: a one-sided pronoun is an addition and is
+        # allowed, two different ones are not).
+        cand_pron = _supersede_pronouns(content)
+        if ref_pron and cand_pron and ref_pron != cand_pron:
             continue
         if _tokens_contain_in_order(ref_tokens,
                                     _supersede_ref_tokens(content)):

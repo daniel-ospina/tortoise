@@ -1532,11 +1532,15 @@ def run_benchmark(
                         "operator drops (#8503): the EXTRACTOR logged no "
                         "operator/edge drop in any session — so an "
                         "edge_missing verdict in this receipt is not an "
-                        "extractor-side drop. ⛔ This does NOT cover the "
-                        "commit seam: apply_payload_operators logs its skips "
-                        "through _logger only and has no warnings sink on "
-                        "the capture, so a drop there is INVISIBLE to this "
-                        "block (named blind spot, not a clean bill)")
+                        "extractor-side drop. ⛔ This does NOT cover two "
+                        "seams: the commit layer "
+                        "(apply_payload_operators logs its skips through "
+                        "_logger, with no warnings sink on the capture), and "
+                        "a session whose snapshot failed to read (it emits "
+                        "no warnings at all; graph_census's per-session "
+                        "error names those). Both are INVISIBLE to this "
+                        "block, which is a named blind spot, not a clean "
+                        "bill")
                 for result in session_results:
                     sid = result["session_id"]
                     owned = [
@@ -1834,11 +1838,18 @@ _OPERATOR_DROP_MARKERS = (
 # SUCCESS warning used to share that prefix, so the prefix form counted a
 # resolution as a refusal — the same false-attribution class this block exists
 # to prevent (code-review finding, #8503). A success line names no refusal.
+# ⛔ AND THE FORM MUST BE THE REFUSING ONE: "is not expressible in the
+# Layer-1 payload" also matches the `lifecycle='changed'` notice, which drops
+# NO supersedes ref (a changed entity's record is still appended), so the
+# marker is the superseded-no-ref form only — otherwise the replace channel
+# reads ~4x as refusing as it is (code-review round 2, #8503).
 _SUPERSEDE_REFUSAL_MARKERS = (
     "matches no S3 prior",
+    "is the point itself",
+    "supersedes itself",
     "is ambiguous",
     "does not resolve to an S3 search result",
-    "is not expressible in the Layer-1 payload",
+    "lifecycle=superseded with no supersedes ref",
 )
 
 
@@ -1849,15 +1860,13 @@ def operator_drop_warnings(session_results: list[dict]) -> dict:
     int, "by_session": {sid: [warning, ...]}}``.
 
     ⛔ ``operator_drops == 0`` means the EXTRACTOR logged no drop — it does
-    NOT mean the write path dropped nothing. Two seams are outside this
-    instrument's reach: the commit layer (`commit_ops.apply_payload_operators`)
-    logs its skips through ``_logger`` only, with no warnings sink on the
-    capture, and a snapshot that never read a session produces no warnings at
-    all. So a zero is evidence about the operator pass and about nothing else;
-    the run note says exactly that, and an ``edge_missing`` verdict stays a
-    SELECTION finding only where the snapshot for that session read
-    successfully (``graph_census``'s per-session ``error`` names the ones that
-    did not).
+    NOT mean the write path dropped nothing. TWO seams are outside this
+    instrument's reach, and both are named in the run note: the commit layer
+    (`commit_ops.apply_payload_operators`) logs its skips through
+    ``_logger`` only, with no warnings sink on the capture, and a snapshot
+    that never read a session produces no warnings at all
+    (``graph_census``'s per-session ``error`` names the ones that did not).
+    So a zero is evidence about the operator pass and about nothing else.
     """
     by_session: dict[str, list[str]] = {}
     total = operator_drops = supersede_refusals = 0

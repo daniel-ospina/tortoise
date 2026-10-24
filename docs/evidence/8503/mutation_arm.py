@@ -157,6 +157,26 @@ def check_supersede_band() -> None:
     _expect_detected(caught,
                      "a leg that folds EVERY prior is caught by the same pin")
 
+    # the SHAPE regression review round 2 asked for: put the coverage ratio
+    # back in place of the ordered-containment predicate. The negative pin
+    # must red — otherwise the predicate is pinned only by prose.
+    from tests.test_extractor_v2 import TestOperatorSemantics2552 as SafetyPin
+    original_contains = v2._tokens_contain_in_order
+    try:
+        def _ratio(ref_tokens, prior_tokens, _min=0.85):
+            ref_set, prior_set = set(ref_tokens), set(prior_tokens)
+            if not ref_set:
+                return False
+            return len(ref_set & prior_set) / len(ref_set) >= _min
+        v2._tokens_contain_in_order = _ratio
+        caught = _pin_fails(
+            SafetyPin().test_supersede_band_refuses_every_substitution)
+    finally:
+        v2._tokens_contain_in_order = original_contains
+    _expect_detected(caught,
+                     "restoring the COVERAGE RATIO is caught by the negative "
+                     "pin (the predicate is pinned, not just described)")
+
 
 # ── 3. the attribution classifier (the receipt's discriminator) ────────────
 def check_drop_attribution() -> None:

@@ -6498,9 +6498,9 @@ class TestOperatorSemantics2552:
             "We ship the lease fix all-at-once behind a single global kill flag",
             {"points": pts}, warnings=[])
         assert r is not None and r["id"] == "pt_1"
-        # 2) two EQUAL-BEST priors refuse (never guess). A near-tie is not a
-        # tie: the band returns only the top-scoring candidates, so a unique
-        # winner that is genuinely closer still resolves.
+        # 2) TWO candidates refuse (never guess). The leg is a BOOLEAN
+        # predicate — there is no score and no "closer" — so containment is
+        # either unique or it is not:
         twin = [{"id": "pt_2", "content": old, "kind": "statement"},
                 {"id": "pt_1", "content": old, "kind": "statement"}]
         w: list[str] = []
@@ -6565,6 +6565,33 @@ class TestOperatorSemantics2552:
             "queue",
             "the retry budget must not stay below three attempts for the "
             "payments queue")
+        # an exchanged CONNECTIVE (a frame word, invisible to containment):
+        # "tuesday and wednesday" is not "tuesday or wednesday"
+        assert not resolves(
+            "We ship the lease fix on tuesday and wednesday behind the canary "
+            "flag",
+            "We ship the lease fix on tuesday or wednesday behind the canary "
+            "flag")
+        # a DELETED gating qualifier: containment still holds, so the
+        # condition set must be compared — an ungated claim may not supersede
+        # a gated decision
+        assert not resolves(
+            "we ship the lease fix behind a kill flag",
+            "we ship the lease fix behind a kill flag once the canary passes "
+            "in staging")
+        # a DELETED condition where BOTH sides spell a hyphenated compound —
+        # the sub-token split of "all-at-once" yields the marker "once", which
+        # would make the comparison blind to the dropped clause (round 3)
+        assert not resolves(
+            "we ship the lease fix all-at-once behind a kill flag",
+            "we ship the lease fix all-at-once behind a kill flag once the "
+            "canary passes in staging")
+        # a SUBJECT substitution (pronouns carry an entity in this module's
+        # own model). One-sided presence is an ADDITION and stays allowed —
+        # the measured ref prefixes "We" to a prior that states no subject.
+        assert not resolves(
+            "We ship the lease fix behind the canary flag",
+            "They ship the lease fix behind the canary flag")
         # and the positive control: additive drift still resolves
         assert resolves(
             "We ship the lease fix behind a single global kill flag",
