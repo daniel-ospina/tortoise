@@ -292,11 +292,12 @@ PLIST
 }
 
 cron_line() {
-  # ⛔ CEILING, not truncation. `INTERVAL/60` turned a 90-second interval into `*/1` — the finest
-  # cron can express, i.e. 60s, which fires TIGHTER than the operator asked (1.5x). Cron's
-  # granularity is one minute, so rounding up is the only way to keep the "never more often than
-  # requested" rule that the cadence choice below rests on.
-  local minutes=$(( (INTERVAL + 59) / 60 )); [ "$minutes" -lt 1 ] && minutes=1
+  # ⛔ CEIL BY SUBTRACTING, NOT BY ADDING: `(INTERVAL + 59) / 60` OVERFLOWS. Bash arithmetic is
+  # signed 64-bit, so for INTERVAL >= 2**63 - 59 the addition wraps NEGATIVE, the `-lt 1` clamp
+  # then pins it to 1, and the entry renders `*/1 * * * *` — a once-a-MINUTE loop for a
+  # 19-digit interval, i.e. the tightest loop cron can express, with a NOTE claiming the opposite
+  # (found in cycle 2). `(N - 1) / 60 + 1` is the same ceiling and cannot overflow for N >= 1.
+  local minutes=$(( (INTERVAL - 1) / 60 + 1 )); [ "$minutes" -lt 1 ] && minutes=1
   local sched="" eff="" d
   # ⛔ `*/N` IS NOT A PERIOD UNLESS N DIVIDES THE FIELD'S RANGE, and cron has no other way to say
   # "every N". `*/45` on the minute field fires at :00 and :45 only, so a 45-minute interval really
@@ -316,7 +317,7 @@ cron_line() {
     done
   fi
   if [ -z "$sched" ]; then
-    local h=$(( (minutes + 59) / 60 )); [ "$h" -lt 1 ] && h=1
+    local h=$(( (minutes - 1) / 60 + 1 )); [ "$h" -lt 1 ] && h=1
     for d in 1 2 3 4 6 8 12; do
       if [ "$d" -ge "$h" ]; then sched="0 */$d * * *"; eff=$(( d * 60 )); break; fi
     done
@@ -415,8 +416,13 @@ status() {
       if [ -f "$tmr" ]; then
         echo "installed: $tmr"
         echo "enabled: $(systemctl is-enabled "$LABEL.timer" 2>&1)"
-        echo "active:  $(systemctl is-active "$LABEL.timer" 2>&1)"
+        local state; state="$(systemctl is-active "$LABEL.timer" 2>&1)"
+        echo "active:  $state"
         systemctl list-timers "$LABEL.timer" --all --no-pager 2>/dev/null | sed -n '1,2p'
+        # ⛔ A STOPPED TIMER IS INERT TOO (`systemctl stop`, a mask, a failed unit). The install
+        # path already fails hard on `is-active`, so `--status` reporting 0 for `active: inactive`
+        # was the same false PASS one branch over (cycle 2; pre-existing, same family).
+        [ "$state" = "active" ] || { echo "WARNING: $LABEL.timer is '$state', not active — it will not fire"; armed=0; }
         # ⛔ A TIMER WITH NOTHING TO ACTIVATE IS THE OTHER INERT STATE, and a WARNING on stdout is
         # not a verdict: `armed` stayed 1 and `--status` returned 0 on a schedule that fires into
         # a missing unit (round 11 review, P1).
@@ -587,7 +593,15 @@ case "$PLATFORM" in
       # while printing "run without --status to load", which is precisely the invocation that just
       # failed. The installer's own promise is that re-running converges; the systemd leg
       # (`systemctl start`) and the cron leg (rewrite) both do (round 11 review, P2).
-      if ! launchctl list 2>/dev/null | grep -qF "$PLIST_LABEL"; then
+      # ⛔ `grep -q` IS WRONG HERE, AND `set -o pipefail` MAKES IT A FALSE "NOT LOADED". `-q` exits
+      # at the FIRST match, so a still-writing `launchctl list` takes SIGPIPE and the pipeline
+      # reports 141 — which `!` reads as "the agent is not loaded" even when it is. A real
+      # `launchctl list` on a Mac with a few hundred jobs is 10-40 KB, well past the pipe buffer,
+      # so this is the COMMON case: every healthy re-run would bootstrap an already-loaded agent,
+      # the bootstrap would fail ("Bootstrap failed: 5"), and the installer would exit 1 with the
+      # opposite of the truth (cycle 2, P1). `-F ... >/dev/null` reads to EOF, so there is no
+      # SIGPIPE — the same shape the final verification below already uses.
+      if ! launchctl list 2>/dev/null | grep -F "$PLIST_LABEL" >/dev/null; then
         launchctl bootstrap "gui/$(id -u)" "$plist" \
           || { echo "ERROR: $PLIST_LABEL is not loaded and could not be bootstrapped" >&2; exit 1; }
         echo "re-armed: $PLIST_LABEL was not loaded; bootstrapped from the unchanged plist"
@@ -599,7 +613,17 @@ case "$PLATFORM" in
       launchctl bootstrap "gui/$(id -u)" "$plist" || exit 1
       echo "installed: $plist"
     fi
-    launchctl list 2>/dev/null | grep -F "$PLIST_LABEL" || { echo "ERROR: $PLIST_LABEL is not loaded" >&2; exit 1; } ;;
+    # ⛔ THE LOAD CHECK IS THE ONLY THING BETWEEN "WROTE A PLIST" AND "A JOB THAT WILL RUN".
+    # A `launchctl bootstrap` that exits 0 is not proof the label is registered — a GUI session
+    # that is not the caller's, a disabled login item, or a `bootout` racing the bootstrap all
+    # leave the plist on disk and nothing loaded. Deleting this check makes the installer report
+    # success for an agent that never fires (the inert-enforcer shape this file exists to
+    # refuse), which is why `test_launchd_install_fails_when_the_agent_is_not_loaded` pins it.
+    # `grep -F ... >/dev/null` (NOT `-q`) so the reader is still consuming when the writer
+    # finishes: `-q` exits at the first match, `launchctl list` takes SIGPIPE, and `pipefail`
+    # then reports 141 — a FALSE "not loaded" on a real Mac.
+    launchctl list 2>/dev/null | grep -F "$PLIST_LABEL" >/dev/null \
+      || { echo "ERROR: $PLIST_LABEL is not loaded" >&2; exit 1; } ;;
   *)
     echo "REFUSED: no systemd and no cron on this box — a schedule here would install and never fire." >&2
     echo "         Install one, or run tools/runner_autoscale.py from the fleet's controller loop." >&2
