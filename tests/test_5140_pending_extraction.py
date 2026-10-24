@@ -740,12 +740,10 @@ def test_upgrade_makes_no_claim_for_a_document_with_nothing_to_extract():
     AND the run's own event log carries no ``IngestStarted`` for the document.
     ⛔ The banner alone does NOT prove no claim was minted (round 8: a partial
     revert that claims while keeping the banner inside the branch leaves the
-    banner absent and the claim present — measured, banner-only pin passed), and
-    a follow-up plain ingest cannot detect it either because that path claims
-    under ``extractor.version`` while this one claims under
-    ``api.agent_id or "extractor@0"`` — different idempotency keys. The event log
-    is the actual claim record: ``api.begin_ingest`` emits ``IngestStarted`` for
-    every non-skipped call. The completion marker still clears, which is pinned
+    banner absent and the claim present — measured, banner-only pin passed). The
+    event log is the claim record, and it is the right observation because it
+    names the claim directly, without a second mutating run: ``api.begin_ingest``
+    emits ``IngestStarted`` on every call that does not skip. The completion marker still clears, which is pinned
     separately — that is the one thing ``--upgrade`` keeps from pre-D10 for a
     no-sections document.
     """

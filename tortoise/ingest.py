@@ -317,12 +317,23 @@ def _document_is_pending(needs_extraction, doc_status, *,
     if doc_status == "captured":
         return True
     if doc_status == "extracted":
+        # A completion record outranks a stale ``needs_extraction=true``. This is
+        # the ONE cell where the sweep's selected set differs from pre-D10
+        # discovery: pre-D10 SELECTED it and then skipped it inside the loop
+        # (``skip …: already extracted``), so UPGRADE BEHAVIOUR IS UNCHANGED —
+        # only the ``skipped`` count is (review round 9).
         return False
     if needs_extraction is True:
         return True
     if doc_status is not None:
         return other_legacy_is_pending
     if needs_extraction is not None:
+        # A stated "done" (``needs_extraction=false``) with no legacy marker.
+        # This is the ONE cell where ``--upgrade`` differs from pre-D10, and it
+        # is DELIBERATE: pre-D10 ``coalesce(d.doc_status,'captured')`` made it
+        # pending, D10's expectation is that an explicit false means done —
+        # pinned by ``tests/test_ingest.py::test_upgrade_on_already_extracted_is_noop``
+        # (review round 9).
         return False
     return unmarked_is_pending
 
