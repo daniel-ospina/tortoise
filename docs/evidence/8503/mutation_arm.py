@@ -48,7 +48,7 @@ def _pin_fails(fn, *args, **kwargs) -> bool:
         fn(*args, **kwargs)
     except AssertionError:
         return True
-    except Exception as exc:  # noqa: BLE001 - any raise is still a detection
+    except Exception as exc:  # any raise is still a detection
         print(f"             (pin raised {type(exc).__name__}: {exc})")
         return True
     return False
@@ -270,7 +270,6 @@ def check_supersede_band() -> None:
 def check_drop_attribution() -> None:
     print("\n3. edge_missing attribution (operator drop vs supersede refusal)")
     from tests.eval.write_path.test_write_path_runner import (
-        test_operator_drop_warnings_ignores_benign_extraction_warnings,
         test_operator_drop_warnings_separates_the_replace_channel,
     )
 
@@ -301,8 +300,8 @@ def check_drop_attribution() -> None:
     )
     original = runner._SUPERSEDE_REFUSAL_MARKERS
     try:
-        runner._SUPERSEDE_REFUSAL_MARKERS = original + (
-            "point-supersede recall band",)
+        runner._SUPERSEDE_REFUSAL_MARKERS = (
+            *original, "point-supersede recall band")
         caught = _pin_fails(test_recall_leg_success_warning_is_not_a_refusal)
     finally:
         runner._SUPERSEDE_REFUSAL_MARKERS = original
@@ -314,8 +313,8 @@ def check_drop_attribution() -> None:
     # entity-lifecycle notices as operator drops.
     original = runner._OPERATOR_DROP_MARKERS
     try:
-        runner._OPERATOR_DROP_MARKERS = original + (
-            "is not expressible in the Layer-1 payload",)
+        runner._OPERATOR_DROP_MARKERS = (
+            *original, "is not expressible in the Layer-1 payload")
         caught = _pin_fails(
             test_operator_drop_warnings_separates_the_replace_channel)
     finally:
