@@ -17,10 +17,19 @@ Usage:
     uv run python eval/how-to-use-tortoise/step1/setup.py \
         --id duplicate_entity --db /tmp/ax-eval/duplicate_entity.db
 
-``--fresh`` deletes, so it is guarded: it refuses a directory (an embedded
-DB_PATH is always a FILE, so a directory is the mistyped-``--db`` shape) and it
-refuses any file that does not carry the ``.ax-setup.json`` marker this tool
-writes beside the db it seeds. A typo therefore refuses instead of deleting.
+Ownership is proved on BOTH paths, not only the destructive one. ``--fresh``
+deletes, so it refuses a directory (an embedded DB_PATH is always a FILE, so a
+directory is the mistyped-``--db`` shape) and it refuses any file that does not
+carry the ``.ax-setup.json`` marker this tool writes beside the db it seeds. A
+typo therefore refuses instead of deleting.
+
+A plain seed (no ``--fresh``) is guarded by the same rule, and that is not
+redundancy — it is what makes the ``--fresh`` guard mean anything. Guarding only
+the deletion left the proof mintable by the path that had no check: `_claim()`
+ran on every invocation, so ONE unflagged run against an existing foreign db
+wrote the very marker ``--fresh`` accepts as ownership. That single run both
+seeded a write into the operator's real graph and armed its deletion for the
+next ``--fresh`` run (#9695 P1).
 """
 
 from __future__ import annotations
@@ -44,41 +53,60 @@ def _is_uri(db: str) -> bool:
     return db.startswith(("docker://", "redis://", "rediss://"))
 
 
-def _refuse(db: str, why: str) -> None:
+def _refuse(db: str, why: str, *, fresh: bool) -> None:
+    """Refuse with the reason for the path ACTUALLY taken, and what survived."""
+    if fresh:
+        raise SystemExit(
+            f"refusing --fresh for --db {db!r}: {why}.\n"
+            "NOTHING was deleted. --fresh only removes a graph this tool created "
+            f"(it writes {MARKER_SUFFIX} beside the db it seeds), because a path "
+            "the operator merely typed cannot prove what it names (#9695). "
+            "Pass the db this tool seeded, or remove the file yourself."
+        )
     raise SystemExit(
-        f"refusing --fresh for --db {db!r}: {why}.\n"
-        "NOTHING was deleted. --fresh only removes a graph this tool created "
-        f"(it writes {MARKER_SUFFIX} beside the db it seeds), because a path "
-        "the operator merely typed cannot prove what it names (#9695). "
-        "Pass the db this tool seeded, or remove the file yourself."
+        f"refusing to seed for --db {db!r}: {why}.\n"
+        "NOTHING was seeded and NOTHING was deleted. This tool only writes into "
+        f"a graph it created — the {MARKER_SUFFIX} marker beside the db it seeds "
+        "is that proof — because seeding a db it cannot identify would pollute "
+        "that graph AND, by writing the marker, ARM ITS DELETION for the next "
+        "--fresh run (#9695). Point --db at a path that does not exist yet, or "
+        "remove the file yourself."
     )
 
 
-def _delete_own_graph(db: str, given: Path, target: Path) -> None:
-    """Delete ``target`` only if it is positively identified as our own graph.
+def _prove_ours(db: str, target: Path, *, fresh: bool) -> None:
+    """Refuse unless ``target`` is positively identified as our own graph.
 
     Every check is allow-list shaped: the target must BE the expected artifact
     (a regular file, carrying a marker this tool wrote, naming this path). A
     directory is the mistyped-``--db`` shape — an embedded graph is a file
-    (``tortoise/config.py``) — so it can never be legitimately deleted here.
+    (``tortoise/config.py``) — so it can never be legitimately touched here.
+
+    This looks only at the RESOLVED artifact; the typed-path (symlink) check is
+    ``prepare``'s, because by the time a path reaches here the link has already
+    been resolved away and a dangling link never reaches here at all.
+
+    Called on the seed path as well as the delete path: an existing file this
+    tool cannot identify is neither seeded into nor deleted, so no run can
+    manufacture the ownership proof that ``--fresh`` trusts. The proof cannot
+    be forged by a typo — writing a marker that names this exact path and
+    :data:`TOOL_ID` beside a file this tool did not create is a deliberate act,
+    not a mistyped ``--db``.
     """
-    if given.is_symlink():
-        _refuse(db, "it is a symlink, so the path typed is not the path deleted")
     if target.is_dir():
-        _refuse(db, "it is a directory, and an embedded graph is always a FILE")
+        _refuse(db, "it is a directory, and an embedded graph is always a FILE", fresh=fresh)
     if not target.is_file():
-        _refuse(db, "it is not a regular file")
+        _refuse(db, "it is not a regular file", fresh=fresh)
     marker = marker_path(target)
     if not marker.is_file():
-        _refuse(db, f"it carries no {MARKER_SUFFIX} marker")
+        _refuse(db, f"it carries no {MARKER_SUFFIX} marker", fresh=fresh)
     try:
         claim = json.loads(marker.read_text())
     except (OSError, ValueError) as exc:
-        _refuse(db, f"its {MARKER_SUFFIX} marker is unreadable ({exc})")
+        _refuse(db, f"its {MARKER_SUFFIX} marker is unreadable ({exc})", fresh=fresh)
     claimed = Path(str(claim.get("db", "")))
     if claim.get("tool") != TOOL_ID or claimed != target:
-        _refuse(db, f"its {MARKER_SUFFIX} marker names another artifact")
-    target.unlink()
+        _refuse(db, f"its {MARKER_SUFFIX} marker names another artifact", fresh=fresh)
 
 
 def _claim(target: Path, input_id: str) -> None:
@@ -102,13 +130,27 @@ def _claim(target: Path, input_id: str) -> None:
 
 
 def prepare(db: str, input_id: str, *, fresh: bool) -> None:
-    """Make ``db`` ready to seed, deleting an existing graph ONLY if it is ours."""
+    """Make ``db`` ready to seed, TOUCHING an existing graph only if it is ours.
+
+    Ownership is required on both paths. Guarding only ``--fresh`` was
+    defeatable from the guarded-free side: with ``fresh=False`` an existing
+    foreign file was left alone but still CLAIMED (``_claim`` wrote the marker
+    ``--fresh`` treats as proof) and then seeded into — polluting it, and arming
+    its deletion for the next ``--fresh`` run (#9695 P1).
+    """
     if _is_uri(db):
         return
     given = Path(db).expanduser()
     target = given.resolve()
-    if fresh and target.exists():
-        _delete_own_graph(db, given, target)
+    # A symlink is refused even when the link is broken: `resolve()` would put
+    # the seed at the link's DESTINATION while the operator typed the link, and
+    # a dangling link never reaches `_prove_ours` (its target does not exist).
+    if given.is_symlink():
+        _refuse(db, "it is a symlink, so the path typed is not the path written", fresh=fresh)
+    if target.exists():
+        _prove_ours(db, target, fresh=fresh)
+        if fresh:
+            target.unlink()
     target.parent.mkdir(parents=True, exist_ok=True)
     _claim(target, input_id)
 

@@ -117,6 +117,13 @@ beside it, or a symlink. It exits non-zero naming the reason and deletes
 nothing, so a one-level-short `--db` cannot cost the directory it points at
 (#9695). The marker is written by `setup.py` itself when it seeds.
 
+The same ownership rule governs a **plain seed** (no `--fresh`), and that is
+what makes the delete guard mean anything: if the unflagged run were allowed to
+seed into an unmarked file, it would write that very marker beside it, so the
+next `--fresh` could no longer tell the operator's store from the tool's. Both
+paths refuse an existing file the tool cannot identify, and neither writes
+anything when it refuses.
+
 The instrument's scoring rules are pinned by
 `tests/test_ax_write_eval.py` — no database, no network, no embedding model:
 

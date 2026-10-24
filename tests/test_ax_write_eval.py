@@ -1007,6 +1007,79 @@ def test_fresh_refuses_a_graph_file_this_tool_did_not_create(tmp_path):
     assert foreign.exists(), "an unmarked file was deleted by --fresh"
 
 
+def test_a_plain_seed_refuses_a_foreign_graph_instead_of_arming_its_deletion(
+    tmp_path,
+):
+    """#9695 P1: the unguarded path must not MINT the proof `--fresh` trusts.
+
+    `_claim()` ran on every invocation, including `fresh=False`, and it wrote
+    exactly the marker `_delete_own_graph` accepts as ownership. So a single
+    unflagged run — the flag dropped, or a seeding script that omits it — against
+    an existing foreign db (a) wrote the marker claiming it and (b) seeded a
+    write INTO it; the next `--fresh` run then deleted the operator's real
+    store. The guard existed only on the destructive half, so the harmless half
+    could manufacture its proof.
+
+    Both runs are exercised below. This fails on the pre-fix code at the FIRST
+    `pytest.raises`: `prepare(..., fresh=False)` returned normally and left the
+    marker beside a file the tool never created.
+    """
+    foreign = tmp_path / "torchvision-cache.db"
+    original = "someone else's artifact at a path that looks like a db"
+    foreign.write_text(original)
+
+    with pytest.raises(SystemExit) as exc:
+        step1_setup.prepare(str(foreign), "duplicate_entity", fresh=False)
+
+    assert "refusing to seed" in str(exc.value), exc.value
+    assert not step1_setup.marker_path(foreign).exists(), (
+        "the unflagged run minted the ownership marker --fresh trusts, "
+        "so the follow-up --fresh can no longer tell this db from ours"
+    )
+    assert foreign.read_text() == original, "the unflagged run wrote into a foreign db"
+
+    # …and the armed deletion is therefore unreachable too.
+    with pytest.raises(SystemExit) as exc:
+        step1_setup.prepare(str(foreign), "duplicate_entity", fresh=True)
+
+    assert "refusing --fresh" in str(exc.value), exc.value
+    assert foreign.read_text() == original, "the operator's db was deleted"
+
+
+def test_a_plain_seed_refuses_a_symlink_so_it_cannot_write_through_it(tmp_path):
+    """The typed path is the written path, on BOTH runs — a dangling link too.
+
+    `prepare` resolves `--db` before touching it, so a symlink put the seed at
+    the link's destination while the operator typed the link. The `--fresh`
+    guard refused that shape but the seed path did not, and a DANGLING link is
+    doubly silent: its target does not exist, so the ownership check is never
+    even reached. This fails on the pre-fix code (no SystemExit, and a marker
+    materialises beside the link's destination).
+    """
+    destination = tmp_path / "somewhere-else.db"
+    dangling = tmp_path / "dangling.db"
+    dangling.symlink_to(destination)
+
+    with pytest.raises(SystemExit) as exc:
+        step1_setup.prepare(str(dangling), "duplicate_entity", fresh=False)
+
+    assert "symlink" in str(exc.value), exc.value
+    assert not destination.exists(), "the seed was written through the link"
+    assert not step1_setup.marker_path(destination).exists()
+
+    real = tmp_path / "real.db"
+    step1_setup.prepare(str(real), "duplicate_entity", fresh=False)
+    real.write_text("keep me")
+    live = tmp_path / "live.db"
+    live.symlink_to(real)
+
+    with pytest.raises(SystemExit) as exc:
+        step1_setup.prepare(str(live), "duplicate_entity", fresh=False)
+
+    assert "symlink" in str(exc.value), exc.value
+    assert real.read_text() == "keep me"
+
+
 def test_fresh_deletes_the_graph_this_tool_claimed(tmp_path):
     """The guard must not disable the feature: our own db is still replaceable."""
     db = tmp_path / "duplicate_entity.db"
