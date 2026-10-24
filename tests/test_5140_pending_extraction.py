@@ -18,6 +18,7 @@ existed to stamp it on nodes that predated the capture path.
 """
 from __future__ import annotations  # noqa: I001
 
+import json
 import os
 import sys
 import tempfile
@@ -736,9 +737,17 @@ def test_upgrade_makes_no_claim_for_a_document_with_nothing_to_extract():
     same reason; this pins the ``--upgrade`` half.
 
     Observable: the ``upgrading`` banner is emitted only on the extracting path,
-    and the claim is what carries it. The completion marker still clears, which
-    is pinned separately — that is the one thing ``--upgrade`` keeps from
-    pre-D10 for a no-sections document.
+    AND the run's own event log carries no ``IngestStarted`` for the document.
+    ⛔ The banner alone does NOT prove no claim was minted (round 8: a partial
+    revert that claims while keeping the banner inside the branch leaves the
+    banner absent and the claim present — measured, banner-only pin passed), and
+    a follow-up plain ingest cannot detect it either because that path claims
+    under ``extractor.version`` while this one claims under
+    ``api.agent_id or "extractor@0"`` — different idempotency keys. The event log
+    is the actual claim record: ``api.begin_ingest`` emits ``IngestStarted`` for
+    every non-skipped call. The completion marker still clears, which is pinned
+    separately — that is the one thing ``--upgrade`` keeps from pre-D10 for a
+    no-sections document.
     """
     if not _require_live_falkor():
         return
@@ -749,8 +758,9 @@ def test_upgrade_makes_no_claim_for_a_document_with_nothing_to_extract():
     _seed_document(uri, doc_id, str(t),
                    doc_status="captured", needs_extraction=False)
 
+    log_path = _tmp("events.jsonl")
     out = _run([str(t), "--db", uri,
-                "--log", _tmp("events.jsonl"), "--out", _tmp("graph.html"),
+                "--log", log_path, "--out", _tmp("graph.html"),
                 "--upgrade", "--point-model", "mock:cheap",
                 "--relation-model", "mock:reason"], capture=True)
 
@@ -766,3 +776,23 @@ def test_upgrade_makes_no_claim_for_a_document_with_nothing_to_extract():
         f"the completion transition must still run for a no-sections document "
         f"named explicitly (got needs_extraction={nx!r}, doc_status={ds!r}); "
         f"output was:\n{out}")
+
+    # The claim control — the event log IS the claim record: `begin_ingest`
+    # emits `IngestStarted` for every call that does not skip.
+    claims = []
+    log_file = Path(log_path)
+    # The log file is created on the FIRST append, so its absence is itself
+    # evidence of no claim: a no-sections `--upgrade` writes no event at all (the
+    # completion transition goes straight to the projection).
+    if log_file.exists():
+        for line in log_file.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            ev = json.loads(line)
+            if ev.get("type") == "IngestStarted" and ev.get("source_id") == doc_id:
+                claims.append(ev)
+    assert not claims, (
+        f"`--upgrade` minted an extraction claim for a document it then declined "
+        f"to extract: {claims}. At a bumped extractor version that claim "
+        f"supersedes/retracts the source's earlier Points.")

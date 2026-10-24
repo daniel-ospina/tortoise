@@ -308,7 +308,8 @@ def _document_is_pending(needs_extraction, doc_status, *,
     version) deliberately KEEPS its marker and is reported in its own bucket —
     clearing it would record "extracted" for work that never ran. A PARTIAL
     extraction (``failed_sections``) still clears, matching pre-D10 — the
-    sections that succeeded are written, and the bucket is reported. The
+    sections that succeeded are written, the document counts as ``upgraded`` (no
+    bucket), and a ``warning: N sections failed extraction`` line is printed. The
     explicit ``--upgrade`` path is the pre-D10 behaviour and DOES clear after a
     "no ## sections" outcome: the operator named that document, there is nothing
     to extract, and it says so.
@@ -558,8 +559,12 @@ def _do_upgrade_all(proj, api, args):
     key (content-hash + extractor version), so identical content is a no-op. A
     document this sweep CANNOT complete is left PENDING and counted in its own
     bucket (see the summary line) — the marker is the operator's signal that
-    something is still outstanding, so it is not cleared on a failure path.
-    Only a completed extraction clears it.
+    something is still outstanding, so it is not cleared on a failure path. Only
+    an attempt that RAN clears it: a PARTIAL run (``stats['failed_sections']``
+    non-empty) also clears and counts as ``upgraded``, matching pre-D10, with a
+    ``warning: N sections failed extraction`` line printed (review round 8 —
+    this docstring said "only a completed extraction", which the code has never
+    done; ``_document_is_pending`` states the real rule).
 
     #329 containment: the file read path (s.sourcePath OR s.url — both are
     tenant-mutable graph state) is resolved strictly under TORTOISE_INGEST_BASE_DIR;
@@ -825,11 +830,14 @@ def main(argv=None):
                          "awaiting extraction — needs_extraction=true, a surviving "
                          "legacy doc_status other than 'extracted', or no signal at "
                          "all (requires the transcript positional arg). A stored "
-                         "needs_extraction=false with no legacy marker still skips.")
+                         "needs_extraction=false with no legacy marker still skips, and "
+                         "a stored doc_status='extracted' outranks needs_extraction=true.")
     ap.add_argument("--upgrade-all", action="store_true",
                     help="#133/#5140: discover document Sources awaiting extraction "
                          "(an explicit needs_extraction=true, or a surviving legacy "
-                         "doc_status='captured' marker) and upgrade each")
+                         "doc_status='captured' marker; a stored "
+                         "doc_status='extracted' outranks needs_extraction=true) and "
+                         "upgrade each")
     ap.add_argument("--include-unstamped", action="store_true",
                     help="#5140: with --upgrade-all, also select document Sources "
                          "that carry no extraction signal at all (`needs_extraction` "
