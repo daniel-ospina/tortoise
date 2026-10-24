@@ -243,7 +243,7 @@ class Env:
         self.sudo = _exe(
             self.bin / "sudo",
             "#!/usr/bin/env bash\n"
-            f'printf \"%s\\n\" \"sudo $*\" >> \"{tmp / "sudo.log"}\"\n'
+            f'printf "%s\\n" "sudo $*" >> "{tmp / "sudo.log"}"\n'
             + (
                 '[ "${1:-}" = "-n" ] && shift\n'
                 'case "$*" in *systemctl*restart*) exec "$@" ;; esac\n'
@@ -986,11 +986,16 @@ def test_the_requested_install_index_is_repo_agnostic(env):
     assert rec["live"] <= rec["ceiling"], rec
 
 
-def test_a_provisioner_refusal_is_an_answer_not_a_failure(env):
-    """`install-ci-runner-x64.sh` exit 2 is its GUARD REFUSING — reported as a refusal, not exit 3.
+def test_a_provisioner_refusal_is_VISIBLE_not_green(env):
+    """`install-ci-runner-x64.sh` exit 2 is its GUARD REFUSING — and that must NOT read as success.
 
-    Folding it into `action-failed` made a scheduled pass cry failure every 10 minutes over a
-    deliberate no, and hid that the two predicates disagree (round 4, finding 3, #9672).
+    The refusal means the box is UNDER target and the one sanctioned registration path will not
+    fill it (its `COUNT*2 + 2 <= ncpu` arm caps a 4-core box at ONE, while this tool's ceiling
+    targets the owner's 2). Folding it into `action-failed` made a scheduled pass cry failure over
+    a deliberate no; folding it into exit 0 — the pre-#9685 contract — made the timer GREEN on a
+    permanently-under-filled box, which is the false PASS this file exists to prevent. It is
+    therefore its own verdict and its own non-zero code, keyed on the CAUSE so a `--status` plan
+    and a memory-reserve stop keep exit 0.
     """
     e = env(pool=[("r1", "online", False, "")], installs=[("gh-runner-x64-1", "r1")])
     e.provisioner_rc = 3
@@ -1000,9 +1005,14 @@ def test_a_provisioner_refusal_is_an_answer_not_a_failure(env):
     e2 = env(pool=[("r1", "online", False, "")], installs=[("gh-runner-x64-1", "r1")])
     e2.provisioner_rc = 2
     rec2 = e2.record()
-    assert rec2["verdict"] == "provisioner-refused", rec2
-    assert rec2["_rc"] == 0, rec2
-    assert any("REFUSED slot #" in n and "rc=2" in n for n in rec2["notes"]), rec2["notes"]
+    assert rec2["verdict"] == "fill-refused-by-provisioner", rec2
+    assert rec2["_rc"] == 5, rec2
+    notes = " ".join(rec2["notes"])
+    assert "fill-refused-by-provisioner: slot #" in notes and "rc=2" in notes, rec2["notes"]
+    # The note must name BOTH models' disagreement — the CPU arm is the one no memory reading
+    # can move, and it was the arm the earlier prose never mentioned.
+    assert "2 cores + 2 reserved" in notes, rec2["notes"]
+    assert "#9672" in notes, rec2["notes"]
 
 
 def test_dry_run_promises_only_what_it_can_measure(env):
@@ -1109,11 +1119,11 @@ def test_unknown_architecture_refuses_rather_than_guessing(env):
 def test_missing_provisioner_is_a_named_refusal_not_a_failed_pass(env):
     """A box that cannot create a NEW install refuses to add — and SAYS WHY, without crying failure.
 
-    ⛔ Round 10, I1: the FILL step delegates to `install-ci-runner-x64.sh`, which is not in this
-    tree (it lands with #9639). Reporting the absence as `action-failed` made a scheduled pass on
-    a below-ceiling box exit 3 every interval — a red unit forever over a dependency this PR does
-    not own. It is a REFUSAL with a named cause: `fill-blocked`, exit 0, and the note names the
-    upstream PR so the state is actionable rather than a generic failure.
+    ⛔ Round 10, I1: the FILL step delegates to `install-ci-runner-x64.sh`, which ships in this
+    repo at `tools/install-ci-runner-x64.sh` since #9639. Reporting an unresolvable path as
+    `action-failed` made a scheduled pass on a below-ceiling box exit 3 every interval. It is a
+    REFUSAL with a named cause: `fill-blocked`, exit 0, and the note names the file, its home in
+    this repo, and the env var that fixes it — never a merged PR as the owner of a missing thing.
     """
     e = env()
     e.provisioner = e.bin / "absent.sh"
@@ -1123,7 +1133,13 @@ def test_missing_provisioner_is_a_named_refusal_not_a_failed_pass(env):
     assert rec["problems"] == [], rec["problems"]
     notes = " ".join(rec["notes"])
     assert "no provisioner" in notes, rec["notes"]
-    assert "#9639" in notes, f"the note must name the dependency it is blocked on: {rec['notes']}"
+    # The message must point at something an operator can ACT on: the file's home in this repo
+    # and the env var. It must not name a merged PR as the owner of a file that exists here.
+    assert "tools/install-ci-runner-x64.sh" in notes, rec["notes"]
+    assert "RUNNER_AUTOSCALE_PROVISIONER" in notes, rec["notes"]
+    assert "#9639" not in notes, (
+        "the absence is about this box's candidate paths, not about a PR that has landed: " + notes
+    )
 
 
 def test_missing_provisioner_still_repairs_dead_runners(env):
@@ -1208,7 +1224,7 @@ def test_a_scoped_sudo_DENIAL_is_not_mistaken_for_a_failed_restart(env):
     e.sudo = _exe(
         e.bin / "sudo",
         "#!/usr/bin/env bash\n"
-        'shift\n'
+        "shift\n"
         "echo \"Sorry, user tester is not allowed to execute '$*' as root on host.\" >&2\n"
         "exit 1\n",
     )
@@ -1601,6 +1617,20 @@ MUTATIONS = {
         kwargs=dict(provisioner_absent=True),
         args=(),
         wrong=lambda r: r.get("verdict") != "fill-blocked",
+    ),
+    # ⛔ The exit-5 arm (#9685 review, Issue 2): a callee-guard refusal must NOT exit 0. Mutating
+    # the mapping back to the pre-fix contract leaves the verdict intact and only the CODE wrong,
+    # so the predicate reads the exit code — the datum a systemd timer actually sees.
+    "provisioner-refusal-exits-zero": dict(
+        old='    if record["verdict"] == "fill-refused-by-provisioner":\n        return 5',
+        new="    if False:\n        return 5",
+        kwargs=dict(
+            pool=[("r1", "online", False, "")],
+            installs=[("gh-runner-x64-1", "r1")],
+            provisioner_rc=2,
+        ),
+        args=(),
+        wrong=lambda r: r.get("verdict") == "fill-refused-by-provisioner" and r.get("_rc") == 0,
     ),
 }
 

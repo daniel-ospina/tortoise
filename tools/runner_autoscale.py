@@ -47,6 +47,22 @@ THE CEILING IS A PREDICATE, NOT A NUMBER
   live → min(3, 1+3)=3 ✓ (the ruling's 3); a box at 3 live with 5.5 GB free → min(3, 3+2)=3, so
   a fourth is refused by CORES with the reading printed (this is the live case measured below).
 
+  ⛔ THIS CEILING IS NOT THE ONLY PREDICATE, AND THIS FILE DOES NOT PRETEND IT IS. The one
+  sanctioned registration path — `tools/install-ci-runner-x64.sh`, in this tree since #9639 — runs
+  its OWN guard before it creates anything: `COUNT*CORES_PER_RUNNER + CORES_RESERVED_FOR_AGENT_LANES
+  <= ncpu` (2 + 2) and `COUNT*2 + 4 <= MemAvailable` GB. That CPU arm caps a 4-core cell at ONE
+  runner while the owner's table above targets 2, so on such a box this file computes a target the
+  callee will refuse, and no memory reading can change it. This file neither silently lowers the
+  ceiling to the callee's model (that would abandon the owner's ruling on its own authority) nor
+  averages the two (that would hide the disagreement): the pass reports
+  `verdict=fill-refused-by-provisioner` and exits 5, so the under-filled box is VISIBLE instead of
+  green, and which predicate binds is the open decision at #9672. ⛔ EXPECT THAT STATE TO BE
+  STANDING ON THE CANONICAL CELLS: the installer's memory arm (`COUNT*2 + 4 <= MemAvailable` GB)
+  needs 6 GB for a single runner, which cell-3 (5.9 GB total) never has, and 8 GB for two, which
+  cell-4 (7.5 GB total) never has — so FILL is refused there every pass until #9672 lands. A
+  perma-amber unit that names a real undecided defect is the honest reading; the alternative
+  (exit 0) was a green timer over an unfillable box.
+
 WHAT IT DOES, IN ORDER (every step idempotent; safe to run every few minutes)
   1. MEASURE   cores, MemAvailable. Unreadable ⇒ exit 2 and NO action — "cannot verify" is
                never a pass and never a guess.
@@ -81,14 +97,16 @@ WHAT IT DOES, IN ORDER (every step idempotent; safe to run every few minutes)
   6. FILL      while live < target: add ONE runner, printing `mem_available_mb` before and after,
                and stop if the next addition would leave < MEM_RESERVE_MB. A NEW install is
                created by the FLEET's installer, `install-ci-runner-x64.sh` (the one registration
-               path — it downloads and sha256-checks the runner), resolved from the candidates
-               `provision()` lists. ⛔ That installer is NOT in this tree today (it lands with
-               #9639): on a box without it this step REFUSES — `verdict=fill-blocked`, exit 0 —
-               rather than improvising a second registration path. It is a REFUSAL, not a
-               failure: the missing file is a dependency this PR does not own, and a timer that
-               goes red every interval over it would be the "installed but cries failure" class.
-               Measurement, repair (restart / re-register), `--want`, `--status` and `--dry-run`
-               are unaffected by its absence.
+               path — it downloads and sha256-checks the runner), which ships IN THIS REPO at
+               `tools/install-ci-runner-x64.sh` (landed by #9639), resolved from the candidates
+               `provision()` lists. When no candidate resolves on this box the step REFUSES —
+               `verdict=fill-blocked`, exit 0 — rather than improvising a second registration
+               path. ⛔ When the installer's OWN guard refuses the count this tool asked for, the
+               step reports `verdict=fill-refused-by-provisioner` and exits 5, NOT 0: the box is
+               under target and the one sanctioned path will not fill it, so a timer that read
+               that as success reported a permanently-under-filled box as green. Measurement,
+               repair (restart / re-register), `--want`, `--status` and `--dry-run` are
+               unaffected by either.
   7. REFUSE    beyond the ceiling nothing is added and the reading is printed. `--want N` is the
                explicit-request form of the same guard; `--status` is the read-only form.
 
@@ -136,8 +154,9 @@ USAGE
   box with no guard, which is the defect this file exists to close.
 
 EXIT  0 converged / at-ceiling / over-ceiling / nothing to do / a REFUSAL (an answer, not a
-        failure): `provisioner-refused` (its own guard), `fill-blocked` (no provisioner on this
-        box — the #9639 dependency is absent, so FILL cannot run; nothing else is affected), and
+        failure): `fill-blocked` (no provisioner resolves on this box — the installer ships in
+        this repo at `tools/install-ci-runner-x64.sh`, so an absence means it is at none of the
+        candidate paths here; FILL cannot run and nothing else is affected), and
         `under-target` reached WITHOUT an attempted growth — a `--status`/`--dry-run` plan (it
         changes nothing by design, so it cannot be a failed pass) or a stop at this box's own
         memory reserve (the capacity counterpart of `fill-blocked`). `over-ceiling` is here too,
@@ -158,6 +177,24 @@ EXIT  0 converged / at-ceiling / over-ceiling / nothing to do / a REFUSAL (an an
         the verdict itself to a non-zero code would red the timer every interval on a healthy
         box that is simply below target, and would make the installer's install-time `--status`
         probe report FAILED on those same boxes.
+      5 `fill-refused-by-provisioner` — `install-ci-runner-x64.sh`'s OWN guard refused the count
+        this tool asked for. ⛔ THIS ONE IS NOT EXIT 0, and the difference is what the refusal
+        MEANS: the box is under target and the one sanctioned registration path will not fill it,
+        so exit 0 here is a green timer on a permanently-under-filled box (the false-PASS class
+        this file exists to prevent). ⛔ The tool's ceiling is NOT the binding predicate — the
+        installer sizes a runner at `CORES_PER_RUNNER=2` + `CORES_RESERVED_FOR_AGENT_LANES=2`, so
+        a 4-core box caps at ONE through that path while the owner's table targets 2, and no
+        memory reading can change the CPU arm. Reconciling the two models is a DECISION, not an
+        average, and it is open at #9672; this exit code is what makes the disagreement visible
+        meanwhile. ⛔ AND THAT MEANS PERMA-AMBER IS INTENDED HERE, not an oversight: the
+        installer's `2 GB/runner + 4 GB` reserve is stricter than every canonical cell's free
+        memory, so on those cells this refusal is the STEADY STATE — the unit will read `failed`
+        continuously until #9672 decides which predicate binds. That is deliberate and it is the
+        opposite of the "installed but cries failure" case above: there the pass was healthy and
+        the message was about a missing path; here the box genuinely cannot reach its target and
+        a green timer would hide it. The install-time `--status` probe cannot see it either (it
+        runs the tool in its no-change mode, which never attempts a provision), so the unit is
+        the only signal — and the journal carries the callee's own refusal words.
 """
 
 from __future__ import annotations
@@ -216,20 +253,36 @@ class ActionFailed(Exception):
 
 
 class ProvisionerRefused(ActionFailed):
-    """The provisioner's OWN guard refused (exit 2). A refusal is an answer, not a failure."""
+    """The provisioner's OWN guard refused (exit 2). A refusal — but an UNDER-TARGET one.
+
+    ⛔ NOT AN ANSWER THAT EXITS 0 ANY MORE. A refusal here means the box is below its target and
+    the one sanctioned registration path will not fill it: the tool computed a count the callee's
+    guard rejects (`COUNT*2 + 2 <= ncpu`, `COUNT*2 + 4 <= MemAvailable`). The pass reports
+    `verdict=fill-refused-by-provisioner` and exits 5 so the schedule is not green on a box that
+    is permanently under-filled — the false PASS that a "a refusal is an answer, exit 0" reading
+    created. ⛔ The two models are deliberately NOT averaged: the ceiling is the owner's measured
+    one, the callee's is the registration path's, and which one binds is the open decision at
+    #9672. See `ceiling`.
+    """
 
 
-class ProvisionerAbsent(ProvisionerRefused):
-    """No provisioner resolves on this box — a DEPENDENCY is missing, not this pass.
+class ProvisionerAbsent(ActionFailed):
+    """No provisioner resolves on this box — a DEPENDENCY/MISCONFIGURATION, not this pass.
 
-    ⛔ A SUBCLASS OF `ProvisionerRefused` ON PURPOSE. The installer that owns the registration
-    path (`install-ci-runner-x64.sh`) is not in this tree yet (it lands with #9639), so on a box
-    without it the FILL step cannot run at all. Reporting that as `ActionFailed` made every
-    scheduled pass on a BELOW-CEILING box exit 3 — a red unit every interval, forever, over a
-    file this PR does not own, which is the "installed but cries failure" class this installer
-    exists to avoid. It is a REFUSAL with a named cause (`fill-blocked`), so the timer records
-    the state without claiming the guard is broken; the next pass re-evaluates (idempotent), and
-    every other capability — measurement, repair, `--want`, `--status`, `--dry-run` — still works.
+    ⛔ A SIBLING OF `ProvisionerRefused`, NOT A SUBCLASS — and that is the exit contract, not a
+    style choice. This exception is about WHERE THE INSTALLER IS; `ProvisionerRefused` is about
+    what it will ACCEPT. Only the second one means "the box is under target and cannot be filled"
+    (exit 5). `install-ci-runner-x64.sh` ships in THIS repo (`tools/install-ci-runner-x64.sh`,
+    landed by #9639), so an absence means no candidate path here holds it — the installed run copy
+    lives at `~/.pi/agent/scripts/`, a timer's cwd is not a shell's, and
+    `install-runner-autoscale-schedule.sh` pins the path it finds into the unit. Reporting that as
+    `ActionFailed` made every scheduled pass on a BELOW-CEILING box exit 3 — a red unit every
+    interval, forever, over a path setting — so it is a REFUSAL with a named cause
+    (`fill-blocked`), exit 0, whose message names the file, its home in this repo, and the env var
+    that fixes it. Subclassing `ProvisionerRefused` instead (as this class did while both exited
+    0) would hand it exit 5 the moment a handler stopped listing it first: a perma-red unit over a
+    path setting. The next pass re-evaluates (idempotent), and every other capability —
+    measurement, repair, `--want`, `--status`, `--dry-run` — still works.
     """
 
 
@@ -537,13 +590,13 @@ def resolve_labels(pool: dict[str, PoolEntry], machine: str) -> str:
     """The label set a re-registered runner gets — arch marker, plus the fallback label only if
     the fallback is engaged right now.
 
-    This mirrors the label rule of `install-ci-runner-x64.sh::resolve_labels` (the one
-    registration path) instead of inventing a second rule, and it is `auto`: the gate's state is
-    the source of truth, so a runner never acquires a permanent claim on the pool. ⛔ That
-    installer is not in this tree yet (it lands with #9639), so this is a restatement of a rule no
-    reader can open here — which is why it re-derives NOTHING it cannot check: the arch marker is
-    this box's own `uname -m`, and the fallback label comes from `ci_runner_gate.sh`'s condition
-    read off the live pool (see `fallback_engaged`). An unknown architecture RAISES —
+    This mirrors the label rule of `install-ci-runner-x64.sh::resolve_labels`
+    (`tools/install-ci-runner-x64.sh:192`, in this tree since #9639) instead of inventing a
+    second rule, and it is `auto`: the gate's state is the source of truth, so a runner never
+    acquires a permanent claim on the pool. The reader CAN open it, which is why this file
+    re-derives NOTHING it cannot check: the arch marker is this box's own `uname -m`, and the
+    fallback label comes from `ci_runner_gate.sh`'s condition read off the live pool (see
+    `fallback_engaged`). An unknown architecture RAISES —
     `self-hosted`/`Linux`/`<ARCH>` are host-derived and may not be set, so there is no safe
     default to fall back to.
     """
@@ -836,14 +889,14 @@ def provision(target_count: int) -> str:
 
     ⛔ This file never downloads a runner binary and never builds a `config.sh` argv for a NEW
     install: download + sha256 verification + the headroom/arch guards are the provisioner's job
-    (`install-ci-runner-x64.sh`, the one registration path). ⛔ THE PROVISIONER IS NOT IN THIS
-    TREE: it lives on #9639's branch (`fix/ci-x64-runner-pool`) and is resolved at run time from
-    the candidates below — a sibling of this file, `$PWD/tools/`, or `~/.pi/agent/scripts/`.
-    Absent, this REFUSES — `verdict=fill-blocked`, exit 0, `no provisioner` in the notes — rather
-    than improvising a second, divergent registration path. It is a REFUSAL, because the missing
-    file is a dependency of another PR, not a defect of this pass: `--want`, `--status`,
-    `--dry-run`, every measurement and every restart/re-register repair work without it. Set
-    `RUNNER_AUTOSCALE_PROVISIONER` to the installer's real path on a box that has one.
+    (`install-ci-runner-x64.sh`, the one registration path, which ships IN THIS REPO at
+    `tools/install-ci-runner-x64.sh` — landed by #9639). It is resolved at run time from the
+    candidates below — a sibling of this file, `$PWD/tools/`, or `~/.pi/agent/scripts/` — because
+    the RUNNING copy of this tool lives in the last one. When none of them resolves, this REFUSES
+    — `verdict=fill-blocked`, exit 0, `no provisioner` in the notes — rather than improvising a
+    second, divergent registration path. `--want`, `--status`, `--dry-run`, every measurement and
+    every restart/re-register repair work without it. Set `RUNNER_AUTOSCALE_PROVISIONER` to the
+    installer's real path on a box whose checkout is somewhere else.
     """
     raw = os.environ.get("RUNNER_AUTOSCALE_PROVISIONER")
     # The installer is resolved, never assumed: the RUNNING copy of this tool lives in
@@ -861,13 +914,16 @@ def provision(target_count: int) -> str:
     )
     provisioner = next((c for c in candidates if c and Path(c).exists()), None)
     if not provisioner:
-        # ⛔ NAMES THE DEPENDENCY AND ITS OWNER. Round 10 read the previous message as presenting
-        # a file of this repo; it is #9639's, and the absence is a fact a reader must be able to
-        # act on rather than a generic "action failed".
+        # ⛔ NAMES THE FILE, ITS HOME IN THIS REPO, AND THE FIX. An earlier revision said the
+        # installer "is not in this tree yet (it lands with #9639)" — false since #9639 landed,
+        # and an operator acting on it looked for a dependency instead of setting a path. The
+        # absence is about THIS BOX's candidate paths, not about the repository.
         raise ProvisionerAbsent(
-            "no provisioner: install-ci-runner-x64.sh is absent (it lands with #9639's branch "
-            "`fix/ci-x64-runner-pool` and is NOT in this tree), so a NEW runner cannot be created "
-            "on this box (this script never downloads a runner binary). Measurement, "
+            "no provisioner: install-ci-runner-x64.sh was found at none of this tool's candidate "
+            "paths, so a NEW runner cannot be created on this box (this script never downloads a "
+            "runner binary). The installer ships in this repo at "
+            "tools/install-ci-runner-x64.sh; the running copy of this tool lives in "
+            "~/.pi/agent/scripts, and a systemd/cron unit's cwd is not a shell's. Measurement, "
             "--want/--status/--dry-run and the restart/re-register repairs still work; set "
             "RUNNER_AUTOSCALE_PROVISIONER to the installer's path to enable FILL."
         )
@@ -876,10 +932,13 @@ def provision(target_count: int) -> str:
     )
     if rc == 2:
         # `install-ci-runner-x64.sh` publishes 2 as "GUARD REFUSED — nothing was attempted". That
-        # is its own headroom guard declining, not this tool failing: reported as a REFUSAL in its
-        # own words, so a scheduled pass does not cry failure every 10 minutes over a deliberate
-        # no — and so the two predicates that disagree (its 2 GB+4 GB reserve vs this file's
-        # measured 1.5 GB+2 GB, #9672) stay visible instead of being averaged away.
+        # is its own headroom guard declining a count this tool computed — i.e. the box is UNDER
+        # target and the one sanctioned path will not fill it. Its guard sizes a runner at
+        # 2 cores + 2 reserved and 2 GB + 4 GB reserve; this file's ceiling uses its MEASURED
+        # 1.5 GB + 2 GB and the owner's core table. ⛔ The two models are NOT averaged away here,
+        # and the refusal is NOT exit 0 — see `main`'s exit 5 and #9672 (the open decision on
+        # which predicate binds). The message carries the callee's OWN words so the operator reads
+        # which arm refused.
         raise ProvisionerRefused(f"rc=2 {out[-300:]}")
     if rc != 0:
         raise ActionFailed(f"provisioner --count {target_count} rc={rc}: {out[-400:]}")
@@ -1153,10 +1212,11 @@ def converge(
         try:
             note = provision(index)
         except ProvisionerAbsent as exc:
-            # ⛔ A MISSING DEPENDENCY IS NOT A FAILED PASS. The installer this step delegates to
-            # is not in this tree (it lands with #9639), so `action-failed`/exit 3 made the timer
-            # red every interval on exactly the boxes the guard is meant to help. A named refusal
-            # records the state, keeps exit 0, and the next pass re-evaluates.
+            # ⛔ A MISSING PROVISIONER PATH IS NOT A FAILED PASS. The installer ships in this repo
+            # (`tools/install-ci-runner-x64.sh`), so this is about where THIS BOX keeps it: a
+            # timer's cwd is not a shell's. `action-failed`/exit 3 made the timer red every
+            # interval on exactly the boxes the guard is meant to help. A named refusal records
+            # the state, keeps exit 0, and the next pass re-evaluates.
             record["problem_kind"] = "no-provisioner"
             record["notes"].append(
                 f"fill-blocked: {exc} — nothing was added. This is a REFUSAL, not a failure: "
@@ -1166,9 +1226,13 @@ def converge(
         except ProvisionerRefused as exc:
             record["problem_kind"] = "refusal"
             record["notes"].append(
-                f"provisioner REFUSED slot #{index}: {exc} — its own headroom guard is stricter "
-                "than this tool's measured ceiling, so nothing was added (a refusal is an answer, "
-                "not a failure; the two predicates must be reconciled — see #9672)"
+                f"fill-refused-by-provisioner: slot #{index} — {exc}. ⛔ This box is UNDER target "
+                "and the one sanctioned registration path will not fill it: that guard sizes a "
+                "runner at 2 cores + 2 reserved (so a 4-core box caps at ONE) AND 2 GB + 4 GB "
+                "reserve, while this tool's ceiling uses the owner's core table and its MEASURED "
+                "1.5 GB + 2 GB. The tool's ceiling is therefore not the binding predicate, and "
+                "the two are not averaged away here — which model binds is the open decision at "
+                "#9672. Nothing was added, and this pass does NOT report success."
             )
             break
         except ActionFailed as exc:
@@ -1216,12 +1280,18 @@ def converge(
     if record["problems"]:
         record["verdict"] = "action-failed"
     elif record.get("problem_kind") == "no-provisioner":
-        # Named apart from the provisioner's own headroom refusal: this one is a DEPENDENCY that
-        # has not landed (#9639), so a reader can tell "the box is full" from "fill cannot run
-        # here" without reading the log prose. Exit 0 — a refusal is an answer.
+        # Named apart from the provisioner's own headroom refusal: this one is about WHERE the
+        # installer is on this box (it ships in this repo at tools/install-ci-runner-x64.sh), so a
+        # reader can tell "the box is full" from "fill cannot run here" without reading the log
+        # prose. Exit 0 — the file is missing from this box's candidate paths, not from the repo.
         record["verdict"] = "fill-blocked"
     elif record.get("problem_kind") == "refusal":
-        record["verdict"] = "provisioner-refused"
+        # ⛔ AND THIS ONE IS **NOT** EXIT 0 (see `main`). The callee's guard and this file's
+        # ceiling disagree about what the box can hold, and the box stays under target while they
+        # do — so a pass that read that as success was a green timer on a permanently-under-filled
+        # box. The disagreement itself is a DECISION (which predicate binds, #9672), never an
+        # average this file may take on its own.
+        record["verdict"] = "fill-refused-by-provisioner"
     elif record.get("unverified"):
         # A measurement could not be taken (after a restart). Reported as unmeasurable rather than
         # "converged so nothing to see", because the box's state is genuinely unknown here.
@@ -1419,6 +1489,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if record["verdict"] == "under-target" and record.get("problem_kind") == "no-listener":
         return 4
+    # ⛔ EXIT 5: the installer's OWN guard refused a count this tool computed, so the box is under
+    # target and the one sanctioned registration path will not fill it. Exit 0 here (the pre-#9685
+    # contract) made the scheduled pass report a permanently-under-filled box as GREEN — the
+    # false-PASS class this file exists to prevent. It is keyed on the CAUSE (`problem_kind`), not
+    # on `under-target`, so a `--status` plan and a stop at the memory reserve keep exit 0: those
+    # are answers, and an install-time probe on such a box must stay PASS.
+    if record["verdict"] == "fill-refused-by-provisioner":
+        return 5
     return 0
 
 
