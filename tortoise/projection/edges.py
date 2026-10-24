@@ -975,6 +975,15 @@ SUPERSEDE_TRANSFERRED_RELS = frozenset({
 #: reason is stated at the code site and in `04-projection.md` §3 — never left to
 #: be found. Also used by `TortoiseSDK._record_structural_edge` for the self-edge
 #: skip, so the two per-write declines share ONE once-per-relation register.
+#:
+#: ⚠️ NAMED DECLINES LIKE THE ENDPOINT ONE GO THROUGH `_log_identity_skip`, not
+#: through this register: that reporter is the package's ONE seam for "a record
+#: was not written because an endpoint could not be addressed", it also RECORDS
+#: the skip (`record_identity_skip`) so a run boundary can count it, and a second
+#: register would make the same event visible in one place and invisible in the
+#: other (#9827's review asked for exactly this seam). This set is left for the
+#: SELF-EDGE skip alone, which is not an identity defect — both ids are fine, the
+#: fold's `E2E-11.6` contract refuses the shape.
 _RECORD_GAP_WARNED: set[str] = set()
 
 
@@ -1049,27 +1058,48 @@ class _EdgeHandlers:
         write a record the JOURNAL rebuild cannot consume while the RECORD rebuild
         can — the two routes disagreeing, which is the one thing this family is
         supposed to make impossible. Such a write is DECLINED (no partial
-        descriptor) and disclosed ONCE per relation, with the reason, rather than
-        dropped in silence (the failure mode that let R5 sit).
+        descriptor) and REPORTED through the package's one skip reporter,
+        `projection._log_identity_skip` (`absent_is_ordinary=False`,
+        `drops_record=True`), rather than dropped in silence — the failure mode
+        that let R5 sit. That seam also RECORDS the skip, so a run boundary can
+        count what a rebuild will not restore instead of reading a log.
         """
         recorder = getattr(self, "_structural_edge_recorder", None)
         if recorder is None:
             return
         # Lazy import: `tortoise.projection` imports THIS module.
-        from tortoise.projection import replay_window_open
+        from tortoise.projection import _log_identity_skip, replay_window_open
 
         if replay_window_open():
             # Expected and silent: a replay reconstructs a graph from records that
             # ALREADY describe these edges. Nothing is disclosed because nothing
             # is missing — the journal is the source, not a consumer.
             return
-        declined: list[str] = []
         for s in sources:
             for t in targets:
                 for end in (s, t):
                     if not _record_addressable(end):
-                        declined.append(
-                            f"{end.get('label')}:{end.get('key')}")
+                        # `where` carries the reason, because the reporter's own
+                        # message states the refused SHAPE (absent / non-str /
+                        # NUL-bearing), and the shape is only half the story
+                        # here: this endpoint may be perfectly well-formed and
+                        # still unaddressable — a `:Source` is url-keyed and the
+                        # fold sweeps `EPISTEMIC_LABELS` on `p.id` only.
+                        _log_identity_skip(
+                            f"structural edge {rel!r} {end.get('label')} "
+                            "endpoint",
+                            end.get("value"),
+                            "id (record endpoint)",
+                            where=(
+                                "structural edge (mint): the fold sweeps "
+                                f"{sorted(RECORD_ADDRESSABLE_EDGE_LABELS)} on "
+                                "`p.id` only, so this endpoint is not "
+                                "addressable — the edge is in the graph and no "
+                                "`DirectEdgeCreated` is journaled (#9553 class "
+                                "4, `04-projection.md` §3)"),
+                            absent_is_ordinary=False,
+                            drops_record=True,
+                        )
                         break
                 else:
                     recorder({
@@ -1079,17 +1109,6 @@ class _EdgeHandlers:
                         "tgt": t["value"],
                         "tgt_label": t["label"],
                     })
-        if declined and rel not in _RECORD_GAP_WARNED:
-            _RECORD_GAP_WARNED.add(rel)
-            logger.warning(
-                "structural edge %r: %d endpoint(s) are NOT addressable by the "
-                "`DirectEdgeCreated` replay fold (%s) — the edge is written to "
-                "the graph and NOT journaled, so a record-sourced rebuild "
-                "cannot carry it. The fold sweeps %s on `p.id` only; a `:Source` "
-                "is url-keyed and outside it (#9553 class 4, declared at "
-                "`04-projection.md` §3 — not a silent drop).",
-                rel, len(declined), ", ".join(sorted(set(declined))[:4]),
-                sorted(RECORD_ADDRESSABLE_EDGE_LABELS))
 
     def _create_edges(self, p: dict) -> None:
         """Create typed edges for an operator Point. Auto-creates stub nodes
@@ -2465,7 +2484,15 @@ class _EdgeHandlers:
 
     def create_edge(self, source_id: str, target_id: str, predicate: str) -> bool:
         """Create a named edge between two entities by their IDs.
-        Matches target by id OR eventId (Event nodes use eventId as key)."""
+        Matches target by id OR eventId (Event nodes use eventId as key).
+
+        ⛔ This verb takes NO property parameter and NO ``**kwargs`` — §9.6's
+        boundary (a derivation edge minted here carries no ``sourceVersion``
+        anchor and nothing can supply one) is pinned by
+        ``tests/test_references_boundary_5213.py``. The record CARRIER for the
+        edge is emitted one level up, by the SDK door, which resolves the
+        endpoints and writes ``DirectEdgeCreated`` (#9553, R5 class 4).
+        """
         valid_predicates = _VALID_EDGE_PREDICATES
         if predicate not in valid_predicates:
             raise ValueError(f"Unknown predicate: {predicate}")

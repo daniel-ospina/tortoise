@@ -198,17 +198,41 @@ Google's crawl latency — Google's equivalent is Search Console's request-index
 separate, authenticated API that is not wired up. Do not report this feature as "indexing on
 Google".
 
-**What fires it.** Only the transition to published through the agent API
-(`PATCH /blog/api/posts/:slug` with `status: "published"`). It submits **one** URL — the article's
-canonical URL — in the background, so the publish never waits for it.
+**What fires it.** Two callers reach the same submission path — the agent API, and the console (which
+has four call sites across three user actions):
+
+1. **The agent API's publish transition** — `PATCH /blog/api/posts/:slug` (`api/posts/[[path]].ts`).
+   Two arms, both "the row became publicly readable": a `status: "published"` transition, and
+   `hold_for_review: false` on a row that is already `published` and held (which changes no status but
+   makes the URL stop answering 404).
+2. **The console**, which writes status straight to Supabase with supabase-js and therefore never
+   passes through the agent API. Every console write that can make a row publishable notifies, via
+   `POST /blog/api/notify-publish { slug }` (#9803):
+   - the **editor form's publish save** — including "publish again" on an already-live post;
+   - the **drafts-queue one-click Publish** (`publishPost`) — the path the agent-draft backlog is
+     actually published through;
+   - **clearing a hold** on a published post (`clearHoldPost`) — the transition that makes a held
+     post's URL live, since the hold itself is not cleared by publishing.
+
+   The endpoint does not write the post: it re-reads the row with the service role and answers **409
+   `not_live`** for anything not live, so a slug from the browser can never nominate a draft URL.
+   **"Live" is two columns**: `status = 'published'` AND `hold_for_review = false`. A held post has the
+   status but is filtered out of every public surface, so its URL answers 404 — the endpoint refuses it
+   rather than submitting a dead URL.
+
+It submits **one** URL — the article's canonical URL — in the background, so the publish never waits
+for it. The agent API and the console share `_shared/indexnow.ts`: one rule, both doors.
 
 **Never fired:**
 
-- writing a draft;
-- **creating a post directly as `published`** — `POST /blog/api/posts` with `status: "published"` is a
-  publish transition, but the notification belongs to the PATCH transition. Publish a draft with
-  PATCH if you want the submission;
-- editing an article that is already published;
+- writing a draft (from either caller);
+- **creating a post directly as `published` through the AGENT API** — `POST /blog/api/posts` with
+  `status: "published"` is a publish transition, but the notification belongs to the PATCH transition.
+  Publish a draft with PATCH if you want the submission. (The **editor's** create-and-publish does
+  notify — it goes through the endpoint above, which is why the bullet names the agent API.)
+- an edit through the **agent API** that leaves both `status` and `hold_for_review` unchanged. The
+  editor's publish button does notify on a re-publish — that is the explicit "this URL changed" case,
+  and the 24-hour window below is what makes it safe;
 - unpublishing;
 - re-publishing the same URL within 24 hours (`blog_posts.indexnow_submitted_at` records the last
   attempt);
@@ -236,10 +260,26 @@ the shapes the path produces:
 | `skipped (state unreadable, supabase 401\|403\|5xx)` | the read failed for another reason: a rotated/wrong service-role key, or a Supabase fault | check the key / the Supabase status — **the migration will not help here**. Nothing was submitted |
 | `skipped (state unreadable, upstream unreachable)` | the state read timed out or the network failed — **not** a migration problem | nothing urgent; the publish is live and the next publish of that article will submit |
 | `skipped (state unreadable, no row)` | the row was gone when the stamp was read (a concurrent delete) | nothing — but note the state was unknown, so nothing was submitted |
+| `skipped (not live: status=…, hold_for_review=…)` | the console asked for a submission and the row is not publicly readable (a draft, or a published-but-held post), so nothing was submitted and the endpoint answered 409 `not_live` | this is the answer to "why was my publish not submitted?" — clear the hold, then publish again |
+| `admin path read failed (supabase <n>)` | the editor's endpoint could not read the row, so it answered 503 `skipped-unreadable` and submitted nothing | check the service-role key and Supabase status — the migration is **not** implicated |
+| `admin path read failed (upstream unreachable)` | same, when the read timed out or the network failed | as above; nothing was submitted |
 | `unexpected failure` | a bug-shaped error inside the notification | file it; the publish itself already succeeded |
 
-⚠️ **A publish from the admin console is not submitted.** The console writes the status change
-directly to Supabase and never reaches the agent API that fires the notification.
+⚠️ **The admin console reaches the notification through its own endpoint.** The console writes the
+status change directly to Supabase, so it never passes through the agent API — the editor therefore
+calls `POST /blog/api/notify-publish { slug }` after a publish save (#9803). That endpoint answers
+**409 `not_live`** for anything the public cannot read — a draft, or a published-but-held post — so it
+cannot be used to nominate a dead URL. If you publish by editing the row directly in Supabase, nothing
+is submitted.
+
+The endpoint answers with a `result`, and it is an OUTCOME, not a success flag: `submitted` (the
+vendor accepted), `submit-failed` (the attempt was made and the vendor rejected it or did not answer —
+read the corresponding `submit failed` log line above for which), `skipped-window` (inside the 24h
+window) or `skipped-unreadable` (the state could not be read, so nothing was submitted). Only
+`submitted` means an engine received the URL. A `skipped-unreadable` from the endpoint's own row read
+arrives as a **503**; the same arm from the submission stamp arrives as a 200 carrying that result.
+The console logs every arm other than `submitted` as `[indexnow] <slug>: <arm>`, so the browser console
+and the server log answer the same question.
 
 ⚠️ **Known limit of the 24-hour window.** The stamp is per post *row* and is read before the
 submission and written after it. Two publish transitions of the same post that overlap (both read the

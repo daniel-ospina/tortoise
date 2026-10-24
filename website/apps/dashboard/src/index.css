@@ -134,7 +134,7 @@ a { color: var(--accent); }
 /* #2735: rotate's one-time replacement reveal (regenerateKey). #2667 dropped
    this class with the standalone block, but rotate still needs it. */
 .new-key { background: rgba(74,222,128,0.08); border: 1px solid rgba(74,222,128,0.3); border-radius: 10px; padding: 14px; margin-bottom: 16px; display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
-.key-value { font-size: 13px; word-break: break-all; }
+.key-value { display: block; font-size: 13px; word-break: break-all; }
 
 /* Tables */
 table { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid rgba(255,255,255,0.06); border-radius: 10px; overflow: hidden; }
@@ -804,6 +804,12 @@ html { scroll-padding-top: 24px; }
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  /* #9660 polish: WRAP. Without it the primary action's label ("Done — Continue
+     to dashboard") pushed the row past the viewport on a phone, so the button
+     was clipped at the right edge and "Back" was squeezed to a stub. The row
+     now wraps and the actions take the full width when they must. */
+  flex-wrap: wrap;
+  row-gap: 10px;
   margin-top: 1.25rem;
   padding-top: 1rem;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
@@ -824,6 +830,25 @@ html { scroll-padding-top: 24px; }
   margin-left: auto;
   flex-wrap: wrap;
   justify-content: flex-end;
+  /* #9660 polish: a long primary label must be able to shrink rather than
+     overflow the row it sits in. */
+  min-width: 0;
+}
+
+/* #9660 polish: on a phone the primary action gets its own line and the full
+   width — the actions are the point of the screen, and side-by-side is what
+   clipped them. */
+@media (max-width: 560px) {
+  .wizard-nav-actions {
+    width: 100%;
+    margin-left: 0;
+    justify-content: stretch;
+  }
+  .wizard-nav-actions > button,
+  .wizard-nav-actions > a {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
 }
 .wizard-nav-spacer { flex: 1; }
 
@@ -959,7 +984,26 @@ input::placeholder, textarea::placeholder {
 
 /* #1003: new-key modal — wider than the standard modal because it holds the key-value <code> block */
 .modal.key-create-modal { max-width: 540px; }
-.key-create-modal .key-value { font-size: 12px; padding: 8px 10px; background: var(--bg-soft, #0f172a); border: 1px solid var(--border, #1e293b); border-radius: 6px; word-break: break-all; margin: 6px 0; }
+/* #9660 polish: the reveal is a BLOCK, not an inline <code>.  As an inline
+   element the padded box sat inside the caption's line box — it overlapped the
+   "Copy this key now" line (clipping its descenders) and ran on the same line as
+   the expiry, which is the broken dialog the owner screenshotted.  `display:
+   block` fixes the collision and gives the key its own selectable line; the
+   expiry gets one too.  Scoped next to the padding/border rule so a future
+   restyle cannot bring the inline box back unnoticed. */
+.key-create-modal .key-value {
+  display: block;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 8px 10px;
+  background: var(--bg-soft, #0f172a);
+  border: 1px solid var(--border, #1e293b);
+  border-radius: 6px;
+  word-break: break-all;
+  margin: 8px 0 4px;
+}
+.key-create-modal .key-expiry { display: block; }
 .key-create-modal .new-key-actions { display: flex; gap: 8px; margin-top: 10px; }
 .key-create-modal .new-key-actions button { flex: 1; }
 

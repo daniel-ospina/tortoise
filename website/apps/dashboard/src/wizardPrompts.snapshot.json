@@ -12,7 +12,9 @@
     "codex/1": "Add Tortoise MCP at https://api.premiselabs.co/mcp/.\nKey: tk_snapshot\nSave it to my shell profile (export TORTOISE_API_KEY=…).\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding) from https://app.premiselabs.co/install-tortoise-skills.sh.\nOnboarding is instructions, not a skill — read and follow them at https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md.\nTell me when to restart Codex.\nDocs: https://tortoise.premiselabs.co/docs",
     "codex/2": "Call tortoise_health to verify the connection, then tortoise_create_point to file my first memory.\nDocs: https://tortoise.premiselabs.co/docs",
     "claude-desktop/2": "Call tortoise_health to verify the connection, then tortoise_create_point to file my first memory.\nDocs: https://tortoise.premiselabs.co/docs",
-    "claude-web/2": "Call tortoise_health to verify the connection, then tortoise_create_point to file my first memory.\nDocs: https://tortoise.premiselabs.co/docs"
+    "claude-web/2": "Call tortoise_health to verify the connection, then tortoise_create_point to file my first memory.\nDocs: https://tortoise.premiselabs.co/docs",
+    "chatgpt/1": "You have Tortoise connected over MCP (the tortoise_* tools).\nRead the how-to-use-tortoise skill before your first write — it is the source of truth for how to add memories, the links between them, and when to use which. If it is not installed, read it at https://app.premiselabs.co/skills/how-to-use-tortoise/SKILL.md first.\nOnboarding is instructions, not a skill — read and follow them at https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md.\nCall tortoise_overview(section=\"health\") to verify the connection, then tortoise_create_point to file my first memory.\nDocs: https://tortoise.premiselabs.co/docs",
+    "chatgpt/2": "Call tortoise_overview(section=\"health\") to verify the connection, then tortoise_create_point to file my first memory.\nDocs: https://tortoise.premiselabs.co/docs"
   },
   "promptsSeparate": {
     "pi/1": "Add Tortoise MCP at https://api.premiselabs.co/mcp/.\nI'll give you the API key when you need it.\nSave it to my shell profile (~/.zshrc).\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding) from https://app.premiselabs.co/install-tortoise-skills.sh.\nOnboarding is instructions, not a skill — read and follow them at https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md.\nTell me when to restart Pi.\nDocs: https://tortoise.premiselabs.co/docs",
@@ -24,7 +26,9 @@
     "codex/1": "Add Tortoise MCP at https://api.premiselabs.co/mcp/.\nI'll give you the API key when you need it.\nSave it to my shell profile (export TORTOISE_API_KEY=…).\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding) from https://app.premiselabs.co/install-tortoise-skills.sh.\nOnboarding is instructions, not a skill — read and follow them at https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md.\nTell me when to restart Codex.\nDocs: https://tortoise.premiselabs.co/docs",
     "codex/2": "Call tortoise_health to verify the connection, then tortoise_create_point to file my first memory.\nDocs: https://tortoise.premiselabs.co/docs",
     "claude-desktop/2": "Call tortoise_health to verify the connection, then tortoise_create_point to file my first memory.\nDocs: https://tortoise.premiselabs.co/docs",
-    "claude-web/2": "Call tortoise_health to verify the connection, then tortoise_create_point to file my first memory.\nDocs: https://tortoise.premiselabs.co/docs"
+    "claude-web/2": "Call tortoise_health to verify the connection, then tortoise_create_point to file my first memory.\nDocs: https://tortoise.premiselabs.co/docs",
+    "chatgpt/1": "You have Tortoise connected over MCP (the tortoise_* tools).\nRead the how-to-use-tortoise skill before your first write — it is the source of truth for how to add memories, the links between them, and when to use which. If it is not installed, read it at https://app.premiselabs.co/skills/how-to-use-tortoise/SKILL.md first.\nOnboarding is instructions, not a skill — read and follow them at https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md.\nCall tortoise_overview(section=\"health\") to verify the connection, then tortoise_create_point to file my first memory.\nDocs: https://tortoise.premiselabs.co/docs",
+    "chatgpt/2": "Call tortoise_overview(section=\"health\") to verify the connection, then tortoise_create_point to file my first memory.\nDocs: https://tortoise.premiselabs.co/docs"
   },
   "workflows": "You have Tortoise connected (the 'tortoise' MCP tools). Follow these workflows — the Tortoise skills, served as documents:\n\n- Using Tortoise (read this one first): https://app.premiselabs.co/skills/how-to-use-tortoise/SKILL.md\n- Running a decision: https://app.premiselabs.co/skills/tortoise-decide/SKILL.md\n- Filing a research finding: https://app.premiselabs.co/skills/tortoise-file-finding/SKILL.md\n\nOpen and follow each one before you use the tools. They are the source of truth for how to write to the graph, run a decision, and file a research finding — do not improvise those workflows from the tool names. If you cannot open a link, say so and I will paste the document instead.\n\nCall tortoise_health to verify the connection, then tortoise_create_point to file my first memory.\nDocs: https://tortoise.premiselabs.co/docs\n\nOnboarding is instructions, not a skill — read and follow them at https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md.",
   "workflowsSeparate": "You have Tortoise connected (the 'tortoise' MCP tools). Follow these workflows — the Tortoise skills, served as documents:\n\n- Using Tortoise (read this one first): https://app.premiselabs.co/skills/how-to-use-tortoise/SKILL.md\n- Running a decision: https://app.premiselabs.co/skills/tortoise-decide/SKILL.md\n- Filing a research finding: https://app.premiselabs.co/skills/tortoise-file-finding/SKILL.md\n\nOpen and follow each one before you use the tools. They are the source of truth for how to write to the graph, run a decision, and file a research finding — do not improvise those workflows from the tool names. If you cannot open a link, say so and I will paste the document instead.\n\nCall tortoise_health to verify the connection, then tortoise_create_point to file my first memory.\nDocs: https://tortoise.premiselabs.co/docs\n\nOnboarding is instructions, not a skill — read and follow them at https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md.",
@@ -47,7 +51,7 @@
     "codex": "Run these commands in your terminal:",
     "codexDesktop": "Edit ~/.codex/config.toml (create it if missing) — Codex Desktop and the CLI share this file. Copy the block, paste it in, then fully quit and reopen Codex Desktop:",
     "pi": "Paste this into your Pi agent:",
-    "chatgpt": "Start a new chat at chatgpt.com and paste the prompt below — that conversation becomes your connected agent. ChatGPT has no local skills — the prompt gives it the Tortoise workflows."
+    "chatgpt": "Start a new chat at chatgpt.com — the Tortoise skills you installed above give it the workflows. (If you skipped the install, paste the prompt below instead.)"
   },
   "harnessSteps": {
     "claude-web": [
@@ -83,17 +87,17 @@
       "Session capture is opt-in on this machine and IDE-ONLY: without `export TORTOISE_CAPTURE=1` the sessionEnd hook files nothing to Tortoise Cloud (a credential alone never enables capture, #3615); with it, local desktop-editor sessions are captured, but CURSOR CLOUD AGENT sessions are not — Cursor's docs: 'Cloud agents have no editor-lifetime session boundary. sessionEnd is tied to the IDE session, not a cloud agent chat.'"
     ],
     "chatgpt": [
-      "Enable Developer mode: chatgpt.com → Settings → Security and login → Developer mode (Plus/Pro/Business/Enterprise/Education).",
-      "Open chatgpt.com/plugins → the + button → create a Developer-mode app.",
+      "Open chatgpt.com/plugins → the Add button → Add custom MCP server.",
+      "Fill in the dialog: Name = Tortoise, leave Description empty (or write your own), leave Connection on Server URL, leave Authentication on OAuth, skip Icon.",
       {
-        "label": "MCP server URL",
+        "label": "Server URL — paste this into the dialog",
         "code": "https://api.premiselabs.co/mcp",
         "copy": "https://api.premiselabs.co/mcp"
       },
-      "Choose OAuth — ChatGPT discovers Tortoise's authorization server (no API key needed).",
-      "Scan Tools — sign in to Tortoise when prompted and click Authorize.",
-      "The tortoise_* tools appear (Developer mode); write actions ask for confirmation in chat.",
-      "Paste the prompt below into a ChatGPT chat — it gives ChatGPT the Tortoise workflows."
+      "Now tick \"I understand and want to continue\" and click Create as a plugin.",
+      "Open chatgpt.com/settings/plugins-settings → Tortoise → View details → Connect, sign in to Tortoise and click Authorize, then pick your Organization.",
+      "Install the Tortoise skills once — on tortoise.premiselabs.co/docs#chatgpt download the three files (how-to-use-tortoise, tortoise-decide, tortoise-file-finding), then open chatgpt.com/skills → Add → Upload from your computer and pick them together. To update one, upload that file again and choose Replace existing. Rather not install? Paste the document below into one chat instead.",
+      "The tortoise_* tools follow that connection — if they do not appear, re-open chatgpt.com/settings/plugins-settings and check Tortoise shows as connected, then ask the chat which tools it can call. Write actions ask for confirmation in chat."
     ]
   },
   "captureInstall": {

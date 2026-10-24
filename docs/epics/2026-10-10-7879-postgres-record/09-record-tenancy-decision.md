@@ -36,9 +36,7 @@ connect as a role that bypasses it.
 | **Which role does the record connect as?** | `tortoise_record_app` — `NOBYPASSRLS`, `NOSUPERUSER`, not the table owner. Created by migration, granted `SELECT`+`INSERT` on every record table (`THE_RECORD_TABLES`, ten of them since #9555 added `public.session_narrative`), plus `UPDATE`+`DELETE` on the **nine that are not `journal_event`** — the journal is append-only, and its trigger's one escape is a GUC (`app.record_journal_purge`) that **any** role may set, so a `DELETE` grant would let the boundary role erase its own audit trail (the posture suite pins the narrow grant). **Not** `postgres` (R1's DSN shape today) and **not** `service_role`. | `supabase/migrations/20261025000001_record_tenancy_role_and_guc.sql` §1–3 |
 | **Is RLS the boundary, or defence-in-depth?** | **The boundary**, for both record doors the application path uses — the write path and `tortoise record-reconcile`. ⚠️ One reader is outside them: `tortoise/record_read.py` takes a caller-supplied connection and installs no scope, which is #9555's outstanding read arm. | one `*_app_tenant` policy per record table in `THE_RECORD_TABLES` (ten), `USING` **and** `WITH CHECK`; **and, by code**, `record_projection.scope_connection()` — which refuses a connection whose role can bypass them (superuser, `BYPASSRLS`, membership of either, or owner of a record table) |
 | **What sets the tenant?** | `set_config('app.current_org_id', $1, true)` — **transaction-local**, issued by `record_projection.replay()` as the first statement, from the same `org_id` it projects. | `record_projection.TENANT_GUC_SQL` |
-| **Who sets it on the READ path?** | The SAME helper: `cache_projection.read_record_view()` (the `tortoise record-reconcile` verb) opens its own connection from the same `TORTOISE_RECORD_DSN`, so it installs the same scope before its first `SELECT`. Without it the policies read NULL — zero rows and no error — and a coherent pair WOULD BE reported divergent (`extra_in_cache` with
-`missing_in_cache = 0`; the counterfactual is what the read-back prevents, #9600
-review cycle 2). | `record_projection.scope_connection()`, called by both doors |
+| **Who sets it on the READ path?** | The SAME helper: `cache_projection.read_record_view()` (the `tortoise record-reconcile` verb) opens its own connection from the same `TORTOISE_RECORD_DSN`, so it installs the same scope before its first `SELECT`. Without it the policies read NULL — zero rows and no error — and a coherent pair WOULD BE reported divergent (`extra_in_cache` with `missing_in_cache = 0`; the counterfactual is what the read-back prevents, #9600 review cycle 2). | `record_projection.scope_connection()`, called by both doors |
 | **Who may bypass?** | `postgres`/table owner and `service_role`, for three named purposes only: schema, the **database-level** backup/restore (R9: `pg_dump`/`pg_restore`), and the org-erasure RPC. They are not the application path — and ⚠️ **not** `record-restore` (R8), which reads through the read door and so connects as the app role. | `purge_org_record` (`20261012000005`) is `SECURITY DEFINER` + `service_role`-only EXECUTE |
 | **Which pooler mode?** | R1's DSN is `:5432` = the shared Supavisor pooler, **session** mode. `:6543` = transaction mode. **The posture does not depend on the answer** — see §3. | `docs/infra-runbook.md` → "The record's connecting role" |
 
@@ -110,10 +108,12 @@ Operator steps: `docs/infra-runbook.md` → "The record's connecting role".
 
 - **R1's DSN must name the app role**, not `postgres`:
   `postgresql://tortoise_record_app.<project-ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres?sslmode=require`.
-  R1 is not armed (`TORTOISE_RECORD_DSN` is set in no `fly.toml`, `entrypoint.sh` or deploy workflow —
-  re-measured 2026-10-23). The runbook's Secrets Matrix *documents* the variable as
-  required-when-armed (#9600); documentation is not provisioning, and the value is what `NOT_ARMED`
-  turns on. So this is a correction to a plan, not a migration.
+  R1 is not armed: the arming SURFACES landed in #9548 — `deploy-hosted.yml` binds, probes and
+  stages it from the GitHub secret of the same name, `.github/scripts/fly-managed-secrets.txt`
+  declares it `gh-secret:`, and `fly.toml` + the runbook's Secrets Matrix document it — but the
+  *value* is the operator's act (it does not exist, so the guarded staging is a no-op) and the
+  connecting role ships `NOLOGIN` until it is given a credential. Declared is not provisioned:
+  the seam still reads `NOT_ARMED`. So this is a correction to a plan, not a migration.
 - **R7 (#9555) inherits the posture**: its new table ships the same three policies (read-org,
   `service_role`, app-tenant) or it is a table whose RLS state this decision does not explain.
   `tests/test_record_tenancy_guc.py::test_the_migration_covers_every_record_table` reddens until it

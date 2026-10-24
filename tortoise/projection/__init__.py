@@ -14884,10 +14884,12 @@ class FalkorProjection(
                 # #8499 / A10 #1048: the plain direct-edge BASE creation —
                 # deferred to the pass-2b sweep (see its declaration and the
                 # fold there for why it must precede the repoint leg).
-                # #9553: the journal SEQ rides along, because the supersede guard
-                # inside that fold is an ORDERING property, not a rel-type one
-                # (a creation AFTER its own supersede was never moved by it).
-                direct_edge_created_events.append((seq, ev))
+                # ⚠️ The event only, NOT `(seq, ev)`: an ordering gate on the
+                # journal seq was tried here and reverted (see
+                # `_supersede_took_this_edge`'s docstring for the measurement),
+                # and a tuple nothing unpacks reads to the next reader as a
+                # comparison that exists.
+                direct_edge_created_events.append(ev)
             elif t == "DirectEdgeRepoint":
                 # #2423: supersede's 2a-DIRECT transfer emits a flat
                 # DirectEdgeRepoint descriptor {src, tgt, edge_type, attrs}
@@ -16224,7 +16226,7 @@ class FalkorProjection(
             # hardcoded :Point match would silently drop every Object↔Object
             # direct edge — the SAME defect the repoint leg's direct branch
             # carried until #8622 widened it with this identical sweep.
-            for ev_seq, ev in direct_edge_created_events:  # noqa: B007 - seq kept for shape
+            for ev in direct_edge_created_events:
                 etype = ev.get("edge_type")
                 src, tgt = ev.get("src"), ev.get("tgt")
                 if (not isinstance(src, str) or not isinstance(tgt, str)

@@ -1840,6 +1840,22 @@ def _nested_node_carrier(record: Mapping[str, Any],
 #:     `RECORD_ADDRESSABLE_EDGE_LABELS`).
 #:   * `about*` when no `EntityLinked` record exists is now carried by the bare
 #:     `create_about_edge` mint, on the same `DirectEdgeCreated` route.
+#:   * ⚠️ **THE `idx` RESIDUAL (#9844), measured, not inferred.** A
+#:     `DirectEdgeCreated` descriptor carries no `idx`, so
+#:     `_relation_coordinates` defaults it to `0` — while `relation`'s conflict key
+#:     INCLUDES `idx` and an operator's own `hasPart`/`IMPL`/`NAND` rows carry
+#:     `idx = enumerate(inputs)`. Mint the edge the operator's record already
+#:     carries at `idx >= 1` and the record gains a SECOND row for ONE graph edge
+#:     (measured: `create_operator("composedOf", a, [b])` then
+#:     `create_edge("hasPart", op, b)` leaves the LIVE graph unchanged at two rows
+#:     — the `MERGE` is property-agnostic and dedups onto the `idx=1` edge — while
+#:     the record route computes `(op, b, hasPart, 0)` beside `(op, b, hasPart, 1)`).
+#:     The PRODUCER cannot fix it (the mint takes no property parameter, §9.6, and
+#:     cannot read the `idx` the existing edge carries), so the fix belongs to this
+#:     layer and needs its own test: insert only when no row already exists for the
+#:     `(org, graph, rel_type, src, tgt)` triple, for the `DirectEdgeCreated` family
+#:     only, so `DirectEdgeRepoint` and the re-linking families are untouched.
+#:     Filed as **#9844**.
 _ENVELOPE_RELATIONS: tuple[tuple[str, str, str, str, str], ...] = (
     ("PointAdded", "contains_session", "CONTAINS", "Session", "Point"),
     ("OperatorAdded", "contains_session", "CONTAINS", "Session", "Point"),

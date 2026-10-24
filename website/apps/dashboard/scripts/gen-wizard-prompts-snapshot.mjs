@@ -50,10 +50,11 @@ import {
   CODEX_DESKTOP_COMMAND,
 } from '../src/harnesses.js'
 
-// The harnesses with a live dashboard surface. `chatgpt` is deliberately absent:
-// #2698 keeps it out of the chooser, so wizardPromptText returns '' for it and
-// it has no wizard surface at all (its carrier is the setup docs page).
-const HARNESSES = ['pi', 'cursor', 'claude', 'codex', 'claude-desktop', 'claude-web']
+// The harnesses with a live dashboard surface. #9660 owner ruling: `chatgpt`
+// JOINED this list — it is a live chooser family now (the paste-only docs
+// carrier is gone as its sole path). It renders step 1 (the first-job prompt)
+// and step 2 (the shared verify/file body).
+const HARNESSES = ['pi', 'cursor', 'claude', 'codex', 'claude-desktop', 'claude-web', 'chatgpt']
 // Both are live: main.jsx:2906 `useState('included')`, passed to every prompt.
 const MODES = ['included', 'separate']
 const KEY = 'tk_snapshot' // deterministic: the renders must not depend on a real key

@@ -1466,7 +1466,7 @@ const classified = mergeCopyReads(Object.values(copyReadsByFile))
 // pin that had stayed main.jsx-only would have gone red here and, once re-pinned,
 // would have certified a surface that no longer included the rows.
 const COPY_READ_CENSUS = Object.freeze({
-  CANONICAL_MCP_URL: [2, 0],
+  CANONICAL_MCP_URL: [4, 0],
   CAPTURE_OPT_IN_LINE: [4, 0],
   HARNESS_CAPTURE_INSTALL: [1, 0],
   HARNESS_CAPTURE_REASON: [1, 0],
@@ -1486,14 +1486,19 @@ const COPY_READ_CENSUS = Object.freeze({
   HARNESS_SKILLS_IN_PROMPT: [0, 2],
   HARNESS_SKILLS_IN_STEPS: [0, 2],
   HARNESS_STEPS: [0, 2],
+  // #9660: the ChatGPT install block reads these two in the LIVE render
+  // (one link per archive in SKILL_ARCHIVE_NAMES), so their reachability is
+  // live, not archived.
+  SKILL_ARCHIVE_NAMES: [1, 0],
+  skillArchiveUrl: [1, 0],
   CODEX_DESKTOP_COMMAND: [1, 0],
-  WIZARD_CAPTIONS: [7, 0],
+  WIZARD_CAPTIONS: [9, 0],
   analyticsHarnessOf: [1, 0],
   harnessDisplayName: [1, 0],
   harnessFamilyOf: [1, 0],
   knownHarnessName: [1, 0],
   preferredSurface: [1, 0],
-  wizardPromptText: [2, 0],
+  wizardPromptText: [3, 0],
   wizardWorkflowsText: [1, 0],
 })
 

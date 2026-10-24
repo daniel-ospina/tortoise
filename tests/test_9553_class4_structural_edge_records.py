@@ -238,23 +238,36 @@ def test_the_addressable_label_set_is_the_folds_own():
     assert frozenset(EPISTEMIC_LABELS) == RECORD_ADDRESSABLE_EDGE_LABELS
 
 
-def test_a_source_endpoint_is_declined_and_disclosed(edge_sdk, caplog):
+def test_a_source_endpoint_is_declined_and_reported(edge_sdk):
     """`references` from a `:Source` is written to the graph and NOT journaled.
 
     The fold cannot address a `:Source` (url-keyed, outside the epistemic
     sweep), so journaling it would give the RECORD an edge the JOURNAL rebuild
     can never re-create. The write still happens — the decline is a disclosure,
-    not a refusal — and it says so, once, with the reason.
+    not a refusal — and it is reported through the package's ONE skip reporter
+    (`projection._log_identity_skip`), which also RECORDS it, so a run boundary
+    can count what a rebuild will not restore.
     """
+    from tortoise.projection.nonfolded import collect_identity_skips
+
     sdk, journal = edge_sdk
     ids = _world(sdk, source=True)
-    caplog.set_level("WARNING")
-    assert sdk.create_edge(
-        "references", "https://class4.test/src", ids["object"])["created"] is True
+    with collect_identity_skips() as skips:
+        assert sdk.create_edge(
+            "references", "https://class4.test/src",
+            ids["object"])["created"] is True
 
     assert _direct_edges(journal) == [], "a Source endpoint must not be journaled"
-    assert any("NOT addressable by the `DirectEdgeCreated` replay fold" in r.message
-               for r in caplog.records), [r.message for r in caplog.records]
+    reported = [s for s in skips if "structural edge" in s.what]
+    assert reported, (
+        "the mint declined a `:Source` endpoint in SILENCE — a live-only edge "
+        "with no carrier and no signal is indistinguishable at runtime from a "
+        "deliberate skip")
+    assert all(s.drops_record for s in reported), (
+        "a declined endpoint means NO record for an edge that IS in the live "
+        "graph, so the skip must be counted as a dropped RECORD")
+    assert any("id (record endpoint)" in s.label for s in reported), [
+        (s.what, s.label) for s in reported]
     # the LIVE edge exists — the graph is not the thing being refused
     rows = sdk._get_proj().g.query(
         "MATCH (:Source {url:$u})-[:references]->(:Object {id:$o}) RETURN count(*)",
@@ -263,17 +276,24 @@ def test_a_source_endpoint_is_declined_and_disclosed(edge_sdk, caplog):
     assert rows[0][0] == 1
 
 
-def test_the_gap_is_disclosed_once_per_relation(edge_sdk, caplog):
-    """A per-write line on the `references` fan-out would bury the log."""
+def test_every_declined_write_is_counted_not_just_logged(edge_sdk):
+    """A decline is COUNTED per write, so a recovery can report what it lost.
+
+    `logger.warning` alone is readable only by a human reading a stream; "how
+    many edges will a rebuild not restore" is a question a run boundary must be
+    able to answer, and `record_identity_skip` is the register that answers it.
+    Two declined writes on the same relation therefore register twice — a
+    once-per-relation dedupe would silently undercount the loss.
+    """
+    from tortoise.projection.nonfolded import collect_identity_skips
+
     sdk, _journal = edge_sdk
     ids = _world(sdk, source=True)
-    sdk.create_object("class4-object-2")
-    caplog.set_level("WARNING")
-    sdk.create_edge("references", "https://class4.test/src", ids["object"])
-    sdk.create_edge("references", "https://class4.test/src", ids["object"])
-    hits = [r for r in caplog.records
-            if "NOT addressable by the `DirectEdgeCreated` replay fold" in r.message]
-    assert len(hits) == 1, [r.message for r in hits]
+    with collect_identity_skips() as skips:
+        sdk.create_edge("references", "https://class4.test/src", ids["object"])
+        sdk.create_edge("references", "https://class4.test/src", ids["p2"])
+    reported = [s for s in skips if "structural edge" in s.what]
+    assert len(reported) == 2, [s.what for s in reported]
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -384,30 +404,38 @@ def test_every_carried_predicate_actually_journals(edge_sdk):
     }
 
 
-def test_a_source_targeted_about_edge_is_declined_and_its_family_is_not_claimed(
-        edge_sdk, caplog):
-    """`aboutDocument`/`aboutSource` are in the lane and can NEVER be journaled.
+def test_an_aboutDocument_at_a_source_target_is_declined_per_write_not_per_rel(
+        edge_sdk):
+    """`aboutDocument` IS a carried predicate; its CANONICAL WRITE is declined.
 
-    Their contract target is a document/provenance `:Source`, which the pass-2b
-    sweep cannot address, so this is not a per-write caveat like `references` —
-    it is 100% of the family. The ledger must say so (it is NOT in
-    `RECORD_CARRIED_STRUCTURAL_RELS`), the write must still land, and the decline
-    must be disclosed.
+    The two answers are different questions and this leg pins both, because the
+    inverse of one of them was once written down here (a cycle-4 review found it):
+
+    * the PREDICATE is carried — `structural_edge_record_carrier` answers
+      `"record"`, and `aboutDocument` is in `RECORD_CARRIED_STRUCTURAL_RELS`,
+      because the mint journals it between epistemic endpoints (the next leg);
+    * the canonical WRITE (`(Point)-[:aboutDocument]->(a document :Source)`) is
+      declined, because the pass-2b sweep addresses `EPISTEMIC_LABELS` on `p.id`
+      and a `:Source` is url-keyed — so it is declined PER WRITE, reported, and
+      made addressable only by a FOLD change (`#9834`), not by a producer one.
     """
+    from tortoise.projection.nonfolded import collect_identity_skips
+
     sdk, journal = edge_sdk
     ids = _world(sdk, source=True)
-    caplog.set_level("WARNING")
     doc = sdk.create_document("class4-doc", documentKind="page")
     doc_id = doc.get("url") or doc.get("id")
-    assert sdk._get_proj().create_about_edge(
-        ids["p1"], doc_id, "aboutDocument") is True
+    with collect_identity_skips() as skips:
+        assert sdk._get_proj().create_about_edge(
+            ids["p1"], doc_id, "aboutDocument") is True
 
     assert [r["edge_type"] for r in _direct_edges(journal)
             if r["edge_type"] == "aboutDocument"] == []
-    assert any("NOT addressable by the `DirectEdgeCreated` replay fold" in r.message
-               for r in caplog.records), [r.message for r in caplog.records]
+    assert [s for s in skips if "structural edge" in s.what], (
+        "the declined `aboutDocument` write was not reported")
     # The PREDICATE is carried (the producer exists); this WRITE was declined.
     assert structural_edge_record_carrier("aboutDocument") == "record"
+    assert "aboutDocument" in RECORD_CARRIED_STRUCTURAL_RELS
 
 
 def test_an_aboutSource_between_epistemic_endpoints_IS_journaled(edge_sdk):

@@ -323,6 +323,14 @@
       transition: color 0.2s;
     }
     .legal-footer a:hover { color: var(--accent); }
+
+    /* Short viewports: the hero is a fixed full-height beat with no scroll of
+       its own, and its subtitle runs ~10 lines on a phone. On a landscape
+       window `justify-content: center` cuts the h1 off the top and the CTA off
+       the bottom, so let the stack scroll instead of clipping it. */
+    @media (max-height: 520px) {
+      #beat-hero { justify-content: flex-start; overflow-y: auto; }
+    }
   </style>
 </head>
 <body>
@@ -343,7 +351,7 @@
   <div id="scroll-wrapper">
     <section id="beat-hero" class="beat">
       <h1>Stop explaining. <span>Start delegating</span></h1>
-      <p class="hero-sub">Tortoise equips your agents with an evolving model of how your business and its systems work, connecting decisions, constraints, and consequences. They can reason through trade-offs, adapt to new evidence, and pursue goals without constant supervision.</p>
+      <p class="hero-sub">Tortoise equips your agents with a logical model that maps how your business and projects work. They can reason through trade-offs, understand the context beyond a task, adapt to new evidence, and pursue goals without constant supervision. A full cognitive layer with agent memory, reasoning, and learning.</p>
       <p class="hero-pitch">Delegate outcomes, not just tasks.</p>
       <a href="/auth" class="cta-start hero-cta">Connect your agent →</a>
       <p style="margin-top:1.25rem;font-size:0.85rem;"><a href="/docs" style="color:var(--accent);text-decoration:none;">Browse the docs →</a> · <a href="https://github.com/daniel-ospina/tortoise" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;">GitHub repo →</a> · <a href="/blog" style="color:var(--accent);text-decoration:none;">Read the blog →</a></p>

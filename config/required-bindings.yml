@@ -104,9 +104,10 @@ projects:
         envs: [production]
         note: >-
           server-side blog writes. The explicit ``503 not_configured`` sites are
-          website/functions/blog/api/posts/[[path]].ts (2),
-          website/functions/blog/api/purge.ts, .../generate-cover.ts and
-          .../generate-seo.ts. website/functions/blog/_shared/admin-auth.ts reads
+          website/functions/blog/api/posts/[[path]].ts (3),
+          website/functions/blog/api/purge.ts, .../generate-cover.ts,
+          .../generate-seo.ts and .../notify-publish.ts (#9803).
+          website/functions/blog/_shared/admin-auth.ts reads
           it too (`?? ""`). The blog admin gate (now on the app origin, #4171)
           deliberately does NOT read it — it checks `is_admin()` with the user's
           minted token + the anon key, so the service-role secret stays here.

@@ -62,6 +62,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stderr
 from datetime import UTC, datetime, timedelta
@@ -447,6 +448,38 @@ if [ "${1:-}" = "rev-parse" ]; then
     if [ "$a" = "origin/main" ]; then
       exit 1
     fi
+  done
+fi
+exec "${REAL_GIT:?REAL_GIT unset}" "$@"
+"""
+
+# Fails ONLY the DISTANCE read the stale-holder test needs (`rev-list --count
+# --left-right`). The terminal predicates use `rev-list --first-parent`, which still
+# works, so this is the single combination where a stale-looking branch is judged with NO
+# measurement of how far behind main it is — which must keep it BLOCKING.
+GIT_STUB_NO_DISTANCE = r"""#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = "rev-list" ]; then
+  for a in "$@"; do
+    if [ "$a" = "--count" ]; then
+      echo "git-stub: refusing rev-list --count" >&2
+      exit 1
+    fi
+  done
+fi
+exec "${REAL_GIT:?REAL_GIT unset}" "$@"
+"""
+
+# Fails ONLY `git log -1 --format=%ct`, the tip-commit DATE read. The distance and every
+# terminal witness still work, so the branch is a candidate by divergence and unmeasurable
+# by silence: an unread age must never become a downgrade.
+GIT_STUB_NO_TIP_DATE = r"""#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = "log" ]; then
+  for a in "$@"; do
+    case "$a" in
+      --format=%ct) echo "git-stub: refusing the commit date" >&2; exit 1 ;;
+    esac
   done
 fi
 exec "${REAL_GIT:?REAL_GIT unset}" "$@"
@@ -7103,6 +7136,507 @@ class CollisionPreflightTest(unittest.TestCase):
         # would be the "confident verdict about a scope it did not establish"
         # bug this exit-code contract exists to prevent.
         self.assertNotIn("VERDICT", proc.stdout)
+
+
+    # ── #9806: the STALE HOLDER (a branch whose evidence expired) ───────────
+    #
+    # THE MEASURED DEFECT. A controller with 24 candidates dispatched NOTHING because
+    # every one answered `collision — a peer owns it`: the holders were branches whose
+    # names carry the issue number and whose last commit was 8.6 to 54.8 days old, at
+    # 457 to 3732 commits behind `origin/main`, with no live process, no uncommitted
+    # work and no claim ref. The gate read the branch's NAME as a live claim and never
+    # asked again.
+    #
+    # ⛔ EVERY TEST BELOW IS IN THE DEMOTION DIRECTION OR THE KEEP-BLOCKING DIRECTION,
+    # AND THE SECOND HALF IS THE ONE THAT MATTERS. A rule that demotes a far-behind old
+    # branch is worthless if it ALSO demotes a branch with a recent commit, a live
+    # process standing in its worktree, uncommitted work in that worktree, or a live
+    # claim on the issue — so each of those four is proven to still produce COLLISION,
+    # one test per direction.
+    #
+    # The histories are REAL (fast-import writes 350 commits; the tip commit is genuinely
+    # dated 12 days ago), because the thresholds being tested are the ones the code ships
+    # and a fixture that mocked `judge` would prove nothing about them.
+
+    #: Commits main gains after the abandoned branch is cut. Must exceed
+    #: `STALE_BEHIND_MIN` (300) by a margin, so the divergence test is not read as
+    #: satisfied-by-accident at the boundary.
+    BEHIND = 350
+    #: The abandoned branch's tip age. Above `STALE_TIP_DAYS` (7.0) and below the
+    #: 54.8 and 12.4 day holders the incident measured.
+    STALE_DAYS = 12
+
+    # ── fixtures ────────────────────────────────────────────────────────────
+
+    def bare_origin(self) -> Path:
+        """A LOCAL bare origin the tool can really `ls-remote`/`fetch`.
+
+        ⛔ NECESSARY FOR EVERY TEST IN THIS CLASS, not only the claim ones. The
+        stale-holder test's fourth condition reads `refs/claims/issue-<N>` from
+        `origin`; against the `https://github.com/…` URL `setUp` installs, that read
+        fails (no network in the suite), and an unreadable registry is LIVE — so the
+        demotion tests would fail for a reason that looks like the rule not working.
+
+        The path deliberately ends `<owner>/<repo>.git`: `_remote_slug` derives the gh
+        target from the LAST TWO path components, so `…/test-owner/test-repo.git`
+        resolves to the fixture's own `test-owner/test-repo` and the fleet board stays
+        answerable (a different slug would refuse the board and rebuild → INCOMPLETE).
+        """
+        path = self.tmp / "remotes" / "test-owner" / "test-repo.git"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-q", "--bare", str(path)], check=True,
+                       capture_output=True, text=True)
+        _git(self.repo, "remote", "set-url", "origin", str(path))
+        return path
+
+    def _fast_forward_main(self, n: int) -> None:
+        """Write `n` commits onto `refs/heads/main` in ONE `git fast-import`.
+
+        `behind` is a COUNT of commits, so a fixture for it needs a real history. One
+        fast-import (~30 ms) rather than `n` subprocesses keeps the class cheap; the
+        commits carry real trees so `rev-list`, `--merged` and `status` all behave
+        normally on them.
+        """
+        tip = self._git_out("rev-parse", "HEAD").strip()
+        lines = []
+        for i in range(1, n + 1):
+            msg = f"main advance {i}".encode()
+            body = f"{i}\n".encode()
+            lines.append(b"commit refs/heads/main\n")
+            lines.append(b"committer Test <test@example.com> 1792789000 +0000\n")
+            lines.append(b"data %d\n" % len(msg) + msg + b"\n")
+            # ⛔ `from` COMES AFTER the message data, not before `committer`: the
+            # fast-import grammar is `commit` → optional author → committer → data →
+            # `from` → filemodify commands. Emitting it first makes fast-import fail
+            # with "Expected committer but didn't get one".
+            if i == 1:
+                lines.append(f"from {tip}\n".encode())
+            lines.append(b"M 100644 inline advance.txt\n")
+            lines.append(b"data %d\n" % len(body) + body)
+            lines.append(b"\n")
+        # ⛔ `--force` IS REQUIRED: `main` is the CHECKED-OUT branch of this fixture, and
+        # fast-import refuses to move a checked-out branch without it ("use -f"). A
+        # pytest run is not the harness's git gate, so this is a fixture, not a merge.
+        stored = subprocess.run(["git", "fast-import", "--quiet", "--force"],
+                                cwd=self.repo, input=b"".join(lines),
+                                capture_output=True)
+        self.assertEqual(stored.returncode, 0, stored.stderr.decode())
+
+    def abandoned_branch(self, branch: str, *, age_days: int | None = None) -> str:
+        """A branch with ONE commit of its own, dated `age_days` ago, far behind main.
+
+        ⛔ IT MUST HAVE A COMMIT OF ITS OWN. A branch pointing at main's own ancestor
+        is TERMINAL (the existing `_branch_terminal_state` demotes it as merged
+        history), so a test using one would pass without the stale-holder rule ever
+        running — the vacuity this class exists to avoid. One commit ahead, 350 behind
+        and 12 days silent is the measured shape of the incident's holders.
+
+        Main is advanced AFTER the branch is cut, so the branch is genuinely behind by
+        `BEHIND` commits rather than by construction of the assertion.
+        """
+        self.bare_origin()
+        base = self._git_out("rev-parse", "HEAD").strip()
+        tree = self._git_out("rev-parse", f"{base}^{{tree}}").strip()
+        days = self.STALE_DAYS if age_days is None else age_days
+        when = int(time.time()) - days * 86400
+        env = {
+            **os.environ,
+            "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "test@example.com",
+            "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "test@example.com",
+            "GIT_AUTHOR_DATE": f"{when} +0000",
+            "GIT_COMMITTER_DATE": f"{when} +0000",
+        }
+        sha = subprocess.run(
+            ["git", "commit-tree", tree, "-p", base, "-m", "abandoned work"],
+            cwd=self.repo, check=True, capture_output=True, text=True, env=env,
+        ).stdout.strip()
+        _git(self.repo, "update-ref", f"refs/heads/{branch}", sha)
+        _git(self.repo, "update-ref", f"refs/remotes/origin/{branch}", sha)
+        self._fast_forward_main(self.BEHIND)
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "refs/heads/main")
+        # The bare origin gets the same main, so a `fetch` of a claim ref has a valid
+        # remote and cannot be confused with an unreachable one.
+        _git(self.repo, "push", "-q", "origin", "refs/heads/main:refs/heads/main")
+        # ⛔ THE FIXTURE IS ASSERTED AGAINST THE SHIPPED THRESHOLDS. A history that came
+        # out shorter than `BEHIND`, or a commit date the fixture failed to backdate, would
+        # make every demotion below pass or fail for a reason unrelated to the rule — the
+        # same class as a test that asserts a constant against itself. Measured with the
+        # tool's OWN helpers, so the fixture and the rule cannot drift.
+        mod = _tool_module()
+        ref = f"refs/remotes/origin/{branch}"
+        counts = mod._ahead_behind("git", str(self.repo), ref, 60)
+        self.assertIsNotNone(counts, "the fixture branch's distance from main is unreadable")
+        _ahead, behind = counts
+        self.assertGreaterEqual(behind, mod.STALE_BEHIND_MIN,
+                                f"fixture is only {behind} behind main")
+        age = mod._ref_tip_age_days("git", str(self.repo), ref, 60)
+        self.assertIsNotNone(age, "the fixture branch's tip date is unreadable")
+        if age_days is None:
+            # Skipped for the deliberate FRESH-tip fixture (the keep-blocking direction),
+            # which must fail this test rather than pass it.
+            self.assertGreaterEqual(age, mod.STALE_TIP_DAYS,
+                                    f"fixture tip is only {age:.1f} days old")
+        else:
+            self.assertLess(age, mod.STALE_TIP_DAYS,
+                            f"the fresh fixture's tip is {age:.1f} days old — a "
+                            "keep-blocking fixture must be SILENT for the rule to be what "
+                            "holds it")
+        return sha
+
+    def checked_out_worktree(self, branch: str, name: str) -> Path:
+        """A worktree with a REAL checkout (not `--no-checkout`).
+
+        ⛔ `--no-checkout` (what `add_worktree` above uses for other tests) leaves an
+        empty index beside a full HEAD tree, so `git status --porcelain` reports every
+        file as deleted — i.e. "uncommitted work" — and the stale-holder rule would
+        never demote anything here. This fixture checks the tree out so a CLEAN
+        worktree reads as clean.
+        """
+        path = self.tmp / "wt" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _git(self.repo, "worktree", "add", "-q", str(path), branch)
+        return path
+
+    def live_claim(self, lease_until: int | None, *, message: str | None = None) -> None:
+        """Write a real `refs/claims/issue-<ISSUE>` into the bare origin.
+
+        The commit's MESSAGE is the lease (`claims.sh:_claim_commit`), and the empty
+        tree is the one git defines for exactly this shape. `message` overrides the
+        lease-shaped body, which is how the unparseable-lease polarity is exercised.
+        """
+        origin = self.tmp / "remotes" / "test-owner" / "test-repo.git"
+        empty_tree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+        env = {
+            **os.environ,
+            "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "test@example.com",
+            "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "test@example.com",
+        }
+        # ⛔ THE COMMIT IS BUILT IN THE ORIGIN, not in the clone: `update-ref` in a bare
+        # repo cannot point at an object its own odb does not have, and `commit-tree` in
+        # a bare repo needs no worktree at all.
+        body = message if message is not None else (
+            f"claim owner=box-a lease_until={lease_until} nonce=9806")
+        sha = subprocess.run(
+            ["git", "-C", str(origin), "commit-tree", empty_tree, "-m", body],
+            check=True, capture_output=True, text=True, env=env,
+        ).stdout.strip()
+        subprocess.run(
+            ["git", "-C", str(origin), "update-ref",
+             f"refs/claims/issue-{ISSUE}", sha],
+            check=True, capture_output=True, text=True, env=env,
+        )
+
+    def row(self, out: str, prefix: str) -> str:
+        """The surface-table row for `prefix` — its NOTE lives here, not in the hit list."""
+        return next(ln for ln in out.splitlines() if ln.startswith(prefix))
+
+    def hit(self, out: str, needle: str, surface: str | None = None) -> str:
+        """The HIT line naming `needle` (`  [surface] ref — detail (number)`).
+
+        ⛔ ASSERTING ON THE ROW WOULD BE VACUOUS. The row's note mentions the words
+        ADVISORY and "demoted" even when nothing was demoted, so a `assertNotIn` there
+        would pass for the wrong reason; the strength of a hit is only visible on its own
+        line.
+
+        ⛔ AND THE SURFACE IS SELECTABLE, because a worktree's PATH also appears in the
+        BRANCH hit's detail (its owner basis names the checkout). Searching by path alone
+        finds the branch row, so a test would assert about the wrong surface.
+        """
+        prefix = f"  [{surface}] " if surface else "  ["
+        lines = [ln for ln in out.splitlines()
+                 if ln.startswith(prefix) and needle in ln]
+        self.assertTrue(lines, f"no {surface or ''} hit line names {needle!r}:\n{out}")
+        return lines[0]
+
+    # ── the DEMOTION direction: provably abandoned → ADVISORY ───────────────
+
+    def test_a_far_behind_silent_unowned_unclaimed_branch_is_advisory(self):
+        """The incident's own shape: 1 ahead, 350+ behind, 12 days silent, nobody home.
+
+        It must be CLEAN **and** the row must still be PRINTED — "reported, does not
+        block, never silently dropped" is the whole contract: the cleanup (deleting the
+        branch) is a separate, evidence-based action that needs the row visible.
+        """
+        self.gh_fixtures(closed_prs=[])
+        branch = f"feat/{ISSUE}-stale"
+        self.abandoned_branch(branch)
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        line = self.hit(out, f"origin/{branch}")
+        self.assertIn("ADVISORY", line)
+        self.assertIn("350 behind origin/main", line)
+        self.assertIn("no commit in 12.0 days", line)
+        self.assertIn("no worktree is checked out on it", line)
+        self.assertIn(f"no `refs/claims/issue-{ISSUE}` on origin", line)
+        # The note reports the MEASUREMENT, so a reader can tell a demotion happened
+        # rather than the ref simply not being enumerated.
+        self.assertIn("1 demoted to ADVISORY", out)
+
+    def test_a_worktree_record_on_an_abandoned_branch_is_advisory_too(self):
+        """The #2446 angle: the HOLDER was the worktree, not only the branch.
+
+        Demoting the branch alone would leave the issue un-dispatchable through the
+        worktree row — the two are one claim seen twice, so both must answer the same
+        way. The worktree here is clean and no process stands in it, which is exactly
+        what the incident's `tm-2446` checkout looked like.
+        """
+        self.gh_fixtures(closed_prs=[])
+        branch = f"fix/{ISSUE}-stale-wt"
+        self.abandoned_branch(branch)
+        wt = self.checked_out_worktree(branch, f"wt-{ISSUE}")
+        self.assertTrue((wt / "seed.txt").exists(), "the worktree must be checked out")
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        line = self.hit(out, str(wt), surface="local worktrees")
+        self.assertIn("ADVISORY", line)
+        # The basis names the checkout's PATH, so the reader can see which directory was
+        # measured rather than a rule firing at them from nowhere.
+        self.assertIn(f"{wt}: no live pi process and no uncommitted work", line)
+        # ...and the BRANCH hit for the same claim is advisory too, not merely masked.
+        self.assertIn("ADVISORY", self.hit(out, f"refs/heads/{branch}"))
+
+    def test_an_expired_claim_ref_does_not_keep_a_stale_branch_blocking(self):
+        """Condition 4 reads the LEASE, not the ref's existence.
+
+        The incident measured 60 of 60 sampled claim refs EXPIRED. Reading presence as
+        liveness would leave every one of them blocking — the rule would be inert on
+        exactly the box it was measured on.
+        """
+        self.gh_fixtures(closed_prs=[])
+        self.abandoned_branch(f"feat/{ISSUE}-stale-claim")
+        self.live_claim(int(time.time()) - 3600)
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        line = self.hit(out, "origin/feat/" + f"{ISSUE}-stale-claim")
+        self.assertIn("ADVISORY", line)
+        self.assertIn("EXPIRED at", line)
+
+    # ── the KEEP-BLOCKING direction: one test per non-vacuity condition ─────
+
+    def test_a_recent_commit_on_a_far_behind_branch_still_blocks(self):
+        """Condition 2 (silence). A long-lived branch 350 behind that is STILL being
+        committed to is live work — divergence alone must never demote.
+
+        ⛔ IT IS ALSO THE PROOF THAT `behind` IS NOT DECISIVE: measured across this
+        repo's 1507 number-naming refs, 98 are 300+ behind with a tip under 7 days old.
+        """
+        self.gh_fixtures(closed_prs=[])
+        self.abandoned_branch(f"feat/{ISSUE}-recent", age_days=0)
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        line = self.hit(out, f"origin/feat/{ISSUE}-recent")
+        self.assertNotIn("ADVISORY", line)
+        self.assertIn("350 behind origin/main", line)
+        self.assertIn("0 demoted to ADVISORY", self.row(out, "remote branches"))
+
+    def test_an_old_commit_that_is_not_far_behind_still_blocks(self):
+        """Condition 1 (divergence). Silence alone must never demote.
+
+        This branch's tip is 12 days old — the silence test passes — but `origin/main` has
+        not moved past it, so it is NOT behind. A ref that main has not passed is not
+        stranded work, and demoting on age alone would turn this rule into a liveness
+        timer for every idle lane on a quiet day.
+        """
+        self.gh_fixtures(closed_prs=[])
+        branch = f"feat/{ISSUE}-idle"
+        self.bare_origin()
+        base = self._git_out("rev-parse", "HEAD").strip()
+        tree = self._git_out("rev-parse", f"{base}^{{tree}}").strip()
+        when = int(time.time()) - self.STALE_DAYS * 86400
+        env = {
+            **os.environ,
+            "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "test@example.com",
+            "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "test@example.com",
+            "GIT_AUTHOR_DATE": f"{when} +0000",
+            "GIT_COMMITTER_DATE": f"{when} +0000",
+        }
+        sha = subprocess.run(
+            ["git", "commit-tree", tree, "-p", base, "-m", "idle work"],
+            cwd=self.repo, check=True, capture_output=True, text=True, env=env,
+        ).stdout.strip()
+        _git(self.repo, "update-ref", f"refs/remotes/origin/{branch}", sha)
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "refs/heads/main")
+        _git(self.repo, "push", "-q", "origin", "refs/heads/main:refs/heads/main")
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        line = self.hit(out, f"origin/{branch}")
+        self.assertNotIn("ADVISORY", line)
+        self.assertIn("0 behind origin/main", line)
+
+    def test_a_live_process_in_the_worktree_still_blocks(self):
+        """Condition 3a (process cwd). A long test run is a live owner.
+
+        The worktree is old, the branch is 350 behind and its tip is 12 days old — every
+        OTHER condition holds. What keeps it blocking is a live `pi` process whose cwd is
+        inside the checkout, which is the discriminator the rule rests on (age is not).
+        """
+        self.gh_fixtures(closed_prs=[])
+        branch = f"fix/{ISSUE}-busy"
+        self.abandoned_branch(branch)
+        wt = self.checked_out_worktree(branch, f"busy-{ISSUE}")
+        fake_bin = self.tmp / "fakebin"
+        fake_bin.mkdir(exist_ok=True)
+        # ⛔ A COPY OF A REAL BINARY, NOT A SHELL SCRIPT. `fleet_state.pi_processes`
+        # matches `basename(argv[0]) == "pi"`, and the kernel rewrites argv[0] to the
+        # INTERPRETER for a `#!` script — `ps` then reads `bash /…/pi 120` and the census
+        # legitimately does not see a lane named `pi`. An ELF copy keeps argv[0].
+        pi = fake_bin / "pi"
+        shutil.copy("/bin/sleep", pi)
+        proc = subprocess.Popen([str(pi), "120"], cwd=str(wt),
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            # Precondition: the census the tool uses can SEE it, so a green
+            # assertion below cannot be a subprocess race.
+            self._wait_for_pi_cwd(wt)
+            rc, out = self.run_tool()
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("ADVISORY", self.hit(out, str(wt), surface="local worktrees"))
+        self.assertIn("live pi process standing in it",
+                      self.row(out, "local worktrees"))
+
+    def test_uncommitted_work_in_the_worktree_still_blocks(self):
+        """Condition 3b (uncommitted work). A lane's unsaved changes are its work."""
+        self.gh_fixtures(closed_prs=[])
+        branch = f"fix/{ISSUE}-dirty"
+        self.abandoned_branch(branch)
+        wt = self.checked_out_worktree(branch, f"dirty-{ISSUE}")
+        (wt / "wip.txt").write_text("unsaved work\n")
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("the worktree has uncommitted work",
+                      self.row(out, "local worktrees"))
+        self.assertNotIn("ADVISORY", self.hit(out, str(wt), surface="local worktrees"))
+
+    def test_a_live_claim_ref_still_blocks(self):
+        """Condition 4 (a live claim). This is the dimension #6108 is actually about:
+        a lane that has CLAIMED the work — here an unexpired `refs/claims/issue-N` —
+        keeps the issue blocked, whatever the branch's age."""
+        self.gh_fixtures(closed_prs=[])
+        self.abandoned_branch(f"feat/{ISSUE}-claimed")
+        self.live_claim(int(time.time()) + 3600)
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("ADVISORY", self.hit(out, f"origin/feat/{ISSUE}-claimed"))
+        self.assertIn("is a LIVE claim", self.row(out, "remote branches"))
+
+    def test_a_claim_ref_with_an_unparseable_lease_never_demotes(self):
+        """The lease polarity is `claims.sh`'s, and it is the fail-CLOSED direction.
+
+        A claim whose message carries no parseable `lease_until` is LIVE, never expired:
+        reading it as free would let a malformed (or truncated) lease CLEAR a blocking
+        holder — the fail-open direction of the one condition that touches the network.
+        """
+        self.gh_fixtures(closed_prs=[])
+        self.abandoned_branch(f"feat/{ISSUE}-badlease")
+        self.live_claim(None, message="claim owner=box-a nonce=9806")
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("ADVISORY", self.hit(out, f"origin/feat/{ISSUE}-badlease"))
+        self.assertIn("lease this reader cannot parse", self.row(out, "remote branches"))
+
+    def test_an_unreadable_distance_from_main_never_demotes(self):
+        """Fail-closed on condition 1's MEASUREMENT (not on its threshold).
+
+        A branch whose distance from main cannot be counted is UNMEASURED, and an
+        unmeasured datum must never become a downgrade: that is the class of every
+        false CLEAN this module has historically shipped.
+        """
+        self.gh_fixtures(closed_prs=[])
+        self.abandoned_branch(f"feat/{ISSUE}-nodistance")
+        stub = _write_exec(self.tmp / "git-stub-no-distance", GIT_STUB_NO_DISTANCE)
+        rc, out = self.run_tool(git_bin=stub,
+                                env_extra={"REAL_GIT": shutil.which("git")})
+        self.assertNotEqual(rc, 0, out)
+        self.assertNotIn("ADVISORY", self.hit(out, f"origin/feat/{ISSUE}-nodistance"))
+        self.assertIn("could not be measured", self.row(out, "remote branches"))
+
+    def test_an_unreadable_tip_date_never_demotes(self):
+        """Fail-closed on condition 2's MEASUREMENT (not on its threshold)."""
+        self.gh_fixtures(closed_prs=[])
+        self.abandoned_branch(f"feat/{ISSUE}-nodate")
+        stub = _write_exec(self.tmp / "git-stub-no-date", GIT_STUB_NO_TIP_DATE)
+        rc, out = self.run_tool(git_bin=stub,
+                                env_extra={"REAL_GIT": shutil.which("git")})
+        self.assertNotEqual(rc, 0, out)
+        self.assertNotIn("ADVISORY", self.hit(out, f"origin/feat/{ISSUE}-nodate"))
+        self.assertIn("tip commit's date could not be read", self.row(out, "remote branches"))
+
+    def test_a_detached_worktree_is_never_matched_by_name(self):
+        """`(detached)` is not a branch name, and treating it as one was a fail-closed trap.
+
+        A detached checkout of an UNRELATED commit, carrying uncommitted work, must not
+        keep an abandoned branch blocking: matching `(detached)` by name would make every
+        detached worktree "the same holder" as every ref under judgement, and dirty work in
+        one unrelated checkout would hold an arbitrary issue forever.
+        """
+        self.gh_fixtures(closed_prs=[])
+        branch = f"feat/{ISSUE}-detached-neighbour"
+        self.abandoned_branch(branch)
+        # ⛔ THE PATH MUST NOT NAME THE ISSUE. A path that does is a hit in its own right
+        # (#9540: a detached worktree leaves no branch to contradict the path), which would
+        # make this test pass or fail for a reason that has nothing to do with the owner read.
+        other = self.tmp / "wt" / "unrelated-checkout"
+        other.parent.mkdir(parents=True, exist_ok=True)
+        _git(self.repo, "worktree", "add", "-q", "--detach", str(other), "HEAD")
+        (other / "unrelated.txt").write_text("someone else's work\n")
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("ADVISORY", self.hit(out, f"origin/{branch}"))
+
+    def test_an_unreadable_claim_registry_never_demotes(self):
+        """Fail-closed on the one condition that costs network I/O.
+
+        An `origin` that cannot be consulted (rc != 0) is NOT "nobody holds it": it is
+        an unread registry, and the branch keeps blocking.
+        """
+        self.gh_fixtures(closed_prs=[])
+        self.abandoned_branch(f"feat/{ISSUE}-noregistry")
+        _git(self.repo, "remote", "set-url", "origin",
+             str(self.tmp / "does-not-exist.git"))
+        rc, out = self.run_tool()
+        # The slug is still derived from the OTHER components of the URL, so the run is
+        # a real verdict; only the claim read fails.
+        self.assertIn("claim registry could not be read",
+                      self.row(out, "remote branches"))
+        self.assertNotIn("ADVISORY", self.hit(out, f"origin/feat/{ISSUE}-noregistry"))
+        self.assertNotEqual(rc, 0, out)
+
+    # ── helpers ─────────────────────────────────────────────────────────────
+
+    def _wait_for_pi_cwd(self, wt: Path, timeout: float = 10.0) -> None:
+        """Block until `fleet_state` can see the fake lane, then assert it did.
+
+        Without this the census can run before the child has exec'd, and the test would
+        read a real race as a rule failure — a green-below / red-above flake is the
+        worst kind of test.
+        """
+        mod = _tool_module()
+        deadline = time.time() + timeout
+        want = os.path.realpath(str(wt))
+        while time.time() < deadline:
+            procs, err = mod.fleet_state.pi_processes()
+            if not err:
+                cwds, cerr = mod.fleet_state.process_cwds(
+                    [int(p["pid"]) for p in procs])
+                if not cerr and any(
+                        os.path.realpath(c) == want for c in cwds.values()):
+                    return
+            time.sleep(0.1)
+        self.fail("the process census never saw the fake pi lane — the test cannot "
+                  "discriminate process-cwd liveness")
 
 
 class HolderGateTests(unittest.TestCase):

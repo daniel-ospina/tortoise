@@ -335,16 +335,43 @@ closed at both layers:
   > ⚠️ **Supersede.** The `DirectEdgeCreated` fold's superseded-endpoint skip is gated on what the supersede
   > DID to that edge, not on the rel type (`_supersede_took_this_edge`): `IMPL`/`NAND` are moved in both
   > directions by leg 2a (which always journals a repoint), while every other moved rel is moved by 2b
-  > OUTGOING-only and only at supersede time — so the skip requires the superseded point to be the SOURCE and
-  > the creation to PRECEDE the supersede (journal seq compared). Without that, a rebuild dropped edges live
-  > still held, in two shapes review found: an INCOMING edge to the superseded point, and an edge minted at an
-  > already-superseded id. Residual: `wasDerivedFrom`/`aboutAction` move live with no repoint descriptor, so the
-  > journal route still loses them after a supersede — **#9836**.
+  > OUTGOING-only and only at supersede time — so the skip requires the superseded point to be the SOURCE.
+  > Without that, a rebuild dropped edges live still held: an INCOMING edge to the superseded point.
+  >
+  > ⛔ **The gate is DIRECTION, not ORDER, and the difference is a residual — do not read a seq comparison
+  > into it.** An ordering gate (`creation_seq < supersede_seq`) was implemented and REVERTED: replaying the
+  > creation of an edge minted AFTER its own supersede is then deleted again by pass-2b's structural repoint
+  > delete-leg, which cannot tell the pass-2 resurrection from a fresh replay — measured: live keeps it, the
+  > record keeps it, the journal route ends with it absent either way. So `_supersede_took_this_edge` takes
+  > no seq (`projection/__init__.py`, its docstring records the measurement), and the shape is a NAMED
+  > residual below rather than a behaviour this fold delivers.
+  >
+  > **Residuals.** (1) `wasDerivedFrom`/`aboutAction` are moved live by 2b but are not derivable, so 2b
+  > journals no repoint and the journal route loses them after a supersede. (2) An edge MINTED at an
+  > already-superseded id (`create_edge`/`create_about_edge` have no terminal-endpoint guard, unlike
+  > `create_direct_edge`'s #2422 refusal) is kept LIVE at the terminal point and kept by the RECORD, and the
+  > journal rebuild drops it — pinned as a known residual by
+  > `test_an_edge_minted_AT_a_superseded_point_is_a_KNOWN_RESIDUAL`. Both need the supersede move journaled
+  > for non-derivable rels AND the record to model the move (delete-old + write-successor) — **#9836**.
   >
   > ⚠️ One uncarried writer is OUTSIDE this lane and stays open:
   > `sdk.backfill_about_entities` mints about edges through `_create_about_edges` →
   > `wire_about_link` (a bare MERGE) with no record and no `aboutEntities` snapshot
   > prop, so neither carrier restores them — **#9833**.
+  >
+  > ⚠️ **One RECORD-side residual the producer cannot reach — `idx` (#9844), measured.** A
+  > `DirectEdgeCreated` descriptor carries no `idx`, so the record defaults it to `0`, while
+  > `relation`'s conflict key includes `idx` and an operator's own `hasPart`/`IMPL`/`NAND` rows
+  > carry `idx = enumerate(inputs)`. Mint the edge an operator's record already carries at
+  > `idx >= 1` (`create_operator("composedOf", a, [b])`, then
+  > `create_edge("hasPart", op, b)`) and the LIVE graph is unchanged — the `MERGE` is
+  > property-agnostic, so it dedups onto the `idx=1` edge and mints no new edge — while the
+  > record route computes `(op, b, hasPart, 0)` beside the existing `(op, b, hasPart, 1)`: two
+  > rows for one edge, the record RICHER than the graph. The producer cannot fix it (the mint
+  > takes no property parameter, §9.6, and cannot read the `idx` the existing edge carries), so
+  > the fix is a record-layer rule with its own test — insert only when the
+  > `(org, graph, rel_type, src, tgt)` triple is absent, for this family only — filed as
+  > **#9844**.
 * **It does not approve `#7879`'s scope.** Scope and Plan carry human gates.
 * **It adds no migration-safety surface** (owner scope ruling, 2026-10-10).
 * **It changes no public surface.** No MCP tool and no public SDK method is added,
