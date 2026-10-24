@@ -25,7 +25,7 @@ WHAT THIS FILE IS THE GATE ON (one test per property, so a regression names itse
   4. **No caller was left behind.** A rename that misses one call site leaves a live
      `AttributeError` in a route or tool; this scans the package for the retired tokens.
 """
-from __future__ import annotations  # noqa: I001
+from __future__ import annotations
 
 import re
 import subprocess

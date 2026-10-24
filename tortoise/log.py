@@ -188,6 +188,19 @@ TORN_TAIL_HARMLESS_EVENT_TYPES = frozenset({
     "BatchIdStamped", "IngestStarted", "CalibrationRecorded",
     "DedupeRecorded", "DedupeRejected", "EntityBindingRefused",
     "DirectEdgeCreated",
+    # #9555/R7: §9.1's narrative carrier, which is in `_NO_PROJECTION_FOLD`
+    # — no dispatcher folds it, so its loss is the same proof-carrying
+    # NO-OP on the graph as the bookkeeping records above. ⛔ The polarity
+    # here is deliberate ("a NEW event type defaults to REFUSED"), so
+    # omitting it is not neutral: a commit-path append cut off mid-line (the
+    # S15 case this tolerance exists for) would then make `tortoise
+    # rebuild`, `recover_from_log` and `backup.restore` REFUSE an otherwise
+    # intact journal — measured on a SIGKILL-truncated tail in PR #9862's
+    # review. The record-side cost is that one capture's narrative cannot
+    # be replayed from that line, which is bounded to the torn record
+    # itself: the live row was written before the tear, and a torn line
+    # could not be replayed anyway.
+    "SessionNarrated",
     # Additive edge / prop writes (MERGE + SET only).
     "EntityLinked",
 })

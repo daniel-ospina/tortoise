@@ -32574,7 +32574,7 @@ class TortoiseSDK:
 
     def update_memory_graph(self, org_id: str, graph_id: str, *,
                             name: str | None = None,
-                            recording: bool | None | _Unset = _UNSET) -> bool:
+                            recording: bool | _Unset | None = _UNSET) -> bool:
         """The ONE partial update a memory graph has — rename it, and/or
         set/clear its session-recording override.
 
