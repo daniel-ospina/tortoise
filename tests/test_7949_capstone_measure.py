@@ -677,7 +677,7 @@ def test_a_surface_that_says_the_pass_did_not_run_is_not_a_witness():
     # The refusal names WHERE the OFF block was found, so a reader can tell
     # "absent" (the #9116 cause) from "present and off" (this cause).
     assert "receipt['vet']" in unobserved["S2.2"], unobserved["S2.2"]
-    assert "tortoise/sdk.py:12401" not in unobserved["S2.2"], unobserved["S2.2"]
+    assert "tortoise/sdk.py:12487" not in unobserved["S2.2"], unobserved["S2.2"]
 
 
 def test_the_witness_rule_requires_the_flag_and_a_pass_that_did_work():
@@ -747,7 +747,7 @@ def test_the_flag_alone_is_not_a_witness_and_has_its_own_cause():
         # the LIST gate, and must NOT be attributed to the #9116 meta fold
         assert "`enabled` reads True" in cause, cause
         assert "never that the pass ran" in cause, cause
-        assert "tortoise/sdk.py:12401" not in cause, cause
+        assert "tortoise/sdk.py:12487" not in cause, cause
         assert "did NOT run" not in cause, cause
 
     # ── S2.2 cites the VET pass's own code … ──────────────────────────────
@@ -824,7 +824,7 @@ def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
     The shipped constant said "the receipt's stats carries 20 keys" — a number
     nothing counted — and blamed `extract_session_v2`, which in fact BUILDS
     `result["vet"]` (:8288-8292) and `result["classify_later"]` (:8278-8285). The
-    drop is the meta fold at `tortoise/sdk.py:12401` — the cite was `:12196` until
+    drop is the meta fold at `tortoise/sdk.py:12487` — the cite was `:12196` until
     this round, which at this PR's base is a comment line 200 lines away, so the
     bundle was sending the #9116 fixer into unrelated code. Getting it wrong sends
     the next lane to the wrong file; getting the ARITHMETIC wrong sends it to a
@@ -840,11 +840,11 @@ def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
     assert "S2.2" not in observed
     cause = unobserved["S2.2"]
     assert f"inspected {len(stats)} stats key(s)" in cause, cause
-    assert "tortoise/sdk.py:12401" in cause, cause
+    assert "tortoise/sdk.py:12487" in cause, cause
     assert "tortoise/extractor_v2.py:8288-8292" in cause, cause
     assert "tortoise/sdk.py:12196" not in cause, cause
     assert "20 keys" not in cause, cause
-    assert "tortoise/sdk.py:12401" in unobserved["S2.3"], unobserved["S2.3"]
+    assert "tortoise/sdk.py:12487" in unobserved["S2.3"], unobserved["S2.3"]
 
 
 def test_every_step_is_witnessed_or_given_a_cause():
@@ -1087,3 +1087,40 @@ def test_the_not_established_section_quotes_the_s5_operator_counts_the_log_measu
                   if ln.startswith("| S5 CONNECT"))
     assert f"IMPL={measured.group(1)} INPUT={measured.group(2)} " \
            f"NAND={measured.group(3)}" in s5_row, s5_row
+
+# ── the bundle's OWN `file:line` cites must RESOLVE (not merely be spelled) ──
+#
+# The literal-string assertions above pin the SPELLING of a cite, so they pass on
+# a number that has moved under it — twice now (#9835's sdk.py insertion moved the
+# entry point, and the same commit moved the meta fold and the capture path). This
+# leg closes that gap for the cites whose SYMBOL the bundle names, so a future
+# insertion reds HERE instead of silently sending the next implementer to an
+# unrelated line (which is the rejection this bundle itself records).
+
+def test_the_bundles_named_cites_resolve_to_their_symbols():
+    """`file:line` → the line that actually carries the named symbol."""
+    from pathlib import Path as _Path
+
+    repo = _Path(__file__).resolve().parents[1]
+    sdk = (repo / "tortoise/sdk.py").read_text(encoding="utf-8").splitlines()
+    edges = (repo / "tortoise/projection/edges.py").read_text(
+        encoding="utf-8").splitlines()
+    # (label, source lines, 1-indexed line, a substring the line MUST contain)
+    cites = [
+        ("_extract_session_v2 def", sdk, 11709, "def _extract_session_v2("),
+        ("_extract_session_v2 call", sdk, 10746,
+         "self._extract_session_v2("),
+        ("the meta fold S2.2/S2.3 are dropped at", sdk, 12487,
+         '"stats": out.get("stats")'),
+        ("the capture path E3 is reached from", sdk, 12768,
+         "proj.link_source_to_event("),
+        ("_DERIVATION_REFERENCES_LABELS", edges, 468,
+         "_DERIVATION_REFERENCES_LABELS = frozenset"),
+        ("link_source_to_event (the writer the cite ranges over)", edges, 2424,
+         "def link_source_to_event("),
+    ]
+    for label, lines, line, needle in cites:
+        got = lines[line - 1]
+        assert needle in got, (
+            f"{label}: the bundle cites line {line}, which is now {got.strip()!r} "
+            "— re-derive the number (and the range) before changing this pin")
