@@ -116,13 +116,15 @@ def _mint_subject_stub(g, name: str) -> None:
     construction), and an id may not be derived from a name.
 
     So a bare-name reference now resolves to the single LIVE holder and otherwise
-    stays unwired, with a structured non-folded record (``unregistered-
-    reference`` / ``ambiguous-entity-name``, both fail-closed). The remedy lives
-    on the producer — register what you reference before referencing it (D9);
-    the SDK doors do exactly that.
+    stays unwired, with a structured non-folded record (``unfolded-mention`` —
+    exempt: an about-edge name is loose attribution, and the live and replay
+    passes drop the same link). The remedy lives on the producer — register what
+    you reference before referencing it (D9); the SDK's entity doors do exactly
+    that.
     """
     from tortoise.entity_identity import resolve_fold_name
-    resolve_fold_name(g, "Subject", name, context="about-edge Subject")
+    resolve_fold_name(g, "Subject", name, context="about-edge Subject",
+                      mention=True)
 
 
 def _mint_source_stub(

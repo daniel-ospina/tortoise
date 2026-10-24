@@ -16859,6 +16859,9 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
 
     # ── 3b. Extracted occurrences — Event NODES (issue #1013: never points
     # with pointKind event). Content-addressed ev_<sha> ids; MERGE-safe. ──
+    #: (eventId, Object name) pairs the events mention — wired in step 6a, after
+    #: step 6 has REGISTERED the entities (see the note at the append site).
+    _deferred_about_objects: list[tuple[str, str]] = []
     for ev in (payload.events or []):
         proj.g.query(
             "MERGE (e:Event {eventId:$eid}) "
@@ -16891,20 +16894,14 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             # P2-4 (#1272 review): entity creation runs in step 6, AFTER this
             # event wiring — a MATCH-only Object lookup silently dropped the
             # edge for NEW entities, so the write resolved-or-minted on demand.
-            # ⛔ #3590: it RESOLVES now and never mints here. A fold-time mint
-            # is not replay-deterministic (`rebuild != live` by construction),
-            # and an id may not be derived from a name — the projection is not
-            # the minter (D9). Step 6 registers the entity with a real minted
-            # id, so the reference resolves once that has run; an unresolved
-            # reference is left unwired rather than fabricating a node.
-            _resolved = resolve_fold_name(proj.g, "Object", name,
-                                          context="session-commit aboutObject")
-            if _resolved:
-                proj.g.query(
-                    "MATCH (e:Event {eventId:$eid}), (o:Object {id:$oid}) "
-                    "MERGE (e)-[:aboutObject]->(o)",
-                    params={"eid": ev.id, "oid": _resolved},
-                )
+            # ⛔ #3590 removes the mint (a fold-time mint is not replay-
+            # deterministic, and an id may not be derived from a name — the
+            # projection is not the minter, D9), so the ORDER is now the whole
+            # fix: the reference is DEFERRED to step 6a, after step 6 has
+            # registered the entity with its real minted id. Resolving HERE
+            # found no holder for a name this payload introduces and dropped the
+            # edge for exactly the case P2-4 was filed about.
+            _deferred_about_objects.append((ev.id, name))
 
     # ── 4. Source bridge: the session Source (#4005 — the canonical
     # ``session:<session_id>`` identity ONTOLOGY §4.6 registers, the SAME url
@@ -17292,6 +17289,25 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 **_kind_kw,
                 passes_frequency_gate=er.entity.passes_frequency_gate,
                 is_episodic=False,
+            )
+
+    # ── 6a. Event→aboutObject, AFTER the entities exist. The reference is
+    # RESOLVED, never minted (#3590 D9): a fold-time / wiring-time mint is not
+    # replay-deterministic and an id may not be derived from a name. That makes
+    # the ORDER load-bearing — step 3b journals/writes the events before step 6
+    # registers their targets, so resolving there found no holder for a name
+    # this very payload introduces and dropped the edge, which is exactly the
+    # #1272 P2-4 case the retired `MERGE (o:Object {name:$name})` existed to
+    # cover. A name that still resolves to nothing is left UNWIRED (and recorded
+    # by `resolve_fold_name`) rather than fabricated.
+    for _eid, _name in _deferred_about_objects:
+        _resolved = resolve_fold_name(proj.g, "Object", _name,
+                                      context="session-commit aboutObject")
+        if _resolved:
+            proj.g.query(
+                "MATCH (e:Event {eventId:$eid}), (o:Object {id:$oid}) "
+                "MERGE (e)-[:aboutObject]->(o)",
+                params={"eid": _eid, "oid": _resolved},
             )
 
     # ── 6b. Supersessions — client-derived records (the deterministic channel

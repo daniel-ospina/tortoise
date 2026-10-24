@@ -159,8 +159,8 @@ class TestCaptureFoldRoundTrip:
 
 # ── Tests 3-4 (RED): only-on-create semantics ──────────────────────────────
 
-class TestOnlyOnCreate:
-    def test_remenion_double_journals_and_rebuild_matches_live(
+class TestReMentionJournalsEveryRegistration:
+    def test_remention_double_journals_and_rebuild_matches_live(
             self, tmp_path):
         """A canonical re-mention (MERGE by ID, ON MATCH) APPENDS a duplicate
         ``ObjectRegistered`` (#3590 retired the first-registration probe — see
@@ -207,9 +207,11 @@ class TestOnlyOnCreate:
         finally:
             sdk.close()
 
-    def test_remenion_after_fold_does_not_journal_or_resurrect(self, tmp_path):
-        """A superseded name re-mentioned: zero new ObjectRegistered lines,
-        no status reset live, no resurrect on rebuild."""
+    def test_remention_after_fold_keeps_the_fold_and_does_not_resurrect(
+            self, tmp_path):
+        """A superseded name re-mentioned: no status reset live, and no
+        resurrect on rebuild (the re-mention's registration line MERGEs onto the
+        existing node instead of creating a second one)."""
         events = tmp_path / "events"
         events.mkdir()
         sdk = TortoiseSDK(str(tmp_path / "t4.db"),

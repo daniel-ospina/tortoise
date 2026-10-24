@@ -217,3 +217,203 @@ def test_delete_then_recreate_the_same_name_yields_two_entities(sdk):
         "replay resurrected the deleted incarnation — resurrection")
     assert set(_name_ids(proj, "Object", "Acme")) == {holders[0]}, (
         "replay changed which incarnation holds the name")
+
+
+# ── Review findings from the #3590 checkpoint review ───────────────────────
+# Four behaviours the D9 "register what you reference" rule decides, each one
+# RED on the pre-fix head at this branch (`b7f2b4d40`). They live here — beside
+# the acceptance promises — because each is a consequence of the same model
+# change: the fold no longer mints, so SOME door has to.
+
+def test_a_mention_no_door_registered_does_not_make_the_journal_unrebuildable(
+        sdk):
+    """#3590 review P1: a mention with no registration must not abort replay.
+
+    ``EventAPI.add_event`` is this repo's main journal producer (the module
+    docstring names the v1 extractor, ``ingest``, ``docs_miner``, ``mining``
+    and the CLI as its callers), and it registers NONE of the names it writes
+    into ``subject`` / ``object`` / ``uses[]``. Pre-#3590 the fold minted a
+    stub for each, so those journals replayed; once the fold stopped minting,
+    every one of them raised ``NonFoldedEventsError`` — *the durable copy of
+    the data could no longer be rebuilt from its journal*.
+
+    A mention is loose ATTRIBUTION, not the folded record's identity: the live
+    pass and the replay pass run the same resolver, so both drop the SAME link.
+    That is a producer omission (real, and recorded), not a live/replay
+    divergence — so the shape is exempt, and the run completes.
+    """
+    from tortoise.api import EventAPI
+    from tortoise.log import EventLog
+    from tortoise.projection.nonfolded import EXEMPT_SHAPES, SHAPE_UNFOLDED_MENTION
+
+    client, events = sdk
+    proj = client._get_proj()
+    api = EventAPI(EventLog(str(events / "events.jsonl")),
+                   initiated_by="extractor", projection=proj)
+    # No `add_object`/`add_subject` for ANY of these names — exactly the
+    # unregistered-mention journal a producer writes.
+    api.add_event("ev-mention", "meeting",
+                  subject="Nobody Registered",
+                  object_name="Nothing Registered",
+                  uses=[{"name": "No Tool Registered", "kind": "core:tool"}])
+
+    # The exemption is a CLASSIFICATION, not a silent pass: an unclassified
+    # shape is fail-closed by default (`nonfolded.py`), so this pins that the
+    # mention shape was decided rather than forgotten.
+    assert SHAPE_UNFOLDED_MENTION in EXEMPT_SHAPES, (
+        "the mention shape is not exempt — replay of this journal refuses")
+
+    # The P1: pre-fix this raised NonFoldedEventsError (2 unregistered
+    # references, one per mention) and the graph was left WIPED.
+    proj.rebuild_all(str(events), confirm_destructive=True)
+
+    rows = proj.g.query(
+        "MATCH (e:Event {eventId:'ev-mention'}) RETURN e.eventKind"
+    ).result_set
+    assert rows and rows[0][0] == "meeting", (
+        "the rebuild did not replay the journal it refused to refuse")
+    # …and replay agrees with live: neither side fabricated the mention.
+    assert proj.g.query(
+        "MATCH (o:Object {name:'Nothing Registered'}) RETURN count(o)"
+    ).result_set[0][0] == 0, (
+        "replay MINTED an entity for a mention — the fold is not the minter")
+
+
+def test_an_unregistered_mention_is_exempt_but_an_identity_miss_is_not(sdk):
+    """The exemption's BOUND: mentions only — never a record's own identity.
+
+    The degraded guarantee recorded in ``EXEMPT_SHAPES`` is worth nothing
+    unless the neighbouring shape still fails the run. An id-less
+    ``ObjectSuperseded`` addresses an ENTITY (it must move its status), so it
+    keeps the non-exempt ``unregistered-reference`` shape and still refuses —
+    a mention exemption that leaked into that class would let a supersede be
+    silently not applied.
+    """
+    from tortoise.projection.nonfolded import (
+        EXEMPT_SHAPES,
+        SHAPE_UNFOLDED_MENTION,
+        SHAPE_UNREGISTERED_REFERENCE,
+    )
+
+    assert SHAPE_UNFOLDED_MENTION in EXEMPT_SHAPES
+    assert SHAPE_UNREGISTERED_REFERENCE not in EXEMPT_SHAPES, (
+        "the identity shape became exempt — a fold that must move an entity's "
+        "state can now be skipped with a green run")
+
+
+def test_a_declared_objecttype_object_still_folds_the_work_item_status(sdk):
+    """#3590 review P2: ``objectType='Object'`` must not drop the status fold.
+
+    ``_event_plain_merge`` resolves the event's explicit ``object`` to an id and
+    hands it to ``_fold_object_status``. Keying that hand-off on TRUTHINESS of
+    ``objectType`` discarded the id for a DECLARED ``'Object'`` (only
+    ``'Document'`` has no entity id to give — its object is a :Source url), so
+    both halves of the fold went inert: the ``#1350`` work-item status was
+    silently NOT applied and nothing was reported. Fail-open, in the opposite
+    direction to every other fold in the change.
+
+    Reachable from a public door: ``EventAPI.add_event(object_type=…)``.
+    """
+    client, _ = sdk
+    proj = client._get_proj()
+    client.create_entity("object", "Widget", is_episodic=False)
+    (oid,) = _name_ids(proj, "Object", "Widget")
+
+    client.create_event("widget closed", "github.issue.closed",
+                        object="Widget", objectType="Object",
+                        is_episodic=False)
+
+    status = proj.g.query(
+        "MATCH (o:Object {id:$id}) RETURN o.status", params={"id": oid}
+    ).result_set
+    assert status and status[0][0] == "completed", (
+        "objectType='Object' suppressed the built-in lifecycle fold — status "
+        f"is {status[0][0] if status else None!r} (#1350)")
+    # …and the produces edge still lands on the resolved id, not a stub.
+    assert proj.g.query(
+        "MATCH (e:Event)-[:produces]->(o:Object {id:$id}) "
+        "RETURN count(e)", params={"id": oid}).result_set[0][0] == 1
+
+
+def test_an_event_may_mention_a_name_two_live_entities_hold(sdk):
+    """#3590 review P2: a doubly-held name is legal — it must not fail the door.
+
+    Same-name coexistence is a state the model explicitly legalises (#8864 /
+    D2), and the about-link cascade journals and writes EVERY carrier. The
+    registration this door performs must therefore not turn a legal graph into
+    a hard ``AmbiguousEntityName`` for the event door only — the refusal
+    belongs to the CREATE door, not to a reference.
+    """
+    client, _ = sdk
+    proj = client._get_proj()
+    client.create_entity("object", "Dup", _server_id="id-dup-a",
+                         is_episodic=False)
+    client.create_entity("object", "Dup", _server_id="id-dup-b",
+                         is_episodic=False)
+    assert sorted(_name_ids(proj, "Object", "Dup")) == ["id-dup-a", "id-dup-b"], (
+        "fixture did not produce the legal two-carrier state")
+
+    client.create_event("mentions a doubly-held name", "note",
+                        aboutObject="Dup", _server_id="ev-dup",
+                        is_episodic=False)
+    eid = "ev-dup"
+
+    wired = {r[0] for r in proj.g.query(
+        "MATCH (e:Event {eventId:$eid})-[:aboutObject]->(o:Object) "
+        "RETURN o.id", params={"eid": eid}).result_set}
+    assert wired == {"id-dup-a", "id-dup-b"}, (
+        f"the event wired {sorted(wired)} instead of BOTH legal carriers")
+
+
+def test_the_event_door_registers_every_name_its_record_mentions(sdk):
+    """#3590 D9 at the SDK door: mentions are REGISTERED, so edges survive replay.
+
+    ``EventRecorded`` carries three kinds of entity reference — the ``about*``
+    links, and the loose mentions ``subject`` / ``object`` / ``uses[]``. The
+    ``about*`` half already registered its targets; the mention half registered
+    nothing, so the fold resolved them against no holder and silently dropped
+    ``performs`` / ``produces`` / ``uses`` — live AND on replay (this is the
+    producer omission the ``unfolded-mention`` exemption tolerates for legacy
+    journals, not something a current door may keep doing).
+
+    The pin is replay-based on purpose: a mention edge that lands live but
+    vanishes on ``rebuild_all`` is `rebuild != live`, which is the invariant the
+    whole change exists for.
+    """
+    client, events = sdk
+    proj = client._get_proj()
+    client.create_event("meeting with a tool", "meeting",
+                        subject="Agent Pi",
+                        object="Docs Thing",
+                        uses=[{"name": "Tool X", "kind": "core:tool"}],
+                        _server_id="ev-mentions",
+                        is_episodic=False)
+
+    def _edges() -> dict:
+        return {
+            "performs": {r[0] for r in proj.g.query(
+                "MATCH (s:Subject)-[:performs]->(e:Event {eventId:'ev-mentions'}) "
+                "RETURN s.name").result_set},
+            "produces": {r[0] for r in proj.g.query(
+                "MATCH (e:Event {eventId:'ev-mentions'})-[:produces]->(o:Object) "
+                "RETURN o.name").result_set},
+            "uses": {r[0] for r in proj.g.query(
+                "MATCH (e:Event {eventId:'ev-mentions'})-[:uses]->(o:Object) "
+                "RETURN o.name").result_set},
+        }
+
+    live = _edges()
+    assert live == {"performs": {"Agent Pi"},
+                    "produces": {"Docs Thing"},
+                    "uses": {"Tool X"}}, live
+
+    # An id-shaped name would be the pre-#3590 derivation sneaking back in; the
+    # registration must MINT (and the mention must resolve to that minted id).
+    for name in ("Docs Thing", "Tool X"):
+        ids = _name_ids(proj, "Object", name)
+        assert len(ids) == 1 and ids[0] != name, (name, ids)
+
+    proj.rebuild_all(str(events), confirm_destructive=True)
+    assert _edges() == live, (
+        "the mention edges did not survive replay — the door referenced names "
+        "its journal never registered (#3590 D9)")

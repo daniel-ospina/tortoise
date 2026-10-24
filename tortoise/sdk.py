@@ -35480,6 +35480,51 @@ class TortoiseSDK:
                 if holders:
                     raise NameAlreadyHeld(label, new_name, holders, id_val)
 
+    def _register_referenced_entity(self, label: str, name) -> None:
+        """D9: REGISTER an entity a JOURNALED write references by name.
+
+        #3590 D9 puts the minting duty on the producer: a fold-time mint is not
+        replay-deterministic, so the projection resolves names against LIVE
+        holders only and leaves an unregistered reference unfolded. The door
+        that appends the journal record is therefore the door that must make the
+        reference resolvable — this helper is that duty, for an EventRecorded's
+        mentions (`subject`, `object`, `uses[]`) and for the `about*` links.
+
+        Three guards live HERE rather than at each call site, because each is a
+        way a producer damages the journal or the write:
+
+        * **id-shaped values are never registered.** `_is_entity_id` is the same
+          predicate the fold uses to decide a value addresses a node; treating
+          an already-minted id as a NAME would mint a second entity *named* the
+          id, and journal it.
+        * **a name with live holders is not re-registered.** `create_entity` is
+          the #452 idempotent re-mention, but it still APPENDS a registration
+          record, so calling it for an already-known name would grow the journal
+          by one line per mention. The resolve is the same primitive the fold
+          uses (`live_name_holder_ids`), so "already registered" means exactly
+          what the fold means by it. A name held by TWO OR MORE live entities is
+          the legal same-name coexistence (#8864 / D2) — nothing to register,
+          and the reference cascade addresses the whole list.
+        * **`AmbiguousEntityName` is not an error here.** It is a CREATE-door
+          refusal (a create may not pick one carrier); a REFERENCE is not a
+          create, and the consumer (`resolve_about_link`, `resolve_fold_name`)
+          already handles N carriers. The probe above can also go stale between
+          the read and the create, so the refusal is caught rather than
+          propagated — an event that mentions a doubly-held name must not fail
+          to be written (#3590 review P2).
+        """
+        if not isinstance(name, str) or not name.strip():
+            return
+        if _is_entity_id(name):
+            return
+        from .entity_identity import AmbiguousEntityName, live_name_holder_ids
+        if live_name_holder_ids(self._get_proj().g, label, name):
+            return
+        try:
+            self.create_entity(label.lower(), name)
+        except AmbiguousEntityName:
+            return
+
     def _entity_identity_for(self, label: str, name: str, *,
                              explicit_id: str | None = None) -> str:
         """The id a create must write: the live holder's, or a freshly MINTED one.
@@ -36361,8 +36406,14 @@ class TortoiseSDK:
                     # Registering under the DECLARED label (not "whatever the
                     # cascade finds first") keeps `aboutObject="Acme"` on the
                     # Object arm instead of silently becoming `aboutSubject`.
+                    # ⛔ NOT `self.create_entity(...)` directly: a name held by
+                    # 2+ live entities is LEGAL (#8864 / D2) and the cascade
+                    # three lines below journals/writes EVERY carrier, so the
+                    # create-door refusal must not abort the event write here
+                    # (#3590 review P2). `_register_referenced_entity` owns that
+                    # distinction, the id-shape guard and the no-op probe.
                     if _tlabel in ("Subject", "Object"):
-                        self.create_entity(_tlabel.lower(), _val)
+                        self._register_referenced_entity(_tlabel, _val)
                     _link, _internal = proj.resolve_about_link(_val)
                     if _link is not None:
                         about_links.append(_link)
@@ -36371,6 +36422,29 @@ class TortoiseSDK:
                     # an unresolvable HANDLE wires NO edge (#3586) — nothing to
                     # journal, but the door still has to report it.
                     _about_writes.append((_rel, _val))
+            # ── #3590 D9: the MENTIONS this record carries ───────────────
+            # The `about*` loop above registers its own targets; the record's
+            # OTHER entity references — `subject`, `object` and every `uses[]`
+            # name — were never registered by anyone, so the fold resolved them
+            # against no holder, dropped the `performs` / `produces` / `uses`
+            # edge, and (before the `unfolded-mention` exemption) made the
+            # journal un-rebuildable. Every in-repo producer of this record
+            # goes through THIS door — `EventAPI.add_event` is the exception and
+            # is named in the exemption's degraded guarantee — so registering
+            # them here is the D9 producer duty and it is what keeps a rebuilt
+            # graph's Event edges equal to the live ones.
+            # `objectType='Document'` means `object` is a :Source url (written
+            # by the document fold), NOT an entity: never register it.
+            self._register_referenced_entity("Subject", props.get("subject"))
+            if (props.get("objectType") or "") != "Document":
+                self._register_referenced_entity("Object", props.get("object"))
+            _uses = props.get("uses")
+            if isinstance(_uses, (str, dict)):
+                _uses = [_uses]
+            for _use in _uses or ():
+                _use_name = (_use.get("name")
+                             if isinstance(_use, dict) else _use)
+                self._register_referenced_entity("Object", _use_name)
             node = self._create_entity("Event", eid, {
                 "eventId": eid, "name": name, "eventKind": eventKind,
                 "eventStatus": "scheduled", **props}, "EventRecorded",
