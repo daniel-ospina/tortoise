@@ -3198,6 +3198,12 @@ if [ "${STUB_FAIL_FIRST:-0}" != "0" ] && [ "$n" -le "${STUB_FAIL_FIRST}" ]; then
   printf '000'
   exit 7
 fi
+# exit 0 having written `000` (a mid-stream reset): a status of 000 is not only a
+# non-zero curl exit, and the step's arm covers both.
+if [ "${STUB_ZERO:-0}" != "0" ]; then
+  printf '000'
+  exit 0
+fi
 code=200
 ctype="${STUB_CTYPE}"
 cache="${STUB_CACHE:-DYNAMIC}"
@@ -3210,6 +3216,11 @@ case "$path" in
   *app.premiselabs.co*notify-publish)
     code="${STUB_PROXY_CODE}"; body="${STUB_PROXY_BODY}";;
   *tortoise.premiselabs.co*notify-publish)
+    if [ "${STUB_GATE_FAIL:-0}" != "0" ]; then
+      echo 'curl: (7) Failed to connect to host' >&2
+      printf '000'
+      exit 7
+    fi
     code="${STUB_GATE_CODE}"; body="${STUB_GATE_BODY}";;
   *.txt)
     if [ "$query" = "nonce" ]; then
@@ -3229,6 +3240,14 @@ case "$path" in
         ctype="text/html; charset=utf-8"; body='<!doctype html><title>oops</title>'
       fi
     else
+      # A knob for the edge leg ALONE: `STUB_FAIL_FIRST` is call-count based, so
+      # the origin leg always fails first and the edge transport arm was
+      # unreachable from here (and therefore unverified).
+      if [ "${STUB_EDGE_FAIL:-0}" != "0" ]; then
+        echo 'curl: (7) Failed to connect to host' >&2
+        printf '000'
+        exit 7
+      fi
       code="${STUB_EDGE_CODE:-${STUB_GET_CODE}}"
       case "${STUB_EDGE_BODY_MODE:-${STUB_BODY_MODE}}" in
         key) body="$key";;
@@ -3256,11 +3275,14 @@ def _run_indexnow_gate(
     body_mode: str = "key",
     gate_code: str = "401",
     gate_body: str = '{"error":"unauthorized","message":"Session expired or not an admin"}',
-    fail_first: bool = False,
+    fail_first: int | bool = False,  # a COUNT: 99 fails every attempt
     module_text: str = _INDEXNOW_MODULE_OK,
     cache: str = "DYNAMIC",
     edge_code: str = "",
     edge_body_mode: str = "",
+    edge_fail: bool = False,
+    gate_fail: bool = False,
+    zero: bool = False,
     bad_first: bool = False,
     cwd: Path | None = None,
 ) -> tuple[int, str, list[str]]:
@@ -3289,6 +3311,9 @@ def _run_indexnow_gate(
         "STUB_CACHE": cache,
         "STUB_EDGE_CODE": edge_code,
         "STUB_EDGE_BODY_MODE": edge_body_mode,
+        "STUB_EDGE_FAIL": "1" if edge_fail else "0",
+        "STUB_GATE_FAIL": "1" if gate_fail else "0",
+        "STUB_ZERO": "1" if zero else "0",
         "STUB_BAD_FIRST": "1" if bad_first else "0",
     }
     script = _indexnow_fixture(
@@ -3317,7 +3342,10 @@ def _run_indexnow_proxy(
     tmp_path: Path,
     proxy_code: str = "401",
     proxy_body: str = '{"error":"not_signed_in"}',
-    fail_first: bool = False,
+    # a COUNT (`99` fails EVERY attempt) — a bool could only ever express "one
+    # blip", which the retry absorbs, so the step's transport-failure arm was
+    # unreachable from here.
+    fail_first: int | bool = False,
 ) -> tuple[int, str, list[str]]:
     """Run the shipped app-origin proxy gate; return (rc, output, urls requested)."""
     bin_dir = _stub_bin(tmp_path, "curl", STUB_INDEXNOW_CURL)
@@ -3350,6 +3378,18 @@ def _run_indexnow_proxy(
     calls_file = tmp_path / "calls"
     calls = calls_file.read_text(encoding="utf-8").split() if calls_file.exists() else []
     return r.returncode, r.stdout + r.stderr, calls
+
+
+def test_each_indexnow_step_cleans_up_its_scratch_dir() -> None:
+    """A per-run scratch dir that is never removed is a slow leak on a self-hosted
+    runner — and `$D` exists precisely to stop concurrent lanes sharing `/tmp`, so
+    leaving it behind undoes half of what it was added for."""
+    for code, name in (
+        (_step_code(INDEXNOW_PROBE), "deploy"),
+        (_dashboard_step_code(INDEXNOW_PROXY_PROBE), "deploy-dashboard"),
+    ):
+        assert 'D="${RUNNER_TEMP:-/tmp}/' in code, f"{name}: no per-run scratch dir"
+        assert 'trap \'rm -rf "$D"\' EXIT' in code, f"{name}: the scratch dir is never removed"
 
 
 def test_the_indexnow_gate_polls_and_is_blocking() -> None:
@@ -3454,7 +3494,13 @@ def test_the_indexnow_gate_passes_when_the_surface_is_correct(tmp_path) -> None:
 @pytest.mark.parametrize(
     "argv,needle",
     [
-        ({"get_code": "404"}, "at ORIGIN"),
+        ({"get_code": "404"}, "is not served by the deployment"),
+        # A 5xx on the static key file is an outage, not a missing file (#3485).
+        # The needle must be a phrase of THIS arm: "NOT evidence the key file is
+        # gone" is also in the transport arm's message, so it could not see the
+        # outage arm being widened to swallow `5xx`.
+        ({"get_code": "520"}, "an origin/edge outage or rate limit"),
+        ({"get_code": "429"}, "or rate limit"),
         ({"body_mode": "newline"}, "must contain the key and NOTHING else"),
         ({"body_mode": "other"}, "must contain the key and NOTHING else"),
         # The BODY TEXT is pinned separately from the byte COUNT, on both legs: a
@@ -3467,7 +3513,14 @@ def test_the_indexnow_gate_passes_when_the_surface_is_correct(tmp_path) -> None:
         ({"cache": "HIT"}, "was answered from CACHE"),
         # Leg 2 is what the endpoint actually fetches: origin-correct is not enough,
         # and BOTH of its halves are pinned (count and text).
-        ({"edge_code": "404"}, "at the EDGE"),
+        ({"edge_code": "404"}, "not serving the key file"),
+        ({"edge_code": "522"}, "an edge outage or rate limit"),
+        # `000` on the edge leg alone: STUB_ZERO zeroes both legs, so the origin arm
+        # exits first and this alternative was unreachable — deleting `|000` from
+        # the edge arm left the suite green.
+        ({"edge_code": "000"}, "an edge transport failure"),
+        # A rate limit is a provider condition, not a delivery fault.
+        ({"edge_code": "429"}, "an edge outage or rate limit"),
         ({"edge_body_mode": "other"}, "at the EDGE"),
         ({"edge_body_mode": "other32"}, "at the EDGE"),
         ({"edge_body_mode": "newline"}, "at the EDGE"),
@@ -3476,8 +3529,10 @@ def test_the_indexnow_gate_passes_when_the_surface_is_correct(tmp_path) -> None:
         # A provider blip is NOT "the route is gone" (#3485) — the message must
         # say so, or the operator hunts a Function that was never deleted.
         (
+            # a phrase unique to THIS arm: the `503*` catch-all below would satisfy
+            # a bare "could not verify" even if this arm were deleted.
             {"gate_code": "503", "gate_body": '{"error":"unavailable","message":"try later"}'},
-            "could not verify",
+            "admin lookup outage",
         ),
         (
             {"gate_code": "503", "gate_body": '{"error":"not_configured"}'},
@@ -3491,8 +3546,18 @@ def test_the_indexnow_gate_passes_when_the_surface_is_correct(tmp_path) -> None:
         ({"gate_code": "503", "gate_body": ""}, "could not verify"),
         (
             {"gate_code": "503", "gate_body": "<html><body>503</body></html>"},
-            "could not verify",
+            "an outage, not a missing route",  # unique to the 503* catch-all
         ),
+        # A transport failure never reached the route: it must not be reported as
+        # "did not refuse an anonymous caller" (the blip-as-broken-route mistake).
+        ({"gate_code": "000"}, "could not verify"),
+        # And neither did a 5xx that the two NAMED bodies do not cover — the app
+        # origin's step handled the whole class and this one did not.
+        ({"gate_code": "502", "gate_body": ""}, "could not verify"),
+        ({"gate_code": "504", "gate_body": "<html>gateway timeout</html>"}, "could not verify"),
+        ({"gate_code": "521"}, "could not verify"),
+        # a Cloudflare rate limit is a provider condition, not a broken route
+        ({"gate_code": "429"}, "or rate limit, not a missing route"),
     ],
 )
 def test_the_indexnow_gate_fails_for_each_broken_surface(tmp_path, argv: dict, needle: str) -> None:
@@ -3501,6 +3566,21 @@ def test_the_indexnow_gate_fails_for_each_broken_surface(tmp_path, argv: dict, n
     assert rc == 1, f"{argv} should have red the gate, got rc={rc}:\n{out}"
     assert "::error::" in out, out
     assert needle in out, out
+    # Non-vacuity made structural rather than incidental: "could not verify" must
+    # never arrive with the sentence that blames the surface (a case arm can grow a
+    # second echo, and a presence-only assertion would not notice).
+    if "could not verify" in needle or needle in {
+        "NOT evidence the key file is gone",
+        "an edge outage or rate limit",
+        "an edge transport failure",
+        "an outage, not a missing route",
+        "admin lookup outage",
+    }:
+        # The outage arms must never arrive with the sentence that blames the
+        # surface — for the key-file rows too, which cannot reach the POST probe.
+        assert "did not refuse an anonymous caller" not in out, out
+        assert "is not served by the deployment" not in out, out
+        assert "not serving the key file" not in out, out
 
 
 @pytest.mark.parametrize(
@@ -3521,8 +3601,16 @@ def test_the_indexnow_gate_fails_for_each_broken_surface(tmp_path, argv: dict, n
         # the proxy's own session-store path (#3485): could not verify, not "gone"
         (
             {"proxy_code": "503", "proxy_body": '{"error":"session_store_unavailable"}'},
-            "could not verify",
+            "the proxy's session store",  # unique: the 5xx arm also says "could not verify"
         ),
+        # A deterministic 500 is the one 5xx where "re-run" is not the answer.
+        ({"proxy_code": "500", "proxy_body": "boom"}, "next suspect"),
+        # ANY 5xx is the same class. An exact `503)` arm let 502/504 (origin down)
+        # and Cloudflare's 520-522/524 fall through to the arm that blames the route.
+        ({"proxy_code": "502", "proxy_body": "<html>bad gateway</html>"}, "could not verify"),
+        ({"proxy_code": "504", "proxy_body": ""}, "could not verify"),
+        ({"proxy_code": "521", "proxy_body": "<html>origin down</html>"}, "could not verify"),
+        ({"proxy_code": "429", "proxy_body": "rate limited"}, "could not verify"),
     ],
 )
 def test_the_indexnow_proxy_gate_fails_for_each_broken_surface(
@@ -3532,6 +3620,12 @@ def test_the_indexnow_proxy_gate_fails_for_each_broken_surface(
     assert rc == 1, f"{argv} should have red the proxy gate, got rc={rc}:\n{out}"
     assert "::error::" in out, out
     assert needle in out, out
+    if "could not verify" in needle or needle in {
+        "the proxy's session store",
+        "next suspect",
+        "or rate limit",
+    }:
+        assert "did not answer the proxy's session gate" not in out, out
     assert any("app.premiselabs.co" in c and c.endswith("notify-publish") for c in calls), calls
 
 
@@ -3576,6 +3670,23 @@ def test_the_indexnow_gate_retries_a_bad_200_instead_of_accepting_it(tmp_path) -
     assert rc == 0, out
     origin = [c for c in calls if f"/{_INDEXNOW_KEY}.txt?cb=" in c]
     assert len(origin) == 2, f"a bad 200 was accepted on the first attempt: {calls}"
+
+
+def test_the_indexnow_proxy_gate_diagnoses_a_dead_route_instead_of_blaming_it(tmp_path) -> None:
+    """Every proxy attempt blips: an outage, not a missing route.
+
+    `deploy-dashboard` is a blocking job and its `000)` arm is the ONLY thing that
+    distinguishes "the origin never answered" from "the route is gone" — two
+    failures with opposite fixes. It was unreachable from this harness while
+    `fail_first` was a bool, so a mutation deleting the arm would have left the
+    suite green.
+    """
+    rc, out, calls = _run_indexnow_proxy(tmp_path, fail_first=99)
+    assert rc == 1, out
+    assert "::error::" in out, out
+    assert "could not verify" in out, f"a transport failure blamed the route: {out!r}"
+    assert "did not answer the proxy's session gate" not in out, out
+    assert calls, "nothing was requested"
 
 
 def test_the_shipped_extractor_reads_the_shipped_constant(tmp_path) -> None:
@@ -3646,7 +3757,11 @@ def test_the_indexnow_gate_diagnoses_a_dead_origin_instead_of_aborting_silently(
     rc, out, calls = _run_indexnow_gate(tmp_path, fail_first=99)
     assert rc == 1, out
     assert "::error::" in out, f"the step died without a diagnosis: {out!r}"
-    assert "curl-failed" in out or "000" in out, out
+    assert "could not verify" in out, out
+    assert "is not served by the deployment" not in out, (
+        f"a transport failure was reported as a deploy fault: {out!r}"
+    )
+    assert "curl-failed" in out, out
     assert calls, "nothing was requested"
 
 
@@ -3679,6 +3794,51 @@ def test_the_indexnow_gate_reports_an_extractor_fault_without_touching_the_site(
     assert "EXTRACTOR fault" in out, out
     assert "is not served" not in out, f"an extractor fault blamed the deploy: {out}"
     assert calls == [], f"an unreadable constant still made requests: {calls}"
+
+
+def test_the_indexnow_gate_diagnoses_an_unreachable_edge_instead_of_blaming_delivery(
+    tmp_path,
+) -> None:
+    """Origin 200, edge unreachable: a re-run, not a cache-rule hunt.
+
+    The edge leg is the URL the endpoint actually fetches, so a wrong status there
+    IS a delivery fault — but a transport failure is not, and the two need
+    different operators. `STUB_EDGE_FAIL` fails the second leg only; before that
+    knob existed this arm could not be executed by any test.
+    """
+    rc, out, calls = _run_indexnow_gate(tmp_path, edge_fail=True)
+    assert rc == 1, out
+    assert "could not verify" in out, out
+    assert "at the EDGE" in out, out
+    assert "not serving the key file" not in out, f"an outage blamed delivery: {out!r}"
+    assert len(calls) > 1, f"the edge leg was never attempted: {calls}"
+
+
+def test_the_notify_hop_transport_failure_surfaces_curl_itself(tmp_path) -> None:
+    """The key-file arm prints `curl said: …`; the POST hops must not be quieter.
+
+    curl's stderr is the only datum that says WHY nothing completed (DNS, TLS, a
+    reset), and both POST legs were sending it to /dev/null.
+    """
+    rc, out, calls = _run_indexnow_gate(tmp_path, gate_fail=True)
+    assert rc == 1, out
+    assert "could not verify" in out, out
+    assert "curl: (7)" in out, f"curl's own diagnosis was discarded: {out!r}"
+    assert "did not refuse an anonymous caller" not in out, out
+    assert calls, "nothing was requested"
+
+
+def test_the_indexnow_gate_diagnoses_a_zero_status_as_an_outage(tmp_path) -> None:
+    """`000` with curl exiting 0 must not read as "the file is not served".
+
+    A mid-stream reset can finish with status 000 and exit code 0, so keying the
+    outage arm on `curl-failed*` alone leaves that shape blaming the deployment.
+    """
+    rc, out, calls = _run_indexnow_gate(tmp_path, zero=True)
+    assert rc == 1, out
+    assert "could not verify" in out, out
+    assert "is not served by the deployment" not in out, f"an outage blamed the deploy: {out!r}"
+    assert calls, "nothing was requested"
 
 
 @pytest.mark.parametrize(
