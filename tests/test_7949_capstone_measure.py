@@ -1270,11 +1270,19 @@ def _bundle_missing(kind: str, anchors, source_lines, start: int, end,
                     end_spec=None):
     """[] when the cite resolves, else what the cited lines do not carry."""
     stop = int(end) if end else start
-    if kind == "line":
+    if kind in ("line", "def"):
+        # A RANGE written against a single-line rule is a cite this rule cannot
+        # check: the branches below read ONE line, so `sdk.py:12768-12770` would
+        # be verified at its start and its end would be checked by nothing — the
+        # reader is sent into whatever the range grew over, and the pin stays
+        # green. Red instead, so a widened cite is a decision (add a range rule)
+        # rather than a silent hole. Same invariant as the `span` end bound below.
+        if end and int(end) != start:
+            return [f"a single-line rule, but the cite is the range {start}-{end}"
+                    " (its END would be checked by nothing — add a range rule)"]
         got = source_lines[start - 1]
-        return [a for a in anchors if a not in got]
-    if kind == "def":
-        got = source_lines[start - 1]
+        if kind == "line":
+            return [a for a in anchors if a not in got]
         return [] if got.lstrip().startswith(anchors[0]) else [anchors[0]]
     if kind == "span":
         span = source_lines[start - 1:stop]
@@ -1318,12 +1326,12 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     `extractor_v2.py`) across `README.md`, both probes, and the `docs/00_index.md`
     row that is the bundle's entry point — 44 cites at this head.
 
-    Non-vacuity: against `main`'s documents 26 of the 44 cites red across five
+    Non-vacuity: against `main`'s documents 26 of the 44 cites red — 22 across five
     rules (`sdk.py:12401` for the meta fold, `12682` for the capture path,
     `11623` for the entry point, `edges.py:467` for the reference labels and
     `2168-2192` for the writer) — the cited lines hold the #4716 re-key comments
-    instead of the symbols — and the four `extractor_v2.py:8278-8285` cites red on
-    the END bound alone (the range closes one line into the next block).
+    instead of the symbols — plus the four `extractor_v2.py:8278-8285` cites that
+    red on the END bound alone (the range closes one line into the next block).
     The `extractor_v2.py` cites are correct at this head, so those rules cannot red
     on `main`; they are the tripwire for the NEXT insertion above `8288`/`7912`/
     `7804`, and they bite: with the README's `` `extractor_v2.py:7912` `` moved to
@@ -1336,6 +1344,7 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     source_lines = {name: path.read_text(encoding="utf-8").splitlines()
                     for name, path in _BUNDLE_SOURCES.items()}
     fired, checked, unmatched, failures = set(), 0, [], []
+    checked_by_doc: dict[str, int] = {}
     skipped: dict[str, list[str]] = {}
     for doc_name, doc_path in _BUNDLE_DOCS:
         text = doc_path.read_text(encoding="utf-8")
@@ -1364,6 +1373,7 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
             label, _, _, anchors, kind, end_spec = rule
             fired.add(label)
             checked += 1
+            checked_by_doc[doc_name] = checked_by_doc.get(doc_name, 0) + 1
             missing = _bundle_missing(kind, anchors, source_lines[source],
                                       start, end, end_spec)
             if missing:
@@ -1390,3 +1400,28 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
         " — the bundle's cites for those symbols moved or were dropped; re-derive them")
     assert checked >= 20, (
         f"only {checked} live cites were resolved — the sweep is not reading the bundle")
+    # COVERAGE, not just volume: every document a lane is SENT INTO must have
+    # contributed at least one resolved cite. Total-only counting let the index
+    # drop out silently — its two cites are duplicated in the README/probes, so
+    # all rules still `fired` and `checked` stayed high, and the `#7949` row the
+    # README sends a lane into was verified by NOTHING while the leg read green
+    # (the precise gap this document was added to close).
+    # ⛔ The required names are a LITERAL here, not a loop over `_BUNDLE_DOCS`:
+    # a per-document check that iterates the list it guards passes when the list
+    # shrinks — measured by dropping the index entry, which stayed green. With
+    # the names restated, removing a document is an edit to this assertion too,
+    # i.e. a decision instead of an omission.
+    required_docs = (
+        "README.md",
+        "probes/capstone_measure.py",
+        "probes/capstone_run.py",
+        "docs/00_index.md",
+    )
+    empty_docs = [name for name in required_docs if not checked_by_doc.get(name)]
+    assert not empty_docs, (
+        f"these documents contributed NO resolved cite: {empty_docs} — the sweep is "
+        "not reading them (or their cites moved out from under the rule table): "
+        f"per-document checked={checked_by_doc}")
+    assert set(required_docs) <= {name for name, _ in _BUNDLE_DOCS}, (
+        "a document this pin requires is not swept at all: "
+        f"required={sorted(required_docs)} swept={[n for n, _ in _BUNDLE_DOCS]}")
