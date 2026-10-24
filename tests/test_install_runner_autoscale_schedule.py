@@ -54,8 +54,20 @@ def _write_stub(bindir: Path, name: str, body: str) -> Path:
     return path
 
 
-def _sandbox(tmp_path: Path, uname: str = "Darwin", *, cron: bool = True) -> dict:
-    """Throwaway repo/HOME/log + PATH stubs. Nothing here can touch the host."""
+def _sandbox(
+    tmp_path: Path, uname: str = "Darwin", *, cron: bool = True, platform: str | None = None
+) -> dict:
+    """Throwaway repo/HOME/log + PATH stubs. Nothing here can touch the host.
+
+    ⛔ `platform` is the installer's own `AUTOSCALE_PLATFORM` test seam, and a test that
+    exercises a NON-default scheduler branch MUST pass it. Without it the branch is chosen by
+    `platform()`, which asks the REAL box: `has_systemd` reads `/run/systemd/system` and
+    `command -v systemctl`, so on a Linux cell the Linux+cron case silently rendered a
+    systemd unit and `has_cron` was never reached. That made these cases pass only on the
+    macOS box the fleet's lanes ran on and fail on the Linux CI runner — the assertion, not
+    the installer, was host-dependent (measured: `platform=systemd` in the `--dry-run` header
+    on cell-4, 4 cases RED in `test (a)/(b)/(e)/(i)`).
+    """
     bindir = tmp_path / "bin"
     bindir.mkdir(parents=True)
     home = tmp_path / "home"
@@ -132,6 +144,8 @@ def _sandbox(tmp_path: Path, uname: str = "Darwin", *, cron: bool = True) -> dic
             "SYSTEMD_UNIT_DIR": str(tmp_path / "units"),
         }
     )
+    if platform is not None:
+        env["AUTOSCALE_PLATFORM"] = platform
     return {
         "env": env,
         "bin": bindir,
@@ -411,7 +425,7 @@ def test_cron_line_carries_the_path_and_home_the_job_needs(tmp_path):
 
     Mutation: drop `$CRON_ENV` from cron_line -> no PATH=/HOME= in the entry -> RED.
     """
-    sb = _sandbox(tmp_path, uname="Linux", cron=True)
+    sb = _sandbox(tmp_path, uname="Linux", cron=True, platform="cron")
     res = _run(sb, "--dry-run")
     assert res.returncode == 0, (res.stdout, res.stderr)
     line = [ln for ln in res.stdout.splitlines() if f"{LABEL}-cron" in ln]
@@ -421,7 +435,7 @@ def test_cron_line_carries_the_path_and_home_the_job_needs(tmp_path):
 
 def test_cron_install_is_idempotent_and_survives_an_empty_crontab(tmp_path):
     """Re-installing with a changed interval must not exit 1 AFTER succeeding (pipefail)."""
-    sb = _sandbox(tmp_path, uname="Linux", cron=True)
+    sb = _sandbox(tmp_path, uname="Linux", cron=True, platform="cron")
     first = _run(sb)
     assert first.returncode == 0, (first.stdout, first.stderr)
     assert f"{LABEL}-cron" in sb["crontab_store"].read_text(encoding="utf-8")
@@ -439,7 +453,7 @@ def test_cron_install_is_idempotent_and_survives_an_empty_crontab(tmp_path):
 def test_cron_uninstall_removes_only_its_own_line(tmp_path):
     """`--uninstall` on a crontab holding ONLY our line must report success, not
     "could not rewrite crontab" (the same pipefail shape)."""
-    sb = _sandbox(tmp_path, uname="Linux", cron=True)
+    sb = _sandbox(tmp_path, uname="Linux", cron=True, platform="cron")
     assert _run(sb).returncode == 0
     store = sb["crontab_store"]
     store.write_text(
@@ -546,6 +560,16 @@ def test_the_probe_runs_the_schedule_s_repo_and_pinned_environment(tmp_path):
     only `RUNNER_AUTOSCALE_STATE_DIR`, not the HOME/PATH/RUNNER_AUTOSCALE_GH pins the unit and
     plist exist to carry. A box inert BECAUSE of those pins still probed OK.
     Mutation: drop `$ARGV_TAIL`/the pinned env from `probe()` -> no `--repo`, no pinned HOME -> RED.
+
+    ⛔ The gh assertion is a PROPERTY, not `== the sandbox stub`. The installer resolves `gh` from
+    an ABSOLUTE candidate list first (`/usr/bin/gh`, `/usr/local/bin/gh`, `/opt/homebrew/bin/gh`,
+    `$HOME/bin/gh`) and only falls back to `command -v gh`, because a timer's PATH is
+    `/usr/bin:/bin:/usr/sbin:/sbin` and a Homebrew `gh` is not on it. So the stub on the sandbox
+    PATH wins only on a box with no system `gh` — asserting the stub path made this case pass on
+    macOS and fail on the Linux CI runner, where `/usr/bin/gh` exists and won (4 cases RED in
+    `test (a)/(b)/(e)/(i)`). What the probe must reproduce is the pin the TIMER carries, whichever
+    `gh` that is, so the readable end is: non-empty, a real executable, and EQUAL to the value
+    rendered into the installed plist.
     """
     sb = _sandbox(tmp_path)
     # a `gh` the installer can resolve at install time: the pin it then carries is what the probe
@@ -570,7 +594,17 @@ def test_the_probe_runs_the_schedule_s_repo_and_pinned_environment(tmp_path):
     assert "--repo someone/other-repo" in log, log
     assert f"HOME={sb['home']}" in log, log
     # (the first ARGV line is the interpreter FLOOR CHECK, `-c …`, not the probe)
-    assert f"GH={sb['bin']}/gh" in log, f"the resolved gh must be pinned for the probe: {log}"
+    pinned = [ln[len("GH=") :] for ln in log.splitlines() if ln.startswith("GH=")]
+    assert pinned, f"the probe must carry a pinned gh at all: {log}"
+    gh = pinned[-1]
+    assert gh, f"the resolved gh must be pinned, not left at the bare default: {log}"
+    assert os.path.isabs(gh), (
+        f"the pin must be an absolute path, not PATH-resolved at fire time: {gh!r}"
+    )
+    assert os.access(gh, os.X_OK), f"the pin must be a real executable: {gh!r}"
+    # and it is the SAME pin the timer is given — a probe green on a different gh green-lights nothing
+    installed = (sb["agents"] / PLIST_NAME).read_text(encoding="utf-8")
+    assert f"<key>RUNNER_AUTOSCALE_GH</key><string>{gh}</string>" in installed, installed
 
 
 def test_status_reports_a_healthy_probe(tmp_path):
