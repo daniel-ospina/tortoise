@@ -6518,23 +6518,52 @@ def _supersede_ref_tokens(text: str) -> list[str]:
     return out
 
 
-def _tokens_contain_contiguous(ref_tokens: list[str],
-                               prior_tokens: list[str]) -> bool:
-    """True when ``ref_tokens`` is a CONTIGUOUS span of ``prior_tokens``.
+def _supersede_span_tokens(text: str) -> list[str]:
+    """Punctuation-normalised tokens IN ORDER, frame words KEPT.
 
-    Contiguous, not merely ordered: an ordered subsequence can be recombined
-    from two different clauses of one prior ("we ship A" + "do not ship B"
-    yields "we ship A ship B"), and a recombined ref is not a copy of
-    anything. The measured drift is a contiguous PREFIX once frame words are
-    dropped ("We ship the lease fix…" against "Ship the lease fix…"), so the
-    stricter form costs that case nothing, and a word INSERTED into the middle
-    refuses — the direction a belief-corrupting write wants.
+    Different from ``_supersede_ref_tokens`` (which drops frame words for the
+    length floor): the span test needs the frame words, because a frame word's
+    ROLE can be load-bearing ("by 30 seconds" is not "to 30 seconds", "and" is
+    not "or") and dropping them made every frame-word substitution invisible
+    (code-review round 3). Sentence punctuation is stripped per token — a
+    copied ref routinely differs from its prior by a quote mark.
     """
-    n = len(ref_tokens)
+    out: list[str] = []
+    for raw in _norm(text).split():
+        tok = raw.strip(".,;:!?\"'()[]{}")
+        if tok:
+            out.append(tok)
+    return out
+
+
+def _span_contains(ref_tokens: list[str], prior_tokens: list[str]) -> bool:
+    """True when the ref's CORE is a contiguous span of the prior's tokens.
+
+    "Core" = the ref with its FRAME-ONLY leading and trailing runs trimmed: the
+    measured drift prefixes a subject-less prior with "We" ("We ship the lease
+    fix…" against "Ship the lease fix…"), so an edge made only of frame words
+    is an addition and is allowed. Everything INSIDE the span must match
+    token-for-token, which is what closes the three axes review found in
+    sequence — a recombination across clauses, an exchanged connective, and a
+    substituted preposition ("by 30 seconds" against "to 30 seconds") — because
+    each of those changes a token or breaks the run. A word dropped from the
+    MIDDLE of the prior breaks the span; a trailing deletion does not, which is
+    why the condition/negation predicates below stay.
+    """
+    def _frame(tok: str) -> bool:
+        return tok in _FRAME_STOPWORDS
+
+    i, j = 0, len(ref_tokens)
+    while i < j and _frame(ref_tokens[i]):
+        i += 1
+    while j > i and _frame(ref_tokens[j - 1]):
+        j -= 1
+    core = ref_tokens[i:j]
+    n = len(core)
     if not n or n > len(prior_tokens):
         return False
-    return any(prior_tokens[i:i + n] == ref_tokens
-               for i in range(len(prior_tokens) - n + 1))
+    return any(prior_tokens[k:k + n] == core
+               for k in range(len(prior_tokens) - n + 1))
 
 
 def _supersede_condition_markers(text: str) -> frozenset[str]:
@@ -6566,7 +6595,7 @@ def _supersede_pronouns(text: str) -> frozenset[str]:
     prior that states no subject, and refusing that would undo the fix. Only a
     substitution — pronouns on BOTH sides, and different — is refused.
     """
-    return frozenset(tok for tok in _norm(text).split()
+    return frozenset(tok for tok in _supersede_span_tokens(text)
                      if tok in _ENTITY_PRONOUNS)
 
 
@@ -6575,10 +6604,12 @@ def _supersede_band_candidates(ref: str, points: list[dict]) -> list[dict]:
 
     Returns every candidate that passes; the CALLER resolves only when exactly
     one does. Acceptance is deliberately boolean rather than a similarity
-    score: a ref that must be a contiguous span, with matching negation and
-    condition markers, no exchanged connective and no substituted subject, is
-    either a copy of this prior or it is not one — and a score is what let a
-    substitution through in the first cut.
+    score: a ref whose core (frame-only edges trimmed) must be a contiguous
+    span of the prior's tokens — with matching negation and condition markers,
+    no exchanged connective and no substituted subject — is either a copy of
+    this prior or it is not one. A score is what let a substitution through in
+    the first cut, and a frame-word-blind span is what let a preposition
+    through in the third.
     """
     ref_tokens = _supersede_ref_tokens(ref)
     if len(ref_tokens) < SUPERSEDE_REF_MIN_TOKENS:
@@ -6608,8 +6639,8 @@ def _supersede_band_candidates(ref: str, points: list[dict]) -> list[dict]:
         cand_pron = _supersede_pronouns(content)
         if ref_pron and cand_pron and ref_pron != cand_pron:
             continue
-        if _tokens_contain_contiguous(ref_tokens,
-                                      _supersede_ref_tokens(content)):
+        if _span_contains(_supersede_span_tokens(ref),
+                          _supersede_span_tokens(content)):
             out.append(p)
     return out
 

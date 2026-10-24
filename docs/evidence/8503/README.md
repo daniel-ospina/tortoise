@@ -40,11 +40,14 @@ derives a corpus-level `operator_audit.drop_warnings` that separates the two cla
 
 | class | markers (refusal TAILS, never a shared prefix) | what a count means |
 |---|---|---|
-| **operator drops** | `operator dropped:`, `operator with unknown op_type`, `endpoint NOT minted`, `MITIGATES target edge not emitted` | the operator pass refused an edge the model emitted |
+| **operator drops** | `operator dropped:`, `operator with unknown op_type`, `non-dict operator entry`, `endpoint NOT minted`, `MITIGATES target edge not emitted` | the operator pass refused an edge the model emitted |
 | **supersede refusals** | `matches no S3 prior`, `is the point itself`, `supersedes itself`, `is ambiguous`, `does not resolve to an S3 search result`, `lifecycle=superseded with no supersedes ref` | the replace channel dropped a CORRECTS/supersession record |
 
-Measured on the fixed tree: **`operator_drops = 0` in every run.** Two defects in this
-discriminator were found in review and fixed before merge:
+Measured on the fixed tree: **`operator_drops = 0` in every run.** ⚠️ The column counts
+**warning LINES, not operators**: one operator whose `src` names an emitted entity logs both
+`endpoint NOT minted` (the mint refusal) and `operator dropped: src/dst did not resolve` (the
+pass consuming it), so a non-zero count over-reports — only the `== 0` test is sound. Three
+defects in this discriminator were found in review and fixed before merge:
 
 1. the first cut merged the two marker sets and reported "5 operator drops" on a run where
 the operator pass dropped nothing — five *entity-lifecycle* notices. Pinned by
@@ -54,6 +57,9 @@ SUCCESS warning also carried — counting the one resolution that worked as a dr
 markers are now refusal TAILS and the leg's success line is a distinct prefix, pinned by
 `test_recall_leg_success_warning_is_not_a_refusal` (which runs the leg and classifies the
 warning it actually emits, so a prose edit cannot satisfy it).
+3. `non-dict operator entry … skipped` had NO marker, so a malformed operator — a drop —
+left `operator_drops` at 0 while the run note said nothing had been dropped (round 3). It is
+a marker now, and the mutation arm pins the class.
 
 ⛔ **A ZERO IS EVIDENCE ABOUT THE OPERATOR PASS AND NOTHING ELSE.** Two seams are outside
 this instrument: the commit layer (`commit_ops.apply_payload_operators`) logs its skips
@@ -120,11 +126,15 @@ on purpose. The pre-fix operator receipt (`...-2026-10-19.json`) also reads `reg
 this is a stale family-wide baseline rather than a regression this PR caused, and it is not
 this issue's to re-bless.
 
-Two further diagnostic runs of the fixed tree (same instrument, prompt set slightly
-narrower — before the supersede band landed) read **6** and **6** `edge_correct` with
-`content_ok` 12/12, and two earlier harness runs of the intermediate prompt read 5 and 2.
-**The honest range of the fixed tree is 2–6 edges, median 5.** `content_ok` never left
-11–13 on any fixed-tree run, against **7** before — that is the systematic part.
+**What the committed artifacts support, and nothing more.** `before-run.json` = 3 (content_ok
+7); `...-8503-a.json` and `...-8503-b.json` = 5 and 5 (content_ok 11 and 11);
+`...-8503-preleg.json` = 5 (content_ok 13); the issue's own pre-fix receipt = 5. So the
+committed range on the fixed tree is **5–5 at the criterion number**, and `content_ok` 11–13
+against 7 before is the only movement the artifacts establish. Two further probe runs of this
+lane (not committed — the instrument is `probe`, not the runner) read 6 and 6, and two
+intermediate-run receipts read 5 and 2; they are named here so the reader can see why the
+document says the metric is noisy, and they are deliberately NOT used to claim a bigger
+range or a better median.
 
 ## 3. The mechanisms and what was done about each
 
@@ -184,13 +194,16 @@ wire IMPL between a root cause and the theory it refuted". This row flipped to
 `edge_correct` in **every** run of the fixed tree.
 
 **(b) the replace channel — a drifted copy of the prior.** The `SUPERSEDE` row is the one the
-issue names as `#3679`'s supersedes/`S3 RESOLVE` path. The receipt now shows the real
-mechanism: `point supersedes='We ship the lease fix all-at-once behind a single global kil'
+issue names as `#3679`'s supersedes/`S3 RESOLVE` path. **`w2b-operator-2026-10-24-8503-preleg.json`
+(committed, EVIDENCE VALID) shows the mechanism** — a run of this lane before the recall leg
+existed: `point supersedes='We ship the lease fix all-at-once behind a single global kil'
 matches no S3 prior — skipped (fail-open)`. The model **did** express the cross-session
 reversal through the licensed channel; the ref differed from the wp06 prior by a lead-in
-word ("We ship…" for "Ship…") and `_resolve_point_supersede` requires *exact* normalized
+word ("We ship…" for "Ship…") and `_resolve_point_supersede` required *exact* normalized
 equality, so the CORRECTS edge — the only carrier of a cross-session decision reversal —
-was dropped on a quoting slip.
+was dropped on a quoting slip. (The two later receipts do NOT carry that string: in those
+runs the model used the entity channel instead, which is why the row is still red in §2 and
+the fix is proven by §4's deterministic replay.)
 
 **Fixed:** the resolver gains a recall leg under the **same never-guess discipline**. The
 shape of that leg is the part review changed, and the first cut is worth recording: it
@@ -201,11 +214,13 @@ timeout onto a 60-second one, and a cause/effect pair onto its inversion — eve
 a pair `distinguishing_difference` refuses to even FOLD. A false CORRECTS terminalizes a
 live belief and there is no un-supersede API, so the leg is now **contiguous containment**:
 
-* the ref's content tokens must appear as a **contiguous** span of the prior's tokens (not
-  merely in order — an ordered subsequence can be recombined from two different clauses, and
-  a recombined ref is not a copy of anything) — a different number, entity, scope word, or a
-  role inversion breaks the span, while an ADDITION at either end (the measured drift) does
-  not;
+* the ref's CORE — the ref with its frame-only leading and trailing runs trimmed — must be a
+  **contiguous span** of the prior's tokens, with **frame words kept inside the span**. Frame
+  words are kept because a frame word's *role* is load-bearing: "by 30 seconds" is not "to 30
+  seconds", and "and" is not "or". Contiguous rather than merely ordered, because an ordered
+  match can be recombined from two different clauses of one prior. A different number, entity,
+  scope word, preposition, connective, or a role inversion breaks the span; an ADDITION at
+  either END (the measured drift prefixes "We") does not;
 * the two must carry the **same negation markers** (set equality, not presence — every
   negator is a frame word, so containment alone would fold "the cache is shared" onto
   "the cache is not shared", and two claims can each carry a negator and mean opposites);
@@ -215,7 +230,9 @@ live belief and there is no un-supersede API, so the leg is now **contiguous con
 The prompt also states that an **entity-level** supersede writes no reversal edge (the
 Layer-1 payload has no such channel) — the model had been expressing the reversal that way.
 `test_supersede_band_refuses_every_substitution` pins the safety direction with the exact
-pairs the first cut folded.
+pairs each review round folded, and the mutation arm proves each predicate is pinned by
+REVERTING it (`§4`) — a predicate with no discriminating case is a predicate nobody can
+regress-test.
 
 ⚠️ **This row still reads `edge_missing` in both after-runs**, because in those runs the
 model used the *entity* channel only and emitted no point-level `supersedes` at all. The
@@ -267,7 +284,9 @@ rewritten in review:
              and the drop is named: point supersedes='We ship the lease fix all-at-once behind a single global kil' matches no S3 prior — skipped (fail-open)
   [DETECTED] a leg that folds EVERY prior is caught by the same pin
   [DETECTED] restoring the COVERAGE RATIO is caught by the negative pin (the predicate is pinned, not just described)
-  [DETECTED] reverting to the ORDERED-SUBSEQUENCE predicate is caught by the negative pin (the contiguity tightening is pinned, not just described)
+  [DETECTED] reverting to the ORDERED-SUBSEQUENCE predicate is caught by the negative pin (the span tightening is pinned, not just described)
+  [DETECTED] removing the NEGATION predicate is DETECTED by its pin
+  [DETECTED] removing the TOKEN FLOOR is DETECTED by its pin
 
 3. edge_missing attribution (operator drop vs supersede refusal)
   [DETECTED] shipped classifier separates the classes AND ignores the recall leg's success line
@@ -286,8 +305,9 @@ coverage-ratio shape is re-injected as a fourth arm in section 2.
 
 ## 5. What did NOT move, and the honest limits of this measurement
 
-* **`edge_correct` did not move beyond noise.** Before 3, after 5/5 (and 6/6 on two
-  diagnostic runs, 2 on one harness run). The extractor is LLM-sampled
+* **`edge_correct` did not move beyond noise.** The committed artifacts read 3 before
+  (probe) and 5/5 after, against the issue's own pre-fix 5 — the number the criterion
+  measures is the same. The extractor is LLM-sampled
   (`deepseek/deepseek-v4-flash`, provider-served as `deepseek-flash`), and the README's own
   earlier note ("a corpus-level figure is stable enough at N=2") is **not** true of this
   state: the same code measured 2 and 6 on consecutive full-corpus runs. Any future claim on
@@ -340,7 +360,8 @@ receipts' `verdict` (`regression` — against a baseline that is stale fleet-wid
 receipt reads the same) was never stated. The mutation arm now also re-injects the
 coverage-ratio shape, so the predicate is pinned rather than merely described.
 
-**Round 3** found the condition predicate itself spoofable: `_condition_markers` reads whole
+**Round 3** found five more, in two passes. First the condition predicate itself was
+spoofable: `_condition_markers` reads whole
 tokens AND their word-parts (deliberately, for the fold path), and the sub-token split of
 "all-at-once" yields the marker `once` — so when both sides spelled that compound, a ref that
 had DROPPED a genuine "once the canary passes in staging" clause compared equal and resolved.
@@ -349,6 +370,24 @@ cannot be minted from inside a compound; every refusal this loses is still a ref
 compound case is pinned alongside the plain one. The containment test itself was tightened
 from an ordered subsequence to a **contiguous span** at the same time: an ordered match can be
 recombined across two clauses of one prior, which is not a copy of anything.
+
+The same round then found four more, and they are the reason the leg is now a span over the
+FULL token sequence rather than over content tokens:
+
+* a substituted **PREPOSITION** crossed every gate — "raise the timeout **by** 30 seconds"
+  superseded "raise the timeout **to** 30 seconds". Prepositions are frame words and are in no
+  connective slot, so nothing read them; a frame word inside the span is compared now;
+* the **pronoun** gate tokenised on a raw split, so `"they" ship …` (one quote mark) restored
+  the subject substitution — it now tokenises with the same punctuation strip as everything
+  else;
+* the **negation** predicate and the **token floor** had no discriminating pin: the pin's only
+  polarity case was refused by the floor instead, and setting the floor to 1 left the suite
+  green. Both now have an isolating case AND their own mutation arm;
+* `non-dict operator entry … skipped` was an unclassified real drop (§1).
+
+The pattern across the three rounds is worth stating: every hole was a **frame word** the
+predicate could not see, and each fix moved the leg closer to "the prior must literally
+contain this text". That is what a false CORRECTS costs.
 
 ## 6. Reproduction
 
