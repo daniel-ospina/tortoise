@@ -552,9 +552,20 @@ def _run(cmd: list[str], timeout: int = 300) -> tuple[int, str]:
     return proc.returncode, ((proc.stdout or "") + (proc.stderr or "")).strip()
 
 
+# Every way `sudo` says NO, because a refusal that is NOT recognised here is classified `failed`,
+# which sends the caller to `register(..., replace=True)` — re-registering a runner that was never
+# restarted, and invalidating the credentials of one that may be reconnecting. ⛔ The CANONICAL
+# denial was missing from the first version: sudo's actual words are "Sorry, user X is not allowed
+# to execute '…' as root on host" (a sudoers rule scoped to `/bin/systemctl` while `which` resolves
+# `/usr/bin/systemctl`, a rule for `start` but not `restart`, or a `nosuid` mount), and
+# "command not allowed" — the wording that WAS listed — is `doas`, not sudo.
 _SUDO_REFUSED = re.compile(
-    r"sudo:.*(?:password is required|no askpass program specified|not in the sudoers|"
-    r"a terminal is required|no tty present|command not allowed)",
+    r"sudo:.*(?:password is required|no askpass program specified|a terminal is required|"
+    r"no tty present)"
+    r"|Sorry, user .* is not allowed to execute"
+    r"|is not in the sudoers file"
+    r"|must be owned by uid .* and have the setuid bit set"
+    r"|effective uid is not",
     re.IGNORECASE,
 )
 

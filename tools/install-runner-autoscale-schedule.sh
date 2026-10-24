@@ -221,8 +221,8 @@ cron_daemon_problem() {
     echo "no cron/crond process is running"; return 1
   fi
   local d name
-  if [ -d /proc ]; then
-    for d in /proc/[0-9]*; do
+  if [ -d "${AUTOSCALE_PROC_DIR:-/proc}" ]; then
+    for d in "${AUTOSCALE_PROC_DIR:-/proc}"/[0-9]*; do
       [ -r "$d/comm" ] || continue
       read -r name < "$d/comm" 2>/dev/null || continue
       case "$name" in cron|crond) return 0 ;; esac
@@ -236,6 +236,33 @@ cron_daemon_problem() {
   fi
   echo "cannot determine whether a cron daemon is running (no pgrep, no /proc, no ps)"
   return 1
+}
+
+# ── reading the user's crontab: A FAILED READ MUST NEVER LOOK LIKE AN EMPTY ONE ──────────────
+# ⛔ THE DESTRUCTIVE SHAPE THIS REPLACES. Both the install and the uninstall leg fed
+# `crontab -l 2>/dev/null || true` straight into `crontab -`. A read that FAILS for any reason
+# other than "no crontab yet" (a permissions problem, a locked/held crontab, `crontab` on a box
+# with no spool directory) therefore produced an EMPTY string, which is indistinguishable from "the
+# user has no crontab" — and the write then REPLACED the whole thing: a user's own MAILTO and
+# nightly jobs gone, with `installed: cron entry -> …` and exit 0 printed over the loss. The
+# comment claiming "the `|| true` is on the READS only; the final write stays fatal" was exactly
+# backwards: a failed read is what makes the write fatal to the user's data.
+#
+# So the read happens ONCE, its stderr is kept, and the ONLY tolerated failure is the benign "no
+# crontab for <user>" (the normal state of a box that has never had one). Anything else REFUSES
+# before any write. Prints the current crontab on stdout; returns 2 (after naming the reason) when
+# it cannot be read.
+crontab_current() {
+  local err out rc
+  err="$(mktemp "${TMPDIR:-/tmp}/autoscale-crontab.XXXXXX")" || {
+    echo "REFUSED: cannot create a temp file to read the crontab safely" >&2; return 2; }
+  out="$(crontab -l 2>"$err")"; rc=$?
+  if [ "$rc" -ne 0 ] && ! grep -qi 'no crontab for' "$err"; then
+    echo "REFUSED: cannot read the crontab, so it will NOT be rewritten: $(tail -1 "$err" 2>/dev/null)" >&2
+    rm -f "$err"; return 2
+  fi
+  rm -f "$err"
+  printf '%s' "$out"
 }
 
 platform() {
@@ -470,10 +497,15 @@ status() {
       local svc="$UNIT_DIR/$LABEL.service" tmr="$UNIT_DIR/$LABEL.timer"
       if [ -f "$tmr" ]; then
         echo "installed: $tmr"
-        echo "enabled: $(systemctl is-enabled "$LABEL.timer" 2>&1)"
+        local en; en="$(systemctl is-enabled "$LABEL.timer" 2>&1)"
+        echo "enabled: $en"
         local state; state="$(systemctl is-active "$LABEL.timer" 2>&1)"
         echo "active:  $state"
         systemctl list-timers "$LABEL.timer" --all --no-pager 2>/dev/null | sed -n '1,2p'
+        # ⛔ ENABLED IS A THIRD INERT STATE. A disabled timer still starts and runs until the next
+        # boot, so `is-active` alone reads it as armed while the schedule is already doomed — and
+        # the install path now enables on every run, so the two must agree (cycle 3 review, P2).
+        [ "$en" = "enabled" ] || { echo "WARNING: $LABEL.timer is '$en', not enabled — it will not survive a reboot"; armed=0; }
         # ⛔ A STOPPED TIMER IS INERT TOO (`systemctl stop`, a mask, a failed unit). The install
         # path already fails hard on `is-active`, so `--status` reporting 0 for `active: inactive`
         # was the same false PASS one branch over (cycle 2; pre-existing, same family).
@@ -486,26 +518,13 @@ status() {
         echo "NOT installed (no $tmr)"; armed=0
       fi ;;
     cron)
-      # `grep -F … >/dev/null`, never `grep -q`: `-q` exits at the FIRST match, so a still-writing
-      # `crontab -l` takes SIGPIPE and `set -o pipefail` reports 141 — which `if` reads as "no
-      # match". Whether it fires depends on the buffer and on how much `crontab -l` still has to
-      # write when `-q` exits, so it is not a rare shape: measured on the dev box, 85 KB did NOT
-      # reproduce and 2.2 MB DID (141, 5/5) — host-dependent, and unfixable by sizing. When it
-      # does, `--status` reported an armed schedule as NOT installed (armed=0, exit 2) and a
-      # re-install APPENDED a second identical line, firing the guard twice per period (cycle 2
-      # review, P2 — the same SIGPIPE bug fixed for launchd, one branch over).
-      if crontab -l 2>/dev/null | grep -F "$LABEL-cron" >/dev/null; then
-        echo "installed: cron entry present"; crontab -l 2>/dev/null | grep -F "$LABEL-cron"
-        # ⛔ INSTALLED IS NOT ARMED: with the daemon down the entry never fires (see `has_cron`).
-        if cron_daemon_problem > /dev/null; then
-          echo "installed: cron entry present"; crontab -l 2>/dev/null | grep -F "$LABEL-cron"
-          # ⛔ INSTALLED IS NOT ARMED: with the daemon down the entry never fires, and an
-          # unverifiable reading (no pgrep, no /proc, no ps) must not read as "armed" either
-          # (see `cron_daemon_problem`).
-        else
-          echo "installed: cron entry present"; crontab -l 2>/dev/null | grep -F "$LABEL-cron"
-          echo "WARNING: $(cron_daemon_problem) — the entry will not fire"; armed=0
-        fi
+      cur="$(crontab_current 2>/dev/null)" || { echo "NOT verifiable (cannot read the crontab)"; armed=0; cur=""; }
+      if printf '%s\n' "$cur" | grep -F "$LABEL-cron" >/dev/null; then
+        echo "installed: cron entry present"; printf '%s\n' "$cur" | grep -F "$LABEL-cron"
+        # ⛔ INSTALLED IS NOT ARMED: with the daemon down the entry never fires, and an
+        # unverifiable reading (no pgrep, no /proc, no ps) must not read as "armed" either
+        # (see `cron_daemon_problem`).
+        cron_daemon_problem >/dev/null || { echo "WARNING: $(cron_daemon_problem) — the entry will not fire"; armed=0; }
       else echo "NOT installed (no $LABEL-cron in crontab)"; armed=0; fi ;;
     launchd)
       local plist="$AGENTS_DIR/$PLIST_LABEL.plist"
@@ -568,16 +587,26 @@ case "$MODE" in
         rm -f "$INSTALLED" 2>/dev/null || true
     echo "removed: $LABEL.timer/.service + the runnable copy" ;;
       cron)
-        # ⛔ `grep -vF` prints NOTHING and exits 1 when our line is the ONLY one, and `crontab -l`
-        # exits 1 on a box with no crontab yet — under `set -o pipefail` both made a SUCCESSFUL
-        # rewrite look failed ("could not rewrite crontab"). The `|| true` is on the READS only;
-        # the final write stays fatal.
-        { crontab -l 2>/dev/null | grep -vF "$LABEL-cron" || true; } | crontab - \
+        # ⛔ THE READ IS VALIDATED FIRST (`crontab_current`), or a failed read writes an EMPTY
+        # crontab over the user's own entries — see that function's comment.
+        cur="$(crontab_current)"; rc=$?
+        [ "$rc" = 0 ] || exit "$rc"
+        { if [ -n "$cur" ]; then printf '%s\n' "$cur" | grep -vF "$LABEL-cron" || true; fi; } | crontab - \
           || { echo "ERROR: could not rewrite crontab" >&2; exit 1; }
         echo "removed: $LABEL-cron" ;;
       launchd)
         launchctl bootout "gui/$(id -u)/$PLIST_LABEL" 2>/dev/null || true
         rm -f "$AGENTS_DIR/$PLIST_LABEL.plist" || exit 1
+        # ⛔ "REMOVED THE PLIST" IS NOT "STOPPED THE AGENT". If `bootout` failed ("Operation not
+        # permitted" from outside the GUI session, a disabled login item) the plist is gone while
+        # the LOADED agent keeps firing every INTERVAL, and `--status` afterwards reports NOT
+        # installed because it only checks the plist — nothing would ever surface it. The install
+        # path already has the "wrote != loaded" verification this path lacked.
+        if launchctl list 2>/dev/null | grep -F "$PLIST_LABEL" >/dev/null; then
+          echo "ERROR: $PLIST_LABEL is STILL LOADED (bootout failed) — it will keep firing" >&2
+          echo "       retry from a GUI session, or: launchctl bootout gui/$(id -u)/$PLIST_LABEL" >&2
+          exit 1
+        fi
         echo "removed: $PLIST_LABEL" ;;
       *) echo "nothing to remove on $(uname -s)" ;;
     esac
@@ -600,7 +629,15 @@ esac
 # (VGATE round 2). Resolve the cron entry HERE, before the probe and before any write, so the
 # promise holds on every refusal path.
 CRON_LINE=""
-[ "$PLATFORM" = cron ] && { CRON_LINE="$(cron_line)" || exit 2; }
+# ⛔ THE CRONTAB IS READ HERE, ONCE, BEFORE ANY WRITE — for the same reason the period gate above
+# is: both install branches WRITE THE WHOLE CRONTAB BACK, so an unvalidated read that failed
+# silently would replace the user's own entries with just our line. Reading it here keeps the
+# "a refusal writes NOTHING" promise instead of refusing after the runnable copy was refreshed.
+CRONTAB_CUR=""
+[ "$PLATFORM" = cron ] && {
+  CRON_LINE="$(cron_line)" || exit 2
+  CRONTAB_CUR="$(crontab_current)" || exit 2
+}
 # ⛔ AND THE SAME RULE FOR A CRON ENTRY ON A BOX WITH NO CRON DAEMON. The systemd leg refuses on
 # `is-active != active` and the launchd leg on a missing label, but the cron leg checked only that
 # the BINARIES exist. `crontab` present with the daemon stopped is the normal shape of a container
@@ -657,8 +694,14 @@ case "$PLATFORM" in
     fi
     if [ "$changed" = 1 ]; then
       sudo -n systemctl daemon-reload || exit 1
-      sudo -n systemctl enable "$LABEL.timer" || exit 1
     fi
+    # ⛔ ENABLE RUNS ON EVERY INSTALL, NOT ONLY WHEN THE UNITS CHANGED. `systemctl enable` is
+    # idempotent, and a re-run whose unit files are byte-identical (i.e. every run after the first)
+    # skipped it — so on a box where the timer was disabled out of band (`systemctl disable --now`
+    # to pause the guard, a preset reset) the installer printed "installed … (active)" and exited 0
+    # without ever enabling it, and the schedule was silently gone at the next reboot. Same class
+    # as the launchd leg's "UNCHANGED IS NOT LOADED", fixed in this PR one branch over.
+    sudo -n systemctl enable "$LABEL.timer" || exit 1
     sudo -n systemctl start "$LABEL.timer" || exit 1
     # VERIFY the timer will actually fire — "enabled" alone is not a schedule.
     state="$(systemctl is-active "$LABEL.timer" 2>&1)"
@@ -667,13 +710,16 @@ case "$PLATFORM" in
     systemctl list-timers "$LABEL.timer" --no-pager 2>/dev/null | sed -n '1,2p' ;;
   cron)
     line="$CRON_LINE"
-    if crontab -l 2>/dev/null | grep -F "$LABEL-cron" >/dev/null; then
-      cur="$(crontab -l 2>/dev/null | grep -F "$LABEL-cron")"
-      if [ "$cur" = "$line" ]; then echo "installed (unchanged): cron entry present"; exit 0; fi
-      { crontab -l 2>/dev/null | grep -vF "$LABEL-cron" || true; } | { cat; echo "$line"; } | crontab - \
+    # The read was VALIDATED in the pre-flight gate (`CRONTAB_CUR`), so this never writes over a
+    # crontab it could not read.
+    cur="$CRONTAB_CUR"
+    if printf '%s\n' "$cur" | grep -F "$LABEL-cron" >/dev/null; then
+      existing="$(printf '%s\n' "$cur" | grep -F "$LABEL-cron")"
+      if [ "$existing" = "$line" ]; then echo "installed (unchanged): cron entry present"; exit 0; fi
+      { printf '%s\n' "$cur" | grep -vF "$LABEL-cron" || true; echo "$line"; } | crontab - \
         || exit 1
     else
-      { crontab -l 2>/dev/null || true; echo "$line"; } | crontab - || exit 1
+      { [ -n "$cur" ] && printf '%s\n' "$cur"; echo "$line"; } | crontab - || exit 1
     fi
     echo "installed: cron entry -> $line" ;;
   launchd)
