@@ -725,12 +725,19 @@ def source_change_notices(g, source_refs, current_versions: dict[str, str] | Non
 # WHY DECLARED AND NOT JOURNALLED, PRECISELY. Two shapes would have made this
 # write honest without a declaration, and the evidence rejects BOTH:
 #   * `_live_write_scope` — its contract is "journal appended first, then the
-#     fold". ✅ That is now TRUE of this lane (`#9553` class 4): the mints journal
-#     a flat `DirectEdgeCreated` next to the edge, so the lane COULD declare it.
-#     It keeps the narrower `_structural_edge_write_scope` because the write is
-#     still not gated on the append (the append is best-effort, and a refused
-#     append must not refuse a product write) — the declaration names the write,
-#     not the ordering.
+#   * `_live_write_scope` — its contract is "journal appended first, then the
+#     fold". ⛔ That is still NOT this lane's ordering, and `#9553` class 4 did
+#     not make it so: the mints now DO journal a flat `DirectEdgeCreated` next to
+#     the edge, but they still call the recorder AFTER the
+#     `with _structural_edge_write_scope():` block closed — APPEND-AFTER-WRITE,
+#     and the append is not gated (`_emit_event` is best-effort by contract, and
+#     a refused append must not refuse a product write). A failed or absent
+#     append therefore leaves a live edge with no record until a retry closes the
+#     window. That is `create_direct_edge`'s posture, deliberately, not this
+#     lane's mistake; the lane keeps the narrower `_structural_edge_write_scope`
+#     because the declaration names the WRITE, not an ordering it does not hold.
+#     ⛔ Do NOT re-word this into "the ordering is now true": a downstream lane
+#     reads this block as the contract, and the contract is append-after-write.
 #   * journalling — ✅ LANDED (`#9553` class 4, `_record_structural_edges`).
 #     `DirectEdgeCreated` is a flat `{src, tgt, edge_type, source_label,
 #     target_label}` record whose pass-2b fold re-creates exactly this edge shape,
@@ -739,9 +746,12 @@ def source_change_notices(g, source_refs, current_versions: dict[str, str] | Non
 #     emission lives at the mint and reaches the journal through the recorder the
 #     journal-owning door binds; a REPLAY never emits (`replay_window_open`),
 #     because a recovery write that appended to the truth store would make the
-#     log a function of itself. The record-store epic that owns this half is
-#     `#7879` (R5), and the write-class row this lane's LIVE side already carried
-#     is on `#9079`'s census.
+#     log a function of itself. ⛔ The mint is the ONLY producer: `#9827` had put
+#     one at the SDK door (`sdk.create_edge`), which left the typed wrappers and
+#     the node-property lane uncarried and double-journaled every door edge once
+#     this landed — it was DELETED in the same change. The record-store epic that
+#     owns this half is `#7879` (R5), and the write-class row this lane's LIVE
+#     side already carried is on `#9079`'s census.
 # And the ORDERING is settled the other way round regardless: the declaration
 # lands BEFORE the guard, because a guard that refuses the product's own edge
 # mints is not a guard, it is a regression (measured on `#9079`'s lane: arming it
@@ -787,6 +797,20 @@ def source_change_notices(g, source_refs, current_versions: dict[str, str] | Non
 #     and a SELF-EDGE is skipped (the fold's `E2E-11.6` no-self contract) — both
 #     warn once. Before `#9553`, EVERY one of these was uncarried and silent;
 #     the point of the ledger is that the remaining gaps are named.
+#
+#     ⛔ The emission sits at the MINT (`_record_structural_edges`), not at any
+#     SDK door, so it reaches the three typed wrappers
+#     (`create_owned_by`/`create_managed_by`/`create_authored_by` —
+#     `return self.create_edge(...)`), the node-property lane
+#     (`sdk.create_object(..., ownedBy=…)`, which calls `proj.create_owned_by`
+#     DIRECTLY and so never passed through any door), and every other direct
+#     `proj.create_edge` caller (the ingest bundle-connection writer, the
+#     approver/event `performs`/`uses`/`produces` writes, the `wasDerivedFrom`
+#     writer) for free. MEASURED pre-fix: `sdk.create_object(name, "product",
+#     ownedBy=team)` journalled no `DirectEdgeCreated`, live `ownedBy` count 1,
+#     post-rebuild **0** — the commonest `ownedBy` producer. That lane is
+#     CARRIED now, and pinned by
+#     `tests/test_9553_class4_structural_edge_carrier.py`.
 #
 # ⛔ WHAT THIS LANE DOES NOT COVER — stated, so a reader does not infer it from
 # a green suite. `_EdgeHandlers` holds OTHER edge-minting verbs; they are not
@@ -961,11 +985,23 @@ SUPERSEDE_TRANSFERRED_RELS = frozenset({
 })
 
 
-#: Logged once per relation, not once per write: the decline is a DECLARED gap
-#: ("this endpoint class has no record carrier"), and a per-write line on the
-#: `references` fan-out would bury every other log in the process. The reason is
-#: stated at the code site and in `04-projection.md` §3 — never left to be found.
-_RECORD_GAP_WARNED: set[str] = set()
+#: Logged once per (CAUSE, relation) — not once per write and not once per
+#: relation: the decline is a DECLARED gap ("this endpoint class has no record
+#: carrier"), and a per-write line on the `references` fan-out would bury every
+#: other log in the process. The reason is stated at the code site and in
+#: `04-projection.md` §3 — never left to be found.
+#:
+#: ⛔ KEYED BY THE CAUSE, NOT BY THE RELATION ALONE (#9553 review P3). Two
+#: DIFFERENT writers disclose two DIFFERENT facts about the same relation:
+#: this module's mint ("endpoint NOT addressable by the replay fold", per write)
+#: and `TortoiseSDK._record_structural_edge` ("SELF-EDGE skipped, `E2E-11.6`", per
+#: write). With a relation-only key either writer's `add()` suppressed the
+#: other's disclosure, so the second cause went silent: one `references` with a
+#: `:Source` source followed by `create_edge("references", p, p)` wrote a live
+#: self-loop, journalled nothing, and said nothing — the exact
+#: "silent live ≠ rebuild divergence" the skip exists to prevent. Each cause now
+#: keeps its own once-per-relation line.
+_RECORD_GAP_WARNED: set[tuple[str, str]] = set()
 
 
 def _record_addressable(end: Mapping[str, Any]) -> bool:
@@ -1039,14 +1075,24 @@ class _EdgeHandlers:
         write a record the JOURNAL rebuild cannot consume while the RECORD rebuild
         can — the two routes disagreeing, which is the one thing this family is
         supposed to make impossible. Such a write is DECLINED (no partial
-        descriptor) and disclosed ONCE per relation, with the reason, rather than
-        dropped in silence (the failure mode that let R5 sit).
+        descriptor) and disclosed ONCE per (cause, relation), with the reason,
+        rather than dropped in silence (the failure mode that let R5 sit).
+
+        ⛔ AND AN ENDPOINT WITH NO WRITABLE `id` IS A THIRD, SEPARATE CAUSE, with
+        a higher severity: the live edge WAS minted (the source OR-set carries
+        `by_url=True` so a url-only `:Source` stub resolves), so there is no
+        identity to name and no record — a data-loss signal, not an ordinary
+        absent identity. It is REPORTED per write through
+        `projection._log_identity_skip(absent_is_ordinary=False,
+        drops_record=True)`, and it keeps its own `(cause, relation)` key in
+        :data:`_RECORD_GAP_WARNED` so it can never be silenced by the label
+        gate's line (or by the SDK's self-edge line) for the same relation.
         """
         recorder = getattr(self, "_structural_edge_recorder", None)
         if recorder is None:
             return
         # Lazy import: `tortoise.projection` imports THIS module.
-        from tortoise.projection import replay_window_open
+        from tortoise.projection import _writable_id, replay_window_open
 
         if replay_window_open():
             # Expected and silent: a replay reconstructs a graph from records that
@@ -1056,21 +1102,47 @@ class _EdgeHandlers:
         declined: list[str] = []
         for s in sources:
             for t in targets:
-                for end in (s, t):
+                skip_pair = False
+                for role, end in (("source", s), ("target", t)):
+                    props = end.get("properties") or {}
+                    node_id = props.get("id")
+                    if not _writable_id(node_id):
+                        # ⛔ A DIFFERENT CAUSE from the label gate below, and a
+                        # different SEVERITY. `_record_addressable` refuses on
+                        # the fold's own terms; this refuses because there is no
+                        # identity to name AT ALL, while the live edge IS minted
+                        # (the source OR-set carries `by_url=True` precisely so a
+                        # url-only `:Source` stub — `_mint_source_stub` writes
+                        # no `id` — RESOLVES). A live-only edge with no carrier
+                        # and no signal is indistinguishable at runtime from the
+                        # declared skips, so it is REPORTED through the
+                        # projection's one skip reporter, per write, rather than
+                        # swept into the once-per-relation declaration.
+                        from tortoise.projection import _log_identity_skip
+
+                        _log_identity_skip(
+                            f"structural edge ({rel}) {role} endpoint",
+                            node_id, "id (record endpoint)",
+                            absent_is_ordinary=False, drops_record=True)
+                        skip_pair = True
+                        break
                     if not _record_addressable(end):
                         declined.append(
                             f"{end.get('label')}:{end.get('key')}")
+                        skip_pair = True
                         break
-                else:
-                    recorder({
-                        "edge_type": rel,
-                        "src": s["value"],
-                        "src_label": s["label"],
-                        "tgt": t["value"],
-                        "tgt_label": t["label"],
-                    })
-        if declined and rel not in _RECORD_GAP_WARNED:
-            _RECORD_GAP_WARNED.add(rel)
+                if skip_pair:
+                    continue
+                recorder({
+                    "edge_type": rel,
+                    "src": s["value"],
+                    "src_label": s["label"],
+                    "tgt": t["value"],
+                    "tgt_label": t["label"],
+                })
+        cause = ("endpoint-not-addressable", rel)
+        if declined and cause not in _RECORD_GAP_WARNED:
+            _RECORD_GAP_WARNED.add(cause)
             logger.warning(
                 "structural edge %r: %d endpoint(s) are NOT addressable by the "
                 "`DirectEdgeCreated` replay fold (%s) — the edge is written to "
@@ -2455,7 +2527,15 @@ class _EdgeHandlers:
 
     def create_edge(self, source_id: str, target_id: str, predicate: str) -> bool:
         """Create a named edge between two entities by their IDs.
-        Matches target by id OR eventId (Event nodes use eventId as key)."""
+        Matches target by id OR eventId (Event nodes use eventId as key).
+
+        ⛔ This verb takes NO property parameter and NO ``**kwargs`` — §9.6's
+        boundary (a derivation edge minted here carries no ``sourceVersion``
+        anchor and nothing can supply one) is pinned by
+        ``tests/test_references_boundary_5213.py``. The record CARRIER for the
+        edge is emitted one level up, by the SDK door, which resolves the
+        endpoints and writes ``DirectEdgeCreated`` (#9553, R5 class 4).
+        """
         valid_predicates = _VALID_EDGE_PREDICATES
         if predicate not in valid_predicates:
             raise ValueError(f"Unknown predicate: {predicate}")

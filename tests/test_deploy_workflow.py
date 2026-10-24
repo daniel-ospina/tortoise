@@ -2203,3 +2203,870 @@ class TestWorkflowScriptDependenciesAreOnTheRunner:
         assert any(w == "billing-reconcile-cron.yml" for w, _j, _r, _c in cases), (
             "the billing reconcile driver must be among the covered jobs"
         )
+
+
+# ── R1 (#9548, epic #7879): the Postgres record must be ARMABLE from the deploy ─
+# The record's seam is presence-based on `TORTOISE_RECORD_DSN`: unset ⇒
+# NOT_ARMED ⇒ zero statements, no connection attempt, nothing red (§A8 of
+# `docs/epics/2026-10-10-7879-postgres-record/08-hosted-prerequisites.md` measured
+# exactly that state on the live deployment). Every other part of the record was
+# already built and CI-green, so the remaining defect was that NO deploy surface
+# named the variable — a capability that could only be switched on with an
+# out-of-band `fly secrets set`, which the provenance gate then correctly reports
+# as unsourced. These two tests pin the surfaces R1 changed, because each one can
+# be reverted with the rest of the suite still green.
+
+_RECORD_DSN_ENV = "TORTOISE_RECORD_DSN"
+_PROVENANCE_STEP = "Check Fly secret provenance (fail-closed)"
+_REPO_ROOT = _WORKFLOW.parents[2]
+_SECRET_MANIFEST = _REPO_ROOT / ".github" / "scripts" / "fly-managed-secrets.txt"
+_RUNBOOK = _REPO_ROOT / "docs" / "infra-runbook.md"
+_EPIC_DOC = (
+    _REPO_ROOT
+    / "docs"
+    / "epics"
+    / "2026-10-10-7879-postgres-record"
+    / "08-hosted-prerequisites.md"
+)
+
+#: A Secrets Matrix row, same shape the #8614 guard reads.
+_MATRIX_ROW = re.compile(
+    r"^\|\s*([A-Z][A-Z0-9_]*)\s*\|([^|]*)\|([^|]*)\|([^|]*)\|\s*$", re.MULTILINE
+)
+
+
+def _drift_gate():
+    """The shipped provenance gate, imported as a module.
+
+    ONE reader per surface: `read_manifest` (the manifest) and
+    `fly_toml_env_keys` (what counts as an `[env]` ASSIGNMENT) are the gate's
+    own, so this test cannot disagree with the deploy about what a declaration
+    means. The local copy this replaced did `line.split("#", 1)[0].split()`,
+    which is the parse bug the gate documents — `REGISTRY_STREAM_KEY
+    fly-only:#661` truncated to `fly-only:` — i.e. the test meant to prove "the
+    manifest and the gate agree" used a weaker parser than the gate (#9548
+    review, non-blocking B).
+    """
+    import importlib.util
+
+    sys.path.insert(0, str(_REPO_ROOT / ".github" / "scripts"))
+    spec = importlib.util.spec_from_file_location(
+        "check_fly_secret_drift_r1", _REPO_ROOT / ".github" / "scripts" / "check-fly-secret-drift.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def _manifest_declarations() -> dict[str, str]:
+    """`{Fly variable: source token}` for every shipped manifest declaration."""
+    return _drift_gate().read_manifest(_SECRET_MANIFEST)
+
+
+def test_the_manifest_reader_keeps_a_fly_only_reference_intact():
+    """#9548 review B: the manifest is read with the GATE's parser, not a `#` split.
+
+    A plain `line.split("#", 1)[0]` cuts at the `#` INSIDE a `fly-only:#661`
+    reference, so `REGISTRY_STREAM_KEY` parsed to `fly-only:` — the issue number
+    silently lost, the exact spelling `check-fly-secret-drift.py` records as a
+    past bug. The reader is now the gate's own `read_manifest`, and this asserts
+    the READING (the reference keeps its `#<N>`), not merely that the name
+    appears, so a future hand-rolled copy turns this red.
+
+    The reference is validated with the GATE's own `_FLY_ONLY_REF_RE`, not a
+    locally retyped `fly-only:#\\d+` (#9585 review, non-blocking): the gate's
+    contract admits `<owner>/<repo>#<N>` as well as `#<N>`, so the narrower copy
+    would have red a future cross-repo `fly-only:` entry on prose, not on a bug —
+    the same "one reader per surface" rule the module applies to `read_manifest`.
+    """
+    gate = _drift_gate()
+    ref_re = gate._FLY_ONLY_REF_RE
+    # The relaxed pin must still reject the EXACT truncation it exists to catch,
+    # and still accept both documented spellings — otherwise "use the gate's
+    # regex" could widen to nothing (#9585 review r5).
+    assert ref_re.fullmatch("#661") and ref_re.fullmatch("acme/repo#661"), (
+        "the gate's fly-only reference no longer accepts the documented `#<N>` / "
+        "`<owner>/<repo>#<N>` spellings — this pin's scope has changed, re-derive it"
+    )
+    assert not ref_re.fullmatch(""), (
+        "the gate's fly-only reference accepts the EMPTY argument, so a `#`-split "
+        "reader (`fly-only:#661` → `fly-only:`) would pass this pin"
+    )
+    declared = _manifest_declarations()
+    fly_only = {n: s for n, s in declared.items() if s.startswith("fly-only:")}
+    assert fly_only, "the shipped manifest declares no fly-only: name — the reader is wrong"
+    for name, source in fly_only.items():
+        argument = source.split(":", 1)[1]
+        assert ref_re.fullmatch(argument), (
+            f"{name} parsed as {source!r} (reference {argument!r}) — the `#` inside "
+            "the issue reference was read as a comment marker (read the manifest "
+            "with the gate's `read_manifest` instead of a `split('#')` copy), or "
+            "the entry carries no well-formed issue reference at all"
+        )
+
+
+def _matrix_rows() -> dict[str, tuple[str, str, str]]:
+    """`{name: (fly, falkordb, github)}` for the runbook's Secrets Matrix rows."""
+    section = _RUNBOOK.read_text(encoding="utf-8").split("## Secrets Matrix", 1)
+    assert len(section) == 2, "docs/infra-runbook.md has no `## Secrets Matrix` section"
+    body = section[1].split("\n## ", 1)[0]
+    return {
+        name: (fly.strip(), fdb.strip(), gh.strip())
+        for name, fly, fdb, gh in _MATRIX_ROW.findall(body)
+    }
+
+
+_RECORD_ARMING_HEADING = "### Arming the Postgres record"
+
+
+def _record_arming_section() -> str:
+    """The runbook's `Arming the Postgres record` section, verbatim.
+
+    Scoped to the section, so a `/metrics` mention elsewhere in the 2.7k-line
+    runbook (§6.9's `serve_health` discussion legitimately has one) can neither
+    satisfy nor fail these assertions by accident.
+    """
+    text = _RUNBOOK.read_text(encoding="utf-8")
+    assert _RECORD_ARMING_HEADING in text, (
+        f"docs/infra-runbook.md has no {_RECORD_ARMING_HEADING!r} section — the "
+        "operator's only arming recipe moved or was deleted"
+    )
+    body = text.split(_RECORD_ARMING_HEADING, 1)[1]
+    return body.split("\n## ", 1)[0].split("\n### ", 1)[0]
+
+
+def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
+    """#9548 review P1: the verify recipe must not read a route the app never serves.
+
+    The recipe shipped with this section was
+    `fly ssh console … -C "curl -s localhost:9090/metrics | grep record_write_failures"`,
+    and it CANNOT return a reading in any state: the hosted app's 9090 listener is
+    `monitoring.start_health_listener` → `_HealthzHandler`, which answers `/healthz`
+    and 404s every other path, and `serve_health` (the only `/metrics` server) is not
+    a `fly.toml` process. `curl -s` prints the 404 body, `grep` matches none of it,
+    and the recipe emits NOTHING — byte-identical to "0 failures", the reading the
+    next line told the operator to want. A fail-open verification step, in the
+    section that exists because the record can be silently inert.
+
+    Falsifying on the pre-fix text: `9090/metrics` and the absolute bar both appear
+    there, and neither may come back.
+    """
+    section = _record_arming_section()
+    # No PRESCRIBED command block may read the route: the section may (and does)
+    # QUOTE the broken recipe in prose to warn an operator off it, but a fenced
+    # `bash` block is a command the operator is told to run.
+    blocks = re.findall(r"```bash\n(.*?)```", section, re.DOTALL)
+    assert blocks, "the arming section prescribes no command — the reader is wrong"
+    for block in blocks:
+        assert "9090/metrics" not in block, (
+            "a prescribed arming command greps `localhost:9090/metrics`, which the "
+            "hosted app does NOT serve (`_HealthzHandler` 404s every path but "
+            "/healthz`) — it prints nothing in every state, so an empty grep reads "
+            "as a pass"
+        )
+    # ... and the check that DOES exist is named: the seam logs every non-write at
+    # WARN with its reason (`tortoise/record_writer.py`).
+    assert "the record write did not happen" in section, (
+        "the section names no read surface for a refused write — the seam logs "
+        "'the record write did not happen (<reason>)' and nothing greps it"
+    )
+    # The pass bar must state the EXPECTED non-zero baseline instead of "0":
+    # a `no_durable_journal` decline is the healthy M2 capture path, and #9264's
+    # `DatatypeMismatch` refusals are counted on `write_failed`.
+    assert "must stay **0**" not in section, (
+        "the section sets an absolute `record_write_failures == 0` bar, which a "
+        "HEALTHY armed deployment fails: #9264's DatatypeMismatch refusals are "
+        "counted on write_failed (and the R1-before-R2 ordering expects them)"
+    )
+    for expected in ("#9264", "no_durable_journal", "record_non_journal_skips"):
+        assert expected in section, (
+            f"the verify section does not name {expected!r} — an operator reading a "
+            "non-zero counter has no way to tell the documented baseline from a "
+            "real arming failure"
+        )
+    # ... and the bar must require PRESENCE, and must not let an empty reading
+    # pass. `write_live_record` returns BEFORE counting anything when unarmed
+    # (`tortoise/record_writer.py`: `if not armed: return None`), so an unarmed
+    # deployment yields `record_write_failures: {}`,
+    # `record_non_journal_skips: {}` and an empty `fly logs` grep — the "no
+    # unexpected failure" half is then VACUOUSLY satisfied.
+    #
+    # These pin CLAUSES (a sentence), never a bare token: `record_position_unproven`
+    # and `journal_event` already appear elsewhere in the section (the recipe-2
+    # counter list, the SQL block), so membership tests on them are satisfied
+    # without the bar saying anything (#9585 reviews; three assertions were
+    # vacuous that way). Each is mutation-proven against a meaning inversion.
+    assert re.search(r"An all-empty reading is NOT a pass", section), (
+        "the bar never says an all-empty reading is not a pass — an unarmed "
+        "deployment counts nothing at all, so a bar written only as 'no growth' "
+        "is vacuously green on the silent-inert deployment this exists to detect"
+    )
+    assert re.search(r"After the capture, require\s+at least one reading \*\*before\*\* you interpret anything:", section), (
+        "the bar states no presence requirement — name the reading that must "
+        "EXIST after a capture before the reason breakdown means anything"
+    )
+    # The presence LIST must be the five qualifying readings, in one clause — not
+    # merely a lead-in that some other, always-true reading could be appended to.
+    presence = re.search(
+        r"After the capture, require\s+at least one reading \*\*before\*\* you interpret anything:(.*?)\.\s",
+        section,
+        re.S,
+    )
+    assert presence, "the presence requirement does not enumerate its readings"
+    for reading in ("record_write_failures", "record_non_journal_skips",
+                    "record_position_unproven", "journal_event"):
+        assert reading in presence.group(1), (
+            f"the presence list omits {reading!r} — an armed deployment whose only "
+            "signal is that reading is then indistinguishable from an inert one"
+        )
+    # The closure pin's PROPERTY: presence must be evidence of a WRITE ATTEMPT that
+    # could reach the record. A `capture_session` capture declines at
+    # `write_live_record`'s `if not durable` branch — before tenant resolution, the
+    # breaker, or any socket — so it grows `no_durable_journal` on a deployment
+    # armed against nothing. The bar must therefore say the proving capture is a
+    # JOURNALING one, and no route/probe reading may qualify.
+    assert not re.search(r"/health|GET /|probe", presence.group(1)), (
+        "the presence list admits a health/liveness probe — that answers on an "
+        "app whose record seam is completely inert, so presence becomes "
+        "trivially satisfiable and the bar greens the state it exists to catch"
+    )
+    assert re.search(r"The capture that proves presence must be a\s+JOURNALING one", section), (
+        "the bar does not require the proving capture to be a JOURNALING one — a "
+        "`capture_session` capture grows `no_durable_journal` at "
+        "`write_live_record`'s `if not durable` branch, before any tenant "
+        "resolution or socket, so it satisfies presence on a deployment that "
+        "never reaches Postgres"
+    )
+    # The BEFORE-and-after baseline: "growth" has no referent without it.
+    assert re.search(r"read both counters BEFORE the\s+capture and again after", section), (
+        "the bar says 'growth' but never tells the operator to take a reading "
+        "BEFORE the capture — an absolute count left from earlier in the "
+        "process's life then reads as this capture's growth"
+    )
+    assert re.search(r"If nothing appeared at all, do not conclude the record is healthy", section), (
+        "the bar has no arm for an empty reading — an operator landing there is "
+        "told nothing, and that state is the whole point of the section"
+    )
+    # ... and item 2 must survive, anchored on its imperative the same way the
+    # presence lead-in is. A phrase-only pin accepted "*Then*, if convenient:" and
+    # "*Then*: you need not care about …" (both GREEN), i.e. the half the bar
+    # depends on could be voided without a red.
+    assert re.search(r"\*Then\*:\s*\*\*no growth in a reason other than", section), (
+        "the bar drops or softens item 2 — with it gone, a `circuit_open` / "
+        "`no_tenant` reading passes on the #9264 baseline alone, which is the "
+        "state this section exists to catch"
+    )
+    assert re.search(
+        r"none at all for `no_tenant` /\s+`malformed_dsn` / `circuit_open`", section
+    ), (
+        "the bar no longer says the three always-fail reasons are a fail-and-fix, "
+        "so the state this section exists to catch reads as a pass"
+    )
+    # The #9264 `write_failed` exemption bound: without it the documented
+    # R1-without-R2 state (writes nothing, counts only `write_failed`) satisfies
+    # item 1's *any reason* clause AND the exemption — green with zero rows.
+    assert re.search(r"a\s+deployment that writes no row at all is not passing this bar", section), (
+        "the `write_failed` exemption is unbounded — the R1-without-R2 deployment "
+        "writes no row, grows only `write_failed`, and then passes both halves"
+    )
+    assert re.search(r"a new `journal_event` / `point` row must still appear", section), (
+        "the bar never requires a row to exist, only that no unexpected reason "
+        "grew — a deployment writing nothing satisfies that"
+    )
+    # The reasons must NOT be given a common basis: a later review found the
+    # section asserting "each is counted only after the DSN resolved, so any of
+    # them proves the seam exists and ran", which `no_journal` (journal-less
+    # lane, `write_live_record` never entered) and `malformed_dsn` (counted when
+    # the DSN fails the scheme check) both contradict. Pin the MEANING, not the
+    # old phrase: the section must send the reader to the counting site instead.
+    assert re.search(r"its counting site in the code is the\s+authoritative statement", section), (
+        "the section states no authority for the meanings it does not give — "
+        "without it a common basis for the reasons is the natural (wrong) reading"
+    )
+    # `record_dsn()` does no parsing (a scheme-prefix check only), so a "parseable
+    # DSN" definition of `malformed_dsn` is false and self-contradictor by the
+    # section's own §The value, which says the scheme check cannot catch a bad
+    # password.
+    assert "not a parseable DSN" not in section, (
+        "the section defines `malformed_dsn` as a parse failure — `record_dsn()` "
+        "does no parsing, only a `postgresql://` / `postgres://` prefix check"
+    )
+    assert re.search(r"does \*\*not start with\*\*\s+`postgresql://`", section), (
+        "`malformed_dsn` is not defined by the scheme check it actually is"
+    )
+    # `no_tenant` is also the DESIGNED outcome for a credential that names no
+    # graph (`record_tenant_for` returns None for org-wide / session / legacy /
+    # OAuth keys; `hosted_api._bind_record_tenant` documents the seed and
+    # background-indexing surfaces the same way, #9188/#9192), and these counters
+    # are process-global — so an absolute "none at all for `no_tenant`" reds a
+    # healthy armed deployment on ordinary traffic and offers no legitimate
+    # remedy. The bar must bound that arm to the CAPTURE and say how to attribute
+    # growth, while keeping it a fail-and-fix for the capture's own writes.
+    assert re.search(r"BOUND to the proving capture, not to the process", section), (
+        "the `no_tenant` arm is absolute — it fails a healthy deployment on the "
+        "unbound-credential `no_tenant` the code counts by design, and the only "
+        "lever the section offers (`TORTOISE_RECORD_SINGLE_TENANT`) is the "
+        "#9192 cross-tenant hazard it forbids below"
+    )
+    # ⛔ NOT the bare token `process-global`: the section already says "env is
+    # process-global" about the #9192 env pair (line ~2960), so a bare-token arm
+    # passed on the PRE-fix wording — a vacuous assertion, caught by the verifier
+    # and re-anchored to this clause.
+    assert re.search(r"These counters are \*\*process-global\*\*", section), (
+        "the section does not say the counters are process-global, so a "
+        "before/after delta reads as if it measured only the capture"
+    )
+    assert re.search(r"graph-bound", section), (
+        "the section gives no way to make the capture's own `no_tenant` "
+        "impossible — a graph-bound credential is the discriminator"
+    )
+    assert re.search(r"record_tenant_for|_bind_record_tenant", section), (
+        "the bounded arm names no counting site, so a reader cannot check the "
+        "claim that `no_tenant` is designed on those lanes"
+    )
+
+
+def _guarded_append(name: str) -> str:
+    """The exact guard + append line an optional secret must carry (`-n`-guarded)."""
+    return f'[ -n "${name}" ] && ARGS+=({name}="${name}")'
+
+
+def test_record_arming_secret_is_staged_from_its_own_github_secret():
+    """#9548 R1 target (c): every deploy surface names `TORTOISE_RECORD_DSN`.
+
+    Three surfaces, and each one is load-bearing on its own:
+
+    * the payload step must BIND and APPEND it (from its own same-named GitHub
+      secret) — otherwise the value stays on GitHub and the app keeps answering
+      `NOT_ARMED`;
+    * the provenance gate must PROBE it into `GH_SECRETS_PRESENT` — the fleet's
+      `probed == declared_gh` lockstep derives that from the manifest
+      (`test_fly_secret_drift.py`). ⚠️ **Do not write "the deploy hard-fails
+      without the probe" as a present-tense fact (#9585 review P3, measured).**
+      With the probe removed and the name absent from Fly, the gate still exits
+      **0**: rule (3)'s `UNSOURCED` fires only when the name is already ON Fly
+      (`check-fly-secret-drift.py`), so before the secret is provisioned nothing
+      deploy-time holds the probe in place — the lockstep guard and the assertion
+      below are the whole pin. Once the value is provisioned it is load-bearing.
+    * the manifest must DECLARE it and the runbook's Secrets Matrix must show the
+      GitHub home — a declaration the runbook contradicts is how an operator gets
+      told to rotate Fly-only, which the next deploy then silently reverts
+      (#8614).
+
+    ⚠️ **Ownership (#9585 review P2), because a duplicated pin is process weight.**
+    The bind / probe / declaration / append assertions below are BELT-AND-BRACES.
+    Their owner is `tests/test_fly_secret_drift.py`, which DERIVES each of them
+    from the shipped manifest (`_declared_gh_names(REAL_MANIFEST)`), so it covers
+    a newly declared `gh-secret:` name with no edit:
+
+    * `::test_gh_secret_declarations_are_bound_from_their_own_github_secret` —
+      both steps bind `secrets.<name>` (same two steps);
+    * `::test_probe_block_and_manifest_gh_secret_names_are_in_lockstep` —
+      `probed == declared_gh` and every probe env-bound to its own secret;
+    * `::test_shipped_manifest_matches_the_real_workflow_and_recorded_debt` — the
+      gate's own state machine over the real artifacts (`STALE` / `UNDECLARED`);
+    * `::test_secrets_matrix_github_column_agrees_with_the_manifest` — the ✅ cell.
+
+    They are kept here because the failure they name is cheap to read next to the
+    workflow, not because they are its only pin — and the closing block asserts
+    those owners still exist under those names, so this note cannot rot into a
+    pointer at a renamed test. What this test ALONE owns is the matrix **row's
+    existence**: the derived matrix guard only inspects rows that exist, so a
+    `gh-secret:` declaration landing with no row is unpinned there.
+    """
+    gate = _steps()[_PROVENANCE_STEP]
+    payload = _steps()[_SET_STEP]
+    # Bound in BOTH steps, from the SAME-named GitHub secret (a cross-wired
+    # binding passes name presence while shipping the wrong value, #4334).
+    for step in (gate, payload):
+        assert _env_bindings(step).get(_RECORD_DSN_ENV) == _RECORD_DSN_ENV, (
+            f"{_RECORD_DSN_ENV} is not bound to secrets.{_RECORD_DSN_ENV} in the "
+            "step that must carry it — the record stays unarmed in production "
+            "while every test here is green"
+        )
+    assert f'[ -n "${_RECORD_DSN_ENV}" ] && GH_PRESENT="$GH_PRESENT {_RECORD_DSN_ENV}"' in gate["run"], (
+        "the provenance gate does not probe TORTOISE_RECORD_DSN into "
+        "GH_SECRETS_PRESENT — the manifest's `gh-secret:` declaration then has no "
+        "probe beside it, and ONLY the lockstep guard catches that: the gate itself "
+        "exits 0 until the name is also on Fly, so do not claim a deploy-time "
+        "failure that does not exist before provisioning"
+    )
+    # Appended to the flyctl argv, AND guarded. Membership alone is guard-blind:
+    # `_array_pairs` scans the whole `run:` text, so it maps a guarded append and
+    # a bare one identically, and the provenance gate does not refuse the bare one
+    # either (in the all-present sample the name is `assigned`). An unguarded
+    # append pushes `TORTOISE_RECORD_DSN=` on every deploy — a silent DISARM — so
+    # the guard is asserted too, and
+    # `test_the_record_arming_append_is_guarded_not_merely_present` proves that
+    # assertion discriminates.
+    assert _array_pairs(payload["run"]).get(_RECORD_DSN_ENV) == _RECORD_DSN_ENV, (
+        f"the secrets-set step never appends {_RECORD_DSN_ENV} to the flyctl "
+        "array — the GitHub secret would never reach Fly"
+    )
+    assert _guarded_append(_RECORD_DSN_ENV) in payload["run"], (
+        f"the {_RECORD_DSN_ENV} append is not `-n`-guarded — an absent GitHub "
+        "secret would stage an EMPTY DSN and silently disarm the record while "
+        "every guard here stays green"
+    )
+    assert _manifest_declarations().get(_RECORD_DSN_ENV) == f"gh-secret:{_RECORD_DSN_ENV}", (
+        f"{_RECORD_DSN_ENV} is not declared gh-secret:{_RECORD_DSN_ENV} in "
+        ".github/scripts/fly-managed-secrets.txt — the provenance gate then "
+        "reports it UNDECLARED the moment it exists on Fly"
+    )
+    rows = _matrix_rows()
+    assert _RECORD_DSN_ENV in rows, (
+        f"{_RECORD_DSN_ENV} has no Secrets Matrix row in docs/infra-runbook.md — "
+        "an operator cannot find where the record is armed"
+    )
+    assert "✅" in rows[_RECORD_DSN_ENV][2], (
+        "the Secrets Matrix shows TORTOISE_RECORD_DSN with no GitHub Actions home, "
+        "while the manifest declares it `gh-secret:` — the Fly-only rotation recipe "
+        "looks correct for a name the next deploy overwrites"
+    )
+    # The belt-and-braces note in the docstring names four owners; assert they
+    # still exist under those names, so a rename or a deletion reds HERE rather
+    # than leaving this test's pointer aimed at nothing (#9585 review P2).
+    owners = (_REPO_ROOT / "tests" / "test_fly_secret_drift.py").read_text(
+        encoding="utf-8"
+    )
+    for owner in (
+        "test_gh_secret_declarations_are_bound_from_their_own_github_secret",
+        "test_probe_block_and_manifest_gh_secret_names_are_in_lockstep",
+        "test_shipped_manifest_matches_the_real_workflow_and_recorded_debt",
+        "test_secrets_matrix_github_column_agrees_with_the_manifest",
+    ):
+        assert f"def {owner}(" in owners, (
+            f"tests/test_fly_secret_drift.py no longer defines {owner!r} — that is "
+            "the manifest-derived owner of an assertion kept here for local "
+            "readability, so this test's belt-and-braces claim is now false and "
+            "the invariant may have lost its only deriving reader"
+        )
+
+
+def _superseded_census_note() -> str:
+    """The epic's #9548 supersession note for the first census command, verbatim.
+
+    Scoped to that paragraph (through its fenced command), so a
+    `TORTOISE_RECORD_DSN` mention elsewhere in the doc — the §A8 rows — can
+    neither satisfy nor fail these assertions by accident.
+    """
+    text = _EPIC_DOC.read_text(encoding="utf-8")
+    marker = "The first census line is superseded by #9548"
+    assert marker in text, (
+        "docs/epics/2026-10-10-7879-postgres-record/08-hosted-prerequisites.md "
+        "no longer carries the #9548 supersession note — the census claim the "
+        "operator reads is then gone or unattributed"
+    )
+    return text.split(marker, 1)[1].split("\n```", 1)[0]
+
+
+def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
+    """#9548 review P2: the provenance note must not credit a path it never greps.
+
+    The epic's census block records the "not in place" claim as
+    `grep -rn TORTOISE_RECORD_DSN fly.toml entrypoint.sh .github/workflows/\
+    docs/infra-runbook.md`. #9548 supersedes that line, and the note said the
+    command "now returns … the manifest declaration" — but
+    `.github/scripts/fly-managed-secrets.txt` is NOT in that path set, so it is
+    not returned. In a note whose whole purpose is provenance honesty about
+    which evidence moved, that is the sentence a later lane relies on before
+    re-running the census. Fail-closed on rewording: the check needs the note's
+    "it now returns …" clause and its "comment." terminus, so deleting either
+    (or softening the claim into prose) reds rather than passes.
+    """
+    note = _superseded_census_note()
+    # The census command's path set, read from the doc rather than retyped.
+    block = _EPIC_DOC.read_text(encoding="utf-8").split("Census commands", 1)[1]
+    cmd = re.search(r"grep -rn TORTOISE_RECORD_DSN(.*?)→", block, re.S)
+    assert cmd, "the doc's baseline census command is gone — the note has no referent"
+    paths = [t for t in cmd.group(1).replace("\\", " ").split() if t]
+    assert set(paths) == {
+        "fly.toml", "entrypoint.sh", ".github/workflows/", "docs/infra-runbook.md"
+    }, paths
+    manifest = ".github/scripts/fly-managed-secrets.txt"
+    assert manifest not in paths, (
+        "the baseline census command grew the manifest path, so the note's scope "
+        "claim has changed — re-derive it instead of trusting this assertion"
+    )
+    # ⛔ NEITHER THE WORD NOR THE SENTENCE WINDOW IS THE CLAIM. Two reword
+    # bypasses were measured here: naming the FILE instead of the word, and
+    # ending the "it now returns …" sentence early so the false provenance sits
+    # in the NEXT sentence. A window-scoped assertion passed both, and it
+    # REJECTED a truthful "…and NOT the manifest declaration". So stop scoping on
+    # a window: bind every MENTION of the manifest in the note to a clause that
+    # DENIES it is one of the census command's returns. The note may name the
+    # file as often as it likes; what it may not do is credit the baseline
+    # command with it (#9548 review r2).
+    sentences = [s for s in re.split(r"(?<=\.)\s+", note) if s.strip()]
+    naming = [
+        s for s in sentences
+        if "manifest" in s or manifest in s or Path(manifest).name in s
+    ]
+    assert naming, (
+        "the note no longer names the manifest declaration at all — the fourth "
+        "arming surface is then undocumented in the provenance record"
+    )
+    unnegated = [
+        s for s in naming
+        # ⛔ Case-insensitive: emphasis variants are legitimate prose — a
+        # "…and NOT the manifest declaration" is exactly the truthful shape this
+        # assertion must ACCEPT, and a case-sensitive `\bnot\b` rejected it
+        # (measured while checking that this pin does not over-block).
+        if not re.search(r"\b(?:not|never|isn't|is not|are not)\b", s, re.I)
+    ]
+    assert not unnegated, (
+        "the note names the manifest declaration in a sentence that does not "
+        "deny it is in the baseline census command's path set:\n  "
+        + "\n  ".join(unnegated)
+        + "\n`.github/scripts/fly-managed-secrets.txt` is NOT in that command's "
+        "path set, so crediting the command with it is the pre-#9548-P2 false "
+        "claim however it is reworded (#9548 review r2)"
+    )
+    # The denial has to be about THAT command's path set — a negation elsewhere
+    # in the sentence is not the correction.
+    assert re.search(r"\bnot\b[^.]{0,12}in that path set", note, re.I), (
+        "the note no longer states that the manifest is NOT in the baseline "
+        "census command's path set — that denial is the whole correction"
+    )
+    # Claim 2: the surface it DOES live on is named, so the reader has a command
+    # that reaches it ...
+    assert manifest in note, (
+        "the note does not name where the manifest declaration lives — the "
+        "fourth arming surface is then undocumented in the provenance record"
+    )
+    # ... and that command really returns one declaration (executed, not asserted).
+    hits = [
+        line
+        for line in (_REPO_ROOT / manifest).read_text(encoding="utf-8").splitlines()
+        if _RECORD_DSN_ENV in line
+    ]
+    assert len(hits) == 1, (
+        f"`grep -rn {_RECORD_DSN_ENV} {manifest}` returns {len(hits)} lines, not "
+        "the 1 the note promises"
+    )
+    # Claim 3 — the BASELINE reading the note's provenance rests on. The note
+    # said the census was empty before #9548; it was not. #9556/R8 landed the
+    # runbook's §9 `record-restore` operator example (`export TORTOISE_RECORD_DSN=`),
+    # so the same path set returned ONE line before #9548 — an invocation, not an
+    # arming surface. Without this arm the note can go back to claiming an empty
+    # baseline and nothing reds: the manifest grep above is executed, the baseline
+    # census grep never was (#9548 review P1/P2).
+    assert re.search(r"NOT empty", note), (
+        "the note claims the pre-#9548 census was empty — it returned one line, "
+        "#9556/R8's §9 operator example, and a later lane needs that line named to "
+        "tell it apart from a #9548 arming surface"
+    )
+    assert re.search(r"#9556", note), (
+        "the note does not attribute the pre-existing census line to #9556/R8, so "
+        "the reader cannot tell which cause put it there"
+    )
+    # ... and that attribution is TRUE of the runbook it names: the operator
+    # example really is in the runbook's §9, at the line the note cites.
+    runbook = (_REPO_ROOT / "docs/infra-runbook.md").read_text(encoding="utf-8")
+    assert re.search(r"export TORTOISE_RECORD_DSN=", runbook), (
+        "the note blames #9556/R8 for a runbook line that is not there — the "
+        "census hit it explains has no referent"
+    )
+    # Claim 4 — the COUNT, and it is where this note was wrong last time (#9585
+    # review P2): it said "1 line", while at the merge base it is 3 (#9600's two
+    # documentation hits arrived on top of #9556/R8's invocation). The stated
+    # number and the enumerated hits must be ONE measurement, or a later lane
+    # re-runs the census and gets a different answer than the record of record.
+    stated = re.search(r"the pre-#9548 reading is\s+\*\*(\d+) lines?\*\*", note)
+    assert stated, (
+        "the note no longer states how many lines the pre-#9548 census returned, "
+        "so `NOT empty` is all it claims and the count can drift to any number"
+    )
+    count = int(stated.group(1))
+    # \d{3,5}, not \d{4,5}: the runbook's early sections cite THREE-digit lines
+    # (`docs/infra-runbook.md:382` is R9's `record-backup` section, and :528 its
+    # drill commentary), and the narrower pattern silently dropped them while the
+    # count kept claiming them — a pin blind in exactly the direction that lets
+    # the enumeration and the number disagree (#9585 review r3).
+    cites = re.findall(r"docs/infra-runbook\.md:(\d{3,5})", note)
+    assert len(cites) == count, (
+        f"the note states {count} line(s) but enumerates {len(cites)} "
+        f"({', '.join(cites)}) — the number and the enumerated hits are then two "
+        "different measurements of the same census"
+    )
+    # ... and every enumerated hit is REAL in the tree it describes, by the snippet
+    # the item names rather than by its line number (the numbers move as the
+    # runbook grows; the mentions do not).
+    runbook_text = (_REPO_ROOT / "docs" / "infra-runbook.md").read_text(encoding="utf-8")
+    for snippet in (
+        "export TORTOISE_RECORD_DSN=",
+        "| TORTOISE_RECORD_DSN |",
+        "TORTOISE_RECORD_DSN=postgresql://tortoise_record_app.",
+    ):
+        assert snippet in note, (
+            f"the note does not enumerate the census hit {snippet!r} — a hit that "
+            "predates #9548 is then invisible to whoever re-runs the census"
+        )
+        assert runbook_text.count(snippet) == 1, (
+            f"{snippet!r} occurs {runbook_text.count(snippet)} times in the runbook, "
+            "not the 1 hit the note's baseline attributes to it"
+        )
+    # The two documentation hits arrived with #9600, and that attribution is what
+    # separates them from #9556/R8's operator invocation (#9585 review P2).
+    assert "#9600" in note, (
+        "the note does not attribute the two documentation hits to #9600, so a "
+        "reader cannot tell them apart from a `record-restore` invocation"
+    )
+    # Claim 5 — a count is only meaningful with its TREE: the same path set reads 0
+    # at this branch's start point, 1 after #9556/R8 and 3 after #9600, so pinning
+    # one number to no commit is the stale-flag class this note exists to close.
+    for sha in ("c5cbcbb4f", "d5c71a470", "7761252f"):
+        assert sha in note, (
+            f"the note does not pin the tree {sha!r} its count is measured at — a "
+            "count without a tree is exactly the stale flag; a migration or a "
+            "doc landing elsewhere silently re-numbers it"
+        )
+    # ⚠️ The SAME claim is published a second time, ~600 lines earlier, in §A8's
+    # evidence cell — and the note extractor above is deliberately scoped to exclude
+    # it ("so a TORTOISE_RECORD_DSN mention elsewhere in the doc can neither satisfy
+    # nor fail these assertions"). That exclusion is a hole, not a guard: #9585
+    # review r4 found the row still stating the "3 lines immediately before #9548"
+    # reading at c5cbcbb4f's line numbers while the note said 5 at ff6379eb2, and
+    # both passed. Pin the row to the same number and tree the note states.
+    row = next(
+        (
+            line
+            for line in _EPIC_DOC.read_text(encoding="utf-8").splitlines()
+            if line.startswith("| **the record, in the hosted deployment**")
+        ),
+        None,
+    )
+    assert row, (
+        "§A8's arming row is gone — the census it republishes has no reader"
+    )
+    assert f"**{count} lines at `ff6379eb2`**" in row, (
+        f"§A8's evidence cell does not state the same {count}-line reading at "
+        "ff6379eb2 that the census note states, so the document answers \"how many "
+        "lines immediately before #9548\" twice, with different numbers"
+    )
+    assert "3 lines immediately before #9548" not in row, (
+        "§A8's evidence cell still carries the retired 3-line reading — the "
+        "figure the census note's own last paragraph calls stale"
+    )
+
+
+def test_the_census_migration_denominator_agrees_with_the_docs_own_head_count():
+    """#9585 review P2: `over all 70 migrations` contradicted the same document's 71.
+
+    The §A5 pgvector census says the grep "over all N migrations" returns 0, so N is
+    the DENOMINATOR of a measurement. When main landed a migration it became 71 while
+    the note still said 70 — and §A7 of this same document already said 71, so the
+    document contradicted itself and the number that was read depended on which line
+    the reader hit.
+
+    Asserted as SELF-CONSISTENCY on purpose: a pin against the tree's live count would
+    red every unrelated PR that adds a migration and does not touch this epic's record,
+    which is friction, not correctness. What must not happen is the two current-day
+    figures in the document disagreeing.
+
+    Falsified on the pre-fix text: §A5 says 70, §A7 says 71.
+    """
+    text = _EPIC_DOC.read_text(encoding="utf-8")
+    a5 = re.search(r"`grep -riE 'pgvector\|vector\\\('` over all\s+(\d+)\s+migrations", text)
+    assert a5, (
+        "the epic's §A5 pgvector census no longer states a migration denominator — "
+        "the measurement then has no scope that can be checked"
+    )
+    at_head = re.findall(r"at this head, (\d+) migrations", text)
+    assert at_head, (
+        "the epic states no `at this head, N migrations` figure, so there is no "
+        "second, dated denominator for §A5 to agree with"
+    )
+    for other in at_head:
+        assert a5.group(1) == other, (
+            f"the epic contradicts itself about the migration count: §A5's pgvector "
+            f"census is scoped to {a5.group(1)} migrations while the same document "
+            f"states {other} at this head — the pgvector denominator is then stale "
+            "(#9600's R6 migration is the 71st; #9585 review P2)"
+        )
+
+
+def _census_block() -> str:
+    """The epic doc's `Census commands` block, verbatim (through its fence)."""
+    text = _EPIC_DOC.read_text(encoding="utf-8")
+    assert "Census commands" in text, (
+        "docs/epics/2026-10-10-7879-postgres-record/08-hosted-prerequisites.md no "
+        "longer carries the census block — the provenance record is gone"
+    )
+    return text.split("Census commands", 1)[1].split("```text", 1)[1].split("```", 1)[0]
+
+
+def test_the_census_freshness_claim_is_scoped_to_the_lines_it_actually_re_measured():
+    """#9585 review P2: a "re-measured and unchanged" claim must not cover a line
+    the same document corrects — and every corrected line must carry its ⚠️.
+
+    The epic's note said *"The other six lines were re-measured 2026-10-23 and are
+    unchanged"* while, two paragraphs below, the same document states the
+    `narrative|raw_turn|raw_text|transcript` line is **no longer 0** — and since
+    #9554 landed the tenant GUC the `app.current_org_id` line is no longer 0
+    either. That sentence is the one a later lane trusts before re-running the
+    census, so an unscoped "unchanged" over a line that moved is the stale-flag
+    class, not wording: it re-certifies the pre-#9555 / pre-R6 zeros.
+
+    Falsified on the pre-fix text: it carries the unscoped sentence, and the
+    `app.current_org_id` line carries no marker at all.
+    """
+    block = _census_block()
+    text = _EPIC_DOC.read_text(encoding="utf-8")
+    # 1. No UNIVERSAL freshness claim. Both spellings measured in review — the
+    # note above the fence and the one under the #9555 correction — said "the
+    # other six", which is exactly the set that contains a corrected line.
+    universal = re.findall(
+        r"The other six (?:lines|commands)[^.]*?(?:unchanged|exactly as stated)[^.]*\.", text
+    )
+    assert not universal, (
+        "the census note claims EVERY other line was re-measured and is unchanged, "
+        "while two of them have moved (the `narrative|…` grep since #9555, the "
+        "`app.current_org_id` setter count since #9554):\n  "
+        + "\n  ".join(universal)
+    )
+    # 2. The scoped replacement exists and names BOTH exceptions, so the reader
+    # is not left to discover them 40 lines apart.
+    scoped = re.search(
+        r"The remaining census\s+lines were re-measured at this head(.*?)(?:\n\n|$)",
+        text,
+        re.S,
+    )
+    assert scoped, (
+        "the note no longer states which lines were re-measured at this head — the "
+        "scoping is the fix, and deleting it silently restores the universal claim"
+    )
+    for issue in ("#9555", "#9554"):
+        assert issue in scoped.group(1), (
+            f"the scoped freshness sentence does not name {issue} as an exception, so "
+            "a later lane reads the block's pre-correction count as live"
+        )
+    # 3. Each line that moved carries its own marker IN the block: a correction
+    # that lives only in prose below is invisible to whoever copies the command.
+    for needle in ("narrative|raw_turn", "app.current_org_id"):
+        line = [ln for ln in block.splitlines() if needle in ln]
+        assert len(line) == 1, f"the census block has {len(line)} lines for {needle!r}"
+        assert "⚠️" in line[0], (
+            f"the census line for {needle!r} carries no ⚠️ marker although it no "
+            "longer returns the count beside it — the block reads as a current "
+            "measurement"
+        )
+    # 4. The markers are TRUE of this tree (so the ⚠️ is not an invented
+    # exception): the GUC the note blames really is shipped, and the narrative
+    # migration the #9555 note blames really exists.
+    projection = (_REPO_ROOT / "tortoise" / "record_projection.py").read_text(encoding="utf-8")
+    assert "TENANT_GUC = \"app.current_org_id\"" in projection, (
+        "the note attributes the census delta to a shipped `app.current_org_id` "
+        "setter that `tortoise/record_projection.py` does not carry"
+    )
+    assert "set_config('app.current_org_id'" in projection, (
+        "the note names a transaction-local `set_config('app.current_org_id', …)` "
+        "that the record projection does not install"
+    )
+    assert (
+        _REPO_ROOT / "supabase" / "migrations"
+        / "20261023000001_record_session_narrative.sql"
+    ).is_file(), (
+        "the #9555 note blames a narrative migration that is not in the tree — the "
+        "count it corrects has no referent"
+    )
+    # 5. The `app.current_org_id` count is MEASURED here, not merely read (#9585
+    # review P2, round 9): the note stated "2 lines" that reproduce at `ff6379eb2`
+    # but not at the head it shipped on (a later merge added three
+    # `record_backup.py` mentions and moved the cited offsets), i.e. the exact
+    # stale-count class the note narrates twice. Pinning the tree is half the fix;
+    # re-deriving the live count is the half that cannot re-stale, because main
+    # moving under the number now reddens THIS test instead of the document.
+    live = [
+        f"{path.relative_to(_REPO_ROOT)}:{lineno}"
+        for base in ("tortoise", "tools")
+        for path in sorted((_REPO_ROOT / base).rglob("*.py"))
+        for lineno, text_line in enumerate(
+            path.read_text(encoding="utf-8", errors="replace").splitlines(), 1
+        )
+        if "app.current_org_id" in text_line
+    ]
+    assert f"**{len(live)} lines at this head**" in text, (
+        "the census note's `app.current_org_id` count is not the "
+        f"{len(live)} this tree returns ({', '.join(live)}): a count with no "
+        "tree pin re-stales on the next main-side edit — the failure this note "
+        "exists to close"
+    )
+    assert "**2 lines at `ff6379eb2`**" in text, (
+        "the note dropped the sha its '2 lines' was measured at — a count with no "
+        "tree is the stale-flag class, not a correction of it"
+    )
+
+
+def test_the_record_arming_append_is_guarded_not_merely_present():
+    """#9548 review P2: the arming append's GUARD is asserted, not just its presence.
+
+    `_array_pairs` runs its regexes over the whole `run:` text with no awareness
+    of the enclosing shell test, so `[ -n "$X" ] && ARGS+=(X="$X")` and a bare
+    `ARGS+=(X="$X")` produce the SAME mapping. The sibling test's membership
+    assertion therefore pinned presence, not guardedness.
+
+    This is the discrimination proof for the guard assertion: the shipped text
+    satisfies it, and the SAME text with the guard stripped does not — while the
+    guard-blind membership reading is identical for both. (The global
+    `test_optional_fly_appends_are_n_guarded` covers this name too; it is pinned
+    here as well because that test's per-line scan exempts anything it cannot
+    classify, so a change there must not silently drop this one.)
+    """
+    run = _steps()[_SET_STEP]["run"]
+    guard_prefix = f'[ -n "${_RECORD_DSN_ENV}" ] && '
+    guarded = _guarded_append(_RECORD_DSN_ENV)
+    assert guard_prefix in run, (
+        f"the payload step carries no `{guard_prefix.strip()}` guard at all"
+    )
+    assert guarded in run, f"the guarded append {guarded!r} is not in the payload step"
+
+    unguarded = run.replace(guard_prefix, "", 1)
+    assert unguarded != run, "the guard this test pins was not stripped — the probe is vacuous"
+    assert guarded not in unguarded, "the stripped text still carries the guarded line"
+    # ... and the guard-blind reader cannot tell the two apart, which is exactly
+    # why the assertion above has to read the TEXT.
+    assert _array_pairs(unguarded).get(_RECORD_DSN_ENV) == _RECORD_DSN_ENV, (
+        "the guard-stripped step no longer maps the name — then `_array_pairs` "
+        "would have caught an unguarded append and this test would be redundant"
+    )
+
+
+def test_the_record_is_not_armed_single_tenant_on_the_hosted_app():
+    """#9548 R1: `TORTOISE_RECORD_SINGLE_TENANT` and the env tenant pair stay UNSET.
+
+    The hosted lane is MULTI-tenant and carries its tenant **per request**, which
+    always wins (`record_writer.record_tenant`). The `_ORG_ID`/`_GRAPH_ID` pair is
+    PROCESS-GLOBAL, so on this app it is not a weaker answer than the request
+    scope — it is a WRONG one: with the declaration absent the pair is refused
+    (`no_tenant`, counted), and with it present every tenant's rows are filed
+    under one graph (#9192) — a well-formed row under the wrong organisation,
+    which nothing downstream can detect. So the arming act must not grow a
+    "make it work" declaration.
+
+    Asserted on ASSIGNMENTS, never on mentions: the runbook and `fly.toml`'s
+    `[env]` comment both NAME these variables precisely to forbid setting them,
+    and a prose-mention test would force that warning out of the tree.
+    """
+    # The gate's OWN parsers, so this test and the deploy cannot disagree about
+    # what counts as an assignment (a comment does not).
+    gate = _drift_gate()
+    env_keys = gate.fly_toml_env_keys((_REPO_ROOT / "fly.toml").read_text(encoding="utf-8"))
+
+    declared = _manifest_declarations()
+    argv_keys = _array_pairs(_steps()[_SET_STEP]["run"])
+    env_bound = {
+        name
+        for step in _steps().values()
+        for name in _env_bindings(step)
+    }
+    for name in (
+        "TORTOISE_RECORD_SINGLE_TENANT",
+        "TORTOISE_RECORD_ORG_ID",
+        "TORTOISE_RECORD_GRAPH_ID",
+    ):
+        assert name not in env_keys, f"{name} is an assigned key in fly.toml [env]"
+        assert name not in argv_keys, f"the deploy stages {name} to Fly"
+        assert name not in env_bound, f"the deploy binds {name} from a GitHub secret"
+        assert name not in declared, f"{name} is declared in fly-managed-secrets.txt"

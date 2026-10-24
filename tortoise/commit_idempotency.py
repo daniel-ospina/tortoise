@@ -154,6 +154,52 @@ class CommitRecordStore:
 
     # ── Transitions (re-submission path, PL3) ─────────────────────────
 
+    def discard_attempt(self, client_commit_id: str) -> bool:
+        """Delete a record THIS attempt created, before any write (#4051).
+
+        A refusal that happens after ``acquire`` leaves a ``status='partial'``
+        record behind unless it cleans up after itself. That is NOT a neutral
+        leftover: ``plan_commit``/``is_first_adjudication`` treat ANY existing
+        record as a previous attempt, so the retry of the very same
+        ``client_commit_id`` is re-adjudicated WITHOUT the first-adjudication
+        hard-25 band and writes the items the original attempt would have HELD
+        (measured: a 26-net-new payload 200s with ``held`` 26 on a clean graph,
+        and WRITES them after a refusal left the record).
+
+        The 429 ingest throttle calls this; the 402 org-limit gates still do
+        not, which is #9826 — so a 402-then-retry still writes what a first
+        adjudication would have held.
+
+        Deleting restores the pre-attempt state exactly, which is what the
+        refusal promised: nothing was written, so the client's documented
+        backoff-then-retry (``docs/INGEST_CONTRACT.md`` §9) is a FIRST
+        adjudication, not a second one.
+
+        Refuses to delete anything carrying write work, so a genuine mid-write
+        crash (the PL3 re-submission path) is untouched. The load-bearing limb
+        is ``value_nodes_declared IS NULL``: the write phase stamps that on the
+        record at its FIRST statement (``hosted_api`` step 1 — "the stamp and
+        the arithmetic are one statement"), so a crash leaves it SET, while
+        ``write_ops_billed`` is only written AFTER the phase completes and is
+        therefore still 0 on a mid-write record (``acquire`` writes the column as
+        ``0`` when it creates the record; the ``1`` lands only after the phase
+        completes: ``store.update(... "fully_written")`` then
+        ``SET r.write_ops_billed=1``). Both limbs are checked (belt
+        and braces), but do NOT simplify the guard to ``status``/``wob`` alone —
+        that would delete a live in-flight record.
+
+        Returns True when a record was deleted.
+        """
+        rows = self._proj.g.query(
+            "MATCH (r:CommitRecord {client_commit_id:$cid}) "
+            "WHERE r.status = 'partial' "
+            "  AND coalesce(r.write_ops_billed, 0) = 0 "
+            "  AND r.value_nodes_declared IS NULL "
+            "DELETE r RETURN count(*) AS n",
+            params={"cid": client_commit_id},
+        ).result_set
+        return bool(rows and int(rows[0][0] or 0) > 0)
+
     def update(
         self, client_commit_id: str, *, status: str
     ) -> CommitRecordState | None:

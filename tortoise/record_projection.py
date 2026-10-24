@@ -1826,7 +1826,18 @@ def _nested_node_carrier(record: Mapping[str, Any],
 #: half was the PRODUCER, not this fold. Since `#9553` the structural-edge lane's
 #: two mints journal that record (`projection/edges.py::_record_structural_edges`
 #: ← `TortoiseSDK._record_structural_edge`), so those edges land a `relation` row
-#: with `source_label`/`target_label` naming the endpoints' tables. What stays
+#: with `source_label`/`target_label` naming the endpoints' tables.
+#:
+#: ⛔ ONE producer, and it is the MINT — not the SDK door. `#9827` first emitted
+#: from `sdk.create_edge`, which left the typed wrappers / node-property lane
+#: (`create_owned_by` & co., called on the PROJECTION by `sdk.py`'s entity
+#: wiring) uncarried; `#9553` moved the emission down to the mint that all of
+#: them funnel through, and the door emission was DELETED in the same change.
+#: A mint-level emitter plus a door-level one journals every `sdk.create_edge`
+#: edge twice — two `DirectEdgeCreated` records with the same payload `id` and
+#: two different `event_id`s, and two DESCRIPTORS that disagree about
+#: `source_label`/`target_label` (the door carried neither), which is a rebuild
+#: divergence inside one journal. What stays
 #: missing is NAMED, not implied:
 #:   * `tags` → `TAGGED`: the target is a `:Tag` node and `NODE_TABLES` has no
 #:     `tag` table, so the record holds no `(Tag, key)` identity for
@@ -1840,6 +1851,17 @@ def _nested_node_carrier(record: Mapping[str, Any],
 #:     `RECORD_ADDRESSABLE_EDGE_LABELS`).
 #:   * `about*` when no `EntityLinked` record exists is now carried by the bare
 #:     `create_about_edge` mint, on the same `DirectEdgeCreated` route.
+#:   * a URL-ONLY `:Source` stub (`_mint_source_stub` writes no `id`) emits NO
+#:     record, and is REPORTED through `projection._log_identity_skip`
+#:     (`absent_is_ordinary=False, drops_record=True`) rather than dropped in
+#:     silence — a live-only edge with no carrier and no signal is
+#:     indistinguishable from a declared degrade;
+#:   * a SELF-EDGE is skipped (the fold's `E2E-11.6` no-self contract) and
+#:     disclosed once per (relation, cause), like the endpoint decline.
+#: The list is restated at the point of enforcement in `projection/edges.py`'s
+#: declaration block, and pinned by
+#: `tests/test_9553_class4_structural_edge_records.py` and
+#: `tests/test_9553_class4_structural_edge_carrier.py`.
 _ENVELOPE_RELATIONS: tuple[tuple[str, str, str, str, str], ...] = (
     ("PointAdded", "contains_session", "CONTAINS", "Session", "Point"),
     ("OperatorAdded", "contains_session", "CONTAINS", "Session", "Point"),

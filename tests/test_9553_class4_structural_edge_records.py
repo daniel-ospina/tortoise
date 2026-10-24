@@ -271,6 +271,45 @@ def test_the_gap_is_disclosed_once_per_relation(edge_sdk, caplog):
     assert len(hits) == 1, [r.message for r in hits]
 
 
+def test_the_two_declined_causes_do_not_silence_each_other(edge_sdk, caplog):
+    """⛔ TWO causes, TWO facts, TWO disclosures — the registry is keyed on both.
+
+    `_RECORD_GAP_WARNED` is the once-per-relation register shared by the mint's
+    endpoint decline (`edges.py::_record_structural_edges`, "endpoint NOT
+    addressable by the replay fold") and the SDK's self-edge skip
+    (`sdk.py::_record_structural_edge`, "SELF-EDGE … E2E-11.6"). Keyed on the
+    relation ALONE, either writer's `add(rel)` suppressed the other's `if rel not
+    in …`, so a SECOND, DIFFERENT fact was disclosed to nobody.
+
+    Reachable with one relation, no contrivance: a `references` whose source is a
+    `:Source` (the documented live case) sets the key, and a subsequent
+    `create_edge("references", p, p)` then wrote a live self-loop, journalled
+    nothing, and logged nothing — a silent live ≠ rebuild divergence, which is
+    exactly what `sdk.py`'s comment on that branch promises cannot happen.
+
+    Vacuous pre-fix: the second assertion finds no self-edge line at all.
+    """
+    sdk, _journal = edge_sdk
+    ids = _world(sdk, source=True)
+    caplog.set_level("WARNING")
+
+    # cause 1 — the endpoint decline, on `references`.
+    sdk.create_edge("references", "https://class4.test/src", ids["object"])
+    declined = [r for r in caplog.records
+                if "NOT addressable by the `DirectEdgeCreated` replay fold"
+                in r.message]
+    assert len(declined) == 1, [r.message for r in caplog.records]
+
+    # cause 2 — a SELF-EDGE, same relation. A DIFFERENT fact about the same rel.
+    sdk.create_edge("references", ids["p1"], ids["p1"])
+    self_edges = [r for r in caplog.records if "SELF-EDGE" in r.message]
+    assert self_edges, (
+        "the self-edge skip was SILENCED by the endpoint decline's entry for the "
+        "same relation — the register is keyed on the relation alone, so the "
+        "live self-loop written here is disclosed to nobody "
+        f"(records: {[r.message for r in caplog.records]})")
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # 3. The RECORD consumes it — no new record type, no new column
 # ════════════════════════════════════════════════════════════════════════════

@@ -258,9 +258,29 @@ def claim_server(tmp_path_factory):
         "BACKUP_WATCHER_DISABLED": "1",
         "TORTOISE_PRICING_PATH": str(Path(__file__).resolve().parent / "fixtures" / "pricing-e2e.json"),
         "TORTOISE_AUDIT_DSN": "",
+        # #9548: this fixture boots the FULL production app, whose `_emit` calls
+        # `record_writer.write_live_record`, and record arming is PRESENCE-based —
+        # so an inherited DSN (an operator shell, a sourced `.env`, the runbook's
+        # own step) makes a "hermetic" run write journal_event/point rows into the
+        # REAL record. `conftest.py` scrubs this for the shared harness boot; this
+        # second boot path builds its own env and inherited it silently. Blank
+        # (never popped): `_load_dotenv` refills ABSENT keys from the repo `.env`,
+        # so a popped key would come straight back.
+        "TORTOISE_RECORD_DSN": "",
     }
-    for var in ("TORTOISE_DB_URI", "FALKORDB_CLOUD_URI", "STRIPE_SECRET_KEY",
-                "STRIPE_WEBHOOK_SECRET", "STRIPE_PRICE_IDS", "GITHUB_CLIENT_ID"):
+    # ⛔ BLANK, NOT setdefault, for the two DB SELECTORS. `hosted_api._make_sdk`
+    # does `if os.environ.get("TORTOISE_DB_URI"): return TortoiseSDK(namespace=…)`
+    # and never consults `TORTOISE_DB_PATH` — so an operator shell or a sourced
+    # `.env` carrying a URI silently points this "hermetic" claim server at that
+    # DB (the shared docker FalkorDB) instead of the fixture's `db_path`. That is
+    # the same blank-not-pop mechanic the record-DSN entry above documents, one
+    # variable over, and `setdefault` leaves an inherited value intact (#9548
+    # review r2). The optional vendor keys keep `setdefault`: presence of a
+    # Stripe key does not redirect where the run reads and writes.
+    for var in ("TORTOISE_DB_URI", "FALKORDB_CLOUD_URI"):
+        env[var] = ""
+    for var in ("STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET",
+                "STRIPE_PRICE_IDS", "GITHUB_CLIENT_ID"):
         env.setdefault(var, "")
 
     log_path = Path(db_path).parent / "claim-uvicorn.log"

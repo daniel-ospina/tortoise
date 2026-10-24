@@ -339,6 +339,24 @@ closed at both layers:
   > `sdk.backfill_about_entities` mints about edges through `_create_about_edges` →
   > `wire_about_link` (a bare MERGE) with no record and no `aboutEntities` snapshot
   > prop, so neither carrier restores them — **#9833**.
+  >
+  > ⛔ **One producer, and it is the MINT.** `#9827` had put the emission at the
+  > public SDK door (`sdk.create_edge`). Landing the mint-level producer on top of
+  > it journalled every door edge TWICE — two `DirectEdgeCreated` records with the
+  > same payload `id` and two different `event_id`s — and the two descriptors
+  > DISAGREED: the door's carried no `source_label`/`target_label` (so
+  > `record_projection` defaulted both to `Point` and a `Subject` endpoint filed no
+  > `relation` row), the mint's carries them. The door emission was therefore
+  > DELETED in this change, which also LIFTS two of `#9827`'s measured bounds: the
+  > typed-wrapper / node-property lane (`sdk.create_object(..., ownedBy=…)` calls
+  > `proj.create_owned_by` directly, so no SDK door could ever reach it) and an
+  > edge at a later-superseded endpoint (the fold's skip is now gated on
+  > `_supersede_moved_rels()`). Both are re-cut as assertions in
+  > `tests/test_9553_class4_structural_edge_carrier.py`. The labels are the reason
+  > the "is this carried" answer cannot be taken from the door: an endpoint
+  > resolved in the wrong table lands NO row rather than a wrong one, so the
+  > record route would have gone silently empty for every `Subject`/`Object`
+  > endpoint.
 * **It does not approve `#7879`'s scope.** Scope and Plan carry human gates.
 * **It adds no migration-safety surface** (owner scope ruling, 2026-10-10).
 * **It changes no public surface.** No MCP tool and no public SDK method is added,

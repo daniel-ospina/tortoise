@@ -61,7 +61,17 @@ def _boot_selfhost(tmpdir: str):
     # #303 (review r2): blank-not-pop — mcp_server._load_dotenv refills only
     # ABSENT keys from the repo .env in the fresh child, so a popped URI
     # would be re-populated and silently beat TORTOISE_DB_PATH.
-    for var in ("TORTOISE_DB_URI", "FALKORDB_CLOUD_URI"):
+    # #9548: `TORTOISE_RECORD_DSN` joins the list for the same two reasons and
+    # a third. Same blank-not-pop mechanics, and the same consequence as the
+    # shared harness boot (`conftest.py` scrubs it there): this child runs the
+    # real app, arming is presence-based, so an inherited DSN makes a hermetic
+    # run write rows into the REAL record. This boot path builds its own env and
+    # would otherwise be A blind spot left in the directory — not "the" one:
+    # the claim-server boot in `test_13_claim.py` was a second unscrubbed path
+    # and is blanked in the same change. This sentence scopes the guarantee to
+    # what was actually verified (all four child-env builders in this directory),
+    # not to the shape of one commit's diff (#9548 review r2).
+    for var in ("TORTOISE_DB_URI", "FALKORDB_CLOUD_URI", "TORTOISE_RECORD_DSN"):
         env[var] = ""
     env.update({
         "TORTOISE_DB_PATH": os.path.join(tmpdir, "selfhost.db"),
@@ -276,6 +286,14 @@ def test_parity_export_import(api, session_jwt, tmp_path):
 
     key = os.urandom(32)
     env = dict(os.environ, TORTOISE_BACKUP_KEY=_b64.b64encode(key).decode())
+    # #9548: the same presence-based-arming scrub the two boot paths apply. This
+    # `tortoise export` child runs against an on-disk graph, so no journal write
+    # is reachable from it today (`_cmd_export` never appends a record) — but an
+    # inherited DSN would make "no child in this directory sees the real record"
+    # an invariant that holds only until the exporter grows a write path. Scrubbing
+    # it here keeps that a property of the directory rather than of today's call
+    # graph, which is the only version of it a future lane can rely on.
+    env["TORTOISE_RECORD_DSN"] = ""
     out = str(tmp_path / "parity.tortoise")
     r = subprocess.run(
         [sys.executable, "-m", "tortoise", "export",

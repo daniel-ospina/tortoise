@@ -417,6 +417,15 @@ _UNRESOLVED = {
     "_find_point_by_content",
     "_find_points_by_key",
     "_find_terminal_dedup_hit",
+    # #8400 review P3: ONE query now backs both key legs. It was hoisted out of
+    # the per-leg copies — those callers no longer reach the graph handle
+    # themselves and are not scan entry points any more — so the two legs stop
+    # carrying byte-identical copies of the terminal probe (the fork class the
+    # `_dedup_match_clauses` extraction exists to kill). Hand check, same as
+    # before: a literal `MATCH (n:Point) WHERE n.id IN $ids AND <terminal
+    # predicate> RETURN n.id LIMIT 1` is a pure read that appends no record and
+    # writes nothing; it only decides whether a fold WOULD be refused.
+    "_terminal_holder_among",
     # #9350: `_capture_stamp_targets` runs the CALLER's statement prefix (it is
     # handed the shared `MATCH … WHERE` half so the read and the guarded write
     # cannot drift), so the resolver cannot unfold it. Checked by hand: the
