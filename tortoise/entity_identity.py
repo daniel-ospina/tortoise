@@ -281,7 +281,7 @@ def resolve_or_mint(g, label: str, name: str, *,
 
 
 def resolve_fold_name(g, label: str, name: str, *,
-                      context: str = "") -> str | None:
+                      context: str = "", mention: bool = False) -> str | None:
     """Resolve a NAME to one live id **for a fold** — never mints, never guesses.
 
     #3590 D9: the projection is not the minter. A fold-time mint cannot be
@@ -295,12 +295,25 @@ def resolve_fold_name(g, label: str, name: str, *,
     * no live holder (or only a terminal/id-less one) -> ``unregistered-
       reference`` recorded, nothing folded.
 
-    Both refusal shapes are NON-exempt: a journal record that references an
-    entity the journal never registered is a producer bug (#3590 R8), and the
-    run must fail on it rather than silently drop the link. The remedy is on the
-    producer: register what you reference before referencing it (D9) — the SDK
-    doors do exactly that, so this path is reached only by a producer that did
-    not.
+    ``mention=True`` classifies the caller's reference as loose ATTRIBUTION (an
+    Event's ``subject``/``object``/``uses[]``, an ``about_entities`` status-fold
+    target, an about-edge name) rather than the identity of the record being
+    folded, and records the EXEMPT :data:`SHAPE_UNFOLDED_MENTION` instead. The
+    distinction is load-bearing: a mention that cannot resolve drops ONE link
+    and moves no entity's state, and the live pass and the replay pass drop the
+    same one (they run this same resolver) — so it is a producer omission, not a
+    live/replay divergence. The IDENTITY shapes stay NON-exempt: a record whose
+    own target cannot be resolved (an id-less ``ObjectSuperseded``, a rename/
+    delete/restatus miss) must still fail the run rather than silently not
+    apply.
+
+    Why the mention exemption exists at all: this repo's own journal writer
+    (``EventAPI.add_event``, and pre-#3590 journals generally) references names
+    it never registered, and the retired fold minted a stub for them. Without
+    the exemption every such journal becomes UN-REBUILDABLE — the durable copy
+    of the data can no longer be recovered from its journal (#3590 review P1).
+    The remedy for NEW journals is on the producer: register what you reference
+    before referencing it (D9) — the SDK's entity doors do exactly that.
     """
     holders = live_name_holder_ids(g, label, name)
     ids = [str(h) for h in holders if h]
@@ -308,11 +321,15 @@ def resolve_fold_name(g, label: str, name: str, *,
         return ids[0]
     from tortoise.projection.nonfolded import (
         SHAPE_AMBIGUOUS_ENTITY_NAME,
+        SHAPE_UNFOLDED_MENTION,
         SHAPE_UNREGISTERED_REFERENCE,
         record_non_folded,
     )
-    shape = (SHAPE_AMBIGUOUS_ENTITY_NAME if len(holders) > 1
-             else SHAPE_UNREGISTERED_REFERENCE)
+    if mention:
+        shape = SHAPE_UNFOLDED_MENTION
+    else:
+        shape = (SHAPE_AMBIGUOUS_ENTITY_NAME if len(holders) > 1
+                 else SHAPE_UNREGISTERED_REFERENCE)
     # ``nonfolded.record_non_folded(shape, **fields)`` takes the R8 vocabulary
     # (label / candidates / detail) — NOT the identity module's positional
     # ``(label, name, candidate_ids, shape=)``. Passing ``name=``/``ids=``/
@@ -321,6 +338,8 @@ def resolve_fold_name(g, label: str, name: str, *,
     # recording. Verified against ``nonfolded.NonFoldedEvent``'s fields.
     record_non_folded(shape, label=label, candidates=tuple(ids),
                       detail=f"name={name!r}" + (
+                          f" cause={'ambiguous-holders' if len(holders) > 1 else 'no-live-holder'}"
+                          if mention else "") + (
                           f" context={context}" if context else ""))
     logger.warning(
         "entity-identity: a journal record references %s %r by NAME and it "

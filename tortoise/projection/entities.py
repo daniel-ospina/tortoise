@@ -4707,7 +4707,8 @@ class _EntityHandlers:
                 if not (isinstance(about, str) and about and about != name):
                     continue
                 about_id = resolve_fold_name(self.g, "Object", about,
-                                             context="status fold about")
+                                             context="status fold about",
+                                             mention=True)
                 if about_id:
                     out.append(("id", about_id, False, about))
             return out
@@ -4878,7 +4879,8 @@ class _EntityHandlers:
             # (D9), and the SDK door does that for `about*`/`subject`.
             from tortoise.entity_identity import resolve_fold_name
             stub_id = resolve_fold_name(self.g, "Subject", subj,
-                                        context="EventRecorded.subject")
+                                        context="EventRecorded.subject",
+                                        mention=True)
             if stub_id:
                 self.g.query(
                     "MATCH (s:Subject {id:$id}), (e:Event {eventId:$eid}) "
@@ -4984,7 +4986,8 @@ class _EntityHandlers:
             # registers what it references (D9).
             from tortoise.entity_identity import resolve_fold_name
             stub_id = resolve_fold_name(self.g, "Object", obj,
-                                        context="EventRecorded.object")
+                                        context="EventRecorded.object",
+                                        mention=True)
             if stub_id:
                 self.g.query(
                     "MATCH (o:Object {id:$id}), (e:Event {eventId:$eid}) "
@@ -5049,9 +5052,18 @@ class _EntityHandlers:
             # the status fold addresses one entity rather than every carrier of
             # a name (an unresolved name keeps the name path, and the fold then
             # records the ambiguity instead of writing).
+            # ⛔ The Document arm is the ONLY arm without an id: its `object` is
+            # a :Source url, not an entity (the branch above writes the Source),
+            # and `stub_id` is None there by construction. Keying this on
+            # `not object_type` instead — as an earlier revision did — discarded
+            # the id for a DECLARED `objectType='Object'`: both halves of
+            # `_fold_object_status` are guarded on the id, so the work-item
+            # status fold silently stopped and reported nothing (fail-open, the
+            # opposite direction to the rest of the change). `objectType` is
+            # reachable from a public door (`EventAPI.add_event(object_type=…)`).
             self._fold_object_status(_obj_name, _wk, about_names=_about,
-                                     object_id=(stub_id if not object_type
-                                                else None))
+                                     object_id=(None if object_type == "Document"
+                                                else stub_id))
         # Event -[:uses]-> Object (input entities, #122; #125 structured dicts)
         uses = inner.get("uses")
         if uses:
@@ -5081,7 +5093,8 @@ class _EntityHandlers:
                     # fold (see the subject/object mentions above).
                     from tortoise.entity_identity import resolve_fold_name
                     stub_id = resolve_fold_name(self.g, "Object", use_name,
-                                                context="EventRecorded.uses")
+                                                context="EventRecorded.uses",
+                                                mention=True)
                     if stub_id:
                         # #9572: coalesce, not a hard SET — a `uses[]` entry
                         # that names no kind must not reset a stored

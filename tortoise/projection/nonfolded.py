@@ -68,6 +68,14 @@ SHAPE_UNREGISTERED_REFERENCE = "unregistered-reference"
 #: live entities hold it. NON-exempt, same reason as above — resolving would be
 #: a guess, and the graph then folds an arbitrary carrier.
 SHAPE_AMBIGUOUS_ENTITY_NAME = "ambiguous-entity-name"
+#: #3590 D9: a fold record MENTIONED an Object/Subject by name and it resolved
+#: to no single live holder — an Event's ``subject``/``object``/``uses[]``, an
+#: ``about_entities`` status-fold target, or an about-edge name. Distinct from
+#: :data:`SHAPE_UNREGISTERED_REFERENCE` because a mention is loose
+#: ATTRIBUTION, not the identity of the record being folded: the fold drops one
+#: link and moves no entity's state. See the exemption's bounded guarantee
+#: below (``EXEMPT_SHAPES``) for why that difference buys the run a green pass.
+SHAPE_UNFOLDED_MENTION = "unfolded-mention"
 #: ``EntityMutated op=delete`` matched 0 rows.
 SHAPE_DELETE_MISS = "delete-miss"
 #: An ``EntityMutated`` op the fold has no arm for (recorded on #3299).
@@ -205,6 +213,27 @@ EXEMPT_SHAPES: dict[str, str] = {
         "GUARANTEE: the record is still emitted (with the offending scope), "
         "and the rebuilt graph may keep seeds the live graph dropped — "
         "reconcile the producer before relying on the rebuilt edge state"
+    ),
+    SHAPE_UNFOLDED_MENTION: (
+        "a MENTION — an Event's subject/object/uses[], an about_entities "
+        "status-fold target, an about-edge name — resolved to no single live "
+        "holder, so the fold wired NO link: on the live pass and on replay "
+        "alike, since both run this same resolver. Pre-#3590 journals, and the "
+        "producers that still do not register (`EventAPI.add_event`), reference "
+        "names nothing registered — the retired fold minted a stub for them — "
+        "so refusing would make such a journal un-rebuildable at all (#3590 "
+        "review P1: `rebuild_all` raised for journals that replay on main). "
+        "DEGRADED GUARANTEE: (a) ATTRIBUTION ONLY — the shapes that address a "
+        "record's own identity (`unregistered-reference`, "
+        "`ambiguous-entity-name`, and the supersede/delete/state-op misses) "
+        "stay non-exempt, so a fold that must MOVE an entity's state can never "
+        "take this exemption; (b) live and replay drop the SAME link (one "
+        "resolver), so this is a producer omission, not a live/replay "
+        "divergence — what a legacy journal loses is the stub nodes the "
+        "retired fold minted, which no replay can recreate; (c) every "
+        "occurrence is still recorded here and NAMED by the run boundary's "
+        "report (and by `_log_identity_skip`'s census for the empty/absent "
+        "form), never silently swallowed"
     ),
 }
 
