@@ -213,10 +213,16 @@ def _document_is_pending(needs_extraction, doc_status, *,
                          other_legacy_is_pending: bool = False) -> bool:
     """#5140 P1: is this document Source awaiting extraction? ONE definition.
 
-    ``_do_upgrade`` (one document the operator named) and ``_do_upgrade_all``
-    (a corpus sweep) answer the same question, so they read it here — the same
-    discipline the retrieval legs follow for ``documentKind`` (#5140 finding 1):
-    two paths that each spell the rule out drift apart.
+    ``_do_upgrade`` (one document the operator named) READS THIS FUNCTION. The
+    corpus sweep (``_do_upgrade_all``) reads its Cypher mirror
+    ``_discover_pending_documents``, because it has to ask the question of the
+    whole graph in one query; the two are kept arm-for-arm in step by
+    ``tests/test_5140_pending_extraction.py::test_python_rule_and_cypher_twin_agree``,
+    and the discipline is the one the retrieval legs follow for
+    ``documentKind`` (#5140 finding 1): two paths that each spell a rule out
+    drift apart. ⛔ The sweep does not call this function (review round 10) — a
+    comment saying it does is how an auditor concludes the rule has one home
+    when it has two.
 
     D10 retired ``doc_status`` and left ``needs_extraction`` as the only stored
     signal — but it also moved the DEFAULT. Pre-D10 ``_do_upgrade`` read
@@ -260,7 +266,7 @@ def _document_is_pending(needs_extraction, doc_status, *,
        the generic retired-value arm so a ``draft`` node carrying an explicit
        ``true`` is still discovered — pre-D10 discovery was an OR over both).
     4. any other retired value (``draft``) → ``other_legacy_is_pending``. The
-       SWEEP passes ``False``: pre-D10 discovery never selected it
+       sweep's mirror hard-codes ``False``: pre-D10 discovery never selected it
        (``doc_status='captured' OR needs_extraction = true``), and selecting it
        would re-enter every pre-D10 full-ingest document. ``--upgrade`` passes
        ``True`` because pre-D10 ``_do_upgrade`` skipped on ``'extracted'``
