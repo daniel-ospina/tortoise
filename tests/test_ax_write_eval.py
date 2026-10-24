@@ -1553,7 +1553,10 @@ def test_the_documented_failure_classes_reconcile_with_the_committed_records():
         if edge["relation"] == "NAND"
         and (edge.get("from_id") in nand_ops or edge.get("to_id") in nand_ops)
     )
-    assert nand_edges == 2, nand_edges
+    assert nand_edges == 2, (
+        f"the committed meeting graph carries {nand_edges} NAND edge(s) — update "
+        f"the results row 2 and the NAND class row together"
+    )
     for pattern, where in (
         (r"\*\*unexplained NAND\*\* \((\w+) edges", "the results table's row 2"),
         (r"one NAND operator with (\w+) edges", "the NAND class row"),
@@ -1571,7 +1574,10 @@ def test_the_documented_failure_classes_reconcile_with_the_committed_records():
     wrong_axis_total = sum(
         len(record["wrong_axis_kinds"]) for record in runs
     )
-    assert wrong_axis_total == 1, wrong_axis_total
+    assert wrong_axis_total == 1, (
+        f"the committed records carry {wrong_axis_total} wrong-axis kind(s) — "
+        f"update the census row's 'declared for another axis' count"
+    )
     census_axis = re.search(r"\*\*(\w+) kind declared for another axis\*\*", doc)
     assert census_axis, "the census row no longer states the wrong-axis kind count"
     assert census_axis.group(1).lower() == number_words[wrong_axis_total], (
@@ -1588,6 +1594,45 @@ def test_the_documented_failure_classes_reconcile_with_the_committed_records():
     assert doc.count(issue_phrase) == 2, (
         f"expected the undeclared-kind row and the correction log to both state "
         f"{issue_phrase!r}; the doc states it {doc.count(issue_phrase)} time(s)"
+    )
+
+    # Two more graph-derivable counts the failure column states, which cycle 5
+    # found outside both the pinned set and the narrative disclosure:
+    #   * row 5's correction run — the record carries ONE undeclared kind
+    #     (`kind_census == {"Event": ["correction"]}`); the row used to charge
+    #     "two", contradicting its own parenthetical and the aggregate below it;
+    #   * row 9's **no NAND** — the contradicting run carries zero NAND operators,
+    #     which is what its P0 turns on.
+    correction_record = next(
+        record for record in runs if record["input"] == "correction_existing_claim"
+    )
+    correction_undeclared = sum(
+        len(kinds) for kinds in correction_record["kind_census"].values()
+    )
+    assert correction_undeclared == 1, (
+        f"the correction run carries {correction_undeclared} undeclared kind(s) — "
+        f"update results row 5 and the aggregate sentence together"
+    )
+    assert f"{number_words[correction_undeclared]} undeclared kind elsewhere" in doc, (
+        "results row 5 and the aggregate no longer agree on the correction run's "
+        f"undeclared-kind count ({correction_undeclared})"
+    )
+
+    contradicting_graph = json.loads(
+        (GOLD.parent / "runs" / "contradicting_claim" / "graph.json").read_text()
+    )
+    contradicting_nands = sum(
+        1
+        for operator in contradicting_graph["operators"]
+        if operator["op_type"] == "NAND"
+    )
+    assert contradicting_nands == 0, (
+        f"the contradicting-claim run carries {contradicting_nands} NAND "
+        f"operator(s) — results row 9's '**no NAND**' would be false"
+    )
+    assert "**no NAND**" in doc, (
+        "results row 9's '**no NAND**' — the finding the whole input exists to "
+        "demonstrate — is gone from the doc"
     )
 
     # The census ENUMERATION is prose, so its `×N` multipliers drifted unpinned
