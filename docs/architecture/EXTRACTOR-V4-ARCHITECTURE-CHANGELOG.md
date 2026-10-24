@@ -937,13 +937,22 @@ FAILURE POLICY and §4.4 states its own status (*"a SPEC, not a description of w
 no row for any of them — the first deliverable `#5064`'s Scope section names.
 
 **What landed in the registry.** `exact_dedup` (`D-b`+`D-c`, one mechanism at two keys — `dedup_classify.exact_hit_id`
-for the in-capture leg; the against-store leg is `sdk._find_point_by_content`, a METHOD, so it is named in the note
-rather than anchored), `near_dup_detect` (`extractor_v2._boundary`, the mechanical site that runs BEFORE the gate),
-`against_priors_consolidation` (`D-d`, `extractor_v2.classify_consolidation`, ordered behind `exact_dedup` by
-`preconditions:`), `atomic_point_write` (**`not-implemented`**, tracking `#9879` — filed because a declared
-precondition with nobody tracking it is the defect), `failure_policy` (**`not-implemented`**, tracking `#5087`, the
-code half the design itself names). Markers sit at each declaration site, so `membership_errors` holds the new rows
-exactly as it holds the old ones.
+for the in-capture leg; the design's `D-b` within-batch leg is an INLINE `_norm`-keyed dict inside `execute_embed` and
+`D-c` is `sdk._find_point_by_content`, a METHOD, so both are named in the note rather than anchored — and the three
+legs do not share one equality notion), `near_dup_detect` (`extractor_v2._boundary`), `against_priors_consolidation`
+(`D-d`, `extractor_v2.classify_consolidation`), `atomic_point_write` (**`not-implemented`**, tracking `#9879` — filed
+because a declared precondition with nobody tracking it is the defect), `failure_policy` (**`not-implemented`**,
+tracking `#5087`, the code half the design itself names). Each row marks ONE site per scanned document (the
+convention is per-document, not per-section), so `membership_errors` holds the new rows exactly as it holds the old
+ones.
+
+**The most valuable thing the enumeration found: `near_dup_detect` is a guard whose declared PLACEMENT does not
+exist.** `_boundary` is real and tested (`fold_allowed` and the `*_differs` wrappers resolve to it), but every shipped
+call site is reached from INSIDE the post-gate consolidation pass (`classify_consolidation`, called from
+`execute_embed`) or from the capture seam (`dedup_classify.rephrase_hit`, which FOLDS and DETACH-DELETEs). In
+`extract_session_v2`, `apply_vet` runs BEFORE `execute_embed` — so the design's pre-gate `S2.2a-β` site does not
+exist, which §4.2's own *"The order is inverted"* already records and `#5087` owns the code half. The row says so in
+its note rather than letting `implemented` read as "the pre-gate step ships".
 
 **Drift is now checked in one structure, not only by convention.** §4.2's audit table is a mechanism enumeration a
 prose document can be read for, so `test_the_four_audited_dedups_each_have_a_row` parses it and compares it to the

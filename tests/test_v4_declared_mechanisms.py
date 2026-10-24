@@ -1353,17 +1353,39 @@ def test_an_unreadable_dedup_table_is_refused(tmp_path) -> None:
 def test_the_near_dup_three_sites_are_separately_registered() -> None:
     """§4.2's three-site split is a REGISTRY fact, not only a paragraph.
 
-    DETECT (mechanical, before the gate) · VERDICT (`vet_gate.OUTCOMES`' `MERGE`,
-    S2.2b) · FUSION (S3). The design's claim is *"no operation has two homes"*;
-    a registry that carried only the fusion made the first two sites look like
-    part of it. Pinned by symbol so a merge of the two rows cannot pass silently.
+    DETECT (the mechanical guard) · VERDICT (`vet_gate.OUTCOMES`' `MERGE`, S2.2b)
+    · FUSION (S3). The design's claim is *"no operation has two homes"*; a
+    registry that carried only the fusion made the first two sites look like part
+    of it. Each site is pinned to the thing that would have to change for the
+    split to be lost:
+
+      * DETECT -> the `near_dup_detect` row anchors `_boundary` and owns its own
+        file, so folding it into the fusion row cannot pass silently;
+      * VERDICT -> `MERGE` is a member of `vet_gate.OUTCOMES` AND the `vet` row
+        anchors that module (an earlier revision of this test asserted only a
+        tautology here — the observed value was already asserted one line up, so
+        the line could never fail and nothing read the verdict site at all);
+      * FUSION -> the `near_dup_merge` row anchors the fusion's own symbols.
     """
+    from tortoise import vet_gate
+
     rows = {r["id"]: r for r in load_registry()["mechanisms"]}
     assert "_boundary" in rows["near_dup_detect"]["symbols"], rows["near_dup_detect"]
+    assert "tortoise/extractor_v2.py" in rows["near_dup_detect"]["code"], (
+        "the DETECT row no longer owns the file its symbol lives in"
+    )
     assert "near_dup_merge" in rows["near_dup_merge"]["symbols"], rows["near_dup_merge"]
-    assert rows["near_dup_detect"]["code"] != rows["near_dup_merge"]["code"] or (
-        "_boundary" in rows["near_dup_detect"]["symbols"]
-        and "near_dup_merge" in rows["near_dup_merge"]["symbols"]
+    assert rows["near_dup_detect"]["code"] != rows["near_dup_merge"]["code"], (
+        "the DETECT and FUSION rows now share every declared file — the design's "
+        "one-site-per-operation split is no longer legible in the registry"
+    )
+    assert "MERGE" in vet_gate.OUTCOMES, (
+        "the VET arbiter no longer emits MERGE, so the fusion's only authorising "
+        "verdict is gone while `near_dup_merge` stays `implemented`"
+    )
+    assert "tortoise/vet_gate.py" in rows["vet"]["code"], (
+        "the VERDICT site is not in the `vet` row's declared code, so the middle "
+        "site of the three has no registry home"
     )
     assert rows["exact_dedup"]["code"] == ["tortoise/dedup_classify.py"]
 
@@ -1401,6 +1423,14 @@ def test_the_atomic_write_absence_is_pinned_to_the_schema() -> None:
     is a decision, not an impossibility), and no UNIQUE constraint names a Point
     (so the row's state is still the truth). The day one is added, this reds and
     the row must flip — the same polarity as the carve-out's render pin.
+
+    ⚠️ The scan covers BOTH constraint spellings this repo's DDL vocabulary names
+    (`CONSTRAINT CREATE`, the graph form, and `CREATE CONSTRAINT`, the form
+    `tests/test_9079_event_writers_journal.py` lists): a pin that knew only one
+    order would stay green on the other. Its SCOPE is stated, not universal —
+    `tortoise/**/*.py` is where a write path creates constraints; one created
+    from a script or a console session is out of this scan's reach, and the row's
+    note says so.
     """
     constraints: list[str] = []
     for path in sorted((ROOT / "tortoise").rglob("*.py")):
@@ -1408,7 +1438,9 @@ def test_the_atomic_write_absence_is_pinned_to_the_schema() -> None:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeError):  # unreadable is not absent
             continue
-        for match in re.finditer(r"CONSTRAINT\s+CREATE[^\n]*", text):
+        for match in re.finditer(
+            r"(?i)(?:CONSTRAINT\s+CREATE|CREATE\s+(?:OR\s+REPLACE\s+)?CONSTRAINT)[^\n]*", text
+        ):
             constraints.append(
                 f"{path.relative_to(ROOT).as_posix()}: {match.group(0).strip()}"
             )

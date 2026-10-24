@@ -73,12 +73,15 @@
 # mechanism its row omits. Position inside the document is a CONVENTION the gate
 # cannot check — prose cannot be parsed for "this paragraph declares the
 # mechanism" — so a marker moved away from its declaration while the passage is
-# deleted keeps the gate green. Every cited section below carries its marker AT
-# the site (re-checked when a row is added or a document is restructured); that
-# is a discipline, not a verdict.
+# deleted keeps the gate green. Each row that dates its markers below marks ONE
+# site per scanned document (the convention is per-DOCUMENT, not per-section), so
+# a row citing several sections of one document is marked at the site that names
+# the mechanism and the other citations are UNMARKED prose — the stated limit,
+# not an omission; that is a discipline, not a verdict.
 #
-# ⭐ MEMBERSHIP IS A GATE, NOT A HAND-PINNED TUPLE. The first seven rows came
-# from #5064's own O/I/T indicator (1); `state_value_carve_out` came from the
+# ⭐ MEMBERSHIP IS A GATE, NOT A HAND-PINNED TUPLE. Seven rows came from #5064's
+# own O/I/T indicator (1) — `vet`, `source_dedup`, `near_dup_merge`, `span_link`,
+# `embed_gate`, `sufficiency_router`, `fanout_cap`; `state_value_carve_out` came from the
 # enumeration #5064's Scope section names as its first deliverable ("enumerate
 # every mechanism the v4 design declares") and is recorded on #5064's 2026-10-13
 # E2 comment — *"mark the omission explicit in the registry this issue builds"*.
@@ -128,9 +131,14 @@
 
 version: 1
 
-# The declared set is CLOSED, and it is in PIPELINE ORDER: the tuple below is
-# pinned, so a mechanism can neither be silently dropped from nor reordered
-# within the registry without the gate saying so.
+# The declared set is CLOSED, and the tuple below is pinned in THIS order, so a
+# mechanism can neither be silently dropped from nor reordered within the
+# registry without the gate saying so. ⚠️ It is NOT "pipeline order": `vet`
+# (S2.2b) sits before `source_dedup` (S0b), and `state_value_carve_out` (a
+# prompt-side guarantee) sits after the read-path router. The order is
+# provenance + insertion, and the gate pins it as such — do not read an ordering
+# invariant into it, and do not use it to decide what to build first (that is
+# what `preconditions:` is for, and it is enforced).
 #
 # ⭐ IT GREW FROM EIGHT TO THIRTEEN BY READING THE DESIGN'S OWN ENUMERATIONS, and
 # that is the enumeration deliverable (#5064 Scope: *"enumerate every mechanism
@@ -142,8 +150,8 @@ version: 1
 #
 #   - §4.1's step list / §4.2's "resulting order" block declare `S2.2a-α EXACT
 #     DEDUP` and `S2.2a-β NEAR-DUP DETECT` as steps with a named rule; the
-#     registry carried only the FUSION (`near_dup_merge`), so the DETECT half —
-#     the one that runs BEFORE the gate — had no verdict at all;
+#     registry carried only the FUSION (`near_dup_merge`), so the mechanical
+#     DETECT half had no verdict at all;
 #   - §4.2's FOUR-DEDUP AUDIT table (`D-a`..`D-d`) is a four-row enumeration of
 #     mechanisms; only `D-a` (source) had a row. `D-b`/`D-c` are one mechanism at
 #     two keys (`exact_dedup`), `D-d` is another (`against_priors_consolidation`),
@@ -209,24 +217,30 @@ mechanisms:
     symbols:
       - exact_hit_id
     note: >-
-      `D-b` (within-batch, and the capture seam's in-capture repeats) and `D-c`
-      (against-store, raw content hash) are ONE declared mechanism at two keys —
-      §4.2 audits them as two rows of its four-dedup table and lists them as one
-      step, `S2.2a-α EXACT DEDUP … within-batch + against-store`.
-      `exact_hit_id` is the in-capture leg: a byte-level `content_hash` dict
-      lookup over the claims the run already accepted (its docstring records why
-      it is deliberately NOT normalized-fuzzy — a fabricated hit is worse than a
-      miss). The against-store leg is `sdk._find_point_by_content` via
-      `_resolve_dedup_hit`, which is a METHOD, so it cannot be a `symbols:`
-      anchor (the anchor resolves module-level names); the row names it here
-      instead of leaving it implied.
-      ⚠️ `implemented` does NOT mean the mechanism is CLOSED. §4.2 states the
-      against-store exact dedup has FOUR preconditions and that the FOURTH — an
-      ATOMIC write — does not exist. That precondition is its OWN row
-      (`atomic_point_write`, `not-implemented`), and it is deliberately NOT a
-      `preconditions:` edge on this one: the edge would force this row to
-      `not-implemented` and so record `D-b`/`D-c` — which exist, with tests — as
-      absent, which is the misreport this registry exists to prevent.
+      `D-b` and `D-c` are ONE declared mechanism at two keys — §4.2 audits them
+      as two rows of its four-dedup table and lists them as one step,
+      `S2.2a-α EXACT DEDUP … within-batch + against-store`.
+      ⚠️ THE THREE LEGS DO NOT SHARE ONE EQUALITY NOTION, and only ONE of them is
+      symbol-anchorable. Named here rather than implied, because two legs rest on
+      this note instead of on the gate:
+      (1) the CAPTURE in-capture repeat — `exact_hit_id`, the anchor: a byte-level
+      `content_hash` dict lookup (deliberately NOT normalized-fuzzy, per its own
+      docstring — a fabricated hit is worse than a miss);
+      (2) the design's `D-b` within-batch leg — an INLINE `_norm(content)`-keyed
+      dict inside `execute_embed` ("first wins"), i.e. NORMALIZED case/whitespace
+      equality, which is a DIFFERENT notion from (1), and an inline statement, so
+      it cannot be a `symbols:` anchor;
+      (3) `D-c` against-store — `sdk._find_point_by_content` via
+      `_resolve_dedup_hit`, a METHOD, likewise unanchorable.
+      ⚠️ So a change that deleted (2) or (3) would leave this row `implemented`
+      and the gate green. That is a stated residual of the symbol anchor, NOT a
+      claim that either leg is absent.
+      ⚠️ `implemented` also does NOT mean the mechanism is CLOSED: §4.2 states
+      the against-store exact dedup has FOUR preconditions and that the FOURTH —
+      an ATOMIC write — does not exist. That precondition is its OWN row
+      (`atomic_point_write`, `not-implemented`); it is deliberately NOT a
+      `preconditions:` edge on this one, because that edge would force this row
+      to `not-implemented` and so record legs that exist, with tests, as absent.
       ⚠️ The capture seam's paraphrase leg is scoped separately and is NOT read
       as closed here: it enforces the BOUNDARY half of D12/O4 only, and the seam
       that consumes a hit DETACH-DELETEs the folded node's `aboutObject` —
@@ -249,12 +263,23 @@ mechanisms:
       S2.2a-β, mechanical — this row) · record the VERDICT `MERGE` for a pair
       that survives it (`vet_gate.OUTCOMES`, S2.2b — row `vet`) · execute the
       FUSION (row `near_dup_merge`, S3).
+      ⚠️ WHAT EXISTS IS THE GUARD, NOT ITS DECLARED PLACEMENT — and the row must
+      not be read the other way. `_boundary` is the mechanical pair comparison
+      and `fold_allowed` plus the `*_differs` wrappers are its public shape (they
+      resolve to `_boundary`), but every shipped call site is reached from INSIDE
+      the post-gate pass or from the capture seam. Measured: the wrappers are
+      called from the consolidation classifier (`classify_consolidation`, which
+      runs inside `execute_embed`) and from `dedup_classify.rephrase_hit` (the
+      capture seam, which FOLDS and DETACH-DELETEs — see #9437); in
+      `extract_session_v2` `apply_vet` runs BEFORE `execute_embed`, so the
+      design's pre-gate `S2.2a-β` SITE does not exist. §4.2's own "The order is
+      inverted" records exactly that, and #5087 owns the code half.
+      ⚠️ So `implemented` here means "the mechanical DETECT + never-across guard
+      is a real, tested mechanism", NOT "the pre-gate detection step ships".
       ⚠️ Before this row the registry carried only the FUSION, so the mechanical
-      half had NO verdict in the checked set — and it is the half that runs
-      BEFORE the gate, which is what makes "dedup before the gate" and "a fusion
-      never precedes the gate" compatible rather than contradictory (§4.2
-      constraint 2). A refused-merge mechanism whose DETECT step is unregistered
-      reads as if the guard were part of the fusion.
+      half had no verdict in the checked set at all — and a refused-merge
+      mechanism whose DETECT step is unregistered reads as if the guard were part
+      of the fusion.
 
   - id: near_dup_merge
     name: "near-duplicate MERGE (Jev-arbitrated, D12/O4)"
@@ -308,14 +333,18 @@ mechanisms:
       - tests/test_consolidation_4way.py
     symbols:
       - classify_consolidation
-    preconditions:
-      - exact_dedup
     note: >-
       `D-d` is the FOURTH of §4.2's four audited dedups and the only one that
-      needs the graph (constraint 5: against-priors consolidation needs the
-      lookup), so it stays after S3 while `exact_dedup` may run first — which is
-      exactly the order declared above, and why `exact_dedup` is this row's
-      precondition rather than its successor.
+      needs the graph (constraint 5: against-priors consolidation needs the S3
+      lookup), so it stays after S3 while `exact_dedup` may run first.
+      ⚠️ NO `preconditions:` EDGE HERE, on purpose. The declared prerequisite is
+      the S3 LOOKUP, and there is no registry row for it, so an edge naming
+      `exact_dedup` would declare a dependency that does not exist — a false
+      verdict generator: if `exact_dedup` were ever honestly re-marked
+      `not-implemented`, this row would be forced to `not-implemented` although
+      it does not depend on it, and the real prerequisite would stay unrecorded.
+      The ordering is therefore recorded as prose here, and the gate keeps
+      checking the edges that ARE real (`near_dup_merge` → `fanout_cap`).
       ⚠️ It is a DIFFERENT mechanism from `near_dup_merge`, not a second home for
       the same one: this classifier DECIDES a candidate's disposition against its
       priors (no LLM, no graph I/O, unit-testable in isolation); the fusion
@@ -457,7 +486,7 @@ mechanisms:
     note: >-
       The declared requirement, in §4.2's own words: *"`create_point(dedup=True)`
       is a check-then-CREATE, and there is no uniqueness constraint on `Point`.
-      Two concurrent writers both see \"absent\" and both create. Nothing in the
+      Two concurrent writers both see 'absent' and both create. Nothing in the
       current write path closes that window."*
       MEASURED in the code, not quoted from the design: the resolve is
       `SDK._resolve_dedup_hit` → `SDK._find_point_by_content` and the CREATE is a
@@ -471,8 +500,12 @@ mechanisms:
       `near_dup_merge` note recorded it as untracked, which is the
       declared-and-absent-with-nobody-tracking shape #5064 exists to make
       visible. `test_the_atomic_write_absence_is_pinned_to_the_schema` reds the
-      day a `Point` uniqueness constraint is added, so the row cannot quietly
-      outlive its own absence.
+      day a `Point` uniqueness constraint appears in the spellings this repo's
+      DDL uses (`CONSTRAINT CREATE` or `CREATE CONSTRAINT`, scanning
+      `tortoise/**/*.py`) — so the row cannot quietly outlive its own absence.
+      ⚠️ That pin's scope is STATED, not universal: a constraint created outside
+      `tortoise/**/*.py` (a script, a migration, a console session) would not be
+      seen. It is the reachable surface the claim lives in, not the whole world.
 
   - id: failure_policy
     name: "per-step FAILURE POLICY (G3) — HOLD the unresolved identity, never assert `new`"
