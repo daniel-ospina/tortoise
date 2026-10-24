@@ -1387,18 +1387,25 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     `extractor_v2.py`) across `README.md`, both probes, and the `docs/00_index.md`
     row that is the bundle's entry point — 44 cites at this head.
 
-    Non-vacuity: against `main`'s documents 26 of the 44 cites red across five
-    rules (`sdk.py:12401` for the meta fold, `12682` for the capture path,
-    `11623` for the entry point, `edges.py:467` for the reference labels and
-    `2168-2192` for the writer) — the cited lines hold the #4716 re-key comments
-    instead of the symbols — and the four `extractor_v2.py:8278-8285` cites red on
-    the END bound alone (the range closes one line into the next block).
+    Non-vacuity: re-staling a LIVE cite reds this test (measured: putting
+    `00_index.md`'s fold cite back to `12401` reds it). The RED COUNT is a
+    property of the base, not of the rule set, so it is stamped with the commit it
+    was measured at rather than asserted about `main`: 17 of the 44 cites red
+    across three rules at `0c7062af1` (`sdk.py:12679` for the meta fold, `12960`
+    for the call that writes the references edge, `11851` for the entry point — a
+    supersession comment, an ORDER comment and a counters line instead of the
+    symbols), and 26 of the 44 red at `f86ae965b` (`52e2be157^`), the base #9850
+    repaired. An earlier round quoted `26` and `five rules` as a standing fact
+    about `main`; both went stale the moment the pins were repaired, which is why
+    the numbers here name their base.
     The `extractor_v2.py` cites are correct at this head, so those rules cannot red
-    on `main`; they are the tripwire for the NEXT insertion above `8288`/`7912`/
-    `7804`, and they bite: with the README's `` `extractor_v2.py:8454` `` moved to
-    `7913`, `the vet flag` reds with `extractor_v2.py:7913 reads 'or
-    _value_gate_enabled())', which carries none of ['vet_enabled = (']`, while the
-    pre-fix sweep (no `extractor_v2` alternative) stayed green on the same text.
+    on `main`; they are the tripwire for the NEXT insertion above the live cites
+    (`extractor_v2.py:8346` the entry point, `:8423` the classify flag, `:8454`
+    the vet flag). They bite: with the README's `` `extractor_v2.py:8454` `` moved
+    to `7913`, `the vet flag` reds with `extractor_v2.py:7913 reads 'continue',
+    which carries none of ['vet_enabled = (']` (measured at this head; an earlier
+    round quoted an older read of `7913`, which the extractor's own growth had
+    since moved).
     The index row's cites are pinned by the same sweep: re-staling `00_index.md`'s
     `sdk.py:12738` to `12401` reds it, and before this leg nothing read that row.
     """
