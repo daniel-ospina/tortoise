@@ -2186,7 +2186,8 @@ def test_the_step1_eval_evidence_doc_selects_core_not_tier1():
     (`test_ax_write_eval.py` in `test_files`). The non-vacuity clause below
     exists for that second one: it re-selects from a manifest copy with the pin
     stripped from `core`, which proves the second assert turns on the `core`
-    registration alone (656 -> 655 files, pin gone).
+    registration alone (the pin is the ONLY difference; the file counts move
+    with every manifest edit, so they are not restated here).
     """
     r = _sel(["docs/ax/how-to-use-tortoise-step1-eval.md"])
     assert r["surfaces"] == ["core"], r
@@ -2194,7 +2195,7 @@ def test_the_step1_eval_evidence_doc_selects_core_not_tier1():
     assert r["full"] is False, r
 
     # Non-vacuous: the pin's presence turns on its `core` registration alone —
-    # strip that entry and the same selection loses the pin (656 -> 655 files).
+    # strip that entry and the same selection loses the pin and NOTHING else.
     # This makes the assert above a claim about `core` being the pin's ONLY
     # home: a `tier1` dual-registration would keep it selected and red this.
     stripped = copy.deepcopy(load_manifest())
