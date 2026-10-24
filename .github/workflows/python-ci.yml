@@ -3438,8 +3438,16 @@ jobs:
           mkdir -p "$SCRATCH"
           # #3470: the log is captured through `tee`, so this leg gets the same
           # attribution every captured leg gets (`pytest-attribution.sh`).
+          # #9555/R7: the record's narrative CARRIER and §9.4's VERBATIM
+          # fetch — a Postgres-only pair, so it arms in this job like the
+          # four-layer legs beside it. Its sibling
+          # `tests/test_9555_narrative_cache_rebuild.py` is deliberately NOT
+          # here: that leg destroys and rebuilds a FalkorDB cache, and this
+          # job's leg gate FAILS on ANY skip (#9551) — a leg that cannot arm
+          # here would red the job over a cache this job does not have.
           timeout -s INT -k 10 12m stdbuf -oL python -m pytest \
             tests/test_9078_record_written_by_production_path.py \
+            tests/test_9555_narrative_carrier.py \
             tests/test_9664_capstone_connector_to_record.py \
             -v --timeout=300 -p no:cacheprovider -r fEs \
             --junitxml="$SCRATCH/junit.xml" -o junit_family=xunit1 \

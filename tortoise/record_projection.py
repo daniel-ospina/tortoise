@@ -144,6 +144,8 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 __all__ = [
     "JOURNAL_EVENT_TYPES",
+    "NARRATIVE_RECORD_TYPE",
+    "NARRATIVE_TABLE",
     "PACKAGED_MIGRATIONS",
     "RECORD_MUTATIONS",
     "ROLE_POSTURE_SQL",
@@ -210,6 +212,13 @@ RECORD_MIGRATIONS: tuple[str, ...] = (
     # reader must see it or `_split_properties` would refuse every narrative
     # column and the projection would write nothing while reporting success.
     "20261023000001_record_session_narrative.sql",
+    # #9555/R7: the narrative CARRIER, recorded on the SCHEMA as COMMENT ON
+    # (append-only — the table's own creation file cannot be edited, #1095).
+    # Contributes no COLUMN, so it is listed for the registry reason above: the
+    # filename is the only total partition of "is this the record's schema", and
+    # an unlisted migration is invisible to the reverse direction of
+    # `tests/test_9231_record_migrations_trigger.py`.
+    "20261024000001_record_session_narrative_carrier.sql",
     # The tenancy boundary itself (#9554, epic #7879): the app role, its table
     # grants and the tenant GUC. It contributes NO column and no refusal — and
     # it is listed anyway, per the registry rule above. Leaving it out was the
@@ -399,6 +408,13 @@ ENVELOPE_KEYS: frozenset[str] = frozenset({
     # keeps it.
 })
 
+#: The ONE record type whose whole job is to carry §9.1's narrative into the
+#: record (#9555 / R7). Declared ONCE here and imported by its producer
+#: (`hosted_api._narrative_carrier`), so the producer and the registry cannot
+#: spell the type differently — the class of defect that made
+#: `create_document(type="SourceCreated")` journal nothing at all.
+NARRATIVE_RECORD_TYPE = "SessionNarrated"
+
 #: The journal's record-type vocabulary. Sourced from the graph fold's own
 #: dispatch (`tortoise/projection/`) and the producers' emit sites, and pinned
 #: by `tests/test_record_projection.py` against both. A type that appears in a
@@ -425,6 +441,7 @@ JOURNAL_EVENT_TYPES: frozenset[str] = frozenset({
     "SourceVersioned",
     "DocumentCreated",
     "SessionRecorded",
+    NARRATIVE_RECORD_TYPE,
     "SessionDeleted",
     "EntityLinked",
     "DirectEdgeCreated",
@@ -870,6 +887,25 @@ RECORD_MUTATIONS: dict[str, Mutation] = {
              "row'). Pinned by tests/test_9599_blank_session_id.py — do not "
              "'fix' one side to match the other without deciding which "
              "projection is authoritative.",
+    ),
+    # ── §9.1's narrative carrier (#9555, R7) ─────────────────────────────────
+    NARRATIVE_RECORD_TYPE: Mutation(
+        NoRecordEffect(
+            "#9555/R7 — the §9.1 narrative's own carrier, emitted by the layer-1 "
+            "commit path (`hosted_api._execute_commit_writes`) so the narrative "
+            "and the raw turn text have a home in the record instead of only a "
+            "field on whichever row happened to hold them. It materialises NO "
+            "node on purpose: §9.1 places the narrative 'not in the graph, not a "
+            "Document node, not a Point', because a narrative is a searchable "
+            "string with no confidence and no topological weight. Its record "
+            "effect is contributed by the SHAPE-KEYED secondary projection "
+            "(`_narrative_statements`, which fires for any record naming its "
+            "session and carrying `story_arc`/`capture_redactions`/`turn_count`), "
+            "so the statement set for a CARRYING payload is not empty even "
+            "though no declared node effect exists — pinned by "
+            "tests/test_9555_narrative_carrier.py and by "
+            "tests/test_record_projection.py's totality fixture."
+        ),
     ),
     "SessionDeleted": Mutation(
         NodeDelete(
@@ -2934,6 +2970,7 @@ def _declared_mutations(
 
 #: The record's narrative table (§9.1 / migration 20261023000001).
 NARRATIVE_TABLE = "session_narrative"
+
 
 #: The payload keys naming the session a narrative/count record belongs to.
 #: Both spellings are live: `sessionId` on the hosted commit's `:Source`/`:Event`

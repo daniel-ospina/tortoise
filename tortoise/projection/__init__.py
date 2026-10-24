@@ -7501,6 +7501,16 @@ _NO_PROJECTION_FOLD = frozenset({
     # intentionally-not-folded; without this entry every replay would log an
     # "unrecognized event type" warning per refusal.
     "EntityBindingRefused",
+    # #9555/R7: §9.1's narrative carrier. It has NO graph effect by design —
+    # §9.1 places the narrative "not in the graph, not a `Document` node, not a
+    # `Point`" — so it folds NOWHERE and its record home is Postgres's
+    # `public.session_narrative` (the record projection's shape-keyed secondary
+    # projection). Listing it here is what keeps a replay of a journal holding
+    # one from logging an "unrecognized event type" warning per capture; leaving
+    # it out would also make the graph fold's own vocabulary check
+    # (tests/test_record_projection.py) the only thing standing between a new
+    # producer and a warning storm.
+    "SessionNarrated",
 })
 
 # #3305: the Point-lifecycle terminalizers whose replay fold is a per-event
