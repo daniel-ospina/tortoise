@@ -315,6 +315,71 @@ def test_add_excludes_pairs_from_one_episodic_transcript_file(
         f"its same-document pair leaked in: {result['add']}")
 
 
+def test_add_keeps_pairs_that_share_only_a_legacy_basename_session_source(
+        sdk_factory, tmp_path):
+    """A pre-#4005 session Source (bare-filename url, ``agentSession`` kind)
+    is a capture session too, so it does NOT make a pair same-source.
+
+    #4005 replaced the hosted commit's session-Source identity
+    (``os.path.basename(ref.path)`` — literally ``session.md``) with the
+    canonical ``session:<id>``, and nodes minted before it KEEP the bare
+    basename: the session-source migration leaves a node it cannot attribute
+    in place (``_LEGACY_CANDIDATES`` is its definition). Classifying on the
+    ``session:`` prefix alone turns such a node into a DOCUMENT, so every pair
+    of Points from one legacy capture is skipped — the empty-add failure this
+    exclusion was corrected for, on the pre-#4005 population.
+    """
+    sdk = sdk_factory(tmp_path)
+    p1 = sdk.create_point("statement", "kubernetes rollout plan")
+    p2 = sdk.create_point("statement", "kubernetes deployment guide")
+    p3 = sdk.create_point("statement", "postgres vacuum tuning")
+    _link_to_source(sdk, [p1, p2], "session.md", sourceKind="agentSession")
+    _link_to_source(sdk, [p3], "doc://ops.md", sourceKind="document")
+    result = sdk.review_connections(
+        mode="add",
+        similarity_fn=_sim({
+            (p1["id"], p2["id"]): 0.9,  # one legacy session — DIFFERENT docs
+            (p1["id"], p3["id"]): 0.8,
+            (p2["id"], p3["id"]): 0.8,
+        }),
+    )
+    pairs = {frozenset((e["from"], e["to"])) for e in result["add"]}
+    assert frozenset((p1["id"], p2["id"])) in pairs, (
+        "a legacy bare-filename session Source was treated as a document — "
+        f"mode=add is dead on the pre-#4005 population; got {result['add']}")
+    assert len(pairs) == 3, f"expected all 3 pairs, got {result['add']}"
+
+
+def test_add_excludes_pairs_from_one_bare_filename_document_source(
+        sdk_factory, tmp_path):
+    """The legacy-session arm must not swallow DOCUMENTS: a bare-filename
+    Source of kind ``document`` is still one document and still excludes.
+
+    ``_LEGACY_CANDIDATES`` requires ``sourceKind='agentSession'`` for exactly
+    this reason — a bare basename says nothing about being a session on its
+    own (an indexer/caller can name a file ``readme.md``).
+    """
+    sdk = sdk_factory(tmp_path)
+    p1 = sdk.create_point("statement", "deployment section intro")
+    p2 = sdk.create_point("statement", "deployment section details")
+    p3 = sdk.create_point("statement", "deployment runbook elsewhere")
+    _link_to_source(sdk, [p1, p2], "readme.md", sourceKind="document")
+    _link_to_source(sdk, [p3], "doc://other.md", sourceKind="document")
+    result = sdk.review_connections(
+        mode="add",
+        similarity_fn=_sim({
+            (p1["id"], p2["id"]): 1.0,   # one bare-filename document
+            (p1["id"], p3["id"]): 0.8,
+            (p2["id"], p3["id"]): 0.8,
+        }),
+    )
+    pairs = {frozenset((e["from"], e["to"])) for e in result["add"]}
+    assert frozenset((p1["id"], p2["id"])) not in pairs, (
+        "a bare-filename DOCUMENT source stopped excluding; the legacy-session "
+        f"arm is too wide: {result['add']}")
+    assert len(pairs) == 2, f"expected the 2 cross-document pairs, got {result['add']}"
+
+
 def test_add_one_sided_source_is_not_same_source(sdk_factory, tmp_path):
     """The exclusion needs a SHARED source — a pair where only ONE point has
     a Source is still suggested (fail OPEN: a missing provenance never hides

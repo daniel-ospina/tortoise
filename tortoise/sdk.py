@@ -22435,11 +22435,12 @@ class TortoiseSDK:
             construction and are excluded, see _review_add) are surfaced as
             suggested connections: {from, to, suggested_relation: "IMPL",
             reason, similarity}. Suggestions only — nudge, don't enforce
-            (design principle 4). A shared ``session:`` ref — the session
-            Source's identity, ``session:<session_id>`` — is capture
-            provenance, not co-authorship of one document, so it does NOT
-            exclude a pair; nor does a Source whose url is corrupt (a legacy
-            list-valued url), which contributes nothing.
+            (design principle 4). A capture-session Source — the canonical
+            ``session:<session_id>`` ref, or a pre-#4005 bare-filename
+            ``agentSession`` Source — is capture provenance, not co-authorship
+            of one document, so it does NOT exclude a pair; nor does a Source
+            whose url is corrupt (a legacy list-valued url), which contributes
+            nothing.
             Scope: ``scope`` (topic text or Point id) narrows the candidate
             pool via hybrid retrieval; None = whole graph, capped at
             REVIEW_ADD_POOL_CAP most-recently-updated non-terminal,
@@ -22805,43 +22806,67 @@ class TortoiseSDK:
             f"  AND {_current_status_clause('n.status')} "
             "  AND (n.outdated IS NULL OR n.outdated = false) "
             "OPTIONAL MATCH (n)-[:extractedFrom]->(src:Source) "
-            "RETURN n.id, n.content, n.status, n.updatedAt, collect(src.url)",
+            "RETURN n.id, n.content, n.status, n.updatedAt, "
+            "       collect([src.url, src.sourceKind])",
         ).result_set
         pool = {}
-        for pid, content, status, updated_at, sources in rows:
+        for pid, content, status, updated_at, source_rows in rows:
             content = content or ""
             if content.startswith("[MITIGATION]"):
                 continue  # mitigation bookkeeping — not a standalone claim
-            # Point→Source is many-to-many (ontology §3.3, #3263), so collect,
-            # never a single url. Keep the DOCUMENT sources only: session
-            # provenance is NOT document provenance, so it never enters the
-            # set — ``_extract_session_v2`` stamps EVERY point it mines with
-            # ONE ref (``session:{session_id}``), so a single capture call
-            # shares a Source across a whole conversation and intersecting on
-            # it would skip every pair on the flagship capture route.
+            # Point→Source is many-to-many (ontology §3.3, #3263), so collect
+            # every pair, never a single url. Keep the DOCUMENT sources only:
+            # session provenance is NOT document provenance, so it never
+            # enters the set — ``_extract_session_v2`` stamps EVERY point it
+            # mines with ONE ref (``session:{session_id}``), so a single
+            # capture call shares a Source across a whole conversation and
+            # intersecting on it would skip every pair on the flagship capture
+            # route.
             #
-            # ``session:`` PREFIX in Python — not a Cypher string operator,
-            # and not the ``sourceKind``/``is_episodic`` flags:
-            #   * the prefix IS the session identity: ``derive_session_source_url``
-            #     (file_indexer.py) is the one derivation every writer and the
-            #     session-source migration use (``_canonical_url``), so a
-            #     migrated session node's url still starts with ``session:``;
-            #   * ``sourceKind='agentSession'`` is not — the indexer stamps the
+            # Two session signals, both narrow enough to BE the identity:
+            #   * the ``session:`` PREFIX. Every writer that goes through a
+            #     derivation lands on it (``derive_session_source_url`` in
+            #     file_indexer.py is what ``session_source_migration._canonical_url``
+            #     uses, so a migrated node keeps it), and ``_extract_session_v2``
+            #     concatenates the same prefix — the prefix holds either way.
+            #   * a pre-#4005 BARE-FILENAME ``agentSession`` url (the old
+            #     ``os.path.basename(ref.path)`` — literally ``session.md``).
+            #     The session-source migration leaves such a node in place when
+            #     it cannot attribute it, so part of that population survives
+            #     indefinitely; ``session_source_migration._LEGACY_CANDIDATES``
+            #     is its definition, and the arm below mirrors it so the two
+            #     agree.
+            # The FLAGS alone are not signals, and keying on them silently
+            # disabled this exclusion on the corpus #9914 targets (a document
+            # dropped out of the set ⇒ empty intersection ⇒ its same-document
+            # pairs came back):
+            #   * ``sourceKind='agentSession'`` — the indexer stamps the
             #     classifier's kind on per-FILE ``corpus://`` permalinks
             #     (``source_kind_for_classifier``), so a transcript file is an
-            #     ``agentSession`` Source though it is one document;
-            #   * ``is_episodic=true`` is not — the capture commit stamps it on
-            #     every EXTERNAL source of ``payload.sources`` (hosted_api.py
-            #     step 4) and ``backfill_is_episodic.py`` statement 4 on EVERY
-            #     Source reachable from a session point. Keying on either flag
-            #     silently disabled the exclusion on the corpus #9914 targets.
+            #     ``agentSession`` Source though it is one document. That is
+            #     why the legacy arm additionally requires a separator-free
+            #     url;
+            #   * ``is_episodic=true`` — the capture commit stamps it on every
+            #     EXTERNAL source of ``payload.sources`` (hosted_api.py step 4)
+            #     and ``backfill_is_episodic.py`` statement 4 on EVERY Source
+            #     reachable from a session point.
             # A non-string url (a :Source minted before #3263 can hold an
             # ARRAY) is unhashable and is no identity, so it contributes
             # nothing — fail OPEN, like every other missing provenance here,
             # and never let corrupt data crash a read-only review.
-            document_sources = {u for u in (sources or [])
-                                if isinstance(u, str) and u
-                                and not u.startswith("session:")}
+            document_sources = set()
+            for src_row in (source_rows or []):
+                if not isinstance(src_row, (list, tuple)) or len(src_row) != 2:
+                    continue
+                src_url, src_kind = src_row
+                if not isinstance(src_url, str) or not src_url:
+                    continue  # corrupt/absent url is not an identity
+                if src_url.startswith("session:"):
+                    continue  # canonical capture session (ONTOLOGY §4.6)
+                if (src_kind == "agentSession" and "://" not in src_url
+                        and "/" not in src_url):
+                    continue  # legacy bare-filename session Source
+                document_sources.add(src_url)
             pool[pid] = {"id": pid, "content": content,
                           "status": status or "draft",
                           "updated_at": updated_at or "",
