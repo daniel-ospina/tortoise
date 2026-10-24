@@ -1127,10 +1127,10 @@ def test_ac5_wall_bounds_contract():
       acceptance criterion — its "a 3 s pass must still fail" clause — and only
       applies when the box has at most one runnable task per CPU. The other
       limb ("passes reliably on a LOADED box") is residual 1 below and is
-      #9474's to close; 3.0 s is a margin over a quiet-box pass measured at
-      3.0 s vs this lane's 1.3-1.8 s samples and vs the population's worst
-      healthy 2.53 s (residual 4) — a claim about the bound's headroom, not
-      about the criterion being met.
+      #9474's to close. 3.0 s is a bound over THIS LANE's 1.3-1.8 s samples,
+      and its real headroom is over the population's worst healthy quiet
+      reading, 2.53 s (residual 4) — 1.19x. A claim about headroom, not about
+      the criterion being met.
     - the HANG bound must clear the TOP of the measured healthy range by a
       wide margin, because it is a hang detector and not a contention
       detector. That range is 3.07-4.27 s at 12 workers (cpu 0.85-0.88),
@@ -1432,9 +1432,9 @@ def test_ac5_interactive_latency_zone():
     that has just been loaded, and a reading taken only afterwards misses a
     spike that began just before the window) wall clock IS this pass's own
     latency, and the bound is 3.0 s: the "a 3 s pass must still fail" clause of
-    #9015's acceptance criterion, which #9474 carries, with the quiet-box pass
-    measured at 1.3-1.8 s (the population's worst healthy quiet reading is
-    2.53 s: residual 4). ⚠️ That is ONE limb of a two-limb criterion —
+    #9015's acceptance criterion, which #9474 carries, with THIS LANE's
+    quiet-box passes measuring 1.3-1.8 s (the population's worst healthy quiet
+    reading is 2.53 s: residual 4, i.e. 1.19x headroom). ⚠️ That is ONE limb of a two-limb criterion —
     #9015's acceptance is "passes reliably on a LOADED box WHILE still failing
     on a genuine multi-x regression", and the loaded-box limb is deliberately
     NOT asserted here (a wall bound tight enough to catch a 3 s pass on a
