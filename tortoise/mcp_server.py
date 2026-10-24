@@ -658,7 +658,7 @@ async def _scoped_dispatch(name: str, arguments, graph_ref: str | None, *,
       ``ToolError`` from the wrapper instead of returning the transport's own
       refusal — recorded ``exec_error``/``ToolError`` in the very
       ``mcp_tool_call`` series #3834 F-1/F-2 keep truthful, with a
-      control-plane ``graph_list`` read issued for an answered request.
+      control-plane ``list_memory_graphs`` read issued for an answered request.
 
     Resolving INSIDE the task fixes both by construction: the scope moves with
     the task, so it cannot outlive it and the task's own result is scoped by
@@ -3657,7 +3657,7 @@ def tortoise_list_graphs() -> list[str]:
     workspace that holds more than one graph must be able to see them here. It
     used to return ONLY the tenant namespace, so a connector could not even
     learn that a second graph existed — one half of the defect the argument
-    fixes. The extra names are taken from the org's OWN `graph_list` rows, not
+    fixes. The extra names are taken from the org's OWN `list_memory_graphs` rows, not
     from a namespace-prefix test: `org_<id>_` is also the prefix of a DIFFERENT
     org whose id begins with `<id>_`, and a prefix test would leak that
     tenant's graph name."""

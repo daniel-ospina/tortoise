@@ -10,8 +10,8 @@ misdirected**, and each claim is wrong for a reason that is checkable:
   * `tortoise/__init__.py` binds six names (`__version__`, `os`, `RELATIVE_PATH_ERROR`,
     `enforce_embedded_fork_safety`, `fork_safe_serverconfig`, `atexit_fast_close`) and
     carries **no `__all__`** — so does `tortoise/sdk.py`.
-  * The 150 are **methods on the `TortoiseSDK` class** in `tortoise/sdk.py` (284 `def`
-    statements in the class body, 150 of them public). A module-level `__all__` physically
+  * The 149 are **methods on the `TortoiseSDK` class** in `tortoise/sdk.py` (339 `def`
+    statements in the class body, 149 of them public). A module-level `__all__` physically
     cannot name them, so adding one would declare nothing about the surface that drifted.
   * The surface consumed in production is the CLASS body: `tests/test_surface_resolution.py`
     resolves `getattr(TortoiseSDK, entry.sdk_method)`.
@@ -52,7 +52,7 @@ disagreement in either direction:
      (#3863).
 
 AST and REFLECTION are not the same question, and nothing reconciled them until this file.
-They agree exactly today (150 / 150). They are not guaranteed to keep agreeing: a public
+They agree exactly today (149 / 149). They are not guaranteed to keep agreeing: a public
 attribute attached to the class OUTSIDE its body is visible to reflection and invisible to the
 AST walk, which is precisely where a `dir()`-only gate and an AST-only gate would silently
 part company.

@@ -2623,7 +2623,8 @@ def test_the_guard_refuses_an_sdk_row_whose_name_is_not_its_method(tmp_path):
     keeping a real method contributes nothing to the comparison. Measured before the fix:
     a fabricated `name: sdk:totally_new_and_unapproved` carrying an existing `method` and
     `exemption: true` → `OK … 151 public SDK methods (1 exempt)`, exit 0. The derivation
-    emits `sdk:<method>` for every one of the 150 rows, so that identity is the check.
+    emits `sdk:<method>` for every `sdk:` row, so that identity is the check (the
+    count is whatever the surface is — 149 today, 150 when this was measured).
     """
     doc = _manifest()
     real = next(r for r in doc["rows"] if str(r["name"]).startswith("sdk:"))
@@ -3452,7 +3453,7 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # #3540 ruling B: 82 -> 81 (two per-source switches retired into ONE
     # consolidated tool — the surface SHRANK, which is the ruling's point).
     assert live["mcp"] == manifest["counts"]["tools"] == 81
-    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 150
+    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 149
 
 
 def test_the_compliance_check_is_RED_on_todays_gap(capsys):

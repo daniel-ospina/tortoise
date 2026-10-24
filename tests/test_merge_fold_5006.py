@@ -26,12 +26,15 @@ BOTH no-payload arms are covered: the paraphrase band (step 3) and the
 exact-content arm (step 1, `reason == "identical"`), which returns before the
 per-prior loop and would otherwise drop the same evidence.
 
-⚠️ SCOPE — this is the EVIDENCE-PRESERVATION half of #5006, not the union-merge
-itself. The Jev-arbitrated fusion (which keeps ONE point and writes the union of
-both sides' attachments onto it) remains unimplemented: `config/v4-mechanisms.yml`
-keeps `near_dup_merge` at `state: not-implemented, tracking_issue: 5006`, and
-this change deliberately does not flip it. What changes here is only which
-folds are admissible: a fold that would lose evidence is no longer taken.
+✅ SCOPE — this module pins the EVIDENCE-PRESERVATION half of #5006. The
+union-merge half now EXISTS: `tortoise/near_dup_merge.py` is the authorised
+FUSION (keeps ONE point, writes the union of both sides' attachments onto it,
+keeps the losing document's session + quote), and `config/v4-mechanisms.yml`
+records `near_dup_merge` as `implemented`. The two halves are complementary by
+design, and these cases stay valid because the default is still the REFUSAL:
+the fusion fires only for a pair S2.2b recorded a `MERGE` verdict for, so every
+assertion below (`merge_flagged` absent) is unchanged and now pins the safe
+branch rather than a dead end.
 """
 
 from __future__ import annotations

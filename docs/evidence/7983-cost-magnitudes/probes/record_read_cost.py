@@ -73,6 +73,10 @@ MIGRATIONS = [
     # probe measures walks the record's tables, and the shipped projection now
     # writes this one. Pinned by `tests/test_7950_capstone_probe.py`.
     "20261023000001_record_session_narrative.sql",
+    # #9555/R7's carrier migration (`COMMENT ON` only). Applied so this list stays
+    # EQUAL to `record_projection.RECORD_MIGRATIONS` (#9550) — the probe stands up
+    # the SHIPPED schema, comments included.
+    "20261024000001_record_session_narrative_carrier.sql",
     # The TENANCY POSTURE (#9554, epic #7879): the app role, its grants (and
     # `relation_id_seq`'s USAGE) and the `*_app_tenant` policies, one per record
     # table (ten, since #9555's `session_narrative`). No column

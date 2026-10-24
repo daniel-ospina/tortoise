@@ -870,7 +870,6 @@ declaration"*, while §4.0/§4.1 declare **EIGHT** (and §4.4 covers all eight),
 *"not a ninth declaration"*. Both are corrected in the design document; a guard now reds if that subsection states a
 spelled or numeric step count other than §4.0's canonical one, or a `… declaration` ordinal other than the next one.
 
-
 ## 2026-10-23 — §4.2's `S0a/S0b` verdict was stale in both directions
 
 The four-way dedup audit's closing sentence said *"`S0a NORMALIZE + HASH → S0b SOURCE DEDUP` is genuinely absent"*. That
@@ -881,3 +880,48 @@ is the part that is still absent. The passage now states the design in the prese
 measurement history lives here rather than in the design document (#8542's rule). `config/v4-mechanisms.yml` carries
 `source_dedup` as `implemented` and its declaration marker sits on this passage, so a stale
 verdict there would be a row saying "shipped" anchored to a document saying "absent".
+
+## 2026-10-24 — D12/O4's FUSION landed: the flagged verdict finally has a consumer (#5006)
+
+`config/v4-mechanisms.yml` recorded `near_dup_merge` as `state: not-implemented, tracking_issue: 5006` while
+`EXTRACTOR-V4-ARCHITECTURE.md` §4.2 named **three** sites for the near-duplicate concern — DETECT the pair
+(`_boundary`, S2.2a-β), record the VERDICT (`vet_gate.OUTCOMES`' `MERGE`, S2.2b), execute the FUSION (S3) — and the
+third had no implementation. `vet_gate.py`'s own docstring was the honest record of it: *"nothing consumes it yet: no
+code routes a `MERGE` verdict to S3"*. #9424 had already landed the REFUSAL half (a fold that would drop an
+attachment is not taken); what was missing is the authorised alternative for exactly that pair.
+
+**What landed.** `tortoise/near_dup_merge.py` is the fusion: ONE survivor (the prior, its claim **byte-identical** —
+never fused), the **union** of both sides' attachments written onto it, and the losing document's provenance kept as
+a `(Session)-[:CONTAINS]->(Point)` edge with its own quote on the merge record. `extract_session_v2` routes the VET
+`MERGE` verdicts (`_merge_flagged_contents`, matched by normalised content, not by VET's index-shaped item ids) into
+`execute_embed`'s consolidation pass; `classify_consolidation` gained the fifth `MERGE` outcome the design always had.
+The fusion runs in `capture_session` through `apply_merge_union`: the `aboutObject` union edges go through the
+journaled `link_entity` writer, so they replay (`#3664`). The losing document's provenance edge
+(`(Session)-[:CONTAINS]->(Point)`) is the same raw, unjournaled write the `#2104` fold uses — durable through the
+`:Session` snapshot rather than the journal (`#3947`, `#3722` scope) — and an id-less `Object` stub stays a
+live-only `MERGE` (`#1727`). What is guaranteed is that no edge is *lost*; what is not is that every one of them
+replays.
+
+**Why the bar is 0.95 and not the NOOP band's 0.45.** §16.4's evidence (*"practical thresholds cluster at ~0.95"*;
+*"a false merge costs MORE than keeping near-duplicates"*) plus `#9424`'s split: a mid-band paraphrase pair is still
+REFUSED and still goes to `ADD` — both claims survive. The fusion only makes the near-IDENTICAL pair admissible.
+
+**The verdict is necessary and never sufficient.** The mechanical ladder (§16.4's never-across guard, the bar, a
+readable union) is re-checked inside the mechanism. With no arbiter injected there are no `MERGE` verdicts, so the
+mechanism is **inert** — the same injected-seam posture VET ships with — and the registry row says `implemented` on
+the strength of `tests/test_near_dup_merge_5006.py` driving the real classifier, the real write path and a real
+graph, not on a flag flip. A false `contained` counter (counting the ATTEMPT rather than the edge) was found and
+fixed by that battery before landing.
+
+**Review round 2 — three residual gaps, all closed by measurement.** (1) The verdict key was content-only: `MERGE` is
+a legal outcome for `entities`/`events`/`points` alike and `_item_text` is `name or content` for all three, so an
+event's text — or an entity's name — that normalised to a point's could authorise a fusion of a Point the arbiter
+never marked. `_merge_flagged_contents` now keeps only the `points` section (a row with no readable section
+contributes nothing), and `test_a_verdict_on_another_SECTION_does_not_authorise_a_point_merge` pins it. (2) The
+id-less `Object`-stub branch of `apply_merge_union` counted the ATTEMPT (`linked += 1` with no read-back) while the
+`CONTAINS` branch beside it counted the EDGE — reachable whenever the survivor is absent, and the one place `linked`
+would stop being a measurement; it is now `MERGE … RETURN count(*)` like its sibling. (3) The ONE production
+invocation of the fusion (`capture_session`'s merge block) was reached by no test — a mutation deleting it stayed
+green. `TestTheCapturePathExecutesTheFusion` now drives the real capture write path (the S1–S5 extraction stubbed,
+since `MERGE` needs an injected arbiter `capture_session` has no seam for) and asserts on the graph: the survivor
+carries the candidate-only attachment, `(Session)-[:CONTAINS]->(Point)` exists, and no second Point was minted.

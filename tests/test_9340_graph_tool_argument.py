@@ -80,7 +80,7 @@ OTHER_TENANT = {
     "status": "active",
 }
 
-#: What `graph_list(ORG_A)` returns — the caller's own rows incl. a tombstone.
+#: What `list_memory_graphs(ORG_A)` returns — the caller's own rows incl. a tombstone.
 OWN_ROWS = [DEFAULT, FUND_A, FUND_B, DUP_1, DUP_2, DELETED]
 #: The same set with a FOREIGN row a leaky reader could hand back; the
 #: resolver must drop it locally rather than trust the reader.
@@ -88,12 +88,12 @@ ROWS = [*OWN_ROWS, OTHER_TENANT]
 
 
 class _FakeSDK:
-    """The control-plane reader `graph_list` stands in for."""
+    """The control-plane reader `list_memory_graphs` stands in for."""
 
     def __init__(self, rows):
         self._rows = rows
 
-    def graph_list(self, org_id):  # one tenant in these tests
+    def list_memory_graphs(self, org_id):  # one tenant in these tests
         return list(self._rows)
 
 
@@ -179,9 +179,9 @@ def test_reachable_rows_drops_a_tombstoned_status():
 
 
 def test_a_row_from_another_workspace_is_dropped_by_the_reachable_set():
-    """The resolver does not TRUST `graph_list` to be org-scoped.
+    """The resolver does not TRUST `list_memory_graphs` to be org-scoped.
 
-    `graph_list(org_id)` is org-scoped today; this pins the second, local
+    `list_memory_graphs(org_id)` is org-scoped today; this pins the second, local
     check, so a future reader change cannot turn a namespace into a
     cross-tenant opener.
     """
@@ -1170,7 +1170,7 @@ def test_no_advertised_handler_names_the_workspace_default_itself():
 # refusal was replaced by a graph error, the `mcp_tool_call` row was
 # `exec_error`/`ToolError` where the truthful row is `refused`/
 # `transport_wait_bound` (the very series #3834 F-1/F-2 keep honest), and a
-# control-plane `graph_list` read was issued for an answered request.
+# control-plane `list_memory_graphs` read was issued for an answered request.
 #
 # The obvious guard (`if not _wait_bound_refused(): resolve`) is WRONG, and the
 # tests below pin its real defects: the scope it applies to the CALLER's context
@@ -1286,7 +1286,7 @@ def test_a_transport_refused_graph_call_is_not_a_graph_error(monkeypatch):
     assert dispatched == [], (
         "the dispatch body ran for a request the transport had already answered")
     assert reads == [], (
-        "a control-plane `graph_list` read was issued for a request the "
+        "a control-plane `list_memory_graphs` read was issued for a request the "
         "transport had already answered")
 
 
