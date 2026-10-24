@@ -2572,14 +2572,16 @@ def _symbol_index() -> tuple[dict[str, frozenset[str]], dict[str, frozenset[str]
     same collision from 5 hops to 4 and took the accepted count from 69 pairs
     to 70). The relation's own note now states what the code enforces: a
     repeated ATTRIBUTE or builtin name can still buy a hop (`list`, `.delete`),
-    while a repeated function-LOCAL name no longer resolves — and the local
-    class was the one that produced a WRONG attribution rather than an extra
-    hop, so locals are excluded here and the negative probe for that exact pair
-    lives in
+    while a repeated function-LOCAL name no longer resolves. The `#9817`
+    local-VARIABLE defect was the class that produced a WRONG attribution rather
+    than an extra hop, so those definition nodes are excluded here and the
+    negative probe for that exact pair lives in
     `test_the_door_attribution_refuses_a_door_that_reaches_another_reader`.
-    A class whose body is walked from a function carries `in_function` through
-    unchanged, and `test_a_class_defined_inside_a_function_is_not_a_symbol`
-    pins both halves of that.
+    A local CLASS body is a weaker case, measured separately: it supplies extra
+    hop CANDIDATES and moves no accepted pair at all — which is why it needed a
+    pin of its own (`test_a_class_defined_inside_a_function_is_not_a_symbol`)
+    rather than resting on the two ceilings. A class whose body is walked from a
+    function carries `in_function` through unchanged.
     Values of a local assignment are still REACHED from the enclosing function
     (`mentions` walks every `Assign` value), so dropping the target nodes loses
     no real reference.
@@ -2809,11 +2811,14 @@ def test_the_door_attribution_refuses_a_door_that_reaches_another_reader():
         "renamed tool yields frozenset() and refuses every reader)"
     )
     assert not _door_reaches("MCP tortoise_search", "hosted_backup.py::_COUNT_ALL_EDGES_QUERY"), (
-        "the search door is attributed to `hosted_backup.py::_COUNT_ALL_EDGES_QUERY`, "
-        "which the search path never reaches — the attribution walked a bare NAME "
-        "(`ids`/`edges`) through a function-LOCAL assignment, so any file that reuses "
-        "a common variable name becomes reachable from any door. Locals must not be "
-        "symbol definitions (`_symbol_index`)."
+        "the search door is attributed to `hosted_backup.py::_COUNT_ALL_EDGES_QUERY` "
+        "INSIDE this reader's 4-hop budget. At the pinned head that pair is 14 hops "
+        "— past the 12-hop search cap, so `_door_distance` answers `None`, and far "
+        "past the budget — so this arm reds only once the pair has come INSIDE the "
+        "budget: the attribution then walked a bare NAME (`ids`/`edges`) through a "
+        "function-LOCAL assignment, so any file that reuses a common variable name "
+        "becomes reachable from any door. Locals must not be symbol definitions "
+        "(`_symbol_index`)."
     )
 
 
