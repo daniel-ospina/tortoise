@@ -146,6 +146,130 @@ def test_add_excludes_same_source_pairs(sdk_factory, tmp_path):
     assert all({e["from"], e["to"]} != {p1["id"], p2["id"]} for e in add)
 
 
+def test_add_keeps_pairs_that_share_only_a_session_source(
+        sdk_factory, tmp_path):
+    """A shared ``session:`` ref is a capture window, not one document, so
+    it does NOT make a pair same-source.
+
+    ``_extract_session_v2`` stamps EVERY point it mines with a single ref —
+    ``extractedFrom=f"session:{session_id}"`` — so one capture call puts one
+    Source across a whole conversation (200 points mined from 20 different
+    documents all share it), and ``create_point`` infers the same ref from
+    ``session_id``. An exclusion keyed on "the Source sets intersect" alone
+    therefore returns an EMPTY add queue for every capture-built corpus,
+    including the cross-document pairs mode=add exists to surface. Session
+    provenance is capture identity, not co-authorship of one document.
+    """
+    sdk = sdk_factory(tmp_path)
+    sess = "session:s1"
+    p1 = sdk.create_point("statement", "kubernetes rollout plan",
+                          extractedFrom=sess)
+    p2 = sdk.create_point("statement", "kubernetes deployment guide",
+                          extractedFrom=sess)
+    p3 = sdk.create_point("statement", "postgres vacuum tuning",
+                          extractedFrom="doc://ops.md")
+    result = sdk.review_connections(
+        mode="add",
+        similarity_fn=_sim({
+            (p1["id"], p2["id"]): 0.9,  # same session — DIFFERENT documents
+            (p1["id"], p3["id"]): 0.8,
+            (p2["id"], p3["id"]): 0.8,
+        }),
+    )
+    pairs = {frozenset((e["from"], e["to"])) for e in result["add"]}
+    assert frozenset((p1["id"], p2["id"])) in pairs, (
+        "a pair sharing only a capture session was excluded — mode=add is dead "
+        f"on every capture-built graph; got {result['add']}")
+    assert len(pairs) == 3, f"expected all 3 pairs, got {result['add']}"
+
+
+def test_add_document_source_still_excludes_a_session_tagged_pair(
+        sdk_factory, tmp_path):
+    """Dropping session provenance must not drop the DOCUMENT exclusion: a
+    pair whose points share a document source is still skipped even when it
+    also carries a ``session:`` ref.
+
+    Points are many-to-many with Sources (ontology §3.3), and capture points
+    carry both refs, so the exclusion has to intersect the document sources
+    rather than replace the rule with "has a session ref ⇒ ignore".
+    """
+    sdk = sdk_factory(tmp_path)
+    doc = "doc://mined.md"
+    p1 = sdk.create_point("statement", "deployment section intro",
+                          extractedFrom=["session:s1", doc])
+    p2 = sdk.create_point("statement", "deployment section details",
+                          extractedFrom=["session:s1", doc])
+    p3 = sdk.create_point("statement", "deployment runbook elsewhere",
+                          extractedFrom=["session:s1", "doc://other.md"])
+    result = sdk.review_connections(
+        mode="add",
+        similarity_fn=_sim({
+            (p1["id"], p2["id"]): 1.0,  # same document — must be excluded
+            (p1["id"], p3["id"]): 0.8,
+            (p2["id"], p3["id"]): 0.8,
+        }),
+    )
+    pairs = {frozenset((e["from"], e["to"])) for e in result["add"]}
+    assert frozenset((p1["id"], p2["id"])) not in pairs, (
+        f"same-document pair leaked back in: {result['add']}")
+    assert len(pairs) == 2, f"expected the 2 cross-document pairs, got {result['add']}"
+
+
+def test_add_one_sided_source_is_not_same_source(sdk_factory, tmp_path):
+    """The exclusion needs a SHARED source — a pair where only ONE point has
+    a Source is still suggested (fail OPEN: a missing provenance never hides
+    a suggestion).
+    """
+    sdk = sdk_factory(tmp_path)
+    p1 = sdk.create_point("statement", "kubernetes rollout plan",
+                          extractedFrom="doc://a.md")
+    p2 = sdk.create_point("statement", "kubernetes deployment guide")
+    result = sdk.review_connections(
+        mode="add",
+        similarity_fn=_sim({(p1["id"], p2["id"]): 0.9}),
+    )
+    pairs = {frozenset((e["from"], e["to"])) for e in result["add"]}
+    assert pairs == {frozenset((p1["id"], p2["id"]))}, (
+        f"a one-sided source hid a suggestion; got {result['add']}")
+
+
+def test_add_scoped_pool_keeps_the_source_exclusion(
+        sdk_factory, tmp_path, monkeypatch):
+    """The SCOPED pool carries provenance too, so the exclusion is not a
+    silent no-op for every scoped call.
+
+    ``_review_pool`` builds the scoped branch by copying the row dict minus
+    ``updated_at``; a copy that also dropped ``sources`` would make every
+    scoped ``mode=add`` skip the exclusion (or raise ``KeyError``) while the
+    whole-graph tests stay green.
+    """
+    sdk = sdk_factory(tmp_path)
+    doc = "doc://scoped.md"
+    p1 = sdk.create_point("statement", "kubernetes rollout plan",
+                          extractedFrom=doc)
+    p2 = sdk.create_point("statement", "kubernetes rollout details",
+                          extractedFrom=doc)
+    p3 = sdk.create_point("statement", "kubernetes runbook elsewhere",
+                          extractedFrom="doc://other.md")
+    monkeypatch.setattr(
+        sdk, "tortoise_fts_query",
+        lambda *a, **k: [{"id": p["id"], "scores": {"rrf": 1.0}}
+                         for p in (p1, p2, p3)])
+    result = sdk.review_connections(
+        mode="add",
+        scope="kubernetes deployment",
+        similarity_fn=_sim({
+            (p1["id"], p2["id"]): 1.0,  # same source — the HIGHEST score
+            (p1["id"], p3["id"]): 0.8,
+            (p2["id"], p3["id"]): 0.8,
+        }),
+    )
+    pairs = {frozenset((e["from"], e["to"])) for e in result["add"]}
+    assert frozenset((p1["id"], p2["id"])) not in pairs, (
+        f"same-source pair leaked through the scoped pool: {result['add']}")
+    assert len(pairs) == 2, f"expected the 2 cross-source pairs, got {result['add']}"
+
+
 def test_add_below_threshold_excluded(sdk_factory, tmp_path):
     """Pairs below the similarity threshold are not suggested."""
     sdk = sdk_factory(tmp_path)

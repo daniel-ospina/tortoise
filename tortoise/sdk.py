@@ -22431,11 +22431,13 @@ class TortoiseSDK:
             are semantically related (embedding cosine similarity above
             ``similarity_threshold``) but NOT yet connected (no shared
             operator, no direct edge — and not extracted from the same
-            Source: same-source pairs are near-duplicates by construction and
-            are excluded, see _review_add) are surfaced as suggested
-            connections: {from, to, suggested_relation: "IMPL", reason,
-            similarity}. Suggestions only — nudge, don't enforce (design
-            principle 4).
+            DOCUMENT Source: same-document pairs are near-duplicates by
+            construction and are excluded, see _review_add) are surfaced as
+            suggested connections: {from, to, suggested_relation: "IMPL",
+            reason, similarity}. Suggestions only — nudge, don't enforce
+            (design principle 4). A shared ``session:`` ref is capture
+            provenance, not co-authorship of one document, so it does NOT
+            exclude a pair.
             Scope: ``scope`` (topic text or Point id) narrows the candidate
             pool via hybrid retrieval; None = whole graph, capped at
             REVIEW_ADD_POOL_CAP most-recently-updated non-terminal,
@@ -22801,10 +22803,28 @@ class TortoiseSDK:
             f"  AND {_current_status_clause('n.status')} "
             "  AND (n.outdated IS NULL OR n.outdated = false) "
             "OPTIONAL MATCH (n)-[:extractedFrom]->(src:Source) "
-            "RETURN n.id, n.content, n.status, n.updatedAt, collect(src.url)",
+            "RETURN n.id, n.content, n.status, n.updatedAt, "
+            "       collect(CASE WHEN src IS NULL "
+            # Session provenance is NOT document provenance, so it never
+            # enters the set: ``_extract_session_v2`` stamps EVERY point it
+            # mines with ONE ref (``session:{session_id}``), so a single
+            # capture call shares a Source across a whole conversation — a
+            # 200-point capture over 20 documents would intersect on it and
+            # an unqualified intersection empties mode=add on the whole
+            # capture-built corpus. Three signals, because they are set by
+            # different writers over time: the url prefix IS the MERGE
+            # identity (durable across replay); ``sourceKind`` and
+            # ``is_episodic`` are stamped by ``_mint_source_stub``
+            # (projection/edges.py) and the session-source migration, and
+            # cover a session Source stored under a MIGRATED url that no
+            # longer starts with ``session:``.
+            "                     OR coalesce(src.sourceKind, '') = 'agentSession' "
+            "                     OR coalesce(src.is_episodic, false) = true "
+            "                     OR src.url STARTS WITH 'session:' "
+            "                    THEN null ELSE src.url END)",
         ).result_set
         pool = {}
-        for pid, content, status, updated_at, sources in rows:
+        for pid, content, status, updated_at, document_sources in rows:
             content = content or ""
             if content.startswith("[MITIGATION]"):
                 continue  # mitigation bookkeeping — not a standalone claim
@@ -22812,10 +22832,13 @@ class TortoiseSDK:
                           "status": status or "draft",
                           "updated_at": updated_at or "",
                           # Point→Source is many-to-many (ontology §3.3,
-                          # #3263), so collect, never a single url. mode=add
-                          # skips pairs that SHARE a source — see the
+                          # #3263), so collect, never a single url. Holds the
+                          # DOCUMENT-kind sources only (the query drops
+                          # session ones, and collect keeps their nulls):
+                          # mode=add skips pairs that SHARE one — see the
                           # same-source exclusion in _review_add.
-                          "sources": {u for u in (sources or []) if u}}
+                          "document_sources": {u for u in (document_sources or [])
+                                               if u}}
         if not scope:
             # Whole-graph scan: cap at the most-recently-updated points so
             # the O(n²) pairwise pass stays bounded (REVIEW_ADD_POOL_CAP).
@@ -22917,19 +22940,29 @@ class TortoiseSDK:
                 continue
             if frozenset((a, b)) in connected:
                 continue  # already connected — nothing to suggest
-            # Same-source pairs are excluded: two Points extracted from ONE
-            # document or session are near-duplicates by construction —
-            # consecutive sections of a file sit in the 0.89+ band
-            # embeddings.py reserves for near-duplicates and clear any add
-            # threshold — so on a mined corpus they crowd the suggestion
-            # queue with pairs that can never be a useful *connection*:
-            # they already share provenance. Measured on a ~7.7k-point
-            # corpus: add-mode suggestions were dominated by 1.00-similarity
-            # pairs from the identical doc_…md source, and mode=add was
-            # effectively unusable at scale. A shared source is not a
-            # relationship an agent needs to be told to add.
-            if pool[a]["sources"] & pool[b]["sources"]:
-                continue  # same extractedFrom — provenance, not a connection
+            # Same-DOCUMENT pairs are excluded: two Points extracted from ONE
+            # document are near-duplicates by construction — consecutive
+            # sections of a file sit in the 0.89+ band embeddings.py reserves
+            # for near-duplicates and clear any add threshold — so on a mined
+            # corpus they crowd the suggestion queue with pairs that can
+            # never be a useful *connection*: they already share provenance.
+            # Measured on a ~7.7k-point corpus: add-mode suggestions were
+            # dominated by 1.00-similarity pairs from the identical doc_…md
+            # source, and mode=add was effectively unusable at scale. A shared
+            # document is not a relationship an agent needs to be told to add.
+            #
+            # ``document_sources`` deliberately excludes ``session:``
+            # provenance (_review_pool's query drops it): a capture session is
+            # a WINDOW, not a document — ``_extract_session_v2`` stamps every
+            # point of one capture with the same ``session:<id>`` ref whatever
+            # document it came from, so intersecting on that ref alone would
+            # skip every pair on the flagship capture route and return an
+            # EMPTY add list, including the cross-document pairs mode=add
+            # exists to surface. The exclusion needs a shared DOCUMENT, and a
+            # missing/mismatched provenance fails OPEN (empty intersection ⇒
+            # pair kept).
+            if pool[a]["document_sources"] & pool[b]["document_sources"]:
+                continue  # same document — provenance, not a connection
             try:
                 score = float(s)
             except (TypeError, ValueError):
