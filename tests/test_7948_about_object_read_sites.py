@@ -343,8 +343,11 @@ WHAT THIS PINS
    docstring carries both rows and the percentages recomputed from them, and an arm
    there holds the two prose sites to the same rows. The first measurement belongs to a
    DIFFERENT tree, `69390341f`, and `#9549` changed the census universe between them, so
-   neither set is a re-measurement of the other. Neither row is restated here: a figure
-   copied into this paragraph is a figure no arm recomputes — `#9528` re-review.)
+   neither set is a re-measurement of the other. The `69390341f` row is not restated
+   here: a figure copied into this paragraph is a figure no arm recomputes, and the
+   `81f5594dc` pair above is recomputed only because `_BASE_MEASUREMENT_PROSE` holds it
+   to that row — `#9528` re-review, which caught this sentence claiming both were
+   unchecked when one of them is the most tightly held prose in the file.)
    `_unsettleable_magnitudes()` states that rule once for the word form
    (a magnitude — digit or word — is allowed only with the framing that produced it),
    and `test_the_gate_walk_comment_asserts_no_unmeasured_magnitude` applies it to the
@@ -6261,10 +6264,16 @@ def _MAGNITUDE_PHASE_SHARE_TAIL(tail: str) -> bool:
     so the whole tail read GREEN. The pronoun now reds on its own, which is the fourth
     constraint this veto states, applied to the pronoun spelling of it.
 
-    Stated residual, pinned by the GREEN legs beside this arm: a DEMONSTRATIVE naming a
-    measurement (`# the second half of this cost`) is treated as naming the thing, the
-    same as `the` — the phase reading is granted because no possessive is there — and an
-    anaphor with no possessive (`# the second half of it`) is the same shape.
+    Stated residual, pinned by the GREEN legs beside this arm: a DEMONSTRATIVE is
+    stripped exactly as `the` is, so a phase of a thing named that way
+    (`# the second half of this cost`, `# the second half of these costs`) keeps the
+    exemption the same as `# the second half of the costs` — the boundary this veto
+    draws is POSSESSIVES, and a demonstrative names the thing rather than owning it.
+    `# the second half of these costs` used to read RED only because `these` was not in
+    the strip, while `# the second half of the costs` read GREEN: an inconsistency
+    between two spellings of the same sentence, not a stricter guard (`#9528`
+    re-review). An anaphor with no possessive (`# the second half of it`) is the same
+    shape.
     """
     head = re.match(r"\s*of\s+", tail, re.IGNORECASE)
     if not head:
@@ -6276,7 +6285,13 @@ def _MAGNITUDE_PHASE_SHARE_TAIL(tail: str) -> bool:
     words = re.findall(r"[\w’'-]+", rest)[: _MAGNITUDE_TAIL_WORDS]
     for position, word in enumerate(words):
         lowered = word.lower()
-        if lowered in _MAGNITUDE_POSSESSIVE_PRONOUNS:
+        # The pronoun owns the DIVIDED THING only as its determiner — the first word of
+        # the tail. Scanning the whole window red `# the second half of the walk
+        # re-reads its sources`, where `its` owns something in a LATER clause and the
+        # divided thing carries no possessive at all: a false RED with a remediation
+        # ("state the framing that produced it") describing a figure the sentence does
+        # not contain (`#9528` re-review).
+        if position == 0 and lowered in _MAGNITUDE_POSSESSIVE_PRONOUNS:
             return True
         if lowered.endswith(("'s", "’s")) or lowered.endswith("s'"):
             return True
@@ -6304,7 +6319,8 @@ def _unsettleable_magnitudes(comment: str) -> list[str]:
     - `69390341f` (the `#9516` merge): rebuild 1.70 s / 1.81 s, arm 3.35 s / 3.14 s,
       ungated 10.81 s / 9.90 s.
     - `81f5594dc` (`#9549`; the merge base when the figures were taken): rebuild 2.50 s / 3.00 s, arm 3.90 s / 4.40 s. `#9549` changed the census universe, so these absolute times are NOT the
-      ones above; the direction (over half the arm) is the same on both trees.
+      ones above; the direction is the same on both trees, and the percentages
+      recomputed from these rows below are the claim.
 
     Read against the ARM the comment sits in, the rebuild is **over half** of it, not a
     small fraction. Each percentage below is RECOMPUTED from the row above it by
@@ -6619,9 +6635,12 @@ def test_the_gate_walk_magnitude_ratios_recompute_from_the_rows_they_name():
     """The word form's percentages are computed from the figures beside them (`#9501`).
 
     ⚠️ **A hand-computed percentage is a claim, and this paragraph shipped one that was
-    wrong.** The `#9501` review found it attaching `~17 %` to the reading "with the
-    ungated pass folded in" — which that arithmetic gives 12 % / 14 % for, the ~16–18 %
-    belonging to the ungated pass ALONE. (An earlier revision of this paragraph is
+    wrong.** The `#9501` review found it attaching a folded-in figure to the reading
+    "with the ungated pass folded in" — a reading that arithmetic does not give: the
+    folded percentage is the smaller one, and the small-looking figure belongs to the
+    ungated pass ALONE. (Both readings are recomputed by this arm from the rows below
+    and never restated here — not even the shipped figure, which the quoted paragraph in
+    `_PREFIX_MAGNITUDE_PARAGRAPH` carries verbatim.) (An earlier revision of this paragraph is
     where the `1.70 s / 1.81 s of 3.35 s / 3.14 s` pair and the base-labelled
     `2.5–3.0 s of 3.9–4.4 s` pair sat in two different trees; in the text quoted by
     `_PREFIX_MAGNITUDE_PARAGRAPH` below, the first pair is already parenthesised to
@@ -6637,8 +6656,9 @@ def test_the_gate_walk_magnitude_ratios_recompute_from_the_rows_they_name():
     Non-vacuity, three legs: (1) the paragraph as it shipped before this correction,
     quoted verbatim in `_PREFIX_MAGNITUDE_PARAGRAPH`, produces findings — it states a
     percentage nothing recomputes; (2) that shipped percentage re-written as a `folded`
-    row reds on the ARITHMETIC (the row's own figures give 12 % / 14 %, it claimed
-    ~17 %), so the comparison is live rather than the row-shape check alone; (3) the
+    row reds on the ARITHMETIC (the row's own figures give a folded reading well below
+    the figure it claimed), so the comparison is live rather than the row-shape check
+    alone; (3) the
     module docstring's base-anchored figures must be the same set the `81f5594dc` row
     carries, so the two prose sites cannot name different trees for one measurement
     again.
@@ -7241,7 +7261,13 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
         # other.
         "# the second half of this cost is the parse",
         "# the second half of that work is the parse",
+        "# the second half of these costs is the parse",
         "# the second half of it is the parse",
+        # ...and a possessive pronoun that owns something in a LATER clause is not a
+        # possessive on the divided thing: scanning the whole tail window red this
+        # sentence, one word from the GREEN leg above (`#9528` re-review). The pronoun
+        # check is scoped to the divided thing's own determiner position.
+        "# the second half of the walk re-reads its sources",
         # a proportion bound to something that is not a measured quantity:
         "# e.g. 3 in 4 cases",
         "# most of these modules are run in the suite",
