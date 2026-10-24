@@ -199,11 +199,13 @@ differing content token was free** (6/7 = 0.857). Measured against that cut: "re
 latency regression to the payments team" folded onto "…to the search team", a 30-second
 timeout onto a 60-second one, and a cause/effect pair onto its inversion — every one of them
 a pair `distinguishing_difference` refuses to even FOLD. A false CORRECTS terminalizes a
-live belief and there is no un-supersede API, so the leg is now **ordered containment**:
+live belief and there is no un-supersede API, so the leg is now **contiguous containment**:
 
-* the ref's content tokens must appear **in order** inside the prior's content tokens — a
-  different number, entity, scope word, or a role inversion breaks containment, while an
-  ADDITION in the prior (the measured drift) does not;
+* the ref's content tokens must appear as a **contiguous** span of the prior's tokens (not
+  merely in order — an ordered subsequence can be recombined from two different clauses, and
+  a recombined ref is not a copy of anything) — a different number, entity, scope word, or a
+  role inversion breaks the span, while an ADDITION at either end (the measured drift) does
+  not;
 * the two must carry the **same negation markers** (set equality, not presence — every
   negator is a frame word, so containment alone would fold "the cache is shared" onto
   "the cache is not shared", and two claims can each carry a negator and mean opposites);
@@ -265,6 +267,7 @@ rewritten in review:
              and the drop is named: point supersedes='We ship the lease fix all-at-once behind a single global kil' matches no S3 prior — skipped (fail-open)
   [DETECTED] a leg that folds EVERY prior is caught by the same pin
   [DETECTED] restoring the COVERAGE RATIO is caught by the negative pin (the predicate is pinned, not just described)
+  [DETECTED] reverting to the ORDERED-SUBSEQUENCE predicate is caught by the negative pin (the contiguity tightening is pinned, not just described)
 
 3. edge_missing attribution (operator drop vs supersede refusal)
   [DETECTED] shipped classifier separates the classes AND ignores the recall leg's success line
@@ -310,7 +313,7 @@ coverage-ratio shape is re-injected as a fourth arm in section 2.
 
 Six findings were raised against the first cut and all six were fixed before merge. Two were
 **data-integrity** defects in the new supersede leg, and they are the reason the leg is
-ordered containment rather than a similarity score (§3.2b): the coverage ratio folded a
+contiguous containment rather than a similarity score (§3.2b): the coverage ratio folded a
 substituted entity, a changed number, a flipped role order and a changed scope word, and the
 polarity test was presence-of-any-negator rather than set equality. Two more were defects in
 this PR's own instrumentation: the refusal markers keyed on a prefix the recall leg's success
@@ -343,7 +346,9 @@ tokens AND their word-parts (deliberately, for the fold path), and the sub-token
 had DROPPED a genuine "once the canary passes in staging" clause compared equal and resolved.
 The leg now uses `_supersede_condition_markers`, which matches whole tokens only (a marker
 cannot be minted from inside a compound; every refusal this loses is still a refusal), and the
-compound case is pinned alongside the plain one.
+compound case is pinned alongside the plain one. The containment test itself was tightened
+from an ordered subsequence to a **contiguous span** at the same time: an ordered match can be
+recombined across two clauses of one prior, which is not a copy of anything.
 
 ## 6. Reproduction
 

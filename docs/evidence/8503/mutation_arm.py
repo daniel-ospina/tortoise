@@ -158,24 +158,44 @@ def check_supersede_band() -> None:
                      "a leg that folds EVERY prior is caught by the same pin")
 
     # the SHAPE regression review round 2 asked for: put the coverage ratio
-    # back in place of the ordered-containment predicate. The negative pin
+    # back in place of the contiguous-span predicate. The negative pin
     # must red — otherwise the predicate is pinned only by prose.
     from tests.test_extractor_v2 import TestOperatorSemantics2552 as SafetyPin
-    original_contains = v2._tokens_contain_in_order
+    original_contains = v2._tokens_contain_contiguous
     try:
         def _ratio(ref_tokens, prior_tokens, _min=0.85):
             ref_set, prior_set = set(ref_tokens), set(prior_tokens)
             if not ref_set:
                 return False
             return len(ref_set & prior_set) / len(ref_set) >= _min
-        v2._tokens_contain_in_order = _ratio
+        v2._tokens_contain_contiguous = _ratio
         caught = _pin_fails(
             SafetyPin().test_supersede_band_refuses_every_substitution)
     finally:
-        v2._tokens_contain_in_order = original_contains
+        v2._tokens_contain_contiguous = original_contains
     _expect_detected(caught,
                      "restoring the COVERAGE RATIO is caught by the negative "
                      "pin (the predicate is pinned, not just described)")
+
+    # and the OTHER shape regression: undo the contiguity tightening, back to
+    # the ordered-subsequence test the leg shipped for one commit. Nothing but
+    # the contiguity discriminator distinguishes them, so if this is not
+    # DETECTED the tightening is unpinned.
+    def _ordered(ref_tokens, prior_tokens):
+        if not ref_tokens:
+            return False
+        remaining = iter(prior_tokens)
+        return all(tok in remaining for tok in ref_tokens)
+    try:
+        v2._tokens_contain_contiguous = _ordered
+        caught = _pin_fails(
+            SafetyPin().test_supersede_band_refuses_every_substitution)
+    finally:
+        v2._tokens_contain_contiguous = original_contains
+    _expect_detected(caught,
+                     "reverting to the ORDERED-SUBSEQUENCE predicate is "
+                     "caught by the negative pin (the contiguity tightening is "
+                     "pinned, not just described)")
 
 
 # ── 3. the attribution classifier (the receipt's discriminator) ────────────
@@ -194,7 +214,7 @@ def check_drop_attribution() -> None:
             "point supersedes='We ship the lease fix' matches no S3 prior",
             # the recall leg's SUCCESS line — must NOT count as a refusal
             "point-supersede recall band (#8503): ref 'We ship the lease fix' "
-            "is an ordered token subsequence of 'pt_wp06_decision'",
+            "is a contiguous token span of 'pt_wp06_decision'",
             "operator dropped: src/dst did not resolve to an emitted point",
         ],
     }]

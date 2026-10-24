@@ -6515,7 +6515,7 @@ def _resolve_point_supersede(ref: str, search: dict,
     even FOLD, let alone supersede. A false CORRECTS terminalizes a live
     belief and there is no un-supersede API to repair it.
 
-    So the leg is **ordered containment**, which cannot cross a substituted
+    So the leg is **contiguous containment**, which cannot cross a substituted
     CONTENT token by construction: the ref's content tokens must appear IN
     ORDER inside the prior's content tokens (a different number, entity, scope
     word or a role inversion breaks containment) AND the two must carry the
@@ -6560,7 +6560,7 @@ def _resolve_point_supersede(ref: str, search: dict,
             prior = drifted[0]
             warnings.append(
                 f"point-supersede recall band (#8503): ref {ref[:60]!r} is "
-                f"an ordered token subsequence of {prior.get('id')!r} "
+                f"a contiguous token span of {prior.get('id')!r} "
                 f"('{str(prior.get('content'))[:60]}') — resolved to that "
                 "prior instead of failing open")
             return prior
@@ -6589,9 +6589,10 @@ SUPERSEDE_REF_MIN_TOKENS = 5
 def _supersede_ref_tokens(text: str) -> list[str]:
     """ORDERED content tokens of a supersede ref / prior content.
 
-    Order is the point: an ordered subsequence test cannot cross a substituted
-    entity, a changed number, a changed scope word or a role inversion, while
-    a bag-of-tokens ratio silently does. Frame words are dropped (and negation
+    Order is the point: a contiguous-span test cannot cross a substituted
+    entity, a changed number, a changed scope word or a role inversion, nor a
+    recombination across two clauses, while a bag-of-tokens ratio silently
+    does all of them. Frame words are dropped (and negation
     is compared separately, by ``_negation_markers``, because every negator is
     a frame word). Sentence punctuation is stripped per token — a copied ref
     routinely differs from its prior by a trailing '.' or a quote mark.
@@ -6604,18 +6605,23 @@ def _supersede_ref_tokens(text: str) -> list[str]:
     return out
 
 
-def _tokens_contain_in_order(ref_tokens: list[str],
-                             prior_tokens: list[str]) -> bool:
-    """True when ``ref_tokens`` appears as an ORDERED subsequence.
+def _tokens_contain_contiguous(ref_tokens: list[str],
+                               prior_tokens: list[str]) -> bool:
+    """True when ``ref_tokens`` is a CONTIGUOUS span of ``prior_tokens``.
 
-    The ``x in iterator`` idiom consumes the iterator as it matches, so a
-    token can only match a later position than the previous one — the ref may
-    be a prefix, a suffix, or a middle span of the prior, never a reordering.
+    Contiguous, not merely ordered: an ordered subsequence can be recombined
+    from two different clauses of one prior ("we ship A" + "do not ship B"
+    yields "we ship A ship B"), and a recombined ref is not a copy of
+    anything. The measured drift is a contiguous PREFIX once frame words are
+    dropped ("We ship the lease fix…" against "Ship the lease fix…"), so the
+    stricter form costs that case nothing, and a word INSERTED into the middle
+    refuses — the direction a belief-corrupting write wants.
     """
-    if not ref_tokens:
+    n = len(ref_tokens)
+    if not n or n > len(prior_tokens):
         return False
-    remaining = iter(prior_tokens)
-    return all(tok in remaining for tok in ref_tokens)
+    return any(prior_tokens[i:i + n] == ref_tokens
+               for i in range(len(prior_tokens) - n + 1))
 
 
 def _supersede_condition_markers(text: str) -> frozenset[str]:
@@ -6656,10 +6662,10 @@ def _supersede_band_candidates(ref: str, points: list[dict]) -> list[dict]:
 
     Returns every candidate that passes; the CALLER resolves only when exactly
     one does. Acceptance is deliberately boolean rather than a similarity
-    score: a ref that must be an ordered subsequence with matching negation,
-    no exchanged connective and an identical condition set is either a copy of
-    this prior or it is not one, and a score is what let a substitution
-    through in the first cut.
+    score: a ref that must be a contiguous span, with matching negation and
+    condition markers, no exchanged connective and no substituted subject, is
+    either a copy of this prior or it is not one — and a score is what let a
+    substitution through in the first cut.
     """
     ref_tokens = _supersede_ref_tokens(ref)
     if len(ref_tokens) < SUPERSEDE_REF_MIN_TOKENS:
@@ -6689,8 +6695,8 @@ def _supersede_band_candidates(ref: str, points: list[dict]) -> list[dict]:
         cand_pron = _supersede_pronouns(content)
         if ref_pron and cand_pron and ref_pron != cand_pron:
             continue
-        if _tokens_contain_in_order(ref_tokens,
-                                    _supersede_ref_tokens(content)):
+        if _tokens_contain_contiguous(ref_tokens,
+                                      _supersede_ref_tokens(content)):
             out.append(p)
     return out
 

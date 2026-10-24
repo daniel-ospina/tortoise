@@ -1061,7 +1061,7 @@ def test_recall_leg_success_is_not_counted_as_a_refusal():
         "session_id": "wp07_bluepeak_followup",
         "extraction_warnings": [
             "point-supersede recall band (#8503): ref 'We ship the lease fix' "
-            "is an ordered token subsequence of 'pt_wp06_decision' — resolved "
+            "is a contiguous token span of 'pt_wp06_decision' — resolved "
             "to that prior instead of failing open",
             "point supersedes='We ship the lease fix' matches no S3 prior — "
             "skipped (fail-open)",

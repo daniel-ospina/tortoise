@@ -6592,6 +6592,25 @@ class TestOperatorSemantics2552:
         assert not resolves(
             "We ship the lease fix behind the canary flag",
             "They ship the lease fix behind the canary flag")
+        # THE CONTIGUITY DISCRIMINATOR (above the 5-token floor, every other
+        # gate neutral): the ref DROPS the prior's middle span
+        # ("rather than a week of per-shard canary" keeps only "rather than
+        # canary"), so it is an ordered subsequence but not a contiguous one.
+        # Contiguous-span refuses; the pre-tightening ordered test resolved.
+        # This is the only case in this pin that the tightening itself
+        # decides — the others are refused by the negation / condition /
+        # connective / pronoun gates or by the token floor.
+        assert not resolves(
+            "ship the lease fix all-at-once behind a single global kill flag "
+            "rather than canary",
+            "Ship the lease fix all-at-once behind a single global kill flag "
+            "rather than a week of per-shard canary")
+        # a ref taken from TWO clauses of one prior likewise refuses (here the
+        # 5-token floor and the negation-set gate also fire, so this case
+        # corroborates contiguity rather than isolating it)
+        assert not resolves(
+            "we ship the alpha runbook",
+            "we ship the alpha runbook and we do not ship the beta runbook")
         # and the positive control: additive drift still resolves
         assert resolves(
             "We ship the lease fix behind a single global kill flag",
