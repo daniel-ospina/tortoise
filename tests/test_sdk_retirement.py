@@ -155,6 +155,47 @@ def test_every_retired_name_carries_its_own_approval() -> None:
     )
 
 
+def test_each_retirement_records_the_row_it_chose() -> None:
+    """A RANGE approval does not pin WHICH row — the recorded ordinal does.
+
+    The group row approves rows 30–33, so `"graph_list": "delete_memory_graph"` would
+    satisfy every other assertion in this file and its hint would send every caller to
+    the eraser. This test is the pin that makes the author's choice an artifact instead
+    of a runtime re-decision: the recorded ordinal must resolve to the DECLARED
+    replacement, in a row the approving region actually names.
+    """
+    from tortoise.sdk_retired import (
+        RETIRED_SDK_APPROVAL_ROWS,
+        RETIRED_SDK_METHODS,
+    )
+
+    assert set(RETIRED_SDK_APPROVAL_ROWS) == set(RETIRED_SDK_METHODS), (
+        "every retirement needs its chosen target row, and only retirements may have "
+        f"one: {sorted(set(RETIRED_SDK_APPROVAL_ROWS) ^ set(RETIRED_SDK_METHODS))}"
+    )
+    rows = _target_rows()
+    wrong: dict[str, tuple] = {}
+    for old, new in RETIRED_SDK_METHODS.items():
+        row = RETIRED_SDK_APPROVAL_ROWS[old]
+        if rows.get(row) != new:
+            wrong[old] = (row, rows.get(row), new)
+    assert not wrong, (
+        "the recorded target row does not name the declared replacement "
+        "(row, the name on that row, the declared replacement): "
+        f"{wrong}"
+    )
+    outside = {
+        old: (RETIRED_SDK_APPROVAL_ROWS[old], sorted(_approved_replacements(old)))
+        for old in RETIRED_SDK_METHODS
+        if rows[RETIRED_SDK_APPROVAL_ROWS[old]] not in _approved_replacements(old)
+    }
+    assert not outside, (
+        "the recorded target row lies OUTSIDE the region the owner approved — the "
+        "ordinal cannot be used to smuggle in a row the approval never named: "
+        f"{outside}"
+    )
+
+
 def test_each_retired_name_left_the_public_surface() -> None:
     """`old` must no longer be a public method — a map entry for a LIVE name is a lie."""
     from tortoise.sdk_retired import RETIRED_SDK_METHODS

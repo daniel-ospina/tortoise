@@ -77,9 +77,13 @@ RETIRED_SDK_METHODS: dict[str, str] = {
 #: ⚠️ The residual, stated rather than papered over: a group row names a RANGE
 #: of approved targets, so this map's job is to prove the replacement is one of
 #: those rows and that the old name is in the row authorising it. WHICH row of
-#: the range a given old name collapses into is the author's design decision and
-#: is settled by review, not by this map — no machine can decide that
-#: `graph_list` is row 31 rather than row 30.
+#: the range a given old name collapses into is the author's design decision —
+#: no machine can decide that `graph_list` is row 31 rather than row 30 — so the
+#: decision is RECORDED in :data:`RETIRED_SDK_APPROVAL_ROWS` and pinned by
+#: `tests/test_sdk_retirement.py`, instead of being re-decided at runtime. That
+#: cell is not decoration: a range alone would admit a DESTRUCTIVE mis-target
+#: (`"graph_list": "delete_memory_graph"` sits inside rows 30–33), whose hint
+#: would send every caller to the eraser with a green run.
 RETIRED_SDK_APPROVALS: dict[str, str] = {
     "events_poll": "| `events_poll` | → row 11 `poll_events`. |",
     "restore_point_at": (
@@ -107,6 +111,24 @@ RETIRED_SDK_APPROVALS: dict[str, str] = {
         "`graph_set_recording` survives, because it is an agent's only in-MCP recovery "
         "from the capture 409. |"
     ),
+}
+
+#: retired name -> the ONE target-row ordinal its replacement was chosen from.
+#:
+#: The approvals above authorise a REGION (a group row names rows 30–33). The CHOICE
+#: inside that region is an author decision, and this cell is where that decision is
+#: RECORDED rather than re-decided at runtime. It is a gate, not documentation: with
+#: only the region, `"graph_list": "delete_memory_graph"` would satisfy every check and
+#: send each `graph_list` caller to the eraser — so `tests/test_sdk_retirement.py`
+#: resolves this ordinal against `beta-sdk-surface.md` and requires it to BE the
+#: declared replacement, and requires the ordinal to lie inside the approved region.
+RETIRED_SDK_APPROVAL_ROWS: dict[str, int] = {
+    "events_poll": 11,
+    "restore_point_at": 7,
+    "graph_list": 31,
+    "graph_restore": 33,
+    "graph_set_name": 30,
+    "graph_set_recording": 30,
 }
 
 

@@ -4935,7 +4935,23 @@ _UNDATED_SENTINEL = "1970-01-01T00:00:00Z"
 #: MEANINGFUL value ("clear the override → inherit the org default"), so
 #: conflating it with "unspecified" would clear an override on every call
 #: that only meant to rename the graph.
-_UNSET: object = object()
+class _Unset:
+    """The type of :data:`_UNSET` — so the parameter's contract stays narrow.
+
+    Annotating the parameter ``bool | None | object`` would collapse to ``object``
+    (a union with ``object`` IS ``object``), which silently drops the contract: a
+    caller could pass ``recording="false"`` and the registry would store a STRING
+    that reads back truthy, leaving recording ON. With a distinct type the accepted
+    set is exactly ``{True, False, None, _UNSET}`` at zero runtime cost.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - diagnostics only
+        return "<unset>"
+
+
+_UNSET: _Unset = _Unset()
 
 
 def _iso_date10(value: object) -> str:
@@ -32289,7 +32305,7 @@ class TortoiseSDK:
 
     def update_memory_graph(self, org_id: str, graph_id: str, *,
                             name: str | None = None,
-                            recording: bool | None | object = _UNSET) -> bool:
+                            recording: bool | None | _Unset = _UNSET) -> bool:
         """The ONE partial update a memory graph has — rename it, and/or
         set/clear its session-recording override.
 
@@ -32316,7 +32332,11 @@ class TortoiseSDK:
         Resolves the literal ``default`` id to the org's kind='default' node
         (mode-agnostic callers use either); any other id must match a real
         node exactly. Soft-deleted nodes (status='deleted') are NOT patchable
-        — treated as unknown (mirror ``list_memory_graphs``' tombstone skip).
+        — treated as unknown, exactly as both setters it replaces did. (The
+        tombstone FILTER lives on the readers that list rows —
+        ``hosted_api.list_graphs`` skips ``status='deleted'`` rows, while
+        ``list_memory_graphs`` deliberately returns them, which is why
+        ``graph_count`` was not folded into it.)
 
         Returns True when the node was found (the requested fields written),
         False on an unknown graph — callers map that to 404. At least one of

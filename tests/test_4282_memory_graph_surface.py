@@ -27,6 +27,8 @@ WHAT THIS FILE IS THE GATE ON (one test per property, so a regression names itse
 """
 from __future__ import annotations  # noqa: I001
 
+import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -212,19 +214,41 @@ class TestTheOldNamesAreGone:
     def test_no_in_repo_caller_still_uses_a_retired_name(self):
         """A missed call site is a live `AttributeError` in a route or a tool.
 
-        Scanned by TOKEN, on tracked Python only, excluding this file (which spells the
-        old names deliberately) and the retirement table (whose job is to hold them).
+        The scan is deliberately WIDER than a `.name(` call-shape match, because the
+        narrow version is how a real call site survived this very slice:
+
+          * a **bound method reference** carries no `(` — `asyncio.to_thread(
+            sdk.graph_restore, …)` was the actual shape in `hosted_api.py`;
+          * `graph-scripts/` and `tools/` are not under `tortoise/`, and
+            `graph-scripts/` did hold a live `graph_list` caller.
+
+        So: every TRACKED Python file (no test file — this one and a sibling pin the old
+        names on purpose), matching `.<name>` at a word boundary, which covers calls,
+        bound references and `getattr`-free attribute reads. Two allowances, both
+        explicit: `sdk_retired.py` owns the names, and a registered MCP TOOL id
+        (`id="surface.graph_set_recording"`) is a tool identifier, never an SDK
+        attribute — that tool is an owner-ruled survivor (2026-09-21).
         """
+        out = subprocess.run(
+            ["git", "ls-files", "*.py"],
+            cwd=ROOT, capture_output=True, text=True, check=True,
+        ).stdout.split()
+        pattern = re.compile(
+            r"\.(" + "|".join(map(re.escape, RETIRED)) + r")\b",
+        )
         offenders: list[str] = []
-        for path in sorted(ROOT.joinpath("tortoise").rglob("*.py")):
-            if path.name == "sdk_retired.py":
+        for rel in out:
+            if rel.startswith("tests/") or rel == "tortoise/sdk_retired.py":
                 continue
-            text = path.read_text(encoding="utf-8")
-            for old in RETIRED:
-                if f".{old}(" in text:
-                    offenders.append(f"{path.relative_to(ROOT)}: .{old}(")
+            for lineno, line in enumerate(
+                ROOT.joinpath(rel).read_text(encoding="utf-8").splitlines(), 1
+            ):
+                for m in pattern.finditer(line):
+                    if f'id="surface.{m.group(1)}"' in line:
+                        continue  # an MCP tool id, not an SDK attribute
+                    offenders.append(f"{rel}:{lineno}: .{m.group(1)}")
         assert not offenders, (
-            "a caller still invokes a retired SDK name — it would raise at runtime: "
+            "a caller still references a retired SDK name — it would raise at runtime: "
             f"{offenders}"
         )
 

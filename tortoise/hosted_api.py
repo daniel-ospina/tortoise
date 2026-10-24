@@ -19357,7 +19357,13 @@ async def list_my_orgs(user: dict = Depends(get_current_user)):  # noqa: B008
         graphs_by_org.update(await offload(
             lambda chunk=chunk: {
                 org_id: _graph_list_for(org_id) for org_id in chunk},
-            op="list_memory_graphs"))
+            # `op` is an OBSERVABILITY label naming the operation, not the SDK
+            # method it calls (its siblings are `data_sdk`, `org_sdk`, `query`):
+            # `tests/test_read_routes_loop_responsiveness.py` counts this exact
+            # label to prove the org-switcher fan-out stays chunked (#3718), so
+            # renaming it with the method it happens to call silently reds a pin
+            # that is about submission COUNT — and breaks metric continuity.
+            op="graph_list"))
 
     out = []
     for m, org in resolved:
