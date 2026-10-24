@@ -583,9 +583,50 @@ def test_a_provisioner_that_adds_nothing_does_not_report_convergence(env):
     e = env(pool=[("r1", "online", False, "self-hosted-x64")], installs=[("gh-runner-x64-1", "r1")])
     e.provisioner_adds = 0
     rec = e.record()
-    assert rec["live"] == 1, rec
-    assert any("no listener came up" in n for n in rec["notes"]), rec["notes"]
     assert rec["verdict"] == "under-target", rec
+    # ⛔ AND THE EXIT CODE SAYS SO: the pass TRIED (a provisioner ran) and the pool did not grow,
+    # so exit 0 would report "converged" to everything that gates on the status — the systemd
+    # timer's own success line, a controller reading the last run, `--status`'s probe. Named
+    # `problem_kind=no-listener` so the code keys on the CAUSE: a `--status`/`--dry-run` plan and
+    # a memory-reserve stop also end `under-target` by design and must stay exit 0 (pinned below).
+    assert rec["problem_kind"] == "no-listener", rec
+    assert rec["_rc"] == 4, rec
+
+
+def test_a_status_read_that_ends_under_target_is_not_a_failed_schedule(env):
+    """`--status`/`--dry-run` change NOTHING by design, so they cannot be a failed pass.
+
+    The installer's install-time probe runs exactly `--json --status` and reads a non-zero exit
+    as "this schedule would fire and do NOTHING" (install-runner-autoscale-schedule.sh, the
+    `probe:` block). Mapping the `under-target` VERDICT to a non-zero code — the obvious fix for
+    the exit-0 hole above — would therefore red the install probe on every healthy box that is
+    simply below its target, which is most of them most of the time. This pin is that edge.
+    """
+    e = env(pool=[("r1", "online", False, "self-hosted-x64")], installs=[("gh-runner-x64-1", "r1")])
+    e.provisioner_adds = 0
+    rec = e.record("--status")
+    assert rec["dry_run"] is True, rec
+    assert rec["verdict"] == "under-target", rec
+    assert "problem_kind" not in rec or rec["problem_kind"] != "no-listener", rec
+    assert rec["_rc"] == 0, rec
+    assert e.provisioned() == [], e.provisioned()
+
+
+def test_a_capacity_stop_under_target_is_a_refusal_not_a_failure(env):
+    """A box that stops at its own memory reserve is REFUSED by physics, not failing the guard.
+
+    This is the capacity counterpart of `fill-blocked`, which the EXIT contract keeps at 0 on
+    purpose ("a refusal is an answer"). Pinned so the exit-4 cause cannot quietly widen into
+    "every under-target", which would red the timer on a box that needs a bigger machine rather
+    than a repair.
+    """
+    e = env(mem_mb=6700, ncpu=8, shrink_to=2000)
+    rec = e.record()
+    assert rec["verdict"] == "under-target", rec
+    assert rec["live"] < rec["ceiling"], rec
+    assert any("reserve_mb" in n for n in rec["notes"]), rec["notes"]
+    assert rec.get("problem_kind") != "no-listener", rec
+    assert rec["_rc"] == 0, rec
 
 
 def test_fill_re_measures_and_stops_before_starving_a_shard(env):
@@ -634,6 +675,9 @@ def test_over_ceiling_is_reported_and_nothing_is_removed(env):
     rec = e.record()
     assert rec["verdict"] == "over-ceiling", rec
     assert rec["ceiling"] == 1
+    # Exit 0 is the RECORDED choice, not an accident: a live count above the measured ceiling
+    # removes nothing (a runner that may be serving is never removed), so there is no action this
+    # pass could have failed at. Pinned here because the EXIT block now says so out loud.
     assert rec["_rc"] == 0
     assert e.provisioned() == [] and e.restarted() == []
 
@@ -886,6 +930,7 @@ def test_installs_without_a_listener_do_not_loop_forever(env):
     assert len(e.provisioned()) == 1, f"unbounded fill loop: {len(e.provisioned())} calls"
     assert any("no listener came up" in n for n in rec["notes"]), rec["notes"]
     assert rec["verdict"] == "under-target", rec
+    assert rec["_rc"] == 4, rec
 
 
 def test_a_mid_pass_measurement_failure_keeps_what_already_happened(env):

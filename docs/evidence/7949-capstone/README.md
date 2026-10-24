@@ -132,7 +132,7 @@ a log. The frozen `capstone-measured-e0fc940b.log` therefore still carries the c
 stamp** (`sdk.py:12401`, `sdk.py:12682`, `edges.py:467`, `edges.py:2168-2192`), which no longer
 resolve on `main` — and it renders `tortoise/extractor_v2.py:8278-8285`, whose END was already one
 line long at that stamp (`8284` closes the block; `8285` opens the next one) and is corrected to
-`8524-8530` here, not in the log. That is deliberate: a scored log is a measurement record and the bundle's rule is
+`8823-8829` here, not in the log. That is deliberate: a scored log is a measurement record and the bundle's rule is
 that a row moves only by RE-RUNNING the probe and removing the file it replaces, never by editing a
 number in place. Read this README (and the probes it pins) for CURRENT cites; read the log for the
 numbers measured at `e0fc940b5`. A re-run under a new `<new-head8>` is the supersede path.

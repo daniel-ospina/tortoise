@@ -135,9 +135,14 @@ USAGE
   `--ceiling` / `--max-runners` flag: a box that can be told to exceed its own measurement is a
   box with no guard, which is the defect this file exists to close.
 
-EXIT  0 converged / at-ceiling / nothing to do / a REFUSAL (an answer, not a failure):
-        `provisioner-refused` (its own guard) and `fill-blocked` (no provisioner on this box —
-        the #9639 dependency is absent, so FILL cannot run; nothing else is affected)
+EXIT  0 converged / at-ceiling / over-ceiling / nothing to do / a REFUSAL (an answer, not a
+        failure): `provisioner-refused` (its own guard), `fill-blocked` (no provisioner on this
+        box — the #9639 dependency is absent, so FILL cannot run; nothing else is affected), and
+        `under-target` reached WITHOUT an attempted growth — a `--status`/`--dry-run` plan (it
+        changes nothing by design, so it cannot be a failed pass) or a stop at this box's own
+        memory reserve (the capacity counterpart of `fill-blocked`). `over-ceiling` is here too,
+        deliberately: a live count above the measured ceiling removes nothing (a runner that may
+        be serving is never removed), so that pass has nothing it could have failed at.
       1 usage, or `--want N` refused (N above the measured ceiling — nothing was changed)
       2 a measurement or pool read was UNREADABLE — fail-closed. ⛔ NOT always "nothing was
         changed": a pass that already restarted/registered a runner and THEN could not
@@ -145,6 +150,14 @@ EXIT  0 converged / at-ceiling / nothing to do / a REFUSAL (an answer, not a fai
         already did ("the actions listed above were already performed") — read the record, not
         this line, for whether the box was touched
       3 an ACTION failed (restart / registration) — the record says which
+      4 a REAL pass ended `under-target` because a runner was INSTALLED and NO listener came up —
+        the guard tried to grow the pool and the pool did not grow (`problem_kind=no-listener`).
+        ⛔ ONE VERDICT, THREE CAUSES, and only this one is a failure of the guard — so this code
+        keys on the CAUSE, never on `under-target` alone. A `--status`/`--dry-run` plan and a
+        stop at the memory reserve both end `under-target` by design and exit 0 (above); mapping
+        the verdict itself to a non-zero code would red the timer every interval on a healthy
+        box that is simply below target, and would make the installer's install-time `--status`
+        probe report FAILED on those same boxes.
 """
 
 from __future__ import annotations
@@ -1181,6 +1194,11 @@ def converge(
             f"live listeners {live})"
         )
         if live <= previous_live:
+            # ⛔ THE ONE `under-target` CAUSE THAT IS A FAILURE, and it is NAMED so the exit code
+            # can key on the cause instead of on the verdict (see the EXIT block). Without this
+            # the scheduled pass reported exit 0 — "converged" to anything gating on the exit
+            # status — on the exact shape this file's own docstring refuses: installed, and inert.
+            record["problem_kind"] = "no-listener"
             record["notes"].append(
                 f"stop: slot #{index} was installed but no listener came up (live={live}), so "
                 "another call would repeat the same result — stopping instead of reporting a "
@@ -1399,6 +1417,8 @@ def main(argv: list[str] | None = None) -> int:
         return 3
     if record["verdict"] == "unmeasurable":
         return 2
+    if record["verdict"] == "under-target" and record.get("problem_kind") == "no-listener":
+        return 4
     return 0
 
 
