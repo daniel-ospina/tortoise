@@ -338,12 +338,13 @@ WHAT THIS PINS
    figures were taken; `main` has advanced since, so a `base` label would describe a
    tree the measurement never saw (fresh process, `_literal_files()` warm, two runs) —
    the rebuild is 2.5–3.0 s of
-   `_narrow_gate_walk_sites`'s own 3.9–4.4 s — **over half the arm**, not a small
-   fraction of it. (The first measurement belongs to a DIFFERENT tree, `69390341f`, and
-   reads 1.70 s / 1.81 s of 3.35 s / 3.14 s; `#9549` changed the census universe between
-   them, so the two sets are not interchangeable and neither is a re-measurement of the
-   other. `_unsettleable_magnitudes`' docstring carries both rows and the percentages
-   recomputed from them, and an arm there holds the two prose sites to the same rows.)
+   `_narrow_gate_walk_sites`'s own 3.9–4.4 s, and the percentages recomputed from that
+   row are the claim — not the word form the sentence used. (`_unsettleable_magnitudes`'
+   docstring carries both rows and the percentages recomputed from them, and an arm
+   there holds the two prose sites to the same rows. The first measurement belongs to a
+   DIFFERENT tree, `69390341f`, and `#9549` changed the census universe between them, so
+   neither set is a re-measurement of the other. Neither row is restated here: a figure
+   copied into this paragraph is a figure no arm recomputes — `#9528` re-review.)
    `_unsettleable_magnitudes()` states that rule once for the word form
    (a magnitude — digit or word — is allowed only with the framing that produced it),
    and `test_the_gate_walk_comment_asserts_no_unmeasured_magnitude` applies it to the
@@ -6040,22 +6041,50 @@ _MAGNITUDE_QUALIFIER = r"(?:entire|whole|full|overall|complete|remaining|aforeme
 #: it" for a sentence holding no figure — a false positive, not a policy (`#9501` review).
 #: ⚠️ The ANAPHOR is the cycle-3 P0: without it `# the rebuild is a small fraction of it`
 #: was GREEN, one pronoun away from the sentence `#9516` left behind. `it`/`its`/`them`/
-#: `their`/`itself`/`this one` bind as subjects; a bare `this`/`that`/`these`/`those`
-#: deliberately does NOT, because the innocent shapes this binding exists to keep green
-#: (`# most of these modules`, `# most of this file is parsed once`) are exactly a
-#: demonstrative plus a noun — so `# most of that` going GREEN is a stated residual in
-#: `#9531`, not an oversight.
+#: `their`/`itself`/`this one` bind as subjects, and so does a DEMONSTRATIVE with a
+#: measured noun after it (`# most of that arm`, `# most of those arms`): `that`/`those`
+#: were missing from the determiner slot, so swapping one determiner turned the same
+#: sentence GREEN (`#9528` re-review). A demonstrative naming anything else stays the
+#: innocent shape this binding exists to keep green (`# most of these modules`,
+#: `# most of this file is parsed once`), and a BARE demonstrative with no noun at all
+#: (`# most of that`) is a stated residual in `#9531`, not an oversight.
 #: ⚠️ Two more shapes are deliberately ABSENT: a bare `bulk` with no subject (measured: it
 #: red `# reads them in bulk from the disk`), and the bare noun `time` (measured: it red
 #: `# most of the time this is fine`, an idiom, not a figure). The cost of the second is
 #: a time-share claim in words going GREEN, which is the direction a merge gate should
 #: err in; both are listed with the other residuals in `#9531`.
+#:
+#: Possessive PRONOUNS on a measured quantity (`#9528` re-review). Defined here because
+#: BOTH predicates read one vocabulary: the share veto below and the subject slot here.
+#: A determiner strip that consumed `its`/`their`/`our` as if they were `the` put the
+#: measurement noun at position 0 of a tail, where the dropped-apostrophe check is
+#: suppressed — so `# the second half of its cost is the parse` read GREEN while
+#: `… of the arm's cost` red, one pronoun away from the sentence the veto exists for.
+#: And on the SUBJECT side the old anaphor list was `it|its|itself|them|their`, so
+#: `# most of our total` matched nothing at all — the vocabulary is one set now, so a
+#: pronoun cannot bind in one predicate and be missing from the other.
+_MAGNITUDE_POSSESSIVE_PRONOUNS = frozenset(
+    {"its", "itself", "their", "theirs", "our", "ours", "his", "her", "hers", "your", "yours", "my"}
+)
+
+#: The ANAPHORS that stand in for a measured quantity — the object pronouns plus the
+#: whole possessive vocabulary above. `them` is not a possessive and stays: `# most of
+#: them` is a share of the things the walk reads.
+_MAGNITUDE_ANAPHOR = "|".join(
+    sorted(
+        {"it", "them", "this\\s+one", "that\\s+one"} | _MAGNITUDE_POSSESSIVE_PRONOUNS,
+        key=len,
+        reverse=True,
+    )
+)
+
 _MAGNITUDE_SUBJECT = (
-    rf"(?:(?:the\s+|this\s+|these\s+)?(?:{_MAGNITUDE_QUALIFIER}\s+)?"
+    rf"(?:(?:the\s+|this\s+|that\s+|these\s+|those\s+)?(?:{_MAGNITUDE_QUALIFIER}\s+)?"
     r"(?:\w+(?:[- ]\w+)*['’]s\s+|\w+(?:[- ]\w+)*s'\s+)?"
     r"(?:arms?|costs?|wall[- ]?clocks?|runs?|suites?|totals?|works?|budgets?|walks?)\b"
-    r"|(?:it|its|itself|them|their)\b|this\s+one|that\s+one)"
+    rf"|(?:{_MAGNITUDE_ANAPHOR})\b)"
 )
+
 
 #: A multiplier slot — a DIGIT or a number WORD, so `4 times` cannot be green where
 #: `4x` reds and `three in four` cannot be green where `3 in 4` reds (cycle-3 review).
@@ -6219,21 +6248,36 @@ def _MAGNITUDE_PHASE_SHARE_TAIL(tail: str) -> bool:
       `the gate walk's cost` spelling — the same one-word-retires-the-guard shape, moved
       from the adjective slot to the divided-thing slot.
 
-    The determiner is consumed as a determiner, not as the divided thing: without that,
-    `# the second half of the work re-reads the sources` read RED because `the` stood in
-    for the share's subject and `work` looked like a dropped-apostrophe measurement —
-    the documented-GREEN parallel of `the second half of the walk re-reads the sources`.
+    The DEMONSTRATIVE determiner is consumed as a determiner, not as the divided thing:
+    without that, `# the second half of the work re-reads the sources` read RED because
+    `the` stood in for the share's subject and `work` looked like a dropped-apostrophe
+    measurement — the documented-GREEN parallel of `the second half of the walk re-reads
+    the sources`.
+
+    ⚠️ A POSSESSIVE PRONOUN is NOT consumed (`#9528` re-review). It names an owner, not
+    a thing: `the second half of its cost` is a share of a measurement exactly as
+    `of the arm's cost` is, and stripping the pronoun as a determiner landed the
+    measurement noun at position 0 — where the dropped-apostrophe check is suppressed —
+    so the whole tail read GREEN. The pronoun now reds on its own, which is the fourth
+    constraint this veto states, applied to the pronoun spelling of it.
+
+    Stated residual, pinned by the GREEN legs beside this arm: a DEMONSTRATIVE naming a
+    measurement (`# the second half of this cost`) is treated as naming the thing, the
+    same as `the` — the phase reading is granted because no possessive is there — and an
+    anaphor with no possessive (`# the second half of it`) is the same shape.
     """
     head = re.match(r"\s*of\s+", tail, re.IGNORECASE)
     if not head:
         return False
     rest = tail[head.end() :]
-    determiner = re.match(r"(?:the|this|that|its|their|our)\s+", rest, re.IGNORECASE)
+    determiner = re.match(r"(?:the|this|that|these|those)\s+", rest, re.IGNORECASE)
     if determiner:
         rest = rest[determiner.end() :]
     words = re.findall(r"[\w’'-]+", rest)[: _MAGNITUDE_TAIL_WORDS]
     for position, word in enumerate(words):
         lowered = word.lower()
+        if lowered in _MAGNITUDE_POSSESSIVE_PRONOUNS:
+            return True
         if lowered.endswith(("'s", "’s")) or lowered.endswith("s'"):
             return True
         # a dropped apostrophe: the measurement noun right after the divided thing
@@ -6417,8 +6461,12 @@ _MAGNITUDE_CLAIM_ROW = re.compile(
     re.MULTILINE,
 )
 
-#: A stated percentage is rounded to a whole point, so recomputation agrees within one.
-_MAGNITUDE_RATIO_TOLERANCE_PP = 1.5
+#: A stated percentage is rounded to a whole point, so recomputation agrees within HALF
+#: a point; the full point of slack is for a row whose figures are themselves rounded.
+#: ⚠️ It was 1.5 while the comment claimed "within one", and that admitted a materially
+#: wrong figure: `51 %` (true value 50.7) written as `52 %` passed (`#9528` re-review,
+#: measured) — a tolerance wider than the rounding it excuses is a hole, not slack.
+_MAGNITUDE_RATIO_TOLERANCE_PP = 1.0
 
 #: The module docstring's base-anchored figures, which must be the SAME set the
 #: `81f5594dc` measurement row carries — the two prose sites state one measurement.
@@ -6622,6 +6670,22 @@ def test_the_gate_walk_magnitude_ratios_recompute_from_the_rows_they_name():
         f"recomputation is not comparing them: {mismatched}"
     )
 
+    # ⛔ …and a percentage that is WRONG BY MORE THAN ROUNDING must red, which is what
+    # the tolerance is FOR: at 1.5 points `51 %` (true value 50.7) could be written
+    # `52 %` and the arm stayed green, while the comment beside the constant claimed the
+    # recomputation "agrees within one" (`#9528` re-review, measured). The tolerance is
+    # now the rounding it excuses, and this leg pins the direction.
+    drifted = prose.replace("arm 51 % / 58 %", "arm 52 % / 59 %")
+    assert drifted != prose, (
+        "the magnitude paragraph no longer carries `arm 51 % / 58 %`, so this leg pins "
+        "nothing — retarget it at the row it does carry"
+    )
+    drift = _magnitude_ratio_findings(drifted)
+    assert any("arm:" in finding and "figures give" in finding for finding in drift), (
+        "a stated percentage 1.3 points off its own row passes, so the tolerance admits "
+        f"a materially wrong figure rather than the rounding it exists for: {drift}"
+    )
+
     # The bare-percentage sweep must close every spelling, not one of them: a rotated
     # figure re-spelt `43%` / `43 per cent` / `43 pct` sat outside every row and was
     # silent, which is the rot this third shape exists to catch (`#9528` review P2).
@@ -6690,9 +6754,12 @@ def test_the_gate_walk_comment_asserts_no_unmeasured_magnitude():
 
     ⚠️ **The gap `#9516` left, executed rather than argued.** Its guard holds the
     comment to its DURATIONS; the comment it produced pins a *proportion* in words
-    instead — "the rebuild is a small fraction of this arm's cost" — which measured at
-    this head is over half the arm (2.5–3.0 s of the walk's own 3.9–4.4 s; the numbers
-    and their framing are in `_unsettleable_magnitudes`' docstring). So the guard moved
+    instead — "the rebuild is a small fraction of this arm's cost" — which does not
+    reproduce against the row that names its figures' tree, `81f5594dc`
+    (`_unsettleable_magnitudes`' docstring carries the rows and the percentages
+    recomputed from them; no figure is copied here, because a copy is what nothing
+    recomputes — `#9528` re-review: this docstring said "at this head", which is a tree
+    the measurement never saw). So the guard moved
     the figure out of the sentence and the sentence kept the claim, which is the defect
     class this issue chain exists to end: a magnitude stated in prose with nothing
     measuring it. The rule is the same one the duration arm states, applied to the other
@@ -7166,6 +7233,15 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
         # Widening `_MAGNITUDE_SUBJECT` to see it must red this leg and update the
         # docstring's residual bullet in the same change.
         "# the second half of the gate walk cost is the parse",
+        # ...and the STATED RESIDUAL the `#9528` re-review added beside it: a
+        # DEMONSTRATIVE names the divided thing rather than owning it, so a phase of it
+        # keeps the exemption — the same boundary as `the second half of the walk`. The
+        # possessive PRONOUN spelling of the same sentence is RED below, and the two
+        # legs are what keep the difference from being quietly widened one way or the
+        # other.
+        "# the second half of this cost is the parse",
+        "# the second half of that work is the parse",
+        "# the second half of it is the parse",
         # a proportion bound to something that is not a measured quantity:
         "# e.g. 3 in 4 cases",
         "# most of these modules are run in the suite",
@@ -7206,6 +7282,15 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
         # ...and a possessive on a NON-measurement: the stated cost of the rule, not a
         # shape it is trying to catch, and it is a share of a thing either way.
         "# the second half of the run's output is the parse",
+        # ...and a POSSESSIVE PRONOUN on the divided thing (`#9528` re-review): the
+        # determiner strip consumed `its`/`their`/`our` as if they were `the`, which put
+        # the measurement noun at position 0 — where the dropped-apostrophe check is
+        # suppressed — and read the whole share GREEN. `of its output` carries no
+        # measurement noun at all, so the pronoun has to red on its own.
+        "# the second half of its cost is the parse",
+        "# the second half of their work is the parse",
+        "# the second half of our total is the parse",
+        "# the second half of its output is the parse",
     ):
         assert _unsettleable_magnitudes(share), (
             f"{share!r} is a SHARE of a measured quantity wearing a phase's clothes — a "
@@ -7255,6 +7340,13 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
         # `one|two|three|four in two|…|five` window was GREEN on `one in ten`).
         "# two in ten of the walks pay the parse.",
         "# five in six of the walks pay the parse.",
+        # ⚠️ The DEMONSTRATIVE determiner (`#9528` re-review): `that`/`those` were
+        # missing from the subject slot's determiner list, so ONE determiner swapped a
+        # RED for a GREEN on the same sentence — the one-synonym-away fail-open, one
+        # vocabulary over.
+        "# the rebuild is a small fraction of that arm",
+        "# most of those arms is the parse",
+        "# the rebuild is most of that run",
     ):
         assert _unsettleable_magnitudes(spelling), (
             f"{spelling!r} states a proportion of a measured quantity and must red — a "
