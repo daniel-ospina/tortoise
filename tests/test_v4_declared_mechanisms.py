@@ -1253,8 +1253,16 @@ AUDITED_DEDUP_ROW = re.compile(r"^\|\s*\*\*(" + _DEDUP_ID + r")\*\*", re.MULTILI
 #: shape (`**D-a**`, `D-a`, `**D-a** (note)`). Used only to prove the reader above
 #: did not silently skip a row: an id this loose pattern finds and the strict one
 #: does not is an UNREADABLE ROW, which is a violation rather than a gap.
+#: ⚠️ NOT anchored on a leading pipe either: an INDENTED row
+#: (`  | **D-e** | …`) and a row whose first cell lost its leading pipe
+#: (`**D-e** | … | ✅ |`) are the same table row, and a `^\|` anchor in BOTH
+#: readers made the cross-check share the strict reader's blind spot — measured:
+#: an indented fifth dedup produced zero errors. A line that contains a pipe AND a
+#: dedup id is a table row for this purpose, whatever its indentation.
 AUDITED_DEDUP_ROW_LOOSE = re.compile(
-    r"^\|[^|\n]*?\b(" + _DEDUP_ID + r")\b", re.MULTILINE
+    # A line that contains a pipe ANYWHERE is table-ish; the id may sit on either
+    # side of it, which is why this is a lookahead and not two ordered groups.
+    r"^(?=[^\n]*\|)[^\n]*?\b(" + _DEDUP_ID + r")\b", re.MULTILINE
 )
 
 
@@ -1590,12 +1598,55 @@ def _use_key(node: ast.expr) -> str | None:
     return None
 
 
+#: "This expression STARTS a constraint statement", used to recognise a statement
+#: assembled from parts — `"GRAPH.CONSTRAINT " + "CREATE x UNIQUE NODE Point"`
+#: holds no complete statement in either operand, so the full-statement regex
+#: cannot see it. Deliberately NOT the bare word: `_CYPHER_RESERVED` (a list of
+#: reserved words) and a regex like `ADD CONSTRAINT … CHECK` both contain it, and
+#: an inclusion test on the word alone tainted them (measured: two false positives
+#: on the real tree). A CREATE-side spelling is what a constraint STATEMENT opens
+#: with; `ADD CONSTRAINT` is a column check, not a graph constraint.
+DDL_FRAGMENT = re.compile(
+    r"(?i)(?:GRAPH\s*\.\s*CONSTRAINT|CONSTRAINT\s+CREATE"
+    r"|CREATE\s+(?:OR\s+REPLACE\s+)?CONSTRAINT)"
+)
+
+
+def _ddl_fragments(node: ast.expr) -> list[str]:
+    """Every string literal inside `node`, however deeply nested.
+
+    A fragment can be carried by a COLLECTION as easily as by a `+`: measured,
+    `PARTS = ["CREATE CONSTRAINT pt UNIQUE NODE ", "Point"]; "".join(PARTS)`
+    was neither `found` (no literal holds the whole statement) nor `assembled`
+    (the `.join` branch only read constants inside the CALL), so an assembled
+    `Point` constraint read as ABSENT. Walking the whole subtree closes every
+    carrier shape at once — collections, dict values, nested calls.
+    """
+    return [
+        n.value for n in ast.walk(node)
+        if isinstance(n, ast.Constant) and isinstance(n.value, str)
+    ]
+
+
 def _incomplete_ddl(value: ast.expr | None) -> bool:
-    """Is `value` a literal that STARTS a constraint and names no label yet?"""
-    if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
+    """Does `value` carry a constraint fragment whose label is NOT resolved here?
+
+    A single literal is the common case. A COLLECTION of fragments is the same
+    thing spread over elements (`PARTS = ["… UNIQUE NODE ", "Point"]`), and a
+    fragment may hold only the WORD when the statement is split across operands —
+    so anything that carries a `CONSTRAINT`-bearing fragment and does not carry a
+    COMPLETE labelled statement is incomplete, and a use of it is unverifiable
+    rather than absent.
+    """
+    if value is None:
         return False
-    match = DDL.search(value.value)
-    return bool(match) and not DDL_LABELLED.search(match.group(0))
+    fragments = _ddl_fragments(value)
+    if not any(DDL_FRAGMENT.search(f) for f in fragments):
+        return False
+    return not any(
+        DDL.search(f) and DDL_LABELLED.search(DDL.search(f).group(0))
+        for f in fragments
+    )
 
 
 def _bound_pairs(tree: ast.AST) -> list[tuple[ast.expr, ast.expr | None]]:
@@ -1613,6 +1664,15 @@ def _bound_pairs(tree: ast.AST) -> list[tuple[ast.expr, ast.expr | None]]:
             targets: list[ast.expr] = list(node.targets)
         elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
             targets = [node.target]
+        elif isinstance(node, ast.NamedExpr):
+            # `if (d := "… UNIQUE NODE "):` — a walrus IS a binding.
+            targets = [node.target]
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            # `for d in ["… UNIQUE NODE "]:` — the loop target is bound to the
+            # iterable's ELEMENTS, so the iterable is the value to inspect.
+            targets = [node.target]
+            pairs.append((node.target, node.iter))
+            continue
         else:
             continue
         value = node.value
@@ -1693,15 +1753,13 @@ def ddl_scan(root: Path) -> tuple[list[str], list[str], list[str]]:
                     if isinstance(v, ast.Constant) and isinstance(v.value, str)
                 ]
             elif isinstance(node, ast.BinOp):  # `+`, `%` and every other operator
-                fragments = [
-                    n.value for n in (node.left, node.right)
-                    if isinstance(n, ast.Constant) and isinstance(n.value, str)
-                ]
+                # A statement SPLIT across operands (`"…CONSTRAINT " + "CREATE …"`)
+                # holds no complete statement in either literal, so the word is
+                # what makes it reportable — an assembled statement must never
+                # read as absent.
+                fragments = _ddl_fragments(node)
             elif isinstance(node, ast.AugAssign):
-                fragments = [
-                    n.value for n in ast.walk(node.value)
-                    if isinstance(n, ast.Constant) and isinstance(n.value, str)
-                ]
+                fragments = _ddl_fragments(node.value)
                 if set(_binding_keys(node.target)) & tainted:
                     assembled.append(f"{rel}: `{ast.unparse(node.target)}` += …")
             elif (
@@ -1709,13 +1767,20 @@ def ddl_scan(root: Path) -> tuple[list[str], list[str], list[str]]:
                 and isinstance(node.func, ast.Attribute)
                 and node.func.attr in _ASSEMBLY_ATTRS
             ):
-                fragments = [
-                    n.value for n in ast.walk(node)
-                    if isinstance(n, ast.Constant) and isinstance(n.value, str)
-                ]
+                fragments = _ddl_fragments(node)
             for fragment in fragments:
+                statement = False
                 for match in DDL.finditer(fragment):
+                    statement = True
                     assembled.append(f"{rel}: {match.group(0).strip()}")
+                if not statement and DDL_FRAGMENT.search(fragment):
+                    # A fragment with the WORD but no statement: the statement is
+                    # split across operands (`"…CONSTRAINT " + "CREATE …"`), which
+                    # no single literal holds. Assembled, not absent.
+                    assembled.append(
+                        f"{rel}: a constraint fragment with no statement in it "
+                        f"({fragment.strip()[:60]!r})"
+                    )
             # A USE of a name bound to an incomplete statement — the label is
             # supplied HERE, which a static scan cannot resolve. `Load` only: a
             # target is a binding, not a use, and `ctx` is the shape-independent
@@ -1820,6 +1885,39 @@ def test_the_ddl_scan_sees_every_form_that_could_name_a_label(tmp_path) -> None:
             '_A, _B = "CREATE CONSTRAINT pt UNIQUE NODE ", "Point"\n'
             'g.query(_A + _B)\n',
             True,
+            True,
+        ),
+        "parts_list": (
+            'P = ["CREATE CONSTRAINT pt UNIQUE NODE ", "Point"]\n'
+            'g.query("".join(P))\n',
+            True,
+            True,
+        ),
+        "walrus": (
+            'if (d := "CREATE CONSTRAINT pt UNIQUE NODE "):\n'
+            '    g.query(d + "Point")\n',
+            True,
+            True,
+        ),
+        "for_target": (
+            'for d in ["CREATE CONSTRAINT pt UNIQUE NODE "]:\n'
+            '    g.query(d + "Point")\n',
+            True,
+            True,
+        ),
+        "split_keyword": (
+            'g.query("GRAPH.CONSTRAINT " + "CREATE pt UNIQUE NODE Point")\n',
+            True,
+            False,  # no SINGLE literal holds the statement — that is the point
+        ),
+        "complete_name": (
+            # The ACCEPTING direction of the taint rule: a name bound to a COMPLETE
+            # labelled statement is exactly the shipped `GraphEvent` constraint and
+            # must NOT be called unverifiable (measured: unpinned, so reducing the
+            # rule to `bool(match)` left the suite green while over-blocking it).
+            '_D = "GRAPH.CONSTRAINT CREATE ge UNIQUE NODE GraphEvent"\n'
+            'g.query(_D)\n',
+            False,
             True,
         ),
         "docstring": (
@@ -1942,13 +2040,14 @@ def test_the_atomic_write_absence_is_pinned_to_the_schema() -> None:
         + "\n  ".join(point_constraints)
     )
     assert assembled == [], (
-        "a graph constraint is ASSEMBLED AT RUNTIME (f-string / `+` / `%` / "
-        ".format / .format_map / .join / `+=` / a name — plain, annotated, "
-        "attribute or tuple-bound — carrying an incomplete statement), which "
-        "this static scan cannot resolve — so whether it names "
-        "Point is UNKNOWN, and an unknown is not an absence. Write the statement "
-        "as a literal (implicit concatenation is fine), or extend this pin to "
-        "resolve the label:\n  "
+        "a graph constraint is ASSEMBLED AT RUNTIME — f-string / `+` / `%` / "
+        ".format / .format_map / .join / `+=` / a statement SPLIT across operands "
+        "/ a name, attribute, subscript or tuple target BOUND to an incomplete "
+        "one (`AnnAssign`, walrus, `for` target, a collection of fragments) — "
+        "which this static scan cannot resolve, so whether it names Point is "
+        "UNKNOWN, and an unknown is not an absence. Write the statement as a "
+        "literal (implicit concatenation is fine), or extend this pin to resolve "
+        "the label:\n  "
         + "\n  ".join(assembled)
     )
     row = {r["id"]: r for r in load_registry()["mechanisms"]}["atomic_point_write"]

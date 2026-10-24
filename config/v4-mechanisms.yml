@@ -555,12 +555,18 @@ mechanisms:
       `tortoise/**/*.py`) — so the row cannot quietly outlive its own absence.
       ⚠️ That pin's scope is STATED, not universal: a constraint created outside
       `tortoise/**/*.py` (a script, a migration, a console session) would not be
-      seen, a statement ASSEMBLED at runtime (an f-string / `+` / `%` / `.format`
-      / `.join` / `+=`) is REFUSED as unverifiable rather than read as absent, and
-      a match cannot be told apart from an explanatory MENTION of the DDL spelling
-      (docstrings are skipped; a non-docstring string that spells the statement
-      out reds and must be reworded). It is the reachable surface the claim lives
-      in, not the whole world.
+      seen, a statement ASSEMBLED at runtime is REFUSED as unverifiable rather
+      than read as absent — an f-string / `+` / `%` / `.format` / `.format_map` /
+      `.join` / `+=`, a statement SPLIT across operands (no single literal holds
+      it), and any name, attribute, subscript or tuple target BOUND to an
+      incomplete one (`AnnAssign`, walrus, `for` target, a collection of
+      fragments) wherever it is used. Two things remain out of a static scan's
+      reach and are stated rather than implied: a fragment whose keyword lives
+      entirely outside the scanned module (handed in by a helper or bound by
+      `with`), and — for a MATCH — whether the string is a statement or an
+      explanatory MENTION of the DDL spelling (docstrings are skipped; any other
+      string that spells the statement out reds and must be reworded). It is the
+      reachable surface the claim lives in, not the whole world.
 
   - id: failure_policy
     name: "per-step FAILURE POLICY (G3) — HOLD the unresolved identity, never assert `new`"
