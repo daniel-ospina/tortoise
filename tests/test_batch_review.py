@@ -916,6 +916,22 @@ def test_record_returns_3_when_the_batch_is_partial(tmp_path, stub_recorder, cap
     ]
 
 
+def test_record_fails_closed_when_the_recorder_does_not_resolve(tmp_path, capsys):
+    # A recorder path that does not exist must be a REFUSAL (BatchError -> rc 2), never an
+    # uncaught FileNotFoundError out of subprocess.run: `record` is the only executor of a
+    # minted record, so a traceback there reads — in a skim of the log — like a batch that
+    # recorded (#6869 shape: an unexplained crash where the documented line belongs).
+    # Reachable on every host that has neither the name on PATH nor ~/.pi/agent/scripts/
+    # (this worktree is one: `scripts/` is the #9475 machine-local pointer).
+    m = manifest((1, HEAD_A, DIFF_A))
+    outcomes = [br.validate_answer(m, {"results": [result(1, HEAD_A, DIFF_A)]})[0]]
+    missing = str(tmp_path / "nope" / "record-review.sh")
+    argv = [*_record_files(tmp_path, m, outcomes, {1: "comment:42"}), "--record-review", missing]
+    assert br.main(argv) == 2
+    err = capsys.readouterr().err
+    assert "not found" in err and missing in err and "nothing was recorded" in err
+
+
 def test_record_refuses_when_no_clean_verdict_has_evidence(tmp_path, stub_recorder, capsys):
     script, _log = stub_recorder
     m = manifest((1, HEAD_A, DIFF_A))
