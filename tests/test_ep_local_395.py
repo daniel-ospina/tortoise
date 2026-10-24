@@ -912,7 +912,10 @@ _AC5_QUIET_WALL_S = 3.0
 # loaded box WHILE still failing on a genuine multi-x regression, i.e. a 3 s
 # pass must still fail"): this bound implements the "a 3 s pass must still
 # fail" clause, on a quiet box. The loaded-box limb is NOT asserted here —
-# that is residual 1, carried by #9474. A quiet-box pass measured 1.3-1.8 s.
+# that is residual 1, carried by #9474. This lane's own quiet-box passes
+# measured 1.3-1.8 s; the population's worst healthy quiet reading is 2.53 s
+# (residual 4), so 3.0 s carries 1.19x over the real worst, not 1.7x over
+# these.
 # The gate is the box's own load average, because that is the confound: below
 # one runnable task per CPU there is little to contend with, so the pass's wall
 # reading is its own.
@@ -1125,7 +1128,9 @@ def test_ac5_wall_bounds_contract():
       applies when the box has at most one runnable task per CPU. The other
       limb ("passes reliably on a LOADED box") is residual 1 below and is
       #9474's to close; 3.0 s is a margin over a quiet-box pass measured at
-      1.3-1.8 s wall, not a claim that the criterion is met.
+      3.0 s vs this lane's 1.3-1.8 s samples and vs the population's worst
+      healthy 2.53 s (residual 4) — a claim about the bound's headroom, not
+      about the criterion being met.
     - the HANG bound must clear the TOP of the measured healthy range by a
       wide margin, because it is a hang detector and not a contention
       detector. That range is 3.07-4.27 s at 12 workers (cpu 0.85-0.88),
@@ -1156,10 +1161,13 @@ def test_ac5_wall_bounds_contract():
     """
     assert _AC5_QUIET_WALL_S == 3.0, (
         "the quiet-box wall bound implements #9015's 'a 3 s pass must still "
-        "fail' clause — widening it silently un-implements that limb")
-    assert _AC5_QUIET_WALL_S > 1.8, (
-        "the quiet bound must clear the slowest wall measured on a quiet box "
-        "(1.3-1.8 s measured) or it flakes the very pass it guards")
+        "fail' clause — widening it un-implements that limb, and narrowing it "
+        "toward the population's 2.53 s healthy reading re-creates the flake")
+    assert _AC5_QUIET_WALL_S > 2.53, (
+        "the quiet bound must clear the POPULATION's worst healthy quiet-box "
+        "reading (2.53 s, residual 4) — not merely this lane's own 1.3-1.8 s "
+        "samples, which would allow narrowing it to ~2.0 s and red a healthy "
+        "pass on a quiet box")
     assert _AC5_QUIET_LOAD_RATIO == 1.0, (
         "the quiet gate is the 'quiet box' precondition of #9015's failing-pass "
         "clause (at most one runnable task per CPU), not a margin: any ratio "
@@ -1395,12 +1403,14 @@ def test_ac5_interactive_latency_zone():
     budget plus the #1273 margin, which is NOT relaxed here; only the
     quantity it is read from changes), and the WALL leg is conditional: a
     latency bound where wall is measurable, a hang detector everywhere else.
-    The CPU reading is only 0.57-0.66x of the wall reading (measured on a
+    The CPU reading is only 0.57-0.65x of the wall reading (measured on a
     10-CPU box at loadavg 19: 1.34-1.52 s wall against 0.856-0.870 s cpu —
     the client half of a process-scoped clock excludes the daemon's own
     0.22-0.24 s of service, and the remainder is contention), so `cpu < 1.2`
-    permits wall well past 2 s. That offset is the client-half limit of the
-    clock, not a relaxation anyone chose.
+    permits wall up to ~2.1 s at that ratio — and more when the box is
+    contended (wall/CPU measured at 2.0-2.2x under load, i.e. a healthy pass
+    near the CPU bound can sit at 2.4-2.6 s wall). That offset is the
+    client-half limit of the clock, not a relaxation anyone chose.
 
     ⛔ WHAT THE WALL LEG DOES **NOT** DO, AND WHY IT IS SHAPED THIS WAY.
     (a) A bound scaled to the pass's own work (`4 x cpu`) FLAKES. Under 12
@@ -1423,16 +1433,21 @@ def test_ac5_interactive_latency_zone():
     spike that began just before the window) wall clock IS this pass's own
     latency, and the bound is 3.0 s: the "a 3 s pass must still fail" clause of
     #9015's acceptance criterion, which #9474 carries, with the quiet-box pass
-    measured at 1.3-1.8 s. ⚠️ That is ONE limb of a two-limb criterion —
+    measured at 1.3-1.8 s (the population's worst healthy quiet reading is
+    2.53 s: residual 4). ⚠️ That is ONE limb of a two-limb criterion —
     #9015's acceptance is "passes reliably on a LOADED box WHILE still failing
     on a genuine multi-x regression", and the loaded-box limb is deliberately
     NOT asserted here (a wall bound tight enough to catch a 3 s pass on a
     loaded box is the flake this change removes). So: the quiet-box limb is
     met, the loaded-box limb is the residual below, and #9474 stays open on it.
-    Measured discrimination: inject `time.sleep(1.3)` inside the timed window
-    and it passes (wall ~2.6 s); inject `time.sleep(3.1)` and it REDS on the
-    quiet bound (wall 4.22-4.36 s). On a loaded box the same read is the box,
-    not the pass, so only the hang leg applies.
+    Measured discrimination, all four legs exercised: on a quiet box, inject
+    `time.sleep(1.3)` inside the timed window and it PASSES (wall ~2.6 s),
+    inject `time.sleep(3.1)` and it REDS on the quiet bound (`spent 4.22-4.51s
+    wall for 0.85s of CPU — budget is 3.0s`). On a loaded box the same read is
+    the box, not the pass, so the 3.1 s wait PASSES (~4.4 s wall, hang leg
+    only) while a 61 s wait REDS the hang leg (`spent 62.10s wall for 0.86s of
+    CPU — budget is 60.0s`) — that row is what shows the 60 s leg is not dead
+    code. A CPU burn reds the CPU leg independently (`took 2.37s of CPU`).
 
     THE RESIDUALS, stated rather than papered over — all four need a dedicated
     quiet lane, and none is closed by a tighter bound:
