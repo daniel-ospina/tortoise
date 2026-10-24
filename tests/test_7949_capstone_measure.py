@@ -1107,19 +1107,24 @@ def test_the_not_established_section_quotes_the_s5_operator_counts_the_log_measu
 #
 # ⚠️ Coverage is every cite that NAMES ITS FILE (`sdk.py`, `edges.py`,
 # `extractor_v2.py` — the three sources the bundle prints numbers for), in all
-# three documents. A bare `:NNNN` continuation (the docs write `` `extractor_v2.py:7912`
-# and `:7932` ``) is NOT a cite this leg can resolve, because the file is named
-# only once for several numbers; the README's bare `` `symbol` `:NNN` `` step
-# table is owned by `test_7949_capstone_verdict_check.py`. `extractor_v2.py` was
-# the gap: its 15 cites (`8288-8292`, `8278-8285`, `7928-7932`, `7912`, `7881`,
-# `7781-7801`, `7804`) matched no pattern at all, so they were neither resolved
-# nor reported `unmatched` — the leg stayed green over numbers it never read.
+# FOUR documents a reader is sent into: the README, both probes, and the
+# `docs/00_index.md` row that is the entry point to this bundle. A bare `:NNNN`
+# continuation (the docs write `` `extractor_v2.py:7912` and `:7932` ``) is NOT a
+# cite this leg can resolve, because the file is named only once for several
+# numbers; the README's bare `` `symbol` `:NNN` `` step table is owned by
+# `test_7949_capstone_verdict_check.py`. `extractor_v2.py` was the first gap: its
+# 15 cites (`8288-8292`, `8278-8285`, `7928-7932`, `7912`, `7881`, `7781-7801`,
+# `7804`) matched no pattern at all, so they were neither resolved nor reported
+# `unmatched` — the leg stayed green over numbers it never read. The index row
+# was the second: nothing but a hand re-derivation stood between it and the same
+# silent staleness.
 
 _BUNDLE_DOCS = (
     ("README.md", _REPO / "docs/evidence/7949-capstone/README.md"),
     ("probes/capstone_measure.py", PROBE),
     ("probes/capstone_run.py",
      _REPO / "docs/evidence/7949-capstone/probes/capstone_run.py"),
+    ("docs/00_index.md", _REPO / "docs/00_index.md"),
 )
 
 _BUNDLE_SOURCES = {
@@ -1136,10 +1141,15 @@ _BUNDLE_CITE = re.compile(
 
 # A paragraph that is ABOUT numbers which no longer resolve is not a live cite:
 # the README discloses the frozen log's stale set on purpose, and the supersession
-# history names the old stamps' cites. Those are the only two such paragraphs, and
-# each says so in its own words — hence the phrases, not a line number.
-_BUNDLE_HISTORICAL = re.compile(
-    r"no longer\s+resolve|SUPERSEDED and its file is gone", re.IGNORECASE)
+# history names the old stamps' cites. Each such paragraph says so in its own
+# words, and what it is allowed to skip is pinned below it — frozen numbers by
+# definition, so a LIVE cite landing in one of these paragraphs reds instead of
+# vanishing into the exclusion.
+_BUNDLE_HISTORICAL = {
+    r"no longer\s+resolve": (
+        "sdk.py:12401", "sdk.py:12682", "edges.py:467", "edges.py:2168-2192"),
+    r"SUPERSEDED and its file is gone": ("sdk.py:12196",),
+}
 
 # (label, source, phrases the DOCUMENT uses to name the line, what the line must
 #  carry, how to check it). No numbers: those are read out of the document.
@@ -1204,21 +1214,37 @@ def _paragraph_spans(text: str) -> list[tuple[int, int]]:
     return spans
 
 
-def _bundle_rule(source: str, own_line: str, nearby: str):
-    """The rule whose phrase the document uses for THIS cite (own line first).
-
-    The cite and its naming phrase are usually on one line; a wrapped paragraph
-    (or an f-string split across source lines) puts them on adjacent ones, so the
-    own line is tried first and the ±1-line window only as a fallback — otherwise
-    a neighbouring cite's phrase would claim this one.
-    """
-    for rule in _BUNDLE_RULES:
-        if rule[1] == source and any(p in own_line for p in rule[2]):
-            return rule
-    for rule in _BUNDLE_RULES:
-        if rule[1] == source and any(p in nearby for p in rule[2]):
-            return rule
+def _bundle_historical(paragraph: str) -> str | None:
+    """The historical marker this paragraph carries, or None (its own words)."""
+    for pattern in _BUNDLE_HISTORICAL:
+        if re.search(pattern, paragraph, re.IGNORECASE):
+            return pattern
     return None
+
+
+def _bundle_rule(source: str, paragraph: str, base: int, cite_pos: int):
+    """The rule whose naming phrase sits NEAREST this cite — distance, not order.
+
+    A document names a line with the phrase right beside it (`` `vet_enabled` is
+    computed at `extractor_v2.py:7912` ``), so the closest phrase is the one that
+    names THIS cite. Table order cannot decide it: `docs/00_index.md`'s #7949 row
+    names the CLASSIFY pass and then the VET flag on one line, and taking the first
+    table match bound the VET cite to the classify phrase ~40 characters away (a
+    false RED). Distance is measured to the phrase's END, because a naming phrase
+    precedes the number it names, and the longer phrase wins an overlap —
+    `result["classify_later"]` and its `classify_later` substring end one
+    character apart, and the surface must win over the flag.
+    """
+    best = None
+    for order, rule in enumerate(_BUNDLE_RULES):
+        if rule[1] != source:
+            continue
+        for phrase in rule[2]:
+            for found in re.finditer(re.escape(phrase), paragraph):
+                key = (abs((base + found.end()) - cite_pos), -len(phrase), order)
+                if best is None or key < best[0]:
+                    best = (key, rule)
+    return best[1] if best else None
 
 
 def _bundle_missing(kind: str, anchors, source_lines, start: int, end):
@@ -1226,7 +1252,7 @@ def _bundle_missing(kind: str, anchors, source_lines, start: int, end):
     stop = int(end) if end else start
     if kind == "line":
         got = source_lines[start - 1]
-        return [] if anchors[0] in got else [anchors[0]]
+        return [a for a in anchors if a not in got]
     if kind == "def":
         got = source_lines[start - 1]
         return [] if got.lstrip().startswith(anchors[0]) else [anchors[0]]
@@ -1249,9 +1275,10 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     """Every live `file.py:line` cite that names its file → the code it names there.
 
     Covers all three sources the bundle prints numbers for (`sdk.py`, `edges.py`,
-    `extractor_v2.py`) across `README.md` and both probes.
+    `extractor_v2.py`) across `README.md`, both probes, and the `docs/00_index.md`
+    row that is the bundle's entry point — 44 cites at this head.
 
-    Non-vacuity: against `main`'s documents 21 of the 42 cites red across five
+    Non-vacuity: against `main`'s documents 22 of the 44 cites red across five
     rules (`sdk.py:12401` for the meta fold, `12682` for the capture path,
     `11623` for the entry point, `edges.py:467` for the reference labels and
     `2168-2192` for the writer) — the cited lines hold the #4716 re-key comments
@@ -1262,23 +1289,27 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     `7913`, `the vet flag` reds with `extractor_v2.py:7913 reads 'or
     _value_gate_enabled())', which carries none of ['vet_enabled = (']`, while the
     pre-fix sweep (no `extractor_v2` alternative) stayed green on the same text.
+    The index row's cites are pinned by the same sweep: re-staling `00_index.md`'s
+    `sdk.py:12487` to `12401` reds it, and before this leg nothing read that row.
     """
     source_lines = {name: path.read_text(encoding="utf-8").splitlines()
                     for name, path in _BUNDLE_SOURCES.items()}
     fired, checked, unmatched, failures = set(), 0, [], []
+    skipped: dict[str, list[str]] = {}
     for doc_name, doc_path in _BUNDLE_DOCS:
         text = doc_path.read_text(encoding="utf-8")
-        lines = text.splitlines()
         paragraphs = _paragraph_spans(text)
         for match in _BUNDLE_CITE.finditer(text):
             paragraph = next((s, e) for s, e in paragraphs
                              if s <= match.start() < e)
-            if _BUNDLE_HISTORICAL.search(text[paragraph[0]:paragraph[1]]):
+            marker = _bundle_historical(text[paragraph[0]:paragraph[1]])
+            if marker:
+                skipped.setdefault(marker, []).append(match.group(0))
                 continue
             line_no = text.count("\n", 0, match.start()) + 1
             source, start, end = match.group(1), int(match.group(2)), match.group(3)
-            rule = _bundle_rule(source, lines[line_no - 1],
-                                "\n".join(lines[max(0, line_no - 2):line_no + 1]))
+            rule = _bundle_rule(source, text[paragraph[0]:paragraph[1]],
+                                paragraph[0], match.start())
             cite = f"{doc_name}:{line_no} `{match.group(0)}`"
             if rule is None:
                 unmatched.append(cite)
@@ -1293,6 +1324,12 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
                 failures.append(
                     f"{cite} ({label}): {source}.py:{start} reads {shown!r}, which "
                     f"carries none of {missing!r}")
+    assert {marker: tuple(cites) for marker, cites in skipped.items()} \
+        == {marker: tuple(cites) for marker, cites in _BUNDLE_HISTORICAL.items()}, (
+        "the historical exclusion dropped cites this pin does not know about, and a "
+        "cite inside an excluded paragraph is verified by NOTHING — move the live "
+        "cite out of the historical paragraph, and update this pin only together "
+        f"with the paragraph it names: skipped={skipped}")
     assert not unmatched, (
         "these cites name a line no rule in _BUNDLE_RULES can verify, so nothing "
         "checked them — add the phrase the document uses for the new line, do not "
