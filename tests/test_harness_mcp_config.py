@@ -932,7 +932,7 @@ class TestDocsPageAndSkillConfig:
             "Connect",                   # 3 — the OAuth grant is a SEPARATE act
             "Connect Tortoise",          # 3 — the consent dialog between Connect and Authorize
             "Authorize",                 # 3 — consent (key-less connect completes here)
-            "pick the organization you are onboarding",  # 3 — the MULTI-org chooser (oauth.py)
+            "pick the Organization you are onboarding",  # 3 — the MULTI-org chooser (oauth.py)
                                        #     hides the named-org line and keeps
                                        #     Authorize disabled until it is picked
             "chatgpt.com/skills",        # 4 — the Skills surface the archives install on
@@ -2262,7 +2262,10 @@ def test_9660_chatgpt_is_a_live_onboarding_journey_not_a_docs_dead_end():
     #    neither can pass vacuously on a slice that lost the connector block.
     assert "{CANONICAL_MCP_URL}" in connector, (
         "the card's Server URL must come from the constant, not a re-typed literal")
-    assert "https://api.premiselabs.co/mcp" not in card, (
+    # The ARM, not just `card`: prose above the plan note (the card's caption) is
+    # exactly where a re-typed URL would land, and `card` starts below it.
+    arm_from = main.index(_CHATGPT_SELECTOR)
+    assert "https://api.premiselabs.co/mcp" not in main[arm_from:last_end], (
         "the ChatGPT card re-types the server URL — read it from CANONICAL_MCP_URL")
     # 5. The skill hand-off is an INSTALL of the real archives, in its own block.
     for fact in ("SKILL_ARCHIVE_NAMES.map", "skillArchiveUrl(name)",
@@ -2383,9 +2386,10 @@ def test_9660_the_org_choice_precedes_authorize_on_every_recipe_carrier():
             "asks them to pick when their account can use more than one "
             "Organization (tortoise/oauth.py). If the sentence was reworded, "
             "update BOTH the copy and this pin — do not drop the fact.")
-        # Case-insensitive: docs.html and the served document write
-        # "organization", the dashboard writes "Organization". The ORDER is the
-        # property; the house capitalisation belongs to each surface.
+        # Compared case-insensitively so the pin tracks the ORDER, not the
+        # spelling — but every surface writes "Organization": it is the product's
+        # own noun (the dashboard uses it for the tenant throughout), not the
+        # consent page's control, whose placeholder is "Choose an org…".
         org = flat.lower().find("organization")
         authorize = flat.lower().find("authorize")
         assert -1 not in (org, authorize), (
