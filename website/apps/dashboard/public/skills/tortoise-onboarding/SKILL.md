@@ -122,11 +122,14 @@ mode → teach-human fallback).
 
 > **#1701 — ChatGPT is a 7th harness, outside this table.** ChatGPT connects
 > key-less through OpenAI's custom MCP server (chatgpt.com/plugins → Add →
-> Add custom MCP server → MCP server URL → OAuth → Create as a plugin →
-> connect the plugin), and then receives the Tortoise workflows by installing the
-> three reusable skills (chatgpt.com/skills → Add → Upload from your computer) or
-> by pasting them into one chat. This document itself is NOT one of them — read
-> it here, at the served URL above (or paste it into one chat); #4365 is why.
+> Add custom MCP server → fill the dialog: Name `Tortoise`, Connection
+> **Server URL**, Server URL `https://api.premiselabs.co/mcp`, Authentication
+> **OAuth** → tick **I understand and want to continue** → **Create as a
+> plugin** → connect the plugin), and then receives the Tortoise workflows by
+> installing the three reusable skills (chatgpt.com/skills → Add → Upload from
+> your computer) or by pasting them into one chat. This document itself is NOT
+> one of them — read it here, at the served URL above, or paste it into one
+> chat.
 > It has no local filesystem, no shell, and no local skill installer, so it
 > never runs the self-install steps in the install/connect sections below.
 > It also has its own surface in the dashboard's connect step (the ChatGPT

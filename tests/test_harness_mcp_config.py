@@ -2071,6 +2071,15 @@ def test_9660_chatgpt_is_a_live_onboarding_journey_not_a_docs_dead_end():
         "the server URL must come from the constant, not a re-typed literal")
     # 5. The skill hand-off is an INSTALL of the real archives, not a prose
     #    rendering: the branch must map over the archive names and link them.
+    #    The server URL is bound to the ChatGPT ARM (not "somewhere after the
+    #    branch"): the card uses the constant twice — the visible URL and the
+    #    Copy button — so an unbound slice passed even with a re-typed literal on
+    #    screen (#9660 review).
+    arm = main[branch:main.index(": wizardKeyless ? (", branch)]
+    assert "CANONICAL_MCP_URL" in arm, (
+        "the card's Server URL must come from the constant, not a re-typed literal")
+    assert "https://api.premiselabs.co/mcp" not in arm, (
+        "the ChatGPT arm re-types the server URL — read it from CANONICAL_MCP_URL")
     after("SKILL_ARCHIVE_NAMES.map")
     after("skillArchiveUrl(name)")
     after("Upload from your computer")

@@ -835,7 +835,8 @@ export const HARNESS_ORDER = ['claude', 'claude-desktop', 'claude-web', 'codex',
 // Codex hid its CLI/Desktop split behind an in-body toggle (#2328). Codex had
 // the better shape; this lifts it to every multi-surface harness:
 //
-//   level 1 — the HARNESS (the product you use): Claude | Codex | Cursor | Pi
+//   level 1 — the HARNESS (the product you use):
+//             Claude | Codex | Cursor | Pi | ChatGPT
 //   level 2 — the SURFACE you connect (only when there is a real choice):
 //             Claude → Code, Desktop, Web;  Codex → CLI, Desktop
 //
@@ -844,8 +845,8 @@ export const HARNESS_ORDER = ['claude', 'claude-desktop', 'claude-web', 'codex',
 // keyed exactly as before — this is a UI grouping, not a vocabulary change
 // (DE2E-5's 7-harness contract is untouched). CODEX_DESKTOP_COMMAND is a bare
 // function, not a per-harness map: it serves the one manual leaf (#3430).
-// ChatGPT stays out: it has no Claude/Codex-style surface split and its
-// connector path is not reachable from the dashboard chooser (#2698).
+// ChatGPT was excluded here (#2698) on the grounds that its connector path was
+// not reachable from the chooser and the public docs page was its only carrier.
 // #9660 OWNER RULING (2026-10-23) — REVERSES that exclusion: ChatGPT Web is a
 // supported onboarding journey in its own right (signup → org → pick harness →
 // connect → install skills → first job). The old justification was that the

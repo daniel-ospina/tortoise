@@ -236,6 +236,43 @@ def test_9660_skill_archive_holds_exactly_its_own_skill(name):
         "skill from it")
 
 
+def test_9660_the_docs_origin_actually_publishes_the_archives():
+    """The card links these archives CROSS-ORIGIN, so two deploy-time facts
+    decide whether the hand-off works at all — and neither was asserted:
+
+    * `website/skills/` is a NEW top-level entry, and the Pages deploy refuses
+      to upload an UNCLASSIFIED one (`check_pages_upload_root.py`, run as a
+      preflight). Flipping it to `excluded` would leave the whole suite green
+      while every archive link 404s.
+    * an unknown extension has no MIME mapping, and the dashboard's links are
+      cross-origin, where browsers ignore `download` — so `/skills/*.skill`
+      must be served as an attachment. Without the rule the file's behaviour
+      depends on how the host guesses it.
+    """
+    sys.path.insert(0, str(REPO_ROOT))
+    from tools.check_pages_upload_root import load_classification
+
+    staged = load_classification()
+    assert staged.get("skills") is True, (
+        "config/pages-upload-classification.txt must classify `skills` as "
+        "`public` — the deploy stages only public entries, and a 404 here is "
+        "the exact dead-end the ChatGPT journey exists to remove")
+
+    headers = (REPO_ROOT / "website" / "_headers").read_text(encoding="utf-8")
+    rules = re.findall(r"^(\S[^\n]*)\n((?:[ \t]+[^\n]*\n)+)", headers, re.M)
+    matched = [(pat, block) for pat, block in rules if pat.strip() == "/skills/*.skill"]
+    assert matched, (
+        "website/_headers must carry a `/skills/*.skill` rule — the card links "
+        "the archives cross-origin, where `download` is ignored, so only the "
+        "response headers make it a download")
+    block = matched[0][1]
+    assert re.search(r"^\s+Content-Type:\s*application/octet-stream\s*$", block, re.M), (
+        "/skills/*.skill must be served as application/octet-stream")
+    assert re.search(r"^\s+Content-Disposition:\s*attachment", block, re.M), (
+        "/skills/*.skill must be served with Content-Disposition: attachment — "
+        "otherwise the browser may render the zip in-tab instead of saving it")
+
+
 def _js_skill_archive_names() -> tuple[str, ...]:
     """`SKILL_ARCHIVE_NAMES` from harnesses.js — the set the CARD hands over."""
     src = (REPO_ROOT / "website" / "apps" / "dashboard" / "src"
@@ -278,6 +315,14 @@ def test_9660_onboarding_is_never_installed_as_a_skill():
         "an archive nothing hands over "
         f"(js={_js_skill_archive_names()}, "
         f"build={_build_skill_names()}, served={SERVED_SKILL_NAMES})")
+    # …and against the INSTALLER, which is the authoritative ancestor: an
+    # upstream `--sync` that adds a skill updates the installer and the pin, and
+    # a hand-kept literal here would not notice, so the card could hand over
+    # three while the installer ships four.
+    assert tuple(_installer_skills()) == _js_skill_archive_names(), (
+        "the installer's SKILLS=(…) set and the card's install set must be ONE "
+        f"set (installer={_installer_skills()}, "
+        f"card={_js_skill_archive_names()})")
     for label, names in (("harnesses.js SKILL_ARCHIVE_NAMES", _js_skill_archive_names()),
                          ("build_skill_archives.py SKILL_NAMES", _build_skill_names()),
                          ("the served set", SERVED_SKILL_NAMES)):

@@ -141,10 +141,10 @@ export function wizardPromptText(harness, step, key, mode) {
     // node word — the ratchet in overview.test.js scans this file (comments
     // included), and the node word is the WRONG mental model for the user
     // anyway: to them the graph holds memories.
-    // The skill is installable and SKIPPABLE (the step above offers the paste as
-    // the alternative), so this sentence may not assert that it is installed —
-    // a skipper would copy a first job that tells its agent to read a file it
-    // does not have. Name the served document as the fallback instead.
+    // The skill is installable, and a user may skip the install (nothing on the
+    // card forces it), so this sentence may not assert that it is installed — a
+    // skipper would copy a first job that tells its agent to read a file it does
+    // not have. The served document is named as the fallback instead.
     // The verify call is `tortoise_overview(section="health")`, NOT the retired
     // `tortoise_health`: a tool-grant client builds its grant from `tools/list`,
     // which does not advertise retired names (see ADVERTISED_VERIFY_FILE_STEP_TEXT).
