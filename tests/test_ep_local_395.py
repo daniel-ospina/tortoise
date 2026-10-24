@@ -881,46 +881,69 @@ def test_compute_confidence_read_never_stamps_updated_at():
 # ── AC5: interactive latency ─────────────────────────────────────────────
 
 # THE WALL LEG IS TWO BOUNDS: #9015's 3 s latency criterion where wall is
-# MEASURABLE (a quiet box), and a flat 5.0 s runaway cap everywhere. A ceiling
-# SCALED to the pass's own CPU — `max(2.5, 4 x cpu)`, the previous shape — was a
-# FLAKE. Measured under deliberate CPU saturation (12 busy-loop workers on
-# this 4-CPU box, each run a fresh SDK + 40-claim zone): wall/cpu 3.50, 3.91 and
-# 5.00x on passes that were HEALTHY by every other measure (cpu 0.85-0.88 s,
-# converged, 40 confidences) — 4.27 s of wall for 0.85 s of CPU. A 4 x cpu
-# ceiling is 3.48 s at that cost, so it reds all three: the same
-# health-vs-starved confusion #9015/#9331 filed, moved from "the box is a bit
-# busy" to "the box is saturated". A flat cap cannot make that mistake, because
-# it does not scale with the pass's own CPU — and 5.0 s is the cap this test
-# always carried ("stays only as a runaway hard cap"), until now dead code
-# behind the tighter wall bound. What a flat cap alone CANNOT do is keep
-# #9015's "a 3 s pass must still fail", so the tight bound survives where the
-# measurement is valid: a quiet box. See `test_ac5_interactive_latency_zone`.
-_AC5_RUNAWAY_S = 5.0
-# On a QUIET box wall clock IS a latency signal, and there a tighter wall bound
-# is the only way #9015's acceptance criterion can be met at all ("a 3 s pass
-# must still fail"). The gate is the box's own load average, because that is
-# the confound: below one runnable task per CPU there is little to contend
-# with, so the pass's wall reading is its own. 3.0 s is the criterion itself
-# (#9015), not a margin; a quiet-box pass measured 1.3-1.8 s wall.
+# MEASURABLE (a quiet box), and a hang detector everywhere else.
+#
+# WHY A BOUND DERIVED FROM THE PASS'S OWN WORK WAS A FLAKE. Landed main bounded
+# the wall leg by `max(2.5, 4 x cpu)`. Measured on this 4-CPU box under
+# deliberate CPU saturation (12 busy-loop workers, fresh SDK + 40-claim zone per
+# run), on passes that were HEALTHY by every other measure (converged, 40
+# confidences, cpu 0.85-0.88 s inside the unchanged `cpu < 1.2` budget):
+#     cpu 0.877  wall 3.070  ceiling 3.508  pass (+0.438)
+#     cpu 0.866  wall 3.384  ceiling 3.464  pass (+0.080)
+#     cpu 0.853  wall 4.268  ceiling 3.412  RED   (-0.856)
+# i.e. one of three healthy passes reds, and another clears by 0.08 s. (A second
+# reviewer reproduced the same direction independently: 1 of 4 reds at 12
+# workers.) A ceiling that scales with the pass's own cpu cannot separate "the
+# pass got slower" from "the box got busier" — it is the #9015/#9331 confusion,
+# moved from "the box is a bit busy" to "the box is saturated".
+#
+# WHY A FLAT FIVE SECONDS IS ALSO NOT SAFE. The flat cap that replaced it was
+# then measured at 30 workers on the same box: healthy passes took 7.25 / 9.56 /
+# 8.89 s of wall at cpu 0.92-0.94 — so a 5.0 s flat cap reds a healthy pass too,
+# just at a higher load. Any wall-derived *latency* bound reds on a loaded
+# enough box; the only wall bound that survives saturation is one far outside
+# contention's reach, whose job is catching a HANG.
+#
+# So: the latency criterion lives where wall is measurable, and everywhere else
+# the wall leg only catches a hang. See `test_ac5_interactive_latency_zone`.
 _AC5_QUIET_WALL_S = 3.0
+# #9015's acceptance criterion verbatim ("a 3 s pass must still fail"), which
+# #9474 carries: the quiet-box bound IS that criterion, and a quiet-box pass
+# measured 1.3-1.8 s wall, so the margin is the pass's, not the bound's.
+# The gate is the box's own load average, because that is the confound: below
+# one runnable task per CPU there is little to contend with, so the pass's wall
+# reading is its own.
 _AC5_QUIET_LOAD_RATIO = 1.0
+# A HANG detector, not a contention detector: 3x the worst wall measured on a
+# healthy pass under saturation (9.56 s at 30 workers / 4 CPUs). A wedged pass
+# blows past it; a starved one does not. The suite's own timeout is the outer
+# backstop, so this can stay generous without leaving a CI leg unbounded.
+_AC5_HANG_S = 30.0
 
 
 def _ac5_effective_cpus() -> int:
-    """CPUs this process may actually use — cgroup quota aware.
+    """CPUs this process may actually use — affinity and cgroup quota aware.
 
     `os.cpu_count()` reports the HOST's CPUs, and `loadavg` is host-wide, so on
-    a quota-limited container on a busy host the ratio can read "quiet" while
-    the pass is genuinely starved: exactly the health-vs-starved confusion this
-    change exists to close. Dividing host load by the quota instead OVERSTATES
-    contention, which only ever selects the loose runaway cap — the safe
-    direction."""
+    a constrained container on a busy host the ratio can read "quiet" while the
+    pass is genuinely starved — exactly the health-vs-starved confusion this
+    change exists to close. Both constraint mechanisms must be honoured: a
+    cgroup QUOTA (`cpu.max`) and a CPUSET pin (`sched_getaffinity`), because a
+    cpuset needs no quota. Every correction only ever REDUCES the count, which
+    overstates contention, which only ever selects the loose hang bound — the
+    safe direction."""
     cpus = os.cpu_count() or 1
+    try:
+        cpus = max(1, min(cpus, len(os.sched_getaffinity(0))))
+    except (AttributeError, OSError):
+        pass
     try:
         with open("/sys/fs/cgroup/cpu.max", encoding="ascii") as fh:
             quota, period = fh.read().split()[:2]
         if quota != "max":
-            cpus = max(1, min(cpus, -(-int(quota) // int(period))))
+            period = int(period)
+            if period > 0:
+                cpus = max(1, min(cpus, -(-int(quota) // period)))
     except (OSError, ValueError):
         pass
     return cpus
@@ -931,70 +954,83 @@ def _ac5_wall_bound(load1_ratio: float, load5_ratio: float) -> float:
 
     Both the 1-min and the 5-min ratio must be quiet: the 1-min average lags a
     box that has only just been loaded, so it alone would assert the latency
-    bound on a box that is no longer quiet."""
+    bound on a box that is no longer quiet. The caller passes the WORSE of a
+    reading taken before the timed window and one taken after it — a spike that
+    began just before the pass is invisible to a reading taken only afterwards."""
     if load1_ratio <= _AC5_QUIET_LOAD_RATIO and load5_ratio <= _AC5_QUIET_LOAD_RATIO:
         return _AC5_QUIET_WALL_S
-    return _AC5_RUNAWAY_S
+    return _AC5_HANG_S
 
 
 def test_ac5_wall_bounds_contract():
-    """Pin the AC5 wall leg's calibration: a quiet-box latency bound over a flat
-    runaway cap. Every leg is mutation-sensitive.
+    """Pin the AC5 wall leg: a quiet-box latency bound over a hang detector.
 
-    The two bounds exist because wall clock has two regimes, and the numbers
-    are measurements, not picks:
-    - the QUIET bound (3.0 s) is #9015's acceptance criterion verbatim ("a 3 s
-      pass must still fail") and only applies when the box has at most one
-      runnable task per CPU. 3.0 s is not a margin — it is the criterion. A
-      quiet-box pass measured 1.3-1.8 s wall, so the headroom is the pass's,
-      not the bound's.
-    - the RUNAWAY cap must exceed the worst wall measured on a pass that was
-      HEALTHY under deliberate saturation (4.27 s: 12 busy-loop workers on 4
-      CPUs, cpu 0.85 s, converged, 40 confidences) or it re-flakes exactly the
-      #9015/#9331 class this change exists to close; and it must not be
-      inflated past the 5.0 s bound the test has always carried.
-    - the CPU leg must remain the operative budget: strictly tighter than both
-      wall bounds (`cpu < 1.2`).
+    The two bounds exist because wall clock has two regimes, and every number
+    here is a measurement on a 4-CPU box, not a pick:
+    - the QUIET bound (3.0 s) is #9015/#9474's acceptance criterion verbatim
+      ("a 3 s pass must still fail") and only applies when the box has at most
+      one runnable task per CPU. 3.0 s is not a margin — it is the criterion. A
+      quiet-box pass measured 1.3-1.8 s wall.
+    - the HANG bound must clear the worst wall measured on a pass that was
+      HEALTHY under deliberate saturation (9.56 s at 30 workers, cpu 0.92 s,
+      converged, 40 confidences) by a wide margin, because it is a hang
+      detector and not a contention detector; and it must stay small enough
+      that a wedged pass is still bounded (it is floored here at 3x the
+      measured worst healthy wall, and capped at one minute).
+    - the CPU leg must remain the operative budget (`cpu < 1.2`), i.e. strictly
+      tighter than both wall bounds.
     - the quiet gate must be a real gate, not always-true or always-false: a
       ratio of 0 would never assert the latency bound and a ratio of 100 would
       assert it on a saturated box.
+
+    THE RESIDUALS, stated where a future editor will meet them (they are also
+    in `test_ac5_interactive_latency_zone` and in the scoping doc, §5):
+    - on a LOADED box a wall-shaped regression below the hang bound passes, and
+      `cpu < 1.2` is UPWARD-only, so a cpu DROP passes it too;
+    - the gate reads a 1-to-5 minute average, so contention that begins INSIDE
+      the timed window is invisible to it and can still red the latency leg.
+    Both need a dedicated quiet lane to close; neither is closed by a tighter
+    bound, which is what this contract exists to prevent.
     """
     assert _AC5_QUIET_WALL_S == 3.0, (
-        "the quiet-box wall bound IS #9015's acceptance criterion ('a 3 s pass "
-        "must still fail') — widening it silently un-meets the criterion")
+        "the quiet-box wall bound IS #9015/#9474's acceptance criterion ('a 3 s "
+        "pass must still fail') — widening it silently un-meets the criterion")
     assert _AC5_QUIET_WALL_S > 1.8, (
         "the quiet bound must clear the slowest wall measured on a quiet box "
         "(1.3-1.8 s measured) or it flakes the very pass it guards")
     assert 0 < _AC5_QUIET_LOAD_RATIO <= 2.0, (
         "the quiet gate must be a real gate: 0 never asserts the latency bound, "
         "and a large ratio asserts it on a saturated box")
-    assert _AC5_RUNAWAY_S > 4.27, (
-        "the cap must clear the worst wall measured on a healthy pass under "
-        "deliberate CPU saturation (4.27 s at 12 workers / 4 CPUs) or it "
-        "re-flakes the #9015/#9331 class")
-    assert _AC5_RUNAWAY_S <= 5.0, (
-        "the cap must not be inflated past the 5.0 s runaway bound this test "
-        "has always carried ('stays only as a runaway hard cap')")
-    assert _AC5_RUNAWAY_S > 1.2, (
-        "the CPU leg (`cpu < 1.2`) must stay the operative budget — a wall cap "
-        "at or below 1.2 s would make the wall leg the budget again")
+    assert _AC5_HANG_S > 3 * 9.56, (
+        "the hang bound must sit far outside contention's reach (the worst "
+        "healthy wall measured under saturation was 9.56 s) or it reds a "
+        "starved-but-healthy pass — the #9015/#9331 class this closes")
+    assert _AC5_HANG_S <= 60.0, (
+        "the hang bound must still bound a wedged pass — the suite's timeout is "
+        "the outer backstop, not a substitute")
+    assert _AC5_HANG_S > _AC5_QUIET_WALL_S > 1.2, (
+        "the CPU leg (`cpu < 1.2`) must stay the operative budget and the "
+        "quiet bound the strict one — a wall bound at or below 1.2 s would "
+        "make the wall leg the budget again")
     # Both branches of the gate, so neither is dead code: a fully quiet box
-    # gets #9015's latency bound …
+    # gets #9015/#9474's latency bound …
     assert _ac5_wall_bound(0.10, 0.10) == _AC5_QUIET_WALL_S
     assert _ac5_wall_bound(_AC5_QUIET_LOAD_RATIO, _AC5_QUIET_LOAD_RATIO) == (
         _AC5_QUIET_WALL_S), "the gate's boundary must be inclusive-quiet"
-    # … and each way of being loaded gets only the cap: the 1-min average alone
-    # must not be enough (it lags a box that has just been loaded), nor the
-    # 5-min alone, nor this box's own measured readings.
-    assert _ac5_wall_bound(0.50, 2.00) == _AC5_RUNAWAY_S, (
-        "a quiet 1-min average over a loaded 5-min one must select the cap — "
-        "the lag guard is the whole reason both are read")
-    assert _ac5_wall_bound(2.00, 0.50) == _AC5_RUNAWAY_S
-    assert _ac5_wall_bound(1.24, 1.38) == _AC5_RUNAWAY_S, (
-        "this box's own measured ratios (1m 1.24 / 5m 1.38) select the cap")
+    # … and each way of being loaded gets only the hang bound: the 1-min
+    # average alone must not be enough (it lags a box that has just been
+    # loaded), nor the 5-min alone, nor this box's own measured readings.
+    assert _ac5_wall_bound(0.50, 2.00) == _AC5_HANG_S, (
+        "a quiet 1-min average over a loaded 5-min one must select the hang "
+        "bound — the lag guard is the whole reason both are read")
+    assert _ac5_wall_bound(2.00, 0.50) == _AC5_HANG_S
+    assert _ac5_wall_bound(1.24, 1.38) == _AC5_HANG_S, (
+        "this box's own measured ratios (1m 1.24 / 5m 1.38) select the hang "
+        "bound")
     # The effective-CPU count is what the ratios are divided by, so it must be a
-    # real count, never 0 (which would make the ratio infinite and always load).
-    assert _ac5_effective_cpus() >= 1
+    # real count, never 0 (which would make the ratio infinite and always load),
+    # and it can never exceed the host's own count.
+    assert 1 <= _ac5_effective_cpus() <= (os.cpu_count() or 1)
 
 
 def test_ac5_interactive_latency_zone():
@@ -1020,8 +1056,8 @@ def test_ac5_interactive_latency_zone():
 
     So: `process_time` carries the AC5 budget (unchanged at 1.2 s — the ≤1s
     budget plus the #1273 margin, which is NOT relaxed here; only the
-    quantity it is read from changes), and the WALL reading is a FLAT
-    runaway cap of 5.0 s, never a budget and never scaled to this pass's CPU.
+    quantity it is read from changes), and the WALL leg is conditional: a
+    latency bound where wall is measurable, a hang detector everywhere else.
     The CPU reading is only 0.57-0.66x of the wall reading (measured on a
     10-CPU box at loadavg 19: 1.34-1.52 s wall against 0.856-0.870 s cpu —
     the client half of a process-scoped clock excludes the daemon's own
@@ -1029,44 +1065,45 @@ def test_ac5_interactive_latency_zone():
     permits wall well past 2 s. That offset is the client-half limit of the
     clock, not a relaxation anyone chose.
 
-    ⛔ WHAT THE WALL LEG DOES **NOT** DO. It is a RUNAWAY cap only — it does
-    not detect an added wait, and it is not a latency gate. Two measurements
-    force that, both against this same pass:
-    (a) scaling the cap to the work (`4 x cpu`) FLAKES ON A SATURATED BOX.
-    Under 12 busy-loop workers on these 4 CPUs, three passes that were
-    healthy by every other measure (cpu 0.85-0.88 s, converged, 40
-    confidences) took 3.07/3.38/4.27 s of wall — wall/cpu 3.50/3.91/**5.00**x.
-    A `4 x cpu` cap is 3.48 s at that cost and reds all three; a flat cap
-    cannot, because it does not scale with the pass's own CPU.
-    (b) a wait-shaped regression is invisible below the cap ON A LOADED BOX.
-    Measured: adding `time.sleep(1.3)` inside the timed window gives wall
-    ~2.6 s at cpu ~0.86 and PASSES; adding `time.sleep(3.1)` gives wall 4.22 s
-    and still passes the 5.0 s cap (on a quiet box that same 4.22 s reds the
-    3.0 s latency bound instead). So on a loaded box an added wait up to
-    roughly the cap's headroom over this pass's own wall (~3 s of added wait)
-    passes green — and `cpu < 1.2` is an UPWARD-only bound, so a cpu DROP
-    (replace compute with wait) passes it too.
-    (c) THEREFORE THE WALL LEG IS CONDITIONAL — and that is how #9015's
-    acceptance criterion ("a 3 s pass must still fail") is met. On a QUIET box
-    (load per CPU <= 1.0 on both the 1-min and 5-min averages, the 1-min one
-    because it lags a box that has just been loaded) wall clock IS this pass's
-    own latency, and the bound is 3.0 s: #9015's criterion verbatim, with the
-    quiet-box pass measured at 1.3-1.8 s. On a loaded box the same reading is
-    the box, not the pass, so it is PRINTED and only the flat cap applies. The
-    asymmetry is deliberate: a genuine 3 s regression reds on a quiet box every
-    time, and a starved box can never red on the latency leg. Above 5.0 s the
-    flat cap applies in both regimes.
-    The residual that remains, stated: on a LOADED box a wall-shaped regression
-    below 5.0 s passes, because it cannot be distinguished from contention
-    there — the instrument, not the code, is what is missing, and a dedicated
-    quiet lane is the fix (not this change).
+    ⛔ WHAT THE WALL LEG DOES **NOT** DO, AND WHY IT IS SHAPED THIS WAY.
+    (a) A bound scaled to the pass's own work (`4 x cpu`) FLAKES. Under 12
+    busy-loop workers on these 4 CPUs, on passes healthy by every other
+    measure (cpu 0.85-0.88 s, converged, 40 confidences): wall 3.070 against a
+    3.508 ceiling (pass, +0.438), 3.384 against 3.464 (pass, +0.080), 4.268
+    against 3.412 (RED, -0.856). One of three reds and another clears by
+    0.08 s — the #9015/#9331 confusion, moved from "the box is a bit busy" to
+    "the box is saturated".
+    (b) A flat FIVE SECONDS is no safer, which is why it is not used: at 30
+    workers on this box the same healthy passes took 7.25/9.56/8.89 s of wall
+    at cpu 0.92-0.94, so a 5.0 s flat cap reds them too. Any wall-derived
+    LATENCY bound reds on a loaded enough box; only a hang bound far outside
+    contention's reach survives, which is what the 30.0 s leg is.
+    (c) THEREFORE the latency criterion lives where wall is measurable. On a
+    QUIET box (load per CPU <= 1.0 on both the 1-min and 5-min averages, in
+    readings taken BEFORE and AFTER the pass — the 1-min average lags a box
+    that has just been loaded, and a reading taken only afterwards misses a
+    spike that began just before the window) wall clock IS this pass's own
+    latency, and the bound is 3.0 s — #9015/#9474's acceptance criterion
+    verbatim ("a 3 s pass must still fail"), with the quiet-box pass measured
+    at 1.3-1.8 s. Measured discrimination: inject `time.sleep(1.3)` inside the
+    timed window and it passes (wall ~2.6 s); inject `time.sleep(3.1)` and it
+    REDS on the quiet bound (wall 4.22 s). On a loaded box the same read is
+    the box, not the pass, so only the hang leg applies.
 
-    What the wall leg does still buy: it catches a genuine runaway (a hang or
-    a live-lock, >5 s), and it is the only thing standing between a wedged
-    pass and an unbounded CI leg. That is the cap this test always carried —
-    "stays only as a runaway hard cap" — which until now was dead code behind
-    the tighter wall bound. See `_AC5_RUNAWAY_S` and
-    `test_ac5_wall_bounds_contract` for the pinned calibration.
+    THE RESIDUALS, stated rather than papered over — all three need a
+    dedicated quiet lane, and none is closed by a tighter bound:
+    1. On a LOADED box a wall-shaped regression below 30 s passes, because it
+       cannot be distinguished from contention there.
+    2. `cpu < 1.2` is UPWARD-only, so a cpu DROP (replace compute with wait)
+       passes the CPU leg; only the quiet-box wall leg can see it.
+    3. The gate is a 1-to-5 minute average, so contention that begins INSIDE
+       the timed window is invisible to it and can still red the latency leg.
+       So a starved box is *far less likely* to red on that leg, not unable to.
+
+    What the hang leg still buys: it catches a genuine hang or live-lock, and
+    it is the only thing between a wedged pass and an unbounded CI leg. See
+    `_AC5_HANG_S`, `_AC5_QUIET_WALL_S` and `test_ac5_wall_bounds_contract`
+    for the pinned calibration.
 
     Why not #9015's recommended option 2 (best-of-N wall)? Because it does
     not separate code from box here either: the four passes above were all
@@ -1082,10 +1119,19 @@ def test_ac5_interactive_latency_zone():
         for cid in zone:
             sdk.set_point_baseline(cid, 1, 1)  # #344: calibrated graph
         assert sdk._dirty_roots
+        # Read the box's load BEFORE the pass as well as after it: the averages
+        # are 1- and 5-minute EWMAs, so a reading taken only afterwards misses a
+        # spike that began just before the window and would then assert the
+        # latency bound on a starved pass (measured: 12 workers started ~10 s
+        # before the pass kept the 1-min ratio <= 1.0 while the pass ran 3-4x
+        # slow). Taking the worse of the two readings closes that direction.
+        cpus = _ac5_effective_cpus()
+        before = tuple(v / cpus for v in os.getloadavg()[:2])
         w0, c0 = time.perf_counter(), time.process_time()
         result = sdk.compute_confidence()
         elapsed = time.perf_counter() - w0
         cpu = time.process_time() - c0
+        after = tuple(v / cpus for v in os.getloadavg()[:2])
         assert result["converged"] is True
         assert len(result["confidences"]) >= 39
         # O/IT indicator 1: interactive local EP ≤ 1s for 10-50 claim zones.
@@ -1099,30 +1145,32 @@ def test_ac5_interactive_latency_zone():
         # `loadavg 13.8` would survive it — a volatile token that makes this
         # id's failure signature un-matchable against main's, which is exactly
         # the #9331 block. Host context belongs in the log, not in the id.
-        print(f"[ac5] loadavg {os.getloadavg()[0]:.1f} (context only)")
+        print(
+            f"[ac5] load/cpu before 1m {before[0]:.2f} 5m {before[1]:.2f}, "
+            f"after 1m {after[0]:.2f} 5m {after[1]:.2f}, over {cpus} cpus "
+            f"(context only)")
         assert cpu < 1.2, (
             f"local EP took {cpu:.2f}s of CPU ({elapsed:.2f}s wall) — "
             f"interactive budget is ≤1s")
         # The wall leg has TWO jobs, and only the first is conditional.
-        # (1) On a QUIET box wall clock is this pass's own latency, so #9015's
-        #     acceptance criterion ("a 3 s pass must still fail") is asserted
-        #     there — this is the only regime where it is measurable at all.
-        #     Both the 1-min and the 5-min average must be quiet, because the
-        #     1-min average lags a box that has just been loaded.
-        # (2) Everywhere, a flat RUNAWAY cap. Flat because a ceiling that
-        #     scales with this pass's CPU reds a healthy pass on a saturated
-        #     box (measured 5.00x wall/cpu under 12 workers); the cap cannot
-        #     be tightened to a latency bound for the same reason.
+        # (1) On a QUIET box wall clock is this pass's own latency, so
+        #     #9015/#9474's acceptance criterion ("a 3 s pass must still fail")
+        #     is asserted there — the only regime where it is measurable. Both
+        #     averages must be quiet in BOTH readings: the 1-min average lags a
+        #     box that has just been loaded, and a reading taken only after the
+        #     window misses a spike that began just before it.
+        # (2) Everywhere, a HANG bound. Not flat at any small number: a flat
+        #     5.0 s cap was measured reding healthy passes at 30 workers
+        #     (7.25/9.56/8.89 s wall, cpu 0.92-0.94), because any wall-derived
+        #     latency bound reds on a loaded enough box. The hang bound is 3x
+        #     the worst healthy wall measured, so only a wedged pass reaches it.
         # AC5's <=1s is enforced by the `cpu < 1.2` assertion above, which is
         # UPWARD-only, so a cpu DROP passes it too — that is why (1) exists.
-        cpus = _ac5_effective_cpus()
-        load1, load5 = os.getloadavg()[0] / cpus, os.getloadavg()[1] / cpus
-        wall_bound = _ac5_wall_bound(load1, load5)
-        quiet = wall_bound == _AC5_QUIET_WALL_S
+        wall_bound = _ac5_wall_bound(
+            max(before[0], after[0]), max(before[1], after[1]))
         print(
-            f"[ac5] load/cpu 1m {load1:.2f} 5m {load5:.2f} over {cpus} cpus "
-            f"-> {'quiet-box latency bound' if quiet else 'runaway cap only'} "
-            f"({wall_bound:.1f}s)")
+            f"[ac5] wall bound {wall_bound:.1f}s "
+            f"({'quiet-box latency criterion' if wall_bound == _AC5_QUIET_WALL_S else 'hang detector only'})")
         assert elapsed < wall_bound, (
             f"local EP spent {elapsed:.2f}s wall for {cpu:.2f}s of CPU — "
             f"budget is {wall_bound:.1f}s")
