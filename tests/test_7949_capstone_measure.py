@@ -1118,6 +1118,14 @@ def test_the_bundles_named_cites_resolve_to_their_symbols():
          "_DERIVATION_REFERENCES_LABELS = frozenset"),
         ("link_source_to_event (the writer the cite ranges over)", edges, 2424,
          "def link_source_to_event("),
+        # Two more the bundle names a symbol for, in files this leg already
+        # opens, and which RENDER into the log (peer review, cycle 2).
+        ("_TURN_WRITE_CYPHER (the capture path's turn writer)",
+         sdk, 2367, "_TURN_WRITE_CYPHER = ("),
+        ("_anchor_on_create (the #5199 anchor expression)", edges, 495,
+         "def _anchor_on_create("),
+        ("_DERIVATION_ANCHOR_SET (the anchor the writers concatenate)",
+         edges, 503, '_DERIVATION_ANCHOR_SET = _anchor_on_create("s.contentHash")'),
     ]
     for label, lines, line, needle in cites:
         got = lines[line - 1]

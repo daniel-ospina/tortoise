@@ -125,6 +125,16 @@ line of this log: both surfaces were ABSENT on this run, so the refusal branch n
 below carry the absent-surface cause). Disclosed rather than smoothed, like the dirty-tree delta
 itself.
 
+⚠️ **A later probe delta DOES render, and the log is not edited for it.** #9553's insertion into
+`tortoise/sdk.py` (+86 lines) moved the symbols this bundle cites, so the `file:line` numbers in the
+probe's `E3_RULE` and in the S2.2/S2.3 cause strings were re-derived — and those strings RENDER into
+a log. The frozen `capstone-measured-e0fc940b.log` therefore still carries the cites **as-of its own
+stamp** (`sdk.py:12401`, `sdk.py:12682`, `edges.py:467`, `edges.py:2168-2192`), which no longer
+resolve on `main`. That is deliberate: a scored log is a measurement record and the bundle's rule is
+that a row moves only by RE-RUNNING the probe and removing the file it replaces, never by editing a
+number in place. Read this README (and the probes it pins) for CURRENT cites; read the log for the
+numbers measured at `e0fc940b5`. A re-run under a new `<new-head8>` is the supersede path.
+
 ⚠️ **One clause of this log was corrected IN PLACE, and here is which.** The `row E3 note` (human and
 machine copies) and the `e3 point composition` line described the *superseded* reading by splicing
 THIS run's counts into it with a typed `= 1.000000` — so the record stated a historical fact that
