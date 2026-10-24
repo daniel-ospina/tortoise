@@ -1196,11 +1196,20 @@ AUDITED_DEDUP_ROWS = {
     "D-d": "against_priors_consolidation",
 }
 
-#: A table ROW whose first cell is a bold dedup id (`| **D-a** | ...`). Anchored
-#: on the ROW START so a `D-a` mentioned inside another row's prose is not a
-#: declaration, and `MULTILINE` so the table can move down the document without
-#: the check losing it.
-AUDITED_DEDUP_ROW = re.compile(r"^\|\s*\*\*(D-[a-z])\*\*\s*\|", re.MULTILINE)
+#: A table ROW whose first cell is a bold dedup id. Anchored on the ROW START so a
+#: `D-a` mentioned inside another row's prose is not a declaration, and
+#: `MULTILINE` so the table can move down the document without the check losing
+#: it. ⚠️ NOT anchored on the closing pipe: `| **D-e** (a note) |` is the same
+#: declaration in a different cell shape, and a pattern that required the pipe
+#: immediately after the id read that row as absent — measured: a fifth dedup in
+#: that shape left this check GREEN, which is the one drift it exists to see.
+AUDITED_DEDUP_ROW = re.compile(r"^\|\s*\*\*(D-[a-z])\*\*", re.MULTILINE)
+
+#: Any id that LOOKS like a table-row declaration of a dedup, whatever the cell
+#: shape (`**D-a**`, `D-a`, `**D-a** (note)`). Used only to prove the reader above
+#: did not silently skip a row: an id this loose pattern finds and the strict one
+#: does not is an UNREADABLE ROW, which is a violation rather than a gap.
+AUDITED_DEDUP_ROW_LOOSE = re.compile(r"^\|[^|\n]*?\b(D-[a-z])\b", re.MULTILINE)
 
 
 def audited_dedups(doc: Path = V4_ARCH_DOC) -> list[str]:
@@ -1237,6 +1246,18 @@ def audited_dedup_errors(doc: Path, registry_ids: set[str],
             "never a silent pass)"
         ]
     errors: list[str] = []
+    # A PARTIALLY readable table is the dangerous one: `not declared` only fires
+    # when the reader finds NOTHING, so one unreadable row among four would read
+    # as a complete enumeration. The loose pattern is the second pair of eyes.
+    loose = set(AUDITED_DEDUP_ROW_LOOSE.findall(doc.read_text(encoding="utf-8")))
+    for did in sorted(loose - set(declared)):
+        errors.append(
+            f"{did}: appears as a dedup TABLE ROW but the row reader skipped it "
+            "— its cell shape is not the one `AUDITED_DEDUP_ROW` expects, so a "
+            "declared dedup reads as absent. Normalise the row (or teach the "
+            "reader the shape); this is a violation, not a gap, because a "
+            "partially read table cannot prove it is complete"
+        )
     for did in declared:
         mid = mapping.get(did)
         if mid is None:
@@ -1348,6 +1369,33 @@ def test_an_unreadable_dedup_table_is_refused(tmp_path) -> None:
                    encoding="utf-8")
     errors = audited_dedup_errors(doc, {r["id"] for r in load_registry()["mechanisms"]})
     assert errors and "yielded NO ids" in errors[0], errors
+
+
+def test_a_dedup_row_in_a_shape_the_reader_cannot_parse_is_refused(tmp_path) -> None:
+    """A PARTIALLY readable table is the dangerous one, so an unparsed row is a violation.
+
+    The fail-closed branch above only fires when the reader finds NO ids at all.
+    One row in a cell shape the reader does not expect, beside four it does, would
+    leave `declared` looking like a complete enumeration — measured on the real
+    table: `| **D-e** (a note) | … |` was skipped by a pattern that required the
+    closing pipe immediately after the id, and the fifth dedup went GREEN. So the
+    reader is cross-checked against a loose pattern that only asks "does this row
+    look like a dedup declaration?", and any id it finds that the strict reader
+    skipped is an UNREADABLE ROW — a violation, because a table nobody fully read
+    cannot prove it is complete.
+    """
+    doc = tmp_path / "arch.md"
+    doc.write_text(
+        "| **D-a** | source |\n| **D-b** | within-batch |\n"
+        "| **D-c** | store |\n| **D-d** | semantic |\n"
+        "| D-e (unbolded id) | a NEW key |\n",
+        encoding="utf-8",
+    )
+    errors = audited_dedup_errors(doc, {r["id"] for r in load_registry()["mechanisms"]})
+    assert any("D-e" in e and "skipped it" in e for e in errors), (
+        "a dedup row in a shape the reader cannot parse passed as absent: "
+        f"{errors}"
+    )
 
 
 def test_the_near_dup_three_sites_are_separately_registered() -> None:
@@ -1463,10 +1511,21 @@ def test_the_atomic_write_absence_is_pinned_to_the_schema() -> None:
     note says so. An UNPARSABLE source under `tortoise/` is a violation rather
     than a skip: a constraint inside it would be invisible, and every module in
     the package must parse anyway.
+
+    ⚠️ A HIT IS "A CONSTRAINT, OR A MENTION OF ONE" AND THE MESSAGE SAYS SO. A
+    string that spells the statement out while explaining why it is NOT created
+    is indistinguishable from one that runs it (measured: an explanatory constant
+    red the pin with "flip the row", which is the wrong instruction). DOCSTRINGS
+    are excluded — they are never executed — and every other hit is reported as
+    "a statement or a mention, this scan cannot tell which", with both remedies.
     """
     ddl = re.compile(
         r"(?i)(?:CONSTRAINT\s+CREATE|CREATE\s+(?:OR\s+REPLACE\s+)?CONSTRAINT)[^;]{0,300}"
     )
+    #: A constraint statement that names its label is COMPLETE — reassembling it
+    #: adds nothing, so `_DDL = "… NODE GraphEvent"` + `g.query(_DDL)` is a
+    #: statement this scan fully saw and must not be called unverifiable.
+    labelled = re.compile(r"(?i)\bNODE\s+[A-Za-z_]\w*")
     constraints: list[str] = []
     unparsable: list[str] = []
     assembled: list[str] = []
@@ -1477,8 +1536,36 @@ def test_the_atomic_write_absence_is_pinned_to_the_schema() -> None:
         except (OSError, UnicodeError, SyntaxError, ValueError):
             unparsable.append(rel)
             continue
+        docstrings = {
+            id(n.body[0].value)
+            for n in ast.walk(tree)
+            if isinstance(n, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and n.body and isinstance(n.body[0], ast.Expr)
+            and isinstance(n.body[0].value, ast.Constant)
+        }
+        # Names bound to an INCOMPLETE keyword-carrying literal (`… UNIQUE NODE `
+        # with the label not yet attached). A use of such a name is a statement
+        # whose label this scan cannot resolve — the `_DDL += _LABEL` shape, which
+        # no expression-form rule would catch.
+        tainted = {
+            target.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str) and ddl.search(node.value.value)
+            and not labelled.search(ddl.search(node.value.value).group(0))
+            for target in node.targets
+            if isinstance(target, ast.Name)
+        }
+        bound_targets = {
+            id(t)
+            for n in ast.walk(tree)
+            if isinstance(n, (ast.Assign, ast.AugAssign))
+            for t in (n.targets if isinstance(n, ast.Assign) else [n.target])
+        }
         for node in ast.walk(tree):
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                if id(node) in docstrings:
+                    continue
                 for match in ddl.finditer(node.value):
                     constraints.append(f"{rel}: {match.group(0).strip()}")
                 continue
@@ -1488,15 +1575,22 @@ def test_the_atomic_write_absence_is_pinned_to_the_schema() -> None:
                     v.value for v in node.values
                     if isinstance(v, ast.Constant) and isinstance(v.value, str)
                 ]
-            elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            elif isinstance(node, ast.BinOp):  # `+`, `%` and every other operator
                 fragments = [
                     n.value for n in (node.left, node.right)
                     if isinstance(n, ast.Constant) and isinstance(n.value, str)
                 ]
+            elif isinstance(node, ast.AugAssign):
+                fragments = [
+                    n.value for n in ast.walk(node.value)
+                    if isinstance(n, ast.Constant) and isinstance(n.value, str)
+                ]
+                if isinstance(node.target, ast.Name) and node.target.id in tainted:
+                    assembled.append(f"{rel}: {node.target.id} += …")
             elif (
                 isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)
-                and node.func.attr in {"format", "join"}
+                and node.func.attr in {"format", "format_map", "join"}
             ):
                 fragments = [
                     n.value for n in ast.walk(node)
@@ -1505,6 +1599,16 @@ def test_the_atomic_write_absence_is_pinned_to_the_schema() -> None:
             for fragment in fragments:
                 for match in ddl.finditer(fragment):
                     assembled.append(f"{rel}: {match.group(0).strip()}")
+            if (
+                isinstance(node, ast.Name)
+                and node.id in tainted
+                and id(node) not in bound_targets
+            ):
+                assembled.append(
+                    f"{rel}: `{node.id}` carries an incomplete DDL statement "
+                    "and is used as a value"
+                )
+    assembled = sorted(set(assembled))  # the walk visits ancestors too
     assert unparsable == [], (
         "a source under tortoise/ could not be parsed, so a constraint written "
         "in it is INVISIBLE to this pin — that is not the same as its absence: "
@@ -1520,17 +1624,22 @@ def test_the_atomic_write_absence_is_pinned_to_the_schema() -> None:
         if "UNIQUE" in c.upper() and re.search(r"\bPoints?\b", c)
     ]
     assert point_constraints == [], (
-        "a UNIQUE constraint now names Point: the `atomic_point_write` row's "
-        "absence claim is no longer true — flip the row to `implemented` (and "
-        "close #9879) instead of deleting this assertion:\n  "
+        "a UNIQUE constraint naming Point appears in tortoise/ — either the\n  "
+        "• STATEMENT: the `atomic_point_write` row's absence claim is no longer "
+        "true — flip the row to `implemented` (and close #9879); or\n  "
+        "• MENTION: an explanatory string spells the DDL out while saying it is "
+        "NOT created — this scan cannot tell a statement from a mention, so "
+        "reword it without the DDL spelling (`a uniqueness constraint on Point`)\n  "
+        "Neither is fixed by deleting this assertion:\n  "
         + "\n  ".join(point_constraints)
     )
     assert assembled == [], (
-        "a graph constraint is ASSEMBLED AT RUNTIME (f-string / `+` / .format / "
-        "join), which this static scan cannot resolve — so whether it names Point "
-        "is UNKNOWN, and an unknown is not an absence. Write the statement as a "
-        "literal (implicit concatenation is fine), or extend this pin to resolve "
-        "the label:\n  "
+        "a graph constraint is ASSEMBLED AT RUNTIME (f-string / `+` / `%` / "
+        ".format / .format_map / .join / `+=` / a name carrying an incomplete "
+        "statement), which this static scan cannot resolve — so whether it names "
+        "Point is UNKNOWN, and an unknown is not an absence. Write the statement "
+        "as a literal (implicit concatenation is fine), or extend this pin to "
+        "resolve the label:\n  "
         + "\n  ".join(assembled)
     )
     row = {r["id"]: r for r in load_registry()["mechanisms"]}["atomic_point_write"]

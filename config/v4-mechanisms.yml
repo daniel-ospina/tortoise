@@ -368,9 +368,14 @@ mechanisms:
     symbols:
       - classify_consolidation
     note: >-
-      `D-d` is the FOURTH of §4.2's four audited dedups and the only one that
-      needs the graph (constraint 5: against-priors consolidation needs the S3
-      lookup), so it stays after S3 while `exact_dedup` may run first.
+      `D-d` is the FOURTH of §4.2's four audited dedups and the only D-d one
+      that needs the S3 LOOKUP — constraint 5, which is what places it AFTER S3.
+      ⚠️ "Needs the graph" is NOT a property that separates D-d from the other
+      three: `D-c` (against-store exact) is a graph query too
+      (`sdk._find_point_by_content`, reached via `_resolve_dedup_hit`), and it runs
+      BEFORE S3 under constraint 1. What differs is WHICH read each needs — the
+      store lookup versus the priors semantic lookup — not whether it touches a
+      store.
       ⚠️ NO `preconditions:` EDGE HERE, on purpose. The declared prerequisite is
       the S3 LOOKUP, and there is no registry row for it, so an edge naming
       `exact_dedup` would declare a dependency that does not exist — a false
@@ -481,10 +486,13 @@ mechanisms:
       (`tortoise/extractor_v2.py`) is rendered into S1 (`_granularity_text`) and
       S2/S4 (`_render_master_core_only`, `_render_master_verbose`), and
       `VALUE_FIDELITY_RULE` rides the S2/S4 `{anti_routine}` slot via
-      `_s2s4_rules()` — never S1, never the master render (a code fact the
-      `SEAMS:` comment above `SHORT_SESSION_FACT_RULE` states;
-      `tests/test_extractor_v4_citation_rot.py` pins the never-S1 half, and
-      `tests/test_extractor_v2.py` pins the render). The FILTER side is
+      `_s2s4_rules()` — never S1, never the master render (pinned by
+      `tests/test_extractor_v4_citation_rot.py`, and
+      `tests/test_extractor_v2.py` pins the render). ⚠️ It is pinned THERE and NOT
+      read off a comment: the `SEAMS:` comment above `SHORT_SESSION_FACT_RULE`
+      belongs to a different constant and names S1 as one of ITS seams, so citing
+      it as authority for value-fidelity's never-S1 would say the opposite of what
+      the row claims. The FILTER side is
       mechanical and is NOT what this row records as absent:
       `tortoise/value_gate.py::identifier_only` is the SELECTION predicate
       that drops identifier-like residues (`#4899`), and the EMBED gate reuses
@@ -498,7 +506,7 @@ mechanisms:
       `STATE_VALUE_CARVE_OUT` at all, so one render path silently drops the
       guarantee. ⚠️ The omission is MEASURED, not read off a comment: the
       comment above the compact render's hint blocks
-      (`tortoise/extractor_v2.py:1162`) only excludes them from the SHUFFLE
+      (`tortoise/extractor_v2.py:1175-1177`) only excludes them from the SHUFFLE
       ("only the kind vocabulary randomizes") and then emits a FILTERED
       `MEMORY GRANULARITY` block, so it neither says nor implies that the
       carve-out is dropped —
@@ -539,7 +547,12 @@ mechanisms:
       `tortoise/**/*.py`) — so the row cannot quietly outlive its own absence.
       ⚠️ That pin's scope is STATED, not universal: a constraint created outside
       `tortoise/**/*.py` (a script, a migration, a console session) would not be
-      seen. It is the reachable surface the claim lives in, not the whole world.
+      seen, a statement ASSEMBLED at runtime (an f-string / `+` / `%` / `.format`
+      / `.join` / `+=`) is REFUSED as unverifiable rather than read as absent, and
+      a match cannot be told apart from an explanatory MENTION of the DDL spelling
+      (docstrings are skipped; a non-docstring string that spells the statement
+      out reds and must be reworded). It is the reachable surface the claim lives
+      in, not the whole world.
 
   - id: failure_policy
     name: "per-step FAILURE POLICY (G3) — HOLD the unresolved identity, never assert `new`"
