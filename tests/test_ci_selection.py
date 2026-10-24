@@ -10233,3 +10233,26 @@ def test_9206_lane_suites_run_on_the_diffs_that_can_break_them():
 
     r = _sel(["tortoise/sdk.py"])
     assert r["full"] is True, r
+
+
+def test_batch_review_tool_change_selects_core_not_tier1():
+    # #9790 review P1: tools/batch_review.py owns tests/test_batch_review.py
+    # (registered `core`, the guard for the fail-closed record path).
+    #
+    # `tools/` is a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row
+    # matches the tool, so a tool-only change came back with `changed == []` and
+    # took the docs-only early return — tier-1 smoke, where the guard is not
+    # registered. Measured before this entry: `select(["tools/batch_review.py"])`
+    # -> surfaces=[], full=False, test_batch_review.py absent. That is the
+    # #1349/#3332/#3616 silent-drop class on the one diff that can break the
+    # guard: deleting `plan_records`'s manifest-head equality would have merged
+    # with none of the suite running (no count in the prose: it decays every time
+    # a pin is added, and what this test pins is the SELECTION, not the number).
+    #
+    # CORE_ALSO (not TOOL_CARVEOUTS): the suite is hermetic, so `core` is the
+    # cheapest leg that can carry it. Mutation check: removing the CORE_ALSO
+    # entry fails assert 2 below.
+    r = _sel(["tools/batch_review.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_batch_review.py" in r["test_files"], r
+    assert r["full"] is False, r
