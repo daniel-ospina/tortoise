@@ -484,6 +484,23 @@ of 9 misses per run while omitting `SUPPORTS`. Round 7 found the last two unclas
 sites (`non-dict retraction ref`, `empty retraction ref`), which let a run whose retractions were
 all refused ship the "no supersede refusal" note.
 
+**Round 8** found no defect in the executable change and one in the INSTRUMENT'S REACH: the two
+pins that bind THIS document (the `docs/00_index.md` row and the verdict banner below) lived in
+`tests/test_extractor_v2.py`, which is registered `core` **and is a `slow_files` member** — and
+`tier1` has slow files subtracted from it, while `docs/` is in `NON_PYTHON_PREFIXES` and
+`docs/evidence/8503/` matches no `CORE_ALSO` entry. A diff touching only this README therefore
+took the selector's docs-only early return (`surfaces: []`, `slow_run: false`, 63 test files) and
+the pins ran in **no leg at all**: deleting the index row, or restoring the
+pre-fix banner sentence that read every `edge_missing` as the model's miss (the wording the pin
+below forbids, so it is named and not quoted here), merged green and only reddened `main`
+post-merge. Strictly the failure #8503's own attribution work exists to prevent — a green check
+over a claim nothing measured. The two file-scan pins now live in
+`tests/test_evidence_8503_claims.py`, registered in **both** `core` and `tier1` (the lane a
+docs-only diff actually runs), and the selector itself is pinned by
+`tests/test_ci_selection.py::test_the_8503_docs_pins_run_on_a_docs_only_diff`, which also proves
+the `tier1` entry is what closes the hole. The third pin stays in `test_extractor_v2.py` because
+it reads `tortoise/extractor_v2.py`'s source — correctly bound to a CODE diff.
+
 ## 6. Reproduction
 
 ```bash
@@ -501,7 +518,7 @@ PYTHONPATH=$PWD .venv/bin/python docs/evidence/8503/mutation_arm.py     # exit 0
 ```
 
 Suites run green on this tree (review-round head): `tests/test_extractor_v2.py`,
-`tests/eval/write_path/test_write_path_grading.py` +
+`tests/test_evidence_8503_claims.py`, `tests/eval/write_path/test_write_path_grading.py` +
 `test_write_path_operator_receipt.py`, the non-EP subset of
 `test_write_path_runner.py`, and `docs/evidence/8503/mutation_arm.py` (exit 0). The full
 `tests/eval/write_path/` directory cannot complete on this box — the EP/SVBP pass exceeds the

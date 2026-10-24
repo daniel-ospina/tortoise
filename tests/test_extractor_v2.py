@@ -7108,84 +7108,25 @@ class TestOperatorSelectionRules:
 # the executable change ships 5/14, so the attribution is the product, and an
 # attribution nobody pins re-stales the moment a section is edited.
 #
-# (1) the bundle was not registered in `docs/00_index.md` (AGENTS.md's
-#     Documentation Filing Protocol step 3, the #9110-review-P2 precedent): a
-#     reader routing by the documented entry point could not find it at all;
-# (2) the verdict banner inferred "no edge_missing is an extractor-side drop"
-#     from "no operator drop was logged", while the doc's own §3.2b/§3.2e put
-#     the SUPERSEDE row's edge_missing in the replace channel — an
-#     extractor-side refusal — i.e. the two-mechanism conflation #8503 was
-#     filed on, reproduced in the artifact meant to end it;
-# (3) the `_resolve_point_supersede` docstring claimed an acceptance gate the
-#     shipped leg does not have (same negation + condition markers), which a
-#     maintainer would "restore" as a second predicate the same docstring
-#     calls dead code.
-_EVIDENCE_8503 = Path(__file__).resolve().parent.parent / "docs" / "evidence" / "8503"
-_INDEX_00 = Path(__file__).resolve().parent.parent / "docs" / "00_index.md"
-
-
+# ⛔ TWO OF THE THREE PINS MOVED OUT OF THIS FILE (code-review round 9, P1).
+# This module is registered `core` AND is a `slow_files` member, so slow files
+# are subtracted from `tier1` — and a docs-only diff (the bundle README, the
+# index row) takes `select()`'s docs-only early return, which runs tier1 ONLY.
+# The bundle-registration pin and the verdict-banner pin therefore ran in NO
+# leg on the exact diff class that breaks them. They are file scans, so they
+# now live in `tests/test_evidence_8503_claims.py`, registered in BOTH `core`
+# and `tier1` (`docs/evidence/8503/` matches no CORE_ALSO entry).
+#
+# What stays HERE is (3): the `_resolve_point_supersede` docstring claimed an
+# acceptance gate the shipped leg does not have (same negation + condition
+# markers), which a maintainer would "restore" as a second predicate the same
+# docstring calls dead code — a pin on `tortoise/extractor_v2.py`'s own source,
+# correctly bound to a CODE diff (this file's lane), not to a doc one.
 def _flat(text: str) -> str:
     return " ".join(text.split())
 
 
 class TestEvidence8503Claims:
-    def test_the_bundle_is_registered_in_the_docs_index(self):
-        """Filing rule AND figure rule (the #9110 review-P2 pin's shape).
-
-        A missing row is the review-P2 omission; two rows is an index that
-        names the same artifact twice; a row citing figures the document does
-        not establish is worse than no row, because it is an index entry a
-        reader trusts.
-        """
-        rows = [line for line in _INDEX_00.read_text(encoding="utf-8").splitlines()
-                if line.startswith("|") and "docs/evidence/8503/README.md" in line]
-        assert len(rows) == 1, (
-            "expected exactly one docs/00_index.md row naming "
-            f"docs/evidence/8503/README.md, found {len(rows)}")
-        row = rows[0]
-        for artifact in (
-            "docs/evidence/8503/before-run.json",
-            "docs/evidence/8503/mutation_arm.py",
-            "w2b-operator-2026-10-24-8503-a.json",
-            "w2b-operator-2026-10-24-8503-b.json",
-            "w2b-operator-2026-10-24-8503-preleg.json",
-        ):
-            assert artifact in row, f"the docs/00_index.md row does not cite {artifact}"
-        # the figures the document actually establishes — and NOT the one the
-        # criterion asks for. The row must publish the miss, not just the gain.
-        assert "5/14" in row and "NOT the 14/14" in row, (
-            "the index row must publish 5/14 and say it is NOT the 14/14 the "
-            "criterion asks for — a row that reads as a gain is the over-claim "
-            "this pin exists to prevent")
-        assert "7/15 → 11/15" in row, "the row must carry the endpoint-recall figure"
-        assert "does NOT make every `edge_missing` a selection miss" in row, (
-            "the row must keep the banner's bound: the operator-drop zero does "
-            "not make every edge_missing a selection miss")
-
-    def test_the_banner_does_not_infer_every_edge_missing_is_an_extractor_drop(self):
-        """The banner must state what was measured, not what it implies.
-
-        `operator_drops = 0` is a measurement of the OPERATOR PASS. The
-        SUPERSEDE row's `edge_missing` is assigned by the same document
-        (§3.2b/§3.2e) to `_resolve_point_supersede` — an extractor-side
-        refusal — so "so no edge_missing is an extractor-side drop" is false,
-        and a lane reading the banner would hunt a prompt fix for a row whose
-        repair the doc itself says needs a semantic resolver.
-        """
-        flat = _flat((_EVIDENCE_8503 / "README.md").read_text(encoding="utf-8"))
-        # the two over-claiming sentences must be GONE, not softened
-        assert "so no `edge_missing` is an extractor-side drop" not in flat
-        assert "each `edge_missing` is a **selection** miss" not in flat
-        # the scoped claim replaces it, and names the pass it measured
-        assert "logged no OPERATOR-PASS drop in any run" in flat, (
-            "the banner must scope the zero to the OPERATOR PASS")
-        assert "does NOT make every `edge_missing` a selection miss" in flat
-        # two-sided: the honest accounting §3.2e owns is still the summary,
-        # and it still assigns the SUPERSEDE row to the resolver.
-        assert "the SUPERSEDE row is the resolver" in flat, (
-            "§3.2e must still state the SUPERSEDE row's class — the pin is on "
-            "the banner agreeing with it, not on deleting the classification")
-
     def test_the_supersede_leg_documentation_matches_the_shipped_predicate(self):
         """No negation gate and no condition gate exist; the doc must say so.
 

@@ -1939,13 +1939,18 @@ def operator_drop_warnings(session_results: list[dict]) -> dict:
     int, "by_session": {sid: [warning, ...]}}``.
 
     ⛔ ``operator_drops == 0`` means the EXTRACTOR logged no drop — it does
-    NOT mean the write path dropped nothing. TWO seams are outside this
-    instrument's reach, and both are named in the run note: the commit layer
+    NOT mean the write path dropped nothing. THREE seams are outside this
+    instrument's reach, and the run note names all three: the commit layer
     (`commit_ops.apply_payload_operators`) logs its skips through
-    ``_logger`` only, with no warnings sink on the capture, and a snapshot
-    that never read a session produces no warnings at all
-    (``graph_census``'s per-session ``error`` names the ones that did not).
+    ``_logger`` only, with no warnings sink on the capture; a snapshot that
+    never read a session produces no warnings at all (``graph_census``'s
+    per-session ``error`` names the ones that did not); and a point-level
+    ``supersedes`` ref on a point that folds as a NOOP is dropped where the
+    ref is collected, before the resolver runs, so it logs nothing either.
     So a zero is evidence about the operator pass and about nothing else.
+    (This docstring said TWO while ``operator_drop_notes`` enumerated three —
+    code-review round 8; the note is the copy a receipt reader sees, so the
+    docstring was the stale half.)
     """
     by_session: dict[str, list[str]] = {}
     total = operator_drops = supersede_refusals = 0

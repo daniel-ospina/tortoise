@@ -303,6 +303,60 @@ def test_the_record_arming_runbook_pins_run_on_a_runbook_only_diff():
     )
 
 
+def test_the_8503_docs_pins_run_on_a_docs_only_diff():
+    """#8503 round 9 (P1): the bundle's own pins must run on the bundle.
+
+    `tests/test_evidence_8503_claims.py` binds two DOC claims: the single
+    `docs/00_index.md` row that routes a reader into
+    `docs/evidence/8503/README.md`, and that README's verdict banner (the zero
+    operator-drop count `does NOT make every edge_missing a selection miss`;
+    the pre-fix banner said the opposite). `docs/` is in
+    NON_PYTHON_PREFIXES and `docs/evidence/8503/` matches no CORE_ALSO entry,
+    so a bundle-README-only diff filters to `changed == []` and takes the
+    docs-only early return — tier1 ONLY, measured: `surfaces == []`,
+    `slow_run is False`, 63 test files.
+
+    Both pins used to live in `tests/test_extractor_v2.py`, registered `core`
+    AND a `slow_files` member — and slow files are SUBTRACTED from tier1, so
+    on that diff they ran in NO leg (adding them to tier1 there would have
+    been a no-op). Deleting the index row, or restoring the banner's
+    "so no edge_missing is an extractor-side drop" over-claim, therefore
+    merged GREEN and only reddened `main` post-merge — the #1349/#3332/#3616/
+    #4309 silent-drop class, the same shape as `test_fly_secret_drift.py`
+    above.
+
+    Non-vacuity: dropping the `tier1` entry below re-opens exactly that hole,
+    and the second half asserts it by driving `select()` on a manifest copy
+    with the entry removed.
+    """
+    r = _sel(["docs/evidence/8503/README.md"])
+    assert r["full"] is False
+    assert r["surfaces"] == []
+    assert "test_evidence_8503_claims.py" in r["test_files"], (
+        "a bundle-README-only diff must select the pins that bind its prose "
+        "(`test_evidence_8503_claims.py`) — otherwise a docs-only edit that "
+        "deletes the index row or restores the banner's over-claim merges "
+        "green (#8503 round 9, #4309 class)"
+    )
+    # the `docs/00_index.md` half rides the same lane
+    idx = _sel(["docs/00_index.md"])
+    assert "test_evidence_8503_claims.py" in idx["test_files"], (
+        "a docs/00_index.md-only diff must select the row pin too"
+    )
+    # ... and the pre-fix home must NOT be relied on: it is a slow file, which
+    # tier1 subtracts, so it cannot cover the docs-only lane.
+    assert "test_extractor_v2.py" not in r["test_files"]
+
+    # non-vacuity: without the `tier1` entry the pin is asleep again.
+    m = copy.deepcopy(load_manifest())
+    m["tier1"] = [f for f in m["tier1"] if f != "test_evidence_8503_claims.py"]
+    blind = select(["docs/evidence/8503/README.md"], "pull_request", m)
+    assert "test_evidence_8503_claims.py" not in blind["test_files"], (
+        "the tier1 registration is what makes this pin run on a docs-only "
+        "diff; `core` alone does not reach that lane"
+    )
+
+
 def test_b7_runbook_ok_semantics_gate_runs_on_a_runbook_only_diff():
     """#8135 review (P1, two reviews): the runbook's `ok` pin must run on the runbook.
 

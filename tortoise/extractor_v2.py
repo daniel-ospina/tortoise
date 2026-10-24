@@ -6574,8 +6574,8 @@ def _resolve_point_supersede(ref: str, search: dict,
             return prior
         if len(drifted) > 1:
             warnings.append(f"point supersedes={ref[:60]!r} is ambiguous "
-                            f"({len(drifted)} priors contain it) — "
-                            "skipped (never guess)")
+                            f"({len(drifted)} priors tie once edge frame "
+                            "words are disregarded) — skipped (never guess)")
             return None
         warnings.append(f"point supersedes={ref[:60]!r} matches no S3 prior "
                         "— skipped (fail-open)")
