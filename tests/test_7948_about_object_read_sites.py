@@ -831,6 +831,33 @@ def _span(tree: ast.Module, dotted: str) -> tuple[int, int] | None:
     return None
 
 
+def _class_body_targets(rel: str, function: str, cls: str) -> frozenset[str]:
+    """`Assign`/`AnnAssign` target names in the body of `cls`, a class defined
+    directly inside `function`, both in `tortoise/<rel>`.
+
+    ⚠️ Read from the SOURCE, independently of `_symbol_index`, and that is the
+    whole point. A pin that asserts a node id is ABSENT from the index —
+    `assert <id> not in defs.get(name, set())` — is `not in set()` the moment the
+    attribute is RENAMED in the source, so it passes while testing nothing. Pairing
+    each absence with this presence check turns a rename into a red that says
+    "re-point this pin", which is the same silent-green a SUBJECT-locality pin
+    refuses for a hoist. `_bound_name` resolves the single-target `Assign` /
+    `AnnAssign` forms these declarations use.
+    """
+    tree = _parsed(str(PKG / rel))
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name != function:
+            continue
+        for inner in node.body:
+            if isinstance(inner, ast.ClassDef) and inner.name == cls:
+                return frozenset(
+                    target for statement in inner.body if (target := _bound_name(statement))
+                )
+    return frozenset()
+
+
 @functools.cache
 def _code_lines(path: Path) -> tuple[str, ...]:
     """The module's source with COMMENTS and PROSE STRINGS blanked out.
@@ -2482,9 +2509,9 @@ def _route_table() -> dict[tuple[str, str], frozenset[str]]:
 #     lane that re-measures at HEAD and finds no discrimination there has not
 #     refuted it.
 #     The SHIPPED predicate — the exceptions in `_DISTANCE_EXCEPTIONS`
-#     included — accepts the rate the arm below pins (`_ACCEPTED_PAIRS_AT_THIS_HEAD`
-#     over the derived population), because a rate restated in prose is a count
-#     that rots: this sentence still read 63/340 = 18.5 % after the table grew.
+#     included — accepts the COUNT the arm below pins (`_ACCEPTED_PAIRS_AT_THIS_HEAD`
+#     over the derived population), because a figure restated in prose rots: this
+#     sentence still read 63/340 = 18.5 % after the table grew.
 #     Depth still trades both ways — at a UNIFORM 2 hops nine legitimate rows
 #     false-red (seven if the `_DISTANCE_EXCEPTIONS` budgets are honoured, i.e.
 #     only the global budget is lowered) — and the only two true attributions
@@ -2502,8 +2529,9 @@ def _route_table() -> dict[tuple[str, str], frozenset[str]]:
 #: note above: this is a BOUND, not a proof.
 #:
 #: ⚠️ **Three, and this is a BOUND, not a proof.** Re-measured 2026-10-24 at
-#: `d07c9e99e`, with function LOCALS excluded from the symbol index (see
-#: `_symbol_index`) and the per-reader exceptions DISABLED, so these are the PURE
+#: `d07c9e99e`, with function-local ASSIGNMENT targets excluded from the symbol
+#: index (see `_symbol_index`; the NAME of a nested `def`/`class` is still indexed)
+#: and the per-reader exceptions DISABLED, so these are the PURE
 #: relation's figures over the 418 pairs: a uniform 2 accepts 24, a uniform 3 34,
 #: a uniform 4 43, a uniform 5 52. The SHIPPED predicate — the two exceptions in
 #: `_DISTANCE_EXCEPTIONS` added — accepts 36, i.e. the exceptions are worth exactly
@@ -2938,6 +2966,19 @@ def test_a_local_class_body_is_not_a_source_of_symbols():
         "still defined inside a function (or delete the pair, and the coverage with "
         "it), rather than loosening them."
     )
+    # ⚠️ The ATTRIBUTE is pinned PRESENT from source before it is pinned ABSENT
+    # from the index. Without this half, renaming `_fields_` in `index_walk.py`
+    # makes the next assertion read `assert <id> not in set()` — green, and testing
+    # nothing — which is the same silence the SUBJECT pin above refuses for a
+    # hoist. A rename must red as "re-point this pin".
+    local_targets = _class_body_targets("index_walk.py", "_getmntinfo_table", "_StatFS")
+    assert "_fields_" in local_targets, (
+        "this pin's ATTRIBUTE has moved: the body of `_StatFS` in "
+        "`tortoise/index_walk.py` declares no `_fields_` target (targets present: "
+        f"{sorted(local_targets)}), so the absence check below is `not in set()` and "
+        "tests nothing. Re-point BOTH halves at the attribute the local class now "
+        "declares, rather than deleting the pair and the coverage with it."
+    )
     assert "index_walk.py::_getmntinfo_table._StatFS._fields_" not in defs.get("_fields_", set()), (
         "a function-local class body is indexed as a symbol again — "
         "`index_walk.py::_getmntinfo_table._StatFS._fields_` is a definition node, and "
@@ -2947,6 +2988,18 @@ def test_a_local_class_body_is_not_a_source_of_symbols():
         f"{sorted(defs.get('_fields_', ()))}. (If the id reads `index_walk.py::_StatFS."
         "_fields_` instead, the class was HOISTED — re-point the pin above rather "
         "than treating it as a propagation defect.)"
+    )
+    # The `__slots__` half gets the same PRESENT-from-source guard as `_fields_`:
+    # a rename would leave the absence check below asserting `not in set()`.
+    node_targets = _class_body_targets(
+        "projection/__init__.py", "journal_epistemic_existence", "_Node"
+    )
+    assert "__slots__" in node_targets, (
+        "this pin's ATTRIBUTE has moved: the body of `_Node` in "
+        "`tortoise/projection/__init__.py` declares no `__slots__` target (targets "
+        f"present: {sorted(node_targets)}), so the absence check below is "
+        "`not in set()` and tests nothing. Re-point BOTH halves at the attribute "
+        "the local class now declares, rather than deleting the pair."
     )
     assert "projection/__init__.py::journal_epistemic_existence._Node.__slots__" not in defs.get(
         "__slots__", set()
@@ -3157,19 +3210,18 @@ def test_every_customer_callable_row_reaches_a_declared_door():
                         "re-derive the pinned figures) or to shorten the chain. ⛔ A "
                         "`_DISTANCE_EXCEPTIONS` entry cannot help: it raises the "
                         "reader's BUDGET, and the search stops at the cap before any "
-                        "budget is consulted."
+                        "budget is consulted. So this door is UNVERIFIED here, not "
+                        "wrong: it may be the right door on a chain longer than the cap."
                     )
                 else:
                     shortfall = (
                         f"needs {distance} references and this row's budget is {hops}, so "
                         "it is not a door to THIS reader (if the chain is legitimately "
                         "longer now, give the reader an entry in `_DISTANCE_EXCEPTIONS` "
-                        "with the reason, rather than loosening the budget for every row)."
+                        "with the reason, rather than loosening the budget for every row). "
+                        "The blast-radius count would be counted from the wrong tool."
                     )
-                broken.append(
-                    f"{label} — {door} exists but {shortfall} The blast-radius count would "
-                    "be counted from the wrong tool."
-                )
+                broken.append(f"{label} — {door} exists but {shortfall}")
 
     # A predicate that silently stops resolving its entries turns this arm green
     # on an assertion it never made — so the floor is asserted, not assumed.
