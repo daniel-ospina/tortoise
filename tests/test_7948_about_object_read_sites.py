@@ -2473,14 +2473,15 @@ def _route_table() -> dict[tuple[str, str], frozenset[str]]:
 #     nothing) — but only TWO of them discriminate 5 from 3: the backup swap is
 #     already refused at 5, because row 31's swapped cell is 7 hops (and under the
 #     shipped predicate row 29's is 5 against that reader's 4-hop exception) — the
-#     per-door figures are in the `_DOOR_REACH_HOPS` note above.
+#     per-door figures are in the `_DOOR_REACH_HOPS` note below.
 #     The SHIPPED predicate — the exceptions in `_DISTANCE_EXCEPTIONS`
 #     included — accepts the rate the arm below pins (`_ACCEPTED_PAIRS_AT_THIS_HEAD`
 #     over the derived population), because a rate restated in prose is a count
 #     that rots: this sentence still read 63/340 = 18.5 % after the table grew.
-#     Depth still trades both
-#     ways — at 2 hops nine legitimate rows false-red — and the only two true
-#     attributions beyond 3 are named in `_DISTANCE_EXCEPTIONS` with the code fact
+#     Depth still trades both ways — at a UNIFORM 2 hops nine legitimate rows
+#     false-red (seven if the `_DISTANCE_EXCEPTIONS` budgets are honoured, i.e.
+#     only the global budget is lowered) — and the only two true attributions
+#     beyond 3 are named in `_DISTANCE_EXCEPTIONS` with the code fact
 #     that earns each. ⚠️ This is why the bound is pinned on BOTH sides: the
 #     acceptance rate is itself an arm
 #     (`test_the_attribution_predicate_does_not_swallow_the_whole_table`), so the
@@ -2994,8 +2995,10 @@ def test_the_attribution_predicate_does_not_swallow_the_whole_table():
     """The bound above is only a check if the predicate still DISCRIMINATES.
 
     The REJECTED `_DOOR_REACH_HOPS = 5` accepted roughly two fifths of the
-    (row, table-door) pairs *as the table stood then* — and three substitutions
-    that keep a REAL tool in a cell stayed green under it. (The figure is stated as
+    (row, table-door) pairs *as the table stood then* — and two of the three
+    substitutions that keep a REAL tool in a cell stayed green under it (the
+    backup-doors swap was ALREADY refused at 5, on row 31's 7-hop cell; the
+    per-door figures are in the `_DOOR_REACH_HOPS` note). (The figure is stated as
     a proportion on purpose: the population has grown since, and a percentage
     restated against a fixed denominator is the rot this file retires.) A bound is not a proof, so the acceptance RATE is
     pinned as its own number: the predicate may accept, over the table's own
