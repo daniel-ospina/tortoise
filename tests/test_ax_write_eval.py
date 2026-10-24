@@ -1406,6 +1406,29 @@ def test_the_documented_failure_classes_reconcile_with_the_committed_records():
             f"anything"
         )
 
+    # The census row's LABEL carries a SECOND number — the input count the census
+    # was taken over — which the `[^|]*` in `row_cell` swallowed: mutating
+    # `(the graph-wide census, 7 inputs)` to `3 inputs` kept the suite green
+    # (#9695 review cycle 2). Its own cell's render discards the input count, so
+    # both are pinned from the measurement above.
+    census_inputs = measured["graph-wide"][1]
+    assert f"(the graph-wide census, {census_inputs} inputs)" in doc, (
+        f"the census row's label no longer states the {census_inputs} inputs the "
+        f"census covers"
+    )
+    # The section heading states the record count in words, and `classes` is
+    # measured over whatever is committed — so a run added or removed must move
+    # both the doc and this table rather than silently re-scoping the heading.
+    number_words = {10: "ten"}
+    assert len(runs) in number_words, (
+        f"the bundle carries {len(runs)} runs and no number word is pinned for "
+        f"that count — update the doc's heading and this map together"
+    )
+    assert f"recomputed from the {number_words[len(runs)]} `score.json`s" in doc, (
+        f"the class table's heading no longer says '{number_words[len(runs)]}' "
+        f"while the bundle carries {len(runs)} records"
+    )
+
     # The census ENUMERATION is prose, so its `×N` multipliers drifted unpinned
     # once — `role` ×2 beside three `role` Objects in the committed graph (#9695
     # review). Pin every `kind` ×N the doc states to the node count in the
