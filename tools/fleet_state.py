@@ -1798,13 +1798,21 @@ def live_sessions() -> LiveSessions:
                 # message exists to fit (measured: `orphan` fell out of `[:320]` at
                 # pathlen 90). The TAIL is what identifies the directory, so it is the
                 # part kept.
+                # ⛔ THE BOUND IS ON THE RENDERED SAMPLE (review of #2401, third round). Capping
+                # the raw string and then rendering it with `!r` let a path carrying control bytes
+                # expand four-fold — measured: a 60-char sample repr'd to 242 and pushed the remedy
+                # out of the 320-char window again, the third instance of the same defect class in
+                # this message. The rendered form is what has to fit, so the cap is applied to it.
+                # The TAIL is kept because it is what identifies the directory.
                 sample_txt = ""
                 if sample:
-                    sample_txt = sample if len(sample) <= 60 else "…" + sample[-59:]
+                    sample_txt = repr(sample)
+                    if len(sample_txt) > 64:
+                        sample_txt = repr("…" + sample[-40:])[:64]
                 proc_error = (
                     f"live pi pid(s) {pids_txt}{more} have no ATTRIBUTABLE cwd"
                     + (
-                        f" — e.g. {sample_txt!r} (a removed directory or a reader "
+                        f" — e.g. {sample_txt} (a removed directory or a reader "
                         "placeholder)"
                         if sample_txt else ""
                     )

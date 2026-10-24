@@ -2555,8 +2555,16 @@ def test_the_gap_fits_the_bound_its_readers_apply(monkeypatch) -> None:
     assert "/tmp/cell-wt-adv-runnerprov-land0 (deleted)" in head, (
         "the datum fell outside the window")
     assert "orphan" in head, "and so did the remedy"
-    assert len(live.error) < 400, (
-        f"the whole sentence should fit one bound: {len(live.error)} chars")
+    # ⛔ THE BOUND IS ON THE DECIDING ARM, NOT ON THE WHOLE SENTENCE (review of #2401, third round).
+    # `live.error` joins the process arm AND the cmux arm, and a real box's cmux arm is long: with
+    # both grammars refusing (the measured cell-4 state) the whole sentence is 622 characters. The
+    # old `len(live.error) < 400` went RED for that legitimate state and was green here only because
+    # this fixture stubs the cmux arm to `"no cmux"`. What the readers bound is the FIRST CAUSE —
+    # `unusable_cause` cuts at 320 — so that is what has to fit, and it is the arm that decides
+    # `measured` that must lead it.
+    proc_arm = live.error.split("; cmux session store: ")[0]
+    assert len(proc_arm) <= 320, (
+        f"the deciding arm must fit the first-cause cut: {len(proc_arm)} chars")
 
     # ⛔ AND A REAL FLEET PATH IS LONG (review of #2401). The case above uses a
     # 40-character path, which cannot see the failure that matters: Mac worktrees are
@@ -2578,6 +2586,27 @@ def test_the_gap_fits_the_bound_its_readers_apply(monkeypatch) -> None:
     assert "orphan" in head, "the remedy must survive a long pathlen too"
     assert "runnerprov-land-0123456789 (deleted)" in head, (
         "and the datum must keep the part that IDENTIFIES the directory — its tail")
+
+    # ⛔ AND WITH A REAL cmux ARM (review of #2401, third round). The ordering change exists so the
+    # process arm — the only one that can poison `measured` — LEADS the cause, and nothing tested it
+    # against a realistic second arm: cell-4's two grammar refusals are ~350 characters on their own,
+    # so the deciding datum is only visible because it comes first.
+    cmux_arm = (
+        "`cmux sessions list --json --all` exited 2: 'usage.invalid: --all needs a "
+        "value' (a failed command's output is not read as a session store); "
+        "`cmux session list --json` exited 3: 'cannot connect to session socket "
+        "/tmp/cmux-tui-1000/cloud.sock: Connection refused (os error 111)' "
+        "(a failed command's output is not read as a session store)"
+    )
+    monkeypatch.setattr(fs, "cmux_session_records", lambda: ([], "", cmux_arm))
+    live = fs.live_sessions()
+    head = live.error[:320]
+    assert live.error.startswith("live-process table: "), (
+        "the deciding arm must lead the sentence")
+    assert "orphan" in head, (
+        "the remedy must still be inside the first-cause cut when a real cmux arm follows it")
+    for pid in long_refused:
+        assert str(pid) in head, f"pid {pid} was pushed out by the cmux arm"
 
 
 def test_the_plural_grammar_is_preferred_and_a_later_one_can_answer(monkeypatch) -> None:
