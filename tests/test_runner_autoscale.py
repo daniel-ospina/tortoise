@@ -224,6 +224,7 @@ class Env:
         svc_mark: str = "",
         provisioner_absent: bool = False,
         sudo_fails: bool = False,
+        sudo_scoped: bool = False,
     ) -> None:
         self.tmp = tmp
         self.root = tmp / "opt"
@@ -235,9 +236,21 @@ class Env:
         self.provisioner = _exe(self.bin / "provision.sh", PROVISIONER_FAKE)
         self.ps = _exe(self.bin / "ps", f"#!/usr/bin/env bash\necho 'ps: boom' >&2\nexit {ps_rc}\n")
         # A `sudo` that refuses (no passwordless sudo — the shipped default on a dev box).
+        # `sudo_scoped` instead models the COMMON least-privilege sudoers, a rule scoped to the
+        # command (`NOPASSWD: /usr/bin/systemctl`): it permits the restart and denies anything else,
+        # which is exactly what a `sudo -n true` pre-probe would misread as "no escalation".
+        self.sudo_log = tmp / "sudo.log"
         self.sudo = _exe(
             self.bin / "sudo",
-            "#!/usr/bin/env bash\necho 'sudo: a password is required' >&2\nexit 1\n",
+            "#!/usr/bin/env bash\n"
+            f'printf \"%s\\n\" \"sudo $*\" >> \"{tmp / "sudo.log"}\"\n'
+            + (
+                '[ "${1:-}" = "-n" ] && shift\n'
+                'case "$*" in *systemctl*restart*) exec "$@" ;; esac\n'
+                "echo 'sudo: a password is required' >&2\nexit 1\n"
+                if sudo_scoped
+                else "echo 'sudo: a password is required' >&2\nexit 1\n"
+            ),
         )
         self.meminfo = _meminfo(tmp / "meminfo", mem_mb, omit=omit_memavailable)
         self.pool_tsv = _pool(tmp / "pool.tsv", pool or [])
@@ -252,6 +265,7 @@ class Env:
         self.svc_mark = svc_mark
         self.provisioner_absent = provisioner_absent
         self.sudo_fails = sudo_fails
+        self.sudo_scoped = sudo_scoped
         self.state_dir = tmp / "state"
         self.alive_file = tmp / "alive.txt"
         self.busy_file = tmp / "busy.txt"
@@ -1123,6 +1137,35 @@ def test_a_launchd_host_without_svc_sh_is_unknown_never_offline(env):
     assert e.restarted() == []
 
 
+def test_a_command_scoped_sudoers_still_repairs(env):
+    """⛔ THE FIX FOR THE REFUSED-ESCALATION CASE MUST NOT DELETE A WORKING REPAIR.
+
+    The first version of the fix asked `sudo -n true` whether escalation worked at all and refused
+    the restart on any non-zero rc. But sudoers is commonly COMMAND-SCOPED — `NOPASSWD:
+    /usr/bin/systemctl`, or just the restart line — which DENIES `true` while allowing exactly the
+    restart this code needs. That box was then classified `unsupported` on every pass: a repair the
+    code had always performed correctly was silently deleted, and (because `unsupported` sets
+    `stop_pass`) every scheduled fire exited 2 forever. Classify on sudo's OWN refusal signature
+    instead, so an allowed restart succeeds and only an actual refusal reads `unsupported`.
+
+    Mutation: reinstate a `_sudo_prefix()` + `sudo -n true` pre-probe -> state is `unsupported`, no
+    restart is attempted, nothing comes back online -> RED.
+    """
+    e = env(
+        pool=[("r1", "offline", False, "self-hosted-x64")],
+        installs=[("gh-runner-x64-1", "r1")],
+        service="systemd",
+        sudo_fails=True,
+        sudo_scoped=True,
+    )
+    rec = e.record()
+    assert rec["_rc"] == 0, rec
+    restarts = e.restarted()
+    assert len(restarts) == 1 and "restart" in restarts[0] and "r1" in restarts[0], restarts
+    assert any("came back online" in a for a in rec["actions"]), rec["actions"]
+    assert e.config() == "", f"a working restart must never re-register: {e.config()}"
+
+
 def test_systemd_escalation_that_cannot_run_is_unknown_never_a_replace(env):
     """⛔ REFUSED ESCALATION IS rc 1, NOT 127 — so the systemd leg fell through to `--replace`.
 
@@ -1149,10 +1192,14 @@ def test_systemd_escalation_that_cannot_run_is_unknown_never_a_replace(env):
     assert rec["verdict"] == "unmeasurable", rec
     assert rec["unverified_cause"] == "no-restart-primitive", rec
     assert e.config() == "", f"nothing may be re-registered on an unknown state: {e.config()}"
-    # ⛔ And the restart must not be ATTEMPTED either: a `systemctl restart` that ran after a
-    # failed escalation would be a second false claim about a command that never executed.
+    # The escalation IS attempted (that is how sudo gets to say no), so asserting "no restart was
+    # attempted" would be decorative — the refusing `sudo` stub never execs `systemctl`, leaving
+    # `restarted()` empty in BOTH directions (measured; the earlier version of this assertion could
+    # not fail). Assert the layer that is actually reached instead: `sudo` was invoked, `systemctl`
+    # was NOT, and the refusal was attributed to escalation rather than to the runner.
+    assert "restart" in e.sudo_log.read_text(encoding="utf-8"), e.sudo_log.read_text()
     assert e.restarted() == [], e.restarted()
-    assert any("cannot restart r1" in a for a in rec["actions"]), rec["actions"]
+    assert "password is required" in " ".join(rec["actions"]), rec["actions"]
 
 
 def test_launchd_never_escalates_so_a_passwordless_sudo_gap_cannot_force_a_replace(env):

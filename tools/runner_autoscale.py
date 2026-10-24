@@ -552,6 +552,13 @@ def _run(cmd: list[str], timeout: int = 300) -> tuple[int, str]:
     return proc.returncode, ((proc.stdout or "") + (proc.stderr or "")).strip()
 
 
+_SUDO_REFUSED = re.compile(
+    r"sudo:.*(?:password is required|no askpass program specified|not in the sudoers|"
+    r"a terminal is required|no tty present|command not allowed)",
+    re.IGNORECASE,
+)
+
+
 def _sudo_prefix() -> list[str]:
     return [] if os.environ.get("RUNNER_AUTOSCALE_NO_SUDO") == "1" else ["sudo", "-n"]
 
@@ -600,31 +607,22 @@ def restart_runner(runner: LocalRunner) -> tuple[str, str]:
     """
     manager = service_manager()
     if manager == "systemd":
-        # ⛔ REFUSED ESCALATION IS rc 1, NOT 127 — so the `rc == 127` guard below never catches the
-        # case this repo already measured. The shipped unit runs as `User=$(id -un)` and does NOT
-        # set RUNNER_AUTOSCALE_NO_SUDO, so `sudo -n` is the default; on a box without passwordless
-        # sudo it exits 1 having run nothing ("sudo: a password is required" — measured on the dev
-        # box, and recorded in the launchd branch below). Read as `failed`, the caller skips
-        # `wait_online` and goes straight to `register(..., replace=True)`: it re-registers on the
-        # strength of an attempt that never happened, invalidating the credentials of a runner that
-        # may be reconnecting — the destructive half of F1, still present on systemd after it was
-        # fixed for launchd. Probe the escalation itself so "could not attempt" reads `unsupported`.
-        prefix = _sudo_prefix()
-        if prefix:
-            probe_rc, probe_out = _run([*prefix, "true"], timeout=30)
-            if probe_rc != 0:
-                return (
-                    "unsupported",
-                    f"cannot restart {runner.name}: '{' '.join(prefix)}' is unavailable "
-                    f"(rc={probe_rc} {probe_out[:120]}) — NOTHING was attempted, so it is not "
-                    "offline and nothing is re-registered",
-                )
         rc, out = _run(_systemctl(["restart", runner.unit]), timeout=180)
         # ⛔ COULD NOT BE INVOKED IS NOT "STILL OFFLINE". 127 is `_run`'s own code for "the command
-        # did not run" (missing binary, refused escalation), which tells us NOTHING about the
-        # runner. Read as `failed`, it sends the caller to `--replace` on the strength of an
-        # attempt that never happened.
-        status = "ok" if rc == 0 else ("unsupported" if rc == 127 else "failed")
+        # did not run" (missing binary), and a REFUSED ESCALATION is a different event with a
+        # DIFFERENT rc: `sudo -n` exits 1 having run nothing ("sudo: a password is required" —
+        # measured on the dev box, and recorded in the launchd branch below). The shipped unit runs
+        # as `User=$(id -un)` and does NOT set RUNNER_AUTOSCALE_NO_SUDO, so that is the default; read
+        # as `failed` the caller skips `wait_online` and re-registers with `--replace`, invalidating
+        # the credentials of a runner that may be reconnecting.
+        #
+        # ⛔ CLASSIFIED ON SUDO'S OWN OUTPUT — never with a `sudo -n true` pre-probe. A sudoers rule
+        # is commonly COMMAND-SCOPED (`NOPASSWD: /usr/bin/systemctl`, or the restart line alone):
+        # that denies `true` while allowing exactly the restart we need, so a pre-probe refuses
+        # forever a repair the code performed correctly, on every fire, and deletes a working
+        # capability to guard against a case the output already names unambiguously.
+        sudo_refused = rc != 0 and _SUDO_REFUSED.search(out) is not None
+        status = "ok" if rc == 0 else ("unsupported" if (rc == 127 or sudo_refused) else "failed")
         return status, f"systemctl restart {runner.unit} rc={rc} {out[:200]}"
     if manager == "launchd":
         svc = runner.directory / "svc.sh"
