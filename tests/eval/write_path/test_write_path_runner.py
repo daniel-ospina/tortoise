@@ -1061,7 +1061,7 @@ def test_recall_leg_success_is_not_counted_as_a_refusal():
         "session_id": "wp07_bluepeak_followup",
         "extraction_warnings": [
             "point-supersede recall band (#8503): ref 'We ship the lease fix' "
-            "is a contiguous token span of 'pt_wp06_decision' — resolved "
+            "is the same claim as 'pt_wp06_decision' once frame words at its edges are disregarded — resolved "
             "to that prior instead of failing open",
             "point supersedes='We ship the lease fix' matches no S3 prior — "
             "skipped (fail-open)",
@@ -1110,13 +1110,13 @@ def test_recall_leg_success_warning_is_not_a_refusal():
              "points": [{"content": "roll out per-service flags for the next "
                                     "rollout instead of one global kill flag",
                           "pointKind": "statement",
-                          "supersedes": "We ship the lease fix behind a single "
-                                        "global kill flag"}],
+                          "supersedes": "lease fix ships behind the canary "
+                                        "flag at"}],
              "operators": []}
     search = {"entities": [], "events": [],
               "points": [{"id": "pt_wp06", "kind": "statement",
-                          "content": "Ship the lease fix behind a single global "
-                                     "kill flag rather than per-shard canary"}]}
+                          "content": "The lease fix ships behind the canary "
+                                     "flag"}]}
     r = v2.execute_embed(embed, search, session_id="s1")
     assert any(s["superseded"] == "pt_wp06" for s in r["supersessions"])
     success = [w for w in r["warnings"] if "recall band" in w]
@@ -1124,6 +1124,33 @@ def test_recall_leg_success_warning_is_not_a_refusal():
     drops = runner.operator_drop_warnings(
         [{"session_id": "s1", "extraction_warnings": success}])
     assert drops["total"] == 0, drops
+
+
+def test_non_dict_operator_drop_is_a_marker():
+    """#8503 round 4: a malformed operator entry IS a drop and is classified.
+
+    It never reaches the operator pass, so the pass's own drop line cannot
+    cover it; without this marker the receipt reports `operator_drops == 0` on
+    a run where an operator was skipped.
+    """
+    drops = runner.operator_drop_warnings([{
+        "session_id": "wp01_quarry_debug",
+        "extraction_warnings": [
+            'non-dict operator entry "IMPL: a -> b" skipped'],
+    }])
+    assert drops["operator_drops"] == 1, drops
+    assert drops["supersede_refusals"] == 0
+
+
+def test_receipt_omits_drop_warnings_when_the_audit_carries_none():
+    """A receipt must not assert "0 drops" for a run that measured none."""
+    report = _completed_report()
+    report["operator_audit"] = {
+        "planted": 15, "edge_correct": 2, "content_ok": 7,
+        "operators_total": 27, "operators_provenanced": 27, "results": {},
+    }
+    receipt = runner.build_receipt(report)
+    assert "drop_warnings" not in receipt["operator_audit"]
 
 
 def test_receipt_carries_extraction_warnings_and_drop_attribution():

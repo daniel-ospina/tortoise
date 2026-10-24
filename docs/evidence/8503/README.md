@@ -195,48 +195,51 @@ wire IMPL between a root cause and the theory it refuted". This row flipped to
 
 **(b) the replace channel — a drifted copy of the prior.** The `SUPERSEDE` row is the one the
 issue names as `#3679`'s supersedes/`S3 RESOLVE` path. **`w2b-operator-2026-10-24-8503-preleg.json`
-(committed, EVIDENCE VALID) shows the mechanism** — a run of this lane before the recall leg
-existed: `point supersedes='We ship the lease fix all-at-once behind a single global kil'
+(committed, EVIDENCE VALID) shows the mechanism** — a run of this lane before any recall leg:
+`point supersedes='We ship the lease fix all-at-once behind a single global kil'
 matches no S3 prior — skipped (fail-open)`. The model **did** express the cross-session
-reversal through the licensed channel; the ref differed from the wp06 prior by a lead-in
-word ("We ship…" for "Ship…") and `_resolve_point_supersede` required *exact* normalized
-equality, so the CORRECTS edge — the only carrier of a cross-session decision reversal —
-was dropped on a quoting slip. (The two later receipts do NOT carry that string: in those
-runs the model used the entity channel instead, which is why the row is still red in §2 and
-the fix is proven by §4's deterministic replay.)
+reversal through the licensed channel; the ref differed from the wp06 prior by a leading word
+AND a dropped tail ("…rather than a week of per-shard canary"), and
+`_resolve_point_supersede` required exact normalized equality, so the CORRECTS edge — the only
+carrier of a cross-session decision reversal — was dropped. (The two later receipts do NOT
+carry that string: in those runs the model used the entity channel instead.)
 
-**Fixed:** the resolver gains a recall leg under the **same never-guess discipline**. The
-shape of that leg is the part review changed, and the first cut is worth recording: it
-scored the ref's token COVERAGE inside the prior, dividing by the ref alone, so **one
-differing content token was free** (6/7 = 0.857). Measured against that cut: "report the
-latency regression to the payments team" folded onto "…to the search team", a 30-second
-timeout onto a 60-second one, and a cause/effect pair onto its inversion — every one of them
-a pair `distinguishing_difference` refuses to even FOLD. A false CORRECTS terminalizes a
-live belief and there is no un-supersede API, so the leg is now **contiguous containment**:
+**What was tried, and what ships — the honest version.** Four review rounds each found a hole
+in a *tolerant* matcher, and the fourth settled the design:
 
-* the ref's CORE — the ref with its frame-only leading and trailing runs trimmed — must be a
-  **contiguous span** of the prior's tokens, with **frame words kept inside the span**. Frame
-  words are kept because a frame word's *role* is load-bearing: "by 30 seconds" is not "to 30
-  seconds", and "and" is not "or". Contiguous rather than merely ordered, because an ordered
-  match can be recombined from two different clauses of one prior. A different number, entity,
-  scope word, preposition, connective, or a role inversion breaks the span; an ADDITION at
-  either END (the measured drift prefixes "We") does not;
-* the two must carry the **same negation markers** (set equality, not presence — every
-  negator is a frame word, so containment alone would fold "the cache is shared" onto
-  "the cache is not shared", and two claims can each carry a negator and mean opposites);
-* a **unique** match is required (0 or 2+ candidates fail open with a named warning), and a
-  ref under 5 content tokens is refused so a generic short ref cannot match half the graph.
+| attempt | drift it tolerated | what it folded |
+|---|---|---|
+| exact equality (pre-fix) | nothing | the measured ref — the row's whole loss |
+| token-COVERAGE ratio | one differing content token | a substituted entity, a changed number, a flipped role order, a changed scope word (R1) |
+| ordered / contiguous span over frame-STRIPPED tokens | any content-token addition | an exchanged connective, a substituted subject, a deleted qualifier (R2); a substituted preposition once frame words were kept in the span (R3) |
+| span over FULL tokens, additive tail allowed | an added **tail** | any trailing QUALIFIER the ref dropped — "…kill flag" over "…kill flag after the staging canary passes" (R4) |
+| **shipped: frame-EDGE-trimmed token equality** | **frame words at the two ends only** | nothing reachable that changes what the claim asserts |
 
-The prompt also states that an **entity-level** supersede writes no reversal edge (the
-Layer-1 payload has no such channel) — the model had been expressing the reversal that way.
-`test_supersede_band_refuses_every_substitution` pins the safety direction with the exact
-pairs each review round folded, and the mutation arm proves each predicate is pinned by
-REVERTING it (`§4`) — a predicate with no discriminating case is a predicate nobody can
-regress-test.
+The reason the last one ships is not exhaustion, it is the failure mode: a false CORRECTS marks
+a live belief `outdated` (`commit_ops.apply_supersessions` → `supersede()`), and there is no
+un-supersede API. A tail-tolerant matcher cannot be made safe with a closed-class vocabulary,
+because **trailing truncation is exactly what this model does** — the measured ref is one — so
+every qualifier spelling it has not been taught is a silent corruption. The leg therefore
+tolerates only an edge made of frame words (articles, pronouns, prepositions at the very ends),
+which cannot change a claim's content, and it refuses everything else:
 
-⚠️ **This row still reads `edge_missing` in both after-runs**, because in those runs the
-model used the *entity* channel only and emitted no point-level `supersedes` at all. The
-fix is proven deterministically instead (§4, and the unit test), not by a lucky sample.
+* core-token **equality**, after trimming frame-only runs from each end of both sequences — a
+  different number, entity, scope word, role order, connective or preposition refuses;
+* the **same negation markers** (set equality, not presence) and the **same condition markers**
+  (whole tokens, so a hyphenated compound cannot mint one);
+* no **substituted subject** (pronouns on both sides must agree — a one-sided pronoun is the
+  measured drift's shape and is allowed);
+* a **unique** match (0 or 2+ candidates fail open with a named warning) and a **5-content-token
+  floor**.
+
+⛔ **CONSEQUENCE, stated rather than buried: this does NOT repair the `SUPERSEDE` row.** The
+measured ref is a content-tail truncation, so the leg refuses it — and it keeps refusing it by
+test, not by luck (`test_supersede_leg_tolerates_frame_edges_only`, and the mutation arm's
+"the MEASURED content-tail truncation does NOT resolve"). The row stays `edge_missing` in §2.
+Repairing it needs a **semantic** resolver — the Jev-shaped seam
+`EXTRACTOR-V4-ARCHITECTURE.md` names as unbuilt ("it is work, not a config flag") — or a prompt
+that gets the ref copied exactly. It is not something a string predicate should be trusted
+with, which is the conclusion four review rounds paid for.
 
 **(c) MITIGATES pair choice — a sibling point chosen as the dampener's src.**
 `wp01_quarry_debug_op_02` and `wp04_aurora_perf_op_03` have both endpoints present and a
@@ -278,10 +281,11 @@ rewritten in review:
   [DETECTED] shared rule: every warrant point is a src
 
 2. SUPERSEDE recall leg (the drop the receipt measured)
-  [DETECTED] leg ON: the drifted ref forms the CORRECTS
+  [DETECTED] leg ON: the frame-edge ref forms the CORRECTS
              supersessions=[{'superseded': 'pt_wp06_decision', 'supersedes_by': 'pt_99f3c02b3f229c942349180425af69e8910a95ee939fc668bbaba7172d4607', 'evidence': 'point-level supersede ref (claim/decision reversal; cross-session correction)'}]
+  [DETECTED] the MEASURED content-tail truncation does NOT resolve (the residual is pinned, not left open)
   [DETECTED] leg OFF: the same ref is DROPPED again (the mutation is real)
-             and the drop is named: point supersedes='We ship the lease fix all-at-once behind a single global kil' matches no S3 prior — skipped (fail-open)
+             and the drop is named: point supersedes='lease fix ships behind the canary flag at' matches no S3 prior — skipped (fail-open)
   [DETECTED] a leg that folds EVERY prior is caught by the same pin
   [DETECTED] restoring the COVERAGE RATIO is caught by the negative pin (the predicate is pinned, not just described)
   [DETECTED] reverting to the ORDERED-SUBSEQUENCE predicate is caught by the negative pin (the span tightening is pinned, not just described)
@@ -333,7 +337,7 @@ coverage-ratio shape is re-injected as a fourth arm in section 2.
 
 Six findings were raised against the first cut and all six were fixed before merge. Two were
 **data-integrity** defects in the new supersede leg, and they are the reason the leg is
-contiguous containment rather than a similarity score (§3.2b): the coverage ratio folded a
+frame-EDGE-trimmed equality rather than a similarity score (§3.2b): the coverage ratio folded a
 substituted entity, a changed number, a flipped role order and a changed scope word, and the
 polarity test was presence-of-any-negator rather than set equality. Two more were defects in
 this PR's own instrumentation: the refusal markers keyed on a prefix the recall leg's success
@@ -388,6 +392,21 @@ FULL token sequence rather than over content tokens:
 The pattern across the three rounds is worth stating: every hole was a **frame word** the
 predicate could not see, and each fix moved the leg closer to "the prior must literally
 contain this text". That is what a false CORRECTS costs.
+
+**Round 4** finished the argument and narrowed the leg to what a string predicate can be
+trusted with. Two reachable corruptions remained in the span design: a pronoun ref against a
+prior that names its subject with a NOUN ("They can raise the timeout…" superseding "The
+payments team can raise the timeout…"), and — the systemic one — any TRAILING qualifier the
+ref dropped, because the span allowed an additive tail by construction and the condition
+vocabulary cannot enumerate qualifier spellings ("…kill flag after the staging canary
+passes", "…to 30 seconds for the payments queue"). Tail truncation is precisely the drift this
+model produces, so the tail tolerance had to go. The leg is now frame-EDGE-trimmed token
+EQUALITY: the only drift it accepts is an edge made of frame words, and the measured wp07
+truncation is refused BY TEST (§3.2b, and the mutation arm pins the refusal). Round 4 also
+found that `_connective_swap` had stopped being load-bearing (the span subsumed it, so it was
+removed from the leg), that the `non-dict operator entry` marker was not pinned (it is now),
+and that `build_receipt` defaulted a missing `drop_warnings` to zeros — a receipt asserting
+"0 drops" for a run that measured none (it now omits the block).
 
 ## 6. Reproduction
 

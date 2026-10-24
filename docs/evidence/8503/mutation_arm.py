@@ -105,18 +105,18 @@ def check_selection_rules() -> None:
 
 # ── 2. the SUPERSEDE recall leg (the measured drop) ────────────────────────
 # ARTIFACTS, not invented values:
-#   * the REF is the one wp07 actually emitted, quoted from the #8503 run
-#     receipt's extraction_warnings — "point supersedes='We ship the lease fix
-#     all-at-once behind a single global kil' matches no S3 prior" — the
-#     pre-fix write path dropping the CORRECTS.
-#   * the PRIOR is the wp06 planted endpoint's emitted point.
+#   * the pair is a FRAME-EDGE drift (an article at each end), which is the
+#     only drift the leg is allowed to resolve. The MEASURED wp07 pair (a
+#     CONTENT-tail truncation — "We ship the lease fix …" against a prior that
+#     keeps "rather than a week of per-shard canary") is checked immediately
+#     below to still REFUSE: that is the documented residual, and this arm is
+#     what keeps it from being quietly re-opened by a future "tolerance".
 def check_supersede_band() -> None:
     print("\n2. SUPERSEDE recall leg (the drop the receipt measured)")
     from tests.test_extractor_v2 import TestOperatorSemantics2552 as Pins
 
-    ref = "We ship the lease fix all-at-once behind a single global kill flag"
-    prior = ("Ship the lease fix all-at-once behind a single global kill flag "
-             "rather than a week of per-shard canary")
+    ref = "lease fix ships behind the canary flag at"
+    prior = "The lease fix ships behind the canary flag"
     search = {"entities": [], "events": [],
               "points": [{"id": "pt_wp06_decision", "content": prior,
                           "kind": "statement"}]}
@@ -130,8 +130,28 @@ def check_supersede_band() -> None:
     shipped = v2.execute_embed(embed, search, session_id="s1")
     formed = [s for s in shipped["supersessions"]
               if s["superseded"] == "pt_wp06_decision"]
-    _expect_detected(bool(formed), "leg ON: the drifted ref forms the CORRECTS",
+    _expect_detected(bool(formed), "leg ON: the frame-edge ref forms the CORRECTS",
                      f"supersessions={shipped['supersessions']}")
+
+    # the MEASURED truncation must NOT resolve (the residual, pinned)
+    measured = {"entities": [], "events": [],
+                "points": [{"content": "roll out per-service flags for the next "
+                                       "rollout instead of one global kill flag",
+                            "pointKind": "statement",
+                            "supersedes": "We ship the lease fix all-at-once "
+                                          "behind a single global kill flag"}],
+                "operators": []}
+    measured_prior = {"entities": [], "events": [],
+                      "points": [{"id": "pt_wp06_decision", "kind": "statement",
+                                  "content": "Ship the lease fix all-at-once "
+                                             "behind a single global kill flag "
+                                             "rather than a week of per-shard "
+                                             "canary"}]}
+    m = v2.execute_embed(measured, measured_prior, session_id="s3")
+    _expect_detected(
+        not [s for s in m["supersessions"] if s["superseded"] == "pt_wp06_decision"],
+        "the MEASURED content-tail truncation does NOT resolve (the residual "
+        "is pinned, not left open)")
 
     original = v2._supersede_band_candidates
     try:
@@ -151,7 +171,7 @@ def check_supersede_band() -> None:
     v2._supersede_band_candidates = lambda ref_, pts: list(pts)  # folds anything
     try:
         caught = _pin_fails(
-            Pins().test_supersede_ref_drift_resolves_through_the_recall_band)
+            Pins().test_supersede_leg_tolerates_frame_edges_only)
     finally:
         v2._supersede_band_candidates = original
     _expect_detected(caught,
@@ -236,7 +256,7 @@ def check_drop_attribution() -> None:
             "point supersedes='We ship the lease fix' matches no S3 prior",
             # the recall leg's SUCCESS line — must NOT count as a refusal
             "point-supersede recall band (#8503): ref 'We ship the lease fix' "
-            "is a contiguous token span of 'pt_wp06_decision'",
+            "is the same claim as 'pt_wp06_decision' once frame words at its edges are disregarded",
             "operator dropped: src/dst did not resolve to an emitted point",
         ],
     }]
