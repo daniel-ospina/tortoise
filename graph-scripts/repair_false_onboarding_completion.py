@@ -146,7 +146,7 @@ def _has_scoped_graphs(org_id: str, listed: set[str],
 
     Detection is by the org id as a SUBSTRING of the raw graph list (covers
     both tenant prefixes and the usual scoped shape), cross-checked against
-    the registry's own `graph_list(org_id)` when that is readable. The
+    the registry's own `list_memory_graphs(org_id)` when that is readable. The
     registry rows carry the DB graph name in **`namespace`**, NOT in `name`
     (the default graph's `name` is the display string ``"default"``) —
     keying on `name` made every normally-provisioned org look scoped. NOTE: a
@@ -162,7 +162,7 @@ def _has_scoped_graphs(org_id: str, listed: set[str],
     try:
         from tortoise.sdk import TortoiseSDK
         handle = TortoiseSDK(namespace="registry")
-        names = {r.get("namespace") for r in handle.graph_list(org_id)}
+        names = {r.get("namespace") for r in handle.list_memory_graphs(org_id)}
     except Exception:  # noqa: BLE001, RUF100
         return True  # cannot confirm → fail-closed, never repair
     finally:

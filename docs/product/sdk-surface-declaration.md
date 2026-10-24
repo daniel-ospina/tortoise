@@ -4,7 +4,7 @@
 hand — edit the generator, or the declaration it derives from. `--check` reds if this file
 is stale.
 
-**150 public methods**, declared in `config/sdk-surface.json`.
+**149 public methods**, declared in `config/sdk-surface.json`.
 
 ## What is declared, and where it comes from
 
@@ -42,8 +42,8 @@ declaration against three views derived by genuinely different means, in both di
 | **REFLECTION** | `dir(TortoiseSDK)` + `callable` | what is **reachable**, incl. attributes attached outside the class body |
 | **FROZEN** | `config/surface-manifest.yml` `sdk:` rows | the frozen snapshot the declaration is reconciled against — a drift control, **not** the approved target (#3863/#4185) |
 
-At the render that produced this file: AST **150** · reflection **150**
-· frozen **150** — all agree.
+At the render that produced this file: AST **149** · reflection **149**
+· frozen **149** — all agree.
 
 AST and reflection are *not* the same question, and nothing reconciled them before this file.
 `tortoise/sdk.py` already attaches one attribute outside the class body
@@ -87,6 +87,6 @@ until the replacement it points a caller at exists.
 - `docs/product/mcp-sdk-surface.md` — the curated list the owner reads, and the frozen
   baseline's human form (#3863).
 - `docs/product/bridge-table.md` — Phase 0.1: every tool and its single SDK destination.
-- `docs/product/canonical-sdk-methods.md` — all 150 methods in groups (#1521).
+- `docs/product/canonical-sdk-methods.md` — all 149 methods in groups (#1521).
 - `docs/product/beta-sdk-surface.md` — the **target** set. A target is not a description of
   today; this declaration describes **today**.

@@ -1256,14 +1256,29 @@ def cmux_session_records() -> tuple[list[dict[str, Any]], str, str]:
         (LIVE_STORE_CMUX_PLURAL, ["cmux", "sessions", "list", "--json", "--all"]),
         (LIVE_STORE_CMUX_SINGULAR, ["cmux", "session", "list", "--json"]),
     ):
-        out = _run(cmd, timeout=60)
-        if not out.strip():
-            errors.append(f"`{' '.join(cmd)}` produced nothing")
+        raw, rc, err = _capture(cmd)
+        # ⛔ THE GRAMMAR'S OWN ANSWER IS THE CAUSE, AND IT IS OFTEN ON STDERR.
+        # The guest CLI writes its refusal as JSON on STDERR and exits non-zero
+        # (`cmux sessions list --json --all` → rc 2, stderr
+        # `{"code":"usage.invalid","message":"--all needs a value"}`), so a
+        # reader that takes STDOUT and only when rc == 0 sees an EMPTY STRING here
+        # and reports "produced nothing" about a command that named its own
+        # problem — which is how a whole cell reported an undiagnosable refusal
+        # while the cause sat in a payload the reader had already discarded.
+        # `_run` is deliberately left as it is (`gh_json` depends on its
+        # succeed-or-empty polarity); this store needs the failure's OWN words.
+        payload = raw if raw.strip() else err
+        if not payload.strip():
+            errors.append(f"`{' '.join(cmd)}` exited {rc} with no output")
             continue
         try:
-            data = json.loads(out)
+            data = json.loads(payload)
         except Exception:
-            errors.append(f"`{' '.join(cmd)}` returned no parsable JSON")
+            first = payload.strip().splitlines()[0][:200]
+            errors.append(
+                f"`{' '.join(cmd)}` exited {rc} and returned no parsable JSON: "
+                f"{first}"
+            )
             continue
         recs = data.get("sessions") if isinstance(data, dict) else None
         if not isinstance(recs, list):
@@ -1271,7 +1286,23 @@ def cmux_session_records() -> tuple[list[dict[str, Any]], str, str]:
                 detail = f"{data.get('code') or '?'}: {data.get('message') or ''}".strip()
             else:
                 detail = type(data).__name__
-            errors.append(f"`{' '.join(cmd)}` answered {detail!r}, not a session store")
+            errors.append(
+                f"`{' '.join(cmd)}` exited {rc} and answered {detail!r}, "
+                "not a session store"
+            )
+            continue
+        if rc != 0:
+            # ⛔ A STORE FROM A FAILED COMMAND IS NOT A READING, and this is the ONE
+            # polarity the capture change must not move: a non-zero exit can mean a
+            # PARTIAL list, and a lane missing from it is the fail-open direction
+            # (the gate answering "nobody holds it" about a lane the store omitted).
+            # The payload is still what NAMES the refusal above — a refusal read
+            # from the failure's own words is the whole point of `_capture` — but
+            # it is never ACCEPTED as the answer (review of #2401).
+            errors.append(
+                f"`{' '.join(cmd)}` exited {rc} and returned a session store — "
+                "refusing to read a store from a failed command"
+            )
             continue
         return [r for r in recs if isinstance(r, dict)], source, ""
     return [], "", "; ".join(errors)
@@ -1398,6 +1429,41 @@ def _usable_cwd(value: str) -> str:
     return value
 
 
+class CwdMap(dict):
+    """{pid: cwd} carrying the pids whose cwd was READ but is not a usable path.
+
+    ``refused`` maps pid -> the RAW string the reader returned, because the two
+    things ``process_cwds`` can report are NOT the same fact and every caller has
+    to tell them apart:
+
+      * **nothing was read** — an exited pid, a ``/proc`` entry this user cannot
+        open, a reader that could not run. There is no datum.
+      * **a datum was read and is not a path** — ``/wt/x (deleted)`` (the
+        kernel's removed-directory marker) or lsof's
+        ``/proc/8/cwd (readlink: Permission denied)`` placeholder.
+
+    ⛔ DROPPING THE RAW STRING IS HOW ONE CELL'S WHOLE QUEUE WENT TO ZERO
+    (measured 2026-10-24, cell-4). Two live lanes had their worktrees REAPED
+    under them, so ``/proc/<pid>/cwd`` answered ``/tmp/cell-wt-… (deleted)``. The
+    reader rejected the string (correct: it attributes to nothing) and then
+    reported the refusal as "no cwd could be read" — which is FALSE, and it threw
+    away the one datum that identifies the orphan and its dead worktree. The
+    board refused every candidate and the funnel printed
+    ``0 usable verdict`` for 12+ hours while an operator had no way to learn that
+    two pids needed reaping. The VERDICT does not move: an unattributable live
+    pid still leaves the store UNMEASURED (fail-closed, #8999). Only the cause now
+    carries what was read, and WHICH pid read it.
+    """
+
+    refused: dict[int, str]
+
+    def __init__(
+        self, *args: Any, refused: dict[int, str] | None = None, **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.refused = dict(refused or {})
+
+
 def process_cwds(pids: Sequence[int]) -> tuple[dict[int, str], str]:
     """``({pid: cwd}, error)`` — ONE read for every pid, not one per pid.
 
@@ -1416,26 +1482,35 @@ def process_cwds(pids: Sequence[int]) -> tuple[dict[int, str], str]:
     attributed to no worktree, so the pid would contribute no lane while the store
     still read MEASURED. It is reported as unresolved instead, and the per-pid
     ``pid_alive`` judgement above decides.
+
+    The returned mapping is a :class:`CwdMap`, so the REJECTED raw strings travel
+    with the answer instead of being discarded here (see ``CwdMap``: a rejected
+    cwd is a datum, not an absence).
     """
     if not pids:
-        return {}, ""
+        return CwdMap(), ""
     if _proc_cwd_is_readable():
         got: dict[int, str] = {}
+        refused: dict[int, str] = {}
         for pid in pids:
             try:
-                cwd = _usable_cwd(os.readlink(f"/proc/{pid}/cwd"))
+                raw = os.readlink(f"/proc/{pid}/cwd")
             except OSError:
                 continue
+            cwd = _usable_cwd(raw)
             if cwd:
                 got[pid] = cwd
-        return got, ""
+            else:
+                refused[pid] = raw
+        return CwdMap(got, refused=refused), ""
     out, err = _run_tolerant(
         ["lsof", "-a", "-d", "cwd", "-Fn", "-p", ",".join(str(p) for p in pids)],
         timeout=60,
     )
     if err:
-        return {}, err
-    got = {}
+        return CwdMap(), err
+    got: dict[int, str] = {}
+    refused: dict[int, str] = {}
     cur: int | None = None
     for line in out.splitlines():
         if line.startswith("p"):
@@ -1444,10 +1519,36 @@ def process_cwds(pids: Sequence[int]) -> tuple[dict[int, str], str]:
             except ValueError:
                 cur = None
         elif line.startswith("n") and cur is not None:
-            cwd = _usable_cwd(line[1:])
+            raw = line[1:]
+            cwd = _usable_cwd(raw)
             if cwd:
                 got[cur] = cwd
-    return got, ""
+            else:
+                refused[cur] = raw
+    return CwdMap(got, refused=refused), ""
+
+
+def _capture(cmd: Sequence[str], timeout: int = 60) -> tuple[str, int, str]:
+    """``(stdout, returncode, stderr)`` — NOTHING is discarded on a failure.
+
+    ⛔ ``_run`` DEGRADES A NON-ZERO EXIT TO THE EMPTY STRING (correct for
+    ``gh_json`` and for the cmux workspace list, which must not read a chatty
+    failure as an answer). A caller that has to CLASSIFY the failure cannot use
+    it: the payload it classifies is exactly the one a failing command prints.
+    ``cmux_session_records`` is such a caller — it shape-checks the payload to tell
+    a session store from a refusal — and routing it through ``_run`` made that arm
+    UNREACHABLE while its own docstring said it fired (measured 2026-10-24: the
+    reader reported "produced nothing" for a grammar that answered
+    ``usage.invalid: --all needs a value``). So the failure is captured whole here
+    and the polarity decision stays with the caller.
+    """
+    try:
+        p = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout, check=False
+        )
+    except Exception as exc:
+        return "", 127, f"`{cmd[0]}` could not be run: {type(exc).__name__}: {exc}"
+    return p.stdout or "", p.returncode, p.stderr or ""
 
 
 def _run_tolerant(cmd: Sequence[str], timeout: int = 60) -> tuple[str, str]:
@@ -1629,11 +1730,30 @@ def live_sessions() -> LiveSessions:
             unresolved = [r["pid"] for r in candidates if r["pid"] not in cwds]
             still_alive = [p for p in unresolved if pid_alive(p)]
             if still_alive:
+                # ⛔ NAME THE DATUM, NOT ONLY THE PID. "no cwd could be read" is
+                # FALSE whenever the reader got a string and rejected it, and that
+                # wording is what made two reaped-worktree lanes an
+                # undiagnosable, cell-wide dispatch stop (see `CwdMap`). The raw
+                # string is what tells an operator (or a reaper) that the
+                # worktree was deleted and the pid needs reaping; a pid alone
+                # does not. The VERDICT is untouched: a live pid with no
+                # attributable cwd still leaves the store UNMEASURED.
+                refused = getattr(cwds, "refused", {}) or {}
+                named = []
+                for p in still_alive[:5]:
+                    raw = refused.get(p)
+                    named.append(
+                        f"{p} (cwd read as {raw!r}, which attributes to no "
+                        "worktree — a removed directory or a reader "
+                        "placeholder)" if raw else f"{p} (no cwd could be read)"
+                    )
                 proc_error = (
-                    "no cwd could be read for live pi pid(s) "
-                    + ", ".join(str(p) for p in still_alive[:5])
-                    + " — a process with no cwd cannot be attributed, so 'nobody "
-                    "holds it' is unprovable for the lanes they may be"
+                    "a live pi pid has no ATTRIBUTABLE cwd: "
+                    + ", ".join(named)
+                    + " — with no worktree to attribute, 'nobody holds it' is "
+                    "unprovable for the lanes they may be. If the path is a "
+                    "reaped worktree, the orphan process is the thing to fix, "
+                    "not the gate"
                 )
         for cwd, pids in by_cwd.items():
             pids.sort()
@@ -1660,7 +1780,23 @@ def live_sessions() -> LiveSessions:
     # of them answered (see the ⛔ above). `source` still names what did answer.
     result.measured = bool(sources) and not proc_error
     result.source = "+".join(sources)
-    result.error = "; ".join(x for x in (cmux_error, proc_error) if x)
+    # ⛔ THE ARM THAT DECIDED THE REFUSAL LEADS. Only `proc_error` poisons
+    # `measured` — an unreadable cmux store is covered by the process table, which
+    # sees every live lane this user runs — so listing the cmux failure first put a
+    # cause that changed nothing at the front of the sentence, and every downstream
+    # reader that BOUNDS the cause (the harness records the first cause cut to 320
+    # chars and the dispatch line cut to 400) truncated away the one arm that did.
+    # Measured 2026-10-24: `[dispatch] BLOCKED … first cause: … (tried: `cmux sessi`
+    # — the datum was cut mid-word, on a box whose refusal was decided by the
+    # process arm several clauses later.
+    result.error = "; ".join(
+        f"{label}: {msg}"
+        for label, msg in (
+            ("live-process table", proc_error),
+            ("cmux session store", cmux_error),
+        )
+        if msg
+    )
     return result
 
 

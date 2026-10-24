@@ -4933,6 +4933,39 @@ _ISO_DATE10_RE = re.compile(r"^(\d{4})[-/](\d{2})[-/](\d{2})")
 #: fabricated date in front of a temporal question.
 _UNDATED_SENTINEL = "1970-01-01T00:00:00Z"
 
+#: "the caller did not pass this field" — the ONE sentinel for a partial
+#: update (#4282 phase 2.3). A plain ``None`` default cannot carry this
+#: meaning: for ``update_memory_graph``'s ``recording``, ``None`` is a
+#: MEANINGFUL value ("clear the override → inherit the org default"), so
+#: conflating it with "unspecified" would clear an override on every call
+#: that only meant to rename the graph.
+class _Unset:
+    """The type of :data:`_UNSET` — so the parameter's contract stays narrow.
+
+    Annotating the parameter ``bool | None | object`` would collapse to ``object``
+    (a union with ``object`` IS ``object``), which silently drops the contract: a
+    caller could pass ``recording="false"`` and the registry would store a STRING
+    that reads back truthy, leaving recording ON.
+
+    ⛔ The ANNOTATION is not the enforcement — ``sdk.py`` is
+    ``from __future__ import annotations``, so at runtime every annotation is a
+    string, and the only static consumer (``mypy tortoise/``) disables
+    ``arg-type``. ``update_memory_graph`` therefore REFUSES a non-``bool``
+    ``recording`` with a ``TypeError`` before any write, so the accepted set really
+    is ``{True, False, None, _UNSET}``. Same rule, same wording as the REST twin
+    (``hosted_api.GraphRecordingPatch._strict_bool``: *"reject anything that is not
+    an actual bool"*), because ``_apply_graph_recording_override`` resolves the
+    stored value with ``bool(override)`` — a stored ``"false"`` reads back ON.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - diagnostics only
+        return "<unset>"
+
+
+_UNSET: _Unset = _Unset()
+
 
 def _iso_date10(value: object) -> str:
     """``value``'s ``YYYY-MM-DD`` calendar date, else ``""`` (unknown).
@@ -10108,6 +10141,15 @@ class TortoiseSDK:
             model, _redact_turn_contents(conversation)[0],
             sdk=self, session_id=session_id, chunk_size=chunk_size,
             session_date=session_date)
+        # ⚠️ A `MERGE` verdict decided HERE has no applier on this path: only
+        # ``_extract_session_v2`` reads ``out["merges"]`` (the ``merges = out.get("merges")``
+        # line below its extraction call) and executes ``apply_merge_union``. This
+        # entry passes no ``vet_arbiter``, and #5006's
+        # verdicts come from one, so any ``MERGE`` it could see today would suppress a
+        # payload point with no union written — no Point, no edges, no warning. If an
+        # arbiter is ever wired here, this call needs its own merge relay (or an
+        # ``allow_merge=False`` switch on ``extract_session_v2``), because the payload
+        # point is already gone by the time the record exists (#9872).
         payload = out.get("payload")
         errors = list(out.get("errors", []) or [])
         if payload is None and not errors:
@@ -12405,6 +12447,56 @@ class TortoiseSDK:
                     f"{skipped_noops} consolidation fold(s) not surfaced "
                     "(non-capture canonical / paraphrase fold / missing "
                     "node — deferred surface)")
+
+        # #5006 (D12/O4): execute the near-duplicate FUSIONs the extractor's S3
+        # decided. Unlike the noop surface above this is NOT a display path —
+        # the merge has already happened at decision time (ONE survivor, no new
+        # payload point); what remains is to write the UNION of both sides'
+        # attachments onto that survivor and the losing document's provenance
+        # (its session) onto the claim. `apply_merge_union` is the one
+        # implementation of that write, invoked from HERE; it never raises — a
+        # failed attachment is a warning, never a lost capture.
+        #
+        # ⚠️ The eval lane does NOT come through this path, and it is not a
+        # missing wire — it injects no `vet_arbiter`
+        # (`tools/longmem_eval/ingest_v2.py:1017`) and consumes only `noops`,
+        # so `merges` is always empty there. Giving eval merge coverage would
+        # need its own `_apply_merges`, in that lane.
+        #
+        # It is data-driven, not flag-driven: with no arbiter and
+        # `TORTOISE_VET` unset there are no `MERGE` verdicts, so `merges` is
+        # empty and this block is a no-op on every default capture.
+        merges = out.get("merges") or []
+        if merges:
+            from tortoise.near_dup_merge import apply_merge_union
+
+            for _m in merges:
+                _m_res = apply_merge_union(proj, _m, session_id=session_id,
+                                           sdk=self,
+                                           subject_names=subject_entity_names)
+                for _w in (_m_res.get("warnings") or []):
+                    warnings.append(f"merge {_m_res.get('point_id')}: {_w}")
+                if _m_res.get("unresolved"):
+                    # An attachment the graph could not resolve is NOT a silent
+                    # drop: it is named, and the merge record still carries the
+                    # entity so a later backfill can link it.
+                    warnings.append(
+                        "merge " + str(_m_res.get("point_id")) +
+                        ": unresolved attachment(s) " +
+                        ", ".join(_m_res["unresolved"][:5]))
+                if _m_res.get("skipped_subject"):
+                    # #5006 review (F2): a subject-kind name must NOT get the
+                    # un-gated `aboutObject` edge — the same skip this method's
+                    # own attachment pass makes above (`_n in
+                    # subject_entity_names`). It is a DROP, not a resolution
+                    # failure, so it is named separately from `unresolved`: a
+                    # merge emits no payload point, so `bind_point_subjects`
+                    # never runs for the candidate and that binding is lost.
+                    warnings.append(
+                        "merge " + str(_m_res.get("point_id")) +
+                        ": subject-kind attachment(s) skipped (the binder owns "
+                        "the gated aboutSubject edge): " +
+                        ", ".join(_m_res["skipped_subject"][:5]))
 
         # ── events ──
         # #2552: payload events are created under their CONTENT-ADDRESSED
@@ -32290,7 +32382,7 @@ class TortoiseSDK:
         SOR is the ``graphs`` table (20260901000001) — but the INSERT path
         into it is C2/C3 (provisioning service, out of C1 scope), so this
         method still returns the deterministic id WITHOUT persisting; the
-        registry-shaped list seam (graph_metadata/graph_list) derives the
+        registry-shaped list seam (graph_metadata/list_memory_graphs) derives the
         default graph from organizations.graph_name and reads custom rows once they
         exist. Selfhost (registry mode) keeps the registry Graph node. The
         zero-registry-writes cutover contract (registry node count == 0)
@@ -32323,8 +32415,11 @@ class TortoiseSDK:
         )
         return {"graph_id": gid, "name": name, "kind": kind, "namespace": ns}
 
-    def graph_list(self, org_id: str) -> list[dict]:
-        """List Graph nodes for an org (default graph first).
+    def list_memory_graphs(self, org_id: str) -> list[dict]:
+        """List this account's memory graphs (default graph first).
+
+        The #4282 phase 2.3 rename of ``graph_list``: the owner-approved name
+        (`docs/product/beta-sdk-surface.md` row 31). Behaviour is unchanged.
 
         #765 (plan Task 8 reader inventory): in Supabase control-plane mode
         the default graph is derived from ``teams.graph_name`` via the seam
@@ -32430,8 +32525,14 @@ class TortoiseSDK:
         )
         return True
 
-    def graph_restore(self, org_id: str, graph_id: str) -> bool:
-        """#2304 trash restore: flip a tombstoned custom node back to active
+    def restore_memory_graph(self, org_id: str, graph_id: str) -> bool:
+        """Undo a recoverable delete; refuse a purged graph.
+
+        The #4282 phase 2.3 rename of ``graph_restore`` (approved target:
+        `docs/product/beta-sdk-surface.md` row 33 — "Undo a recoverable delete.
+        **Refuses on a purged graph**"). Behaviour is unchanged.
+
+        #2304 trash restore: flip a tombstoned custom node back to active
         and clear the deletion stamp. Returns False when nothing matched
         (unknown / active / default / ALREADY PURGED — callers 404/403/410).
         Keys stay dead (revoked at delete; restore never resurrects them) —
@@ -32471,17 +32572,70 @@ class TortoiseSDK:
             for r in rows
         ]
 
-    def graph_set_recording(self, org_id: str, graph_id: str,
-                            value: bool | None) -> bool:
-        """C6 #2115: set the session_recording override on a Graph node.
+    def update_memory_graph(self, org_id: str, graph_id: str, *,
+                            name: str | None = None,
+                            recording: bool | None | _Unset = _UNSET) -> bool:
+        """The ONE partial update a memory graph has — rename it, and/or
+        set/clear its session-recording override.
 
-        ``value`` True/False = explicit override; None = remove the override
-        (FalkorDB SET null removes the prop → inherit org default, #1927
-        default-ON preserved). Resolves the literal ``default`` id to the
-        org's kind='default' node (the default graph IS graph 0 — settable
-        per epic §6.3); real gids match directly. Returns True when the node
-        was found (override written/cleared), False on unknown graph —
-        callers map to 404."""
+        The #4282 phase 2.3 target (`docs/product/beta-sdk-surface.md` row 30):
+        *"The one partial update a memory graph has — rename it, or set/clear
+        its session-recording override. A graph is created with its fields; this
+        is the single place they change."* It merges ``graph_set_name``
+        (#2701) and ``graph_set_recording`` (C6 #2115) into one call, so a
+        field is never settable through a second, per-field verb.
+
+        ``name`` — the graph's DISPLAY name. Display-only: the node's
+        id/kind/namespace (the data-plane storage key) are untouched, so a
+        rename never orphans points/keys (the default graph is renameable
+        too — graph 0's node carries ``name`` as a label distinct from
+        ``namespace``).
+
+        ``recording`` — True/False sets the per-graph session-recording
+        override; ``None`` removes it (FalkorDB SET null removes the prop →
+        inherit the org default, #1927 default-ON preserved). **Omit the
+        parameter entirely to leave the override untouched** — that is why
+        the default is a sentinel rather than ``None``: ``None`` is a
+        meaningful VALUE (clear the override), not "unspecified".
+
+        Resolves the literal ``default`` id to the org's kind='default' node
+        (mode-agnostic callers use either); any other id must match a real
+        node exactly. Soft-deleted nodes (status='deleted') are NOT patchable
+        — treated as unknown, exactly as both setters it replaces did. (The
+        tombstone FILTER lives on the readers: ``hosted_api.list_graphs`` skips
+        ``status='deleted'`` rows, while ``list_memory_graphs`` returns them in
+        the selfhost registry lane — which is why ``graph_count`` was not folded
+        into it. In the Supabase lane that reader filters to active already.)
+
+        Returns True when the node was found (the requested fields written),
+        False on an unknown graph — callers map that to 404. At least one of
+        ``name``/``recording`` must be given; a call that asks for nothing is
+        a programming error, not a no-op (it would otherwise report success
+        having written nothing). ``recording`` must be a REAL ``bool`` or
+        ``None`` — anything else (``"false"``, ``1``, …) raises ``TypeError``
+        rather than being stored, the same strict-bool rule the REST PATCH
+        applies.
+        """
+        if name is None and recording is _UNSET:
+            raise ValueError(
+                "update_memory_graph needs at least one field to change — "
+                "pass name=... and/or recording=... (recording=None CLEARS "
+                "the override; omitting it leaves the field untouched)")
+        # The `_Unset` annotation narrows the TYPE; this is the runtime half, and the
+        # half that matters: `sdk.py` defers annotations (`from __future__ import
+        # annotations`), so the annotation is a STRING to the interpreter and mypy's
+        # `arg-type` is disabled repo-wide — nothing would reject a truthy string.
+        # Refusing it here (before any read or write) is what stops a caller's
+        # `recording="false"` becoming a stored STRING that `bool(override)` in
+        # `hosted_api._apply_graph_recording_override` reads back as recording ON.
+        if (recording is not _UNSET and recording is not None
+                and not isinstance(recording, bool)):
+            raise TypeError(
+                "update_memory_graph's `recording` is a STRICT bool or None — got "
+                f"{type(recording).__name__} ({recording!r}). `None` CLEARS the "
+                "override and omitting the parameter leaves it untouched; a truthy "
+                "string (e.g. \"false\") would be stored verbatim and read back as "
+                "recording ON, so it is refused rather than coerced.")
         reg = self._get_registry()
         rows = reg.query(
             "MATCH (g:Graph {org_id:$tid}) RETURN g.id, g.kind, "
@@ -32490,8 +32644,7 @@ class TortoiseSDK:
         ).result_set
         # The literal ``default`` id maps to the org's kind='default' node
         # (mode-agnostic callers use either); any other id must match a real
-        # node exactly. Soft-deleted nodes (status='deleted') are NOT
-        # patchable — treat as unknown (mirror list_graphs' tombstone skip).
+        # node exactly.
         if graph_id == "default":
             node = next((r[0] for r in rows
                          if r[1] == "default" and r[2] != "deleted"), None)
@@ -32501,10 +32654,16 @@ class TortoiseSDK:
             node = None
         if node is None:
             return False
-        reg.query(
-            "MATCH (g:Graph {id:$gid, org_id:$tid}) SET g.recording = $v",
-            params={"gid": node, "tid": org_id, "v": value},
-        )
+        if name is not None:
+            reg.query(
+                "MATCH (g:Graph {id:$gid, org_id:$tid}) SET g.name = $name",
+                params={"gid": node, "tid": org_id, "name": name},
+            )
+        if recording is not _UNSET:
+            reg.query(
+                "MATCH (g:Graph {id:$gid, org_id:$tid}) SET g.recording = $v",
+                params={"gid": node, "tid": org_id, "v": recording},
+            )
         return True
 
     def graph_key_ids(self, org_id: str, graph_id: str) -> list[str]:
@@ -32541,41 +32700,6 @@ class TortoiseSDK:
             params={"tid": org_id, "gid": graph_id},
         ).result_set
         return int(rows[0][0]) if rows else 0
-
-    def graph_set_name(self, org_id: str, graph_id: str,
-                       name: str) -> bool:
-        """#2701 — rename a graph's DISPLAY name on its registry Graph node.
-
-        Display-name-only: the node's id/kind/namespace (the data-plane
-        storage key) are untouched, so a rename never orphans points/keys
-        (the default graph is renameable too — graph 0's node carries
-        ``name`` as a label distinct from ``namespace``). Resolves the
-        literal ``default`` id to the org's kind='default' node (mode-
-        agnostic callers use either); real gids match directly. Returns
-        True when the node was found (name written), False on unknown
-        graph — callers map to 404. Soft-deleted nodes (status='deleted')
-        are NOT renameable — treat as unknown (mirror list_graphs'
-        tombstone skip + graph_set_recording)."""
-        reg = self._get_registry()
-        rows = reg.query(
-            "MATCH (g:Graph {org_id:$tid}) RETURN g.id, g.kind, "
-            "coalesce(g.status, 'active')",
-            params={"tid": org_id},
-        ).result_set
-        if graph_id == "default":
-            node = next((r[0] for r in rows
-                         if r[1] == "default" and r[2] != "deleted"), None)
-        elif any(r[0] == graph_id and r[2] != "deleted" for r in rows):
-            node = graph_id
-        else:
-            node = None
-        if node is None:
-            return False
-        reg.query(
-            "MATCH (g:Graph {id:$gid, org_id:$tid}) SET g.name = $name",
-            params={"gid": node, "tid": org_id, "name": name},
-        )
-        return True
 
     def org_get(self, org_id: str) -> dict | None:
         """Get an org by ID. Returns None if not found."""

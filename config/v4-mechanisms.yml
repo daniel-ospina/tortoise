@@ -166,8 +166,15 @@ mechanisms:
     declared_in:
       - docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md  # §16.4; decision D12
       - docs/architecture/STORAGE-ARCHITECTURE.md       # §14.1 O4, the owner ruling
-    state: not-implemented
-    tracking_issue: 5006
+    state: implemented
+    code:
+      - tortoise/near_dup_merge.py
+      - tortoise/extractor_v2.py
+    tests:
+      - tests/test_near_dup_merge_5006.py
+    symbols:
+      - near_dup_merge
+      - apply_merge_union
     # #5010 as #5064 summarises it: the adopted fan-out cap has no
     # implementation "and it is the precondition for ever deduplicating" —
     # and #5064's refactor direction names this same pair as the ordering
@@ -175,14 +182,25 @@ mechanisms:
     preconditions:
       - fanout_cap
     note: >-
-      `classify_consolidation` still has the four-way ADD/UPDATE/NOOP/DELETE
-      outcome set and no MERGE action; the paraphrase-NOOP band absorbs one side
-      by threshold instead. The OTHER half of the ordering is not a row here and
-      is NOT silently assumed: the against-store exact dedup's fourth
-      precondition — an ATOMIC write (`create_point(dedup=True)` is a
-      check-then-CREATE with no uniqueness constraint on `Point`;
-      EXTRACTOR-V4-ARCHITECTURE.md §4.2) — is unimplemented and has no registry
-      row and no tracking issue in this closed set.
+      The FUSION the design places at S3, after the gate. §4.2 splits the
+      near-duplicate concern across three sites and says no operation has two
+      homes: DETECT the pair (`_boundary`, S2.2a-β, mechanical), record the
+      VERDICT (`vet_gate.OUTCOMES`' `MERGE`, S2.2b, the arbiter), execute the
+      FUSION (`near_dup_merge` + `apply_merge_union`, S3). Before #5006 the
+      third had no implementation and the verdict had no consumer.
+      ⚠️ `implemented` does NOT mean "always on": the fusion fires only for a
+      candidate S2.2b recorded a `MERGE` verdict for, so with no arbiter
+      injected it is INERT — the same honest, injected-seam posture VET itself
+      ships with. The mechanical ladder (the §16.4 never-across guard, the
+      ~0.95 bar, a readable union) re-checks every pair inside the mechanism:
+      the verdict is necessary and never sufficient, and a refused pair falls
+      through to ADD with both claims surviving.
+      ⚠️ The OTHER half of the ordering is still not a row here and is NOT
+      silently assumed: the against-store exact dedup's fourth precondition —
+      an ATOMIC write (`create_point(dedup=True)` is a check-then-CREATE with
+      no uniqueness constraint on `Point`; EXTRACTOR-V4-ARCHITECTURE.md §4.2) —
+      is unimplemented and has no registry row and no tracking issue in this
+      closed set.
 
   - id: span_link
     name: "verbatim SPAN link on every Point (an address, not a payload)"

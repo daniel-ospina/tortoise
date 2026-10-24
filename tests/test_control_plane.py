@@ -383,10 +383,10 @@ class TestGraphC1Status:
         assert rows and rows[0][0] == "active"
         assert rows[0][1] is None  # recording NULL = inherit team default
 
-    def test_graph_list_emits_status_and_recording(self, sdk, team):
+    def test_list_memory_graphs_emits_status_and_recording(self, sdk, team):
         """Registry-shaped rows now carry status/recording (None-safe)."""
         sdk._graph_create(team["id"], "prod", kind="custom")
-        graphs = sdk.graph_list(team["id"])
+        graphs = sdk.list_memory_graphs(team["id"])
         assert any(g["name"] == "prod" for g in graphs)
         for g in graphs:
             assert "status" in g

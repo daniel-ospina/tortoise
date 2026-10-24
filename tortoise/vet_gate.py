@@ -81,8 +81,10 @@ Vocabulary (owner ruling **O4**, `EXTRACTOR-V4-ARCHITECTURE.md` §16.3 / §16.4)
 
 This is VET's **selection** axis and is deliberately distinct from
 ``extractor_v2.DecisionRecord``'s consolidation axis (``ADD``/``UPDATE``/
-``NOOP``/``DELETE``). The token ``NOOP`` is shared, but the two sets are
-decisions at different steps and neither module consumes the other's set.
+``NOOP``/``DELETE``/``MERGE``). The tokens ``NOOP`` and ``MERGE`` are shared by
+name, but the two sets are decisions at different steps: VET **records** a
+``MERGE`` verdict, and ``extractor_v2`` reads that recorded verdict and takes
+the ``MERGE`` **action** at S3 — neither module's outcome set is the other's.
 
 ⚠️ ``MERGE-INTO-EXISTING`` is deliberately **NOT** emitted — and that removal IS
 the A4 correction §16.2 records (*"✅ NOW FIXED — ``MERGE-INTO-EXISTING`` is
@@ -90,10 +92,16 @@ removed from VET's outputs (§S2.2)"*). VET runs before S3 RESOLVE, and S3 is
 what *finds* what exists — so "merge into existing" is circular at this
 position. ⚠️ **The verdict and the action are not the same token** (§S2.2,
 #5092): this gate may record ``MERGE`` for a flagged pair, it never performs the
-fusion. A merge candidate is flagged ``MERGE`` and
-**recorded in the VET evidence surface only — nothing consumes it yet**: no
-code routes a ``MERGE`` verdict to S3, and the merge *itself* is #5006's (it
-needs the union-of-attachments machinery and the high bar).
+fusion.
+
+✅ **The verdict HAS a consumer (#5006).** A ``MERGE`` outcome in
+``stats["decisions"]`` is read by ``extractor_v2._merge_flagged_contents`` and
+routed into S3's consolidation pass, where ``tortoise.near_dup_merge`` executes
+the fusion (union of both attachment sets onto ONE survivor). This module still
+performs no fusion itself and must not: the split is §4.2's, and moving the
+write here would put the fusion BEFORE the gate — the one thing that section
+forbids. With ``arbiter=None`` there are no ``MERGE`` verdicts, so the routing
+is inert on every arbiter-less run.
 
 Failure policy (§4.2): FAIL-OPEN
 --------------------------------

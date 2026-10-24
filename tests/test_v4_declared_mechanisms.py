@@ -2641,11 +2641,15 @@ def test_gate_fails_closed_on_a_preconditions_value_that_is_not_a_list() -> None
 def test_gate_accepts_a_precondition_declared_by_a_not_implemented_row() -> None:
     """Ordering is recorded on ABSENT rows too — that is its whole point.
 
-    `near_dup_merge` is `not-implemented` and carries the ordering today; a
-    marked-absent row declaring its precondition is the case the registry
-    actually ships, so it must be clean. So must a row that declares NO ordering
-    (the field omitted) — and only that: an explicit `preconditions:` with no
-    value is refused above, because an empty declaration must not read as one.
+    A marked-absent row that declares its precondition must be clean, so that an
+    ordering is recorded at the moment the mechanism is named rather than
+    discovered at implementation time. (This was the LIVE shape until #5006
+    implemented `near_dup_merge` — the registry shipped exactly this pair. The
+    rule is pinned on fixtures so it survives that row flipping to
+    `implemented`, which is the case it was written for.) So must a row that
+    declares NO ordering (the field omitted) — and only that: an explicit
+    `preconditions:` with no value is refused above, because an empty
+    declaration must not read as one.
     """
     assert gate_errors([_absent_row(id="a"), _absent_row(id="b", preconditions=["a"])]) == []
     assert gate_errors([_absent_row()]) == []

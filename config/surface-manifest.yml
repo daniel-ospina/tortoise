@@ -21,7 +21,7 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-cut_at_commit: 87f23b8642280e9f08b4acee720c002663a22a44
+cut_at_commit: a999be41ead974deaca577cbb1610b49c1656834
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -500,7 +500,7 @@ approval_pr: '4120'
 approval_date: '2026-09-18'
 counts:
   tools: 81
-  sdk_public_methods: 150
+  sdk_public_methods: 149
   retired: 18
   keyword_distribution:
     fetch: 14
@@ -515,7 +515,7 @@ counts:
     operate: 6
 high_water_counts:
   tools: 82
-  sdk_public_methods: 150
+  sdk_public_methods: 149
 retired:
 - name: tortoise_get
   use_instead: tortoise_get_entity(id, type=...)
@@ -2149,7 +2149,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_list_graphs
-  served_from: tortoise/mcp_server.py:c48982d2359a7aea
+  served_from: tortoise/mcp_server.py:4be83d1986fe278d
   served_attributes: 06490fe8c983ed26
   family: sessions
   family_rank: 4
@@ -4215,94 +4215,6 @@ rows:
   exemption: false
   approval: null
   class: no-caller-found
-- name: sdk:graph_list
-  method: graph_list
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.graph_list.
-  dependency: 'reached by no registered MCP tool; caller categories: engine, other-tooling, tenant-rest'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: engine, other-tooling, tenant-rest'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: internal
-- name: sdk:graph_restore
-  method: graph_restore
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.graph_restore.
-  dependency: 'reached by no registered MCP tool; caller categories: tenant-rest'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: tenant-rest'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
-- name: sdk:graph_set_name
-  method: graph_set_name
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.graph_set_name.
-  dependency: 'reached by no registered MCP tool; caller categories: tenant-rest'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: tenant-rest'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
-- name: sdk:graph_set_recording
-  method: graph_set_recording
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.graph_set_recording.
-  dependency: 'reached by no registered MCP tool; caller categories: tenant-rest'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: tenant-rest'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
 - name: sdk:index_directory
   method: index_directory
   family: null
@@ -4721,6 +4633,28 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
+- name: sdk:list_memory_graphs
+  method: list_memory_graphs
+  family: null
+  family_rank: null
+  served: sdk
+  sdk_method: null
+  group_source: null
+  keyword: null
+  keyword_rank: null
+  cluster: null
+  canonical: null
+  job: Public SDK method TortoiseSDK.list_memory_graphs.
+  dependency: 'reached by no registered MCP tool; caller categories: engine, other-tooling, tenant-rest'
+  lifecycle: active
+  used_by: tooling, docs
+  recommendation: review
+  reason: 'no MCP tool binds it; callers: engine, other-tooling, tenant-rest'
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: internal
 - name: sdk:list_namespaces
   method: list_namespaces
   family: null
@@ -5447,6 +5381,28 @@ rows:
   exemption: false
   approval: null
   class: internal
+- name: sdk:restore_memory_graph
+  method: restore_memory_graph
+  family: null
+  family_rank: null
+  served: sdk
+  sdk_method: null
+  group_source: null
+  keyword: null
+  keyword_rank: null
+  cluster: null
+  canonical: null
+  job: Public SDK method TortoiseSDK.restore_memory_graph.
+  dependency: 'reached by no registered MCP tool; caller categories: tenant-rest'
+  lifecycle: active
+  used_by: tooling, docs
+  recommendation: review
+  reason: 'no MCP tool binds it; callers: tenant-rest'
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: no-caller-found
 - name: sdk:retract_point
   method: retract_point
   family: null
@@ -6041,6 +5997,28 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
+- name: sdk:update_memory_graph
+  method: update_memory_graph
+  family: null
+  family_rank: null
+  served: sdk
+  sdk_method: null
+  group_source: null
+  keyword: null
+  keyword_rank: null
+  cluster: null
+  canonical: null
+  job: Public SDK method TortoiseSDK.update_memory_graph.
+  dependency: 'reached by no registered MCP tool; caller categories: tenant-rest'
+  lifecycle: active
+  used_by: tooling, docs
+  recommendation: review
+  reason: 'no MCP tool binds it; callers: tenant-rest'
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: no-caller-found
 - name: sdk:update_point
   method: update_point
   family: null

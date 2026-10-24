@@ -284,8 +284,10 @@ done by `register_source`; the confidence tools are split across `recall_beliefs
 2. **Publish the bridge table** (MCP `type=`/`mode=` → SDK method).
 3. Implement the MCP list with the **SDK frozen** (method names + capabilities unchanged)
    so the handlers are written once.
-4. Then the **SDK canonical list** (`config/surface-manifest.yml` declares **150** public
-   methods; the scoping doc says 152 — reconcile when that pass starts). Renames there are mechanical for the
+4. Then the **SDK canonical list** (`config/surface-manifest.yml` declares **149** public
+   methods, and `docs/product/canonical-sdk-methods.md` agrees after #4282 phase 2.3 — the
+   earlier 150/152 discrepancy is closed; reconcile the per-name mapping when that pass
+   starts). Renames there are mechanical for the
    MCP handlers; only a *capability* removal can force an MCP change — which the bridge
    table will have flagged.
 

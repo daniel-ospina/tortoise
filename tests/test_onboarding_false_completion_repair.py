@@ -573,7 +573,7 @@ class TestGuardHelpers:
             "aaa", {"org_aaa", "team_aaa"}, "org_aaa") is False
 
     def test_registry_cross_check_keys_on_namespace_not_display_name(self):
-        """`graph_list` rows carry the DB graph name in `namespace`; the
+        """`list_memory_graphs` rows carry the DB graph name in `namespace`; the
         default graph's `name` is the display string "default". Keying on
         `name` made EVERY normally-provisioned org look scoped, turning
         `--apply` into a silent no-op. No registry node is created for the
@@ -605,7 +605,7 @@ class TestGuardHelpers:
         def _boom(self, org_id):
             raise RuntimeError("registry down")
 
-        monkeypatch.setattr(TortoiseSDK, "graph_list", _boom)
+        monkeypatch.setattr(TortoiseSDK, "list_memory_graphs", _boom)
         assert g._has_scoped_graphs("zzz", {"org_zzz"}, "org_zzz") is True
 
     def test_check_is_store_wide_and_exit_codes_are_honest(self, monkeypatch):

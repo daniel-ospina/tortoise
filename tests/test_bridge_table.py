@@ -306,7 +306,12 @@ def test_c1_blockers_are_exactly_the_targets_without_a_method() -> None:
         targets.add(MCP_BACKING.get(t, t))
     for dest in DESTINATION.values():
         ns = next((n for n in NAMESPACES if dest.startswith(n)), None)
-        targets.add(dest[len(ns):] if ns else dest)
+        name = dest[len(ns):] if ns else dest
+        # A plain target is a TARGET TOOL, whose existence is its BACKING method's —
+        # the same rule the loop above applies to TARGET_MCP. Without this,
+        # `graph_set_recording` (a surviving MCP tool whose per-field SDK method was
+        # retired in phase 2.3) reads as an unimplemented target forever.
+        targets.add(MCP_BACKING.get(name, name))
     targets.discard("REMOVED")
 
     # The backing map is load-bearing authored data and MUST NOT be imported as

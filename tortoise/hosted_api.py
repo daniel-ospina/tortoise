@@ -19202,7 +19202,7 @@ async def _membership_org(user_id: str, org_id: str) -> dict | None:
 def _graph_list_for(org_id: str) -> list[dict]:
     """One org's graph listing (#3718: blocking registry/PostgREST read).
 
-    The MODE BRANCH is here, not left to ``graph_list``'s own short-circuit:
+    The MODE BRANCH is here, not left to ``list_memory_graphs``'s own short-circuit:
     in Supabase mode ``_registry_anchor()`` would build (and eagerly attach)
     a FalkorDB handle BEFORE the callee ever consulted the mode, so the
     switcher — the first read every client makes — would need a live graph
@@ -19224,7 +19224,7 @@ def _graph_list_for(org_id: str) -> list[dict]:
     )
     if is_supabase_enabled():
         return graph_metadata(get_control_plane(), org_id)
-    return _registry_anchor().graph_list(org_id)
+    return _registry_anchor().list_memory_graphs(org_id)
 
 
 #: Orgs per off-loop submission when the switcher lists graphs, PER LANE
@@ -19335,13 +19335,13 @@ async def list_my_orgs(user: dict = Depends(get_current_user)):  # noqa: B008
     When EVERY membership is suspended there is nothing healthy to list →
     403 SUSPENDED with the appeal detail (#1853 lockdown preserved).
 
-    #765 (plan Task 8 reader inventory): graph_list resolves via the
+    #765 (plan Task 8 reader inventory): list_memory_graphs resolves via the
     mode-aware SDK (Supabase → teams.graph_name derivation via the seam;
     registry → Graph nodes). The mode branch that keeps this endpoint off the
     registry in Supabase mode is NOT the callee's short-circuit — it is the
     call-site branch in ``_graph_list_for`` (#3718), together with the
     lane-and-chunk choice made on the loop below, because ``_registry_anchor()``
-    binds eagerly and would be built before ``graph_list`` could consult the
+    binds eagerly and would be built before ``list_memory_graphs`` could consult the
     mode."""
     memberships = await _user_memberships(user["user_id"])
     resolved = []
@@ -19352,7 +19352,7 @@ async def list_my_orgs(user: dict = Depends(get_current_user)):  # noqa: B008
         resolved.append((m, org))
 
     # Suspended rows are excluded from graph resolution — they cannot be
-    # selected anyway, and graph_list must not observe the suspension stamp.
+    # selected anyway, and list_memory_graphs must not observe the suspension stamp.
     # #3718: the listing is a blocking registry/PostgREST read, and it used to
     # run per membership ON the loop. It now costs one OFF-LOOP submission per
     # chunk — ceil(N / the lane's chunk) submissions for N healthy orgs. (The
@@ -19407,6 +19407,12 @@ async def list_my_orgs(user: dict = Depends(get_current_user)):  # noqa: B008
         graphs_by_org.update(await offload(
             lambda chunk=chunk: {
                 org_id: _graph_list_for(org_id) for org_id in chunk},
+            # `op` is an OBSERVABILITY label naming the operation, not the SDK
+            # method it calls (its siblings are `data_sdk`, `org_sdk`, `query`):
+            # `tests/test_read_routes_loop_responsiveness.py` counts this exact
+            # label to prove the org-switcher fan-out stays chunked (#3718), so
+            # renaming it with the method it happens to call silently reds a pin
+            # that is about submission COUNT — and breaks metric continuity.
             op="graph_list"))
 
     out = []
@@ -20422,7 +20428,7 @@ async def create_org_graph(org_id: str, body: dict,
     async with _provision_lock(org_id):
         # Duplicate-active check INSIDE the lock (registry has no unique
         # index — P2 from review: the app check is the registry guard).
-        existing = _make_sdk(namespace="registry").graph_list(org_id)
+        existing = _make_sdk(namespace="registry").list_memory_graphs(org_id)
         if any(g["name"] == name and g.get("status") != "deleted"
                for g in existing):
             raise HTTPException(status_code=409, detail="Graph name already exists")
@@ -20492,7 +20498,7 @@ async def create_graph(body: dict, request: Request,
         raise HTTPException(status_code=404, detail="Unknown organization")
     await _provision_preflight(org)
     async with _provision_lock(org_id):
-        existing = _make_sdk(namespace="registry").graph_list(org_id)
+        existing = _make_sdk(namespace="registry").list_memory_graphs(org_id)
         if any(g["name"] == name and g.get("status") != "deleted"
                for g in existing):
             raise HTTPException(status_code=409, detail="Graph name already exists")
@@ -20690,7 +20696,7 @@ async def _apply_graph_recording_override(
             found = any(r[0] == graph_id and r[2] != "deleted" for r in rows)
         if not found:
             raise HTTPException(status_code=404, detail="Unknown graph")
-        written = sdk.graph_set_recording(org_id, graph_id, body.recording)
+        written = sdk.update_memory_graph(org_id, graph_id, recording=body.recording)
     if not written:
         raise HTTPException(status_code=404, detail="Unknown graph")
     return {"graph_id": graph_id, "recording": body.recording}
@@ -20830,17 +20836,17 @@ def _pack_entries_from_body(raw: object) -> list[dict] | None:
 
 
 def _registry_graph_list(org_id: str) -> list[dict]:
-    """Registry-lane ``graph_list`` in ONE worker hop — SDK construction
+    """Registry-lane ``list_memory_graphs`` in ONE worker hop — SDK construction
     included (#8648 review P1).
 
     ``_make_sdk`` is NOT free: in embedded mode it runs the keepalive anchor's
     probe query and, on a miss, an eager connect that holds the socket
     (#4660). Building the SDK on the loop and off-loading only the callee
-    (``to_thread(sdk.graph_list, …)``) left that blocking I/O on the event
+    (``to_thread(sdk.list_memory_graphs, …)``) left that blocking I/O on the event
     loop — the exact defect ``tests/test_read_routes_loop_responsiveness.py``
     pins.
     """
-    return _make_sdk(namespace="registry").graph_list(org_id)
+    return _make_sdk(namespace="registry").list_memory_graphs(org_id)
 
 
 async def _resolve_graph_data_namespace(org_id: str, graph_id: str) -> str | None:
@@ -20849,7 +20855,7 @@ async def _resolve_graph_data_namespace(org_id: str, graph_id: str) -> str | Non
     ``None`` = unknown / deleted / another team's graph (fail closed). The
     literal ``"default"`` resolves by KIND, not by id: in registry mode the
     default node carries a real gid as its id, while in Supabase mode the
-    derived default row's id IS the literal — reading the ``graph_list`` seam
+    derived default row's id IS the literal — reading the ``list_memory_graphs`` seam
     makes both lanes agree without a second resolution path.
     """
     try:
@@ -21324,7 +21330,7 @@ async def _apply_graph_rename(
     # name_active as the cross-worker DB backstop, whose violation is mapped
     # to the same 409 below (create-key parity: "HTTP 409" → 409, never 500).
     async with _provision_lock(org_id):
-        for row in sdk.graph_list(org_id):
+        for row in sdk.list_memory_graphs(org_id):
             if row.get("status") == "deleted":
                 continue
             if row.get("name") == name and row.get("graph_id") != target:
@@ -21337,7 +21343,7 @@ async def _apply_graph_rename(
                                         graph_id, name),
                     op="set_graph_name")
             else:
-                written = sdk.graph_set_name(org_id, graph_id, name)
+                written = sdk.update_memory_graph(org_id, graph_id, name=name)
         except Exception as _exc:
             if is_supabase_enabled() and "HTTP 409" in str(_exc):
                 raise HTTPException(
@@ -21787,7 +21793,7 @@ async def _restore_trash_graph_locked(request: Request, user: dict,
             restored = await asyncio.to_thread(
                 sb_restore, get_control_plane(), org_id, graph_id)
         else:
-            restored = await asyncio.to_thread(sdk.graph_restore, org_id,
+            restored = await asyncio.to_thread(sdk.restore_memory_graph, org_id,
                                                graph_id)
     except RuntimeError as e:
         # #2468: a concurrent create landing the freed name between the
@@ -21962,7 +21968,7 @@ async def list_graphs(org_id: str, user: dict = Depends(get_current_user)):  # n
         raise HTTPException(status_code=404, detail="Unknown organization")
     _ensure_not_suspended(org)
     sdk = _make_sdk(namespace="registry")
-    graphs = sdk.graph_list(org_id)
+    graphs = sdk.list_memory_graphs(org_id)
     from tortoise.supabase_control import (
         count_graph_keys,
         get_control_plane,
