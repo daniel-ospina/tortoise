@@ -1257,55 +1257,122 @@ def cmux_session_records() -> tuple[list[dict[str, Any]], str, str]:
         (LIVE_STORE_CMUX_SINGULAR, ["cmux", "session", "list", "--json"]),
     ):
         raw, rc, err = _capture(cmd)
-        # ⛔ THE GRAMMAR'S OWN ANSWER IS THE CAUSE, AND IT IS OFTEN ON STDERR.
-        # The guest CLI writes its refusal as JSON on STDERR and exits non-zero
-        # (`cmux sessions list --json --all` → rc 2, stderr
-        # `{"code":"usage.invalid","message":"--all needs a value"}`), so a
-        # reader that takes STDOUT and only when rc == 0 sees an EMPTY STRING here
-        # and reports "produced nothing" about a command that named its own
-        # problem — which is how a whole cell reported an undiagnosable refusal
-        # while the cause sat in a payload the reader had already discarded.
+        # ⛔ THE STREAMS ARE NOT INTERCHANGEABLE, AND THIS IS THE LINE THAT KEEPS THEM
+        # APART (review of #2401).
+        #
+        #   * an **ANSWER** may only come from STDOUT, and only from a command that
+        #     SUCCEEDED. A store read out of a diagnostics stream would make stderr
+        #     an evidence source the pre-#2401 reader never consulted — and a
+        #     `{"sessions": []}` on stderr would then be a MEASURED "nothing is
+        #     running" read from a channel that carries warnings. A non-zero exit is
+        #     refused on the same principle: it can mean a PARTIAL list, and a lane
+        #     missing from a partial store is the fail-open direction (#8999).
+        #   * the **CAUSE** may come from either stream, because the guest CLI writes
+        #     its refusal as JSON on STDERR and exits non-zero
+        #     (`cmux sessions list --json --all` → rc 2, stderr
+        #     `{"code":"usage.invalid","message":"--all needs a value"}`). A reader
+        #     that took stdout-only would see an EMPTY STRING here and report
+        #     "produced nothing" about a command that named its own problem — which
+        #     is how a whole cell reported an undiagnosable refusal while the cause
+        #     sat in a payload the reader had already discarded. On a FAILURE stderr
+        #     wins, because stdout may carry the command's chatter (a progress line,
+        #     a warning) and naming that would point an operator at the wrong thing.
         # `_run` is deliberately left as it is (`gh_json` depends on its
         # succeed-or-empty polarity); this store needs the failure's OWN words.
-        payload = raw if raw.strip() else err
-        if not payload.strip():
-            errors.append(f"`{' '.join(cmd)}` exited {rc} with no output")
+        # ⛔ THE CAUSE COMES FROM THE FIRST STREAM THAT ACTUALLY SAID SOMETHING (review of
+        # #2401, final round). `raw`-truthiness is not enough: a WHITESPACE-only stdout (`"\n"`)
+        # won over a non-empty stderr, so the message rendered `(stderr: no output)` about a stream
+        # that had named the problem — the "produced nothing about a command that said something"
+        # falsehood this change exists to remove, narrowed to a whitespace case.
+        said = (
+            (err if rc != 0 and err.strip() else "")
+            or (raw if raw.strip() else "")
+            or err
+        )
+        detail = _cmux_said(said)
+        if rc != 0:
+            errors.append(
+                f"`{' '.join(cmd)}` exited {rc}: {detail} (a failed command's "
+                "output is not read as a session store)"
+            )
+            continue
+        if not raw.strip():
+            errors.append(
+                f"`{' '.join(cmd)}` exited 0 and printed nothing on stdout"
+                + (f" (stderr: {detail})" if err.strip() else "")
+            )
             continue
         try:
-            data = json.loads(payload)
+            data = json.loads(raw)
         except Exception:
-            first = payload.strip().splitlines()[0][:200]
             errors.append(
-                f"`{' '.join(cmd)}` exited {rc} and returned no parsable JSON: "
-                f"{first}"
+                f"`{' '.join(cmd)}` exited 0 and returned no parsable JSON: {detail}"
             )
             continue
         recs = data.get("sessions") if isinstance(data, dict) else None
         if not isinstance(recs, list):
-            if isinstance(data, dict):
-                detail = f"{data.get('code') or '?'}: {data.get('message') or ''}".strip()
-            else:
-                detail = type(data).__name__
             errors.append(
-                f"`{' '.join(cmd)}` exited {rc} and answered {detail!r}, "
-                "not a session store"
-            )
-            continue
-        if rc != 0:
-            # ⛔ A STORE FROM A FAILED COMMAND IS NOT A READING, and this is the ONE
-            # polarity the capture change must not move: a non-zero exit can mean a
-            # PARTIAL list, and a lane missing from it is the fail-open direction
-            # (the gate answering "nobody holds it" about a lane the store omitted).
-            # The payload is still what NAMES the refusal above — a refusal read
-            # from the failure's own words is the whole point of `_capture` — but
-            # it is never ACCEPTED as the answer (review of #2401).
-            errors.append(
-                f"`{' '.join(cmd)}` exited {rc} and returned a session store — "
-                "refusing to read a store from a failed command"
+                f"`{' '.join(cmd)}` exited 0 and answered {detail}, not a session store"
             )
             continue
         return [r for r in recs if isinstance(r, dict)], source, ""
     return [], "", "; ".join(errors)
+
+
+#: The rendered bound on `_cmux_said`'s output. Applied AFTER `repr`, because
+#: `repr` expands each non-printable character four-fold — slicing the input first
+#: produced up to 802 characters from a 200-byte input (measured), 2.5x the 320-char
+#: window the harness reads a cause through (review of #2401).
+_CMUX_SAID_BOUND = 200
+
+
+def _bounded_repr(text: str, bound: int = _CMUX_SAID_BOUND) -> str:
+    r"""``repr(text)`` bounded to ``bound`` characters WITHOUT splitting an escape.
+
+    ⛔ A HEAD CUT OF A RENDERED STRING LANDS MID-ESCAPE (review of #9887, fourth round).
+    ``repr("\x01" * 50)[:200]`` ends ``…\x01\x0`` — a sequence that never existed, in the
+    persisted cause, which is the same ``repr``-expansion defect class the bound exists
+    for, one layer down. The RAW text is trimmed from the TAIL and re-rendered instead:
+    the head is what a reader needs from a refusal, and a whole character can never be
+    half-written.
+    """
+    if len(repr(text)) <= bound:
+        return repr(text)
+    cut = text[:bound]
+    while cut and len(repr(cut)) > bound:
+        cut = cut[:-1]
+    return repr(cut)
+
+
+def _cmux_said(text: str) -> str:
+    """One short, quotable rendering of what a cmux grammar SAID, for a cause.
+
+    A JSON error object becomes ``'usage.invalid: --all needs a value'`` — the one
+    form an operator can act on — and anything else becomes its first non-empty
+    line. Never raises: this only ever runs on text that is already a failure, and
+    a formatter that threw here would lose the cause entirely.
+
+    ⛔ THE BOUND IS ON THE RENDERED String, NOT ON ITS INPUT (review of #2401).
+    Slicing the input to 200 and then calling ``repr`` produced up to **802**
+    characters, because ``repr`` escapes each non-printable byte as a four-character
+    ``\\xNN`` sequence (200 control bytes → 802 characters, measured) — which is 2.5x
+    the 320-char bound this message is read through, so an ANSI- or CR-laden refusal
+    would still overrun ``liveness_error`` and the persisted board cache.
+    ``_CMUX_SAID_BOUND`` is therefore applied AFTER the repr.
+    """
+    body = (text or "").strip()
+    if not body:
+        return "no output"
+    first = body.splitlines()[0]
+    try:
+        data = json.loads(body)
+    except Exception:
+        return _bounded_repr(first)
+    if isinstance(data, dict) and (data.get("code") or data.get("message")):
+        return _bounded_repr(
+            f"{data.get('code') or '?'}: {data.get('message') or ''}".strip()
+        )
+    return _bounded_repr(first)
 
 
 def pi_processes() -> tuple[list[dict[str, Any]], str]:
@@ -1739,21 +1806,83 @@ def live_sessions() -> LiveSessions:
                 # does not. The VERDICT is untouched: a live pid with no
                 # attributable cwd still leaves the store UNMEASURED.
                 refused = getattr(cwds, "refused", {}) or {}
-                named = []
-                for p in still_alive[:5]:
-                    raw = refused.get(p)
-                    named.append(
-                        f"{p} (cwd read as {raw!r}, which attributes to no "
-                        "worktree — a removed directory or a reader "
-                        "placeholder)" if raw else f"{p} (no cwd could be read)"
-                    )
+                # ⛔ THE PIDS COME FIRST AND THE DATUM IS SAID ONCE. The first draft
+                # repeated a 120-character clause per pid: five refused pids made a
+                # 977-character sentence, and the harness cuts the first cause at 320
+                # characters — so the pids that identify the orphans, and the remedy,
+                # fell off the end, i.e. the message was built for a reader with no
+                # bound. Measured against that bound: this form keeps every pid, one
+                # raw path and the remedy inside 320.
+                # ⛔ BUT 320 IS NOT THE BUDGET IN EVERY READER (review of #2401, fifth
+                # round), so do not read the line above as "an operator always sees the
+                # datum". The harness cuts the COMPOSED reason, and the claim gate puts its
+                # own prose IN FRONT of this arm — measured 181 characters:
+                # `_holder_gate_note`'s `claim gate: the FLEET BOARD could not answer — `
+                # plus `_board_can_answer`'s `the board's live-session store could not be
+                # read, … an unmeasured pid is not a dead owner (tried: `. (The gate's own
+                # ` (comment prose is not read, #8175)` sits AFTER the cause, so it costs it
+                # nothing — tallying the whole wrapper would over-state the cost by 36 and
+                # under-state the budget by the same, which is the arithmetic error the
+                # fourth review round caught here.) 320 - 181 leaves this arm **139**
+                # characters. Measured inside them, on the counting fixture: every named pid
+                # survives (the last of five 8-digit pids ends at 259), the datum is cut after
+                # `e.g. '/tmp/cell-wt-many` — so its ` (deleted)` suffix, the part that says
+                # the directory is GONE, does not — and the remedy does not appear at all.
+                # That static prose in front of a cause whose only job is to carry a datum is
+                # the budget bug, tracked as #9900; until it shrinks, the composed record is
+                # the pids plus a folder prefix. `test_the_gap_fits_the_bound_its_readers_apply`
+                # composes the note with the gate's OWN functions and pins exactly that, so a
+                # change to its wording re-measures instead of passing quietly.
+                pids_txt = ", ".join(str(p) for p in still_alive[:5])
+                # ⛔ THE DATUM MUST BELONG TO A PID THE MESSAGE NAMES (review of #2401, fourth
+                # round). Scanning all of `still_alive` while printing only the first five let an
+                # operator read `pid(s) … (+2 more)` and then be shown the path of the SEVENTH —
+                # reaping the five named ones would change nothing. The sample is drawn from the
+                # printed slice, so it always names one of them.
+                sample = next(
+                    (refused[p] for p in still_alive[:5] if p in refused), None
+                )
+                more = "" if len(still_alive) <= 5 else f" (+{len(still_alive) - 5} more)"
+                # ⛔ THE SAMPLE IS BOUNDED TOO, AND IT KEEPS ITS TAIL (review of #2401).
+                # The remedy has to survive the 320-char window this arm is read through, and a
+                # Mac worktree path is routinely 90+ characters — so an unbounded sample put the
+                # remedy straight back outside that bound (measured: `orphan` fell out of `[:320]`
+                # at pathlen 90). The TAIL is what identifies the directory, so it is the part kept.
+                # ⛔ THE BOUND IS ON THE RENDERED SAMPLE (review of #2401, third round). Capping
+                # the raw string and then rendering it with `!r` let a path carrying control bytes
+                # expand four-fold — measured: a 60-char sample repr'd to 242 and pushed the remedy
+                # out of the 320-char window again, the third instance of the same defect class in
+                # this message. The rendered form is what has to fit, so the cap is applied to it.
+                # The TAIL is kept because it is what identifies the directory.
+                sample_txt = ""
+                if sample:
+                    sample_txt = repr(sample)
+                    if len(sample_txt) > 64:
+                        # ⛔ THE CUT IS FROM THE HEAD, AND IT IS RE-RENDERED EACH TIME (review of
+                        # #2401, fifth round). `repr("…" + sample[-40:])[:64]` was a HEAD cut of the
+                        # RENDERED form, so the guarantee above did not hold in the case the cap
+                        # exists for: a control-laden path rendered four-fold past 64 characters
+                        # lost its SUFFIX — measured on the `ctl` fixture (40×`\x01` + ` (deleted)`),
+                        # whose `[:64]` kept `'…` and 61 escape characters and dropped ` (deleted)`,
+                        # the one part that says the directory is gone. Trimming the RAW suffix from
+                        # the head and re-rendering keeps the tail, bounds the rendered form (never
+                        # the raw one, which `repr` expands), and never lands the cut mid-escape.
+                        cut = sample[-40:]
+                        while cut and len(repr("…" + cut)) > 64:
+                            cut = cut[1:]
+                        sample_txt = repr("…" + cut)
                 proc_error = (
-                    "a live pi pid has no ATTRIBUTABLE cwd: "
-                    + ", ".join(named)
-                    + " — with no worktree to attribute, 'nobody holds it' is "
-                    "unprovable for the lanes they may be. If the path is a "
-                    "reaped worktree, the orphan process is the thing to fix, "
-                    "not the gate"
+                    f"live pi pid(s) {pids_txt}{more} have no ATTRIBUTABLE cwd"
+                    + (
+                        f" — e.g. {sample_txt} (a removed directory or a reader "
+                        "placeholder)"
+                        if sample_txt else ""
+                    )
+                    # ⛔ SHORT ON PURPOSE: the counting case (8-digit pids + `(+N more)` + a
+                    # 64-char sample) measured 324-326 characters against a 320-character cut
+                    # (review of #2401, fourth round), so this clause is the slack. Every word
+                    # removed here is a character the pids keep.
+                    + " — so 'nobody holds it' is unprovable; reap the orphan, not the gate"
                 )
         for cwd, pids in by_cwd.items():
             pids.sort()
