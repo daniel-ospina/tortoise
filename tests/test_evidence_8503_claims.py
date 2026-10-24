@@ -30,10 +30,24 @@ The third pin of the original class
 `tortoise/extractor_v2.py`'s own source and imports the module, so it STAYS in
 `tests/test_extractor_v2.py` — it is correctly bound to a code diff, and moving
 it here would put an extractor import in the tier1 lane for no coverage gain.
+
+Round 9's review P2 added one more pin to THIS file, and the same selection
+argument is why it lives here rather than in `test_write_path_runner.py` (a
+`slow_files` member, so tier1 subtracts it): the bundle's blind-spot map in §1
+said **two** seams while `runner.operator_drop_notes` enumerated **three**, and
+the document is what a receipt reader opens first. The pin compares the two
+lists mechanically — count, then each clause — against the note the shipped
+code actually emits, so neither copy can drift alone. It imports
+`tests.eval.write_path.runner`, whose module-scope imports are stdlib +
+`tests.eval.write_path.{corpus,grading,judge,schema,prescreen}` (also stdlib), so
+it stays tier1-safe: measured 0.06 s import, no graph, no DB, no network.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
+
+from tests.eval.write_path import runner
 
 _REPO = Path(__file__).resolve().parent.parent
 _EVIDENCE_8503 = _REPO / "docs" / "evidence" / "8503"
@@ -42,6 +56,31 @@ _INDEX_00 = _REPO / "docs" / "00_index.md"
 
 def _flat(text: str) -> str:
     return " ".join(text.split())
+
+
+#: The seam COUNT, in the form both copies state it ("Three seams", "cover
+#: three seams"). Numbers are accepted so a future note that says "4 seams" is
+#: compared rather than silently unmatched.
+_SEAM_COUNT = re.compile(r"\b(\d+|two|three|four|five|six)\s+seams\b", re.IGNORECASE)
+_SEAM_NUMBERS = {"two": 2, "three": 3, "four": 4, "five": 5, "six": 6}
+
+#: One probe per seam, matched in BOTH copies. Deliberately topical (not a
+#: whole-sentence quote): a reworded seam must still be recognized, and a seam
+#: DROPPED from either copy must fail here instead of degrading the map quietly.
+_SEAM_CLAUSES = (
+    "commit layer",
+    "snapshot failed to read",
+    "NOOP",
+)
+
+
+def _seam_count(text: str) -> int:
+    matches = _SEAM_COUNT.findall(text)
+    assert len(matches) == 1, (
+        f"expected exactly one 'N seams' statement in {text[:60]!r}…, found "
+        f"{matches} — the blind-spot map must state one count, once")
+    raw = matches[0].lower()
+    return int(raw) if raw.isdigit() else _SEAM_NUMBERS[raw]
 
 
 class TestEvidence8503Claims:
@@ -101,3 +140,46 @@ class TestEvidence8503Claims:
         assert "the SUPERSEDE row is the resolver" in flat, (
             "§3.2e must still state the SUPERSEDE row's class — the pin is on "
             "the banner agreeing with it, not on deleting the classification")
+
+    def test_the_blind_spot_enumeration_matches_the_shipped_note(self):
+        """§1's seam list and the run note's seam list are the SAME list.
+
+        Round 9 (P2): the bundle — the deliverable — said **two** seams while
+        `runner.operator_drop_notes` enumerated **three**, and the paragraph
+        also asserted the note "says so verbatim". The omitted seam was the
+        point-level `supersedes` ref dropped on a NOOP fold, i.e. exactly the
+        replace-channel drop the SUPERSEDE row is about, so the document
+        UNDERSTATED the instrument's blind spots in the fail-open direction:
+        a lane reading it would rule that route out and hunt a prompt fix.
+
+        The note is a pure function, so the pin compares against the text the
+        shipped code actually emits rather than against a copy of it, and
+        compares COUNTS as well as clauses: a fourth seam added in code fails
+        here until the document states four, and a seam deleted from either
+        copy fails on the clause probe.
+        """
+        doc = _flat((_EVIDENCE_8503 / "README.md").read_text(encoding="utf-8"))
+        note = _flat(runner.operator_drop_notes(
+            {"operator_drops": 0, "supersede_refusals": 0}, "llm")[0])
+        # the note the code ships is the reference; the doc must match it
+        assert _seam_count(note) == _seam_count(doc), (
+            "docs/evidence/8503/README.md §1 states a different number of "
+            "blind-spot seams than runner.operator_drop_notes emits — the doc "
+            "is the copy a reader opens first, so it may not understate the "
+            "instrument (this is the round-9 P2: doc said two, code said "
+            "three)")
+        assert _seam_count(note) >= 3, (
+            "the shipped note must name all three known seams")
+        for clause in _SEAM_CLAUSES:
+            assert clause in note, (
+                f"the shipped note no longer names the {clause!r} seam — if it "
+                "was renamed, update _SEAM_CLAUSES and §1 together")
+            assert clause in doc, (
+                f"docs/evidence/8503/README.md §1 does not name the "
+                f"{clause!r} seam that runner.operator_drop_notes names — the "
+                "blind-spot map is understating the instrument again")
+        # the "verbatim" claim was false when the counts differed; the pin is
+        # what makes it true, so assert the doc points AT this comparison.
+        assert "runner.operator_drop_notes" in doc, (
+            "§1 must name the function whose note it claims to match, so the "
+            "claim is checkable by a reader")

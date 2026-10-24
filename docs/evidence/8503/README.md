@@ -66,12 +66,23 @@ warning it actually emits, so a prose edit cannot satisfy it).
 left `operator_drops` at 0 while the run note said nothing had been dropped (round 3). It is
 a marker now, and the mutation arm pins the class.
 
-⛔ **A ZERO IS EVIDENCE ABOUT THE OPERATOR PASS AND NOTHING ELSE.** Two seams are outside
-this instrument: the commit layer (`commit_ops.apply_payload_operators`) logs its skips
-through `_logger` with no warnings sink on the capture, and a session whose snapshot failed
-to read produces no warnings at all. The run note says so verbatim; the receipts committed
-here predate that wording (their note still reads "not the write path dropping one") — the
-counts are unchanged and the corrected note is what the shipped code emits.
+⛔ **A ZERO IS EVIDENCE ABOUT THE OPERATOR PASS AND NOTHING ELSE.** **Three seams** are
+outside this instrument: the commit layer (`commit_ops.apply_payload_operators`) logs its
+skips through `_logger` with no warnings sink on the capture; a session whose snapshot failed
+to read produces no warnings at all; and a point-level `supersedes` ref on a point that folds
+as **NOOP** is dropped where the ref is collected — before `_resolve_point_supersede` ever
+runs — so it logs nothing. The third is the SUPERSEDE row's own channel, which is why this
+list is a blind-spot map and not a footnote: on that channel a zero drop count and a missing
+edge coexist. The run note (`runner.operator_drop_notes`, zero branch) enumerates the same
+three, and `tests/test_evidence_8503_claims.py::test_the_blind_spot_enumeration_matches_the_shipped_note`
+compares the two lists mechanically (count first, then each clause), so this paragraph cannot
+understate the instrument again — it said *two* until review round 9.
+
+The receipts committed here predate that wording, and their note carries **two** stale
+clauses, not one: "not the write path dropping one" (the commit seam) and a claim that every
+`edge_missing` in the receipt is the model not forming the edge — the second is refuted by
+the receipt's own `operator_audit.drop_warnings` (6 replace-channel refusals in A, 7 in B).
+The counts are unchanged and the corrected note is what the shipped code emits.
 
 **`supersede_refusals`: 2 (receipt A) and 4 (receipt B)** — and the way to read that number
 is a lesson in itself. The receipts RECORD 6 and 7, because they were produced before review
