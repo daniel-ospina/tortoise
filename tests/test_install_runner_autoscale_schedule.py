@@ -1354,3 +1354,110 @@ def test_uninstall_fails_when_the_agent_stays_loaded(tmp_path):
     res = _run(sb, "--uninstall")
     assert res.returncode == 1, (res.stdout, res.stderr)
     assert "STILL LOADED" in res.stderr, res.stderr
+
+
+# ── cycle 4 review: the symlinked main checkout, and the interpreter the SCHEDULE pins ────────
+def _real_checkout(repo: Path) -> None:
+    """Turn the sandbox's `repo` into a REAL git checkout.
+
+    ⛔ The fixture's `.git` is an EMPTY DIRECTORY on purpose (a plain checkout, "not a linked
+    worktree"), so the real `git` exits 128 and `_common` is empty in every other case — which
+    means the worktree guard's ACCEPT direction was exercised by no test at all. These cases need
+    the real binary, because the bug they pin is a LOGICAL-vs-PHYSICAL path comparison that only a
+    real `git rev-parse` produces.
+    """
+    import shutil as _shutil
+
+    git = _shutil.which("git")
+    if not git:
+        pytest.skip("git is required for the real-checkout premise")
+    (repo / ".git").rmdir()
+    subprocess.run([git, "init", "-q", str(repo)], check=True, capture_output=True)
+    subprocess.run(
+        [git, "-C", str(repo), "-c", "user.email=a@b", "-c", "user.name=a",
+         "commit", "-q", "--allow-empty", "-m", "x"],
+        check=True, capture_output=True,
+    )
+
+
+def test_a_main_checkout_reached_through_a_symlink_is_NOT_a_linked_worktree(tmp_path):
+    """⛔ `REPO` IS BASH'S LOGICAL `pwd`; `git` ANSWERS WITH THE PHYSICAL PATH.
+
+    Compared as raw strings, a MAIN checkout reached through any symlinked component — macOS
+    `/tmp` -> `/private/tmp`, a symlinked home or deploy dir — is indistinguishable from a linked
+    worktree, so the installer refused it with "run from a linked worktree" while it was exactly
+    what that message asks for, and nothing was ever installed on such a box. A trailing slash on
+    the repo root hit the same string compare.
+
+    Mutation: compare `"$_main" != "$REPO"` again (drop `_physical`/`_REPO_PHYS`) -> the symlinked
+    path refuses -> RED.
+    """
+    sb = _sandbox(tmp_path, uname="Linux", cron=False)
+    _systemd_stubs(sb)
+    # the sandbox fabricates only `tools/runner_autoscale.py`; the installer has to exist at the
+    # path the symlinked invocation addresses
+    import shutil as _shutil
+
+    _shutil.copy(SCRIPT, sb["repo"] / "tools" / SCRIPT.name)
+    _real_checkout(sb["repo"])
+
+    # the SYMLINKED COMPONENT is the PARENT, so the checkout is addressed by a path that differs
+    # textually from its physical one. `AUTOSCALE_REPO_ROOT` is pinned to THAT path — the fixture
+    # sets it to the physical repo, which would bypass the derivation under test.
+    link = tmp_path / "via-symlink"
+    link.symlink_to(sb["repo"].parent, target_is_directory=True)
+    alt = link / sb["repo"].name
+    assert str(alt) != str(sb["repo"]), "the premise needs a path that differs textually"
+    env = dict(sb["env"], AUTOSCALE_HAS_SYSTEMD="1", AUTOSCALE_REPO_ROOT=str(alt))
+
+    res = subprocess.run(
+        ["bash", str(alt / "tools" / "install-runner-autoscale-schedule.sh"), "--dry-run"],
+        env=env, capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL,
+    )
+    assert "run from a linked worktree" not in res.stderr, (res.stdout, res.stderr)
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    assert f"WorkingDirectory={sb['repo']}" in res.stdout or "runner-autoscale.timer" in res.stdout, (
+        res.stdout, res.stderr)
+
+    # AND A REAL LINKED WORKTREE IS STILL REFUSED — the fix must not delete the guard.
+    git = _shutil.which("git")
+    wt = tmp_path / "wt" / "linked"
+    wt.mkdir(parents=True)
+    subprocess.run([git, "worktree", "add", "-q", "--detach", str(wt)],
+                   cwd=str(sb["repo"]), check=True, capture_output=True)
+    (wt / "tools").mkdir(exist_ok=True)
+    _shutil.copy(sb["repo"] / "tools" / "install-runner-autoscale-schedule.sh", wt / "tools")
+    res = subprocess.run(
+        ["bash", str(wt / "tools" / "install-runner-autoscale-schedule.sh"), "--dry-run"],
+        env=dict(env, AUTOSCALE_REPO_ROOT=str(wt)),
+        capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL,
+    )
+    assert res.returncode == 2, (res.stdout, res.stderr)
+    assert "linked worktree" in res.stderr, res.stderr
+    assert not (sb["install"] / "runner_autoscale.py").exists(), "refusal wrote the run-copy"
+
+
+def test_status_fails_when_the_PINNED_interpreter_is_gone(tmp_path):
+    """⛔ `--status` PROBED WITH THE INTERPRETER *IT* RESOLVED, NOT THE ONE THE UNIT PINS.
+
+    The installer RENDERS `$PYTHON` into the plist/unit at install time (chosen by the >= 3.12
+    floor). `--status` re-resolved it and probed with whatever THIS shell found, so the two could
+    disagree and the probe still passed: install pins a `.venv/bin/python`, the `.venv` is later
+    reaped (it lives under a worktree that is reaped with its PR), every fire executes a missing
+    binary, and `--status` printed `probe: OK` and exited 0 on it.
+
+    Mutation: probe with `$PYTHON` unconditionally and drop the `pinned_interpreter` check -> rc 0
+    on a schedule whose pinned binary is gone -> RED.
+    """
+    sb = _sandbox(tmp_path)  # Darwin -> launchd, whose plist pins ProgramArguments[0]
+    assert _run(sb).returncode == 0
+    pinned = sb["bin"] / "py312"
+    assert pinned.exists(), "the install must have pinned the sandbox interpreter"
+    pinned.unlink()  # the directory it named is reaped; a fresh >= 3.12 one is still on PATH
+    fresh = _write_stub(
+        sb["bin"], "py312b",
+        '#!/usr/bin/env bash\nif [ "$1" = "-c" ]; then exit 0; fi\nexit 0\n',
+    )
+    res = _run(sb, "--status", env=dict(sb["env"], AUTOSCALE_PYTHON=str(fresh)))
+    assert "MISSING" in res.stderr, (res.stdout, res.stderr)
+    assert res.returncode == 2, (res.stdout, res.stderr)
