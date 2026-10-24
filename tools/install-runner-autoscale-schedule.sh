@@ -45,6 +45,18 @@
 #                              (the install-time `--status` probe is what refuses that by default)
 #   AUTOSCALE_SHA256           hasher for the drift check (default sha256sum, else shasum -a 256)
 #   AUTOSCALE_PLATFORM         force one platform branch (systemd|cron|launchd) — test seam
+#   AUTOSCALE_HAS_SYSTEMD      0|1 override for the systemd PROBE only — test seam (see below)
+#   AUTOSCALE_HAS_CRON         0|1 override for the cron PROBE only — test seam (see below)
+#
+# ⛔ AUTOSCALE_PLATFORM vs the two PROBE seams — they are NOT interchangeable, and the difference
+# is testability, not convenience. `AUTOSCALE_PLATFORM` short-circuits `platform()` BEFORE the
+# `case "$(uname -s)"` dispatch, so a suite that leans on it tests the branch it NAMES and nothing
+# in the real `Linux)` arm. Measured in review of PR #9685: with the cron cases on that seam, two
+# mutations of the Linux arm survived a fully green suite — deleting `elif has_cron` (a cron-only
+# Linux box then resolves to `none` and REFUSES to install, losing its schedule forever) and
+# reordering the probes (a systemd box silently swapped onto cron). Both are the "inert enforcer
+# with a green suite" this file's header exists to refuse. Overriding the PROBES keeps the real
+# dispatch under test — the `case` arm runs, only the two host facts are supplied.
 #
 # ⛔ WHY A COPY AND NOT THE CHECKOUT PATH. The timer must survive the checkout: a linked worktree
 # is reaped when its PR merges, and the main worktree's branch moves. The fleet's own machinery is
@@ -162,8 +174,14 @@ CRON_ENV="HOME=$HOME PATH=$GH_DIR:/usr/local/bin:/usr/bin:/bin"
 [ -n "$PROVISIONER" ] && CRON_ENV="$CRON_ENV RUNNER_AUTOSCALE_PROVISIONER=$PROVISIONER"
 
 # ── platform detection, fail-closed ───────────────────────────────────────────────────────────
-has_systemd() { [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; }
-has_cron()    { command -v crontab >/dev/null 2>&1 && [ -n "$(command -v cron 2>/dev/null || command -v crond 2>/dev/null || ls /usr/sbin/cron 2>/dev/null)" ]; }
+has_systemd() {
+  if [ -n "${AUTOSCALE_HAS_SYSTEMD:-}" ]; then [ "$AUTOSCALE_HAS_SYSTEMD" = 1 ]; return; fi
+  [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1
+}
+has_cron() {
+  if [ -n "${AUTOSCALE_HAS_CRON:-}" ]; then [ "$AUTOSCALE_HAS_CRON" = 1 ]; return; fi
+  command -v crontab >/dev/null 2>&1 && [ -n "$(command -v cron 2>/dev/null || command -v crond 2>/dev/null || ls /usr/sbin/cron 2>/dev/null)" ]
+}
 
 platform() {
   # A TEST SEAM, like AUTOSCALE_PYTHON: `has_systemd` needs /run/systemd/system, which no
