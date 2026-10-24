@@ -1516,15 +1516,78 @@ def test_the_documented_failure_classes_reconcile_with_the_committed_records():
     )
 
     # The blanket claim the rest of this file is justified by must stay TRUE of
-    # the table it heads: the two figures no committed artifact re-derives (the
-    # matcher's partial scores, the provenance call-shape count) are disclosed
-    # rather than counted as derived. Dropping the disclosure would silently
-    # re-open the "one more unpinned number" loop every review cycle found
-    # (#9695 review cycle 3).
-    assert "with two exceptions that no committed artifact re-derives" in doc, (
-        "the doc claims every table number is recomputed from the graph; the "
-        "matcher's partial scores and the provenance call-shape count are not "
-        "re-derived by anything, so the exceptions must stay stated"
+    # the table it heads. It is now COLUMN-scoped: the counted columns are
+    # recomputed and pinned, the failure column is narrative. Cycle 4 found that
+    # enumerating "two exceptions" was itself false (the provenance figures are
+    # readings of `write.py`, and the matcher's partial scores of the matcher),
+    # so what is pinned here is the scoping itself — dropping it silently
+    # re-opens the "one more unpinned number" loop every cycle found.
+    assert "counted columns" in doc and "The rest of the failure column is narrative" in doc, (
+        "the doc's numbers claim is no longer column-scoped: it would claim the "
+        "narrative failure column is recomputed from the graph, which it is not"
+    )
+    assert "readings of each run's `write.py`" in doc, (
+        "the failure column's provenance figures are readings of `write.py` — "
+        "the disclosure that says so was dropped"
+    )
+
+    # The graph-derivable counts the scoping sentence PROMISES are pinned are
+    # pinned here, so the sentence cannot be true-by-vagueness (#9695 review
+    # cycle 4): the NAND's edge count in the one run that wrote one, and the
+    # wrong-axis kind count from the records' own `wrong_axis_kinds`.
+    number_words = {
+        1: "one", 2: "two", 3: "three", 4: "four", 5: "five",
+        6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten",
+    }
+    meeting_graph = json.loads(
+        (GOLD.parent / "runs" / "meeting_transcript" / "graph.json").read_text()
+    )
+    nand_ops = {
+        operator["id"]
+        for operator in meeting_graph["operators"]
+        if operator["op_type"] == "NAND"
+    }
+    nand_edges = sum(
+        1
+        for edge in meeting_graph["edges"]
+        if edge["relation"] == "NAND"
+        and (edge.get("from_id") in nand_ops or edge.get("to_id") in nand_ops)
+    )
+    assert nand_edges == 2, nand_edges
+    for pattern, where in (
+        (r"\*\*unexplained NAND\*\* \((\w+) edges", "the results table's row 2"),
+        (r"one NAND operator with (\w+) edges", "the NAND class row"),
+    ):
+        found = re.search(pattern, doc)
+        assert found, f"{where} no longer states the NAND's edge count"
+        word = found.group(1).lower()
+        assert number_words.get(nand_edges) == word, (
+            f"{where} says the NAND has {word} edges; the committed graph "
+            f"carries {nand_edges}"
+        )
+
+    # "one kind declared for another axis" is the records' `wrong_axis_kinds`
+    # total — the correction's Point-layer `incident`.
+    wrong_axis_total = sum(
+        len(record["wrong_axis_kinds"]) for record in runs
+    )
+    assert wrong_axis_total == 1, wrong_axis_total
+    census_axis = re.search(r"\*\*(\w+) kind declared for another axis\*\*", doc)
+    assert census_axis, "the census row no longer states the wrong-axis kind count"
+    assert census_axis.group(1).lower() == number_words[wrong_axis_total], (
+        f"the census row says {census_axis.group(1)!r} kind(s) declared for "
+        f"another axis; the records carry {wrong_axis_total}"
+    )
+
+    # The undeclared-kind row's `pointKind: issue` ×N is the same two Point-layer
+    # nodes the wrong-but-declared row charges, one row up in the same table. It
+    # is stated TWICE — that row and the correction log that moved it out of the
+    # invented-kind class — so the count is pinned to 2: a drift in either place
+    # reds rather than being masked by the other (#9695 review cycle 4).
+    issue_phrase = f"`pointKind: issue` ×{issue_points}"
+    assert doc.count(issue_phrase) == 2, (
+        f"expected the undeclared-kind row and the correction log to both state "
+        f"{issue_phrase!r}; the doc states it {doc.count(issue_phrase)} time(s)"
     )
 
     # The census ENUMERATION is prose, so its `×N` multipliers drifted unpinned

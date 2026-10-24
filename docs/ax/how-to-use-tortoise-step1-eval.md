@@ -138,14 +138,16 @@ removing (#9695 review P2).
 
 ## Results — measured 2026-10-22, ten runs
 
-Every number in the two tables below is recomputed from the graph each agent
-wrote, with two exceptions that no committed artifact re-derives and that are
-labelled where they appear rather than trusted: the item matcher's partial
-scores (`3 of 4 stems … 0.375`), quoted from the matcher and explained under
-*Instrument limitations and corrections* below, and the call-shape count of runs
-that reached provenance through `create_point(extractedFrom=[…])` rather than
-`create_edge` (`seven`), which is a reading of each run's own `write.py` and not
-of the graph. Each run
+Every number in the two tables' **counted columns** — the results table's
+`#`/input/P0/P1/Layers cells and every class-table Count cell — is recomputed
+from the committed records, and the graph-derivable counts the failure column
+states (the census's `×N`, the NAND's two edges, the one wrong-axis kind) are
+pinned the same way. The rest of the failure column is narrative: the
+provenance figures (how many runs wrote their own Source, and through which
+call) are readings of each run's `write.py`, and the item matcher's partial
+scores (`3 of 4 stems … 0.375`) are its own internal arithmetic — neither is
+re-derived by anything here, so read them as prose rather than as a second
+table of facts. Each run
 directory holds **both** halves — `graph.json` (every node's label, kind and id,
 every edge) and `score.json` (the verdicts read from it) — beside the agent's own
 `write.py`. Re-scoring a committed `graph.json` reproduces its `score.json`
