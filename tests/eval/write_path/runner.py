@@ -1743,12 +1743,14 @@ def operator_drop_notes(drops: dict) -> list[str]:
             "operator drops (#8503): the EXTRACTOR logged no operator drop and "
             "no supersede refusal in any session — so an edge_missing verdict "
             "in this receipt is not an EXTRACTOR-side drop. ⛔ This does NOT "
-            "cover two seams: the commit layer (apply_payload_operators logs "
-            "its skips through _logger, with no warnings sink on the capture), "
-            "and a session whose snapshot failed to read (it emits no warnings "
-            "at all; graph_census's per-session error names those). Both are "
-            "INVISIBLE to this block, which is a named blind spot, not a clean "
-            "bill"
+            "cover three seams: the commit layer (apply_payload_operators logs "
+            "its skips through _logger, with no warnings sink on the capture); "
+            "a session whose snapshot failed to read (it emits no warnings at "
+            "all; graph_census's per-session error names those); and a "
+            "point-level `supersedes` ref on a point that folds as NOOP, which "
+            "is dropped where the ref is collected, before the resolver runs, "
+            "so it logs nothing. All three are INVISIBLE to this block, which "
+            "is a named blind spot, not a clean bill"
         ]
     if not refusals:
         # ⛔ THE DROPS-ONLY CASE IS THE ONE THIS NOTE EXISTS FOR: returning []

@@ -1149,6 +1149,10 @@ def test_run_note_never_claims_zero_drops_when_drops_exist():
 
     both_zero = notes_for(0, 0)
     assert "logged no operator drop and no supersede refusal" in both_zero
+    # the blind-spot enumeration is part of the claim: three seams, named
+    assert "three seams" in both_zero
+    assert "commit layer" in both_zero and "snapshot failed to read" in both_zero
+    assert "NOOP" in both_zero
     # drops only: THE note must exist and name the drops (an empty string would
     # satisfy a bare "not in" assertion — the vacuous pin review round 6 caught)
     drops_only = notes_for(2, 0)

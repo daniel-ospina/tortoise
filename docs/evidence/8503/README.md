@@ -13,8 +13,8 @@ aboutObjects: "#8503, #7949, #2552, #3679, #2514, #9077, EXTRACTOR-V4-ARCHITECTU
 
 **Measured at:** `a999be41e` (the lane's base) with the fix in the working tree, 2026-10-24.
 E4's own gate (`tools/operator_receipt_check.py`) is the acceptance instrument; the
-receipts this document cites are `tests/eval/write_path/receipts/w2b-operator-2026-10-24-8503-{a,b}.json`
-and both exit **EVIDENCE VALID**.
+receipts this document cites are `tests/eval/write_path/receipts/w2b-operator-2026-10-24-8503-{a,b,preleg}.json`
+and all three exit **EVIDENCE VALID**.
 
 > **Verdict: 5/14 in-14 — the SAME number the issue's own pre-fix run measured, and NOT the
 > 14/14 the criterion asks for. This PR does not claim a gain on the criterion number.**
@@ -110,9 +110,11 @@ original corpus run), so the criterion denominator is **14**.
 | arm | `edge_correct` (in-14) | `content_ok` /15 | `operator_drops` | `distractor_leakage` |
 |---|---|---|---|---|
 | BEFORE (unmodified tree, 1 diagnostic run — `before-run.json`) | **3** | 7 | — | — |
+| BEFORE (2026-10-19 product-lane receipt) | 2 | 8 | — | 0 |
 | BEFORE (the issue's own run, 2026-10-24T04:25Z) | **5** | — | not carried | — |
 | AFTER run A | **5** | 11 | 0 | 1 |
 | AFTER run B | **5** | 11 | 0 | 0 |
+| AFTER `preleg` (before the recall leg) | **5** | 13 | — (field absent; NOT 0) | **2 — above the gold tolerance of 1** |
 
 **Provenance of the BEFORE column, stated rather than implied.** `before-run.json` (committed
 beside this file) is a DIAGNOSTIC PROBE artifact, not a runner receipt: it drives the same
@@ -123,8 +125,9 @@ and 3/14 are the same measurement). The issue's own pre-fix run is a third artif
 receipt, and reads **5/14** — which is why this document does not claim a gain at the
 criterion number. The probe exists because no pre-fix receipt at the base commit does.
 
-⚠️ **Both committed receipts carry `verdict: regression` / `failure_origin: gate_regression`**
-(salient survival 0.511 / 0.500 against the blessed baseline). "EVIDENCE VALID" means the
+⚠️ **All three committed fixed-tree receipts carry `verdict: regression` /
+`failure_origin: gate_regression`**
+(salient survival 0.511 / 0.500 / 0.489 against the blessed 0.544, all below it). "EVIDENCE VALID" means the
 receipt is a valid E4 artifact, NOT that the benchmark passed — the gate holds the two apart
 on purpose. The pre-fix operator receipt (`...-2026-10-19.json`) also reads `regression`, so
 this is a stale family-wide baseline rather than a regression this PR caused, and it is not
@@ -357,10 +360,10 @@ coverage-ratio shape is re-injected as a fourth arm in section 2.
   earlier note ("a corpus-level figure is stable enough at N=2") is **not** true of this
   state: the same code measured 2 and 6 on consecutive full-corpus runs. Any future claim on
   E4 needs ≥5 runs.
-* **The acceptance number 14/14 is not reached, and the remaining bucket is model judgment**:
-  3 MITIGATES rows (sibling-point choice), 1 SUPERSEDE row (channel not used by the model),
-  2 endpoint rows (different claims about the same subject). No plant amendment is proposed:
-  every planted pair is licensed by `ONTOLOGY.md` §3.1/§3.9.
+* **The acceptance number 14/14 is not reached; the residual is NINE rows per run, in four
+  classes** (§3.2e lists every one): MITIGATES pair choice 3 (A) / 2 (B) · SUPPORTS with no IMPL
+  formed between two present claims 2 (A) / 3 (B) · SUPERSEDE 1 · `to_content_missing` 3 in each.
+  No plant amendment is proposed: every planted pair is licensed by `ONTOLOGY.md` §3.1/§3.9.
 * **Environment disclosure.** The cell's root filesystem was at 100% (315 MB free) and
   `.venv` could not be synced (`uv sync --extra embeddings` failed with ENOSPC on
   `triton/_C/libtriton.so`). The measurements ran on a peer lane's venv read-only
@@ -371,8 +374,13 @@ coverage-ratio shape is re-injected as a fourth arm in section 2.
   pass (`tortoise/svbp.py`, jax) exceeds the repo's 300 s per-test cap at this box's load
   (average 8–11 on 8 CPUs with ~60 live worktrees). The suites that do not enter that path
   are green (§6).
-* **Leakage did not regress**: `distractor_leakage_per_run` 1 and 0 after, against a design
-  tolerance of 1 — the wider claim licence did not turn into routine-aside leakage.
+* **Leakage: 1 and 0 in the two after-receipts, but 2 in `preleg`** — and 2 is ABOVE the golds'
+  `distractor_leakage_tolerance` of 1, which `schema.py` records as a regression in `compare_run`.
+  So the honest statement is NOT "the wider claim licence did not leak": it is that of the three
+  committed fixed-tree runs, TWO measured within tolerance (1 and 0) and one did not (2), on a
+  corpus whose leakage tolerance is 1. That is a risk this PR carries rather than a non-regression, and it is
+  stated here because the alternative — quoting only the two runs that read 1 and 0 — is the
+  selective reporting this document exists to avoid.
 
 ### 5.1 What the review rounds changed (and what they caught)
 
