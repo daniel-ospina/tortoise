@@ -1812,7 +1812,7 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              "tools/runner_autoscale.py",
              # PR #9685 review round 9, P1-2: the INSTALLER arms the guard, and it was
              # missing while its `.py` was listed — so an installer-only diff selected
-             # NO surface. That is the same silent-drop class one file over: the 366
+             # NO surface. That is the same silent-drop class one file over: the 825
              # lines that decide whether the timer is armed at all were verified by
              # nothing. Pinned by
              # tests/test_ci_selection.py::test_runner_autoscale_installer_change_selects_core_not_tier1.

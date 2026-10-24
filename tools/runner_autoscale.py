@@ -180,19 +180,23 @@ EXIT  0 converged / at-ceiling / over-ceiling / nothing to do / a REFUSAL (an an
         the verdict itself to a non-zero code would red the timer every interval on a healthy
         box that is simply below target, and would make the installer's install-time `--status`
         probe report FAILED on those same boxes.
-      5 `fill-refused-by-provisioner` — `install-ci-runner-x64.sh`'s OWN guard refused the count
-        this tool asked for. ⛔ THIS ONE IS NOT EXIT 0, and the difference is what the refusal
-        MEANS: the box is under target and the one sanctioned registration path will not fill it,
-        so exit 0 here is a green timer on a permanently-under-filled box (the false-PASS class
-        this file exists to prevent). ⛔ The tool's ceiling is NOT the binding predicate — the
-        installer sizes a runner at `CORES_PER_RUNNER=2` + `CORES_RESERVED_FOR_AGENT_LANES=2`, so
-        a 4-core box caps at ONE through that path while the owner's table targets 2, and no
-        memory reading can change the CPU arm. Reconciling the two models is a DECISION, not an
-        average, and it is open at #9672; this exit code is what makes the disagreement visible
-        meanwhile. ⛔ AND THAT MEANS PERMA-AMBER IS INTENDED HERE, not an oversight: while a
-        canonical cell is below its target, the installer's `2 GB/runner + 4 GB` reserve is
-        stricter than that cell's free memory, so the refusal repeats every pass and the unit
-        reads `failed` continuously until #9672 decides which predicate binds. ⛔ IT IS NOT
+      5 `fill-refused-by-provisioner` — `install-ci-runner-x64.sh`'s OWN guard refused this box
+        (the count it asked for, or one of the callee's other arms — architecture, forks, DISK, an
+        unreadable measurement, gate state; `die()` defaults to 2 for every one of them). ⛔ Read
+        the pass note, not this line, for WHICH arm: only `cpu headroom` / `memory headroom` are
+        the sizing disagreement below, and the others must be ACTIONED, never waited out. ⛔ THIS
+        ONE IS NOT EXIT 0, and the difference is what the refusal MEANS: the box is under target
+        and the one sanctioned registration path will not fill it, so exit 0 here is a green timer
+        on an under-filled box (the false-PASS class this file exists to prevent). ⛔ When the arm
+        IS the sizing rule, the tool's ceiling is NOT the binding predicate — the installer sizes
+        a runner at `CORES_PER_RUNNER=2` + `CORES_RESERVED_FOR_AGENT_LANES=2`, so a 4-core box
+        caps at ONE through that path while the owner's table targets 2, and no memory reading can
+        change the CPU arm. Reconciling the two models is a DECISION, not an average, and it is
+        open at #9672; this exit code is what makes the disagreement visible meanwhile. ⛔ AND
+        THAT MEANS PERMA-AMBER IS INTENDED FOR THAT ARM, not an oversight: while a canonical cell
+        is below its target, the installer's `2 GB/runner + 4 GB` reserve is stricter than that
+        cell's free memory, so the refusal repeats every pass and the unit reads `failed`
+        continuously until #9672 decides which predicate binds. ⛔ IT IS NOT
         ALWAYS AMBER: FILL is only attempted while `live < target`, so a cell AT its ceiling never
         calls the provisioner and exits 0 (`at-ceiling`) — the disagreement is invisible there,
         and that is correct, because nothing was refused. The amber state is deliberate and it
