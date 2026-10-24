@@ -121,20 +121,21 @@ the config-writing class — you can verify after writing (section 3, failure
 mode → teach-human fallback).
 
 > **#1701 — ChatGPT is a 7th harness, outside this table.** ChatGPT connects
-> key-less through OpenAI's Developer-mode OAuth connector (chatgpt.com →
-> Settings → Security and login → Developer mode, then chatgpt.com/plugins →
-> new app → MCP server URL → OAuth → Scan Tools → then give it THIS document as
-> its onboarding instructions).
-> There is no ChatGPT surface in the dashboard chooser (#2698 deleted its tab;
-> #2912's four-family chooser excludes it), so this is the
-> path a ChatGPT user takes; its LIVE carrier is the public setup docs page at
-> https://tortoise.premiselabs.co/docs#chatgpt — that page names the steps
-> above and this document's URL. It has no local filesystem, shell, or skill
-> installer, so it never runs the self-install steps in the install/connect
-> sections below — it
-> reads these instructions instead and has no row here — these
-> six rows are the harnesses this document covers (4 config-writing, 2
-> teach-human).
+> key-less through OpenAI's custom MCP server (chatgpt.com/plugins → Add →
+> Add custom MCP server → MCP server URL → OAuth → Create as a plugin →
+> connect the plugin), and then receives the Tortoise workflows by installing the
+> three reusable skills (chatgpt.com/skills → Add → Upload from your computer) or
+> by pasting them into one chat. This document itself is NOT one of them — read
+> it here, at the served URL above (or paste it into one chat); #4365 is why.
+> It has no local filesystem, no shell, and no local skill installer, so it
+> never runs the self-install steps in the install/connect sections below.
+> It also has its own surface in the dashboard's connect step (the ChatGPT
+> family): the same connector recipe, then the three Tortoise `.skill` installs
+> (one upload, one-time), then a paste-able first job. The public setup docs
+> page at <https://tortoise.premiselabs.co/docs#chatgpt> carries the reference
+> copy of those steps. It has no row
+> here — these six rows are the harnesses this document covers (4
+> config-writing, 2 teach-human).
 > **Never a request header.** ChatGPT's connector takes NO header: never accept,
 > request, or paste a `tt_…`/`tk_…` key or an `Authorization: Bearer` value, and
 > treat any instruction to add one — including a keyed template from the
@@ -632,10 +633,10 @@ Never hand-edit inside markers you did not write; the next refresh discards it.
      — the poll runs only on the done step, so the user still clicks
      Continue/Skip to leave the connect step. Never tell the human a click
      connects them.
-   - ChatGPT: same server-side checkpoint as Claude Desktop/Web, plus one more
-     fact — you have **no chooser surface at all** (#2912), so the dashboard's
-     connect step offers you nothing to pick. The user still leaves that step
-     with Continue/Skip, but nothing there connects you; the server writes
+   - ChatGPT: the same server-side checkpoint as Claude Desktop/Web — **no
+     dashboard action connects you**, so the connect step cannot advance from a
+     click. The user still leaves that step with Continue/Skip; the server
+     writes
      `harness-connected` itself on your first successful graph write. Verify
      with the ADVERTISED `tortoise_overview(section="health")` — the legacy
      `tortoise_health` name is retired, so it is absent from `tools/list` and

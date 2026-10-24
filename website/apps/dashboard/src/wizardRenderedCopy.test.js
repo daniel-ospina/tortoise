@@ -53,10 +53,10 @@ const snapshot = JSON.parse(readFileSync(join(here, 'wizardRenderedCopy.snapshot
 // The reviewed population, as a census of (family, kind) — pinned by HAND, never
 // derived from the render. A new paragraph in ANY family changes its count here.
 const PROSE_CENSUS = {
-  'wizard-caption:data': 5,
-  'wizard-caption:inline': 3,
+  'wizard-caption:data': 6,
+  'wizard-caption:inline': 8,
   'wizard-note:expression': 1,
-  'wizard-note:inline': 2,
+  'wizard-note:inline': 4,
   'wizard-note:local-const': 3,
   // #4915: was 2. The second `snippet:expression` node was the Memory-sources
   // row's `<pre className="snippet">{HARNESS_CAPTURE_INSTALL[h]}</pre>`, which
@@ -168,7 +168,15 @@ function patch(source, oldText, newText, label) {
   return source.replace(oldText, newText)
 }
 
-const WORKFLOWS_CAPTION = '<p className="wizard-caption">{WIZARD_CAPTIONS.workflows}</p>'
+// #4885: the mutation anchor must be UNIQUE in main.jsx, and the prose class is
+// now rendered on two surfaces — the Claude connector leaves' workflows card and
+// #9660's ChatGPT first-job card. Anchoring the paragraph ALONE would match both
+// and the mutation would be ambiguous, so the anchor carries the comment line
+// that only the Claude arm has. The property under test is unchanged: append a
+// paragraph to the Claude arm and the census must see it.
+const WORKFLOWS_CAPTION =
+  '<p className="wizard-caption">{WIZARD_CAPTIONS.workflows}</p>\n'
+  + '                            {/* #2865: composed KEY-LESS — a connector surface'
 
 test('#4885 falsifiability: an appended sentence in the OAuth note fails the pin', async () => {
   // The exact proof the issue records.

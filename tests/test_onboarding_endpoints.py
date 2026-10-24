@@ -1363,9 +1363,12 @@ def test_cross_surface_harness_vocab_contract():
         harnesses_js.index("export const HARNESS_FAMILIES"):
         harnesses_js.index("export const HARNESS_FAMILY_IDS")]
     chooser_leaves = set(re.findall(r"id:\s*'([^']+)'", fam_src))
+    # #9660 owner ruling (2026-10-23): `chatgpt` joined the chooser as a
+    # single-choice family — the selection it reverses is the #2698/#2912
+    # EXCLUSION, not the #1701 vocabulary decision (see 2b, unchanged).
     assert chooser_leaves == {
         "claude", "claude-desktop", "claude-web", "codex", "codexDesktop",
-        "cursor", "pi",
+        "cursor", "pi", "chatgpt",
     }, ("the chooser leaf population moved — re-check the analytics bridge "
         "(HARNESS_ANALYTICS_ALIASES) for the new leaf; #2936")
 
@@ -1376,14 +1379,24 @@ def test_cross_surface_harness_vocab_contract():
 
     # 2a. Every leaf the LIVE wizard can put on screen resolves into the
     # vocabulary — and the resolved set IS the vocabulary, so a narrowed or
-    # renamed server enum reds here too.
-    emitted = {attributed(leaf) for leaf in chooser_leaves}
+    # renamed server enum reds here too. #9660: `chatgpt` is now reachable but
+    # DELIBERATELY inert (its alias is null — #1701 keeps the session vocabulary
+    # closed to a harness that never files one), so it is excluded here and
+    # pinned as the ONLY such leaf immediately below.
+    attributed_leaves = chooser_leaves - {"chatgpt"}
+    emitted = {attributed(leaf) for leaf in attributed_leaves}
     assert None not in emitted, (
         f"a chooser leaf has no analytics value — the beacon would emit nothing: "
-        f"{sorted(leaf for leaf in chooser_leaves if attributed(leaf) is None)}")
+        f"{sorted(leaf for leaf in attributed_leaves if attributed(leaf) is None)}")
     assert emitted == set(_HARNESS_ANALYTICS_VALUES), (
         f"the wizard's copy attribution must cover exactly the server vocabulary: "
         f"{sorted(emitted)} != {sorted(_HARNESS_ANALYTICS_VALUES)}")
+    # The exception list is PINNED: a second non-attributable chooser leaf cannot
+    # appear without editing this line, and the reason is recorded next to it.
+    assert {leaf for leaf in chooser_leaves if attributed(leaf) is None} == {"chatgpt"}, (
+        "#1701: chatgpt is the one chooser leaf whose copy beacons are inert "
+        "(it never files a session, so the server vocabulary stays closed to it) — "
+        "widening the vocabulary is a REOPEN of #1701, not a refactor")
 
     # 2b. The ARCHIVED #1643 render maps the full HARNESS_ORDER, so every tab it
     # can select is either attributable or DELIBERATELY excluded — and the one
