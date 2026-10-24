@@ -6035,6 +6035,17 @@ def _flatten_comment(comment: str) -> str:
 #: stated GREEN residual in `#9531`, the same disposition as an unknown quantity noun.
 _MAGNITUDE_QUALIFIER = r"(?:entire|whole|full|overall|complete|remaining|aforementioned)"
 
+#: ⚠️ The subject's DETERMINER slot is two layers, not one (`#9528` re-review round 3).
+#: It was `the|this|that|these|those`, so `that`/`those` were added first and then the
+#: QUANTIFIERS (`all|every|each|both|some|any|no`) — and each round closed one spelling
+#: while its neighbour stayed GREEN, because a quantifier can sit IN FRONT OF an article
+#: or a possessive (`# the rebuild is half of all its cost`, `# half of every run pays
+#: the parse`). One layer could not express both, so the slot is now
+#: quantifier-then-article, and the two vocabularies are this file's single lists rather
+#: than a shape (`\w+\s+` would swallow `no such` and every innocent noun phrase).
+_MAGNITUDE_QUANTIFIER = r"(?:all|every|each|both|some|any|no)"
+_MAGNITUDE_ARTICLE = r"(?:the|this|that|these|those|its|their|our|his|her|your|my)"
+
 #: The quantities a proportion claim is ABOUT — the arm, its cost, its work, in the
 #: plural too ("most of the walks pay the parse"), or an ANAPHOR standing in for one
 #: ("a small fraction of it", "… of its cost"). Every alternative below BINDS to one of
@@ -6042,6 +6053,13 @@ _MAGNITUDE_QUALIFIER = r"(?:entire|whole|full|overall|complete|remaining|aforeme
 #: `most of`": `# most of these modules are literal carriers` asserts no magnitude at
 #: all, and a merge-gating arm that reds on it reports "state the framing that produced
 #: it" for a sentence holding no figure — a false positive, not a policy (`#9501` review).
+#: ⚠️ The DETERMINER slot is `the|this|that|these|those` plus the QUANTIFIERS
+#: (`all|every|each|both|some|any|no`): `# the rebuild is half of all its cost` and
+#: `# half of every run pays the parse` were GREEN while the `these` spelling red, so one
+#: determiner still retired the guard (`#9528` re-review). The slot is a closed list and
+#: every spelling added to it is a GREEN leg's neighbour, which is why it is one list for
+#: the whole predicate rather than a shape (`\w+\s+` would swallow `no such` and every
+#: innocent noun phrase in this repo's comments).
 #: ⚠️ The ANAPHOR is the cycle-3 P0: without it `# the rebuild is a small fraction of it`
 #: was GREEN, one pronoun away from the sentence `#9516` left behind. `it`/`its`/`them`/
 #: `their`/`itself`/`this one` bind as subjects, and so does a DEMONSTRATIVE with a
@@ -6082,7 +6100,7 @@ _MAGNITUDE_ANAPHOR = "|".join(
 )
 
 _MAGNITUDE_SUBJECT = (
-    rf"(?:(?:the\s+|this\s+|that\s+|these\s+|those\s+)?(?:{_MAGNITUDE_QUALIFIER}\s+)?"
+    rf"(?:(?:{_MAGNITUDE_QUANTIFIER}\s+)?(?:{_MAGNITUDE_ARTICLE}\s+)?(?:{_MAGNITUDE_QUALIFIER}\s+)?"
     r"(?:\w+(?:[- ]\w+)*['’]s\s+|\w+(?:[- ]\w+)*s'\s+)?"
     r"(?:arms?|costs?|wall[- ]?clocks?|runs?|suites?|totals?|works?|budgets?|walks?)\b"
     rf"|(?:{_MAGNITUDE_ANAPHOR})\b)"
@@ -6229,10 +6247,17 @@ _MAGNITUDE_MEASUREMENT_NOUNS = frozenset(
     {"cost", "costs", "work", "time", "runtime", "wall-clock", "wallclock"}
 )
 
-#: How many words of the tail are scanned for the possessive. The divided thing is a
-#: noun phrase (`the gate walk's cost`), not a sentence, so a possessive past this
-#: window is not one about THIS share.
-_MAGNITUDE_TAIL_WORDS = 6
+#: How many words of the tail are scanned for a possessive. The divided thing is a
+#: noun PHRASE (`the gate walk's cost`), not a sentence: three words covers a determiner
+#: or qualifier plus the head noun plus one modifier, and a possessive past that is not
+#: one about THIS share. ⚠️ It was six, which reached into the sentence's NEXT clause:
+#: `# the second half of the walk re-reads the arm's output` and `# the second half of the
+#: suite validates the work of the extractor` both RED — two spellings of an innocent
+#: phase sentence, differing from their GREEN twins only by a later clause's noun
+#: (`#9528` re-review). The price is stated: a possessive three words into the divided
+#: thing (`the entire first gate walk's cost`) is now GREEN, and the dropped-apostrophe
+#: spellings the file pins are all at positions 0-2.
+_MAGNITUDE_TAIL_WORDS = 3
 
 
 def _MAGNITUDE_PHASE_SHARE_TAIL(tail: str) -> bool:
@@ -6295,8 +6320,11 @@ def _MAGNITUDE_PHASE_SHARE_TAIL(tail: str) -> bool:
             return True
         if lowered.endswith(("'s", "’s")) or lowered.endswith("s'"):
             return True
-        # a dropped apostrophe: the measurement noun right after the divided thing
-        if position > 0 and lowered in _MAGNITUDE_MEASUREMENT_NOUNS:
+        # a dropped apostrophe: the measurement noun RIGHT AFTER the divided thing —
+        # position 1, not "somewhere in the window", which is what the code did and red
+        # `# the second half of the suite validates the work of the extractor` on a
+        # `work` three words out (`#9528` re-review).
+        if position == 1 and lowered in _MAGNITUDE_MEASUREMENT_NOUNS:
             return True
     return False
 
@@ -6377,6 +6405,13 @@ def _unsettleable_magnitudes(comment: str) -> list[str]:
       are RED), or a PERCENTAGE WITH NO SUBJECT AT ALL (a bare figure whose value
       is written and whose object is not — written without a concrete number here, so
       this description is not itself a bare figure).
+      ⚠️ The phase exemption's NOUN set is closed too (`half|halves|most|part|parts|
+      portion|portions|share|shares|fraction|fractions`), so a positional qualifier in
+      front of a SHARE noun REDs: `# the first third of the walk` and
+      `# the last quarter of the run` are refused even though they name a phase, because
+      `third` and `quarter` are the share class this chain enumerates and admitting them
+      to the phase set would retire the guard for `# a third of the arm`. Stated cost,
+      pinned by a RED leg, and the remedy is one edit (`the first part of the walk`).
       That last cell is the stated PRICE OF THE BINDING rather than an oversight: the
       `percent` alternative requires `of|in <subject>`, because a bare percentage is
       overwhelmingly an unpacked figure (a coverage or a share of something unnamed)
@@ -6537,8 +6572,10 @@ def _magnitude_ratio_findings(prose: str) -> list[str]:
     commit-anchored figures behind it, a percentage that disagrees with the figures of
     the commit it names, and a percentage written OUTSIDE a claim row — which no arm
     recomputes, so it is free to rot. That last shape is the defect this replaces: the
-    paragraph said `It reaches ~17 % only if "this arm" is read as the whole gate walk,
-    with the ungated pass folded in`, and the folded reading is 12 % / 14 %.
+    paragraph it quotes attached a folded-in figure to a reading whose own rows do not
+    give it (the folded percentage is the smaller of the three readings, and the
+    small-looking one belongs to the ungated pass alone — both recomputed from the rows
+    below by the arm that calls this function, never restated here).
     """
     findings: list[str] = []
     measured: dict[str, dict[str, list[float]]] = {}
@@ -6766,6 +6803,28 @@ def test_the_gate_walk_magnitude_ratios_recompute_from_the_rows_they_name():
             f"`{base.group('sha')}`: the module docstring states {stated} and the "
             f"measurement row carries {measured!r} — the two prose sites describe "
             "different measurements of the same tree"
+        )
+
+    # ⚠️ The paragraph also makes the claim in WORDS — "the rebuild is over half of it" —
+    # and a claim in words is not recomputed by a percentage check. Derive it from the
+    # same rows: a re-measurement that puts the rebuild at or below half now reds instead
+    # of leaving the sentence standing while every percentage arm stays green
+    # (`#9528` re-review round 3, which measured exactly that: a consistent re-measurement
+    # at 25 % left both ratio arms and the base-prose arm green).
+    for sha, measured_row in rows.items():
+        rebuild = _seconds(measured_row.group("rebuild"))
+        arm_seconds = _seconds(measured_row.group("arm"))
+        assert rebuild and arm_seconds and len(rebuild) == len(arm_seconds), (
+            f"`{sha}`: the row carries {measured_row.group('rebuild')!r} of "
+            f"{measured_row.group('arm')!r}, so the over-half claim cannot be derived"
+        )
+        assert all(
+            100.0 * value / total > 50.0
+            for value, total in zip(rebuild, arm_seconds, strict=True)
+        ), (
+            f"`{sha}`: the paragraph calls the rebuild 'over half' the arm and these rows "
+            f"put it at or below half ({measured_row.group('rebuild')} of "
+            f"{measured_row.group('arm')}) — the words and the figures disagree"
         )
 
 
@@ -7268,6 +7327,12 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
         # sentence, one word from the GREEN leg above (`#9528` re-review). The pronoun
         # check is scoped to the divided thing's own determiner position.
         "# the second half of the walk re-reads its sources",
+        # ...and the SAME false positive in the two branches the re-review found still
+        # position-blind: an apostrophe or a measurement noun in a LATER clause. Each is
+        # now GREEN, and each differed from a RED leg only by one word's position
+        # (`#9528` re-review round 3).
+        "# the second half of the walk re-reads the arm's output",
+        "# the second half of the suite validates the work of the extractor",
         # a proportion bound to something that is not a measured quantity:
         "# e.g. 3 in 4 cases",
         "# most of these modules are run in the suite",
@@ -7325,6 +7390,23 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
             "without both constraints one word in front of the noun retires this guard"
         )
 
+    # ⚠️ STATED COST of the CLOSED phase-noun set, pinned rather than implied: a
+    # positional qualifier in front of a SHARE noun names a phase and is refused anyway,
+    # because admitting `third`/`quarter` to the phase set would retire the guard for
+    # `# a third of the arm` — the share class this chain enumerates. `the walk` has
+    # three passes, so `the first third of the walk` is the natural spelling and the
+    # remedy is one edit (`the first part of the walk`) (`#9528` re-review round 3).
+    for refused_in_theory_only in (
+        "# the first third of the walk is the ungated pass",
+        "# the last quarter of the run is the cache",
+    ):
+        assert _unsettleable_magnitudes(refused_in_theory_only), (
+            f"{refused_in_theory_only!r} names a PHASE and is refused anyway — that is "
+            "the stated cost of the closed phase-noun set, so if it ever goes GREEN the "
+            "docstring's residual bullet is stale and the share class it protects "
+            "(`# a third of the arm`) has been admitted to the exemption"
+        )
+
     # ⚠️ The PRODUCTIVE proportion spellings are closed, not only the adjectives in front
     # of them. Making the adjective optional fixed `a fraction of this arm`; the
     # vocabulary was still a hand-list, so `two thirds of the arm` escaped — the same
@@ -7366,6 +7448,13 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
         # `one|two|three|four in two|…|five` window was GREEN on `one in ten`).
         "# two in ten of the walks pay the parse.",
         "# five in six of the walks pay the parse.",
+        # ⚠️ The DETERMINER slot is a closed list, and closing one spelling at a time is
+        # how this guard was retired before: `all|every|each|both|some|any|no` were
+        # missing, so `# half of all runs pay the parse` shipped GREEN while the `these`
+        # spelling red (`#9528` re-review round 3).
+        "# half of all runs pay the parse.",
+        "# half of every run pays the parse.",
+        "# the rebuild is half of all its cost.",
         # ⚠️ The DEMONSTRATIVE determiner (`#9528` re-review): `that`/`those` were
         # missing from the subject slot's determiner list, so ONE determiner swapped a
         # RED for a GREEN on the same sentence — the one-synonym-away fail-open, one
