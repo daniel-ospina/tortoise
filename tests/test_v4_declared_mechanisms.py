@@ -1589,8 +1589,109 @@ def _binding_keys(target: ast.expr) -> list[str]:
     return []
 
 
+def _class_body_keys(tree: ast.AST) -> dict[int, list[str]]:
+    """CLASS-QUALIFIED keys for bindings made in a class body, at any depth.
+
+    A class-body binding and its use key differently — `stmt = …` is `name:stmt`,
+    while every use is `Ddl.stmt`, i.e. `expr:Ddl.stmt` — so a class-level DDL
+    fragment shipped unrefused (measured). The transform is mechanical, keyed on
+    the LEADING component of the binding key, so it covers every shape
+    `_binding_keys` can emit rather than the one that was reported:
+
+      `name:stmt`           -> `expr:Ddl.stmt`
+      `expr:parts['k']`     -> `expr:Ddl.parts['k']`
+      a tuple target        -> one entry per leaf (`Ddl.stmt_a`, …)
+      a NESTED class        -> `expr:Outer.Inner.stmt`
+
+    Keyed by `id(target)` so the caller widens exactly the binding whose value is
+    incomplete: widening every class-body binding regardless of value tainted enum
+    members by the dozen (`OpenOutcome.DEDUP`), and a bare final name collided with
+    any attribute of that name (`intent.scope` vs a class-body `scope`) — both
+    measured before the key was made class-qualified.
+    """
+    keys: dict[int, list[str]] = {}
+    # Qualified names from a parent map, so a NESTED class is `Outer.Inner` and not
+    # `Inner` (measured: the inner name alone never matches `Outer.Inner.stmt`).
+    parent: dict[int, ast.AST] = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parent[id(child)] = node
+
+    def qualified(node: ast.ClassDef) -> str:
+        names = [node.name]
+        up = parent.get(id(node))
+        while up is not None:
+            if isinstance(up, ast.ClassDef):
+                names.append(up.name)
+            up = parent.get(id(up))
+        return ".".join(reversed(names))
+
+    #: A compound statement INSIDE a class body binds just as much as a plain
+    #: assignment (`class Ddl: for stmt in ["… UNIQUE NODE "]: …`), and reading only
+    #: `cls.body`'s direct statements missed it — measured: that binding shipped with
+    #: `assembled == []` while the identical binding at module level was refused.
+    #: So the class body is descended through the compound forms; a nested CLASS is
+    #: not descended (it gets its own qualified name) and neither is a method body
+    #: (its `self.x` bindings and uses already share one spelling).
+    _SCOPE = (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+
+    def body_statements(nodes: list[ast.stmt]) -> list[ast.stmt]:
+        out: list[ast.stmt] = []
+        for node in nodes:
+            if isinstance(node, _SCOPE):
+                continue
+            out.append(node)
+            for name in ("body", "orelse", "finalbody"):
+                inner = getattr(node, name, None)
+                if isinstance(inner, list) and inner and isinstance(inner[0], ast.stmt):
+                    out.extend(body_statements(inner))
+            for handler in getattr(node, "handlers", []) or []:
+                out.extend(body_statements(handler.body))
+            for case in getattr(node, "cases", []) or []:
+                out.extend(body_statements(case.body))
+        return out
+
+    for cls in [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]:
+        qual = qualified(cls)
+        for stmt in body_statements(cls.body):
+            targets: list[ast.expr] = []
+            if isinstance(stmt, ast.Assign):
+                targets = list(stmt.targets)
+            elif isinstance(stmt, ast.AnnAssign):
+                targets = [stmt.target]
+            # A `for` target and a walrus inside the class body bind too, and they
+            # are not Assign/AnnAssign nodes: a class body that guards its binding
+            # with a loop or a condition is the shape that shipped unrefused after
+            # the first class-body fix (measured).
+            for inner in ast.walk(stmt):
+                if isinstance(inner, (ast.For, ast.AsyncFor, ast.NamedExpr)):
+                    targets.append(inner.target)
+            for target in targets:
+                # EVERY node of the target shape gets a class-qualified key, so a
+                # tuple target's leaves (`stmt_a`, `stmt_b`) and a subscript target
+                # (`parts["k"]`) are covered without naming each shape here.
+                for elt in ast.walk(target):
+                    if not isinstance(
+                        elt, (ast.Name, ast.Attribute, ast.Subscript, ast.Tuple, ast.List)
+                    ):
+                        continue
+                    for key in _binding_keys(elt):
+                        keys.setdefault(id(elt), []).append(
+                            f"expr:{qual}.{key.split(':', 1)[1]}"
+                        )
+    return keys
+
+
 def _use_key(node: ast.expr) -> str | None:
-    """The same key for a USE of a bound name; `None` for anything else."""
+    """The same key for a USE of a bound name; `None` for anything else.
+
+    A `Name` keys on its identifier; an attribute or subscript keys on its SOURCE
+    TEXT. A class-body binding is the case those two disagree on: the binding is
+    `stmt = …` (keyed `name:stmt`) but every use is `Ddl.stmt` (keyed
+    `expr:Ddl.stmt`), so a class-level DDL fragment shipped unrefused (measured).
+    :func:`_class_body_keys` therefore registers such a binding under its final
+    name too, and an attribute use is matched against that.
+    """
     if isinstance(node, ast.Name):
         return f"name:{node.id}"
     if isinstance(node, (ast.Attribute, ast.Subscript)):
@@ -1643,9 +1744,15 @@ def _incomplete_ddl(value: ast.expr | None) -> bool:
     fragments = _ddl_fragments(value)
     if not any(DDL_FRAGMENT.search(f) for f in fragments):
         return False
-    return not any(
-        DDL.search(f) and DDL_LABELLED.search(DDL.search(f).group(0))
+    # ANY incomplete fragment makes the whole carrier incomplete. The earlier
+    # reading ("taint unless some element is a complete statement") left a MIXED
+    # collection — `[<the complete GraphEvent DDL>, "… UNIQUE NODE "]` — clean, so
+    # `_TEMPLATES[1] + "Point …"` shipped through it (measured). One resolvable
+    # element says nothing about the others.
+    return any(
+        not (DDL.search(f) and DDL_LABELLED.search(DDL.search(f).group(0)))
         for f in fragments
+        if DDL_FRAGMENT.search(f)
     )
 
 
@@ -1728,17 +1835,22 @@ def ddl_scan(root: Path) -> tuple[list[str], list[str], list[str]]:
         #: supplied at the use site cannot be decided here, so a USE of one is
         #: `assembled` and never an absence.
         tainted: set[str] = set()
+        class_keys = _class_body_keys(tree)
         for target, value in _bound_pairs(tree):
             if not _incomplete_ddl(value):
                 continue
             keys = _binding_keys(target)
             if keys:
                 tainted.update(keys)
+                # A class-body binding is USED as `Cls.name` — a different key from
+                # the `name:` spelling it binds under (`_class_body_keys`).
+                tainted.update(class_keys.get(id(target), ()))
             else:  # a binding shape this scan cannot key is NOT clean
                 assembled.append(
                     f"{rel}: `{ast.unparse(target)}` is bound to an incomplete "
                     "DDL statement in a shape this scan does not resolve"
                 )
+
         for node in ast.walk(tree):
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 if id(node) in docstrings:
@@ -1909,6 +2021,109 @@ def test_the_ddl_scan_sees_every_form_that_could_name_a_label(tmp_path) -> None:
             'g.query("GRAPH.CONSTRAINT " + "CREATE pt UNIQUE NODE Point")\n',
             True,
             False,  # no SINGLE literal holds the statement — that is the point
+        ),
+        "class_attr_use": (
+            'class Ddl:\n'
+            '    stmt = "CREATE CONSTRAINT pt UNIQUE NODE "\n'
+            '\n'
+            'def create(g):\n'
+            '    g.query(Ddl.stmt + "Point")\n',
+            True,
+            True,
+        ),
+        "cls_compound_for": (
+            # A class body that GUARDS its binding with a loop — the shape that
+            # shipped unrefused after the first class-body fix, because only
+            # direct `Assign`/`AnnAssign` statements were class-qualified.
+            'class Ddl:\n'
+            '    for stmt in ["CREATE CONSTRAINT pt UNIQUE NODE "]:\n'
+            '        pass\n'
+            '\n'
+            'def c(g):\n'
+            '    g.query(Ddl.stmt + "Point")\n',
+            True,
+            True,
+        ),
+        "cls_compound_if": (
+            'class Ddl:\n'
+            '    if True:\n'
+            '        stmt = "CREATE CONSTRAINT pt UNIQUE NODE "\n'
+            '\n'
+            'def c(g):\n'
+            '    g.query(Ddl.stmt + "Point")\n',
+            True,
+            True,
+        ),
+        "cls_compound_try": (
+            'class Ddl:\n'
+            '    try:\n'
+            '        stmt = "CREATE CONSTRAINT pt UNIQUE NODE "\n'
+            '    except Exception:\n'
+            '        stmt = ""\n'
+            '\n'
+            'def c(g):\n'
+            '    g.query(Ddl.stmt + "Point")\n',
+            True,
+            True,
+        ),
+        "cls_compound_with": (
+            'class Ddl:\n'
+            '    with open("x") as f:\n'
+            '        stmt = "CREATE CONSTRAINT pt UNIQUE NODE "\n'
+            '\n'
+            'def c(g):\n'
+            '    g.query(Ddl.stmt + "Point")\n',
+            True,
+            True,
+        ),
+        "cls_tuple_target": (
+            'class Ddl:\n'
+            '    a, b = "CREATE CONSTRAINT pt UNIQUE NODE ", "Point"\n'
+            '\n'
+            'def c(g):\n'
+            '    g.query(Ddl.a + "Point")\n',
+            True,
+            True,
+        ),
+        "cls_subscript": (
+            'class Ddl:\n'
+            '    parts = {}\n'
+            '    parts["k"] = "CREATE CONSTRAINT pt UNIQUE NODE "\n'
+            '\n'
+            'def c(g):\n'
+            '    g.query(Ddl.parts["k"] + "Point")\n',
+            True,
+            True,
+        ),
+        "nested_class": (
+            'class O:\n'
+            '    class I:\n'
+            '        stmt = "CREATE CONSTRAINT pt UNIQUE NODE "\n'
+            '\n'
+            'def c(g):\n'
+            '    g.query(O.I.stmt + "Point")\n',
+            True,
+            True,
+        ),
+        "mixed_collection": (
+            # One COMPLETE statement beside one incomplete fragment: the whole
+            # carrier is unverifiable, because a resolvable element says nothing
+            # about its neighbours (measured: this read as clean).
+            '_T = ["GRAPH.CONSTRAINT CREATE ge UNIQUE NODE GraphEvent",\n'
+            '      "CREATE CONSTRAINT pt UNIQUE NODE "]\n'
+            'g.query(_T[1] + "Point")\n',
+            True,
+            True,
+        ),
+        "enum_members": (
+            # The CONTROL for the class-body widening: a class body full of ordinary
+            # strings must not taint its members (measured: an earlier widening did,
+            # by the dozen).
+            'class R(Enum):\n'
+            '    DEDUP = "dedup"\n'
+            '    FILED = "filed"\n',
+            False,
+            False,
         ),
         "complete_name": (
             # The ACCEPTING direction of the taint rule: a name bound to a COMPLETE

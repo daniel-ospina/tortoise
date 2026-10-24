@@ -559,14 +559,19 @@ mechanisms:
       than read as absent — an f-string / `+` / `%` / `.format` / `.format_map` /
       `.join` / `+=`, a statement SPLIT across operands (no single literal holds
       it), and any name, attribute, subscript or tuple target BOUND to an
-      incomplete one (`AnnAssign`, walrus, `for` target, a collection of
-      fragments) wherever it is used. Two things remain out of a static scan's
-      reach and are stated rather than implied: a fragment whose keyword lives
-      entirely outside the scanned module (handed in by a helper or bound by
-      `with`), and — for a MATCH — whether the string is a statement or an
-      explanatory MENTION of the DDL spelling (docstrings are skipped; any other
-      string that spells the statement out reds and must be reworded). It is the
-      reachable surface the claim lives in, not the whole world.
+      incomplete one (`AnnAssign`, walrus, `for` target, a CLASS-BODY binding used
+      as `Cls.name` — including a tuple target, a subscript target and a NESTED
+      class `Outer.Inner.name`, or a class body that GUARDS its binding with
+      `if` / `for` / `try` / `with` — or a collection that mixes a complete
+      statement with an incomplete fragment) wherever it is used. What no static
+      scan reaches is stated as EXAMPLES rather than as a closed list — a fragment
+      whose keyword lives entirely outside the scanned module (handed in by a
+      helper or a default argument), a lookup resolved dynamically
+      (`globals()["X"]`, `getattr(obj, name)`), and — for a MATCH — whether the
+      string is a statement or an explanatory MENTION of the DDL spelling
+      (docstrings are skipped; any other string that spells the statement out reds
+      and must be reworded). It is the reachable surface the claim lives in, not
+      the whole world.
 
   - id: failure_policy
     name: "per-step FAILURE POLICY (G3) — HOLD the unresolved identity, never assert `new`"
