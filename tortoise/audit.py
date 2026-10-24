@@ -974,13 +974,22 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                     # temporal record is frozen by the shared guard, so naming
                     # `tortoise_update_point` there would prescribe a call that
                     # always raises; say what the state IS instead.
+                    #
+                    # ⛔ The refusal is the DOOR's, not the SDK's: name
+                    # `tortoise_update_point` and never "through the SDK".
+                    # `update_entity`'s Point arms write caller props with no
+                    # lifecycle guard and no window validator (#9649), so a
+                    # window re-stamp is still reachable there on a dead claim —
+                    # claiming otherwise in a HIGH finding would hand the
+                    # operator a second unexecutable statement.
                     if is_terminal_status(w_status, bool(w_outdated)):
                         _fix = (
-                            f"Not repairable through the SDK: point {wid} is a "
-                            "terminal claim, and tortoise_update_point now "
-                            "refuses a temporal re-stamp on a dead claim "
-                            "(#7819) — the window stays as stored (a "
-                            "retroactive correction is #5362, not shipped)"
+                            f"Not repairable through tortoise_update_point: "
+                            f"point {wid} is a terminal claim, whose temporal "
+                            "record that verb refuses (#7819) — the window "
+                            "stays as stored (a retroactive correction is "
+                            "#5362, not shipped; the unguarded update_entity "
+                            "door is #9649)"
                         )
                     else:
                         _fix = (f"Repair the window: tortoise_update_point("
