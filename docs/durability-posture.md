@@ -621,8 +621,12 @@ named there as unclassified candidates, where a per-site read is still owed
 (#9867) — not silently tolerated. The durability-scoped
 gate in `tests/test_durability_posture.py` fails the build if a
 `log`/`journal`/`jsonl`/`event stream` is bound to `source of truth` — or to
-`is [the] truth` — or to `is [the|a|an|our|its|their|your] durab(le|ility)` —
-outside this file.
+`is [the] truth` — or to `is [the|a|an|our|its|their|your]? durab(le|ility)` —
+outside this file. Every bracket here marks an OPTIONAL slot, and the `?` on the
+determiner group states it outright: the bare `the log is durable` **is** a hit
+(pinned at `test_claim_regex_matches_the_original_defect_forms`), so reading that
+bracket as "exactly one determiner" would build a gate that fails open on the
+wording #9134's first reword produced.
 
 **The gate's roots are the contract surfaces plus `graph-scripts/` (#4308).**
 The owner's §6 root list (`tortoise/`, the five docs, README) left the two
@@ -642,8 +646,9 @@ source of truth for a test session's created-graph ownership).
 
 **The gate matches a CLAIM SHAPE, not durability claims in general.** It fires on
 a `log`/`journal`/`jsonl`/`event stream` bound to `source of truth` / `is [the]
-truth` / `is [the|a|an|our|its|their|your] durab(le|ility)` (the three families
-spelled out where the gate's roots are described, above); a *mechanism promise* —
+truth` / `is [the|a|an|our|its|their|your]? durab(le|ility)` (the three families
+spelled out where the gate's roots are described, above; the determiner group is
+optional, so a bare `is durable` fires too); a *mechanism promise* —
 e.g. a managed store "provides AOF durability" —
 does not match it, and is corrected by hand (`docs/infra-runbook.md` §1 did this
 under **#2968**). That seam is not this gate's to close: the general binding from
@@ -790,11 +795,12 @@ a written claim to the system it describes is **#5063**.
   The #2881 design round (§7) recommends reversing it to store-authoritative.
   This document states the store-authoritative rule the shipped code already
   implements; the row is the owner's to answer.
-- **#9867 — five live restatements the gate is BLIND to, plus the negation shape
-  it must never touch. This list is NOT claimed complete.** What the gate fires
-  on is a `log`/`journal`/`jsonl`/`event stream` within 40 chars of `source of
-  truth` (either order), or of `is [the] truth`, or of
-  `is [the|a|an|our|its|their|your] durab(le|ility)`. Every site below fails that
+- **#9867 — five sites (six wordings) the gate is BLIND to, plus the negation
+  shape it must never touch. This list is NOT claimed complete.** What the gate
+  fires on is a `log`/`journal`/`jsonl`/`event stream` within 40 chars of `source
+  of truth` (either order), or of `is [the] truth`, or of
+  `is [the|a|an|our|its|their|your]? durab(le|ility)` — the determiner group is
+  optional, so the bare `is durable` is a hit. Every site below fails that
   SHAPE — and **not** because "store" is a different noun: `is the truth store`
   bound to a `journal` subject *would* match the middle alternation, as measured.
   The blindness comes in three measured forms: *truth* sits with no `is`
@@ -806,17 +812,29 @@ a written claim to the system it describes is **#5063**.
   **De-fronting that last one does not fix it — measured: the same sentence with
   `is` in front of `log` is still a miss, and only re-phrasing so that durability
   is the direct predicate matches** — so a widened pattern must handle the gloss
-  form, not the word order. (No positive example is quoted here on purpose: a
-  matching sentence in this doc is itself a wrapped hit, which is the measurement
-  the gate's `"0 anywhere"` claim rests on.) Measured 2026-10-24 on `92b364e8b` and re-checked on
+  form, not the word order. (No positive example is quoted here on purpose, and
+  **not** because this file is scanned: it is the one file BOTH offender legs
+  skip by name — `test_no_durability_source_of_truth_claim_outside_the_canonical_doc`
+  and `test_no_wrapped_durability_claim_anywhere_in_the_scanned_roots` each
+  `continue` on `CANONICAL_DOC_REL` before scanning — so a sentence written here
+  is no hit of either family and cannot move the repo-wide `0`. The `0 anywhere`
+  measurement is over the NON-exempt roots. The reason to withhold a positive
+  example is different and narrower: this doc is the authority, so a quoted
+  false statement would be a copyable restatement sitting in the one file the
+  gate never reads.)
+  Measured 2026-10-24 on `92b364e8b` and re-checked on
   the merged base `9296a4e85`, all still live:
   `projection/entities.py` (*Restore verbatim — the journal is still the truth*:
   `still` defeats the predicate); `log.py`'s `EventLog` rubric (*Is this log a
   JOURNAL — a durable, replayable truth set*: the copula predicates `a JOURNAL`
   and durability is an adjective in the gloss, never the predicate);
   `projection/edges.py` (*a recovery write that appended to the truth store*: no
-  `is`); `commit_ops.py` (*rebuild retains the truth*, in an f-string that splits
-  the phrase around it);
+  `is` copula **and** no subject inside the window — the nearest, `journal-owning`,
+  is on the previous line, so this is a subject-free nominal, a fourth form the
+  three above do not name); `commit_ops.py` (*rebuild retains the truth*:
+  contiguous on one source line, `f"(rebuild retains the truth)"`, and a miss for
+  form 1 — `retains` is not a copula; the adjacent f-string literals split the
+  surrounding SENTENCE, never the phrase);
   `sdk.py` (*the journal — the TRUTH — never* recorded; *the journal (TRUTH)*).
   **The OPPOSITE claim is also present and must stay green** — the gate's
   silence there is correct, not a hole: the `no`/`needs no` truth-store negation
@@ -842,6 +860,8 @@ a written claim to the system it describes is **#5063**.
   `journal` is 34 characters) and misses only because the wrapped scan
   deliberately excludes that family and the line break puts `exists — the
   append-only journal` on the next line — so this is the join-SCOPE hole, not a
-  pattern hole, and it is the strongest case here, the one #9867 must decide;
-  and `sdk.py`'s *whole truth of this write* (said of the journaled payload,
-  across a comment break).
+  pattern hole, and it is the ONLY site here whose answer a widened JOIN
+  changes. The one other candidate that looks like a wrap is `sdk.py`'s *the
+  journaled payload is the whole truth of this write*: it misses for the
+  PREDICATE (`is the whole truth`, not `is [the] truth`), and joining it would
+  not change that — the same reading applies to it with the break removed.

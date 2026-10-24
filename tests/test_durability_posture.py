@@ -401,6 +401,55 @@ def test_canonical_doc_is_itself_a_claim_hit():
     )
 
 
+def test_canonical_doc_gate_description_matches_the_gate():
+    """The doc is the artifact #9867's widened pattern is written FROM, so a
+    description narrower than `CLAIM_RE` fails OPEN by construction — the third
+    review cycle in a row found the doc misstating the gate's reach, once in the
+    alternation COUNT and twice in the wrong direction about its own coverage.
+    Pin the two descriptions that decide how a reader rebuilds the pattern.
+
+    Non-vacuity: the pre-fix doc wrote the durability family as
+    `is [the|a|an|our|its|their|your] durab(le|ility)` (an "exactly one
+    determiner" reading, since brackets elsewhere in the doc mark an optional
+    slot) and claimed a matching sentence in this file "is itself a wrapped
+    hit". Both assertions below fail on that text and pass on the corrected
+    text, while `CLAIM_RE` is byte-identical either way — so this is a real
+    doc/gate divergence pin, not a green-on-both-sides assertion.
+    """
+    text = CANONICAL_DOC.read_text(encoding="utf-8")
+
+    # 1. the determiner slot is OPTIONAL, marked as such everywhere the doc
+    #    renders the durability family — and the implementation agrees.
+    assert "your]? durab(le|ility)" in text, (
+        f"{CANONICAL_DOC_REL} must mark the determiner group optional in the "
+        "durability family's shape"
+    )
+    assert not re.search(r"your\] durab\(le\|ility\)", text), (
+        f"{CANONICAL_DOC_REL} still renders the durability family with a "
+        "mandatory determiner — a gate built from that text misses `the log is "
+        "durable`, which CLAIM_RE deliberately catches"
+    )
+    assert CLAIM_RE.search("the log is durable"), (
+        "CLAIM_RE must fire on the bare-determiner form the doc now describes; "
+        "if this fails the DOC is right and the gate is the defect"
+    )
+
+    # 2. this file is exempt from BOTH offender legs — say so, and never claim
+    #    the exemption's opposite.
+    assert "is itself a wrapped hit" not in text, (
+        f"{CANONICAL_DOC_REL} must not claim its own text is caught by the "
+        "wrapped scan: both offender legs `continue` on CANONICAL_DOC_REL"
+    )
+    for leg in (
+        "test_no_durability_source_of_truth_claim_outside_the_canonical_doc",
+        "test_no_wrapped_durability_claim_anywhere_in_the_scanned_roots",
+    ):
+        assert leg in text, (
+            f"{CANONICAL_DOC_REL} must name {leg} as a leg that SKIPS this "
+            "file, so the repo-wide `0 anywhere` reading is checkable"
+        )
+
+
 # ── 4. the regex fires on the defect and not on unrelated prose ─────────────
 
 # ``CLAIM_RE`` is line-at-a-time, so wrapping is the one hole left in it. These
