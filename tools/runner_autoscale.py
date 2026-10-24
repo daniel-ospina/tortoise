@@ -56,12 +56,15 @@ THE CEILING IS A PREDICATE, NOT A NUMBER
   ceiling to the callee's model (that would abandon the owner's ruling on its own authority) nor
   averages the two (that would hide the disagreement): the pass reports
   `verdict=fill-refused-by-provisioner` and exits 5, so the under-filled box is VISIBLE instead of
-  green, and which predicate binds is the open decision at #9672. ⛔ EXPECT THAT STATE TO BE
-  STANDING ON THE CANONICAL CELLS: the installer's memory arm (`COUNT*2 + 4 <= MemAvailable` GB)
-  needs 6 GB for a single runner, which cell-3 (5.9 GB total) never has, and 8 GB for two, which
-  cell-4 (7.5 GB total) never has — so FILL is refused there every pass until #9672 lands. A
-  perma-amber unit that names a real undecided defect is the honest reading; the alternative
-  (exit 0) was a green timer over an unfillable box.
+  green, and which predicate binds is the open decision at #9672. ⛔ ON A CANONICAL CELL THAT IS
+  UNDER TARGET, EXPECT THAT STATE TO BE STANDING: the installer's memory arm
+  (`COUNT*2 + 4 <= MemAvailable` GB) needs 6 GB for a single runner, which cell-3 (5.9 GB total)
+  never has, and 8 GB for two, which cell-4 (7.5 GB total) never has — so while such a cell is
+  below its ceiling FILL is refused every pass until #9672 lands, and the unit reads `failed`
+  continuously. That is the honest reading of a real undecided defect. ⛔ THE CONVERSE IS ALSO
+  TRUE AND MUST NOT BE FORGOTTEN: FILL is only attempted while `live < target`, so a cell that is
+  AT its ceiling never calls the provisioner and exits 0 (`at-ceiling`) — the disagreement is
+  invisible there, and that green is correct, because nothing is being refused.
 
 WHAT IT DOES, IN ORDER (every step idempotent; safe to run every few minutes)
   1. MEASURE   cores, MemAvailable. Unreadable ⇒ exit 2 and NO action — "cannot verify" is
@@ -186,15 +189,18 @@ EXIT  0 converged / at-ceiling / over-ceiling / nothing to do / a REFUSAL (an an
         a 4-core box caps at ONE through that path while the owner's table targets 2, and no
         memory reading can change the CPU arm. Reconciling the two models is a DECISION, not an
         average, and it is open at #9672; this exit code is what makes the disagreement visible
-        meanwhile. ⛔ AND THAT MEANS PERMA-AMBER IS INTENDED HERE, not an oversight: the
-        installer's `2 GB/runner + 4 GB` reserve is stricter than every canonical cell's free
-        memory, so on those cells this refusal is the STEADY STATE — the unit will read `failed`
-        continuously until #9672 decides which predicate binds. That is deliberate and it is the
-        opposite of the "installed but cries failure" case above: there the pass was healthy and
-        the message was about a missing path; here the box genuinely cannot reach its target and
-        a green timer would hide it. The install-time `--status` probe cannot see it either (it
-        runs the tool in its no-change mode, which never attempts a provision), so the unit is
-        the only signal — and the journal carries the callee's own refusal words.
+        meanwhile. ⛔ AND THAT MEANS PERMA-AMBER IS INTENDED HERE, not an oversight: while a
+        canonical cell is below its target, the installer's `2 GB/runner + 4 GB` reserve is
+        stricter than that cell's free memory, so the refusal repeats every pass and the unit
+        reads `failed` continuously until #9672 decides which predicate binds. ⛔ IT IS NOT
+        ALWAYS AMBER: FILL is only attempted while `live < target`, so a cell AT its ceiling never
+        calls the provisioner and exits 0 (`at-ceiling`) — the disagreement is invisible there,
+        and that is correct, because nothing was refused. The amber state is deliberate and it
+        is the opposite of the "installed but cries failure" case above: there the pass was
+        healthy and the message was about a missing path; here the box genuinely cannot reach its
+        target and a green timer would hide it. The install-time `--status` probe cannot see it
+        either (it runs the tool in its no-change mode, which never attempts a provision), so the
+        unit is the only signal — and the journal carries the callee's own refusal words.
 """
 
 from __future__ import annotations
@@ -256,13 +262,16 @@ class ProvisionerRefused(ActionFailed):
     """The provisioner's OWN guard refused (exit 2). A refusal — but an UNDER-TARGET one.
 
     ⛔ NOT AN ANSWER THAT EXITS 0 ANY MORE. A refusal here means the box is below its target and
-    the one sanctioned registration path will not fill it: the tool computed a count the callee's
-    guard rejects (`COUNT*2 + 2 <= ncpu`, `COUNT*2 + 4 <= MemAvailable`). The pass reports
-    `verdict=fill-refused-by-provisioner` and exits 5 so the schedule is not green on a box that
-    is permanently under-filled — the false PASS that a "a refusal is an answer, exit 0" reading
-    created. ⛔ The two models are deliberately NOT averaged: the ceiling is the owner's measured
-    one, the callee's is the registration path's, and which one binds is the open decision at
-    #9672. See `ceiling`.
+    the one sanctioned registration path will not fill it, so the pass reports
+    `verdict=fill-refused-by-provisioner` and exits 5 instead of a green timer over a box that
+    cannot grow — the false PASS that a "a refusal is an answer, exit 0" reading created.
+    ⛔ TWO KINDS OF REFUSAL ARRIVE HERE, AND THEY ARE NOT THE SAME FACT: `die()` in
+    `tools/install-ci-runner-x64.sh:137` exits 2 for EVERY guard arm, so this is either the
+    sizing disagreement (`cpu headroom` / `memory headroom` — the tool computed a count the
+    callee's `COUNT*2 + 2 <= ncpu` / `COUNT*2 + 4 <= MemAvailable` guard rejects, open at #9672)
+    or one of the callee's other arms (architecture, forks, disk, an unreadable measurement, gate
+    state). The note the fill loop writes is keyed on the callee's OWN words so the second kind is
+    never dressed up as the first; only the first is a waiting game.
     """
 
 
@@ -931,14 +940,14 @@ def provision(target_count: int) -> str:
         ["bash", provisioner, "--count", str(target_count), "--fallback", "auto"], timeout=1800
     )
     if rc == 2:
-        # `install-ci-runner-x64.sh` publishes 2 as "GUARD REFUSED — nothing was attempted". That
-        # is its own headroom guard declining a count this tool computed — i.e. the box is UNDER
-        # target and the one sanctioned path will not fill it. Its guard sizes a runner at
-        # 2 cores + 2 reserved and 2 GB + 4 GB reserve; this file's ceiling uses its MEASURED
-        # 1.5 GB + 2 GB and the owner's core table. ⛔ The two models are NOT averaged away here,
-        # and the refusal is NOT exit 0 — see `main`'s exit 5 and #9672 (the open decision on
-        # which predicate binds). The message carries the callee's OWN words so the operator reads
-        # which arm refused.
+        # `install-ci-runner-x64.sh` publishes 2 as "GUARD REFUSED — nothing was attempted", and
+        # `die()` uses 2 as the DEFAULT for EVERY arm — the sizing guards (cores/memory) and the
+        # others (architecture, forks, disk, unreadable measurements, gate state). All of them mean
+        # the box is UNDER target and the one sanctioned path will not fill it, so all of them are
+        # a refusal this pass must not report as success (exit 5, `main`). ⛔ WHICH arm it was is
+        # NOT decided here: the callee's own words are carried in the exception and the fill loop
+        # keys its note on them, so a disk refusal is never described as the two-models
+        # disagreement at #9672. Carrying the raw output is what makes that readable at all.
         raise ProvisionerRefused(f"rc=2 {out[-300:]}")
     if rc != 0:
         raise ActionFailed(f"provisioner --count {target_count} rc={rc}: {out[-400:]}")
@@ -1225,15 +1234,35 @@ def converge(
             break
         except ProvisionerRefused as exc:
             record["problem_kind"] = "refusal"
-            record["notes"].append(
-                f"fill-refused-by-provisioner: slot #{index} — {exc}. ⛔ This box is UNDER target "
-                "and the one sanctioned registration path will not fill it: that guard sizes a "
-                "runner at 2 cores + 2 reserved (so a 4-core box caps at ONE) AND 2 GB + 4 GB "
-                "reserve, while this tool's ceiling uses the owner's core table and its MEASURED "
-                "1.5 GB + 2 GB. The tool's ceiling is therefore not the binding predicate, and "
-                "the two are not averaged away here — which model binds is the open decision at "
-                "#9672. Nothing was added, and this pass does NOT report success."
-            )
+            # ⛔ THE INSTALLER'S `die` EXITS 2 FROM EVERY GUARD, NOT JUST THE SIZING ONE.
+            # `tools/install-ci-runner-x64.sh:137` is `die() { say "REFUSED: $1"; exit "${2:-2}"; }`,
+            # so the wrong arch, an unreadable fork cap, a FULL DISK, an unreadable core count and
+            # an unreadable gate state all arrive here as rc=2 exactly like the cpu/memory arms do.
+            # Only `cpu headroom` / `memory headroom` are the two-models disagreement (#9672), and
+            # attributing a disk refusal to it would read as "expected until that decision lands"
+            # and never be investigated. So the branch is keyed on the CALLEE'S OWN WORDS, which
+            # `provision()` captured verbatim in the exception.
+            said = str(exc)
+            if "cpu headroom" in said or "memory headroom" in said:
+                record["notes"].append(
+                    f"fill-refused-by-provisioner: slot #{index} — {exc}. ⛔ This box is UNDER "
+                    "target and the one sanctioned registration path will not fill it: that guard "
+                    "sizes a runner at 2 cores + 2 reserved (so a 4-core box caps at ONE) AND "
+                    "2 GB + 4 GB reserve, while this tool's ceiling uses the owner's core table "
+                    "and its MEASURED 1.5 GB + 2 GB. The tool's ceiling is therefore not the "
+                    "binding predicate, and the two are not averaged away here — which model "
+                    "binds is the open decision at #9672. Nothing was added, and this pass does "
+                    "NOT report success."
+                )
+            else:
+                record["notes"].append(
+                    f"fill-refused-by-provisioner: slot #{index} — {exc}. ⛔ This box is UNDER "
+                    "target and the one sanctioned registration path refused BEFORE doing "
+                    "anything. The arm it names above is the callee's own reason — architecture, "
+                    "forks, disk, or a measurement it could not read — NOT the sizing "
+                    "disagreement at #9672, so it must be acted on and not waited out. Nothing "
+                    "was added, and this pass does NOT report success."
+                )
             break
         except ActionFailed as exc:
             record["problems"].append(str(exc))

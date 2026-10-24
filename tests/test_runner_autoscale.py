@@ -93,7 +93,7 @@ PROVISIONER_FAKE = textwrap.dedent("""\
     # progress. PROVISIONER_SHRINK_TO lowers MemAvailable after an install, because a real
     # addition consumes memory — the per-step re-measure is only meaningful if the reading moves.
     printf '%s\\n' "$*" >> "${PROVISIONER_LOG:-/dev/null}"
-    if [ "${PROVISIONER_RC:-0}" != "0" ]; then echo "boom" >&2; exit "$PROVISIONER_RC"; fi
+    if [ "${PROVISIONER_RC:-0}" != "0" ]; then echo "${PROVISIONER_MSG:-boom}" >&2; exit "$PROVISIONER_RC"; fi
     count="$2"
     base="$RUNNER_AUTOSCALE_RUNNER_ROOT/gh-runner-x64"
     if [ "${PROVISIONER_ADDS:-1}" = "1" ]; then
@@ -213,6 +213,7 @@ class Env:
         not_alive: list[str] | None = None,
         pool_fail_after: int | None = None,
         provisioner_rc: int = 0,
+        provisioner_msg: str = "boom",
         provisioner_alive: int = 1,
         provisioner_break_meminfo: int = 0,
         gap_slots: list[int] | None = None,
@@ -279,6 +280,10 @@ class Env:
         self.shrink_to = shrink_to
         self.enable_rc = 0
         self.provisioner_rc = provisioner_rc
+        # The callee's OWN words on a refusal. `die` in install-ci-runner-x64.sh exits 2 from every
+        # guard arm, and the tool reads these words to decide which arm it was (a sizing refusal
+        # cites #9672; a disk/arch/fork refusal must not).
+        self.provisioner_msg = provisioner_msg
         self.provisioner_adds = 1
         self.provisioner_alive = provisioner_alive
         self.provisioner_break_meminfo = provisioner_break_meminfo
@@ -350,6 +355,7 @@ class Env:
                 "PROVISIONER_ALIVE": str(self.provisioner_alive),
                 "PROVISIONER_BREAK_MEMINFO": "1" if self.provisioner_break_meminfo else "",
                 "PROVISIONER_RC": str(self.provisioner_rc),
+                "PROVISIONER_MSG": self.provisioner_msg,
             }
         )
         if self.service:
@@ -990,12 +996,11 @@ def test_a_provisioner_refusal_is_VISIBLE_not_green(env):
     """`install-ci-runner-x64.sh` exit 2 is its GUARD REFUSING — and that must NOT read as success.
 
     The refusal means the box is UNDER target and the one sanctioned registration path will not
-    fill it (its `COUNT*2 + 2 <= ncpu` arm caps a 4-core box at ONE, while this tool's ceiling
-    targets the owner's 2). Folding it into `action-failed` made a scheduled pass cry failure over
-    a deliberate no; folding it into exit 0 — the pre-#9685 contract — made the timer GREEN on a
-    permanently-under-filled box, which is the false PASS this file exists to prevent. It is
-    therefore its own verdict and its own non-zero code, keyed on the CAUSE so a `--status` plan
-    and a memory-reserve stop keep exit 0.
+    fill it. Folding it into `action-failed` made a scheduled pass cry failure over a deliberate
+    no; folding it into exit 0 — the pre-#9685 contract — made the timer GREEN on an
+    under-filled box, which is the false PASS this file exists to prevent. It is therefore its own
+    verdict and its own non-zero code, keyed on the CAUSE so a `--status` plan and a memory-reserve
+    stop keep exit 0.
     """
     e = env(pool=[("r1", "online", False, "")], installs=[("gh-runner-x64-1", "r1")])
     e.provisioner_rc = 3
@@ -1009,10 +1014,56 @@ def test_a_provisioner_refusal_is_VISIBLE_not_green(env):
     assert rec2["_rc"] == 5, rec2
     notes = " ".join(rec2["notes"])
     assert "fill-refused-by-provisioner: slot #" in notes and "rc=2" in notes, rec2["notes"]
-    # The note must name BOTH models' disagreement — the CPU arm is the one no memory reading
-    # can move, and it was the arm the earlier prose never mentioned.
-    assert "2 cores + 2 reserved" in notes, rec2["notes"]
-    assert "#9672" in notes, rec2["notes"]
+
+
+def test_a_NON_sizing_provisioner_refusal_is_not_blamed_on_the_model_disagreement(env):
+    """⛔ `die` EXITS 2 FROM EVERY GUARD ARM, so exit 2 alone does NOT mean the sizing dispute.
+
+    `tools/install-ci-runner-x64.sh:137` is `die() { say "REFUSED: $1"; exit "${2:-2}"; }` — the
+    wrong architecture, an unreadable fork cap, a FULL DISK, an unreadable core count and an
+    unreadable gate state all refuse with 2. Naming #9672 for those would describe a disk-full box
+    as "expected until the decision lands" and nobody would ever fix it. The classification is
+    therefore keyed on the CALLEE'S OWN WORDS, and this fixture's callee refuses on DISK — the arm
+    this box's real installer hits first (measured: 5 G free against 36 G needed for 2 runners).
+    """
+    e = env(
+        pool=[("r1", "online", False, "")],
+        installs=[("gh-runner-x64-1", "r1")],
+        provisioner_rc=2,
+        provisioner_msg="REFUSED: disk headroom: 4G free against 36G needed for 2 runners",
+    )
+    rec = e.record()
+    notes = " ".join(rec["notes"])
+    assert rec["verdict"] == "fill-refused-by-provisioner", rec
+    assert rec["_rc"] == 5, rec
+    # The callee's own arm is quoted for the operator, and the open decision is NOT cited.
+    assert "disk headroom" in notes, rec["notes"]
+    assert "NOT the sizing disagreement at #9672" in notes, rec["notes"]
+    assert "2 cores + 2 reserved" not in notes, rec["notes"]
+
+
+def test_a_SIZING_provisioner_refusal_names_both_models_and_the_open_decision(env):
+    """The one arm that IS the two-models disagreement: quote it, and cite the decision (#9672).
+
+    The CPU arm is the one no memory reading can move — `COUNT*2 + 2 <= ncpu` caps a 4-core box at
+    ONE while the owner's table targets 2 — and it was the arm the earlier prose never mentioned.
+    """
+    e = env(
+        pool=[("r1", "online", False, "")],
+        installs=[("gh-runner-x64-1", "r1")],
+        provisioner_rc=2,
+        provisioner_msg=(
+            "REFUSED: cpu headroom: 2 runners need 2x2 cores + 2 reserved for agent lanes = 6, "
+            "this box has 4"
+        ),
+    )
+    rec = e.record()
+    notes = " ".join(rec["notes"])
+    assert rec["verdict"] == "fill-refused-by-provisioner", rec
+    assert "2 cores + 2 reserved" in notes, rec["notes"]
+    assert "1.5 GB + 2 GB" in notes, rec["notes"]
+    assert "#9672" in notes, rec["notes"]
+    assert "not the binding predicate" in notes, rec["notes"]
 
 
 def test_dry_run_promises_only_what_it_can_measure(env):
