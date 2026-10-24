@@ -1201,16 +1201,18 @@ def test_the_reported_totals_match_the_committed_records():
     # the report's per-input table could contradict the records with the suite
     # green. This is the table, value by value — and each row is grepped out of the
     # doc so a stale cell is a red test rather than a reading exercise.
+    records = [
+        json.loads(path.read_text())
+        for path in sorted((GOLD.parent / "runs").glob("*/score.json"))
+    ]
     per_input = {
         record["input"]: (
             record["severity_counts"]["P0"],
             record["severity_counts"]["P1"],
         )
-        for record in (
-            json.loads(path.read_text())
-            for path in sorted((GOLD.parent / "runs").glob("*/score.json"))
-        )
+        for record in records
     }
+    layers_by_input = {record["input"]: record["counts"] for record in records}
     assert per_input == {
         "portfolio_update": (2, 5),
         "meeting_transcript": (2, 7),
@@ -1237,12 +1239,32 @@ def test_the_reported_totals_match_the_committed_records():
     }
     for input_id, (row_index, cell) in cells.items():
         p0, p1 = per_input[input_id]
-        expected_row = f"| {row_index} | {cell} | {p0} | {p1} |"
+        # The LAYERS cell is part of the row. The doc states that every number
+        # below is recomputed from the graph, so a prefix match on `P0 | P1`
+        # alone left the layer distribution — the column the Method section's
+        # whole "read the layer off the node" claim rests on — silently
+        # editable: re-cutting a row to invented layer counts kept the suite
+        # green (#9695 review). Built from the record's own `counts`, in the
+        # order the record carries them, so a new layer appears here by itself.
+        layers = " · ".join(
+            f"{count} {layer}"
+            for layer, count in layers_by_input[input_id].items()
+            if count
+        )
+        expected_row = f"| {row_index} | {cell} | {p0} | {p1} | {layers} |"
         assert expected_row in doc, (
             f"the doc's table row for {input_id} is not {expected_row!r} — the "
             f"report and the records disagree"
         )
     assert "6 of 10 inputs" in doc
+    # The sentence beside the headline is a number too: "four inputs carry no
+    # P0" is the complement of the 6 above, and nothing re-derived it.
+    no_p0 = len(per_input) - with_p0
+    assert no_p0 == 4, f"the records carry {no_p0} inputs with no P0, not four"
+    assert "Four inputs carry no P0" in doc, (
+        f"the doc's 'four inputs carry no P0' sentence drifted: the records "
+        f"carry {no_p0}"
+    )
     index = (REPO_ROOT / "docs" / "00_index.md").read_text()
     assert "13 P0 / 31 P1" in index, "the docs index headline drifted from the records"
 
@@ -1305,6 +1327,84 @@ def test_the_documented_failure_classes_reconcile_with_the_committed_records():
         "1 input, 1 finding",
     ):
         assert claim in doc, f"the class table no longer states {claim!r}"
+
+    # EVERY row's Count cell, not just the four claims above. The table is
+    # headed "each count recomputed from the ten `score.json`s", so a cell that
+    # nothing re-derives is the doc-only-edit hole this PR's own CORE_ALSO entry
+    # exists to close: re-cutting the census row to `11 findings`, or
+    # wrong-but-declared to `9`, kept the suite at 60 passed (#9695 review).
+    # The cell is read out of the doc's row and compared to the count measured
+    # from the records — the expected text is DERIVED, never restated.
+    def row_cell(label: str) -> str:
+        found = re.search(
+            r"^\| \*\*" + re.escape(label) + r"\*\*[^|]*\| ([^|]+) \|",
+            doc,
+            re.MULTILINE,
+        )
+        assert found, f"the class table's {label!r} row is gone from the doc"
+        return found.group(1).strip()
+
+    row_cells = {
+        "UNDECLARED kind": (
+            "Undeclared kind",
+            lambda n, i: f"{n} scored items across {i} inputs",
+        ),
+        "graph-wide": ("Uncatalogued kinds beyond the gold", lambda n, i: f"{n} findings"),
+        "LAYER confusion": (
+            "Layer confusion — only the wrong layer holds the item",
+            lambda n, i: f"{n} items across {i} inputs",
+        ),
+        "two homes:": (
+            "Two homes — the right layer holds it AND a second one does",
+            lambda n, i: f"{n} items across {i} inputs",
+        ),
+        "kind outside the frozen set": ("Wrong-but-declared kind", lambda n, i: f"{n}"),
+        "EDGE-LAYER confusion": ("Edge on the wrong endpoints", lambda n, i: f"{n}"),
+        "no node represents it": ("Item absent from the graph", lambda n, i: f"{n}"),
+        "INVALIDATES/mitigation": (
+            "Truth vs relevance",
+            lambda n, i: f"{i} input, {n} finding",
+        ),
+        "a NAND was written where nothing contradicts": (
+            "NAND where nothing contradicts",
+            lambda n, i: f"{n}",
+        ),
+        "(provenance)": ("Provenance", lambda n, i: f"{n}"),
+        "nodes carry one identity": ("Duplicate identity", lambda n, i: f"{n}"),
+    }
+    assert set(row_cells) == set(classes), (
+        "every class measured above must have its Count cell pinned: "
+        f"{sorted(set(classes) ^ set(row_cells))}"
+    )
+    # "Truth vs relevance" is the one row whose cell is NOT the
+    # `INVALIDATES/mitigation` needle's count: that needle is the negative
+    # control for a dampener charged as a second finding (`0, 0`), while the
+    # row counts the ONE truth-vs-relevance P0 whose own text names the
+    # dampener inside it. Its item key is shared with the meeting's
+    # "NAND where nothing contradicts" P1, so it is measured by the predicate
+    # the row's own wording states, and never restated.
+    truth_rows = [
+        (record["input"], finding)
+        for record in runs
+        for finding in record["findings"]
+        if finding["item"] == "(truth-vs-relevance)"
+        and finding["severity"] == "P0"
+        and "mitigations:" in finding["finding"]
+    ]
+    truth_vs_relevance = (len(truth_rows), len({n for n, _ in truth_rows}))
+    assert truth_vs_relevance == (1, 1), truth_vs_relevance
+    for needle, (label, render) in row_cells.items():
+        n, i = (
+            truth_vs_relevance
+            if needle == "INVALIDATES/mitigation"
+            else measured[needle]
+        )
+        stated = row_cell(label)
+        assert stated == render(n, i), (
+            f"the class table's {label!r} cell reads {stated!r}, the committed "
+            f"records say {render(n, i)!r} — the count is not recomputed by "
+            f"anything"
+        )
 
     # The census ENUMERATION is prose, so its `×N` multipliers drifted unpinned
     # once — `role` ×2 beside three `role` Objects in the committed graph (#9695
