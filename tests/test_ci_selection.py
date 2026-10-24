@@ -2173,7 +2173,7 @@ def test_the_step1_eval_evidence_doc_selects_core_not_tier1():
 
     MEASURED before the CORE_ALSO entry (`select()` in-process):
     `select(["docs/ax/how-to-use-tortoise-step1-eval.md"])` → `surfaces=[]`,
-    `full=False`, 63 files, pin ABSENT. `docs/` is a flat NON_PYTHON_PREFIXES
+    `full=False`, pin ABSENT. `docs/` is a flat NON_PYTHON_PREFIXES
     entry and `_is_non_code_doc` recognises four exact paths, so the changed
     list came back empty and `select()` took the docs-only early return. A
     one-file PR could therefore re-cut the headline to any number and merge with

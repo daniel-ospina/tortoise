@@ -1716,7 +1716,7 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              #
              # MEASURED before this entry (`select()` in-process):
              # `select(["docs/ax/how-to-use-tortoise-step1-eval.md"])` →
-             # `surfaces=[]`, `full=False`, 63 files, pin ABSENT. `docs/` is a
+             # `surfaces=[]`, `full=False`, pin ABSENT. `docs/` is a
              # flat NON_PYTHON_PREFIXES entry and `_is_non_code_doc` recognises
              # four exact paths, so the changed list comes back empty and
              # select() takes the docs-only early return — tier-1 smoke, which
