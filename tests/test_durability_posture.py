@@ -421,24 +421,29 @@ def test_canonical_doc_gate_description_matches_the_gate():
     """
     text = CANONICAL_DOC.read_text(encoding="utf-8")
 
-    # 1. the determiner slot is OPTIONAL, marked optional in whatever notation
-    #    the doc uses (`[the|a|…]?`, `(?:the |a |…)?`, or the word "optional"
-    #    in the same sentence) — the gate really does accept the bare form.
-    slots = [
-        m.group(1)
-        for m in re.finditer(
-            r"(\[[^\]]*\]\??|\(\?:[^)]*\)\??)\s*durab\(", text
-        )
-    ]
-    assert slots, (
+    # 1. the determiner slot is OPTIONAL, and the doc marks it so in whatever
+    #    notation it uses (`[the|a|…]?`, `(?:the |a |…)?`, or the word
+    #    "optional" on the line that renders the shape) — the gate really does
+    #    accept the bare form, so a doc that says otherwise fails open.
+    def _optional(match: re.Match[str]) -> bool:
+        if match.group(1).endswith("?"):
+            return True
+        start = text.rfind("\n", 0, match.start()) + 1
+        end = text.find("\n", match.end())
+        return "optional" in text[start : end if end != -1 else len(text)].lower()
+
+    matches = list(
+        re.finditer(r"(\[[^\]]*\]\??|\(\?:[^)]*\)\??)\s*durab\(", text)
+    )
+    assert matches, (
         f"{CANONICAL_DOC_REL} must render the durability family's shape so a "
         "reader can rebuild the pattern (#9867)"
     )
-    optional = [s for s in slots if s.endswith("?")]
-    assert optional, (
+    assert any(_optional(m) for m in matches), (
         f"{CANONICAL_DOC_REL} renders the durability family with a mandatory "
-        f"determiner in every form found ({slots}) — a gate built from that "
-        "text misses `the log is durable`, which CLAIM_RE deliberately catches"
+        f"determiner in every form found ({[m.group(0) for m in matches]}) — a "
+        "gate built from that text misses `the log is durable`, which CLAIM_RE "
+        "deliberately catches"
     )
     assert CLAIM_RE.search("the log is durable"), (
         "CLAIM_RE must fire on the bare-determiner form the doc describes; if "

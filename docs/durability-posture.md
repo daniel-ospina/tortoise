@@ -625,8 +625,8 @@ gate in `tests/test_durability_posture.py` fails the build if a
 outside this file. Every bracket here marks an OPTIONAL slot, and the `?` on the
 determiner group states it outright: the bare `the log is durable` **is** a hit
 (pinned at `test_claim_regex_matches_the_original_defect_forms`), so reading that
-bracket as "exactly one determiner" would build a gate that fails open on the
-wording #9134's first reword produced. And the `source of truth` family is the
+bracket as "exactly one determiner" would build a gate that fails open on that
+same bare form — the one narrowing the optional group closes. And the `source of truth` family is the
 one whose durability side needs NO log subject: `source of truth … durable`
 within the window fires on its own, which is how a *source of truth for
 durability* claim is caught; the two `is`-predicate families always require the
@@ -828,16 +828,20 @@ a written claim to the system it describes is **#5063**.
   is the direct predicate matches** — so a widened pattern must handle the gloss
   form, not the word order. (The quotes below are the blind restatements
   themselves, not positive examples quoted as live claims — and the reason is
-  **not** that this file is scanned: it is the one file BOTH offender legs skip
-  by name — `test_no_durability_source_of_truth_claim_outside_the_canonical_doc`
+  **not** that this file cannot match the patterns: it does match them, and it
+  must (`test_canonical_doc_is_itself_a_claim_hit` requires this doc to carry the
+  authority statement). The reason is that this file is the one path BOTH
+  offender legs SKIP by name —
+  `test_no_durability_source_of_truth_claim_outside_the_canonical_doc`
   and `test_no_wrapped_durability_claim_anywhere_in_the_scanned_roots` each
-  `continue` on `CANONICAL_DOC_REL` before scanning — so a sentence written here
-  is no hit of either family and cannot move the repo-wide `0`. The `0 anywhere`
-  measurement is over the NON-exempt roots. One caveat keeps that honest: the
-  `record_writer.py` sentence quoted below is reproduced with a different wrap
-  than the source's, so inside this file it reads as a line-at-a-time hit — the
-  SOURCE's break is what the join-scope diagnosis is about, and quoting it in a
-  shape the gate would match is exactly why the exemption matters.)
+  `continue` on `CANONICAL_DOC_REL` before scanning — so a hit written here is
+  unscanned and cannot move the repo-wide `0`, which is measured over the
+  NON-exempt roots. Two measured caveats keep that honest: the `record_writer.py`
+  sentence quoted below is reproduced with a different wrap than the source's,
+  so in this file it reads as a line-at-a-time hit; and this very paragraph
+  renders the bare form `the log is durable`, which matches too (line-at-a-time,
+  and again in the joined scan). Quoting a claim here is safe only because the
+  path is unscanned — never because the patterns are silent on it.)
   Measured 2026-10-24 on `92b364e8b` and re-checked on
   the merged base `9296a4e85`, all still live:
   `projection/entities.py` (*Restore verbatim — the journal is still the truth*:
