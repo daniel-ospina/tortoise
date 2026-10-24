@@ -31,6 +31,7 @@ existing tests (test_ep_sources.py:140/154) still drive it.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import random
 import sys
@@ -926,7 +927,7 @@ _AC5_QUIET_LOAD_RATIO = 1.0
 _AC5_HANG_S = 60.0
 
 
-def _ac5_effective_cpus() -> int:
+def _ac5_effective_cpus(quotas=None) -> int:
     """CPUs this process may actually use — affinity and cgroup quota aware.
 
     `os.cpu_count()` reports the HOST's CPUs, and `loadavg` is host-wide, so on
@@ -944,32 +945,40 @@ def _ac5_effective_cpus() -> int:
     Every correction only ever REDUCES the count, and a fractional quota is
     FLOORED (a 1.5-CPU quota is reported as 1, not 2), so the derived ratio
     overstates contention, which only ever selects the loose hang bound — the
-    safe direction."""
+    safe direction.
+
+    `quotas` is injectable so the arithmetic is pinned by
+    `test_ac5_effective_cpus_is_quota_aware` without needing a quota-shaped
+    host: the divisor is host-dependent, so an uninjectable reader is
+    indistinguishable from a deleted one."""
     cpus = os.cpu_count() or 1
-    try:
+    with contextlib.suppress(AttributeError, OSError):
         cpus = max(1, min(cpus, len(os.sched_getaffinity(0))))
-    except (AttributeError, OSError):
-        pass
-    for quota, period in _ac5_cgroup_quotas():
+    for quota, period in (_ac5_cgroup_quotas() if quotas is None else quotas):
         try:
-            quota, period = int(quota), int(period)
+            quota_n, period_n = int(quota), int(period)
         except (TypeError, ValueError):
             continue
-        if quota > 0 and period > 0:
-            cpus = max(1, min(cpus, quota // period))
+        if quota_n > 0 and period_n > 0:
+            cpus = max(1, min(cpus, quota_n // period_n))
     return cpus
 
 
-def _ac5_cgroup_quotas():
-    """Yield `(quota, period)` for this process's cgroup and each ancestor."""
+def _ac5_cgroup_quotas(proc_cgroup: str | None = None, root: str | None = None):
+    """Yield `(quota, period)` for this process's cgroup and each ancestor.
+
+    `proc_cgroup` / `root` are injectable so the WALK is testable against a
+    synthetic tree (`test_ac5_effective_cpus_is_quota_aware`); the defaults are
+    the live `/proc/self/cgroup` and the cgroup mount point."""
+    proc_cgroup = "/proc/self/cgroup" if proc_cgroup is None else proc_cgroup
+    root = "/sys/fs/cgroup" if root is None else root
     try:
-        with open("/proc/self/cgroup", encoding="ascii") as fh:
+        with open(proc_cgroup, encoding="ascii") as fh:
             rel = next(
                 (line.split("::", 1)[1].strip() for line in fh
                  if line.startswith("0::")), "")
     except OSError:
         return
-    root = "/sys/fs/cgroup"
     parts = [p for p in rel.split("/") if p]
     # The process's own cgroup, then each ancestor up to the mount root.
     for depth in range(len(parts), -1, -1):
@@ -992,14 +1001,31 @@ def _ac5_cgroup_quotas():
             continue
 
 
+def _ac5_worst_ratio(
+    before: tuple[float, float], after: tuple[float, float]
+) -> tuple[float, float]:
+    """The WORSE of the pre- and post-window load readings, per average.
+
+    `loadavg` is a 1-to-5 minute EWMA, so a reading taken only after the pass
+    misses a burst that began just before the window: the ratio still reads
+    "quiet" while the pass ran contended, and the tight latency bound is then
+    asserted on a starved pass (measured: 12 workers started ~10 s before a
+    pass kept the 1-min ratio <= 1.0 while that pass ran 3-4x slow).
+
+    What this does NOT close: contention that begins INSIDE the timed window is
+    still invisible (residual 3) — closing that needs an instrument that
+    observes the whole window, not two 1-minute averages."""
+    return (max(before[0], after[0]), max(before[1], after[1]))
+
+
 def _ac5_wall_bound(load1_ratio: float, load5_ratio: float) -> float:
     """The wall bound in force for a box at these load ratios (per CPU).
 
     Both the 1-min and the 5-min ratio must be quiet: the 1-min average lags a
     box that has only just been loaded, so it alone would assert the latency
     bound on a box that is no longer quiet. The caller passes the WORSE of a
-    reading taken before the timed window and one taken after it — a spike that
-    began just before the pass is invisible to a reading taken only afterwards."""
+    reading taken before the timed window and one taken after it — via
+    `_ac5_worst_ratio`, which `test_ac5_worst_ratio_contract` pins."""
     if load1_ratio <= _AC5_QUIET_LOAD_RATIO and load5_ratio <= _AC5_QUIET_LOAD_RATIO:
         return _AC5_QUIET_WALL_S
     return _AC5_HANG_S
@@ -1047,9 +1073,11 @@ def test_ac5_wall_bounds_contract():
     assert _AC5_QUIET_WALL_S > 1.8, (
         "the quiet bound must clear the slowest wall measured on a quiet box "
         "(1.3-1.8 s measured) or it flakes the very pass it guards")
-    assert 0 < _AC5_QUIET_LOAD_RATIO <= 2.0, (
-        "the quiet gate must be a real gate: 0 never asserts the latency bound, "
-        "and a large ratio asserts it on a saturated box")
+    assert _AC5_QUIET_LOAD_RATIO == 1.0, (
+        "the quiet gate IS the criterion (at most one runnable task per CPU), "
+        "not a margin: any ratio above 1.0 asserts the 3.0 s latency bound on a "
+        "box carrying more runnable tasks than CPUs, where healthy passes were "
+        "measured at 3.07-3.38 s — the flake this bound exists to close")
     assert _AC5_HANG_S > 2 * 27.0, (
         "the hang bound must sit far outside contention's reach: a healthy "
         "pass reached 24-27 s of wall at 90 workers on 4 CPUs, so a bound at "
@@ -1084,6 +1112,110 @@ def test_ac5_wall_bounds_contract():
     # real count, never 0 (which would make the ratio infinite and always load),
     # and it can never exceed the host's own count.
     assert 1 <= _ac5_effective_cpus() <= (os.cpu_count() or 1)
+
+
+def test_ac5_effective_cpus_is_quota_aware(tmp_path, monkeypatch):
+    """Pin the AC5 divisor: the quota walk must actually divide.
+
+    The divisor selects WHICH bound applies, so a silently dead quota arm is a
+    silent false-red on a throttled pass — the #9015/#9331 class this change
+    exists to close. The assertions in the contract test are inequalities every
+    implementation satisfies (each correction only ever clamps to >= 1), so a
+    deleted quota arm stays green on any host whose cgroup reads `max`. Both
+    halves therefore get synthetic input here: the arithmetic directly, and the
+    CGROUP WALK against a fabricated tree.
+    """
+    # The arithmetic. A fractional quota is FLOORED (1.5 CPUs -> 1), because
+    # under-counting only overstates contention, which only ever selects the
+    # loose hang bound; rounding up would keep the count above real capacity
+    # and select the tight bound on a throttled pass.
+    monkeypatch.setattr(os, "cpu_count", lambda: 8)
+    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(8)))
+    assert _ac5_effective_cpus([("200000", "100000")]) == 2
+    assert _ac5_effective_cpus([("100000", "100000")]) == 1
+    assert _ac5_effective_cpus([("150000", "100000")]) == 1, (
+        "a 1.5-CPU quota must be floored: ceiling it keeps the divisor above "
+        "real capacity, which understates contention and selects the TIGHT "
+        "bound on a throttled pass")
+    assert _ac5_effective_cpus([("399999", "100000")]) == 3
+    # The tightest ancestor wins, and unbounded/malformed entries are skipped.
+    assert _ac5_effective_cpus(
+        [("200000", "100000"), ("100000", "100000"), ("max", "100000")]) == 1
+    assert _ac5_effective_cpus([("max", "100000")]) == 8
+    assert _ac5_effective_cpus([("-1", "100000")]) == 8, (
+        "cgroup v1 writes -1 for 'unlimited' — it must not reduce the count")
+    assert _ac5_effective_cpus([("200000", "0"), ("garbage", "100000")]) == 8, (
+        "a zero period or a non-numeric token must be skipped, not raise")
+    assert _ac5_effective_cpus([]) == 8
+    # A cpuset pin tightens it on its own, with no quota at all.
+    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: {0, 1, 2})
+    assert _ac5_effective_cpus([]) == 3
+    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(8)))
+
+    # The WALK. `CPUQuota=` normally sits on a service slice, not on the cgroup
+    # the process lands in, so the process's own cgroup reading `max` must not
+    # hide an ancestor's quota — reading only the mount root (the shape this
+    # PR first shipped) is what makes the arm dead on every systemd host.
+    root = tmp_path / "cgroup"
+    lane = root / "system.slice" / "lane.service"
+    lane.mkdir(parents=True)
+    (lane / "cpu.max").write_text("max 100000\n", encoding="ascii")
+    proc_cgroup = tmp_path / "self_cgroup"
+    proc_cgroup.write_text(
+        "0::/system.slice/lane.service\n1:name=systemd:/legacy\n", encoding="ascii")
+    assert list(_ac5_cgroup_quotas(str(proc_cgroup), str(root))) == [], (
+        "no ancestor carries a quota here")
+    (root / "system.slice" / "cpu.max").write_text("200000 100000\n", encoding="ascii")
+    assert list(_ac5_cgroup_quotas(str(proc_cgroup), str(root))) == [
+        ("200000", "100000")], (
+        "the quota on the service SLICE must be found by walking ancestors")
+    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(8)))
+    # …and the v1 pair is read from the same walk.
+    (root / "system.slice" / "cpu.max").unlink()
+    (root / "system.slice" / "cpu.cfs_quota_us").write_text("300000\n", encoding="ascii")
+    (root / "system.slice" / "cpu.cfs_period_us").write_text("100000\n", encoding="ascii")
+    assert list(_ac5_cgroup_quotas(str(proc_cgroup), str(root))) == [
+        ("300000", "100000")], "cgroup v1 quotas are read from the same walk"
+    # A missing /proc/self/cgroup degrades to "no quota", never to an error.
+    assert list(_ac5_cgroup_quotas(str(tmp_path / "absent"), str(root))) == []
+
+
+def test_ac5_worst_ratio_contract():
+    """Pin the before/after load rule the gate's call site depends on.
+
+    Review cycle 1's third fix was reading the averages BEFORE the timed window
+    as well as after it; a 1-minute EWMA read only afterwards keeps saying
+    "quiet" for the first ~20-25 s of a burst while the pass runs 3-4x slow.
+    Reverting to a single after-window read leaves every `_ac5_wall_bound`
+    assertion green, so the rule is pinned here AND at the call site.
+    """
+    # A burst that began BEFORE the window: only the earlier reading sees it.
+    assert _ac5_worst_ratio((2.00, 1.80), (0.90, 0.95)) == (2.00, 1.80)
+    # A burst that began DURING the window: only the later reading sees it.
+    assert _ac5_worst_ratio((0.90, 0.95), (2.00, 1.80)) == (2.00, 1.80)
+    # Per component, not per tuple: the worse of each average wins.
+    assert _ac5_worst_ratio((0.50, 2.00), (2.00, 0.50)) == (2.00, 2.00)
+    # Two quiet readings stay quiet.
+    assert _ac5_worst_ratio((0.10, 0.20), (0.30, 0.10)) == (0.30, 0.20)
+    # …and the gate reads it that way: a pre-window burst selects the hang
+    # bound even though the post-window reading is quiet.
+    assert _ac5_wall_bound(*_ac5_worst_ratio((2.00, 1.80), (0.90, 0.95))) == (
+        _AC5_HANG_S), (
+        "a burst that began before the window must not assert the 3.0 s "
+        "latency bound")
+
+    # CALL-SITE PIN. The assertions above cover the helper; the defect they
+    # guard is one line in the live caller, which cannot be exercised without
+    # running the 40-claim EP pass itself. Reverting the call site to a single
+    # after-window read reds this.
+    import inspect
+    src = inspect.getsource(test_ac5_interactive_latency_zone)
+    assert "_ac5_worst_ratio(before, after)" in src, (
+        "the latency test must gate on the worse of its before/after load "
+        "readings, not on a single post-pass reading")
+    assert "before = tuple(v / cpus for v in os.getloadavg()[:2])" in src, (
+        "the pre-window load reading is the one that sees a burst that began "
+        "before the pass")
 
 
 def test_ac5_interactive_latency_zone():
@@ -1232,8 +1364,7 @@ def test_ac5_interactive_latency_zone():
         #     reaches it.
         # AC5's <=1s is enforced by the `cpu < 1.2` assertion above, which is
         # UPWARD-only, so a cpu DROP passes it too — that is why (1) exists.
-        wall_bound = _ac5_wall_bound(
-            max(before[0], after[0]), max(before[1], after[1]))
+        wall_bound = _ac5_wall_bound(*_ac5_worst_ratio(before, after))
         print(
             f"[ac5] wall bound {wall_bound:.1f}s "
             f"({'quiet-box latency criterion' if wall_bound == _AC5_QUIET_WALL_S else 'hang detector only'})")
