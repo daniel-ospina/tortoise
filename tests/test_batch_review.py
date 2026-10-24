@@ -932,6 +932,26 @@ def test_record_fails_closed_when_the_recorder_does_not_resolve(tmp_path, capsys
     assert "not found" in err and missing in err and "nothing was recorded" in err
 
 
+def test_record_fails_closed_when_the_recorder_is_not_executable(tmp_path, capsys):
+    # The sibling of the missing-path case, and the half a plain `is_file()` check lets
+    # through: a recorder that EXISTS without +x (a clone that lost the bit, a file aimed
+    # at by --record-review) passes `is_file()`, so `record` used to print
+    # `+ record-review.sh 1` and then raise an uncaught PermissionError out of
+    # subprocess.run — the exact "printed the line, then died" shape the guard exists to
+    # remove. `shutil.which` implies X_OK; an explicit path must be checked for it.
+    m = manifest((1, HEAD_A, DIFF_A))
+    outcomes = [br.validate_answer(m, {"results": [result(1, HEAD_A, DIFF_A)]})[0]]
+    rec = tmp_path / "record-review.sh"
+    rec.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    rec.chmod(0o644)  # exists, readable, NOT executable
+    argv = [*_record_files(tmp_path, m, outcomes, {1: "comment:42"}), "--record-review", str(rec)]
+    assert br.main(argv) == 2
+    err = capsys.readouterr().err
+    assert "not executable" in err and str(rec) in err and "nothing was recorded" in err
+    # and no misleading `+ record-review.sh 1` line was printed before the refusal
+    assert "+ record-review.sh" not in capsys.readouterr().out
+
+
 def test_record_refuses_when_no_clean_verdict_has_evidence(tmp_path, stub_recorder, capsys):
     script, _log = stub_recorder
     m = manifest((1, HEAD_A, DIFF_A))

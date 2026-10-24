@@ -294,7 +294,7 @@ pool), and it needs no `TORTOISE_DB_URI`. Only if your shell's conftest refuses 
 URI-less session outright, export one (`docker://…`) rather than reaching for
 `TORTOISE_TEST_CARVE_OUT=1`: that variable is the embedded-lane escape hatch, and a
 `core` file running green under it is green on a backend it is not registered for.
-(54 cases — including the recorder-does-not-resolve refusal; the load-bearing ones: a top-level verdict invalidates every PR, one bad
+(the load-bearing ones — no case count in the prose, because it decays with every pin added: a top-level verdict invalidates every PR, one bad
 result never invalidates a sibling, a record is never minted for a PR that fell
 out or whose digest is not the manifest's, neither `post` nor `record` reports a
 partial batch as a success, a comment is never re-posted for a PR already covered at

@@ -1040,16 +1040,20 @@ def cmd_record(args) -> int:
         )
     )
     # A recorder path that does not resolve must FAIL as a BatchError, not surface as an
-    # uncaught FileNotFoundError out of `subprocess.run`: the lane then reads a traceback
+    # uncaught OSError out of `subprocess.run` (FileNotFoundError for a missing path,
+    # PermissionError for one that exists without +x — a clone that lost the bit, or a
+    # `--record-review` aimed at a non-executable file): the lane then reads a traceback
     # instead of the documented "that PR has NO record" line, and `record` is exactly the
     # path where a silent-looking failure is worst (a batch that printed `+ record-review.sh
     # 42` and then died reads, in a log skim, like a batch that recorded 42). This host is
     # the live case: `scripts/` is the gitignored machine-local pointer (#9475), so the name
     # is often on neither PATH nor `$HOME`.
-    if not args.dry_run and not (Path(recorder).is_file() or shutil.which(recorder)):
+    if not args.dry_run and not (
+        (Path(recorder).is_file() and os.access(recorder, os.X_OK)) or shutil.which(recorder)
+    ):
         raise BatchError(
-            f"record-review.sh not found ({recorder!r}) — pass --record-review <path> "
-            "(nothing was recorded)"
+            f"record-review.sh not executable or not found ({recorder!r}) — pass "
+            "--record-review <path> to a runnable recorder (nothing was recorded)"
         )
     rc = 0
     for argv in plan:
