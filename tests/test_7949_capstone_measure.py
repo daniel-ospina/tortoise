@@ -1092,43 +1092,170 @@ def test_the_not_established_section_quotes_the_s5_operator_counts_the_log_measu
 #
 # The literal-string assertions above pin the SPELLING of a cite, so they pass on
 # a number that has moved under it — twice now (#9835's sdk.py insertion moved the
-# entry point, and the same commit moved the meta fold and the capture path). This
-# leg closes that gap for the cites whose SYMBOL the bundle names, so a future
-# insertion reds HERE instead of silently sending the next implementer to an
-# unrelated line (which is the rejection this bundle itself records).
+# entry point, and the same commit moved the meta fold and the capture path).
+#
+# ⚠️ The first version of this leg hardcoded the numbers into a third copy and
+# compared that copy against the tree, so it never read the bundle: reverting the
+# README's `12487` to the stale `12401` left it green (PR #9850 review, P1). The
+# numbers below are therefore read OUT of the documents — the same shape as
+# `test_7949_capstone_verdict_check`'s entry-point pins, which are the legs that
+# actually caught this drift on `main`. What is fixed here is the RULE: for each
+# cite, the phrase the document itself uses to name the line (`"stats": out.get`,
+# `the meta fold`, `link_source_to_event`, …) decides what the cited line must
+# carry. A cite whose line names nothing this table knows about FAILS rather than
+# passing unchecked, so a re-derived number cannot slip in unverified.
 
-def test_the_bundles_named_cites_resolve_to_their_symbols():
-    """`file:line` → the line that actually carries the named symbol."""
-    from pathlib import Path as _Path
+_BUNDLE_DOCS = (
+    ("README.md", _REPO / "docs/evidence/7949-capstone/README.md"),
+    ("probes/capstone_measure.py", PROBE),
+    ("probes/capstone_run.py",
+     _REPO / "docs/evidence/7949-capstone/probes/capstone_run.py"),
+)
 
-    repo = _Path(__file__).resolve().parents[1]
-    sdk = (repo / "tortoise/sdk.py").read_text(encoding="utf-8").splitlines()
-    edges = (repo / "tortoise/projection/edges.py").read_text(
-        encoding="utf-8").splitlines()
-    # (label, source lines, 1-indexed line, a substring the line MUST contain)
-    cites = [
-        ("_extract_session_v2 def", sdk, 11709, "def _extract_session_v2("),
-        ("_extract_session_v2 call", sdk, 10746,
-         "self._extract_session_v2("),
-        ("the meta fold S2.2/S2.3 are dropped at", sdk, 12487,
-         '"stats": out.get("stats")'),
-        ("the capture path E3 is reached from", sdk, 12768,
-         "proj.link_source_to_event("),
-        ("_DERIVATION_REFERENCES_LABELS", edges, 468,
-         "_DERIVATION_REFERENCES_LABELS = frozenset"),
-        ("link_source_to_event (the writer the cite ranges over)", edges, 2424,
-         "def link_source_to_event("),
-        # Two more the bundle names a symbol for, in files this leg already
-        # opens, and which RENDER into the log (peer review, cycle 2).
-        ("_TURN_WRITE_CYPHER (the capture path's turn writer)",
-         sdk, 2367, "_TURN_WRITE_CYPHER = ("),
-        ("_anchor_on_create (the #5199 anchor expression)", edges, 495,
-         "def _anchor_on_create("),
-        ("_DERIVATION_ANCHOR_SET (the anchor the writers concatenate)",
-         edges, 503, '_DERIVATION_ANCHOR_SET = _anchor_on_create("s.contentHash")'),
-    ]
-    for label, lines, line, needle in cites:
-        got = lines[line - 1]
-        assert needle in got, (
-            f"{label}: the bundle cites line {line}, which is now {got.strip()!r} "
-            "— re-derive the number (and the range) before changing this pin")
+_BUNDLE_SOURCES = {
+    "sdk": _REPO / "tortoise/sdk.py",
+    "edges": _REPO / "tortoise/projection/edges.py",
+}
+
+# `tortoise/sdk.py:12487`, ``tortoise/projection/edges.py:2424-2450``, `edges.py:468`
+_BUNDLE_CITE = re.compile(
+    r"(?<![\w.])(?:tortoise/)?(?:projection/)?(sdk|edges)\.py:(\d+)(?:-(\d+))?")
+
+# A paragraph that is ABOUT numbers which no longer resolve is not a live cite:
+# the README discloses the frozen log's stale set on purpose, and the supersession
+# history names the old stamps' cites. Those are the only two such paragraphs, and
+# each says so in its own words — hence the phrases, not a line number.
+_BUNDLE_HISTORICAL = re.compile(
+    r"no longer\s+resolve|SUPERSEDED and its file is gone", re.IGNORECASE)
+
+# (label, source, phrases the DOCUMENT uses to name the line, what the line must
+#  carry, how to check it). No numbers: those are read out of the document.
+#   line        — every anchor appears IN the cited line
+#   def         — the cited line, stripped, STARTS WITH the anchor
+#   span        — every anchor appears somewhere in the cited line or range
+#   method-span — the cited line is the `def`, and the range stays inside it
+_BUNDLE_RULES = (
+    ("the meta fold S2.2/S2.3 are dropped at", "sdk",
+     ('"stats": out.get', "meta fold", "same fold", "dropped at", "must target"),
+     ('"stats": out.get("stats")',), "line"),
+    ("the call that writes the references edge", "sdk",
+     ("proj.link_source_to_event(",),
+     ("proj.link_source_to_event(",), "line"),
+    ("the capture path's turn writer", "sdk",
+     ("_TURN_WRITE_CYPHER",), ("_TURN_WRITE_CYPHER = (",), "line"),
+    ("the entry point", "sdk",
+     ("_extract_session_v2",), ("def _extract_session_v2(",), "def"),
+    ("the references target labels", "edges",
+     ("_DERIVATION_REFERENCES_LABELS",),
+     ("_DERIVATION_REFERENCES_LABELS = frozenset",), "line"),
+    ("the #5199 anchor expression and the set the writers concatenate", "edges",
+     ("_anchor_on_create",),
+     ("def _anchor_on_create(", "_DERIVATION_ANCHOR_SET = _anchor_on_create("),
+     "span"),
+    ("the references writer", "edges",
+     ("link_source_to_event",), ("def link_source_to_event(",), "method-span"),
+)
+
+
+def _paragraph_spans(text: str) -> list[tuple[int, int]]:
+    """Blank-line-delimited paragraph offsets — the unit a cite's claim lives in."""
+    spans, start = [], 0
+    for sep in re.finditer(r"\n[ \t]*\n", text):
+        spans.append((start, sep.start()))
+        start = sep.end()
+    spans.append((start, len(text)))
+    return spans
+
+
+def _bundle_rule(source: str, own_line: str, nearby: str):
+    """The rule whose phrase the document uses for THIS cite (own line first).
+
+    The cite and its naming phrase are usually on one line; a wrapped paragraph
+    (or an f-string split across source lines) puts them on adjacent ones, so the
+    own line is tried first and the ±1-line window only as a fallback — otherwise
+    a neighbouring cite's phrase would claim this one.
+    """
+    for rule in _BUNDLE_RULES:
+        if rule[1] == source and any(p in own_line for p in rule[2]):
+            return rule
+    for rule in _BUNDLE_RULES:
+        if rule[1] == source and any(p in nearby for p in rule[2]):
+            return rule
+    return None
+
+
+def _bundle_missing(kind: str, anchors, source_lines, start: int, end):
+    """[] when the cite resolves, else the anchors the cited lines do not carry."""
+    stop = int(end) if end else start
+    if kind == "line":
+        got = source_lines[start - 1]
+        return [] if anchors[0] in got else [anchors[0]]
+    if kind == "def":
+        got = source_lines[start - 1]
+        return [] if got.lstrip().startswith(anchors[0]) else [anchors[0]]
+    if kind == "span":
+        span = source_lines[start - 1:stop]
+        return [a for a in anchors if not any(a in ln for ln in span)]
+    # method-span: the def is HERE, and the range must not run into the next one
+    assert kind == "method-span", kind
+    if not source_lines[start - 1].lstrip().startswith(anchors[0]):
+        return [anchors[0]]
+    next_def = next(
+        (i + 1 for i in range(start, len(source_lines))
+         if re.match(r" {0,4}def ", source_lines[i])), len(source_lines))
+    if stop >= next_def:
+        return [f"a range ending at {stop}, which runs past the next def at {next_def}"]
+    return []
+
+
+def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
+    """Every live `file:line` the bundle prints → the code the bundle names there.
+
+    Non-vacuity: against `main`'s documents (which cite `sdk.py:12401` for the meta
+    fold, `12682` for the capture path, `edges.py:467` and `2168-2192` for the
+    reference labels and writer) the four rules whose phrase those cites carry all
+    red — the cited lines hold the #4716 re-key comments instead of the symbols.
+    """
+    source_lines = {name: path.read_text(encoding="utf-8").splitlines()
+                    for name, path in _BUNDLE_SOURCES.items()}
+    fired, checked, unmatched, failures = set(), 0, [], []
+    for doc_name, doc_path in _BUNDLE_DOCS:
+        text = doc_path.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        paragraphs = _paragraph_spans(text)
+        for match in _BUNDLE_CITE.finditer(text):
+            paragraph = next((s, e) for s, e in paragraphs
+                             if s <= match.start() < e)
+            if _BUNDLE_HISTORICAL.search(text[paragraph[0]:paragraph[1]]):
+                continue
+            line_no = text.count("\n", 0, match.start()) + 1
+            source, start, end = match.group(1), int(match.group(2)), match.group(3)
+            rule = _bundle_rule(source, lines[line_no - 1],
+                                "\n".join(lines[max(0, line_no - 2):line_no + 1]))
+            cite = f"{doc_name}:{line_no} `{match.group(0)}`"
+            if rule is None:
+                unmatched.append(cite)
+                continue
+            label, _, _, anchors, kind = rule
+            fired.add(label)
+            checked += 1
+            missing = _bundle_missing(kind, anchors, source_lines[source],
+                                      start, end)
+            if missing:
+                shown = source_lines[source][start - 1].strip()
+                failures.append(
+                    f"{cite} ({label}): {source}.py:{start} reads {shown!r}, which "
+                    f"carries none of {missing!r}")
+    assert not unmatched, (
+        "these cites name a line no rule in _BUNDLE_RULES can verify, so nothing "
+        "checked them — add the phrase the document uses for the new line, do not "
+        "leave the cite unverified: " + "; ".join(unmatched))
+    assert not failures, (
+        "the bundle points at lines that do not carry the code it names — re-derive "
+        "the number (and the range) from the tree before changing this pin:\n  "
+        + "\n  ".join(failures))
+    assert fired == {rule[0] for rule in _BUNDLE_RULES}, (
+        f"rules that checked no cite at all: {sorted({r[0] for r in _BUNDLE_RULES} - fired)}"
+        " — the bundle's cites for those symbols moved or were dropped; re-derive them")
+    assert checked >= 20, (
+        f"only {checked} live cites were resolved — the sweep is not reading the bundle")
