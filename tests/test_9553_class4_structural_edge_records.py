@@ -359,8 +359,9 @@ def test_the_lane_is_classified_per_relation_and_the_partition_is_total():
     ⛔ NOT a tautology, deliberately. `RECORD_CARRIED_STRUCTURAL_RELS` is a
     LITERAL and `SOURCE_ENDPOINT_CANONICAL_RELS` is a second literal; this leg is
     what makes adding a predicate to either mint a red test rather than a silent
-    widening, and what keeps the ledger honest about the two families that are in
-    the lane but can never be journaled.
+    widening, and what keeps the ledger honest about the two predicates whose
+    CANONICAL shape is declined per write (they are carried; that one shape is
+    not — see `…_declined_at_the_write_and_the_predicate_is_carried` below).
     """
     assert (frozenset(STRUCTURAL_EDGE_LANE_PREDICATES)
             == RECORD_CARRIED_STRUCTURAL_RELS), (
@@ -423,15 +424,18 @@ def test_every_carried_predicate_actually_journals(edge_sdk):
     }
 
 
-def test_a_source_targeted_about_edge_is_declined_and_its_family_is_not_claimed(
+def test_a_source_targeted_about_edge_is_declined_at_the_write_and_the_predicate_is_carried(
         edge_sdk, caplog):
-    """`aboutDocument`/`aboutSource` are in the lane and can NEVER be journaled.
+    """The `:Source`-targeted SHAPE is declined; the PREDICATE is carried.
 
-    Their contract target is a document/provenance `:Source`, which the pass-2b
-    sweep cannot address, so this is not a per-write caveat like `references` —
-    it is 100% of the family. The ledger must say so (it is NOT in
-    `RECORD_CARRIED_STRUCTURAL_RELS`), the write must still land, and the decline
-    must be disclosed.
+    Their CANONICAL target is a document/provenance `:Source`, which the pass-2b
+    sweep (`EPISTEMIC_LABELS` on `p.id`) cannot address — so this WRITE is
+    declined, warned once, and `SOURCE_ENDPOINT_CANONICAL_RELS` names it. That is
+    a per-WRITE statement like `references`, NOT a per-relation one: both
+    predicates ARE in `RECORD_CARRIED_STRUCTURAL_RELS` and both journal between
+    epistemic endpoints (measured — `…_between_epistemic_endpoints_IS_journaled`
+    below). The write must still land, the decline must be disclosed, and the
+    ledger must keep saying the predicate is carried.
     """
     sdk, journal = edge_sdk
     ids = _world(sdk, source=True)
@@ -447,6 +451,8 @@ def test_a_source_targeted_about_edge_is_declined_and_its_family_is_not_claimed(
                for r in caplog.records), [r.message for r in caplog.records]
     # The PREDICATE is carried (the producer exists); this WRITE was declined.
     assert structural_edge_record_carrier("aboutDocument") == "record"
+    assert "aboutDocument" in RECORD_CARRIED_STRUCTURAL_RELS
+    assert "aboutDocument" in SOURCE_ENDPOINT_CANONICAL_RELS
 
 
 def test_an_aboutSource_between_epistemic_endpoints_IS_journaled(edge_sdk):

@@ -4668,6 +4668,7 @@ _NO_FOLD_LANE = contextlib.nullcontext()
 SUPERSEDE_DIRECT_RELS = frozenset({"IMPL", "NAND"})
 
 
+@functools.lru_cache(maxsize=1)
 def _supersede_moved_rels() -> frozenset[str]:
     """Every edge type a supersede MOVES live — the ones the guard inspects.
 
@@ -4694,11 +4695,14 @@ def _supersede_moved_rels() -> frozenset[str]:
     a delete-old leg on the record side — **#9836**.
 
     Late import: `tortoise.projection.edges` imports THIS module (the same reason
-    `_structural_edge_write_scope` imports late).
+    `_structural_edge_write_scope` imports late). Cached because the
+    `DirectEdgeCreated` fold calls it ONCE PER EVENT (#9835 review, P3): the set
+    is two module-level frozensets, so rebuilding the union per event is pure
+    waste in the one loop that runs over a whole journal.
     """
     from .edges import SUPERSEDE_TRANSFERRED_RELS
 
-    return SUPERSEDE_DIRECT_RELS | SUPERSEDE_TRANSFERRED_RELS
+    return frozenset(SUPERSEDE_DIRECT_RELS | SUPERSEDE_TRANSFERRED_RELS)
 
 
 def _supersede_took_this_edge(etype, ev_seq, src, tgt, succ, supersede_last) -> bool:
