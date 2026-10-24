@@ -3363,6 +3363,23 @@ def test_every_capture_artifact_ships_in_the_wheel():
             f"{artifact} is not matched by any package-data pattern "
             f"{patterns} — a wheel install would fail resolving it")
 
+    # #3515: the store-sync backstop is run FROM THE PACKAGE (`tortoise
+    # store-sync` executes `worker_path()`), not copied by an installer, so it
+    # is deliberately not a `CAPTURE_SEAM` entry and the seam loop above cannot
+    # reach it. A wheel without either file makes the recovery sweep answer
+    # `worker_status: "worker_missing"` on the one production invocation, which
+    # the extension spawns with `stdio: "ignore"` — silent, on the failure this
+    # sweep exists to prevent. The guard MUST evaluate the wheel patterns:
+    # `test_store_sync_worker.py::test_the_worker_artifact_exists_…` asserts on
+    # GIT-TRACKED source paths, so it stays green with both `package-data` rows
+    # deleted and covers nothing here (the vacuous-guard class of #1349/#2938).
+    for rel in ("pi-hooks/store-sync.ts", "pi-hooks/cursor-store.ts"):
+        assert covered(rel), (
+            f"{rel} is not matched by any package-data pattern {patterns} — a "
+            "wheel install would ship a `tortoise store-sync` that cannot run")
+        assert (_REPO_ROOT / "tortoise" / rel).is_file(), (
+            f"{rel} is declared as package data but does not exist")
+
 
 # The shipped install-contract generations, one per wizard-offered harness.
 # The marker is what makes a stale installed seam detectable, so it MUST be
@@ -3415,7 +3432,7 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # also flags the missing script/entry on its own, so the bump is what carries
 # the change to an install whose bytes are frozen at generation 3.
 _EXPECTED_INSTALL_CONTRACT = {"claude": 11, "codex": 3, "cursor": 4,
-                             "pi": 6}
+                             "pi": 14}
 
 
 @pytest.mark.parametrize("harness", sorted(_EXPECTED_INSTALL_CONTRACT))
@@ -3511,12 +3528,12 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
     siblings, so a stale installed copy is comparable rather than
     unmeasurable (#4680).
 
-    Mutation: delete ``// tortoise-hook-version: 6`` from
+    Mutation: delete ``// tortoise-hook-version: 14`` from
     ``tortoise/pi-hooks/tortoise-capture.ts`` — ``read_hook_version`` returns
     ``None``, ``contract_version_for('pi')`` returns ``None``, and both this
     test and the generation pin RED.
     """
-    assert hook_install.read_hook_version(_PI_SRC) == 6
+    assert hook_install.read_hook_version(_PI_SRC) == 14
     assert hook_install.count_canonical_markers(_PI_SRC) == 1, (
         "the Pi seam must carry exactly ONE column-0 marker (a second one is a "
         "site marker that would be mistaken for the contract)")
@@ -3532,7 +3549,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: SHIPPED bytes and so compares equal by construction.  Edit the artifact, move
 #: the generation, update this pair — all three in one commit.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    6, "6f8c94b5f333fe571b9e913e9cec17c00d537395bce804290d9f2fe7ca445ae9")
+    14, "a7b50246ec3edfe989c06c95024c829b1e9674b4140b069deec32d588cd4d3e6")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -3561,6 +3578,59 @@ _GENERATION_DIGESTS = {
     #   `sha256sum tortoise/pi-hooks/tortoise-capture.ts`
     # (or `git show HEAD:tortoise/pi-hooks/tortoise-capture.ts | sha256sum`).
     6: "6f8c94b5f333fe571b9e913e9cec17c00d537395bce804290d9f2fe7ca445ae9",
+    7: "db6fa30beb67fec50f43e05536c00c9501be066279536b52d69766df62f1ca59",
+    # #3515 review: the `capture:` health line also reports the store-sync
+    # backstop's dead-letter count (a permanent refusal crosses that file's
+    # cursor, so the turns can never re-ship — and the one production caller
+    # discards the worker's receipt). Behaviour moved, so the generation moved
+    # with it: generation 8.
+    8: "90813c2efae5b0be48821b9d1c22eb9dd0754f82057758d1acad46a7c2f12c4d",
+    # #3515 review: the extension RECORDS a sweep failure only it can observe (a
+    # `node` too old for the shipped worker exits before the CLI's `main` writes
+    # anything, leaving an earlier HEALTHY status on disk — the line then reads
+    # `capture: OK` over a dead backstop). Generation 8's entry above is kept as
+    # it shipped; these bytes are a new generation.
+    9: "806a821f6ad94b3334f14a049751bc6628171794989aa7c6997b649128dfdd3b",
+    # Generation 10: a sweep's failure is recorded from EVERY path that can
+    # produce one. Generation 9 wired the recorder to `exit` only, which a
+    # PATH-missing CLI never emits (it emits `error` + `close(-2)`), so a box
+    # whose `tortoise` CLI disappeared kept printing `capture: OK` over an inert
+    # crash/kill recovery. Generation 10 listens on `close`, records the SIGNAL
+    # when a sweep is killed (`code` is null there, which wrote the literal
+    # string `exit_null`), and records a spawn failure too.
+    10: "f6ddd866ab6a265fb15624e9ed0f8c35315743b109d09c0ad7ea056ae6189502",
+    # Generation 11: the extension's record is SUBORDINATE to the CLI's own
+    # (`close` fires after `main` has written `reason: worker_missing`, so an
+    # unconditional write replaced the named diagnosis with `exit_1` on every
+    # graceful failure), the spawn names `--cursor-dir` so the writer and both
+    # readers agree under a spool override, and the bookkeeping dir is 0o700 /
+    # 0o600 like every sibling writer.
+    11: "319994020b7fd5ed368384dee12f620fd89321ed2bd3cff7ed2777115391cec0",
+    # Generation 12: exit 0 is CORROBORATED against a fresh status (a zero exit
+    # that wrote nothing used to leave the previous verdict standing — the CLI's
+    # bookkeeping write is best-effort, and a `tortoise` on PATH that is not the
+    # shipped CLI exits 0 without sweeping), and the persisted `reason` is a TOKEN
+    # (`no_credential`) rather than the CLI's free-form stderr prose, which the
+    # generation-11 precedence fix had let reach the health line.
+    12: "e1183607af2862835a4601674be339ef0e9e7593d606e80d968c89862bff450e",
+    # Generation 13: the exit-0 corroboration gained a ONE-SECOND tolerance on
+    # `at` (a coarse-but-fresh stamp otherwise read as older, and the branch then
+    # OVERWROTE a healthy status with `exit_0_without_status` on a box whose
+    # backstop worked — a fail-closed over-report, every sweep); the reason
+    # fallback strips the punctuation that breaks the health line's
+    # comma-delimited grammar (only known classes were tokenised before); and the
+    # CLI's writer narrows an EXISTING store directory to 0700 like the
+    # extension's does.
+    13: "4041c6e2dd02013a65b64169e3a0be98144031b59318f30e09883b6eeb1631f2",
+    # Generation 14: the clock tolerance is ONE value (`CLOCK_SLACK_S`) shared by
+    # the two arms that compare a persisted `at` with our spawn stamp. Generation
+    # 13 added it to the exit-0 arm alone, leaving the precedence arm exact — so
+    # on a platform whose `at` resolves to a second (or after a backwards step)
+    # the extension stopped recognising the CLI's just-written record as THIS
+    # sweep's and overwrote `worker_missing` with `exit_1`, the generation-11
+    # defect. The reason sanitiser also moved to the single write site, so
+    # `spool.error` (a raw exception message) can no longer bypass it.
+    14: "a7b50246ec3edfe989c06c95024c829b1e9674b4140b069deec32d588cd4d3e6",
 }
 
 
