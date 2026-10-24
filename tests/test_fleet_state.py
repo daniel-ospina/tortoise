@@ -2810,3 +2810,74 @@ def test_the_board_reports_which_store_answered(monkeypatch) -> None:
     assert rec["liveness_source"] == fs.LIVE_STORE_PROCESS
     assert rec["liveness_error"] == "no cmux on this box"
     assert rec["liveness_measured"] is True
+
+
+# ── the process census must be able to SEE a lane whose argv[0] is a path ────────
+def test_pi_processes_reads_the_untruncated_command_column(monkeypatch) -> None:
+    """⛔ `ps` TRUNCATES `command=` TO THE OUTPUT WIDTH, AND THE MATCHER READS ITS BASENAME.
+
+    Measured 2026-10-24 while building the EMPTY-CLAIM leg: a fixture lane launched as
+    `/tmp/…/fakebin-empty/pi 120` arrived as `/tmp/…/fakebin-empt` (80 columns), so
+    `_pi_pids_from_ps` matched no basename `pi` and the census answered "no pi process"
+    about a process that was running. That is the fail-open direction for everything built
+    on the answer — `StaleHolder._owner` reads exactly it to decide whether a worktree has a
+    live owner. Without `-ww` this test fails; the assertion is on the ARGV the reader
+    sends, so it cannot pass by accident on a box whose `ps` happens not to truncate.
+    """
+    seen: list[list[str]] = []
+
+    def _fake_run(cmd, timeout=60):
+        seen.append(list(cmd))
+        # A row shaped exactly as the truncated `ps` produces it: the basename gone.
+        return f"  4242   1   {os.getuid()} /tmp/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/fakebin-empt\n"
+
+    monkeypatch.setattr(fs, "_run", _fake_run)
+    procs, err = fs.pi_processes()
+    assert err == ""
+    assert procs == [], "a truncated command is not a pi row — it must not be guessed at"
+    argv = seen[0]
+    assert "-ww" in argv, f"the census must not let `ps` truncate the command column: {argv}"
+    assert argv[:2] == ["ps", "-ww"]
+
+
+def test_pi_processes_sees_a_real_long_path_lane() -> None:
+    """End-to-end MATCHER coverage: a real process named `pi` under a long path is found.
+
+    ⚠️ THIS TEST DOES NOT PIN THE TRUNCATION FIX — `test_pi_processes_reads_the_untruncated
+    _command_column` above does (its subject is the ARGV sent to `ps`). This one is the
+    consumer-side half: the shipped reader must return a live lane whose argv[0] is a path,
+    which is the shape a wrapper/cell launch produces. Whether THIS box's `ps` truncates at
+    80 columns varies (measured both ways on 2026-10-24), so a green here is not evidence
+    about `-ww`; it is evidence that the matcher sees a real path-named lane at all.
+
+    A copy of a real binary (never a `#!` script — the kernel rewrites argv[0] to the
+    interpreter, which `_pi_pids_from_ps` documents). SKIPS where `sleep` is unavailable
+    or the process table cannot be read at all (reported as an error by the reader), so a
+    box without those does not red a census that is fine.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    sleep_bin = shutil.which("sleep") or "/bin/sleep"
+    if not os.path.exists(sleep_bin):
+        pytest.skip(f"no `sleep` binary at {sleep_bin} for the fixture lane")
+    long_dir = Path(tempfile.mkdtemp(prefix="pi-census-" + "x" * 40))
+    try:
+        pi = long_dir / "pi"
+        shutil.copy(sleep_bin, pi)
+        proc = subprocess.Popen([str(pi), "60"],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            procs, err = fs.pi_processes()
+            if err:
+                pytest.skip(f"the process table is unreadable here: {err}")
+            pids = [p["pid"] for p in procs]
+            assert proc.pid in pids, (
+                f"a lane whose argv[0] is {str(pi)!r} was invisible to the census "
+                f"(pids seen: {pids})")
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+    finally:
+        shutil.rmtree(long_dir, ignore_errors=True)
