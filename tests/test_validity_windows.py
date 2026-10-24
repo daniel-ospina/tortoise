@@ -1260,6 +1260,27 @@ def test_the_end_warning_is_scoped_like_the_start_warning(sdk, caplog):
         f"stored — it must warn once, not twice: {_end_hits()}"
     )
 
+    # ⚠️ The shape that is NOT silenced by the stored-value gate, and the only
+    # one that PINS the `_WARN_SUPPRESS` half of the fix: a dedup hit whose
+    # caller value DIFFERS from the stored end. The create leg speaks for the
+    # value it was given and the re-entrant update leg writes the same value, so
+    # only the suppression keeps it to one — without it this write emits TWO
+    # warnings. Measured: removing `repr(_vt)` from the frozenset in
+    # `sdk._WARN_SUPPRESS` leaves every assertion above green and reddens only
+    # this one. (The START arm carries the same row for the same reason:
+    # "deleting the update leg's warning would leave every assertion above
+    # green".)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+        third = _make_point(sdk, content="dedup bad end", validTo="",
+                            dedup=True)
+    assert third["id"] == first["id"], "the fixture must reach the dedup hit"
+    assert _props(sdk, third["id"])["validTo"] == ""
+    assert len(_end_hits()) == 1, (
+        "a dedup hit that CHANGES the stored end to an unparseable one is ONE "
+        f"write and must warn once, not twice: {_end_hits()}"
+    )
+
     # A caller writing only validFrom gets exactly ONE warning, and it names the
     # START: the END's arm must never fire on a bound nobody supplied.
     caplog.clear()
