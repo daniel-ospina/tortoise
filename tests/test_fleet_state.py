@@ -24,6 +24,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -2345,7 +2346,7 @@ def test_a_reaped_worktree_is_named_in_the_gap_not_hidden(monkeypatch) -> None:
     raw = "/tmp/cell-wt-adv-reaping (deleted)"
 
     class _Cwds(dict):
-        refused = {2559943: raw}
+        refused: ClassVar[dict[int, str]] = {2559943: raw}
 
     monkeypatch.setattr(fs, "cmux_session_records", lambda: ([], "", "no cmux"))
     monkeypatch.setattr(fs, "pi_processes", lambda: ([{"pid": 2559943, "ppid": 1}], ""))
