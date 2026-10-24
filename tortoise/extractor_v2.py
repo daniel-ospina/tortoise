@@ -6428,12 +6428,12 @@ def _resolve_point_supersede(ref: str, search: dict,
     even FOLD, let alone supersede. A false CORRECTS terminalizes a live
     belief and there is no un-supersede API to repair it.
 
-    So the leg is **frame-EDGE-trimmed token equality**, which cannot cross a substituted
-    CONTENT token by construction: the ref's content tokens must appear IN
-    ORDER inside the prior's content tokens (a different number, entity, scope
-    word or a role inversion breaks containment) AND the two must carry the
-    SAME negation markers. Additions in the PRIOR are allowed — that is
-    exactly the measured drift — and are not a substitution.
+    So the leg is **frame-EDGE-trimmed token EQUALITY** (see
+    ``_span_contains`` for why every tolerant shape was rejected): after
+    dropping the non-load-bearing frame words at each end of both sequences the
+    two must be EQUAL, carry the same negation and condition markers, and name
+    the same subject. An addition ANYWHERE the trim does not reach — including a
+    tail clause, which is the measured drift's shape — refuses and fails open.
     ``SUPERSEDE_REF_MIN_TOKENS`` keeps a generic short ref from matching half
     the graph, and a unique match is required: 0 candidates and any 2+
     candidates still fail open with a named warning.
@@ -6449,12 +6449,12 @@ def _resolve_point_supersede(ref: str, search: dict,
       * a DELETION of a qualifier only the prior carries (the ref truncated
         before "once the canary passes in staging") CONTAINS in order, so an
         unconditional claim would supersede a gated decision.
-    All three are closed with predicates this module already owns —
-    ``_connective_swap`` (non-empty = a load-bearing connective was exchanged),
-    a pronoun-set check that refuses a SUBSTITUTION but not an ADDITION (the
-    measured ref prefixes "We" to a prior that states no subject), and
-    ``_condition_markers`` (set equality = the same gating) — none of which
-    costs the measured drift its resolution.
+    Round 5 then removed the separate gates entirely: with the load-bearing
+    words excluded from the trim, negation, conditions, connectives and dates
+    all sit INSIDE the compared core, so equality decides them and a second
+    predicate would be dead code. What remains is the trim, a pronoun-set check
+    that refuses a SUBSTITUTION but not an ADDITION, the length floor and the
+    uniqueness rule.
     """
     ref = (ref or "").strip()
     if not ref or ref in ("null", "None"):
@@ -6506,9 +6506,9 @@ def _supersede_ref_tokens(text: str) -> list[str]:
     Order is the point: a contiguous-span test cannot cross a substituted
     entity, a changed number, a changed scope word or a role inversion, nor a
     recombination across two clauses, while a bag-of-tokens ratio silently
-    does all of them. Frame words are dropped (and negation
-    is compared separately, by ``_negation_markers``, because every negator is
-    a frame word). Sentence punctuation is stripped per token — a copied ref
+    does all of them. Frame words are dropped here because this tokenizer only
+    feeds the LENGTH FLOOR; the span test uses ``_supersede_span_tokens``,
+    which keeps them. Sentence punctuation is stripped per token — a copied ref
     routinely differs from its prior by a trailing '.' or a quote mark.
     """
     out: list[str] = []
@@ -6537,6 +6537,30 @@ def _supersede_span_tokens(text: str) -> list[str]:
     return out
 
 
+# #8503: the frame words that may be trimmed from an EDGE, which is a strictly
+# smaller set than `_FRAME_STOPWORDS`: a negator, a condition, a load-bearing
+# connective, a date and a clock unit all change what a claim asserts, and a
+# leading `If` (a frame word AND a condition marker) would otherwise be trimmed
+# away on both sides — an ungated claim then superseding a gated one
+# (review round 5). Pronouns stay trimmable because the measured drift prefixes
+# "We" to a subject-less prior, and `_supersede_pronouns` refuses the
+# substitution direction separately.
+# Temporal-scope adverbs are a load-bearing edge too and are in neither
+# `_DATE_WORDS` nor `_CLOCK_UNITS`, so they are named here: "…kill flag" must
+# not supersede "…kill flag now" (review round 5).
+_TEMPORAL_SCOPE = frozenset({
+    "now", "still", "already", "later", "soon", "currently", "previously",
+    "formerly", "anymore", "anon", "immediately", "eventually",
+})
+_EDGE_TRIMMABLE = (_FRAME_STOPWORDS
+                   - _NEGATION_MARKERS
+                   - _CONDITION_MARKERS
+                   - _CONNECTIVE_MEMBERS
+                   - _DATE_WORDS
+                   - _CLOCK_UNITS
+                   - _TEMPORAL_SCOPE)
+
+
 def _span_contains(ref_tokens: list[str], prior_tokens: list[str]) -> bool:
     """True when the two token sequences agree except for FRAME words at the EDGES.
 
@@ -6558,10 +6582,11 @@ def _span_contains(ref_tokens: list[str], prior_tokens: list[str]) -> bool:
           and no closed-class vocabulary can enumerate every qualifier spelling.
 
     So the leg is the narrowest rule that cannot corrupt a belief: drop the
-    frame-only runs at each END of both sequences and require the remainders to
-    be EQUAL. The only drift it tolerates is an edge made of frame words —
-    articles, pronouns, prepositions that carry no claim content — which cannot
-    change what the claim asserts. Everything else (an added clause, a dropped
+    NON-LOAD-BEARING frame words at each END of both sequences
+    (`_EDGE_TRIMMABLE` — articles, pronouns, prepositions) and require the
+    remainders to be EQUAL. A negator, a condition, a connective, a date or a
+    clock unit is NEVER trimmed, because each of those changes what the claim
+    asserts. Everything else (an added clause, a dropped
     qualifier, a swapped connective or preposition, a changed number, entity or
     scope) refuses, and the caller fails open with a named warning.
 
@@ -6575,34 +6600,14 @@ def _span_contains(ref_tokens: list[str], prior_tokens: list[str]) -> bool:
     """
     def _core(tokens: list[str]) -> list[str]:
         i, j = 0, len(tokens)
-        while i < j and tokens[i] in _FRAME_STOPWORDS:
+        while i < j and tokens[i] in _EDGE_TRIMMABLE:
             i += 1
-        while j > i and tokens[j - 1] in _FRAME_STOPWORDS:
+        while j > i and tokens[j - 1] in _EDGE_TRIMMABLE:
             j -= 1
         return tokens[i:j]
 
     core_ref, core_prior = _core(ref_tokens), _core(prior_tokens)
     return bool(core_ref) and core_ref == core_prior
-
-
-def _supersede_condition_markers(text: str) -> frozenset[str]:
-    """Condition/qualifier markers matched on WHOLE tokens only.
-
-    `_condition_markers` (the fold predicate) reads whole tokens AND their
-    word-parts, deliberately: an over-read only ever refuses a fold. For the
-    supersede leg the same over-read is unsafe in the OTHER direction — it
-    makes a real condition invisible, because the sub-token split of
-    "all-at-once" yields the marker `once`, so a ref that DROPPED a genuine
-    "once the canary passes in staging" clause compared EQUAL to its prior
-    whenever both sides spelled the compound (code-review round 3). Matching
-    whole tokens cannot produce a marker from inside a compound, and every
-    refusal this loses is still a refusal, which is the safe direction here.
-    """
-    whole = frozenset(
-        _deaccent(t) for t in _guard_tokens(text)
-        if _deaccent(t) in _CONDITION_MARKERS)
-    flat = _flat_words(text)
-    return whole | frozenset(p for p in _CONDITION_PHRASES if p in flat)
 
 
 def _supersede_pronouns(text: str) -> frozenset[str]:
@@ -6623,30 +6628,21 @@ def _supersede_band_candidates(ref: str, points: list[dict]) -> list[dict]:
 
     Returns every candidate that passes; the CALLER resolves only when exactly
     one does. Acceptance is deliberately boolean rather than a similarity
-    score: a ref whose FRAME-EDGE-TRIMMED token sequence must EQUAL the
-    prior's — with matching negation and condition markers and no substituted
-    subject — is either a copy of this prior or it is not one. A score is what
+    score: a ref whose frame-edge-trimmed token sequence must EQUAL the
+    prior's, naming the same subject, is either a copy of this prior or it is
+    not one. (Negation, conditions, connectives and dates need no separate
+    gate: they are LOAD-BEARING, `_EDGE_TRIMMABLE` never removes them, so they
+    are inside the compared core and equality decides them.) A score is what
     let a substitution through in the first cut; a span tolerant of an additive
     tail is what let a dropped qualifier through in the third.
     """
     ref_tokens = _supersede_ref_tokens(ref)
     if len(ref_tokens) < SUPERSEDE_REF_MIN_TOKENS:
         return []
-    ref_neg = _negation_markers(ref)
-    ref_cond = _supersede_condition_markers(ref)
     ref_pron = _supersede_pronouns(ref)
     out: list[dict] = []
     for p in points:
         content = str(p.get("content") or "")
-        # SET equality, never presence: two claims can each carry a negator
-        # and mean opposite things ("not exceed" vs "not stay below"), and a
-        # negator is a frame word so containment cannot see it.
-        if _negation_markers(content) != ref_neg:
-            continue
-        # a DELETION of a gating qualifier still contains in order — an
-        # unconditional claim must not supersede a gated decision.
-        if _supersede_condition_markers(content) != ref_cond:
-            continue
         # a SUBJECT substitution is a frame-word substitution too (see
         # `_supersede_pronouns`: a one-sided pronoun is an addition and is
         # allowed, two different ones are not).

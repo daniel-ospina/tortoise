@@ -1095,6 +1095,38 @@ def test_operator_drop_warnings_ignores_benign_extraction_warnings():
         "by_session": {}}
 
 
+def test_run_note_never_claims_zero_drops_when_drops_exist():
+    """#8503 round 5: the note's operator sentence tracks the operator count.
+
+    The `elif supersede_refusals` branch was reachable with `operator_drops > 0`
+    and still said "logged no operator drop" — a false statement in a shipped
+    receipt. Four combinations, all pinned: both zero, drops only, refusals
+    only, both non-zero.
+    """
+    def notes_for(operator_drops: int, refusals: int) -> str:
+        audit = {
+            "planted": 15, "edge_correct": 5, "content_ok": 11,
+            "operators_total": 10, "operators_provenanced": 10,
+            "drop_warnings": {"total": operator_drops + refusals,
+                              "operator_drops": operator_drops,
+                              "supersede_refusals": refusals,
+                              "by_session": {}},
+        }
+        return "\n".join(runner.operator_drop_notes(audit["drop_warnings"]))
+
+    both_zero = notes_for(0, 0)
+    assert "logged no operator drop and no supersede refusal" in both_zero
+    # drops only: no zero-claim at all
+    assert "logged no operator drop" not in notes_for(2, 0)
+    # refusals only: the operator sentence is truthful
+    assert "the operator pass logged no drop" in notes_for(0, 3)
+    # BOTH non-zero: must name the drops, never claim zero
+    both = notes_for(2, 3)
+    assert "logged no operator drop" not in both
+    assert "2 drop warning(s)" in both
+    assert "3 supersede refusal(s)" in both
+
+
 def test_recall_leg_success_warning_is_not_a_refusal():
     """#8503 code-review finding: the classifier and the warning TEXT agree.
 

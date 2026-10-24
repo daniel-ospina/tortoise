@@ -22,9 +22,11 @@ and both exit **EVIDENCE VALID**.
 > planted edges with both anchors present, on every run of the fixed tree — the systematic
 > part, upstream of the edge; (b) **the extractor logged no operator drop in any run**, so no
 > `edge_missing` is an extractor-side drop (that zero is NOT a clean bill for the write path —
-> a commit-seam or a failed snapshot is invisible to it, §1); (c) three rows flipped red→green
-> in every run and three flipped green→red, i.e. the edge number is inside this extractor's
-> sampling variance (§5). The deliverable is the ATTRIBUTION, not a moved needle.
+> a commit-seam or a failed snapshot is invisible to it, §1); (c) row-level churn is
+> two-way and inside sampling noise — **2** rows flipped red→green in BOTH fixed-tree runs
+> (`wp04_aurora_perf_op_02`, `wp05_retro_writeup_op_01`), **1** flipped green→red in both
+> (`wp07_bluepeak_followup_op_03`), and counting a flip in *at least one* run gives 5 up and 2
+> down (§2, §5). The deliverable is the ATTRIBUTION, not a moved needle.
 
 ---
 
@@ -43,7 +45,8 @@ derives a corpus-level `operator_audit.drop_warnings` that separates the two cla
 | **operator drops** | `operator dropped:`, `operator with unknown op_type`, `non-dict operator entry`, `endpoint NOT minted`, `MITIGATES target edge not emitted` | the operator pass refused an edge the model emitted |
 | **supersede refusals** | `matches no S3 prior`, `is the point itself`, `supersedes itself`, `is ambiguous`, `does not resolve to an S3 search result`, `lifecycle=superseded with no supersedes ref` | the replace channel dropped a CORRECTS/supersession record |
 
-Measured on the fixed tree: **`operator_drops = 0` in every run.** ⚠️ The column counts
+Measured on the fixed tree: **`operator_drops = 0` in every run that carries the field** (the `preleg` receipt predates
+it and records only the pre-narrowing refusal class). ⚠️ The column counts
 **warning LINES, not operators**: one operator whose `src` names an emitted entity logs both
 `endpoint NOT minted` (the mint refusal) and `operator dropped: src/dst did not resolve` (the
 pass consuming it), so a non-zero count over-reports — only the `== 0` test is sound. Three
@@ -75,8 +78,8 @@ round 2 narrowed two markers: `is not expressible in the Layer-1 payload` also m
 record is still appended), and the self-supersede refusal (`is the point itself`) matched no
 marker at all after round 1 removed the prefix form. Re-classifying the receipts' stored
 `extraction_warnings` with the shipped markers gives **2 / 4**, of which one (run A) and two (run B) are
-entity refs that did not resolve (the wp07 `all-at-once rollout` case — the `SUPERSEDE` row's
-real mechanism, §3.2b) and the rest are superseded-with-no-ref notices. The replace channel
+entity refs that did not resolve (the wp07 `all-at-once rollout` case — one of the
+`SUPERSEDE` row's two mechanisms, §3.2b) and the rest are superseded-with-no-ref notices. The replace channel
 refuses a *little*, not systematically; the earlier "5–7 per run" reading was the classifier
 over-counting by ~3×.
 
@@ -138,7 +141,7 @@ range or a better median.
 
 ## 3. The mechanisms and what was done about each
 
-### 3.1 Endpoint recall — 5 of the 14 misses, 8 of 28 endpoints
+### 3.1 Endpoint recall — the upstream half, and 7 of 28 endpoints
 
 The issue scopes endpoint recall out ("the other 5 failures are NOT this issue"). They were
 measured anyway, because an edge cannot form without both endpoints, and the measurement
@@ -177,7 +180,8 @@ carries an issue id but not an outcome that carries a command and a clock time.
 
 ### 3.2 Operator selection — the `edge_missing` half
 
-With `operator_drops = 0` in every run, each `edge_missing` is a **selection** miss — the
+With `operator_drops = 0` in every run **that carries the field**, each `edge_missing` is a
+**selection** miss — the
 model had both claims and wired no operator between them. That inference is bounded by the
 commit-seam blind spot named in §1: the operator pass dropped nothing in these runs, but a
 commit-layer drop is not observable from a receipt, so it is *not excluded*, only unobserved.
@@ -220,15 +224,19 @@ a live belief `outdated` (`commit_ops.apply_supersessions` → `supersede()`), a
 un-supersede API. A tail-tolerant matcher cannot be made safe with a closed-class vocabulary,
 because **trailing truncation is exactly what this model does** — the measured ref is one — so
 every qualifier spelling it has not been taught is a silent corruption. The leg therefore
-tolerates only an edge made of frame words (articles, pronouns, prepositions at the very ends),
-which cannot change a claim's content, and it refuses everything else:
+tolerates only an edge made of NON-load-bearing frame words (articles, pronouns, prepositions at
+the very ends), and it refuses everything else:
 
-* core-token **equality**, after trimming frame-only runs from each end of both sequences — a
-  different number, entity, scope word, role order, connective or preposition refuses;
-* the **same negation markers** (set equality, not presence) and the **same condition markers**
-  (whole tokens, so a hyphenated compound cannot mint one);
-* no **substituted subject** (pronouns on both sides must agree — a one-sided pronoun is the
-  measured drift's shape and is allowed);
+* core-token **EQUALITY**, after trimming the NON-load-bearing frame words at each end of both
+  sequences (`_EDGE_TRIMMABLE` = frame words MINUS negators, conditions, connectives, dates,
+  clock units and temporal-scope adverbs). Everything interior is compared token-for-token, so a different number, entity,
+  scope word, preposition, connective or role order refuses — and so does a negated or gated
+  version of the same claim, because those words are never trimmed and therefore sit inside the
+  compared core. Negation and condition need no separate gate; that is stated in the code
+  rather than left as a reader's inference;
+* no **substituted subject**: pronouns ARE trimmable at an edge, so a pronoun ref must agree
+  with any pronoun the prior names (a one-sided pronoun is the measured drift's shape and is
+  allowed);
 * a **unique** match (0 or 2+ candidates fail open with a named warning) and a **5-content-token
   floor**.
 
@@ -271,7 +279,6 @@ constant — true by construction, and it would have passed with every pin delet
 rewritten in review:
 
 ```
-
 1. operator-selection rules (the real pins run under mutation)
   [DETECTED] S2_TMPL: assistant-asserted claims are licensed
   [DETECTED] S2_TMPL: an asserting question carries its claim
@@ -289,8 +296,10 @@ rewritten in review:
   [DETECTED] a leg that folds EVERY prior is caught by the same pin
   [DETECTED] restoring the COVERAGE RATIO is caught by the negative pin (the predicate is pinned, not just described)
   [DETECTED] reverting to the ORDERED-SUBSEQUENCE predicate is caught by the negative pin (the span tightening is pinned, not just described)
-  [DETECTED] removing the NEGATION predicate is DETECTED by its pin
   [DETECTED] removing the TOKEN FLOOR is DETECTED by its pin
+  [DETECTED] removing the PRONOUN predicate is DETECTED by its pin
+  [DETECTED] trimming LOAD-BEARING edge words is DETECTED by its pin
+  [DETECTED] letting a TEMPORAL ADVERB back into the trim is DETECTED by its pin
 
 3. edge_missing attribution (operator drop vs supersede refusal)
   [DETECTED] shipped classifier separates the classes AND ignores the recall leg's success line
@@ -375,8 +384,8 @@ compound case is pinned alongside the plain one. The containment test itself was
 from an ordered subsequence to a **contiguous span** at the same time: an ordered match can be
 recombined across two clauses of one prior, which is not a copy of anything.
 
-The same round then found four more, and they are the reason the leg is now a span over the
-FULL token sequence rather than over content tokens:
+The same round then found four more, and they are the reason the leg moved from a span over
+frame-stripped tokens to a span over the full token sequence:
 
 * a substituted **PREPOSITION** crossed every gate — "raise the timeout **by** 30 seconds"
   superseded "raise the timeout **to** 30 seconds". Prepositions are frame words and are in no
@@ -407,6 +416,19 @@ found that `_connective_swap` had stopped being load-bearing (the span subsumed 
 removed from the leg), that the `non-dict operator entry` marker was not pinned (it is now),
 and that `build_receipt` defaulted a missing `drop_warnings` to zeros — a receipt asserting
 "0 drops" for a run that measured none (it now omits the block).
+
+**Round 5** finished the simplification the narrowing implied. A leading `If` is BOTH a frame
+word and a condition marker, so the edge trim was eating it — an ungated claim superseded a
+gated one — and a trailing `today`/`now` was trimmed the same way. The trim is now restricted to
+**non-load-bearing** frame words (`_EDGE_TRIMMABLE` = frame words minus negators, conditions,
+connectives, dates, clock units and temporal-scope adverbs), which put negation and conditions
+INSIDE the compared core and made their separate gates dead code — those gates and
+`_supersede_condition_markers` are gone, and the code says so rather than leaving a reader to
+infer it. Round 5 also caught that the run note's "logged no operator drop" wording was
+reachable with `operator_drops > 0` (a false statement in a shipped receipt: the operator
+sentence is now built from the count, with all four branches pinned), and that the churn
+sentence overstated the row flips (2 red→green and 1 green→red in both runs; 5/2 counting a
+flip in at least one).
 
 ## 6. Reproduction
 

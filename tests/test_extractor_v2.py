@@ -6637,6 +6637,26 @@ class TestOperatorSemantics2552:
             "Raise the batch writer timeout to 30 seconds",
             "Raise the batch writer timeout to 30 seconds for the payments "
             "queue")
+        # a leading CONDITION is a frame word, so the edge trim must not
+        # remove it — an ungated claim may not supersede a gated decision
+        # (review round 5: without this case the condition predicate is
+        # unpinned and its removal leaves the whole suite green)
+        assert not resolves(
+            "we ship the lease fix all-at-once behind a single global kill flag",
+            "If we ship the lease fix all-at-once behind a single global kill "
+            "flag")
+        # a trailing DATE-SCOPE word is likewise not trimmable
+        assert not resolves(
+            "we ship the lease fix all-at-once behind a single global kill flag",
+            "we ship the lease fix all-at-once behind a single global kill flag "
+            "today")
+        # and a TRAILING TEMPORAL ADVERB — `now` is in neither `_DATE_WORDS`
+        # nor `_CLOCK_UNITS`, so without its own entry in `_TEMPORAL_SCOPE`
+        # this pair folds (review round 5's isolating case)
+        assert not resolves(
+            "we ship the lease fix all-at-once behind a single global kill flag",
+            "we ship the lease fix all-at-once behind a single global kill flag "
+            "now")
         # THE CONTIGUITY DISCRIMINATOR (above the 5-token floor, every other
         # gate neutral): the ref DROPS the prior's middle span
         # ("rather than a week of per-shard canary" keeps only "rather than

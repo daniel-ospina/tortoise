@@ -219,16 +219,6 @@ def check_supersede_band() -> None:
 
     # the two predicates with no SHAPE of their own need their own arms, or a
     # pin cannot see them (review round 3): polarity and the length floor.
-    original_neg = v2._negation_markers
-    try:
-        v2._negation_markers = lambda _t: frozenset()
-        caught = _pin_fails(
-            SafetyPin().test_supersede_band_refuses_every_substitution)
-    finally:
-        v2._negation_markers = original_neg
-    _expect_detected(caught,
-                     "removing the NEGATION predicate is DETECTED by its pin")
-
     original_floor = v2.SUPERSEDE_REF_MIN_TOKENS
     try:
         v2.SUPERSEDE_REF_MIN_TOKENS = 1
@@ -238,6 +228,42 @@ def check_supersede_band() -> None:
         v2.SUPERSEDE_REF_MIN_TOKENS = original_floor
     _expect_detected(caught,
                      "removing the TOKEN FLOOR is DETECTED by its pin")
+
+    original_pron = v2._supersede_pronouns
+    try:
+        v2._supersede_pronouns = lambda _t: frozenset()
+        caught = _pin_fails(
+            SafetyPin().test_supersede_band_refuses_every_substitution)
+    finally:
+        v2._supersede_pronouns = original_pron
+    _expect_detected(caught,
+                     "removing the PRONOUN predicate is DETECTED by its pin")
+
+    # the round-5 mechanism itself: let the trim eat LOAD-BEARING frame words
+    # (a leading "If", a trailing date/scope word) and the pin must red.
+    original_trim = v2._EDGE_TRIMMABLE
+    try:
+        v2._EDGE_TRIMMABLE = v2._FRAME_STOPWORDS
+        caught = _pin_fails(
+            SafetyPin().test_supersede_band_refuses_every_substitution)
+    finally:
+        v2._EDGE_TRIMMABLE = original_trim
+    _expect_detected(caught,
+                     "trimming LOAD-BEARING edge words is DETECTED by its pin")
+
+    # the narrowest of those: let ONE temporal adverb back into the trim set.
+    # Without this arm the `_TEMPORAL_SCOPE` subtraction is unpinned even
+    # though the coarse arm above is green (review round 5).
+    original_trim = v2._EDGE_TRIMMABLE
+    try:
+        v2._EDGE_TRIMMABLE = original_trim | {"now"}
+        caught = _pin_fails(
+            SafetyPin().test_supersede_band_refuses_every_substitution)
+    finally:
+        v2._EDGE_TRIMMABLE = original_trim
+    _expect_detected(caught,
+                     "letting a TEMPORAL ADVERB back into the trim is DETECTED "
+                     "by its pin")
 
 
 # ── 3. the attribution classifier (the receipt's discriminator) ────────────

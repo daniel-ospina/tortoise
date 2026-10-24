@@ -1527,20 +1527,8 @@ def run_benchmark(
                 # receipt (never formed by the model vs dropped by the seam).
                 operator_audit["drop_warnings"] = operator_drop_warnings(
                     session_results)
-                if operator_audit["drop_warnings"]["operator_drops"] == 0:
-                    notes.append(
-                        "operator drops (#8503): the EXTRACTOR logged no "
-                        "operator/edge drop in any session — so an "
-                        "edge_missing verdict in this receipt is not an "
-                        "extractor-side drop. ⛔ This does NOT cover two "
-                        "seams: the commit layer "
-                        "(apply_payload_operators logs its skips through "
-                        "_logger, with no warnings sink on the capture), and "
-                        "a session whose snapshot failed to read (it emits "
-                        "no warnings at all; graph_census's per-session "
-                        "error names those). Both are INVISIBLE to this "
-                        "block, which is a named blind spot, not a clean "
-                        "bill")
+                notes.extend(operator_drop_notes(
+                    operator_audit["drop_warnings"]))
                 for result in session_results:
                     sid = result["session_id"]
                     owned = [
@@ -1737,6 +1725,43 @@ def extractor_identity() -> dict:
             and (source_file or "").endswith("tortoise/extractor_v2.py")
         ),
     }
+
+
+def operator_drop_notes(drops: dict) -> list[str]:
+    """The drop-attribution note(s) for a run (#8503).
+
+    ⛔ THE OPERATOR SENTENCE IS CONDITIONAL ON THE OPERATOR COUNT, ALWAYS. A
+    report with drops AND supersede refusals reached a "logged no operator
+    drop" branch in an earlier cut (review round 5), so the wording is built
+    from the two counts rather than from which branch was entered. Pure (no
+    graph, no env) so every branch is unit-testable.
+    """
+    operator_drops = int(drops.get("operator_drops") or 0)
+    refusals = int(drops.get("supersede_refusals") or 0)
+    if not operator_drops and not refusals:
+        return [
+            "operator drops (#8503): the EXTRACTOR logged no operator drop and "
+            "no supersede refusal in any session — so an edge_missing verdict "
+            "in this receipt is not an EXTRACTOR-side drop. ⛔ This does NOT "
+            "cover two seams: the commit layer (apply_payload_operators logs "
+            "its skips through _logger, with no warnings sink on the capture), "
+            "and a session whose snapshot failed to read (it emits no warnings "
+            "at all; graph_census's per-session error names those). Both are "
+            "INVISIBLE to this block, which is a named blind spot, not a clean "
+            "bill"
+        ]
+    if not refusals:
+        return []
+    operator_clause = (
+        "the operator pass logged no drop, but"
+        if not operator_drops
+        else f"the operator pass logged {operator_drops} drop warning(s), and")
+    return [
+        f"operator drops (#8503): {operator_clause} the replace channel logged "
+        f"{refusals} supersede refusal(s) — a refused replace record is an "
+        "extractor-side cause of a missing edge too, so an edge_missing on a "
+        "SUPERSEDE row may be the resolver rather than the model"
+    ]
 
 
 def operator_audit_notes(audit: dict | None, posture: str) -> list[str]:
