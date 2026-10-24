@@ -234,7 +234,7 @@ WHAT THIS PINS
    ARM rather than as a comment, the same correction (16) records for the
    fragment census that existed for three cycles and was never CALLED.
 22. `test_the_attribution_predicate_does_not_swallow_the_whole_table` — (8)'s
-   relation is a BOUND, so the RATE it accepts is pinned as its own number: at
+   relation is a BOUND, so the COUNT it accepts is pinned as its own number: at
    most `_ACCEPTED_PAIRS_AT_THIS_HEAD` of the (row, table-door) pairs and at
    most `_WORST_ROW_AT_THIS_HEAD` for any one row, with a floor at the cell
    occurrences §13 states, so a predicate that breaks the other way also reds.
@@ -832,17 +832,18 @@ def _span(tree: ast.Module, dotted: str) -> tuple[int, int] | None:
 
 
 def _class_body_targets(rel: str, function: str, cls: str) -> frozenset[str]:
-    """`Assign`/`AnnAssign` target names in the body of `cls`, a class defined
-    directly inside `function`, both in `tortoise/<rel>`.
+    """`Assign`/`AnnAssign` target names `_symbol_index` would register from the
+    body of `cls`, a class defined directly inside `function`, in `tortoise/<rel>`.
 
-    ⚠️ Read from the SOURCE, independently of `_symbol_index`, and that is the
-    whole point. A pin that asserts a node id is ABSENT from the index —
-    `assert <id> not in defs.get(name, set())` — is `not in set()` the moment the
-    attribute is RENAMED in the source, so it passes while testing nothing. Pairing
-    each absence with this presence check turns a rename into a red that says
-    "re-point this pin", which is the same silent-green a SUBJECT-locality pin
-    refuses for a hoist. `_bound_name` resolves the single-target `Assign` /
-    `AnnAssign` forms these declarations use.
+    ⚠️ The condition is `_symbol_index`'s OWN — `Assign`/`AnnAssign` carrying a
+    VALUE, single-`Name` targets only — not a looser "every bound name". This check
+    exists to stop the paired ABSENCE pins from going vacuous, so a looser predicate
+    would defeat it in a new costume: a nested `def`/`class` called `_fields_`, or an
+    annotation-only `_fields_: list`, would satisfy PRESENT while the index can never
+    mint the id the next assertion forbids — `assert <id> not in set()`, green and
+    testing nothing. Read from the SOURCE, because the index is exactly what the
+    source must still agree with: a RENAME reds here as "re-point this pin" instead
+    of going quiet, the same treatment the SUBJECT-locality pins give a hoist.
     """
     tree = _parsed(str(PKG / rel))
     for node in tree.body:
@@ -852,9 +853,19 @@ def _class_body_targets(rel: str, function: str, cls: str) -> frozenset[str]:
             continue
         for inner in node.body:
             if isinstance(inner, ast.ClassDef) and inner.name == cls:
-                return frozenset(
-                    target for statement in inner.body if (target := _bound_name(statement))
-                )
+                names: set[str] = set()
+                for statement in inner.body:
+                    if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                        continue
+                    if statement.value is None:
+                        continue
+                    targets = (
+                        statement.targets
+                        if isinstance(statement, ast.Assign)
+                        else [statement.target]
+                    )
+                    names.update(t.id for t in targets if isinstance(t, ast.Name))
+                return frozenset(names)
     return frozenset()
 
 
@@ -2480,7 +2491,7 @@ def _route_table() -> dict[tuple[str, str], frozenset[str]]:
 #     class node itself stays (both directions are pinned in
 #     `test_a_local_class_body_is_not_a_source_of_symbols`) — so this residual
 #     is about local VARIABLES, not about every local definition.
-#     The budget and the pinned rate are what keep the residue small; the arm
+#     The budget and the pinned count are what keep the residue small; the arm
 #     still does not prove a call graph.
 #   * **A door that ENTERS the shared search path is attributed to the readers
 #     that path touches — measured, not merely possible.**
@@ -2517,7 +2528,7 @@ def _route_table() -> dict[tuple[str, str], frozenset[str]]:
 #     only the global budget is lowered) — and the only two true attributions
 #     beyond 3 are named in `_DISTANCE_EXCEPTIONS` with the code fact
 #     that earns each. ⚠️ This is why the bound is pinned on BOTH sides: the
-#     acceptance rate is itself an arm
+#     acceptance count is itself an arm
 #     (`test_the_attribution_predicate_does_not_swallow_the_whole_table`), so the
 #     predicate cannot quietly go permissive again.
 #   * **Falsifiability is a SEPARATE arm**
