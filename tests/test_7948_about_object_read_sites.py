@@ -2798,10 +2798,12 @@ def test_the_door_attribution_refuses_a_door_that_reaches_another_reader():
     # locals `ids` and `edges` in unrelated functions, because the indexer used to
     # register function-local assignments as symbols. None of the dumps' own symbols
     # is inside this door's budget and that stays so — measured, `dump_graph` 12 hops
-    # and `create_backup` 11 sit just past it, `_independent_counts` and
-    # `_DUMP_EDGE_PAGE_QUERY` are 13 and `_COUNT_ALL_EDGES_QUERY` 14 (all beyond the
-    # 12-hop `_DISTANCE_SEARCH_CAP`, so `_door_distance` reports `None` for them —
-    # "further than we looked", not "unreachable"), and `restore_graph` /
+    # and `create_backup` 11 are far past that budget and still INSIDE the cap (so
+    # `_door_distance` returns their distance and the pair is refused on the budget
+    # alone), `_independent_counts` and
+    # `_DUMP_EDGE_PAGE_QUERY` are 13 and `_COUNT_ALL_EDGES_QUERY` 14 (those three are
+    # beyond the 12-hop `_DISTANCE_SEARCH_CAP`, so `_door_distance` reports `None` for
+    # them — "further than we looked", not "unreachable"), and `restore_graph` /
     # `_restore_copy_settled` are unreachable AT CAP 24 (the cap was raised for
     # that measurement) — "unreachable" is not claimed for caps beyond it. (Other
     # `hosted_backup.py`
@@ -2865,13 +2867,29 @@ def test_a_class_defined_inside_a_function_is_not_a_symbol():
     # defined at module level (as `__slots__` routinely is), and a whole-tree
     # `not defs.get(name)` would then red on a legitimate module-level definition
     # while blaming `in_function` propagation.
+    # ⚠️ The SUBJECT's own locality is pinned first: hoisting `_StatFS` to module
+    # scope is behaviour-preserving and would move the offending id to
+    # `index_walk.py::_StatFS._fields_`, leaving the arm below GREEN while it no
+    # longer exercises the local-class rule at all. Pinned here so a hoist reds as
+    # "re-point this pin", not as silence or as a false `in_function` diagnosis.
+    assert "index_walk.py::_getmntinfo_table._StatFS" in defs.get("_StatFS", set()), (
+        "this pin's SUBJECT has moved: `_StatFS` is no longer a class defined inside "
+        "`index_walk._getmntinfo_table` (present nodes: "
+        f"{sorted(defs.get('_StatFS', ()))}). If it was hoisted to module scope, a "
+        "module-level `Class.ATTR` is legitimate and the `_fields_` arm below no "
+        "longer tests the local-class rule — re-point both at another class that is "
+        "still defined inside a function (or delete the pair, and the coverage with "
+        "it), rather than loosening them."
+    )
     assert "index_walk.py::_getmntinfo_table._StatFS._fields_" not in defs.get("_fields_", set()), (
         "a function-local class body is indexed as a symbol again — "
         "`index_walk.py::_getmntinfo_table._StatFS._fields_` is a definition node, and "
         "`_StatFS` is a class defined INSIDE `_getmntinfo_table`, so `in_function` is "
         "not propagating into the `ClassDef` branch and a local class's attributes "
         "become reachable bare names (`_symbol_index`). `_fields_` now resolves to "
-        f"{sorted(defs.get('_fields_', ()))}."
+        f"{sorted(defs.get('_fields_', ()))}. (If the id reads `index_walk.py::_StatFS."
+        "_fields_` instead, the class was HOISTED — re-point the pin above rather "
+        "than treating it as a propagation defect.)"
     )
     assert "projection/__init__.py::journal_epistemic_existence._Node.__slots__" not in defs.get(
         "__slots__", set()
@@ -2879,7 +2897,11 @@ def test_a_class_defined_inside_a_function_is_not_a_symbol():
         "the function-local `_Node` class body is indexed again — "
         "`journal_epistemic_existence._Node.__slots__` is a definition node, so a "
         "bare `__slots__` anywhere resolves to it (`in_function` must carry into "
-        "the `ClassDef` branch with its value UNCHANGED)."
+        "the `ClassDef` branch with its value UNCHANGED). If the id reads "
+        "`projection/__init__.py::_Node.__slots__` instead, `_Node` was HOISTED out "
+        "of `journal_epistemic_existence` — re-point this pin at a class that is "
+        "still function-local rather than treating a legitimate module-level "
+        "`__slots__` as a propagation defect."
     )
     # The class ITSELF is still a symbol — only its body's assignments are dropped.
     # Stated so the arm above cannot be greened by dropping local nested defs too.
