@@ -6767,9 +6767,20 @@ def test_the_gate_walk_magnitude_ratios_recompute_from_the_rows_they_name():
 
     # ⛔ …and the BARE-percentage sweep must hold on EVERY prose site in this file, not
     # only on the one paragraph this arm points it at (`#9528` re-review round 5). The
-    # sweep ran on `_unsettleable_magnitudes.__doc__` alone, so the defect class this
-    # branch exists to close could be re-inserted into the module docstring and into this
-    # arm's OWN docstring with a full green run — measured, before this leg existed.
+    # ⛔ …and every OTHER shape `_magnitude_ratio_findings` can report must hold on every
+    # prose site in this file, not only on the paragraph this arm points it at (`#9528`
+    # re-review rounds 5-6). The sweep ran on `_unsettleable_magnitudes.__doc__` alone,
+    # so the defect class this branch exists to close could be re-inserted into the module
+    # docstring and into this arm's OWN docstring: measured, a bare percentage reds now,
+    # but so did a CLAIM ROW whose percentage disagrees with its own figures (T4) and a
+    # percentage row naming a commit no measurement row carries — both stayed GREEN while
+    # this leg selected only the `free to rot` shape. The two row-ABSENCE findings are the
+    # only ones dropped here, because these prose sites legitimately carry no claim row;
+    # every other shape is kept.
+    ROW_ABSENCE = (
+        "the prose states no commit-anchored measurement row",
+        "the prose states no recomputed percentage row",
+    )
     for site, text in (
         ("the module docstring", __doc__ or ""),
         (
@@ -6782,11 +6793,15 @@ def test_the_gate_walk_magnitude_ratios_recompute_from_the_rows_they_name():
             inspect.getdoc(_unsettleable_magnitudes) or "",
         ),
     ):
-        rot = [finding for finding in _magnitude_ratio_findings(text) if "free to rot" in finding]
-        assert not rot, (
-            f"{site} states a percentage outside any recomputed claim row, so it is free "
-            f"to rot: {rot} — a prose site no arm reads is where this branch's own defect "
-            "class lives"
+        findings_here = [
+            finding
+            for finding in _magnitude_ratio_findings(text)
+            if not finding.startswith(ROW_ABSENCE)
+        ]
+        assert not findings_here, (
+            f"{site} states a percentage that no recomputed claim row holds up: "
+            f"{findings_here} — a prose site no arm reads is where this branch's own "
+            "defect class lives"
         )
 
     # The bare-percentage sweep must close every spelling, not one of them: a rotated
