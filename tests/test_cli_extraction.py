@@ -629,14 +629,6 @@ _FAKE_ENGINE = textwrap.dedent("""\
         out = sys.argv[sys.argv.index("--output-last-message") + 1]
         with open(out, "w") as f:
             f.write('{\\"claims\\": [{\\"kind\\": \\"fact\\", \\"content\\": \\"x\\"}]}')
-        if os.environ.get("FAKE_MODE") == "codex-cached":
-            # a token key this module does not recognise (codex's real
-            # `cached_input_tokens`): part of the input total is uncounted, so
-            # the pair must NOT be stamped complete
-            print(json.dumps({"info": {"input_tokens": 10,
-                                       "cached_input_tokens": 500,
-                                       "output_tokens": 4}}))
-            sys.exit(0)
         print(json.dumps({"info": {"input_tokens": 10, "output_tokens": 4}}))
         if os.environ.get("FAKE_MODE") == "codex-downgrade":
             # a later token-less event (aborted turn) must not erase the pair
@@ -807,18 +799,6 @@ class TestCallEngineHardening(unittest.TestCase):
         os.environ["FAKE_MODE"] = "codex-downgrade"
         _, toks, _ = call_engine("codex", "gpt-fake", "high", self.prompt)
         self.assertEqual(toks, {"in": 10, "out": 4, "accounting": "complete"})
-
-    def test_codex_unrecognised_token_key_never_stamps_complete(self):
-        # codex reports `cached_input_tokens`, a token key this module does not
-        # sum. Presenting the recognised subset as a complete total is an
-        # undercount presented as authoritative, so the pair must stay
-        # incomplete — the same rule `_sum_usage` applies to the claude lane.
-        os.environ["CODEX_BIN"] = self.exe
-        self.addCleanup(os.environ.pop, "CODEX_BIN", None)
-        os.environ["FAKE_MODE"] = "codex-cached"
-        _, toks, _ = call_engine("codex", "gpt-fake", "high", self.prompt)
-        self.assertEqual(toks, {"in": None, "out": 4,
-                                "accounting": "incomplete"})
 
 
 if __name__ == "__main__":

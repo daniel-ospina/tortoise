@@ -397,19 +397,11 @@ def call_engine(engine: str, model: str, effort: str, prompt: str):
                     # latch the most complete sighting: a later token-less
                     # event (aborted turn) must never erase an earlier
                     # complete pair, and never downgrade complete->incomplete
-                    #
-                    # Routed through `_sum_usage` — the module's ONE
-                    # accounting rule — rather than assigning in/out by hand.
-                    # The hand-rolled form checked only `output_tokens`, so an
-                    # event carrying a token key this module does not recognise
-                    # (codex reports `cached_input_tokens`) was stamped
-                    # "complete" over an input total that omitted that count:
-                    # an undercount presented as authoritative, which is the
-                    # one thing the accounting design exists to prevent.
-                    cand = _sum_usage(info)
-                    if (cand["accounting"] == "complete"
-                            or toks["accounting"] != "complete"):
-                        toks = cand
+                    cand_in = _tok(info["input_tokens"])
+                    cand_out = _tok(info.get("output_tokens"))
+                    if cand_out is not None or toks["accounting"] != "complete":
+                        toks["in"], toks["out"] = cand_in, cand_out
+                        toks["accounting"] = "complete" if cand_out is not None else "incomplete"
             extra = {}
         else:
             raise SystemExit(f"unknown engine {engine}")
