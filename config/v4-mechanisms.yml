@@ -491,7 +491,9 @@ mechanisms:
       `tests/test_extractor_v4_citation_rot.py`; the core-only render
       byte-for-byte by `tests/test_extractor_v2.py`; and — added 2026-10-24,
       because it was NOT pinned — the `VALUE_FIDELITY_RULE` text absent from all
-      three renders by
+      FOUR render surfaces (S1, core-only, verbose AND the `compact` render
+      selected by `TORTOISE_EXTRACTOR_PROMPT=compact`, which fills the same
+      `{master_list}` slot of S2/S4) by
       `tests/test_v4_declared_mechanisms.py::test_the_value_fidelity_rule_rides_the_s2s4_slot_and_no_master_render`,
       which also asserts the rule still rides `_s2s4_rules()` so the absence cannot
       pass by vacancy. Measured before that test: appending the rule to
@@ -563,15 +565,29 @@ mechanisms:
       as `Cls.name` — including a tuple target, a subscript target and a NESTED
       class `Outer.Inner.name`, or a class body that GUARDS its binding with
       `if` / `for` / `try` / `with` — or a collection that mixes a complete
-      statement with an incomplete fragment) wherever it is used. What no static
+      statement with an incomplete fragment) wherever it is used — including a
+      fragment bound in ANOTHER scanned module and used here through any import
+      spelling (`carrier.X`, `c.X`, `X as Y`, a DEEPER chain such as
+      `carrier.constraints.X` or `carrier.obj.ddl` — the translation walks to the
+      leftmost qualifier, not just `Name.attr`; a RELATIVE import, whose dots live
+      in `node.level` rather than in `node.module`; and a RE-EXPORT that renames on
+      the way, since the import graph is followed to a fixpoint). An attribute
+      target also mints its FINAL name, so `self._ddl` bound here and `OBJ._ddl`
+      used elsewhere is refused too. ⚠️ Taint is keyed on the SPELLING
+      of a binding, not its scope, so a coincident name in an unrelated module is
+      refused too: fail-CLOSED (a false block on a name nobody assembled, never a
+      false pass on one that was). What no static
       scan reaches is stated as EXAMPLES rather than as a closed list — a fragment
       whose keyword lives entirely outside the scanned module (handed in by a
       helper or a default argument), a lookup resolved dynamically
-      (`globals()["X"]`, `getattr(obj, name)`), and — for a MATCH — whether the
-      string is a statement or an explanatory MENTION of the DDL spelling
-      (docstrings are skipped; any other string that spells the statement out reds
-      and must be reworded). It is the reachable surface the claim lives in, not
-      the whole world.
+      (`globals()["X"]`, `getattr(obj, name)`), a runtime SUBSTITUTION this scan
+      does not model (`.replace`, `string.Template.substitute`) or a keyword SPLIT
+      between the two words (`"CREATE " + "CONSTRAINT …"`) — both measured to read
+      as absent, and both tracked for a hardened detector in #9901 — and, for a
+      MATCH, whether the string is a statement or an explanatory MENTION of the DDL
+      spelling (docstrings are skipped; any other string that spells the statement
+      out reds and must be reworded). It is the reachable surface the claim lives
+      in, not the whole world.
 
   - id: failure_policy
     name: "per-step FAILURE POLICY (G3) — HOLD the unresolved identity, never assert `new`"

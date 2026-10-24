@@ -1197,6 +1197,16 @@ def test_the_value_fidelity_rule_rides_the_s2s4_slot_and_no_master_render() -> N
         ("S1 (`_granularity_text`)", v2._granularity_text),
         ("core-only master", v2._render_master_core_only),
         ("verbose master", v2._render_master_verbose),
+        # The FOURTH render surface: selected by the documented
+        # `TORTOISE_EXTRACTOR_PROMPT=compact` and substituted into the SAME
+        # `{master_list}` slot of S2/S4 that `{anti_routine}` fills — so a second
+        # copy here is the same double emission. It was the one render the pin
+        # missed (measured: appending the rule to its granularity branch left the
+        # suite green and put the instruction in the prompt twice).
+        (
+            "compact master",
+            lambda m: v2._render_master_compact(m, "we shipped the dev: extractor change"),
+        ),
     ):
         rendered = render(master)
         assert rule not in rendered, (
@@ -1566,7 +1576,7 @@ def _binding_keys(target: ast.expr) -> list[str]:
     (`_DDL = …`), an ANNOTATED name (`_DDL: str = …`), an attribute or subscript
     (`self._ddl = …`), and a tuple/list of any of those
     (`_A, _B = "… NODE ", "Point"`). The spelling is shared with
-    :func:`_use_key`, so a binding and a use cannot disagree about WHICH name
+    :func:`_use_keys`, so a binding and a use cannot disagree about WHICH name
     they mean — an earlier name-only allow-list (`isinstance(target, ast.Name)`)
     keyed neither `AnnAssign` nor an attribute target, so
     `_D: str = "… UNIQUE NODE "` + `g.query(_D + _L)` passed the pin with the
@@ -1577,7 +1587,15 @@ def _binding_keys(target: ast.expr) -> list[str]:
     """
     if isinstance(target, ast.Name):
         return [f"name:{target.id}"]
-    if isinstance(target, (ast.Attribute, ast.Subscript)):
+    if isinstance(target, ast.Attribute):
+        # BOTH spellings: the receiver-qualified one (`self._ddl`, matched by a use
+        # written the same way) and the final name (`_ddl`, matched by a use through
+        # ANY receiver — `OBJ._ddl` in another module). Measured: with only the
+        # qualified spelling, a `self._ddl` fragment completed at an
+        # `OBJ._ddl`-style use site read as ABSENT. Spelling-keyed, so a coincident
+        # final name over-refuses — fail-closed, and the row's note says so.
+        return [f"expr:{ast.unparse(target)}", f"name:{target.attr}"]
+    if isinstance(target, ast.Subscript):
         return [f"expr:{ast.unparse(target)}"]
     if isinstance(target, ast.Starred):
         return _binding_keys(target.value)
@@ -1682,21 +1700,74 @@ def _class_body_keys(tree: ast.AST) -> dict[int, list[str]]:
     return keys
 
 
-def _use_key(node: ast.expr) -> str | None:
-    """The same key for a USE of a bound name; `None` for anything else.
+def _import_aliases(tree: ast.AST) -> tuple[dict[str, str], dict[str, str]]:
+    """`(name aliases, module aliases)` — so a QUALIFIED or ALIASED import is keyed.
 
-    A `Name` keys on its identifier; an attribute or subscript keys on its SOURCE
-    TEXT. A class-body binding is the case those two disagree on: the binding is
-    `stmt = …` (keyed `name:stmt`) but every use is `Ddl.stmt` (keyed
-    `expr:Ddl.stmt`), so a class-level DDL fragment shipped unrefused (measured).
-    :func:`_class_body_keys` therefore registers such a binding under its final
-    name too, and an attribute use is matched against that.
+    `from carrier import X` puts `X` in scope; `from carrier import X as Y` puts `Y`
+    there; `import carrier` makes `carrier.X` reachable and `import carrier as c`
+    makes it `c.X`. The binding is minted as `name:X` inside `carrier`, so a use in
+    ANOTHER module only matches it if the import's spelling is translated back —
+    without that, `import carrier; carrier.X + "Point"` (and `import carrier as c`,
+    and `from carrier import X as Y`) was not refused at all: measured, three
+    spellings of the same cross-module use shipped while the bare-`from` form was
+    caught. Imports are not bindings `_bound_pairs` sees, which is why they need
+    their own map rather than another target shape.
     """
+    names: dict[str, str] = {}
+    modules: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                local = alias.asname or alias.name.split(".")[0]
+                modules[local] = alias.name.split(".")[0]
+        elif isinstance(node, ast.ImportFrom):
+            if node.module is None:  # a relative import: no stable module key
+                continue
+            for alias in node.names:
+                local = alias.asname or alias.name
+                names[local] = alias.name
+                # `from carrier import X` also makes X reachable as an ATTRIBUTE of
+                # the module only after `import carrier`, so nothing more to map.
+    return names, modules
+
+
+def _use_keys(node: ast.expr, aliases: tuple[dict[str, str], dict[str, str]]) -> set[str]:
+    """Every key a USE could be spelled by, including its import translations."""
+    names, modules = aliases
+    keys: set[str] = set()
     if isinstance(node, ast.Name):
-        return f"name:{node.id}"
-    if isinstance(node, (ast.Attribute, ast.Subscript)):
-        return f"expr:{ast.unparse(node)}"
-    return None
+        keys.add(f"name:{node.id}")
+        if node.id in names:
+            keys.add(f"name:{names[node.id]}")
+    elif isinstance(node, (ast.Attribute, ast.Subscript)):
+        text = ast.unparse(node)
+        keys.add(f"expr:{text}")
+        if isinstance(node, ast.Attribute):
+            # The FINAL name is the spelling a class-body or module binding mints
+            # (`name:X` / `expr:Cls.X`), however deep the qualifier chain is.
+            keys.add(f"name:{node.attr}")
+        # Translate the LEFTMOST qualifier, not only a bare `Name.attr`: the chain
+        # can be any depth (`carrier.Ddl.stmt`, `carrier.PARTS["k"]`,
+        # `carrier.constraints.POINT_UNQ`) and a one-level-only translation left
+        # every deeper chain unfused — measured: three cross-module spellings of an
+        # assembled `Point` constraint read as ABSENT while the single-level form was
+        # refused.
+        leftmost = node
+        while isinstance(leftmost, (ast.Attribute, ast.Subscript)):
+            leftmost = leftmost.value
+        if isinstance(leftmost, ast.Name):
+            stripped = text.split(".", 1)[1] if "." in text else text
+            if leftmost.id in modules:
+                keys.add(f"expr:{stripped}")
+                keys.add(f"expr:{modules[leftmost.id]}.{stripped}")
+            elif leftmost.id in names:
+                # `from carrier import obj as O; O.ddl` — the qualifier is a
+                # RENAMED from-import, so the tainted `expr:obj.ddl` in the carrier
+                # is reachable only by substituting the imported name. Measured:
+                # without this, that spelling read as ABSENT.
+                keys.add(f"expr:{names[leftmost.id]}.{stripped}"
+                         if "." in text else f"name:{names[leftmost.id]}")
+    return keys
 
 
 #: "This expression STARTS a constraint statement", used to recognise a statement
@@ -1810,6 +1881,7 @@ def ddl_scan(root: Path) -> tuple[list[str], list[str], list[str]]:
     found: list[str] = []
     unparsable: list[str] = []
     assembled: list[str] = []
+    trees: list[tuple[str, ast.AST]] = []
     for path in sorted(root.rglob("*.py")):
         rel = path.relative_to(root).as_posix()
         try:
@@ -1824,6 +1896,102 @@ def ddl_scan(root: Path) -> tuple[list[str], list[str], list[str]]:
         except (OSError, UnicodeError, SyntaxError, ValueError):
             unparsable.append(rel)
             continue
+        trees.append((rel, tree))
+
+    #: ⚠️ TAINT IS TREE-WIDE, NOT PER-FILE. A fragment bound in one module and used
+    #: in another (`POINT_UNQ = "… UNIQUE NODE "` here, `g.query(POINT_UNQ +
+    #: "Point")` there) is the same unverifiable statement as the single-file case,
+    #: and a per-file set refused only the easy half — measured: two modules carrying
+    #: the two halves produced `assembled == []` and the pin stayed green. The
+    #: keyword literal IS inside the scanned tree in that shape, so it is not one of
+    #: the residual cases the row documents.
+    file_taint: dict[str, set[str]] = {}
+    tree_taint: set[str] = set()
+    for rel, tree in trees:
+        local: set[str] = set()
+        class_keys = _class_body_keys(tree)
+        for target, value in _bound_pairs(tree):
+            if not _incomplete_ddl(value):
+                continue
+            keys = _binding_keys(target)
+            if keys:
+                local.update(keys)
+                # A class-body binding is USED as `Cls.name` — a different key from
+                # the `name:` spelling it binds under (`_class_body_keys`).
+                local.update(class_keys.get(id(target), ()))
+            else:  # a binding shape this scan cannot key is NOT clean
+                assembled.append(
+                    f"{rel}: `{ast.unparse(target)}` is bound to an incomplete "
+                    "DDL statement in a shape this scan does not resolve"
+                )
+        file_taint[rel] = local
+        tree_taint |= local
+
+    # ⚠️ IMPORTS ARE TRANSITIVE, INCLUDING A RENAME. A fragment bound in `a.py`,
+    # re-exported as `from a import X as Y` in `b.py` and used as `Y` in `c.py` is
+    # the same unverifiable statement, and a one-hop map lost it — measured: both
+    # `from b import Y` and `import b; b.Y` read as ABSENT while the same chain
+    # without the rename was refused. So the taint is propagated to a FIXPOINT over
+    # the import graph: a name imported under an alias inherits the taint of the
+    # name it came from, and an imported MODULE exposes its tainted names as
+    # qualified spellings.
+    module_files: dict[str, str] = {}
+    for rel in file_taint:
+        mod = rel[: -len(".py")].replace("/", ".")
+        module_files[mod] = rel
+        if mod.endswith(".__init__"):
+            module_files[mod[: -len(".__init__")]] = rel
+
+    def resolve(module: str | None, level: int, rel: str) -> str | None:
+        """The file a `from … import` came from, ABSOLUTE or RELATIVE.
+
+        ⚠️ The dots are NOT in `node.module`: `ast.ImportFrom` carries them in
+        `node.level` (`from .carrier import X` -> module "carrier", level 1; `from .
+        import x` -> module None, level 1; `from ..pkg import y` -> module "pkg",
+        level 2). Testing `module.startswith(".")` therefore never fires — measured:
+        a relative re-export with a rename was not refused, and a level-2 import
+        resolved as an ABSOLUTE one, binding taint from the wrong file.
+        """
+        if level:
+            pkg = rel.rsplit("/", 1)[0].replace("/", ".") if "/" in rel else ""
+            parts = pkg.split(".") if pkg else []
+            base = ".".join(parts[: len(parts) - (level - 1)]) if level > 1 else pkg
+            cand = f"{base}.{module}" if (base and module) else (base or module or "")
+            return module_files.get(cand) or None
+        if not module:
+            return None
+        return module_files.get(module)
+
+    changed = True
+    while changed:
+        changed = False
+        for rel, tree in trees:
+            here = file_taint[rel]
+            before = len(here)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom):
+                    src = resolve(node.module, node.level, rel)
+                    if src is None:
+                        continue
+                    up = file_taint[src]
+                    for alias in node.names:
+                        if f"name:{alias.name}" in up:
+                            here.add(f"name:{alias.asname or alias.name}")
+                elif isinstance(node, ast.Import):
+                    for alias in node.names:
+                        src = resolve(alias.name, 0, rel)
+                        if src is None:
+                            continue
+                        local = alias.asname or alias.name.split(".")[0]
+                        for key in file_taint[src]:
+                            if key.startswith("name:"):
+                                here.add(f"expr:{local}.{key.split(':', 1)[1]}")
+            if len(here) != before:
+                changed = True
+        tree_taint = set().union(*file_taint.values())
+
+    for rel, tree in trees:
+        aliases = _import_aliases(tree)
         docstrings = {
             id(n.body[0].value)
             for n in ast.walk(tree)
@@ -1831,25 +1999,10 @@ def ddl_scan(root: Path) -> tuple[list[str], list[str], list[str]]:
             and n.body and isinstance(n.body[0], ast.Expr)
             and isinstance(n.body[0].value, ast.Constant)
         }
-        #: Keys of names bound to an INCOMPLETE statement: whether the label is
-        #: supplied at the use site cannot be decided here, so a USE of one is
-        #: `assembled` and never an absence.
-        tainted: set[str] = set()
-        class_keys = _class_body_keys(tree)
-        for target, value in _bound_pairs(tree):
-            if not _incomplete_ddl(value):
-                continue
-            keys = _binding_keys(target)
-            if keys:
-                tainted.update(keys)
-                # A class-body binding is USED as `Cls.name` — a different key from
-                # the `name:` spelling it binds under (`_class_body_keys`).
-                tainted.update(class_keys.get(id(target), ()))
-            else:  # a binding shape this scan cannot key is NOT clean
-                assembled.append(
-                    f"{rel}: `{ast.unparse(target)}` is bound to an incomplete "
-                    "DDL statement in a shape this scan does not resolve"
-                )
+        #: A USE anywhere in the tree of a name bound to an INCOMPLETE statement is
+        #: unverifiable — the label may be supplied at the use site. Tree-wide, so
+        #: a fragment bound in another module is covered too (see above).
+        tainted = tree_taint
 
         for node in ast.walk(tree):
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -1901,7 +2054,7 @@ def ddl_scan(root: Path) -> tuple[list[str], list[str], list[str]]:
             if (
                 isinstance(node, (ast.Name, ast.Attribute, ast.Subscript))
                 and isinstance(node.ctx, ast.Load)
-                and _use_key(node) in tainted
+                and (_use_keys(node, aliases) & tainted)
             ):
                 assembled.append(
                     f"{rel}: `{ast.unparse(node)}` carries an incomplete DDL "
@@ -2167,6 +2320,161 @@ def test_the_ddl_scan_sees_every_form_that_could_name_a_label(tmp_path) -> None:
             "spelling is present, and a docstring is not a statement at all"
         )
         probe.unlink()
+    # TAINT IS TREE-WIDE: a fragment bound in one module and used in another is the
+    # same unverifiable statement. A per-file set refused only the easy half
+    # (measured: two modules carrying the two halves left `assembled == []`).
+    (tmp_path / "carrier.py").write_text(
+        'POINT_UNQ = "GRAPH.CONSTRAINT CREATE pt_u UNIQUE NODE "\n', encoding="utf-8"
+    )
+    (tmp_path / "user.py").write_text(
+        'from carrier import POINT_UNQ\n'
+        'g.query(POINT_UNQ + "Point PROPERTIES 1 content")\n',
+        encoding="utf-8",
+    )
+    found, _, assembled = ddl_scan(tmp_path)
+    assert assembled and "POINT_UNQ" in assembled[0], (
+        "a fragment bound in ANOTHER module and completed at the use site was not "
+        f"refused — that is the cross-file half of the same fail-open: {assembled}"
+    )
+    # EVERY import spelling of the same use: `import carrier; carrier.X`,
+    # `import carrier as c; c.X`, `from carrier import X as Y; Y`. The bare `from
+    # carrier import X` shape above was the only one refused before the import map
+    # existed (measured: the other three shipped), because the binding is minted as
+    # `name:X` in the carrier and an imported use is spelled differently.
+    for spelling in (
+        'import carrier\ng.query(carrier.POINT_UNQ + "Point PROPERTIES 1 c")\n',
+        'import carrier as c\ng.query(c.POINT_UNQ + "Point PROPERTIES 1 c")\n',
+        'from carrier import POINT_UNQ as PU\ng.query(PU + "Point PROPERTIES 1 c")\n',
+    ):
+        (tmp_path / "user.py").write_text(spelling, encoding="utf-8")
+        _, _, assembled = ddl_scan(tmp_path)
+        assert assembled, (
+            f"this import spelling of a cross-module fragment was not refused "
+            f"({spelling.splitlines()[0]!r}) — the import map is what makes an "
+            "aliased or qualified use visible"
+        )
+    # The ACCEPTING control for this whole section: a COMPLETE statement carried
+    # across modules and used through `import carrier` must NOT be refused (the
+    # refusal is about what the scan cannot resolve, not about modules). This
+    # control was reduced to an unscanned write during an earlier de-duplication,
+    # so nothing asserted it — restored with the assertion it needs.
+    (tmp_path / "carrier.py").write_text(
+        'OK = "GRAPH.CONSTRAINT CREATE ge UNIQUE NODE GraphEvent"\n', encoding="utf-8"
+    )
+    for spelling in ('import carrier\ng.query(carrier.OK)\n',
+                     'from carrier import OK\ng.query(OK)\n'):
+        (tmp_path / "user.py").write_text(spelling, encoding="utf-8")
+        _, _, assembled = ddl_scan(tmp_path)
+        assert assembled == [], (
+            f"a COMPLETE statement used cross-module was refused ({spelling!r}): "
+            f"{assembled}"
+        )
+    # A DEEPER qualifier chain, not only `carrier.X`: a class-body binding used
+    # through the module (`carrier.Ddl.stmt`) and a subscript target
+    # (`carrier.PARTS["k"]`). A one-level-only translation left all of these
+    # unfused (measured: each read as absent while the single-level form was
+    # refused), which is why the translation walks to the LEFTMOST name.
+    (tmp_path / "carrier.py").write_text(
+        'class Ddl:\n    stmt = "CREATE CONSTRAINT pt UNIQUE NODE "\n'
+        'PARTS = {"k": "CREATE CONSTRAINT pt UNIQUE NODE "}\n',
+        encoding="utf-8",
+    )
+    for spelling in (
+        'import carrier\ng.query(carrier.Ddl.stmt + "Point")\n',
+        'import carrier as c\ng.query(c.Ddl.stmt + "Point")\n',
+        'import carrier\ng.query(carrier.PARTS["k"] + "Point")\n',
+    ):
+        (tmp_path / "user.py").write_text(spelling, encoding="utf-8")
+        _, _, assembled = ddl_scan(tmp_path)
+        assert assembled, (
+            f"a DEEPER-qualifier use of a cross-module fragment was not refused "
+            f"({spelling.splitlines()[-1]!r}) — the translation must walk to the "
+            "leftmost name, not stop at Name.attr"
+        )
+    # A RENAME UPSTREAM OF THE USE: `a` binds, `b` re-exports as `Y`, `c` uses `Y`
+    # (and `b.Y`). A one-hop alias map lost the taint here — measured: both
+    # spellings read as ABSENT while the un-renamed chain was refused — so the
+    # import graph is resolved to a FIXPOINT.
+    (tmp_path / "carrier.py").write_text(
+        'POINT_UNQ = "GRAPH.CONSTRAINT CREATE pt_u UNIQUE NODE "\n', encoding="utf-8"
+    )
+    (tmp_path / "middle.py").write_text(
+        'from carrier import POINT_UNQ as Y\n', encoding="utf-8"
+    )
+    for spelling in (
+        'from middle import Y\ng.query(Y + "Point")\n',
+        'import middle\ng.query(middle.Y + "Point")\n',
+    ):
+        (tmp_path / "user.py").write_text(spelling, encoding="utf-8")
+        _, _, assembled = ddl_scan(tmp_path)
+        assert assembled, (
+            "a fragment RE-EXPORTED under another name and used here was not "
+            f"refused ({spelling.splitlines()[-1]!r}) — the import graph has to be "
+            "followed transitively, not one hop"
+        )
+    # AN ALIASED from-import of the QUALIFIER: `from carrier import obj as O` then
+    # `O.ddl`. The qualifier is renamed, so the carrier's `expr:obj.ddl` is
+    # reachable only by substituting the imported name — measured: without that
+    # substitution the spelling read as ABSENT.
+    (tmp_path / "carrier.py").write_text(
+        'class obj:\n    ddl = "CREATE CONSTRAINT pt UNIQUE NODE "\n',
+        encoding="utf-8",
+    )
+    for spelling in (
+        'from carrier import obj as O\ng.query(O.ddl + "Point")\n',
+        'from carrier import obj\ng.query(obj.ddl + "Point")\n',
+    ):
+        (tmp_path / "user.py").write_text(spelling, encoding="utf-8")
+        _, _, assembled = ddl_scan(tmp_path)
+        assert assembled, (
+            "an ALIASED qualifier import of a cross-module fragment was not "
+            f"refused ({spelling.splitlines()[-1]!r})"
+        )
+    (tmp_path / "middle.py").unlink()
+    (tmp_path / "carrier.py").unlink()
+    (tmp_path / "user.py").unlink(missing_ok=True)
+    # A RELATIVE import with a rename — the repo's own idiom (`from .x import y as
+    # z`). The dots live in `node.level`, not in `node.module`, so a
+    # `module.startswith(".")` test never fires: measured, this shape was not
+    # refused and a level-2 import resolved as an ABSOLUTE one from the wrong file.
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "carrier.py").write_text(
+        'POINT_UNQ = "CREATE CONSTRAINT pt UNIQUE NODE "\n', encoding="utf-8"
+    )
+    (tmp_path / "pkg" / "__init__.py").write_text(
+        'from .carrier import POINT_UNQ as Q\n', encoding="utf-8"
+    )
+    (tmp_path / "user.py").write_text(
+        'from pkg import Q\ng.query(Q + "Point")\n', encoding="utf-8"
+    )
+    _, _, assembled = ddl_scan(tmp_path)
+    assert assembled, (
+        "a RELATIVE re-export with a rename was not refused — the import graph "
+        "must read `node.level`, not a dot in `node.module`"
+    )
+    # An ATTRIBUTE-target binding used through ANOTHER receiver: `self._ddl` bound
+    # in one module, `OBJ._ddl` used in another. The qualified spelling alone never
+    # matches, so the binding also mints its final name.
+    (tmp_path / "pkg" / "carrier.py").write_text(
+        'class C:\n    def __init__(self):\n'
+        '        self._ddl = "CREATE CONSTRAINT pt UNIQUE NODE "\nOBJ = C()\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "pkg" / "__init__.py").write_text(
+        'from .carrier import OBJ\n', encoding="utf-8"
+    )
+    (tmp_path / "user.py").write_text(
+        'from pkg import OBJ\ng.query(OBJ._ddl + "Point")\n', encoding="utf-8"
+    )
+    _, _, assembled = ddl_scan(tmp_path)
+    assert assembled, (
+        "an attribute-target binding used through another receiver was not "
+        "refused (`OBJ._ddl` vs the `self._ddl` binding)"
+    )
+    for stray in ("pkg/carrier.py", "pkg/__init__.py", "user.py"):
+        (tmp_path / stray).unlink()
+    (tmp_path / "carrier.py").unlink(missing_ok=True)
+    (tmp_path / "user.py").unlink(missing_ok=True)
     # A docstring is excluded from `found` too: nothing executes it.
     (tmp_path / "doc.py").write_text(
         'def f():\n    """GRAPH.CONSTRAINT CREATE x UNIQUE NODE Point PROPERTIES 1 h"""\n',
