@@ -36,9 +36,10 @@
 //     a per-isolate Map would be correct only until the next isolate — green in a
 //     test, a flood in production, which is the shape this repo keeps re-learning.
 //     The state is `blog_posts.indexnow_submitted_at` (migration
-//     20261022000001_blog_indexnow.sql). Every read or write of it is fail-soft
-//     and LOGGED: the stamp is a rate limit, never a correctness dependency of
-//     the publish.
+//     20261026000001_blog_indexnow.sql — renumbered forward from 20261022000001,
+//     which a first-merged migration had already claimed). Every read or write of
+//     it is fail-soft and LOGGED: the stamp is a rate limit, never a correctness
+//     dependency of the publish.
 //
 // ZERO-DEPENDENCY (plain TS + Web APIs, like its siblings in this directory).
 

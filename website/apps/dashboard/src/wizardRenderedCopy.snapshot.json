@@ -250,11 +250,12 @@
       "renders": [
         {
           "label": "",
-          "text": "Tick I understand and want to continue, then click Create as a plugin. Now open chatgpt.com/settings/plugins-settings → Tortoise → View details → Connect, sign in to Tortoise, click Authorize, and pick the Organization you are onboarding.",
+          "text": "Tick I understand and want to continue, then click Create as a plugin. Now open chatgpt.com/settings/plugins-settings → Tortoise → View details → Connect, then confirm Connect Tortoise in the dialog it opens. Sign in to Tortoise, pick the Organization you are onboarding — the page names it, or asks you to choose when your account can use more than one — then click Authorize. That Organization is the one the connector writes to.",
           "tags": [
             "strong",
             "strong",
             "code",
+            "strong",
             "strong",
             "strong",
             "strong",
@@ -373,7 +374,7 @@
         },
         {
           "label": "wizardHarness=\"claude-desktop\",harnessKey=\"tk_snapshot\",welcomeKey=\"tk_snapshot\"",
-          "text": "Tortoise — Claude Desktop (OAuth, no API key)\nClaude Desktop reaches a remote MCP server through the Connectors UI:\n1. Open Claude Desktop → Settings → Connectors → Add custom connector.\n2. Name: Tortoise\n3. Server URL: https://api.premiselabs.co/mcp\n4. Leave Request headers empty — no API key is needed. Claude opens\n   Tortoise's sign-in page on the first connection: sign in, click Authorize,\n   then pick the Organization you're onboarding.\n5. Start a new chat and paste the Tortoise workflows prompt — it gives Claude\n   the Tortoise workflows. Then say \"Set up Tortoise\" so the agent calls\n   tortoise_health to verify, and click \"I've connected it — Continue\" in the\n   dashboard connect step (the click only advances — the connection itself is\n   confirmed by your agent's first successful write).",
+          "text": "Tortoise — Claude Desktop (OAuth, no API key)\nClaude Desktop reaches a remote MCP server through the Connectors UI:\n1. Open Claude Desktop → Settings → Connectors → Add custom connector.\n2. Name: Tortoise\n3. Server URL: https://api.premiselabs.co/mcp\n4. Leave Request headers empty — no API key is needed. Claude opens\n   Tortoise's sign-in page on the first connection: sign in, pick the\n   Organization you're onboarding (the page names it, or asks you to choose when\n   your account can use more than one), then click Authorize.\n5. Start a new chat and paste the Tortoise workflows prompt — it gives Claude\n   the Tortoise workflows. Then say \"Set up Tortoise\" so the agent calls\n   tortoise_health to verify, and click \"I've connected it — Continue\" in the\n   dashboard connect step (the click only advances — the connection itself is\n   confirmed by your agent's first successful write).",
           "tags": []
         },
         {

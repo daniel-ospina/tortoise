@@ -139,8 +139,12 @@ WHAT THIS PINS
    fail-open:** substituting a different REGISTERED tool on rows 4 and 21 left
    every arm green, and the blast-radius door count is derived from those very
    cells. The residual is named there — the closure is name-based (permissive:
-   it can miss a bad door, never invent reach), the budget is a BOUND (3, with two
-   measured exceptions), and its acceptance RATE is pinned by (22) so it cannot
+   it can miss a bad door, and it can invent a hop through a repeated attribute or
+   builtin name; a repeated function-local VARIABLE target no longer resolves
+   (`#9817` — the NAME of a nested `def`/`class` still does, and that residue is
+   declared in the note at `_DOOR_REACH_HOPS`), the
+   budget is a BOUND (3, with two
+   measured exceptions), and its acceptance COUNT is pinned by (22) so it cannot
    loosen again silently. **The REST door is keyed on `(verb, path)`, not path
    alone** — a cell naming the sibling `GET` of a `POST` route is a different
    door, and was green before the verb was checked.
@@ -230,7 +234,7 @@ WHAT THIS PINS
    ARM rather than as a comment, the same correction (16) records for the
    fragment census that existed for three cycles and was never CALLED.
 22. `test_the_attribution_predicate_does_not_swallow_the_whole_table` — (8)'s
-   relation is a BOUND, so the RATE it accepts is pinned as its own number: at
+   relation is a BOUND, so the COUNT it accepts is pinned as its own number: at
    most `_ACCEPTED_PAIRS_AT_THIS_HEAD` of the (row, table-door) pairs and at
    most `_WORST_ROW_AT_THIS_HEAD` for any one row, with a floor at the cell
    occurrences §13 states, so a predicate that breaks the other way also reds.
@@ -825,6 +829,54 @@ def _span(tree: ast.Module, dotted: str) -> tuple[int, int] | None:
             if _bound_name(inner) == tail:
                 return (inner.lineno, inner.end_lineno or inner.lineno)
     return None
+
+
+def _class_body_targets(rel: str, function: str, cls: str) -> frozenset[str]:
+    """What a class body DECLARES, read from the SOURCE: the `Assign`/`AnnAssign`
+    target names of `cls` (a class defined directly inside `function`, in
+    `tortoise/<rel>`) that carry a VALUE and whose targets are bare `Name`s —
+    `_symbol_index`'s own condition, applied to a class that is itself
+    function-local.
+
+    ⚠️ These are exactly the names the index must NOT contain for this class: a
+    class local to a function has a local BODY, so `index()` walks it with
+    `in_function=True` and mints none of them (that absence is what the paired
+    assertion pins). This helper reports the SOURCE side of the pair, so a red on it
+    means the SOURCE moved — a rename, or a declaration re-shaped into a form the
+    index skips — and the pin needs re-pointing. It does NOT mean `in_function`
+    stopped propagating.
+
+    ⚠️ The condition must be the index's own, not a looser one, or the presence
+    check defeats itself: an annotation-only `x: list` (no value) would satisfy
+    PRESENT while the index cannot mint the id the next assertion forbids —
+    `assert <id> not in set()`, green and testing nothing. Nested `def`/`class`
+    names are excluded for a DIFFERENT reason: the index mints a nested definition
+    node regardless of `in_function`, so including them would red the ABSENCE pin
+    with the wrong diagnosis ("`in_function` is not propagating") when what changed
+    was a name collision.
+    """
+    tree = _parsed(str(PKG / rel))
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name != function:
+            continue
+        for inner in node.body:
+            if isinstance(inner, ast.ClassDef) and inner.name == cls:
+                names: set[str] = set()
+                for statement in inner.body:
+                    if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                        continue
+                    if statement.value is None:
+                        continue
+                    targets = (
+                        statement.targets
+                        if isinstance(statement, ast.Assign)
+                        else [statement.target]
+                    )
+                    names.update(t.id for t in targets if isinstance(t, ast.Name))
+                return frozenset(names)
+    return frozenset()
 
 
 @functools.cache
@@ -2434,11 +2486,23 @@ def _route_table() -> dict[tuple[str, str], frozenset[str]]:
 #
 # ⚠️ **Declared residuals — each MEASURED here, not assumed:**
 #
-#   * **The relation is PERMISSIVE, so it can miss a bad door; it cannot invent
-#     reach.** Resolution is by name, so a call through a computed attribute
-#     (`getattr(obj, name)`) is invisible. That direction is chosen: a
-#     permissive relation false-REDS nothing, and this arm's job is to stop a
-#     *substituted* door, not to prove a call graph.
+#   * **The relation is PERMISSIVE, so it can miss a bad door; and it can INVENT
+#     one hop through a repeated identifier.** Resolution is by name, so a hop
+#     resolves a bare name to EVERY symbol of that name: a call through a computed
+#     attribute (`getattr(obj, name)`) is invisible (permissive, the harmless
+#     direction), and a common name — an attribute (`list`, `.delete`) or a
+#     builtin — makes two unrelated sites adjacent (measured: `MCP tortoise_search`
+#     reaches `hosted_backup.py::BackupStorage.list` in 2 hops, the last of which is
+#     nothing but the repeated name `list`). Function-local ASSIGNMENT targets no longer do:
+#     since the `#9817` fix they are not symbol definitions at all (see
+#     `_symbol_index`), and that class was the one that produced a WRONG attribution
+#     rather than an extra hop. ⚠️ The NAME of a nested `def`/`class` is still a
+#     symbol — what the local-class rule drops is its BODY's assignments, and the
+#     class node itself stays (both directions are pinned in
+#     `test_a_local_class_body_is_not_a_source_of_symbols`) — so this residual
+#     is about local VARIABLES, not about every local definition.
+#     The budget and the pinned count are what keep the residue small; the arm
+#     still does not prove a call graph.
 #   * **A door that ENTERS the shared search path is attributed to the readers
 #     that path touches — measured, not merely possible.**
 #     `tortoise_suggest_entry_points` reaches row 2's reader in three hops
@@ -2452,20 +2516,29 @@ def _route_table() -> dict[tuple[str, str], frozenset[str]]:
 #   * **`_DOOR_REACH_HOPS` is a BOUND, and the number is a MEASUREMENT, not a
 #     guess — the first one was WRONG and a review caught it.** A uniform budget
 #     of 5 attributed every row of the table as it stood then, so it looked safe;
-#     measured against substitutions that keep a REAL tool in the cell it accepted
-#     it swallowed the largest share of the (row, table-door) pairs, and three such
-#     substitutions stayed GREEN (rows 22/24's reach cells swapped, rows 28-31's
-#     backup doors swapped, and row 28's verb changed to the sibling `GET` that
-#     dumps nothing). At a uniform 3 hops the same sweep accepts far less and all
-#     three red; the SHIPPED predicate — the exceptions in `_DISTANCE_EXCEPTIONS`
-#     included — accepts the rate the arm below pins (`_ACCEPTED_PAIRS_AT_THIS_HEAD`
-#     over the derived population), because a rate restated in prose is a count
-#     that rots: this sentence still read 63/340 = 18.5 % after the table grew.
-#     Depth still trades both
-#     ways — at 2 hops nine legitimate rows false-red — and the only two true
-#     attributions beyond 3 are named in `_DISTANCE_EXCEPTIONS` with the code fact
+#     measured against substitutions that keep a REAL tool in the cell, it accepted
+#     the largest share of the (row, table-door) pairs, and three such substitutions
+#     are refused at a uniform 3 (rows 22/24's reach cells swapped, rows 28-31's
+#     backup doors swapped, and row 28's verb changed to the sibling `GET` that dumps
+#     nothing) — but at `3f2f48932` only TWO of them discriminate 5 from 3: the
+#     backup swap is already refused at 5, because row 31's swapped cell is 7 hops
+#     (and under the shipped predicate row 29's is 5 against that reader's 4-hop
+#     exception) — the per-door figures are in the `_DOOR_REACH_HOPS` note below.
+#     ⚠️ **The 5-versus-3 comparison above is made at THAT commit, against its own
+#     pre-`#9817` index**: under the current index all three are refused even at a
+#     uniform 5 (the four substituted backup cells are 11, 12, `None`, `None`), so a
+#     lane that re-measures at HEAD and finds no discrimination there has not
+#     refuted it.
+#     The SHIPPED predicate — the exceptions in `_DISTANCE_EXCEPTIONS`
+#     included — accepts the COUNT the arm below pins (`_ACCEPTED_PAIRS_AT_THIS_HEAD`
+#     over the derived population), because a figure restated in prose rots: this
+#     sentence still read 63/340 = 18.5 % after the table grew.
+#     Depth still trades both ways — at a UNIFORM 2 hops nine legitimate rows
+#     false-red (seven if the `_DISTANCE_EXCEPTIONS` budgets are honoured, i.e.
+#     only the global budget is lowered) — and the only two true attributions
+#     beyond 3 are named in `_DISTANCE_EXCEPTIONS` with the code fact
 #     that earns each. ⚠️ This is why the bound is pinned on BOTH sides: the
-#     acceptance rate is itself an arm
+#     acceptance count is itself an arm
 #     (`test_the_attribution_predicate_does_not_swallow_the_whole_table`), so the
 #     predicate cannot quietly go permissive again.
 #   * **Falsifiability is a SEPARATE arm**
@@ -2477,22 +2550,51 @@ def _route_table() -> dict[tuple[str, str], frozenset[str]]:
 #: note above: this is a BOUND, not a proof.
 #:
 #: ⚠️ **Three, and this is a BOUND, not a proof.** Re-measured 2026-10-24 at
-#: `d07c9e99e`, with function LOCALS excluded from the symbol index (see
-#: `_symbol_index`) and the per-reader exceptions DISABLED, so these are the PURE
-#: relation's figures: a uniform 2 accepts 24/418 = 5.7 %, a uniform 3 34/418 =
-#: **8.1 %**, a uniform 4 43/418 = 10.3 %, a uniform 5 52/418 = 12.4 %. The SHIPPED
-#: predicate — the two exceptions in `_DISTANCE_EXCEPTIONS` added — accepts 36/418 =
-#: **8.6 %**, i.e. the exceptions are worth exactly the 34 -> 36 above, stated
-#: separately so neither figure hides the other. Every one of the 31 true
-#: attributions is within 3 hops except the two named in `_DISTANCE_EXCEPTIONS`.
-#: ⚠️ An earlier wording here reported 16.5 % for a uniform 5 and 15.6 % for a
-#: uniform 3, and justified the tighter number with three substitutions that stayed
-#: green at 5 and red at 3 (rows 22/24's reach cells swapped, rows 28/30's REST
-#: doors swapped, row 28's verb changed). **Those figures were measured before the
-#: local-symbol rule and they do not reproduce**: under the current index all three
-#: of those substitutions are REFUSED even at a uniform 5. The budget stays at 3 —
-#: it is a bound and nothing depends on the old figures — but a rate restated from
-#: the pre-fix predicate would be a measurement of a defect, so it is not restated.
+#: `d07c9e99e`, with function-local ASSIGNMENT targets excluded from the symbol
+#: index (see `_symbol_index`; the NAME of a nested `def`/`class` is still indexed)
+#: and the per-reader exceptions DISABLED, so these are the PURE
+#: relation's figures over the 418 pairs: a uniform 2 accepts 24, a uniform 3 34,
+#: a uniform 4 43, a uniform 5 52. The SHIPPED predicate — the two exceptions in
+#: `_DISTANCE_EXCEPTIONS` added — accepts 36, i.e. the exceptions are worth exactly
+#: the 34 -> 36 above, stated separately so neither figure hides the other. Every
+#: one of the 31 true attributions is within 3 hops except the two named in
+#: `_DISTANCE_EXCEPTIONS`. (Counts, not percentages, on purpose: this file's own
+#: rule is that a rate restated against a fixed denominator rots on the next table
+#: growth — a sentence two screens up still read `63/340 = 18.5 %` after the table
+#: grew. The denominator is 19 rows x 22 doors at this head.)
+#: ⚠️ **The figures an earlier wording here carried were re-measured, not merely
+#: re-labelled.** It reported `16.5 %` for a uniform 5 and `15.6 %` for a uniform 3,
+#: and justified the tighter number with three substitutions it said stayed green
+#: at 5 and red at 3 (rows 22/24's reach cells swapped, rows 28-31's backup doors
+#: swapped, row 28's verb changed). At `3f2f48932` — the commit that wrote that
+#: sentence — the figures reproduce **against that commit's own, still-defective index** (it
+#: had no `in_function` flag at all, so function locals were symbols): uniform
+#: 2/3/4/5 = 26/59/90/170 of 418 and the shipped predicate 69, which is why
+#: `16.5 %` (69/418) reproduces there and `15.6 %` reproduces on NO index (a
+#: uniform 3 was 59/418 = 14.1 %, and the uniform-5 rate was 170/418, which is
+#: the "170 of the 418 (row, table-door) pairs" the arm BELOW states). ⚠️ The
+#: index matters: the CURRENT sweep above, locals excluded, applied to that same
+#: tree measures 24/34/42/52 and a shipped 36 — the difference is the defect,
+#: not the tree.
+#: The DISCRIMINATION the old wording claimed was only PARTLY true there, and the
+#: per-DOOR distances are what show it, not a per-cell minimum. Measured there, per
+#: door and per CELL — a swapped DOOR changes every cell that carries it, so the
+#: backup swap is FOUR cells (rows 28/29 carry `POST /v1/backups`, rows 30/31 its
+#: `restore` sibling), not the two the old wording named: row 24's reader via row
+#: 22's two doors 5, 5; row 22's reader via row 24's three doors 3, 4, 4; rows 28/29
+#: via `POST /v1/backups/restore` 5, 5; rows 30/31 via `POST /v1/backups` 5, 7; row
+#: 28's verb `GET` 5. **Every one of those cells is refused at a uniform 3** —
+#: row 22's because two of its three substituted doors sit at 4, since the arm
+#: refuses a CELL when ANY of its doors exceeds the budget (so the leading `3` is
+#: one green door inside a refused cell, never a green cell). ⚠️ **So only two of
+#: the three substitutions discriminate 5 from 3**: at a uniform 5 the backup swap
+#: is ALREADY refused, on row 31's 7-hop cell (and, with the exceptions on, on row
+#: 29's 5-hop cell against that reader's 4-hop budget) — its green cells are rows
+#: 28/29/30 only. What changed is that the local-symbol fix removes the collisions
+#: those substitutions were exploiting: under the current index all three are
+#: REFUSED even at a uniform 5.
+#: The budget stays at 3 — it is a bound, and nothing here depends on the old
+#: rates.
 _DOOR_REACH_HOPS = 3
 
 #: Readers whose door chain is legitimately LONGER than `_DOOR_REACH_HOPS`,
@@ -2516,10 +2618,16 @@ _DISTANCE_EXCEPTIONS: dict[str, tuple[int, str]] = {
     ),
 }
 
-#: How far the search itself may walk. Deliberately above every budget in play, so
-#: a `None` means UNREACHABLE rather than "further than we looked" — the message
-#: distinguishes the two, and a short search cap would report a long chain as no
-#: chain at all.
+#: How far the search itself may walk. Above every BUDGET in play (3, plus the
+#: two exceptions whose budgets are 4 and 5) — which is NOT the same as above
+#: every CHAIN, and the difference is measured, not assumed: at this head
+#: `MCP tortoise_search` reaches `hosted_backup.py::_independent_counts` and
+#: `_DUMP_EDGE_PAGE_QUERY` in 13 hops and `_COUNT_ALL_EDGES_QUERY` in 14, so
+#: `_door_distance` returns `None` for them at this cap. **`None` therefore means
+#: "not found within `_DISTANCE_SEARCH_CAP` hops", never "unreachable"**, and
+#: every message that consumes the value says which of the two it is — a short
+#: cap reports a long chain as no chain at all, so a caller must not read `None`
+#: as proof of absence.
 _DISTANCE_SEARCH_CAP = 12
 
 
@@ -2546,10 +2654,20 @@ def _symbol_index() -> tuple[dict[str, frozenset[str]], dict[str, frozenset[str]
     middle hops are the locals `ids` and `edges` in functions that have nothing
     to do with each other (`#9720` added the `ids` local, which shortened the
     same collision from 5 hops to 4 and took the accepted count from 69 pairs
-    to 70). The relation's own note claims it "can miss a bad door; it cannot
-    invent reach" — this was reach invented, so locals are excluded here and
-    the negative probe for that exact pair lives in
+    to 70). The relation's own note now states what the code enforces: a
+    repeated ATTRIBUTE or builtin name can still buy a hop (`list`, `.delete`),
+    while a repeated function-local VARIABLE target no longer resolves (the NAME
+    of a nested `def`/`class` still does — the residual note above declares that
+    remaining permissive direction). The `#9817`
+    local-VARIABLE defect was the class that produced a WRONG attribution rather
+    than an extra hop, so those definition nodes are excluded here and the
+    negative probe for that exact pair lives in
     `test_the_door_attribution_refuses_a_door_that_reaches_another_reader`.
+    A local CLASS body is a weaker case, measured separately: it supplies extra
+    hop CANDIDATES and moves no accepted pair at all — which is why it needed a
+    pin of its own (`test_a_local_class_body_is_not_a_source_of_symbols`)
+    rather than resting on the two ceilings. A class whose body is walked from a
+    function carries `in_function` through unchanged.
     Values of a local assignment are still REACHED from the enclosing function
     (`mentions` walks every `Assign` value), so dropping the target nodes loses
     no real reference.
@@ -2605,9 +2723,13 @@ def _symbol_index() -> tuple[dict[str, frozenset[str]], dict[str, frozenset[str]
                 index(node.body, rel, f"{qual}.", in_function=True)
             elif isinstance(node, ast.ClassDef):
                 defs.setdefault(node.name, set()).add(f"{rel}::{prefix}{node.name}")
-                # A class BODY still declares symbols (`Class.ATTR` constants), so
-                # the flag does not survive into it.
-                index(node.body, rel, f"{prefix}{node.name}.", in_function=False)
+                # A class BODY still declares symbols (`Class.ATTR` constants) —
+                # the class ITSELF is always a symbol (a nested `def`/`class` is
+                # indexed whether or not it is inside a function), but a class
+                # local to a function has a local BODY, so only its `Assign`
+                # targets are dropped and the flag carries through unchanged (see
+                # `test_a_local_class_body_is_not_a_source_of_symbols`).
+                index(node.body, rel, f"{prefix}{node.name}.", in_function=in_function)
             elif (
                 isinstance(node, (ast.Assign, ast.AnnAssign))
                 and node.value is not None
@@ -2659,7 +2781,13 @@ def _door_entry_ids(door: str) -> frozenset[str]:
 
 @functools.cache
 def _door_distance(door: str, reader: str) -> int | None:
-    """Shortest reference distance from `door` to `reader`; `None` = unreachable.
+    """Shortest reference distance from `door` to `reader`; `None` = NOT FOUND
+    within `_DISTANCE_SEARCH_CAP` hops.
+
+    ⚠️ `None` is a TRUNCATION, not a proof of absence — a chain longer than the
+    cap reports `None` exactly like one that does not exist (measured at this
+    head: `_COUNT_ALL_EDGES_QUERY` is 14 hops against a cap of 12), which is why
+    the two are never conflated in a message.
 
     Returns the DISTANCE rather than a boolean so the failure can say how far the
     chain actually is — "needs 4 references, budget is 3" is actionable, "not
@@ -2726,10 +2854,29 @@ def test_the_door_attribution_refuses_a_door_that_reaches_another_reader():
 
     # …and a door that exists but is on another surface path must not be
     # attributed to a reader it does not reach.
+    # ⚠️ This door needs the SAME non-vacuity guard as `MCP tortoise_search`
+    # below: `_door_entry_ids` yields `frozenset()` for a handler that no longer
+    # resolves, `_door_distance` then returns `None`, and every `not
+    # _door_reaches(...)` in the loop would pass while testing nothing.
+    assert _door_entry_ids("MCP tortoise_suggest_entry_points"), (
+        "this probe's door does not resolve, so the `not _door_reaches(...)` loop "
+        "below would be vacuous — a door that is not in the index never reaches "
+        "anything (measured: a renamed tool yields frozenset() and refuses every "
+        "reader)"
+    )
     for wrong in (
         "mcp_server.py::_preview_supersede",
         "sdk.py::TortoiseSDK.belief_timeline",
     ):
+        # The READER needs the guard too, not just the door: a reader id that no
+        # longer resolves is absent from the index, `_door_distance` returns
+        # `None`, and the assertion below passes while testing NOTHING — the same
+        # vacuity the door guard above closes, one operand over.
+        assert wrong in _symbol_index()[1], (
+            f"the probe reader `{wrong}` is not a node in the symbol index, so the "
+            "`not _door_reaches(...)` assertion below would pass on a reader that "
+            "cannot be reached because it does not exist"
+        )
         assert not _door_reaches("MCP tortoise_suggest_entry_points", wrong), (
             f"MCP `tortoise_suggest_entry_points` is attributed to `{wrong}`, which it "
             "does not reach — the door→reader predicate answers True too freely, so "
@@ -2737,26 +2884,163 @@ def test_the_door_attribution_refuses_a_door_that_reaches_another_reader():
             "substituted door."
         )
 
-    # ⚠️ A chain built out of a REPEATED NAME is not reach, and this pair is the
-    # measured case: `MCP tortoise_search` was attributed to row 29's backup count
-    # constant over `tortoise_fts_query` → `_review_prune.ids` →
+    # ⚠️ A chain built out of a repeated FUNCTION-LOCAL name is not reach, and
+    # this pair is the measured case: `MCP tortoise_search` was attributed to row
+    # 29's backup count constant over `tortoise_fts_query` → `_review_prune.ids` →
     # `_independent_counts.edges` → the constant — hops two and three being the
     # locals `ids` and `edges` in unrelated functions, because the indexer used to
-    # register function-local assignments as symbols. None of the dumps' own
-    # symbols is inside this door's budget and that stays so — measured,
-    # `dump_graph` is 12 hops, `create_backup` 11, `restore_graph` /
-    # `_independent_counts` / `_DUMP_EDGE_PAGE_QUERY` / `_COUNT_ALL_EDGES_QUERY` /
-    # `_restore_copy_settled` unreachable — so if THIS pair reds, a local is a
-    # symbol again. (Other
-    # `hosted_backup.py` symbols ARE reachable at 2-3 hops through attribute names —
-    # `list`, `delete` — which is the relation's declared permissive direction: it
-    # can invent a hop, so only the shape the door is FOR is pinned here.)
+    # register function-local assignments as symbols. None of the dumps' own symbols
+    # is inside this door's budget and that stays so — measured, `dump_graph` 12 hops
+    # and `create_backup` 11 are far past that budget and still INSIDE the cap (so
+    # `_door_distance` returns their distance and the pair is refused on the budget
+    # alone), `_independent_counts` and
+    # `_DUMP_EDGE_PAGE_QUERY` are 13 and `_COUNT_ALL_EDGES_QUERY` 14 (those three are
+    # beyond the 12-hop `_DISTANCE_SEARCH_CAP`, so `_door_distance` reports `None` for
+    # them — "further than we looked", not "unreachable"), and `restore_graph` /
+    # `_restore_copy_settled` are unreachable AT CAP 24 (the cap was raised for
+    # that measurement) — "unreachable" is not claimed for caps beyond it. (Other
+    # `hosted_backup.py`
+    # symbols ARE reachable at 2-3 hops through ATTRIBUTE names — `list`, `delete` —
+    # which is the relation's declared permissive direction: a repeated identifier
+    # can buy a hop, so only the pair the door is FOR is pinned here. If it reds,
+    # either a local is a symbol again or the search path grew a real edge into the
+    # backup's whole-graph count — name which before tightening anything.)
+    assert _door_entry_ids("MCP tortoise_search"), (
+        "this probe's door does not resolve, so `not _door_reaches(...)` below would be "
+        "vacuous — a door that is not in the index never reaches anything (measured: a "
+        "renamed tool yields frozenset() and refuses every reader)"
+    )
+    # The READER needs the same guard as the door: a reader id that no longer
+    # resolves is absent from the index, `_door_distance` answers `None`, and the
+    # `not _door_reaches(...)` assertion below passes while testing nothing.
+    assert "hosted_backup.py::_COUNT_ALL_EDGES_QUERY" in _symbol_index()[1], (
+        "the probe reader `hosted_backup.py::_COUNT_ALL_EDGES_QUERY` is not a node in "
+        "the symbol index, so the assertion below would pass on a reader that cannot "
+        "be reached because it no longer exists — re-point the pin at the renamed "
+        "constant rather than letting it go silent"
+    )
     assert not _door_reaches("MCP tortoise_search", "hosted_backup.py::_COUNT_ALL_EDGES_QUERY"), (
-        "the search door is attributed to `hosted_backup.py::_COUNT_ALL_EDGES_QUERY`, "
-        "which the search path never reaches — the attribution walked a bare NAME "
-        "(`ids`/`edges`) through a function-LOCAL assignment, so any file that reuses "
-        "a common variable name becomes reachable from any door. Locals must not be "
-        "symbol definitions (`_symbol_index`)."
+        "the search door is attributed to `hosted_backup.py::_COUNT_ALL_EDGES_QUERY` "
+        "INSIDE this reader's 4-hop budget. At the pinned head that pair is 14 hops "
+        "— past the 12-hop search cap, so `_door_distance` answers `None`, and far "
+        "past the budget — so this arm reds only once the pair has come INSIDE the "
+        "budget: the attribution then walked a bare NAME (`ids`/`edges`) through a "
+        "function-LOCAL assignment, so any file that reuses a common variable name "
+        "becomes reachable from any door. Locals must not be symbol definitions "
+        "(`_symbol_index`)."
+    )
+
+
+def test_a_local_class_body_is_not_a_source_of_symbols():
+    """The `in_function` flag reaches a class BODY, and only the local one is dropped.
+
+    ⚠️ The class NAME is NOT what this arm forbids: a class defined inside a
+    function remains a symbol (pinned below), which is why the arm is named for the
+    BODY — what must not be indexed is that body's assignments.
+
+    `_symbol_index`'s `ClassDef` branch used to hard-code `in_function=False`, so a
+    class defined INSIDE a function had its own body indexed as if it were
+    module-level: `index_walk.py::_getmntinfo_table._StatFS._fields_` and
+    `projection/__init__.py::journal_epistemic_existence._Node.__slots__` were
+    registered under the BARE names `_fields_` / `__slots__`, so a same-named
+    assignment anywhere resolved to them — the same defect class as #9817's local
+    variables, one nesting level down. The flag now propagates.
+
+    ⚠️ **Why this needs its own arm.** Nothing else in the file can catch that
+    branch: the two ceilings (`_ACCEPTED_PAIRS_AT_THIS_HEAD`,
+    `_WORST_ROW_AT_THIS_HEAD`) are `<=` and this change moves NO pair (measured —
+    the accepted total is unchanged), so reverting `in_function=in_function` to
+    `in_function=False` leaves every other arm green. Both directions are pinned
+    here: the local class body is gone, AND a module-level `Class.ATTR` constant
+    is still indexed, so the arm cannot be satisfied by deleting the whole
+    `ClassDef` branch either.
+    """
+    defs, _ = _symbol_index()
+
+    # A module-level `Enum`'s member is an `Assign` with a value at
+    # `in_function=False` — it must SURVIVE (dropping class bodies wholesale would
+    # also make §13's constant rows unattributable).
+    assert "alert_store.py::ResolveOutcome.RESOLVED" in defs.get("RESOLVED", set()), (
+        "the module-level `Class.ATTR` constant `ResolveOutcome.RESOLVED` is no "
+        "longer a symbol — the `ClassDef` branch must still index a class body "
+        "whose class is NOT local. Present in `_symbol_index`'s output: "
+        f"{sorted(defs.get('RESOLVED', ()))}. If `ResolveOutcome` moved, re-point "
+        "this pin rather than deleting it — it is the positive half of the pair."
+    )
+
+    # …and the body of a class local to a FUNCTION must not be. ⚠️ Node-id precise,
+    # like the `__slots__` arm below and for the same reason: the NAME may also be
+    # defined at module level (as `__slots__` routinely is), and a whole-tree
+    # `not defs.get(name)` would then red on a legitimate module-level definition
+    # while blaming `in_function` propagation.
+    # ⚠️ The SUBJECT's own locality is pinned first: hoisting `_StatFS` to module
+    # scope is behaviour-preserving and would move the offending id to
+    # `index_walk.py::_StatFS._fields_`, leaving the arm below GREEN while it no
+    # longer exercises the local-class rule at all. Pinned here so a hoist reds as
+    # "re-point this pin", not as silence or as a false `in_function` diagnosis.
+    assert "index_walk.py::_getmntinfo_table._StatFS" in defs.get("_StatFS", set()), (
+        "this pin's SUBJECT has moved: `_StatFS` is no longer a class defined inside "
+        "`index_walk._getmntinfo_table` (present nodes: "
+        f"{sorted(defs.get('_StatFS', ()))}). If it was hoisted to module scope, a "
+        "module-level `Class.ATTR` is legitimate and the `_fields_` arm below no "
+        "longer tests the local-class rule — re-point both at another class that is "
+        "still defined inside a function (or delete the pair, and the coverage with "
+        "it), rather than loosening them."
+    )
+    # ⚠️ The ATTRIBUTE is pinned PRESENT from source before it is pinned ABSENT
+    # from the index. Without this half, renaming `_fields_` in `index_walk.py`
+    # makes the next assertion read `assert <id> not in set()` — green, and testing
+    # nothing — which is the same silence the SUBJECT pin above refuses for a
+    # hoist. A rename must red as "re-point this pin".
+    local_targets = _class_body_targets("index_walk.py", "_getmntinfo_table", "_StatFS")
+    assert "_fields_" in local_targets, (
+        "this pin's ATTRIBUTE has moved: the body of `_StatFS` in "
+        "`tortoise/index_walk.py` declares no `_fields_` target (targets present: "
+        f"{sorted(local_targets)}), so the absence check below is `not in set()` and "
+        "tests nothing. Re-point BOTH halves at the attribute the local class now "
+        "declares, rather than deleting the pair and the coverage with it."
+    )
+    assert "index_walk.py::_getmntinfo_table._StatFS._fields_" not in defs.get("_fields_", set()), (
+        "a function-local class body is indexed as a symbol again — "
+        "`index_walk.py::_getmntinfo_table._StatFS._fields_` is a definition node, and "
+        "`_StatFS` is a class defined INSIDE `_getmntinfo_table`, so `in_function` is "
+        "not propagating into the `ClassDef` branch and a local class's attributes "
+        "become reachable bare names (`_symbol_index`). `_fields_` now resolves to "
+        f"{sorted(defs.get('_fields_', ()))}. (If the id reads `index_walk.py::_StatFS."
+        "_fields_` instead, the class was HOISTED — re-point the pin above rather "
+        "than treating it as a propagation defect.)"
+    )
+    # The `__slots__` half gets the same PRESENT-from-source guard as `_fields_`:
+    # a rename would leave the absence check below asserting `not in set()`.
+    node_targets = _class_body_targets(
+        "projection/__init__.py", "journal_epistemic_existence", "_Node"
+    )
+    assert "__slots__" in node_targets, (
+        "this pin's ATTRIBUTE has moved: the body of `_Node` in "
+        "`tortoise/projection/__init__.py` declares no `__slots__` target (targets "
+        f"present: {sorted(node_targets)}), so the absence check below is "
+        "`not in set()` and tests nothing. Re-point BOTH halves at the attribute "
+        "the local class now declares, rather than deleting the pair."
+    )
+    assert "projection/__init__.py::journal_epistemic_existence._Node.__slots__" not in defs.get(
+        "__slots__", set()
+    ), (
+        "the function-local `_Node` class body is indexed again — "
+        "`journal_epistemic_existence._Node.__slots__` is a definition node, so a "
+        "bare `__slots__` anywhere resolves to it (`in_function` must carry into "
+        "the `ClassDef` branch with its value UNCHANGED). If the id reads "
+        "`projection/__init__.py::_Node.__slots__` instead, `_Node` was HOISTED out "
+        "of `journal_epistemic_existence` — re-point this pin at a class that is "
+        "still function-local rather than treating a legitimate module-level "
+        "`__slots__` as a propagation defect."
+    )
+    # The class ITSELF is still a symbol — only its body's assignments are dropped.
+    # Stated so the arm above cannot be greened by dropping local nested defs too.
+    assert "projection/__init__.py::journal_epistemic_existence._Node" in defs.get("_Node", set()), (
+        "the local `_Node` CLASS is no longer a symbol — a nested `def`/`class` "
+        "is still indexed whether or not it is inside a function; only its body's "
+        "`Assign` targets are local. Present: "
+        f"{sorted(defs.get('_Node', ()))}"
     )
 
 
@@ -2801,11 +3085,18 @@ _WORST_ROW_AT_THIS_HEAD = 4
 def test_the_attribution_predicate_does_not_swallow_the_whole_table():
     """The bound above is only a check if the predicate still DISCRIMINATES.
 
-    The REJECTED `_DOOR_REACH_HOPS = 5` accepted roughly two fifths of the
-    (row, table-door) pairs *as the table stood then* — and three substitutions
-    that keep a REAL tool in a cell stayed green under it. (The figure is stated as
-    a proportion on purpose: the population has grown since, and a percentage
-    restated against a fixed denominator is the rot this file retires.) A bound is not a proof, so the acceptance RATE is
+    The REJECTED `_DOOR_REACH_HOPS = 5` accepted 170 of the 418 (row, table-door)
+    pairs — and the population is 418 pairs at BOTH commits, so the difference
+    from today's 52 is the INDEX, not the table — measured against the
+    PRE-`#9817` index that stood when it was rejected (`3f2f48932`, the commit
+    that wrote the old wording). At THAT index two of the three substitutions
+    that keep a REAL tool in a cell stayed green under it: the backup-doors swap
+    was ALREADY refused at 5, on row 31's 7-hop cell (under the CURRENT index
+    all three are refused even at 5; the per-door figures are in the
+    `_DOOR_REACH_HOPS` note). The figure is a COUNT over that population, not a
+    rate, for the reason the `_DOOR_REACH_HOPS` note gives: a rate restated
+    against a fixed denominator rots on the next table growth (the `63/340`
+    precedent). A bound is not a proof, so the acceptance COUNT is
     pinned as its own number: the predicate may accept, over the table's own
     doors, at most `_ACCEPTED_PAIRS_AT_THIS_HEAD` pairs and at most
     `_WORST_ROW_AT_THIS_HEAD` for any single row. A predicate that starts
@@ -2932,15 +3223,26 @@ def test_every_customer_callable_row_reaches_a_declared_door():
             hops = _distance_budget(reader)
             distance = _door_distance(door, reader)
             if distance is None or distance > hops:
-                reached = "does not reach it at all" if distance is None else f"needs {distance} references"
-                broken.append(
-                    f"{label} — {door} exists but {reached} to reach `{reader}`, and this "
-                    f"row's budget is {hops} — the door is not a door to THIS reader, so "
-                    "the blast-radius count would be counted from the wrong tool "
-                    "(if the chain is legitimately longer now, give the reader an entry in "
-                    "`_DISTANCE_EXCEPTIONS` with the reason, rather than loosening the budget "
-                    "for every row)"
-                )
+                if distance is None:
+                    shortfall = (
+                        f"is not found within the {_DISTANCE_SEARCH_CAP}-hop search cap. "
+                        "This arm cannot tell 'no chain' from 'a chain longer than it "
+                        "looked', so the fix is to raise `_DISTANCE_SEARCH_CAP` (and "
+                        "re-derive the pinned figures) or to shorten the chain. ⛔ A "
+                        "`_DISTANCE_EXCEPTIONS` entry cannot help: it raises the "
+                        "reader's BUDGET, and the search stops at the cap before any "
+                        "budget is consulted. So this door is UNVERIFIED here, not "
+                        "wrong: it may be the right door on a chain longer than the cap."
+                    )
+                else:
+                    shortfall = (
+                        f"needs {distance} references and this row's budget is {hops}, so "
+                        "it is not a door to THIS reader (if the chain is legitimately "
+                        "longer now, give the reader an entry in `_DISTANCE_EXCEPTIONS` "
+                        "with the reason, rather than loosening the budget for every row). "
+                        "The blast-radius count would be counted from the wrong tool."
+                    )
+                broken.append(f"{label} — {door} exists but {shortfall}")
 
     # A predicate that silently stops resolving its entries turns this arm green
     # on an assertion it never made — so the floor is asserted, not assumed.

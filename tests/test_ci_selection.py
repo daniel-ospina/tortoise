@@ -3212,6 +3212,41 @@ def test_9192_guard_runs_on_the_diff_that_can_break_it():
     assert "test_9192_tenant_armed_by_request.py" in api_sel["test_files"], api_sel
 
 
+def test_9664_capstone_runs_on_the_middleware_diff_that_can_break_it():
+    # #9664 review P2: `tests/test_9664_capstone_connector_to_record.py` is the
+    # end-to-end pin of "an authenticated CONNECTOR request reaches the record
+    # under the request's OWN tenant". It was registered `core`-only, and
+    # `tortoise/mcp_auth.py` — the per-request tenant install it drives, AND the
+    # module that produces the 401 body its refusal leg asserts — is an EXACT
+    # `SOURCE_PATTERNS["api"]` entry, so a middleware-only diff selects `api` and
+    # REPLACES the `core` fallback (`core` is added only in the `if not found:`
+    # branch; `CORE_ALSO` lists neither path). Registration alone is not a
+    # selection pin: a guard registered and never selected on the diff that can
+    # break it certifies nothing (#9196/#9231, the same reasoning as the #9192 pin
+    # above).
+    #
+    # Measured before this entry's `api` arm was added:
+    # `select(["tortoise/mcp_auth.py"])` -> surfaces=['api'] with the file ABSENT.
+    #
+    # Mutation check: deleting the `api` arm fails the second pair of asserts,
+    # deleting the `core` arm fails the first — neither can be dropped believing
+    # the other covers it.
+    core_sel = _sel(["tortoise/record_writer.py"])
+    assert core_sel["full"] is False, core_sel
+    assert "core" in core_sel["surfaces"], core_sel
+    assert "test_9664_capstone_connector_to_record.py" in core_sel["test_files"], core_sel
+
+    for middleware_diff in ("tortoise/mcp_auth.py", "tortoise/supabase_control.py"):
+        api_sel = _sel([middleware_diff])
+        assert api_sel["full"] is False, api_sel
+        assert api_sel["surfaces"] == ["api"], (middleware_diff, api_sel)
+        assert "test_9664_capstone_connector_to_record.py" in api_sel["test_files"], (
+            middleware_diff,
+            "the capstone would not run on the diff class that can break its "
+            "tenant install or its refusal text",
+            api_sel)
+
+
 def test_source_currency_tool_change_selects_core_not_tier1():
     # #5581: tools/source_currency.py owns tests/test_source_currency_5581.py
     # (`core`) — the §4.6 aggregate, the sourced disclosure, and the flag-gated

@@ -1571,7 +1571,9 @@ test('#2865: the live connect step makes the two Claude leaves key-less OAuth', 
     'a key-less OAuth leaf opens on the connector block, never a key block')
   assert.match(connect, /\{procedureTail && \(\s*<WizardBlock step=\{2\} title=\{procedureTailTitle\}>/,
     '#3218: the prompt hand-off keeps its own numbered block on the key-less leaf too')
-  // the recipe: connector name + canonical URL + sign-in → Authorize → org
+  // the recipe: connector name + canonical URL + sign-in → Organization choice →
+  // Authorize (that order — the consent page disables Authorize until the org
+  // chooser has a value, tortoise/oauth.py)
   const oauth = slice("} else if (wizardKeyless) {", '\n\n                      return (',
                       'live OAuth branch')
   assert.match(oauth, /Add custom connector/,

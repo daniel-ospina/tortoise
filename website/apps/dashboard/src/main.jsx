@@ -9731,7 +9731,7 @@ function claimIntentInFlight() {
                         // Anthropic's "Request headers" field, which is exactly
                         // the population #2865 exists for. The shape is lifted
                         // from the shipped chatgpt recipe (server URL → sign-in →
-                        // Authorize → org chooser) and needs NO key, so it
+                        // Organization choice → Authorize) and needs NO key, so it
                         // renders for members as well as owner/admins.
                         const web = wizardHarness === 'claude-web'
                         procedureTitle = `Add the ${displayName} connector`
@@ -9752,8 +9752,8 @@ function claimIntentInFlight() {
                             </p>
                             <ol className="wizard-fields">
                               <li>{web ? 'Claude' : 'Claude Desktop'} opens Tortoise&apos;s sign-in page on the first connection — sign in.</li>
+                              <li>Pick the Organization you&apos;re onboarding — the page names it, or asks you to choose when your account can use more than one.</li>
                               <li>Click <strong>Authorize</strong>.</li>
-                              <li>Pick the Organization you&apos;re onboarding.</li>
                             </ol>
                             <p className="wizard-note">
                               The <code>tortoise_*</code> tools appear once you authorize. The authorization belongs to your Tortoise account — remove the Tortoise connector any time in {web ? 'claude.ai' : 'Claude Desktop'} → Settings → Connectors.{web ? ' Claude connects from Anthropic\u2019s cloud — nothing is stored on a local machine.' : ''}
@@ -9852,7 +9852,9 @@ function claimIntentInFlight() {
                                 <p className="wizard-caption">
                                   Tick <strong>I understand and want to continue</strong>, then click <strong>Create as a plugin</strong>. Now open
                                   {' '}<code>chatgpt.com/settings/plugins-settings</code> → <strong>Tortoise</strong> → <strong>View details</strong> → <strong>Connect</strong>,
-                                  sign in to Tortoise, click <strong>Authorize</strong>, and pick the Organization you are onboarding.
+                                  then confirm <strong>Connect Tortoise</strong> in the dialog it opens. Sign in to Tortoise, pick the Organization
+                                  you are onboarding — the page names it, or asks you to choose when your account can use more than one —
+                                  then click <strong>Authorize</strong>. That Organization is the one the connector writes to.
                                 </p>
                               </WizardBlock>
                               <WizardBlock step={2} title="Install the Tortoise skills">

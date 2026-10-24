@@ -15880,10 +15880,22 @@ def _commit_response(
     """§6.1 200 response body — commit_id = client_commit_id (stable per
     logical commit); duplicate:true ⇒ zero writes, zero write-ops billed
     (PL4); held non-empty ⇒ overflow (PL3), client-side, re-commit checks
-    the 50-ceiling only. warnings[] (#405): additive, warn-first domain
-    integrity violations — the commit WRITES anyway; present (possibly
-    empty) on every 200, deterministic per payload (idempotent re-commits
-    return the same warnings)."""
+    the 50-ceiling only.
+
+    ``warnings[]`` (#405): additive, warn-first — the commit WRITES anyway;
+    present (possibly empty) on every 200. TWO kinds ride the one key, and the
+    difference is why the field is not uniform per payload:
+
+    * the payload's DOMAIN integrity warnings, derived from the payload alone
+      — deterministic per payload, so an idempotent re-commit returns the
+      same ones;
+    * WRITE-TIME advisories (``temporal_not_applied``, #7819) — observed while
+      the writes ran (a dedup fold dropped on an already-terminal claim wrote
+      NOTHING). These are present only on the response to the call that
+      PERFORMED the write; a ``duplicate:true`` replay writes nothing, so
+      nothing can be dropped, and its ``warnings[]`` is exactly the payload's
+      domain warnings (see the inline note in ``commit_session``'s write
+      phase)."""
     return {
         "session_id": payload.session_id,
         "commit_id": payload.client_commit_id,
@@ -16049,6 +16061,18 @@ def _prevalidate_supersede_window(sdk, pr, *, now: str) -> None:
     - a freshly-minted successor's payload ``when`` (``create_point`` writes
       ``validFrom`` only for a truthy ``when``).
 
+    ⚠️ The first bullet holds for a NON-TERMINAL dedup target only. When the
+    target is a terminal claim, ``create_point`` DROPS the fold whole (#7819):
+    a payload carrying any ``_TEMPORAL_RESTAMP_PROPS`` member writes nothing, so
+    the re-keyed node's stored start is NOT overwritten. ``payload_when`` is
+    still this mirror's input in that case, which makes the check CONSERVATIVE —
+    it can compare an end against a start the writer will never write. Because
+    ``_succ_state``'s terminal pre-check then skips ``supersede_point`` anyway,
+    no inverted window can result (nothing is written, so nothing is refused
+    late); the residual is an over-refusal — a ``supersede_window_inverted`` 422
+    for an inversion that exists only in the mirror's model — and it is
+    deterministic, so it must be repaired in the payload, not retried.
+
     When the resolution would instead fall through to a clock this check cannot
     read before the write (a fresh node's future ``createdAt``, or
     ``supersede_point``'s own ``now``), NOTHING is refused here and the ``[5]``
@@ -16074,9 +16098,13 @@ def _prevalidate_supersede_window(sdk, pr, *, now: str) -> None:
     # sibling loops + the MCP preview's identical read).
     old_vfs = [r[0] for r in old_rows]
     # Mirror `create_point(dedup=True)`'s successor resolution AT THIS POINT in
-    # the write sequence. A match re-keys the write onto that node (and, with a
-    # truthy payload `when`, `update_point` overwrites its stored start); no
-    # match mints the content-addressed `supersede_id` with the payload `when`.
+    # the write sequence. A match re-keys the write onto that node and — for a
+    # NON-TERMINAL target — a truthy payload `when` overwrites its stored start
+    # through the dedup fold's `update_point` (#7819 DROPS that fold whole when
+    # the target is a terminal claim, so `payload_when` is then the mirror's
+    # model of a write that will not happen: conservative, never fail-open —
+    # `_succ_state` skips the supersede itself). No match mints the
+    # content-addressed `supersede_id` with the payload `when`.
     existing_id = sdk._find_point_by_content(
         pr.point.content, pointKind=pr.point.pointKind)
     payload_when = pr.point.when or None
@@ -16136,6 +16164,14 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     now = datetime.now(UTC).isoformat()
     session_id = payload.session_id
     reconcile = plan.reconcile
+    # #7819: TRANSIENT write-time advisories this phase has to REPORT but that
+    # are not payload domain warnings — today the only one is
+    # `temporal_not_applied`, raised when `create_point`'s dedup branch DROPS a
+    # fold carrying a validity window because the content address resolves to a
+    # terminal claim. A dropped fold writes nothing, so without this the client
+    # gets a 200 whose `when` was silently not applied. The handler folds these
+    # into the response's `warnings[]` (#405's additive channel).
+    _write_advisories: list[dict] = []
     # #5363 (B): each supersede window is validated inside the points loop
     # below, PER ACTION and immediately BEFORE that action's successor is
     # minted — see `_prevalidate_supersede_window` for why the position in the
@@ -16505,6 +16541,9 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 # a new point property.
                 session_id=session_id, **point_props,
             )
+            # #7819: a fold dropped because the target is terminal writes
+            # NOTHING — carry the advisory out so the receipt reports it.
+            _write_advisories.extend(_written.get("advisories") or [])
             # #1370: record the id the write RESOLVED to (the map the binder
             # reads). #4970: the SUCCESSOR may itself re-key (its content
             # already exists under another id) — supersede the prior with the
@@ -16647,6 +16686,8 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 # the same source-session attribution surface.
                 session_id=session_id, **point_props,
             )
+            # #7819: same drop, the plain-create leg.
+            _write_advisories.extend(_written.get("advisories") or [])
             # #1370: the id the write RESOLVED to. #4970: the graph id §5
             # CONTAINS and the supersede below must use — the pre-existing
             # node on a dedup re-key, the payload id otherwise.
@@ -16883,6 +16924,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         point_content_by_id=lambda pid: _point_content_by_id(
             payload, _commit_reverse_id_map.get(pid, pid)),
     )
+    return _write_advisories
 
 
 @app.post("/v1/sessions/commit")
@@ -17017,7 +17059,9 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
     # write proceeds). Phase B (wired-but-inactive in prod — no production
     # chain is 'block'): a block-severity warning rejects the commit.
     from tortoise.commit_schema import domain_block_warnings
-    warnings = result.warnings or []
+    # COPY: `_execute_commit_writes` appends the #7819 write-time advisories
+    # below, and the plan's own warning list must not be mutated by a write.
+    warnings = list(result.warnings or [])
     blocking = domain_block_warnings(warnings)
     if blocking:
         raise HTTPException(
@@ -17283,7 +17327,13 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
         # client retries with the same client_commit_id — safe by L1; the record
         # stays partial).
         try:
-            _execute_commit_writes(sdk, payload, plan)
+            # #7819: the phase returns its write-time advisories (a dedup fold
+            # dropped on a terminal claim wrote nothing) — they ride the same
+            # additive `warnings[]` channel as the payload's domain warnings, so
+            # a client sees that its `when` was not applied instead of a silent
+            # 200. They are NOT on the duplicate:true replay path (nothing is
+            # written there, so nothing is dropped).
+            warnings.extend(_execute_commit_writes(sdk, payload, plan) or [])
         except HTTPException:
             raise
         except InvertedSupersedeWindow as exc:
