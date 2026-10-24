@@ -616,7 +616,9 @@ durability authority, so the text inherited whatever the nearest comment
 believed. The fix is **deletion, not reconciliation**: the three contradicting
 journal-authority statements are removed, and no other file in the gate's
 contract surfaces carries the claim. Every remaining live restatement is
-enumerated under *Open items*, not silently tolerated. The durability-scoped
+enumerated under *Open items* (or, where it cannot be classified without a
+per-site reading, named there as an open sweep — **#9867**), not silently
+tolerated. The durability-scoped
 gate in `tests/test_durability_posture.py` fails the build if a
 `log`/`journal`/`jsonl`/`event stream` is bound to `source of truth` — or to
 `is [the] truth` — outside this file.
@@ -785,3 +787,31 @@ a written claim to the system it describes is **#5063**.
   The #2881 design round (§7) recommends reversing it to store-authoritative.
   This document states the store-authoritative rule the shipped code already
   implements; the row is the owner's to answer.
+- **#9867 — six confidently-classifiable live restatements the gate is BLIND
+  to, named because the sentence above promises it; the list is NOT claimed
+  complete.** The #2881 gate matches `source of truth`,
+  `is [the] truth` and `is [a/our/its] durab(le|ility)`; it cannot see `truth
+  store` (a different noun), `is **still** the truth` (the adverb defeats the
+  predicate) or the journal named as bare `TRUTH`/`truth set`. Measured
+  2026-10-24 on `92b364e8b`, all still live: `projection/entities.py` (*restore
+  verbatim — the journal is still the truth*), `log.py`'s `EventLog` rubric
+  (*a durable, replayable truth set*), `projection/__init__.py` (*with no
+  journal there is no truth store*), `projection/edges.py` (*appended to the
+  truth store*, wrapped across two lines), `commit_ops.py` (*rebuild retains
+  the truth*) and `sdk.py` (*the journal — the TRUTH*; *(TRUTH)*). A green gate
+  run therefore does **not** mean no restatement: it means none in three
+  wordings. Two further hits are legitimate NEGATIONS and must stay green
+  (`__main__.py`'s *a SCRATCH journal, not a truth set*; `projection/__init__.py`'s
+  *a message that promised a journal would tell an operator a truth store is
+  bound when none is*). **Not fixed by #9864, deliberately** — that change is
+  `fix(main)` for the two claims the gate *catches* (#9695 is red on them) — and
+  not a blind sweep either: `tortoise/` also uses *truth* for the legitimate
+  replay-ORDER axis (*the derived store must never lead the TRUTH*), which the
+  rule above does not forbid, so the widened detector and the per-site reword
+  have to land as ONE change or the pattern reds a correct sentence. The same
+  measurement found a further handful of candidates that need that per-site
+  reading before they can be called restatements — *there is no truth store*
+  in `mcp_auth.py`/`mcp_server.py`, *the whole truth* / *truth already exists —
+  the append-only journal* in `record_writer.py`, the journal-as-truth-store
+  frame in `onboarding/state.py`, and `sdk.py`'s remaining *lead the TRUTH*
+  family — so #9867's sweep, not this list, is what completeness means.
