@@ -114,6 +114,327 @@ def test_add_does_not_suggest_connected_pairs(sdk_factory, tmp_path):
     assert result["add"] == []
 
 
+def test_add_excludes_same_source_pairs(sdk_factory, tmp_path):
+    """Same-source pairs are never suggested — shared provenance is not a
+    missing connection.
+
+    Consecutive sections of one document are near-duplicates by
+    construction (0.89+ cosine — the band embeddings.py reserves for
+    near-duplicates) and crowd the add queue on a mined corpus, so they are
+    excluded even ABOVE threshold, while cross-source pairs at a lower
+    similarity are still suggested.
+    """
+    sdk = sdk_factory(tmp_path)
+    doc = "doc://same-corpus.md"
+    p1 = sdk.create_point("statement", "deployment section intro",
+                          extractedFrom=doc)
+    p2 = sdk.create_point("statement", "deployment section details",
+                          extractedFrom=doc)
+    p3 = sdk.create_point("statement", "deployment runbook elsewhere",
+                          extractedFrom="doc://other-corpus.md")
+    result = sdk.review_connections(
+        mode="add",
+        similarity_fn=_sim({
+            (p1["id"], p2["id"]): 1.0,   # same source — the HIGHEST score
+            (p1["id"], p3["id"]): 0.8,   # cross-source — lower score
+            (p2["id"], p3["id"]): 0.8,
+        }),
+    )
+    add = result["add"]
+    assert len(add) == 2, f"expected the 2 cross-source pairs, got {add}"
+    # The 1.0-similarity same-source pair must NOT be among them.
+    assert all({e["from"], e["to"]} != {p1["id"], p2["id"]} for e in add)
+
+
+def test_add_keeps_pairs_that_share_only_a_session_source(
+        sdk_factory, tmp_path):
+    """A shared ``session:`` ref is a capture window, not one document, so
+    it does NOT make a pair same-source.
+
+    ``_extract_session_v2`` stamps EVERY point it mines with a single ref —
+    ``extractedFrom=f"session:{session_id}"`` — so one capture call puts one
+    Source across a whole conversation (200 points mined from 20 different
+    documents all share it), and ``create_point`` infers the same ref from
+    ``session_id``. An exclusion keyed on "the Source sets intersect" alone
+    therefore returns an EMPTY add queue for every capture-built corpus,
+    including the cross-document pairs mode=add exists to surface. Session
+    provenance is capture identity, not co-authorship of one document.
+    """
+    sdk = sdk_factory(tmp_path)
+    sess = "session:s1"
+    p1 = sdk.create_point("statement", "kubernetes rollout plan",
+                          extractedFrom=sess)
+    p2 = sdk.create_point("statement", "kubernetes deployment guide",
+                          extractedFrom=sess)
+    p3 = sdk.create_point("statement", "postgres vacuum tuning",
+                          extractedFrom="doc://ops.md")
+    result = sdk.review_connections(
+        mode="add",
+        similarity_fn=_sim({
+            (p1["id"], p2["id"]): 0.9,  # same session — DIFFERENT documents
+            (p1["id"], p3["id"]): 0.8,
+            (p2["id"], p3["id"]): 0.8,
+        }),
+    )
+    pairs = {frozenset((e["from"], e["to"])) for e in result["add"]}
+    assert frozenset((p1["id"], p2["id"])) in pairs, (
+        "a pair sharing only a capture session was excluded — mode=add is dead "
+        f"on every capture-built graph; got {result['add']}")
+    assert len(pairs) == 3, f"expected all 3 pairs, got {result['add']}"
+
+
+def test_add_document_source_still_excludes_a_session_tagged_pair(
+        sdk_factory, tmp_path):
+    """Dropping session provenance must not drop the DOCUMENT exclusion: a
+    pair whose points share a document source is still skipped even when it
+    also carries a ``session:`` ref.
+
+    Points are many-to-many with Sources (ontology §3.3), and capture points
+    carry both refs, so the exclusion has to intersect the document sources
+    rather than replace the rule with "has a session ref ⇒ ignore".
+    """
+    sdk = sdk_factory(tmp_path)
+    doc = "doc://mined.md"
+    p1 = sdk.create_point("statement", "deployment section intro",
+                          extractedFrom=["session:s1", doc])
+    p2 = sdk.create_point("statement", "deployment section details",
+                          extractedFrom=["session:s1", doc])
+    p3 = sdk.create_point("statement", "deployment runbook elsewhere",
+                          extractedFrom=["session:s1", "doc://other.md"])
+    result = sdk.review_connections(
+        mode="add",
+        similarity_fn=_sim({
+            (p1["id"], p2["id"]): 1.0,  # same document — must be excluded
+            (p1["id"], p3["id"]): 0.8,
+            (p2["id"], p3["id"]): 0.8,
+        }),
+    )
+    pairs = {frozenset((e["from"], e["to"])) for e in result["add"]}
+    assert frozenset((p1["id"], p2["id"])) not in pairs, (
+        f"same-document pair leaked back in: {result['add']}")
+    assert len(pairs) == 2, f"expected the 2 cross-document pairs, got {result['add']}"
+
+
+def test_add_tolerates_a_list_valued_source_url(sdk_factory, tmp_path):
+    """A legacy Source whose `url` is a LIST must not break the read.
+
+    ``_link_source``'s docstring records that pre-#3263 code silently MERGEd
+    ONE Source whose ``url`` was an ARRAY, and that fix only stopped NEW ones
+    — so such nodes exist in populated graphs. Classifying the session
+    prefix in Cypher (``src.url STARTS WITH 'session:'``) made the engine
+    TYPE-CHECK every url and the whole pool query raised
+    ``ResponseError: Type mismatch: expected String or Null but was List``,
+    which is NOT inside a try: one legacy node disabled the hygiene surface
+    for every caller. A non-comparable url is not an identity, so it must
+    fail OPEN — the pair is still suggested.
+    """
+    sdk = sdk_factory(tmp_path)
+    p1 = sdk.create_point("statement", "kubernetes rollout plan")
+    p2 = sdk.create_point("statement", "kubernetes deployment guide")
+    sdk._get_proj().g.query(
+        "MERGE (s:Source {url: $url}) "
+        "WITH s MATCH (n:Point) WHERE n.id IN $ids "
+        "MERGE (n)-[:extractedFrom]->(s)",
+        params={"url": ["doc://a.md", "doc://b.md"],
+                "ids": [p1["id"], p2["id"]]})
+    result = sdk.review_connections(
+        mode="add",
+        similarity_fn=_sim({(p1["id"], p2["id"]): 0.9}),
+    )
+    pairs = {frozenset((e["from"], e["to"])) for e in result["add"]}
+    assert pairs == {frozenset((p1["id"], p2["id"]))}, (
+        f"a list-valued source url was not failed-open; got {result['add']}")
+
+
+def _link_to_source(sdk, points, url, **props):
+    """Wire points to a Source with the given url + props (raw write)."""
+    set_clause = " ".join(f"SET s.{k} = ${k}" for k in props)
+    sdk._get_proj().g.query(
+        "MERGE (s:Source {url: $url}) " + set_clause + " "
+        "WITH s MATCH (n:Point) WHERE n.id IN $ids "
+        "MERGE (n)-[:extractedFrom]->(s)",
+        params={"url": url, "ids": [p["id"] for p in points], **props})
+
+
+def test_add_excludes_pairs_from_one_corpus_permalink_file(
+        sdk_factory, tmp_path):
+    """``sourceKind='agentSession'`` is NOT a session marker on its own: the
+    indexer stamps it on per-FILE corpus permalinks, which are one document.
+
+    ``_index_process_unit`` mints ``corpus://<corpus>/<path>`` with the
+    classifier's kind, and ``session_source_migration``'s docstring names
+    that keyed population as explicitly distinct from the session node. Two
+    sections of ONE such file are near-duplicates of one document, so the
+    exclusion must still fire — keying it on the kind flag would silently
+    stop excluding them.
+    """
+    sdk = sdk_factory(tmp_path)
+    p1 = sdk.create_point("statement", "deployment section intro")
+    p2 = sdk.create_point("statement", "deployment section details")
+    p3 = sdk.create_point("statement", "deployment runbook elsewhere")
+    permalink = "corpus://ops/docs/transcript-notes.md"
+    _link_to_source(sdk, [p1, p2], permalink, sourceKind="agentSession")
+    _link_to_source(sdk, [p3], "doc://other.md", sourceKind="document")
+    result = sdk.review_connections(
+        mode="add",
+        similarity_fn=_sim({
+            (p1["id"], p2["id"]): 1.0,   # one file — must be excluded
+            (p1["id"], p3["id"]): 0.8,
+            (p2["id"], p3["id"]): 0.8,
+        }),
+    )
+    pairs = {frozenset((e["from"], e["to"])) for e in result["add"]}
+    assert frozenset((p1["id"], p2["id"])) not in pairs, (
+        "a per-file corpus permalink was treated as a capture session — the "
+        f"document exclusion stopped firing; got {result['add']}")
+    assert len(pairs) == 2, f"expected the 2 cross-document pairs, got {result['add']}"
+
+
+def test_add_excludes_pairs_from_one_episodic_transcript_file(
+        sdk_factory, tmp_path):
+    """``is_episodic=true`` is NOT a session marker on its own: the hosted
+    narrative writer stamps it on the transcript DOCUMENT Source, which is
+    one document per ``doc_<sha256(session:captured_at)>``.
+
+    Keying the exclusion on the flag would silently stop excluding the
+    sections of one transcript from each other.
+    """
+    sdk = sdk_factory(tmp_path)
+    p1 = sdk.create_point("statement", "deployment section intro")
+    p2 = sdk.create_point("statement", "deployment section details")
+    doc = "doc_aa11"
+    _link_to_source(sdk, [p1, p2], doc,
+                    sourceKind="document", documentKind="transcript",
+                    is_episodic=True)
+    result = sdk.review_connections(
+        mode="add",
+        similarity_fn=_sim({(p1["id"], p2["id"]): 1.0}),
+    )
+    assert result["add"] == [], (
+        "an episodic transcript DOCUMENT was treated as a capture session — "
+        f"its same-document pair leaked in: {result['add']}")
+
+
+def test_add_keeps_pairs_that_share_only_a_legacy_basename_session_source(
+        sdk_factory, tmp_path):
+    """A pre-#4005 session Source (bare-filename url, ``agentSession`` kind)
+    is a capture session too, so it does NOT make a pair same-source.
+
+    #4005 replaced the hosted commit's session-Source identity
+    (``os.path.basename(ref.path)`` — literally ``session.md``) with the
+    canonical ``session:<id>``, and nodes minted before it KEEP the bare
+    basename: the session-source migration leaves a node it cannot attribute
+    in place (``_LEGACY_CANDIDATES`` is its definition). Classifying on the
+    ``session:`` prefix alone turns such a node into a DOCUMENT, so every pair
+    of Points from one legacy capture is skipped — the empty-add failure this
+    exclusion was corrected for, on the pre-#4005 population.
+    """
+    sdk = sdk_factory(tmp_path)
+    p1 = sdk.create_point("statement", "kubernetes rollout plan")
+    p2 = sdk.create_point("statement", "kubernetes deployment guide")
+    p3 = sdk.create_point("statement", "postgres vacuum tuning")
+    _link_to_source(sdk, [p1, p2], "session.md", sourceKind="agentSession")
+    _link_to_source(sdk, [p3], "doc://ops.md", sourceKind="document")
+    result = sdk.review_connections(
+        mode="add",
+        similarity_fn=_sim({
+            (p1["id"], p2["id"]): 0.9,  # one legacy session — DIFFERENT docs
+            (p1["id"], p3["id"]): 0.8,
+            (p2["id"], p3["id"]): 0.8,
+        }),
+    )
+    pairs = {frozenset((e["from"], e["to"])) for e in result["add"]}
+    assert frozenset((p1["id"], p2["id"])) in pairs, (
+        "a legacy bare-filename session Source was treated as a document — "
+        f"mode=add is dead on the pre-#4005 population; got {result['add']}")
+    assert len(pairs) == 3, f"expected all 3 pairs, got {result['add']}"
+
+
+def test_add_excludes_pairs_from_one_bare_filename_document_source(
+        sdk_factory, tmp_path):
+    """The legacy-session arm must not swallow DOCUMENTS: a bare-filename
+    Source of kind ``document`` is still one document and still excludes.
+
+    ``_LEGACY_CANDIDATES`` requires ``sourceKind='agentSession'`` for exactly
+    this reason — a bare basename says nothing about being a session on its
+    own (an indexer/caller can name a file ``readme.md``).
+    """
+    sdk = sdk_factory(tmp_path)
+    p1 = sdk.create_point("statement", "deployment section intro")
+    p2 = sdk.create_point("statement", "deployment section details")
+    p3 = sdk.create_point("statement", "deployment runbook elsewhere")
+    _link_to_source(sdk, [p1, p2], "readme.md", sourceKind="document")
+    _link_to_source(sdk, [p3], "doc://other.md", sourceKind="document")
+    result = sdk.review_connections(
+        mode="add",
+        similarity_fn=_sim({
+            (p1["id"], p2["id"]): 1.0,   # one bare-filename document
+            (p1["id"], p3["id"]): 0.8,
+            (p2["id"], p3["id"]): 0.8,
+        }),
+    )
+    pairs = {frozenset((e["from"], e["to"])) for e in result["add"]}
+    assert frozenset((p1["id"], p2["id"])) not in pairs, (
+        "a bare-filename DOCUMENT source stopped excluding; the legacy-session "
+        f"arm is too wide: {result['add']}")
+    assert len(pairs) == 2, f"expected the 2 cross-document pairs, got {result['add']}"
+
+
+def test_add_one_sided_source_is_not_same_source(sdk_factory, tmp_path):
+    """The exclusion needs a SHARED source — a pair where only ONE point has
+    a Source is still suggested (fail OPEN: a missing provenance never hides
+    a suggestion).
+    """
+    sdk = sdk_factory(tmp_path)
+    p1 = sdk.create_point("statement", "kubernetes rollout plan",
+                          extractedFrom="doc://a.md")
+    p2 = sdk.create_point("statement", "kubernetes deployment guide")
+    result = sdk.review_connections(
+        mode="add",
+        similarity_fn=_sim({(p1["id"], p2["id"]): 0.9}),
+    )
+    pairs = {frozenset((e["from"], e["to"])) for e in result["add"]}
+    assert pairs == {frozenset((p1["id"], p2["id"]))}, (
+        f"a one-sided source hid a suggestion; got {result['add']}")
+
+
+def test_add_scoped_pool_keeps_the_source_exclusion(
+        sdk_factory, tmp_path, monkeypatch):
+    """The SCOPED pool carries provenance too, so the exclusion is not a
+    silent no-op for every scoped call.
+
+    ``_review_pool`` builds the scoped branch by copying the row dict minus
+    ``updated_at``; a copy that also dropped ``document_sources`` would make
+    every scoped ``mode=add`` skip the exclusion (or raise ``KeyError``)
+    while the whole-graph tests stay green.
+    """
+    sdk = sdk_factory(tmp_path)
+    doc = "doc://scoped.md"
+    p1 = sdk.create_point("statement", "kubernetes rollout plan",
+                          extractedFrom=doc)
+    p2 = sdk.create_point("statement", "kubernetes rollout details",
+                          extractedFrom=doc)
+    p3 = sdk.create_point("statement", "kubernetes runbook elsewhere",
+                          extractedFrom="doc://other.md")
+    monkeypatch.setattr(
+        sdk, "tortoise_fts_query",
+        lambda *a, **k: [{"id": p["id"], "scores": {"rrf": 1.0}}
+                         for p in (p1, p2, p3)])
+    result = sdk.review_connections(
+        mode="add",
+        scope="kubernetes deployment",
+        similarity_fn=_sim({
+            (p1["id"], p2["id"]): 1.0,  # same source — the HIGHEST score
+            (p1["id"], p3["id"]): 0.8,
+            (p2["id"], p3["id"]): 0.8,
+        }),
+    )
+    pairs = {frozenset((e["from"], e["to"])) for e in result["add"]}
+    assert frozenset((p1["id"], p2["id"])) not in pairs, (
+        f"same-source pair leaked through the scoped pool: {result['add']}")
+    assert len(pairs) == 2, f"expected the 2 cross-source pairs, got {result['add']}"
+
+
 def test_add_below_threshold_excluded(sdk_factory, tmp_path):
     """Pairs below the similarity threshold are not suggested."""
     sdk = sdk_factory(tmp_path)
