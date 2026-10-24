@@ -6427,13 +6427,26 @@ def _refuse_inverted_point_window(g, props: dict, *,
     if "validFrom" not in props and "validTo" not in props:
         return
     # #6140 option C, as the owner ruled it — a WARNING, not a refusal. A
-    # caller handing us a start that names no instant (`""`, `"TBD"`) is told
-    # what that value MEANS (reading A: no start recorded ⇒ the window is open
-    # below), and the write proceeds: refusing would make a legacy point
-    # impossible to update or supersede until its window was repaired. Only the
-    # CALLER's value warns — a bound merged in from the stored opposite side is
-    # not being written, so `commit_schema.validate_validity_window` (which sees
-    # only the merged pair) deliberately stays silent.
+    # caller handing us a bound that names no instant (`""`, `"TBD"`) is told
+    # what that value MEANS, and the write proceeds: refusing would make a
+    # legacy point impossible to update or supersede until its window was
+    # repaired. Only the CALLER's value warns — a bound merged in from the
+    # stored opposite side is not being written, so
+    # `commit_schema.validate_validity_window` (which sees only the merged pair)
+    # deliberately stays silent.
+    #
+    # ⚠️ BOTH ENDS (#9202). The ruling named the START, and the START was the
+    # only side wired — so `create_point(validFrom="TBD")` spoke while
+    # `create_point(validTo="TBD")` said nothing, and the silent one is the
+    # more consequential mistake: the reply then reports `end_state: "known"`
+    # and `get_historical_knowledge` answers `found` about the year 2050 with no
+    # field distinguishing it from a dated end. The COVERAGE rule for that value
+    # is settled and shared (ONTOLOGY §4.7: a bound that names no instant is not
+    # a bound — the #6140 start reading, extended to the end by #9408), and the
+    # write door now says so on either side. The end's REPORTED STATE
+    # (`known` vs `unknown`) is #9202's OWNER decision and is deliberately NOT
+    # touched here: this warning changes no read, which is why it is safe to
+    # ship ahead of that ruling.
     #
     # Warn ONCE per value per WRITE. Two re-entry shapes reach this function
     # for a single write: a dedup-hit `create_point` (create leg, then
@@ -6441,26 +6454,62 @@ def _refuse_inverted_point_window(g, props: dict, *,
     # create leg sets ``_WARN_SUPPRESS`` for the re-entry it causes, and the
     # update leg stays silent for a value the stored node already carries — an
     # unrelated update of a legacy point re-reads a value nobody is writing.
-    def _warn_unorderable_caller_start(caller_vf: object) -> None:
-        if caller_vf is None:
+    def _warn_unorderable_caller_bound(prop: str, bound: object) -> None:
+        """Say what a caller bound that names no instant MEANS, once per write.
+
+        The gate is ``_created_sort_key`` — the very measure ``_covers``,
+        ``validity.effective_precision`` and the inversion guard order with, so
+        a warning cannot disagree with the read path about which values are
+        instants (``key[0] == 0``). No second notion of "parseable" is
+        introduced (#9201's rule), and the value is neither refused nor
+        rewritten (#6140's ruling: a warning, never a refusal).
+        """
+        if bound is None:
             return
         from tortoise.search_engine import _created_sort_key  # lazy — no cycle
-        if _created_sort_key(caller_vf)[0] == 0:
+        if _created_sort_key(bound)[0] == 0:
             return
         suppressed = _WARN_SUPPRESS.get()
-        if suppressed is not None and repr(caller_vf) in suppressed:
+        if suppressed is not None and repr(bound) in suppressed:
+            return
+        if prop == "validTo":
+            # The END text must state the END's meaning. Reusing the start's
+            # "OPEN below" wording would tell the operator the opposite of what
+            # this value does (it bounds nothing ABOVE), which is worse than
+            # the silence it replaces.
+            #
+            # ⚠️ The remedy must name `validTo=None` for the UPDATE leg, which is
+            # where this warning also fires: `_refuse_inconsistent_validity_precision`
+            # resolves the pair an update will persist, so OMITTING `validTo` keeps
+            # the stored un-datable value and then refuses the declaration beside it
+            # (a `ValueError` where the caller was following this advice).
+            #
+            # The end's REPORTED STATE is deliberately not asserted here: it is
+            # #9202's pending owner decision, and a warning that recited today's
+            # `known` would be stale the moment the ruling lands.
+            _logger.warning(
+                "validTo %r names no instant — it bounds NOTHING, so the "
+                "window is UNBOUNDED above (ONTOLOGY §4.7, #9202). If the "
+                "end is known but un-datable, pass validToPrecision='unknown' "
+                "with NO validTo (on an update pass validTo=None explicitly — "
+                "omitting it keeps the stored value); otherwise pass an "
+                "ISO-8601 instant. What the reply should call such an end is "
+                "#9202's pending owner decision.",
+                bound,
+            )
             return
         _logger.warning(
             "validFrom %r names no instant — it means NO START WAS "
             "RECORDED, so the window is OPEN below (ONTOLOGY §4.7, "
             "#6140). Pass an ISO-8601 instant, or omit the property, to "
             "make the intent explicit.",
-            caller_vf,
+            bound,
         )
 
     from tortoise.commit_schema import validate_validity_window
     if point_id is None:
-        _warn_unorderable_caller_start(props.get("validFrom"))
+        _warn_unorderable_caller_bound("validFrom", props.get("validFrom"))
+        _warn_unorderable_caller_bound("validTo", props.get("validTo"))
         validate_validity_window(props.get("validFrom"), props.get("validTo"))
         return
     rows = g.query(
@@ -6469,16 +6518,24 @@ def _refuse_inverted_point_window(g, props: dict, *,
     ).result_set
     if not rows:
         return
-    warned = False
+    warned_start = False
+    warned_end = False
     for stored_vf, stored_vt in rows:
         # ``get(key, default)`` uses the default only when the key is ABSENT,
         # so a key present with value None still clears the bound (matching
         # `SET n += $props`), while an absent key keeps the stored one.
         effective_vf = props.get("validFrom", stored_vf)
         effective_vt = props.get("validTo", stored_vt)
-        if not warned and "validFrom" in props and props["validFrom"] != stored_vf:
-            _warn_unorderable_caller_start(props["validFrom"])
-            warned = True
+        if not warned_start and "validFrom" in props and props["validFrom"] != stored_vf:
+            _warn_unorderable_caller_bound("validFrom", props["validFrom"])
+            warned_start = True
+        # #9202: the END arm is gated exactly like the start's — the CALLER's own
+        # value, and only when it differs from what the node already carries (a
+        # duplicate-id fan-out must not re-warn per sibling; an unrelated update
+        # of a legacy point re-reads a value nobody is writing).
+        if not warned_end and "validTo" in props and props["validTo"] != stored_vt:
+            _warn_unorderable_caller_bound("validTo", props["validTo"])
+            warned_end = True
         validate_validity_window(effective_vf, effective_vt)
 
 
@@ -9414,13 +9471,15 @@ class TortoiseSDK:
                     # dirty-marking (#490 review P2-1: re-capture would churn
                     # confidence for every point).
                     props["updatedAt"] = now
-                    # #6140: the CREATE leg of this call already warned about
-                    # an unorderable caller `validFrom` if it had one, and this
-                    # update leg writes the same value — so suppress the repeat
-                    # for the duration of THIS write only.
+                    # #6140 / #9202: the CREATE leg of this call already warned
+                    # about an unorderable caller `validFrom` / `validTo` if it
+                    # had one, and this update leg writes the same value — so
+                    # suppress the repeat for the duration of THIS write only.
                     _vf = props.get("validFrom")
+                    _vt = props.get("validTo")
                     _tok = _WARN_SUPPRESS.set(
-                        frozenset({repr(_vf)}) if _vf is not None else None)
+                        frozenset({repr(_vf), repr(_vt)})
+                        if (_vf is not None or _vt is not None) else None)
                     try:
                         self.update_point(pid, **props)
                     finally:
