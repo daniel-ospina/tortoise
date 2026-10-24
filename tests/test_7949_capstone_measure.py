@@ -1104,6 +1104,16 @@ def test_the_not_established_section_quotes_the_s5_operator_counts_the_log_measu
 # `the meta fold`, `link_source_to_event`, …) decides what the cited line must
 # carry. A cite whose line names nothing this table knows about FAILS rather than
 # passing unchecked, so a re-derived number cannot slip in unverified.
+#
+# ⚠️ Coverage is every cite that NAMES ITS FILE (`sdk.py`, `edges.py`,
+# `extractor_v2.py` — the three sources the bundle prints numbers for), in all
+# three documents. A bare `:NNNN` continuation (the docs write `` `extractor_v2.py:7912`
+# and `:7932` ``) is NOT a cite this leg can resolve, because the file is named
+# only once for several numbers; the README's bare `` `symbol` `:NNN` `` step
+# table is owned by `test_7949_capstone_verdict_check.py`. `extractor_v2.py` was
+# the gap: its 15 cites (`8288-8292`, `8278-8285`, `7928-7932`, `7912`, `7881`,
+# `7781-7801`, `7804`) matched no pattern at all, so they were neither resolved
+# nor reported `unmatched` — the leg stayed green over numbers it never read.
 
 _BUNDLE_DOCS = (
     ("README.md", _REPO / "docs/evidence/7949-capstone/README.md"),
@@ -1115,11 +1125,14 @@ _BUNDLE_DOCS = (
 _BUNDLE_SOURCES = {
     "sdk": _REPO / "tortoise/sdk.py",
     "edges": _REPO / "tortoise/projection/edges.py",
+    "extractor_v2": _REPO / "tortoise/extractor_v2.py",
 }
 
-# `tortoise/sdk.py:12487`, ``tortoise/projection/edges.py:2424-2450``, `edges.py:468`
+# `tortoise/sdk.py:12487`, ``tortoise/projection/edges.py:2424-2450``, `edges.py:468`,
+# ``tortoise/extractor_v2.py:8288-8292``
 _BUNDLE_CITE = re.compile(
-    r"(?<![\w.])(?:tortoise/)?(?:projection/)?(sdk|edges)\.py:(\d+)(?:-(\d+))?")
+    r"(?<![\w.])(?:tortoise/)?(?:projection/)?"
+    r"(sdk|edges|extractor_v2)\.py:(\d+)(?:-(\d+))?")
 
 # A paragraph that is ABOUT numbers which no longer resolve is not a live cite:
 # the README discloses the frozen log's stale set on purpose, and the supersession
@@ -1154,6 +1167,30 @@ _BUNDLE_RULES = (
      "span"),
     ("the references writer", "edges",
      ("link_source_to_event",), ("def link_source_to_event(",), "method-span"),
+    # `extractor_v2.py` — the surfaces whose ABSENCE is #9116. Two cites per
+    # surface: the block it EMITS (the `result[...] = {` assignment, a range)
+    # and the FLAG computed earlier (a single line). The surface rule comes
+    # first so a two-cite line names the surface it prints, not a phrase the
+    # neighbouring cite happens to share.
+    ("the classify-later surface the extractor emits", "extractor_v2",
+     ('result["classify_later"]', "result['classify_later']"),
+     ('result["classify_later"] = {',), "span"),
+    ("the vet surface the extractor emits", "extractor_v2",
+     ('result["vet"]', "result['vet']"),
+     ('result["vet"] = {',), "span"),
+    ("the classify-later flag, computed before the passed step is reached",
+     "extractor_v2", ("classify_later",),
+     ("classify_later = kind_classifier is not None",), "line"),
+    ("the vet flag, computed before the pass is reached", "extractor_v2",
+     ("vet_enabled",), ("vet_enabled = (",), "line"),
+    ("the vet pass's fail-open exception path", "extractor_v2",
+     ("_run_vet_pass",),
+     ("except Exception as e:", "return embed_list, {}, ["), "span"),
+    ("the early-return block that emits both OFF surfaces", "extractor_v2",
+     ("early-return path",),
+     ('"classify_later": {"enabled"', '"vet": {"enabled"'), "span"),
+    ("the extractor entry point", "extractor_v2",
+     ("extract_session_v2",), ("def extract_session_v2(",), "def"),
 )
 
 
@@ -1209,12 +1246,22 @@ def _bundle_missing(kind: str, anchors, source_lines, start: int, end):
 
 
 def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
-    """Every live `file:line` the bundle prints → the code the bundle names there.
+    """Every live `file.py:line` cite that names its file → the code it names there.
 
-    Non-vacuity: against `main`'s documents (which cite `sdk.py:12401` for the meta
-    fold, `12682` for the capture path, `edges.py:467` and `2168-2192` for the
-    reference labels and writer) the four rules whose phrase those cites carry all
-    red — the cited lines hold the #4716 re-key comments instead of the symbols.
+    Covers all three sources the bundle prints numbers for (`sdk.py`, `edges.py`,
+    `extractor_v2.py`) across `README.md` and both probes.
+
+    Non-vacuity: against `main`'s documents 21 of the 42 cites red across five
+    rules (`sdk.py:12401` for the meta fold, `12682` for the capture path,
+    `11623` for the entry point, `edges.py:467` for the reference labels and
+    `2168-2192` for the writer) — the cited lines hold the #4716 re-key comments
+    instead of the symbols.
+    The `extractor_v2.py` cites are correct at this head, so those rules cannot red
+    on `main`; they are the tripwire for the NEXT insertion above `8288`/`7912`/
+    `7804`, and they bite: with the README's `` `extractor_v2.py:7912` `` moved to
+    `7913`, `the vet flag` reds with `extractor_v2.py:7913 reads 'or
+    _value_gate_enabled())', which carries none of ['vet_enabled = (']`, while the
+    pre-fix sweep (no `extractor_v2` alternative) stayed green on the same text.
     """
     source_lines = {name: path.read_text(encoding="utf-8").splitlines()
                     for name, path in _BUNDLE_SOURCES.items()}
