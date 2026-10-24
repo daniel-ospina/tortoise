@@ -31,7 +31,8 @@ there" is a fact about the code, not about the path.
 
 WHAT THIS GATE DELIBERATELY DOES NOT DO (#5064, bounded slice)
 -------------------------------------------------------------
-* It does not implement any mechanism. Three of the eight are genuinely absent
+* It does not implement any mechanism. Four of the thirteen are genuinely
+  absent
   and are *meant* to be marked `not-implemented` — recording an absence is the
   output, not a failure.
 * It does not generate a design document from the registry (indicator (2) /
@@ -159,12 +160,17 @@ REGISTRY = ROOT / "config" / "v4-mechanisms.yml"
 DECLARED_IDS = (
     "vet",
     "source_dedup",
+    "exact_dedup",
+    "near_dup_detect",
     "near_dup_merge",
+    "against_priors_consolidation",
     "span_link",
     "embed_gate",
     "sufficiency_router",
     "fanout_cap",
     "state_value_carve_out",
+    "atomic_point_write",
+    "failure_policy",
 )
 
 #: WHERE the design's declarations live, and HOW one is marked. The marker is the
@@ -1073,8 +1079,8 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
 # ── the gate over the real registry ─────────────────────────────────────────
 
 
-def test_declared_set_is_exactly_the_eight_named_mechanisms() -> None:
-    """The registry declares the closed set from #5064 indicator (1) + the enumeration."""
+def test_declared_set_is_exactly_the_named_mechanisms() -> None:
+    """The registry declares the closed set: indicator (1) + the enumeration."""
     mechanisms = load_registry()["mechanisms"]
     assert tuple(r["id"] for r in mechanisms) == DECLARED_IDS
     assert len(mechanisms) == len(DECLARED_IDS)
@@ -1161,6 +1167,265 @@ def test_the_compact_render_omits_the_carve_out_the_row_records() -> None:
         "the compact render now carries the carve-out: the `state_value_carve_out` "
         "row still records the omission, so update the row (and #9775) with the "
         "decision instead of deleting this assertion"
+    )
+
+
+# ── THE ENUMERATION: the design's own mechanism lists are compared ───────────
+#
+# `DECLARED_IDS` is a PIN, and a pin can only hold a set somebody already wrote.
+# The membership markers close that gap for a mechanism that HAS a row; they
+# cannot close it for a mechanism the design GAINS and nobody marks — the stated
+# residual. One enumeration in the design is machine-readable WITHOUT a
+# convention: §4.2's FOUR-DEDUP AUDIT is a table whose first cell is a mechanism
+# id. So that table is compared STRUCTURALLY here, and a fifth audited dedup
+# arrives as a red gate instead of as prose nobody counted. This is why the
+# registry grew from eight rows to thirteen: the audit declared FOUR dedups and
+# the registry carried one of them.
+
+V4_ARCH_DOC = ARCH_DOCS / "EXTRACTOR-V4-ARCHITECTURE.md"
+
+#: The audited dedups -> the registry row that owns each. Two ids can share ONE
+#: row, and that is not a bookkeeping shortcut: `D-b` and `D-c` are one mechanism
+#: at two keys, which is how §4.2 itself lists them (`S2.2a-α EXACT DEDUP …
+#: within-batch + against-store`). A mapping rather than a set, so the sharing is
+#: declared rather than inferred from a count.
+AUDITED_DEDUP_ROWS = {
+    "D-a": "source_dedup",
+    "D-b": "exact_dedup",
+    "D-c": "exact_dedup",
+    "D-d": "against_priors_consolidation",
+}
+
+#: A table ROW whose first cell is a bold dedup id (`| **D-a** | ...`). Anchored
+#: on the ROW START so a `D-a` mentioned inside another row's prose is not a
+#: declaration, and `MULTILINE` so the table can move down the document without
+#: the check losing it.
+AUDITED_DEDUP_ROW = re.compile(r"^\|\s*\*\*(D-[a-z])\*\*\s*\|", re.MULTILINE)
+
+
+def audited_dedups(doc: Path = V4_ARCH_DOC) -> list[str]:
+    """The dedup ids §4.2's FOUR-DEDUP AUDIT declares, in document order.
+
+    The table is the one place the design enumerates dedups by ID, so it is the
+    one mechanism enumeration a prose document can be compared against without a
+    marker convention. Reading it is the whole point: a structure that is READ is
+    a declaration a check can hold; a structure that is only written down is the
+    defect #5064 exists for.
+    """
+    return AUDITED_DEDUP_ROW.findall(doc.read_text(encoding="utf-8"))
+
+
+def audited_dedup_errors(doc: Path, registry_ids: set[str],
+                         mapping: dict[str, str] | None = None) -> list[str]:
+    """Every violation between the design's audited-dedup table and the registry.
+
+    FAIL CLOSED in the two directions a hand-maintained list gets wrong: a dedup
+    the design DECLARES whose id maps to no row (the shape this whole issue is
+    about — a declared mechanism with no verdict), and a mapping entry for a
+    dedup the design no longer declares (a stale mapping reads as coverage for a
+    withdrawn mechanism). An unreadable table — zero ids — is a THIRD violation,
+    never an empty pass: a shape change must not silently satisfy the check.
+    """
+    mapping = AUDITED_DEDUP_ROWS if mapping is None else mapping
+    declared = audited_dedups(doc)
+    if not declared:
+        return [
+            f"{doc.name}: the FOUR-DEDUP AUDIT table yielded NO ids — its shape "
+            "changed, so the design's dedup enumeration can no longer be "
+            "compared with the registry. Restore the `| **D-x** | …` rows or "
+            "update `AUDITED_DEDUP_ROW` with the shape it became (fail closed, "
+            "never a silent pass)"
+        ]
+    errors: list[str] = []
+    for did in declared:
+        mid = mapping.get(did)
+        if mid is None:
+            errors.append(
+                f"{did}: declared by the design's audited-dedup table and mapped "
+                "to NO registry mechanism — add a `config/v4-mechanisms.yml` row "
+                f"for it and an `AUDITED_DEDUP_ROWS` entry (`{did}` -> <row id>)"
+            )
+        elif mid not in registry_ids:
+            errors.append(
+                f"{did}: mapped to `{mid}`, which is not a DECLARED mechanism — "
+                "a dedup cannot be covered by a row that does not exist"
+            )
+    for did in sorted(set(mapping) - set(declared)):
+        errors.append(
+            f"{did}: `AUDITED_DEDUP_ROWS` names a dedup the design no longer "
+            "declares — a stale mapping reads as coverage for a withdrawn "
+            "mechanism; withdraw the entry (or restore the declaration)"
+        )
+    return errors
+
+
+def test_the_four_audited_dedups_each_have_a_row() -> None:
+    """The design's dedup ENUMERATION and the registry agree, both ways.
+
+    This is the drift detector. Before it, adding a fifth dedup to §4.2's table
+    was invisible: `DECLARED_IDS` would not change, no marker had to move, and
+    the registry would keep claiming the declared set was complete. The ids are
+    pinned in ORDER as well as membership, because a reordered or renamed row is
+    the same silent edit.
+    """
+    rows = {r["id"] for r in load_registry()["mechanisms"]}
+    assert audited_dedups() == ["D-a", "D-b", "D-c", "D-d"], (
+        "§4.2's four-dedup audit no longer declares exactly D-a..D-d — read the "
+        f"table, got {audited_dedups()!r}, and update AUDITED_DEDUP_ROWS with it"
+    )
+    errors = audited_dedup_errors(V4_ARCH_DOC, rows)
+    assert errors == [], (
+        "the design's audited dedups and the registry disagree:\n  "
+        + "\n  ".join(errors)
+    )
+
+
+def test_a_fifth_audited_dedup_with_no_row_is_refused(tmp_path) -> None:
+    """DRIFT, PROVEN: add a mechanism to the design's enumeration and the check reds.
+
+    The real table has exactly four rows, so a check that merely counted them
+    would be vacuous today and could stay green tomorrow. This fixture is the
+    fake fifth declaration: `D-e` is declared by the design and mapped to no
+    row, and the check must name it rather than shrug.
+    """
+    doc = tmp_path / "arch.md"
+    doc.write_text(
+        "| id | key | where | exists? |\n|---|---|---|---|\n"
+        "| **D-a** | source | URL only | no |\n"
+        "| **D-b** | within-batch exact | `:1` | ✅ |\n"
+        "| **D-c** | vs store | `:2` | ✅ |\n"
+        "| **D-d** | semantic | `:3` | ✅ |\n"
+        "| **D-e** | a NEW key nobody registered | `:4` | ✅ |\n",
+        encoding="utf-8",
+    )
+    rows = {r["id"] for r in load_registry()["mechanisms"]}
+    errors = audited_dedup_errors(doc, rows)
+    assert any("D-e" in e and "NO registry mechanism" in e for e in errors), (
+        "a declared dedup with no registry row was NOT refused — this is the "
+        f"declared-implies-present shape the gate exists for: {errors}"
+    )
+
+
+def test_a_mapping_entry_the_design_no_longer_declares_is_refused(tmp_path) -> None:
+    """The other drift direction: a withdrawn declaration cannot keep its row."""
+    doc = tmp_path / "arch.md"
+    doc.write_text(
+        "| **D-a** | source |\n| **D-b** | within-batch |\n| **D-c** | store |\n",
+        encoding="utf-8",
+    )
+    rows = {r["id"] for r in load_registry()["mechanisms"]}
+    errors = audited_dedup_errors(doc, rows)
+    assert any("D-d" in e and "no longer" in e for e in errors), (
+        "a mapping entry for a dedup the design dropped stayed green: "
+        f"{errors}"
+    )
+
+
+def test_an_audited_dedup_mapped_to_an_undeclared_row_is_refused(tmp_path) -> None:
+    """A mapping is not evidence: the row it names has to be a declared mechanism."""
+    doc = tmp_path / "arch.md"
+    doc.write_text(
+        "| **D-a** | source |\n| **D-b** | within-batch |\n"
+        "| **D-c** | store |\n| **D-d** | semantic |\n",
+        encoding="utf-8",
+    )
+    errors = audited_dedup_errors(
+        doc,
+        {"source_dedup"},
+        mapping={"D-a": "source_dedup", "D-b": "a_row_that_does_not_exist",
+                 "D-c": "a_row_that_does_not_exist",
+                 "D-d": "a_row_that_does_not_exist"},
+    )
+    assert any("D-b" in e and "not a DECLARED mechanism" in e for e in errors), (
+        f"a mapping to an undeclared row passed: {errors}"
+    )
+
+
+def test_an_unreadable_dedup_table_is_refused(tmp_path) -> None:
+    """A shape change is a violation, never an empty pass (the fail-closed rule)."""
+    doc = tmp_path / "arch.md"
+    doc.write_text("| id | key |\n|---|---|\n| **dedup-a** | source |\n",
+                   encoding="utf-8")
+    errors = audited_dedup_errors(doc, {r["id"] for r in load_registry()["mechanisms"]})
+    assert errors and "yielded NO ids" in errors[0], errors
+
+
+def test_the_near_dup_three_sites_are_separately_registered() -> None:
+    """§4.2's three-site split is a REGISTRY fact, not only a paragraph.
+
+    DETECT (mechanical, before the gate) · VERDICT (`vet_gate.OUTCOMES`' `MERGE`,
+    S2.2b) · FUSION (S3). The design's claim is *"no operation has two homes"*;
+    a registry that carried only the fusion made the first two sites look like
+    part of it. Pinned by symbol so a merge of the two rows cannot pass silently.
+    """
+    rows = {r["id"]: r for r in load_registry()["mechanisms"]}
+    assert "_boundary" in rows["near_dup_detect"]["symbols"], rows["near_dup_detect"]
+    assert "near_dup_merge" in rows["near_dup_merge"]["symbols"], rows["near_dup_merge"]
+    assert rows["near_dup_detect"]["code"] != rows["near_dup_merge"]["code"] or (
+        "_boundary" in rows["near_dup_detect"]["symbols"]
+        and "near_dup_merge" in rows["near_dup_merge"]["symbols"]
+    )
+    assert rows["exact_dedup"]["code"] == ["tortoise/dedup_classify.py"]
+
+
+def test_the_failure_policy_absence_is_pinned_to_the_inverted_render() -> None:
+    """The `failure_policy` row's absence claim is a CALL, not a grep of its note.
+
+    §4.4 declares the policy and says the code implements the INVERTED one. If a
+    later change gives S3 the `HOLD` path, the renderer must stop telling the
+    model to assume everything is new — and the row must flip to `implemented`.
+    Rendering the degraded search result is the probe: while it still instructs
+    `new`, the declared mechanism is genuinely absent.
+    """
+    from tortoise import extractor_v2 as v2
+
+    rendered = v2._render_search_results({"degraded": True, "reason": "S3 degraded"})
+    assert "assume everything is new" in rendered, (
+        "the degraded S3 render no longer invites the model to assume everything "
+        "is new — either the HOLD path landed (flip `failure_policy` to "
+        "`implemented` and delete this assertion) or the probe target moved "
+        f"(rendered: {rendered!r})"
+    )
+    assert "DEGRADED" in rendered, (
+        "the render no longer marks the result DEGRADED, so the assertion above "
+        "is not reading the degraded branch"
+    )
+
+
+def test_the_atomic_write_absence_is_pinned_to_the_schema() -> None:
+    """The `atomic_point_write` row's absence claim, read off the SCHEMA.
+
+    The declaration is *"there is no uniqueness constraint on `Point`"*, and the
+    thing that would falsify it is a constraint, not a paragraph. Two facts are
+    asserted together: the capability is used in this repository (so the absence
+    is a decision, not an impossibility), and no UNIQUE constraint names a Point
+    (so the row's state is still the truth). The day one is added, this reds and
+    the row must flip — the same polarity as the carve-out's render pin.
+    """
+    constraints: list[str] = []
+    for path in sorted((ROOT / "tortoise").rglob("*.py")):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):  # unreadable is not absent
+            continue
+        for match in re.finditer(r"CONSTRAINT\s+CREATE[^\n]*", text):
+            constraints.append(
+                f"{path.relative_to(ROOT).as_posix()}: {match.group(0).strip()}"
+            )
+    assert any("UNIQUE" in c.upper() for c in constraints), (
+        "no UNIQUE graph constraint exists anywhere in tortoise/ — the contrast "
+        "this check rests on (the capability is already used) is gone: "
+        f"{constraints}"
+    )
+    point_constraints = [
+        c for c in constraints
+        if "UNIQUE" in c.upper() and re.search(r"\bPoints?\b", c)
+    ]
+    assert point_constraints == [], (
+        "a UNIQUE constraint now names Point: the `atomic_point_write` row's "
+        "absence claim is no longer true — flip the row to `implemented` (and "
+        "close #9879) instead of deleting this assertion:\n  "
+        + "\n  ".join(point_constraints)
     )
 
 

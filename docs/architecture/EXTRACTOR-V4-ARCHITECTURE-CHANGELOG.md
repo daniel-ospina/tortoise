@@ -925,3 +925,35 @@ invocation of the fusion (`capture_session`'s merge block) was reached by no tes
 green. `TestTheCapturePathExecutesTheFusion` now drives the real capture write path (the S1–S5 extraction stubbed,
 since `MERGE` needs an injected arbiter `capture_session` has no seam for) and asserts on the graph: the survivor
 carries the candidate-only attachment, `(Session)-[:CONTAINS]->(Point)` exists, and no second Point was minted.
+
+## 2026-10-24 — the declared set became an ENUMERATION: 8 rows → 13 (`#5064`)
+
+`config/v4-mechanisms.yml` carried eight mechanisms. §4.2's FOUR-DEDUP AUDIT table declares four dedups by name
+(`D-a`..`D-d`) and **only `D-a` had a row**; §4.1's step list declares `S2.2a-α EXACT DEDUP` and `S2.2a-β NEAR-DUP
+DETECT` and neither was registered (only the S3 FUSION was); §4.2's *"the against-store exact dedup has FOUR
+preconditions"* paragraph declares the fourth — an ATOMIC write — and says it does not exist, and the registry's own
+`near_dup_merge` note recorded that it had **no row and no tracking issue**; §4.3 G3 / §4.4 declare a per-step
+FAILURE POLICY and §4.4 states its own status (*"a SPEC, not a description of what runs"*). Five declared mechanisms,
+no row for any of them — the first deliverable `#5064`'s Scope section names.
+
+**What landed in the registry.** `exact_dedup` (`D-b`+`D-c`, one mechanism at two keys — `dedup_classify.exact_hit_id`
+for the in-capture leg; the against-store leg is `sdk._find_point_by_content`, a METHOD, so it is named in the note
+rather than anchored), `near_dup_detect` (`extractor_v2._boundary`, the mechanical site that runs BEFORE the gate),
+`against_priors_consolidation` (`D-d`, `extractor_v2.classify_consolidation`, ordered behind `exact_dedup` by
+`preconditions:`), `atomic_point_write` (**`not-implemented`**, tracking `#9879` — filed because a declared
+precondition with nobody tracking it is the defect), `failure_policy` (**`not-implemented`**, tracking `#5087`, the
+code half the design itself names). Markers sit at each declaration site, so `membership_errors` holds the new rows
+exactly as it holds the old ones.
+
+**Drift is now checked in one structure, not only by convention.** §4.2's audit table is a mechanism enumeration a
+prose document can be read for, so `test_the_four_audited_dedups_each_have_a_row` parses it and compares it to the
+registry BOTH ways — a fifth audited dedup with no row reds, and a mapping entry for a withdrawn one reds. The
+marker convention remains what covers every other declaration, and an UNMARKED prose declaration is still invisible
+(the residual #9778 states, unchanged and restated in the registry header). Two absence claims are pinned to the
+code rather than to their notes: the degraded S3 render still instructing *"assume everything is new"*
+(`failure_policy`), and no UNIQUE constraint naming `Point` while one already exists for another label
+(`atomic_point_write`).
+
+**What this does NOT do.** No mechanism was implemented — recording the absences is the output. `sufficiency_router`
+(`#5009`) and `state_value_carve_out` (`#9775`) stay `not-implemented`, so `#5064`'s Target 3 (the attached symptoms
+stop reproducing) is still open; the substrate half is done and should not be redone.
