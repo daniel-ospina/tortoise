@@ -7012,8 +7012,8 @@ durations:
   test_9553_class4_structural_edge_records.py: 15.0  # unmeasured -- a file ADDED BY A PR has no CI junit measurement
   #   (`tools/ci_timing.py --refresh-durations` samples push-to-main runs only), and WITHOUT this row
   #   `duration_coverage_issues()` reds on `ci_selection.py --integrity`. Count at this head
-  #   (`--collect-only` is the authority): 21 test functions / 21 collected cases (no parametrization at this
-  #   head). The 15.0 weight is NOT a
+  #   (`--collect-only` is the authority): 24 test functions / 24 collected cases (no parametrization at this
+  #   head; re-derived after the supersede-gate ordering legs landed). The 15.0 weight is NOT a
   #   CI reading -- it is this PR's local embedded-lane wall session, and it carries the same caveat the
   #   sibling `test_9553_class4_structural_edge_carrier.py` row documents: the session is dominated by the
   #   once-per-session embedded-fixture cost (`#3400` attributes it to no file) and by the lazy embedding

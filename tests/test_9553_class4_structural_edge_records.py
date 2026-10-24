@@ -627,3 +627,157 @@ def test_an_edge_minted_AT_a_superseded_point_is_replayed(edge_sdk):
     assert outgoing(ids["p1"]) == live, (
         "a rebuild dropped an edge minted AFTER its point was superseded — the "
         "supersede never moved it, so the creation must be replayed")
+
+
+def test_the_supersede_gate_is_an_ordering_test_not_a_rel_type_test():
+    """The PREDICATE, as a table — the comparison nothing else reached.
+
+    ⛔ THE GAP THIS CLOSES (#9835 review, P2). Every behavioural leg checked
+    before this one exits ahead of `ev_seq < superseded_at[0]`: the `dependsOn`
+    legs at `etype not in _supersede_moved_rels()`, the incoming `aboutPoint`
+    leg at `src not in succ`. So the two answers that make this gate an ORDERING
+    test (skip only what supersede actually MOVED) were pinned by nothing — a
+    gate reduced to `src in succ`, or with the comparison inverted, passed the
+    whole file. Both are red here (measured by mutation, then reverted).
+
+    The table is the contract, so it is asserted as one:
+
+      * a DIRECT rel (`IMPL`/`NAND`) is moved in BOTH directions by 2a, and 2a
+        always journals a repoint ⇒ a superseded endpoint on either side means
+        moved, regardless of ordering;
+      * a TRANSFERRED structural rel is moved by 2b OUTGOING only, at supersede
+        time ⇒ moved iff `src in succ` AND the creation preceded the supersede;
+      * a rel outside the moved set is never moved by any leg ⇒ never skipped.
+    """
+    from tortoise.projection import SUPERSEDE_DIRECT_RELS, _supersede_took_this_edge
+
+    dead, other = "p-dead", "p-other"
+    succ = {dead: "p-successor"}
+    # The supersede ran at seq 9; the creations below are at 5 (before) / 10 (after).
+    supersede_last = {dead: (9, {"id": dead})}
+
+    def moved(etype, ev_seq, src, tgt):
+        return _supersede_took_this_edge(
+            etype, ev_seq, src, tgt, succ, supersede_last)
+
+    assert frozenset({"IMPL", "NAND"}) == SUPERSEDE_DIRECT_RELS
+    # 2a — both directions, ordering irrelevant.
+    for rel in SUPERSEDE_DIRECT_RELS:
+        assert moved(rel, 5, dead, other) is True
+        assert moved(rel, 10, other, dead) is True
+    # 2b — OUTGOING only, and only when the edge existed at supersede time.
+    for rel in ("aboutPoint", "aboutSubject", "extractedFrom", "wasDerivedFrom"):
+        assert moved(rel, 5, dead, other) is True, rel        # preceded ⇒ moved
+        assert moved(rel, 10, dead, other) is False, rel      # followed ⇒ kept at dead
+        assert moved(rel, 5, other, dead) is False, rel       # INCOMING ⇒ never moved
+    # Outside the moved set: supersede touches nothing, so nothing is skipped.
+    for rel in ("dependsOn", "ownedBy", "hasPart", "references"):
+        assert moved(rel, 5, dead, other) is False, rel
+        assert moved(rel, 5, other, dead) is False, rel
+    # A supersede this pass did not keep: not "did not move" — UNKNOWN, so the
+    # creation is skipped (the conservative answer the gate's own docstring names).
+    assert _supersede_took_this_edge(
+        "aboutPoint", 10, dead, other, succ, {}) is True
+
+
+def test_a_moved_rel_minted_BEFORE_the_supersede_is_skipped_at_the_dead_point(
+        edge_sdk):
+    """The `True` half of the ordering branch: creation PRECEDED the supersede.
+
+    ⛔ THE GAP THIS CLOSES (#9835 review, P2). `_supersede_took_this_edge`'s
+    moved-rel half is `src in succ` **and** `ev_seq < superseded_at[0]`, and no
+    leg reached the comparison: the `dependsOn` legs return at
+    `etype not in _supersede_moved_rels()`, and the `aboutPoint` leg above has
+    `src` = the EVENT (an incoming edge), so it returns at `src not in succ`.
+    Both halves of `src in succ AND created-first` were therefore unpinned — for
+    the very rels the PR calls a residual (`wasDerivedFrom`, `aboutAction`).
+
+    `aboutPoint` is in `DERIVABLE_STRUCTURAL_RELS`, so supersede leg 2b MOVES
+    this edge to the successor live AND journals a `DirectEdgeRepoint` for it.
+    Replaying the creation at the dead source on top of that leg would leave a
+    phantom at the old point — the divergence `E2E-11.6` forbids, and the
+    direction Interface A forbids (the graph RICHER than live).
+
+    The target is created WITH a `name`, deliberately: `aboutPoint`'s replay key
+    in the transfer descriptor is the target's `name` (`stub_key`), so a
+    name-less Point target has no replayable descriptor at all, 2b would move the
+    edge live while journaling nothing, and this leg would then pass for a
+    pre-existing #2489 reason instead of for the gate.
+
+    ⚠️ HONEST LIMIT, measured (comparison inverted, then reverted): this leg
+    STILL PASSES with the ordering comparison inverted, because the 2b replay leg
+    runs AFTER the creation fold and its delete-old leg scrubs the phantom the
+    fold just minted at the dead point. So what this leg pins is the ROUND TRIP
+    (live == rebuilt at the successor, nothing at the dead point), not the
+    comparison — the comparison is pinned by
+    `test_the_supersede_gate_is_an_ordering_test_not_a_rel_type_test` above and
+    by the AFTER leg below. Stated here so the next reader does not mistake it
+    for a discriminating leg.
+    """
+    sdk, journal = edge_sdk
+    ids = _world(sdk)
+    proj = sdk._get_proj()
+    target = sdk.create_point("statement", "moved target", name="moved-target")["id"]
+    # BEFORE the supersede: this edge exists when 2b runs, so 2b moves it.
+    assert proj.create_about_edge(ids["p1"], target, "aboutPoint") is True
+    successor = sdk.create_point("claim", "moved successor", pointKind="statement")
+    sdk.supersede_point(ids["p1"], successor["id"])
+
+    def outgoing(pid: str) -> set[str]:
+        return {row[0] for row in proj.g.query(
+            "MATCH (:Point {id:$p})-[r]->() RETURN type(r)",
+            params={"p": pid}).result_set}
+
+    live_old, live_new = outgoing(ids["p1"]), outgoing(successor["id"])
+    assert "aboutPoint" not in live_old, (
+        "premise: 2b moves an aboutPoint that existed at supersede time, so "
+        f"live holds it at the successor, not at the dead point ({live_old})")
+    assert "aboutPoint" in live_new, live_new
+    # ...and the transfer was JOURNALED, so the successor copy is recoverable.
+    assert [r for r in _direct_edges(journal) if r["edge_type"] == "aboutPoint"]
+
+    proj.rebuild_all(str(journal.parent), confirm_destructive=True)
+
+    assert "aboutPoint" not in outgoing(ids["p1"]), (
+        "a rebuild replayed a creation the supersede MOVED, leaving a phantom "
+        "at the dead point the live graph does not hold")
+    assert outgoing(successor["id"]) == live_new
+
+
+def test_a_moved_rel_minted_AFTER_the_supersede_is_replayed_at_the_old_point(
+        edge_sdk):
+    """The `False` half — same rel, same superseded source, ordering INVERTED.
+
+    ⛔ THE GAP THIS CLOSES (#9835 review, P2): `aboutPoint` is in the moved set
+    AND `src in succ`, so this is the only shape that reaches
+    `ev_seq < superseded_at[0]` and answers **False**. The `dependsOn` leg above
+    proves the same OUTCOME through the rel-type early return, so nothing pinned
+    the comparison itself: a gate that answered `src in succ` alone, or that
+    inverted the comparison, would pass every other leg in this file.
+
+    Live keeps the edge at the dead point (2b already ran, and it moves only
+    what existed then), so the rebuild must re-create it there.
+    """
+    sdk, _journal = edge_sdk
+    ids = _world(sdk)
+    proj = sdk._get_proj()
+    successor = sdk.create_point("claim", "later successor", pointKind="statement")
+    sdk.supersede_point(ids["p1"], successor["id"])
+    # AFTER the supersede, at the now-terminal id (`create_about_edge` has no
+    # terminal-endpoint guard, unlike `create_direct_edge`'s #2422 refusal).
+    assert proj.create_about_edge(ids["p1"], ids["p2"], "aboutPoint") is True
+
+    def outgoing(pid: str) -> set[str]:
+        return {row[0] for row in proj.g.query(
+            "MATCH (:Point {id:$p})-[r]->() RETURN type(r)",
+            params={"p": pid}).result_set}
+
+    live_old = outgoing(ids["p1"])
+    assert "aboutPoint" in live_old, live_old
+
+    proj.rebuild_all(str(_journal.parent), confirm_destructive=True)
+
+    assert "aboutPoint" in outgoing(ids["p1"]), (
+        "a rebuild dropped a moved-set edge minted AFTER the supersede — the "
+        "supersede never moved it, so the ordering comparison must answer False"
+    )
