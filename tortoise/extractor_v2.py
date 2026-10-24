@@ -6505,13 +6505,26 @@ def _resolve_point_supersede(ref: str, search: dict,
     so the CORRECTS edge — the ONLY licensed carrier of a cross-session
     decision reversal — was dropped on a quoting slip, which is what the
     receipt's `point supersedes=… matches no S3 prior` warning names.
-    A UNIQUE prior containing ``SUPERSEDE_REF_OVERLAP`` of the ref's content
-    tokens now resolves, under the SAME never-guess discipline: 0 candidates
-    and >1 EQUAL-BEST candidates still fail open. The band is deliberately
-    stricter than the endpoint-anchor band (0.45 in the write-path grader)
-    and floor-guarded, because a wrong CORRECTS corrupts a live belief: it
-    marks a point superseded that nobody superseded, which is the one
-    failure mode a recall leg must never introduce.
+
+    ⛔ A COVERAGE RATIO IS THE WRONG SHAPE FOR THIS LEG, and the first cut of
+    this change proved it: dividing by the ref alone made ONE differing
+    content token free (6/7 = 0.857), so "report the latency regression to the
+    payments team" folded onto "…to the search team", a 30-second timeout
+    onto a 60-second one, and a `cause`/`effect` swap onto its inversion —
+    each of which `_boundary` (`distinguishing_difference`, above) refuses to
+    even FOLD, let alone supersede. A false CORRECTS terminalizes a live
+    belief and there is no un-supersede API to repair it.
+
+    So the leg is **ordered containment**, which cannot cross a substitution
+    by construction: the ref's content tokens must appear IN ORDER inside the
+    prior's content tokens (a different number, entity, scope word or a role
+    inversion breaks containment) AND the two must carry the SAME negation
+    markers (a negator is a frame word, so containment alone would fold "the
+    cache is shared" onto "the cache is not shared"). Additions in the PRIOR
+    are allowed — that is exactly the measured drift — and are not a
+    substitution. ``SUPERSEDE_REF_MIN_TOKENS`` keeps a generic short ref from
+    matching half the graph, and a unique match is required: 0 candidates and
+    any 2+ candidates still fail open with a named warning.
     """
     ref = (ref or "").strip()
     if not ref or ref in ("null", "None"):
@@ -6527,16 +6540,16 @@ def _resolve_point_supersede(ref: str, search: dict,
     if not matches:
         drifted = _supersede_band_candidates(ref, points)
         if len(drifted) == 1:
-            prior = drifted[0][1]
+            prior = drifted[0]
             warnings.append(
-                f"point supersedes={ref[:60]!r} resolved by the #8503 "
-                f"recall band ({drifted[0][0]:.2f} of the ref's content "
-                f"tokens are in the prior) — the ref drifted from the "
-                f"prior's exact text ('{str(prior.get('content'))[:60]}')")
+                f"point-supersede recall band (#8503): ref {ref[:60]!r} is "
+                f"an ordered token subsequence of {prior.get('id')!r} "
+                f"('{str(prior.get('content'))[:60]}') — resolved to that "
+                "prior instead of failing open")
             return prior
         if len(drifted) > 1:
             warnings.append(f"point supersedes={ref[:60]!r} is ambiguous "
-                            f"({len(drifted)} equally-close priors) — "
+                            f"({len(drifted)} priors contain it) — "
                             "skipped (never guess)")
             return None
         warnings.append(f"point supersedes={ref[:60]!r} matches no S3 prior "
@@ -6549,62 +6562,70 @@ def _resolve_point_supersede(ref: str, search: dict,
     return matches[0]
 
 
-# #8503: the supersede-ref recall band's two bounds. 0.85 keeps the lead-in /
-# lead-out drift class (a paraphrase of one clause) and refuses a ref that only
-# shares a subject. The 5-token floor keeps a short ref ("the lease decision")
-# from matching half the graph, and keeps the *never-guess* property testable.
-SUPERSEDE_REF_OVERLAP = 0.85
+# #8503: the supersede-ref recall leg's one bound. Ordered containment is a
+# boolean test (no threshold to tune); this floor keeps a short generic ref
+# ("the lease decision") from matching half the graph and keeps the
+# never-guess property testable.
 SUPERSEDE_REF_MIN_TOKENS = 5
 
 
-def _supersede_ref_tokens(text: str) -> set[str]:
-    """Content tokens of a supersede ref / prior content, for the band leg.
+def _supersede_ref_tokens(text: str) -> list[str]:
+    """ORDERED content tokens of a supersede ref / prior content.
 
-    Sentence punctuation is stripped per token: a copied ref routinely differs
-    from its prior only by a trailing '.' or a quote mark, and a token that is
-    equal but for punctuation is the same token — the exact leg above is where
-    character equality is required.
+    Order is the point: an ordered subsequence test cannot cross a substituted
+    entity, a changed number, a changed scope word or a role inversion, while
+    a bag-of-tokens ratio silently does. Frame words are dropped (and negation
+    is compared separately, by ``_negation_markers``, because every negator is
+    a frame word). Sentence punctuation is stripped per token — a copied ref
+    routinely differs from its prior by a trailing '.' or a quote mark.
     """
-    out: set[str] = set()
+    out: list[str] = []
     for raw in _norm(text).split():
         tok = raw.strip(".,;:!?\"'()[]{}")
         if tok and tok not in _FRAME_STOPWORDS:
-            out.add(tok)
+            out.append(tok)
     return out
 
 
-def _supersede_band_candidates(ref: str,
-                               points: list[dict]) -> list[tuple[float, dict]]:
-    """Priors whose content carries ``SUPERSEDE_REF_OVERLAP`` of ``ref``.
+def _tokens_contain_in_order(ref_tokens: list[str],
+                             prior_tokens: list[str]) -> bool:
+    """True when ``ref_tokens`` appears as an ORDERED subsequence.
 
-    Returns the EQUAL-BEST candidates (coverage given by the ref, so a long
-    prior is not penalised for carrying extra claims — the ref is the short
-    side of a copy). A negation-polarity mismatch refuses the candidate: the
-    ref and the prior must agree on whether the claim is negated, or the
-    "reversal" would mark a positive claim superseded by a negated one.
+    The ``x in iterator`` idiom consumes the iterator as it matches, so a
+    token can only match a later position than the previous one — the ref may
+    be a prefix, a suffix, or a middle span of the prior, never a reordering.
+    """
+    if not ref_tokens:
+        return False
+    remaining = iter(prior_tokens)
+    return all(tok in remaining for tok in ref_tokens)
+
+
+def _supersede_band_candidates(ref: str, points: list[dict]) -> list[dict]:
+    """Priors the ref is a faithful (drifted, never substituted) copy of.
+
+    Returns every candidate that passes; the CALLER resolves only when exactly
+    one does. Acceptance is deliberately boolean rather than a similarity
+    score: a ref that must be an ordered subsequence with matching negation is
+    either a copy of this prior or it is not one, and a score is what let a
+    substitution through in the first cut.
     """
     ref_tokens = _supersede_ref_tokens(ref)
     if len(ref_tokens) < SUPERSEDE_REF_MIN_TOKENS:
         return []
     ref_neg = _negation_markers(ref)
-    scored: list[tuple[float, dict]] = []
+    out: list[dict] = []
     for p in points:
         content = str(p.get("content") or "")
-        cand = _supersede_ref_tokens(content)
-        if not cand:
+        # SET equality, never presence: two claims can each carry a negator
+        # and mean opposite things ("not exceed" vs "not stay below"), and a
+        # negator is a frame word so containment cannot see it.
+        if _negation_markers(content) != ref_neg:
             continue
-        shared = ref_tokens & cand
-        if len(shared) < _MIN_OVERLAP_TOKENS:
-            continue
-        if bool(ref_neg) != bool(_negation_markers(content)):
-            continue
-        coverage = len(shared) / len(ref_tokens)
-        if coverage >= SUPERSEDE_REF_OVERLAP:
-            scored.append((coverage, p))
-    if not scored:
-        return []
-    best = max(c for c, _ in scored)
-    return [(c, p) for c, p in scored if c == best]
+        if _tokens_contain_in_order(ref_tokens,
+                                    _supersede_ref_tokens(content)):
+            out.append(p)
+    return out
 
 
 def _supersession_records(entity_refs: list[dict], search: dict,

@@ -6522,6 +6522,55 @@ class TestOperatorSemantics2552:
         assert v2._resolve_point_supersede(
             "the lease decision", {"points": pts}, warnings=[]) is None
 
+    def test_supersede_band_refuses_every_substitution(self):
+        """#8503 code-review finding: the leg must not FOLD a substitution.
+
+        The first cut of the recall band divided by the ref's token count
+        alone, so ONE differing content token was free: an entity swap, a
+        changed number, a flipped role order or a changed scope word all
+        scored ≥0.85 and terminalized a live belief on the prior (no
+        un-supersede API exists). Ordered containment + set-equal negation is
+        the shape that cannot cross them; each pair below is one that
+        `distinguishing_difference` refuses to even FOLD.
+        """
+        def resolves(ref: str, prior: str) -> bool:
+            return v2._resolve_point_supersede(
+                ref, {"points": [{"id": "pt_x", "content": prior,
+                                  "kind": "statement"}]}, warnings=[]) is not None
+
+        # a substituted NAMED ENTITY (two teams, two real regressions)
+        assert not resolves(
+            "report the latency regression to the payments team on the "
+            "incidents channel",
+            "report the latency regression to the search team on the "
+            "incidents channel")
+        # a substituted NUMBER (30s vs 60s)
+        assert not resolves(
+            "raise the batch writer timeout to 30 seconds and keep the "
+            "retry budget at 3",
+            "raise the batch writer timeout to 60 seconds and keep the "
+            "retry budget at 3")
+        # a ROLE INVERSION (cause/effect swapped, same content multiset)
+        assert not resolves(
+            "the pgbouncer restart caused the connection storm on every replica",
+            "the connection storm caused the pgbouncer restart on every replica")
+        # OPPOSITE negation (a negator is a frame word → containment cannot
+        # see it, so the polarity test must be SET equality, not presence)
+        assert not resolves(
+            "the cache is shared across the teams",
+            "the cache is not shared across the teams")
+        # a substituted SCOPE word in an otherwise identical sentence
+        assert not resolves(
+            "the retry budget must not exceed three attempts for the payments "
+            "queue",
+            "the retry budget must not stay below three attempts for the "
+            "payments queue")
+        # and the positive control: additive drift still resolves
+        assert resolves(
+            "We ship the lease fix behind a single global kill flag",
+            "Ship the lease fix behind a single global kill flag rather than "
+            "a week of per-shard canary")
+
     def test_point_supersede_self_ref_skipped(self):
         """op_04 self guard: a ref resolving to the point ITSELF (same id)
         is skipped with a warning — a self-CORRECTS would poison the graph."""
@@ -6804,15 +6853,23 @@ class TestOperatorSelectionRules:
         NAND attacks.
         """
         for tmpl in (v2.S2_TMPL, v2.S4_TMPL):
-            assert "USER VS ASSISTANT" in tmpl
-            assert "the SPEAKER is not a filter on CLAIMS" in tmpl
+            # whitespace-flattened: the two templates wrap the same rule at
+            # different columns, so a raw substring test would pin the WRAP
+            # rather than the rule.
+            flat = " ".join(tmpl.split())
+            assert "USER VS ASSISTANT" in flat
+            assert "the SPEAKER is not a filter on CLAIMS" in flat
             # the rule that produced the loss must be GONE, not just softened
             assert "do not emit it as a statement point unless the user" \
-                " confirmed it" not in tmpl
+                " confirmed it" not in flat
             # and the exclusion is scoped to what asserts nothing
-            assert "BARE OFFERS" in tmpl
+            assert "BARE OFFERS" in flat
+            # an interrogative FRAME is not a disqualifier: the embedded claim
+            # counts (measured: two planted endpoints live in such turns)
+            assert "A QUESTION THAT ASSERTS A CLAIM" in flat
+            assert "HYPOTHESIS UNDER INVESTIGATION" in flat
             # a user-personal-state fact still belongs to the user alone
-            assert "USER-PERSONAL-STATE" in tmpl
+            assert "USER-PERSONAL-STATE" in flat
 
     def test_displaced_theory_is_a_nand_attacker_never_an_impl(self):
         """A retrospective's finding REFUTES the theory it displaced (#8503).
@@ -6868,4 +6925,7 @@ class TestOperatorSelectionRules:
         the dampener to the other one. The rule now asks for one MITIGATES per
         pair rather than an arbitrary choice between them.
         """
-        assert "ONE MITIGATES PER PAIR" in v2._s2s4_rules()
+        shared = v2._s2s4_rules()
+        assert "ONE MITIGATES PER PAIR" in shared
+        # the half that names WHY a sibling point is also a src
+        assert "The SRC of a MITIGATES is ANY point" in shared

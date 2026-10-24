@@ -19,10 +19,11 @@ and both exit **EVIDENCE VALID**.
 > **Verdict: 5/14 in-14, up from 3/14 on the same instrument, and NOT the 14/14 the issue's
 > `edge_correct` criterion asks for.** The part that is systematic is upstream of the edge:
 > **endpoint recall rose 7/15 → 11/15 planted edges with both anchors present** across every
-> run of the fixed tree, and **operator drops are measured at 0 in every run** — so every
-> remaining `edge_missing` is the model not selecting the operator, not the write path
-> dropping one. The edge number itself sits inside this extractor's run-to-run variance
-> (§5), which is why it is reported as a distribution and not as a point estimate.
+> run of the fixed tree, and **the extractor logged no operator drop in any run** — so no
+> remaining `edge_missing` is an extractor-side drop. (That zero is NOT a clean bill for the
+> write path: a commit-seam drop is not observable from a receipt — §1, blind spot.) The
+> edge number itself sits inside this extractor's run-to-run variance (§5), which is why it
+> is reported as a distribution and not as a point estimate.
 
 ---
 
@@ -36,19 +37,32 @@ carried no extraction warnings at all. That ambiguity is what the issue was file
 `runner` now records the extractor's own warnings per session (`extraction_warnings`) and
 derives a corpus-level `operator_audit.drop_warnings` that separates the two classes:
 
-| class | markers | what a count means |
+| class | markers (refusal TAILS, never a shared prefix) | what a count means |
 |---|---|---|
 | **operator drops** | `operator dropped:`, `operator with unknown op_type`, `endpoint NOT minted`, `MITIGATES target edge not emitted` | the operator pass refused an edge the model emitted |
-| **supersede refusals** | `point supersedes=`, `does not resolve to an S3 search result`, `is not expressible in the Layer-1 payload` | the replace channel dropped a CORRECTS/supersession record |
+| **supersede refusals** | `matches no S3 prior`, `is ambiguous`, `does not resolve to an S3 search result`, `is not expressible in the Layer-1 payload` | the replace channel dropped a CORRECTS/supersession record |
 
-Measured on the fixed tree: **`operator_drops = 0` in every run** (and a run note says so in
-the receipt). The first cut of this classifier merged the two marker sets and reported "5
-operator drops" on a run where the operator pass dropped nothing — five *entity-lifecycle*
-notices. That false attribution is now a pin
-(`test_operator_drop_warnings_separates_the_replace_channel`).
+Measured on the fixed tree: **`operator_drops = 0` in every run.** Two defects in this
+discriminator were found in review and fixed before merge:
+
+1. the first cut merged the two marker sets and reported "5 operator drops" on a run where
+the operator pass dropped nothing — five *entity-lifecycle* notices. Pinned by
+`test_operator_drop_warnings_separates_the_replace_channel`.
+2. the refusal set keyed on the `point supersedes=` **prefix**, which the recall leg's own
+SUCCESS warning also carried — counting the one resolution that worked as a drop. The
+markers are now refusal TAILS and the leg's success line is a distinct prefix, pinned by
+`test_recall_leg_success_warning_is_not_a_refusal` (which runs the leg and classifies the
+warning it actually emits, so a prose edit cannot satisfy it).
+
+⛔ **A ZERO IS EVIDENCE ABOUT THE OPERATOR PASS AND NOTHING ELSE.** Two seams are outside
+this instrument: the commit layer (`commit_ops.apply_payload_operators`) logs its skips
+through `_logger` with no warnings sink on the capture, and a session whose snapshot failed
+to read produces no warnings at all. The run note says so verbatim; the receipts committed
+here predate that wording (their note still reads "not the write path dropping one") — the
+counts are unchanged and the corrected note is what the shipped code emits.
 
 **`supersede_refusals` is 5–7 per run** — the replace channel is systematically refusing
-references. One of those refusals was the `SUPERSEDE` row's real mechanism (§3.1).
+references. One of those refusals was the `SUPERSEDE` row's real mechanism (§3.2b).
 
 ## 2. The measurement — 15 planted edges, 14 in the criterion
 
@@ -127,8 +141,11 @@ carries an issue id but not an outcome that carries a command and a clock time.
 
 ### 3.2 Operator selection — the `edge_missing` half
 
-With `operator_drops = 0`, every `edge_missing` is a **selection** miss: the model had both
-claims and wired no operator between them. Three distinct sub-mechanisms were measured:
+With `operator_drops = 0` in every run, each `edge_missing` is a **selection** miss — the
+model had both claims and wired no operator between them. That inference is bounded by the
+commit-seam blind spot named in §1: the operator pass dropped nothing in these runs, but a
+commit-layer drop is not observable from a receipt, so it is *not excluded*, only unobserved.
+Three distinct sub-mechanisms were measured:
 
 **(a) kind selection — a displaced theory wired as IMPL, not NAND.** `wp05_retro_writeup_op_01`
 (`NEGATE`) was `edge_missing` because the mapper emitted `IMPL` from the root-cause claim to
@@ -149,14 +166,28 @@ word ("We ship…" for "Ship…") and `_resolve_point_supersede` requires *exact
 equality, so the CORRECTS edge — the only carrier of a cross-session decision reversal —
 was dropped on a quoting slip.
 
-**Fixed:** the resolver gains a recall leg under the **same never-guess discipline** — a
-**unique** prior carrying ≥ `SUPERSEDE_REF_OVERLAP` (0.85) of the ref's content tokens
-resolves; 0 candidates, two *equal-best* candidates, a polarity mismatch, or a ref under
-5 content tokens still fail open with a named warning. The band is deliberately stricter
-than the endpoint-anchor band (0.45) because a false CORRECTS corrupts a live belief,
-which is the one failure mode a recall leg must not introduce. The prompt also states that
-an **entity-level** supersede writes no reversal edge (the Layer-1 payload has no such
-channel) — the model had been expressing the reversal that way.
+**Fixed:** the resolver gains a recall leg under the **same never-guess discipline**. The
+shape of that leg is the part review changed, and the first cut is worth recording: it
+scored the ref's token COVERAGE inside the prior, dividing by the ref alone, so **one
+differing content token was free** (6/7 = 0.857). Measured against that cut: "report the
+latency regression to the payments team" folded onto "…to the search team", a 30-second
+timeout onto a 60-second one, and a cause/effect pair onto its inversion — every one of them
+a pair `distinguishing_difference` refuses to even FOLD. A false CORRECTS terminalizes a
+live belief and there is no un-supersede API, so the leg is now **ordered containment**:
+
+* the ref's content tokens must appear **in order** inside the prior's content tokens — a
+  different number, entity, scope word, or a role inversion breaks containment, while an
+  ADDITION in the prior (the measured drift) does not;
+* the two must carry the **same negation markers** (set equality, not presence — every
+  negator is a frame word, so containment alone would fold "the cache is shared" onto
+  "the cache is not shared", and two claims can each carry a negator and mean opposites);
+* a **unique** match is required (0 or 2+ candidates fail open with a named warning), and a
+  ref under 5 content tokens is refused so a generic short ref cannot match half the graph.
+
+The prompt also states that an **entity-level** supersede writes no reversal edge (the
+Layer-1 payload has no such channel) — the model had been expressing the reversal that way.
+`test_supersede_band_refuses_every_substitution` pins the safety direction with the exact
+pairs the first cut folded.
 
 ⚠️ **This row still reads `edge_missing` in both after-runs**, because in those runs the
 model used the *entity* channel only and emitted no point-level `supersedes` at all. The
@@ -185,37 +216,42 @@ right to refuse them, and no mechanism change would make them the planted claim.
 
 ## 4. The mutation arm — does the gate fail when a mechanism regresses?
 
-`docs/evidence/8503/mutation_arm.py` reverts each mechanism **in memory** and asserts the
-pin catches it (exit 0 = every injected regression detected):
+`docs/evidence/8503/mutation_arm.py` reverts each mechanism **in memory** and then runs the
+**real pin** from `tests/` under that mutation; a pin that raises is a detection (exit 0 =
+every injected regression detected). The first cut of this script only re-read the mutated
+constant — true by construction, and it would have passed with every pin deleted — so it was
+rewritten in review:
 
 ```
-1. operator-selection rules (prompt text pins)
+
+1. operator-selection rules (the real pins run under mutation)
   [DETECTED] S2_TMPL: assistant-asserted claims are licensed
   [DETECTED] S2_TMPL: an asserting question carries its claim
   [DETECTED] S2_TMPL: an operational outcome is a durable claim
-  [DETECTED] shared rule reaches S2+S4: a displaced theory is a NAND attacker (never IMPL)
-  [DETECTED] shared rule reaches S2+S4: an entity supersede writes no reversal edge
-  [DETECTED] shared rule reaches S2+S4: every warrant point is a src
+  [DETECTED] shared rule: a displaced theory is a NAND attacker (never IMPL)
+  [DETECTED] shared rule: an entity supersede writes no reversal edge
+  [DETECTED] shared rule: every warrant point is a src
 
-2. SUPERSEDE recall band (the drop the receipt measured)
-  [DETECTED] band ON: the drifted ref forms the CORRECTS record
-             supersessions=[{'superseded': 'pt_wp06_decision', 'supersedes_by': 'pt_99f3c02b…',
-                             'evidence': 'point-level supersede ref (claim/decision reversal; cross-session correction)'}]
-  [DETECTED] band OFF: the same ref is DROPPED again (the mutation is real)
-             and the drop is named: point supersedes='We ship the lease fix all-at-once behind a single global kil'
-             matches no S3 prior — skipped (fail-open)
+2. SUPERSEDE recall leg (the drop the receipt measured)
+  [DETECTED] leg ON: the drifted ref forms the CORRECTS
+             supersessions=[{'superseded': 'pt_wp06_decision', 'supersedes_by': 'pt_99f3c02b3f229c942349180425af69e8910a95ee939fc668bbaba7172d4607', 'evidence': 'point-level supersede ref (claim/decision reversal; cross-session correction)'}]
+  [DETECTED] leg OFF: the same ref is DROPPED again (the mutation is real)
+             and the drop is named: point supersedes='We ship the lease fix all-at-once behind a single global kil' matches no S3 prior — skipped (fail-open)
+  [DETECTED] a leg that folds EVERY prior is caught by the same pin
 
 3. edge_missing attribution (operator drop vs supersede refusal)
-  [DETECTED] shipped classifier separates the two drop classes
-  [DETECTED] merged-marker mutation is DETECTED (counts move 1 -> 3)
-             merged=3 shipped=1
+  [DETECTED] shipped classifier separates the classes AND ignores the recall leg's success line
+             operator_drops=1 supersede_refusals=2
+  [DETECTED] a marker that swallows the recall leg's SUCCESS line is DETECTED by its pin
+  [DETECTED] the merged-marker defect (entity notices counted as operator drops) is DETECTED by its pin
 
 MUTATION ARM: every injected regression was detected by its pin.
 ```
 
-Section 2 is the strongest arm available on this corpus: the ref and the prior are the
-**actual strings the after-run receipt recorded**, so the replay is deterministic — the
-pre-fix resolver drops the edge and the fixed one forms it, with no LLM in the loop.
+Section 1 now calls `tests/test_extractor_v2.py::TestOperatorSelectionRules` itself; section 2
+replays the **actual strings the after-run receipt recorded**, so the drift resolves with no
+LLM in the loop, and adds the SAFETY direction (a leg that folds every prior must red the
+same pin); section 3 re-injects the two attribution defects this review found.
 
 ## 5. What did NOT move, and the honest limits of this measurement
 
@@ -242,6 +278,23 @@ pre-fix resolver drops the edge and the fixed one forms it, with no LLM in the l
 * **Leakage did not regress**: `distractor_leakage_per_run` 1 and 0 after, against a design
   tolerance of 1 — the wider claim licence did not turn into routine-aside leakage.
 
+### 5.1 What the review round changed (and what it caught)
+
+Six findings were raised against the first cut and all six were fixed before merge. Two were
+**data-integrity** defects in the new supersede leg, and they are the reason the leg is
+ordered containment rather than a similarity score (§3.2b): the coverage ratio folded a
+substituted entity, a changed number, a flipped role order and a changed scope word, and the
+polarity test was presence-of-any-negator rather than set equality. Two more were defects in
+this PR's own instrumentation: the refusal markers keyed on a prefix the recall leg's success
+warning shared (so a resolution counted as a drop), and the run note claimed more than its
+instrument can see (the commit seam is not observed — §1). The last two were a tautological
+mutation-arm section and a missing negative test; both are now real (§4, and
+`test_supersede_band_refuses_every_substitution`).
+
+The lesson worth keeping: a recall leg on a belief-corrupting write must be a **predicate**,
+not a threshold. "Is this ref a copy of this prior, or not" has a shape; "is it 0.85 similar"
+does not, and the difference is a live belief terminalized with no un-supersede API.
+
 ## 6. Reproduction
 
 ```bash
@@ -258,7 +311,9 @@ PYTHONPATH=$PWD .venv/bin/python tools/operator_receipt_check.py \
 PYTHONPATH=$PWD .venv/bin/python docs/evidence/8503/mutation_arm.py     # exit 0
 ```
 
-Suites run green on this tree: `tests/test_extractor_v2.py` (338 passed),
+Suites run green on this tree (review-round head): `tests/test_extractor_v2.py`,
 `tests/eval/write_path/test_write_path_grading.py` +
-`test_write_path_operator_receipt.py` (135 passed), and the non-EP subset of
-`test_write_path_runner.py` (25 passed).
+`test_write_path_operator_receipt.py`, the non-EP subset of
+`test_write_path_runner.py`, and `docs/evidence/8503/mutation_arm.py` (exit 0). The full
+`tests/eval/write_path/` directory cannot complete on this box — the EP/SVBP pass exceeds the
+repo's 300 s per-test cap at this load — so CI is the authority for that leg.

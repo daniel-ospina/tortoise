@@ -1048,6 +1048,30 @@ def test_operator_drop_warnings_separates_the_replace_channel():
     assert drops["total"] == 3
 
 
+def test_recall_leg_success_is_not_counted_as_a_refusal():
+    """#8503 code-review finding: the refusal markers key on TAILS, not the
+    `point supersedes=` prefix.
+
+    The recall leg's SUCCESS warning shares that prefix, so the first cut of
+    `_SUPERSEDE_REFUSAL_MARKERS` counted the one resolution that worked as a
+    replace-channel DROP — the exact false-attribution class the two-class
+    split exists to prevent.
+    """
+    results = [{
+        "session_id": "wp07_bluepeak_followup",
+        "extraction_warnings": [
+            "point-supersede recall band (#8503): ref 'We ship the lease fix' "
+            "is an ordered token subsequence of 'pt_wp06_decision' — resolved "
+            "to that prior instead of failing open",
+            "point supersedes='We ship the lease fix' matches no S3 prior — "
+            "skipped (fail-open)",
+        ],
+    }]
+    drops = runner.operator_drop_warnings(results)
+    assert drops["supersede_refusals"] == 1, drops
+    assert drops["operator_drops"] == 0
+
+
 def test_operator_drop_warnings_ignores_benign_extraction_warnings():
     """Zero is a MEASUREMENT (#8503): "the extractor logged no drop".
 
@@ -1060,7 +1084,6 @@ def test_operator_drop_warnings_ignores_benign_extraction_warnings():
         "extraction_warnings": [
             "value-bearing point 'X' resolved verbatim in turn 8, but the "
             "quoted text carries no value",
-            "entity 'lumen auth' lifecycle='changed' is not expressible",
             "point 'Maya owns the pre-deploy check': search_keys capped at 4",
             "MITIGATES target edge materialized (#2552 mint-before-wire)",
             "operator endpoint minted (#2552 mint-before-wire): IMPL dst",
@@ -1070,6 +1093,37 @@ def test_operator_drop_warnings_ignores_benign_extraction_warnings():
     assert runner.operator_drop_warnings(results) == {
         "total": 0, "operator_drops": 0, "supersede_refusals": 0,
         "by_session": {}}
+
+
+def test_recall_leg_success_warning_is_not_a_refusal():
+    """#8503 code-review finding: the classifier and the warning TEXT agree.
+
+    The refusal markers key on refusal tails, and the recall leg's success
+    line must therefore name no refusal. This pin runs the leg and classifies
+    the warning it actually emits — a regression that re-uses the
+    `point supersedes=… matches no S3 prior` shape for a SUCCESS fails here,
+    not in a prose assertion.
+    """
+    import tortoise.extractor_v2 as v2
+
+    embed = {"entities": [], "events": [],
+             "points": [{"content": "roll out per-service flags for the next "
+                                    "rollout instead of one global kill flag",
+                          "pointKind": "statement",
+                          "supersedes": "We ship the lease fix behind a single "
+                                        "global kill flag"}],
+             "operators": []}
+    search = {"entities": [], "events": [],
+              "points": [{"id": "pt_wp06", "kind": "statement",
+                          "content": "Ship the lease fix behind a single global "
+                                     "kill flag rather than per-shard canary"}]}
+    r = v2.execute_embed(embed, search, session_id="s1")
+    assert any(s["superseded"] == "pt_wp06" for s in r["supersessions"])
+    success = [w for w in r["warnings"] if "recall band" in w]
+    assert success, r["warnings"]
+    drops = runner.operator_drop_warnings(
+        [{"session_id": "s1", "extraction_warnings": success}])
+    assert drops["total"] == 0, drops
 
 
 def test_receipt_carries_extraction_warnings_and_drop_attribution():

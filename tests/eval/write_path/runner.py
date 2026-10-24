@@ -1529,11 +1529,14 @@ def run_benchmark(
                     session_results)
                 if operator_audit["drop_warnings"]["operator_drops"] == 0:
                     notes.append(
-                        "operator drops (#8503): the extractor logged NO "
-                        "operator/edge drop in any session — every "
-                        "edge_missing verdict in this receipt is the model "
-                        "not forming the edge (operator selection), not the "
-                        "write path dropping one")
+                        "operator drops (#8503): the EXTRACTOR logged no "
+                        "operator/edge drop in any session — so an "
+                        "edge_missing verdict in this receipt is not an "
+                        "extractor-side drop. ⛔ This does NOT cover the "
+                        "commit seam: apply_payload_operators logs its skips "
+                        "through _logger only and has no warnings sink on "
+                        "the capture, so a drop there is INVISIBLE to this "
+                        "block (named blind spot, not a clean bill)")
                 for result in session_results:
                     sid = result["session_id"]
                     owned = [
@@ -1827,8 +1830,13 @@ _OPERATOR_DROP_MARKERS = (
     "endpoint NOT minted",
     "MITIGATES target edge not emitted",
 )
+# ⛔ Refusal TAILS, never the `point supersedes=` PREFIX: the recall leg's own
+# SUCCESS warning used to share that prefix, so the prefix form counted a
+# resolution as a refusal — the same false-attribution class this block exists
+# to prevent (code-review finding, #8503). A success line names no refusal.
 _SUPERSEDE_REFUSAL_MARKERS = (
-    "point supersedes=",
+    "matches no S3 prior",
+    "is ambiguous",
     "does not resolve to an S3 search result",
     "is not expressible in the Layer-1 payload",
 )
@@ -1838,11 +1846,18 @@ def operator_drop_warnings(session_results: list[dict]) -> dict:
     """Attribute ``edge_missing``: which sessions had a seam-level drop (#8503).
 
     Returns ``{"total": int, "operator_drops": int, "supersede_refusals":
-    int, "by_session": {sid: [warning, ...]}}``. ``operator_drops == 0`` on a
-    session is a MEASURED statement, not a default: the operator pass logged no
-    drop, so every ``edge_missing`` there is the model never forming the edge —
-    the selection mechanism, not the write path. A non-zero
-    ``supersede_refusals`` names the replace-channel drop instead.
+    int, "by_session": {sid: [warning, ...]}}``.
+
+    ⛔ ``operator_drops == 0`` means the EXTRACTOR logged no drop — it does
+    NOT mean the write path dropped nothing. Two seams are outside this
+    instrument's reach: the commit layer (`commit_ops.apply_payload_operators`)
+    logs its skips through ``_logger`` only, with no warnings sink on the
+    capture, and a snapshot that never read a session produces no warnings at
+    all. So a zero is evidence about the operator pass and about nothing else;
+    the run note says exactly that, and an ``edge_missing`` verdict stays a
+    SELECTION finding only where the snapshot for that session read
+    successfully (``graph_census``'s per-session ``error`` names the ones that
+    did not).
     """
     by_session: dict[str, list[str]] = {}
     total = operator_drops = supersede_refusals = 0
