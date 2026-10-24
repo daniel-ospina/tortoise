@@ -832,18 +832,28 @@ def _span(tree: ast.Module, dotted: str) -> tuple[int, int] | None:
 
 
 def _class_body_targets(rel: str, function: str, cls: str) -> frozenset[str]:
-    """`Assign`/`AnnAssign` target names `_symbol_index` would register from the
-    body of `cls`, a class defined directly inside `function`, in `tortoise/<rel>`.
+    """What a class body DECLARES, read from the SOURCE: the `Assign`/`AnnAssign`
+    target names of `cls` (a class defined directly inside `function`, in
+    `tortoise/<rel>`) that carry a VALUE and whose targets are bare `Name`s —
+    `_symbol_index`'s own condition, applied to a class that is itself
+    function-local.
 
-    ⚠️ The condition is `_symbol_index`'s OWN — `Assign`/`AnnAssign` carrying a
-    VALUE, single-`Name` targets only — not a looser "every bound name". This check
-    exists to stop the paired ABSENCE pins from going vacuous, so a looser predicate
-    would defeat it in a new costume: a nested `def`/`class` called `_fields_`, or an
-    annotation-only `_fields_: list`, would satisfy PRESENT while the index can never
-    mint the id the next assertion forbids — `assert <id> not in set()`, green and
-    testing nothing. Read from the SOURCE, because the index is exactly what the
-    source must still agree with: a RENAME reds here as "re-point this pin" instead
-    of going quiet, the same treatment the SUBJECT-locality pins give a hoist.
+    ⚠️ These are exactly the names the index must NOT contain for this class: a
+    class local to a function has a local BODY, so `index()` walks it with
+    `in_function=True` and mints none of them (that absence is what the paired
+    assertion pins). This helper reports the SOURCE side of the pair, so a red on it
+    means the SOURCE moved — a rename, or a declaration re-shaped into a form the
+    index skips — and the pin needs re-pointing. It does NOT mean `in_function`
+    stopped propagating.
+
+    ⚠️ The condition must be the index's own, not a looser one, or the presence
+    check defeats itself: an annotation-only `x: list` (no value) would satisfy
+    PRESENT while the index cannot mint the id the next assertion forbids —
+    `assert <id> not in set()`, green and testing nothing. Nested `def`/`class`
+    names are excluded for a DIFFERENT reason: the index mints a nested definition
+    node regardless of `in_function`, so including them would red the ABSENCE pin
+    with the wrong diagnosis ("`in_function` is not propagating") when what changed
+    was a name collision.
     """
     tree = _parsed(str(PKG / rel))
     for node in tree.body:
