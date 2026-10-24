@@ -19,8 +19,8 @@ and both exit **EVIDENCE VALID**.
 > **Verdict: 5/14 in-14 — the SAME number the issue's own pre-fix run measured, and NOT the
 > 14/14 the criterion asks for. This PR does not claim a gain on the criterion number.**
 > What it does establish, on committed artifacts: (a) **endpoint recall rose 7/15 → 11/15**
-> planted edges with both anchors present, on every run of the fixed tree — the systematic
-> part, upstream of the edge; (b) **the extractor logged no operator drop in any run**, so no
+> planted edges with both anchors present (11–13 on the fixed-tree receipts, 7 on the pre-fix
+> probe) — the systematic part, upstream of the edge; (b) **the extractor logged no operator drop in any run**, so no
 > `edge_missing` is an extractor-side drop (that zero is NOT a clean bill for the write path —
 > a commit-seam or a failed snapshot is invisible to it, §1); (c) row-level churn is
 > two-way and inside sampling noise — **2** rows flipped red→green in BOTH fixed-tree runs
@@ -43,14 +43,15 @@ derives a corpus-level `operator_audit.drop_warnings` that separates the two cla
 | class | markers (refusal TAILS, never a shared prefix) | what a count means |
 |---|---|---|
 | **operator drops** | `operator dropped:`, `operator with unknown op_type`, `non-dict operator entry`, `endpoint NOT minted`, `MITIGATES target edge not emitted` | the operator pass refused an edge the model emitted |
-| **supersede refusals** | `matches no S3 prior`, `is the point itself`, `supersedes itself`, `is ambiguous (`, `matches no S3 prior or same-session point`, `does not resolve to an S3 search result`, `lifecycle=superseded with no supersedes ref` | the replace channel dropped a CORRECTS/supersession record |
+| **supersede refusals** | `matches no S3 prior`, `is the point itself`, `supersedes itself`, `is ambiguous (`, `matches no S3 prior or same-session point`, `non-dict retraction ref`, `empty retraction ref`, `does not resolve to an S3 search result`, `lifecycle=superseded with no supersedes ref` | the replace channel dropped a CORRECTS/supersession record |
 
 Measured on the fixed tree: **`operator_drops = 0` in every run that carries the field** (the `preleg` receipt predates
 it and records only the pre-narrowing refusal class). ⚠️ The column counts
 **warning LINES, not operators**: one operator whose `src` names an emitted entity logs both
 `endpoint NOT minted` (the mint refusal) and `operator dropped: src/dst did not resolve` (the
-pass consuming it), so a non-zero count over-reports — only the `== 0` test is sound. Three
-defects in this discriminator were found in review and fixed before merge:
+pass consuming it), so a non-zero count over-reports — only the `== 0` test is sound. Five
+defects in this discriminator were found in review and fixed before merge (the last two are the
+Round 6/7 paragraph in §5.1 — they are defects of this same marker set):
 
 1. the first cut merged the two marker sets and reported "5 operator drops" on a run where
 the operator pass dropped nothing — five *entity-lifecycle* notices. Pinned by
@@ -288,7 +289,9 @@ closing bullet names; this is the complete accounting, recomputed from the commi
 So the residual is, per run: **MITIGATES 3 (A) / 2 (B) + SUPPORTS 2 (A) / 3 (B) + SUPERSEDE 1 + endpoint rows 3**,
 and the honest class statement is: *no `edge_missing` here is an operator-pass drop; the MITIGATES
 and SUPPORTS rows are the mapper choosing a different (or no) pair, the SUPERSEDE row is the
-resolver refusing a truncation, and the `to_content_missing` rows are endpoint recall.* The
+resolver — an **entity-channel** refusal in the two committed after-receipts, a **drifted-copy**
+refusal in the `preleg` run, and the two are not merged here — and the `to_content_missing` rows
+are endpoint recall.* The
 `SUPPORTS` class is the least understood of the four: the mapper emits `IMPL` edges in every one
 of these sessions, just not between the planted pair, and nothing in this PR fixes that — the
 prompt already asks for it.
@@ -458,6 +461,18 @@ reachable with `operator_drops > 0` (a false statement in a shipped receipt: the
 sentence is now built from the count, with all four branches pinned), and that the churn
 sentence overstated the row flips (2 red→green and 1 green→red in both runs; 5/2 counting a
 flip in at least one).
+
+**Rounds 6 and 7** were the classifier's turn. Round 6 found that `is ambiguous` in the refusal
+markers also matched `entity '<x>' kind '<y>' is ambiguous across namespaces … created with the
+explicit kind` — a notice that refuses nothing, because the entity IS created — so a receipt
+claimed a replace-channel drop that never happened; the markers now key on the resolver's own
+parenthesised forms (`is ambiguous (`), and the pin enumerates every resolver ambiguity branch.
+Round 6 also caught `operator_drop_notes` returning NO note for the drops-only case (the one case
+the note exists for) behind a vacuous `not in` assertion, and a residual accounting that covered 6
+of 9 misses per run while omitting `SUPPORTS`. Round 7 found the last two unclassified refusal
+sites (`non-dict retraction ref`, `empty retraction ref`), which let a run whose retractions were
+all refused ship the "no supersede refusal" note.
+
 
 ## 6. Reproduction
 

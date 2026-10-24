@@ -1211,6 +1211,23 @@ def test_non_dict_operator_drop_is_a_marker():
     assert drops["supersede_refusals"] == 0
 
 
+def test_retraction_refusals_are_counted():
+    """#8503 round 7: a refused RETRACTION is an extractor-side drop too.
+
+    Two of the four retraction refusal forms matched no marker, so a run whose
+    retractions were all refused classified as `{total: 0}` and shipped the
+    "no supersede refusal in any session" note — the false-zero class again.
+    """
+    for form in (
+        "non-dict retraction ref 'pt_abc123' skipped",
+        "empty retraction ref (no id, no content) — skipped",
+    ):
+        drops = runner.operator_drop_warnings(
+            [{"session_id": "s", "extraction_warnings": [form]}])
+        assert drops["supersede_refusals"] == 1, form
+        assert drops["operator_drops"] == 0, form
+
+
 def test_receipt_omits_drop_warnings_when_the_audit_carries_none():
     """A receipt must not assert "0 drops" for a run that measured none."""
     report = _completed_report()

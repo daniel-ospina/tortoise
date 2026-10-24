@@ -1901,6 +1901,12 @@ _SUPERSEDE_REFUSAL_MARKERS = (
     # the retraction branch are covered by it.
     "is ambiguous (",
     "matches no S3 prior or same-session point",
+    # the retraction branch's own two refusals: a retraction record that is
+    # never created is the same extractor-side drop class, and the no-match
+    # text above already counts one of its forms — counting two of four is
+    # worse than counting none (review round 7).
+    "non-dict retraction ref",
+    "empty retraction ref",
     "does not resolve to an S3 search result",
     "lifecycle=superseded with no supersedes ref",
 )
