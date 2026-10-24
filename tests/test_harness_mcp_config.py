@@ -2103,6 +2103,27 @@ def _chatgpt_block(main: str, index: int) -> str:
             f"({main[line_start:end_pos]!r}). Re-pin the bound: a truncated slice "
             "can pass the pins vacuously.")
 
+    # A block is CARD COPY, so a ternary continuation inside it means an arm
+    # boundary sits there — a sibling arm spelled some way `_ARM_SELECTOR` does not
+    # count (`) : wizardDesktop ? (`, `) : wizardKeyless && extra ? (`), or a nested
+    # ternary WITH A PARENTHESISED BRANCH (the inline `{cond ? a : b}` form carries no
+    # `) :`, and is not detected — see the LIMIT note in the shape test). Spelling
+    # agnostic on purpose; measured: the real blocks carry no stray `) :` / `):`.
+    # `) :`/`):` occurrences expected in this slice: ZERO for a block ending at the
+    # next title, and exactly ONE for the last block — its own terminator's clause
+    # opener, which the adjacent-line check above pins to that terminator. Any extra
+    # one is an arm boundary (a sibling arm, or a nested ternary with a
+    # parenthesised branch) whose copy would be pinned as if it were the card's.
+    expected = 0 if index + 1 < len(_CHATGPT_BLOCKS) else 1
+    if True:
+        assert (main.count(") :", start_pos, end_pos)
+                + main.count("):", start_pos, end_pos)) == expected, (
+            f"an arm boundary sits inside block {index + 1} of the chatgpt card "
+            f"({main.count(') :', start_pos, end_pos) + main.count('):', start_pos, end_pos)} "
+            f"continuation tokens, expected {expected}): a sibling arm or a "
+            "parenthesised nested ternary is inside the slice, so the copy pinned "
+            "there could be satisfied by the wrong card — or render conditionally")
+
     # Exactly one harness selector — the card's own — may precede the end of this
     # block. Two means a SIBLING arm was inserted between the card's start and the
     # block's end, and the slice spans it.
@@ -2151,7 +2172,7 @@ def test_9660_the_chatgpt_card_slices_red_on_a_moved_or_duplicated_title():
     # A sibling arm wedged between the LAST title and the terminator is refused:
     # the slice would otherwise span it, and the copy pinned inside could be
     # satisfied by the wrong card.
-    with pytest.raises(AssertionError, match="another harness arm sits between"):
+    with pytest.raises(AssertionError, match="an arm boundary sits inside block 3"):
         _chatgpt_block(
             "{wizardConnectHarness === 'chatgpt' ? (\n"
             "  <WizardBlock title=\"Add the Tortoise connector\">a</WizardBlock>\n"
@@ -2169,7 +2190,9 @@ def test_9660_the_chatgpt_card_slices_red_on_a_moved_or_duplicated_title():
             f'  <WizardBlock title="{title}">{slot}</WizardBlock>\n'
             for slot, title in enumerate(_CHATGPT_BLOCKS))
         split_at = titles.index(f'<WizardBlock title="{_CHATGPT_BLOCKS[gap + 1]}"')
-        with pytest.raises(AssertionError, match="another harness arm sits between"):
+        with pytest.raises(
+                AssertionError,
+                match="an arm boundary sits inside block"):
             _chatgpt_block(
                 "{wizardConnectHarness === 'chatgpt' ? (\n"
                 + titles[:split_at]
@@ -2202,7 +2225,6 @@ def test_9660_the_chatgpt_card_slices_red_on_a_moved_or_duplicated_title():
     for inert in (
         'href="//cdn.example/x"',
         "<p>a /* b</p>",
-        "{a ? (\n    <p>x</p>\n  ) : (\n    <p>y</p>\n  )}",
         "// route (`/auth/*`).",
         "/* ends at wizardKeyless ? ( below */",
     ):
@@ -2210,6 +2232,21 @@ def test_9660_the_chatgpt_card_slices_red_on_a_moved_or_duplicated_title():
                            f"<WizardBlock title=\"Add the Tortoise connector\">{inert}")
         block_text = _chatgpt_block(src, 0)
         assert "a</WizardBlock>" in block_text and "keyless" not in block_text, inert
+
+    # A nested ternary whose branches are parenthesised (`? ( … ) : ( … )`) is
+    # REFUSED rather than treated as inert: the copy pinned there would render
+    # conditionally, so a user could get a card without the act the pin asserts.
+    # LIMIT, stated: the INLINE form `{cond ? <p>x</p> : null}` does not carry the
+    # `) :` token and is not detected — no block in the card uses one, and pinning
+    # conditional copy remains this guard's blind spot rather than a false claim.
+    with pytest.raises(AssertionError, match="an arm boundary sits inside block"):
+        _chatgpt_block(
+            "{wizardConnectHarness === 'chatgpt' ? (\n"
+            "  <WizardBlock title=\"Add the Tortoise connector\">{a ? (\n"
+            "    <p>x</p>\n  ) : (\n    <p>y</p>\n  )}</WizardBlock>\n"
+            "  <WizardBlock title=\"Install the Tortoise skills\">b</WizardBlock>\n"
+            "  <WizardBlock title=\"Give it its first job\">c</WizardBlock>\n"
+            ") : wizardKeyless ? (\n", 0)
 
     # The ordering law reds on inverted copy and passes on correct copy — proved on
     # synthetic blocks, because the real file can only ever show the passing case.
@@ -2367,11 +2404,23 @@ def test_9660_chatgpt_is_a_live_onboarding_journey_not_a_docs_dead_end():
 def test_9660_the_recipe_carriers_use_one_casing_for_the_tenant_noun():
     """The tenant noun is capitalised on every recipe carrier — one casing, guarded.
 
-    `docs/ONTOLOGY.md` spells the domain type `org:Organization`, and the dashboard's
-    own body prose capitalises it, so the capital is the house form in headings AND
-    prose; an earlier commit lowercased only the recipe sentences, which rendered the
-    same concept two ways. The ordered pins compare case-insensitively (the ORDER is
-    what they are about), so the casing needs its own assertion.
+    The ground is the ENTITY: `docs/ONTOLOGY.md` names the domain type
+    `org:Organization`, so the tenant is written with a capital when the copy names
+    it. (Not a citation to the consent page — `tortoise/oauth.py` writes "Org" and
+    "Choose an org…" there, which is a different word for the same thing — and not a
+    house style for all prose: `main.jsx` mixes both spellings, and unifying that is
+    a separate change.)
+
+    SCOPE, exactly as coded. All four carriers (`main.jsx`, `harnesses.js`,
+    `docs.html`, `tortoise/onboarding/SKILL.md`) get the three phrase assertions and
+    the capital-present assertion. `docs.html` ADDITIONALLY gets a window scan from
+    the ChatGPT settings line to end of file for the word " organization". None of
+    them is scanned wholesale: each legitimately writes the lowercase noun elsewhere
+    (docs.html says "An organization account gets an isolated graph"; the others use
+    it in other phrasings), so a whole-file scan would red on correct copy.
+
+    The ordered pins compare case-insensitively (the ORDER is what they are about),
+    which is why the casing needs its own assertion.
     """
     root = Path(__file__).resolve().parent.parent
     carriers = (
@@ -2387,6 +2436,15 @@ def test_9660_the_recipe_carriers_use_one_casing_for_the_tenant_noun():
         # slip past on markup alone.
         raw = (root / rel).read_text(encoding="utf-8").replace("&apos;", "'")
         text = " ".join(re.sub(r"<[^>]+>", " ", raw).split())
+        if rel.endswith("docs.html"):
+            # Scanned OUTRIGHT, not by pattern: the three-phrase list below cannot
+            # see a phrasing it does not name, and review found two such lines in
+            # this very recipe.
+            recipe = text[text.index("chatgpt.com/settings/plugins-settings"):]
+            assert " organization" not in recipe, (
+                "docs.html lowercases the tenant noun inside the ChatGPT recipe; the "
+                "recipe copy capitalises it (`Organization`), so one card must not "
+                "render it two ways")
         for lower in ("organization you are onboarding", "organization you're onboarding",
                       "organization is the one the connector writes to"):
             assert lower not in text, (
