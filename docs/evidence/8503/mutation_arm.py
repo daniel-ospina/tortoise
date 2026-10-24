@@ -158,21 +158,21 @@ def check_supersede_band() -> None:
                      "a leg that folds EVERY prior is caught by the same pin")
 
     # the SHAPE regression review round 2 asked for: put the coverage ratio
-    # back in place of the contiguous-span predicate. The negative pin
-    # must red — otherwise the predicate is pinned only by prose.
+    # back in place of the span predicate. The negative pin must red —
+    # otherwise the predicate is pinned only by prose.
     from tests.test_extractor_v2 import TestOperatorSemantics2552 as SafetyPin
-    original_contains = v2._tokens_contain_contiguous
+    original_contains = v2._span_contains
     try:
         def _ratio(ref_tokens, prior_tokens, _min=0.85):
             ref_set, prior_set = set(ref_tokens), set(prior_tokens)
             if not ref_set:
                 return False
             return len(ref_set & prior_set) / len(ref_set) >= _min
-        v2._tokens_contain_contiguous = _ratio
+        v2._span_contains = _ratio
         caught = _pin_fails(
             SafetyPin().test_supersede_band_refuses_every_substitution)
     finally:
-        v2._tokens_contain_contiguous = original_contains
+        v2._span_contains = original_contains
     _expect_detected(caught,
                      "restoring the COVERAGE RATIO is caught by the negative "
                      "pin (the predicate is pinned, not just described)")
@@ -187,15 +187,37 @@ def check_supersede_band() -> None:
         remaining = iter(prior_tokens)
         return all(tok in remaining for tok in ref_tokens)
     try:
-        v2._tokens_contain_contiguous = _ordered
+        v2._span_contains = _ordered
         caught = _pin_fails(
             SafetyPin().test_supersede_band_refuses_every_substitution)
     finally:
-        v2._tokens_contain_contiguous = original_contains
+        v2._span_contains = original_contains
     _expect_detected(caught,
                      "reverting to the ORDERED-SUBSEQUENCE predicate is "
-                     "caught by the negative pin (the contiguity tightening is "
+                     "caught by the negative pin (the span tightening is "
                      "pinned, not just described)")
+
+    # the two predicates with no SHAPE of their own need their own arms, or a
+    # pin cannot see them (review round 3): polarity and the length floor.
+    original_neg = v2._negation_markers
+    try:
+        v2._negation_markers = lambda _t: frozenset()
+        caught = _pin_fails(
+            SafetyPin().test_supersede_band_refuses_every_substitution)
+    finally:
+        v2._negation_markers = original_neg
+    _expect_detected(caught,
+                     "removing the NEGATION predicate is DETECTED by its pin")
+
+    original_floor = v2.SUPERSEDE_REF_MIN_TOKENS
+    try:
+        v2.SUPERSEDE_REF_MIN_TOKENS = 1
+        caught = _pin_fails(
+            SafetyPin().test_supersede_band_refuses_every_substitution)
+    finally:
+        v2.SUPERSEDE_REF_MIN_TOKENS = original_floor
+    _expect_detected(caught,
+                     "removing the TOKEN FLOOR is DETECTED by its pin")
 
 
 # ── 3. the attribution classifier (the receipt's discriminator) ────────────

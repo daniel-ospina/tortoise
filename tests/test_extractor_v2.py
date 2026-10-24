@@ -6592,6 +6592,30 @@ class TestOperatorSemantics2552:
         assert not resolves(
             "We ship the lease fix behind the canary flag",
             "They ship the lease fix behind the canary flag")
+        # a substituted PREPOSITION — a frame word whose role is load-bearing
+        # ("by 30 seconds" is not "to 30 seconds"). The span test keeps frame
+        # words INSIDE the span, so an exchange breaks it (round 3).
+        assert not resolves(
+            "raise the batch writer timeout by 30 seconds and keep the retry "
+            "budget at 3",
+            "raise the batch writer timeout to 30 seconds and keep the retry "
+            "budget at 3")
+        # a SUBJECT substitution written with PUNCTUATION around the pronoun —
+        # the pronoun set must be tokenised like everything else, or one quote
+        # mark restores the axis (round 3)
+        assert not resolves(
+            '"they" ship the lease fix behind the canary flag',
+            "we ship the lease fix behind the canary flag")
+        # OPPOSITE POLARITY above the token floor: the floor must not be what
+        # refuses it, or the polarity predicate is unpinned (round 3)
+        assert not resolves(
+            "we ship the lease fix behind the single global kill flag",
+            "we do not ship the lease fix behind the single global kill flag")
+        # and the FLOOR itself, isolated: a short ref that IS a contiguous span
+        # of the prior still refuses
+        assert not resolves(
+            "scale on traffic",
+            "the lease fix should scale on traffic and on shard count")
         # THE CONTIGUITY DISCRIMINATOR (above the 5-token floor, every other
         # gate neutral): the ref DROPS the prior's middle span
         # ("rather than a week of per-shard canary" keeps only "rather than

@@ -1828,9 +1828,18 @@ def operator_audit_notes(audit: dict | None, posture: str) -> list[str]:
 #     mechanism, and it is NOT an operator drop: the operator pass never ran.
 # Everything else the extractor warns about (value spans, slot binding,
 # search_keys) is neither.
+# ⛔ The count is of WARNING LINES, not of operators: one operator whose src
+# names an emitted ENTITY logs both `endpoint NOT minted` (the mint refusal)
+# and `operator dropped: src/dst did not resolve` (the pass consuming it), and
+# a malformed entry never reaches the pass at all. Both of those are drops and
+# both markers are needed — a classifier that recognised only the pass's line
+# reported `operator_drops == 0` on a run where a non-dict operator entry had
+# been skipped (code-review round 3) — but the column must never be read as an
+# operator count.
 _OPERATOR_DROP_MARKERS = (
     "operator dropped:",
     "operator with unknown op_type",
+    "non-dict operator entry",
     "endpoint NOT minted",
     "MITIGATES target edge not emitted",
 )
