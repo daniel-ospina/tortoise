@@ -9,8 +9,12 @@ measurement is not a RED row), the table shape the gate parses, and the two rule
 that stop a row from claiming a number its artifact does not carry.
 
 Every assertion is DB-free, network-free and LLM-free: the module imports no
-``tortoise`` symbol at import time, and the only files it reads are the shipped
-pre-registration, the landed E1/E2 log and the log the probe itself wrote.
+``tortoise`` symbol at import time, and the files it reads are the shipped
+pre-registration, the landed E1/E2 log, the log the probe itself wrote, and —
+for the cite-resolution legs — the documents that print the bundle's
+``file:line`` cites (`README.md`, both probes, the `docs/00_index.md` row) plus
+the three sources those cites name (`sdk.py`, `projection/edges.py`,
+`extractor_v2.py`), read as TEXT only.
 """
 from __future__ import annotations
 
@@ -19,6 +23,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import types
 from pathlib import Path
 
@@ -1135,13 +1140,27 @@ _BUNDLE_SOURCES = {
     "extractor_v2": _REPO / "tortoise/extractor_v2.py",
 }
 
-# `docs/00_index.md` is a shared router of 142 table rows, so only the ROW (the
-# line) that names this bundle is swept: another epic's row citing `sdk.py` must
-# not red the #7949 pin (it would be told to add a phrase for a line it is not
-# about). The paragraph is the wrong unit — the whole §5 table is ONE paragraph.
-_BUNDLE_PARAGRAPH_FILTER = {
+# `docs/00_index.md` is a shared router of ~140 table rows, so only the ROW that
+# names this bundle is swept: another epic's row citing `sdk.py` must not red the
+# #7949 pin (it would be told to add a phrase for a line it is not about). The
+# paragraph is the wrong unit — the whole §5 table is ONE paragraph, so a
+# paragraph-scoped filter matches every row in it. The filter is applied to the
+# CITE'S OWN LINE (see `_bundle_in_scope`), and
+# `test_the_index_sweep_keeps_to_the_row_that_names_this_bundle` holds it there.
+_BUNDLE_ROW_FILTER = {
     "docs/00_index.md": re.compile(r"#7949"),
 }
+
+
+def _bundle_in_scope(doc_name: str, line: str) -> bool:
+    """Is a cite found on `line` this bundle's to verify?
+
+    Only for a scoped document, and only by the ROW the cite sits on: the unit is
+    the line, never the paragraph (which is the whole markdown table for the
+    index). An unscoped document is swept whole.
+    """
+    scope = _BUNDLE_ROW_FILTER.get(doc_name)
+    return scope is None or bool(scope.search(line))
 
 # `tortoise/sdk.py:12487`, ``tortoise/projection/edges.py:2424-2449``, `edges.py:468`,
 # ``tortoise/extractor_v2.py:8288-8292``
@@ -1311,44 +1330,30 @@ def _bundle_missing(kind: str, anchors, source_lines, start: int, end,
     return []
 
 
-def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
-    """Every live `file.py:line` cite that names its file → the code it names there.
+def _bundle_sweep(docs, sources) -> dict:
+    """Read every LIVE cite out of `docs` and resolve it against `sources`.
 
-    Covers all three sources the bundle prints numbers for (`sdk.py`, `edges.py`,
-    `extractor_v2.py`) across `README.md`, both probes, and the `docs/00_index.md`
-    row that is the bundle's entry point — 44 cites at this head.
-
-    Non-vacuity: against `main`'s documents 26 of the 44 cites red across five
-    rules (`sdk.py:12401` for the meta fold, `12682` for the capture path,
-    `11623` for the entry point, `edges.py:467` for the reference labels and
-    `2168-2192` for the writer) — the cited lines hold the #4716 re-key comments
-    instead of the symbols — and the four `extractor_v2.py:8278-8285` cites red on
-    the END bound alone (the range closes one line into the next block).
-    The `extractor_v2.py` cites are correct at this head, so those rules cannot red
-    on `main`; they are the tripwire for the NEXT insertion above `8288`/`7912`/
-    `7804`, and they bite: with the README's `` `extractor_v2.py:7912` `` moved to
-    `7913`, `the vet flag` reds with `extractor_v2.py:7913 reads 'or
-    _value_gate_enabled())', which carries none of ['vet_enabled = (']`, while the
-    pre-fix sweep (no `extractor_v2` alternative) stayed green on the same text.
-    The index row's cites are pinned by the same sweep: re-staling `00_index.md`'s
-    `sdk.py:12487` to `12401` reds it, and before this leg nothing read that row.
+    Returns the collected state (`fired`, `checked`, `unmatched`, `failures`,
+    `skipped`) and asserts nothing, so a test can drive the SAME sweep over
+    synthetic documents — `test_the_index_sweep_keeps_to_the_row_that_names_this_
+    bundle` does, because the row scoping cannot be falsified against the real
+    index (only the #7949 row carries a swept cite today).
     """
     source_lines = {name: path.read_text(encoding="utf-8").splitlines()
-                    for name, path in _BUNDLE_SOURCES.items()}
+                    for name, path in sources.items()}
     fired, checked, unmatched, failures = set(), 0, [], []
     skipped: dict[str, list[str]] = {}
-    for doc_name, doc_path in _BUNDLE_DOCS:
+    for doc_name, doc_path in docs:
         text = doc_path.read_text(encoding="utf-8")
         doc_lines = text.splitlines()
         paragraphs = _paragraph_spans(text)
-        scope = _BUNDLE_PARAGRAPH_FILTER.get(doc_name)
         for match in _BUNDLE_CITE.finditer(text):
             paragraph = next((s, e) for s, e in paragraphs
                              if s <= match.start() < e)
             line_no = text.count("\n", 0, match.start()) + 1
             # a scoped document is swept ROW by row: only the row (line) that
             # names this bundle is ours, not the whole markdown-table paragraph.
-            if scope and not scope.search(doc_lines[line_no - 1]):
+            if not _bundle_in_scope(doc_name, doc_lines[line_no - 1]):
                 continue
             marker = _bundle_historical(text[paragraph[0]:paragraph[1]])
             if marker:
@@ -1371,6 +1376,36 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
                 failures.append(
                     f"{cite} ({label}): {source}.py:{start} reads {shown!r}, which "
                     f"carries none of {missing!r}")
+    return {"fired": fired, "checked": checked, "unmatched": unmatched,
+            "failures": failures, "skipped": skipped}
+
+
+def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
+    """Every live `file.py:line` cite that names its file → the code it names there.
+
+    Covers all three sources the bundle prints numbers for (`sdk.py`, `edges.py`,
+    `extractor_v2.py`) across `README.md`, both probes, and the `docs/00_index.md`
+    row that is the bundle's entry point — 44 cites at this head.
+
+    Non-vacuity: against `main`'s documents 26 of the 44 cites red across five
+    rules (`sdk.py:12401` for the meta fold, `12682` for the capture path,
+    `11623` for the entry point, `edges.py:467` for the reference labels and
+    `2168-2192` for the writer) — the cited lines hold the #4716 re-key comments
+    instead of the symbols — and the four `extractor_v2.py:8278-8285` cites red on
+    the END bound alone (the range closes one line into the next block).
+    The `extractor_v2.py` cites are correct at this head, so those rules cannot red
+    on `main`; they are the tripwire for the NEXT insertion above `8288`/`7912`/
+    `7804`, and they bite: with the README's `` `extractor_v2.py:7912` `` moved to
+    `7913`, `the vet flag` reds with `extractor_v2.py:7913 reads 'or
+    _value_gate_enabled())', which carries none of ['vet_enabled = (']`, while the
+    pre-fix sweep (no `extractor_v2` alternative) stayed green on the same text.
+    The index row's cites are pinned by the same sweep: re-staling `00_index.md`'s
+    `sdk.py:12487` to `12401` reds it, and before this leg nothing read that row.
+    """
+    result = _bundle_sweep(_BUNDLE_DOCS, _BUNDLE_SOURCES)
+    fired, checked = result["fired"], result["checked"]
+    unmatched, failures, skipped = (result["unmatched"], result["failures"],
+                                    result["skipped"])
     assert {marker: tuple(cites) for marker, cites in skipped.items()} \
         == {marker: tuple(cites) for marker, cites in _BUNDLE_HISTORICAL.items()}, (
         "the historical exclusion dropped cites this pin does not know about, and a "
@@ -1390,3 +1425,70 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
         " — the bundle's cites for those symbols moved or were dropped; re-derive them")
     assert checked >= 20, (
         f"only {checked} live cites were resolved — the sweep is not reading the bundle")
+
+
+def test_the_index_sweep_keeps_to_the_row_that_names_this_bundle():
+    """A cite on ANOTHER epic's index row is not this bundle's to verify.
+
+    `docs/00_index.md` routes ~140 table rows and the whole §5 table is ONE
+    blank-line-delimited paragraph, so a paragraph-scoped filter cannot tell the
+    `#7949` row from any other row: the leg's first index sweep (PR #9850 review,
+    P2) matched the paragraph and swept every row inside it, which reds a lane
+    that adds a CORRECT `sdk.py` cite to an unrelated row — and tells it to
+    "re-derive the number … before changing this pin" for a line this pin is not
+    about. The unit is the cite's own LINE.
+
+    Non-vacuity: both rows below sit in ONE paragraph, so the pre-fix unit (the
+    paragraph) put both in scope and the unrelated row's cite reached
+    `_bundle_rule`, found no naming phrase and landed in `unmatched`. The second
+    half drives the shipped `_bundle_sweep`, not the predicate alone, so moving
+    the decision back to the paragraph reds this leg.
+    """
+    table = (
+        "| **`#9664` capstone — the onboarding journey** — see `sdk.py:9` | x |\n"
+        "| **`#7949` / `#9080` capstone — the closing rule** — dropped at "
+        "`sdk.py:3` | y |\n"
+    )
+    rows = table.splitlines()
+    assert len(_paragraph_spans(table)) == 1, (
+        "this pin exists because the two rows share one paragraph; if they no "
+        "longer do, the paragraph unit would discriminate and this leg is moot")
+    assert not _bundle_in_scope("docs/00_index.md", rows[0]), (
+        "an unrelated epic's index row is in scope — the sweep would verify a cite "
+        "this bundle does not own")
+    assert _bundle_in_scope("docs/00_index.md", rows[1])
+    # an UNSCOPED document is still swept whole: the filter belongs to the index
+    assert _bundle_in_scope("README.md", rows[0])
+
+    sdk = ["x"] * 9
+    sdk[2] = '            "stats": out.get("stats") or {},'   # line 3: the meta fold
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        doc = root / "00_index.md"
+        doc.write_text(table, encoding="utf-8")
+        source = root / "sdk.py"
+        source.write_text("\n".join(sdk) + "\n", encoding="utf-8")
+
+        swept = _bundle_sweep((("docs/00_index.md", doc),), {"sdk": source})
+        assert swept["unmatched"] == [], (
+            "the unrelated row's cite was reported `unmatched` — the sweep is "
+            f"reading rows it does not own: {swept['unmatched']}")
+        assert swept["checked"] == 1, (
+            f"expected only the #7949 row's cite to be checked, got {swept['checked']}")
+
+        # and the scope follows the MARKER, not the row's position
+        doc.write_text("\n".join(reversed(rows)) + "\n", encoding="utf-8")
+        swept = _bundle_sweep((("docs/00_index.md", doc),), {"sdk": source})
+        assert swept["checked"] == 1 and swept["unmatched"] == [], (
+            f"the scope is positional, not marker-based: {swept}")
+
+    # the shipped index is swept by the same rule: its only swept cites sit on the
+    # #7949 row, so the bundle row is in scope for every one of them
+    shipped = (_REPO / "docs/00_index.md").read_text(encoding="utf-8")
+    shipped_rows = shipped.splitlines()
+    owned = [m for m in _BUNDLE_CITE.finditer(shipped)
+             if _bundle_in_scope("docs/00_index.md",
+                                 shipped_rows[shipped.count("\n", 0, m.start())])]
+    assert owned, "no cite in docs/00_index.md is in scope — the index row is unwatched"
+    assert all("#7949" in shipped_rows[shipped.count("\n", 0, m.start())]
+               for m in owned)
