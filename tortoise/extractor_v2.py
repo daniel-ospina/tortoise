@@ -6428,7 +6428,7 @@ def _resolve_point_supersede(ref: str, search: dict,
     even FOLD, let alone supersede. A false CORRECTS terminalizes a live
     belief and there is no un-supersede API to repair it.
 
-    So the leg is **contiguous containment**, which cannot cross a substituted
+    So the leg is **frame-EDGE-trimmed token equality**, which cannot cross a substituted
     CONTENT token by construction: the ref's content tokens must appear IN
     ORDER inside the prior's content tokens (a different number, entity, scope
     word or a role inversion breaks containment) AND the two must carry the
@@ -6473,7 +6473,8 @@ def _resolve_point_supersede(ref: str, search: dict,
             prior = drifted[0]
             warnings.append(
                 f"point-supersede recall band (#8503): ref {ref[:60]!r} is "
-                f"a contiguous token span of {prior.get('id')!r} "
+                f"the same claim as {prior.get('id')!r} once frame words at "
+                f"its edges are disregarded "
                 f"('{str(prior.get('content'))[:60]}') — resolved to that "
                 "prior instead of failing open")
             return prior
@@ -6537,33 +6538,51 @@ def _supersede_span_tokens(text: str) -> list[str]:
 
 
 def _span_contains(ref_tokens: list[str], prior_tokens: list[str]) -> bool:
-    """True when the ref's CORE is a contiguous span of the prior's tokens.
+    """True when the two token sequences agree except for FRAME words at the EDGES.
 
-    "Core" = the ref with its FRAME-ONLY leading and trailing runs trimmed: the
-    measured drift prefixes a subject-less prior with "We" ("We ship the lease
-    fix…" against "Ship the lease fix…"), so an edge made only of frame words
-    is an addition and is allowed. Everything INSIDE the span must match
-    token-for-token, which is what closes the three axes review found in
-    sequence — a recombination across clauses, an exchanged connective, and a
-    substituted preposition ("by 30 seconds" against "to 30 seconds") — because
-    each of those changes a token or breaks the run. A word dropped from the
-    MIDDLE of the prior breaks the span; a trailing deletion does not, which is
-    why the condition/negation predicates below stay.
+    ⛔ This is deliberately NOT a containment test, and the reason is the whole
+    history of this leg. Three review rounds each found a hole in a tolerant
+    matcher, and every hole was a difference the tolerance could not see:
+
+      * a COVERAGE ratio folded every substituted content token (round 1);
+      * an ordered/contiguous span over frame-STRIPPED tokens folded an
+          exchanged connective, a substituted subject and a deleted qualifier,
+          and then a substituted preposition once frame words were kept inside
+          the span (rounds 2 and 3);
+      * allowing an ADDITIVE TAIL — which the measured drift needs, because the
+          model truncated "…rather than a week of per-shard canary" — folds any
+          trailing QUALIFIER the ref dropped ("…kill flag" over "…kill flag
+          after the staging canary passes", "…to 30 seconds" over "…to 30
+          seconds for the payments queue"). A trailing truncation is exactly
+          what this model does, so a tail-tolerant matcher is unsafe BY DESIGN,
+          and no closed-class vocabulary can enumerate every qualifier spelling.
+
+    So the leg is the narrowest rule that cannot corrupt a belief: drop the
+    frame-only runs at each END of both sequences and require the remainders to
+    be EQUAL. The only drift it tolerates is an edge made of frame words —
+    articles, pronouns, prepositions that carry no claim content — which cannot
+    change what the claim asserts. Everything else (an added clause, a dropped
+    qualifier, a swapped connective or preposition, a changed number, entity or
+    scope) refuses, and the caller fails open with a named warning.
+
+    ⚠️ CONSEQUENCE, stated rather than buried: the measured wp07 drift is a
+    CONTENT-tail truncation, so this leg does NOT repair that row — it refuses
+    it. Repairing a truncated copy needs a semantic resolver (the Jev-shaped
+    seam the extractor-v4 architecture names as unbuilt) or a prompt that gets
+    the ref copied exactly; it is not something a string predicate should be
+    trusted with, because the failure mode is a live belief marked outdated
+    with no un-supersede API.
     """
-    def _frame(tok: str) -> bool:
-        return tok in _FRAME_STOPWORDS
+    def _core(tokens: list[str]) -> list[str]:
+        i, j = 0, len(tokens)
+        while i < j and tokens[i] in _FRAME_STOPWORDS:
+            i += 1
+        while j > i and tokens[j - 1] in _FRAME_STOPWORDS:
+            j -= 1
+        return tokens[i:j]
 
-    i, j = 0, len(ref_tokens)
-    while i < j and _frame(ref_tokens[i]):
-        i += 1
-    while j > i and _frame(ref_tokens[j - 1]):
-        j -= 1
-    core = ref_tokens[i:j]
-    n = len(core)
-    if not n or n > len(prior_tokens):
-        return False
-    return any(prior_tokens[k:k + n] == core
-               for k in range(len(prior_tokens) - n + 1))
+    core_ref, core_prior = _core(ref_tokens), _core(prior_tokens)
+    return bool(core_ref) and core_ref == core_prior
 
 
 def _supersede_condition_markers(text: str) -> frozenset[str]:
@@ -6604,12 +6623,11 @@ def _supersede_band_candidates(ref: str, points: list[dict]) -> list[dict]:
 
     Returns every candidate that passes; the CALLER resolves only when exactly
     one does. Acceptance is deliberately boolean rather than a similarity
-    score: a ref whose core (frame-only edges trimmed) must be a contiguous
-    span of the prior's tokens — with matching negation and condition markers,
-    no exchanged connective and no substituted subject — is either a copy of
-    this prior or it is not one. A score is what let a substitution through in
-    the first cut, and a frame-word-blind span is what let a preposition
-    through in the third.
+    score: a ref whose FRAME-EDGE-TRIMMED token sequence must EQUAL the
+    prior's — with matching negation and condition markers and no substituted
+    subject — is either a copy of this prior or it is not one. A score is what
+    let a substitution through in the first cut; a span tolerant of an additive
+    tail is what let a dropped qualifier through in the third.
     """
     ref_tokens = _supersede_ref_tokens(ref)
     if len(ref_tokens) < SUPERSEDE_REF_MIN_TOKENS:
@@ -6628,10 +6646,6 @@ def _supersede_band_candidates(ref: str, points: list[dict]) -> list[dict]:
         # a DELETION of a gating qualifier still contains in order — an
         # unconditional claim must not supersede a gated decision.
         if _supersede_condition_markers(content) != ref_cond:
-            continue
-        # a load-bearing CONNECTIVE is a frame word, so containment is blind
-        # to "and" -> "or"; the module's own swap predicate is not.
-        if _connective_swap(ref, content):
             continue
         # a SUBJECT substitution is a frame-word substitution too (see
         # `_supersede_pronouns`: a one-sided pronoun is an addition and is

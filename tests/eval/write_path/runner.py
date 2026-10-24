@@ -2151,9 +2151,11 @@ def build_receipt(report: dict, *, justification: str | None = None) -> dict:
             # no operator was dropped at the seam, which is what turns an
             # `edge_missing` verdict into a selection finding instead of an
             # unexplained miss.
-            "drop_warnings": audit.get(
-                "drop_warnings", {"total": 0, "operator_drops": 0,
-                                  "supersede_refusals": 0, "by_session": {}}),
+            # ⛔ OMIT the block when the audit carries none: defaulting to
+            # zeros would make a receipt that measured nothing assert "0 drops"
+            # — the fail-open shape this block exists to prevent.
+            **({"drop_warnings": audit["drop_warnings"]}
+               if audit.get("drop_warnings") is not None else {}),
             # #9077 (E4): the PER-EDGE evidence the epic's closing rule asks
             # for — every planted edge either wired+persisted or carrying a
             # named cause, each wired edge carrying its pre/post-commit

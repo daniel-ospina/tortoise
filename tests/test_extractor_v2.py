@@ -6478,49 +6478,55 @@ class TestOperatorSemantics2552:
                        for s in r2["supersessions"])
         assert any("ambiguous" in w for w in r2["warnings"])
 
-    def test_supersede_ref_drift_resolves_through_the_recall_band(self):
-        """#8503: a drifted COPY resolves; a paraphrase still never guesses.
+    def test_supersede_leg_tolerates_frame_edges_only(self):
+        """#8503: the leg resolves a FRAME-edge drift and refuses a content one.
 
-        Measured on the #2514 corpus: wp07 emitted a point-level `supersedes`
-        whose ref differed from the wp06 prior by two lead-in words ("We ship
-        the lease fix…" vs "Ship the lease fix…"), and the exact-only rule
-        dropped the CORRECTS edge — the only licensed carrier of a
-        cross-session decision reversal. The band resolves that drift under
-        the SAME never-guess discipline: uniqueness required, ambiguity
-        refused, polarity mismatch refused, and a ref too short (or too
-        unlike) to be a copy still fails open.
+        Four review rounds shaped this rule, and the fourth is why the leg is
+        no longer a containment test at all. A tolerant span folds a claim that
+        dropped a trailing QUALIFIER ("…kill flag" over "…kill flag after the
+        staging canary passes"), and a trailing truncation is exactly what this
+        model does — the measured wp07 ref is one. So the leg keeps only the
+        drift a string predicate can be trusted with: an EDGE made of frame
+        words. The measured truncation is REFUSED, and that is the documented
+        residual (§3.2b of the evidence doc) rather than a silent slot.
         """
-        old = ("Ship the lease fix all-at-once behind a single global kill "
-               "flag rather than a week of per-shard canary")
-        pts = [{"id": "pt_1", "content": old, "kind": "statement"}]
-        # 1) the measured drift: lead-in words + truncated tail → resolves
-        r = v2._resolve_point_supersede(
+        # 1) a frame-edge drift resolves: an article dropped at the head
+        assert v2._resolve_point_supersede(
+            "lease fix ships behind the canary flag at",
+            {"points": [{"id": "pt_1", "kind": "statement",
+                         "content": "The lease fix ships behind the canary "
+                                    "flag"}]}, warnings=[]) is not None
+        # 2) the MEASURED truncation does NOT resolve — the prior keeps a
+        # content tail ("rather than a week of per-shard canary") the ref lost
+        measured_prior = ("Ship the lease fix all-at-once behind a single "
+                          "global kill flag rather than a week of per-shard "
+                          "canary")
+        assert v2._resolve_point_supersede(
             "We ship the lease fix all-at-once behind a single global kill flag",
-            {"points": pts}, warnings=[])
-        assert r is not None and r["id"] == "pt_1"
-        # 2) TWO candidates refuse (never guess). The leg is a BOOLEAN
-        # predicate — there is no score and no "closer" — so containment is
-        # either unique or it is not:
-        twin = [{"id": "pt_2", "content": old, "kind": "statement"},
-                {"id": "pt_1", "content": old, "kind": "statement"}]
+            {"points": [{"id": "pt_2", "kind": "statement",
+                         "content": measured_prior}]}, warnings=[]) is None
+        # 3) two candidates refuse even when both match (never guess)
+        twin = [{"id": "pt_a", "kind": "statement",
+                 "content": "The lease fix ships behind the canary flag"},
+                {"id": "pt_b", "kind": "statement",
+                 "content": "The lease fix ships behind the canary flag"}]
         w: list[str] = []
         assert v2._resolve_point_supersede(
-            "We ship the lease fix all-at-once behind a single global kill "
-            "flag", {"points": twin}, warnings=w) is None
+            "lease fix ships behind the canary flag at",
+            {"points": twin}, warnings=w) is None
         assert any("ambiguous" in x for x in w), w
-        # 3) a ref that is NOT the prior's copy still fails open
+        # 4) a ref that is not the prior's copy fails open
         w = []
         assert v2._resolve_point_supersede(
             "we should ship per-service flags for the next rollout instead",
-            {"points": pts}, warnings=w) is None
+            {"points": [{"id": "pt_3", "kind": "statement",
+                         "content": measured_prior}]}, warnings=w) is None
         assert any("matches no S3 prior" in x for x in w), w
-        # 4) polarity: a negated ref never matches a positive prior
-        assert v2._resolve_point_supersede(
-            "We never ship the lease fix all-at-once behind a single global "
-            "kill flag", {"points": pts}, warnings=[]) is None
         # 5) the floor: a short ref is not a copy of anything
         assert v2._resolve_point_supersede(
-            "the lease decision", {"points": pts}, warnings=[]) is None
+            "the lease decision",
+            {"points": [{"id": "pt_3", "kind": "statement",
+                         "content": measured_prior}]}, warnings=[]) is None
 
     def test_supersede_band_refuses_every_substitution(self):
         """#8503 code-review finding: the leg must not FOLD a substitution.
@@ -6611,11 +6617,26 @@ class TestOperatorSemantics2552:
         assert not resolves(
             "we ship the lease fix behind the single global kill flag",
             "we do not ship the lease fix behind the single global kill flag")
-        # and the FLOOR itself, isolated: a short ref that IS a contiguous span
-        # of the prior still refuses
+        # and the FLOOR itself, isolated: a short ref whose core EQUALS the
+        # prior's still refuses (nothing else in the leg would)
         assert not resolves(
-            "scale on traffic",
-            "the lease fix should scale on traffic and on shard count")
+            "retry budget at 3",
+            "the retry budget at 3")
+        # a pronoun ref substituting a NAMED SUBJECT in the prior — the
+        # one-sided-pronoun allowance must not reach this (round 4)
+        assert not resolves(
+            "They can raise the batch writer timeout to 30 seconds",
+            "The payments team can raise the batch writer timeout to 30 seconds")
+        # a TRAILING QUALIFIER the ref dropped, spelled outside the condition
+        # vocabulary — this is why the leg is no longer a containment test
+        assert not resolves(
+            "Ship the lease fix all-at-once behind a single global kill flag",
+            "Ship the lease fix all-at-once behind a single global kill flag "
+            "after the staging canary passes")
+        assert not resolves(
+            "Raise the batch writer timeout to 30 seconds",
+            "Raise the batch writer timeout to 30 seconds for the payments "
+            "queue")
         # THE CONTIGUITY DISCRIMINATOR (above the 5-token floor, every other
         # gate neutral): the ref DROPS the prior's middle span
         # ("rather than a week of per-shard canary" keeps only "rather than
@@ -6635,11 +6656,11 @@ class TestOperatorSemantics2552:
         assert not resolves(
             "we ship the alpha runbook",
             "we ship the alpha runbook and we do not ship the beta runbook")
-        # and the positive control: additive drift still resolves
+        # and the positive control: a FRAME-EDGE drift still resolves (an
+        # article dropped at the head and one added at the tail)
         assert resolves(
-            "We ship the lease fix behind a single global kill flag",
-            "Ship the lease fix behind a single global kill flag rather than "
-            "a week of per-shard canary")
+            "lease fix ships behind the canary flag at",
+            "The lease fix ships behind the canary flag")
 
     def test_point_supersede_self_ref_skipped(self):
         """op_04 self guard: a ref resolving to the point ITSELF (same id)
