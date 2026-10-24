@@ -265,12 +265,14 @@ Tests: `test_a_RETAINED_batch_is_not_reported_OK`,
 `test_a_shrunk_REFUSAL_does_not_fail_the_sweep_but_an_ACTIONABLE_one_still_wins`,
 `test_a_409_is_SURFACED_because_one_of_its_two_meanings_is_a_policy_refusal`,
 `test_an_ACTIONABLE_refusal_outranks_a_no_header_id_error`,
+`test_a_no_header_id_ONLY_sweep_still_reports_no_header_id`,
 `test_a_cursor_that_could_not_be_PERSISTED_is_a_withheld_verdict`,
 `test_the_default_cursor_dir_is_BESIDE_the_spool_like_both_readers`,
 `test_the_status_temp_path_is_PER_PROCESS`. Each fails with its fix reverted, and for
 the last two the REVERTED WRITER is what reds them (not the helper): the
 `withheld`/`ok`/exit-code assertions, the per-file skip ORDER (mixed sweep →
-`http_401`), the 409 surfacing and its self-clearing, the errors-masking rule, the
+`http_401`), the 409 surfacing and its self-clearing, the errors-masking rule (the
+header-less file SORTS FIRST, so `errors[0]` is the reason it must outrank), the
 cursor-write verdict, the persisted status landing at the spool-derived path
 instead of `$HOME` (it drives `main`), and the two pids' temp names surviving a
 refused rename (it drives `write_sweep_status`).

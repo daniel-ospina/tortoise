@@ -1175,21 +1175,45 @@ def test_an_ACTIONABLE_refusal_outranks_a_no_header_id_error(server, tmp_path):
     can act on, while a rotated key goes unreported on every surface the production
     caller reads (the detached sweep discards `--json`).
     """
-    _session_file(tmp_path, "a.jsonl", [
+    _session_file(tmp_path, "a-noheader.jsonl", [
+        _message("v1", None, "user", "no session header"),
+    ])
+    _session_file(tmp_path, "b.jsonl", [
         _header("sid-rotated"),
         _message("u1", None, "user", "the key got rotated"),
-    ])
-    _session_file(tmp_path, "z-noheader.jsonl", [
-        _message("v1", None, "user", "no session header"),
     ])
     server.status = 401
     proc, receipt = _run_sync(tmp_path, server=server)
     assert receipt["log"]["errors"], "the premise: errors[] is non-empty here"
+    # The header-less file SORTS FIRST, so the worker enumerates it first and
+    # `errors[0]` is the no-header reason: this is the ordering that makes the
+    # assertion discriminate. If `no_header_id` were ever treated as actionable
+    # (or if the withheld rule were gated on the worker's own verdict), one stray
+    # file would mask the rotated key again and these assertions red.
+    assert receipt["log"]["files"][0]["reason"] == "no_header_id", receipt["log"]["files"]
     assert receipt["log"]["withheld"] == "http_401", receipt["log"]
     assert receipt["ok"] is False
     assert proc.returncode == 1
     status = json.loads((tmp_path / "cursor" / "sweep-status.json").read_text())
     assert status["reason"] == "http_401", status
+
+
+def test_a_no_header_id_ONLY_sweep_still_reports_no_header_id(server, tmp_path):
+    """The other side of the classification: not actionable for MASKING purposes is
+    not "silent". A header-less ``.jsonl`` is refused, the sweep is failed, and the
+    reason is named — it just cannot outrank an actionable refusal."""
+    _session_file(tmp_path, "a-noheader.jsonl", [
+        _message("u1", None, "user", "no session header"),
+    ])
+    proc, receipt = _run_sync(tmp_path, server=server)
+    assert receipt["log"]["files"][0]["reason"] == "no_header_id"
+    assert receipt["log"].get("withheld") is None, "non-actionable, so not withheld"
+    assert receipt["ok"] is False, "the sweep is still failed"
+    assert proc.returncode == 1
+    status = json.loads((tmp_path / "cursor" / "sweep-status.json").read_text())
+    assert status["ok"] is False
+    assert status["reason"] == "no_header_id", status
+    assert server.calls == 0, "an invented id would have produced a POST"
 
 
 def test_a_cursor_that_could_not_be_PERSISTED_is_a_withheld_verdict(server, tmp_path):
