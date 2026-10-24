@@ -2170,6 +2170,31 @@ def test_tmpdir_sweep_tool_change_selects_core_not_tier1():
     assert set(r["test_files"]) != _tier1()
 
 
+def test_cli_extraction_engine_change_selects_core_and_carve_out_leg():
+    # #9929 review #2: the CORE_ALSO entry for
+    # integrations/cli-extraction/extract_turns.py exists only to stop the
+    # #6138 silent drop — `integrations/` is a flat NON_PYTHON_PREFIXES entry,
+    # so without it an extractor-only diff comes back changed=[], select()
+    # takes the docs-only early return and NOT ONE of the lane's guards runs on
+    # the very diff that can break the extractor.
+    #
+    # The guard runs in the CARVE-OUT leg, not `test_files`:
+    # tests/test_cli_extraction.py is a carve_out member, so it is excluded
+    # from the docker legs by construction and `carve_out_run` (a matched
+    # surface owns a carve-out file) is what actually schedules it. Asserting
+    # on `test_files` here would be the wrong half of the contract.
+    #
+    # Mutation check (verified by dropping the CORE_ALSO entry in a REPL):
+    # select() then returns surfaces=[] , full=False and carve_out_run=False
+    # on the 64-file tier-1 smoke set, so asserts 2-5 below go RED.
+    r = _sel(["integrations/cli-extraction/extract_turns.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert r["carve_out_run"] is True, r
+    assert "test_cli_extraction.py" in cs.carve_out_files(load_manifest()), r
+    assert set(r["test_files"]) != _tier1(), r
+
+
 def test_docs_lint_baseline_tool_change_selects_core_not_tier1():
     # #7435 review P1: tools/docs_lint_baseline.py owns
     # tests/test_docs_lint_baseline.py (`core`), whose 58 cases pin the differ's

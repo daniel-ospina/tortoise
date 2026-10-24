@@ -631,8 +631,13 @@ _FAKE_ENGINE = textwrap.dedent("""\
             f.write('{\\"claims\\": [{\\"kind\\": \\"fact\\", \\"content\\": \\"x\\"}]}')
         print(json.dumps({"info": {"input_tokens": 10, "output_tokens": 4}}))
         if os.environ.get("FAKE_MODE") == "codex-downgrade":
-            # a later token-less event (aborted turn) must not erase the pair
-            print(json.dumps({"info": {}}))
+            # a later event that HAS input_tokens but LACKS output_tokens (an
+            # aborted turn) must not erase the earlier complete pair, nor
+            # downgrade complete->incomplete. It must carry input_tokens: the
+            # gate at the top of the loop discards an event without one, so a
+            # bare {"info": {}} never reaches the latch and would make this
+            # fixture vacuous (it pins nothing).
+            print(json.dumps({"info": {"input_tokens": 20}}))
         sys.exit(0)
     mode = os.environ["FAKE_MODE"]
     if mode == "fail":
