@@ -19,6 +19,33 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 GOLD = REPO_ROOT / "eval" / "how-to-use-tortoise" / "step1" / "inputs.json"
 
+# The report's per-input table, row index and cell label per input (#9695 review).
+# Module-level because TWO pins read it: the totals pin (which needs `row ->
+# input` to scope a row's own `×N` multipliers to that run's graph) and the
+# class pin. One copy, so the row an assertion names cannot disagree with the
+# row the other assertion names.
+TABLE_CELLS = {
+    "portfolio_update": (1, "portfolio update"),
+    "meeting_transcript": (2, "meeting transcript"),
+    "research_paper": (3, "research paper"),
+    "decision_request": (4, "decision request"),
+    "correction_existing_claim": (5, "correction to a claim"),
+    "duplicate_entity": (6, "duplicate entity"),
+    "regulatory_filing": (7, "regulatory filing"),
+    "person_appointment": (8, "person appointment"),
+    "contradicting_claim": (9, "contradicting claim"),
+    "product_spec_object": (10, "product spec"),
+}
+
+# The kind axis the doc's `axisKind: value` spellings belong to.
+AXIS_LAYER = {
+    "subjectKind": "Subject",
+    "objectKind": "Object",
+    "pointKind": "Point",
+    "eventKind": "Event",
+    "sourceKind": "Source",
+}
+
 
 def _load_tool():
     spec = importlib.util.spec_from_file_location(
@@ -1225,18 +1252,7 @@ def test_the_reported_totals_match_the_committed_records():
         "contradicting_claim": (2, 2),
         "product_spec_object": (2, 2),
     }, f"the report's per-input table drifted from the records: {per_input}"
-    cells = {
-        "portfolio_update": (1, "portfolio update"),
-        "meeting_transcript": (2, "meeting transcript"),
-        "research_paper": (3, "research paper"),
-        "decision_request": (4, "decision request"),
-        "correction_existing_claim": (5, "correction to a claim"),
-        "duplicate_entity": (6, "duplicate entity"),
-        "regulatory_filing": (7, "regulatory filing"),
-        "person_appointment": (8, "person appointment"),
-        "contradicting_claim": (9, "contradicting claim"),
-        "product_spec_object": (10, "product spec"),
-    }
+    cells = TABLE_CELLS
     for input_id, (row_index, cell) in cells.items():
         p0, p1 = per_input[input_id]
         # The LAYERS cell is part of the row. The doc states that every number
@@ -1264,6 +1280,50 @@ def test_the_reported_totals_match_the_committed_records():
     assert "Four inputs carry no P0" in doc, (
         f"the doc's 'four inputs carry no P0' sentence drifted: the records "
         f"carry {no_p0}"
+    )
+
+    # PER-ROW `axisKind: value` ×N. The older pattern (`` `[\w:]+` ×N ``) could
+    # not match these at all — the backticked span carries a space — so
+    # `subjectKind: person` ×3 on the meeting row and ×2 on the appointment row
+    # were editable with the suite green, and the comment claiming it pinned
+    # "every `kind` ×N the doc states" was false (#9695 review cycle 3). Each is
+    # scoped to ITS OWN row's graph and matched on the node's LAYER as well as
+    # its kind, so a count moved onto the wrong axis cannot pass.
+    nodes_by_input = {
+        path.parent.name: json.loads(path.read_text())["nodes"]
+        for path in sorted((GOLD.parent / "runs").glob("*/graph.json"))
+    }
+
+    def axis_count(input_id: str, axis: str, value: str) -> int:
+        return sum(
+            1
+            for node in nodes_by_input[input_id]
+            if node.get("layer") == AXIS_LAYER[axis]
+            and (node.get("kind") or "").lower() == value.lower()
+        )
+
+    row_lines = {
+        int(found.group(1)): line
+        for line in doc.splitlines()
+        if (found := re.match(r"^\| (\d+) \| ", line))
+    }
+    assert set(row_lines) >= {index for index, _cell in cells.values()}, sorted(row_lines)
+    pinned_multipliers = 0
+    for input_id, (row_index, _cell) in cells.items():
+        for axis, value, stated in re.findall(
+            r"`(\w+Kind): ([^`]+)` ×(\d+)", row_lines[row_index]
+        ):
+            assert axis in AXIS_LAYER, f"unknown kind axis {axis!r} in the doc"
+            measured_count = axis_count(input_id, axis, value)
+            assert measured_count == int(stated), (
+                f"row {row_index} ({input_id}) states `{axis}: {value}` ×{stated}; "
+                f"its graph carries {measured_count} such node(s) on the "
+                f"{AXIS_LAYER[axis]} layer"
+            )
+            pinned_multipliers += 1
+    assert pinned_multipliers >= 2, (
+        "the per-row `axisKind: value` ×N multipliers vanished from the table — "
+        "nothing left for this pin to check"
     )
     index = (REPO_ROOT / "docs" / "00_index.md").read_text()
     assert "13 P0 / 31 P1" in index, "the docs index headline drifted from the records"
@@ -1416,17 +1476,55 @@ def test_the_documented_failure_classes_reconcile_with_the_committed_records():
         f"the census row's label no longer states the {census_inputs} inputs the "
         f"census covers"
     )
-    # The section heading states the record count in words, and `classes` is
-    # measured over whatever is committed — so a run added or removed must move
-    # both the doc and this table rather than silently re-scoping the heading.
+
+    # The graph-wide `pointKind: issue … statement ×2` is prose, not a
+    # backticked `×N`, so no pattern reaches it: the two Point-layer `issue`
+    # nodes are exactly what the wrong-but-declared row charges (#9695 review
+    # cycle 3). Pinned from the committed graphs.
+    issue_points = sum(
+        1
+        for path in sorted((GOLD.parent / "runs").glob("*/graph.json"))
+        for node in json.loads(path.read_text())["nodes"]
+        if node.get("layer") == "Point"
+        and (node.get("kind") or "").lower() == "issue"
+    )
+    assert issue_points == 2, issue_points
+    assert f"where the item is a statement ×{issue_points}" in doc, (
+        "the wrong-but-declared row's `statement ×N` no longer matches the "
+        f"{issue_points} Point-layer `issue` nodes the committed graphs carry"
+    )
+
+    # The record count in words is stated in FOUR places and the cycle-2 pin read
+    # one. The other three are pinned from the same value here (#9695 review
+    # cycle 3), so an added or removed record cannot leave the Results heading
+    # and the aggregate still claiming "ten".
     number_words = {10: "ten"}
     assert len(runs) in number_words, (
         f"the bundle carries {len(runs)} runs and no number word is pinned for "
-        f"that count — update the doc's heading and this map together"
+        f"that count — update the doc's headings and this map together"
     )
-    assert f"recomputed from the {number_words[len(runs)]} `score.json`s" in doc, (
-        f"the class table's heading no longer says '{number_words[len(runs)]}' "
-        f"while the bundle carries {len(runs)} records"
+    word = number_words[len(runs)]
+    assert f"recomputed from the {word} `score.json`s" in doc, (
+        f"the class table's heading no longer says '{word}' while the bundle "
+        f"carries {len(runs)} records"
+    )
+    assert f"## Results — measured 2026-10-22, {word} runs" in doc, (
+        f"the Results heading no longer says '{word} runs'"
+    )
+    assert f"across the {word} inputs" in doc, (
+        f"the aggregate no longer says 'across the {word} inputs'"
+    )
+
+    # The blanket claim the rest of this file is justified by must stay TRUE of
+    # the table it heads: the two figures no committed artifact re-derives (the
+    # matcher's partial scores, the provenance call-shape count) are disclosed
+    # rather than counted as derived. Dropping the disclosure would silently
+    # re-open the "one more unpinned number" loop every review cycle found
+    # (#9695 review cycle 3).
+    assert "with two exceptions that no committed artifact re-derives" in doc, (
+        "the doc claims every table number is recomputed from the graph; the "
+        "matcher's partial scores and the provenance call-shape count are not "
+        "re-derived by anything, so the exceptions must stay stated"
     )
 
     # The census ENUMERATION is prose, so its `×N` multipliers drifted unpinned

@@ -138,7 +138,14 @@ removing (#9695 review P2).
 
 ## Results — measured 2026-10-22, ten runs
 
-Every number below is recomputed from the graph each agent wrote. Each run
+Every number in the two tables below is recomputed from the graph each agent
+wrote, with two exceptions that no committed artifact re-derives and that are
+labelled where they appear rather than trusted: the item matcher's partial
+scores (`3 of 4 stems … 0.375`), quoted from the matcher and explained under
+*Instrument limitations and corrections* below, and the call-shape count of runs
+that reached provenance through `create_point(extractedFrom=[…])` rather than
+`create_edge` (`seven`), which is a reading of each run's own `write.py` and not
+of the graph. Each run
 directory holds **both** halves — `graph.json` (every node's label, kind and id,
 every edge) and `score.json` (the verdicts read from it) — beside the agent's own
 `write.py`. Re-scoring a committed `graph.json` reproduces its `score.json`
