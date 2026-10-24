@@ -942,16 +942,21 @@ for the in-capture leg; the design's `D-b` within-batch leg is an INLINE `_norm`
 legs do not share one equality notion), `near_dup_detect` (`extractor_v2._boundary`), `against_priors_consolidation`
 (`D-d`, `extractor_v2.classify_consolidation`), `atomic_point_write` (**`not-implemented`**, tracking `#9879` — filed
 because a declared precondition with nobody tracking it is the defect), `failure_policy` (**`not-implemented`**,
-tracking `#5087`, the code half the design itself names). Each row marks ONE site per scanned document (the
-convention is per-document, not per-section), so `membership_errors` holds the new rows exactly as it holds the old
-ones.
+tracking `#5087`, the code half the design itself names). The marker convention is per-DOCUMENT and requires
+"at least one" — `span_link`, `fanout_cap` and `sufficiency_router` mark two sites each — while a row citing several
+sections of one document may be marked at only one, so `membership_errors` holds the new rows exactly as it holds the
+old ones.
 
 **The most valuable thing the enumeration found: `near_dup_detect` is a guard whose declared PLACEMENT does not
 exist.** `_boundary` is real and tested (its wrappers are `distinguishing_difference`, `_difference`, `fold_allowed`
-and `supersede_allowed`), but the three call-site families are the post-gate consolidation pass
+and `supersede_allowed`), but the FOUR call-site families are the post-gate consolidation pass
 (`classify_consolidation`, called from `execute_embed`), the capture seam (`dedup_classify.rephrase_hit`, which FOLDS
-and DETACH-DELETEs), and the temporal counting lane (`temporal_aggregation._restatement`, which has no in-product
-caller today — its consumer is `tools/longmem_eval/`). In `extract_session_v2`, `apply_vet` runs BEFORE
+and DETACH-DELETEs), the temporal counting lane (`temporal_aggregation._restatement`; that COUNTING LANE has no
+in-product `tortoise/` caller today — its consumer is `tools/longmem_eval/`), and the mining/ingest apply-first path
+(`SDK._dedup_content_candidates`, a shipped write path reached from `mining.py` and from the public `SDK.mine_corpus`
+→ `mining.mine_corpus_with_sdk`, whose `content_dedup` defaults to True — the parameter is the miner's, not
+`SDK.mine_corpus`'s — which WIRES a draft-to-draft IMPL on the guard's verdict).
+In `extract_session_v2`, `apply_vet` runs BEFORE
 `execute_embed` — so the design's pre-gate `S2.2a-β` site does not exist, which §4.2's own *"The order is inverted"*
 already records and `#5087` owns the code half. The row says so in its note rather than letting `implemented` read as
 "the pre-gate step ships".

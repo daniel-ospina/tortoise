@@ -73,11 +73,13 @@
 # mechanism its row omits. Position inside the document is a CONVENTION the gate
 # cannot check — prose cannot be parsed for "this paragraph declares the
 # mechanism" — so a marker moved away from its declaration while the passage is
-# deleted keeps the gate green. Each row that dates its markers below marks ONE
-# site per scanned document (the convention is per-DOCUMENT, not per-section), so
-# a row citing several sections of one document is marked at the site that names
-# the mechanism and the other citations are UNMARKED prose — the stated limit,
-# not an omission; that is a discipline, not a verdict.
+# deleted keeps the gate green. The convention is per-DOCUMENT, and a document
+# may be marked at MORE than one site — `span_link`, `fanout_cap` and
+# `sufficiency_router` mark two each, and `membership_errors` requires "at least
+# one", never "exactly one". What is NOT true is the reverse: a row citing
+# several sections of one document can be marked at only SOME of them, and its
+# other citations are then UNMARKED prose. That is the stated limit, not an
+# omission — a discipline, not a verdict.
 #
 # ⭐ MEMBERSHIP IS A GATE, NOT A HAND-PINNED TUPLE. Seven rows came from #5064's
 # own O/I/T indicator (1) — `vet`, `source_dedup`, `near_dup_merge`, `span_link`,
@@ -268,7 +270,7 @@ mechanisms:
       its public shape is the wrapper family `distinguishing_difference`,
       `_difference`, `fold_allowed` and `supersede_allowed` (all four resolve to
       `_boundary`), plus the `_entity_names`/`MergePlan` machinery in
-      `near_dup_merge.py`. Measured — and there are THREE call-site families, not
+      `near_dup_merge.py`. Measured — and there are FOUR call-site families, not
       one:
       (1) the post-gate consolidation pass: `classify_consolidation` (which runs
       inside `execute_embed`) calls the guard on the paraphrases it folds;
@@ -276,10 +278,23 @@ mechanisms:
       and then FOLDS and DETACH-DELETEs the loser (see #9437);
       (3) the temporal counting lane: `temporal_aggregation._restatement` calls
       `fold_allowed` when deciding whether two events are one restatement, which
-      moves `count_distinct_events`' `n_events`. ⚠️ That module has no in-product
-      `tortoise/` caller today (its consumer is `tools/longmem_eval/`), so it is
-      a shipped-MODULE site, not a shipped-write-path one — but it is a real
-      consumer of the guard's semantics and a lane changing the guard must see it.
+      moves `count_distinct_events`' `n_events`. ⚠️ That COUNTING LANE has no
+      in-product `tortoise/` caller today — its consumer is `tools/longmem_eval/`
+      (the module's other export, `classify_temporal_aggregate`, is called from
+      `tortoise/aggregate.py`) — so it is a shipped-MODULE site, not a
+      shipped-write-path one; but it is a real consumer of the guard's semantics
+      and a lane changing the guard must see it.
+      (4) the mining/ingest apply-first path: `SDK._dedup_content_candidates`
+      calls `fold_allowed` before deciding whether to WIRE a draft-to-draft
+      "already decided" IMPL — it asserts two rival claims are one decision on the
+      guard's verdict. That is a shipped WRITE path: it is reached from
+      `mining.py` (the mining/ingest composition and the MCP mining tool) and from
+      the public `SDK.mine_corpus` → `mining.mine_corpus_with_sdk`, whose
+      `content_dedup` defaults to True. ⚠️ The parameter is the MINER's, not
+      `SDK.mine_corpus`'s — that method takes no `content_dedup` argument, so read
+      the default from `mining.py`, not from the SDK surface. Its own docstring
+      records that it consults the same predicate as the other near-duplicate
+      consumers, which is why it is listed here instead of left to a reader's grep.
       In `extract_session_v2` `apply_vet` runs BEFORE `execute_embed`, so the
       design's pre-gate `S2.2a-β` SITE does not exist. §4.2's own "The order is
       inverted" records exactly that, and #5087 owns the code half.
