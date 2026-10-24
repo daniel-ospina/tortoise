@@ -626,7 +626,11 @@ outside this file. Every bracket here marks an OPTIONAL slot, and the `?` on the
 determiner group states it outright: the bare `the log is durable` **is** a hit
 (pinned at `test_claim_regex_matches_the_original_defect_forms`), so reading that
 bracket as "exactly one determiner" would build a gate that fails open on the
-wording #9134's first reword produced.
+wording #9134's first reword produced. And the `source of truth` family is the
+one whose durability side needs NO log subject: `source of truth … durable`
+within the window fires on its own, which is how a *source of truth for
+durability* claim is caught; the two `is`-predicate families always require the
+log subject.
 
 **The gate's roots are the contract surfaces plus `graph-scripts/` (#4308).**
 The owner's §6 root list (`tortoise/`, the five docs, README) left the two
@@ -648,7 +652,8 @@ source of truth for a test session's created-graph ownership).
 a `log`/`journal`/`jsonl`/`event stream` bound to `source of truth` / `is [the]
 truth` / `is [the|a|an|our|its|their|your]? durab(le|ility)` (the three families
 spelled out where the gate's roots are described, above; the determiner group is
-optional, so a bare `is durable` fires too); a *mechanism promise* —
+optional, so a bare `is durable` fires too, and on the `source of truth` side
+the `durab` arm needs no log subject at all); a *mechanism promise* —
 e.g. a managed store "provides AOF durability" —
 does not match it, and is corrected by hand (`docs/infra-runbook.md` §1 did this
 under **#2968**). That seam is not this gate's to close: the general binding from
@@ -800,28 +805,39 @@ a written claim to the system it describes is **#5063**.
   fires on is a `log`/`journal`/`jsonl`/`event stream` within 40 chars of `source
   of truth` (either order), or of `is [the] truth`, or of
   `is [the|a|an|our|its|their|your]? durab(le|ility)` — the determiner group is
-  optional, so the bare `is durable` is a hit. Every site below fails that
+  optional, so the bare `is durable` is a hit. **The `source of truth` family is
+  also the one whose durability side needs no log subject**: `source of truth …
+  durable` inside the window fires on its own — that is how *the source of truth
+  for durability claims* is caught, and a widened pattern that binds `durab` to
+  the log subject everywhere would drop it. The two `is`-predicate families do
+  require the log subject. Every site below fails that
   SHAPE — and **not** because "store" is a different noun: `is the truth store`
   bound to a `journal` subject *would* match the middle alternation, as measured.
   The blindness comes in three measured forms: *truth* sits with no `is`
-  copula after the subject (`appended to the truth store`, `rebuild retains the
-  truth`, bare `TRUTH`); an adverb interrupts the predicate (`is still the
+  copula (`rebuild retains the truth`, bare `TRUTH`) — and for `appended to the
+  truth store` and the `f"(rebuild retains the truth)"` literal at
+  `commit_ops.py:1464` there is no log SUBJECT inside the window either (its
+  `:1469` sibling does carry `journaled`, which the `journal` alternation matches
+  because it has no trailing boundary), so a widening bound to the subject keeps
+  missing them; an adverb interrupts the predicate (`is still the
   truth`); or the copula predicates a NOUN and durability survives only inside an
   em-dash gloss (`Is this log a JOURNAL — a durable, replayable truth set`),
   where the determiner slot takes `a` and the pattern needs `durab` next.
   **De-fronting that last one does not fix it — measured: the same sentence with
   `is` in front of `log` is still a miss, and only re-phrasing so that durability
   is the direct predicate matches** — so a widened pattern must handle the gloss
-  form, not the word order. (No positive example is quoted here on purpose, and
-  **not** because this file is scanned: it is the one file BOTH offender legs
-  skip by name — `test_no_durability_source_of_truth_claim_outside_the_canonical_doc`
+  form, not the word order. (The quotes below are the blind restatements
+  themselves, not positive examples quoted as live claims — and the reason is
+  **not** that this file is scanned: it is the one file BOTH offender legs skip
+  by name — `test_no_durability_source_of_truth_claim_outside_the_canonical_doc`
   and `test_no_wrapped_durability_claim_anywhere_in_the_scanned_roots` each
   `continue` on `CANONICAL_DOC_REL` before scanning — so a sentence written here
   is no hit of either family and cannot move the repo-wide `0`. The `0 anywhere`
-  measurement is over the NON-exempt roots. The reason to withhold a positive
-  example is different and narrower: this doc is the authority, so a quoted
-  false statement would be a copyable restatement sitting in the one file the
-  gate never reads.)
+  measurement is over the NON-exempt roots. One caveat keeps that honest: the
+  `record_writer.py` sentence quoted below is reproduced with a different wrap
+  than the source's, so inside this file it reads as a line-at-a-time hit — the
+  SOURCE's break is what the join-scope diagnosis is about, and quoting it in a
+  shape the gate would match is exactly why the exemption matters.)
   Measured 2026-10-24 on `92b364e8b` and re-checked on
   the merged base `9296a4e85`, all still live:
   `projection/entities.py` (*Restore verbatim — the journal is still the truth*:
@@ -829,12 +845,13 @@ a written claim to the system it describes is **#5063**.
   JOURNAL — a durable, replayable truth set*: the copula predicates `a JOURNAL`
   and durability is an adjective in the gloss, never the predicate);
   `projection/edges.py` (*a recovery write that appended to the truth store*: no
-  `is` copula **and** no subject inside the window — the nearest, `journal-owning`,
-  is on the previous line, so this is a subject-free nominal, a fourth form the
-  three above do not name); `commit_ops.py` (*rebuild retains the truth*:
-  contiguous on one source line, `f"(rebuild retains the truth)"`, and a miss for
-  form 1 — `retains` is not a copula; the adjacent f-string literals split the
-  surrounding SENTENCE, never the phrase);
+  `is` copula **and** no log subject inside the window — the nearest,
+  `journal-owning`, is on the previous line — i.e. form 1 plus a subject-free
+  nominal); `commit_ops.py` (*rebuild retains the truth*: contiguous on one source
+  line, `f"(rebuild retains the truth)"` at `:1464`, and a miss for form 1 —
+  `retains` is not a copula, and this occurrence has no log subject either; the
+  adjacent f-string literals split the surrounding SENTENCE, never the phrase,
+  which is why the f-string is not the cause);
   `sdk.py` (*the journal — the TRUTH — never* recorded; *the journal (TRUTH)*).
   **The OPPOSITE claim is also present and must stay green** — the gate's
   silence there is correct, not a hole: the `no`/`needs no` truth-store negation
