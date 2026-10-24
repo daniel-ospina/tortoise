@@ -147,6 +147,12 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # TORTOISE_DB_PATH to a tmp_path db) — the delenv IS the point, and the
     # fixture-param monkeypatch auto-restores at teardown (no lane leak).
     "test_attribution_actor.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],  # embedded lane via delenv (the test_billing pattern — db_path-pinned store, so the constructions never ride the URI)
+    # #9664's capstone builds a REAL registry SDK + `create_http_app` against a
+    # tmp_path db (the `delenv` is what pins it to the embedded lane, and the
+    # `function`-scoped monkeypatch auto-restores). Declared here rather than
+    # renamed: the org/key fixture must NOT ride a shared server graph.
+    "test_9664_capstone_connector_to_record.py": [
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     "test_audit.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',
                        r'monkeypatch\.setenv\(\s*$'],
     "test_billing.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],

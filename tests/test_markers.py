@@ -70,6 +70,17 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # resolves. Same class as test_quota/test_commit_endpoint.
     "test_cohort_cost_cap.py": {"registry": "prod-coupled"},
     "test_cross_tenant_read_isolation.py": {"registry": "prod-coupled"},  # #3663 — registry control-plane seeding for the cross-tenant read proof
+    # #9664's capstone hands `create_http_app` its OWN registry SDK
+    # (`TortoiseSDK(namespace="registry")` as `_registry_sdk=`), and
+    # `OrgResolutionMiddleware._get_registry_sdk` returns that injected object
+    # before it would ever build its own (mcp_auth.py:1103-1112) — so the graph
+    # name follows the INJECTED handle, not a second prod resolution. The
+    # canonical namespace PROD resolves is `registry` (`_make_sdk(namespace=
+    # "registry")`, mcp_auth.py:1111 / metering.py:775 / hosted_api.py:1240), and
+    # that is the class this entry declares: `prod-coupled`. (The rename-safety
+    # of the two fixture legs is NOT established — they skip here, needing
+    # `TEST_RECORD_DB_URI`, so no claim is made about it.)
+    "test_9664_capstone_connector_to_record.py": {"registry": "prod-coupled"},
     "test_graph_storage.py": {"registry": "prod-coupled"},  # #5331 — the byte-meter fixture seeds an org through the registry namespace (the literal is the namespace PROD resolves; same class as test_cross_tenant_read_isolation)
     # The `reg` fixture (the two T7 registry-lane cases; the rest of the file
     # is Supabase-lane) reads the graph handle `_reg_seed_org` / `_reg_seed_key`
