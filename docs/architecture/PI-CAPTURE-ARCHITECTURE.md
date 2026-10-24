@@ -197,7 +197,8 @@ So the verdict is composed from what the log half actually did:
 | a batch the server retained (401/403/407/402/429/5xx) | `false` | `http_<status>` | `capture: …, store-sync FAILED (http_401)` |
 | a retained batch with **no** status (a transport failure — DNS, refused connection, timeout) | `false` | the transport reason as the worker reported it (sanitised only where it is written to the status file) | `capture: …, store-sync FAILED (fetch failed)` |
 | a window refused as shrunk (`window_shrunk`) | `true` | — (the `shrunk` count is on `stdout`/`--json`) | `capture: OK` |
-| a `409` ("already in flight — a concurrent producer writing the SAME turns") | `true` | — | `capture: OK` |
+| a `409` (in-flight duplicate **or** "recording disabled for this team") | `false` | `http_409` | `capture: …, store-sync FAILED (http_409)` |
+| a cursor that could not be PERSISTED (`cursorWriteError`) | `false` | `cursor_write_failed` | `capture: …, store-sync FAILED (cursor_write_failed)` |
 | turns DEAD-LETTERED and crossed (a permanent 4xx) | `true` | — | `capture: …, N store-sync dead-lettered` |
 | the log half never ran (`worker_status`) | `false` | — | its own not-run reason, not "withheld" |
 
@@ -207,33 +208,41 @@ derived once and rendered by BOTH legs from the same read; `main` also prints it
 on `stderr` (a count that only exists under `--json` is a count nobody reads), and
 the process **exit code follows the verdict** so a caller that ignores the file is
 still told. `--dry-run` writes **no** status (a plan is not an outcome, and
-overwriting a real failure with a plan was a bug once) — but its exit code does
-follow the verdict, so a plan that would be refused is not reported as success.
+overwriting a real failure with a plan was a bug once) and its exit code still
+follows the verdict — but a plan never POSTs, so it cannot observe a retained batch:
+its verdict covers only the structural failures (`worker_status`, `errors[]`).
 
-**Two refusals are deliberately NOT failures, and the skip is PER FILE.**
+**One refusal is deliberately NOT a failure, and the skip is PER FILE.**
 `window_shrunk` refuses ONE dead file by design (shipping the shorter window would
 let the turn store hard-delete past it) and the unproven refusal writes no cursor
 row, so the same file is refused on every sweep for as long as it exists — 55 of
 292 real session files carry a `compaction`. Failing the sweep for that would paint
 a PERMANENT red over a backstop working exactly as designed, and a permanent red is
-how a line stops being read. `409` is the worker's own benign retain. But because
-the skip is per file, an ACTIONABLE refusal in the same sweep still wins: a box
-carrying both a compacted session and a rotated key reports `http_401`, not the
-thing nobody can fix. **The known cost, stated rather than hidden:** a box whose
-ONLY withheld state is a compacted refusal reports `capture: OK` while that one
-dead session's turns do not ship — the refusal is the recorded remainder on #3515
-(monotone window across `/compact`), and surfacing it as its own count segment
-needs the same change on both legs (`_with_store_sync_terms` and
-`captureHealthLine`), which is that fix's job, not a `FAILED` verdict's.
+how a line stops being read. Because the skip is per file, an ACTIONABLE refusal in
+the same sweep still wins: a box carrying both a compacted session and a rotated
+key reports `http_401`, not the thing nobody can fix. **The known cost, stated
+rather than hidden:** a box whose ONLY withheld state is a compacted refusal reports
+`capture: OK` while that one dead session's turns do not ship — the refusal is the
+recorded remainder on #3515 (monotone window across `/compact`), and surfacing it as
+its own count segment needs the same change on both legs (`_with_store_sync_terms`
+and `captureHealthLine`), which is that fix's job, not a `FAILED` verdict's.
 
-**One refusal is NOT on this path.** A file with no readable session id is pushed
-to the worker's `errors[]`, so `run_worker` already returns `ok: false` and the
-withheld rule never runs for it; its reason is `no_header_id`, derived from the
-error token by `_reason_token`. `withheld` exists for the refusals that leave
-`errors[]` EMPTY — which is why they used to report `OK`. Dead-lettered turns are
-likewise disclosed by their own COUNT term on the line, never silently: the verdict
-is not failed for them because a crossed file is already reported, and failing the
-sweep as well would report one loss twice.
+**`409` is deliberately NOT benign, and `no_header_id` cannot mask anything.** The
+server answers 409 for two different things — the in-flight duplicate (carries
+`Retry-After`) and "Session recording is disabled for this team", an org policy the
+user can reverse and which never clears by retrying — and the worker cannot tell
+them apart (`postCapture` keeps no headers and the worker forbids matching prose).
+Calling the code benign would report `capture: OK` for ever on a box whose recording
+is switched off, so it is surfaced: fail-CLOSED, and self-clearing (an in-flight
+collision clears on the next sweep; a disabled toggle clears when it is enabled).
+`no_header_id` is different: the worker already pushes it into `errors[]`, so the
+sweep is `ok: false` with that reason; but ``withheld`` is composed whenever the log
+half RAN — even when `errors[]` already failed the sweep — precisely so that one
+stray header-less `.jsonl` cannot turn every sweep's reason into the one thing
+nobody can act on while a rotated key goes unreported on every surface the
+detached caller reads. Dead-lettered turns are disclosed by their own COUNT term,
+never silently: the verdict is not failed for them because a crossed file is
+already reported, and failing the sweep as well would report one loss twice.
 
 The store is **one directory, derived one way**: the CLI's own default is now
 `<spool-parent>/store-sync` (it used to be `$HOME/.tortoise/store-sync`), which is
@@ -254,14 +263,17 @@ the failure.
 
 Tests: `test_a_RETAINED_batch_is_not_reported_OK`,
 `test_a_shrunk_REFUSAL_does_not_fail_the_sweep_but_an_ACTIONABLE_one_still_wins`,
-`test_a_BENIGN_409_does_not_fail_the_sweep`,
+`test_a_409_is_SURFACED_because_one_of_its_two_meanings_is_a_policy_refusal`,
+`test_an_ACTIONABLE_refusal_outranks_a_no_header_id_error`,
+`test_a_cursor_that_could_not_be_PERSISTED_is_a_withheld_verdict`,
 `test_the_default_cursor_dir_is_BESIDE_the_spool_like_both_readers`,
 `test_the_status_temp_path_is_PER_PROCESS`. Each fails with its fix reverted, and for
 the last two the REVERTED WRITER is what reds them (not the helper): the
 `withheld`/`ok`/exit-code assertions, the per-file skip ORDER (mixed sweep →
-`http_401`), the persisted status landing at the spool-derived path instead of
-`$HOME` (it drives `main`), and the two pids' temp names surviving a refused rename
-(it drives `write_sweep_status`).
+`http_401`), the 409 surfacing and its self-clearing, the errors-masking rule, the
+cursor-write verdict, the persisted status landing at the spool-derived path
+instead of `$HOME` (it drives `main`), and the two pids' temp names surviving a
+refused rename (it drives `write_sweep_status`).
 
 ---
 

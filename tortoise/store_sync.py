@@ -329,11 +329,23 @@ def run_sweep(
     # backstop — the false PASS this seam exists to end, one level down: a
     # rotated/expired key (401/403/407 are retained on purpose — crossing the
     # cursor would destroy the sessions), an exhausted quota (402), a 429/5xx
-    # outage, or a dead session whose ``/compact`` shortened its window forever.
-    # The turns are SAFE either way (the cursor did not move); what must not
-    # happen is the only user-visible surface calling that healthy.
-    if receipt["log"] is not None and receipt["log"].get("ok") is not False:
+    # outage, or a recording toggle switched off (the policy 409). The turns are
+    # SAFE either way (the cursor did not move); what must not happen is the only
+    # user-visible surface calling that healthy.
+    #
+    # ALSO when ``errors[]`` already failed the sweep: the reason precedence in
+    # ``write_sweep_status`` prefers ``withheld`` over the error token, so without
+    # this the first error (often an unfixable ``no_header_id``) would mask the
+    # actionable refusal filed in the same sweep.
+    #
+    # And a cursor that could not be PERSISTED is the same class: the turns posted
+    # but the offset did not move, so the next sweep re-POSTs the same window. That
+    # signal is named by the worker (``cursorWriteError``) and was only printed on
+    # stderr, which the production caller discards.
+    if receipt["log"] is not None and not receipt["log"].get("worker_status"):
         withheld = _withheld_token(receipt["log"])
+        if not withheld and receipt["log"].get("cursorWriteError"):
+            withheld = "cursor_write_failed"
         if withheld:
             receipt["log"]["withheld"] = withheld
             receipt["ok"] = False
@@ -341,29 +353,51 @@ def run_sweep(
 
 
 #: Refusals that are NOT the backstop being inert, so they must not fail the
-#: sweep. ``window_shrunk`` refuses ONE dead file by design (shipping the shorter
-#: window would let the turn store hard-delete past it), and its refusal writes no
-#: cursor row, so the same file is refused on every sweep for as long as it exists
-#: — 55 of 292 real session files carry a `compaction`. Failing the sweep for it
-#: would paint a PERMANENT red over a backstop that is working exactly as designed,
-#: which is how a health line stops being read.
-#: ``http_409`` is the worker's own benign case: "already in flight — a concurrent
-#: producer writing the SAME turns", which a fleet box produces routinely.
-_BENIGN_REFUSALS = frozenset({"window_shrunk", "http_409"})
+#: sweep.
+#:
+#: ``window_shrunk`` refuses ONE dead file by design (shipping the shorter window
+#: would let the turn store hard-delete past it), and its refusal writes no cursor
+#: row, so the same file is refused on every sweep for as long as it exists — 55 of
+#: 292 real session files carry a `compaction`. Failing the sweep for it would paint
+#: a PERMANENT red over a backstop working exactly as designed, and a permanent red
+#: is how a line stops being read.
+#:
+#: ``no_header_id`` is already reported by the worker through ``errors[]``, so the
+#: sweep is ``ok: false`` with that reason whether or not this function names it;
+#: keeping it out of the withheld set means it cannot mask an actionable refusal
+#: that is filed in the SAME sweep.
+#:
+#: ``409`` is deliberately NOT here. `POST /v1/sessions` answers 409 for TWO
+#: different things and the worker cannot tell them apart (`postCapture` keeps no
+#: headers, and its own rule forbids matching prose): the benign in-flight duplicate
+#: (`_CAPTURE_SESSION_IN_FLIGHT_DETAIL`, carries `Retry-After`) AND "Session
+#: recording is disabled for this team" — an org policy the user CAN reverse and
+#: which never clears by retrying. Treating the code as benign would report
+#: `capture: OK` for ever on a box whose recording is switched off, which is the
+#: exact false PASS this verdict exists to end. Surfacing it is the fail-CLOSED
+#: choice and it is self-clearing: an in-flight collision clears on the next sweep,
+#: and a disabled toggle clears when the user enables it.
+_NON_ACTIONABLE_REFUSALS = frozenset({"window_shrunk", "no_header_id"})
 
 
 def _withheld_token(log: dict) -> str | None:
     """Why the log half HELD BACK turns it could not deliver (``None``: it held none).
 
     A not-run reason is its own verdict (``worker_status``) and is not "withheld",
-        so it is not re-labelled here.
+    so it is not re-labelled here.
 
     A file is withheld when the worker recorded a ``failed`` outcome for it — the
-    batch was RETAINED (401/402/403/407/429/5xx, whose ``status`` names the code)
-    or refused as shrunk. Benign refusals are skipped, but the SKIP is per-file and
-    the loop keeps looking: an ACTIONABLE refusal (a rotated key, an exhausted
-    quota, an outage) must win over an unfixable one on the same box, or the line
-    would report the thing nobody can act on and hide the thing they can.
+    batch was RETAINED (401/402/403/407/409/429/5xx, whose ``status`` names the
+    code) or refused. Non-actionable refusals are SKIPPED PER FILE and the loop keeps
+    looking, because an ACTIONABLE refusal (a rotated key, an exhausted quota, a
+    disabled recording toggle, an outage) must win on the same box: reporting the
+    one thing nobody can act on would hide the thing they can.
+
+    This is consulted whenever the log half RAN (``worker_status`` absent) — even
+    when ``errors[]`` already failed the sweep — because ``errors[0]`` would
+    otherwise mask the actionable refusal: one stray header-less ``.jsonl`` is enough
+    to turn every sweep's reason into ``no_header_id`` while a rotated key goes
+    unreported on every user-visible surface.
     """
     if not log or log.get("worker_status"):
         return None
@@ -376,7 +410,7 @@ def _withheld_token(log: dict) -> str | None:
         else:
             reason = outcome.get("reason")
             token = str(reason) if reason else "withheld"
-        if token in _BENIGN_REFUSALS:
+        if token in _NON_ACTIONABLE_REFUSALS:
             continue
         return token
     return None

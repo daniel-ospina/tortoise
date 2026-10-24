@@ -1131,20 +1131,86 @@ def test_a_shrunk_REFUSAL_does_not_fail_the_sweep_but_an_ACTIONABLE_one_still_wi
     assert status["reason"] == "http_401", status
 
 
-def test_a_BENIGN_409_does_not_fail_the_sweep(server, tmp_path):
-    """``409`` is the worker's own documented-benign retain: "already in flight —
-    a concurrent producer writing the SAME turns". A fleet box produces it
-    routinely, and a permanent ``store-sync FAILED (http_409)`` would be false."""
+def test_a_409_is_SURFACED_because_one_of_its_two_meanings_is_a_policy_refusal(
+    server, tmp_path
+):
+    """`POST /v1/sessions` answers 409 for TWO different things and the worker cannot
+    tell them apart (`postCapture` keeps no headers, and the worker forbids matching
+    prose): the benign in-flight duplicate, AND "Session recording is disabled for
+    this team" — an org policy the user can reverse and which never clears by
+    retrying.
+
+    Calling the code benign would report `capture: OK` for ever on a box whose
+    recording is switched off. Surfacing it is fail-CLOSED and self-clearing: an
+    in-flight collision clears on the next sweep, and a disabled toggle clears when
+    the user enables it.
+    """
     _session_file(tmp_path, "a.jsonl", [
         _header("sid-409"),
-        _message("u1", None, "user", "already being filed by the hook"),
+        _message("u1", None, "user", "a policy the user can reverse"),
     ])
     server.status = 409
     proc, receipt = _run_sync(tmp_path, server=server)
     assert receipt["log"]["files"][0]["action"] == "failed"
-    assert receipt["log"].get("withheld") is None, "409 is benign, not withheld"
-    assert receipt["ok"] is True
-    assert proc.returncode == 0
+    assert receipt["log"]["withheld"] == "http_409", receipt["log"]
+    assert receipt["ok"] is False
+    assert proc.returncode == 1
+    status = json.loads((tmp_path / "cursor" / "sweep-status.json").read_text())
+    assert status["reason"] == "http_409", status
+
+    # Self-clearing: the same file ships once the refusal lifts.
+    server.status = 200
+    later_proc, later = _run_sync(tmp_path, server=server)
+    assert later["log"]["shipped"] == 1
+    assert later["ok"] is True
+    assert later_proc.returncode == 0
+
+
+def test_an_ACTIONABLE_refusal_outranks_a_no_header_id_error(server, tmp_path):
+    """``errors[]`` must not mask an actionable refusal.
+
+    A header-less ``.jsonl`` pushes ``no_header_id`` into ``errors[]``, so the sweep
+    is already failed and the reason precedence would take ``errors[0]``. One stray
+    file is therefore enough to turn every sweep's reason into the one thing nobody
+    can act on, while a rotated key goes unreported on every surface the production
+    caller reads (the detached sweep discards `--json`).
+    """
+    _session_file(tmp_path, "a.jsonl", [
+        _header("sid-rotated"),
+        _message("u1", None, "user", "the key got rotated"),
+    ])
+    _session_file(tmp_path, "z-noheader.jsonl", [
+        _message("v1", None, "user", "no session header"),
+    ])
+    server.status = 401
+    proc, receipt = _run_sync(tmp_path, server=server)
+    assert receipt["log"]["errors"], "the premise: errors[] is non-empty here"
+    assert receipt["log"]["withheld"] == "http_401", receipt["log"]
+    assert receipt["ok"] is False
+    assert proc.returncode == 1
+    status = json.loads((tmp_path / "cursor" / "sweep-status.json").read_text())
+    assert status["reason"] == "http_401", status
+
+
+def test_a_cursor_that_could_not_be_PERSISTED_is_a_withheld_verdict(server, tmp_path):
+    """The turns post, the offset does not move — so every sweep re-POSTs the same
+    window. That signal is named by the worker (``cursorWriteError``) and used to be
+    printed only on stderr, which the production caller discards."""
+    _session_file(tmp_path, "a.jsonl", [
+        _header("sid-cursor-ro"),
+        _message("u1", None, "user", "the cursor cannot be saved"),
+    ])
+    cursor = tmp_path / "cursor"
+    cursor.mkdir(parents=True, exist_ok=True)
+    os.chmod(cursor, 0o500)  # read+traverse, no create: the save must fail
+    try:
+        proc, receipt = _run_sync(tmp_path, server=server)
+    finally:
+        os.chmod(cursor, 0o700)
+    assert receipt["log"].get("cursorWriteError"), receipt["log"]
+    assert receipt["log"]["withheld"] == "cursor_write_failed", receipt["log"]
+    assert receipt["ok"] is False
+    assert proc.returncode == 1
 
 
 def test_the_default_cursor_dir_is_BESIDE_the_spool_like_both_readers(monkeypatch, tmp_path):
