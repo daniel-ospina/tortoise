@@ -3489,7 +3489,10 @@ def test_the_indexnow_gate_passes_when_the_surface_is_correct(tmp_path) -> None:
     [
         ({"get_code": "404"}, "is not served by the deployment"),
         # A 5xx on the static key file is an outage, not a missing file (#3485).
-        ({"get_code": "520"}, "an origin/edge outage"),
+        # The needle is the arm's OWN continuation: "an origin/edge outage" alone is
+        # also produced by the marketing POST 5xx arm below.
+        ({"get_code": "520"}, "NOT evidence the key file is gone"),
+        ({"get_code": "429"}, "or rate limit"),
         ({"body_mode": "newline"}, "must contain the key and NOTHING else"),
         ({"body_mode": "other"}, "must contain the key and NOTHING else"),
         # The BODY TEXT is pinned separately from the byte COUNT, on both legs: a
@@ -3503,7 +3506,13 @@ def test_the_indexnow_gate_passes_when_the_surface_is_correct(tmp_path) -> None:
         # Leg 2 is what the endpoint actually fetches: origin-correct is not enough,
         # and BOTH of its halves are pinned (count and text).
         ({"edge_code": "404"}, "not serving the key file"),
-        ({"edge_code": "522"}, "an edge outage"),
+        ({"edge_code": "522"}, "an edge outage or rate limit"),
+        # `000` on the edge leg alone: STUB_ZERO zeroes both legs, so the origin arm
+        # exits first and this alternative was unreachable — deleting `|000` from
+        # the edge arm left the suite green.
+        ({"edge_code": "000"}, "an edge transport failure"),
+        # A rate limit is a provider condition, not a delivery fault.
+        ({"edge_code": "429"}, "an edge outage or rate limit"),
         ({"edge_body_mode": "other"}, "at the EDGE"),
         ({"edge_body_mode": "other32"}, "at the EDGE"),
         ({"edge_body_mode": "newline"}, "at the EDGE"),
@@ -3539,6 +3548,8 @@ def test_the_indexnow_gate_passes_when_the_surface_is_correct(tmp_path) -> None:
         ({"gate_code": "502", "gate_body": ""}, "could not verify"),
         ({"gate_code": "504", "gate_body": "<html>gateway timeout</html>"}, "could not verify"),
         ({"gate_code": "521"}, "could not verify"),
+        # a Cloudflare rate limit is a provider condition, not a broken route
+        ({"gate_code": "429"}, "or rate limit, not a missing route"),
     ],
 )
 def test_the_indexnow_gate_fails_for_each_broken_surface(tmp_path, argv: dict, needle: str) -> None:
@@ -3550,8 +3561,19 @@ def test_the_indexnow_gate_fails_for_each_broken_surface(tmp_path, argv: dict, n
     # Non-vacuity made structural rather than incidental: "could not verify" must
     # never arrive with the sentence that blames the surface (a case arm can grow a
     # second echo, and a presence-only assertion would not notice).
-    if needle == "could not verify":
+    if "could not verify" in needle or needle in {
+        "NOT evidence the key file is gone",
+        "an edge outage or rate limit",
+        "an edge transport failure",
+        "or rate limit",
+        "an outage, not a missing route",
+        "admin lookup outage",
+    }:
+        # The outage arms must never arrive with the sentence that blames the
+        # surface — for the key-file rows too, which cannot reach the POST probe.
         assert "did not refuse an anonymous caller" not in out, out
+        assert "is not served by the deployment" not in out, out
+        assert "not serving the key file" not in out, out
 
 
 @pytest.mark.parametrize(
@@ -3581,6 +3603,7 @@ def test_the_indexnow_gate_fails_for_each_broken_surface(tmp_path, argv: dict, n
         ({"proxy_code": "502", "proxy_body": "<html>bad gateway</html>"}, "could not verify"),
         ({"proxy_code": "504", "proxy_body": ""}, "could not verify"),
         ({"proxy_code": "521", "proxy_body": "<html>origin down</html>"}, "could not verify"),
+        ({"proxy_code": "429", "proxy_body": "rate limited"}, "could not verify"),
     ],
 )
 def test_the_indexnow_proxy_gate_fails_for_each_broken_surface(
@@ -3590,7 +3613,12 @@ def test_the_indexnow_proxy_gate_fails_for_each_broken_surface(
     assert rc == 1, f"{argv} should have red the proxy gate, got rc={rc}:\n{out}"
     assert "::error::" in out, out
     assert needle in out, out
-    if needle == "could not verify":
+    if "could not verify" in needle or needle in {
+        "session-store-unavailable",
+        "next suspect",
+        "an origin/edge outage",
+        "an origin/edge outage or rate limit",
+    }:
         assert "did not answer the proxy's session gate" not in out, out
     assert any("app.premiselabs.co" in c and c.endswith("notify-publish") for c in calls), calls
 

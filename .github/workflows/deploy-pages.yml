@@ -808,8 +808,8 @@ jobs:
                 echo "::error::could not verify $url at ORIGIN — no response completed after 10 attempts (${code}); curl said: $(head -3 "$D/key.err" 2>/dev/null | tr '\n' ' '). This is a runner/edge transport failure, NOT evidence the key file is gone. Re-run the job." ;;
               # A 5xx from the edge/origin is an outage, not the file going missing —
               # the same #3485 inversion the POST hops below avoid with `5[0-9][0-9]`.
-              5[0-9][0-9])
-                echo "::error::could not verify $url at ORIGIN — the answer was $code, an origin/edge outage, NOT evidence the key file is gone. Re-run the job." ;;
+              429|5[0-9][0-9])
+                echo "::error::could not verify $url at ORIGIN — the answer was $code, an origin/edge outage or rate limit, NOT evidence the key file is gone. Re-run the job." ;;
               *)
                 echo "::error::$url answered $code at ORIGIN — the IndexNow key file is not served by the deployment ($nonce), so the endpoint cannot fetch the proof of host ownership and answers 403 to every submission (#9680)." ;;
             esac
@@ -835,8 +835,8 @@ jobs:
             case "$edge" in
               curl-failed*|000)
                 echo "::error::could not verify $url at the EDGE — no response completed after 10 attempts (${edge}); an edge transport failure, NOT evidence the key file is gone. Re-run the job." ;;
-              5[0-9][0-9])
-                echo "::error::could not verify $url at the EDGE — the answer was $edge, an edge outage, NOT evidence the key file is gone. Re-run the job." ;;
+              429|5[0-9][0-9])
+                echo "::error::could not verify $url at the EDGE — the answer was $edge, an edge outage or rate limit, NOT evidence the key file is gone. Re-run the job." ;;
               *)
                 echo "::error::$url answered $edge at the EDGE — the substrate the endpoint fetches is not serving the key file, even though origin has it." ;;
             esac
@@ -886,7 +886,7 @@ jobs:
               # operator hunting a deleted Function. The sibling app-origin step
               # already handles this shape this way.
               503*)
-                echo "::error::could not verify /blog/api/notify-publish — the answer was ${gate%|*} (body: ${gate_body:-<empty>}), which is an outage, not a missing route (#3485). Re-run the job; nothing about the route is disproven." ;;
+                echo "::error::could not verify /blog/api/notify-publish — the answer was ${gate%%|*} (body: ${gate_body:-<empty>}), which is an outage, not a missing route (#3485). Re-run the job; nothing about the route is disproven." ;;
               # A transport failure never reached the route at all. Without this arm
               # it fell through to "did not refuse an anonymous caller", i.e. a blip
               # reported as a broken route — the arm's own comment forbids it.
@@ -896,8 +896,8 @@ jobs:
               # (edge cannot reach the Function) and Cloudflare's 520-522/524. The
               # app-origin step already treats the whole 5xx class this way; leaving
               # this one at `503*` alone was the same defect on the other hop.
-              5[0-9][0-9]*)
-                echo "::error::could not verify /blog/api/notify-publish — the answer was ${gate%|*} (body: ${gate_body:-<empty>}), an origin/edge outage, not a missing route. Re-run the job." ;;
+              429*|5[0-9][0-9]*)
+                echo "::error::could not verify /blog/api/notify-publish — the answer was ${gate%%|*} (body: ${gate_body:-<empty>}), an origin/edge outage or rate limit, not a missing route. Re-run the job." ;;
               *)
                 echo "::error::/blog/api/notify-publish did not refuse an anonymous caller with the admin gate (status $gate, body: ${gate_body:-<empty>}) — the console's publish would submit nothing, and nothing else would say so." ;;
             esac
@@ -1401,7 +1401,7 @@ jobs:
             # Any 5xx is the same class: an origin/edge outage, not the route
             # disappearing. 502/504 (origin down) and Cloudflare's 520-522/524 were
             # falling through to the arm that blames the route.
-            5[0-9][0-9])
+            429|5[0-9][0-9])
               echo "::error::could not verify app.premiselabs.co/blog/api/notify-publish — the answer was $proxy (${proxy_body:-no body}), an origin/edge outage, NOT a missing route. Re-run the job; if it repeats, the proxy's own error path is the next suspect (a deterministic 500)." ;;
             *)
               echo "::error::app-origin /blog/api/notify-publish did not answer the proxy's session gate (status $proxy, body: ${proxy_body:-none}) — the console's IndexNow call would not reach the handler, and only the browser console would say so." ;;
