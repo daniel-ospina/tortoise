@@ -1793,8 +1793,22 @@ def live_sessions() -> LiveSessions:
                 # 977-character sentence, and the harness cuts the first cause at 320
                 # characters — so the pids that identify the orphans, and the remedy,
                 # fell off the end, i.e. the message was built for a reader with no
-                # bound. Measured against the real bound: this form keeps every pid,
-                # one raw path and the remedy inside 320.
+                # bound. Measured against that bound: this form keeps every pid, one
+                # raw path and the remedy inside 320.
+                # ⛔ BUT 320 IS NOT THE BUDGET IN EVERY READER (review of #2401, fifth
+                # round), so do not read the line above as "an operator always sees the
+                # datum". The harness cuts the COMPOSED reason, and the claim gate puts
+                # 217 characters of its own prose in front of this arm — measured:
+                # `collision_preflight._board_can_answer`'s `… an unmeasured pid is not a
+                # dead owner (tried: ` plus `_holder_gate_note`'s `claim gate: the FLEET
+                # BOARD could not answer — ` and ` (comment prose is not read, #8175)`.
+                # 320 - 217 leaves this arm **103** characters, inside which the pid list
+                # survives (label + five 8-digit pids + `(+N more)` = 92) and the DATUM AND
+                # REMEDY DO NOT — the recorded line ends mid-word. That static prose in
+                # front of a cause whose only job is to carry a datum is the budget bug,
+                # tracked as #9900; until it shrinks, the composed path names the pids to
+                # reap and nothing else. `test_the_gap_fits_the_bound_its_readers_apply`
+                # pins exactly that, against the composed string and not against this one.
                 pids_txt = ", ".join(str(p) for p in still_alive[:5])
                 # ⛔ THE DATUM MUST BELONG TO A PID THE MESSAGE NAMES (review of #2401, fourth
                 # round). Scanning all of `still_alive` while printing only the first five let an
@@ -1806,12 +1820,10 @@ def live_sessions() -> LiveSessions:
                 )
                 more = "" if len(still_alive) <= 5 else f" (+{len(still_alive) - 5} more)"
                 # ⛔ THE SAMPLE IS BOUNDED TOO, AND IT KEEPS ITS TAIL (review of #2401).
-                # The remedy has to survive the 320-char window the harness cuts the first
-                # cause at, and a Mac worktree path is routinely 90+ characters — so an
-                # unbounded sample put the remedy straight back outside the bound this
-                # message exists to fit (measured: `orphan` fell out of `[:320]` at
-                # pathlen 90). The TAIL is what identifies the directory, so it is the
-                # part kept.
+                # The remedy has to survive the 320-char window this arm is read through, and a
+                # Mac worktree path is routinely 90+ characters — so an unbounded sample put the
+                # remedy straight back outside that bound (measured: `orphan` fell out of `[:320]`
+                # at pathlen 90). The TAIL is what identifies the directory, so it is the part kept.
                 # ⛔ THE BOUND IS ON THE RENDERED SAMPLE (review of #2401, third round). Capping
                 # the raw string and then rendering it with `!r` let a path carrying control bytes
                 # expand four-fold — measured: a 60-char sample repr'd to 242 and pushed the remedy

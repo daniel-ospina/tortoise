@@ -2686,6 +2686,35 @@ def test_the_gap_fits_the_bound_its_readers_apply(monkeypatch) -> None:
         f"the counting case must fit the bound too: {len(many_arm)} chars")
     assert "reap the orphan" in many_arm[:320]
 
+    # ⛔ AND THE BOUND THAT ACTUALLY BITES IS THE COMPOSED ONE (review of #9887, third round).
+    # Everything above grades `live.error` against 320, but the harness never records this arm on
+    # its own: `refresh-candidates.sh:2342` writes the CLAIM GATE's reason through `cut -c1-320`,
+    # and that reason wraps this arm in the gate's own prose — `_board_can_answer`'s
+    # `… (tried: <this>)` (collision_preflight.py:5076) plus `_holder_gate_note`'s
+    # `claim gate: the FLEET BOARD could not answer — ` and ` (comment prose is not read, #8175)`
+    # (:5660) — 217 characters, leaving 103. Asserting `len(live.error) <= 320` therefore proved
+    # nothing about the reader it was written for. What is TRUE today, and what this pins: inside
+    # those 103 characters the message still names EVERY pid an operator has to reap (the last of
+    # five 8-digit pids plus `(+7 more)` ends at 92). What is NOT true, and is tracked as #9900:
+    # the datum and the remedy are cut there, so the composed record is a pid list. If #9900
+    # shrinks the gate's prose, this assertion keeps holding and the two below start applying —
+    # re-measure rather than assume.
+    holder_gate_prose = (
+        "claim gate: the FLEET BOARD could not answer — "
+        "the board's live-session store could not be read, so NO lane's liveness is "
+        "measurable — an unmeasured pid is not a dead owner (tried: "
+    )
+    holder_gate_tail = ") (comment prose is not read, #8175)"
+    assert len(holder_gate_prose) + len(holder_gate_tail) == 217, (
+        "the gate's own prose is 217 chars — re-measure #9900's budget if this moves")
+    composed = (holder_gate_prose + many_arm + holder_gate_tail)[:320]
+    for pid in sorted(many)[:5]:
+        assert str(pid) in composed, (
+            f"pid {pid} fell out of the COMPOSED first cause the harness records")
+    assert "orphan" not in composed, (
+        "NOT a guarantee: the remedy is outside the composed cut today (#9900) — if this "
+        "starts failing, the gate's prose shrank and the assertion should be inverted")
+
 
 def test_the_plural_grammar_is_preferred_and_a_later_one_can_answer(monkeypatch) -> None:
     """Version-awareness, both directions: the Mac's plural grammar answers, and if a
