@@ -175,10 +175,20 @@ stands unchanged.
    ```
 
    The `--scorer` list is **not** optional: with the default `harness` scorer nothing writes `family_*.json`
-   (`battery/runner/run.py:1182–1185`). What a CLI run can produce **today** is R1/R4 `metric_values` on
-   each arm plus the R3/R5 no-data sentinel; R3 `outcomes` and R5 `update_correct_direction` need §7 row 9
-   (the production truth judge) first. That limit is a property of the harness at this head, not of the
-   corpus, and it is why this row's indicator is stated per family rather than as "R1–R5".
+   (`battery/runner/run.py:1182–1185`). What a CLI run can produce **today** is R1/R4 per-episode
+   `metric_values` on each arm plus the R3/R5 no-data sentinel; R3 `outcomes` and R5
+   `update_correct_direction` need §7 row 9 (the production truth judge) first. That limit is a property of
+   the harness at this head, not of the corpus, and it is why this row's indicator is stated per family
+   rather than as "R1–R5".
+
+   ⚠️ **Two invocations write two attempt directories, and `report` reads ONE.** Each `run` stamps its own
+   attempt dir and writes that run's `family_*.json` into it (`battery/runner/run.py:762–763`, `:1093`),
+   while `report` resolves the **latest completed** attempt dir only (`battery/cli.py:597–604` →
+   `battery/report/assemble.py::attempt_dir_resolve`, which returns `candidates[-1]`). A single
+   `profile.json` carrying BOTH arms is therefore not producible by two invocations — the one-run shape is
+   exactly what §7 row 8 (the single-arm probe guard) turns on, and until it lands the two-arm evidence is
+   read from the two per-arm attempt dirs, one `report` per dir (`--out <attempt-dir>`, which
+   `attempt_dir_resolve` resolves to itself).
 2. **Re-file the verdict** — `python -m battery.cli report` → re-write
    `docs/claims/agent-reasoning-verdict.md` per the
    branch the measured profile actually supports; keep the falsification-accepting structure (§1–§7)
@@ -231,19 +241,36 @@ with sealed golds
 **When** the two single-arm invocations of §4 "In scope" item 1 execute (`python -m battery.cli run --tier 1 --arms a4 …`,
 then the same for `a0`, each with the probe `--scorer` list) — from the repo root, because there is no
 `battery` console script, and one arm per run, because probe aggregation refuses more
-(`battery/runner/run.py:619–622`)
-**Then** `family_R1`, `family_R3`, `family_R4` and `family_R5` carry non-empty `metric_values` with
-`n ≥ threshold` on BOTH arms
-**And** `report_status` is `complete`. An itemised per-family residual is a **FAILED** result and must name
-the blocking issue for each family — itemisation is the diagnostic, never the pass, because a criterion
-that accepts it cannot fail on a run whose families were never measured.
+(`battery/runner/run.py:619–622`) — and `report` runs **once per attempt dir**, because the two invocations
+write two attempt dirs and `report` resolves only the latest (§4 item 1)
+**Then** each per-arm profile carries `family_R1`, `family_R3`, `family_R4` and `family_R5` with a
+non-empty `values[primary]` and `n[primary] ≥ threshold` — read off `family_*.json`'s own fields
+(`primary`, `n` as a per-metric MAP, `values`, `cells`: `battery/runner/probe_scorer.py:791–801`).
+`metric_values` is the **per-episode** artifact field (`battery/runner/artifacts.py:86`), not a family
+field, so an assertion written against it reds on a healthy run.
+**And** `report_status` is `incomplete_missing_metrics`, and the ONLY families it reports missing or
+insufficient are the deferred set (L1–L6, D2–D4). `complete` is **not** the criterion and must not be: the
+expected set is the fixed 14-family `METRIC_FAMILIES` (`battery/cli.py:551`), `assemble` sets
+`incomplete_missing_metrics` whenever any expected family is unmeasured
+(`battery/report/assemble.py:113–117`), and `compose_run_status` never returns `complete` (it returns
+`None`, leaving the base rule, or an `incomplete_*`: `:166–220`). A criterion demanding `complete` on a
+four-family run is unsatisfiable, so the only way to satisfy it would be to emit a false status — the
+exact failure this case exists to catch.
+**And** a `complete` claim, an itemised per-family residual presented AS the pass, or any family that is
+neither measured nor explicitly deferred is a **FAILED** result, and the failure must name the blocking
+issue per family — itemisation is the diagnostic, never the pass, because a criterion that accepts it
+cannot fail on a run whose families were never measured.
 
 ### E2E-D2: Verdict re-file is falsification-accepting and reproducible
 
 **Given** the completed run artifact directories (one per arm)
-**When** `python -m battery.cli report` assembles the profile and the claim doc is re-filed
-**Then** all 14 families report a status for both arms — `measured` · `insufficient_n` ·
-`blocked-by-#issue` · `deferred-by-gate-G-1402-DELTA` — and never blank. The deferred status is the one this
+**When** `python -m battery.cli report` assembles each arm's profile (§4 item 1: one `report` per attempt
+dir) and the claim doc is re-filed
+**Then** the **re-filed claim doc's** 14-family table reports a status for both arms — `measured` ·
+`insufficient_n` · `blocked-by-#issue` · `deferred-by-gate-G-1402-DELTA` — and never blank. (The deferred
+status is a status of that TABLE, i.e. a doc surface, not a new `report_status` value: `profile.json` keeps
+the harness's own vocabulary, and `incomplete_missing_metrics` is what a correctly-scoped delta run reads —
+see E2E-D1.) The deferred status is the one this
 delta adds, and it exists for L1–L6 and D2–D4: they are approved `03-scope.md` deliverables that this delta
 SEQUENCES out of the first slice, not exclusions, so "not measured yet" must render as a named status rather
 than as an absent row or a false `blocked-by`. A family that is neither measured nor explicitly deferred
