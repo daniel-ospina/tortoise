@@ -205,6 +205,32 @@ def test_a_known_absent_registry_is_not_reloaded():
     assert declared_mechanisms(label="marks")          # unset -> loads the real one
 
 
+@pytest.mark.parametrize("kwargs", [
+    {"label": ["refutes"]},
+    {"semantics": {"refutes": 1}},
+], ids=["label-list", "semantics-dict"])
+def test_unhashable_argument_declares_nothing_instead_of_raising(kwargs):
+    """The NEVER-raises contract covers the ARGUMENTS, not only the registry.
+    `SEMANTICS_TRANSITION.get` is a dict lookup, so an unhashable `label` or
+    `semantics` raised `TypeError` — out of a comparison documented never to
+    refuse a write. Non-`str` is not a meaning, so it declares nothing.
+
+    Non-vacuous: on the pre-fix code each case raises `TypeError: unhashable
+    type` here. Unreachable from `create_operator` (it tests the same values
+    against a set/dict first) — but the `registry=` seam exists for a second
+    creator, and this is the arm that would carry the bug."""
+    assert declared_mechanisms(registry=None, **kwargs) == []
+
+
+def test_a_bad_argument_does_not_suppress_a_good_one():
+    """Degrading on one argument must not discard the other: a malformed
+    `semantics` beside a readable `label` still discloses what the label
+    declares. The guard is per-argument, not a whole-function bail-out."""
+    assert declared_mechanisms(
+        label="refutes", semantics=["refutes"], registry=None,
+    ) == [("NAND", "the label 'refutes' (a Layer-2 meaning)")]
+
+
 # ── the message must not misdescribe the direction ───────────────────────
 
 def test_message_describes_each_direction_correctly(sdk):
@@ -215,12 +241,24 @@ def test_message_describes_each_direction_correctly(sdk):
     a, b = _two_points(sdk)
     impl_case = _mechanism_warnings(
         sdk.create_operator("IMPL", a, [b], semantics="refutes"))[0]["message"]
-    assert "IMPL wire" in impl_case and "RAISES" in impl_case, impl_case
     nand_case = _mechanism_warnings(
         sdk.create_operator("NAND", a, [b], semantics="supports"))[0]["message"]
-    assert "NAND wire" in nand_case and "LOWERS" in nand_case, nand_case
-    assert "RAISES" not in nand_case.replace(
-        "must RAISE it", ""), nand_case
+    # Assert the CLAIM each sentence makes about the WIRE's effect, and the
+    # absence of the opposite claim. The earlier form asserted `"RAISES" not in
+    # nand_case.replace("must RAISE it", "")` — a no-op in both halves: the NAND
+    # sentence never spells `RAISES` (it says `must RAISE it`, and the replace
+    # target therefore never occurs in the text the assertion can reject), so
+    # that line could not fail for any implementation. Meanwhile both sentences
+    # legitimately name the OTHER verb to describe what the MEANING demands
+    # ("the meaning says it must LOWER it"), so the discriminating pair is the
+    # claim phrase with its object (`RAISES the target's confidence`), which
+    # appears only in the sentence for that direction.
+    assert "IMPL wire" in impl_case, impl_case
+    assert "RAISES the target's confidence" in impl_case, impl_case
+    assert "LOWERS the target's confidence" not in impl_case, impl_case
+    assert "NAND wire" in nand_case, nand_case
+    assert "LOWERS the target's confidence" in nand_case, nand_case
+    assert "RAISES the target's confidence" not in nand_case, nand_case
 
 
 # ── the mechanism leg: meaning → mechanism ────────────────────────────────

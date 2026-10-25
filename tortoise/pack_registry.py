@@ -654,6 +654,17 @@ def declared_mechanisms(
     failure — or a malformed row — into a write failure, so the ROW WALK is
     inside the guard, not just the load, and an unhashable `mechanism` is
     rejected rather than raising out of a frozenset membership test.
+
+    The same refusal covers the ARGUMENTS: `SEMANTICS_TRANSITION.get` is itself a
+    dict lookup, so an unhashable `label`/`semantics` raises `TypeError` — the
+    identical exception class the row walk is guarded against, on values this
+    function never validated. A non-`str` argument therefore declares nothing
+    (it is not a meaning) instead of aborting the caller's write; a good argument
+    BESIDE a bad one is still read, so the caller keeps every declaration the
+    walk could read. Unreachable from `create_operator`, which tests the same
+    values against a set and a dict before calling — but the `registry=` seam
+    exists for a second creator, and a contract stated as NEVER must hold for
+    every input the signature admits, not only today's caller's.
     """
     found: list[tuple[str, str]] = []
 
@@ -693,8 +704,18 @@ def declared_mechanisms(
     #    `semantics` or (pre-#7852 spelling) as the `label` itself. Both are
     #    canonicalized, so a retired word cannot mean two different things
     #    depending on which parameter carried it.
-    semantics_c = SEMANTICS_TRANSITION.get(semantics, semantics) if semantics else None
-    label_c = SEMANTICS_TRANSITION.get(label, label) if label else None
+    def _canonical(word: object) -> str | None:
+        # `isinstance` BEFORE the lookup, exactly as `_add` does before its
+        # frozenset test: `SEMANTICS_TRANSITION.get` raises TypeError on an
+        # unhashable key, and this runs on the warn-only write path — a
+        # malformed argument must degrade to "declares nothing", not abort the
+        # caller's write (see the NEVER-raises paragraph in the docstring).
+        if not isinstance(word, str) or not word:
+            return None
+        return SEMANTICS_TRANSITION.get(word, word)
+
+    semantics_c = _canonical(semantics)
+    label_c = _canonical(label)
     if semantics_c in SEMANTICS_MECHANISMS:
         retired = "" if semantics_c == semantics else f" (retired → '{semantics_c}')"
         _add(SEMANTICS_MECHANISMS[semantics_c],
