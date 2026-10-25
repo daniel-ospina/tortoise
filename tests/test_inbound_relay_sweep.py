@@ -572,7 +572,8 @@ def test_the_detail_budget_bounds_the_reads_that_decide_the_actions(sweep: Any) 
     A detail fetch is one `gh api` call, and the page budget alone admits up to
     1,000 candidates. Unbounded, a dense window spends the whole REST budget on
     reads and then 403s on the mutations — and a mutation that fails after its
-    intake POST re-relays the item every 15 minutes without ever closing it.
+    intake POST re-relays the item every 15 minutes, until the close succeeds or
+    the item ages out of the `--since-hours` window.
     """
     client = FakeClient(pulls=[pull(n, author="someone") for n in range(1, 21)])
     report = run(sweep, client, max_actions=20, detail_budget=3)
@@ -1054,6 +1055,10 @@ def test_the_rails_promise_no_retry_that_the_label_step_cannot_get(
         "\"a later run selects it again\" is the same over-claim one step "
         "earlier in the sequence"
     )
+    assert "every 15 minutes without ever closing them" not in rail_text, (
+        "the rails text still calls the re-relay UNBOUNDED — it stops at the "
+        "close or at the age-out, whichever comes first"
+    )
 
     # `EXIT CODES` exit 2 is the operator's list of "could not act" causes, and
     # this change added a fourth one (`--repo` not `owner/name`). A list that
@@ -1082,21 +1087,85 @@ def test_the_rails_promise_no_retry_that_the_label_step_cannot_get(
     # does) and the scoping doc (what a human triaging a red run reads before
     # deciding whether to act by hand) still promised an unconditional re-select.
     # Prose, so it cannot be executed: what is pinned is that the claim is
-    # SCOPED in each copy, and that the unscoped form is gone.
-    def _prose(path: Any) -> str:
-        return " ".join(path.read_text(encoding="utf-8").split())
+    # SCOPED in EACH copy, and that the unscoped form is gone FROM THAT COPY.
+    #
+    # ⛔ EACH COPY IS SLICED TO ITS OWN BLOCK, AND THE COMMENT PREFIX IS STRIPPED
+    # PER LINE. A whole-file `" ".join(text.split())` fails twice: it cannot tell
+    # one copy from another (any copy can revert to the unscoped wording while a
+    # sibling keeps the assertion green), and it cannot match the WRAPPED form at
+    # all — a YAML comment run needs a new `#` on every continuation line, so a
+    # whitespace-only collapse leaves that `#` sitting BETWEEN the words
+    # (`… again and # reds this workflow`), i.e. the pre-fix text the negative
+    # half names reads as already absent. Measured on `origin/main` and pinned
+    # here so it cannot silently go inert again (#9990 review).
+    def _block(text: str, start: str, end: str) -> str:
+        return " ".join(
+            line.lstrip(" #")
+            for line in text.split(start, 1)[1].split(end, 1)[0].splitlines()
+        )
 
-    sweep_workflow = _prose(SWEEP_WORKFLOW)
-    assert "so the next run selects it again and reds this workflow" not in (
-        sweep_workflow
-    ), (
-        "the sweep workflow still promises an unconditional re-select, so an "
-        "item that fails in the last cadence of the window reads as retried"
-    )
-    assert "STILL INSIDE" in sweep_workflow and "ages out" in sweep_workflow, (
-        "the sweep workflow's rails must scope the re-select to the "
-        "`--since-hours` window and name the age-out, like the docstring does"
-    )
+    sweep_workflow = SWEEP_WORKFLOW.read_text(encoding="utf-8")
+    module_text = MODULE_PATH.read_text(encoding="utf-8")
+
+    copies = {
+        "the sweep workflow's rails bullet": (
+            _block(
+                sweep_workflow,
+                "# * `relay-then-close-then-label`",
+                "# * An INCOMPLETE listing",
+            ),
+            "so the next run selects it again and reds this workflow",
+            ("STILL INSIDE", "ages out"),
+        ),
+        "the sweep workflow's cancel note": (
+            _block(sweep_workflow, "# ⛔ NOT the repair story", "concurrency:"),
+            "so the next run selects it again and `already_relayed()` resumes it",
+            ("still inside the `--since-hours` window", "`already_relayed()` resumes it"),
+        ),
+        "RELAY_MARKER's own comment": (
+            _block(module_text, "#: The footer both comment templates", "RELAY_MARKER ="),
+            "a failed close leaves an item that the next run selects again",
+            ("STILL INSIDE", "ages out"),
+        ),
+        "the detail-budget comment": (
+            _block(
+                module_text,
+                "#: How many per-PR detail fetches",
+                "DEFAULT_DETAIL_BUDGET =",
+            ),
+            "every 15 minutes without ever closing it",
+            ("ages out",),
+        ),
+        # The suite's own docstring is a copy of the claim too — it is what the
+        # next reader of this test learns the budget is for.
+        "this suite's detail-budget docstring": (
+            " ".join(
+                (
+                    test_the_detail_budget_bounds_the_reads_that_decide_the_actions.__doc__
+                    or ""
+                ).split()
+            ),
+            "every 15 minutes without ever closing it",
+            ("ages out",),
+        ),
+    }
+    for where, (copy_text, over_claim, scoped) in copies.items():
+        assert over_claim not in copy_text, (
+            f"{where} still makes the UNSCOPED claim ({over_claim!r}) — the copy "
+            "an operator reads promises a retry that the label step, which runs "
+            f"AFTER the close, cannot get (or one the window does not reach): {copy_text}"
+        )
+        for phrase in scoped:
+            assert phrase in copy_text, (
+                f"{where} must scope the claim to the `--since-hours` window and "
+                f"name the age-out ({phrase!r} missing): {copy_text}"
+            )
+
+    def _prose(path: Any) -> str:
+        return " ".join(
+            line.lstrip(" #")
+            for line in path.read_text(encoding="utf-8").splitlines()
+        )
 
     scoping_doc = _prose(SCOPING_DOC)
     assert "therefore retryable rather than open-and-marked" not in scoping_doc, (

@@ -131,7 +131,8 @@ SAFETY RAILS (each pinned by a test) — a sweeper is riskier than a per-event r
     decide them (one `gh api` call each, against a REST budget of ~1,000/hour).
     Candidates beyond either budget are counted as `unexamined` and reported —
     a run that spent its reads would otherwise 403 on its mutations and re-relay
-    the same items every 15 minutes without ever closing them.
+    the same items every 15 minutes — until each close succeeds, or until the
+    item ages out of the `--since-hours` window.
   * `--dry-run` prints the plan and performs nothing.
 
 It carries no merge capability at all: it closes and relays, and it never
@@ -202,7 +203,8 @@ DEFAULT_REPO = f"{OWNER}/tortoise"
 #: and the page budget alone admits up to 1,000 candidates. Without it the run
 #: spends the whole REST budget on reads, then 403s on the mutations — and a
 #: mutation that fails after its intake POST re-relays the item every 15 minutes
-#: without ever closing it (#9946 review, round 2).
+#: until the close succeeds — or until the item ages out of the `--since-hours`
+#: window (#9946 review, round 2).
 DEFAULT_DETAIL_BUDGET = 60
 
 _COMMENT_PULL = (
