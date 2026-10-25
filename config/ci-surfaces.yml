@@ -4807,6 +4807,11 @@ surfaces:
   - test_weights_mitigation.py
   - test_3815_mitigation_moves_weight.py
   - test_6151_annotation_band.py
+  # #8169: the SUPPORT direction of the band (a rated operator counts MORE) must
+  # move the propagated BELIEF. Registered `core` because a `weights.py` change —
+  # which selects `core` via the fallback — must run it; the file reaches the band
+  # through `tortoise/ep.py`, which imports it.
+  - test_8169_support_direction_moves_belief.py
   # #7846: a graph-key `DUMP`/`RESTORE` of a VECTOR-INDEXED graph. The issue
   # (P0) reports the restore permanently wedging the whole instance; measured
   # 2026-10-12 it does not reproduce on any pullable image, but the two in-repo
@@ -5103,6 +5108,12 @@ surfaces:
   # neutral default — so an unrated operator is untouched. Asserts the weight the
   # reader actually consumes, which the pure arithmetic alone cannot observe.
   - test_6151_annotation_band.py
+  # #8169: the annotation band's SUPPORT direction — the half #8169 exists to add —
+  # must reach a BELIEF, not only the weight scalar. `test_6151` above stops at
+  # `compute_operator_weight`; this one runs EP and reads the settled posterior, so
+  # a weight that is computed and then not consumed reds here and stays green there.
+  # That is the exact failure mode an earlier `SUPPORTS` relation hit in this issue.
+  - test_8169_support_direction_moves_belief.py
   - test_ep_sources.py
   - test_2199_decide_calibration.py
   - test_file_human_approval.py
@@ -8230,6 +8241,7 @@ durations:
   test_weights_mitigation.py: 0.2
   test_3815_mitigation_moves_weight.py: 24.8  # unmeasured — #3815: local 3-run max (19.1/24.8/24.3); refresh from CI junit
   test_6151_annotation_band.py: 20.0  # unmeasured — #6151: local 3-run max on this host (8.97/11.20/10.03s pytest, 13.7/15.8/15.2s wall, the whole 13-test file against a private FalkorDB probe; only the three graph-reading tests take the docker lane, the other 10 are pure assertions over the module's own neutral value). 20.0 errs high, the conservative side for a shard-balance veto, without inflating the slow leg. Refresh from the first CI junit that includes it.
+  test_8169_support_direction_moves_belief.py: 2.0  # unmeasured — new in #8169 (the #3400/#4348 trap): a file ADDED BY A PR cannot carry a CI junit measurement (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input. What the weight covers: SIX EP cases, every one building its own embedded FalkorDB namespace and running the real propagation to convergence — so the cost shape is graph fixtures, not source scans. A local whole-file reading was taken and is deliberately NOT adopted: 134 s on this host with the fleet busy, which is dominated by the #3400 first-fixture session cost rather than by this file (the same six cases plus `test_6151_annotation_band.py` and `test_onboarding_variants.py` — 62 cases together — run in 143 s, so the file's marginal cost inside a warm shard is a fraction of that single-process number). The row must EXIST, not merely default: the `ep` + `core` registrations above put the file in `fast_pool()`, and `--integrity`'s `duration_coverage_issues` is measured against that pool's own size. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_3817_tags_rebuild_durability.py: 4.5
   test_5048_mitigated_by_replay.py: 30.0  # unmeasured — #5048: local private-lane readings on this host (17.5s/24.8s/26.5s/29.7s across the review rounds, 10 tests each driving real FalkorDB rebuild cycles); 30.0 is their max. Refresh from the first CI junit that includes it. Registered here rather than in `slow_files` deliberately: ~30s is far under the 360s bound `test_watchdog_is_per_shard_and_scales_with_the_shard` derives, and the value errs high (the conservative side for a shard-balance veto) without inflating the slow leg.
   test_build_cohorts_2517.py: 0.1
