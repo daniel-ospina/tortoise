@@ -641,8 +641,10 @@ def test_the_endpoint_prefers_the_cache_with_a_named_reason(monkeypatch):
     async def _sdk(_org):
         return _CacheSDK()
 
-    # #7970: the route reaches the cache through the bounded graph-lane seam,
-    # lazily — only the `prefer` fallback arm constructs a handle at all.
+    # #7970: `prefer` constructs its handle eagerly through the bounded
+    # graph-lane seam (`_data_sdk_offloaded`, #3498) and captures a construction
+    # failure; only `record` constructs nothing. So the spy records the seam's
+    # calls, and this arm's fallback is what consults the cache.
     monkeypatch.setattr(api, "_data_sdk_offloaded", _sdk)
     monkeypatch.setattr(api, "_resolve_record_tenant", lambda _org: TENANT)
     monkeypatch.setattr(api, "_require_scope", lambda *_a, **_k: None)
@@ -919,3 +921,57 @@ def test_the_endpoint_answers_500_for_a_tenancy_misconfiguration(monkeypatch):
                                               "org_id": "org_t"}))
     assert caught.value.status_code == 500
     assert "tortoise_record_app" in str(caught.value.detail)
+
+
+def test_prefer_surfaces_the_cache_failure_when_the_record_also_misses(monkeypatch):
+    """A double failure must NOT become an absence, and must not be counted.
+
+    With the cache unopenable AND the record holding no row, the client gets the
+    cache's own 403/503 — never a 404 (which would report absence, the §17.2
+    defect this unit forbids) and never a rewritten 500. No fallback is counted:
+    the metric means "answered by the cache", and this request was not.
+    """
+    from fastapi import HTTPException
+
+    import tortoise.hosted_api as api
+
+    rs.reset_fallback_counts()
+    monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_PREFER)
+    monkeypatch.setattr(rs, "open_record", _opener(_FakeConn(rows=[])))
+    monkeypatch.setattr(api, "_resolve_record_tenant", lambda _org: TENANT)
+    monkeypatch.setattr(api, "_require_scope", lambda *_a, **_k: None)
+
+    async def _graph_down(_org):
+        raise HTTPException(status_code=403,
+                            detail={"error_code": "GRAPH_NOT_FOUND"})
+
+    monkeypatch.setattr(api, "_data_sdk_offloaded", _graph_down)
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(api.get_point("p-1", org={"id": "org_t",
+                                              "org_id": "org_t"}))
+    assert caught.value.status_code == 403, (
+        "a double failure was rewritten — an impaired read became a different "
+        "kind of answer")
+    assert rs.fallback_counts() == {}, (
+        "a fallback that never landed was counted")
+
+
+def test_an_armed_read_cannot_be_given_a_fake_fallback_by_stored_props():
+    """The reserved pair is TOTAL: a stored `fallbackReason` cannot masquerade.
+
+    `as_wire` used to omit the key when there was no fallback, so a record-served
+    point whose own props carried `fallbackReason` shipped a response claiming a
+    counted fallback that never happened — an ops/backfill signal manufactured
+    from customer data.
+    """
+    answer = rs.ServedAnswer(read=rs.READ_POINT_BY_ID, coordinate="Point:p-1",
+                             served_from="record", props={"id": "p-1"})
+    wire = answer.as_wire()
+    assert set(wire) == {"servedFrom", "fallbackReason"}
+    assert wire["fallbackReason"] is None
+
+    props = {"id": "p-1", "servedFrom": "cache", "fallbackReason": "record-miss"}
+    props.update(wire)
+    assert props["servedFrom"] == "record"
+    assert props["fallbackReason"] is None, (
+        "a stored property supplied a fallback attribution")

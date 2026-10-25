@@ -9636,7 +9636,7 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
     # So a `prefer` construction failure is CAPTURED and re-raised only when the
     # cache is actually needed (the record missed or was unavailable). `off`
     # keeps propagating it, exactly as before.
-    cache_open_error: BaseException | None = None
+    cache_open_error: Exception | None = None
     if mode == record_serve.MODE_PREFER:
         try:
             sdk = await _data_sdk_offloaded(org)
@@ -9649,9 +9649,14 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
         if sdk is None:
             # The handle could not be built (see `cache_open_error`): this is
             # only reachable when the CACHE is genuinely needed, so the caller
-            # gets the original error — the 403/503 the seam raised — rather
-            # than a plausible empty answer.
-            raise cache_open_error or RuntimeError(
+            # gets the ORIGINAL error — the 403/503 the seam raised — rather
+            # than a plausible empty answer or a rewritten status.
+            # ⚠️ Never `raise captured or RuntimeError(...)`: truthiness decides
+            # that, and an exception class defining `__bool__`/`__len__` would be
+            # silently replaced by an uncaused 500.
+            if cache_open_error is not None:
+                raise cache_open_error
+            raise RuntimeError(
                 "the cache handle is unavailable and the cache is required")
         # #3718 residual 2: sync FalkorDB read off the loop (see list_points).
         # Called from a worker thread (both call sites are off-loop), so the SDK

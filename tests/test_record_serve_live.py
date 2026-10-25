@@ -35,7 +35,7 @@ the FalkorDB jobs export no record DSN. So this file is registered in
 `config/ci-surfaces.yml` so that it is CLASSIFIED (an unclassified test file
 reds `integrity_problems`), NOT because a leg runs it. Until a cross-store job
 exists it must be run BY HAND on a lane with both stores armed — measured there
-2026-10-24: `2 passed in 4.23s` (parity clean, cache 11 fields / record 8; S9
+2026-10-24: 2 passed (parity clean, cache 11 fields / record 8; S9
 answered `served_from=record` with the cache copy destroyed). Do not read a
 green CI run as this file passing.
 
@@ -131,7 +131,11 @@ def _sdk():
     proj._wipe_all_nodes(confirm_destructive=True, operation="test-setup")
     clear_residency(proj.g)
     proj.close()
-    return TortoiseSDK()
+    # ⚠️ The SDK MUST target the graph that was just wiped: `TortoiseSDK()`
+    # derives its graph from the URI (default `tortoise`), so the wipe would be
+    # dead work and the point would land in a SHARED graph. The house pattern
+    # (tests/test_cache_projection_live.py) is to use the projection it wiped.
+    return TortoiseSDK(graph_name=GRAPH_NAME)
 
 
 def _write_and_read_record(point_id: str, snapshot: dict) -> dict:
