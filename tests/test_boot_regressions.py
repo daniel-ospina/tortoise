@@ -98,13 +98,33 @@ def _redact(uri: str) -> str:
     return proc.stdout
 
 
-def _redact_under(uri: str, locale_name: str) -> str:
+def _redact_under(uri: str, locale_name: str, *, export_lc_all: bool = True) -> str:
     """`_redact`, with the CHILD's collation locale pinned explicitly.
 
     `_redact` above inherits the ambient locale, so on a `C` runner a
     locale-dependent predicate reads as correct — which is how #9978 stayed
     green on one runner and red on the next.
+
+    ⛔ `export_lc_all=False` builds the OTHER environment a real host has:
+    `LANG` names a collating locale and `LC_ALL` is ABSENT. That is not a
+    variation on the same case — it is the case that decides whether the
+    redactor's `LC_ALL=C` pin actually reaches its `sed` child.
+
+    `local LC_ALL=C` alone does NOT: `local` preserves the export attribute of
+    an EXISTING export and never confers one, so when `LC_ALL` was not ambient
+    the pin is a plain shell variable and the child keeps the ambient
+    collation. Measured on GNU bash 5.2.21: with `LC_ALL` ambient the child
+    sees `LC_ALL=C`; with only `LANG=en_US.UTF-8` the child sees `LC_ALL`
+    unset. `entrypoint.sh` therefore declares `export LC_ALL` beside the
+    `local`. This arm is what pins that, and it is RED on a `local`-only pin.
     """
+    env = {**os.environ, "LANG": locale_name}
+    if export_lc_all:
+        env["LC_ALL"] = locale_name
+    else:
+        # LANG-only: the ambient-LC_ALL-absent shape. Drop it from the inherited
+        # environment too, or this arm silently becomes the exported case.
+        env.pop("LC_ALL", None)
     proc = subprocess.run(
         [
             "bash",
@@ -115,7 +135,7 @@ def _redact_under(uri: str, locale_name: str) -> str:
         ],
         capture_output=True,
         text=True,
-        env={**os.environ, "LC_ALL": locale_name, "LANG": locale_name},
+        env=env,
     )
     assert proc.returncode == 0, f"redactor failed: {proc.stderr}"
     return proc.stdout
@@ -631,23 +651,36 @@ _LOCALE_SENSITIVE_SHAPES = [
 
 
 @pytest.mark.parametrize("locale_name", ["C", "C.UTF-8", "en_US.UTF-8"])
-def test_the_shell_redactor_is_locale_independent(locale_name: str):
+@pytest.mark.parametrize("export_lc_all", [True, False], ids=["lc_all-set", "lang-only"])
+def test_the_shell_redactor_is_locale_independent(
+    locale_name: str, export_lc_all: bool
+):
     """The masker's verdict must not depend on the ambient locale (#9978).
 
     Non-vacuity: on the pre-fix `entrypoint.sh` the `en_US.UTF-8` arm fails on
     `rediss://[::1]:\u0660` (echoed verbatim, `C` masked it) and on
     `r\u00e9diss://user:S3ntinel@host:6379` (masked, `C` refused it).
+
+    The `lang-only` arm is a SECOND, independent discriminator: `LC_ALL` is
+    absent and only `LANG` names a collating locale, which is the shape of a
+    developer shell and of many container images. A pin that is `local` but not
+    `export`ed passes `lc_all-set` and fails here on
+    `r\u00e9diss://user:S3ntinel@host:6379` (the `sed` child keeps UTF-8
+    collation and masks a scheme the canonical refuses).
     """
     from tortoise.__main__ import _mask_uri_userinfo
 
     for uri in _LOCALE_SENSITIVE_SHAPES:
-        shell = _redact_under(uri, locale_name)
-        assert shell == _redact_under(uri, "C"), (
+        shell = _redact_under(uri, locale_name, export_lc_all=export_lc_all)
+        assert shell == _redact_under(uri, "C", export_lc_all=export_lc_all), (
             f"the shell redactor's verdict depends on the ambient locale "
-            f"({locale_name} vs C) on {uri!r}: {shell!r}. A collated range or "
-            f"class is back; `_redact_uri` must pin LC_ALL=C")
+            f"({locale_name} vs C, export_lc_all={export_lc_all}) on {uri!r}: "
+            f"{shell!r}. A collated range or class is back, or the "
+            f"`LC_ALL=C` pin no longer reaches the child — `_redact_uri` must "
+            f"BOTH `local LC_ALL=C` and `export LC_ALL`")
         assert shell == _mask_uri_userinfo(uri), (
-            f"maskers disagree in locale {locale_name} on {uri!r}: "
+            f"maskers disagree in locale {locale_name} "
+            f"(export_lc_all={export_lc_all}) on {uri!r}: "
             f"shell={shell!r} canonical={_mask_uri_userinfo(uri)!r}")
 
 

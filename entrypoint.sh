@@ -84,14 +84,33 @@ _redact_uri() {
     #   `sed -E s/^[a-zA-Z]$/…/` MATCHED `é` → `rédiss://user:pw@host:6379`
     #                                masked as a scheme while the canonical
     #                                failed closed
-    #   `[[:space:]]` matched NBSP → the cut set bounded differently
-    # `local` restores the caller's locale on return, and it is inherited by
-    # the `sed` child below, so ONE pin covers the `case` ranges, the nested
-    # `_fragment_tell`, and the subprocess. Do not remove it to "keep the
-    # locale" — the redactor must behave identically on every runner.
-    # Regression: `tests/test_boot_regressions.py` runs a
-    # `LC_ALL=en_US.UTF-8` parity case (#9978).
+    #   `[[:alpha:]]` MATCHED `é` (and `[[:upper:]]` `É`) under `en_US.UTF-8`
+    #                                and neither matches under `C` — classes
+    #                                are collated exactly as ranges are.
+    #                                (NBSP is NOT the example: `[[:space:]]`
+    #                                does not match U+00A0 in either bash
+    #                                `case` or sed on glibc — measured.)
+    #
+    # ⛔ BOTH LINES BELOW ARE REQUIRED — `local` IS NOT `export`. `local`
+    # restores the caller's locale on return, but it only PRESERVES the export
+    # attribute of an existing export; it never CONFERS one. With `LC_ALL` in
+    # the ambient environment the `sed` child inherits `LC_ALL=C`. With only
+    # `LANG=en_US.UTF-8` and `LC_ALL` ABSENT — a developer shell, and many
+    # container images — a bare `local LC_ALL=C` leaves the pin a plain shell
+    # variable and the child keeps UTF-8 collation. Measured on GNU bash
+    # 5.2.21: in that shape `rédiss://user:S3ntinel@host:6379` was masked as a
+    # scheme while the canonical helper failed closed on it, so the parity
+    # contract was still open on exactly the hosts the pin exists to protect.
+    # `export LC_ALL` closes it and exports the LOCAL value, so the caller's
+    # `LC_ALL` is still restored on return (verified: `en_US.UTF-8` in, `C`
+    # inside, `en_US.UTF-8` out; unset in, unset out). Do not remove either
+    # line to "keep the locale" — the redactor must behave identically on
+    # every runner.
+    # Regression: `tests/test_boot_regressions.py::test_the_shell_redactor_is_locale_independent`
+    # runs BOTH environments (`lc_all-set` and `lang-only`) across three
+    # locales (#9978).
     local LC_ALL=C
+    export LC_ALL
     local uri="${1:-}" masked line out="" first=1 shaped=0 candidate \
           tail before rest cut=$'[/?#"\047 \t\v\f\r\n]' \
           region scan frag uri_has_scheme=0
@@ -205,9 +224,11 @@ _redact_uri() {
                 # not the authority. The set is spelled out rather than
                 # `[[:space:]]` so it is locale-independent and byte-identical
                 # to `tortoise/__main__.py::_authority_region`. Keep the two in
-                # sync — a different cut set is a divergence, and `[[:space:]]`
-                # additionally matches NBSP under a UTF-8 locale, which the
-                # canonical literal set does not (a parity break).
+                # sync — a different cut set is a divergence. (`[[:space:]]`
+                # is NOT additionally matching NBSP here: measured on glibc it
+                # does not, in bash `case`, `sed` or `grep`. The literal set
+                # is still the right choice — it is byte-exact and needs no
+                # argument about what a class means under a given locale.)
                 region="${candidate%%$cut*}"
                 # #5267: everything AFTER the bounded region is delimiter-
                 # bounded fragment material too, judged by the tell above —
