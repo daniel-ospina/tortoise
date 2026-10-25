@@ -1592,6 +1592,50 @@ def test_the_markdown_takes_the_resolved_sample_time(tmp_path: Path,
     assert f"- sample_time: `{resolved}`" in (out / "ci-timing.md").read_text()
 
 
+def test_a_missing_gh_cli_is_a_fetch_failure_not_a_traceback(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No `gh` on PATH → `DurationsBridgeError`, the type every caller handles.
+
+    `subprocess.run(["gh", …])` raises `FileNotFoundError` when the CLI is absent,
+    and `main()`'s artifact path catches only
+    `(CalledProcessError, DurationsBridgeError)` — so the missing executable escaped
+    as a traceback and the whole run died. MEASURED in CI (run 40164731582, job
+    121086780957): the self-hosted runners have no `gh`, so this red-ed `test (a)` on
+    every PR whose shard ran pytest, printing
+    `FileNotFoundError: [Errno 2] No such file or directory: 'gh'`.
+
+    Deterministic: PATH is pointed at an EMPTY directory, so the assertion cannot pass
+    because the host happens to carry the CLI (a `shutil.which` guard would make the
+    test vacuous on exactly the machines that have it).
+    """
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-bin"))
+    (tmp_path / "empty-bin").mkdir()
+    with pytest.raises(ci_timing.DurationsBridgeError, match="no `gh` CLI on PATH"):
+        ci_timing.gh_api("o/r", "repos/o/r/actions/runs/4242")
+
+
+def test_the_artifact_is_published_when_the_gh_cli_is_absent(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The whole artifact still lands, off the COMMITTED sample, with no `gh`.
+
+    End-to-end half of the same defect: the run-metadata fetch must degrade to the
+    warning path rather than aborting, so the artifact this workflow exists to publish
+    is written and still dates itself from the committed row. Pre-fix this raises
+    `FileNotFoundError` out of `main()`, so there is no artifact at all.
+    """
+    write_log(tmp_path, "pytest-log-test-a/pytest.log", "= 3 passed in 1.00s =\n")
+    out = tmp_path / "out"
+    _seed_one_history_row(out, "4242", "2026-08-20T00:00:00Z", 99, [])
+    monkeypatch.setenv("CI_TIMING_NOW", "2026-08-19T00:00:00Z")
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-bin"))
+    (tmp_path / "empty-bin").mkdir()
+    _run_main_against(tmp_path, monkeypatch, out)
+
+    artifact = json.loads((out / "ci-timing.json").read_text())
+    assert artifact["sampled_run"]["sample_time"] == "2026-08-20T00:00:00Z"
+    assert artifact["history"][0]["counts"]["passed"] == 99
+
+
 def test_a_quoted_summary_is_not_the_session_summary(tmp_path: Path) -> None:
     """A FAILING assertion that quotes a summary must not be read as one.
 
