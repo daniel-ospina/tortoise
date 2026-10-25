@@ -89,16 +89,19 @@ def sweep() -> Any:
 def _scrubbed_intake_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """No unit test in this file may POST a real intake record.
 
-    `GhClient.post_intake` reads `os.environ` directly (`INBOUND_URL` /
-    `INBOUND_SECRET_GITHUB`) rather than taking the creds from `Config`, so a
-    developer shell — or CI — that happens to export the pair would make a test
-    driving the REAL client (the resume-read cases, the stub-`gh` cases) POST to
-    the live intake endpoint before it ever failed on a stub. That is a write to
-    a production system produced by a unit test.
+    A `GhClient` built WITHOUT an explicit credential falls back to
+    `os.environ` (`INBOUND_URL` / `INBOUND_SECRET_GITHUB`) — `main()` passes
+    `Config`'s values instead, so production has one source, but every test in
+    this file constructs the client directly. A developer shell, or CI, that
+    happens to export the pair would therefore make a test driving the REAL
+    client (the resume-read cases, the stub-`gh` cases) POST to the live intake
+    endpoint before it ever failed on a stub: a write to a production system
+    produced by a unit test.
 
     Autouse and module-wide, so a NEW test cannot reintroduce the hazard by
     forgetting to opt in. A test that must exercise `post_intake` re-adds the
-    pair with `monkeypatch.setenv` and stubs the transport.
+    pair with `monkeypatch.setenv` (or passes a credential explicitly) and stubs
+    the transport.
     """
     monkeypatch.delenv("INBOUND_URL", raising=False)
     monkeypatch.delenv("INBOUND_SECRET_GITHUB", raising=False)
