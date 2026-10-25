@@ -57,7 +57,7 @@ claim nothing supports. They are still UNWITNESSABLE through
 first attributed: ``extract_session_v2`` DOES build the surfaces
 (``result["classify_later"]`` at ``tortoise/extractor_v2.py:8823-8829`` and
 ``result["vet"]`` at ``:8833-8837``); they are dropped at the meta fold,
-``tortoise/sdk.py:12738`` (``"stats": out.get("stats") or {}`` inside
+``tortoise/sdk.py:12744`` (``"stats": out.get("stats") or {}`` inside
 ``_extract_session_v2`` — the sibling key is never copied). That is #9116, cited
 rather than worked around: working around
 it would mean reading a wrapper's state, which is the instrumentation E4's row
@@ -146,9 +146,9 @@ ANCHOR_OUT = ("extractedFrom",)
 
 #: The relationship type that points AT a derived node: ``(Source)-[:references]
 #: ->(Event|Document)``, written by ``_EdgeHandlers.link_source_to_event``
-#: (``tortoise/projection/edges.py:2424-2449``, ``MERGE (s)-[r:references]->(e)
+#: (``tortoise/projection/edges.py:2432-2457``, ``MERGE (s)-[r:references]->(e)
 #: ON CREATE SET r.sourceVersion = s.contentHash``) and reached from the capture
-#: path at ``tortoise/sdk.py:13019`` (``proj.link_source_to_event(source_key,
+#: path at ``tortoise/sdk.py:13025`` (``proj.link_source_to_event(source_key,
 #: event_id)`` — ``(Source)-[:references]->(sessionCaptured Event)``). The anchor
 #: is on the same link, but the DERIVED node is its TARGET.
 #: ⚠️ Counting this one in the ``extractedFrom`` direction counts SOURCES.
@@ -162,13 +162,13 @@ E3_RULE = (
     "interchangeable: extractedFrom points FROM the derived node at its source "
     "((Point)-[:extractedFrom]->(GraphEvent|Event)), while references points AT "
     "the derived node ((Source)-[:references]->(Event|Document) — "
-    "tortoise/projection/edges.py:2424-2449 link_source_to_event, reached from "
-    "the capture path at tortoise/sdk.py:13019 "
+    "tortoise/projection/edges.py:2432-2457 link_source_to_event, reached from "
+    "the capture path at tortoise/sdk.py:13025 "
     "(proj.link_source_to_event(source_key, event_id))). The anchor is a "
     "property of the "
-    "DERIVATION LINK (tortoise/projection/edges.py:494-503 "
+    "DERIVATION LINK (tortoise/projection/edges.py:502-510 "
     "_anchor_on_create/_DERIVATION_ANCHOR_SET), and the references target labels "
-    "are _DERIVATION_REFERENCES_LABELS (edges.py:468: Event, Document). A "
+    "are _DERIVATION_REFERENCES_LABELS (edges.py:475: Event, Document). A "
     "Source->Object link is identity/mention and carries none BY DESIGN (owner "
     "option A, #5199; #9736)"
 )
@@ -1290,14 +1290,14 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
             f"this run does not claim the pass ran. Its surface EXISTS one layer "
             f"down: extract_session_v2 emits result['vet'] UNCONDITIONALLY at "
             f"tortoise/extractor_v2.py:8833-8837. It is DROPPED one layer up, at "
-            f"the meta fold tortoise/sdk.py:12738 (\"stats\": out.get(\"stats\") "
+            f"the meta fold tortoise/sdk.py:12744 (\"stats\": out.get(\"stats\") "
             f"or {{}} inside _extract_session_v2 — the sibling key is not "
             f"copied). Measured on this run: "
             f"inspected {stats_key_total} stats key(s) across {len(ran)} "
             f"receipt(s) [{', '.join(stats_keys) or 'none'}] and "
             f"{len(receipt_keys)} receipt top-level key(s) "
             f"[{', '.join(receipt_keys) or 'none'}]; 'vet' is in neither. "
-            f"#9116 is the seam, and tortoise/sdk.py:12738 is the line its fix "
+            f"#9116 is the seam, and tortoise/sdk.py:12744 is the line its fix "
             f"must target; reading a wrapper instead is the instrumentation "
             f"E4's row forbids")
 
@@ -1325,12 +1325,12 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
             f"surface EXISTS one layer down: extract_session_v2 emits "
             f"result['classify_later'] UNCONDITIONALLY at "
             f"tortoise/extractor_v2.py:8823-8829. It "
-            f"is DROPPED at the same meta fold, tortoise/sdk.py:12738 "
+            f"is DROPPED at the same meta fold, tortoise/sdk.py:12744 "
             f"(\"stats\": out.get(\"stats\") inside _extract_session_v2). "
             f"Measured on this run: the same {stats_key_total} stats key(s) and "
             f"{len(receipt_keys)} receipt top-level key(s) inspected above carry "
             f"no 'classify_later'. #9116 is the seam; "
-            f"tortoise/sdk.py:12738 is the line its fix must target")
+            f"tortoise/sdk.py:12744 is the line its fix must target")
 
     if queries and not degraded:
         observed["S3"] = (f"the graph was searched on the real backend: "
