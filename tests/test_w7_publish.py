@@ -16,6 +16,7 @@ from tools.longmem_eval import measurement_posture
 from tools.longmem_eval.w7_publish import (
     JUDGE_PIN,
     MOCK_JUDGE_PIN,
+    OFFICIAL_JUDGE_MODEL_ID,
     _fraction_at_k,
     binary_projections,
     build_receipt,
@@ -310,23 +311,63 @@ def test_mock_graded_run_cannot_publish_the_official_pin(tmp_path):
     zero cost) used to mint a receipt carrying the OFFICIAL judge pin with
     ``receipt_valid: True`` and ``verdict: pass``. Measured before the fix:
     judge_pin ``longmemeval-official-anscheck-gpt4o-2024-08-06-v1``,
-    receipt_valid True, [] issues."""
+    receipt_valid True, [] issues.
+
+    The verdict is asserted HERE, not only in the validator: an earlier
+    revision made the receipt *invalid* without making it *honest* (the
+    receipt still read ``verdict: pass``), so a consumer reading that field
+    alone — the field R12 is about — could still read the claim off the run.
+    """
     artifact = _cli_artifact(tmp_path, "mock-judge")
     receipt = artifact["receipt"]
     assert receipt["judge_pin"] == MOCK_JUDGE_PIN
     assert receipt["judge_pin"] != JUDGE_PIN
-    assert artifact["receipt_valid"] is False
-    assert any("cannot publish 'pass'" in i for i in artifact["receipt_issues"])
+    # the receipt is self-consistent: nothing in it claims the official run
+    assert receipt["verdict"] == "inconclusive"
+    assert receipt["run_status"] == "completed"
+    assert artifact["receipt_valid"] is True
 
 
 def test_substituted_judge_run_is_unpinned_and_cannot_pass(tmp_path):
     """A cheaper model grading the graded run (the substitution this issue
-    forbids) records ``unpinned:<model>`` and cannot publish a 'pass'."""
+    forbids) records ``unpinned:<model>`` and never a 'pass'."""
     artifact = _cli_artifact(tmp_path, "deepseek-v4-flash")
     receipt = artifact["receipt"]
     assert receipt["judge_pin"] == "unpinned:deepseek-v4-flash"
-    assert artifact["receipt_valid"] is False
-    assert any("cannot publish 'pass'" in i for i in artifact["receipt_issues"])
+    assert receipt["verdict"] == "inconclusive"
+
+
+def test_validator_refuses_pass_for_a_non_official_judge():
+    """Defence in depth: a receipt HAND-BUILT (or written by an older
+    publisher) whose pin honestly belongs to a stub, yet claims 'pass', is
+    refused — the CLI derives an honest verdict, so this clause only fires
+    outside it."""
+    base = dict(
+        run_id="r", date="d", commit="c", corpus_hash="sha256:x",
+        judge_pin=MOCK_JUDGE_PIN, judge_model="mock-judge",
+        judge_rubric_id_hash="h",
+        reader_model_spec="s", reader_pinned=True, ingest_mode="det",
+        run_status="completed", verdict="pass", failure_origin=None,
+        cost_usd=1.0, metrics=_base_receipt_metrics(),
+        measurement_posture=_posture("det"),
+        resolved_config={}, notes=[])
+    issues = validate_receipt(base)
+    assert any("cannot publish 'pass'" in i for i in issues)
+    # the same receipt with the honest verdict validates clean
+    assert validate_receipt(dict(base, verdict="inconclusive")) == []
+
+
+def test_official_judge_model_id_matches_the_judge_module():
+    """``OFFICIAL_JUDGE_MODEL_ID`` is a second copy of the identity
+    ``judge.DEFAULT_JUDGE_MODEL`` owns (that module is not imported here: it
+    pulls ``tortoise.ingest``/``reader``, ~2.5 s, into a publication tool).
+    This test is what stops the copy drifting: a judge-model bump applied to
+    one file only would otherwise refuse the NEW official judge while still
+    minting ``JUDGE_PIN`` for the OLD one."""
+    from tools.longmem_eval.judge import DEFAULT_JUDGE_MODEL
+
+    assert OFFICIAL_JUDGE_MODEL_ID in DEFAULT_JUDGE_MODEL
+    assert judge_pin_for(DEFAULT_JUDGE_MODEL) == JUDGE_PIN
 
 
 def test_cli_keeps_the_official_pin_for_the_official_judge(tmp_path):

@@ -617,10 +617,21 @@ def _main(argv: list[str] | None = None) -> None:
                    ingest_mode=methodology.get("ingest_mode", "")))
     seal = seal_answer_keys(instances)
     integrity = report.get("integrity") or {}
+    judge_model = methodology.get("judge_model", "")
+    judge_pin = judge_pin_for(judge_model)
     run_status = ("completed" if integrity.get("valid") is True
                   and report.get("accuracy") is not None
                   else "failed")
-    verdict = "pass" if run_status == "completed" else "inconclusive"
+    # #8486 (R12): the verdict is derived from the SAME identity as the pin, so
+    # the receipt is self-consistent rather than merely refused later. A
+    # completed run graded by a stub or a substituted model records
+    # ``inconclusive`` — a consumer that reads ``verdict`` alone (the field R12
+    # is about, cited by ``docs/benchmarks/w7a-comparison-rows-for-2106.md``)
+    # can no longer read 'pass' off a run that cannot back the official number.
+    # ``validate_receipt`` keeps its clause as defence in depth for receipts
+    # that are HAND-BUILT rather than derived here.
+    verdict = ("pass" if run_status == "completed" and judge_pin == JUDGE_PIN
+               else "inconclusive")
     metrics = {f"official_recall_all@{k}": rows[f"official_recall_all@{k}"]["value"]
                for k in ("5",)}
     # #2516 (C1): the sealed receipt carries the per-category official rows
@@ -635,8 +646,8 @@ def _main(argv: list[str] | None = None) -> None:
         corpus_hash=args.corpus_hash,
         # #8486: DERIVED from the judge the report recorded — never the
         # constant (a mock/substituted judge must not mint the official pin).
-        judge_pin=judge_pin_for(methodology.get("judge_model", "")),
-        judge_model=methodology.get("judge_model", ""),
+        judge_pin=judge_pin,
+        judge_model=judge_model,
         judge_rubric_id_hash=methodology.get("judge_rubric_id_hash", ""),
         reader_model_spec=methodology.get("reader_model_spec", ""),
         reader_pinned=bool(methodology.get("reader_pinned")),
