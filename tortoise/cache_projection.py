@@ -699,8 +699,10 @@ def node_from_row(label: str, row: Mapping[str, Any]) -> RecordNode:
             f"own CHECK would refuse the row, and a NULL key cannot be merged"
         )
     props = _props_from_row(table, row)
-    # The key column is a graph property too (`id`, `name`, `url`, `eventId`),
-    # so it is projected under its own name as well as being the MERGE key.
+    # The key column is a graph property too (`id`, `url`, `eventId` — the
+    # contract's key columns; `name` stopped being one for `Object`/`Subject`
+    # in #9881), so it is projected under its own name as well as being the
+    # MERGE key.
     props.setdefault(key_prop, raw)
     # The fold's `ON CREATE` constants, applied where the record is SILENT
     # (#9634). `None` counts as silence, not as a value: it is a FALLBACK, so a
