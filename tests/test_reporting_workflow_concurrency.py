@@ -2034,7 +2034,8 @@ def _verdict_step_problem(steps: list, ruff_index: int, ruff_id: str) -> str | N
     unmodelled = sorted(
         key
         for key, value in verdict.items()
-        if key not in _RUFF_STEP_KEYS | {"if", "env"} and not _inert_step_key(key, value)
+        if key not in _RUFF_STEP_KEYS | {"if", "env", "continue-on-error"}
+        and not _inert_step_key(key, value)
     )
     if unmodelled:
         return (
@@ -3959,6 +3960,20 @@ def _set_verdict_exit_2(doc: dict) -> None:
     step["run"] = step["run"].replace("exit 1", "exit 2")
 
 
+def _set_verdict_renamed_outcome_var(doc: dict) -> None:
+    """The same step with a renamed outcome variable — the header promises this is green.
+
+    The header lists a renamed outcome variable among the honest spellings that must
+    stay green, and nothing covered it: simplifying `outcome_vars` to the shipped
+    literal left every test green while the promise silently became false, so the
+    next maintainer to rename it got a red naming a variable the artifact no longer
+    had (measured in review cycle 8).
+    """
+    step = _verdict_step(doc)
+    step["env"] = {k.replace("OUTCOME", "VERDICT_OF_RUFF"): v for k, v in step["env"].items()}
+    step["run"] = step["run"].replace("OUTCOME", "VERDICT_OF_RUFF")
+
+
 @pytest.mark.parametrize(
     "label,mutate",
     [
@@ -3968,6 +3983,7 @@ def _set_verdict_exit_2(doc: dict) -> None:
         ("an honest `echo …; exit 1` one-liner", _set_verdict_one_line_echo_then_exit),
         ("an honest `failure)` arm that also exits", _set_verdict_failure_arm_exits),
         ("compact one-line `case` arms", _set_verdict_compact_arms),
+        ("a renamed outcome variable", _set_verdict_renamed_outcome_var),
     ],
     ids=[
         "spaced-always",
@@ -3976,6 +3992,7 @@ def _set_verdict_exit_2(doc: dict) -> None:
         "one-line-echo-then-exit",
         "failure-arm-exits",
         "compact-arms",
+        "renamed-outcome-var",
     ],
 )
 def test_the_verdict_pin_accepts_honest_spellings(label: str, mutate) -> None:
