@@ -3524,6 +3524,15 @@ surfaces:
   - test_extractor_reliability.py
   - test_extractor_embed_coerce_5060.py  # #5060: execute_embed must not raise on a non-string name/content (whole-session payload loss)
   - test_extractor_v2.py
+  # #2684 (Slice B): the value-span census — the wave's per-question T leg
+  # ("the value-bearing evidence is verbatim-present") measured over the
+  # COMMITTED #7947 arms receipts with the shipped `_carries_value` /
+  # `_value_verbatim_span`, zero paid calls. Registered HERE because the
+  # mechanism it pins is `tortoise/extractor_v2.py` (the default `core`
+  # surface, not a SHARED_MODULE) — and on `eval` below, where
+  # `tests/eval/write_path/` is a SOURCE_PATTERNS entry (so a receipts/fixture
+  # change selects it). Hermetic: committed JSON only, no DB/network/model.
+  - eval/write_path/test_value_span_census_2684.py
   # #8503 (code-review round 9, P1): the evidence bundle's DOC pins — the
   # `docs/00_index.md` registration row and the verdict banner's bound. They
   # lived in `test_extractor_v2.py` above, which is `core` AND a `slow_files`
@@ -5982,6 +5991,15 @@ surfaces:
   # test_extractor_v2.py / test_salience_labels_4917.py read those sources.
   # Pinned by tests/test_ci_selection.py::test_write_path_measurement_source_edit_selects_eval.
   - eval/write_path/test_score_qualifiers.py
+  # #2684 (Slice B): the value-span census (see the `core` entry for why it is
+  # registered twice). DUAL-REGISTERED because the two things that can move it
+  # select DIFFERENT surfaces: `tortoise/extractor_v2.py` selects `core`
+  # (where the mechanism's own unit pins live), while the population it
+  # measures is the committed #7947 arms receipts + fixtures under
+  # `tests/eval/write_path/` — a SOURCE_PATTERNS entry of THIS surface. Without
+  # this row a receipts-only change would run the census only via `core`'s
+  # fallback (and `manifest-integrity` would red on the unregistered file).
+  - eval/write_path/test_value_span_census_2684.py
   # #5085: the additive blind BANDED semantic judge + calibration harness
   # (hermetic unit/contract layer — no DB/network/LLM; the real judged run is
   # opt-in via `runner run --judge semantic`).
