@@ -18,7 +18,7 @@ legs, and they are not in the same state:
 
 | Leg | Statement (wave §6) | State |
 |---|---|---|
-| **T-1** per-question | *the value-bearing evidence is **verbatim-present** + **deduped** in the reader's package* | **verbatim half MEASURED** on the sealed corpus — 101 of 112 value-bearing points carry an address that re-reads the point's own words **and a value**; all 11 absences are a **reported** class, 0 silent (§2). **dedupe half NOT discriminating on this corpus** (in the guard's own per-arm universe, **0 of 433** pairs reach 0.9 content overlap at all — so no pair can differ in a value-critical token) — it is pinned by Slice A's unit guards instead (§2.3) |
+| **T-1** per-question | *the value-bearing evidence is **verbatim-present** + **deduped** in the reader's package* | **verbatim half MEASURED** on the sealed corpus — 101 of 112 value-bearing points carry an address that re-reads the point's own words **and a value**; all 11 absences are a **reported** class — **0 silent**, each carrying the warning of its own class, measured rather than asserted (§2.2) — **0 unclassified**. **dedupe half NOT discriminating on this corpus** (in the guard's own per-arm universe, **0 of 433** pairs reach 0.9 content overlap at all — so no pair can differ in a value-critical token) — it is pinned by Slice A's unit guards instead (§2.3) |
 | **T-2** end-to-end | *aggregation-class accuracy **moves** on the same slice with the SAME reader* | **VOID AS WRITTEN** — there is no committed pre-span baseline, and the span mechanism has **no arm to flip** (it is unconditional in extraction since #8659), so "moves" is unfalsifiable rather than failed. Re-specified and re-homed to the end-to-end run **#8486** (§4) |
 
 **No product behaviour changed by this lane.** The census reads committed
@@ -65,7 +65,9 @@ from the committed receipts and **fails on drift**.
 
 112 value-bearing points across 7 sealed sessions × 2 arms; **101 (90.2%)**
 carry an address satisfying all three conditions, and **11 absences** are
-distributed over exactly four classes, none silent:
+distributed over exactly four classes, **all four reported** — measured by
+`test_every_absence_in_the_census_is_REPORTED` over this whole population, not
+asserted here:
 
 | Session | arm | value-bearing | spanned | absences |
 |---|---|---|---|---|
@@ -102,9 +104,24 @@ published exactly that (`band 6 · no turn 1`). Pinned by
 | `band` | 3 | `_value_verbatim_span` — "resolved … by the token-overlap band, not a verbatim anchor". The band route is otherwise **silent**, and it misses by construction exactly when the value was REWRITTEN (#2817's measurement) |
 | `valuefree_quote` | 3 | `_value_verbatim_span` — "the quoted text carries no value … a false address" (#8966's hole: the model quoted the context sentence) |
 | `no_turn` | 4 | the **E3 anchor warning** at the resolution site (`_resolve_source_turn`), before the span branch runs |
-| `empty quote` | 1 | **nothing — silent by design**: no verbatim text exists to address. Pinned by `test_extractor_v2.py::test_empty_quote_model_index_path_carries_no_span` |
+| `empty quote` | 1 | the **resolver** (`_resolve_source_turn`), which the write path runs *before* the stamp — "unverified (empty quote) — using it" when the model index is in range, "no resolvable source turn" when it is not (this corpus's point carries no index and takes the second form, pinned in `test_extractor_v2.py`). `_value_verbatim_span` itself says nothing here — there is no verbatim text to address — but that is **one function being silent, not the class being unreported**: the absence is on the warnings a consumer already receives. Span shape pinned by `test_extractor_v2.py::test_empty_quote_model_index_path_carries_no_span` |
 
-**The two guards, and which one discriminates what.**
+⚠️ **One shape is silent BY CONSTRUCTION and is not in this census**: with an
+EMPTY `edus` list `_resolve_source_turn` returns `None` before any warning
+(`extractor_v2.py:6859`), so a value-bearing point extracted from no turns at all
+would be a silent absence. Declared here rather than measured, because the
+census has no such point — and the fix belongs in the resolver (warn there),
+not in this record.
+
+**What "reported" means, and what it does not.** It means a consumer of the
+warnings sees the absence and can tell WHICH class it is — that is what
+`test_every_absence_in_the_census_is_REPORTED` asserts, per class. It does not
+mean the warning is actionable in every case: the empty-quote report says
+"no resolvable source turn", which is true (there is no quote to resolve
+against) but does not name the *reason* (an empty quote). The REASON is carried
+by this table and by the census's `empty_quote` bucket.
+
+**The guards, and which one discriminates what.**
 
 * `test_every_value_bearing_point_carries_a_span_or_is_a_REPORTED_class` — the
   **census**. It is the guard that catches a population/mechanism regression: the
@@ -119,6 +136,13 @@ published exactly that (`band 6 · no turn 1`). Pinned by
 * `test_the_trimmed_anchor_relaxation_is_pinned_on_both_readings` — the
   **refused relaxation** (§3), which is what stops the `band` class from being
   "fixed" with a false address.
+* `test_every_absence_in_the_census_is_REPORTED` — the **absence-report** guard,
+  and the failing path behind this section's "0 silent" claim: every one of the
+  11 absences must carry the warning of ITS OWN class (a stray warning does not
+  count). Measured discriminating: deleting the resolver's step-4 absence
+  warning turns 5 of the 11 silent (the 4 `no_turn` + the empty quote) and the
+  test fails naming them; deleting the band-route warning turns the 3 `band`
+  points silent and it fails as well.
 
 The census is not a policy guard: it is a pinned measurement, so a lane that
 changes it reads "re-run the census", which is exactly what it should do.
@@ -233,7 +257,7 @@ operators/NANDs, so it measures a raw-content baseline, not Tortoise.
 # suite's session gate requires a DB URI by default):
 TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest \
     tests/eval/write_path/test_value_span_census_2684.py -q -p no:cacheprovider
-# 6 passed
+# 7 passed
 
 # the mechanism's own unit pins:
 TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_extractor_v2.py \
@@ -255,7 +279,9 @@ printf 'tests/eval/write_path/receipts/7947-arms-2026-10-18/wp01_quarry_debug.ar
 
 **Settled.** The mechanism exists, is validated at the commit boundary, rides
 the read path to the package, and on real extractions stamps a truthful
-address for **90.2%** of value-bearing points with **zero silent absences**; the
+address for **90.2%** of value-bearing points with **zero silent absences** —
+each of the 11 carries the warning of its own class, pinned by
+`test_every_absence_in_the_census_is_REPORTED`; the
 obvious relaxation is measured on both readings and refused; the degraded-tier
 boundary is declared (@ `sdk.py:30336-30350`), not an oversight.
 

@@ -78,9 +78,9 @@ SESSIONS = (
 )
 ARMS = ("raw", "narrative")
 
-#: Absence classes. Every one is either REPORTED at the point of resolution or
-#: silent BY DESIGN (there is no verbatim text to address), never a silent drop
-#: of something that could have been addressed:
+#: Absence classes. Every one is REPORTED at the point of absence — measured by
+#: ``test_every_absence_in_the_census_is_REPORTED`` over the whole committed
+#: population, never a silent drop of something that could have been addressed:
 #:  * ``band``            — resolved only by the >=0.6 token-overlap band, so
 #:                          the quote's words are not in the turn. Reported by
 #:                          ``_value_verbatim_span`` (the band route is
@@ -93,11 +93,35 @@ ARMS = ("raw", "narrative")
 #:  * ``no_turn``         — no source turn resolved at all. Reported by the E3
 #:                          anchor warning at the resolution site
 #:                          (``_resolve_source_turn``), not by this function.
-#:  * ``empty_quote``     — no quote, so no verbatim text exists to address.
-#:                          Silent BY DESIGN (nothing was ever claimed
-#:                          verbatim); pinned in
+#:  * ``empty_quote``     — no quote, so no verbatim text exists to address, and
+#:                          ``_value_verbatim_span`` says nothing about it (its
+#:                          warning branch requires a non-empty quote). The
+#:                          absence is still REPORTED — by the RESOLVER, which
+#:                          the census runs FIRST: "unverified (empty quote) —
+#:                          using it" when the model index is in range,
+#:                          "no resolvable source turn" when it is not (this
+#:                          corpus's single point carries no index). Calling this
+#:                          class "silent" contradicts the shipped order; it is
+#:                          the class with no SPAN-side warning, not an
+#:                          unreported one. Span shape pinned in
 #:                          ``test_extractor_v2.py::test_empty_quote_model_index_path_carries_no_span``.
 ABSENCE_CLASSES = ("band", "valuefree_quote", "no_turn", "empty_quote")
+
+#: The message each class's absence report must carry, so the census proves it
+#: sees the RIGHT warning rather than any warning at all. ``empty_quote`` has two
+#: legal forms (both from the resolver — see the class note above).
+EXPECTED_ABSENCE_WARNINGS = {
+    "band": ("token-overlap band",),
+    "valuefree_quote": ("carries no value",),
+    "no_turn": ("no resolvable source turn",),
+    "empty_quote": ("unverified (empty quote)", "no resolvable source turn"),
+}
+
+#: Every absence in this census is reported — the zero the runbook §2.2 and the
+#: ``docs/00_index.md`` row publish. A NON-zero value here means a class stopped
+#: reporting, i.e. a counted outcome became a silent drop; re-measure before
+#: touching this constant.
+SILENT_ABSENCES = 0
 
 #: The census, measured 2026-10-25 at main + this branch's changes, through the
 #: SHIPPED resolution order. Any change here is a change in the SHIPPED
@@ -275,6 +299,61 @@ def test_every_value_bearing_point_carries_a_span_or_is_a_REPORTED_class():
     assert census["absences"] == CENSUS["absences"], (
         f"absence classes moved: {census['absences']} != {CENSUS['absences']}"
         " — a NEW class here means a silent drop, check it before updating")
+
+
+def test_every_absence_in_the_census_is_REPORTED():
+    """**0 silent absences** — the claim the runbook and the index row publish.
+
+    Measured over the whole committed population, in the SHIPPED order
+    (``_resolve_source_turn`` then ``_value_verbatim_span``): every value-bearing
+    absence must carry at least one warning, and it must be the warning of ITS
+    OWN class — not any warning at all. The ``empty_quote`` leg is the one that
+    matters: it has NO span-side warning (there is no verbatim text to address),
+    so the only thing that keeps it out of the silent-drop class is the resolver,
+    which runs first and reports it either as "unverified (empty quote) — using
+    it" (in-range model index) or as "no resolvable source turn".
+
+    ⛔ One shape is silent BY CONSTRUCTION and is NOT exercised here: with an
+    EMPTY ``edus`` list ``_resolve_source_turn`` returns ``None`` before any
+    warning. Declared in runbook §2.2 rather than measured, because the census
+    has no such point."""
+    silent: list[tuple[str, str, str, str]] = []
+    wrong_class: list[tuple[str, str, str, list[str]]] = []
+    reported = 0
+    for session in SESSIONS:
+        edus = _edus(session)
+        for arm in ARMS:
+            for point in _points(session, arm):
+                content = point.get("content") or ""
+                quote = point.get("quote") or ""
+                if not v2._carries_value(content, quote):
+                    continue
+                warnings: list[str] = []
+                turn_idx = v2._resolve_source_turn(point, edus,
+                                                   warnings=warnings)
+                if v2._value_verbatim_span(content, quote, turn_idx, edus,
+                                           warnings=warnings) is not None:
+                    continue
+                klass = _absence_class(turn_idx, quote, warnings)
+                if not warnings:
+                    silent.append((klass, session, arm, content[:60]))
+                    continue
+                reported += 1
+                expected = EXPECTED_ABSENCE_WARNINGS[klass]
+                if not any(any(e in w for e in expected) for w in warnings):
+                    wrong_class.append((klass, session, arm, warnings))
+    assert silent == [], (
+        "value-bearing absences NO consumer can see (neither the resolver nor "
+        f"the stamp warned): {silent} — that is the silent-drop class the "
+        "census claims is empty (§2.2), so the runbook + the index row must "
+        "stop claiming \"0 silent\"")
+    assert wrong_class == [], (
+        "absences reported by a message that does not name their class — the "
+        f"report exists but a consumer cannot tell WHICH absence it is: {wrong_class}")
+    assert reported == sum(CENSUS["absences"].values()) - SILENT_ABSENCES, (
+        f"reported absences moved: {reported} != "
+        f"{sum(CENSUS['absences'].values()) - SILENT_ABSENCES} — re-measure "
+        "§2.2 and the index row before changing SILENT_ABSENCES")
 
 
 def test_every_stamped_span_addresses_the_whole_quote_and_carries_a_value():

@@ -3130,7 +3130,15 @@ class TestValueVerbSpan2684:
     def test_empty_quote_model_index_path_carries_no_span(self):
         """The model-index route (empty quote + in-range index) has no
         verbatim text to address — no span, and not the band's warning
-        either: the band was not consulted."""
+        either: the band was not consulted.
+
+        The absence is still REPORTED, by the resolver that runs first —
+        ``_value_verbatim_span`` cannot say it (its warning needs a non-empty
+        quote), so this route's report is the D4 step-3 "unverified (empty
+        quote)" message. Pinned because the census publishes "0 silent
+        absences" and this is the branch that keeps the empty-quote class out
+        of the silent-drop class (the corpus's own point carries no model
+        index and takes the "no resolvable source turn" branch instead)."""
         r = v2.execute_embed(
             self._embed("the user's 5K best is 27:12", source_turn_id=1),
             {}, session_id="s1", edus=self.EDUS)
@@ -3138,6 +3146,11 @@ class TestValueVerbSpan2684:
         assert pt["source_turn_id"] == 1
         assert "span_start" not in pt
         assert not any("token-overlap band" in w for w in r["warnings"])
+        assert any("unverified (empty quote)" in w for w in r["warnings"]), (
+            f"the empty-quote absence is no longer reported here: {r['warnings']} "
+            "— the census's \"0 silent absences\" and runbook §2.2 depend on this "
+            "warning; if the resolver stopped emitting it, that class IS a silent "
+            "drop now")
 
     def test_span_is_all_or_nothing_on_the_payload(self):
         """A half span is not an address — the two offsets are written
