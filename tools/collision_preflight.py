@@ -91,6 +91,38 @@ Design contract
    hits are reported LOUDLY on the ADVISORY surface `merged PRs naming an OPEN
    issue`; they can never decide a verdict.
 
+6. THE NUMBER IS RESOLVED TO THE WORK ITEM, NOT REFUSED (#9957). A pull request
+   number is also an issue number on GitHub, so a lane BRIEFED by PR number is a
+   normal input — and the gate used to answer it with a refusal that NAMED the
+   linked issue and then asked the dispatcher to re-read it. Measured on #9941:
+   it served #7970, three lanes held #7970, and a fourth dispatch keyed on the
+   PR number was one keystroke from being allowed. The tool held the mapping and
+   did not use it.
+
+   So an OPEN PR number is resolved through the three mechanical signals it
+   carries, in SOURCE-FIRST order: GitHub's computed `closingIssuesReferences`
+   (unioned with the body's closing keyword), then the `(#N)` title convention,
+   then the `<type>/<n>-<slug>` branch convention. The verdict is then computed
+   for the resolved work item(s) — the SAME pre-flight, the same surfaces, and
+   the SAME exit codes (0/1/2/4). A PR whose work item cannot be resolved is a
+   REFUSAL (exit 2, cause (b)) that names what it checked and could not resolve:
+   "could not resolve" is never CLEAN. ⛔ Nothing here is table-driven and
+   nothing is special-cased by number — a mapping table would answer for the
+   numbers someone happened to record and would silently stop answering for the
+   next one.
+
+   ⛔ RESOLUTION CAN ONLY TIGHTEN. Every resolved number is matched against the
+   PR that produced it on the re-run (its title, branch or closing reference is
+   where the number came from), and several work items aggregate WORST-FIRST
+   (`_EXIT_SEVERITY`). So a resolution can add a refusal and can never authorise
+   a dispatch that the direct run would have refused. The residual is stated
+   rather than hidden: a MERGED or CLOSED PR number is not resolved at all (the
+   refusal this relies on is scoped to OPEN PRs, #7009), so such a number keeps
+   its old, documented behaviour — reports immutable history and can read CLEAN.
+   A lane that wants the landed answer for a terminal PR must name the issue;
+   resolving a terminal PR would need a targeted `gh pr view` on EVERY run,
+   which is a fleet-shared GraphQL cost this change does not add.
+
 Surfaces (8 rows, ALL hit-capable)
 ----------------------------------------------------------------------------
   issue landed              issue state (gh issue view);     (CLOSED issue —
@@ -351,12 +383,17 @@ on the caller's OWN artifacts is reported as yours and cannot block. Inferring
 
 Usage
 -----
-    uv run python tools/collision_preflight.py <issue-number>
+    uv run python tools/collision_preflight.py <issue-or-PR-number>
         [--repo OWNER/NAME | --repo PATH]
         [--self-branch REF] [--self-worktree PATH]
         [--gh PATH] [--git PATH]
         [--timeout SECS] [--pr-limit N] [--closed-pr-limit N]
         [--closed-pr-timeout SECS]
+
+An OPEN PULL REQUEST number is accepted and RESOLVED to the work item(s) it
+serves (#9957) — see design-contract point 6. The number to give it is still
+the ISSUE's, and a PR number is only a convenience: resolving one costs extra
+surfaces, while the issue number is the target every brief should name.
 
 ``--repo`` accepts EITHER ``owner/name`` (the GitHub target; a local clone is
 located for the git surfaces) OR a path to a worktree of the target repo (the
@@ -401,11 +438,16 @@ Exit codes
                         failure cannot conceal one (#5251). Rendered as a report
                         ending in `VERDICT: INCOMPLETE`.
                     (b) the queried NUMBER is not a work item: it is an OPEN PULL
-                        REQUEST (#7009). Raised by `NotAWorkItem` BEFORE any
-                        verdict is computed, so this cause prints NO report and
-                        NO `VERDICT` line — only the refusal, on stderr. The
-                        remedy is NOT "fix gh auth/network"; it is "re-run with
-                        the issue number". A caller keying its remedy on
+                        REQUEST (#7009) whose work item could not be RESOLVED
+                        (#9957). Raised by `NotAWorkItem` BEFORE any verdict is
+                        computed, so this cause prints NO report and NO
+                        `VERDICT` line — only the refusal, on stderr, in TWO
+                        sentences: why a PR number cannot be answered, then what
+                        the resolver checked and could not resolve. The remedy is
+                        NOT "fix gh auth/network"; it is "re-run with the issue
+                        number". ⛔ A PR number whose work item IS resolvable never
+                        reaches this cause — it is gated as that work item. A
+                        caller keying its remedy on
                         `VERDICT: INCOMPLETE` will MISS this one; keying on the
                         exit code alone cannot tell (a) from (b).
                     (c) the TARGET is ambiguous: `--repo` was omitted and the number
@@ -528,6 +570,25 @@ EXIT_USAGE = 3
 # gets an explicit LANDED arm in this same change, so the new verdict is not
 # silently defeated there (it used to fall through to "no verdict").
 EXIT_LANDED = 4
+
+#: #9957: the WORST verdict wins when one PR number resolves to SEVERAL work
+#: items. Ordered by how decisive the refusal is, and not by numeric value: 4 is
+#: a terminal fact (the docstring says it takes precedence over 1 and 2), 1 is a
+#: live claim, 2 is "the world could not be read", 0 authorises a dispatch.
+#: Aggregating this way can only ever RAISE the code, never lower it — so
+#: resolving to more work items can add a refusal and can never authorise one.
+_EXIT_SEVERITY = {
+    EXIT_CLEAN: 0,
+    EXIT_INCOMPLETE: 1,
+    EXIT_COLLISION: 2,
+    EXIT_LANDED: 3,
+}
+_EXIT_LABEL = {
+    EXIT_CLEAN: "CLEAN",
+    EXIT_COLLISION: "COLLISION",
+    EXIT_INCOMPLETE: "INCOMPLETE",
+    EXIT_LANDED: "LANDED",
+}
 
 DEFAULT_TIMEOUT = 60.0
 # PR caps are completeness bounds, not sampling windows: OPEN PRs are fetched
@@ -729,7 +790,28 @@ class NotAWorkItem(Exception):
 
     `EXIT_INCOMPLETE` is the protocol's existing "do not start on a guess"
     verdict, so this needs no new exit code, flag or gate.
+
+    ⛔ IT NOW CARRIES THE PR RECORD, AND `main()` RESOLVES IT (#9957). Before
+    this, the refusal was where a PR-numbered dispatch ENDED: the gate said
+    "re-run with the issue number" and left the caller to obey prose. Measured
+    on #9941, three lanes held the issue and a fourth dispatch keyed on the PR
+    number was about to be allowed, because the number one away from the work —
+    and the tool already had it in hand, in the message it printed. So the
+    refusal is now the RESOLUTION TRIGGER: `pr` is the PR entry the scan
+    refused on (its title, head ref, body and computed closing references), and
+    `resolve_pull_request_work_items` turns it into the work item(s) the run
+    should have been asked about. A refusal remains the outcome only when that
+    resolution FAILS (see the reason `main()` prints).
     """
+
+    #: The PR entry the refusal was raised for (title / headRefName / body /
+    #: closingIssuesReferences). Empty when the raiser had none read — the
+    #: resolution then has nothing to resolve and the refusal stands.
+    pr: dict
+
+    def __init__(self, message: str = "", pr: dict | None = None) -> None:
+        super().__init__(message)
+        self.pr = pr or {}
 
 
 class BoardRefusal(str):
@@ -1498,13 +1580,279 @@ def closing_reference(text: str, issue: int) -> bool:
     `_closing_ref_numbers` as the SOURCE, and this regex only as an
     ADDING-ONLY union (when the field was requested) or as the documented
     REST-rescue fallback, whose hits stay `strong`.
+
+    ⛔ THE GRAMMAR LIVES IN ONE PLACE (#9957). This used to spell the pattern
+    inline, and `_closing_numbers_in_text` needs the SAME grammar to answer the
+    opposite question ("which issues does this text close?" instead of "does it
+    close #N?"). Two copies of a grammar drifting apart is the precise defect
+    #3504 deleted, so the pattern is defined once and this predicate is a
+    membership test over it.
     """
-    if not text:
-        return False
-    pattern = (
-        rf"(?i)\b(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\s*:?\s*#{issue}(?![0-9])"
+    return issue in _closing_numbers_in_text(text)
+
+
+#: The closing-keyword grammar: the ONE definition, used by
+#: `closing_reference` (does this text close #N?) and by
+#: `_closing_numbers_in_text` (which issues does this text close?).
+_CLOSING_KEYWORD_RE = re.compile(
+    r"(?i)\b(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\s*:?\s*#(\d+)(?![0-9])"
+)
+
+
+def _arm_numbers(text: str | None, pattern: re.Pattern) -> list[int]:
+    r"""Numbers a `pattern` states in `text`, in order, deduped.
+
+    One reader for every `(#N)`-shaped arm, so a match is parsed in exactly one
+    place instead of a grammar being re-spelled per arm.
+
+    ⛔ THE WIDTH IS UNBOUNDED ON PURPOSE (`\d+`, not `\d{3,7}`), AND THAT IS A
+    FAIL-OPEN FIX. `closing_reference` delegates here, and its pre-#9957 pattern
+    was `#{issue}(?![0-9])` with NO width bound — so narrowing the shared grammar
+    would have stopped `Closes #42` matching issue 42. On the REST-rescued
+    open-PR surface the body keyword is the ONLY closing signal and a
+    non-terminal hit there is `strong`, so that narrowing silently DROPS a
+    blocking hit and a false CLEAN can authorise a dispatch. Measured by review
+    (#9957 cycle 1): `#7`, `#42`, `#99` went True -> False under the narrow form.
+    `test_closing_reference_still_sees_short_issue_numbers` pins it. A width
+    bound belongs in `_is_plausible_issue_number`, which is the RESOLVER's own
+    policy — the resolver over-blocks by construction, while this predicate is
+    one a verdict depends on.
+
+    ⛔ AND NO HEX-DIGEST GUARD HERE, DELIBERATELY. `number_present` needs one
+    because it searches ARBITRARY text for a number (#4935, #3611). Every
+    pattern passed here anchors its digits to a non-hex delimiter — a `#`, then
+    end-of-run or `)` / `-` — and `_inside_hex_digest` requires hex on BOTH
+    sides, so it can never fire on these arms: the left side is always the
+    pattern's own literal. A guard that cannot fire reads as protection and is
+    not, which is the standard this file applies to every other dead face.
+    ⛔ If a future arm does NOT anchor its digits, it must add the guard back.
+    """
+    body = text or ""
+    numbers: list[int] = []
+    for match in pattern.finditer(body):
+        value = int(match.group(1))
+        if value not in numbers:
+            numbers.append(value)
+    return numbers
+
+
+
+def _closing_numbers_in_text(text: str | None) -> list[int]:
+    """Every issue number this text CLOSES by keyword, in order, deduped.
+
+    The inverse of `closing_reference`, over the same grammar — and over the same
+    `_arm_numbers` body, so there is exactly one place a match is read.
+    """
+    return _arm_numbers(text, _CLOSING_KEYWORD_RE)
+
+
+# ── #9957: a PULL REQUEST number is a dispatch input too ────────────────────
+# A pull request number IS an issue number on GitHub, so a lane briefed by PR
+# number is a NORMAL input — and the gate used to answer it with a refusal that
+# named the linked issue and then asked the dispatcher to re-read. Measured on
+# #9941: it closed #7970, three lanes held #7970, and a fourth dispatch keyed on
+# `#9941` was one keystroke from being allowed. The gate held the mapping (it
+# printed "It closes #7970") and did not use it — "a tool that cannot answer its
+# own question".
+#
+# So the number is RESOLVED, never special-cased and never table-driven: the
+# three mechanical signals a PR carries are read in the order that prefers the
+# SOURCE over a re-derivation (#3504).
+#
+# ⛔ WHY A PRECEDENCE CHAIN AND NOT A UNION OF ALL THREE. The union is SAFE —
+# `resolve_pull_request_work_items`' verdicts are aggregated worst-first, and
+# every arm's number is guaranteed to match the PR itself on the re-run, so an
+# extra arm can only ADD a refusal, never authorise one. It is noisy instead:
+# `(#2048)` in a title or `perf/1200-rps-cache` in a branch can be a SIZE or a
+# METRIC, and resolving those drags an unrelated issue into the run (where an
+# issue-absent surface makes the whole dispatch INCOMPLETE). The closing
+# reference is exact by construction; it is tried first and, when it speaks, it
+# is the answer.
+#
+# ⛔ WHY THE BRANCH ARM IS WIDER THAN `_LANE_BRANCH_CLAIM`. That regex is also
+# used to DEMOTE a blocking path hit, where widening is a false CLEAN (#9540) —
+# so it stays `fix/`-only. Here a wider match can only resolve the run onto a
+# number the PR itself will then be matched against, i.e. over-block at worst:
+# #9941's branch is `feat/7970-record-serves-anchored-reads`, and a `fix/`-only
+# resolver would have failed on exactly the case that filed this issue.
+_TITLE_ISSUE_RE = re.compile(r"\(#(\d+)\)")
+_RESOLVE_BRANCH_ISSUE = re.compile(
+    r"^(?:[A-Za-z][A-Za-z0-9._-]*)/#?(\d+)(?![0-9])(?:-|$)"
+)
+
+#: The widest number the resolver will treat as an ISSUE. Deliberately generous
+#: (this repo is at ~10k), and a policy of the RESOLVER only — it is why
+#: `_arm_numbers` keeps its grammar unbounded: a bound here can only cost the
+#: resolver a resolution (a refusal, the fail-closed direction), while a bound in
+#: the shared grammar would narrow `closing_reference`, a predicate a verdict
+#: depends on.
+_ISSUE_NUMBER_MAX = 9_999_999
+
+
+def _is_plausible_issue_number(value: int) -> bool:
+    """Is `value` a number that could NAME an issue, rather than an id or a size?
+
+    A wider run (`(#1234567890123)`) is a snowflake, a timestamp or a metric;
+    resolving one would only spend a `gh issue view` on a number that cannot
+    exist. The bound is the resolver's own — see `_ISSUE_NUMBER_MAX`.
+    """
+    return 0 < value <= _ISSUE_NUMBER_MAX
+
+#: How each arm is named in the resolution line and in the refusal message.
+_ARM_CLOSING = "closing reference"
+_ARM_TITLE = "title `(#N)`"
+_ARM_BRANCH = "branch `<type>/<n>-<slug>`"
+
+
+@dataclass(frozen=True)
+class WorkItemResolution:
+    """What a PULL REQUEST number resolves to (#9957).
+
+    `issues` is empty exactly when NO arm produced a work item; `checked` then
+    carries one factual line per arm, which is the refusal's evidence. It is
+    built by the resolver, never re-derived by the caller, so the message cannot
+    claim a check that did not run.
+    """
+
+    number: int
+    issues: tuple[int, ...]
+    arm: str | None
+    checked: tuple[str, ...]
+    dropped_self: bool
+    @property
+    def resolved(self) -> bool:
+        return bool(self.issues)
+
+
+def resolve_pull_request_work_items(
+    pr: dict, number: int,
+) -> WorkItemResolution:
+    """The work item(s) a PULL REQUEST serves — the number a dispatch meant.
+
+    Three mechanical signals, read in SOURCE-FIRST order (see the section note
+    above): GitHub's own computed `closingIssuesReferences` (unioned with the
+    body's closing keyword, the same deliberate ADDING-ONLY union
+    `scan_pr_surface` documents), then the repo's own `(#N)` title convention,
+    then the `<type>/<n>-<slug>` branch convention.
+
+    ⛔ THE PR'S OWN NUMBER IS NEVER A WORK ITEM. A PR that "closes" itself is
+    the same object, so `number` is dropped from every arm's result — without
+    that, resolution would hand the caller back the number it refused, which
+    either loops or re-refuses with a misleading reason. `dropped_self` records
+    that it happened, so the refusal can say so instead of claiming nothing was
+    found.
+
+    ⛔ AN UNREADABLE CLOSING FIELD IS NOT AN EMPTY ONE. `_closing_ref_numbers`
+    raises on an absent/malformed field (the REST-rescued list genuinely has
+    none, #9402), and reading that as "closes nothing" is the fail-OPEN
+    direction. The arm records that it could not be read and falls through to
+    the next arm — it never asserts a fact the read did not establish.
+
+    No I/O, no verdict: this answers "which work items?" and nothing else, so
+    it is directly testable and cannot itself decide a dispatch.
+    """
+    checked: list[str] = []
+    unreadable = False
+    try:
+        closing = list(_closing_ref_numbers(pr))
+    except SurfaceError:
+        unreadable = True
+        closing = []
+    body_numbers = _closing_numbers_in_text(pr.get("body"))
+    closing += [n for n in body_numbers if n not in closing]
+
+    title_numbers = _arm_numbers(pr.get("title"), _TITLE_ISSUE_RE)
+    head = pr.get("headRefName") or ""
+    if _is_generated_branch(head):
+        # A tool-minted branch (`mergify/merge-queue/6160bad001`) claims
+        # nothing — the same reason it is not read as an issue claim anywhere
+        # else in this module.
+        branch_numbers: list[int] = []
+        branch_note = f"branch {head!r} is tool-generated and claims nothing"
+    else:
+        branch_numbers = _arm_numbers(head, _RESOLVE_BRANCH_ISSUE)
+        branch_note = (
+            f"branch {head!r} names no issue as `<type>/<n>-<slug>`"
+            if not branch_numbers else
+            "branch " + repr(head) + " names "
+            + ", ".join(f"#{n}" for n in branch_numbers)
+        )
+
+    if unreadable:
+        checked.append(
+            "closing references: the computed field could not be read and the "
+            "body carries no closing keyword"
+            if not body_numbers else
+            "closing references: the computed field could not be read; the body's "
+            "closing keyword names " + ", ".join(f"#{n}" for n in body_numbers)
+        )
+    elif closing:
+        checked.append(
+            "closing references name " + ", ".join(f"#{n}" for n in closing)
+        )
+    else:
+        checked.append(
+            "closing references name nothing (the computed field is empty and the "
+            "body has no closing keyword)"
+        )
+    checked.append(
+        f"title {pr.get('title')!r} names no issue as `(#N)`"
+        if not title_numbers else
+        "title " + repr(pr.get("title")) + " names "
+        + ", ".join(f"#{n}" for n in title_numbers)
     )
-    return re.search(pattern, text) is not None
+    checked.append(branch_note)
+
+    dropped: set[int] = set()
+
+    def _keep(values: list[int]) -> list[int]:
+        kept: list[int] = []
+        for value in values:
+            if value == number:
+                dropped.add(value)
+                continue
+            if _is_plausible_issue_number(value) and value not in kept:
+                kept.append(value)
+        return kept
+
+    for arm, values in (
+        (_ARM_CLOSING, closing),
+        (_ARM_TITLE, title_numbers),
+        (_ARM_BRANCH, branch_numbers),
+    ):
+        kept = _keep(values)
+        if kept:
+            return WorkItemResolution(
+                number=number, issues=tuple(sorted(kept)), arm=arm,
+                checked=tuple(checked), dropped_self=bool(dropped),
+            )
+    return WorkItemResolution(
+        number=number, issues=(), arm=None, checked=tuple(checked),
+        dropped_self=bool(dropped),
+    )
+
+
+def _resolution_failure(resolution: WorkItemResolution) -> str:
+    """The refusal that NAMES what could not be resolved (#9957).
+
+    Fail-closed by construction: this string is only ever reached on the path
+    that returns `EXIT_INCOMPLETE`, and it never claims a check that did not
+    run — the evidence lines are the resolver's own, not a re-telling.
+    """
+    number = resolution.number
+    if resolution.dropped_self and not resolution.issues:
+        return (
+            f"could not resolve #{number} to a work item: every work-item "
+            f"reference it carries is #{number} — the PR's OWN number, which is "
+            "the PR and not the work it serves. Nothing was checked about any "
+            "issue, and that is NEVER clean. Re-run with the issue number."
+        )
+    return (
+        f"could not resolve #{number} to a work item, so no verdict about the "
+        f"issue it serves could be computed. Checked: {'; '.join(resolution.checked)}. "
+        "Nothing was checked about any issue, and that is NEVER clean. Re-run "
+        "with the issue number."
+    )
 
 
 # ── git surfaces ─────────────────────────────────────────────────────────────
@@ -4736,7 +5084,11 @@ def scan_pr_surface(
                 f"computed here describes the PR and NOT the issue it belongs "
                 f"to — and an exit 0 would authorise a dispatch on work this "
                 f"PR belongs to.{where} Re-run with the issue number this PR "
-                f"belongs to."
+                f"belongs to.",
+                # #9957: the record travels WITH the refusal, so `main()` can
+                # resolve the number to the work item instead of handing the
+                # caller's prose-obedience problem back to it.
+                pr=pr,
             )
         # 1. SELF (#3504 class 4; #4567's ordering root cause).
         if identity.owns_branch(head):
@@ -7939,6 +8291,94 @@ class _UsageParser(argparse.ArgumentParser):
         self.exit(EXIT_USAGE, f"{self.prog}: error: {message}\n")
 
 
+def _verdict_for_pull_request(
+    exc: NotAWorkItem,
+    number: int,
+    run_one,
+) -> tuple[str | None, int]:
+    """Resolve a PR number to the work item(s) it serves, and gate THOSE (#9957).
+
+    Called only when the pre-flight refused the number as an open pull request.
+    The refusal is the TRIGGER, not the answer: the gate already holds the
+    mapping (it printed "It closes #N"), so it resolves instead of handing the
+    caller a prose instruction. This is the whole of the fix — the same
+    pre-flight, the same surfaces, the same exit codes, run against the number
+    the dispatch MEANT.
+
+    `run_one` is `main`'s own single-number pre-flight, passed in rather than
+    re-implemented so a resolved run cannot drift from a direct one.
+
+    Fail-closed in every degenerate shape:
+
+      * no work item resolvable  -> the two-part refusal names WHY (the
+        resolver's own evidence lines), and the code is `EXIT_INCOMPLETE` —
+        never `EXIT_CLEAN`. This is #9957's own rule, and the same polarity the
+        main-health rule uses: a missing check is not a green check;
+      * a resolved number is ITSELF an open PR -> refused, not re-resolved.
+        Recurse and a PR whose only reference is a peer PR loops; refuse and
+        the caller gets the same "re-run with the issue number" remedy it
+        would have got before, which is the safe end of that shape;
+      * several work items -> EVERY one is gated and the WORST verdict decides
+        (`_EXIT_SEVERITY`), so a resolution can add a refusal and can never
+        authorise a dispatch one of its work items would have refused.
+    """
+    resolution = resolve_pull_request_work_items(exc.pr or {}, number)
+    if not resolution.resolved:
+        # BOTH halves are printed: the first is the sentence the caller already
+        # knows (and several tests pin its wording), the second is the NEW fact
+        # — what was checked and what could not be resolved. A refusal that
+        # does not say what it looked at is a refusal the caller cannot repair.
+        print(f"collision-preflight: {exc}", file=sys.stderr)
+        print(
+            "collision-preflight: " + _resolution_failure(resolution),
+            file=sys.stderr,
+        )
+        return None, EXIT_INCOMPLETE
+
+    results: list[tuple[int, int, str]] = []
+    for issue in resolution.issues:
+        try:
+            text, code = run_one(issue)
+        except NotAWorkItem as inner:
+            print(
+                f"collision-preflight: #{number} resolves to #{issue}, which is "
+                f"itself an open pull request — {inner} The work item could not "
+                "be established, so nothing was checked and this is NEVER "
+                "clean.",
+                file=sys.stderr,
+            )
+            return None, EXIT_INCOMPLETE
+        results.append((code, issue, text))
+
+    worst_code = max(results, key=lambda row: _EXIT_SEVERITY[row[0]])[0]
+    # Worst LAST, so the last `VERDICT:` line a reader sees is the deciding one
+    # — a caller that greps the tail cannot be shown a CLEAN work item while a
+    # sibling refused.
+    results.sort(key=lambda row: _EXIT_SEVERITY[row[0]])
+    map_text = ", ".join(f"#{issue}" for issue in resolution.issues)
+    header = (
+        f"collision-preflight: a PULL REQUEST number was given — #{number}. A "
+        "pull request number is ALSO an issue number, so a verdict computed for "
+        f"#{number} would describe the PR and never the work it serves. Resolved "
+        f"via {resolution.arm}: #{number} → {map_text}. The report(s) below are "
+        "computed for the WORK ITEM(S); exit 0 still means dispatch.\n"
+    )
+    body = "".join(text for _code, _issue, text in results)
+    if len(results) == 1:
+        return header + body, worst_code
+    per_item = ", ".join(
+        f"#{issue} {_EXIT_LABEL[code]}" for code, issue, _text in results
+    )
+    tail = (
+        f"RESOLUTION: PR #{number} → {len(results)} work item(s) "
+        f"({per_item}); the WORST decides "
+        f"{_EXIT_LABEL[worst_code]} (exit {worst_code})"
+        + ("; do NOT dispatch" if worst_code != EXIT_CLEAN else "")
+        + ".\n"
+    )
+    return header + body + tail, worst_code
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _UsageParser(
         prog="collision_preflight",
@@ -8137,21 +8577,38 @@ def main(argv: list[str] | None = None) -> int:
     if rc == 0 and out.strip():
         identity.login = out.strip()
 
-    try:
+    def _run_one(number: int) -> tuple[str, int]:
+        """The pre-flight + report for ONE number.
+
+        Factored out (#9957) so a RESUMED run — one that resolved a PR number to
+        its work item — goes through the identical path. A second entry point
+        would be a second set of surfaces to keep in step.
+        """
         ordered, title, issue = run_preflight(
-            args.issue, target, args.gh, args.git, args.timeout,
+            number, target, args.gh, args.git, args.timeout,
             args.pr_limit, args.closed_pr_limit,
             closed_pr_timeout, identity,
         )
-        report, code = format_report(ordered, issue, target, title)
-    except NotAWorkItem as exc:
-        # The refusal is about the QUESTION, not about a surface, so it must not
-        # be absorbed into a per-surface note and must never become a verdict.
-        # Exit 2 is the protocol's "could not be completed — do not start on a
-        # guess" channel (#7009).
-        print(f"collision-preflight: {exc}", file=sys.stderr)
-        return EXIT_INCOMPLETE
-    except RuntimeError as exc:  # partial-run guard
+        return format_report(ordered, issue, target, title)
+
+    try:
+        try:
+            report, code = _run_one(args.issue)
+        except NotAWorkItem as exc:
+            # The refusal is about the QUESTION, not about a surface, so it must
+            # not be absorbed into a per-surface note and must never become a
+            # verdict.
+            #
+            # ⛔ #9957: THE REFUSAL IS NOW THE RESOLUTION TRIGGER. A PR number is
+            # a normal dispatch input, and the gate already holds the work item's
+            # number — so it answers about the WORK rather than asking the caller
+            # to obey prose. Only a resolution that FAILS still ends here, and it
+            # then names what it could not resolve (exit 2, the protocol's "do
+            # not start on a guess" channel, #7009).
+            report, code = _verdict_for_pull_request(exc, args.issue, _run_one)
+            if report is None:
+                return code
+    except RuntimeError as exc:  # partial-run guard — BOTH paths
         print(f"collision-preflight: {exc}", file=sys.stderr)
         return EXIT_USAGE
     sys.stdout.write(report)
