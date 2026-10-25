@@ -1,0 +1,108 @@
+# THROWAWAY PROBE (#5120) — never merge. Deleted with the `probe/5120` branch.
+#
+# It exists for ONE reason: the production reporter only runs on a `push` to main
+# AND after a lint failure (that `if:` is pinned by
+# tests/test_reporting_workflow_concurrency.py), so "lint is clean and the REPORTER
+# fails" cannot be produced inside main-lint.yml at all. This harness runs the
+# artifact's OWN reporter step — copied verbatim from main-lint.yml by
+# `.github/workflows/../scripts`-free extraction, byte-identical `script:`, same
+# `continue-on-error`, same permissions — against a forced failure, with a clean
+# "lint" stand-in. Expected: job SUCCESS + two NOTIFICATION FAILED warnings.
+name: probe-5120-reporter
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  clean-lint-failing-reporter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: "Lint stand-in (this harness has no ruff step on purpose)"
+        run: echo "::notice title=lint stand-in::verdict PASS — the reporter is the only thing under test here"
+      - name: "Reporter (copied verbatim from main-lint.yml, forced to fail)"
+        if: always()
+        continue-on-error: true
+        uses: actions/github-script@v7
+        env:
+          SIMULATE_COMMENT_FAILURE: 'true'
+        with:
+          script: |
+            const simulate = String(process.env.SIMULATE_COMMENT_FAILURE) === 'true';
+            const { owner, repo } = context.repo;
+            const marker = `commit ${context.sha}`;
+            // ⛔ A NON-PUSH RUN IS NOT THE MERGED TREE, and the body below claims a
+            // POST-MERGE failure of main. On a dispatch, `context.sha` is the branch
+            // head and `listPullRequestsAssociatedWithCommit` resolves a commit that
+            // is not on the default branch to its MERGED **AND OPEN** pull requests —
+            // so the unguarded path posts "main is now lint-red" onto an unmerged
+            // PR, permanently (the marker makes it idempotent, so no re-run corrects
+            // it). Only the push arm may notify; the probe is exempt because it
+            // never writes to a real issue.
+            if (context.eventName !== 'push' && !simulate) {
+              core.info(`main-lint: ${context.eventName} run on ${context.ref} is not the merged tree — not notifying`);
+              return;
+            }
+            // A reporter failure must never read as a verdict, and must never be
+            // anonymous: the endpoint and the HTTP status are the two things the
+            // 2026-10-25 lane could not recover from `Resource not accessible by
+            // integration` alone (#5120).
+            const warn = (what, err) => core.warning(
+              `main-lint NOTIFICATION FAILED — ${what}: ${err.message}`
+              + `${err.status ? ` (HTTP ${err.status})` : ''}. The VERDICT is unaffected `
+              + `(read the "Publish the verdict" step); this step cannot fail the job.`,
+            );
+            let pr = null;
+            try {
+              // Attribution moved off `needs.dedup-check.outputs.pr_number` (that
+              // job lives in post-merge-validation.yml, which this workflow left
+              // behind on purpose). Merge, squash and rebase commits all resolve
+              // here; a direct push simply has no PR to name.
+              const { data } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+                owner, repo, commit_sha: context.sha,
+              });
+              pr = data.length ? data[0].number : null;
+            } catch (err) {
+              warn('repos.listPullRequestsAssociatedWithCommit (attribution)', err);
+            }
+            // The probe deliberately skips the `!pr` early return: a branch
+            // commit has no PR attribution, and the reporter-failure path is
+            // exactly what it is here to exercise.
+            const target = simulate ? 999999999 : pr;
+            if (!target) {
+              core.warning('main lint failed but no PR attribution — see the merge commit check');
+              return;
+            }
+            const body = `⚠️ This PR **failed post-merge ruff lint on main** (run ${context.runId}, ${marker}). Main is now lint-red, which reddens the merge ref of **every** open PR until it is fixed. Reproduce locally with \`pip install ruff==0.16.4 && ruff check .\` and open a fix PR.`;
+            let already = false;
+            try {
+              // IDEMPOTENT: the natural response to a red main is "re-run", and an
+              // unconditional comment would append one more identical warning per
+              // re-run to the merged PR.
+              const existing = await github.rest.issues.listComments({
+                owner, repo, issue_number: target, per_page: 100,
+              });
+              already = existing.data.some(
+                (comment) => comment.body && comment.body.includes(marker),
+              );
+            } catch (err) {
+              // A failed READ is not a reason to stay silent: the marker check is
+              // an optimisation, and one duplicate comment is recoverable while a
+              // missing one is the defect this step exists for.
+              warn(`issues.listComments on #${target} (the duplicate check)`, err);
+            }
+            if (already) {
+              core.info(`main-lint ${marker} already recorded on #${target} — not commenting again`);
+              return;
+            }
+            try {
+              await github.rest.issues.createComment({ issue_number: target, owner, repo, body });
+            } catch (err) {
+              // THE notification. Named as such, so the log says what was lost.
+              warn(`issues.createComment on #${target} (THE NOTIFICATION — the merged PR is not told)`, err);
+            }
