@@ -111,8 +111,10 @@ EVENT_READ = "read"
 EVENT_STOCK = "stock"
 EVENT_CAPPED = "capped"
 #: A returned row the ledger could not ADDRESS — it carries no value for its
-#: label's contract field (an FTS `Subject`/`Object`/`Source` row carries `id`,
-#: never `name`/`url`). Written as its
+#: label's contract field. ⚠️ Since #9881 moved `Subject`/`Object` to the `id`,
+#: those legs are NOT an example: an FTS hit always carries `id`, which IS their
+#: key. The live example is `Source`, whose key is `url` while a hit carries
+#: `sourcePath`. Written as its
 #: own event because a read the ledger cannot key is a HOLE in both the
 #: numerator and the denominator — dropping it silently would make the report
 #: claim a completeness it never had.
@@ -570,10 +572,17 @@ def row_key(label: str, row: Mapping[str, Any]) -> str | None:
 
     `label` is already half the coordinate, so two labels sharing one key string
     stay distinct rows. `None` means the row carries no value for the label's
-    CONTRACT field (an FTS `Object` row carries neither its `id` nor its
-    `name` in the hit shape) — counted as an UNRESOLVED read
+    CONTRACT field — counted as an UNRESOLVED read
     by the report rather than dropped silently, because a read the ledger cannot
     address is a hole in the denominator as well as in the numerator.
+
+    ⚠️ Do NOT read that as "the FTS `Object`/`Subject` legs are unaddressable":
+    they carry `id` (`search_engine.SearchResult.to_dict()` always emits it),
+    and since #9881 `id` IS their contract key, so those rows ARE addressable.
+    The funnel this module feeds records exactly those dicts. A row that lands
+    here has a WIRING gap or a genuinely keyless shape — e.g. a `Source` hit,
+    whose key is `url` and whose dict carries `sourcePath` (#8877), not an
+    unavoidable property of the label.
     """
     field_name = KEY_FIELDS.get(label)
     if field_name is not None:
@@ -1186,7 +1195,10 @@ def _main(argv: list[str] | None = None) -> int:
         print(
             f"⚠️ reads outside the denominator: {f.unregistered_reads} unregistered, "
             f"{f.unresolved_reads} with no value for their label's contract field "
-            f"(an FTS Subject/Object/Source row carries neither its `id` nor its `url`) — "
+            f"(a row produced without the field its label keys on — e.g. a `Source` "
+            f"hit carrying `sourcePath` but no `url`, which IS the Source key; the "
+            f"`Subject`/`Object` legs became addressable when #9881 moved their key "
+            f"to the `id` every hit carries) — "
             f"f undercounts the numerator by these"
         )
     if folded.lines_skipped:

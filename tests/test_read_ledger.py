@@ -229,6 +229,55 @@ def test_a_subject_row_keyed_only_by_name_is_unresolved_not_mis_keyed(ledger):
     assert fold(ledger).unresolved_reads == 1
 
 
+def test_the_fts_hit_shape_is_addressable_for_object_and_subject(ledger):
+    """#9948 review P3 — this module said the OPPOSITE, and it was false.
+
+    The comment carried across the #9881 key move read *"an FTS `Object` row
+    carries neither its `id` nor its `name` in the hit shape"*, which told an
+    operator that roughly the whole Subject/Object funnel is an unavoidable hole
+    — and it is not, in either direction:
+
+      * `search_engine.SearchResult.to_dict()` ALWAYS emits `id` and never emits
+        `name` (measured: the dict's keys are content/eventId/id/match_source/
+        point_kind/relationships/sessionId/similarity/snippet/sourcePath/
+        summary/topics), and
+      * `sdk`'s FTS leg records exactly those dicts (`out = [r.to_dict() …]` →
+        `read_ledger.record_rows(label, rows)`), so under the pre-#9881
+        `Object/Subject → name` contract EVERY such row was unresolved while
+        under the id contract they all resolve.
+
+    So the unaddressable label is `Source` (its key is `url`; a hit carries
+    `sourcePath`), i.e. a wiring gap (#8877), not a property of the labels.
+
+    Non-vacuity: with the pre-fix map (`Object`/`Subject → name`) the two
+    `row_key` assertions return `None` and the fold counts 2 unresolved — this
+    test fails, which is the point.
+    """
+    from tortoise.search_engine import SearchResult
+
+    def hit(node_id: str) -> dict:
+        """The funnel's own row shape, built by the class the funnel builds."""
+        return SearchResult(
+            id=node_id, content="acme", point_kind="object",
+            relationships=[], topics=[],
+        ).to_dict()
+
+    object_hit = hit("o1")
+    assert "id" in object_hit and "name" not in object_hit, object_hit
+
+    assert row_key("Object", object_hit) == "o1"
+    assert row_key("Subject", hit("s1")) == "s1"
+    assert read_ledger.record_rows("Object", [object_hit]) == 1
+    assert fold(ledger).unresolved_reads == 0, (
+        "an FTS Object/Subject hit was counted as UNRESOLVED — its contract key "
+        "is the `id` the hit always carries"
+    )
+
+    # …and the label that genuinely is not addressable in this shape, so the
+    # report's remaining warning keeps a true example.
+    assert row_key("Source", hit("d1")) is None
+
+
 def test_the_ledger_file_is_created_unreadable_to_others(ledger):
     """It holds tenant identifiers — 0600 on create, not the umask's default."""
     record_stock("Subject", "acme", nbytes=10)

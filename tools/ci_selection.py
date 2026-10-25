@@ -1540,6 +1540,25 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # had no entry.) Pinned by
              # tests/test_ci_selection.py::test_the_tenancy_migration_selects_the_posture_pins.
              "supabase/migrations/20261025000001_record_tenancy_role_and_guc.sql",
+             # #9881 / PR #9948 review P2: the FORWARD migration that
+             # RE-DECLARES the Object/Subject key contract — the
+             # `node_identity.key_property` CASE and both
+             # `chk_*_node_key_is_contract_key` pins. It is the one file that can
+             # re-declare what `record_projection.key_properties()` now reads
+             # (LAST declaration wins), and it sorts outside the
+             # `2026101200000` prefix while `supabase/` is a NON_PYTHON_PREFIX,
+             # so a diff touching only this file selected NO surface. Measured on
+             # the pre-fix head: `_sel([<this path>])` -> `surfaces: []`,
+             # `full: false`, and every reader of the contract —
+             # `test_record_projection.py`,
+             # `test_record_schema_placement.py`, `test_cache_projection.py`,
+             # `test_read_ledger.py` — absent from `test_files`. The
+             # #1349/#3332/#3616 silent-drop class, and the reason a `core`
+             # registration alone cannot fix it (a surface's test_files only run
+             # when that surface is ALREADY selected). Pinned by
+             # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change
+             # and ……::test_the_semantic_id_key_migration_selects_every_reader_of_the_contract.
+             "supabase/migrations/20261027000001_record_semantic_id_key.sql",
              # Re-stated at the migration pair, NOT replaced by it (#9638 review
              # P1): the DOC side is an independent member of this set. The
              # #9555/R7 entry above was inserted over this path, so a

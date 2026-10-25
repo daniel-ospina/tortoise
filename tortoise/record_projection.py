@@ -910,9 +910,12 @@ RECORD_MUTATIONS: dict[str, Mutation] = {
         note="#1350 — `supersededBy` is journal-carried verbatim (PRIMARY); "
              "`Object.status` is NOT written (projection-owned cache, §2.6) "
              "and `supersededAt` comes from the record's own envelope `ts`; "
-             "#9881 — keyed by the node's `id`, with the `name` column kept as "
-             "the natural-key match so a legacy line carrying no id still "
-             "resolves",
+             "#9881 — keyed by the node's `id`, and there is NO `name` "
+             "fallback: a line carrying no `id` is REFUSED at the door by "
+             "`_key_value` (the fail-closed shape, where the schema's own pin "
+             "would otherwise abort mid-transaction), and the patch is matched "
+             "on `node_key` — which IS the id since 20261027000001 — never on "
+             "`name`",
     ),
     "SubjectAdded": Mutation(
         NodeSnapshot(Node("subject", "Subject", "id"), path=None, key_from="id"),

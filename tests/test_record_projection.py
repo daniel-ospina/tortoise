@@ -389,6 +389,44 @@ def test_9881_a_rename_moves_the_name_and_never_the_objects_key():
     assert second[0].params[-1] == "1a16d368512-aa11", second[0].params
 
 
+def test_9881_an_objects_patch_with_no_id_is_refused_and_never_name_matched():
+    """#9948 review P3 — `ObjectSuperseded`'s note described a fallback that
+    does not exist, in the direction that matters (fail-OPEN).
+
+    The note said the `name` column is *"kept as the natural-key match so a
+    legacy line carrying no id still resolves"*. Neither half is true after
+    #9881: `_key_value(node, record, "id")` has NO `name` fallback (that
+    absence-keyed fallback exists only for `url`/`eventId`), so a name-only
+    record RAISES `RecordProjectionError`; and the patch goes through
+    `_patch_statement`'s default `match=("node_key",)`, which IS the id — never
+    `name`. Refusing at the door is the right shape (the schema's
+    `chk_object_node_key_is_contract_key` would abort the transaction later,
+    after the `node_identity` insert), and this pins it so a reader cannot be
+    told to expect a legacy fail-open path.
+
+    Non-vacuity: on the pre-#9881 tree the SAME record is accepted
+    (`Node("object", "Object", "name")`, `key_from="name"`) and returns an
+    UPDATE — so the `pytest.raises` below fails.
+    """
+    record = {"type": "ObjectSuperseded", "ts": "T", "name": "acme",
+              "superseded_by": "o2"}
+    with pytest.raises(rp.RecordProjectionError) as excinfo:
+        rp.mutations_for(record, org_id="o", graph_id="g")
+    assert "'id'" in str(excinfo.value), excinfo.value
+
+    statements = rp.mutations_for({**record, "id": "o1"}, org_id="o", graph_id="g")
+    assert len(statements) == 1, statements
+    sql = statements[0].sql
+    assert sql.startswith("UPDATE public.object"), sql
+    where = sql.split(" WHERE ", 1)[1]
+    assert "node_key = %s" in where, (
+        "the patch is not matched on `node_key` (the contract key since "
+        f"20261027000001): {where}")
+    assert "name" not in where, (
+        "the patch matched on `name` — a name is a MUTABLE natural key since "
+        f"#3590, so it can address a different row: {where}")
+
+
 def test_the_declared_refusal_mechanism_still_refuses(monkeypatch):
     """`refused_ops` is EMPTY after #9881 — the MECHANISM must still bite.
 
