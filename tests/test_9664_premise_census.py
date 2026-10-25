@@ -313,13 +313,25 @@ def test_the_record_arm_row_falsifies_if_records_resolve_to_the_union(
 ) -> None:
     """#9691 re-introduced: a resolution that answers the union for a graph that
     HOLDS records. That is the exact defect the Settings copy shipped, so the
-    row must read FALSIFIED rather than stay CONFIRMED on the flag alone."""
+    row must read FALSIFIED rather than stay CONFIRMED on the flag alone.
+
+    The wrapper keeps the REAL resolution's reads (so the row is still
+    measurable) and only corrupts the answer — replacing the function outright
+    would leave the arm unmeasured, which is a different (also pinned) exit.
+    """
     from tortoise import pack_state
 
-    monkeypatch.setattr(
-        pack_state, "resolved_pack_set_for_graph",
-        lambda _g: pack_state.ResolvedPackSet(namespaces=None, revision=0,
-                                              configured=False))
+    real = pack_state.resolved_pack_set_for_graph
+
+    def _union_whenever_records(_g):
+        out = real(_g)
+        if out.namespaces is not None:  # the arm that holds records
+            return pack_state.ResolvedPackSet(namespaces=None, revision=0,
+                                              configured=False)
+        return out
+
+    monkeypatch.setattr(pack_state, "resolved_pack_set_for_graph",
+                        _union_whenever_records)
     probe.census_packs()
     verdict = _measured(probe, "`configured=False` is NOT the catalog union")
     assert verdict.startswith("FALSIFIED"), (
@@ -387,3 +399,54 @@ def test_an_unmodelled_pack_query_leaves_the_packs_section_unmeasured(
     assert rc == 3, f"an unmeasurable premise must exit 3, got {rc}"
     assert "UNMEASURED SECTIONS" in out, out
     assert "census_packs" in out, out
+
+
+def test_a_data_leg_refusal_cannot_be_swallowed_into_a_green_section(
+    probe, monkeypatch, capsys
+) -> None:
+    """Review round 1, P1 — the one fail-open direction this file had.
+
+    `graph_kind_namespaces` wraps its scan in `except Exception: continue` BY
+    DESIGN (`pack_state.py:803-812`, "narrow the union, never widen it"), so an
+    `AssertionError` from the fake's DATA-LEG branch is SWALLOWED: the union
+    silently loses that leg, every row still prints CONFIRMED with "data leg:
+    none", and the section never reds. Measured on the pre-fix probe: with the
+    `RETURN DISTINCT n.` branch removed, all five step-2 rows printed CONFIRMED
+    and `census_packs` added nothing to `unmeasured`.
+
+    The `served` bookkeeping is the fix: the refusal happens in `census_packs`,
+    where nothing catches it.
+    """
+    base = probe._FakeGraph
+
+    class _NoKindScan(base):
+        def query(self, cypher, params=None, **kw):
+            if "RETURN DISTINCT n." in cypher:
+                raise AssertionError("the data-leg scan's shape changed")
+            return super().query(cypher, params, **kw)
+
+    monkeypatch.setattr(probe, "_FakeGraph", _NoKindScan)
+    rc = probe.main()
+    out = capsys.readouterr().out
+    assert rc == 3, (
+        "a data-leg query the fake no longer models must make the census fail "
+        f"closed, got exit {rc}")
+    assert "did not read ['kind_scan']" in out, out
+    assert "`configured=False` is NOT the catalog union" not in out, (
+        "the arm whose data leg was refused must not be printed at all — a row "
+        f"that appears while its read was swallowed is the defect: {out}")
+
+
+def test_the_seeding_stand_in_refuses_a_changed_seed_write(probe) -> None:
+    """Review round 1, P3 — the stand-in must not bookkeep a write it did not model.
+
+    `get_tenant_packs` filters `status == 'removed'` out, so a stub that
+    accepted ANY status would report "5 records after the read" over a
+    regression that seeded them inactive. The branch pins the shape instead.
+    """
+    graph = probe._FakeGraph()
+    with pytest.raises(AssertionError, match="status='active'"):
+        graph.query(
+            "MERGE (p:PackInstall {namespace: $ns}) SET p.version = $version",
+            params={"ns": "dev", "version": "1.0.0"})
+    assert not graph.installs, "a refused seed must leave the graph untouched"

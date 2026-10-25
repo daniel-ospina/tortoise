@@ -181,11 +181,20 @@ class _FakeGraph:
 
     `pack_state.resolved_pack_set_for_graph` is what these rows MEASURE, and
     it reads a graph through exactly three query shapes. This stand-in answers
-    those shapes and nothing else, and an unmodelled query RAISES — so a change
-    in the reader surfaces as an UNMEASURED section (exit 3), never as a
-    silently satisfied row. The RESOLUTION is never re-implemented here: the
-    install records and the marker are the INPUTS, and the real function
+    those shapes and nothing else. The RESOLUTION is never re-implemented here:
+    the install records and the marker are the INPUTS, and the real function
     resolves them.
+
+    ⛔ AN UNMODELLED QUERY RAISING IS NOT ENOUGH, and believing it was is the
+    defect review round 1 found (P1). `graph_kind_namespaces` wraps its scan in
+    ``except Exception: continue`` BY DESIGN (it must narrow the union on a
+    graph error, `pack_state.py:803-812`), so an `AssertionError` raised from
+    the DATA-LEG branch is SWALLOWED: the union silently loses that leg and all
+    five rows still print CONFIRMED with "data leg: none in the probe graph".
+    `served` is what closes it — every branch records the shape it answered,
+    and `census_packs` REFUSES to report unless every shape it depends on was
+    actually served (an unserved one raises OUTSIDE the swallow, so `main()`
+    lands the section in UNMEASURED and exits 3).
 
     The KIND scans (the data leg of the union) all answer empty: every probe
     graph holds no data, which is what makes `namespaces == recorded` below a
@@ -196,24 +205,55 @@ class _FakeGraph:
     def __init__(self, installs=(), marker=None) -> None:
         self.installs = [tuple(r) for r in installs]
         self.marker = marker
+        #: The query shapes this handle actually ANSWERED — see the class note.
+        self.served: set[str] = set()
 
     def query(self, cypher: str, params=None, **_kw):
         p = params or {}
         if "MERGE (p:PackInstall" in cypher:  # ensure_tenant_packs' seeding
+            # The seeding write's OWN shape is modelled, not bookkept (review
+            # round 1, P3): `get_tenant_packs` filters `status == 'removed'`
+            # out, so a stand-in that silently accepted any status would report
+            # "5 records after the read" over a regression that seeded them
+            # inactive. A changed seeding write must fail loud here.
+            if "p.status = 'active'" not in cypher:
+                raise AssertionError(
+                    "the seeding write no longer sets status='active' — the "
+                    f"self-heal row cannot be measured against this: {cypher[:120]!r}")
+            self.served.add("seed")
             ns = p.get("ns")
             if ns and not any(r[0] == ns for r in self.installs):
                 self.installs.append((ns, p.get("version"), "active",
                                       "starter", p.get("now")))
             return _FakeResult([])
         if ":PackInstall" in cypher:
+            self.served.add("installs")
             return _FakeResult(self.installs)
         if ":PackSelection" in cypher:
+            self.served.add("selection")
             return _FakeResult([self.marker] if self.marker else [])
         if "RETURN DISTINCT n." in cypher:  # graph_kind_namespaces — no data
+            self.served.add("kind_scan")
             return _FakeResult([])
         raise AssertionError(
             "the packs rows do not model this query, so they cannot measure "
             f"what depends on it: {cypher[:100]!r}")
+
+
+def _require_served(graph: _FakeGraph, expected: set[str], what: str) -> None:
+    """Fail closed unless every shape this row rests on was actually READ.
+
+    Raised from `census_packs` rather than from `query()` on purpose: the
+    data-leg scan swallows a raising query (see `_FakeGraph`), so the refusal
+    must happen where nothing catches it.
+    """
+    missing = sorted(expected - graph.served)
+    if missing:
+        raise RuntimeError(
+            f"{what} did not read {missing} — the reader's query shape changed, "
+            "so the row would report a leg it never measured (a swallowed "
+            "data-leg refusal is exactly the direction this instrument exists "
+            "to prevent)")
 
 
 @contextlib.contextmanager
@@ -252,27 +292,35 @@ def census_packs() -> None:
 
     # The three arms, in the order `resolved_pack_set` documents them. Every
     # arm is driven through the real function; only the INPUTS differ.
-    union_arm = pack_state.resolved_pack_set_for_graph(_FakeGraph())
+    union = _FakeGraph()
+    union_arm = pack_state.resolved_pack_set_for_graph(union)
+    # Only TWO shapes: the union arm RETURNS EARLY (`pack_state.py:974-975`,
+    # `if not rows and selection is None`) and never consults the data leg — so
+    # requiring `kind_scan` here would be an assertion about a read that does
+    # not happen, and the row says so below.
+    _require_served(union, {"installs", "selection"}, "the union arm")
     row("2", "no `:PackInstall` records AND no `:PackSelection` marker → "
              "`namespaces=None`, the catalog union (#2714 indicator 3)",
         f"{'CONFIRMED' if union_arm.namespaces is None and not union_arm.configured else 'FALSIFIED'}"
         f" (namespaces={'None' if union_arm.namespaces is None else sorted(union_arm.namespaces)};"
-        f" configured={union_arm.configured})")
+        f" configured={union_arm.configured}; data leg: not consulted — the arm returns early)")
 
     seeded = _FakeGraph(installs=((ns, "1.0.0", "active", "starter",
                                    "2026-01-01T00:00:00Z") for ns in starter))
     record_arm = pack_state.resolved_pack_set_for_graph(seeded)
+    _require_served(seeded, {"installs", "selection", "kind_scan"}, "the records arm")
     resolved = sorted(record_arm.namespaces) if record_arm.namespaces is not None else None
     missing = sorted(set(catalog) - set(resolved or ()))
     row("2", "`configured=False` is NOT the catalog union: `:PackInstall` "
              "records with no marker resolve to the RECORDED set (#9691)",
         f"{'CONFIRMED' if resolved == sorted(starter) and not record_arm.configured else 'FALSIFIED'}"
         f" (configured={record_arm.configured}; namespaces={resolved}; "
-        f"catalog−resolved={missing or 'NONE'}; data leg: none in the probe graph)")
+        f"catalog−resolved={missing or 'NONE'}; data leg: scanned, no data in the probe graph)")
 
     marker = (1, "2026-01-01T00:00:00Z", "9664-probe")
-    marked_arm = pack_state.resolved_pack_set_for_graph(
-        _FakeGraph(installs=tuple(seeded.installs), marker=marker))
+    marked = _FakeGraph(installs=tuple(seeded.installs), marker=marker)
+    marked_arm = pack_state.resolved_pack_set_for_graph(marked)
+    _require_served(marked, {"installs", "selection", "kind_scan"}, "the marker arm")
     row("2", "the `:PackSelection` MARKER, not the records, is what makes "
              "`configured=True`",
         f"{'CONFIRMED' if not record_arm.configured and marked_arm.configured else 'FALSIFIED'}"
@@ -291,6 +339,20 @@ def census_packs() -> None:
     with _sdks_absent(fresh):
         listed = pack_state.get_tenant_packs(None)
     after = pack_state.resolved_pack_set_for_graph(fresh)
+    # What must have been READ, given what was observed — two arms, so two
+    # expectations, and neither is a tautology:
+    #   * `seed` only when records APPEARED (a self-heal that seeds nothing is a
+    #     falsified PREMISE, which the row below reports — not an unmeasurable
+    #     one, since no read was skipped);
+    #   * `kind_scan` only when the resolution did NOT take the record-less
+    #     early return (`pack_state.py:974-975`); if it reports a resolved set,
+    #     the data leg is part of that answer and must have been scanned.
+    expected = {"installs", "selection"}
+    if after.namespaces is not None:
+        expected.add("kind_scan")
+    if listed:
+        expected.add("seed")
+    _require_served(fresh, expected, "the self-heal arm")
     row("2", "the FIRST packs read on a record-less unconfigured graph merges "
              "the starter set — so step 2's union arm does not survive the "
              "surface the user opens",
