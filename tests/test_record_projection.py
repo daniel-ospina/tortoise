@@ -399,10 +399,15 @@ def test_9881_an_objects_patch_with_no_id_is_refused_and_never_name_matched():
     absence-keyed fallback exists only for `url`/`eventId`), so a name-only
     record RAISES `RecordProjectionError`; and the patch goes through
     `_patch_statement`'s default `match=("node_key",)`, which IS the id — never
-    `name`. Refusing at the door is the right shape (the schema's
-    `chk_object_node_key_is_contract_key` would abort the transaction later,
-    after the `node_identity` insert), and this pins it so a reader cannot be
-    told to expect a legacy fail-open path.
+    `name`.
+
+    Why the refusal has to be at the DOOR, measured: a name-matched patch would
+    match ZERO rows now that `node_key` is the id — silence, not an error. The
+    schema is not a backstop here either: this mutation emits exactly ONE
+    statement (the `NodePatch` branch; there is no `node_identity` insert on this
+    path, unlike the snapshot branch), and its `SET` never rewrites
+    `name`/`id`/`node_key`, so `chk_object_node_key_is_contract_key` is
+    re-evaluated on an unchanged key triple and can never fire.
 
     Non-vacuity: on the pre-#9881 tree the SAME record is accepted
     (`Node("object", "Object", "name")`, `key_from="name"`) and returns an

@@ -92,7 +92,7 @@ Interface A states four properties, and the failure each one prevents:
 7. **Edge endpoints are RESOLVED, never minted.** An `EntityLinked` endpoint is
    addressed by the journal `id` (the fold's own `MATCH (t:{label} {id:$tid})`),
    but `relation.src_key`/`tgt_key` are composite FKs into `node_identity`, whose
-   key is the label's canonical key (`Object`/`Subject`→`name`, `Source`→`url`,
+   key is the label's canonical key (`Object`/`Subject`→`id` since #9881, `Source`→`url`,
    `Point`/`Session`→`id`, `Event`→`event_id`). The projection joins the node row
    by `id` and takes its `node_key`; an endpoint with no row lands **no relation
    at all** — the fold's own `"absent"` verdict, not a phantom identity the hard
@@ -269,7 +269,7 @@ closed at both layers:
   `Subject`/`Object`/`Event`, so `relation.src_label` comes from the record's own
   node rows rather than being assumed `Point`, which is why these rows are built
   by a statement whose LABELS are subselect columns); each label resolves to its
-  CANONICAL key (`Point`/`Event` → `node_key`, `Subject`/`Object` → `name`),
+  CANONICAL key (`Point`/`Event` → `node_key`, `Subject`/`Object` → `id` since #9881),
   because `relation.src_key` is a `node_identity` FK and the raw journal id for a
   Subject would address a phantom identity; and the conflict path is
   `DO NOTHING`, not `DO UPDATE` — the fold writes `{idx}` on the typed/reverse

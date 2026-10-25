@@ -912,10 +912,13 @@ RECORD_MUTATIONS: dict[str, Mutation] = {
              "and `supersededAt` comes from the record's own envelope `ts`; "
              "#9881 — keyed by the node's `id`, and there is NO `name` "
              "fallback: a line carrying no `id` is REFUSED at the door by "
-             "`_key_value` (the fail-closed shape, where the schema's own pin "
-             "would otherwise abort mid-transaction), and the patch is matched "
-             "on `node_key` — which IS the id since 20261027000001 — never on "
-             "`name`",
+             "`_key_value`. That refusal is what keeps the failure LOUD, and "
+             "the reason is measured rather than rhetorical: a name-matched "
+             "patch would match ZERO rows once `node_key` is the id — SILENCE, "
+             "not an error — and the schema's pin cannot catch it either: this "
+             "mutation emits ONE `UPDATE` and never rewrites "
+             "`name`/`id`/`node_key`, so `chk_object_node_key_is_contract_key` "
+             "is re-evaluated on an unchanged key triple and can never fire",
     ),
     "SubjectAdded": Mutation(
         NodeSnapshot(Node("subject", "Subject", "id"), path=None, key_from="id"),
@@ -1641,11 +1644,14 @@ def _identity_delete_statement(
     it had removed, while the graph's `MATCH … DETACH DELETE n` (the fold's
     `_delete_entity_by_id`) dropped the node AND its edges.
 
-    An Object/Subject delete matches on the `id` column, not `node_key`
-    (Object/Subject key `node_key` on `name`), so the identity row's key is
-    resolved from the node row — which still exists at this point, because this
-    statement MUST run before `_delete_statement`. The subquery reads the node
-    table, so the cascade then removes that row and every incident relation.
+    An Object/Subject delete matches on the `id` column — which since #9881 IS
+    that label's canonical key — but the match column and the key column are not
+    the same column for every label (`source` matches on `id` or `node_key`
+    while its key is `url`; `session` keys `id` but matches `node_key`), so the
+    identity row's key is resolved from the node row — which still exists at
+    this point, because this statement MUST run before `_delete_statement`. The
+    subquery reads the node table, so the cascade then removes that row and
+    every incident relation.
     """
     predicate = " OR ".join(f"{c} = %s" for c in match)
     if len(match) > 1:
@@ -1718,8 +1724,9 @@ def _endpoint_resolution(
     producers emit (`sdk.py::link_entity` passes `o.id`;
     `subject_binding._resolve_target` returns `n.id`). But the RECORD's
     canonical key is `Point`/`Session`→`id`, `Event`→`event_id`,
-    `Source`→`url`, `Object`/`Subject`→`name`
-    (`node_identity.key_property`, migration `20261012000001`), and
+    `Source`→`url`, `Object`/`Subject`→`id` (since #9881 — `name` is a mutable
+    natural key, so it is the LOOKUP and never the identity;
+    `node_identity.key_property`, re-declared by migration `20261027000001`), and
     `relation.src_key`/`tgt_key` are composite FKs into `node_identity`.
 
     Writing the raw journal id straight through therefore attached the edge to

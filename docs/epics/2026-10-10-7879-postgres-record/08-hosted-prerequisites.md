@@ -329,7 +329,7 @@ mirrors it value for value: the `op_type`→predicate map (four composition spel
 reverse `INPUT`, and the two mitigation gates (`is_non_operator_payload` AND
 `has_usable_mitigation_strength`, restated for the STANDALONE load and pinned value-for-value). The
 endpoints resolve across the **four** epistemic labels (#7902) with each label's CANONICAL key
-(`Point`/`Event` → `node_key`, `Subject`/`Object` → `name`), so `relation.src_label` is a fact looked
+(`Point`/`Event` → `node_key`, `Subject`/`Object` → `id` since #9881), so `relation.src_label` is a fact looked
 up rather than a `Point` assumption, and the conflict path is `DO NOTHING` because the fold attaches no
 attribute to these edges beyond `idx`. ⛔ The input gate is `_writable_id`'s (a blank key is
 ADMITTED), not the blank-refusing `_writable_endpoint_id` of the two neighbouring families: those

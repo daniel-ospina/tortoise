@@ -873,23 +873,32 @@ def test_props_checks_refuse_the_derived_names():
 
 def test_relation_is_never_a_bare_id():
     """Interface E: a foreign key is (label, key). The relation table must use it."""
-    text = "\n".join(p.read_text(encoding="utf-8") for p in MIGRATIONS)
-    assert "src_label" in text and "src_key" in text
-    assert "FOREIGN KEY (org_id, graph_id, src_label, src_key)" in text
-    assert "FOREIGN KEY (org_id, graph_id, tgt_label, tgt_key)" in text
-    # the key property is generated from the label, so a store cannot disagree
-    assert "key_property" in text and "GENERATED ALWAYS AS" in text
     # And each layer pins node_key to that label's key column. ⚠️ The
     # expectation is DERIVED from `record_projection.NODE_TABLES` — never a
     # hand-copied tuple. The tuple this replaces said `("object", "name")` /
-    # `("subject", "name")` and stayed GREEN across #9881, because it both
-    # restated the retired contract AND read a migration set that excluded the
-    # file now holding the re-declaration: it certified the very contract the
-    # PR removes, so a later change re-introducing `node_key = name` would have
-    # been consistent with this pin and reddened nothing (#9948 review P2).
+    # `("subject", "name")` and stayed GREEN across #9881, because it restated
+    # the retired contract (#9948 review P2). And the DECLARATIONS are read from
+    # the whole `supabase/migrations` directory, not from this file's
+    # `MIGRATIONS` list: that list is hand-maintained, so a future FORWARD
+    # migration that re-declares a pin would re-create exactly the same defect
+    # (the list is pinned by nothing — `RECORD_MIGRATIONS`' completeness has its
+    # own guard in `test_9231`, this one does not). Measured: over all 73 files
+    # the pin set is identical to the 6-file list's (`source 1 · event 1 ·
+    # session 1 · object 2 · subject 2 · point 1`), so reading the directory is
+    # free and closes the recurrence instead of patching this round of it.
     # The LAST declaration wins (append-only history; the same rule
-    # `key_properties()` reads), and `MIGRATIONS` is sorted so last == newest.
-    pins = contract_key_pins(text)
+    # `key_properties()` reads), and the files are read in filename order — which
+    # IS chronological, because the name is the migration timestamp.
+    all_text = "\n".join(
+        p.read_text(encoding="utf-8")
+        for p in sorted((REPO_ROOT / "supabase" / "migrations").glob("*.sql"))
+    )
+    assert "src_label" in all_text and "src_key" in all_text
+    assert "FOREIGN KEY (org_id, graph_id, src_label, src_key)" in all_text
+    assert "FOREIGN KEY (org_id, graph_id, tgt_label, tgt_key)" in all_text
+    # the key property is generated from the label, so a store cannot disagree
+    assert "key_property" in all_text and "GENERATED ALWAYS AS" in all_text
+    pins = contract_key_pins(all_text)
     assert set(pins) == set(record_projection.NODE_TABLES), (
         "the tables carrying a node_key pin and the projection's NODE_TABLES "
         f"disagree — pinned {sorted(pins)}, NODE_TABLES "
