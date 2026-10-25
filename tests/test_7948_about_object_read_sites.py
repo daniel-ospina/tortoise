@@ -5127,9 +5127,11 @@ def test_the_module_filter_is_a_strict_superset_of_the_anchored_form():
       construction. It is the tripwire for that wiring changing, not a measurement
       of the corpus.
 
-    The derivation pin in `test_the_module_filter_admits_a_split_traversal`
-    (`24` keys / `36` rows) is the second measuring assertion: it is what proves
-    the widening added no site.
+    The derivation pin in `test_the_module_filter_admits_a_split_traversal` (the
+    `(keys, rows)` pair that arm asserts) is the second measuring assertion: it is
+    what proves the widening added no site. ⚠️ The pair is named, not repeated: the
+    figures written here once went stale while the arm's own pin moved for an
+    unrelated reason (`#9604`).
     """
     census = _call_time_census()
     universe = census._universe()
