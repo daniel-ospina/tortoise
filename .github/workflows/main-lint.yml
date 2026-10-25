@@ -80,8 +80,9 @@ name: main-lint
 #      runs an unspecified `shell:` with, so a mid-arm failure really aborts it)
 #      and judges it on its exit code, its STEP SUMMARY (judged on its own, not as
 #      part of the log) and its annotation: `success`/`failure` pass with
-#      PASS/FAIL, `skipped`/unset/an undocumented conclusion exit NON-ZERO with
-#      NO VERDICT. Polarity is decided by running it, not by reading it (`true #
+#      PASS/FAIL, `skipped`/an EMPTY outcome (a null conclusion — GitHub
+#      interpolates the variable to `""`, it is never unset)/an undocumented
+#      conclusion exit NON-ZERO with NO VERDICT. Polarity is decided by running it, not by reading it (`true #
 #      exit 1`, `${OUTCOME:-success}` and a PASS sentence hoisted above the `case`
 #      all defeat a text-shaped check). EVERY one of those halves has a mutant in
 #      `_STARVED_SHAPES`, and the honest spellings (`if: ${{ always() }}`, an
@@ -98,10 +99,11 @@ name: main-lint
 #      that outcome in its `if:` (a second keyed step is how the notifier stops
 #      being the thing that notifies), it carries a status function that removes
 #      the implicit `success()`, and its WRITE PATH is gated: the non-push
-#      `context.eventName` test precedes the `issues.createComment` call and
-#      RETURNS before it, so a dispatch on a branch cannot post "main is lint-red"
-#      onto an unmerged PR (idempotent by the commit marker, so no re-run
-#      corrects it). and its `continue-on-error: true` is required (a
+#      `context.eventName` test precedes the `issues.createComment` call, is the
+#      NEGATIVE test (`!== 'push'` — an inverted one returns on every real push and
+#      notifies on a dispatch) and RETURNS inside its own body, so a dispatch on a
+#      branch cannot post "main is lint-red" onto an unmerged PR (idempotent by the
+#      commit marker, so no re-run corrects it). and its `continue-on-error: true` is required (a
 #      reporter that throws cannot red the job). The pin is the STATUS SLOT, not
 #      the spelling: `failure()` is what this file writes, and `always()` — which
 #      is the same pin, ANDed with the same outcome conjunct — is a pinned

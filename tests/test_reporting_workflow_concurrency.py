@@ -1814,12 +1814,10 @@ def _case_arms(run: str) -> dict[str, list[str]] | None:
     return None  # no `esac`: this is not a `case` this pin can read
 
 
-# The null conclusion is modelled as the EMPTY STRING, which is what GitHub
-# interpolates (`${{ steps.x.outcome }}` on a skipped step yields `""`, never an
-# unset variable). Review cycle 6 measured that modelling it by OMISSION redded an
-# equally correct step — `case "${OUTCOME}" in` under `set -u` — with a diagnosis
-# naming the summary write, which was already right, because the artifact's own
-# `set -u` aborted the shell on a state a runner cannot produce.
+# What GitHub actually interpolates into `env:` for each conclusion. The null
+# conclusion is the EMPTY STRING (`${{ steps.x.outcome }}` on a skipped step renders
+# `""`, never an unset variable); modelling it by omission redded a correct
+# `case "${OUTCOME}" in` under `set -u` — measured in review cycle 6.
 _VERDICT_OUTCOMES = ("", "success", "failure", "skipped", "weird-conclusion")
 
 
@@ -1853,6 +1851,12 @@ def _verdict_behaviour_problem(run: str, outcome_var: str) -> str | None:
         ("success", "zero", "PASS", "::notice"),
         ("failure", "any", "FAIL", "::error"),
     ]
+    # The matrix must judge EVERY conclusion GitHub can interpolate: a value added
+    # to `_VERDICT_OUTCOMES` and forgotten here would skip the matrix silently, which
+    # is the fail-open this pin exists for.
+    assert {outcome for outcome, *_ in expected} == set(_VERDICT_OUTCOMES), (
+        "the polarity matrix no longer covers every conclusion in _VERDICT_OUTCOMES"
+    )
     for outcome, exit_rule, verdict, annotation in expected:
         if outcome == "":
             label = (
@@ -1867,8 +1871,22 @@ def _verdict_behaviour_problem(run: str, outcome_var: str) -> str | None:
                 summary.write_text("")
                 env = {
                     "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                    "HOME": os.environ.get("HOME", "/tmp"),
                     "GITHUB_SHA": "deadbeef",
                     "GITHUB_STEP_SUMMARY": str(summary),
+                    # The standard runner variables a verdict summary may name. Without
+                    # them an honest enrichment (`… run ${GITHUB_RUN_ID}`) aborts under
+                    # `set -u` and the pin reds a CORRECT step, blaming the PASS arm —
+                    # measured in review cycle 7.
+                    "GITHUB_REPOSITORY": "o/r",
+                    "GITHUB_RUN_ID": "1",
+                    "GITHUB_RUN_NUMBER": "1",
+                    "GITHUB_REF": "refs/heads/main",
+                    "GITHUB_REF_NAME": "main",
+                    "GITHUB_EVENT_NAME": "push",
+                    "GITHUB_WORKFLOW": "main-lint",
+                    "GITHUB_ACTOR": "github-actions",
+                    "RUNNER_OS": "Linux",
                     # ALWAYS set, empty for a null conclusion: GitHub interpolates
                     # `${{ steps.x.outcome }}` into `env:` as `""`. Modelling it by
                     # omission redded a correct `${OUTCOME}` under `set -u`.
@@ -1893,9 +1911,14 @@ def _verdict_behaviour_problem(run: str, outcome_var: str) -> str | None:
         except (OSError, subprocess.SubprocessError) as exc:  # pragma: no cover - env
             return f"the verdict step could not be executed to be judged: {exc}"
         if exit_rule == "zero" and proc.returncode != 0:
+            # The LAST lines of output are named: an unbound runner variable under
+            # `set -u` aborts with exit 1, and a message that only says "reports a green
+            # tree red" sends the fixer to the PASS arm, which is correct (cycle 7).
+            tail = " | ".join(line for line in output.splitlines()[-2:] if line.strip())
             return (
                 f"the verdict step EXITS {proc.returncode} on {label} — that path is "
-                "not a failure of the lint gate, so a green tree is reported red"
+                f"not a failure of the lint gate, so a green tree is reported red "
+                f"(last output: {tail[:160]!r})"
             )
         if exit_rule == "nonzero" and proc.returncode == 0:
             return (
@@ -2540,9 +2563,50 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
             if "return" not in script[gate_at:write_at]:
                 return (
                     f"the github-script step keyed on `steps.{step_id}.outcome` tests "
-                    "`context.eventName` but does not RETURN on the non-push arm before "
-                    "it POSTS — naming the event without acting on it gates nothing"
+                    "`context.eventName` but never RETURNS between that test and the "
+                    "POST — naming the event without acting on it gates nothing"
                 )
+            # ⛔ The block above is satisfiable by the WRONG `return` (measured in review
+            # cycle 7: `!target` and `already` both sit between the two offsets), so the
+            # GUARD BLOCK itself is read, on comment-stripped text with STRING LITERALS
+            # KEPT — `_JS_LITERALS` strips `'push'`, and a polarity test on stripped text
+            # cannot see which side of the comparison it is on. Two evasions, both measured
+            # accepted before this: deleting only the guard's `return;` (it logs, then falls
+            # through to the POST), and inverting the test to `=== 'push'` (it then returns
+            # on every real push — main goes red in silence — and posts on a dispatch).
+            gate_lines = raw_script.splitlines()
+            guard_start = next(
+                (i for i, line in enumerate(gate_lines) if "context.eventName" in line), None
+            )
+            if guard_start is not None:
+                guard_end = next(
+                    (
+                        i
+                        for i in range(guard_start + 1, len(gate_lines))
+                        if gate_lines[i].strip() == "}"
+                    ),
+                    None,
+                )
+                if guard_end is not None:
+                    if not re.search(
+                        r"context\.eventName\s*!==?\s*(['\"])push\1", gate_lines[guard_start]
+                    ):
+                        return (
+                            f"the github-script step keyed on `steps.{step_id}.outcome` "
+                            f"tests `{gate_lines[guard_start].strip()}` — not `context."
+                            "eventName !== 'push'`. An INVERTED (or otherwise mismatched) "
+                            "test returns on every real push, so a red main is reported "
+                            "to nobody, and posts on the dispatch path that must not "
+                            "notify at all"
+                        )
+                    if "return" not in "\n".join(gate_lines[guard_start : guard_end + 1]):
+                        return (
+                            f"the github-script step keyed on `steps.{step_id}.outcome` "
+                            "guards on `context.eventName` but its guard body never "
+                            "RETURNS — it logs and falls through to the POST, so a "
+                            "dispatch on a branch posts \"main is lint-red\" onto that "
+                            "branch's OPEN pull request"
+                        )
             # Property 3 is claimed for this step, so it is asserted here: the two
             # datums the 2026-10-25 lane could not recover are the ENDPOINT and the
             # HTTP STATUS, and a warning that drops `err.status` is that failure again.
@@ -3606,6 +3670,25 @@ def _set_notifier_without_status_diagnostic(doc: dict) -> None:
     _set_notifier_script_lines(doc, [line for line in lines if "err.status" not in line])
 
 
+def _set_notifier_guard_falls_through(doc: dict) -> None:
+    """The guard's `return;` deleted: it logs the event and falls through to the POST."""
+    lines = _notifier_script_lines(doc)
+    start = next(i for i, line in enumerate(lines) if "context.eventName !== 'push'" in line)
+    end = next(i for i in range(start, len(lines)) if lines[i].strip() == "}")
+    body = [line for line in lines[start : end + 1] if line.strip() != "return;"]
+    _set_notifier_script_lines(doc, lines[:start] + body + lines[end + 1 :])
+
+
+def _set_notifier_guard_inverted(doc: dict) -> None:
+    """`=== 'push'`: returns on every real push (a red main is silent) and posts on a dispatch."""
+    lines = _notifier_script_lines(doc)
+    start = next(i for i, line in enumerate(lines) if "context.eventName !== 'push'" in line)
+    lines[start] = lines[start].replace(
+        "context.eventName !== 'push'", "context.eventName === 'push'"
+    )
+    _set_notifier_script_lines(doc, lines)
+
+
 def _set_verdict_default_green(doc: dict) -> None:
     step = _verdict_step(doc)
     step["run"] = step["run"].replace("exit 1", "exit 0")
@@ -3785,6 +3868,8 @@ _STARVED_SHAPES = [
         "a notifier whose warning drops the HTTP status",
         _set_notifier_without_status_diagnostic,
     ),
+    ("a notifier whose guard logs but never returns", _set_notifier_guard_falls_through),
+    ("a notifier whose event guard is inverted (`=== 'push'`)", _set_notifier_guard_inverted),
     ("a verdict step that never writes the summary", _set_verdict_without_summary),
     ("a verdict step that emits no `::notice`", _set_verdict_without_notice),
     ("a verdict step that emits no `::error`", _set_verdict_without_error),
