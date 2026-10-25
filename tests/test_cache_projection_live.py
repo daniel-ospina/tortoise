@@ -22,10 +22,13 @@ reuse the caller's tenant graph.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from tests._live_utils import _skip_unless_live_uri
 from tortoise import cache_projection as cp
+from tortoise import record_projection as _rp
 from tortoise.projection import FalkorProjection
 from tortoise.residency import (
     COVERAGE_COMPLETE,
@@ -39,6 +42,24 @@ from tortoise.residency import (
 from tortoise.status_vocabulary import STATUS_DEGRADED, STATUS_EMPTY
 
 GRAPH_NAME = "test_7971_cache_projection"
+
+
+def _row(label: str, key: str, **columns: Any) -> dict[str, Any]:
+    """One record row, keyed by `label`'s **live** contract key — never by hand.
+
+    ⛔ This is the fix for a real, measured failure, not tidiness. `KEY_PROPERTY`
+    moved `Object`/`Subject` from `name` to the stable `id` (#9881 / #9948), and
+    this file **skips** when there is no live engine — so a hardcoded key column
+    rots here in silence: every DB-free lane stays green while the only lane that
+    can see the defect is red. It did exactly that: this fixture still built
+    `{"name": "acme"}`, `node_from_row` raised `UnprojectableRecord: Object: no
+    contract key at object.id`, and `main`'s Python legs went red on the same
+    commit that moved the key.
+
+    Derived, not restated (`record_projection.key_properties()` walks every
+    record migration, so a re-declared key is followed automatically).
+    """
+    return {_rp.snake(cp.KEY_PROPERTY[label]): key, **columns}
 
 
 def _projection() -> FalkorProjection:
@@ -60,21 +81,25 @@ def _view():
 
     `content` and `status` are PRIMARY columns; `openSetProp` rides the `props`
     tail; the edge is a `mitigated_by`-free `aboutObject` from p-1 to the
-    `:Object` keyed by `name` (the Interface E rule at the edge).
+    `:Object` keyed by its stable `id` (the Interface E rule at the edge, #9881).
+    The Object's `id` is deliberately NOT its `name`: a rename must not move the
+    key, so the fixture must not make the two indistinguishable.
     """
     nodes = [
-        cp.node_from_row("Point", {"id": "p-1", "content": "the first claim",
-                                   "point_kind": "claim", "status": "live",
-                                   "props": {"openSetProp": 7}}),
-        cp.node_from_row("Point", {"id": "p-2", "content": "the second claim",
-                                   "point_kind": "claim", "status": "live",
-                                   "props": {}}),
-        cp.node_from_row("Object", {"name": "acme", "object_kind": "org",
-                                    "props": {}}),
+        cp.node_from_row("Point", _row("Point", "p-1",
+                                        content="the first claim",
+                                        point_kind="claim", status="live",
+                                        props={"openSetProp": 7})),
+        cp.node_from_row("Point", _row("Point", "p-2",
+                                        content="the second claim",
+                                        point_kind="claim", status="live",
+                                        props={})),
+        cp.node_from_row("Object", _row("Object", "o-1", name="acme",
+                                        object_kind="org", props={})),
     ]
     rels = [cp.RecordRelation(
         rel_type="aboutObject", src_label="Point", src_key="p-1",
-        tgt_label="Object", tgt_key="acme", idx=0, props={})]
+        tgt_label="Object", tgt_key="o-1", idx=0, props={})]
     return cp.RecordView(nodes=tuple(nodes), relations=tuple(rels))
 
 
@@ -111,11 +136,15 @@ def test_a_record_sourced_rebuild_survives_the_cache_being_destroyed():
     assert second["p-1"]["pointKind"] == "claim"
     assert second["p-1"]["openSetProp"] == 7
 
-    # The edge is restored, bound to the :Object by `name` (never by an id).
+    # The edge is restored, bound to the :Object by the label's CONTRACT key —
+    # its stable `id` (#9881), not its `name`, which is a mutable natural key.
     rels = proj.query(
         "MATCH (a:Point {id:'p-1'})-[:aboutObject]->(b:Object) "
-        "RETURN b.name").result_set
-    assert [r[0] for r in rels] == ["acme"]
+        "RETURN b.id, b.name").result_set
+    assert [tuple(r) for r in rels] == [("o-1", "acme")], (
+        "the edge did not land on the :Object keyed by its stable id — the "
+        "rebuild bound it by name, which a rename would strand"
+    )
 
 
 def _props(proj: FalkorProjection, label: str, key_prop: str,
@@ -152,11 +181,11 @@ def test_a_record_sourced_node_carries_the_discriminator_the_fold_supplies():
     # ── the RECORD side: rows that are SILENT about the kind (NULL columns) ──
     rec = _projection()
     view = cp.RecordView(nodes=(
-        cp.node_from_row("Subject", {"name": "Probe", "id": "s-rec",
-                                     "subject_kind": None, "props": {}}),
-        cp.node_from_row("Object", {"name": "AcmeProbe", "id": "o-rec",
-                                    "object_kind": None, "title": None,
-                                    "props": {}}),
+        cp.node_from_row("Subject", _row("Subject", "s-rec", name="Probe",
+                                        subject_kind=None, props={})),
+        cp.node_from_row("Object", _row("Object", "o-rec", name="AcmeProbe",
+                                       object_kind=None, title=None,
+                                       props={})),
     ))
     rec.rebuild_from_record(view, confirm_destructive=True)
     record_subject = _props(rec, "Subject", "name", "Probe")
@@ -236,7 +265,8 @@ def test_a_homonymous_pair_bounded_between_labels_declares_partial():
     """⛔ THE IDENTITY IS `(label, key)`, proven through the real API.
 
     `Object 'acme'` and `Subject 'acme'` are two record nodes with ONE key
-    string (`KEY_PROPERTY` gives both `name`). A bound that cuts between them —
+    string (`KEY_PROPERTY` gives both the same contract key column — `id` since
+    #9881 — so both rows carry the key `acme`). A bound that cuts between them —
     the documented `limit` mode, nodes sorted by `(label, key)` — writes one and
     omits the other. A key-only declaration calls that `complete`, and a miss on
     the OMITTED label then stands as `empty`: the §17.2 *"no such node"* false
@@ -244,10 +274,10 @@ def test_a_homonymous_pair_bounded_between_labels_declares_partial():
     """
     proj = _projection()
     view = cp.RecordView(nodes=(
-        cp.node_from_row("Object", {"name": "acme", "object_kind": "org",
-                                    "props": {}}),
-        cp.node_from_row("Subject", {"name": "acme", "subject_kind": "org",
-                                     "props": {}}),
+        cp.node_from_row("Object", _row("Object", "acme", name="acme",
+                                        object_kind="org", props={})),
+        cp.node_from_row("Subject", _row("Subject", "acme", name="acme",
+                                         subject_kind="org", props={})),
     ))
     report = proj.rebuild_from_record(view, confirm_destructive=True, limit=1)
     assert report["nodes_written"] == 1
