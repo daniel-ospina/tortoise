@@ -16699,6 +16699,14 @@ class TortoiseSDK:
             a mitigation is a SEPARATE Point that attacks the operator bridge
             it damps, so it can express neither an op_type nor a bridge. It is
             created by ``mitigate_operator`` AFTER the operator exists.
+            The mechanism is the Layer-1 leg of the #7852 triple and it is
+            COMPARED to what the write declares (#9963): a pack relation's own
+            ``mechanism`` for the ``label`` it names, else the mechanism the
+            declared ``semantics`` fixes (``supports`` → IMPL, ``refutes`` →
+            NAND, ``mutuallySupportive``/``mutuallyExclusive`` likewise —
+            ``pack_registry.SEMANTICS_MECHANISMS``). A contradiction returns a
+            ``mechanism_mismatch`` warning and the write PROCEEDS with the
+            caller's op_type stored verbatim (warn-not-block, #1934).
           - label: Layer-3 predicate — the domain verb ("fixes", "bearsOn", …).
           - semantics: Layer-2 meaning — the closed vocabulary in
             ``pack_registry.SEMANTICS_VALUES`` (``addresses``, ``supports``,
@@ -16771,6 +16779,10 @@ class TortoiseSDK:
         # predicate read as undeclared and the warning carried no information:
         # `supports` — the graph's own evidence→claim convention — warned
         # exactly like an invented name, which is how `measures` accumulated.
+        #
+        # This block answers DECLAREDNESS only. The MECHANISM leg of the same
+        # triple (#9963) reads these same rows for their `mechanism` — see the
+        # mechanism block below, after the semantics canonicalization.
         #
         # #2030 (verified, NOT a bug): relation predicates are declared and
         # matched BARE by contract — manifests declare bare `relations[]
@@ -16867,6 +16879,128 @@ class TortoiseSDK:
                     # the Layer-3 `label` predicate — a different input.)
                     direction = derived
                     direction_basis = "semantics"
+        # ── mechanism: the THIRD leg of the #7852 triple (#9963) ────────────
+        # The door checked the triple's other two legs and never this one: the
+        # `label` block above tests MEMBERSHIP (is the word declared?) and the
+        # `semantics` block resolves DIRECTION (which way does the meaning run?),
+        # while `op_type` — the mechanism, HOW it acts — was compared to nothing.
+        # The datum was already in the loop and discarded: the declared set the
+        # label block builds was `{r.get("predicate") for r in
+        # reg.list_relations()}`, and those same rows carry `mechanism`
+        # (measured: {'predicate': 'groundedIn', 'mechanism': 'IMPL',
+        # 'semantics': 'supports', …}). So the one combination that INVERTS the
+        # logic — a write declaring "this evidence refutes that claim" spelled
+        # `op_type='IMPL'` — was accepted in silence and EP then RAISED the
+        # target (#9963: 0.6693602 vs the correctly-typed NAND's 0.1314086),
+        # with `direction_basis: 'semantics'` on the node asserting the declared
+        # meaning had been honoured.
+        #
+        # ORDER (#9963): AFTER the semantics block on purpose — a retired word
+        # (`opposes`) is canonicalized to `mutuallyExclusive` there, so the
+        # comparison reads the meaning the write will actually be recorded as.
+        # Comparing the pre-canonical spelling would compare nothing.
+        #
+        # ⛔ WARN-NOT-BLOCK. #1934's ruling is a recorded decision, and this is
+        # an EXTENSION of it, not a replacement: the write proceeds with the
+        # caller's op_type stored verbatim and the contradiction is disclosed in
+        # `warnings`. Making it refuse is a reopen for the owner.
+        #
+        # A part/whole op_type (`composedOf` / `hasPart`-class) declares NO
+        # mechanism — it is not IMPL and not NAND — so there is nothing to
+        # compare and silence is the honest answer; only a mechanism-vs-mechanism
+        # contradiction is reported.
+        # `emit_violation` is imported HERE as well, exactly as the two blocks
+        # above do: it is otherwise bound only inside `if label:` (:16798) or
+        # `if semantics is not None:` (:16832), so today's reachability rests on
+        # `declared_mechanisms` returning `[]` when both are absent. That coupling
+        # is invisible to every static checker, and its failure mode is a
+        # NameError raised BEFORE the node is written (`pid = ulid()` below) —
+        # i.e. a refused write on the path this block documents as warn-not-block.
+        from tortoise.enforcement import emit_violation
+        from tortoise.pack_registry import CORE_PREDICATES, declared_mechanisms
+
+        if op_type in CORE_PREDICATES:
+            contradictions = [
+                (mechanism, source)
+                for mechanism, source in declared_mechanisms(
+                    label=label, semantics=semantics)
+                if mechanism != op_type
+            ]
+            if contradictions:
+                _declared = "; ".join(
+                    f"{source} declares {mechanism!r}"
+                    for mechanism, source in contradictions)
+                # The worked example is DIRECTION-SPECIFIC (#9963 review): one
+                # hardcoded sentence can only describe one of the two
+                # directions, and read as the wrong claim for the other —
+                # `test_mismatch_still_writes` exercises BOTH (NAND + `supports`).
+                #
+                # It is ALSO source-aware (2026-10-25 review, P3). The example
+                # names a LAYER-2 MEANING, so it may only appear when a meaning
+                # the caller actually declared produced the contradiction. A pack
+                # relation contradicts on its own with no `semantics` at all:
+                # `investment-portfolio-manager` declares `marks` as
+                # `mechanism: IMPL` over `semantics: related`, and `related` is
+                # one of §8's four mechanism-free meanings — so a
+                # `create_operator("NAND", a, [b], label="marks")` is told its
+                # wire carried "an IMPL meaning (e.g. 'supports')", i.e. it is
+                # pointed at an argument its call does not contain. A warning an
+                # agent ACTS on must not describe an input that was never given.
+                #
+                # Provenance is read off `declared_mechanisms` itself, not off
+                # the `source` prose: the meaning legs are exactly the ones keyed
+                # on a MEANING, and asking with the word as `semantics` puts the
+                # pack leg structurally out of reach (that walk only reads packs
+                # when a `label` is given), so each probe returns the Layer-2
+                # half alone. That covers the pre-#7852 spelling too, where the
+                # meaning arrived as `label` — a caller who DID declare the
+                # meaning keeps its worked example.
+                _meaning_mechanisms = {
+                    mechanism
+                    for meaning in (semantics, label)
+                    for mechanism, _ in declared_mechanisms(semantics=meaning)
+                }
+                _from_meaning = any(
+                    mechanism in _meaning_mechanisms
+                    for mechanism, _ in contradictions)
+                if op_type == "IMPL" and _from_meaning:
+                    _inversion = (
+                        "An IMPL wire carrying a NAND meaning (e.g. 'refutes') "
+                        "RAISES the target's confidence where the meaning says "
+                        "it must LOWER it")
+                elif op_type == "IMPL":
+                    _inversion = (
+                        "An IMPL wire fed a relation declared NAND RAISES the "
+                        "target's confidence where the declaration says it must "
+                        "LOWER it")
+                elif _from_meaning:
+                    _inversion = (
+                        "A NAND wire carrying an IMPL meaning (e.g. 'supports') "
+                        "LOWERS the target's confidence where the meaning says "
+                        "it must RAISE it")
+                else:
+                    _inversion = (
+                        "A NAND wire fed a relation declared IMPL LOWERS the "
+                        "target's confidence where the declaration says it must "
+                        "RAISE it")
+                warnings.append({
+                    "code": "mechanism_mismatch",
+                    "message": (
+                        f"op_type {op_type!r} contradicts a mechanism this "
+                        f"write declares: {_declared}. {_inversion}. "
+                        f"The mechanism each meaning declares lives in "
+                        f"pack_registry.SEMANTICS_MECHANISMS (a pack relation's "
+                        f"own `mechanism` is authoritative for its predicate) — "
+                        f"#7852's three-layer model. The write proceeded with "
+                        f"op_type unchanged (warn-not-block, #1934)"
+                    ),
+                    "op_type": op_type,
+                    "declared_mechanism": contradictions[0][0],
+                })
+                emit_violation(
+                    code="mechanism_mismatch", relation=label or semantics,
+                    detail=(f"op_type={op_type} declared="
+                            f"{','.join(m for m, _ in contradictions)}"))
         # Direction default (CYCLE-25 per-op_type, ontology v3.6 #5):
         # direction-absent canonicalizes per op_type — IMPL → "bidirectional"
         # (unchanged), NAND → "unidirectional" (extraction default — ingest IS
