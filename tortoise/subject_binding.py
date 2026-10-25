@@ -52,13 +52,14 @@ edge. Thresholds default to τ_hi=0.7 / τ_lo=0.4 (D4 "start ~0.6–0.7") and ar
 env-overridable; they are load-bearing, not decorative.
 
 **Vocabulary (D2):** the declared subject kinds are the keys of
-``extractor_v2.SUBJECTS``. ``other`` is deliberately NOT bindable — it is the
+``extractor_v2.SUBJECTS``, DECLARED once in ``kind_layers`` (#9964) and
+re-exported by this module — ``other`` is deliberately NOT bindable — it is the
 fail-closed NIL bucket (``known_kinds("subjectKind")`` resolves empty; the
 ONTOLOGY §5 ``other`` is a catch-all, not an identity). ``is_subject_kind``
-accepts a declared key EXACTLY, or its bare form when the declared key is in
-the ``core:`` namespace — never an arbitrary/foreign namespace, never a
-leading-colon form, and never a case/whitespace variant (T2). Unknown kinds are
-never invented into a Subject.
+delegates to ``kind_layers.declares_subject`` and accepts a declared key
+EXACTLY, or its bare form when the declared key is in the ``core:`` namespace —
+never an arbitrary/foreign namespace, never a leading-colon form, and never a
+case/whitespace variant (T2). Unknown kinds are never invented into a Subject.
 """
 from __future__ import annotations
 
@@ -87,19 +88,13 @@ _ROLE_TARGET = {
 }
 
 #: The declared §5 Subject kind vocabulary — ``extractor_v2.SUBJECTS`` keys
-#: EXACT, with ``other`` excluded on purpose (see module docstring).
+#: EXACT, with ``other`` excluded on purpose (see module docstring). #9964: it is
+#: DECLARED once, in ``kind_layers`` (the one authority for the kind↔layer
+#: question), because the write doors now ask the same vocabulary whether a
+#: Subject kind arrived at an Object door.
 def _declared_subject_kinds() -> frozenset[str]:
-    from tortoise.extractor_v2 import SUBJECTS
-    return frozenset(
-        str(k).strip() for k in SUBJECTS
-        # `other` is the NIL/catch-all bucket, not a bindable identity:
-        # binding it would attach a fact to a node whose kind carries no
-        # information — exactly the "wrong subject" the gate forbids.
-        if str(k).strip().split(":", 1)[-1].lower() != "other"
-    )
-
-
-_DECLARED_SUBJECT_KINDS: frozenset[str] = _declared_subject_kinds()
+    from tortoise.kind_layers import subject_kind_names
+    return subject_kind_names()
 
 
 def _normalize_kind(kind: Any) -> str:
@@ -119,8 +114,10 @@ def subject_kind_names() -> frozenset[str]:
     """The bindable subject-kind vocabulary, EXACTLY as declared in
     ``extractor_v2.SUBJECTS`` (``other`` excluded). Public alias consumed by
     the drift test in ``tests/test_subject_binding_1370.py``, which pins this
-    set against the extractor's declaration so the two cannot drift."""
-    return _DECLARED_SUBJECT_KINDS
+    set against the extractor's declaration so the two cannot drift — and
+    DERIVED from ``kind_layers`` (#9964), the one authority the write doors
+    and the classifier's partition both read."""
+    return _declared_subject_kinds()
 
 
 def is_subject_kind(kind: Any) -> bool:
@@ -132,22 +129,16 @@ def is_subject_kind(kind: Any) -> bool:
     a leading-colon form (``:team``), a case/whitespace variant of a declared
     key, ``other``, and ``None``/``""`` are all False (T2). Never invent a
     Subject from an arbitrary namespace.
+
+    #9964: DELEGATED to ``kind_layers.declares_subject`` — the ONE answer to
+    "is this a Subject-layer kind". This predicate used to be a second answer
+    (its own copy of the vocabulary and its own matching rules), which is how
+    the write path could disagree with the classifier's partition about a
+    kind's layer. The T2 contract above is unchanged and pinned by
+    ``tests/test_subject_binding_1370.py``.
     """
-    if not isinstance(kind, str):
-        return False
-    # G2: compare the RAW string — NO whitespace normalization. The former
-    # `kind.strip()` made `' core:team '` / `'core:team\n'` classify as
-    # subject kinds while the module docstring and scoping D2 declare a
-    # case/WHITESPACE variant non-subject. Fail-closed is this module's
-    # contract, so reject rather than normalize.
-    if kind in _DECLARED_SUBJECT_KINDS:
-        return True
-    if ":" in kind:
-        # A namespaced form is accepted only when it is a declared key itself
-        # (handled above). Never strip an arbitrary namespace to a bare name.
-        return False
-    # Bare form: accepted only for a declared ``core:`` key.
-    return f"core:{kind}" in _DECLARED_SUBJECT_KINDS
+    from tortoise.kind_layers import declares_subject
+    return declares_subject(kind)
 
 
 def _as_float(value: Any) -> float | None:
