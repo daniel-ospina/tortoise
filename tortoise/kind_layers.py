@@ -61,7 +61,10 @@ each of those would otherwise inherit a cycle. Every vocabulary read is lazy.
 """
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+_logger = logging.getLogger(__name__)
 
 #: The layers a kind can be declared on, in the order the write doors know them.
 LAYERS = ("subject", "object", "event", "point")
@@ -184,12 +187,35 @@ def section_of(kind: Any) -> str | None:
     ``None`` for a kind the spec does not carry (a legacy/registered/pack kind
     with no classification entry) — the caller then answers from the write-gate
     vocabularies alone.
+
+    ⛔ NEVER RAISES (#1934). The spec is COMPILED from the installed pack
+    manifests, so a structurally valid manifest carrying malformed YAML raises
+    out of the compile (measured: ``kindDefs: {thing: {kind: object, text:
+    [unclosed, flow`` -> ``yaml.parser.ParserError``). This function sits on the
+    write doors' ADVISORY path, where such a raise would REFUSE a write that
+    landed before the advisory existed — the hard refusal #1934 forbids, and the
+    reason this is a deliberate ``except Exception``: a section we cannot read is
+    "no section", never a failed write. Same fail-open posture as
+    ``domain_loader._get_registry`` (any load failure degrades to the base kinds)
+    and ``create_point``'s sibling advisory (#5516).
+
+    A compile failure is still LOUD — the operator hears about a broken pack
+    install on the write that would have been refused, instead of a write
+    silently changing layer behaviour.
     """
     if not isinstance(kind, str) or not kind:
         return None
     from tortoise.value_extractor import kind_index_sections
 
-    return kind_index_sections().get(kind)
+    try:
+        return kind_index_sections().get(kind)
+    except Exception as exc:  # noqa: BLE001, RUF100 — an advisory read must never raise
+        _logger.warning(
+            "kind_layers.section_of: the kind-index spec could not be compiled "
+            "(%s: %s) — answering 'no section' so the write is not refused "
+            "(#1934). Fix the installed pack manifests to restore the "
+            "classifier's partition.", type(exc).__name__, exc)
+        return None
 
 
 # ── the answer ────────────────────────────────────────────────────────────

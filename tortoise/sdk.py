@@ -3758,10 +3758,20 @@ def _kind_layer_note(t: str, props: dict) -> tuple[str, dict | None]:
         return t, _first_layer_mismatch(named, t)
     # 1. Kinds that belong EXCLUSIVELY to one entity layer ROUTE the label — the
     #    kind is the decision, the door's `type` was only a hint. Every named
-    #    kind must agree, so a write that names two different layers is never
-    #    routed on a coin flip.
+    #    kind must be THE SAME kind, so a write that names two different layers
+    #    is never routed on a coin flip. Nor is a write that names ONE property
+    #    under two spellings whose values disagree (`objectKind="core:organization",
+    #    object_kind="core:team"`): routing would have to pick one of two values
+    #    the caller gave for the same property — a silent rewrite of a prop to
+    #    fit, and `named` is ordered by ``_KIND_PROP_SPELLINGS``'s dict iteration,
+    #    so the survivor was an accident of declaration order. Such a write is
+    #    REPORTED instead: nothing is dropped, nothing is rewritten.
     routes = [entity_route(kind) for _layer, _spelling, kind in named]
-    target = routes[0] if routes and all(r == routes[0] for r in routes) else None
+    named_kinds = {kind for _layer, _spelling, kind in named}
+    target = (routes[0]
+              if routes and all(r == routes[0] for r in routes)
+              and len(named_kinds) == 1 else None)
+    moved = named[0][2]
     if target is not None and target != t:
         # ⛔ ROUTING MUST NEVER TURN A LEGAL WRITE INTO A REFUSAL (#1934). The
         # Subject door validates `status` against ONTOLOGY §4.2; the Object door
@@ -3770,17 +3780,23 @@ def _kind_layer_note(t: str, props: dict) -> tuple[str, dict | None]:
         # succeeded — a refusal invented by this fix. When that would happen the
         # write keeps the layer the caller asked for and is REPORTED instead: no
         # write is ever refused, and no prop is ever rewritten to fit.
+        # ⚠️ `isinstance` FIRST, exactly as the Subject door's own validation does
+        # (`_subj_status` below): `_SUBJECT_STATUS_VALUES` is a frozenset, so
+        # membership HASHES the operand and an unhashable `status` (a list/dict)
+        # raised `TypeError: unhashable type` HERE — a crash invented by a guard.
+        # A non-str status is not routable (the Subject door would refuse it), and
+        # it is not a crash either.
+        _status = props.get("status", "live")
         blocked = (target == "subject"
-                   and "status" in props
-                   and props.get("status") not in _SUBJECT_STATUS_VALUES)
+                   and not (isinstance(_status, str)
+                            and _status in _SUBJECT_STATUS_VALUES))
         if not blocked:
             for _layer, spelling, _kind in named:
                 props.pop(spelling, None)
-            moved = named[-1][2]
             props[KIND_PROP[target]] = moved
             return target, {"code": "kind_layer_routed", "kind": moved,
                             "layer": t, "actual": (target,)}
-        return t, {"code": "kind_other_layer", "kind": named[-1][2],
+        return t, {"code": "kind_other_layer", "kind": moved,
                    "layer": t, "actual": (target,),
                    "why": (f"the write's status {props.get('status')!r} is not one "
                            f"of the {target.capitalize()} lifecycle's "
@@ -9115,12 +9131,13 @@ class TortoiseSDK:
         # This door cannot re-route losslessly (a Point and an Event are
         # different records, and §5 declares `decision`/`humanApproval` on BOTH
         # axes — the #7813 owner ruling), so the disagreement is REPORTED and
-        # the write lands as asked (warn-not-block, #1934). The effective kind
-        # is the one the fold will store: a props `pointKind` WINS over the
-        # positional one (measured — see `_refuse_invisible_point_kinds`).
-        _layer_note = _first_layer_mismatch(
-            [("point", "pointKind", str(props.get("pointKind") or kind))],
-            "point")
+        # the write lands as asked (warn-not-block, #1934).
+        # ⚠️ Computed AFTER `_coerce_props` and the props kind gates (further
+        # down): the effective kind is the one the fold will STORE, and the
+        # MCP-style nested `props={"pointKind": …}` shape only exists after the
+        # coercion (read here, it missed the primary caller and reported nothing
+        # — measured on `create_point("statement", "x", props={"pointKind":
+        # "core:deployment"})`).
         # #5475: `pointKind` is one of the properties
         # `pack_state.graph_kind_namespaces` mines the approval set from, so the
         # point door widened it exactly as the entity doors did — measured at
@@ -9143,6 +9160,23 @@ class TortoiseSDK:
         # widened a `dev`-only graph. Gate the whole mined key set, exactly as
         # the entity funnel does.
         self._refuse_unapproved_kinds_in_props(props)
+        # #9964: NOW the effective kind is final — the positional `kind`, then
+        # the props passthrough (which WINS over it, #5475/#9287), then the
+        # nested MCP `props={…}` flatten. Report the layer disagreement from
+        # THAT value. Fail-open (#1934): an advisory that raised would refuse a
+        # write that landed before it existed — and the pack-manifest compile is
+        # a real source of such a raise (see `kind_layers.section_of`).
+        try:
+            _layer_note = _first_layer_mismatch(
+                [("point", "pointKind", str(props.get("pointKind") or kind))],
+                "point")
+        except Exception as _layer_exc:  # noqa: BLE001, RUF100 — advisory must never raise
+            _logger.warning(
+                "create_point: the kind<->layer advisory could not be computed "
+                "(%s: %s) — the write proceeds without the notice (#1934: an "
+                "advisory never refuses a write).",
+                type(_layer_exc).__name__, _layer_exc)
+            _layer_note = None
         # #9167: `content` is a REQUIRED str and nothing said so. A ``None`` or
         # any non-str reached ``_content_hash(content)`` below — i.e.
         # ``text.encode("utf-8")`` one frame inside a private helper — so the
@@ -35765,16 +35799,22 @@ class TortoiseSDK:
                 "'_server_id' is a server-managed field and cannot be set "
                 "via props.")
         t = (type or "").strip().lower()
-        # ── #9964: the KIND decides the layer, not the `type` argument ────────
-        # The classifier's entity partition merges objects and subjects, so a
-        # kind it returns can belong to the OTHER entity layer than the caller
-        # asked for (MEASURED: `classify_items([{"type": "entity", …}])` →
-        # `core:team`, a subjects-section kind, for a write stored as `:Object`).
-        # One authority answers which layer a kind is declared on, and a kind
-        # that belongs exclusively to the other entity layer ROUTES this write
-        # there; a cross-axis kind is reported instead (warn-not-block, #1934).
-        # The advisory is attached to the result once the node id exists.
-        t, _layer_note = _kind_layer_note(t, props)
+        # ── #9964: the KIND decides the layer, then REPORT the disagreement ───
+        # One authority answers which layer a kind is declared on; a kind that
+        # belongs exclusively to the other entity layer ROUTES this write there
+        # and a cross-axis kind is reported instead (warn-not-block, #1934).
+        # Fail-open (#1934): an advisory that raised would refuse a write that
+        # landed before it existed (see `kind_layers.section_of`, whose spec
+        # compile is a real source of such a raise).
+        try:
+            t, _layer_note = _kind_layer_note(t, props)
+        except Exception as _layer_exc:  # noqa: BLE001, RUF100 — advisory must never raise
+            _logger.warning(
+                "create_entity: the kind<->layer advisory could not be "
+                "computed (%s: %s) — the write proceeds without the notice "
+                "(#1934: an advisory never refuses a write).",
+                type(_layer_exc).__name__, _layer_exc)
+            _layer_note = None
         if t == "subject":
             # #1423 (review P1): `status` arrives through `**props` below and
             # OVERRIDES the `"status": "live"` default, so this surface is a

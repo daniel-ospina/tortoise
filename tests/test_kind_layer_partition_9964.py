@@ -59,18 +59,21 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import contextlib
+from pathlib import Path
 
 import pytest
 
+from tortoise.extractor_v2 import CORE_OBJECT_KEYS, EVENTS, POINTS, SUBJECTS
 from tortoise.kind_layers import (
     NIL_KINDS,
     SECTION_LAYERS,
+    core_sections,
     declared_layers,
     entity_route,
     undeclared_on,
 )
 from tortoise.sdk import TortoiseSDK
-from tortoise.value_extractor import compile_kind_index_spec
+from tortoise.value_extractor import _clear_kind_spec_cache, compile_kind_index_spec
 
 TEST_GRAPH = "tortoise_test_9964_kind_layer"
 
@@ -200,6 +203,25 @@ def test_the_classifiers_partition_is_the_one_the_doors_enforce():
     """
     spec = compile_kind_index_spec()
     assert spec["core:team"]["section"] == "subjects"  # the measured case
+    # ── #2818: the CORE key order is the classifier's partition AND the npz
+    # cache key. `compile_kind_index_spec` now builds these entries from
+    # `core_sections()` — whose INSERTION ORDER is deliberately objects →
+    # subjects → points → events — so a reorder (or a member moving group)
+    # rotates `kind_index.cache_key_for`'s hash and silently re-embeds the whole
+    # kind index. `test_pack_value_declarations_2818` compiles the spec twice
+    # and compares the two, which cannot see this: a reorder moves BOTH sides
+    # together. Pin the order itself, against the ONE authority.
+    core = list(core_sections())
+    assert list(spec)[:len(core)] == core, (
+        "the kind-index spec's core key order changed — that is the npz cache "
+        "key (#2818): every graph silently re-embeds the index")
+    assert [spec[k]["section"] for k in core] == [core_sections()[k] for k in core]
+    assert [core_sections()[k] for k in core] == (
+        ["objects"] * len(CORE_OBJECT_KEYS)
+        + ["subjects"] * len(SUBJECTS)
+        + ["points"] * len(POINTS)
+        + ["events"] * len(EVENTS)
+    ), "the four sections must stay contiguous and in objects→subjects→points→events order"
     disagreements = []
     for kind, md in spec.items():
         layer = SECTION_LAYERS[md["section"]]
@@ -298,3 +320,108 @@ def test_undeclared_nil_and_absent_kinds_are_silent(sdk):
         assert _layer_notes(node) == [], (kind, node.get("advisories"))
     bare = sdk.create_object("no kind named")
     assert _layer_notes(bare) == [], bare.get("advisories")
+
+
+# ── #1934: an ADVISORY must never refuse a write ─────────────────────────
+
+def test_a_malformed_pack_manifest_cannot_refuse_a_write(sdk, tmp_path, monkeypatch):
+    """The spec COMPILES the installed manifests, so a broken one raises.
+
+    MEASURED on the pre-fix head with a structurally valid pack directory whose
+    manifest carries malformed YAML: `create_object`/`create_point` raised
+    `yaml.parser.ParserError` out of the ADVISORY path (`section_of` →
+    `kind_index_sections` → `compile_kind_index_spec` → `compile_value_brief`) —
+    a hard refusal of a write that lands on `origin/main` (#1934 forbids exactly
+    that; its neighbours on the path are deliberately fail-open:
+    `domain_loader._get_registry` catches `Exception`, and `create_point`'s
+    sibling advisory (#5516) degrades to "no notice").
+    """
+    packs = tmp_path / "packs"
+    (packs / "dev").mkdir(parents=True)
+    src = Path(__file__).resolve().parent.parent / "packs" / "dev" / "manifest.yaml"
+    (packs / "dev" / "manifest.yaml").write_text(
+        src.read_text(encoding="utf-8"), encoding="utf-8")
+    (packs / "broken").mkdir()
+    (packs / "broken" / "manifest.yaml").write_text(
+        "kindDefs: {thing: {kind: object, text: [unclosed, flow\n",
+        encoding="utf-8")
+    monkeypatch.setenv("TORTOISE_PACKS_DIR", str(packs))
+    _clear_kind_spec_cache()
+    try:
+        obj = sdk.create_object("T3 Acme Holdings", objectKind="core:organization")
+        assert obj.get("id"), "the advisory refused an entity write (#1934)"
+        point = sdk.create_point("statement", "the deploy happened")
+        assert point.get("id"), "the advisory refused a point write (#1934)"
+    finally:
+        _clear_kind_spec_cache()
+    # The advisory degrades to "no section" — the write still lands on the layer
+    # the kind declares, exactly as it does with a readable catalog.
+    assert _node(sdk, obj["id"])[0] == ["Subject"], obj
+
+
+def test_the_mcp_nested_props_shape_is_reported(sdk):
+    """The MCP-style `props={…}` shape must carry the advisory too.
+
+    The note used to be computed BEFORE `_coerce_props`, so the nested shape —
+    the shape the MCP server itself sends — stored an Event kind on a `:Point`
+    with NO advisory (measured pre-fix: `advisories` carried only
+    `no_source`). Reading the props AFTER coercion is what makes the reported
+    kind the one the fold actually stores.
+    """
+    r = sdk.create_point("statement", "nested props",
+                         props={"pointKind": "core:deployment"})
+    assert r.get("id")
+    labels, _ok, _sk, point_kind, _ek = _node(sdk, r["id"])
+    assert labels == ["Point"] and point_kind == "core:deployment", r
+    assert [n["code"] for n in _layer_notes(r)] == ["kind_other_layer"], \
+        r.get("advisories")
+
+
+def test_an_unhashable_status_cannot_crash_the_routing_guard(sdk):
+    """The guard exists to avoid a refusal; it must not invent a CRASH.
+
+    `_SUBJECT_STATUS_VALUES` is a frozenset, so membership HASHES its operand —
+    an unhashable `status` (a list/dict) raised `TypeError: unhashable type`
+    where `origin/main` wrote the node. The Subject door's own validation tests
+    `isinstance(…, str)` FIRST; the guard must mirror it (a non-str status is
+    not routable, and it is not a crash either).
+    """
+    r = sdk.create_object("Q3", objectKind="core:team", status=["active"])
+    assert r.get("id"), "no write may be refused or crash (#1934)"
+    labels, object_kind, _sk, _pk, _ek = _node(sdk, r["id"])
+    assert labels == ["Object"], r
+    assert object_kind == "core:team"
+    # Reported (not re-routed, not crashed): the status is not a Subject status.
+    assert [n["code"] for n in _layer_notes(r)] == ["kind_other_layer"], \
+        r.get("advisories")
+
+
+def test_two_disagreeing_spellings_never_drop_the_caller_s_kind(sdk):
+    """Two spellings of ONE property disagreeing must be REPORTED, not resolved.
+
+    The fold persists `objectKind` and `object_kind` onto the same property, and
+    both route to `subject`. Re-routing had to pick ONE of the two values the
+    caller gave, and the survivor was `named[-1]` — i.e. `_KIND_PROP_SPELLINGS`'s
+    dict-iteration order, not the caller's canonical spelling (measured:
+    `create_object("Q4", objectKind="core:organization", object_kind="core:team")`
+    stored `subjectKind='core:team'` and dropped `core:organization` silently).
+    This module's contract is "no prop is ever rewritten to fit", so an
+    ambiguous write keeps its layer, keeps BOTH spellings, and is reported.
+    """
+    r = sdk.create_object("Q4", objectKind="core:organization",
+                          object_kind="core:team")
+    assert r.get("id")
+    labels, object_kind, subject_kind, _pk, _ek = _node(sdk, r["id"])
+    assert labels == ["Object"], r
+    assert object_kind == "core:organization", "the caller's kind was dropped"
+    assert subject_kind is None, r
+    assert [n["code"] for n in _layer_notes(r)] == ["kind_other_layer"], \
+        r.get("advisories")
+    # Agreement is still routed — the ambiguity is the disagreement, not the
+    # second spelling (the #5475 lesson: a snake-cased kind cannot escape).
+    ok = sdk.create_object("Q5", objectKind="core:organization",
+                           object_kind="core:organization")
+    labels2, _ok2, subject_kind2, _pk2, _ek2 = _node(sdk, ok["id"])
+    assert labels2 == ["Subject"], ok
+    assert subject_kind2 == "core:organization"
+    assert [n["code"] for n in _layer_notes(ok)] == ["kind_layer_routed"]
