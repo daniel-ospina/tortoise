@@ -57,6 +57,15 @@ WHAT THIS PINS
    about the reader's CONTROL FLOW, and `_require_served` cannot see it (it is a
    lower bound). A reader that consults the data leg on that arm must leave the
    section UNMEASURED (exit 3), not print the opposite of what it did.
+10. Row 2b's OTHER clause — "the catalog union (#2714 indicator 3)" — is measured
+   at the write gate that owns it (``pack_state.unapproved_kind_pack``: ``None``
+   admits, an explicit set constrains), so narrowing that ``return None`` into a
+   fallback FALSIFIES the row instead of leaving it CONFIRMED (round 4, P2).
+11. ``TORTOISE_STARTER_PACKS`` is refused (exit 3, section UNMEASURED) rather than
+   measured: an override makes rows 2a-2e describe a starter set the product does
+   not ship, and it misreports in both directions — a false FALSIFIED when the
+   override names an unknown pack, a green section when it names a subset
+   (round 4, P3).
 
 Non-vacuity: on the pre-fix probe, (1) has no ``tortoise_health`` /
 ``tortoise_overview`` / ``tortoise_onboarding_state`` row, (2) has no

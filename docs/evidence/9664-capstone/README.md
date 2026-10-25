@@ -39,7 +39,12 @@ Measured at `git HEAD 653980445f` (2026-10-22), with the census (`02`) re-run at
 became a MEASURED row instead of a `STATIC` one (the rows were first added at
 `b966664db`; the shipped log is the re-run after the round-1 review fix, whose
 fail-closed guards change no printed row — the log body is byte-identical under
-them); deployed
+them), and again at `a310c1d9c` (2026-10-25) for the round-4 review's two
+residuals — row 2b's *"the catalog union (#2714 indicator 3)"* clause and the
+starter set's `TORTOISE_STARTER_PACKS` override. Only **one printed row changes**
+there (2b's evidence line gains the write-gate reading the clause now measures:
+`None` admits, an explicit set constrains; every other row, and the `25 premises, 0
+unmeasured sections` total, is unchanged); deployed
 `commit_sha 81f5594dce` — an
 ancestor of `origin/main` `2bf86487c1`, **39 commits behind** it
 (`git rev-list --count 81f5594dce..2bf86487c1` → `39`; deploy lag, not a stale or
