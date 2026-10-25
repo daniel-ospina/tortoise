@@ -281,7 +281,19 @@ def test_a_homonymous_pair_bounded_between_labels_declares_partial():
 
 
 def test_rebuild_from_record_refuses_without_the_destructive_token():
-    """L1 (#2944) is not bypassed by the new source."""
+    """L1 (#2944) is not bypassed by the new source.
+
+    ⛔ ``_view()`` is built OUTSIDE the raise block, and the raised TYPE is
+    pinned by message, on purpose: ``_view()`` can itself raise
+    ``UnprojectableRecord``, which IS a ``RuntimeError``
+    (``CacheProjectionError(RuntimeError)``, ``tortoise/cache_projection.py:349``),
+    so a row the contract refuses satisfied this assertion on its own — measured
+    on ``origin/main@4c797596d``, this test passed VACUOUSLY while ``_view()``
+    was raising ``no contract key at object.id``, and only the other four reds
+    made the breakage visible. Building the fixture first and matching the gate's
+    own message is what makes this test about L1 rather than about the fixture.
+    """
     proj = _projection()
-    with pytest.raises(RuntimeError):
-        proj.rebuild_from_record(_view(), confirm_destructive=False)
+    view = _view()
+    with pytest.raises(RuntimeError, match="Graph guard: rebuild_from_record performs"):
+        proj.rebuild_from_record(view, confirm_destructive=False)
