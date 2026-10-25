@@ -46,8 +46,12 @@
 #   `.mergify.yml` against the live repo while holding `issues: write`,
 #   `pull-requests: write` and the intake secret. Pinned by a test.
 # * `relay-then-close-then-label`: a failed intake POST (or a failed comment /
-#   close) leaves the item UNLABELLED, so the next run selects it again and
-#   reds this workflow — a dead intake is an alarm, never a silent "handled".
+#   close) leaves the item UNLABELLED, so a later run selects it again — but
+#   only WHILE IT IS STILL INSIDE the `--since-hours` window: the listing stops
+#   at `now - since_hours` and `created_at` never moves, so an item that fails
+#   in the last cadence of the window ages out at `created_at + since_hours` and
+#   nothing selects it again. While it is retryable it reds this workflow — a
+#   dead intake is an alarm, never a silent "handled".
 #   The label is applied LAST because it is the idempotence marker.
 # * An INCOMPLETE listing (a failed page) takes NO action (`exit 2`), `--max`
 #   bounds a run, and `--since-hours` bounds the window so a first run cannot

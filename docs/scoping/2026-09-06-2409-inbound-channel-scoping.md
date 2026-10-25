@@ -141,13 +141,17 @@ Two changes close the gap, and neither changes the policy above:
   repository's own credential, so it is not subject to the approval policy and
   does not depend on any event surviving. It is idempotent on the label,
   window-bounded and capped, and relays BEFORE it closes (a failed intake POST
-  leaves the item open for the next run and reds the workflow). The label is
-  applied LAST, so a failure in the resume read, the intake POST, the comment or
-  the close leaves the item unlabelled and therefore retryable rather than
-  open-and-marked. A label that fails AFTER a successful close is the one state
-  nothing retries — the item is closed and off the open listing, so no later run
-  selects it again; the run says so and asks for the label to be applied by
-  hand. A page that FAILS to read
+  leaves the item open for the next run — but only WHILE IT IS STILL INSIDE the
+  `--since-hours` window: the listing stops at `now - since_hours` and
+  `created_at` never moves, so an item that fails in the last cadence of the
+  window ages out at `created_at + since_hours`, and nothing selects it again).
+  The label is applied LAST, so a failure in the resume read, the intake POST,
+  the comment or the close leaves the item unlabelled and therefore retryable —
+  again only while it is still inside that window, not after it ages out —
+  rather than open-and-marked. A label that fails AFTER a successful close is
+  the one state nothing retries — the item is closed and off the open listing,
+  so no later run selects it again; the run says so and asks for the label to
+  be applied by hand. A page that FAILS to read
   takes no action at all; a window that merely outgrew the page budget is acted
   on as the prefix that was read — otherwise anyone willing to open more than
   `max_pages x 100` items in a day could switch the control off.

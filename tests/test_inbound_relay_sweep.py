@@ -61,6 +61,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 MODULE_PATH = REPO_ROOT / "tools" / "inbound_relay_sweep.py"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "inbound-relay.yml"
 SWEEP_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "inbound-relay-sweep.yml"
+SCOPING_DOC = (
+    REPO_ROOT / "docs" / "scoping" / "2026-09-06-2409-inbound-channel-scoping.md"
+)
 
 OWNER = "daniel-ospina"
 LABEL = "queued-for-triage"
@@ -778,6 +781,38 @@ def test_the_resume_footer_is_bound_to_the_EVENT_path_copies_too(sweep: Any) -> 
         )
 
 
+#: The duplicate-comment predicate BOTH comment steps must contain, whitespace-normalised.
+#: Its POLARITY is the behaviour, so the whole expression is pinned: `includes(FOOTER)`
+#: decides "already commented", `=== 'bot'` / `=== owner` decide whose comment counts.
+#: A pin that only asserts these tokens APPEAR permits every inversion of them.
+_EXPECTED_COMMENT_GATE = (
+    "const alreadyCommented = comments.some((c) => { "
+    "const user = c.user || {}; "
+    "return String(c.body || '').includes(FOOTER) && "
+    "(String(user.type || '').toLowerCase() === 'bot' || user.login === owner); "
+    "});"
+)
+
+
+def _comment_gate(script: str) -> str:
+    """The whitespace-normalised `alreadyCommented` predicate, closing `});` included.
+
+    Re-wrapping the script must not be able to hide (or fake) the polarity, so the
+    slice is normalised before it is compared; a mutation of the MEANING cannot
+    normalise away.
+    """
+    start = script.find("const alreadyCommented")
+    gate = script.find("if (!alreadyCommented)")
+    assert start != -1, "no `alreadyCommented` predicate to bind"
+    assert gate != -1, "the result of the check does not gate the comment"
+    assert start < gate, (
+        "the check must be decided BEFORE the gate that posts the comment"
+    )
+    close = script.find("});", start)
+    assert close != -1 and close < gate, "the predicate never closes"
+    return " ".join(script[start:close + 3].split())
+
+
 def test_every_relay_comment_step_checks_for_an_existing_comment_first(sweep: Any) -> None:
     """The idempotence read must be BEFORE the write, in the event path too.
 
@@ -786,12 +821,20 @@ def test_every_relay_comment_step_checks_for_an_existing_comment_first(sweep: An
     read that happens after `createComment` is not a check.
 
     ⛔ Present-and-ordered is NOT the property worth pinning on its own: measured
-    in cycle 3, replacing the predicate with `const alreadyCommented = false;`
-    left every test green, because the read and its position still existed and
-    the rail had silently become "never skip". So the DETECTION CONSTANT is bound
-    to the sweep's marker, and the predicate must actually consume it plus the
-    same author rule `already_relayed()` applies — a bot-typed comment or the
-    owner's login, never the bare string an author could paste.
+    in an earlier cycle, replacing the predicate with `const alreadyCommented =
+    false;` left every test green, because the read and its position still
+    existed and the rail had silently become "never skip". A later revision bound
+    the predicate's TOKENS (`"includes(FOOTER)" in body`) and that was still not
+    the behaviour: measured on this head (mutate the workflow, run the suite,
+    revert), `includes(FOOTER)` → `!includes(FOOTER)`, `=== 'bot'` → `!== 'bot'`
+    and `const alreadyCommented = false && comments.some(` each left **61 tests
+    passing**. The first inversion is the exact double-comment this rail exists
+    to prevent; the second lets any author suppress the relay by pasting the
+    footer into their own comment, which is the forgeable-bare-string hole
+    `already_relayed()` tests `user.type` to close (#9946 review P2).
+
+    So the assertion is the EXPRESSION, not its vocabulary: normalised and
+    compared whole to the one body both steps must carry, which reds all four.
     """
     import re
 
@@ -811,24 +854,12 @@ def test_every_relay_comment_step_checks_for_an_existing_comment_first(sweep: An
             "recognising each other and both would post"
         )
 
-        start = script.find("const alreadyCommented")
-        gate = script.find("if (!alreadyCommented)")
-        assert start != -1, "no `alreadyCommented` predicate to bind"
-        assert gate != -1, "the result of the check does not gate the comment"
-        assert start < gate, (
-            "the check must be decided BEFORE the gate that posts the comment"
-        )
-        # The slice, not a regex: the predicate is a multi-line arrow function
-        # whose body carries its own semicolons, so a `;`-terminated match stops
-        # at `const user = …;` and tests nothing.
-        body = script[start:gate]
-        assert "includes(FOOTER)" in body, (
-            "the predicate does not test for the footer, so it cannot tell a "
-            f"relayed item from a fresh one: {body}"
-        )
-        assert "user.type" in body and "user.login === owner" in body, (
-            "the predicate does not apply `already_relayed()`'s author rule "
-            f"(a bot comment, or the owner's own login): {body}"
+        body = _comment_gate(script)
+        assert body == _EXPECTED_COMMENT_GATE, (
+            "the duplicate-comment predicate is not the one this rail exists for "
+            "— its POLARITY is the behaviour (`!includes(...)` posts a second "
+            "comment on a relayed item, `!== 'bot'` lets any author forge the "
+            f"marker), and tokens cannot pin it: {body}"
         )
 
 
@@ -1049,6 +1080,46 @@ def test_the_rails_promise_no_retry_that_the_label_step_cannot_get(
         "re-selectable, including the label step that runs after the close"
     )
     assert "BEFORE THE CLOSE" in block_text, block_text
+
+    # The same over-claim was copied into three more operator-facing places, and
+    # the window scoping (`41c3452f0`) reached NONE of them: it scoped this
+    # docstring's SAFETY RAILS, its EXIT CODES and the code's own failure note,
+    # while the workflow an operator opens to read what the control does, the
+    # scoping doc's Status section and `RELAY_MARKER`'s comment kept promising an
+    # unconditional re-select. Pinned together, each by the unqualified promise
+    # it made and by the horizon that must bound it (#9946 review P3).
+    copies = {
+        "the sweep workflow's operating note": (
+            SWEEP_WORKFLOW.read_text(encoding="utf-8").split(
+                "# * `relay-then-close-then-label`", 1)[1].split(
+                "# * An INCOMPLETE listing", 1)[0],
+            "so the next run selects it again and reds this workflow",
+        ),
+        "the scoping doc's Status section": (
+            SCOPING_DOC.read_text(encoding="utf-8").split(
+                "## Status — the relay's converging path", 1)[1].split(
+                "## Review gates", 1)[0],
+            "leaves the item open for the next run and reds the workflow",
+        ),
+        "RELAY_MARKER's own comment": (
+            MODULE_PATH.read_text(encoding="utf-8").split(
+                "#: The footer both comment templates", 1)[1].split(
+                "RELAY_MARKER =", 1)[0],
+            "a failed close leaves an item that the next run selects again",
+        ),
+    }
+    for where, (raw, over_claim) in copies.items():
+        copy_text = " ".join(raw.split())
+        assert over_claim not in copy_text, (
+            f"{where} still promises an unconditional re-select: an item that "
+            "fails in the last cadence of the `--since-hours` window is not "
+            "selected by anything"
+        )
+        assert "--since-hours" in copy_text and "ages out" in copy_text, (
+            f"{where} must scope its re-select promise to the `--since-hours` "
+            "window and name the instant it ages out; without that, a reader "
+            f"triaging a red sweep trusts a retry that does not exist: {copy_text[-400:]}"
+        )
 
 
 def test_run_is_capped_and_reports_the_remainder(sweep: Any) -> None:
