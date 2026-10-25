@@ -76,7 +76,7 @@ All commands run against `origin/main` @ `df0d0888b` (2026-10-22).
 | Claim in the audit | Verified reality |
 |---|---|
 | "zero references from any issue or PR" | **20 tracked files** under `docs/epics/1402-eval-battery/`; **24 commits** on `origin/main` match `1402` (29 across all refs); epic body carries a 12-row wiring table |
-| "no scope" | `03-scope.md` — 9 in-scope deliverables, 4 out, 7 high-level E2E, integration-surface map S1–S8 |
+| "no scope" | `03-scope.md` — 9 in-scope deliverables, 5 out, 7 high-level E2E, integration-surface map S1–S8 |
 | "no plan" | `04-plan.md` — 25 detailed E2Es; **Human gate #2 recorded: approved by owner 2026-08-14 ("go")** |
 | "no children" | `05-decompose.md` — MECE-verified; **11 child issues #1406–#1416 + capstone #1419** (12 wiring rows) |
 | pipeline never ran | `06-verify.md` — `Status: READY`, `Review Gates: 12/12 passed`, `Coherence: 0 issues`, `Artifacts: 5/5` |
@@ -229,8 +229,9 @@ the 10 children that shipped; re-stating the epic as *complex* now mis-sizes the
 
 ## 7. MECE remaining-work list — **propose, do not create**
 
-Every unit below already exists as an issue **except** the last two rows. The recommendation is to
-create **nothing** and instead fix edges/labels. Listed for the owner gate.
+Every unit below already exists as an issue **except** row 6, which is a label change with no issue of
+its own, and row 7, filed during this brief as issue #9701. The recommendation is to create
+**nothing** and instead fix edges/labels. Listed for the owner gate.
 
 | # | Work unit | O/I/T (one line) | State |
 |---|---|---|---|
