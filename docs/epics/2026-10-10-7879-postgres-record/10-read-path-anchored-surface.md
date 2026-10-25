@@ -40,8 +40,8 @@ indistinguishable from an omission:
 |---|---|
 | `anchored-neighbours` | the cache's answer includes operator nodes and an `idx` convention a record row cannot reproduce without re-deciding it. Pinning parity to an answer this unit cannot show is the same one would freeze a decision it has not made. (**#6976** — an operator-hop requirement that returned `[]` for points that had edges, fixed by **#8991** — is the historical member of this defect family, and the reason the anchor must bind or fail.) |
 | `anchored-ep-scalars` | `confidence` / `ep_*` / `posterior_*` are **recomputed from the structure** (§2.0 clause (a), §17.5) and the schema refuses them as columns AND as `props` keys. |
-| `internal-accessor` (`TortoiseSDK.get_point`) | write paths call it **mid-write**; a record-served answer would read a store the same write has not finished projecting. Its caller-facing surface is `tortoise_get_point`, which is not wired because an MCP call carries no hosted org credential from which to resolve a record tenant. |
-| `entity-accessor` (`TortoiseSDK.get_entity` → `tortoise_get_entity`) | a **second** internal accessor with the **same** mid-write hazard (`_get_entity` echoes a written entity back at three write sites). Excluded for the same reason as `get_point`, and named separately because it is a different accessor: `tortoise_get_entity` never reaches `get_point`. (With `type=`, that tool routes to `tortoise_get` — a LIST read, which has no coordinate and falls under `whole-graph`.) |
+| `internal-accessor` (`TortoiseSDK.get_point`) | write paths call it **mid-write**; a record-served answer would read a store the same write has not finished projecting. Its caller-facing surface is `tortoise_get_entity(id, type="point")` (`tortoise_get_point` is its **retired** alias, `tool_registry.RETIRED_USE_INSTEAD`), which is not wired because an MCP call carries no hosted org credential from which to resolve a record tenant. |
+| `entity-accessor` (`TortoiseSDK.get_entity` → `tortoise_get_entity`) | a **second** internal accessor with the **same** mid-write hazard (`_get_entity` echoes a written entity back at **two** write sites — a write echo and a post-write read-back — plus the read accessor's own delegation). Excluded for the same reason as `get_point`, and named separately because it is a different accessor: `tortoise_get_entity` never reaches `get_point`. ⚠️ `tortoise_get` is **not** a separate escape: it is a by-id dispatcher, and `tortoise_get(id, type="point")` lands on the same accessor, so it carries a coordinate and is covered here — only a list-shaped call has none. |
 | `selfhost-endpoint` (`GET /points/{id}` in `selfhost_api.py`) | a **second** caller-facing anchored read. Not wired: the record tenant it needs is resolved from a hosted org credential, and the selfhost surface presents none — that needs its own tenant decision, not a copy of this one. |
 | `whole-graph` (the 377 sites) | no coordinate ⇒ a record answer cannot be shown to be the same SET. Out of this unit's scope by the issue's own wording. |
 
@@ -126,7 +126,7 @@ because they are the cache's own fold state and a record-served answer must not 
 
 ## 3. Mutation arms — the guards, and the edits that turn them RED
 
-Run 2026-10-24 against `tests/test_record_serve.py` (49 tests) and the live file (2 tests):
+Run 2026-10-24 against `tests/test_record_serve.py` (50 tests) and the live file (2 tests):
 
 | edit | result |
 |---|---|

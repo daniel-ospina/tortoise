@@ -317,10 +317,11 @@ ANCHORED_READS: dict[str, AnchoredRead] = {
         reason="write paths call it MID-WRITE to build journal events, so a "
                "record-served answer would read a store the same write has not "
                "finished projecting. The caller-facing reads of the same shape "
-               "are the hosted endpoint served here AND the MCP tool built on it "
-               "(tortoise_get_point) — that tool is not wired, because an MCP call "
-               "carries no hosted org credential from which to resolve a record "
-               "tenant.",
+               "are the hosted endpoint served here AND the MCP route that reaches "
+               "it (`tortoise_get_entity(id, type=\"point\")` — `tortoise_get_point` "
+               "is its RETIRED alias, `tool_registry.RETIRED_USE_INSTEAD`), which is "
+               "not wired because an MCP call carries no hosted org credential from "
+               "which to resolve a record tenant.",
     ),
     "entity-accessor": AnchoredRead(
         name="entity-accessor",
@@ -332,11 +333,14 @@ ANCHORED_READS: dict[str, AnchoredRead] = {
                "post-write read-back — plus the read accessor's own delegation), "
                "so a record-served answer "
                "would read a store the same write has not finished projecting. "
-               "Its caller-facing surface is the MCP tool tortoise_get_entity, "
-               "which is EXCLUDED for the same reason as tortoise_get_point: no "
-               "hosted org credential to resolve a record tenant from. (With an "
-               "explicit type= the tool routes to tortoise_get, a LIST read, "
-               "which has no coordinate and falls under whole-graph.)",
+               "Its caller-facing surface is `tortoise_get_entity`, EXCLUDED for "
+               "the same reason as the point accessor: no hosted org credential "
+               "from which to resolve a record tenant. ⚠️ `tortoise_get` is NOT a "
+               "separate escape from the exclusion — it is a by-id dispatcher, and "
+               "`tortoise_get(id, type=\"point\")` lands on the SAME accessor this "
+               "module excludes (`tortoise_get_point` → `TortoiseSDK.get_point`), so "
+               "it carries a coordinate and is covered here, not by `whole-graph`. "
+               "Only a list-shaped call has no coordinate.",
     ),
     "selfhost-endpoint": AnchoredRead(
         name="selfhost-endpoint",
@@ -524,6 +528,14 @@ def open_record(record_dsn: str | None = None) -> Any:
             "cannot be read, so an absence is NOT established")
     try:
         conn = _default_connect(dsn)
+    except RecordWriteError as e:
+        # A MISSING DRIVER is a deployment defect, not an outage: retrying never
+        # installs `psycopg2`, and the message names the fix ("install the
+        # 'postgres' extra") — which the availability arm below would replace
+        # with a 503 whose detail is a type name. `_default_connect` raises
+        # `RecordWriteError` ONLY for that import (a failed `psycopg2.connect`
+        # propagates as the driver's own exception, handled below).
+        raise RecordServeError(f"the record is armed but its driver is not usable ({e})") from e
     except Exception as e:  # the driver's own message can carry the DSN
         raise RecordUnavailable(
             f"the record could not be opened ({type(e).__name__}) — an absence "

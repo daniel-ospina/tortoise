@@ -194,7 +194,11 @@ def test_every_exclusion_names_who_else_answers_the_same_read():
     artifact a lane reads.
     """
     reason = rs.ANCHORED_READS["internal-accessor"].reason
-    assert "tortoise_get_point" in reason
+    # The CANONICAL route, not its retired alias: `tortoise_get_point` is listed
+    # in `tool_registry.RETIRED_USE_INSTEAD`, so naming only it points a reader
+    # at a tool the registry no longer advertises.
+    assert "tortoise_get_entity" in reason and 'type=\"point\"' in reason
+    assert "RETIRED" in reason
     assert "hosted endpoint" in reason
     # ... and it must say WHY they are not wired, not merely that they are not.
     assert "org credential" in reason
@@ -1043,3 +1047,39 @@ def test_an_armed_mode_with_no_dsn_is_structural_not_an_outage(monkeypatch):
                        mode=rs.MODE_PREFER)
     assert rs.fallback_counts() == {}, (
         "a misconfiguration was counted as a record outage")
+
+
+def test_a_missing_driver_is_structural_not_an_outage(monkeypatch):
+    """No `psycopg2` is a deployment defect, and its message names the extra.
+
+    `_default_connect` raises `RecordWriteError` only for the missing import; the
+    wide availability arm used to convert it into `RecordUnavailable`, so an
+    armed deployment without the extra answered 503 ("retry"), counted
+    `record-unavailable` on every `prefer` read, and DROPPED the "install the
+    'postgres' extra" instruction.
+    """
+    from tortoise.record_writer import RecordWriteError
+
+    rs.reset_fallback_counts()
+
+    def _no_driver(dsn):
+        raise RecordWriteError(
+            "the record is armed but no Postgres driver is installed — install "
+            "the 'postgres' extra")
+
+    # `open_record` imports it from `record_writer` INSIDE the function, so the
+    # patch belongs on the module it comes from.
+    import tortoise.record_writer as rw
+    monkeypatch.setattr(rw, "_default_connect", _no_driver)
+    with pytest.raises(rs.RecordServeError) as caught:
+        rs.open_record("postgresql://app@127.0.0.1:5432/record")
+    assert not isinstance(caught.value, rs.RecordUnavailable)
+    assert "postgres" in str(caught.value) and "extra" in str(caught.value), (
+        "the instruction to install the extra was dropped")
+
+    with pytest.raises(rs.RecordServeError):
+        rs.serve_point(tenant=TENANT, point_id="p-1",
+                       cache_answer=_cache({"id": "p-1"}),
+                       record_dsn="postgresql://app@127.0.0.1:5432/record",
+                       mode=rs.MODE_PREFER)
+    assert rs.fallback_counts() == {}, "a missing driver was counted as an outage"
