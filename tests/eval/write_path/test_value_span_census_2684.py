@@ -21,7 +21,10 @@ The T's per-question leg is *"the value-bearing evidence is verbatim-present"*
 * the resolution + the predicate + the stamp under test: the SHIPPED
   ``tortoise.extractor_v2._resolve_source_turn`` / ``_carries_value`` /
   ``_value_verbatim_span``, called in the SHIPPED ORDER (resolve, then stamp
-  against the resolved turn).
+  against the resolved turn). **The two stamp-side inputs are the ones
+  production hands it** — content clamped to ``_MAX_CONTENT`` and the quote to
+  200 chars (``extractor_v2.py:7340`` / ``:7373``), while the resolver gets the
+  raw point (``:7478``). See ``_stamp_inputs``.
 
 ⛔ **The resolver is not optional in this census.** The receipt's
 ``source_turn_id`` is the model's ADVISORY index; the write path resolves the
@@ -148,6 +151,15 @@ CENSUS = {
 #: a refactor detail.
 ADVISORY_MISATTRIBUTED = 3
 
+#: The population the census runs over, and the half of it that is value-free.
+#: Both are PUBLISHED (runbook §6 quotes "105 of the 217 committed points are
+#: value-free"), so both are pinned: the test used to assert only that
+#: ``total`` was truthy, which let either number drift under a green run.
+#: ``VALUE_FREE_POINTS`` is measured through the SHIPPED predicate on the
+#: SHIPPED (clamped) inputs, i.e. the same test production draws.
+TOTAL_POINTS = 217
+VALUE_FREE_POINTS = 105
+
 #: An INDEPENDENT value detector — deliberately NOT ``_carries_value``, which is
 #: the predicate under test. A currency amount, a numeral, a month name, a
 #: number word, or a unit of time/quantity. Used to prove the addressed text
@@ -205,6 +217,26 @@ def _points(session: str, arm: str) -> list[dict]:
     return _receipt(session)["embed_list"][arm]["points"]
 
 
+def _stamp_inputs(point: dict) -> tuple[str, str]:
+    """The two inputs production hands the span mechanism, CLAMPED the way the
+    write path clamps them.
+
+    ⛔ Not the receipt's raw strings. ``extractor_v2`` trims the content to
+    ``_MAX_CONTENT`` (``:7340``) and the quote to 200 chars (``:7373``) BEFORE
+    ``_value_verbatim_span(content, quote, ...)`` is called (``:7494``); only
+    ``_resolve_source_turn`` gets the raw point (``:7478``, deliberately). A
+    census on the raw strings therefore answers a question production never
+    asks: a >200-char quote gets an address production cannot stamp. Measured
+    over the sealed corpus: 3 of the 217 points carry a >200-char quote and 1
+    of them is value-bearing AND spanned, where the raw census reports
+    ``(0, 201)`` and production writes ``(0, 200)``. No published count moves
+    (the other two are value-free, and no content reaches ``_MAX_CONTENT``),
+    which is exactly why nothing else would ever catch it."""
+    content = str(point.get("content") or "").strip()[:v2._MAX_CONTENT]
+    quote = str(point.get("quote") or "").strip()[:200]
+    return content, quote
+
+
 def _absence_class(turn_idx: int | None, quote: str,
                    warnings: list[str]) -> str:
     if not quote:
@@ -227,8 +259,7 @@ def _census() -> dict:
         edus = _edus(session)
         for arm in ARMS:
             for point in _points(session, arm):
-                content = point.get("content") or ""
-                quote = point.get("quote") or ""
+                content, quote = _stamp_inputs(point)
                 if not v2._carries_value(content, quote):
                     continue
                 out["value_bearing"] += 1
@@ -265,13 +296,21 @@ def test_the_census_is_a_rederivation_not_an_observation():
     the HARNESS changed (it now persists committed points), not that a date
     passed; retire the derivation caveat only after re-measuring through the
     new harness."""
-    total = spanned = 0
+    total = spanned = value_free = 0
     for session in SESSIONS:
         for arm in ARMS:
             for point in _points(session, arm):
                 total += 1
                 spanned += int("span_start" in point or "span_end" in point)
+                value_free += int(not v2._carries_value(*_stamp_inputs(point)))
     assert total, "the census has no population — the receipts did not load"
+    assert total == TOTAL_POINTS, (
+        f"the committed population moved: {total} points, pinned {TOTAL_POINTS} "
+        "— runbook §6 publishes this total; re-measure before touching it")
+    assert value_free == VALUE_FREE_POINTS, (
+        f"{value_free} of the {total} committed points are value-free, pinned "
+        f"{VALUE_FREE_POINTS} — runbook §6 publishes this count as the reason no "
+        "widening to every Point can be read off this corpus")
     assert spanned == 0, (
         f"{spanned} of {total} committed points carry a span key — the "
         "measuring harness now persists committed points (it used to persist "
@@ -354,8 +393,7 @@ def test_every_absence_in_the_census_is_REPORTED():
         edus = _edus(session)
         for arm in ARMS:
             for point in _points(session, arm):
-                content = point.get("content") or ""
-                quote = point.get("quote") or ""
+                content, quote = _stamp_inputs(point)
                 if not v2._carries_value(content, quote):
                     continue
                 warnings: list[str] = []
@@ -477,6 +515,16 @@ SAME_TURN_DEDUPE = {"consulted": 41, "value_flagged": 24,
 SAME_TURN_DEDUPE_VALUE_BEARING = {"consulted": 11, "value_flagged": 8,
                                   "value_guard_decisive": 0, "collapsed": 1}
 
+#: The SAME measurement grouped on the receipt's own ``source_turn_id`` — the
+#: model's ADVISORY index — instead of the resolved turn. Published in runbook
+#: §2.3 as the third population an advisory grouping would produce, and pinned
+#: here so those four numbers are re-derived rather than asserted: the previous
+#: form derived only ``consulted`` (the other three fields stayed 0) and then
+#: asserted ``advisory != resolved``, an inequality that holds for ANY consulted
+#: count, so the doc's figures were checked by nothing.
+ADVISORY_KEY_DEDUPE = {"consulted": 43, "value_flagged": 26,
+                       "value_guard_decisive": 1, "collapsed": 2}
+
 #: EVERY per-arm pair of extracted points, for the content-ratio zero: the
 #: value-bearing restriction narrows the population, and the zero must not be a
 #: property of the narrowing.
@@ -485,8 +533,7 @@ PAIRS_PER_ARM_ALL_POINTS = 1719
 
 def _value_bearing_points(session: str, arm: str) -> list[dict]:
     return [p for p in _points(session, arm)
-            if v2._carries_value(p.get("content") or "",
-                                 p.get("quote") or "")]
+            if v2._carries_value(*_stamp_inputs(p))]
 
 
 def _resolved_turn_key(point: dict, edus: list[dict]) -> str:
@@ -496,7 +543,7 @@ def _resolved_turn_key(point: dict, edus: list[dict]) -> str:
     ADVISORY index; production overwrites it with ``_resolve_source_turn``'s
     answer before the point is committed (``extractor_v2.py:7478`` → ``:7485``),
     and ``_same_fact`` groups on the committed field
-    (``retrieval.py:2408-2409``). Same defect class as §2.1's, one leg over —
+    (``retrieval.py:2403-2405``). Same defect class as §2.1's, one leg over —
     grouping by the advisory index counts pairs production never forms."""
     warnings: list[str] = []
     return _pkg_turn_key({"source_turn_id":
@@ -539,9 +586,11 @@ def test_the_dedupe_leg_is_measured_on_BOTH_legs():
     same_turn = {"consulted": 0, "value_flagged": 0,
                  "value_guard_decisive": 0, "collapsed": 0}
     same_turn_vb = dict(same_turn)
-    # The ADVISORY-key reading, measured only so the KEY CHOICE is pinned as a
-    # divergence: it is NOT published, and a lane that switches the grouping
-    # back to the receipt's field gets a red here instead of a quiet re-measure.
+    # The ADVISORY-key reading (``ADVISORY_KEY_DEDUPE``): the same measurement
+    # grouped on the receipt's field, counted with all four fields so runbook
+    # §2.3's published table is RE-DERIVED, and pinned by equality so a lane
+    # that switches the grouping back to the receipt's field gets a red instead
+    # of a quiet re-measure.
     same_turn_advisory = dict(same_turn)
 
     def _same_turn(acc: dict, a: dict, b: dict, edus: list[dict]) -> None:
@@ -569,12 +618,23 @@ def test_the_dedupe_leg_is_measured_on_BOTH_legs():
                                 b.get("content") or "") >= DEFAULT_PACKAGE_VERBATIM_OVERLAP:
                     all_near_dupe += 1
                 _same_turn(same_turn, a, b, edus)
-                # advisory-key control: same pairs, WRONG key
+                # advisory-key reading: same pairs, WRONG key — all FOUR
+                # fields, so the numbers §2.3 publishes are re-derived (a
+                # consulted-only counter cannot fail: every other field stays
+                # 0, and "advisory != resolved" then holds for any count).
                 at, bt = _pkg_turn_key(a), _pkg_turn_key(b)
                 qa = str(a.get("quote") or "")
                 qb = str(b.get("quote") or "")
                 if at and at == bt and qa and qb:
                     same_turn_advisory["consulted"] += 1
+                    adv_passes = (_pkg_overlap(qa, qb)
+                                  >= DEFAULT_PACKAGE_SAME_TURN_OVERLAP)
+                    if _pkg_differ_value_critical(qa, qb):
+                        same_turn_advisory["value_flagged"] += 1
+                        if adv_passes:
+                            same_turn_advisory["value_guard_decisive"] += 1
+                    elif adv_passes:
+                        same_turn_advisory["collapsed"] += 1
             points = _value_bearing_points(session, arm)
             for a, b in itertools.combinations(points, 2):
                 pairs += 1
@@ -615,6 +675,11 @@ def test_the_dedupe_leg_is_measured_on_BOTH_legs():
         "the SAME-SOURCE-TURN route moved over ALL extracted points (measured "
         f"before: {SAME_TURN_DEDUPE}) — §2.3 publishes these four numbers: "
         "re-measure both readings and update the runbook")
+    assert same_turn_advisory == ADVISORY_KEY_DEDUPE, (
+        "the ADVISORY-key reading of the same-turn route moved (measured: "
+        f"{same_turn_advisory}, pinned: {ADVISORY_KEY_DEDUPE}) — runbook §2.3 "
+        "publishes these four numbers as the population an advisory grouping "
+        "would produce; re-measure both readings and update the table")
     assert same_turn_advisory != same_turn, (
         "the advisory-key reading of the same-turn route no longer differs "
         f"from the RESOLVED-key one ({same_turn_advisory} vs {same_turn}) — "
@@ -687,8 +752,7 @@ def test_the_trimmed_anchor_relaxation_is_pinned_on_both_readings():
         edus = _edus(session)
         for arm in ARMS:
             for point in _points(session, arm):
-                content = point.get("content") or ""
-                quote = point.get("quote") or ""
+                content, quote = _stamp_inputs(point)
                 if not v2._carries_value(content, quote):
                     continue
                 # SHIPPED order: resolve, then stamp.

@@ -36,7 +36,7 @@ from the committed receipts and **fails on drift**.
 | | |
 |---|---|
 | **What is measured** | whether a value-bearing point can be **re-read verbatim** from an address: the point carries `span_start`/`span_end`, the addressed text carries a value, and that text is the point's own quoted words |
-| **On which code** | the **shipped** `tortoise.extractor_v2._value_verbatim_span` / `_carries_value` / `_verbatim_span_in_turn` |
+| **On which code** | the **shipped** `tortoise.extractor_v2._value_verbatim_span` / `_carries_value` / `_verbatim_span_in_turn`, on the **clamped** inputs production hands them: the content trimmed to `_MAX_CONTENT` (`extractor_v2.py:7340`) and the quote to 200 chars (`:7373`), while `_resolve_source_turn` deliberately receives the RAW point (`:7478`). The census applies the same two clamps (`_stamp_inputs`), so the addresses it reports are the ones production writes — a census on the raw strings reports a span production cannot stamp (measured: 3 of the 217 points carry a >200-char quote, 1 of them value-bearing **and** spanned, census `(0, 201)` vs production `(0, 200)`; no published count moves) |
 | **Population** | the **7 sealed write-path sessions × 2 arms** (`receipts/7947-arms-2026-10-18/`), whose points are real `deepseek-v4-flash` S2 extractions — **not** the frozen 50-Q LongMemEval slice |
 | **Paid calls** | **0**. No reader, no judge, no graph, no network |
 | **Reader** | **none** — and none may be substituted: wave §3 freezes GPT-4o + the official judge for every product measurement |
@@ -108,7 +108,7 @@ published exactly that (`band 6 · no turn 1`). Pinned by
 
 ⚠️ **One shape is silent BY CONSTRUCTION and is not in this census**: with an
 EMPTY `edus` list `_resolve_source_turn` returns `None` before any warning
-(`extractor_v2.py:6859`), so a value-bearing point extracted from no turns at all
+(`extractor_v2.py:6860-6861`), so a value-bearing point extracted from no turns at all
 would be a silent absence. Declared here rather than measured, because the
 census has no such point — and the fix belongs in the resolver (warn there),
 not in this record.
@@ -193,11 +193,14 @@ reachable **and decisive**:
 §2.1's rule, one leg over. Production overwrites the model's advisory index with
 the resolver's answer before the point is committed (`extractor_v2.py:7478` →
 `:7485`), and `_same_fact` groups on the committed field
-(`retrieval.py:2408-2409`). Grouping by the advisory index instead gives
+(`retrieval.py:2403-2405`). Grouping by the advisory index instead gives
 `43 / 26 / 1 / 2` over all extracted points — a population no package holds, and
-this section's third population error. It is not published as a reading; the
-guard pins only that the two keys DIVERGE, so a lane that switches the grouping
-back gets a red rather than a quiet re-measure.
+this section's third population error. That reading is **published here and
+pinned** (`test_the_dedupe_leg_is_measured_on_BOTH_legs` asserts
+`ADVISORY_KEY_DEDUPE == {consulted 43, value_flagged 26, value_guard_decisive 1,
+collapsed 2}`), so the four numbers above are re-derived rather than quoted: a
+lane that switches the grouping back to the receipt's field gets a red on the
+counts themselves, not merely on the divergence.
 
 **The one decisive pair is `wp07_bluepeak_followup`/narrative, turn 14**: a
 value-bearing point paired with a strict SUB-quote that carries no value, at quote
@@ -355,7 +358,9 @@ Its **widening — every committed Point carries a span, not just a value-bearin
 one — is UNSHIPPED**: `_value_verbatim_span` returns `None` before any span work
 unless `_carries_value(content, quote)` (`extractor_v2.py:3603-3604`), so no
 value-free point can carry an address at this head (105 of the 217 committed
-points are value-free; 0 of them can have a span). Do **not** read the closed
+points are value-free — both figures pinned by
+`test_the_census_is_a_rederivation_not_an_observation`'s `TOTAL_POINTS` /
+`VALUE_FREE_POINTS`; 0 of them can have a span). Do **not** read the closed
 issue as covering the residual. The residual — a span on every **value-bearing**
 point: `band` 3 · value-free quote 3 · no turn 4 · empty quote 1 — is recorded on
 the still-OPEN **#2684** (issue comment, 2026-10-25), and the every-Point
