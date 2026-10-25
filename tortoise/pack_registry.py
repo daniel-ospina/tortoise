@@ -397,6 +397,44 @@ SEMANTICS_DIRECTIONS: dict[str, str] = {
     "related": "-",
 }
 
+# ── Layer 1 — the MECHANISM each meaning declares (#9963) ──────────────
+# `mechanism` is the model's "how does it act" leg: IMPL raises the target's
+# confidence, NAND lowers it. ONTOLOGY §8's semantics table states it per
+# meaning (#7852's canonical table), and it is RULED, not inferred: `addresses`
+# and `causes` are IMPL, `hasPart` is IMPL, `refutes` and `mutuallyExclusive`
+# are NAND. Over the values that declare one, the OPPOSITE spelling is a logic
+# INVERSION: an IMPL wire labelled `refutes` RAISES the target exactly where the
+# meaning says it must lower it (#9963 measured 0.6693602 vs 0.1314086 on one
+# claim pair — identical declared meaning, only the mechanism differing — and
+# the node recorded `direction_basis: 'semantics'`, i.e. the graph claimed the
+# declared meaning WAS honoured).
+#
+# The four values ONTOLOGY §8 gives NO mechanism (`—`) are deliberately ABSENT:
+# `related`, `transacts`, `ownedBy`, `managedBy` are structural/neutral — they
+# say what the connection IS, not which way belief moves — so either mechanism
+# may be spelled over them and reporting one would invent a ruling the model
+# never made. (The layer-3 predicate is where `ownedBy`/`managedBy` carry their
+# §3.6 shape; the Layer-2 meaning does not fix a belief polarity.)
+#
+# ⛔ Read to COMPARE, never to gate (#1934 governance D1/D2 — a recorded
+# decision). A mismatched write LANDS with the caller's `op_type` and returns a
+# structured warning; converting it into a refusal is a reopen for the owner,
+# not a lane change (#9963 states the contract explicitly).
+#
+# Pinned by test to exactly ONTOLOGY §8's table (the mechanism column) and to a
+# subset of `SEMANTICS_VALUES` / `CORE_PREDICATES`, so a vocabulary move cannot
+# leave this map behind.
+SEMANTICS_MECHANISMS: dict[str, str] = {
+    "addresses": "IMPL",
+    "causes": "IMPL",
+    "dependsOn": "IMPL",
+    "hasPart": "IMPL",
+    "supports": "IMPL",
+    "mutuallySupportive": "IMPL",
+    "refutes": "NAND",
+    "mutuallyExclusive": "NAND",
+}
+
 # Values shipped packs still declare, ruled to collapse onto the core
 # vocabulary. Recognised (never an error, so a pack is not dropped
 # mid-transition) and warned naming the canonical word. The pack alignment
@@ -539,6 +577,86 @@ def relation_write_verdict(rel: dict) -> tuple[str, tuple[str, ...]]:
     if rel.get("declarationOnly") is True:
         return RELATION_DECLARATION_ONLY, ()
     return RELATION_PREDICATE_NOT_IN_ALLOWLIST, ()
+
+
+def declared_mechanisms(
+    *,
+    label: str | None = None,
+    semantics: str | None = None,
+    registry: object | None = None,
+) -> list[tuple[str, str]]:
+    """The mechanism(s) a relation write's OWN declaration fixes (#9963).
+
+    ONE lookup, because the three-layer triple (#7852: mechanism + semantics +
+    direction) is checked by more than one creator and a per-call-site copy is
+    how the legs drift apart. `create_operator` is the only caller TODAY; a
+    second creator that checks two legs of the triple reads this instead of
+    re-deriving it (the defect #9963 records is exactly a re-derivation that
+    read `predicate` and THREW `mechanism` away — the rows it iterated already
+    carried it).
+
+    Returns ``[(mechanism, human-readable source), …]`` — the mechanisms the
+    write DECLARES, each with where it came from. Empty means the write declares
+    none, and then there is nothing to compare against.
+
+    The sources, and why only these:
+
+    * **the pack relation named by `label`** (indicator 2 of #9963). Its
+      declaration IS the authority on what op_type that verb means, so a
+      declared ``mechanism`` in :data:`CORE_PREDICATES` is returned verbatim.
+      Matched on the PREDICATE only: a pack row that merely shares a semantics
+      value is a different relation, and treating it as the meaning's
+      mechanism would invent an ontology ruling #7852 never made (that is the
+      over-warning :data:`SEMANTICS_MECHANISMS` exists to avoid).
+    * **the declared `semantics`**, then the `label` read AS a meaning (the
+      pre-#7852 spelling, where the Layer-2 word rode the label) — both only
+      when the word is in :data:`SEMANTICS_MECHANISMS`, i.e. when ONTOLOGY §8
+      gives the meaning a mechanism at all.
+
+    A retired semantics word is the caller's problem, not this function's: the
+    write door canonicalizes it through :data:`SEMANTICS_TRANSITION` FIRST and
+    passes the canonical value here, so `opposes` is compared as
+    `mutuallyExclusive` (NAND) — comparing the pre-canonical spelling would
+    compare nothing, which is the wrong-order shape #9963 says to avoid.
+
+    ⛔ NEVER raises and never refuses: a registry that will not load degrades to
+    the core map alone (the warn-not-block path must not turn a load failure
+    into a write failure).
+    """
+    found: list[tuple[str, str]] = []
+
+    def _add(mechanism: object, source: str) -> None:
+        if mechanism in CORE_PREDICATES and (mechanism, source) not in found:
+            found.append((mechanism, source))
+
+    # 1. the pack relation the caller NAMED, by predicate.
+    if label and registry is None:
+        try:
+            from .domain_loader import _get_registry
+
+            registry = _get_registry()
+        except Exception:  # noqa: BLE001, RUF100 — warn-not-block path, never raise
+            registry = None
+    if label and registry is not None:
+        try:
+            rows = list(registry.list_relations())  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001, RUF100 — same contract
+            rows = []
+        for rel in rows:
+            if rel.get("predicate") != label:
+                continue
+            _add(rel.get("mechanism"),
+                 f"the pack relation '{label}' ({rel.get('pack') or 'pack'})")
+
+    # 2. the declared MEANING — the Layer-2 word, whether it arrived as
+    #    `semantics` or (pre-#7852 spelling) as the `label` itself.
+    if semantics in SEMANTICS_MECHANISMS:
+        _add(SEMANTICS_MECHANISMS[semantics], f"the semantics '{semantics}'")
+    if label in SEMANTICS_MECHANISMS and label != semantics:
+        _add(SEMANTICS_MECHANISMS[label],
+             f"the label '{label}' (a Layer-2 meaning)")
+
+    return found
 
 # ── Manifest v3.1 (epic #909 §1.4/§1.5): extraction behaviour slots (#1026) ──
 # Per-pack slots that let a pack shape extraction for its own domain while the
