@@ -137,6 +137,16 @@ not-provably-clean, never as clean: the check must not fail open on an
 unreadable index. Both rows — the commit and the tree state — are rendered in
 §1/§6 beside the binding.
 
+The record is taken **twice**, before the first case and after the last one,
+and that is a fifth refusal: a measurement takes minutes, so a commit that
+lands while the run is in flight means the numbers came from **no single
+tree** — the start and end records differ, and `publish` refuses the run rather
+than publishing numbers under either sha. The same applies in reverse to a
+path the run itself dirties. Untracked files count as dirty, and the untracked
+mode is pinned (`--untracked-files=normal`) rather than read from the
+operator's git config, so a repository configured not to report untracked
+files cannot make a dirty tree look clean.
+
 ## Why this is a separate tree from `tests/eval/write_path/`
 
 Mechanical, not stylistic: the write-path corpus's own integrity gate derives

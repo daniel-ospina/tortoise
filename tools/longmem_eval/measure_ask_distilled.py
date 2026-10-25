@@ -639,7 +639,14 @@ def code_identity(repo_root: str | Path | None) -> dict:
         }
     repo_root = Path(repo_root)
     commit = _resolve_commit(repo_root, "HEAD")
-    status = _git(repo_root, "status", "--porcelain")
+    # ⛔ ``--untracked-files=normal`` is PINNED, not inherited: the question is
+    # "was the tree clean?", and without the flag the answer comes from the
+    # reader's git config. ``status.showUntrackedFiles=no`` is a common setting
+    # on a repository this size, and under it an untracked, importable file is
+    # invisible — so ``dirty_paths`` is ``[]`` and the report publishes "clean at
+    # run time" over a tree that includes code nobody recorded.
+    status = _git(repo_root, "status", "--porcelain",
+                  "--untracked-files=normal")
     # A status that FAILS is not a clean tree: a non-zero exit (not a
     # repository, unreadable index) leaves stdout empty, which would otherwise
     # read as "nothing modified" — a fail-open on the one question this asks.
@@ -924,9 +931,10 @@ def run_sealed(*, corpus_root: Path = corpus.ASK_DIR,
     # tree, and that is a refusal rather than a footnote — recorded here because
     # only the run knows when it started.
     identity["at_end"] = code_identity(repo_root)
-    if (identity["at_end"]["commit"] != identity["commit"]
-            or identity["at_end"]["dirty_paths"] != identity["dirty_paths"]):
-        identity["drifted_during_run"] = True
+    # No separate "drifted" flag is recorded: :func:`_validate_code_identity`
+    # and :func:`render_report` both decide from the two records, so a third,
+    # inert field would be a second verdict nothing reads — the shape this
+    # repo has been burned by before.
     report = {
         "schema": RUN_SCHEMA,
         # FIXTURES ONLY — deliberately NOT the full corpus hash, which digests
@@ -1521,8 +1529,14 @@ def _validate_code_identity(receipt: dict) -> list[str]:
             "receipt.code_identity.at_end: missing — the run did not record the "
             "tree AFTER it finished, so nothing shows the measurement stayed on "
             "one tree; a sha cannot reproduce a run that may have straddled two")
+    elif not isinstance(at_end.get("dirty_paths"), list):
+        issues.append(
+            f"receipt.code_identity.at_end.dirty_paths: expected a list, got "
+            f"{at_end.get('dirty_paths')!r} — a record that cannot say whether "
+            f"the END tree was clean is not evidence it was")
     elif (at_end.get("commit") != run_tree
-            or (at_end.get("dirty_paths") or []) != (dirty or [])):
+            or at_end["dirty_paths"] != (dirty if isinstance(dirty, list)
+                                         else [])):
         issues.append(
             f"receipt.code_identity.at_end: the tree CHANGED while the run was "
             f"in progress ({run_tree!r}/{dirty!r} at start → "

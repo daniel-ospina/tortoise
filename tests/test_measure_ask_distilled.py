@@ -1868,3 +1868,48 @@ def test_an_absent_record_never_renders_as_a_clean_tree(shared_run, tmp_path):
                            prereg_sha256="sha256:" + "0" * 64)
     assert "NOT RECORDED" in text
     assert "clean at run time" not in text
+
+
+def test_untracked_files_are_seen_even_when_git_is_configured_to_hide_them(
+        bound_repo):
+    """FAIL-BEFORE without `--untracked-files=normal`: this read as CLEAN.
+
+    `git status --porcelain` answers "was the tree clean?" using the READER's
+    git config, so `status.showUntrackedFiles=no` — a common setting on a
+    repository this size — makes an untracked, importable file invisible and the
+    tree reads clean. The question must be asked of the TREE, not of the
+    operator's config.
+    """
+    repo = bound_repo["repo"]
+    assert m._git(repo, "config", "status.showUntrackedFiles", "no").returncode == 0
+    try:
+        (repo / "invisible_module.py").write_text("X = 1\n", encoding="utf-8")
+        # The premise: with the config in force, an unpinned ask says "clean".
+        unpinned = m._git(repo, "status", "--porcelain")
+        assert unpinned.stdout.strip() == "", (
+            "the fixture did not reproduce the hiding config")
+        identity = m.code_identity(repo)
+        assert "invisible_module.py" in identity["dirty_paths"], identity
+    finally:
+        m._git(repo, "config", "--unset", "status.showUntrackedFiles")
+        (repo / "invisible_module.py").unlink()
+    assert m.code_identity(repo)["dirty_paths"] == []
+
+
+def test_an_end_record_that_cannot_say_whether_it_was_clean_is_refused(
+        shared_run):
+    """`(at_end.get('dirty_paths') or [])` folded an ABSENT key into "clean".
+
+    The start half type-checks the field, so `None`/`""`/`{}` cannot read as
+    clean there; the end half folded it, and a record that cannot say whether
+    the END tree was clean is not evidence that it was.
+    """
+    scored = copy.deepcopy(shared_run["scored"])
+    receipt = _receipt(scored)
+    del receipt["code_identity"]["at_end"]["dirty_paths"]
+    assert any("at_end.dirty_paths: expected a list" in issue
+               for issue in m.validate_ask_receipt(receipt))
+
+    # The same record with the field present is valid: the refusal is about the
+    # missing datum, not about the record's shape in general.
+    assert m.validate_ask_receipt(_receipt(copy.deepcopy(shared_run["scored"]))) == []
