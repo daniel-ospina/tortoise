@@ -682,7 +682,7 @@ def test_a_surface_that_says_the_pass_did_not_run_is_not_a_witness():
     # The refusal names WHERE the OFF block was found, so a reader can tell
     # "absent" (the #9116 cause) from "present and off" (this cause).
     assert "receipt['vet']" in unobserved["S2.2"], unobserved["S2.2"]
-    assert "tortoise/sdk.py:12738" not in unobserved["S2.2"], unobserved["S2.2"]
+    assert "tortoise/sdk.py:12744" not in unobserved["S2.2"], unobserved["S2.2"]
 
 
 def test_the_witness_rule_requires_the_flag_and_a_pass_that_did_work():
@@ -752,7 +752,7 @@ def test_the_flag_alone_is_not_a_witness_and_has_its_own_cause():
         # the LIST gate, and must NOT be attributed to the #9116 meta fold
         assert "`enabled` reads True" in cause, cause
         assert "never that the pass ran" in cause, cause
-        assert "tortoise/sdk.py:12738" not in cause, cause
+        assert "tortoise/sdk.py:12744" not in cause, cause
         assert "did NOT run" not in cause, cause
 
     # ── S2.2 cites the VET pass's own code … ──────────────────────────────
@@ -829,9 +829,9 @@ def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
     The shipped constant said "the receipt's stats carries 20 keys" — a number
     nothing counted — and blamed `extract_session_v2`, which in fact BUILDS
     `result["vet"]` (:8833-8837) and `result["classify_later"]` (:8823-8829). The
-    drop is the meta fold at `tortoise/sdk.py:12738` — the cite was `:12196` until
-    this round, which at this PR's base is a comment line 200 lines away, so the
-    bundle was sending the #9116 fixer into unrelated code. Getting it wrong sends
+    drop is the meta fold at `tortoise/sdk.py:12744` — the cite was `:12196` until
+    this round, and `:12738` until the #9109 merge moved the fold 6 lines down, so
+    each round the bundle sent the #9116 fixer somewhere else. Getting it wrong sends
     the next lane to the wrong file; getting the ARITHMETIC wrong sends it to a
     claim nothing supports.
     """
@@ -845,11 +845,11 @@ def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
     assert "S2.2" not in observed
     cause = unobserved["S2.2"]
     assert f"inspected {len(stats)} stats key(s)" in cause, cause
-    assert "tortoise/sdk.py:12738" in cause, cause
+    assert "tortoise/sdk.py:12744" in cause, cause
     assert "tortoise/extractor_v2.py:8833-8837" in cause, cause
     assert "tortoise/sdk.py:12196" not in cause, cause
     assert "20 keys" not in cause, cause
-    assert "tortoise/sdk.py:12738" in unobserved["S2.3"], unobserved["S2.3"]
+    assert "tortoise/sdk.py:12744" in unobserved["S2.3"], unobserved["S2.3"]
 
 
 def test_every_step_is_witnessed_or_given_a_cause():
@@ -1162,7 +1162,7 @@ def _bundle_in_scope(doc_name: str, line: str) -> bool:
     scope = _BUNDLE_ROW_FILTER.get(doc_name)
     return scope is None or bool(scope.search(line))
 
-# `tortoise/sdk.py:12738`, ``tortoise/projection/edges.py:2424-2449``, `edges.py:468`,
+# `tortoise/sdk.py:12744`, ``tortoise/projection/edges.py:2432-2457``, `edges.py:475`,
 # ``tortoise/extractor_v2.py:8833-8837``
 _BUNDLE_CITE = re.compile(
     r"(?<![\w.])(?:tortoise/)?(?:projection/)?"
@@ -1407,7 +1407,7 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     round quoted an older read of `7913`, which the extractor's own growth had
     since moved).
     The index row's cites are pinned by the same sweep: re-staling `00_index.md`'s
-    `sdk.py:12738` to `12401` reds it, and before this leg nothing read that row.
+    `sdk.py:12744` to `12401` reds it, and before this leg nothing read that row.
     """
     result = _bundle_sweep(_BUNDLE_DOCS, _BUNDLE_SOURCES)
     fired, checked = result["fired"], result["checked"]
