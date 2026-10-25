@@ -319,7 +319,7 @@ operators/NANDs, so it measures a raw-content baseline, not Tortoise.
 # suite's session gate requires a DB URI by default):
 TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest \
     tests/eval/write_path/test_value_span_census_2684.py -q -p no:cacheprovider
-# 7 passed
+# 8 passed
 
 # the mechanism's own unit pins:
 TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_extractor_v2.py \
