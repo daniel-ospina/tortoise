@@ -29,6 +29,7 @@ These tests cover, one per verification-checklist row of the issue:
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 import subprocess
@@ -207,7 +208,21 @@ def _binding(commit: str, corpus_hash: str,
 
 def _receipt(scored: dict, *, commit: str = "a" * 40, cost_usd: float = 0.0,
              prereg_sha256: str | None = None) -> dict:
-    """`build_receipt` with a matching binding (see :func:`_binding`)."""
+    """`build_receipt` with a matching binding + the run's code identity.
+
+    The run's identity is re-stamped to `commit`: these receipts describe a run
+    that executed the tree the receipt names (`_validate_code_identity` refuses
+    the inconsistent pair, which is the point of the tests that break it).
+    """
+    scored = copy.deepcopy(scored)
+    recorded = scored.get("code_identity") or {}
+    scored["code_identity"] = {
+        "schema": m.CODE_IDENTITY_SCHEMA,
+        "commit": commit,
+        "dirty_paths": [],
+        "repo": recorded.get("repo"),
+        "reason": None,
+    }
     return m.build_receipt(
         scored=scored, commit=commit, cost_usd=cost_usd,
         prereg_sha256=prereg_sha256,
@@ -351,10 +366,14 @@ def _make_bound_repo(base: Path) -> dict:
     gold.write_text(json.dumps(rekeyed, indent=2, sort_keys=True) + "\n",
                     encoding="utf-8")
     rekeyed_commit = _git_commit(repo, "gold: re-keyed after the run")
-    # The WORKTREE goes back to the scored corpus, so HEAD (c3) is dirty on
-    # purpose: the mismatch lives ONLY in the commit, which is what makes the
-    # refusal below a test of the sha and not of the disk.
-    gold.write_text(original_gold, encoding="utf-8")
+    # The WORKTREE goes back to ``c2`` — the commit a publish may legitimately
+    # record — so the mismatch lives ONLY in the commit ``c3``, which is what
+    # makes the refusal below a test of the sha and not of the disk. It also
+    # leaves HEAD clean at the run commit, which is the shape a published run
+    # must have (a run records the tree it executed from, and that tree has to
+    # BE the commit the report names).
+    assert m._git(repo, "checkout", "-q", run_commit).returncode == 0
+    assert m.code_identity(repo)["dirty_paths"] == []
     return {"repo": repo, "corpus_dir": corpus_dir, "prereg_path": prereg_path,
             "prereg_commit": prereg_commit, "run_commit": run_commit,
             "rekeyed_commit": rekeyed_commit}
@@ -366,13 +385,18 @@ def bound_repo(tmp_path_factory):
 
 
 @pytest.fixture(scope="module")
-def shared_run(tmp_path_factory):
+def shared_run(tmp_path_factory, bound_repo):
     """ONE run of the two-case subset, shared by the assertions that read it.
 
     These tests grade the same observations in different ways (the bar, the
     receipt, the report, the config comparisons). Re-running the lane per
     assertion would cost CI minutes and measure nothing new — the substrate is
     a stub reader, so the observations are deterministic.
+
+    The run records its code identity from ``bound_repo`` (HEAD == the commit a
+    publish may name, clean): the corpus it reads lives in a tmp directory, and
+    both corpora are generated from ``_small_cases()``, so they are byte-for-byte
+    the same corpus the bound repo carries.
     """
     import os
 
@@ -384,7 +408,7 @@ def shared_run(tmp_path_factory):
     _reset()
     tmp = tmp_path_factory.mktemp("shared-run")
     root = _small_corpus(tmp)
-    run = m.run_sealed(corpus_root=root,
+    run = m.run_sealed(corpus_root=root, repo_root=bound_repo["repo"],
                        reader_factory=_factory(_RecordingReader(_answer_map(), [])))
     scored = m.score(run_report=run, corpus_root=root, judge=_StubJudge(),
                      judge_spec=_StubJudge.model_id)
@@ -1442,3 +1466,114 @@ def test_a_receipt_may_not_publish_an_unproven_ordering(shared_run):
     inverted["commit_binding"]["run_commit_epoch"] = 1767225600
     assert any("is LATER than the run commit's" in issue
                for issue in m.validate_ask_receipt(inverted))
+
+
+# ── 8. the RUN records the tree that produced the numbers ─────────────────
+#
+# §7's binding makes the named sha vouch for the CORPUS and the PROTOCOL at
+# that sha. It says nothing about the tree the NUMBERS came from: a lane can run
+# the corpus at tree A, then name a commit B whose corpus and protocol are
+# byte-identical (any `main` merge between the run and the publish has exactly
+# that shape) and still publish a report telling a reader to `git checkout B`.
+# These pin the other half — the run records the commit it executed from and
+# whether that tree was clean, and publish refuses a run it cannot vouch for.
+
+def test_the_run_records_the_commit_and_the_clean_tree_it_ran_from(bound_repo):
+    """The record is produced by the step that ran, not by the publisher."""
+    identity = m.code_identity(bound_repo["repo"])
+    assert identity["schema"] == m.CODE_IDENTITY_SCHEMA
+    assert identity["commit"] == bound_repo["run_commit"]
+    assert identity["dirty_paths"] == []
+
+    run = m.run_sealed(corpus_root=bound_repo["corpus_dir"],
+                       repo_root=bound_repo["repo"],
+                       reader_factory=_factory(_RecordingReader(_answer_map(), [])))
+    assert run["code_identity"]["commit"] == bound_repo["run_commit"]
+    assert run["code_identity"]["dirty_paths"] == []
+    scored = m.score(run_report=run, corpus_root=bound_repo["corpus_dir"],
+                     judge=_StubJudge(), judge_spec=_StubJudge.model_id)
+    # The scored artifact carries it forward; publish compares it, so a score
+    # step that dropped it would turn the check off silently.
+    assert scored["code_identity"]["commit"] == bound_repo["run_commit"]
+
+
+def test_a_run_that_records_no_tree_cannot_be_published(shared_run):
+    """`run_sealed()` with no repository records the absence, and a run that
+    cannot say where it came from is not publishable — the receipt refuses it."""
+    run = m.run_sealed(corpus_root=shared_run["root"],
+                       reader_factory=_factory(_RecordingReader(_answer_map(), [])))
+    assert run["code_identity"]["commit"] is None
+    assert "no repository" in run["code_identity"]["reason"]
+    scored = copy.deepcopy(shared_run["scored"])
+    scored["code_identity"] = run["code_identity"]
+    receipt = m.build_receipt(
+        scored=scored, commit=shared_run["scored"]["code_identity"]["commit"],
+        cost_usd=0.0,
+        commit_binding=_binding(shared_run["scored"]["code_identity"]["commit"],
+                                scored["corpus_hash"]))
+    assert any("not a full 40-hex sha" in issue
+               for issue in m.validate_ask_receipt(receipt))
+
+
+def test_publish_refuses_a_run_that_ran_from_a_different_commit(
+        tmp_path, shared_run, bound_repo, capsys):
+    """FAIL-BEFORE: this publish returned 0 and wrote the report.
+
+    The run recorded `c1`; the publish names `c2`. Both commits carry the same
+    corpus and the same protocol — which is exactly why §7's binding passes —
+    and the numbers in the report came from `c1`'s code, so `git checkout c2`
+    reproduces this corpus and re-runs DIFFERENT code. That is the residual of
+    "reproducible from the recorded sha alone" that a free-text `--commit` left
+    open one step earlier in the pipeline.
+    """
+    scored = copy.deepcopy(shared_run["scored"])
+    scored["code_identity"]["commit"] = bound_repo["prereg_commit"]
+    scored_path = tmp_path / "scored.json"
+    scored_path.write_text(json.dumps(scored), encoding="utf-8")
+    report = tmp_path / "run-report.md"
+    receipt = tmp_path / "receipt.json"
+    rc = m._main(_publish_argv(
+        scored_path=scored_path, commit=bound_repo["run_commit"], report=report,
+        receipt=receipt, corpus_root=bound_repo["corpus_dir"],
+        prereg=bound_repo["prereg_path"], repo=bound_repo["repo"]))
+    err = capsys.readouterr().err
+    assert rc == 2, "a run from a DIFFERENT tree must never be published"
+    assert "DIFFERENT tree" in err, err
+    assert not report.exists() and not receipt.exists()
+
+
+def test_publish_refuses_a_run_made_from_a_dirty_tree(
+        tmp_path, shared_run, bound_repo, capsys):
+    """FAIL-BEFORE: this publish returned 0 and wrote the report.
+
+    A run from a tree with uncommitted changes reproduces from "sha plus a
+    patch nobody recorded", which is not the recorded sha alone. The path is
+    named in the refusal, so the lane knows what to commit and re-run.
+    """
+    scored = copy.deepcopy(shared_run["scored"])
+    scored["code_identity"]["dirty_paths"] = ["tortoise/ask_lane.py"]
+    scored_path = tmp_path / "scored.json"
+    scored_path.write_text(json.dumps(scored), encoding="utf-8")
+    report = tmp_path / "run-report.md"
+    receipt = tmp_path / "receipt.json"
+    rc = m._main(_publish_argv(
+        scored_path=scored_path, commit=bound_repo["run_commit"], report=report,
+        receipt=receipt, corpus_root=bound_repo["corpus_dir"],
+        prereg=bound_repo["prereg_path"], repo=bound_repo["repo"]))
+    err = capsys.readouterr().err
+    assert rc == 2, "a run from a dirty tree must never be published"
+    assert "uncommitted path" in err and "tortoise/ask_lane.py" in err, err
+    assert not report.exists() and not receipt.exists()
+
+
+def test_the_published_report_names_the_tree_the_run_executed_from(published,
+                                                                  bound_repo):
+    """§1 and §6 must state it, so a reader can audit the provenance from the
+    rendered document rather than from the machinery that made it."""
+    assert published["rc"] == 0
+    identity = published["receipt"]["code_identity"]
+    assert identity["commit"] == bound_repo["run_commit"]
+    assert identity["dirty_paths"] == []
+    text = published["report"].read_text(encoding="utf-8")
+    assert "Tree the run executed from" in text
+    assert "clean at run time" in text
