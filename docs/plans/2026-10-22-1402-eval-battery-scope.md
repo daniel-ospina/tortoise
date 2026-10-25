@@ -139,9 +139,13 @@ measured profile". None is a regression; each is delta work (§7 rows 8–9):
 1. **No production truth judge.** `RunConfig.truth_judge` (`battery/runner/run.py:116,164`) is the seam the
    #2740 emitter leg reads (`battery/runner/run.py:1158` → `probe_scorer.derive_judged_truth`,
    `battery/runner/probe_scorer.py:494–513`), and that function returns immediately on `judge is None`. The
-   only assignments in the tree are in tests: **nothing in production supplies one** — no CLI flag, no
-   runner default — so R3's `outcomes` and R5's `update_correct_direction` stay absent from any CLI run and
-   score `insufficient_n`.
+   only **sources of a non-None judge** are in tests: every production line is a pass-through that
+   forwards whatever it was handed (`battery/runner/run.py:164`, `battery/runner/probe_scorer.py:581`,
+   `:834`), so **nothing in production supplies one** — no CLI flag, no runner default — and R3's
+   `outcomes` and R5's `update_correct_direction` stay absent from any CLI run and
+   score `insufficient_n`. (Stated as *sources*, not as *assignments*: a lane that greps
+   `truth_judge =` does find three production assignments, and concluding row 9 is already wired from
+   them is the same premise-falsification class this brief exists to correct.)
 2. **Probe aggregation is single-arm in this slice.** `battery/runner/run.py:619–622` raises `ConfigError`
    for a probe-scorer run whose arms span more than one, and `battery/runner/probe_scorer.py:754–758`
    raises again at aggregate time (*"aggregation is single-arm in this slice … multi-arm probe runs land
