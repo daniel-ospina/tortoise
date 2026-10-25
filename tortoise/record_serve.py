@@ -24,8 +24,11 @@ just as importantly, every anchored read it deliberately does **not** — each w
 the reason and (for a served read) the parity rule that keeps it honest.
 
 **Served** (the anchored class: the read NAMES one node, so the record can answer
-it by its own interface-E coordinate — `Point → id`, `Subject`/`Object → name`,
-`Source → url`, `Event → eventId`; `public.node_identity` is the contract):
+it by its own interface-E coordinate — `Point → id`, `Subject`/`Object` → `id`
+(they keyed `name` until #9881), `Source → url`, `Event → eventId`,
+`Session → id`; `public.node_identity` is the contract, and
+`record_projection.key_properties` is the reader that decides it — a
+consumer must NOT hard-code this list):
 
 * ``point-by-id``  — ``MATCH (n:Point {id:$id}) RETURN properties(n)``, the
   shape behind ``GET /v1/points/{id}``.

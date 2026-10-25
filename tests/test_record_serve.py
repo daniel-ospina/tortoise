@@ -1084,3 +1084,42 @@ def test_a_missing_driver_is_structural_not_an_outage(monkeypatch):
                        record_dsn="postgresql://app@127.0.0.1:5432/record",
                        mode=rs.MODE_PREFER)
     assert rs.fallback_counts() == {}, "a missing driver was counted as an outage"
+
+
+def test_the_documented_coordinates_match_the_schema_reader():
+    """#9881 moved `Subject`/`Object` from `name` to `id`; the docs did not follow.
+
+    `node-by-key` is a SERVED read whose correctness IS this coordinate: the
+    predicate binds `node_key`, and a wrong key matches no row, which this module
+    defines as an ABSENCE. So the documented list is compared against
+    `record_projection.key_properties()` — the reader the module itself names as
+    the authority — for every label the docs mention.
+    """
+    import pathlib
+    import re
+
+    from tortoise.record_projection import key_properties
+
+    kp = key_properties() if callable(key_properties) else key_properties
+    doc = rs.__doc__ or ""
+    epic = pathlib.Path(
+        "docs/epics/2026-10-10-7879-postgres-record/"
+        "10-read-path-anchored-surface.md").read_text()
+
+    # Both house styles occur — `` `Point → id` `` and `` `Point` → `id` `` — so
+    # the pairs are scraped, not matched per label.
+    for text, where in ((doc, "module docstring"), (epic, "epic doc")):
+        # The pair is written as ONE clause (`Subject`/`Object` → …) — the shape
+        # a stale key survives in, because neither label appears alone.
+        shared = set(re.findall(r"`Subject`\s*/\s*`?Object`?\s*→\s*`?(\w+)`?", text))
+        assert shared == {kp["Subject"], kp["Object"]}, (
+            f"{where} says Subject/Object → {sorted(shared)}")
+
+        pairs = dict(re.findall(r"`?(\w+)`?\s*→\s*`?(\w+)`?", text))
+        for label, key in kp.items():
+            if label in ("Subject", "Object"):
+                continue  # covered by the shared clause above
+            assert label in pairs, f"{where} does not state the coordinate for {label}"
+            assert pairs[label] == key, (
+                f"{where} says {label} → {pairs[label]}, the schema reader "
+                f"says {key}")

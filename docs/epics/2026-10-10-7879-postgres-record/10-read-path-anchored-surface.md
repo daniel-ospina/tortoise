@@ -25,8 +25,9 @@ reason — a served read without one, or an exclusion without one, is refused at
 ## 1. The decision, and the three properties that make it an anchoring
 
 **Served — the anchored class: the read NAMES one node, so the record can answer it by its own
-interface-E coordinate** (`Point → id`, `Subject`/`Object → name`, `Source → url`, `Event → eventId`,
-`Session → id`; `public.node_identity` is the contract):
+interface-E coordinate** (`Point → id`, `Subject`/`Object → id` — they keyed `name` until #9881 —
+`Source → url`, `Event → eventId`, `Session → id`; `public.node_identity` is the contract and
+`record_projection.key_properties` is its reader, so no consumer should hard-code this list):
 
 | read | the cache-side shape it replaces | where it is reachable |
 |---|---|---|
@@ -126,7 +127,7 @@ because they are the cache's own fold state and a record-served answer must not 
 
 ## 3. Mutation arms — the guards, and the edits that turn them RED
 
-Run 2026-10-24 against `tests/test_record_serve.py` (50 tests) and the live file (2 tests):
+Run 2026-10-24 against `tests/test_record_serve.py` (51 tests) and the live file (2 tests):
 
 | edit | result |
 |---|---|
@@ -147,6 +148,7 @@ Run 2026-10-24 against `tests/test_record_serve.py` (50 tests) and the live file
 | `prefer` builds the cache handle before asking the record | 1 RED (`test_prefer_answers_from_the_record_when_the_cache_cannot_be_opened`) |
 | a permanent missing tenant is counted as an outage | 1 RED (`test_prefer_counts_an_unresolved_tenant_under_its_own_reason`) |
 | a tenancy misconfiguration escapes the endpoint | 1 RED (`test_the_endpoint_answers_500_for_a_tenancy_misconfiguration`) |
+| the documented interface-E coordinate drifts from the schema reader | 1 RED (`test_the_documented_coordinates_match_the_schema_reader` — #9881 moved `Subject`/`Object` from `name` to `id`) |
 
 ## 4. What this does not decide, and where the decision could overturn it
 
