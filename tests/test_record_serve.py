@@ -282,7 +282,7 @@ def test_a_record_miss_is_an_absence_in_record_mode():
 
 @pytest.mark.parametrize("failure", [
     OSError("connection refused"),          # the driver / the door
-    rs.RecordUnavailable("no record DSN"),  # the seam's own refusal
+    rs.RecordUnavailable("no record DSN"),  # an outage the seam reports
 ])
 def test_an_unreadable_record_is_not_an_absence(failure):
     """BOTH arms of the failure path raise in record mode — no arm falls back."""
@@ -975,3 +975,24 @@ def test_an_armed_read_cannot_be_given_a_fake_fallback_by_stored_props():
     assert props["servedFrom"] == "record"
     assert props["fallbackReason"] is None, (
         "a stored property supplied a fallback attribution")
+
+
+def test_an_armed_record_served_read_cannot_take_a_stored_fallback_reason(monkeypatch):
+    """The RESERVED pair holds at the WIRE, not only inside `as_wire`.
+
+    Driving `get_point` matters: the endpoint merges the attribution with
+    `props.update(served.as_wire())`, so a "don't emit nulls" tidy there — or a
+    `setdefault` — would let a record row whose own `props` carry
+    `fallbackReason` ship a fallback attribution that never happened, with the
+    isolation test above still green.
+    """
+    monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_RECORD)
+    monkeypatch.setattr(
+        rs, "open_record",
+        _opener(_FakeConn(rows=[_row(props={"fallbackReason": "record-miss",
+                                            "servedFrom": "cache"})])))
+    body, err, _built = _call_endpoint(monkeypatch)
+    assert err is None
+    assert body["servedFrom"] == "record"
+    assert body["fallbackReason"] is None, (
+        "a stored property manufactured a fallback attribution")

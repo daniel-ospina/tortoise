@@ -9691,12 +9691,18 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
             # Counting it `record-unavailable` would make that counter, which
             # exists to alert on outages, fire permanently on a condition the
             # record never caused.
+            # ⚠️ Count AFTER the cache answers — the same invariant as
+            # `record_serve._fell_back`. A cache failure raises out of here, so a
+            # request that was never answered contributes no increment (this arm
+            # is the most-travelled counting path in `prefer` mode, because
+            # `record_tenant_for` returns None for every session/JWT credential).
             reason = record_serve.FALLBACK_RECORD_TENANT_UNRESOLVED
+            props_from_cache = await asyncio.to_thread(_cache_props)
             record_serve.note_fallback(reason)
             served = record_serve.ServedAnswer(
                 read=record_serve.READ_POINT_BY_ID,
                 coordinate=f"Point:{point_id}", served_from="cache",
-                props=await asyncio.to_thread(_cache_props),
+                props=props_from_cache,
                 fallback_reason=reason)
         else:
             try:
@@ -9746,7 +9752,9 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
         if served is None:
             raise HTTPException(status_code=404, detail="Point not found")
         absent: dict = {"message": "Point not found"}
-        absent.update(served.as_wire())  # `as_wire` OMITS a null reason
+        # `as_wire` emits BOTH keys, `fallbackReason` as null when there was
+        # none — an omission would let a stored property masquerade.
+        absent.update(served.as_wire())
         raise HTTPException(status_code=404, detail=absent)
     # The tombstone rule is the ENDPOINT's, not the store's: a retracted point
     # stays retrievable by get_point on the SDK but not here, whichever store
@@ -9765,8 +9773,8 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
     if served is not None:
         # The attribution is ALWAYS on the wire when the mode is armed — a
         # fallback that the caller cannot see is the failure this unit exists to
-        # make impossible, so `servedFrom` (and `fallbackReason` when there is
-        # one) rides every armed response.
+        # make impossible, so BOTH `servedFrom` and `fallbackReason` ride every
+        # armed response (the latter as null when nothing was skipped).
         props.update(served.as_wire())
         if served.served_from == "record":
             # `content_hash` is refused as a stored column (a pure function of
