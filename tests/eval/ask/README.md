@@ -101,7 +101,18 @@ asserting them (`measure_ask_distilled.verify_commit_binding`):
    strings. (`%cI` renders each commit in its own UTC offset, so those strings
    do not sort chronologically across an offset change; the epochs do.) A
    clone whose shallow boundary is that commit reports **UNPROVABLE** and
-   refuses, as does one whose commit times cannot be read.
+   refuses, as does one whose commit times cannot be read — and so does one
+   whose shallow file exists but cannot be **read**: an unreadable boundary is
+   an unknown boundary, and assuming it is absent would silently pass the very
+   check it disengages.
+
+The receipt `publish` writes is then re-checkable **without a checkout**
+(`validate_ask_receipt`): it must carry the binding at all, its own run commit
+and full 40-hex pre-registration commit, the corpus hash the binding re-hashed
+at that sha, the pre-registration's sha256 matching `resolved_config`'s, both
+commit epochs ordered the right way, and — because `ordering: proven` is a claim
+that rests on a proof — the proof sentence itself. Removing a field a
+cross-check compares against invalidates the receipt; it never skips the check.
 
 The verified binding is written into the receipt (`commit_binding`) and
 rendered into §1/§6 of the run report, so a reviewer can re-check it from the

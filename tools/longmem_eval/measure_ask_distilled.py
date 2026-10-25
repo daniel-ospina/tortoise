@@ -569,8 +569,8 @@ def _blob_sha256_at_commit(repo_root: Path, commit: str,
     return corpus.sha256_bytes(proc.stdout)
 
 
-def _shallow_boundary(repo_root: Path) -> set[str]:
-    """The grafted boundary commits of a shallow clone (empty when not shallow).
+def _shallow_boundary(repo_root: Path) -> set[str] | None:
+    """The grafted boundary commits of a shallow clone.
 
     ``git rev-parse --is-shallow-repository`` alone is the wrong question: it is
     true whenever the clone was EVER truncated, even if the boundary sits 500
@@ -578,18 +578,30 @@ def _shallow_boundary(repo_root: Path) -> set[str]:
     in that shape history is perfectly usable. What makes an ordering UNPROVABLE
     is a boundary commit that IS the one being dated, because git reports a
     grafted commit's parents as none and every path then looks added by it.
+
+    The return distinguishes three answers, and the third is why the type is not
+    ``set[str]``: an ABSENT shallow file is ``set()`` (a complete clone), the
+    boundaries are that set, and a shallow file that exists but cannot be READ
+    is ``None``. An unreadable boundary is an UNKNOWN boundary, not an absent
+    one — folding ``OSError`` into ``set()`` made a read failure disengage the
+    guard, and on a clone whose boundary IS the pre-registration commit every
+    ordering check downstream then passes trivially (a false PASS, which is the
+    one outcome this branch exists to prevent).
     """
     git_path = _git_out(repo_root, "rev-parse", "--git-path", "shallow")
     if not git_path:
-        return set()
+        # Cannot even resolve where the boundary would live: unknown, not none.
+        return None
     path = Path(git_path)
     if not path.is_absolute():
         path = repo_root / path
     try:
         return {line.strip() for line in
                 path.read_text(encoding="utf-8").splitlines() if line.strip()}
-    except OSError:
+    except FileNotFoundError:
         return set()
+    except OSError:
+        return None
 
 
 def verify_commit_binding(*, commit: str, repo_root: str | Path,
@@ -673,12 +685,21 @@ def verify_commit_binding(*, commit: str, repo_root: str | Path,
     if committed_prereg_sha is not None:
         prereg_commit = _git_out(repo_root, "rev-list", "-1", run_commit,
                                  "--", prereg_rel)
+        boundary = _shallow_boundary(repo_root)
         if not prereg_commit:
             reasons.append(
                 f"cannot determine which commit introduced {prereg_rel} at or "
                 f"before {run_commit[:12]} — an ordering that cannot be "
                 f"established is not an ordering")
-        elif prereg_commit in _shallow_boundary(repo_root):
+        elif boundary is None:
+            reasons.append(
+                f"ordering UNPROVABLE: cannot READ this clone's shallow "
+                f"boundary, so whether {prereg_rel} is grafted is unknown — an "
+                f"unreadable boundary is not an "
+                f"absent one, and assuming it is absent is the false pass this "
+                f"check exists to prevent. Run `git fetch --unshallow` (or fix "
+                f"the shallow file's permissions) and re-publish")
+        elif prereg_commit in boundary:
             reasons.append(
                 f"ordering UNPROVABLE: {prereg_commit[:12]} (the commit the "
                 f"pre-registration dates to) is this clone's SHALLOW boundary "
@@ -1371,8 +1392,16 @@ def _validate_commit_binding(receipt: dict) -> list[str]:
                 "run sha, the corpus + pre-registration AT that sha, and the "
                 "ordering proof). A receipt that only NAMES a commit asserts "
                 "the reproducibility it is supposed to demonstrate"]
-    for key in ("schema", "run_commit", "prereg_commit", "corpus_hash",
-                "prereg_sha256", "ordering"):
+    # A `proven` ordering is only re-checkable if the receipt carries what a
+    # re-verifier needs: both repo-relative paths, the sha that was asked for,
+    # and the proof sentence §6 renders. Required CONDITIONALLY on `proven`, so
+    # a binding cannot be trimmed down to the fields that happen to pass.
+    required = ["schema", "run_commit", "prereg_commit", "corpus_hash",
+                "prereg_sha256", "ordering"]
+    if binding.get("ordering") == "proven":
+        required += ["run_commit_requested", "corpus_path", "prereg_path",
+                     "ordering_proof"]
+    for key in required:
         value = binding.get(key)
         if key == "ordering":
             if value != "proven":
@@ -1395,6 +1424,20 @@ def _validate_commit_binding(receipt: dict) -> list[str]:
             f"receipt.commit_binding.run_commit: {run_commit!r} is not the "
             f"receipt's own commit ({receipt.get('commit')!r}) — the binding "
             f"must describe the sha the receipt publishes")
+    # The same 40-hex rule as the run commit, for the same reason: the report's
+    # §6 hands THIS value to a re-verifier as
+    # `git merge-base --is-ancestor <prereg_commit> <run_commit>`, so a
+    # placeholder here makes the emitted verification unrunnable while the
+    # receipt still reads `ordering: proven`.
+    prereg_commit = str(binding.get("prereg_commit") or "")
+    if prereg_commit and (len(prereg_commit) != 40
+                          or not all(c in "0123456789abcdef"
+                                     for c in prereg_commit)):
+        issues.append(
+            f"receipt.commit_binding.prereg_commit: {prereg_commit!r} is not a "
+            f"full 40-hex sha — the report publishes it as the sha a reviewer "
+            f"re-runs `git merge-base --is-ancestor` against, and a placeholder "
+            f"there cannot resolve")
     if binding.get("corpus_hash") != receipt.get("corpus_hash"):
         issues.append(
             f"receipt.commit_binding.corpus_hash: {binding.get('corpus_hash')!r}"
@@ -1403,7 +1446,19 @@ def _validate_commit_binding(receipt: dict) -> list[str]:
             f"the corpus these numbers came from")
     resolved = receipt.get("resolved_config") or {}
     prereg_sha = resolved.get("preregistration_sha256")
-    if prereg_sha and binding.get("prereg_sha256") != prereg_sha:
+    # The cross-check is UNCONDITIONAL once a binding is present. Guarding it on
+    # `prereg_sha` truthiness made DELETING the datum the way past it: the
+    # binding's pre-registration hash then travelled with nothing to corroborate
+    # it, and the receipt validated clean. A forger who removes the field he is
+    # compared against must fail, not skip.
+    if not isinstance(prereg_sha, str) or not prereg_sha.strip():
+        issues.append(
+            f"receipt.resolved_config.preregistration_sha256: missing — the "
+            f"commit binding's pre-registration hash "
+            f"({binding.get('prereg_sha256')!r}) cannot be corroborated "
+            f"against the receipt without it, so its absence invalidates the "
+            f"receipt rather than skipping the check")
+    elif binding.get("prereg_sha256") != prereg_sha:
         issues.append(
             f"receipt.commit_binding.prereg_sha256: "
             f"{binding.get('prereg_sha256')!r} is not the published "

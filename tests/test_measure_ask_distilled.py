@@ -207,7 +207,16 @@ def _binding(commit: str, corpus_hash: str,
 
 def _receipt(scored: dict, *, commit: str = "a" * 40, cost_usd: float = 0.0,
              prereg_sha256: str | None = None) -> dict:
-    """`build_receipt` with a matching binding (see :func:`_binding`)."""
+    """`build_receipt` with a matching binding (see :func:`_binding`).
+
+    The pre-registration hash goes to BOTH halves — the receipt's
+    `resolved_config` records the published protocol's hash and the binding
+    records the one re-hashed at the commit — because
+    :func:`m._validate_commit_binding` cross-checks them unconditionally: a
+    fixture that carried only one of them would be exactly the inconsistency
+    that check exists to catch.
+    """
+    prereg_sha256 = prereg_sha256 or "sha256:" + "0" * 64
     return m.build_receipt(
         scored=scored, commit=commit, cost_usd=cost_usd,
         prereg_sha256=prereg_sha256,
@@ -1260,6 +1269,68 @@ def test_the_ordering_claim_is_not_satisfied_when_the_protocol_shares_the_run_co
     assert any("ordering NOT proven" in reason for reason in reasons), reasons
 
 
+def test_a_shallow_boundary_at_the_prereg_commit_is_unprovable(tmp_path):
+    """A grafted boundary is an ordering that CANNOT be shown, so publish refuses.
+
+    `.git/shallow` is what `git clone --depth=N` leaves behind, and git reports
+    a grafted commit's parents as none — every path then looks added by that
+    commit, so `rev-list -1 -- <prereg>` returns it and the ancestry test is
+    trivially true. Writing the boundary file by hand is the same shape git
+    consumes (measured: `rev-list -1 <commit> -- <path>` still answers normally
+    with the file in place), so this pins the refusal without cloning. Each
+    shallow test builds its OWN repository: the boundary file must not leak into
+    the module-scoped fixture the other ordering tests share.
+    """
+    fixture = _make_bound_repo(tmp_path)
+    repo = Path(fixture["repo"])
+    shallow = repo / ".git" / "shallow"
+    shallow.write_text(fixture["prereg_commit"] + "\n", encoding="utf-8")
+    # Non-vacuity: the boundary really is what the reader sees, and history is
+    # still walkable — so the refusal below comes from the guard, not from git
+    # having died on the file.
+    assert m._shallow_boundary(repo) == {fixture["prereg_commit"]}
+    assert m._git_out(repo, "rev-list", "-1", fixture["run_commit"], "--",
+                      "tests/eval/ask/preregistration.json") is not None
+
+    binding, reasons = m.verify_commit_binding(
+        commit=fixture["run_commit"], repo_root=repo,
+        corpus_root=fixture["corpus_dir"], prereg=fixture["prereg_path"])
+    assert binding is None, "UNPROVABLE must never be recorded as a proof"
+    assert any("UNPROVABLE" in reason and "SHALLOW boundary" in reason
+               for reason in reasons), reasons
+
+
+@pytest.mark.skipif(os.geteuid() == 0,
+                    reason="root can read a 0o000 file, so the read would not fail")
+def test_an_unreadable_shallow_file_is_unprovable_not_absent(tmp_path):
+    """FAIL-BEFORE: an unreadable boundary read as `not shallow` — a false PASS.
+
+    `_shallow_boundary` folded every `OSError` into `set()`, so a shallow file
+    that exists but cannot be read disengaged the only guard implementing
+    "UNPROVABLE, refuse": on a clone whose boundary IS the pre-registration
+    commit every downstream ordering check then passes trivially and the
+    binding is recorded `proven`. An unreadable boundary is UNKNOWN, never
+    absent. Measured: git tolerates an unreadable `.git/shallow` (rev-list still
+    answers), so the read failure is reached rather than shadowed by a git error.
+    """
+    fixture = _make_bound_repo(tmp_path)
+    repo = Path(fixture["repo"])
+    shallow = repo / ".git" / "shallow"
+    shallow.write_text(fixture["prereg_commit"] + "\n", encoding="utf-8")
+    shallow.chmod(0o000)
+    try:
+        assert m._shallow_boundary(repo) is None, (
+            "an unreadable boundary must not read as 'this clone is complete'")
+        binding, reasons = m.verify_commit_binding(
+            commit=fixture["run_commit"], repo_root=repo,
+            corpus_root=fixture["corpus_dir"], prereg=fixture["prereg_path"])
+    finally:
+        shallow.chmod(0o644)
+    assert binding is None
+    assert any("cannot READ" in reason and "UNPROVABLE" in reason
+               for reason in reasons), reasons
+
+
 def test_the_ordering_cross_check_compares_instants_not_wall_clock_text(
         tmp_path):
     """FAIL-BEFORE: the clock cross-check refused a correctly ordered pair.
@@ -1506,3 +1577,31 @@ def test_a_receipt_may_not_publish_an_unproven_ordering(shared_run):
     inverted["commit_binding"]["run_commit_epoch"] = 1767225600
     assert any("is LATER than the run commit's" in issue
                for issue in m.validate_ask_receipt(inverted))
+
+    # DELETING the datum a cross-check compares against must fail, not skip: the
+    # pre-registration hash the binding carries has nothing to corroborate it
+    # without `resolved_config.preregistration_sha256`, and the old `if
+    # prereg_sha and ...` guard let a forger drop the field and validate clean.
+    dropped_prereg_sha = _receipt(scored)
+    del dropped_prereg_sha["resolved_config"]["preregistration_sha256"]
+    assert any("preregistration_sha256: missing" in issue
+               for issue in m.validate_ask_receipt(dropped_prereg_sha)), (
+        "removing the field the check compares against must invalidate the "
+        "receipt, not disable the check")
+
+    # The pre-registration's commit is the value §6 hands a re-verifier, so it
+    # needs the same full-sha rule as the run commit — a placeholder there makes
+    # the published `git merge-base --is-ancestor` unrunnable while the receipt
+    # still reads `ordering: proven`.
+    placeholder_prereg = _receipt(scored)
+    placeholder_prereg["commit_binding"]["prereg_commit"] = "b" * 12
+    assert any("commit_binding.prereg_commit" in issue and "40-hex" in issue
+               for issue in m.validate_ask_receipt(placeholder_prereg))
+
+    # `ordering: proven` is a claim that rests on a proof, so the proof is part
+    # of what must be present — otherwise the receipt asserts precedence while
+    # carrying none.
+    no_proof = _receipt(scored)
+    del no_proof["commit_binding"]["ordering_proof"]
+    assert any("commit_binding.ordering_proof" in issue
+               for issue in m.validate_ask_receipt(no_proof))
