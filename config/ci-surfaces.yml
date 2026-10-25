@@ -6047,9 +6047,17 @@ surfaces:
   # `core` (where the mechanism's own unit pins live), `tortoise/retrieval.py`
   # selects `sdk` (the dedupe half — see the `sdk` entry), while the population
   # it measures is the committed #7947 arms receipts + fixtures under
-  # `tests/eval/write_path/` — a SOURCE_PATTERNS entry of THIS surface. Without
-  # this row a receipts-only change would run the census only via `core`'s
-  # fallback (and `manifest-integrity` would red on the unregistered file).
+  # `tests/eval/write_path/` — a SOURCE_PATTERNS entry of THIS surface. This
+  # row records the file's OWN surface, which is what keeps the manifest a
+  # complete statement of where each test runs. It is NOT what carries a
+  # receipts-only diff: the explicit `core` row above does that, because
+  # `CORE_ALSO` keeps `core` on these `tests/eval/write_path/` paths. MEASURED
+  # with this row withheld: `integrity()` is still `[]` (the file is classified
+  # by the `core` row, so `manifest-integrity` cannot red) and
+  # `select(["…/wp01_quarry_debug.arms.json"])` still returns
+  # `['core','eval']` with the census present. So do not delete the `core` row
+  # on the strength of this one — this row is surface completeness, `core` is
+  # coverage.
   - eval/write_path/test_value_span_census_2684.py
   # #5085: the additive blind BANDED semantic judge + calibration harness
   # (hermetic unit/contract layer — no DB/network/LLM; the real judged run is
