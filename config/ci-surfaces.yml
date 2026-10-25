@@ -540,6 +540,16 @@ surfaces:
   # #2877: a dead/never-started backup watcher must surface in /health, not just
   # a boot log. Dual-registered with `core` (same rationale as the boot guards).
   - test_backup_watcher_health.py
+  # #9548 (R1): the arming REPORT — `/health`'s additive `record` block says whether
+  # `TORTOISE_RECORD_DSN` resolves in this process, publishes the value's 8-hex
+  # fingerprint (never the value) and the three record counters, and degrades
+  # `status` only for a set-but-unusable DSN. Same dual registration as the guards
+  # above and for the same reason: the file it guards is `tortoise/hosted_api.py`,
+  # which selects the `api` surface — and the arming state is invisible from
+  # outside the process without this block, which is how the variable sat unset
+  # through a P0. DB-free (pepper env + a stubbed DB probe, no FalkorDB, no
+  # Postgres, no network).
+  - test_9548_record_arming_health.py
   # #7816: importing tortoise.hosted_api must not write the audit JSONL fallback
   # into $HOME. Dual-registered from `core` for the reason this list exists: the
   # guard subprocess-imports tortoise/hosted_api.py, an exact `api` surface match
@@ -3071,6 +3081,14 @@ surfaces:
   # it guards, tortoise/hosted_api.py, selects the `api` surface, so it is
   # dual-registered `api`+`core` for the same reason as the boot guards).
   - test_backup_watcher_health.py
+  # #9548 (R1): the `/health` arming report — the `record` block that makes
+  # "is the record armed HERE" answerable without a shell, and that gives
+  # `record_write_failures` a reader on the deployment it is claimed about (the
+  # hosted app serves no `/metrics` route). Same `api`+`core` dual registration
+  # as the watcher guards above: `tortoise/hosted_api.py` selects `api`, and a
+  # `record_writer.py`-only diff (the `dsn_fingerprint` single definition this
+  # file also pins) falls through to `core`.
+  - test_9548_record_arming_health.py
   - test_graph_write_loop_responsiveness.py  # #3718: REST graph-write off-loop (dual: api)
   - test_control_plane_offload_3498.py  # #3498: control-plane auth/session off-loop (dual: api)
   - test_org_create_pool_7678.py  # #7678: org-create control-plane pool + single membership read (dual: api)
