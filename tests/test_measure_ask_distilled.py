@@ -296,6 +296,24 @@ def _git_commit(repo: Path, message: str, *, date: str | None = None) -> str:
     return sha
 
 
+def _git_init(repo: Path) -> None:
+    """Create a throwaway repo with BOTH ambient init knobs neutralised.
+
+    ``-b main`` pins ``init.defaultBranch``; ``--template=`` pins the template
+    SOURCE, so no template — a host ``init.templateDir``, ``$GIT_TEMPLATE_DIR``,
+    or git's own default directory — can drop files into the fixture's
+    ``.git``. That matters for hooks: ``git init`` copies every non-dot file of
+    the template into ``$GIT_DIR`` (git-init[1], TEMPLATE DIRECTORY), so a
+    template shipping an executable ``hooks/pre-commit`` lands in
+    ``.git/hooks``, and a hermetic commit cannot switch it off by config —
+    nulling ``core.hooksPath`` makes git fall back to ``.git/hooks``. Every
+    throwaway repo in this file is built HERE, so a fixture cannot be hermetic
+    in one helper and ambient in the next.
+    """
+    assert _git_hermetic(repo, "init", "-q", "-b", "main",
+                         "--template=").returncode == 0
+
+
 def _make_dated_repo(base: Path, *, prereg_date: str, run_date: str) -> dict:
     """A two-commit repo whose commits carry EXPLICIT committer dates.
 
@@ -305,8 +323,7 @@ def _make_dated_repo(base: Path, *, prereg_date: str, run_date: str) -> dict:
     """
     repo = base / "dated-repo"
     repo.mkdir(parents=True, exist_ok=True)
-    assert _git_hermetic(repo, "init", "-q", "-b", "main",
-                         "--template=").returncode == 0
+    _git_init(repo)
     corpus_dir = repo / "tests" / "eval" / "ask"
     generate_corpus.write_corpus(corpus_dir, _small_cases())
     prereg_path = corpus_dir / "preregistration.json"
@@ -334,8 +351,7 @@ def _make_bound_repo(base: Path) -> dict:
     """
     repo = base / "repo"
     repo.mkdir(parents=True, exist_ok=True)
-    assert _git_hermetic(repo, "init", "-q", "-b", "main",
-                         "--template=").returncode == 0
+    _git_init(repo)
     corpus_dir = repo / "tests" / "eval" / "ask"
     generate_corpus.write_corpus(corpus_dir, _small_cases())
     prereg_path = corpus_dir / "preregistration.json"
@@ -745,7 +761,7 @@ def test_cli_preregister_run_score_publish(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     repo = tmp_path / "repo"
     repo.mkdir()
-    assert m._git(repo, "init", "-q").returncode == 0
+    _git_init(repo)
     corpus_dir = repo / "tests" / "eval" / "ask"
     generate_corpus.write_corpus(corpus_dir, _small_cases())
     prereg_path = corpus_dir / "preregistration.json"
@@ -1371,6 +1387,54 @@ def test_the_fixture_commits_are_hermetic_against_ambient_git_config(
     # ... and the fixture's own path ignores every one of those knobs.
     sha = _git_commit(repo, "hermetic")
     assert len(sha) == 40
+
+
+def test_the_fixture_init_ignores_an_ambient_template_dir(tmp_path, monkeypatch):
+    """The fixture's OWN init must not inherit a host template or branch default.
+
+    `git init` copies every non-dot file of the template directory into
+    `$GIT_DIR` (git-init[1], TEMPLATE DIRECTORY), so a host template shipping
+    an executable `hooks/pre-commit` lands in the fixture's `.git/hooks` — and
+    the hermetic commit cannot switch it off by config, because nulling
+    `core.hooksPath` makes git fall back to `.git/hooks`. A bare `git init`
+    under the hostile config (the shape `test_cli_preregister_run_score_publish`
+    used before `_git_init`) demonstrates all three exposures at once — trunk
+    branch, copied hook, failing commit — so the assertions below are not
+    satisfied by luck.
+    """
+    template = tmp_path / "hostile-template"
+    (template / "hooks").mkdir(parents=True)
+    (template / "hooks" / "pre-commit").write_text("#!/bin/sh\nexit 1\n",
+                                                   encoding="utf-8")
+    (template / "hooks" / "pre-commit").chmod(0o755)
+    hooks = tmp_path / "hostile-hooks"
+    hooks.mkdir()
+    (hooks / "pre-commit").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    (hooks / "pre-commit").chmod(0o755)
+    hostile = tmp_path / "hostile-gitconfig"
+    hostile.write_text(
+        f"[init]\n\tdefaultBranch = trunk\n\ttemplateDir = {template}\n"
+        f"[core]\n\thooksPath = {hooks}\n", encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(hostile))
+
+    # Probe: a BARE init inherits both of them — the branch AND the hook.
+    ambient = tmp_path / "ambient"
+    ambient.mkdir()
+    assert m._git(ambient, "init", "-q").returncode == 0
+    assert m._git_out(ambient, "symbolic-ref", "--short", "HEAD") == "trunk"
+    assert (ambient / ".git" / "hooks" / "pre-commit").exists(), (
+        "the hostile init.templateDir is not live — this test would pass for "
+        "the wrong reason")
+
+    # ... and the fixture's own init inherits NEITHER, so the commit below
+    # cannot be run through a hook that arrived from outside the repository.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_init(repo)
+    assert m._git_out(repo, "symbolic-ref", "--short", "HEAD") == "main"
+    assert not (repo / ".git" / "hooks" / "pre-commit").exists()
+    (repo / "a.txt").write_text("x\n", encoding="utf-8")
+    assert len(_git_commit(repo, "hermetic")) == 40
 
 
 def test_a_published_report_carries_the_verified_binding(published, bound_repo):
