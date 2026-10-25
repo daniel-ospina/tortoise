@@ -208,11 +208,20 @@ has four call sites across three user actions):
 2. **The console**, which writes status straight to Supabase with supabase-js and therefore never
    passes through the agent API. Every console write that can make a row publishable notifies, via
    `POST /blog/api/notify-publish { slug }` (#9803):
-   - the **editor form's publish save** — including "publish again" on an already-live post;
+   - the **editor form's publish save** — when it makes the URL live. The editor decides that with the
+     same predicate the agent API uses (`lib/publish-transition.ts`, `becomesLive`), so a save that
+     leaves the post exactly as live as it was submits **nothing**. ⚠️ The publish button on an
+     already-published post reads **"Save & Republish"**, and that is NOT a transition: editing a live
+     article and saving it does not notify. There is no content-hash check and no "this URL changed"
+     detection, so a material edit is **not** detected: re-submitting an already-live URL needs a real
+     transition (unpublish → publish, once the 24-hour window has passed) or the deliberate backfill
+     below.
    - the **drafts-queue one-click Publish** (`publishPost`) — the path the agent-draft backlog is
-     actually published through;
+     actually published through. Its button is rendered only for a `draft` row, so the call is a
+     transition by construction;
    - **clearing a hold** on a published post (`clearHoldPost`) — the transition that makes a held
-     post's URL live, since the hold itself is not cleared by publishing.
+     post's URL live, since the hold itself is not cleared by publishing. Its button is rendered only
+     for a held row, so this call is a transition by construction too.
 
    The endpoint does not write the post: it re-reads the row with the service role and answers **409
    `not_live`** for anything not live, so a slug from the browser can never nominate a draft URL.
@@ -230,9 +239,12 @@ for it. The agent API and the console share `_shared/indexnow.ts`: one rule, bot
   `status: "published"` is a publish transition, but the notification belongs to the PATCH transition.
   Publish a draft with PATCH if you want the submission. (The **editor's** create-and-publish does
   notify — it goes through the endpoint above, which is why the bullet names the agent API.)
-- an edit through the **agent API** that leaves both `status` and `hold_for_review` unchanged. The
-  editor's publish button does notify on a re-publish — that is the explicit "this URL changed" case,
-  and the 24-hour window below is what makes it safe;
+- an edit that leaves the row as live as it already was — through **either** caller. The agent API
+  refuses it in `becameLive` (unchanged `status` and `hold_for_review`), and since #9680 the editor
+  refuses it with the same predicate: saving a live article, even via "Save & Republish", submits
+  nothing. This used to notify and lean on the 24-hour window below, which was wrong — a window
+  bounds repeats, it cannot tell a re-publish from an edit, so an edit saved the next day submitted a
+  URL that had not changed;
 - unpublishing;
 - re-publishing the same URL within 24 hours (`blog_posts.indexnow_submitted_at` records the last
   attempt);
