@@ -126,7 +126,7 @@ because they are the cache's own fold state and a record-served answer must not 
 
 ## 3. Mutation arms — the guards, and the edits that turn them RED
 
-Run 2026-10-24 against `tests/test_record_serve.py` (47 tests) and the live file (2 tests):
+Run 2026-10-24 against `tests/test_record_serve.py` (48 tests) and the live file (2 tests):
 
 | edit | result |
 |---|---|
@@ -170,6 +170,10 @@ Run 2026-10-24 against `tests/test_record_serve.py` (47 tests) and the live file
   otherwise a stopped graph would answer `403 GRAPH_NOT_FOUND` before the record
   was consulted, making the lenient mode less able to answer than `record`. `off`
   keeps propagating the failure, exactly as before.
+* **"Armed but no DSN" is a misconfiguration, not an outage.** An armed serve mode
+  with no `TORTOISE_RECORD_DSN` never becomes armed by retrying, so it refuses
+  structurally (500) like a malformed DSN — `prefer`'s "still incomplete" case is
+  a record that ANSWERS with no row (`record-miss`), not one that was never armed.
 * **Not built here, named so the absence is visible:** a CLI verb (the two record verbs that exist,
   `record-reconcile` and `record-restore`, are the precedent); connection pooling for the endpoint's
   per-request record connection; `anchored-neighbours`; parity for any label other than `Point`

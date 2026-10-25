@@ -494,7 +494,14 @@ def open_record(record_dsn: str | None = None) -> Any:
             f"misconfiguration of the arming surface, not an unreadable record"
         ) from e
     if not dsn:
-        raise RecordUnavailable(
+        # STRUCTURAL, like the malformed-DSN arm just above: an armed serve mode
+        # with no DSN is a deployment that never becomes armed by retrying. Filed
+        # as `RecordUnavailable` it would answer 503 in `record` mode and make
+        # every `prefer` read increment the OUTAGE counter, permanently, on a
+        # condition the record never caused. `prefer`'s "still incomplete" case is
+        # a record that ANSWERS with no row (`record-miss`), not one that was
+        # never armed.
+        raise RecordServeError(
             "no record DSN — pass one or set TORTOISE_RECORD_DSN. The record "
             "cannot be read, so an absence is NOT established")
     try:
