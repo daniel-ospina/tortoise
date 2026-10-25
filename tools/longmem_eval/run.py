@@ -93,6 +93,13 @@ from tortoise.projection import (
 # the tortoise reader abstains with (never the _abs question-id marker).
 from tortoise.reader import _looks_abstained as _reader_abstained
 from tortoise.sdk import TortoiseSDK
+
+# #8488: the lexical-arm DECLINE key. Imported from its ONE home (the module
+# that writes it) rather than re-spelled here — the whole point of the key is
+# that every consumer reads the same name, and a local literal is how the
+# decline would silently stop being recognised (the same "consume it, do not
+# mint it" rule the read status vocabulary lives under).
+from tortoise.search_engine import LEXICAL_DECLINED_KEY
 from tortoise.shared_state.concurrency import flock_exclusive
 
 # #1349: the probe seam — benchmark-only model injection (the production
@@ -1802,6 +1809,11 @@ def _legit_sessionless(outcome: dict) -> bool:
 #:         quietly, never trips the breaker;
 #:     ``no_embeddings`` — vector arm: zero embedded points;
 #:     ``breaker_open`` — the breaker skipped the strategy.
+#: A DECLINED ARM entry (#8488) is a THIRD case that is neither: it carries
+#: ``empty_results`` at ``count == 0`` (the dead shape) plus the additive
+#: ``declined`` key, and it asserts nothing about the leg it declined to
+#: rank. See :func:`_leg_entry_declined` — both the resume gate and the
+#: leg-health predicate consult it before reading the dead shape.
 #: Tuples (not sets) so a corrupt non-string reason (hand-edited files)
 #: compares by equality instead of TypeErroring the gate on hashing.
 DEAD_LEG_REASONS: tuple[str, ...] = (
@@ -1810,6 +1822,44 @@ BENIGN_LEG_REASONS: tuple[str, ...] = (
     "ok", "index_missing", "no_embeddings", "breaker_open")
 KNOWN_LEG_REASONS: tuple[str, ...] = tuple(
     sorted(set(DEAD_LEG_REASONS) | set(BENIGN_LEG_REASONS)))
+
+
+def _leg_entry_declined(entry: dict) -> bool:
+    """Did this leg entry record an ARM that DECLINED to rank?
+
+    #8488. ``tortoise.search_engine.run_bm25_query`` — the in-process Okapi
+    BM25 lexical arm — appends ONE further ``fts`` entry when it declines to
+    rank a corpus wider than ``DEFAULT_BM25_CORPUS_CAP``::
+
+        {"leg": "fts", "ran": True, "degraded": False,
+         "reason": "empty_results", "count": 0, "declined": True}
+
+    That entry makes NO CLAIM about the lexical slot. It writes no
+    ``mechanism`` (it produced no rows, so it may not claim the path that
+    produced them) and it writes no ``degraded`` (a leg-local decline is not
+    an impairment of the memory layer — #9508). By the same rule it may not
+    claim the leg was DEAD: ``declined`` says *this arm did not answer*, and
+    the shipped leg's own entry is the one that says what the slot did.
+
+    Reading the decline entry as a dead leg is what this predicate exists to
+    stop, and the consequence is not cosmetic. ``reason="empty_results"`` at
+    ``count == 0`` is a DEAD-leg signal to the #1764 resume gate and to the
+    mid-run watchdog's leg-deadness arm, so on any store wider than the cap
+    — the arm's own documented configuration — enabling
+    ``TORTOISE_BM25_LEXICAL`` would REFUSE every checkpointed outcome
+    (re-encoding it on every resume: the ``index_missing`` livelock) and
+    abort a sustained run with ``leg_dead``, while retrieval was unchanged
+    and every read returned its rows.
+
+    Truthiness, not ``is True``: this is read off checkpoints that may have
+    been hand-edited or written by an older/newer writer, and it matches the
+    rule ``retrieval_preflight.merge_leg_trace`` already applies to
+    ``degraded``. The value is only ever written by the arm itself, so the
+    fail-open direction (an unparseable value suppresses a dead-leg claim)
+    cannot hide a genuine ``query_failed``/``timeout``: those are separate
+    reasons on separate entries.
+    """
+    return bool(entry.get(LEXICAL_DECLINED_KEY))
 
 #: Per-leg result-count floors F_leg (#1785, plan Task 1 Step 2) — derived
 #: from the committed historical re-validation fixture (31 healthy full-graph
@@ -1841,8 +1891,17 @@ def _leg_entry_dead(entry: dict, *, floors: dict[str, int] | None = None) -> boo
     with no exception/timeout are classified HEALTHY (a silent mid-cursor
     short-read above the floor is indistinguishable from a healthy
     low-count leg — the trigger stays armed rather than suppressing on an
-    unobservable signal)."""
+    unobservable signal).
+
+    #8488: a DECLINED ARM entry is never dead (see
+    :func:`_leg_entry_declined`). It carries ``empty_results``/``count == 0``
+    — the exact dead-leg shape — while asserting nothing about the slot: the
+    arm declined to rank, and the shipped leg's own entry is the one that
+    speaks for the leg. Without this exemption the predicate reported a
+    false degradation for a read where every leg ran."""
     floors = floors if floors is not None else F_LEG_FLOORS
+    if _leg_entry_declined(entry):
+        return False
     reason = entry.get("reason")
     if reason in ("timeout", "query_failed"):
         return True
@@ -2096,7 +2155,14 @@ def resume_gate_reject_reason(outcome: dict) -> str | None:
         # reason must compare, not TypeError the gate.
         dead_fts = [leg for leg in fts_entries
                     if leg.get("reason") in DEAD_LEG_REASONS
-                    and leg.get("count") == 0]
+                    and leg.get("count") == 0
+                    # #8488: a declined ARM entry asserts nothing about the
+                    # leg — see _leg_entry_declined. Counting it here let
+                    # ENABLING the lexical arm flip this gate's verdict while
+                    # arm-off and arm-declined are the same retrieval, which
+                    # is the definition of an instrument artifact rather than
+                    # a state.
+                    and not _leg_entry_declined(leg)]
         # #1764/code-review: an fts entry with count==0 and a reason
         # OUTSIDE the known vocabulary (future vocabulary, hand-edited
         # files, reason=None) is NOT dead — the ``dead_fts`` filter above

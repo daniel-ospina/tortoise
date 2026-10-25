@@ -2484,16 +2484,32 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "the section states no authority for the meanings it does not give — "
         "without it a common basis for the reasons is the natural (wrong) reading"
     )
-    # `record_dsn()` does no parsing (a scheme-prefix check only), so a "parseable
-    # DSN" definition of `malformed_dsn` is false and self-contradictor by the
-    # section's own §The value, which says the scheme check cannot catch a bad
-    # password.
+    # `record_dsn()` checks the SCHEME and the HOST, and nothing else, so a
+    # "parseable DSN" definition of `malformed_dsn` is still false and
+    # self-contradictory by the section's own §The value, which says the scheme
+    # check cannot catch a bad password. But pinning the scheme clause ALONE is
+    # not enough: #9548 added the HOST rule to `record_dsn()` (#9548 review P1),
+    # and this test stayed GREEN while the section went false — it still said
+    # "every other malformation surfaces as `circuit_open` / `write_failed`",
+    # which a hostless value no longer does. So pin BOTH refusal causes, or the
+    # prose re-stales the moment the predicate grows.
     assert "not a parseable DSN" not in section, (
         "the section defines `malformed_dsn` as a parse failure — `record_dsn()` "
-        "does no parsing, only a `postgresql://` / `postgres://` prefix check"
+        "does no parsing, only the scheme + host checks"
     )
     assert re.search(r"does \*\*not start with\*\*\s+`postgresql://`", section), (
         "`malformed_dsn` is not defined by the scheme check it actually is"
+    )
+    assert re.search(r"names no host", section), (
+        "the section's `malformed_dsn` definition omits the HOST rule — a "
+        "hostless `TORTOISE_RECORD_DSN` (`postgresql://user:pw@`, a clipped "
+        "paste) is counted `malformed_dsn`, not `circuit_open`, so a reader "
+        "debugging that counter is sent to the wrong cause"
+    )
+    assert re.search(r"Nothing else is parsed", section), (
+        "the section does not bound the host rule, so its reader cannot tell "
+        "which faults `record_dsn()` catches from the ones only a connection "
+        "can find (wrong password / paused project)"
     )
     # `no_tenant` is also the DESIGNED outcome for a credential that names no
     # graph (`record_tenant_for` returns None for org-wide / session / legacy /
