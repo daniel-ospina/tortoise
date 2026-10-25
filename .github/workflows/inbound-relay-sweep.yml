@@ -1,0 +1,191 @@
+# inbound-relay-sweep — the converging half of the intake relay (#2409/#2441).
+#
+# WHY THIS WORKFLOW EXISTS (measured 2026-10-24)
+# ----------------------------------------------
+# `.github/workflows/inbound-relay.yml` is the source stop for external
+# contributions: label `queued-for-triage`, comment, close, relay to intake.
+# Its only external trigger is `opened`, so every item gets exactly ONE chance,
+# and that chance does not survive this repo's settings:
+#
+#   * `approval_policy = all_external_contributors` (verified via
+#     GET /repos/…/actions/permissions/fork-pr-contributor-approval): a run
+#     started by an external actor is held until a maintainer approves it.
+#   * Measured over that workflow's 800 most recent runs
+#     (2026-10-19T05:08Z → 2026-10-24T23:53Z): 792 `skipped` (owner traffic,
+#     correctly excluded before a runner exists), 8 `startup_failure` — every
+#     one an external actor's event — and 0 EXECUTIONS. 8 of 8 external
+#     triggers died before a single step ran.
+#   * Nothing re-fires it: `tools/ci_check_repair.py` repairs REQUIRED checks
+#     only (the relay is not one), and its universal re-trigger is close+reopen,
+#     which fires `reopened` — a type the relay does not listen for.
+#
+# Measured cost of the gap: PR #9883, whose entire diff was one README comment
+# line (`README.md +3 −0`) claiming a Postgres identity migration, stayed open
+# 13h41m, ran the FULL CI matrix (6 reds, all inherited from a base two commits
+# behind main) and consumed a lane cycle. The producer is external
+# (`bot@hermes.agent` pushed through an outside contributor's account), so the
+# fix is not a producer patch and not a diff-shape heuristic — it is the control
+# this repo already promises and never ran.
+#
+# WHY A SCHEDULE
+# --------------
+# A scheduled run is started by the repository's OWN credential, not an external
+# actor's, so it is not subject to the approval policy and does not depend on
+# any event surviving. `tools/inbound_relay_sweep.py` applies the SAME policy as
+# the event path; `tests/test_inbound_relay_sweep.py` evaluates the relay
+# workflow's real job-level `if:` and asserts both paths decide identically, so
+# a new exemption in one cannot silently be missing from the other.
+#
+# SAFETY
+# ------
+# * No PR code is ever checked out: `actions/checkout` is pinned to the
+#   DEFAULT BRANCH by an explicit `ref:`. It is not enough that `schedule` runs
+#   on the default branch — `workflow_dispatch` honours the dispatched ref
+#   (`gh workflow run --ref <branch>`, or the UI's "Use workflow from"), so an
+#   unpinned checkout would execute THAT branch's tool and read its
+#   `.mergify.yml` against the live repo while holding `issues: write`,
+#   `pull-requests: write` and the intake secret. Pinned by a test.
+# * `relay-then-close-then-label`: a failed intake POST (or a failed comment /
+#   close) leaves the item UNLABELLED, so the next run selects it again and
+#   reds this workflow — a dead intake is an alarm, never a silent "handled".
+#   The label is applied LAST because it is the idempotence marker.
+# * An INCOMPLETE listing (a failed page) takes NO action (`exit 2`), `--max`
+#   bounds a run, and `--since-hours` bounds the window so a first run cannot
+#   reach into history. A window holding more items than the page budget acts on
+#   the prefix and DEFERS the rest — a flood must not disable the control.
+# * A manual dispatch defaults to `dry_run=true` (inert): a maintainer running it
+#   to inspect the live repo must not relay, comment and close for real. Only the
+#   exact literal `false` makes a dispatch live — any other typed value stays
+#   inert, so a typo cannot turn "show me the plan" into real closes.
+# * Dispatch inputs are bound in `env:`, never substituted into `run:`: an input
+#   expanded into a shell body is shell SOURCE, not data (#4334/#4361).
+
+name: "Inbound relay sweep — the converging half"
+
+on:
+  schedule:
+    # Every 15 minutes. The item this exists for (#9883) cost its full CI
+    # matrix only because a repair pass re-ran the matrix ~8 h after it opened;
+    # a 15-minute cadence stays well inside that window.
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      since_hours:
+        description: "Only consider items created within this many hours"
+        required: false
+        default: "24"
+      max_actions:
+        description: "Hard cap on items acted on in this run"
+        required: false
+        default: "20"
+      dry_run:
+        description: "Print the plan and perform nothing (true/false)"
+        required: false
+        # INERT BY DEFAULT: a maintainer dispatching this to INSPECT the live
+        # repo must not relay, comment and close for real. The schedule path
+        # passes nothing, so `inputs.dry_run` is empty there and the run is live.
+        default: "true"
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+# One sweep at a time, and never cancel one in flight — because a SWEEP is a
+# batch, not because one item would be left unrepaired. A cancelled sweep
+# silently drops every candidate it had not reached yet (the next run only sees
+# a 24 h window, so a long outage loses them), and two overlapping sweepers can
+# act on the same candidate in one window.
+# ⛔ NOT the repair story: a half-applied item IS repaired. A cancel before the
+# close leaves it open and UNLABELLED, so the next run selects it again and
+# `already_relayed()` resumes it — relay, close, label, with no second comment
+# (pinned by `test_a_retry_resumes_instead_of_re_posting`). The state nothing
+# repairs is the opposite one, open and ALREADY labelled (the event path labels
+# FIRST): `_prefilter` drops it and `main()` reports it as `stranded`.
+concurrency:
+  group: inbound-relay-sweep
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the default branch (never the dispatched ref)
+        uses: actions/checkout@v4
+        with:
+          # ⛔ PINNED. Without `ref:`, a `workflow_dispatch` from an unmerged
+          # branch checks THAT branch out and runs its `tools/inbound_relay_sweep.py`
+          # against the live repo, with `issues: write` + `pull-requests: write`
+          # and the intake secret in reach. `persist-credentials: false` does not
+          # help — the step token and the job's permissions are what the
+          # branch's code would use. Pinned by a test.
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      # ── THE RUNNER TOOL CONTRACT (#9018) ──────────────────────────────
+      # `tools/inbound_relay_sweep.py` does ALL of its work through `gh api`.
+      # `runs-on: ubuntu-latest` can land this job on the fallback pool, whose
+      # service environment is a minimal NON-login `PATH` with no `gh` — and
+      # then the sweep dies `exit 127` and reads as a PRODUCT regression (a dead
+      # intake) instead of the runner fault it is. Measured 2026-10-24: 38 of 39
+      # `finding-provenance` failures plus every availability monitor were this
+      # exact shape on `pi-runner-vm-*`, none on GitHub-hosted.
+      #
+      # ⛔ FIRST shell step, deliberately: a `gh` call that precedes it still
+      # dies with 127, and the ordering is invisible from the exit code
+      # (`tests/test_runner_tool_contract.py` pins the position).
+      #
+      # This job holds `issues: write` + `pull-requests: write` plus the intake
+      # secret, so the provisioner is not a free-floating download: it is pinned
+      # by `gh` VERSION and by the release asset's `sha256`
+      # (`.github/scripts/runner-tools.sh`), and refuses an archive that does not
+      # match the pin.
+      - name: Runner tool contract — provide gh (#9018)
+        run: bash .github/scripts/runner-tools.sh ensure gh
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The queue-batch exclusion is read from `.mergify.yml`. The tool REFUSES
+      # to act without it (an unreadable config must never be read as "no
+      # prefix matches", which would close a queue batch — #5185).
+      #
+      # ⛔ PINNED, and pinned to the lockfile's resolved version: this job holds
+      # `issues: write` + `pull-requests: write` plus the intake secret, so a
+      # free-floating index fetch is a supply-chain surface. `tests/
+      # test_inbound_relay_sweep.py` binds this literal to `uv.lock`.
+      - name: Install the one dependency (the queue config reader)
+        run: python -m pip install --disable-pip-version-check pyyaml==6.0.3
+
+      - name: "Sweep — relay, comment, close, label"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          INBOUND_URL: ${{ secrets.INBOUND_URL }}
+          INBOUND_SECRET_GITHUB: ${{ secrets.INBOUND_SECRET_GITHUB }}
+          # ⛔ Dispatch inputs are DATA and are bound in `env:`, never
+          # substituted into `run:`. GitHub expands `${{ }}` into the step's
+          # shell TEXT before bash parses it, so a value written straight into
+          # the script is shell SOURCE — an input containing `"` breaks out of
+          # the quoting and runs commands in a job holding `issues: write` +
+          # `pull-requests: write` and the intake secret (#4334/#4361, and the
+          # convention every other cron/dispatch workflow here follows).
+          # Pinned by a test.
+          SINCE_HOURS: ${{ inputs.since_hours || 24 }}
+          MAX_ACTIONS: ${{ inputs.max_actions || 20 }}
+          # INERT BY DEFAULT, and inert in the safe DIRECTION: a run acts only
+          # when it is SCHEDULED (a schedule run has no dispatch inputs at all)
+          # or when a dispatch opts in with the exact literal `false`. Any other
+          # typed value — `True`, `yes`, a typo — stays a dry run, so a
+          # maintainer cannot close real items while meaning to inspect them.
+          # Pinned behaviourally by a test that EVALUATES this expression.
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run != 'false' || 'false' }}
+        run: |
+          args=(--repo "$GITHUB_REPOSITORY" --since-hours "$SINCE_HOURS" --max "$MAX_ACTIONS")
+          if [ "$DRY_RUN" = "true" ]; then
+            args+=(--dry-run)
+          fi
+          python tools/inbound_relay_sweep.py "${args[@]}"

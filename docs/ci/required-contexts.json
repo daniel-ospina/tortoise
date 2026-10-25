@@ -400,6 +400,12 @@
         "surface-guard"
       ]
     ],
+    "sweep": [
+      [
+        "inbound-relay-sweep.yml",
+        "sweep"
+      ]
+    ],
     "test (${{ matrix.half }})": [
       [
         "python-ci.yml",
@@ -501,7 +507,7 @@
       ]
     ]
   },
-  "gate_digest": "3c0ecd04ba161a18caf50dc15ce89a2f3ff4f03188fd8878fb88f6059f8dbde0",
+  "gate_digest": "3e914d9a70183ec2b56e92a78ea9f0f8f7513796ece3e840318d8276cbd2fe82",
   "live_checked_at": "2026-09-29T02:35:26Z",
   "live_observed_contexts": [
     "ai-review-gate",
@@ -525,5 +531,5 @@
     "test-isolation"
   ],
   "settings_home_consistent": false,
-  "verified_at": "2026-10-23T18:03:02Z"
+  "verified_at": "2026-10-25T01:38:44Z"
 }
