@@ -903,7 +903,10 @@ def test_a_failed_label_says_it_will_not_be_retried(sweep: Any) -> None:
 
     The close already succeeded, so the item is no longer in the open listing and
     no later run re-selects it. The note must say that instead of claiming a
-    retry that cannot happen.
+    retry that cannot happen — and it must also name the ORDER the recovery is
+    sensitive to: a maintainer who reopens the item unlabelled hands it straight
+    back to this sweep, which closes it again with no second comment (the footer
+    already proves the record landed, so the comment step is skipped by design).
     """
     client = FakeClient(pulls=[pull(9883, author="Maiiiry")], fail_label=True)
     report = run(sweep, client)
@@ -912,6 +915,69 @@ def test_a_failed_label_says_it_will_not_be_retried(sweep: Any) -> None:
     note = next(n for n in report.notes if "9883" in n)
     assert "by hand" in note and "no later run" in note, note
     assert "retries it" not in note, note
+    assert "BEFORE reopening" in note, (
+        "the label failure leaves the item CLOSED and unlabelled, so a reopen "
+        "before the label puts it back in the sweep's selection — open, "
+        "external, no label — and it is closed again with no comment; the note "
+        f"must name the order: {note}"
+    )
+
+    # The re-close it warns about, measured rather than described: reopened with
+    # no label, the sweep selects it, skips the comment (the footer is there) and
+    # closes it again.
+    reopened = FakeClient(pulls=[pull(9883, author="Maiiiry")], relayed=True)
+    second = run(sweep, reopened)
+    assert [n for _, n in second.relayed] == [9883]
+    assert ("comment", 9883) not in reopened.calls, (
+        "a resumed item re-posts no comment (by design) — that is why the "
+        "silent re-close is the outcome the note has to warn about"
+    )
+    assert ("close", 9883) in reopened.calls
+
+
+def test_a_pre_close_failure_names_the_window_edge_it_will_not_survive(
+    sweep: Any,
+) -> None:
+    """A pre-close failure is retried ONLY while the item is inside the window.
+
+    The note used to promise "a later run retries it" unconditionally. That is
+    false at the window edge, and the edge is the one this sweep exists to stop
+    losing items at: `selected` is `_created_at(item) >= now - since_hours` and
+    `created_at` never moves, so an item that fails in the LAST CADENCE of the
+    window has aged out by the next run — open, unlabelled, no intake record, and
+    selected by nothing. Nothing else reports it either: `stranded` counts
+    open+LABELLED items only, and `deferred`/`unexamined` count what THIS window
+    saw.
+
+    So this pins both halves: the note names the exact age-out time (making the
+    claim true and the manual recovery actionable), and the hole it names is
+    measured — the very next run, 15 minutes later, selects nothing.
+    """
+    # 10 minutes short of the 24 h cutoff: inside run 1, outside run 2.
+    near_the_edge = pull(9883, author="Maiiiry",
+                         created=timedelta(hours=23, minutes=50))
+    client = FakeClient(pulls=[near_the_edge], fail_relay=True)
+    first = run(sweep, client)
+
+    assert [n for _, n in first.failed] == [9883]
+    note = next(n for n in first.notes if "9883" in n)
+    ages_out = (NOW - timedelta(hours=23, minutes=50)) + timedelta(hours=24)
+    assert ages_out.isoformat() in note, (
+        "the note must name WHEN the item ages out of the window, not promise a "
+        f"retry that stops existing: {note}"
+    )
+    assert "relayed by hand" in note, note
+
+    # 15 minutes later — a real cadence — the item is gone from the selection.
+    second = sweep.sweep(client, config(sweep), now=NOW + timedelta(minutes=15),
+                         since_hours=24, max_actions=20, dry_run=False)
+    assert second.selected == [], (
+        "if this ever selects the item, the window does not move and the note's "
+        "age-out clause is the thing to delete — not the clause to trust"
+    )
+    assert second.exit_code == 0 and not second.notes, (
+        "and nothing reports it: the run that abandoned it is the only record"
+    )
 
 
 def test_the_rails_promise_no_retry_that_the_label_step_cannot_get(
@@ -949,6 +1015,27 @@ def test_the_rails_promise_no_retry_that_the_label_step_cannot_get(
     assert "by hand" in rail_text, (
         "the rails text must name the recovery for the one state nothing "
         "retries: applying the label by hand"
+    )
+    assert "BEFORE reopening" in rail_text, (
+        "the rails text must name the ORDER the label-by-hand recovery is "
+        "sensitive to — a reopened item with no label is re-selected and "
+        "closed again with no comment"
+    )
+    assert "STILL INSIDE" in rail_text and "ages out" in rail_text, (
+        "the rails text must scope the pre-close re-select to the "
+        "`--since-hours` window: an item that fails in the last cadence of the "
+        "window is not re-selected by anything, so an unqualified "
+        "\"a later run selects it again\" is the same over-claim one step "
+        "earlier in the sequence"
+    )
+
+    # `EXIT CODES` exit 2 is the operator's list of "could not act" causes, and
+    # this change added a fourth one (`--repo` not `owner/name`). A list that
+    # does not name it sends a reader triaging a red run through three causes
+    # that all fail to match.
+    codes = " ".join(rails[1].split())
+    assert "owner/name" in codes, (
+        f"EXIT CODES must name the malformed `--repo` cause it now has: {codes}"
     )
 
     # The same over-claim lived in the block comment at the sequence itself.

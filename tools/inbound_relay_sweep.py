@@ -76,13 +76,21 @@ SAFETY RAILS (each pinned by a test) — a sweeper is riskier than a per-event r
 ---------------------------------------------------------------------------------
   * RELAY-THEN-CLOSE-THEN-LABEL. The intake POST happens first and the LABEL is
     applied LAST. The whole per-item sequence is guarded: if any step BEFORE THE
-    CLOSE fails the item is left UNLABELLED (so the next 15-minute run selects it
-    again), the failure is reported, the remaining items still run, and the run
-    exits 1 — a dead intake is an alarm rather than a silent "handled".
+    CLOSE fails the item is left UNLABELLED and the failure is reported, the
+    remaining items still run, and the run exits 1 — a dead intake is an alarm
+    rather than a silent "handled". ⚠️ A later run re-selects it only WHILE IT
+    IS STILL INSIDE the `--since-hours` window: the listing stops at
+    `now - since_hours` and `created_at` never moves, so an item that fails in
+    the last cadence of the window ages out at `created_at + since_hours` and
+    nothing ever selects it again — which is why the note names that exact
+    time instead of promising a retry.
     ⛔ The LABEL STEP IS THE EXCEPTION, and it is the one state nothing repairs:
     it runs AFTER a successful close, and this sweep lists `state=open` only, so
     a label failure leaves the item relayed and CLOSED but unmarked — no later
-    run re-selects it, and the run's note says to apply the label by hand.
+    run re-selects it, and the run's note says to apply the label by hand, and
+    to do that BEFORE reopening it (a reopened item with no label is re-selected
+    and closed again, with no second comment, because the footer already proves
+    the record landed).
     Applying the label before the close would be worse in the other direction:
     the label is the idempotence marker, so an open+labelled item is skipped by
     every later run and retried by nothing (the event path only listens for
@@ -137,15 +145,20 @@ EXIT CODES
      are not failures, and they do not move the exit code, so a bare "0" does
      NOT mean nothing is pending: read the `deferred=`/`truncated` report.
   1  at least one item failed somewhere in its SEQUENCE — the resume read, the
-     intake POST, the comment, the close, or the label. Every one of those
-     leaves the item UNLABELLED and therefore re-selectable by a later run,
-     EXCEPT a label that failed AFTER a successful close: that item is relayed
-     and closed but no later run selects it again, and the note says to apply
-     the label by hand. (Narrower claims here — "the intake POST failed", "the
-     item was left untouched" — were wrong for the comment/close/label paths
-     the guarded sequence actually has; #9946 review.)
-  2  could not act: intake not configured, the queue config was unreadable, or
-     the listing was incomplete — nothing was mutated
+     intake POST, the comment, the close, or the label. A failure BEFORE the
+     close leaves the item UNLABELLED, so it is re-selectable by a later run
+     ONLY WHILE IT IS STILL INSIDE the `--since-hours` window (the listing stops
+     at `now - since_hours` and `created_at` never moves, so an item that fails
+     in the last cadence of the window is open and unlabelled with nothing left
+     to select it — its note names the exact age-out time). A label that failed
+     AFTER a successful close is the same state immediately: relayed and closed
+     but unlabelled, selected by nothing, and the note says to apply the label
+     by hand BEFORE reopening it. (Narrower claims here — "the intake POST
+     failed", "the item was left untouched" — were wrong for the
+     comment/close/label paths the guarded sequence actually has; #9946 review.)
+  2  could not act: intake not configured, the queue config was unreadable,
+     `--repo` was not exactly `owner/name`, or the listing was incomplete —
+     nothing was mutated
 """
 
 from __future__ import annotations
@@ -537,11 +550,12 @@ def sweep(
         # the idempotence marker: applying it before the comment/close would
         # mean a bookkeeping failure leaves the item OPEN AND LABELLED — skipped
         # by every later run and retried by nothing (the event path only listens
-        # for `opened`). Applied last, any failure BEFORE THE CLOSE leaves the
-        # item unlabelled and therefore re-selectable, and `main()` still prints
-        # the report. A failure IN the label step is the exception — the close
-        # already succeeded, so nothing re-selects it and the handler below says
-        # so instead of claiming a retry that cannot happen.
+        # for `opened`). Applied last, a failure BEFORE THE CLOSE leaves the item
+        # unlabelled and therefore re-selectable while it is inside the window,
+        # and `main()` still prints the report. A failure IN the label step is
+        # the exception — the close already succeeded, so nothing re-selects it
+        # and the handler below says so instead of claiming a retry that cannot
+        # happen.
         step = "resume check"
         try:
             # A retry must RESUME, not restart: if our own footer is already on
@@ -577,17 +591,36 @@ def sweep(
             if step == "label":
                 # ⛔ NOT retried by anyone: the close succeeded, so the item is no
                 # longer in the open listing and no later run re-selects it. Say
-                # so, instead of claiming it self-heals.
+                # so, instead of claiming it self-heals. The order matters and is
+                # named: a maintainer who REOPENS it unlabelled hands it straight
+                # back to this sweep (open, external, no label), which closes it
+                # again WITHOUT a second comment — `resume` is true, so the
+                # comment step is skipped by design.
                 report.notes.append(
                     f"{kind} #{number}: label failed AFTER the close succeeded — "
                     f"the item is relayed and closed but NOT labelled, so no "
                     f"later run will select it again; apply `{cfg.label}` by "
-                    f"hand: {exc}"
+                    f"hand, and apply it BEFORE reopening it (a reopened item "
+                    f"with no label is re-selected and closed again, with no "
+                    f"second comment): {exc}"
                 )
             else:
+                # ⛔ AND A LATER RUN ONLY RETRIES IT WHILE IT IS INSIDE THE
+                # WINDOW. `selected` is `_created_at(item) >= now - since_hours`
+                # and `created_at` never moves, so an item that fails in the last
+                # cadence of the window has aged out by the next run: open,
+                # unlabelled, and selected by nothing. Naming the exact age-out
+                # time is what makes the claim true and the manual recovery
+                # actionable — a bare "a later run retries it" was wrong for that
+                # edge, and it is the edge this sweep exists to stop losing items
+                # at (a real contribution abandoned with no intake record).
+                ages_out = _created_at(item) + timedelta(hours=since_hours)
                 report.notes.append(
                     f"{kind} #{number}: {step} failed (item is still open and "
-                    f"unlabelled, so a later run retries it): {exc}"
+                    f"unlabelled; a later run retries it only while it is still "
+                    f"inside the {since_hours}h window — it ages out at "
+                    f"{ages_out.isoformat()}, after which nothing selects it and "
+                    f"it must be relayed by hand): {exc}"
                 )
             continue
         report.relayed.append((kind, number))
