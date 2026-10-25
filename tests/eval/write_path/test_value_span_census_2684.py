@@ -433,33 +433,68 @@ PAIRS_PER_ARM = 433          # Σ C(n, 2) over the 14 session-arms
 NEAR_DUPE_PAIRS_PER_ARM = 0  # ≥0.9 content overlap
 NEAR_DUPE_VALUE_CONFLICTS_PER_ARM = 0
 
-#: The dedupe half's SAME-SOURCE-TURN route (``_same_fact``'s second leg),
-#: measured on the SAME per-arm universe as ``PAIRS_PER_ARM``: of those 433
-#: pairs, the ones whose two ``source_turn_id`` keys are present and equal AND
-#: whose two quotes are non-empty — the point at which the shipped predicate
-#: consults its quote-level value guard.
+#: The dedupe half's SAME-SOURCE-TURN route (``_same_fact``'s second leg), over
+#: the population dedupe ACTUALLY sees — every extracted point of a session-arm,
+#: not only the value-bearing ones (a hit's partners are whatever the package
+#: holds). Pairs whose two ``source_turn_id`` keys are present and equal AND
+#: whose two quotes are non-empty, i.e. the point at which the shipped predicate
+#: consults its quote-level value guard:
 #:
-#:   consulted           — that pair count (the route IS reachable here);
-#:   value_flagged       — of them, ``_pkg_differ_value_critical(qa, qb)`` True;
-#:   value_guard_decisive— … minus the ones the OVERLAP gate would have refused
-#:                         anyway, i.e. the pairs where deleting the guard
-#:                         changes the outcome;
-#:   collapsed           — quote overlap >= the same-turn gate (value-equal).
+#:   consulted            — that pair count (the route IS reachable here);
+#:   value_flagged        — of them, ``_pkg_differ_value_critical(qa, qb)`` True;
+#:   value_guard_decisive — the ones where deleting the guard CHANGES the
+#:                          outcome (flagged AND the overlap gate would otherwise
+#:                          have collapsed them);
+#:   collapsed            — quote overlap >= the same-turn gate (value-equal).
 #:
-#: ⛔ TWO claims, and only the first is the corpus's: the route is REACHABLE, so
-#: the runbook's old "the corpus cannot exercise the value-safety leg at all"
-#: was wrong — but the value guard is never DECISIVE (``0``), so the leg is
-#: still un-pinned here and rests on Slice A's unit guards. Do not read
-#: ``value_flagged`` as "9 pairs saved by the value guard": every one of those
-#: nine has quote overlap <= 0.5, below the 0.75 gate.
-SAME_TURN_DEDUPE = {"consulted": 12, "value_flagged": 9,
-                    "value_guard_decisive": 0, "collapsed": 1}
+#: ⛔ The key is the RESOLVED turn, never the receipt's advisory
+#: ``source_turn_id`` (``_resolved_turn_key`` below) — §2.1's rule one leg over:
+#: production overwrites the advisory index before the point is committed, and
+#: ``_same_fact`` compares the committed field. Grouping by the advisory index
+#: measures a population no package holds.
+#:
+#: ⛔ ``value_guard_decisive = 1`` — the corpus DOES carry evidence that the
+#: quote-value guard prevents a value loss: ``wp07_bluepeak_followup``/narrative
+#: turn 14 pairs a value-bearing point against a strict SUB-quote that carries no
+#: value, at quote overlap 1.00. The value-bearing-only restriction
+#: (``SAME_TURN_DEDUPE_VALUE_BEARING``) cannot see that pair, which is why the
+#: restricted reading must never be published as the leg's reach. Both readings
+#: are pinned; a change to either is a re-measure.
+SAME_TURN_DEDUPE = {"consulted": 41, "value_flagged": 24,
+                    "value_guard_decisive": 1, "collapsed": 2}
+
+#: The same measurement restricted to the census's span population (both sides
+#: value-bearing). Pinned as the WEAKER reading, with its blind spot named: it
+#: excludes exactly the pair the quote-value guard is decisive on, because that
+#: pair's partner is a non-value-bearing sub-quote.
+SAME_TURN_DEDUPE_VALUE_BEARING = {"consulted": 11, "value_flagged": 8,
+                                  "value_guard_decisive": 0, "collapsed": 1}
+
+#: EVERY per-arm pair of extracted points, for the content-ratio zero: the
+#: value-bearing restriction narrows the population, and the zero must not be a
+#: property of the narrowing.
+PAIRS_PER_ARM_ALL_POINTS = 1719
 
 
 def _value_bearing_points(session: str, arm: str) -> list[dict]:
     return [p for p in _points(session, arm)
             if v2._carries_value(p.get("content") or "",
                                  p.get("quote") or "")]
+
+
+def _resolved_turn_key(point: dict, edus: list[dict]) -> str:
+    """The turn key the WRITE PATH would stamp: the RESOLVED turn.
+
+    ⛔ Not the receipt's own ``source_turn_id``. That field is the S2 model's
+    ADVISORY index; production overwrites it with ``_resolve_source_turn``'s
+    answer before the point is committed (``extractor_v2.py:7478`` → ``:7485``),
+    and ``_same_fact`` groups on the committed field
+    (``retrieval.py:2408-2409``). Same defect class as §2.1's, one leg over —
+    grouping by the advisory index counts pairs production never forms."""
+    warnings: list[str] = []
+    return _pkg_turn_key({"source_turn_id":
+                          v2._resolve_source_turn(point, edus,
+                                                  warnings=warnings)})
 
 
 def test_the_dedupe_leg_is_measured_on_BOTH_legs():
@@ -471,51 +506,77 @@ def test_the_dedupe_leg_is_measured_on_BOTH_legs():
     * **content-ratio** — in the guard's own per-arm universe there is **no**
       ≥ 0.9-overlap pair at all, so THAT route cannot be exercised here; the
       property rests on Slice A's unit guards
-      (``tests/test_evidence_assembly.py``);
+      (``tests/test_evidence_assembly.py``). Checked over EVERY per-arm pair of
+      extracted points, not just the value-bearing narrowing
+      (``PAIRS_PER_ARM_ALL_POINTS``), so the zero is not an artefact of the
+      population filter;
     * **same-source-turn** (``retrieval._same_fact``'s second route: same
       ``source_turn_id``, quote overlap ≥
       ``DEFAULT_PACKAGE_SAME_TURN_OVERLAP``, with
       ``_pkg_differ_value_critical`` consulted on the QUOTES first) — REACHABLE
-      here, and measured: ``SAME_TURN_DEDUPE``. But reachable is not
-      discriminating: the value guard is decisive on **0** of the 12 pairs
-      (the 9 it flags all sit below the overlap gate), so the value-safety leg
-      is still un-pinned by this corpus.
+      here, and **decisive once** (``SAME_TURN_DEDUPE``), so the corpus does
+      carry evidence that the guard prevents a value loss.
 
-    ⛔ The distinction is the point of this test. §2.3 once generalised the
+    ⛔ The population is the finding, twice over. §2.3 first generalised the
     content-ratio zero to "the corpus cannot exercise the value-safety leg at
-    all", which is false — and the correction must not overshoot into "the leg
-    is exercised", which is equally unsupported: the route is reachable, the
-    guard decides nothing."""
+    all"; the correction then narrowed the same-turn route to the CENSUS's
+    value-bearing pairs and concluded "decisive on 0" — which is a property of
+    that narrowing, not of the corpus. ``SAME_TURN_DEDUPE_VALUE_BEARING`` keeps
+    the restricted reading visible *as the weaker one*, with its blind spot
+    named: it excludes the one decisive pair, whose partner is a
+    non-value-bearing sub-quote."""
     pairs = near_dupe = conflicts = 0
+    all_pairs = all_near_dupe = 0
     pooled_pairs = pooled_near_dupe = 0
     same_turn = {"consulted": 0, "value_flagged": 0,
                  "value_guard_decisive": 0, "collapsed": 0}
+    same_turn_vb = dict(same_turn)
+    # The ADVISORY-key reading, measured only so the KEY CHOICE is pinned as a
+    # divergence: it is NOT published, and a lane that switches the grouping
+    # back to the receipt's field gets a red here instead of a quiet re-measure.
+    same_turn_advisory = dict(same_turn)
+
+    def _same_turn(acc: dict, a: dict, b: dict, edus: list[dict]) -> None:
+        at = _resolved_turn_key(a, edus)
+        qa = str(a.get("quote") or "")
+        qb = str(b.get("quote") or "")
+        if not (at and at == _resolved_turn_key(b, edus) and qa and qb):
+            return
+        acc["consulted"] += 1
+        passes_overlap = _pkg_overlap(qa, qb) >= DEFAULT_PACKAGE_SAME_TURN_OVERLAP
+        if _pkg_differ_value_critical(qa, qb):
+            acc["value_flagged"] += 1
+            if passes_overlap:          # the guard CHANGED this outcome
+                acc["value_guard_decisive"] += 1
+        elif passes_overlap:
+            acc["collapsed"] += 1
+
     for session in SESSIONS:
+        edus = _edus(session)
         for arm in ARMS:
+            for a, b in itertools.combinations(_points(session, arm), 2):
+                # content-ratio zero over the population dedupe actually sees
+                all_pairs += 1
+                if _pkg_overlap(a.get("content") or "",
+                                b.get("content") or "") >= 0.9:
+                    all_near_dupe += 1
+                _same_turn(same_turn, a, b, edus)
+                # advisory-key control: same pairs, WRONG key
+                at, bt = _pkg_turn_key(a), _pkg_turn_key(b)
+                qa = str(a.get("quote") or "")
+                qb = str(b.get("quote") or "")
+                if at and at == bt and qa and qb:
+                    same_turn_advisory["consulted"] += 1
             points = _value_bearing_points(session, arm)
             for a, b in itertools.combinations(points, 2):
                 pairs += 1
+                _same_turn(same_turn_vb, a, b, edus)
                 if _pkg_overlap(a.get("content") or "",
                                 b.get("content") or "") >= 0.9:
                     near_dupe += 1
                     if _pkg_differ_value_critical(a.get("content") or "",
                                                   b.get("content") or ""):
                         conflicts += 1
-                # the second route: same source turn, both quotes present
-                at = _pkg_turn_key(a)
-                qa = str(a.get("quote") or "")
-                qb = str(b.get("quote") or "")
-                if not (at and at == _pkg_turn_key(b) and qa and qb):
-                    continue
-                same_turn["consulted"] += 1
-                ov = _pkg_overlap(qa, qb)
-                passes_overlap = ov >= DEFAULT_PACKAGE_SAME_TURN_OVERLAP
-                if _pkg_differ_value_critical(qa, qb):
-                    same_turn["value_flagged"] += 1
-                    if passes_overlap:      # the guard CHANGED this outcome
-                        same_turn["value_guard_decisive"] += 1
-                elif passes_overlap:
-                    same_turn["collapsed"] += 1
         pooled = [p for arm in ARMS for p in _value_bearing_points(session, arm)]
         for a, b in itertools.combinations(pooled, 2):
             pooled_pairs += 1
@@ -525,6 +586,14 @@ def test_the_dedupe_leg_is_measured_on_BOTH_legs():
     assert pairs == PAIRS_PER_ARM, (
         f"the per-arm within-session pair count moved: {pairs} != "
         f"{PAIRS_PER_ARM} — re-run and update the runbook §2.3")
+    assert all_pairs == PAIRS_PER_ARM_ALL_POINTS, (
+        f"the ALL-POINTS per-arm pair count moved: {all_pairs} != "
+        f"{PAIRS_PER_ARM_ALL_POINTS} — §2.3's wider reading must be re-measured")
+    assert all_near_dupe == 0, (
+        f"{all_near_dupe} pairs reach ≥0.9 content overlap over ALL extracted "
+        "points — the content-ratio route is now reachable in the population "
+        "dedupe sees, so the value-bearing zero in §2.3 is no longer the "
+        "strongest reading and the section must be re-measured")
     assert near_dupe == NEAR_DUPE_PAIRS_PER_ARM, (
         f"{near_dupe} pairs reach ≥0.9 content overlap in the guard's own "
         "universe — the CONTENT-RATIO route can now be exercised here, so §2.3 "
@@ -533,10 +602,20 @@ def test_the_dedupe_leg_is_measured_on_BOTH_legs():
         f"{conflicts} near-dupe pairs differ in a value-critical token — §2.3 "
         "must be re-measured")
     assert same_turn == SAME_TURN_DEDUPE, (
-        "the SAME-SOURCE-TURN route moved (measured before: "
-        f"{SAME_TURN_DEDUPE}) — §2.3 quotes these three numbers, and this is the "
-        "route the content-ratio zero says nothing about: re-measure both and "
-        "update the runbook")
+        "the SAME-SOURCE-TURN route moved over ALL extracted points (measured "
+        f"before: {SAME_TURN_DEDUPE}) — §2.3 publishes these four numbers: "
+        "re-measure both readings and update the runbook")
+    assert same_turn_advisory != same_turn, (
+        "the advisory-key reading of the same-turn route no longer differs "
+        f"from the RESOLVED-key one ({same_turn_advisory} vs {same_turn}) — "
+        "either the receipts changed or the resolver now agrees with the "
+        "model's index everywhere; §2.1's rule (the turn is the RESOLVED one) "
+        "is what this test applies, so re-measure before removing the control")
+    assert same_turn_vb == SAME_TURN_DEDUPE_VALUE_BEARING, (
+        "the value-bearing-only reading of the same-turn route moved (measured "
+        f"before: {SAME_TURN_DEDUPE_VALUE_BEARING}) — it is the WEAKER reading "
+        "and its blind spot (the decisive pair's non-value-bearing partner) is "
+        "what makes it zero: re-measure and update §2.3")
     # Measured context, deliberately loose: the zero above is a property of the
     # PER-ARM universe, not of the corpus in general. Pooling the two arms (a
     # pool no package holds) does produce near-dupes — a lane must not restate

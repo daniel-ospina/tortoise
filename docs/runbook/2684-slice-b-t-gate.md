@@ -18,7 +18,7 @@ legs, and they are not in the same state:
 
 | Leg | Statement (wave §6) | State |
 |---|---|---|
-| **T-1** per-question | *the value-bearing evidence is **verbatim-present** + **deduped** in the reader's package* | **verbatim half MEASURED** on the sealed corpus — 101 of 112 value-bearing points carry an address that re-reads the point's own words **and a value**; all 11 absences are a **reported** class — **0 silent**, each carrying a warning the census attributes to its class (the single `empty_quote` point via the resolver's *shared* fail-open "no resolvable source turn" — the same string a `no_turn` emits — so its class rides on the census's derivation from the quote, not on the warning text; §2.2), measured rather than asserted (§2.2) — **0 unclassified**. **dedupe half: the CONTENT-RATIO route is not reachable on this corpus** (in the guard's own per-arm universe, **0 of 433** pairs reach 0.9 content overlap at all, so no pair can differ in a value-critical token *on that route*); the **same-source-turn** route IS reachable (**12** quote pairs consulted) but the quote-value guard is decisive on **0** of them, so the value-safety leg is still un-pinned here and the dedupe property rests on Slice A's unit guards (§2.3) |
+| **T-1** per-question | *the value-bearing evidence is **verbatim-present** + **deduped** in the reader's package* | **verbatim half MEASURED** on the sealed corpus — 101 of 112 value-bearing points carry an address that re-reads the point's own words **and a value**; all 11 absences are a **reported** class — **0 silent**, each carrying a warning the census attributes to its class (the single `empty_quote` point via the resolver's *shared* fail-open "no resolvable source turn" — the same string a `no_turn` emits — so its class rides on the census's derivation from the quote, not on the warning text; §2.2), measured rather than asserted (§2.2) — **0 unclassified**. **dedupe half: the CONTENT-RATIO route is unreachable on this corpus** (in the guard's own per-arm universe, **0 of 433** value-bearing pairs — and **0 of 1,719** pairs over ALL extracted points — reach 0.9 content overlap), while the **same-source-turn** route is reachable and the quote-value guard is **decisive on exactly 1 pair** (a value-bearing point vs a non-value-bearing strict sub-quote, overlap 1.00) — so the corpus does carry evidence the guard prevents a value loss, while the leg's broad property still rests on Slice A's unit guards (§2.3) |
 | **T-2** end-to-end | *aggregation-class accuracy **moves** on the same slice with the SAME reader* | **VOID AS WRITTEN** — there is no committed pre-span baseline, and the span mechanism has **no arm to flip** (it is unconditional in extraction since #8659), so "moves" is unfalsifiable rather than failed. Re-specified and re-homed to the end-to-end run **#8486** (§4) |
 
 **No product behaviour changed by this lane.** The census reads committed
@@ -154,7 +154,7 @@ by the warning text.
 The census is not a policy guard: it is a pinned measurement, so a lane that
 changes it reads "re-run the census", which is exactly what it should do.
 
-### 2.3 The dedupe half — NOT discriminating on this corpus (stated, not hidden)
+### 2.3 The dedupe half — one decisive pair, and the content-ratio route unreachable
 
 "Verbatim-present **+ deduped**" is two properties. The dedupe half is Slice A's
 (#2683, merged): a point and its own source collapse to ≤ `1 + max_verbatim`
@@ -171,36 +171,57 @@ holds** — they are two independent ingests of the same session) does produce
 ≥0.9 pairs, which the guard pins as measured context so the zero is never
 restated as "this corpus has no near-duplicates".
 
-⛔ **That zero is about ONE route, and reading it as the whole leg set was this
-section's first error — but reachable is not the same as discriminating, and
-the correction must not overshoot either.** `_same_fact` has a second,
-content-overlap-INDEPENDENT route (`retrieval.py:2405-2413`): same
-`source_turn_id` **and** quote overlap ≥ 0.75, with
-`_pkg_differ_value_critical(qa, qb)` consulted on the **quotes** first. On this
-same per-arm universe that route IS reachable — so "the corpus cannot exercise
-the value-safety leg at all" is false — and measured on **12** same-turn quote
-pairs it decides **nothing**:
+⛔ **That zero is about ONE route — and the population it is measured over is the
+other half of the same trap.** `_same_fact` has a second, content-overlap-
+INDEPENDENT route (`retrieval.py:2405-2413`): same `source_turn_id` **and** quote
+overlap ≥ 0.75, with `_pkg_differ_value_critical(qa, qb)` consulted on the
+**quotes** first. Over the population dedupe actually sees — **every** extracted
+point of a session-arm, not the value-bearing narrowing this census otherwise
+uses, because a hit's partners are whatever the package holds — that route is
+reachable **and decisive**:
 
-* **9** pairs are flagged by the quote-value guard, and **every one** has quote
-  overlap ≤ 0.5 — below the 0.75 gate, so the overlap threshold would refuse
-  them anyway. The guard is consulted and firing, never **decisive**: deleting
-  `if _pkg_differ_value_critical(qa, qb): return False` from `retrieval.py:2411-2412`
-  changes **0** outcomes on this corpus;
-* **1** pair collapses (quote overlap 1.00) and it is value-**equal**;
-* 2 pairs neither collapse nor are flagged.
+| same-turn route, per-arm | consulted | value-flagged | **guard DECISIVE** | collapses |
+|---|---|---|---|---|
+| all extracted points (the population dedupe sees) | 41 | 24 | **1** | 2 |
+| value-bearing pairs only (the census's span population) | 11 | 8 | 0 | 1 |
 
-So the honest reading, and the one this section's heading keeps: the dedupe
-half is **not discriminating on this corpus** — the content-ratio route is
-unreachable and the same-turn route, though reachable, never lets the value
-guard change an outcome. The leg's evidence stays with Slice A's unit guards.
-Pinned by `test_the_dedupe_leg_is_measured_on_BOTH_legs` (`SAME_TURN_DEDUPE`),
-so neither "cannot be exercised" nor "was exercised" can be written here again.
+⛔ **The key is the RESOLVED turn, never the receipt's `source_turn_id`** —
+§2.1's rule, one leg over. Production overwrites the model's advisory index with
+the resolver's answer before the point is committed (`extractor_v2.py:7478` →
+`:7485`), and `_same_fact` groups on the committed field
+(`retrieval.py:2408-2409`). Grouping by the advisory index instead gives
+`43 / 26 / 1 / 2` over all extracted points — a population no package holds, and
+this section's third population error. It is not published as a reading; the
+guard pins only that the two keys DIVERGE, so a lane that switches the grouping
+back gets a red rather than a quiet re-measure.
 
-So the property rests on Slice A's unit guards — `tests/test_evidence_assembly.py`
-(300-vs-400 survives as its own slot; the `_pkg_differ_value_critical` ratio
-guard). Pinned here by
-`test_the_dedupe_leg_is_measured_on_BOTH_legs`,
-recorded so no future lane reads "deduped: PASS" off this census.
+**The one decisive pair is `wp07_bluepeak_followup`/narrative, turn 14**: a
+value-bearing point paired with a strict SUB-quote that carries no value, at quote
+overlap **1.00**. Delete `if _pkg_differ_value_critical(qa, qb): return False`
+(`retrieval.py:2411-2412`) and the overlap gate collapses those two into one slot
+— so the guard changes exactly one outcome on this corpus, and that outcome is a
+value-bearing claim losing its own words. ⚠️ The value-bearing-only row is the
+**weaker** reading and its zero is a property of the narrowing, not of the
+corpus: it excludes precisely the pair the guard is decisive on, because that
+pair's partner is not value-bearing. It was published as the leg's reach for one
+round and that was wrong; it is kept here, labelled, so the two readings can never
+be confused again.
+
+So: the **content-ratio** route is unreachable here (0 of 433 value-bearing pairs,
+and 0 of 1,719 over all extracted points, so the zero is not an artefact of the
+filter either), and the **same-turn** route is reachable with the quote-value
+guard decisive once — this corpus carries **one** piece of evidence that the guard
+prevents a value loss, which is a unit-guard-scale observation, not a distribution.
+Pinned by `test_the_dedupe_leg_is_measured_on_BOTH_legs` (`SAME_TURN_DEDUPE` for
+the population dedupe sees, `SAME_TURN_DEDUPE_VALUE_BEARING` for the narrowing),
+so neither "cannot be exercised" nor "decides nothing" can be written here again.
+
+So the property, as a property, rests on Slice A's unit guards —
+`tests/test_evidence_assembly.py` (300-vs-400 survives as its own slot; the
+`_pkg_differ_value_critical` ratio guard): one decisive pair on real extractions
+is corroboration of the guard, not a distribution, and it is not a licence to
+read "deduped: PASS" off this census. Pinned here by
+`test_the_dedupe_leg_is_measured_on_BOTH_legs`.
 
 ---
 
@@ -323,9 +344,14 @@ boundary is declared (@ `sdk.py:30340-30356`), not an oversight.
 end-to-end re-ingest, same issue), and the **11 absences this census measures**.
 
 ⚠️ **The 11 absences are NOT tracked by #5007 any more.** #5007 ("a span link on
-every Point") is **CLOSED as COMPLETED (2026-09-25T01:23:27Z)** — its field is
-the one that landed (`2ff8c3c88`, §1). The residual — a span on every
-**value-bearing** point: `band` 3 · value-free quote 3 · no turn 4 · empty quote
-1 — is recorded on the still-OPEN **#2684** (issue comment, 2026-10-25) so it is
-not left pointing at closed scope, and it stays a strict subset of #5007's
-settled field.
+every Point") is **CLOSED as COMPLETED (2026-09-25T01:23:27Z)** — but only its
+**FIELD** landed (`span_start`/`span_end` + `validate_span`, `2ff8c3c88`, §1).
+Its **widening — every committed Point carries a span, not just a value-bearing
+one — is UNSHIPPED**: `_value_verbatim_span` returns `None` before any span work
+unless `_carries_value(content, quote)` (`extractor_v2.py:3603-3604`), so no
+value-free point can carry an address at this head (105 of the 217 committed
+points are value-free; 0 of them can have a span). Do **not** read the closed
+issue as covering the residual. The residual — a span on every **value-bearing**
+point: `band` 3 · value-free quote 3 · no turn 4 · empty quote 1 — is recorded on
+the still-OPEN **#2684** (issue comment, 2026-10-25), and the every-Point
+widening is neither shipped nor owned here.
