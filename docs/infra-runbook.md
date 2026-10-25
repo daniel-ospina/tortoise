@@ -3113,7 +3113,7 @@ customer data. The role, its grants and its login credential are
 [The record's connecting role](#the-records-connecting-role-r6-decision-2026-10-22-9554) below.
 ⚠️ **URL-encode the password** (`@`, `:`, `#`, `/` and `?` are DSN delimiters): a
 raw `p@ss:word` does not fail — it parses into a *different* host/user, and
-`record_dsn()` cannot catch it beyond the scheme check, so the failure surfaces as
+`record_dsn()` cannot catch it beyond the scheme and host checks, so the failure surfaces as
 `circuit_open` / `write_failed` writes rather than as a configuration error.
 §4 of `docs/architecture/STORAGE-ARCHITECTURE.md` decides **one project with
 tenant-scoped rows**, so this is the existing Supabase project — *not* a second
@@ -3125,12 +3125,22 @@ database per team (refused on cost grounds).
 # 1. the value's ONLY home (never a file, never a shell history):
 gh secret set TORTOISE_RECORD_DSN --repo daniel-ospina/tortoise   # paste the pooler DSN
 # 2. any deploy stages it (push to main, or: gh workflow run deploy-hosted.yml)
+#    ⚠️ CHECK THAT `set-secrets` RAN. `deploy-hosted.yml` orders "Check migration
+#    drift (fail-closed)" BEFORE "Set all app secrets on Fly.io", with no bypass,
+#    so a RED drift gate SKIPS the only step that runs `flyctl secrets set --stage`
+#    — the deploy fails, the secret stays in GitHub unread, and the record stays
+#    NOT_ARMED. Confirm from the run's own step list, not from the secret existing:
+#      gh run view <id> --json jobs \
+#        --jq '.jobs[]|select(.name=="deploy-api")|.steps[]|"\(.name): \(.conclusion)"'
+#    `drift=failure` + `set-secrets=skipped` ⇒ the value never reached the app.
 # 3. confirm the machine carries it — NAME only, never the value:
 fly secrets list -a tortoise-y4mjjq | grep -E '^TORTOISE_RECORD_DSN'
 ```
 
 **Verify it is ARMED, not merely set** — a set variable that reaches an
 unreachable or misconfigured database is the one failure this cannot show you.
+The first read below answers it directly: `GET /health`'s `record` block reports
+`armed`, the value's fingerprint, and the three counters.
 
 ⛔ **There is NO `/metrics` route on the hosted app — do not go looking for one.**
 The listener on **9090** is the dedicated liveness listener
@@ -3143,10 +3153,52 @@ co-bind 9090 anyway. So
 prints **nothing in every state** — armed-and-writing, armed-and-refusing, and
 unarmed alike (`curl -s` prints the 404 body, `grep` matches none of it). An
 empty grep is **not** a passing reading: it is the silent `NOT_ARMED` class this
-section exists to close, one layer up. Hosted `GET /health` (8000) does not carry
-the counter either.
+section exists to close, one layer up. Hosted `GET /health` (8000) carries the
+record's **arming state and its three counters** in an additive `record` block
+(`hosted_api._record_health`, #9548) — but it still does not serve `/metrics`
+text, so do not grep the 9090 listener for a counter name.
 
-**Two reads that DO exist on this deployment.**
+**Three reads that DO exist on this deployment.**
+
+0. **The arming report — `GET /health`, unauthenticated, no shell needed.**
+   The `record` block answers *"is the record ARMED here?"* from the seam's own
+   `record_dsn()`, so it cannot report armed for a value the write path would
+   refuse, and it collects **no I/O** (an env read, a scheme + host check, in-memory
+   counters — never a connection, so an unreachable record cannot fail the probe):
+
+   ```bash
+   curl -s https://tortoise-y4mjjq.fly.dev/health | python3 -m json.tool | sed -n '/"record"/,/}/p'
+   ```
+
+   | field | what it tells you |
+   |---|---|
+   | `armed` | `true` = the seam ACCEPTED the value: a Postgres scheme **and** a host (`record_dsn()`'s scheme + host rules). `false` + `error: null` = the supported default-off state (not a fault). `false` + `error` = a value was SET and the seam REFUSED it — a typo'd scheme, a **hostless** value (`postgresql://user:pw@`, the shape a clipped paste produces), or one carrying raw whitespace — and that case is the ONE that flips `/health`'s `status` to `degraded`, because every capture then counts `malformed_dsn` while the record stays empty |
+   | `dsn` | the **8-hex fingerprint** of the value, never the value. To answer "is that the value I set?": `printf %s "$TORTOISE_RECORD_DSN" \| shasum -a 256 \| cut -c1-8` — equal ⇒ the machine carries THIS value; different ⇒ a stale secret, with nothing disclosed either way. ⚠️ The code fingerprints the value **after `.strip()`** (`record_dsn()`), so hash the secret the way it is staged: a file ending in a newline makes your `printf` result differ from the process's for the SAME secret. Trailing whitespace is stripped by both — interior whitespace is refused outright, so it cannot reach here |
+   | `single_tenant_declared` | must be **`false`** on hosted. `true` means someone armed the process-global org/graph pair, which the multi-tenant app must refuse (#9192) |
+   | `record_write_failures` / `record_non_journal_skips` / `record_position_unproven` | the same three keys `monitoring.metrics()` publishes, under the same names — the counters this section's "pass bar" reads, now readable from the pod without `/mcp` auth |
+   | `counters_error` | why the counter snapshot could not be read, or `null`. Kept apart from `error` so the pairing above stays true; non-null also flips `status` to `degraded` |
+   | `tenancy_error` | why `single_tenant_declared` could not be read, or `null`. `false` is the SAFE answer (multi-tenant), so a swallowed read would look like a pass; non-null also flips `status` to `degraded`, and `error` stays `null` |
+
+   ⚠️ A value that is SET but **blank** (`TORTOISE_RECORD_DSN="   "`) reads as
+   `armed: false, error: null` — the default-off state. That is
+   `record_dsn()`'s documented `blank ⇒ None` rule, not a gap here: blank is
+   unarmed by decision, so `fly secrets list` (name only) is the read that tells
+   you a name exists at all.
+
+   ⚠️ `armed: true` is **not** "the database answers". It means the value is
+   present, well-formed **and names a host** — the one unusable shape decidable
+   without a connection. A dead host, a paused project and a wrong password all
+   still read `armed: true`.
+
+   ⛔ **`record_write_failures: {}` is NOT evidence that a row was written.** All
+   three counters are FAILURE/DECLINE channels — there is no positive
+   `record_writes` counter anywhere in `monitoring.py` — so an armed-and-writing
+   deployment and one that has never written a row both read `{}`. A zero here
+   can only ever falsify "writes are failing"; it cannot confirm "writes
+   happened". Indicator (b) of #9548 (`record_write_failures` = 0) is therefore
+   only meaningful **beside the SQL row count** in “No unexpected failure” below:
+   a healthy-looking counter with no new `journal_event` / `point` row is the
+   R1-without-R2 state, not a pass.
 
 1. **The failure log line** — every WARN-level non-write is logged with its reason
    (`tortoise/record_writer.py`: `malformed_dsn` / `no_tenant` / `circuit_open` /
@@ -3260,10 +3312,13 @@ So the bar has **two parts, and BOTH are required**:
    deployment that writes no row at all is not passing this bar, whatever the
    reason breakdown says.** Those three are always a fail-and-fix:
 `no_tenant` = the request carried no tenant, **or** a tenant that was not a full
-org/graph pair, `malformed_dsn` = the value does **not start with**
-`postgresql://` / `postgres://` (`record_dsn()` does no parsing beyond that
-scheme check, so every other malformation surfaces as `circuit_open` /
-`write_failed` instead), `circuit_open` = a recent
+org/graph pair, `malformed_dsn` = the value failed `record_dsn()`'s own checks —
+it does **not start with** `postgresql://` / `postgres://`, or it names no host,
+or it carries raw whitespace (`record_backup.libpq_env` refuses the same
+hostless shape for the same variable, because libpq would otherwise fill the
+host from `PGHOST` or a local socket). Nothing else is parsed: a wrong
+password, a paused project or an unknown database all get past `record_dsn()`
+and surface as `circuit_open` / `write_failed` instead, `circuit_open` = a recent
 connect FAILED (wrong host/password, project paused, network) — i.e. the
 "set but unreachable" state this section exists to catch. All of them are logged
 (recipe 1) and counted (recipe 2), never raised — an armed write that did not
