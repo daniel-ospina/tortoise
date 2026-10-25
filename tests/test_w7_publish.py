@@ -197,8 +197,11 @@ def test_receipt_completed_requires_the_per_category_rows():
         base, metrics={"official_recall_all@5": 0.5,
                        "official_recall_all@5_by_category": ok})) == []
     assert ok["rows"]["knowledge-update"]["n"] == 0
-    # a failed run is not asked for the gate surface
+    # a failed run is not asked for the gate surface (and a failed run's
+    # verdict is 'inconclusive' — 'pass' would be refused by the #8486
+    # status/verdict clause, tested separately)
     assert validate_receipt(dict(base, run_status="failed",
+                                 verdict="inconclusive",
                                  metrics={"x": 1})) == []
 
 
@@ -232,8 +235,10 @@ def test_receipt_completed_requires_pins():
     assert any("official_recall_all" in i for i in issues)
     issues = validate_receipt(dict(base, run_status="bogus"))
     assert any("run_status" in i for i in issues)
-    # a failed run does not demand the completed-run pins
-    failed = dict(base, run_status="failed", metrics={"x": 1})
+    # a failed run does not demand the completed-run pins: it records its own
+    # verdict ('inconclusive' — 'pass' is refused for any non-completed run)
+    failed = dict(base, run_status="failed", verdict="inconclusive",
+                  metrics={"x": 1})
     assert validate_receipt(failed) == []
 
 
@@ -355,6 +360,84 @@ def test_validator_refuses_pass_for_a_non_official_judge():
     assert any("cannot publish 'pass'" in i for i in issues)
     # the same receipt with the honest verdict validates clean
     assert validate_receipt(dict(base, verdict="inconclusive")) == []
+
+
+@pytest.mark.parametrize("run_status", ["failed", "skipped"])
+def test_hand_built_non_completed_receipt_cannot_claim_the_official_pin(
+        run_status):
+    """#8486 (R12): the judge-identity clauses gate EVERY receipt J7 can read,
+    not only a completed one.
+
+    Measured at 885e6f372 (the parent head): both clauses sat inside
+    ``if run_status == "completed":``, so this exact receipt — the OFFICIAL pin
+    with a stub grader, ``verdict: pass``, one neighbouring field flipped to
+    ``failed``/``skipped`` — returned ``[]`` and read ``receipt_valid: True``.
+    ``failed`` and ``skipped`` are legal statuses, so the scope made the gate
+    step-around-able by whichever forger wrote the rest of the receipt.
+
+    RED mutation: move either clause back inside the completed block → this
+    fails on the pin assertion (both statuses), i.e. the hole is back.
+    """
+    base = dict(
+        run_id="r", date="d", commit="c", corpus_hash="sha256:x",
+        judge_pin=JUDGE_PIN, judge_model="mock-judge",
+        judge_rubric_id_hash="h",
+        reader_model_spec="s", reader_pinned=True, ingest_mode="det",
+        run_status=run_status, verdict="pass", failure_origin=None,
+        cost_usd=1.0, metrics={"x": 1}, resolved_config={}, notes=[])
+    issues = validate_receipt(base)
+    # the pin claim is refused on its own
+    assert any("does not belong" in i for i in issues)
+    # and the verdict claim is refused on its own (non-official judge)
+    assert any("cannot publish 'pass'" in i and "graded by" in i
+               for i in issues)
+    # the honest pin/verdict pair for the SAME non-completed run is clean —
+    # the clauses refuse the claim, not the status
+    assert validate_receipt(dict(base, judge_pin=MOCK_JUDGE_PIN,
+                                 verdict="inconclusive")) == []
+
+
+def test_pass_requires_a_completed_run():
+    """The documented claim has TWO predicates — *only an official-pinned
+    **completed** run records `verdict: pass`* — and the validator enforced
+    only the pin half, so a receipt graded by the official judge could still
+    publish `pass` while declaring itself `failed` (measured at 885e6f372:
+    ``validate_receipt`` returned ``[]``).
+
+    RED mutation: delete the status clause → this fails.
+    """
+    base = dict(
+        run_id="r", date="d", commit="c", corpus_hash="sha256:x",
+        judge_pin=JUDGE_PIN, judge_model="gpt-4o-2024-08-06",
+        judge_rubric_id_hash="h",
+        reader_model_spec="s", reader_pinned=True, ingest_mode="det",
+        run_status="failed", verdict="pass", failure_origin=None,
+        cost_usd=1.0, metrics={"x": 1}, resolved_config={}, notes=[])
+    issues = validate_receipt(base)
+    assert any("only a completed run carries a verdict" in i for i in issues)
+    # no pin complaint: this judge legitimately owns the official pin
+    assert not any("judge_pin" in i for i in issues)
+    assert validate_receipt(dict(base, verdict="inconclusive")) == []
+
+
+@pytest.mark.parametrize("judge_pin", [JUDGE_PIN, MOCK_JUDGE_PIN])
+def test_partial_receipt_naming_no_judge_cannot_carry_a_pin(judge_pin):
+    """A PARTIAL receipt — a pin with no ``judge_model`` at all — is refused
+    too, in every status: a pin means "the judge that graded", so a receipt
+    that names no judge cannot back any pin it carries. Before the fix this
+    also returned ``[]`` for a non-completed run (the clauses never ran)."""
+    base = dict(
+        run_id="r", date="d", commit="c", corpus_hash="sha256:x",
+        judge_pin=judge_pin, judge_model=None,
+        judge_rubric_id_hash="h",
+        reader_model_spec="s", reader_pinned=True, ingest_mode="det",
+        run_status="failed", verdict="inconclusive", failure_origin=None,
+        cost_usd=1.0, metrics={"x": 1}, resolved_config={}, notes=[])
+    issues = validate_receipt(base)
+    assert any("does not belong" in i and "unpinned:<unrecorded>" in i
+               for i in issues)
+    # a receipt that carries NO pin makes no claim, and stays valid
+    assert validate_receipt(dict(base, judge_pin="")) == []
 
 
 def test_official_judge_model_id_matches_the_judge_module():

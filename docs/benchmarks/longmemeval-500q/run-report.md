@@ -29,8 +29,9 @@ extends: docs/planning/2026-09-01-2080-gbrain-plan.md (DM-11, §6.6, §7 E2E-8),
 > rather than merely refused downstream: only an official-pinned completed
 > run records `verdict: pass`, and a mock- or substituted-judge run records
 > `inconclusive`. `validate_receipt` additionally refuses a pin that does not
-> belong to the recorded judge, and a `pass` from any non-official judge, so a
-> hand-written receipt cannot claim either (`#8486`).
+> belong to the recorded judge, and a `pass` from any non-official judge or
+> from any non-completed run — on **every** `run_status`, so a hand-written
+> receipt cannot claim either by declaring itself `failed`/`skipped` (`#8486`).
 >
 > **RUN STATUS (this commit): PENDING — full-run NOT executed.** The 9-step
 > run_protocol gates 1–4 (corpus seal, answer-key manifest, dataset_audit

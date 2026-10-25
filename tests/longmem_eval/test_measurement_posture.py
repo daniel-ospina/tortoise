@@ -403,8 +403,11 @@ def test_completed_receipt_refuses_every_undisclosed_posture():
         ingest_mode="deterministic"))
     assert any("disagrees" in i for i in validate_receipt(mismatch))
 
-    # a FAILED run is not asked for the disclosure (nothing is published)
+    # a FAILED run is not asked for the disclosure (nothing is published); its
+    # verdict is 'inconclusive' — a failed run claiming 'pass' is refused by
+    # the #8486 status/verdict clause (tests/test_w7_publish.py)
     assert validate_receipt(_receipt(run_status="failed",
+                                     verdict="inconclusive",
                                      measurement_posture=None,
                                      metrics={"x": 1})) == []
 
