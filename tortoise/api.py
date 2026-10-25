@@ -659,14 +659,19 @@ class EventAPI:
         is the back-compat shape — the fold PRESERVES the stored hash rather
         than clearing it, so a metadata-only re-emit cannot wipe an anchor.
         """
-        # #5140 P1 (review cycle 3): the doc id IS the caller's `:Source` MERGE
-        # key, so this producer could rewrite an existing document's genre to
-        # `transcript` and drop it out of the metered `documents` set (MEASURED,
-        # 3 seeded documents: meter 3 -> 2 -> 1, one call each). The fold's CASE
-        # clause drops that value to keep REPLAY total (a rebuild must not abort
-        # on a pre-guard record), but this is a PRODUCER, not replay: a silent
-        # no-op would return the doc id as if the genre had been written. Runs
-        # BEFORE `_emit` (the commit point), so a refusal leaves no record.
+        # #5140 P1 (review cycle 3): the doc id becomes the caller's `:Source`
+        # MERGE key, so this producer could rewrite an existing document's genre
+        # to `transcript` and drop it out of the metered `documents` set
+        # (MEASURED, 3 seeded documents: meter 3 -> 2 -> 1, one call each). The
+        # fold's CASE clause drops that value to keep REPLAY total (a rebuild
+        # must not abort on a pre-guard record), but this is a PRODUCER, not
+        # replay: a silent no-op would return the doc id as if the genre had
+        # been written. Runs BEFORE `_emit` (the commit point), so a refusal
+        # leaves no record. ⚠️ #9952: the fold now MERGEs a RESOLVED key
+        # (`_upsert_document` adopts `resolve_source_key`), so `doc_id` is the
+        # key only up to resolution — the guard resolves it too
+        # (`quota._document_write_target`), or a URL variant of a metered
+        # document walks past it and journals a genre the fold drops.
         # `getattr` — not `self.projection.g` — because projection-less lanes
         # (the `__main__` demo, `m0.py`) and in-memory doubles have no graph to
         # demote; there the record still journals (`_refuse_unapproved_kinds`

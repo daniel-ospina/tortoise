@@ -732,6 +732,36 @@ def stored_source_document_kinds(g, id_val: str):
     return kinds
 
 
+def _document_write_target(g, doc_id: str) -> str:
+    """The ``:Source`` key a DOCUMENT write for ``doc_id`` will actually MERGE.
+
+    #9952 review ISSUE 1: the fold (``entities.py::_upsert_document``) now
+    routes its MERGE key through the shared S0a/S0b resolver, so the node a
+    document write lands on is ``resolve_source_key(g, doc_id)`` — **not**
+    ``doc_id``. A guard that read the RAW spelling therefore saw "no such
+    ``:Source``, nothing stored" for every URL VARIANT of a metered document:
+    it admitted the write, and the fold then DROPPED the genre into its own
+    CASE warning while the JOURNAL kept ``document_kind='transcript'`` — so a
+    records-derived rebuild would materialise an un-metered genre for a
+    document the cap counts. Reading the genre of the node the write HITS is
+    the same discipline the two ``:Source`` doors already apply
+    (``create_source`` resolves before it reads, #5196); a guard a spelling can
+    walk past is not a guard.
+
+    Resolution is IDENTITY for the ids the document producers derive
+    (``doc_<rel-path>`` from ``derive_document_id``), so the index path is
+    unaffected. Function-level import for the same reason as
+    ``stored_source_document_kinds``: this module stays stdlib-only at import
+    time. ``resolve_source_key`` is documented never to raise and to return its
+    input unchanged when nothing resolves; no ``except`` here on purpose — a
+    broken graph must fail the write LOUDLY, not silently restore the old
+    raw-spelling guard.
+    """
+    from tortoise.source_identity import resolve_source_key
+
+    return resolve_source_key(g, doc_id) or doc_id
+
+
 def refuse_document_writer_demotion(g, doc_id: str, document_kind,
                                     *, surface: str) -> None:
     """#5140 P1 (review cycle 3): the DOCUMENT writers refuse a demotion LOUDLY.
@@ -767,12 +797,15 @@ def refuse_document_writer_demotion(g, doc_id: str, document_kind,
     """
     if document_kind != DOCUMENT_KIND_TRANSCRIPT:
         return
-    stored_kinds = stored_source_document_kinds(g, doc_id)
+    target = _document_write_target(g, doc_id)
+    stored_kinds = stored_source_document_kinds(g, target)
     metered = [k for k in stored_kinds if is_metered_document_kind(k)]
     if not metered:
         return
     raise ValueError(
-        f"`document_kind='transcript'` would move the document {doc_id!r} out "
+        f"`document_kind='transcript'` would move the document {doc_id!r}" + (
+            f" (which resolves to {target!r})" if target != doc_id else "") +
+        f" out "
         f"of the metered `documents` set (stored documentKind={metered[0]!r}; "
         f"the `documents` cap counts `{DOCUMENT_METER_PREDICATE}`). The genre "
         f"of an existing document is not caller-writable in the demotion "

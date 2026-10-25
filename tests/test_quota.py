@@ -758,6 +758,65 @@ class TestDocumentsQuota:
         finally:
             tenant.close()
 
+    def test_document_writer_cannot_demote_a_url_variant(
+            self, reg_sdk, tmp_path):
+        """#9952 review ISSUE 1 — the fold RESOLVES its MERGE key, so the guard must too.
+
+        `_upsert_document` now adopts `resolve_source_key` (#5140 finding 12), so
+        a `DocumentCreated` for any spelling of one identity lands on ONE node.
+        The producer-side demotion guard kept reading the RAW `doc_id`, so a URL
+        VARIANT of a metered document read as "no such `:Source`, nothing
+        stored": the guard admitted the write, `add_document` returned the id as
+        if it had succeeded, the fold DROPPED the genre into its own CASE
+        warning — and the JOURNAL kept `document_kind='transcript'` for a node
+        the `documents` cap still counted. A records-derived rebuild would then
+        materialise that un-metered genre, which is the fail-open direction
+        #5140 P1 closed. One spelling raised; a variant of it was silent.
+
+        FAILS on the pre-#9952 guard with DID NOT RAISE. The non-over-reach half
+        runs in the same test: the guard is not a genre licence check, so a
+        variant that resolves to NOTHING still mints its transcript document.
+        """
+        import os
+
+        from tortoise.api import EventAPI
+        from tortoise.log import EventLog
+
+        tid, tenant = self._tenant(tmp_path, reg_sdk)
+        try:
+            events = str(tmp_path / "variant_events.jsonl")
+            api = EventAPI(EventLog(events), initiated_by="extractor",
+                           projection=tenant._get_proj())
+            metered = "https://example.com/metered"
+            api.add_document(metered, "metered", document_kind="report")
+            assert count_org_usage(tid, "documents", sdk=tenant) == 1
+            size_before = os.path.getsize(events) if os.path.exists(events) else 0
+
+            with pytest.raises(ValueError, match="metered `documents` set"):
+                api.add_document(
+                    "https://Example.COM/metered/?utm_source=x#frag",
+                    "variant", document_kind="transcript")
+            # ⛔ and the refusal lands BEFORE the commit point: a journaled
+            # demotion would replay into the genre the fold just refused.
+            assert (os.path.getsize(events)
+                    if os.path.exists(events) else 0) == size_before, (
+                "a refused variant write was JOURNALED")
+            rows = tenant._get_proj().g.query(
+                "MATCH (s:Source) WHERE toLower(s.url) CONTAINS "
+                "'example.com/metered' "
+                "RETURN count(s), collect(s.documentKind)").result_set
+            assert rows[0] == [1, ["report"]], (
+                f"a variant of a metered document was demoted: {rows!r}")
+            assert count_org_usage(tid, "documents", sdk=tenant) == 1
+
+            # NON-OVER-REACH: nothing stored at the resolved identity ⇒ admitted.
+            api.add_document("https://Example.ORG/new/?utm_source=x", "fresh",
+                             document_kind="transcript")
+            assert count_org_usage(tid, "documents", sdk=tenant) == 1, (
+                "a transcript minted through the variant path was metered")
+        finally:
+            tenant.close()
+
     def test_a_pre_guard_demotion_replays_to_the_metered_genre(
             self, reg_sdk, tmp_path):
         """#5140: the fold must stay TOTAL over a journal that predates the fix.
