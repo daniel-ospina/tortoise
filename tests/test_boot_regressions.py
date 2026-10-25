@@ -98,6 +98,29 @@ def _redact(uri: str) -> str:
     return proc.stdout
 
 
+def _redact_under(uri: str, locale_name: str) -> str:
+    """`_redact`, with the CHILD's collation locale pinned explicitly.
+
+    `_redact` above inherits the ambient locale, so on a `C` runner a
+    locale-dependent predicate reads as correct — which is how #9978 stayed
+    green on one runner and red on the next.
+    """
+    proc = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "set -euo pipefail\n" + _redactor_body() + '\n_redact_uri "$1"',
+            "bash",
+            uri,
+        ],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "LC_ALL": locale_name, "LANG": locale_name},
+    )
+    assert proc.returncode == 0, f"redactor failed: {proc.stderr}"
+    return proc.stdout
+
+
 @pytest.mark.parametrize(
     ("uri", "expected"),
     [
@@ -579,6 +602,53 @@ def test_shell_redactor_agrees_with_the_canonical_python_masker():
 
     for uri in _BARE_URI_CORPUS:
         assert _redact(uri) == _mask_uri_userinfo(uri), f"maskers disagree on {uri!r}"
+
+
+# #9978: bracket RANGES and character CLASSES are COLLATION-SENSITIVE in both
+# bash's `case` and sed's ERE, so under a UTF-8 locale they admit code points an
+# ASCII predicate rejects. Measured on the pre-fix `entrypoint.sh` under
+# `LC_ALL=en_US.UTF-8`:
+#
+#   `[!0-9]`        matched U+0660 — `rediss://[::1]:\u0660` read as a numeric
+#                   port and was echoed VERBATIM, while the canonical helper
+#                   failed closed on it.
+#   sed `[a-zA-Z]`  matched `\u00e9` — `r\u00e9diss://user:pw@host:6379` was masked
+#                   as a scheme while the canonical failed closed.
+#
+# `_redact_uri` now pins `LC_ALL=C`, so both implementations agree in every
+# locale and the redactor cannot report on the runner's collation. This case is
+# that pin: reverting it reds here on a UTF-8 runner. Where the locale is absent
+# the child falls back to C and the case is a no-op, which is why it also
+# asserts the values are the shapes the parity test above already pins.
+_LOCALE_SENSITIVE_SHAPES = [
+    "rediss://[::1]:\u0660",
+    "rediss://host:\u0660",
+    "rediss://[::1]:\u0661\u0662\u0663",
+    "r\u00e9diss://user:S3ntinel@host:6379",
+    "rediss://user:S3ntinel@host:6379",
+    "rediss://host:6379",
+]
+
+
+@pytest.mark.parametrize("locale_name", ["C", "C.UTF-8", "en_US.UTF-8"])
+def test_the_shell_redactor_is_locale_independent(locale_name: str):
+    """The masker's verdict must not depend on the ambient locale (#9978).
+
+    Non-vacuity: on the pre-fix `entrypoint.sh` the `en_US.UTF-8` arm fails on
+    `rediss://[::1]:\u0660` (echoed verbatim, `C` masked it) and on
+    `r\u00e9diss://user:S3ntinel@host:6379` (masked, `C` refused it).
+    """
+    from tortoise.__main__ import _mask_uri_userinfo
+
+    for uri in _LOCALE_SENSITIVE_SHAPES:
+        shell = _redact_under(uri, locale_name)
+        assert shell == _redact_under(uri, "C"), (
+            f"the shell redactor's verdict depends on the ambient locale "
+            f"({locale_name} vs C) on {uri!r}: {shell!r}. A collated range or "
+            f"class is back; `_redact_uri` must pin LC_ALL=C")
+        assert shell == _mask_uri_userinfo(uri), (
+            f"maskers disagree in locale {locale_name} on {uri!r}: "
+            f"shell={shell!r} canonical={_mask_uri_userinfo(uri)!r}")
 
 
 def test_redactor_tolerates_an_empty_argument():

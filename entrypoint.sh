@@ -68,6 +68,30 @@ set -euo pipefail
 # (`error:`, `12:30:45`, `warn: bad`, `C:\foo`, a timestamp), and failing closed
 # on those would drop the diagnostic the mask exists to preserve.
 _redact_uri() {
+    # ⛔ BYTE/ASCII SEMANTICS FOR THE WHOLE REDACTOR — this is a PARITY
+    # contract, not a preference. The canonical helper in
+    # `tortoise/__main__.py` is restricted to ASCII on purpose (`_scheme_ok`
+    # restricts to ASCII "to match entrypoint.sh's sed class
+    # `[a-zA-Z][a-zA-Z0-9+.-]*` — `str.isalpha()` alone accepts Unicode
+    # letters, which the shell does not"), and `_authority_region` spells
+    # its cut set out rather than using `[[:space:]]` "so it is
+    # locale-independent". Both of those claims are FALSE without this line:
+    # bracket RANGES and character CLASSES are collation-sensitive, so under
+    # a UTF-8 locale they admit code points the ASCII predicate rejects.
+    # Measured, under `LC_ALL=en_US.UTF-8`:
+    #   `[!0-9]`   matched U+0660  → port read as numeric, value echoed
+    #                                while the canonical failed closed
+    #   `sed -E s/^[a-zA-Z]$/…/` MATCHED `é` → `rédiss://user:pw@host:6379`
+    #                                masked as a scheme while the canonical
+    #                                failed closed
+    #   `[[:space:]]` matched NBSP → the cut set bounded differently
+    # `local` restores the caller's locale on return, and it is inherited by
+    # the `sed` child below, so ONE pin covers the `case` ranges, the nested
+    # `_fragment_tell`, and the subprocess. Do not remove it to "keep the
+    # locale" — the redactor must behave identically on every runner.
+    # Regression: `tests/test_boot_regressions.py` runs a
+    # `LC_ALL=en_US.UTF-8` parity case (#9978).
+    local LC_ALL=C
     local uri="${1:-}" masked line out="" first=1 shaped=0 candidate \
           tail before rest cut=$'[/?#"\047 \t\v\f\r\n]' \
           region scan frag uri_has_scheme=0
