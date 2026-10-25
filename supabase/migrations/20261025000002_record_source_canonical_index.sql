@@ -41,6 +41,23 @@
 -- row, no dependency for a reader (`record_projection` behaves identically with
 -- and without it — only the plan changes). `IF NOT EXISTS` keeps a re-apply a
 -- no-op, matching the sibling index above.
+--
+-- ⚠️ WHAT IT IS NOT: this build is NOT concurrent, so it holds a lock that makes
+-- WRITES to `public.source` wait for the duration of the build (reads continue).
+-- `IF NOT EXISTS` decides only whether an error is raised for an existing index;
+-- it does not change the lock. On a tenant of a few thousand rows that wait is
+-- short enough to take in a deploy window, which is why the plain form is used:
+-- this file is applied by the SAME fail-closed migration step as every sibling
+-- and a concurrent build cannot run inside that step's transaction. On a tenant
+-- where the build is long, build it out-of-band first — `IF NOT EXISTS` then
+-- makes the deploy's own run a no-op.
+--
+-- `check-migration-drift` classifies a repo-ahead plain non-unique `CREATE
+-- INDEX` as WARN-class, not block-class ("the app cannot read an index; a
+-- pending index is not a correctness dependency"), so a deploy against a prod
+-- that has not applied this WARNS and proceeds: the resolver still works
+-- without the index, it just pays the sequential scan the numbers above
+-- measure. Nothing in this file is a correctness dependency.
 -- ============================================================================
 
 CREATE INDEX IF NOT EXISTS idx_source_canonical_scope
