@@ -1578,6 +1578,48 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotIn("WORK ITEM #", out)
         self.assertNotIn("VERDICT: CLEAN", out)
 
+    def test_a_METRIC_shaped_branch_resolving_to_a_CLOSED_issue_is_LANDED(self):
+        """The union's ONE direction that is not fail-closed, pinned.
+
+        The section note above `_TITLE_ISSUE_RE` says the union's cost is NOISE
+        and that noise is the fail-CLOSED direction. That is true for COLLISION
+        and INCOMPLETE, and FALSE here: a branch naming a SIZE or a METRIC
+        (`perf/1200-rps-cache`) whose number happens to be a real CLOSED issue
+        resolves the run onto that issue and reports LANDED (exit 4) — and LANDED
+        is the answer the caller treats as authoritative and therefore does not
+        re-ask (`refresh-candidates.sh`'s retry-stopping arm). The effect is
+        STARVATION of a real candidate, not the mere delay an over-block costs.
+
+        ⛔ THIS PINS A DISCLOSED TRADEOFF, NOT A DESIRED BEHAVIOUR. Its job is to
+        couple the arm to its note: narrowing the branch arm (the obvious
+        remedy) turns this test red, which forces the section note to be
+        rewritten in the same change instead of quietly going stale. If the arm
+        is narrowed deliberately, replace this case with the narrower shape —
+        do not delete it silently.
+        """
+        self.gh_fixtures(open_prs=[{
+            "number": 7000,
+            "title": "perf(storage): cache the hot read path",
+            # No `(#N)` in the title and no closing keyword: the branch is the
+            # ONLY arm that speaks, so the resolution is the branch arm's alone.
+            "body": "Automated follow-up work.",
+            "state": "open",
+            "headRefName": "perf/1200-rps-cache",
+        }])
+        self.gh_issue_for(7000, title="perf(storage): cache the hot read path")
+        # The METRIC's number IS a real closed issue — the whole point: the arm
+        # cannot tell a rate from an issue number, so it resolves onto one.
+        self.gh_issue_for(1200, title="chore: retire the old cache",
+                          state="CLOSED", state_reason="COMPLETED")
+
+        rc, out = self.run_tool(issue=7000)
+        self.assertEqual(rc, 4, out)
+        self.assertIn(
+            "Resolved via branch `<type>/<n>-<slug>`: #7000 → #1200", out)
+        # ONE work item keeps its verdict ANCHORED, and it is the retry-stopper.
+        self.assertIn("\nVERDICT: LANDED (exit 4)", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+
     def test_a_work_item_a_LOSING_arm_named_is_still_gated(self):
         """EVERY arm's number is gated, not only the first arm that speaks.
 
