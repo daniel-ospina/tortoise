@@ -5651,17 +5651,28 @@ def _record_health() -> dict:
 
     It reports the seam's OWN answer, never a second opinion — ``record_dsn()``
     is the single arming rule, so this cannot say "armed" for a value the write
-    path would refuse. It collects **no I/O** (#2850): an env read, a scheme
+    path would refuse. It collects **no I/O** (#2850): an env read, a string
     check and in-memory counters — never a connection, never a thread hand-off,
     so an unreachable record cannot delay or fail a liveness probe.
 
-    Facts, not a verdict on reachability (``armed`` says the value is present
-    and well-formed; it does NOT say the database answers — that is what the
-    write counters below are for):
+    Facts, NOT a verdict on reachability — and the boundary is exact, because
+    the first draft of this block said ``armed`` meant "a usable DSN is present"
+    while the predicate behind it checked the SCHEME only (#9548 review P1). A
+    clipped paste (``postgresql://user:pw@``) therefore read ``armed: true``,
+    ``ok: true``, ``status: ok`` for a value that can never reach the pooler —
+    the same false green this block exists to end, one level in. It is fixed at
+    the root rather than by rewording: ``record_dsn()`` now also refuses a value
+    that names no host, so:
 
-      * ``armed``      — a usable DSN is present. ``False`` + ``error: null`` is
-        the supported default-off state; ``False`` + ``error`` is a value that
-        was SET and cannot be used.
+      * ``armed``      — the seam ACCEPTED the value: a Postgres scheme AND a
+        host (``record_writer.record_dsn``'s scheme + HOST rules). ``False`` +
+        ``error: null`` is the supported default-off state; ``False`` +
+        ``error`` is a value that was SET and the seam REFUSED — a typo'd
+        scheme, a hostless paste, or a value carrying raw whitespace.
+        ⚠️ STILL not "the record works": a dead host, a paused project and a
+        wrong password all read ``armed: true``. Only a CONNECTION can tell
+        those apart, and this block must never open one — the counters below and
+        the runbook's SQL row count are what say so.
       * ``dsn``        — the 8-hex fingerprint of the value, or ``None``. Never
         the value: it names the secret without disclosing it, so an operator
         can tell the deployed value from a stale one.
@@ -5672,13 +5683,28 @@ def _record_health() -> dict:
       * the three record counters, under the SAME names ``metrics()`` publishes
         (#9188/#9231/#9307) — the hosted app has no ``/metrics`` route, so
         without them indicator (b) of #9548 (``record_write_failures`` = 0) has
-        no reader at all on the deployment it is claimed about.
+        no reader at all on the deployment it is claimed about. Each is
+        ``None`` when it could not be READ, never ``{}``: an unread counter and
+        a zero are different facts, and the obvious consumer
+        (``counts.get("write_failed", 0)``) would read the second from the first
+        (#9548 review P2).
+        ⚠️ All three are FAILURE/decline channels — there is no positive
+        ``record_writes`` counter anywhere in ``monitoring.py``, so a zero here
+        does NOT evidence that a row was written. An armed-and-writing
+        deployment and one that has never written both read ``{}``; indicator
+        (b) needs the runbook's SQL row count beside it.
+      * ``counters_error`` — why the snapshot could not be read, or ``None``.
+        Kept distinct from ``error`` so the documented pairing
+        (*``error`` non-null ⇔ set-but-unusable value*) stays true.
 
-    ``ok`` is False ONLY for a set-but-unusable value, and that one case folds
-    into ``status`` — the ``backup_watcher`` rule: off-by-policy stays ``ok``,
-    "wanted but broken" degrades. A typo'd DSN is exactly the silent-arming
-    defect this exists to end: it is counted ``malformed_dsn`` on every capture
-    and the record stays empty while the operator believes it is armed.
+    ``ok`` is False when the value was SET and refused, AND when the counters
+    could not be read — a monitoring surface that cannot read its own counters
+    must not report healthy, that being fail-open on the monitoring path itself.
+    Both fold into ``status`` (the ``backup_watcher`` rule: off-by-policy stays
+    ``ok``, "wanted but broken" degrades). A refused DSN is exactly the
+    silent-arming defect this exists to end: it is counted ``malformed_dsn`` on
+    every capture and the record stays empty while the operator believes it is
+    armed.
 
     Never raises and never 5xxes — a health path must always answer.
     """
@@ -5691,43 +5717,57 @@ def _record_health() -> dict:
         )
     except Exception as exc:  # liveness must answer, always
         return {"armed": False, "ok": False, "dsn": None,
-                "single_tenant_declared": False, "error": str(exc)[:200]}
+                "single_tenant_declared": False,
+                "record_write_failures": None,
+                "record_non_journal_skips": None,
+                "record_position_unproven": None,
+                "counters_error": str(exc)[:200], "error": str(exc)[:200]}
+    # NOTE the shape: keys are assigned, never `**counters`-spread. A spread
+    # placed after `"error": None` silently OVERWROTE the record-level error
+    # with a counter error and dropped the three counter keys entirely (#9548
+    # review P2) — an unreachable branch must not ship a contradictory shape.
+    block: dict = {
+        "armed": False,
+        "ok": True,
+        "dsn": None,
+        "single_tenant_declared": False,
+        "record_write_failures": None,
+        "record_non_journal_skips": None,
+        "record_position_unproven": None,
+        "counters_error": None,
+        "error": None,
+    }
     try:
-        counters = {
-            "record_write_failures": record_write_failure_counts(),
-            # The sibling keys, not folded into the counter above: a
-            # `no_durable_journal` decline is the HEALTHY M2 lane and a
-            # `position_unproven` append is healed by a replay, so neither may
-            # move the zero that means "no record row was lost" (#9231/#9307).
-            "record_non_journal_skips": record_non_journal_skip_counts(),
-            "record_position_unproven": record_position_unproven_count(),
-        }
+        block["record_write_failures"] = record_write_failure_counts()
+        # The sibling keys, not folded into the counter above: a
+        # `no_durable_journal` decline is the HEALTHY M2 lane and a
+        # `position_unproven` append is healed by a replay, so neither may
+        # move the zero that means "no record row was lost" (#9231/#9307).
+        block["record_non_journal_skips"] = record_non_journal_skip_counts()
+        block["record_position_unproven"] = record_position_unproven_count()
     except Exception as exc:  # liveness must answer, always
-        counters = {"error": str(exc)[:200]}
+        block["counters_error"] = str(exc)[:200]
+        block["ok"] = False
     try:
-        single_tenant = record_writer.single_tenant_declared()
+        block["single_tenant_declared"] = record_writer.single_tenant_declared()
     except Exception:
-        single_tenant = False
+        block["single_tenant_declared"] = False
     try:
         dsn = record_writer.record_dsn()
     except record_writer.RecordWriteError as exc:
-        # configured-but-unusable: the value is SET, so this is not "off by
-        # policy". The error already carries a fingerprint, never the value.
-        return {"armed": False, "ok": False, "dsn": None,
-                "single_tenant_declared": single_tenant,
-                "error": str(exc)[:200], **counters}
+        # SET and refused by the seam: not "off by policy". The error already
+        # carries a fingerprint, never the value.
+        block["ok"] = False
+        block["error"] = str(exc)[:200]
+        return block
     except Exception as exc:  # liveness must answer, always
-        return {"armed": False, "ok": False, "dsn": None,
-                "single_tenant_declared": single_tenant,
-                "error": str(exc)[:200], **counters}
-    return {
-        "armed": dsn is not None,
-        "ok": True,
-        "dsn": None if dsn is None else record_writer.dsn_fingerprint(dsn),
-        "single_tenant_declared": single_tenant,
-        "error": None,
-        **counters,
-    }
+        block["ok"] = False
+        block["error"] = str(exc)[:200]
+        return block
+    if dsn is not None:
+        block["armed"] = True
+        block["dsn"] = record_writer.dsn_fingerprint(dsn)
+    return block
 
 
 @app.get("/health")
@@ -5794,8 +5834,8 @@ async def health():
     ``change_feed`` (state that lives inside the process, or in an env var only
     the process can resolve) and the same class as ``backup_watcher`` (a
     durability seam whose "off" state must be distinguishable from "on"). See
-    ``_record_health``; it collects no I/O, and only a set-but-unusable DSN
-    degrades ``status``.
+    ``_record_health``; it collects no I/O, and only a REFUSED DSN (or a
+    counter snapshot it could not read) degrades ``status``.
     """
     try:
         db = _HEALTH_PROBE.snapshot()

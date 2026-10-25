@@ -35,6 +35,7 @@ import asyncio
 import hashlib
 import json
 import os
+import socket
 
 import pytest
 
@@ -160,12 +161,26 @@ def test_the_fingerprint_convention_has_one_definition(monkeypatch):
     Two copies of a secret-handling convention drift, and the copy that drifts is
     the one that prints a DSN (`record_dsn`'s malformed-value error is the other
     caller).
+
+    The first half pins the ERROR path (a wrong fingerprint in that message is a
+    disclosure). It cannot detect a re-derivation, which is why the second half
+    exists: the block is fed a SENTINEL through `dsn_fingerprint` (#9548 review
+    P3 — an inline `sha256(...)[:8]` in the block left the old version green).
     """
     malformed = "postgresq://typo-in-the-scheme"
     with pytest.raises(RecordWriteError) as excinfo:
         record_writer.record_dsn(malformed)
     assert dsn_fingerprint(malformed) in str(excinfo.value)
     assert malformed not in str(excinfo.value)
+
+    monkeypatch.setenv(record_writer.RECORD_DSN_ENV, RECORD_DSN)
+    monkeypatch.setattr(record_writer, "dsn_fingerprint", lambda _dsn: "SENTINEL")
+
+    assert _health(monkeypatch)["record"]["dsn"] == "SENTINEL", (
+        "the block did not CALL record_writer.dsn_fingerprint — it re-derived "
+        "the slice, so the two copies can now drift and the block's copy is the "
+        "one that runs on an unauthenticated endpoint"
+    )
 
 
 # ── (c) set-but-unusable DEGRADES — the silent-arming defect itself ──────────
@@ -207,6 +222,11 @@ def test_the_health_path_opens_no_connection_to_the_record(monkeypatch):
     not be able to delay or fail a liveness probe — `CONNECT_TIMEOUT_SECONDS`
     bounds a WRITE, and a probe that paid 10 s per call would take the machine
     out of service over a monitoring nicety.
+
+    TWO nets, deliberately (#9548 review P3): the seam's driver hook is what the
+    write path uses, but a connect written directly in the handler
+    (`psycopg2.connect`, `socket.create_connection`, a `to_thread` hand-off)
+    never touches it — and the old single-net version passed all of those.
     """
     monkeypatch.setenv(record_writer.RECORD_DSN_ENV, RECORD_DSN)
 
@@ -214,10 +234,13 @@ def test_the_health_path_opens_no_connection_to_the_record(monkeypatch):
         raise AssertionError("/health opened a connection to the record")
 
     monkeypatch.setattr(record_writer, "_default_connect", _explode)
+    monkeypatch.setattr(socket.socket, "connect", _explode)
+    monkeypatch.setattr(socket, "create_connection", _explode)
 
     body = _health(monkeypatch)
 
     assert body["status"] == "ok"
+    assert body["record"]["ok"] is True
     assert body["record"]["armed"] is True
 
 
@@ -290,3 +313,149 @@ def test_a_declared_single_tenant_deployment_is_reported(monkeypatch):
     monkeypatch.setenv(record_writer.RECORD_SINGLE_TENANT_ENV, "1")
 
     assert _health(monkeypatch)["record"]["single_tenant_declared"] is True
+
+
+# ── (g) a value no connection can USE must not read `armed` ──────────────────
+#
+# #9548 review P1. `armed` is this PR's product, so it must be unable to answer
+# `true` for a value the record cannot use. The scheme check alone could not do
+# that: a clipped `gh secret set` paste (`postgresql://user:pw@`) passed it, and
+# libpq — which does NOT fail a hostless URI, it fills the host from `PGHOST` or
+# a unix socket — would then connect somewhere nobody named. `/health` reported
+# `armed: true, ok: true, status: ok` while the record stayed empty: the same
+# false green this block exists to end, one predicate in.
+
+#: Every shape here can never reach the record, and each is a paste an operator
+#: plausibly produces. Two facts decide them, both from the string alone.
+UNUSABLE_DSN_SHAPES = [
+    ("postgresql://", "no host, no database"),
+    ("postgres://", "no host, no database"),
+    ("postgresql:///postgres", "empty authority ⇒ local socket"),
+    ("postgresql://tortoise_record_app:pw@", "the clipped-paste shape"),
+    ("postgresql://[::1:5432/postgres", "not a readable URI (invalid IPv6)"),
+    (
+        "postgresql:// tortoise_record_app:pw@pooler.supabase.com:5432/postgres",
+        "whitespace-mangled paste — not a URI at all",
+    ),
+]
+
+
+@pytest.mark.parametrize("shape,why", UNUSABLE_DSN_SHAPES)
+def test_the_seam_refuses_a_value_no_connection_can_use(shape, why):
+    """The refusal is in `record_dsn()`, not in the reader — one definition.
+
+    This is the WRITE path's rule: a reader that re-checked would be a second
+    definition of "usable", and the two would disagree exactly when it matters.
+    It also stops the write path handing libpq a hostless DSN, the shape
+    `record_backup.libpq_env` already refuses for this same variable.
+    """
+    with pytest.raises(RecordWriteError) as excinfo:
+        record_writer.record_dsn(shape)
+
+    message = str(excinfo.value)
+    assert "misconfiguration, not an unarmed record" in message, (
+        f"a hostless value must be a MISCONFIGURATION, not an unarmed record "
+        f"({why}) — reason: {message}"
+    )
+    assert dsn_fingerprint(shape) in message, (
+        "the refusal must name the value by fingerprint"
+    )
+    assert shape not in message, (
+        "the refusal must never carry the value itself — it may hold a password"
+    )
+
+
+@pytest.mark.parametrize("shape,why", UNUSABLE_DSN_SHAPES)
+def test_an_unusable_dsn_degrades_health_instead_of_reporting_armed(
+    monkeypatch, shape, why
+):
+    """`/health` must not be able to answer `armed: true` for such a value.
+
+    `status` is the field an operator (and the runbook's pass bar) reads, so
+    leaving it `ok` and adding a field to be remembered is still the false
+    green — the reading has to degrade.
+    """
+    monkeypatch.setenv(record_writer.RECORD_DSN_ENV, shape)
+
+    body = _health(monkeypatch)
+
+    assert body["status"] == "degraded", f"green for an unusable value: {why}"
+    record = body["record"]
+    assert record["armed"] is False, f"armed for an unusable value: {why}"
+    assert record["ok"] is False
+    assert record["error"], "a refused value must say why"
+    assert dsn_fingerprint(shape) in record["error"]
+    assert shape not in json.dumps(body), "the health payload disclosed the value"
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "postgresql://tortoise_record_app:pw@aws-0-us-east-1.pooler.supabase.com:5432/postgres",
+        "postgresql://record/db",
+        # A password that merely CONTAINS `@` must still parse as one DSN.
+        "postgresql://svc:p@ss@host.example.com:5432/postgres",
+    ],
+)
+def test_a_usable_value_is_still_accepted(monkeypatch, shape):
+    """The opposite direction: the host rule must not refuse what WORKS.
+
+    A guard that only ever refuses is indistinguishable from a hardcoded
+    refusal, so the accepted shapes are pinned beside the refused ones.
+    """
+    assert record_writer.record_dsn(shape) == shape
+
+    monkeypatch.setenv(record_writer.RECORD_DSN_ENV, shape)
+
+    record = _health(monkeypatch)["record"]
+    assert record["armed"] is True, f"a usable value was refused: {shape}"
+    assert record["ok"] is True
+    assert record["error"] is None
+
+
+# ── (h) a counter snapshot that cannot be READ must not report ok ────────────
+
+
+def test_a_failing_counter_snapshot_does_not_fail_open(monkeypatch):
+    """#9548 review P2: a monitoring surface that cannot read itself is not ok.
+
+    The pre-fix block recycled `error` for a counter failure and left `ok: true`,
+    so a broken counter snapshot produced `status: ok` with `error` non-null —
+    which the docstring and the runbook both define as "the DSN was SET and is
+    unusable", sending an operator to rotate a secret that was fine. And
+    `**counters` was spread AFTER `"error": None`, so the counter's own `error`
+    key overwrote the record-level one by dict-literal ordering.
+    """
+    monkeypatch.setenv(record_writer.RECORD_DSN_ENV, RECORD_DSN)
+
+    def _explode():
+        raise RuntimeError("counter snapshot exploded")
+
+    monkeypatch.setattr(monitoring, "record_write_failure_counts", _explode)
+
+    body = _health(monkeypatch)
+
+    assert body["status"] == "degraded", (
+        "a health surface that cannot read its own counters reported healthy"
+    )
+    record = body["record"]
+    assert record["ok"] is False
+    # The documented pairing holds: `error` is reserved for a refused VALUE.
+    assert record["error"] is None, (
+        "a counter failure was published as a DSN problem — the operator is "
+        "sent to rotate a secret that is fine"
+    )
+    assert "counter snapshot exploded" in record["counters_error"]
+    # The three keys are PRESENT and null: an unread counter is not a zero, and
+    # `.get("write_failed", 0)` must not read a passing zero from a surface that
+    # never answered.
+    for key in (
+        "record_write_failures",
+        "record_non_journal_skips",
+        "record_position_unproven",
+    ):
+        assert key in record, f"`{key}` vanished, so a `.get(..., 0)` reads zero"
+        assert record[key] is None, f"`{key}` is not null on an unread snapshot"
+    assert record["armed"] is True, (
+        "the arming fact was correct and must survive a counter failure"
+    )

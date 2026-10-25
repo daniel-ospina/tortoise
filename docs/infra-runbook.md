@@ -3172,13 +3172,26 @@ text, so do not grep the 9090 listener for a counter name.
 
    | field | what it tells you |
    |---|---|
-   | `armed` | `true` = a usable DSN is present. `false` + `error: null` = the supported default-off state (not a fault). `false` + `error` = a value was SET and cannot be used — and that case is the ONE that flips `/health`'s `status` to `degraded`, because every capture then counts `malformed_dsn` while the record stays empty |
-   | `dsn` | the **8-hex fingerprint** of the value, never the value. To answer "is that the value I set?": `printf %s "$TORTOISE_RECORD_DSN" \| shasum -a 256 \| cut -c1-8` — equal ⇒ the machine carries THIS value; different ⇒ a stale secret, with nothing disclosed either way |
+   | `armed` | `true` = the seam ACCEPTED the value: a Postgres scheme **and** a host (`record_dsn()`'s scheme + host rules). `false` + `error: null` = the supported default-off state (not a fault). `false` + `error` = a value was SET and the seam REFUSED it — a typo'd scheme, a **hostless** value (`postgresql://user:pw@`, the shape a clipped paste produces), or one carrying raw whitespace — and that case is the ONE that flips `/health`'s `status` to `degraded`, because every capture then counts `malformed_dsn` while the record stays empty |
+   | `dsn` | the **8-hex fingerprint** of the value, never the value. To answer "is that the value I set?": `printf %s "$TORTOISE_RECORD_DSN" \| shasum -a 256 \| cut -c1-8` — equal ⇒ the machine carries THIS value; different ⇒ a stale secret, with nothing disclosed either way. ⚠️ The code fingerprints the value **after `.strip()`** (`record_dsn()`), so hash the secret the way it is staged: a file ending in a newline makes your `printf` result differ from the process's for the SAME secret. Trailing whitespace is stripped by both — interior whitespace is refused outright, so it cannot reach here |
    | `single_tenant_declared` | must be **`false`** on hosted. `true` means someone armed the process-global org/graph pair, which the multi-tenant app must refuse (#9192) |
    | `record_write_failures` / `record_non_journal_skips` / `record_position_unproven` | the same three keys `monitoring.metrics()` publishes, under the same names — the counters this section's "pass bar" reads, now readable from the pod without `/mcp` auth |
+   | `counters_error` | why the counter snapshot could not be read, or `null`. Kept apart from `error` so the pairing above stays true; non-null also flips `status` to `degraded` |
 
-   ⚠️ `armed: true` is **not** "the database answers" — it says the value is
-   present and well-formed. Reachability is what the counters below show.
+   ⚠️ `armed: true` is **not** "the database answers". It means the value is
+   present, well-formed **and names a host** — the one unusable shape decidable
+   without a connection. A dead host, a paused project and a wrong password all
+   still read `armed: true`.
+
+   ⛔ **`record_write_failures: {}` is NOT evidence that a row was written.** All
+   three counters are FAILURE/DECLINE channels — there is no positive
+   `record_writes` counter anywhere in `monitoring.py` — so an armed-and-writing
+   deployment and one that has never written a row both read `{}`. A zero here
+   can only ever falsify "writes are failing"; it cannot confirm "writes
+   happened". Indicator (b) of #9548 (`record_write_failures` = 0) is therefore
+   only meaningful **beside the SQL row count** in “No unexpected failure” below:
+   a healthy-looking counter with no new `journal_event` / `point` row is the
+   R1-without-R2 state, not a pass.
 
 1. **The failure log line** — every WARN-level non-write is logged with its reason
    (`tortoise/record_writer.py`: `malformed_dsn` / `no_tenant` / `circuit_open` /
@@ -3292,10 +3305,13 @@ So the bar has **two parts, and BOTH are required**:
    deployment that writes no row at all is not passing this bar, whatever the
    reason breakdown says.** Those three are always a fail-and-fix:
 `no_tenant` = the request carried no tenant, **or** a tenant that was not a full
-org/graph pair, `malformed_dsn` = the value does **not start with**
-`postgresql://` / `postgres://` (`record_dsn()` does no parsing beyond that
-scheme check, so every other malformation surfaces as `circuit_open` /
-`write_failed` instead), `circuit_open` = a recent
+org/graph pair, `malformed_dsn` = the value failed `record_dsn()`'s own checks —
+it does **not start with** `postgresql://` / `postgres://`, or it names no host,
+or it carries raw whitespace (`record_backup.libpq_env` refuses the same
+hostless shape for the same variable, because libpq would otherwise fill the
+host from `PGHOST` or a local socket). Nothing else is parsed: a wrong
+password, a paused project or an unknown database all get past `record_dsn()`
+and surface as `circuit_open` / `write_failed` instead, `circuit_open` = a recent
 connect FAILED (wrong host/password, project paused, network) — i.e. the
 "set but unreachable" state this section exists to catch. All of them are logged
 (recipe 1) and counted (recipe 2), never raised — an armed write that did not
