@@ -1283,8 +1283,9 @@ def snake(prop: str) -> str:
 #: ⚠️ Deliberately NARROW. `id`, `name`, `label`, `key`, `op` and `state` are
 #: NOT here even though `EntityMutated`/`EntityLinked` treat them as record
 #: coordinates: for a `Point` snapshot `label` is a real PRIMARY property
-#: (operator label), for `Object`/`Subject` `name` is written as the key, and
-#: for `Event` `id` mirrors `eventId` (#122). Those two dispatch paths read
+#: (operator label), for `Object`/`Subject` `name` is a PRIMARY column but NOT
+#: the key — the key is `id` since #9881 — and for `Event` `id` mirrors
+#: `eventId` (#122). Those two dispatch paths read
 #: their coordinates directly, so a global drop would silently lose a PRIMARY
 #: field from the layer rows — exactly the "record poorer than the history"
 #: failure Interface A forbids.

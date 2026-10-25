@@ -430,7 +430,7 @@ def test_a_stale_report_from_an_earlier_step_never_survives_a_failure(tmp_path: 
     a consumer that ever ran anyway (`if: always()`, a future reordering) would
     grade a STALE verdict — the same silent-wrong-answer class as the empty file.
     """
-    proc, _ = _run_step("Link check (changed files)", tmp_path)
+    proc, _report = _run_step("Link check (changed files)", tmp_path)
     assert proc.returncode != 0
 
     stale = tmp_path / "runner_temp" / STEPS["Link check (changed files)"][1]

@@ -60,15 +60,11 @@ def _view():
 
     `content` and `status` are PRIMARY columns; `openSetProp` rides the `props`
     tail; the edge is a `mitigated_by`-free `aboutObject` from p-1 to the
-    `:Object` bound by its CONTRACT key (the Interface E rule at the edge).
-
-    ⚠️ That key is the object's `id`, not its `name` (#9881): `KEY_PROPERTY`
-    reads `public.node_identity`'s live declaration, and a name is a MUTABLE
-    natural key two live objects may share, so it cannot be one. This fixture
-    followed the old contract until #9948 moved the key and left the file
-    behind, which is why these legs redded with `Object: no contract key at
-    object.id` — the row carried a `name` and no `id`. (`id` and `name` carry
-    the same string here, so the edge assertion below reads unchanged.)
+    `:Object` — whose contract key is its stable `id` since #9881, the `name`
+    being a MUTABLE natural key and never the identity (the Interface E rule at
+    the edge). The id and the name are deliberately DIFFERENT strings, so the
+    edge restored below can only resolve by the id: a `{name: $tgt_key}`
+    binding — the pre-#9881 contract — would find nothing and the test reds.
     """
     nodes = [
         cp.node_from_row("Point", {"id": "p-1", "content": "the first claim",
@@ -77,12 +73,12 @@ def _view():
         cp.node_from_row("Point", {"id": "p-2", "content": "the second claim",
                                    "point_kind": "claim", "status": "live",
                                    "props": {}}),
-        cp.node_from_row("Object", {"id": "acme", "name": "acme",
+        cp.node_from_row("Object", {"id": "o-acme", "name": "acme",
                                     "object_kind": "org", "props": {}}),
     ]
     rels = [cp.RecordRelation(
         rel_type="aboutObject", src_label="Point", src_key="p-1",
-        tgt_label="Object", tgt_key="acme", idx=0, props={})]
+        tgt_label="Object", tgt_key="o-acme", idx=0, props={})]
     return cp.RecordView(nodes=tuple(nodes), relations=tuple(rels))
 
 
@@ -119,8 +115,10 @@ def test_a_record_sourced_rebuild_survives_the_cache_being_destroyed():
     assert second["p-1"]["pointKind"] == "claim"
     assert second["p-1"]["openSetProp"] == 7
 
-    # The edge is restored, bound to the :Object by its contract key (`id`
-    # under #9881, not the mutable `name`), and the node still carries `name`.
+    # The edge is restored, bound to the :Object by its `id` — never by the
+    # `name`, which has not been the key since #9881. This reads back `b.name`,
+    # so it can only pass if the id-keyed endpoint resolved to the node NAMED
+    # `acme`: the fixture's id is `o-acme`, and nothing binds by a name.
     rels = proj.query(
         "MATCH (a:Point {id:'p-1'})-[:aboutObject]->(b:Object) "
         "RETURN b.name").result_set
@@ -244,10 +242,9 @@ def test_a_bounded_projection_declares_partial_and_reads_not_hot():
 def test_a_homonymous_pair_bounded_between_labels_declares_partial():
     """⛔ THE IDENTITY IS `(label, key)`, proven through the real API.
 
-    `Object 'acme'` and `Subject 'acme'` are two record nodes with ONE key
-    string (both are keyed by `id`, so both are given the id `acme`; the key
-    string collides across LABELS, which is exactly why identity is
-    `(label, key)` and not the key alone). A bound that cuts between them —
+    `Object` and `Subject` are two record nodes with ONE key string — both keyed
+    `id` since #9881 (`KEY_PROPERTY` no longer gives either one `name`), and both
+    given the id `acme` here. A bound that cuts between them —
     the documented `limit` mode, nodes sorted by `(label, key)` — writes one and
     omits the other. A key-only declaration calls that `complete`, and a miss on
     the OMITTED label then stands as `empty`: the §17.2 *"no such node"* false
@@ -284,7 +281,19 @@ def test_a_homonymous_pair_bounded_between_labels_declares_partial():
 
 
 def test_rebuild_from_record_refuses_without_the_destructive_token():
-    """L1 (#2944) is not bypassed by the new source."""
+    """L1 (#2944) is not bypassed by the new source.
+
+    ⛔ ``_view()`` is built OUTSIDE the raise block, and the raised TYPE is
+    pinned by message, on purpose: ``_view()`` can itself raise
+    ``UnprojectableRecord``, which IS a ``RuntimeError``
+    (``CacheProjectionError(RuntimeError)``, ``tortoise/cache_projection.py:349``),
+    so a row the contract refuses satisfied this assertion on its own — measured
+    on ``origin/main@4c797596d``, this test passed VACUOUSLY while ``_view()``
+    was raising ``no contract key at object.id``, and only the other four reds
+    made the breakage visible. Building the fixture first and matching the gate's
+    own message is what makes this test about L1 rather than about the fixture.
+    """
     proj = _projection()
-    with pytest.raises(RuntimeError):
-        proj.rebuild_from_record(_view(), confirm_destructive=False)
+    view = _view()
+    with pytest.raises(RuntimeError, match="Graph guard: rebuild_from_record performs"):
+        proj.rebuild_from_record(view, confirm_destructive=False)

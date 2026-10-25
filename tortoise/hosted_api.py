@@ -9576,21 +9576,237 @@ async def list_points(
 
 @app.get("/v1/points/{point_id}")
 async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)):  # noqa: B008
-    """Get a single Point by ID."""
+    """Get a single Point by ID.
+
+    ⭐ #7970 — THIS IS THE ANCHORED READ THE RECORD SERVES. It names exactly one
+    node by its interface-E key, so it is the read a `fetch-record` repair
+    (§17.3) is handed, and the first read answered by the record with the graph
+    engine stopped.
+
+    `TORTOISE_RECORD_SERVE` selects the store (`tortoise/record_serve.py`, and
+    its registry states which anchored reads are served and which are not):
+
+    * unset / `off` — the cache answers, exactly as before (byte-identical).
+    * `record` — ONLY the record answers; an unreadable record is **503**, never
+      a 404, because *"the record could not be asked"* is not "no such point"
+      (§17.2's rule, applied to the truth store).
+    * `prefer` — the record first, with a NAMED, COUNTED fallback to the cache
+      (`servedFrom` / `fallbackReason` on the response).
+
+    ⚠️ **503 is only for a record that cannot be REACHED.** A record that is
+    MISCONFIGURED answers **500** in either armed mode, with no fallback and no
+    count — an absent or malformed `TORTOISE_RECORD_DSN`, a missing driver, an
+    unprojectable row, a tenancy that bypasses RLS: retrying repairs none of
+    them, so `prefer` does not treat them as "still incomplete".
+
+    ⚠️ **A credential with NO RECORD TENANT is a third case, and it is not a
+    misconfiguration.** Session and JWT credentials resolve no record tenant by
+    design, so in `record` mode that is a **500** (there is no cache branch to
+    fall back to) while in `prefer` mode it is a NAMED, COUNTED fallback —
+    `record-tenant-unresolved`, the third of the three reasons.
+
+    ⚠️ A record-served answer carries the record's PRIMARY field set, and the
+    differences from the cache answer are named here in full. `content_hash` is
+    RE-DERIVED (a pure function of `content`, #2795 D2 — the schema refuses it as
+    a stored column). Every OTHER name the schema refuses as derived is **ABSENT
+    rather than recomputed** — `confidence`, `ep_*`, `posterior_*`, `version`,
+    `inherited_at`, `c_cal`, `baseline_set`, `lastDreamedAt`, `reason`, and the EP
+    dirty flags (`ep_dirty`, `ep_dirty_at`, the cache's own fold state, §17.5);
+    the full set is `cache_projection._refused("point")`. ⚠️ `confidence` is a
+    supported field of THIS route (`off` mode round-trips it, #4032), so an armed
+    deployment answers a point WITHOUT it: `servedFrom` says which STORE
+    answered, never which FIELDS that store could not, so a caller cannot infer
+    the omission from the wire. Re-deriving any of them is what §17.5 forbids at
+    this layer — hence disclosure, not recomputation.
+
+    ⚠️ `servedFrom` / `fallbackReason` are RESERVED response fields whenever a
+    mode is armed: the attribution always wins, because a caller that cannot
+    tell a fallback from a stored field would have exactly the invisible
+    fallback this unit forbids. A point whose own `props` happen to carry one of
+    those names therefore has it shadowed on an ARMED read; in `off` mode no
+    attribution is emitted at all, so the stored property passes through
+    unchanged (the pre-#7970 response, byte for byte).
+    """
     _require_scope(org, "graphs:read", "get_point")
-    # #3718: the construction is off the loop (see list_points).
-    sdk = await _data_sdk_offloaded(org)
-    # #3718 residual 2: sync FalkorDB read off the loop (see list_points).
-    rows = await asyncio.to_thread(
-        lambda: sdk._get_proj().g.query(
+
+    from tortoise import record_serve
+
+    # ⭐ #7970: the mode is read BEFORE any cache handle is CONSTRUCTED. In
+    # 'record' mode this endpoint must reach the record with the graph engine
+    # stopped, so NO handle is constructed on that path: `_data_sdk_offloaded`
+    # runs `_assert_graph_owned`, whose probe failure raises **403
+    # GRAPH_NOT_FOUND** — an impairment reported as absence, the exact class the
+    # 503 arm below exists to forbid — and on an embedded deployment the SDK's
+    # construction itself probes (and may start) the store.
+    #
+    # ⚠️ The other two modes construct it EXACTLY as before, through the
+    # bounded graph-lane seam (#3498) — which supplies the graph pool slot, the
+    # wait bound and the fail-closed 503. An earlier cut of this change built the
+    # handle from inside a worker thread with a bare sync `_data_sdk`, which made
+    # `record` lazy but silently dropped all three from the DEFAULT path; the
+    # laziness belongs to `record` alone.
+    mode = record_serve.serve_mode()
+    sdk = None
+    # ⚠️ A `prefer` read must be able to answer from the RECORD even when the
+    # CACHE cannot be opened: the lenient mode exists to survive an unavailable
+    # store, and an eager 403 GRAPH_NOT_FOUND here would make it strictly LESS
+    # able to answer than `record` — every prefer read would pay a graph-pool
+    # slot and, with the graph stopped, would never consult the record at all.
+    # So a `prefer` construction failure is CAPTURED and re-raised only when the
+    # cache is actually needed (the record missed or was unavailable). `off`
+    # keeps propagating it, exactly as before.
+    cache_open_error: Exception | None = None
+    if mode == record_serve.MODE_PREFER:
+        try:
+            sdk = await _data_sdk_offloaded(org)
+        except Exception as e:  # the seam's 403/503, or the driver's own
+            cache_open_error = e
+    elif mode == record_serve.MODE_OFF:
+        sdk = await _data_sdk_offloaded(org)
+
+    def _cache_props() -> dict | None:
+        if sdk is None:
+            # The handle could not be built (see `cache_open_error`): this is
+            # only reachable when the CACHE is genuinely needed, so the caller
+            # gets the ORIGINAL error — the 403/503 the seam raised — rather
+            # than a plausible empty answer or a rewritten status.
+            # ⚠️ Never `raise captured or RuntimeError(...)`: truthiness decides
+            # that, and an exception class defining `__bool__`/`__len__` would be
+            # silently replaced by an uncaused 500.
+            if cache_open_error is not None:
+                raise cache_open_error
+            raise RuntimeError(
+                "the cache handle is unavailable and the cache is required")
+        # #3718 residual 2: sync FalkorDB read off the loop (see list_points).
+        # Called from a worker thread (both call sites are off-loop), so the SDK
+        # built on the loop is queried off it — the pre-#7970 shape.
+        rows = sdk._get_proj().g.query(
             "MATCH (p:Point {id: $id}) "
             "WHERE p.status IS NULL OR p.status <> 'retracted' "
             "RETURN properties(p)",
             params={"id": point_id},
-        ).result_set)
-    if not rows:
-        raise HTTPException(status_code=404, detail="Point not found")
-    props = dict(rows[0][0])
+        ).result_set
+        return dict(rows[0][0]) if rows else None
+
+    served = None
+    if mode != record_serve.MODE_OFF:
+        tenant = _resolve_record_tenant(org)
+        if tenant is None:
+            # No record tenant for this credential. In 'record' mode that is a
+            # STRUCTURAL condition — retrying never resolves it — so it is a
+            # 500, never a 503 (which is reserved for "the record could not be
+            # asked") and never a 404 (which would report absence). In 'prefer'
+            # mode it is a NAMED, COUNTED fallback; falling through silently
+            # would be the invisible fallback this unit exists to prevent.
+            if mode == record_serve.MODE_RECORD:
+                raise HTTPException(
+                    status_code=500,
+                    detail=("this credential resolves no record tenant, so the "
+                            "read cannot be served from the record — absence "
+                            "is NOT established"))
+            # A credential that resolves no record tenant is a PERMANENT
+            # condition — `record_tenant_for` returns None for every session/JWT
+            # read and every non-Supabase deployment — so it gets its OWN reason.
+            # Counting it `record-unavailable` would make that counter, which
+            # exists to alert on outages, fire permanently on a condition the
+            # record never caused.
+            # ⚠️ Count AFTER the cache answers — the same invariant as
+            # `record_serve._fell_back`. A cache failure raises out of here, so a
+            # request that was never answered contributes no increment (this arm
+            # is the most-travelled counting path in `prefer` mode, because
+            # `record_tenant_for` returns None for every session/JWT credential).
+            reason = record_serve.FALLBACK_RECORD_TENANT_UNRESOLVED
+            props_from_cache = await asyncio.to_thread(_cache_props)
+            record_serve.note_fallback(reason)
+            served = record_serve.ServedAnswer(
+                read=record_serve.READ_POINT_BY_ID,
+                coordinate=f"Point:{point_id}", served_from="cache",
+                props=props_from_cache,
+                fallback_reason=reason)
+        else:
+            try:
+                served = await asyncio.to_thread(
+                    record_serve.serve_point, tenant=tenant, point_id=point_id,
+                    cache_answer=_cache_props, mode=mode)
+            except record_serve.RecordUnavailable as e:
+                # 'record' mode has no cache branch. Answering 404 here would
+                # turn an IMPAIRED read into a finding of absence — the exact
+                # defect §17.2 exists to forbid, mirrored onto the record.
+                raise HTTPException(
+                    status_code=503,
+                    # `str(e)`, not `type(e).__name__`: `RecordUnavailable`
+                    # is built with its diagnosis inside the message ("the
+                    # record could not be opened (OperationalError)"), and the
+                    # class name alone is the one thing the caller already
+                    # knows — it is the wrapper that raised.
+                    detail=(f"the record could not answer this read "
+                            f"({e}) — absence is NOT established")) from e
+            except record_serve.RecordServeError as e:
+                raise HTTPException(status_code=500, detail=str(e)) from e
+            except Exception as e:
+                # A STRUCTURAL refusal from the record's own projection layer is
+                # a fault, not an impairment: `RecordProjectionError` is how
+                # `scope_connection` refuses a misconfigured tenancy (its message
+                # names the fix — "arm TORTOISE_RECORD_DSN with
+                # tortoise_record_app"), and a `CacheProjectionError` means the
+                # row/column is one this reader was never taught. Neither is a
+                # `RecordServeError`, so without this arm they escape the handler
+                # as a raw traceback and the instruction never reaches the
+                # client. 500, never 503 (unreadable) and never 404 (absence).
+                from tortoise.cache_projection import CacheProjectionError
+                from tortoise.record_projection import RecordProjectionError
+
+                if isinstance(e, (CacheProjectionError,
+                                  RecordProjectionError)):
+                    raise HTTPException(
+                        status_code=500, detail=str(e)) from e
+                raise
+
+    if served is None:
+        props = await asyncio.to_thread(_cache_props)
+    else:
+        props = served.props
+    if not props:
+        # A 404 is still an ANSWERED read, so an armed response carries its
+        # attribution even here: a `prefer`-mode fallback whose cache also held
+        # nothing was COUNTED (`fallback_counts`) and must not be invisible to
+        # the caller. ⚠️ OFF keeps the pre-#7970 detail EXACTLY — a plain string,
+        # not a wrapper — so the default path stays byte-identical.
+        if served is None:
+            raise HTTPException(status_code=404, detail="Point not found")
+        absent: dict = {"message": "Point not found"}
+        # `as_wire` emits BOTH keys, `fallbackReason` as null when there was
+        # none — an omission would let a stored property masquerade.
+        absent.update(served.as_wire())
+        raise HTTPException(status_code=404, detail=absent)
+    # The tombstone rule is the ENDPOINT's, not the store's: a retracted point
+    # stays retrievable by get_point on the SDK but not here, whichever store
+    # answered (#432 Task 2).
+    if props.get("status") == "retracted":
+        # A second 404 arm, and the attribution rule is the same one: a caller
+        # that armed the record must be able to tell WHICH store answered even
+        # when the answer is "not here" — otherwise `prefer`'s fallback becomes
+        # invisible on exactly the reads where it went looking.
+        if served is None:  # OFF keeps the pre-#7970 shape exactly
+            raise HTTPException(status_code=404, detail="Point not found")
+        retracted: dict = {"message": "Point not found"}
+        retracted.update(served.as_wire())
+        raise HTTPException(status_code=404, detail=retracted)
+    props = dict(props)
+    if served is not None:
+        # The attribution is ALWAYS on the wire when the mode is armed — a
+        # fallback that the caller cannot see is the failure this unit exists to
+        # make impossible, so BOTH `servedFrom` and `fallbackReason` ride every
+        # armed response (the latter as null when nothing was skipped).
+        props.update(served.as_wire())
+        if served.served_from == "record":
+            # `content_hash` is refused as a stored column (a pure function of
+            # `content`, #2795 D2) — re-derive it with the writer's own function
+            # so this response does not lose a field to the carve-out.
+            from tortoise.sdk import _content_hash
+
+            if isinstance(props.get("content"), str):
+                props.setdefault("content_hash", _content_hash(props["content"]))
     if "pointKind" in props:
         props["kind"] = props.pop("pointKind")
     return props
