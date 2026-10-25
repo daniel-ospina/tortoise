@@ -699,8 +699,10 @@ def node_from_row(label: str, row: Mapping[str, Any]) -> RecordNode:
             f"own CHECK would refuse the row, and a NULL key cannot be merged"
         )
     props = _props_from_row(table, row)
-    # The key column is a graph property too (`id`, `name`, `url`, `eventId`),
-    # so it is projected under its own name as well as being the MERGE key.
+    # The key column is a graph property too (`id`, `url`, `eventId` — the
+    # contract's key columns; `name` stopped being one for `Object`/`Subject`
+    # in #9881), so it is projected under its own name as well as being the
+    # MERGE key.
     props.setdefault(key_prop, raw)
     # The fold's `ON CREATE` constants, applied where the record is SILENT
     # (#9634). `None` counts as silence, not as a value: it is a FALLBACK, so a
@@ -975,8 +977,9 @@ def declared_key(label: str, key: str, *, scope: str = "") -> str:
     """The declared coordinate for ONE record node — ``label:key``, scoped.
 
     ⛔ **The LABEL is part of the coordinate, never discarded.** ``KEY_PROPERTY``
-    gives ``Subject`` and ``Object`` the same key (``name``) and ``Point`` and
-    ``Session`` the same key (``id``), so a bare key string is **not unique
+    keys ``Object``, ``Subject``, ``Point`` and ``Session`` all on ``id`` (#9881
+    moved ``Object``/``Subject`` off ``name``, which is a mutable natural key —
+    two live entities may share it), so a bare key string is **not unique
     across labels**: a key-only declaration collapses ``(Object, "acme")`` and
     ``(Subject, "acme")`` into ONE hot key, and a projection that wrote only one
     of them then declares ``complete`` — the fail-OPEN polarity this module
