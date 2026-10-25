@@ -1064,7 +1064,7 @@ class BackupWatcher:
             # be exact before any `` — `` prose). The payload belongs in the
             # body; the title stays byte-identical so the search-before-file
             # adoption path cannot be changed by a diagnostic field.
-            # ``test_stale_filing_payload_does_not_change_the_title_shape`` pins it.
+            # ``test_stale_payload_does_not_change_the_title_shape`` pins it.
             evidence["age_min"] = age_min
             evidence["age_human"] = (
                 f"{age_min}m" if age_min < 120 else f"{age_min / 60:.1f}h")
@@ -1077,25 +1077,38 @@ class BackupWatcher:
                     "succeeded once, so the archive SET is what is missing "
                     "(bulk delete / prune / unreadable manifest). R2 "
                     "connectivity is NOT the suspect (#9938).")
+                evidence["closes_when"] = (
+                    "this stops being filed when a default-graph archive is "
+                    "listed under this org's R2 prefix again (its class then "
+                    "changes and the transition rule below closes it).")
             else:
                 evidence["measurement"] = (
                     "no default-graph archive timestamp was measured this "
                     "poll — the archive listing did not answer, so this is a "
                     "cache miss off the census, not an age (#3658).")
-            evidence["closes_when"] = (
-                "this stops being filed when the archive listing answers and "
-                "measures a default-graph archive; no age exists to clear yet."
-            )
+                evidence["closes_when"] = (
+                    "nothing: this filing is not made — an unmeasured `stale` "
+                    "opens no incident (only the pool kinds do). Present for "
+                    "direct callers of this helper.")
         try:
             window = resolve_streak_for(KIND_STALE)
         except Exception:  # unknown kind must not break a filing leg
             window = 1
+        # The close conditions are the SHIPPED ones, not an aspiration: STALE is
+        # resolved both by a measured-fresh reading AND by an org-exclusivity
+        # class change (the `never` / `stamp_missing` arms in `_drive_alerts`,
+        # #3294: "exactly the incidents matching the current classification are
+        # open; superseded ones close on transition"). A triager reading this
+        # line is told what will actually close the issue.
         evidence.setdefault(
             "closes_when",
-            "a default-graph archive is MEASURED no older than "
+            "EITHER a default-graph archive is MEASURED no older than "
             f"{self._stale_min}m on {window} consecutive healthy poll(s) — the "
-            "watcher then closes this incident itself. A class change to "
-            "NEVER_BACKED_UP/METADATA_LOST is NOT a recovery of this one.",
+            "watcher closes it itself; OR the org's own class changes in this "
+            "poll to NEVER_BACKED_UP / METADATA_LOST / not_eligible, and the "
+            "watcher closes this one and opens that one (#3294 org exclusivity "
+            "— a class change is NOT a freshness reading, it is the org moving "
+            "to the incident that matches its current state).",
         )
         return evidence
 

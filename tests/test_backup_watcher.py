@@ -2398,15 +2398,15 @@ def test_a_degraded_poll_files_no_new_stale_for_an_unmeasured_org():
     w._storage = _R2Unreachable()
     status = w.poll()
     assert status["per_team"]["team_a"] == "stale", status["per_team"]  # cache-miss label stands
-    # R2_DOWN is the incident for this poll and IS expected to open; the point
-    # is that no STALE is invented for an org nobody measured.
-    assert list(ch.issues)[: len(before)] == before, (
-        "a degraded poll must not file a STALE it never measured: " f"{ch.issues}")
-    titles = set(ch.issues.values())
-    assert "[DR] R2_DOWN" in titles, (
-        "nothing is silenced by the gate — the pool kind is the outage's "
-        f"incident: {titles}")
-    assert not any("STALE" in t for t in titles), titles
+    # `_Channels` allocates increasing keys, so a NEWLY filed issue is appended:
+    # the ONLY new key this poll may add is R2_DOWN (the outage's own kind).
+    added = set(ch.issues) - set(before)
+    assert all(ch.issues[n] == "[DR] R2_DOWN" for n in added), (
+        "a degraded poll filed something other than the outage's own kind — "
+        f"it must not file a STALE it never measured: {ch.issues}")
+    assert set(before) <= set(ch.issues), (
+        f"nothing was cleared either: {ch.issues}")
+    assert not any("STALE" in t for t in ch.issues.values()), ch.issues
 
 
 def test_a_measured_stale_org_keeps_its_incident_across_a_degraded_poll():
@@ -2427,10 +2427,11 @@ def test_a_measured_stale_org_keeps_its_incident_across_a_degraded_poll():
     w.poll()
     stale_titles = [t for t in ch.issues.values() if "STALE" in t]
     assert stale_titles == ["[DR] STALE — team_a"], ch.issues
-    assert list(ch.issues)[: len(before)] == before, ch.issues
-    assert "[DR] R2_DOWN" in set(ch.issues.values()), (
-        "the outage's own incident files, so the per-org gate silences "
-        f"nothing: {ch.issues}")
+    assert set(before) <= set(ch.issues), ch.issues
+    added = set(ch.issues) - set(before)
+    assert all(ch.issues[n] == "[DR] R2_DOWN" for n in added), (
+        "the outage's own incident files and nothing else, so the per-org gate "
+        f"silences nothing: {ch.issues}")
 
 
 def test_stale_filing_carries_the_measurement_that_justified_it():
@@ -2449,8 +2450,11 @@ def test_stale_filing_carries_the_measurement_that_justified_it():
     assert '"newest_default_archive": "' in body, body
     assert '"stale_threshold_min": 90' in body, body
     assert '"closes_when": "' in body, body
-    # The close condition states the MEASUREMENT, not a menu of classes.
-    assert "METADATA_LOST is NOT a recovery" in body, body
+    # The close condition states what the shipped arms DO — both the measured
+    # reading and the org-exclusivity class change (#3294), so a triager is not
+    # told a class change cannot close it when the `never` arm can.
+    assert "EITHER a default-graph archive is MEASURED" in body, body
+    assert "org exclusivity" in body, body
 
 
 def test_stale_payload_does_not_change_the_title_shape():
