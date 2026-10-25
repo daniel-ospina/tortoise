@@ -437,7 +437,14 @@ def test_a_stale_report_from_an_earlier_step_never_survives_a_failure(tmp_path: 
     stale.write_text('{"total": 0, "error_map": {}, "timeout_map": {}}', encoding="utf-8")
     proc, report = _run_step_for_existing(tmp_path)
     assert proc.returncode != 0
-    assert not stale.exists(), "a stale report must be cleared before the producer can fail"
+    # `report` is the SAME path `stale` was written to (the helper derives it
+    # from the same RUNNER_TEMP + step name), so asserting on it too keeps the
+    # producer's own return value in the test instead of discarding it — an
+    # unused unpacked variable is RUF059, and `ruff check .` fails the whole
+    # repo on it (this file's pre-fix form reddened `agent-infra-ci / lint` on
+    # main, which reddens the merge ref of every open PR).
+    assert report == stale, "the re-run must report the path the stale file sat at"
+    assert not report.exists(), "a stale report must be cleared before the producer can fail"
 
 
 def _run_step_for_existing(tmp_path: Path) -> tuple[subprocess.CompletedProcess, Path]:
