@@ -203,7 +203,8 @@ def test_every_exclusion_names_who_else_answers_the_same_read():
     # ... and it must say WHY they are not wired, not merely that they are not.
     assert "org credential" in reason
     # A SECOND accessor carries the same hazard and must be its own exclusion —
-    # `tortoise_get_entity` reaches `TortoiseSDK.get_entity`, not `get_point`.
+    # the BARE `tortoise_get_entity(id)` reaches `TortoiseSDK.get_entity`, while
+    # the typed `type="point"` form reaches `get_point` (the row above).
     entity = rs.ANCHORED_READS["entity-accessor"].reason
     assert "get_entity" in entity
     assert "tortoise_get_entity" in entity

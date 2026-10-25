@@ -59,9 +59,10 @@ in the same artifact is indistinguishable from an omission:
   RETIRED alias, ``tool_registry.RETIRED_USE_INSTEAD``) — neither is wired,
   because an MCP call carries no hosted org credential to resolve a record
   tenant from. (#8877 names the same internal/caller-facing
-  separation.) ``tortoise_get_entity`` is NOT built on this accessor — it
-  reaches ``TortoiseSDK.get_entity``, a different read with its own coordinate,
-  and it is excluded under ``entity-accessor`` below rather than folded in here.
+  separation.) ⚠️ The TYPED form ``tortoise_get_entity(id, type="point")`` is
+  that route and DOES reach this accessor; the BARE ``tortoise_get_entity(id)``
+  reaches ``TortoiseSDK.get_entity`` — a different read with its own coordinate,
+  excluded under ``entity-accessor`` below rather than folded in here.
 * ``entity-accessor`` — ``TortoiseSDK.get_entity``. A different coordinate (a
   name/alias resolution), not a node id, so a record answer would have to
   re-decide the resolution order to claim parity.
