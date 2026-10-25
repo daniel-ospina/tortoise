@@ -11,6 +11,13 @@
 name: probe-5120-reporter
 
 on:
+  # `push` on its own throwaway branch, NOT `workflow_dispatch`: a workflow file
+  # that is not on the DEFAULT branch cannot be dispatched at all (measured,
+  # 2026-10-25: `gh workflow run probe-5120-reporter.yml --ref probe/5120` →
+  # HTTP 404 "not found on the default branch"). A `push` event runs the workflow
+  # defined in the pushed commit, so this harness needs no default-branch copy.
+  push:
+    branches: ['probe/**']
   workflow_dispatch:
 
 permissions:
