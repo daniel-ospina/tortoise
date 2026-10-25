@@ -2154,6 +2154,20 @@ surfaces:
   # follows) — see the `api` entry.
   - test_capture_backlog_4197.py
   - test_audit_fallback_home_isolation.py
+  # #9675 Step 1: the write-pipeline eval instrument's scoring rules. Registered
+  # here because `tools/ax_write_eval.py` matches no SOURCE_PATTERNS rule, so the
+  # ONE thing a diff that edits the instrument must run is the file pinning its
+  # P0/P1 rules. NOTE: `tools/` is in NON_PYTHON_PREFIXES, so a tool-only change
+  # does NOT fall through to `core` — it takes the docs-only early return and
+  # lands on tier-1 smoke, where this file is absent. `CORE_ALSO` in
+  # `tools/ci_selection.py` (entry: `tools/ax_write_eval.py`, pinned by
+  # `tests/test_ci_selection.py::test_ax_write_eval_tool_change_selects_core_not_tier1`)
+  # is what makes this registration reachable on the diff that weakens a rule.
+  # An unclassified `tests/**/test_*.py` also reds `--integrity`, which is a
+  # `needs:` leg of the REQUIRED `python-ci-gate` (`manifest-integrity` in
+  # python-ci.yml). Hermetic: no DB, no network — it reads the committed gold, the
+  # committed `graph.json`/`score.json` pairs, and the pack registry's manifests.
+  - test_ax_write_eval.py
   # #2655: guards `tortoise/calendar_anchors.py` (the deterministic
   # calendar-anchor resolver). That module matches no SOURCE_PATTERNS rule, so
   # a resolver-only change falls through to `core` — this entry is what makes
@@ -8449,6 +8463,7 @@ durations:
   test_9451_pre_existing_stub_ingest_instant.py: 6.0  # unmeasured — #9451 (#3400/#4348 trap): a file ADDED BY A PR can never carry a CI junit measurement (the refresher samples push-to-main runs only), so this row is declared from a local reading and marked for the first post-merge sweep. Local embedded-lane reading: 5 tests, `testcase/@time` sum ~4.5 s on a warm box (each drives a REAL `capture_session`/`create_point` + journal; three of them run a full `rebuild_all()` and two a record-by-record `rebuild()`); whole-file wall 6-8 s. ⚠️ Do NOT "refresh" this row from a cold box: the FIRST test pays the once-per-process embedding-model load in huggingface_hub HTTP backoff on a box with no HF egress (the #8501 / `test_9206_apply_first_lane.py` rows above disclose the same artefact), which is paid once per leg and is not what this weight packs. Required on BOTH halves: the `core` surface row alone is classification, not a durations weight (#4348).
   test_9206_derived_recompute_lane.py: 4.0  # unmeasured — #9206 (#3400 trap), same class as the row above. Local embedded-lane reading 2.9 s for 5 tests (the resolver's adopt-on-touch plus the journal-bytes assertion); declared above the reading so a cold leg cannot under-pack. Refresh from the first post-merge run that includes it.
   test_audit_fallback_home_isolation.py: 2.4
+  test_ax_write_eval.py: 5.0  # unmeasured — #9675 (#3400/#4348 trap): a file ADDED BY A PR can never carry a CI junit measurement (the refresher samples push-to-main runs only), so an absent row would pack it at the flat 2.0s default. Local readings on this box: `testcase/@time` sum ~2.9 s, whole-file wall ~2.5-3.5 s over several runs (the suite's own test count is deliberately not restated here — it drifts with every pin added and this comment is not the place that would notice). Nothing cold-box inflates it — no DB, no embedding model, no network: it reads the committed gold/`graph.json`/`score.json` files and the pack registry's manifests (the one heavy import is the pack registry, paid once per session). Declared at 5.0, above the highest observed wall, so a loaded leg cannot under-pack. Required on BOTH halves: the `core` surface row above is classification, not a durations weight (#4348). Refresh from the first post-merge run that includes it.
   test_9208_change_feed_degraded.py: 3.2  # new in #9208 (#3400 trap): a file ADDED BY A PR has no CI junit measurement AT PR TIME (the refresher samples push-to-main runs only), so this row carried the flat 2.0s placeholder and the first post-merge refresh replaced it — see the capture note at the end. Without the row the file is in the fast pool, so it would pack at the flat 2.0s default AND `duration_coverage_issues()` sat at 90.02% — one peer lane adding a file tips it under the 90% floor. The placeholder was the flat default deliberately (a LOCAL reading would not be a shard-layout input, #3419/#2788): the local 42-65 s readings for this file are almost entirely the once-per-leg embedding-model load the #3400 method attributes to no file. — ci-timing top-15 2026-10-20 (run 39467226356); was 2.0
   test_ci_stall_identify.py: 16.0  # #5035: the 1.8 predated this PR's subprocess-launching tests. A quiet-machine estimate (measured 12.3, 14.8, 16.3 s; 25.9 s under moderate load and 34-40 s at fleet load 67-79 — the file spawns pytest children, so it tracks box load hard). `tools/ci_timing.py --refresh-durations` is the canonical (CI-measured) writer; this line is a local estimate until it next runs. — ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 1 of 8 testcases = 2.3s, a LOWER bound; kept 16.0
   test_env_contract_covers_supabase_config.py: 2.0  # #4030: appended by hand so the entry exists at all — main sat only just above the guard's floor (764/848 fast files = 90.09%), and this new fast file tipped `duration_coverage_issues()` below it (764/849 = 89.99%, formatted as the `90.0%` in that error). Local estimate: 3.24 s measured for this file plus its paired pin in test_ci_selection.py, most of it one conftest import. `tools/ci_timing.py --refresh-durations` replaces it with the CI-measured value.

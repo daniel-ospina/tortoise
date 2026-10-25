@@ -1,0 +1,420 @@
+{
+  "nodes": [
+    {
+      "layer": "Source",
+      "labels": [
+        "Source"
+      ],
+      "text": "Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks",
+      "kind": "research",
+      "is_operator": false,
+      "op_type": "",
+      "status": "",
+      "url": "https://arxiv.org/abs/2005.11401",
+      "id": "https://arxiv.org/abs/2005.11401"
+    },
+    {
+      "layer": "Subject",
+      "labels": [
+        "Subject"
+      ],
+      "text": "Lewis et al. (2020)",
+      "kind": "authorGroup",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "sub-f2bbddb15b1c341496d17ded56"
+    },
+    {
+      "layer": "Object",
+      "labels": [
+        "Object"
+      ],
+      "text": "Retrieval-Augmented Generation (RAG)",
+      "kind": "architecture",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "obj-ff44d0414b160e331a05273432"
+    },
+    {
+      "layer": "Object",
+      "labels": [
+        "Object"
+      ],
+      "text": "Parametric-only seq2seq baseline",
+      "kind": "architecture",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "obj-d1398d12dca48041f2b6c821ec"
+    },
+    {
+      "layer": "Object",
+      "labels": [
+        "Object"
+      ],
+      "text": "Natural Questions (NQ)",
+      "kind": "asset",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "obj-51f3c727faa4ddedc1fadf6bb1"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "RAG models outperform a parametric-only seq2seq baseline by 44.2% Exact Match on Natural Questions.",
+      "kind": "observation",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "1a166110f41-d338865aff11"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "The reported RAG gain is unstable when the retriever is frozen.",
+      "kind": "observation",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "1a166111085-da0cccedcc9d"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "Joint fine-tuning of the retriever and the generator is necessary for the reported gains.",
+      "kind": "statement",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "1a1661110ff-9e1b78be5258"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "The necessity argument rests on a single ablation, and the paper reports no further ablations corroborating it.",
+      "kind": "observation",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "1a166111126-74acd81424b3"
+    },
+    {
+      "layer": "Event",
+      "labels": [
+        "Event"
+      ],
+      "text": "Ingest: Lewis et al. (2020) RAG \u2014 44.2% Exact Match gain on Natural Questions vs a parametric-only seq2seq baseline, unstable under a frozen retriever; joint fine-tuning argued necessary from a single ablation",
+      "kind": "extraction",
+      "is_operator": false,
+      "op_type": "",
+      "status": "",
+      "url": "",
+      "id": "1a16611113f-c952e16b7f01"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "",
+      "kind": "",
+      "is_operator": true,
+      "op_type": "IMPL",
+      "status": "live",
+      "url": "",
+      "id": "1a166111347-988548aea478"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "[MITIGATION] The instability-to-necessity inference rests on a single ablation; the paper reports no further ablations or replications, so the necessity claim is under-evidenced rather than refuted.",
+      "kind": "statement",
+      "is_operator": false,
+      "op_type": "",
+      "status": "",
+      "url": "",
+      "id": "1a16611150f-69779adc1179"
+    }
+  ],
+  "edges": [
+    {
+      "relation": "authoredBy",
+      "from": "",
+      "to": "Lewis et al. (2020)",
+      "from_layer": "Source",
+      "to_layer": "Subject",
+      "from_id": "https://arxiv.org/abs/2005.11401",
+      "to_id": "sub-f2bbddb15b1c341496d17ded56"
+    },
+    {
+      "relation": "extractedFrom",
+      "from": "RAG models outperform a parametric-only seq2seq baseline by 44.2% Exact Match on Natural Questions.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a166110f41-d338865aff11",
+      "to_id": "https://arxiv.org/abs/2005.11401"
+    },
+    {
+      "relation": "aboutObject",
+      "from": "RAG models outperform a parametric-only seq2seq baseline by 44.2% Exact Match on Natural Questions.",
+      "to": "Retrieval-Augmented Generation (RAG)",
+      "from_layer": "Point",
+      "to_layer": "Object",
+      "from_id": "1a166110f41-d338865aff11",
+      "to_id": "obj-ff44d0414b160e331a05273432"
+    },
+    {
+      "relation": "aboutObject",
+      "from": "RAG models outperform a parametric-only seq2seq baseline by 44.2% Exact Match on Natural Questions.",
+      "to": "Parametric-only seq2seq baseline",
+      "from_layer": "Point",
+      "to_layer": "Object",
+      "from_id": "1a166110f41-d338865aff11",
+      "to_id": "obj-d1398d12dca48041f2b6c821ec"
+    },
+    {
+      "relation": "aboutObject",
+      "from": "RAG models outperform a parametric-only seq2seq baseline by 44.2% Exact Match on Natural Questions.",
+      "to": "Natural Questions (NQ)",
+      "from_layer": "Point",
+      "to_layer": "Object",
+      "from_id": "1a166110f41-d338865aff11",
+      "to_id": "obj-51f3c727faa4ddedc1fadf6bb1"
+    },
+    {
+      "relation": "related",
+      "from": "RAG models outperform a parametric-only seq2seq baseline by 44.2% Exact Match on Natural Questions.",
+      "to": "The reported RAG gain is unstable when the retriever is frozen.",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a166110f41-d338865aff11",
+      "to_id": "1a166111085-da0cccedcc9d"
+    },
+    {
+      "relation": "extractedFrom",
+      "from": "The reported RAG gain is unstable when the retriever is frozen.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a166111085-da0cccedcc9d",
+      "to_id": "https://arxiv.org/abs/2005.11401"
+    },
+    {
+      "relation": "aboutObject",
+      "from": "The reported RAG gain is unstable when the retriever is frozen.",
+      "to": "Retrieval-Augmented Generation (RAG)",
+      "from_layer": "Point",
+      "to_layer": "Object",
+      "from_id": "1a166111085-da0cccedcc9d",
+      "to_id": "obj-ff44d0414b160e331a05273432"
+    },
+    {
+      "relation": "INPUT",
+      "from": "The reported RAG gain is unstable when the retriever is frozen.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a166111085-da0cccedcc9d",
+      "to_id": "1a166111347-988548aea478"
+    },
+    {
+      "relation": "extractedFrom",
+      "from": "Joint fine-tuning of the retriever and the generator is necessary for the reported gains.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a1661110ff-9e1b78be5258",
+      "to_id": "https://arxiv.org/abs/2005.11401"
+    },
+    {
+      "relation": "aboutObject",
+      "from": "Joint fine-tuning of the retriever and the generator is necessary for the reported gains.",
+      "to": "Retrieval-Augmented Generation (RAG)",
+      "from_layer": "Point",
+      "to_layer": "Object",
+      "from_id": "1a1661110ff-9e1b78be5258",
+      "to_id": "obj-ff44d0414b160e331a05273432"
+    },
+    {
+      "relation": "INPUT",
+      "from": "Joint fine-tuning of the retriever and the generator is necessary for the reported gains.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a1661110ff-9e1b78be5258",
+      "to_id": "1a166111347-988548aea478"
+    },
+    {
+      "relation": "extractedFrom",
+      "from": "The necessity argument rests on a single ablation, and the paper reports no further ablations corroborating it.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a166111126-74acd81424b3",
+      "to_id": "https://arxiv.org/abs/2005.11401"
+    },
+    {
+      "relation": "related",
+      "from": "The necessity argument rests on a single ablation, and the paper reports no further ablations corroborating it.",
+      "to": "Joint fine-tuning of the retriever and the generator is necessary for the reported gains.",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a166111126-74acd81424b3",
+      "to_id": "1a1661110ff-9e1b78be5258"
+    },
+    {
+      "relation": "aboutDocument",
+      "from": "Ingest: Lewis et al. (2020) RAG \u2014 44.2% Exact Match gain on Natural Questions vs a parametric-only seq2seq baseline, unstable under a frozen retriever; joint fine-tuning argued necessary from a single ablation",
+      "to": "",
+      "from_layer": "Event",
+      "to_layer": "Source",
+      "from_id": "1a16611113f-c952e16b7f01",
+      "to_id": "https://arxiv.org/abs/2005.11401"
+    },
+    {
+      "relation": "aboutSubject",
+      "from": "Ingest: Lewis et al. (2020) RAG \u2014 44.2% Exact Match gain on Natural Questions vs a parametric-only seq2seq baseline, unstable under a frozen retriever; joint fine-tuning argued necessary from a single ablation",
+      "to": "Lewis et al. (2020)",
+      "from_layer": "Event",
+      "to_layer": "Subject",
+      "from_id": "1a16611113f-c952e16b7f01",
+      "to_id": "sub-f2bbddb15b1c341496d17ded56"
+    },
+    {
+      "relation": "aboutPoint",
+      "from": "Ingest: Lewis et al. (2020) RAG \u2014 44.2% Exact Match gain on Natural Questions vs a parametric-only seq2seq baseline, unstable under a frozen retriever; joint fine-tuning argued necessary from a single ablation",
+      "to": "RAG models outperform a parametric-only seq2seq baseline by 44.2% Exact Match on Natural Questions.",
+      "from_layer": "Event",
+      "to_layer": "Point",
+      "from_id": "1a16611113f-c952e16b7f01",
+      "to_id": "1a166110f41-d338865aff11"
+    },
+    {
+      "relation": "IMPL",
+      "from": "",
+      "to": "The reported RAG gain is unstable when the retriever is frozen.",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a166111347-988548aea478",
+      "to_id": "1a166111085-da0cccedcc9d"
+    },
+    {
+      "relation": "IMPL",
+      "from": "",
+      "to": "Joint fine-tuning of the retriever and the generator is necessary for the reported gains.",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a166111347-988548aea478",
+      "to_id": "1a1661110ff-9e1b78be5258"
+    },
+    {
+      "relation": "mitigated_by",
+      "from": "",
+      "to": "[MITIGATION] The instability-to-necessity inference rests on a single ablation; the paper reports no further ablations or replications, so the necessity claim is under-evidenced rather than refuted.",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a166111347-988548aea478",
+      "to_id": "1a16611150f-69779adc1179"
+    },
+    {
+      "relation": "related",
+      "from": "[MITIGATION] The instability-to-necessity inference rests on a single ablation; the paper reports no further ablations or replications, so the necessity claim is under-evidenced rather than refuted.",
+      "to": "The necessity argument rests on a single ablation, and the paper reports no further ablations corroborating it.",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a16611150f-69779adc1179",
+      "to_id": "1a166111126-74acd81424b3"
+    },
+    {
+      "relation": "IMPL",
+      "from": "[MITIGATION] The instability-to-necessity inference rests on a single ablation; the paper reports no further ablations or replications, so the necessity claim is under-evidenced rather than refuted.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a16611150f-69779adc1179",
+      "to_id": "1a166111347-988548aea478"
+    }
+  ],
+  "counts": {
+    "Point": 6,
+    "Subject": 1,
+    "Object": 3,
+    "Event": 1,
+    "Source": 1
+  },
+  "operators": [
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "",
+      "kind": "",
+      "is_operator": true,
+      "op_type": "IMPL",
+      "status": "live",
+      "url": "",
+      "id": "1a166111347-988548aea478"
+    }
+  ],
+  "sources": [
+    {
+      "layer": "Source",
+      "labels": [
+        "Source"
+      ],
+      "text": "Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks",
+      "kind": "research",
+      "is_operator": false,
+      "op_type": "",
+      "status": "",
+      "url": "https://arxiv.org/abs/2005.11401",
+      "id": "https://arxiv.org/abs/2005.11401"
+    }
+  ],
+  "relations": [
+    "IMPL",
+    "INPUT",
+    "aboutDocument",
+    "aboutObject",
+    "aboutPoint",
+    "aboutSubject",
+    "authoredBy",
+    "extractedFrom",
+    "mitigated_by",
+    "related"
+  ],
+  "mitigations": [
+    {
+      "relation": "mitigated_by",
+      "from": "",
+      "to": "[MITIGATION] The instability-to-necessity inference rests on a single ablation; the paper reports no further ablations or replications, so the necessity claim is under-evidenced rather than refuted.",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a166111347-988548aea478",
+      "to_id": "1a16611150f-69779adc1179"
+    }
+  ]
+}

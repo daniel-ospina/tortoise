@@ -1,0 +1,409 @@
+{
+  "nodes": [
+    {
+      "layer": "Source",
+      "labels": [
+        "Source"
+      ],
+      "text": "Quarterly portfolio update, 2026-08",
+      "kind": "portfolioUpdateMemo",
+      "is_operator": false,
+      "op_type": "",
+      "status": "",
+      "url": "memo://our-fund/portfolio/2026-08-quarterly-update",
+      "id": "memo://our-fund/portfolio/2026-08-quarterly-update"
+    },
+    {
+      "layer": "Subject",
+      "labels": [
+        "Subject"
+      ],
+      "text": "Northwind Logistics",
+      "kind": "company",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "sub-37ec257e0e13ef26543d204184"
+    },
+    {
+      "layer": "Subject",
+      "labels": [
+        "Subject"
+      ],
+      "text": "Solstice Robotics",
+      "kind": "company",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "sub-a198cf7f09fa2b521d08347e6d"
+    },
+    {
+      "layer": "Subject",
+      "labels": [
+        "Subject"
+      ],
+      "text": "Acme Capital",
+      "kind": "investor",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "sub-c1de0e5e5224e5a5a4c745862f"
+    },
+    {
+      "layer": "Object",
+      "labels": [
+        "Object"
+      ],
+      "text": "Northwind Logistics board seat",
+      "kind": "governanceSeat",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "obj-6e0122d8dd525811a714010f2b"
+    },
+    {
+      "layer": "Object",
+      "labels": [
+        "Object"
+      ],
+      "text": "Acme Capital tranche 2 to Solstice Robotics",
+      "kind": "tranche",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "obj-02791c6a4c09b7bb3fbe881cbe"
+    },
+    {
+      "layer": "Event",
+      "labels": [
+        "Event"
+      ],
+      "text": "Northwind Logistics closed a Series B round",
+      "kind": "milestone",
+      "is_operator": false,
+      "op_type": "",
+      "status": "",
+      "url": "",
+      "id": "1a1660ff1c6-722d0d75973e"
+    },
+    {
+      "layer": "Event",
+      "labels": [
+        "Event"
+      ],
+      "text": "Acme Capital released tranche 2 to Solstice Robotics",
+      "kind": "disbursement",
+      "is_operator": false,
+      "op_type": "",
+      "status": "",
+      "url": "",
+      "id": "1a1660ff38c-1bbb1de9c8ac"
+    },
+    {
+      "layer": "Event",
+      "labels": [
+        "Event"
+      ],
+      "text": "Solstice Robotics safety audit passed",
+      "kind": "conditionMet",
+      "is_operator": false,
+      "op_type": "",
+      "status": "",
+      "url": "",
+      "id": "1a1660ff59d-08a3c5cf26c9"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "Northwind Logistics ARR is $8.4M as of 2026-08, up from $5.1M at our entry.",
+      "kind": "observation",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "1a1660ff641-428923ba30bb"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "The board seat our fund holds at Northwind Logistics is unchanged as of the 2026-08 update.",
+      "kind": "observation",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "1a1660ff80e-68fc3111ab20"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "Solstice Robotics headcount is 74 people as of 2026-09-30, up from 61 in Q1 2026.",
+      "kind": "observation",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "1a1660ff848-71dfbf4c7dc8"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "We are not adding new portfolio names this quarter (2026-08 update).",
+      "kind": "decision",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "1a1660ff885-17335c8738d5"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "Acme Capital's tranche 2 release to Solstice Robotics was gated on the safety audit passing; the audit passed and the tranche released 2026-09-02.",
+      "kind": "observation",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "1a1660ff8b6-c61718facc07"
+    }
+  ],
+  "edges": [
+    {
+      "relation": "related",
+      "from": "",
+      "to": "Northwind Logistics",
+      "from_layer": "Source",
+      "to_layer": "Subject",
+      "from_id": "memo://our-fund/portfolio/2026-08-quarterly-update",
+      "to_id": "sub-37ec257e0e13ef26543d204184"
+    },
+    {
+      "relation": "related",
+      "from": "",
+      "to": "Solstice Robotics",
+      "from_layer": "Source",
+      "to_layer": "Subject",
+      "from_id": "memo://our-fund/portfolio/2026-08-quarterly-update",
+      "to_id": "sub-a198cf7f09fa2b521d08347e6d"
+    },
+    {
+      "relation": "related",
+      "from": "Northwind Logistics board seat",
+      "to": "Northwind Logistics",
+      "from_layer": "Object",
+      "to_layer": "Subject",
+      "from_id": "obj-6e0122d8dd525811a714010f2b",
+      "to_id": "sub-37ec257e0e13ef26543d204184"
+    },
+    {
+      "relation": "related",
+      "from": "Acme Capital tranche 2 to Solstice Robotics",
+      "to": "Solstice Robotics",
+      "from_layer": "Object",
+      "to_layer": "Subject",
+      "from_id": "obj-02791c6a4c09b7bb3fbe881cbe",
+      "to_id": "sub-a198cf7f09fa2b521d08347e6d"
+    },
+    {
+      "relation": "related",
+      "from": "Acme Capital tranche 2 to Solstice Robotics",
+      "to": "Acme Capital",
+      "from_layer": "Object",
+      "to_layer": "Subject",
+      "from_id": "obj-02791c6a4c09b7bb3fbe881cbe",
+      "to_id": "sub-c1de0e5e5224e5a5a4c745862f"
+    },
+    {
+      "relation": "aboutSubject",
+      "from": "Northwind Logistics closed a Series B round",
+      "to": "Northwind Logistics",
+      "from_layer": "Event",
+      "to_layer": "Subject",
+      "from_id": "1a1660ff1c6-722d0d75973e",
+      "to_id": "sub-37ec257e0e13ef26543d204184"
+    },
+    {
+      "relation": "aboutSubject",
+      "from": "Acme Capital released tranche 2 to Solstice Robotics",
+      "to": "Solstice Robotics",
+      "from_layer": "Event",
+      "to_layer": "Subject",
+      "from_id": "1a1660ff38c-1bbb1de9c8ac",
+      "to_id": "sub-a198cf7f09fa2b521d08347e6d"
+    },
+    {
+      "relation": "aboutObject",
+      "from": "Acme Capital released tranche 2 to Solstice Robotics",
+      "to": "Acme Capital tranche 2 to Solstice Robotics",
+      "from_layer": "Event",
+      "to_layer": "Object",
+      "from_id": "1a1660ff38c-1bbb1de9c8ac",
+      "to_id": "obj-02791c6a4c09b7bb3fbe881cbe"
+    },
+    {
+      "relation": "aboutSubject",
+      "from": "Solstice Robotics safety audit passed",
+      "to": "Solstice Robotics",
+      "from_layer": "Event",
+      "to_layer": "Subject",
+      "from_id": "1a1660ff59d-08a3c5cf26c9",
+      "to_id": "sub-a198cf7f09fa2b521d08347e6d"
+    },
+    {
+      "relation": "IMPL",
+      "from": "Solstice Robotics safety audit passed",
+      "to": "Acme Capital released tranche 2 to Solstice Robotics",
+      "from_layer": "Event",
+      "to_layer": "Event",
+      "from_id": "1a1660ff59d-08a3c5cf26c9",
+      "to_id": "1a1660ff38c-1bbb1de9c8ac"
+    },
+    {
+      "relation": "extractedFrom",
+      "from": "Northwind Logistics ARR is $8.4M as of 2026-08, up from $5.1M at our entry.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a1660ff641-428923ba30bb",
+      "to_id": "memo://our-fund/portfolio/2026-08-quarterly-update"
+    },
+    {
+      "relation": "aboutSubject",
+      "from": "Northwind Logistics ARR is $8.4M as of 2026-08, up from $5.1M at our entry.",
+      "to": "Northwind Logistics",
+      "from_layer": "Point",
+      "to_layer": "Subject",
+      "from_id": "1a1660ff641-428923ba30bb",
+      "to_id": "sub-37ec257e0e13ef26543d204184"
+    },
+    {
+      "relation": "extractedFrom",
+      "from": "The board seat our fund holds at Northwind Logistics is unchanged as of the 2026-08 update.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a1660ff80e-68fc3111ab20",
+      "to_id": "memo://our-fund/portfolio/2026-08-quarterly-update"
+    },
+    {
+      "relation": "aboutSubject",
+      "from": "The board seat our fund holds at Northwind Logistics is unchanged as of the 2026-08 update.",
+      "to": "Northwind Logistics",
+      "from_layer": "Point",
+      "to_layer": "Subject",
+      "from_id": "1a1660ff80e-68fc3111ab20",
+      "to_id": "sub-37ec257e0e13ef26543d204184"
+    },
+    {
+      "relation": "related",
+      "from": "The board seat our fund holds at Northwind Logistics is unchanged as of the 2026-08 update.",
+      "to": "Northwind Logistics board seat",
+      "from_layer": "Point",
+      "to_layer": "Object",
+      "from_id": "1a1660ff80e-68fc3111ab20",
+      "to_id": "obj-6e0122d8dd525811a714010f2b"
+    },
+    {
+      "relation": "extractedFrom",
+      "from": "Solstice Robotics headcount is 74 people as of 2026-09-30, up from 61 in Q1 2026.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a1660ff848-71dfbf4c7dc8",
+      "to_id": "memo://our-fund/portfolio/2026-08-quarterly-update"
+    },
+    {
+      "relation": "aboutSubject",
+      "from": "Solstice Robotics headcount is 74 people as of 2026-09-30, up from 61 in Q1 2026.",
+      "to": "Solstice Robotics",
+      "from_layer": "Point",
+      "to_layer": "Subject",
+      "from_id": "1a1660ff848-71dfbf4c7dc8",
+      "to_id": "sub-a198cf7f09fa2b521d08347e6d"
+    },
+    {
+      "relation": "aboutSource",
+      "from": "We are not adding new portfolio names this quarter (2026-08 update).",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a1660ff885-17335c8738d5",
+      "to_id": "memo://our-fund/portfolio/2026-08-quarterly-update"
+    },
+    {
+      "relation": "extractedFrom",
+      "from": "We are not adding new portfolio names this quarter (2026-08 update).",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a1660ff885-17335c8738d5",
+      "to_id": "memo://our-fund/portfolio/2026-08-quarterly-update"
+    },
+    {
+      "relation": "extractedFrom",
+      "from": "Acme Capital's tranche 2 release to Solstice Robotics was gated on the safety audit passing; the audit passed and the tranche released 2026-09-02.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a1660ff8b6-c61718facc07",
+      "to_id": "memo://our-fund/portfolio/2026-08-quarterly-update"
+    },
+    {
+      "relation": "aboutSubject",
+      "from": "Acme Capital's tranche 2 release to Solstice Robotics was gated on the safety audit passing; the audit passed and the tranche released 2026-09-02.",
+      "to": "Solstice Robotics",
+      "from_layer": "Point",
+      "to_layer": "Subject",
+      "from_id": "1a1660ff8b6-c61718facc07",
+      "to_id": "sub-a198cf7f09fa2b521d08347e6d"
+    }
+  ],
+  "counts": {
+    "Point": 5,
+    "Subject": 3,
+    "Object": 2,
+    "Event": 3,
+    "Source": 1
+  },
+  "operators": [],
+  "sources": [
+    {
+      "layer": "Source",
+      "labels": [
+        "Source"
+      ],
+      "text": "Quarterly portfolio update, 2026-08",
+      "kind": "portfolioUpdateMemo",
+      "is_operator": false,
+      "op_type": "",
+      "status": "",
+      "url": "memo://our-fund/portfolio/2026-08-quarterly-update",
+      "id": "memo://our-fund/portfolio/2026-08-quarterly-update"
+    }
+  ],
+  "relations": [
+    "IMPL",
+    "aboutObject",
+    "aboutSource",
+    "aboutSubject",
+    "extractedFrom",
+    "related"
+  ],
+  "mitigations": []
+}
