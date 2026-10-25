@@ -954,8 +954,46 @@ def test_the_workflow_never_checks_out_a_dispatched_ref(sweep: Any) -> None:
     assert with_.get("persist-credentials") is False
 
 
+def _sweep_step(doc: dict[str, Any]) -> dict[str, Any]:
+    return next(
+        step
+        for step in doc["jobs"]["sweep"]["steps"]
+        if "inbound_relay_sweep.py" in str(step.get("run") or "")
+    )
+
+
+def _dry_run_expression(step: dict[str, Any]) -> Any:
+    """The step's `DRY_RUN:` value compiled into a callable over contexts.
+
+    Evaluated with the EVENT GUARD's evaluator — the same strict Actions
+    expression subset the job-level `if:` is graded with, which RAISES on any
+    syntax it does not model instead of falling through as True. So the verdict
+    below is the one Actions reaches, not a spelling match.
+    """
+    guard = _load_event_guard()
+    raw = str((step.get("env") or {}).get("DRY_RUN") or "")
+    match = re.fullmatch(r"\s*\$\{\{(?P<expr>.*)\}\}\s*", raw, re.S)
+    assert match, f"DRY_RUN must be one `${{{{ expr }}}}` bound in `env:`: {raw!r}"
+    tokens = guard._tokenize(match.group("expr"))
+
+    def evaluate(*, github: dict[str, Any], inputs: dict[str, Any]) -> bool:
+        # The flag is passed iff the expression renders the string `true`: the
+        # script compares it with `=` against that literal.
+        value = guard._Parser(tokens).parse({"github": github, "inputs": inputs})
+        return str(value).lower() == "true"
+
+    return evaluate
+
+
 def test_a_manual_dispatch_defaults_to_inert(sweep: Any) -> None:
-    """A dispatch to INSPECT the live repo must not relay, comment and close."""
+    """A dispatch to INSPECT the live repo must not relay, comment and close.
+
+    EVALUATED, not spelled: the `DRY_RUN:` expression is run through the event
+    guard's strict evaluator for each context. The liveness half matters as much
+    as the inert half — an expression that resolves dry on the SCHEDULE path
+    leaves the converging half inert, which is the worst regression this
+    workflow can have (the control would exist and never act).
+    """
     import yaml
 
     doc = yaml.safe_load(SWEEP_WORKFLOW.read_text())
@@ -964,21 +1002,70 @@ def test_a_manual_dispatch_defaults_to_inert(sweep: Any) -> None:
         "a silent live default turns 'show me the plan' into real closes"
     )
 
-    # The schedule path passes no input, so `inputs.dry_run` is empty there —
-    # empty is not 'true', so the scheduled run still acts. That property is the
-    # WHOLE control's liveness, so assert the exact expression over the step's
-    # own `run:` script rather than a substring a polarity flip would satisfy
-    # (`!(inputs.dry_run == 'true') && '--dry-run'` makes every scheduled run
-    # dry — the worst regression this workflow can have).
-    script = next(
-        step["run"]
-        for step in doc["jobs"]["sweep"]["steps"]
-        if "inbound_relay_sweep.py" in str(step.get("run") or "")
+    step = _sweep_step(doc)
+    dry_run = _dry_run_expression(step)
+
+    assert dry_run(github={"event_name": "schedule"}, inputs={}) is False, (
+        "a SCHEDULED run must act: no dispatch input exists on that path, so the "
+        "expression has to resolve LIVE there"
     )
+    assert dry_run(github={"event_name": "workflow_dispatch"}, inputs={}) is True, (
+        "a dispatch that somehow carries no value must still be inert"
+    )
+    assert dry_run(github={"event_name": "workflow_dispatch"}, inputs={"dry_run": "true"}) is True
+    assert (
+        dry_run(github={"event_name": "workflow_dispatch"}, inputs={"dry_run": "True"}) is True
+    ), "only the exact literal `false` may make a dispatch live"
+    assert (
+        dry_run(github={"event_name": "workflow_dispatch"}, inputs={"dry_run": "false"}) is False
+    ), "an explicit `false` is the one way to run a dispatch live"
+
+    script = step["run"]
     assert script.count("--dry-run") == 1, script
-    assert re.search(r"\$\{\{\s*inputs\.dry_run == 'true' && '--dry-run' \|\| ''\s*\}\}", script), (
-        "the flag must be guarded by `inputs.dry_run == 'true'` with an empty "
-        "fallback: any other shape makes the SCHEDULED run dry (or unconditional)"
+    assert re.search(r'\[\s*"\$DRY_RUN"\s*=\s*"true"\s*\]', script), (
+        "the flag must be guarded by an exact comparison against the bound "
+        f"DRY_RUN value, not a truthiness test: {script!r}"
+    )
+
+
+def test_dispatch_inputs_are_bound_in_env_never_substituted_into_the_script(
+    sweep: Any,
+) -> None:
+    """A `${{ inputs.* }}` expanded into `run:` is shell SOURCE, not data.
+
+    GitHub substitutes expressions into the step's shell TEXT before bash parses
+    it (#4334/#4361), so `--since-hours "${{ inputs.since_hours }}"` lets an
+    input containing `"` break out of its quoting and run commands in a job that
+    holds `issues: write` + `pull-requests: write` and `INBOUND_SECRET_GITHUB` —
+    dispatch permission (which cannot read repo secrets) escalating to a
+    secret-reading one. Every other cron/dispatch workflow in this repo binds
+    its inputs in `env:` and references them quoted.
+
+    The rule is flat, with no exemption for the decision-shaped inputs: they are
+    EVALUATED in `env:` (`DRY_RUN`) and passed to the script as `$VAR`, so no
+    input value is ever part of the script's text.
+    """
+    import yaml
+
+    doc = yaml.safe_load(SWEEP_WORKFLOW.read_text())
+    declared = set((doc[True]["workflow_dispatch"] or {}).get("inputs") or {})
+    assert declared == {"since_hours", "max_actions", "dry_run"}, declared
+
+    bound: dict[str, str] = {}
+    for step in doc["jobs"]["sweep"]["steps"]:
+        script = str(step.get("run") or "")
+        for name in sorted(declared):
+            assert not re.search(rf"\$\{{\{{[^}}]*\binputs\.{name}\b", script), (
+                f"`inputs.{name}` is substituted into a `run:` body — bind it in "
+                f"`env:` and reference `$VAR` quoted instead: {script!r}"
+            )
+        for key, value in (step.get("env") or {}).items():
+            for name in sorted(declared):
+                if re.search(rf"\binputs\.{name}\b", str(value)):
+                    bound.setdefault(name, str(key))
+
+    assert set(bound) == declared, (
+        f"these dispatch inputs are never bound in `env:`: {sorted(declared - set(bound))}"
     )
 
 
@@ -1025,21 +1112,11 @@ def _stub_gh(sweep: Any, monkeypatch: Any, pages: dict[int, Any]) -> list[str]:
     return seen
 
 
-def test_every_entry_point_guards_the_interpreter_first(sweep: Any) -> None:
-    """#5128: a tracked `tools/*.py` entry point must refuse <3.12 up front.
-
-    This file imports `from datetime import UTC` at module level, so on an
-    ambient 3.9 interpreter it dies with an unattributed ImportError before any
-    guard could run. `tests/test_entry_point_python_guard.py` enumerates tracked
-    entry points, so the guard has to live in the file itself.
-    """
-    text = MODULE_PATH.read_text()
-    guard = text.index("sys.version_info < (3, 12)")
-    assert guard < text.index("import argparse"), (
-        "the interpreter guard must precede the imports it protects"
-    )
-    for required in (">= 3.12", "tools/inbound_relay_sweep.py", "uv run python"):
-        assert required in text[: text.index("import argparse")], required
+# The #5128 interpreter-guard invariant is deliberately NOT re-asserted here: it
+# has an owner that DERIVES its corpus — `tests/test_entry_point_python_guard.py`
+# is parametrized over the tracked `tools/**/*.py` corpus, which includes this
+# tool, and it executes the guard node rather than grepping for it. A second,
+# substring-only copy in this file could only rot against that one.
 
 
 def test_client_stops_paging_at_the_window(sweep: Any, monkeypatch: Any) -> None:
@@ -1228,10 +1305,32 @@ def test_the_resume_marker_must_be_our_own_comment(sweep: Any, monkeypatch: Any)
     assert client.already_relayed(9883) is False
 
 
-def test_the_resume_read_asks_for_the_newest_comments(sweep: Any, monkeypatch: Any) -> None:
-    """Our comment is posted at CLOSE time — page 1 of the default order is oldest."""
-    client = sweep.GhClient(f"{OWNER}/tortoise")
-    seen = _stub_gh_json(sweep, monkeypatch, {"comments": []})
+def test_the_resume_read_walks_to_the_newest_comments(sweep: Any, monkeypatch: Any) -> None:
+    """The comments endpoint IGNORES `sort`/`direction` — page 1 is the OLDEST.
 
-    assert client.already_relayed(9883) is False
-    assert "sort=created&direction=desc" in seen[0], seen
+    Measured on #9613: `?per_page=3&sort=created&direction=desc` returns an
+    ASCENDING triple, identical to the request without those parameters (the
+    endpoint accepts only `since`, `per_page` and `page`). A resume read that
+    asks for "newest first" and stops therefore reads the oldest page — so the
+    relay's own footer, posted at close time (i.e. LAST), is invisible on any
+    item with more than `per_page` comments. The retry then re-posts the
+    identical comment every 15 minutes for as long as the close keeps failing,
+    which is the exact failure this marker exists to prevent.
+    """
+    client = sweep.GhClient(f"{OWNER}/tortoise")
+    oldest = [
+        {"body": f"chatter {i}", "user": {"login": f"u{i}", "type": "User"}}
+        for i in range(client.per_page)
+    ]
+    marker = {
+        "body": f"👋 Thanks for the contribution!\n\n{sweep.RELAY_MARKER}",
+        "user": {"login": "github-actions[bot]", "type": "Bot"},
+    }
+    # `&page=N` (not `page=N`): `per_page=100` itself contains `page=1`.
+    seen = _stub_gh_json(sweep, monkeypatch, {"&page=1": oldest, "&page=2": [marker]})
+
+    assert client.already_relayed(9883) is True, (
+        "the marker lives on the LAST page — a read that stops at page 1 misses "
+        "it and re-posts the comment"
+    )
+    assert any("&page=2" in call for call in seen), seen

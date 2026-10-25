@@ -54,7 +54,11 @@
 #   reach into history. A window holding more items than the page budget acts on
 #   the prefix and DEFERS the rest — a flood must not disable the control.
 # * A manual dispatch defaults to `dry_run=true` (inert): a maintainer running it
-#   to inspect the live repo must not relay, comment and close for real.
+#   to inspect the live repo must not relay, comment and close for real. Only the
+#   exact literal `false` makes a dispatch live — any other typed value stays
+#   inert, so a typo cannot turn "show me the plan" into real closes.
+# * Dispatch inputs are bound in `env:`, never substituted into `run:`: an input
+#   expanded into a shell body is shell SOURCE, not data (#4334/#4361).
 
 name: "Inbound relay sweep — the converging half"
 
@@ -133,9 +137,26 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           INBOUND_URL: ${{ secrets.INBOUND_URL }}
           INBOUND_SECRET_GITHUB: ${{ secrets.INBOUND_SECRET_GITHUB }}
+          # ⛔ Dispatch inputs are DATA and are bound in `env:`, never
+          # substituted into `run:`. GitHub expands `${{ }}` into the step's
+          # shell TEXT before bash parses it, so a value written straight into
+          # the script is shell SOURCE — an input containing `"` breaks out of
+          # the quoting and runs commands in a job holding `issues: write` +
+          # `pull-requests: write` and the intake secret (#4334/#4361, and the
+          # convention every other cron/dispatch workflow here follows).
+          # Pinned by a test.
+          SINCE_HOURS: ${{ inputs.since_hours || 24 }}
+          MAX_ACTIONS: ${{ inputs.max_actions || 20 }}
+          # INERT BY DEFAULT, and inert in the safe DIRECTION: a run acts only
+          # when it is SCHEDULED (a schedule run has no dispatch inputs at all)
+          # or when a dispatch opts in with the exact literal `false`. Any other
+          # typed value — `True`, `yes`, a typo — stays a dry run, so a
+          # maintainer cannot close real items while meaning to inspect them.
+          # Pinned behaviourally by a test that EVALUATES this expression.
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run != 'false' || 'false' }}
         run: |
-          python tools/inbound_relay_sweep.py \
-            --repo "$GITHUB_REPOSITORY" \
-            --since-hours "${{ inputs.since_hours || 24 }}" \
-            --max "${{ inputs.max_actions || 20 }}" \
-            ${{ inputs.dry_run == 'true' && '--dry-run' || '' }}
+          args=(--repo "$GITHUB_REPOSITORY" --since-hours "$SINCE_HOURS" --max "$MAX_ACTIONS")
+          if [ "$DRY_RUN" = "true" ]; then
+            args+=(--dry-run)
+          fi
+          python tools/inbound_relay_sweep.py "${args[@]}"

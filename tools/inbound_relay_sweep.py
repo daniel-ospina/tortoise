@@ -84,9 +84,12 @@ SAFETY RAILS (each pinned by a test) — a sweeper is riskier than a per-event r
     (the event path only listens for `opened`).
   * A RETRY RESUMES ITS COMMENT, never its silence: before re-commenting, the
     run checks for this relay's OWN comment footer (`RELAY_MARKER`, bot-typed or
-    the owner's own login — the string alone is forgeable). The intake POST is
-    still made on a resume: a marker proves we commented, never that the record
-    landed (the event path posts intake LAST), and `source_item_id` keys it.
+    the owner's own login — the string alone is forgeable), reading the NEWEST
+    page of the thread — the comments endpoint ignores `sort`/`direction`, so its
+    first page is the OLDEST and the relay's comment (posted at close time) is
+    only on the last. The intake POST is still made on a resume: a marker proves
+    we commented, never that the record landed (the event path posts intake
+    LAST), and `source_item_id` keys it.
   * THE UNREPAIRABLE STATE IS REPORTED. An open item that already carries the
     label is a half-applied relay — the event path labels FIRST — and nothing
     retries it, so it is counted (`stranded`) by its own filtered read (the
@@ -580,13 +583,24 @@ class GhClient:
     produce on a public repo — switch the control off permanently.
     """
 
-    def __init__(self, repo: str, *, per_page: int = 100, max_pages: int = 10) -> None:
+    def __init__(
+        self,
+        repo: str,
+        *,
+        per_page: int = 100,
+        max_pages: int = 10,
+        comment_page_budget: int = 10,
+    ) -> None:
         self.repo = repo
         #: The repository OWNER, from the repo slug — used only to attribute a
         #: comment this tool posts under its own (non-bot) identity.
         self.owner = repo.split("/")[0]
         self.per_page = per_page
         self.max_pages = max_pages
+        #: How many comment pages one resume read may walk. The relay's comment
+        #: is LAST in the endpoint's ascending order, so the read has to reach
+        #: the end of the thread; 10 × 100 covers any thread this repo has seen.
+        self.comment_page_budget = comment_page_budget
         #: True ⇔ the last listing stopped at the page budget with the window
         #: possibly continuing past it (the unread remainder is deferred).
         self.window_truncated = False
@@ -662,9 +676,14 @@ class GhClient:
     def already_relayed(self, number: int) -> bool:
         """True ⇔ THIS relay already commented on the item (see RELAY_MARKER).
 
-        One bounded read, NEWEST comments first: the relay's comment is posted at
-        close time, so on a busy item it is not on the first page of the default
-        (oldest-first) order.
+        One bounded read of the NEWEST comments. The comments endpoint has NO
+        `sort`/`direction` parameters — it accepts only `since`, `per_page` and
+        `page`, ascending by id, and silently IGNORES anything else, so asking
+        for `direction=desc` returns the OLDEST page (measured on #9613: an
+        ascending triple with and without the parameters). The relay's comment
+        is posted at close time, i.e. LAST, so the newest page has to be WALKED
+        TO, or an item with more than `per_page` comments reports "not relayed"
+        and the retry re-posts the identical comment every 15 minutes.
 
         ⛔ THE MARKER MUST BE OURS, and it proves only that we COMMENTED. The
         footer is a fixed public string printed on every relayed item, so an
@@ -674,19 +693,7 @@ class GhClient:
         raises before any mutation, so the item is left untouched rather than
         acted on with a guess.
         """
-        try:
-            raw = _gh(
-                [
-                    "api",
-                    f"repos/{self.repo}/issues/{number}/comments"
-                    "?per_page=100&sort=created&direction=desc",
-                ]
-            )
-            comments = json.loads(raw)
-        except Exception as exc:
-            raise ListingError(f"issues/{number}/comments: {exc}") from exc
-        if not isinstance(comments, list):
-            raise ListingError(f"issues/{number}/comments: expected a list")
+        comments = self._newest_comment_page(number)
         for comment in comments:
             if RELAY_MARKER not in str(comment.get("body") or ""):
                 continue
@@ -696,6 +703,28 @@ class GhClient:
             if _canon(user.get("login")) == _canon(self.owner):
                 return True
         return False
+
+    def _newest_comment_page(self, number: int) -> list[dict[str, Any]]:
+        """The LAST page of the item's comments — the one holding ours.
+
+        Bounded by `comment_page_budget` so a thread nobody has pruned cannot
+        make a resume read unbounded. On exhausting the budget the deepest page
+        read is scanned (the best evidence available) rather than raising: an
+        `ListingError` here would make a long thread permanently un-relayable,
+        which is worse than the duplicate comment this guards against.
+        """
+        path = f"repos/{self.repo}/issues/{number}/comments"
+        for page in range(1, self.comment_page_budget + 1):
+            try:
+                raw = _gh(["api", f"{path}?per_page={self.per_page}&page={page}"])
+                chunk = json.loads(raw)
+            except Exception as exc:
+                raise ListingError(f"issues/{number}/comments page {page}: {exc}") from exc
+            if not isinstance(chunk, list):
+                raise ListingError(f"issues/{number}/comments: expected a list")
+            if len(chunk) < self.per_page:
+                return chunk
+        return chunk
 
     def post_intake(self, payload: dict[str, Any]) -> None:
         url = os.environ.get("INBOUND_URL", "")

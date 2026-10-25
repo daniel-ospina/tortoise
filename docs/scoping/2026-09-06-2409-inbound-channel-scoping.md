@@ -130,8 +130,8 @@ relayed. Measured on two live items: PR #9883 — a phantom whose entire diff wa
 one README comment line claiming a Postgres identity migration — stayed open
 13 h 41 m, ran the full CI matrix (6 reds, all inherited from a base two commits
 behind `main`) and consumed a lane cycle; and #9915/#9913 (a genuine external
-contribution) sat unrelayed while its content had to be re-landed base-side as
-#9929.
+contribution) sat unrelayed while its content had to be re-landed base-side
+as #9929.
 
 Two changes close the gap, and neither changes the policy above:
 
