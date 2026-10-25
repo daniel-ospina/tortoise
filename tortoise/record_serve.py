@@ -303,8 +303,21 @@ ANCHORED_READS: dict[str, AnchoredRead] = {
     "anchored-neighbours": AnchoredRead(
         name="anchored-neighbours",
         status=NOT_SERVED,
-        cypher="MATCH (a {id:$id})-[r]-(op) ... RETURN type(r), op.op_type, "
-               "op.label, other.id, other.pointKind",
+        # ⚠️ NOT a query — this field states the read this unit REFUSES, and nothing
+        # executes an `AnchoredRead.cypher` at all: the registry's only two readers
+        # (`served_reads` / `not_served_reads`) enumerate its names and statuses.
+        # It is written in WORDS rather than as a Cypher sketch on purpose. An
+        # earlier cut spelled it `MATCH (a {id:$id})-[r]-(op) ... RETURN …`, and
+        # `#7948`'s census derives an all-relationship-type walk from any governed
+        # `MATCH … -[r]- …` string — so a DOCUMENTATION string would have had to be
+        # carried as an exclusion in `tests/_about_call_time_census.py`'s
+        # `EMPTY_PATTERN` register, whose entries excuse real read sites on schema
+        # grounds. A non-executed description is not a read site, and teaching the
+        # register to say so would widen a gate to accommodate prose. §13 enumerates
+        # real readers; this entry is not one of them.
+        cypher="not a query — the cache's neighbour answer walks EVERY incident edge "
+               "of the anchor (no relationship type is bound) and hops through "
+               "operator nodes, so no record row reproduces it (see `reason`)",
         reason="the record shape exists (public.relation) but the cache's "
                "answer includes operator nodes and an idx convention a record "
                "row cannot reproduce without re-deciding it. Pinning parity to "
