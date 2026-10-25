@@ -756,25 +756,25 @@ def test_the_flag_alone_is_not_a_witness_and_has_its_own_cause():
         assert "did NOT run" not in cause, cause
 
     # ── S2.2 cites the VET pass's own code … ──────────────────────────────
-    assert "tortoise/extractor_v2.py:8454" in vet_cause, vet_cause
-    assert ":8474" in vet_cause, vet_cause
+    assert "tortoise/extractor_v2.py:8464" in vet_cause, vet_cause
+    assert ":8484" in vet_cause, vet_cause
     assert "if vet_enabled and embed_list" in vet_cause, vet_cause
     assert "_run_vet_pass" in vet_cause, vet_cause
     # … and NOT the classify pass's flag or gates
-    for classify_cite in ("classify_later", "if classify_later", ":8423",
-                          ":8554", ":8557", ":8679", ":8689"):
+    for classify_cite in ("classify_later", "if classify_later", ":8433",
+                          ":8564", ":8567", ":8689", ":8699"):
         assert classify_cite not in vet_cause, (classify_cite, vet_cause)
 
     # ── S2.3 cites the CLASSIFY pass's own code … ─────────────────────────
-    assert "tortoise/extractor_v2.py:8423" in classify_cause, classify_cause
+    assert "tortoise/extractor_v2.py:8433" in classify_cause, classify_cause
     assert "if classify_later and embed_list" in classify_cause, classify_cause
-    assert ":8554" in classify_cause, classify_cause
-    assert ":8557" in classify_cause, classify_cause
+    assert ":8564" in classify_cause, classify_cause
+    assert ":8567" in classify_cause, classify_cause
     assert "if classify_later and complete_list" in classify_cause, classify_cause
-    assert ":8679" in classify_cause, classify_cause
+    assert ":8689" in classify_cause, classify_cause
     # … and NOT the VET pass's flag, pass function or gates
     for vet_cite in ("vet_enabled", "_run_vet_pass", "if vet_enabled",
-                     ":8454", ":8474", ":8542", ":8664", ":8340"):
+                     ":8464", ":8484", ":8552", ":8674", ":8350"):
         assert vet_cite not in classify_cause, (vet_cite, classify_cause)
 
     # Different text, so neither cause can stand in for the other: a version
@@ -828,9 +828,10 @@ def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
 
     The shipped constant said "the receipt's stats carries 20 keys" — a number
     nothing counted — and blamed `extract_session_v2`, which in fact BUILDS
-    `result["vet"]` (:8833-8837) and `result["classify_later"]` (:8823-8829). The
+    `result["vet"]` (:8843-8847) and `result["classify_later"]` (:8833-8839). The
     drop is the meta fold at `tortoise/sdk.py:13079` — re-derived at the head this
-    branch pins, because `#9964` inserts 326 lines into `sdk.py` above it. The cite
+    branch pins, because `#9964` inserts 326 lines into `sdk.py` above it, so this
+    branch's cite is `+335` from `main`'s and must NOT be "merged" back. The cite
     was `:12196` until an earlier round, and `:12738` until #9952 (`43a6eee6a`, the
     `:Source` MERGE-key resolver
     adopting S0a/S0b) moved the fold 6 lines down, so
@@ -849,7 +850,7 @@ def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
     cause = unobserved["S2.2"]
     assert f"inspected {len(stats)} stats key(s)" in cause, cause
     assert "tortoise/sdk.py:13079" in cause, cause
-    assert "tortoise/extractor_v2.py:8833-8837" in cause, cause
+    assert "tortoise/extractor_v2.py:8843-8847" in cause, cause
     assert "tortoise/sdk.py:12196" not in cause, cause
     assert "20 keys" not in cause, cause
     assert "tortoise/sdk.py:13079" in unobserved["S2.3"], unobserved["S2.3"]
@@ -1166,7 +1167,7 @@ def _bundle_in_scope(doc_name: str, line: str) -> bool:
     return scope is None or bool(scope.search(line))
 
 # `tortoise/sdk.py:13079`, ``tortoise/projection/edges.py:2432-2457``, `edges.py:475`,
-# ``tortoise/extractor_v2.py:8833-8837``
+# ``tortoise/extractor_v2.py:8843-8847``
 _BUNDLE_CITE = re.compile(
     r"(?<![\w.])(?:tortoise/)?(?:projection/)?"
     r"(sdk|edges|extractor_v2)\.py:(\d+)(?:-(\d+))?")
