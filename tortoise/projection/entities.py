@@ -4352,7 +4352,7 @@ class _EntityHandlers:
         # but a variant now reaches it, and `EventAPI.add_document(doc_id=…)`
         # takes a caller-supplied id. Whether promotion should also move
         # `sourceKind` to `'document'` is #9536's contract, not this fold's;
-        # pinned by `test_document_id_that_canonicalises_onto_a_web_source.
+        # pinned by `test_document_id_that_canonicalises_onto_a_web_source`.
         raw_did = did
         did = resolve_source_key(self.g, did)
         if not _writable_id(did):
