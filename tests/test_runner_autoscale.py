@@ -17,7 +17,10 @@ The gates, and the failure each one exists to prevent:
         box at its target reads "over ceiling".
       - the reserve floor is per ADDITION and re-measured every step; `--want` above the
         ceiling is REFUSED with the reading printed.
-  * an unreadable measurement is exit 2 with NOTHING changed — never 0 runners, never "plenty".
+  * an unreadable measurement at pass START is exit 2 with NOTHING changed — never 0 runners,
+    never "plenty". ⛔ A MID-pass re-measure failure is ALSO exit 2, and the box was already
+    touched: the record then lists what it did (see the tool's own exit-2 entry). Reading this line
+    as "exit 2 means untouched" is the mis-triage the tool's EXIT block warns against.
   * a full pool adds nothing (idempotent), a dead runner is restarted (or replaced), an
     orphaned listener is re-registered, and a BUSY/SERVING runner is never touched.
 """
