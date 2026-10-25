@@ -746,7 +746,12 @@ class TestApplyMergeUnionWritesTheUnionAndTheLostProvenance:
         # spelling the capture path emits: lowercase fixture names made the
         # case defect an identity operation, and a hand-written record could
         # not see it either way.
-        team = sdk.create_object("Team", objectKind="core:team")
+        # #9964: these fixtures need a real `:Object` (the merge resolves
+        # `aboutObject` by name), and `core:team`/`core:naturalPerson` are
+        # §5 SUBJECT kinds — the object door now routes them to a `:Subject`
+        # (the kind decides the layer). The kind was incidental to what these
+        # tests assert, so it is left unsupplied (the fold's `other` default).
+        team = sdk.create_object("Team")
         office = sdk.create_object("Office", objectKind="core:location")
         pt = sdk.create_point("statement", PRIOR_CONTENT)
         prior_id = pt["id"]
@@ -832,7 +837,12 @@ class TestApplyMergeUnionWritesTheUnionAndTheLostProvenance:
 
         proj = sdk._get_proj()
         # The Object that shares the SUBJECT's name — the coincidence case.
-        twin = sdk.create_object("Dana", objectKind="core:naturalPerson")
+        # #9964: these fixtures need a real `:Object` (the merge resolves
+        # `aboutObject` by name), and `core:team`/`core:naturalPerson` are
+        # §5 SUBJECT kinds — the object door now routes them to a `:Subject`
+        # (the kind decides the layer). The kind was incidental to what these
+        # tests assert, so it is left unsupplied (the fold's `other` default).
+        twin = sdk.create_object("Dana")
         pt = sdk.create_point("statement", PRIOR_CONTENT)
         proj.g.query("MERGE (s:Session {id:$sid})", params={"sid": "s_sub"})
         record = {"point_id": pt["id"], "about_entities": ["Dana"]}
@@ -871,7 +881,12 @@ class TestApplyMergeUnionWritesTheUnionAndTheLostProvenance:
         from tortoise.near_dup_merge import apply_merge_union
 
         proj = sdk._get_proj()
-        sdk.create_object("Dana", objectKind="core:naturalPerson")
+        # #9964: these fixtures need a real `:Object` (the merge resolves
+        # `aboutObject` by name), and `core:team`/`core:naturalPerson` are
+        # §5 SUBJECT kinds — the object door now routes them to a `:Subject`
+        # (the kind decides the layer). The kind was incidental to what these
+        # tests assert, so it is left unsupplied (the fold's `other` default).
+        sdk.create_object("Dana")
         pt = sdk.create_point("statement", PRIOR_CONTENT)
         proj.g.query("MERGE (s:Session {id:$sid})", params={"sid": "s_sub"})
 
@@ -994,7 +1009,12 @@ class TestTheCapturePathExecutesTheFusion:
         # a merge emits no payload point, so the survivor is pre-existing and
         # `Office` is the candidate's exclusive attachment — the one piece of
         # evidence the fusion exists to keep. `Team` is the prior's own.
-        sdk.create_object("Team", objectKind="core:team")
+        # #9964: these fixtures need a real `:Object` (the merge resolves
+        # `aboutObject` by name), and `core:team`/`core:naturalPerson` are
+        # §5 SUBJECT kinds — the object door now routes them to a `:Subject`
+        # (the kind decides the layer). The kind was incidental to what these
+        # tests assert, so it is left unsupplied (the fold's `other` default).
+        sdk.create_object("Team")
         sdk.create_object("Office", objectKind="core:location")
         prior = sdk.create_point("statement", PRIOR_CONTENT)
 
@@ -1061,7 +1081,12 @@ class TestTheCapturePathExecutesTheFusion:
         import tortoise.extractor_v2 as ev2
 
         # The coincidence: an :Object sharing the SUBJECT's exact name.
-        sdk.create_object("Dana", objectKind="core:naturalPerson")
+        # #9964: these fixtures need a real `:Object` (the merge resolves
+        # `aboutObject` by name), and `core:team`/`core:naturalPerson` are
+        # §5 SUBJECT kinds — the object door now routes them to a `:Subject`
+        # (the kind decides the layer). The kind was incidental to what these
+        # tests assert, so it is left unsupplied (the fold's `other` default).
+        sdk.create_object("Dana")
         sdk.create_object("Office", objectKind="core:location")
         prior = sdk.create_point("statement", PRIOR_CONTENT)
 
