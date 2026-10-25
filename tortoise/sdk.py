@@ -4437,7 +4437,9 @@ def _refuse_document_kind_demotion(stored_kinds, props, *, surface: str,
     caller surface may not move a metered document OUT of the metered class
     (`None` / `'transcript'`). Demotion is the escape; the forgery direction
     (`documentKind` added to a provenance Source) only over-counts — it fails
-    closed — and is deliberately left alone.
+    closed — and is deliberately left alone (`tests/test_quota.py`'s
+    NON-OVER-REACH arm pins it: "SETTING a genre where none is stored is how a
+    document `:Source` is minted through these surfaces at all").
 
     Both spellings are refused on a METERED document, for DIFFERENT reasons —
     stated truthfully because the earlier wording claimed a mechanism the code
@@ -37635,9 +37637,11 @@ class TortoiseSDK:
         proj.apply honors the source_url override (#205 auto-wire onto the REAL
         Source — no phantom) and the embedding-suppression flag (cycle-19); the
         event rides the JSONL so replay reproduces the edge. Frontmatter→ev-dict
-        WHITELIST (cycle-7/8): doc handled set only — title/documentKind/domain/
-        doc_status/topics; everything else DROPPED (authoredBy never persisted;
-        date/startedAt whitelisted-but-dropped → sourceDate falls to ingestedAt)."""
+        WHITELIST (cycle-7/8): doc handled set only — title/documentKind/format/
+        domain/topics; everything else DROPPED (authoredBy never persisted;
+        `doc_status` is RETIRED by D10 (ONTOLOGY §4.4) and is neither read nor
+        emitted; date/startedAt whitelisted-but-dropped → sourceDate falls to
+        ingestedAt)."""
         # Optional frontmatter-metadata validation (#1362) — warn-only, gated
         # by TORTOISE_VALIDATE_FRONTMATTER=1 (default OFF). The write logic
         # below is UNCHANGED — this only reports missing/malformed required

@@ -4295,6 +4295,25 @@ class _EntityHandlers:
         if not _writable_id(did):
             _log_identity_skip("Document", did, "id (MERGE key)")
             return
+        # #5140 finding 12: the document MERGE key adopts the SAME S0a/S0b
+        # canonical-identity resolver (`resolve_source_key`, #5012/#5053) as
+        # every other `:Source` write path (`_upsert_source`,
+        # `_mint_source_stub`, `link_source_to_entity`). Before this the RAW
+        # event id was the MERGE key, so a caller-supplied URL variant minted a
+        # SECOND `:Source` for one identity (measured: `create_source(
+        # 'https://example.com/a/b')` then `DocumentCreated` on
+        # `'https://Example.COM/a/b/?utm_source=x#frag'` → two nodes) — the
+        # S0a/S0b invariant D10 made load-bearing when it folded the document
+        # node into `:Source`. Non-network ids (`doc_<rel-path>` from
+        # `derive_document_id`, `corpus://…` from the CLI) are returned
+        # UNCHANGED by the resolver (identity there), so the index and CLI
+        # paths are unaffected. The resolved key is re-checked because it is a
+        # DIFFERENT value from the one checked above.
+        raw_did = did
+        did = resolve_source_key(self.g, did)
+        if not _writable_id(did):
+            _log_identity_skip("Document", did, "url (resolved MERGE key)")
+            return
         # Compute embedding from title+content for semantic search (#7845).
         # Epic #900 T3 cycle-19: the NEW index path carries a suppress flag in
         # the ev dict (suppress_embedding) — the doc path computes the call
@@ -4378,6 +4397,17 @@ class _EntityHandlers:
         self.g.query(
             "MERGE (s:Source {url:$id}) " + clear_then_set_prefix("s") +
             "SET s.id=coalesce(s.id, $id), "
+            # S0a/S0b (#5012/#5053) identity, parity with `_upsert_source`'s
+            # clauses (#5140 finding 12): without them this node is INVISIBLE
+            # to the shared resolver, so the SAME identity in the other ORDER
+            # still minted a second `:Source` — a `DocumentCreated` on a URL
+            # variant, then `create_source` on the plain url, produced two
+            # nodes because `resolve_source_key` had no `canonicalUrl` to match
+            # on (measured). `coalesce` = never overwrite a stored identity.
+            "    s.canonicalUrl=coalesce(s.canonicalUrl, $cu), "
+            "    s.urlAliases=CASE WHEN $raw_url IN coalesce(s.urlAliases, []) "
+            "        THEN coalesce(s.urlAliases, []) "
+            "        ELSE coalesce(s.urlAliases, []) + [$raw_url] END, "
             # ⛔ `_searchText` is written BEFORE `s.title` (#8870): its
             # last-resort fallback READS `s.title`, and on the server engine a
             # same-clause read observes the value an earlier item just wrote.
@@ -4527,6 +4557,11 @@ class _EntityHandlers:
             "REMOVE " + ", ".join(
                 f"s.{k}" for k in sorted(self._DOC_RETIRED_KEYS)),
             params={"id": did, "title": ev.get("title", did),
+                    # S0a/S0b: the identity form and the RAW spelling this
+                    # record named (the alias set `_upsert_source` keeps), from
+                    # the event's own id — deterministic on replay.
+                    "cu": normalize_source_url(raw_did),
+                    "raw_url": raw_did,
                     # NO "" default here: a present null and an omitted key
                     # both stay Cypher null and fall to the third coalesce
                     # term ("") only on CREATE, so a partial re-write cannot
@@ -4543,8 +4578,19 @@ class _EntityHandlers:
         # so that extra props land on the Source node regardless of edge
         # success). D10 retired keys (content/doc_status/objectKind) are denied
         # here — the fixed clause above already covers every other doc key.
+        # ⚠️ The skip-set reached by this call is the FULL
+        # `_SOURCE_HANDLED | _DOC_PASSTHROUGH_HANDLED | _DOC_RETIRED_KEYS`
+        # reserve, not only the retired keys: server-managed keys such as
+        # `version` and `ingestedAt` are owned by the fixed clause (version is
+        # the §4.6 ordinal — 1 at creation, +1 on a content-hash change — and
+        # advances off `content_hash`, never off the caller), so a caller-
+        # supplied `version=` / `ingestedAt=` on a `DocumentCreated` is DROPPED
+        # rather than persisted verbatim. `documentKind` is skipped for the
+        # same reason (#5140 finding 7): the fixed clause above owns it. That is
+        # deliberate, and it is why this call needs no `allow_keys` closed set
+        # (#228).
         #
-        # This call passes NO `allow_keys` DELIBERATELY: `test_create_document_
+        # ⛔ This call passes NO `allow_keys` DELIBERATELY: `test_create_document_
         # persists_arbitrary_props` (#228) pins the document route as a caller
         # passthrough. It is therefore NOT the same contract as `_upsert_source`
         # (which passes `_SOURCE_EXTRA_PROPS`), and the disagreement between the

@@ -299,8 +299,13 @@ def get_sources():
 # Canonical kind vocabulary per ONTOLOGY v3.4 (docs/ONTOLOGY.md §4):
 #   pointKind: statement, decision, vision, strategy, plan, goal, target,
 #              observation, hypothesis, assessment (+ pack pointKinds)
-#   objectKind: Project, WorkItem, document, tag, user, skill, tool, agent,
+#   objectKind: Project, WorkItem, Problem, tag, user, skill, tool, agent,
 #               workflow, agreement, standard, other (+ pack objectKinds)
+# ⛔ `document` is NOT a core objectKind (#5140): D10 (ONTOLOGY v3.15 §4.4)
+# retired it — a document is a `:Source` carrying `documentKind`, never an
+# Object node, so the viz could not label one from `objectKind` anyway.
+# `Problem` takes the slot: it is in `pack_registry.CANONICAL_OBJECT_KINDS`
+# (ONTOLOGY §6), so the legend stays a subset of the canonical set.
 # Colors follow the app palette (constants.js C / FALLBACK_TYPES in
 # useOntologyTypes.ts) so the graph stays visually consistent.
 _CANONICAL_KINDS = [
@@ -318,7 +323,7 @@ _CANONICAL_KINDS = [
     # objectKind (persistent things)
     ("Project",     "Project",     "#7aa2f7", "A project entity", "folder", "core"),
     ("WorkItem",    "Work Item",   "#9ece6a", "A unit of work", "list", "core"),
-    ("document",    "Document",    "#c0caf5", "A document", "file-text", "core"),
+    ("Problem",     "Problem",     "#f7768e", "A deviation from a desired state", "alert-circle", "core"),
     ("tag",         "Tag",         "#565f89", "Free-form label (TAGGED edge target)", "tag", "core"),
     ("user",        "User",        "#7dcfff", "A user", "user", "core"),
     ("skill",       "Skill",       "#bb9af7", "A skill (mechanism provenance)", "award", "core"),
