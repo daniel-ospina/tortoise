@@ -171,10 +171,11 @@ def test_document_created_fragment_variants_collapse_to_one_node(sdk_factory):
         "RETURN count(s), collect(s.url), collect(s.canonicalUrl)"
     ).result_set
     assert rows[0][0] == 1, f"fragment variants minted separate nodes: {rows}"
-    # The second variant resolves onto the first node, and the stored `url` is
-    # NOT rewritten — adopt-on-touch keeps the first writer's raw id and carries
-    # the identity in `canonicalUrl`. Asserted so this is a stated contract, not
-    # a reading: the node's KEY is the first writer's, the identity is canonical.
+    # The stored `url` is NOT rewritten: the first write stamped `canonicalUrl`,
+    # so the second variant is found by `resolve_source_key`'s step 1
+    # (`MATCH (s:Source {canonicalUrl:$cu})`) and MERGEs onto the first writer's
+    # stored url. Asserted so this is a stated contract, not a reading: the
+    # node's KEY is the first writer's, the identity is canonical.
     assert rows[0][1] == ["https://example.com/doc#section-one"], rows
     assert rows[0][2] == ["https://example.com/doc"], rows
 
@@ -220,4 +221,42 @@ def test_document_created_appends_the_raw_spelling_to_url_aliases(sdk_factory):
     assert sorted(aliases or []) == sorted([canonical, raw]), (
         f"the raw spelling was not recorded — a later variant of it would mint a "
         f"second node: {rows}"
+    )
+
+
+def test_document_id_that_canonicalises_onto_a_web_source(sdk_factory):
+    """The reach of the identity rule beyond documents: a document id whose
+    canonical form equals an EXISTING non-document `:Source` folds onto that
+    source. It is one node — that half is the rule, and it is what is pinned.
+
+    ⚠️ The REST of the measurement is CURRENT BEHAVIOUR, pinned so a change is
+    deliberate, NOT endorsed as the destination: the fold overwrites the
+    source's `title` and gives it a `documentKind`, so the node leaves
+    `list_sources()` (`documentKind IS NULL`) and enters the `documents` meter,
+    while `sourceKind` stays `'web'`. Whether promotion should also move the
+    TYPE axis (or whether a document should fold onto a provenance source at
+    all) is #9536's contract, not this fold's — raised there, not decided here.
+    `EventAPI.add_document` takes a caller-supplied `doc_id`, so this is
+    reachable from a public door.
+    """
+    sdk = sdk_factory()
+    sdk.create_source("https://example.com/a", "web", title="A page")
+    sdk._get_proj().apply(
+        {
+            "type": "DocumentCreated",
+            "id": "https://example.com/a#frag",
+            "title": "Extracted doc",
+            "document_kind": "report",
+        }
+    )
+    rows = sdk._get_proj().g.query(
+        "MATCH (s:Source) WHERE toLower(s.url) CONTAINS 'example.com/a' "
+        "RETURN count(s), collect(s.url), collect(s.sourceKind), "
+        "collect(s.documentKind), collect(s.title)"
+    ).result_set
+    assert rows[0][0] == 1, f"one identity must be one node: {rows}"
+    # current behaviour (see docstring): the source is PROMOTED to a document
+    assert rows[0][2] == ["web"] and rows[0][3] == ["report"], rows
+    assert [r.get("url") for r in sdk.list_sources()] == [], (
+        "a promoted node is metered as a document and leaves list_sources()"
     )

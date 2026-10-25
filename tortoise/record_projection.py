@@ -2964,7 +2964,8 @@ def _declared_mutations(
         # #5140 finding 12 UPDATE: the live `_upsert_document` fold now WRITES
         # `canonicalUrl` too (it adopts the shared `resolve_source_key`), so the
         # PROPERTY divergence this note used to record is gone — both rebuild
-        # routes agree on the node's identity. What remains is ROW-LEVEL, and it
+        # routes agree on the IDENTITY PROPERTY (`canonical_url`). What remains,
+        # and is the sentence below, is the ROW KEY. It is
         # is why the derive stays UNCONDITIONAL: this layer keys the row on the
         # record's RAW id (it is journal-derived and reads no graph), so a
         # URL-VARIANT `DocumentCreated` plans a second `public.source` row for an

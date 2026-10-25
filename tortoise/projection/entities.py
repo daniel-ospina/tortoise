@@ -4275,10 +4275,15 @@ class _EntityHandlers:
         ``doc_<rel-path>`` and its ``source_url`` is ``corpus://…``, so the two
         are never one identity. A caller that supplies a NETWORK URL as the
         document id and the SAME url's variant as ``source_url`` IS one
-        identity — the resolver below (S0a, #5012/#5053) folds it onto one node
-        and the ``#205`` guard skips the self-loop, which is the correct
-        outcome for a document that is its own corpus source, not a topology
-        regression. `content`, `doc_status` and
+        identity — the resolver below (S0a, #5012/#5053) folds it onto one node,
+        which is the correct outcome for a document that is its own corpus
+        source, not a topology regression. The self-loop is then suppressed by
+        ``link_source_to_entity``'s own #5151 guard, NOT by this method's
+        ``#205`` test: ``ref != did`` compares the RAW ref to the RESOLVED id,
+        so it is TRUE for exactly the variant case and false only for an
+        identically-spelled one — which is the caller-side guard
+        ``projection/edges.py`` records as defeated by resolution, and the
+        reason #5151 keeps the guard inside the callee. `content`, `doc_status` and
         `objectKind` are RETIRED and are never written (nor re-admissible via
         the open passthrough).
 
@@ -4330,6 +4335,20 @@ class _EntityHandlers:
         # between), live and replay can land on different keys — the exposure
         # `edges.py::resolve_source_versions` names, already present on
         # `_upsert_source`/`_mint_source_stub`, not introduced here.
+        # ⚠️ AND THE COLLISION IT MAKES REACHABLE, which is NOT limited to
+        # another document: a document id whose canonical form equals an
+        # EXISTING `:Source` — including a non-document provenance source —
+        # folds onto that source and overwrites its `title`/`documentKind`. The
+        # node then leaves `list_sources()` (`documentKind IS NULL`) and enters
+        # the `documents` meter. Measured: `create_source(url,'web')` + a
+        # `DocumentCreated` for a VARIANT of that url → ONE node
+        # (`sourceKind='web'`, `documentKind='report'`, promoted title),
+        # `list_sources()` 1 → 0. It is not a new RULE — the identically
+        # spelled form already behaves this way on `main` (measured there) —
+        # but a variant now reaches it, and `EventAPI.add_document(doc_id=…)`
+        # takes a caller-supplied id. Whether promotion should also move
+        # `sourceKind` to `'document'` is #9536's contract, not this fold's;
+        # pinned by `test_document_id_that_canonicalises_onto_a_web_source.
         raw_did = did
         did = resolve_source_key(self.g, did)
         if not _writable_id(did):
