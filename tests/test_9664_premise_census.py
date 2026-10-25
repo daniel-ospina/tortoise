@@ -543,6 +543,68 @@ def test_a_data_leg_refusal_cannot_be_swallowed_into_a_green_section(
         f"that appears while its read was swallowed is the defect: {out}")
 
 
+def test_the_starter_override_is_refused_not_measured(probe, monkeypatch, capsys) -> None:
+    """Review round 4, P3 — an env override made the section measure a set we do not ship.
+
+    `_starter_namespaces` honours `TORTOISE_STARTER_PACKS` (`pack_state.py:254-268`), so
+    an override silently substitutes the shipped `DEFAULT_STARTER_PACKS` for whatever the
+    runner's shell carries — and it misreports in BOTH directions: measured in review,
+    `TORTOISE_STARTER_PACKS=dev,typo-nonexistent` printed 2e FALSIFIED (*"the self-heal
+    no longer seeds"*) over a documented `unknown in shared catalog — skipped`
+    (`pack_state.py:462-468`) — our own environment reported as a product finding — and
+    `=dev` alone read the whole section green over a one-namespace set.
+
+    The section already refuses this for its sibling switch
+    (`PACK_STATE_DISABLE_SELF_HEAL`), so the override gets the same refuse→UNMEASURED
+    treatment rather than a disclosed-but-graded row.
+    """
+    monkeypatch.setenv("TORTOISE_STARTER_PACKS", "dev,typo-nonexistent")
+    rc = probe.main()
+    out = capsys.readouterr().out
+    assert rc == 3, (
+        "a starter set read through an override is not the shipped one, so the "
+        f"section must fail closed; got exit {rc}: {out}")
+    assert "census_packs" in out and "TORTOISE_STARTER_PACKS is set" in out, out
+    assert "the platform STARTER set is narrower" not in out, (
+        f"no packs row may be printed from an overridden starter set: {out}")
+    assert "catalog union (#2714 indicator 3)" not in out, out
+
+
+def test_the_union_arm_clause_about_the_catalog_union_is_measured(probe, monkeypatch) -> None:
+    """Review round 4, P2 — "the catalog union (#2714 indicator 3)" was a literal.
+
+    The verdict read only `union_arm.namespaces is None and not union_arm.configured`;
+    what `None` MEANS to a consumer is the WRITE GATE's answer
+    (`pack_state.unapproved_kind_pack`'s `if approved is None: return None`, whose
+    docstring IS the #2714 indicator-3 statement). Measured in review: replacing that
+    `return None` with a narrowed fallback (`approved = frozenset({'dev'})`) left all
+    five packs rows CONFIRMED, `25 premises, 0 unmeasured sections`, exit 0 — the
+    instrument green-lit the fallback being dead.
+
+    The wrapper mutates exactly that branch and leaves the rest of the function real,
+    so the row is falsified by the behaviour it prints and not by a broken reader.
+    """
+    from tortoise import pack_state
+
+    real = pack_state.unapproved_kind_pack
+
+    def _narrowed_fallback(kind, approved, *, attribute_bare=False):
+        if approved is None:  # the #2714 indicator-3 branch, narrowed
+            approved = frozenset({"dev"})
+        return real(kind, approved, attribute_bare=attribute_bare)
+
+    monkeypatch.setattr(pack_state, "unapproved_kind_pack", _narrowed_fallback)
+    rc = probe.main()
+    assert rc == 0, f"a falsified premise is DATA, not an unmeasured one; got exit {rc}"
+    verdict = _measured(
+        probe, "no `:PackInstall` records AND no `:PackSelection` marker")
+    assert verdict.startswith("FALSIFIED"), (
+        "`namespaces=None` no longer means 'the catalog union', so the row must "
+        f"not claim it does: {verdict!r}")
+    assert "admitted with approved=None (False)" in verdict, (
+        f"the row must print the gate reading it measured, got {verdict!r}")
+
+
 def test_the_union_arm_absence_clause_is_measured_not_asserted(
     probe, monkeypatch, capsys
 ) -> None:

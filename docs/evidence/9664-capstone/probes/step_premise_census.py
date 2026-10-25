@@ -40,6 +40,7 @@ Exit codes
 from __future__ import annotations
 
 import contextlib
+import os
 import sys
 from pathlib import Path
 
@@ -328,6 +329,20 @@ def census_packs() -> None:
             "the shared catalog could not be read — rows 2a-2e cannot be "
             "measured, and an unreadable catalog would make them report the "
             "opposite of what they exist to find")
+    # `_starter_namespaces` honours `TORTOISE_STARTER_PACKS` (`pack_state.py:254-268`),
+    # so an override makes rows 2a-2e measure a starter set the product does not
+    # ship — and the failure is SILENT in both directions (review round 4, P3):
+    # `TORTOISE_STARTER_PACKS=dev,typo-nonexistent` made 2e print FALSIFIED ("the
+    # self-heal no longer seeds") over a documented skip (`pack_state.py:462-468`,
+    # "unknown in shared catalog — skipped"), and `=dev` alone read the whole
+    # section green over a one-namespace set. Our own environment, reported as a
+    # product finding — the direction this section already refuses for its
+    # sibling switch (`PACK_STATE_DISABLE_SELF_HEAL`, below). Fail closed.
+    if os.environ.get("TORTOISE_STARTER_PACKS", "").strip():
+        raise RuntimeError(
+            "TORTOISE_STARTER_PACKS is set — rows 2a-2e would measure that "
+            "starter set, not the shipped DEFAULT_STARTER_PACKS "
+            "(`pack_state.py:110`); unset it and re-run")
     starter = pack_state._starter_namespaces()
     only_catalog = sorted(set(catalog) - set(starter))
     row("2", "the platform STARTER set is narrower than the shared catalog "
@@ -367,11 +382,28 @@ def census_packs() -> None:
             "(`pack_state.py:974-975`), so the row's 'not consulted' clause is "
             "false and this section's two-shape expectation is stale: re-derive "
             "the section")
+    # The premise's SECOND half — what `namespaces=None` MEANS to a consumer
+    # ("the catalog union") — is a claim about the WRITE GATE, not about this
+    # resolution arm, so it is measured at the gate that owns it:
+    # `pack_state.unapproved_kind_pack`'s `if approved is None: return None`,
+    # whose docstring IS the #2714 indicator-3 statement. Printed as a literal,
+    # this clause survived a narrowed fallback AT THAT LINE with all five packs
+    # rows CONFIRMED and the census at exit 0 (measured in review round 4: M9 →
+    # `approved = frozenset({'dev'})` on the `return None` branch) — the census
+    # green-lit the fallback being dead, which is the class this PR removes.
+    # Both halves are measured against the real function: `None` admits, and an
+    # EXPLICIT set (even an empty one) constrains — the contrast the clause names.
+    gate_kind = f"{(only_catalog or sorted(catalog))[0]}:probe"
+    union_admits = pack_state.unapproved_kind_pack(gate_kind, None) is None
+    narrowed_refusal = pack_state.unapproved_kind_pack(gate_kind, frozenset())
+    narrowed_refuses = narrowed_refusal == gate_kind.partition(":")[0]
     row("2", "no `:PackInstall` records AND no `:PackSelection` marker → "
              "`namespaces=None`, the catalog union (#2714 indicator 3)",
-        f"{'CONFIRMED' if union_arm.namespaces is None and not union_arm.configured else 'FALSIFIED'}"
+        f"{'CONFIRMED' if union_arm.namespaces is None and not union_arm.configured and union_admits and narrowed_refuses else 'FALSIFIED'}"
         f" (namespaces={'None' if union_arm.namespaces is None else sorted(union_arm.namespaces)};"
-        f" configured={union_arm.configured}; data leg: not consulted — the arm returns early)")
+        f" configured={union_arm.configured}; data leg: not consulted — the arm returns early;"
+        f" write gate: `{gate_kind}` admitted with approved=None ({union_admits}) and"
+        f" refused by an explicit set (→{narrowed_refusal}))")
 
     seeded = _FakeGraph(installs=((ns, "1.0.0", "active", "starter",
                                    "2026-01-01T00:00:00Z") for ns in starter))
