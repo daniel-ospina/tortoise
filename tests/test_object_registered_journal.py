@@ -207,11 +207,32 @@ class TestReMentionJournalsEveryRegistration:
         finally:
             sdk.close()
 
-    def test_remention_after_fold_keeps_the_fold_and_does_not_resurrect(
+    def test_remention_of_a_superseded_name_mints_a_new_incarnation(
             self, tmp_path):
-        """A superseded name re-mentioned: no status reset live, and no
-        resurrect on rebuild (the re-mention's registration line MERGEs onto the
-        existing node instead of creating a second one)."""
+        """A superseded name re-mentioned: the FOLD survives untouched and the
+        re-mention is a NEW incarnation — two carriers, one live and one
+        ``superseded`` — live and after replay (``rebuild == live``).
+
+        ⛔ #3590 review P1-2: this deliberately REPLACES the pre-change
+        expectation ("the re-mention's registration line MERGEs onto the
+        existing node instead of creating a second one"). Under a minted,
+        opaque identity a create resolves against **live** holders only, so a
+        ``superseded`` (terminal) carrier is not a create target and the
+        re-mention mints a second incarnation. That is the identity model's own
+        R5 ("re-creation after deletion mints a fresh id — an id is never
+        reused", ``docs/epics/2026-09-10-2835-capability-registry/identity-
+        decision.md``) applied at the create door, and it is legal same-name
+        coexistence (D2/#8864).
+
+        What #1350's clobber guarantee still forbids is a WRITE to the folded
+        carrier — a status reset, or a resolved-on-rebuild "resurrect". Both
+        are pinned below, on the terminal carrier specifically, so a future
+        change that comes back and MERGEs by name fails here.
+
+        Order-independent ON PURPOSE: pre-fix this test asserted
+        ``rows[0][0] == "superseded"`` on a two-row result, i.e. it relied on
+        the backend's row order (it passed live and failed after replay).
+        """
         events = tmp_path / "events"
         events.mkdir()
         sdk = TortoiseSDK(str(tmp_path / "t4.db"),
@@ -222,29 +243,47 @@ class TestReMentionJournalsEveryRegistration:
                               objectKind="core:strategy", is_episodic=False)
             sdk.create_entity("object", "strategy-A",
                               objectKind="core:strategy", is_episodic=False)
+            (first_id,) = [r[0] for r in proj.g.query(
+                "MATCH (o:Object {name:'strategy-A'}) RETURN o.id").result_set]
             from tortoise.commit_ops import apply_supersessions
             assert apply_supersessions(
                 proj, sdk,
                 [{"superseded": "strategy-A", "supersedes_by": "strategy-B",
                   "evidence": "fold"}],
                 session_id="s1") == 1
-            # re-mention the SUPERSEDED name (post-#3590: resolves to the SAME
-            # id, so it appends a registration line that MERGEs onto the
-            # existing node — it must not clear the fold)
+            # re-mention the SUPERSEDED name: a NEW incarnation (R5/D2), never
+            # a write to the folded carrier
             sdk.create_entity("object", "strategy-A",
                               objectKind="core:strategy", is_episodic=False)
-            rows = _object_row(proj, "strategy-A", "status")
-            assert rows and rows[0][0] == "superseded", (
-                "re-mention must not reset superseded (#1350 clobber guard)")
+
+            def _carriers():
+                return sorted(
+                    (r[0], r[1], r[2]) for r in proj.g.query(
+                        "MATCH (o:Object {name:'strategy-A'}) "
+                        "RETURN o.id, o.status, o.supersededBy").result_set)
+
+            live_rows = _carriers()
+            assert len(live_rows) == 2, (
+                "the re-mention is a second incarnation, not a name MERGE: "
+                f"{live_rows}")
+            terminal = [r for r in live_rows if r[0] == first_id]
+            assert terminal == [(first_id, "superseded", "strategy-B")], (
+                "the folded carrier must be untouched by the re-mention "
+                f"(#1350 clobber guard): {live_rows}")
+            minted = [r for r in live_rows if r[0] != first_id]
+            assert len(minted) == 1 and minted[0][1] == "live", (
+                f"the new incarnation is born live: {minted}")
             journal = _journaled(sdk, events)
             assert len(_name_ors(journal, "strategy-A")) == 2, (
-                "re-mention of a superseded Object journals a duplicate "
-                "registration, but must not add a fold or a reset")
+                "re-mention of a superseded name journals its own "
+                "registration line, but must not add a fold or a reset")
+
             proj.rebuild_all(str(events), confirm_destructive=True)
-            rows = _object_row(proj, "strategy-A", "status", "supersededBy")
-            assert rows and rows[0][0] == "superseded", (
-                "no resurrect on rebuild")
-            assert rows[0][1] == "strategy-B", rows[0]
+            rebuilt = _carriers()
+            assert rebuilt == live_rows, (
+                "rebuild must reproduce the live two-incarnation state "
+                f"(no resurrect, no merge): live={live_rows} "
+                f"rebuilt={rebuilt}")
         finally:
             sdk.close()
 

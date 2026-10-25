@@ -3785,6 +3785,82 @@ class TestReviewTelemetryAndEventEdges:
         ).result_set
         assert rows and rows[0][0] == 1, "event→Object edge missing for new entity"
 
+    def test_event_about_object_wires_every_live_carrier(self, client):
+        """#3590 review P1-1: an `aboutObject` mention addresses EVERY live
+        carrier of the name, and is classified as a mention.
+
+        Two live entities may legally hold one name (D2 / #8864), and
+        `origin/main`'s `MERGE (o:Object {name:$name})` bound the edge to both.
+        Resolving the SINGULAR form ("the single live holder or nothing") wired
+        **no** edge for that legal state, so a session commit naming a
+        doubly-held object silently dropped an attribution the retired writer
+        produced. The second half is the classification: an attribution that
+        cannot resolve must record the EXEMPT `unfolded-mention` shape, not the
+        `unregistered-reference` / `ambiguous-entity-name` shapes the decision
+        doc reserves for a fold that moves an entity's state.
+        """
+        import tortoise.hosted_api as ha_mod
+        from tortoise.entity_identity import resolve_fold_name_ids
+        from tortoise.ids import content_hash
+
+        sdk = _team_sdk()
+        proj = sdk._get_proj()
+        # TWO live carriers of ONE name — legal same-name coexistence (D2 /
+        # #8864). Reached through the EXPLICIT-id channel (a connector /
+        # `_server_id` supplies the identity), which is what an opaque-id model
+        # allows; a second NAME-only create would resolve onto the first.
+        sdk.create_entity("object", "dup-mention", _server_id="carrier-a",
+                          is_episodic=False)
+        sdk.create_entity("object", "dup-mention", _server_id="carrier-b",
+                          is_episodic=False)
+        (carrier_a, carrier_b) = sorted(
+            r[0] for r in proj.g.query(
+                "MATCH (o:Object {name:'dup-mention'}) RETURN o.id"
+            ).result_set)
+        assert carrier_a != carrier_b
+
+        # The endpoint contract requires a mentioned entity to be DECLARED, so
+        # the payload declares it — which is also the half that proves the
+        # commit door survives the legal two-carrier state: step 6's
+        # registration must treat `AmbiguousEntityName` as "already registered"
+        # (a reference is not a create), not fail the commit mid-write.
+        ev = f"ev_{content_hash('mentions a doubly-held name')[:62]}"
+        raw = _raw_payload(0, session_id="s-dup-mention")
+        raw["entities"] = [{"name": "dup-mention", "kind": "core:goal",
+                            "passes_frequency_gate": True}]
+        raw["events"] = [{"id": ev, "eventKind": "decision",
+                          "content": "mentions a doubly-held name",
+                          "confidence": 0.5,
+                          "about_entities": ["dup-mention"],
+                          "source_ref": "session.md"}]
+
+        seen: list[dict] = []
+        real = resolve_fold_name_ids
+
+        def _recording(g, label, name, **kw):
+            seen.append({"label": label, "name": name, **kw})
+            return real(g, label, name, **kw)
+
+        ha_mod.resolve_fold_name_ids = _recording
+        try:
+            r = _commit(client, raw)
+        finally:
+            ha_mod.resolve_fold_name_ids = real
+        assert r.status_code == 200, r.text
+
+        wired = sorted(
+            row[0] for row in _team_sdk()._get_proj().g.query(
+                "MATCH (e:Event {eventId:$ev})-[:aboutObject]->(o:Object) "
+                "RETURN o.id", params={"ev": ev}).result_set)
+        assert wired == [carrier_a, carrier_b], (
+            "the mention must wire EVERY live carrier of the name "
+            f"(main wired both): {wired}")
+        call = [c for c in seen if c["name"] == "dup-mention"]
+        assert call, f"step 6a did not resolve the mention: {seen}"
+        assert call[0].get("mention") is True, (
+            "an aboutObject link is ATTRIBUTION — an unresolvable name must "
+            "record the exempt `unfolded-mention`, not an identity miss")
+
 
 # ── E1 (#1533): event startedAt persisted server-side ──────────────────────
 

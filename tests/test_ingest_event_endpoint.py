@@ -2278,11 +2278,14 @@ def test_phase1_and_the_primitive_agree_on_terminal_endpoints(sdk):
 def test_non_canonical_single_carrier_self_edge_is_refused(sdk):
     """A single carrier with a LEGACY id is still the node the bundle ref lands on.
 
-    With ONE carrier the fold MERGEs by NAME onto it and its `ON MATCH` clause
-    rewrites the stored id to `entity_name_id(label, name)` — so an external ref to
-    the carrier's PRE-write id names the same node, and step 4 then finds no such
-    endpoint. Comparing the minted id against the carrier's id missed it: Phase 1
-    returned `[]` and ingest raised with the earlier point committed.
+    With ONE LIVE carrier the create RESOLVES to that carrier's **stored** id
+    (an opaque minted/legacy id, NOT a spelling derived from the name — #3590
+    retired the derived id and with it the `ON MATCH` re-addressing that used to
+    rewrite a legacy carrier's id). So an external ref naming the carrier's id
+    and a bundle item naming its NAME land on the SAME node, and a direct edge
+    between them is a self-edge that step 4 refuses. Comparing a predicted id
+    against the carrier's stored id is what missed it: Phase 1 returned `[]` and
+    ingest raised with the earlier point committed.
     """
     sdk._get_proj().g.query(
         "CREATE (:Object {id:'legacy-ulid-1', name:'Acme', status:'live'})")
@@ -2297,6 +2300,74 @@ def test_non_canonical_single_carrier_self_edge_is_refused(sdk):
         sdk.ingest(bundle)
     assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
                        "RETURN count(n)") == 0
+
+
+def test_operator_axis_reads_the_live_carrier_beside_a_terminal_sibling(sdk):
+    """#3590 review P2-3: the axes come from the LIVE carrier, so a name with
+    ONE live + ONE terminal carrier is a RESOLVE — not "no target".
+
+    `_entity_name_holders` counted carriers of ANY status and treated
+    ``count > 1`` as "2+ live carriers", so every axis came back ``None`` for
+    this shape: the label gate never read the landing node's operator flag,
+    Phase 1 passed, and step 4 then raised `Phase2Error` with the earlier items
+    committed — the exact mid-write class #7925 rounds 3-5 exist to close. The
+    shape is not hypothetical: R5 mints a second incarnation when a TERMINAL
+    name is re-mentioned, and this test constructs it exactly that way.
+    """
+    sdk.create_object("Sibling-Terminal")
+    sdk._get_proj().g.query(
+        "MATCH (o:Object {name:'Sibling-Terminal'}) "
+        "SET o.status = 'superseded'")
+    # R5: the re-mention is a NEW incarnation — one terminal + one LIVE carrier.
+    sdk.create_object("Sibling-Terminal")
+    live_rows = sdk._get_proj().g.query(
+        "MATCH (o:Object {name:'Sibling-Terminal'}) "
+        "WHERE o.status IS NULL OR o.status <> 'superseded' RETURN o.id"
+    ).result_set
+    assert len(live_rows) == 1, live_rows
+    live_id = live_rows[0][0]
+    sdk._get_proj().g.query(
+        "MATCH (o:Object {id:$i}) SET o.is_operator = true",
+        params={"i": live_id})
+    holders = sdk._entity_name_holders("Object", "Sibling-Terminal")
+    assert holders[5] is True and holders[6] == live_id, (
+        "the create RESOLVES to the single live carrier: "
+        f"merges={holders[5]} target={holders[6]} (all={holders})")
+    assert holders[7] == 1, f"live_count must be 1: {holders}"
+    bundle = {
+        "points": [{"kind": "statement", "content": "must-not-commit",
+                    "ref": "p0"}],
+        "entities": [{"ref": "h", "type": "object",
+                      "name": "Sibling-Terminal"}],
+        "connections": [{"from": "p0", "to": "h", "operator": "IMPL",
+                         "reify": True}],
+    }
+    msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
+    assert any("merge target is operator-shaped" in m for m in msgs), (
+        f"the operator axis was not read from the live carrier: {msgs}")
+
+
+def test_endpoint_collision_is_seen_across_a_terminal_sibling(sdk):
+    """#3590 review P2-3, second arm: with 1 live + 1 terminal carrier the
+    endpoint-collision key still resolves. Pre-fix the branch keyed on
+    `exists_by_name` (True for ANY-status carriers) with `target_id` None, so it
+    `continue`d — two refs landing on ONE node were never recognised as one
+    endpoint.
+    """
+    sdk.create_object("Collide")
+    sdk._get_proj().g.query(
+        "MATCH (o:Object {name:'Collide'}) SET o.status = 'superseded'")
+    sdk.create_object("Collide")
+    bundle = {
+        "points": [{"kind": "statement", "content": "must-not-commit"}],
+        "entities": [{"ref": "a", "type": "object", "name": "Collide"},
+                     {"ref": "b", "type": "object", "name": "Collide"}],
+        "connections": [{"from": "a", "to": "b", "operator": "IMPL"}],
+    }
+    msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
+    assert any("address the same endpoint" in m for m in msgs), (
+        "two bundle refs naming a 1-live+1-terminal name land on ONE node, "
+        f"and the guard did not see it: {msgs}")
 
 
 def test_bare_name_subject_stub_is_the_same_endpoint_as_the_bundle_ref(sdk):

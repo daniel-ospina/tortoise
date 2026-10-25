@@ -202,6 +202,15 @@ R8 above requires that a shape genuinely exempt from the fail-the-run assertion 
 
 **Everything else fails the run.** A shape not listed in this table (or in `EXEMPT_SHAPES` in `tortoise/projection/nonfolded.py`) is fail-closed by default: a new fold-miss site that forgets to classify itself still fails, and the two classifiers — the graph replay engines and `check_consistency`'s reference fold — must yield the **same** disposition for the same journal, or `check_consistency` passes a journal `rebuild_all` refuses (the asymmetry #3585's re-review closed).
 
+### R5 at the CREATE door: re-mentioning a TERMINAL name mints a second incarnation
+
+Recorded here because it is a **product delta** a reader would otherwise have to infer from code (#3590 review P1-2), and because it is the one place R5 and #1350 look like they disagree:
+
+* `entity_identity.resolve_or_mint` resolves a create against **live** holders only. A `superseded` / `retracted` / `archived` carrier is **terminal**, so it does not block a create: the create **mints a fresh id** and the graph holds **two** `Object`s of that name — the untouched terminal one and a new `live` incarnation. That is R5 ("re-creation after deletion mints a fresh id — an id is never reused") applied to the name, and legal same-name coexistence (D2 / `#8864`).
+* **#1350's clobber guarantee is unchanged and is the part that must stay pinned**: a re-mention never *writes to* the folded carrier — no status reset, no `supersededBy` overwrite, and `rebuild == live` (the re-mention's own `ObjectRegistered` replays onto its own id, not by name).
+* Pre-`#3590` main had **one** node here because the id was a function of the name, so the create resolved onto the terminal carrier. That single-carrier state is retired with the derived id, not preserved: keeping it would require a name-keyed create target, which is exactly the identity the change removes.
+* Pinned by `tests/test_object_registered_journal.py::TestReMentionJournalsEveryRegistration::test_remention_of_a_superseded_name_mints_a_new_incarnation` (order-independent, live **and** after `rebuild_all`), and reached from the hosted capture door via `sdk.create_entity`.
+
 ---
 
 ## Migration path

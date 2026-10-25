@@ -92,7 +92,9 @@ from tortoise.config import _resolve_event_log_path
 from tortoise.embed_metering import (  # #4488: pure-ASGI encode-work flusher
     EmbedMeteringMiddleware as _EmbedMeteringMiddleware,
 )
-from tortoise.entity_identity import resolve_fold_name  # #3590 fold-side name resolution
+from tortoise.entity_identity import (  # #3590 fold-side name resolution
+    resolve_fold_name_ids,
+)
 from tortoise.env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 from tortoise.file_indexer import (  # #4005 shared identity primitives
     derive_session_source_url,
@@ -16144,6 +16146,30 @@ def _prevalidate_supersede_window(sdk, pr, *, now: str) -> None:
     )
 
 
+def _sdk_register_commit_entity(sdk: TortoiseSDK, label: str, name: str, **kwargs):
+    """Step 6's registration of a payload-declared entity — a REFERENCE duty.
+
+    #3590 D9 puts the minting duty on the producer, so the commit door still
+    registers every entity its payload declares (a journal written without the
+    registration would be un-replayable after the fold stopped minting).
+
+    ⛔ ``AmbiguousEntityName`` is NOT an error for this caller: it is a CREATE-
+    door refusal (a create may not pick one of two live carriers), and a commit
+    that merely NAMES an entity is not creating a third incarnation. Two live
+    entities of one name is the legal D2/#8864 state; refusing the whole commit
+    for it would make a legal graph unwritable through the PRODUCTION capture
+    entry point (and would raise mid-write, after earlier steps committed). The
+    name already has its registrations — the step-6a mention then wires every
+    live carrier (#3590 review P1-1), which is the same posture as
+    ``sdk._register_referenced_entity`` ("a reference is not a create").
+    """
+    from tortoise.entity_identity import AmbiguousEntityName
+    try:
+        return sdk.create_entity(label, name, **kwargs)
+    except AmbiguousEntityName:
+        return None
+
+
 def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # noqa: F821
     """W-3 [5] — the graph write phase for an adjudicated (budget=ok) commit.
 
@@ -16758,15 +16784,15 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             _kind_kw = ({"subjectKind": _ekind} if is_subject_kind(_ekind)
                         else {"objectKind": _ekind})
         if is_subject_kind(_ekind or ""):
-            sdk.create_entity(
-                "subject", er.entity.name,
+            _sdk_register_commit_entity(
+                sdk, "subject", er.entity.name,
                 **_kind_kw,
                 passes_frequency_gate=er.entity.passes_frequency_gate,
                 is_episodic=False,
             )
         else:
-            sdk.create_entity(
-                "object", er.entity.name,
+            _sdk_register_commit_entity(
+                sdk, "object", er.entity.name,
                 **_kind_kw,
                 passes_frequency_gate=er.entity.passes_frequency_gate,
                 is_episodic=False,
@@ -16780,16 +16806,37 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # this very payload introduces and dropped the edge, which is exactly the
     # #1272 P2-4 case the retired `MERGE (o:Object {name:$name})` existed to
     # cover. A name that still resolves to nothing is left UNWIRED (and recorded
-    # by `resolve_fold_name`) rather than fabricated.
+    # by `resolve_fold_name_ids`) rather than fabricated.
+    #
+    # TWO properties this loop gets from the resolver, both #3590 review P1-1:
+    #
+    # * EVERY live carrier of the name, not just a single-holder shape. Two
+    #   live entities may legally hold one name (D2 / #8864), and the retired
+    #   `MERGE (o:Object {name:$name})` bound to all of them. Resolving the
+    #   singular form (`resolve_fold_name`) wired NOTHING for that legal state,
+    #   so a session commit naming a doubly-held object silently lost the
+    #   attribution an `origin/main` commit wrote.
+    # * `mention=True`, its classification. An `aboutObject` link is loose
+    #   ATTRIBUTION: it moves no entity's state, and the live pass and the
+    #   replay pass run the same resolver, so both drop the same link. Without
+    #   the flag an unresolvable name was recorded as the NON-exempt
+    #   `unregistered-reference` / `ambiguous-entity-name` — the shapes the
+    #   decision doc reserves for a fold that must MOVE an entity's state —
+    #   i.e. the record said something false about what failed.
     for _eid, _name in _deferred_about_objects:
-        _resolved = resolve_fold_name(proj.g, "Object", _name,
-                                      context="session-commit aboutObject")
-        if _resolved:
-            proj.g.query(
-                "MATCH (e:Event {eventId:$eid}), (o:Object {id:$oid}) "
-                "MERGE (e)-[:aboutObject]->(o)",
-                params={"eid": _eid, "oid": _resolved},
-            )
+        _targets = resolve_fold_name_ids(
+            proj.g, "Object", _name, mention=True,
+            context="session-commit aboutObject")
+        if not _targets:
+            # No live carrier (none at all, or a terminal-only name): unwired.
+            # D9 — a terminal name's re-mention is a NEW incarnation, not a
+            # link onto the retired one.
+            continue
+        proj.g.query(
+            "MATCH (e:Event {eventId:$eid}) UNWIND $oids AS oid "
+            "MATCH (o:Object {id:oid}) MERGE (e)-[:aboutObject]->(o)",
+            params={"eid": _eid, "oids": _targets},
+        )
 
     # ── 6b. Supersessions — client-derived records (the deterministic channel
     # for the Object status fold, #1350), applied via the SHARED

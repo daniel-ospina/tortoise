@@ -18910,9 +18910,10 @@ class TortoiseSDK:
     def _entity_name_holders(
         self, label: str, name: str,
     ) -> tuple[bool, str | None, str | None, str | None, int, bool,
-               str | None]:
+               str | None, int]:
         """``(exists_by_name, terminal_holder_id, operator_holder_id,
-        unevaluable_status_holder_id, carrier_count, merges, target_id)`` for a
+        unevaluable_status_holder_id, carrier_count, merges, target_id,
+        live_count)`` for a
         bundle-local entity ref (#7925) — the entity sibling of
         :meth:`_find_terminal_dedup_hit`, and it exists for the same reason:
         the bundle-local endpoint guard has to resolve the endpoint the WRITER
@@ -18922,16 +18923,31 @@ class TortoiseSDK:
         ⛔ ``merges`` and the three axes are LOAD-BEARING and they are read from
         the node the write will actually LAND ON, not from "any holder". #3590
         made the CREATE a resolve-or-mint (``entity_identity.resolve_or_mint``),
-        so there are exactly three shapes:
+        and ``live_count`` exists so these predicates can agree with it: the
+        create resolves against **LIVE** holders, so a TERMINAL carrier is not a
+        create target and does not make the name shared.
 
-          * **no carrier** — the item MINTS a fresh opaque id, inherits NO
-            holder axis, and its declared status is what gets stored;
-          * **one carrier** — the item RESOLVES to that holder (idempotent
-            re-mention), so THAT node's axes decide; a declared status is
-            dropped by the ``ON CREATE``-only status write;
-          * **2+ carriers** — the create REFUSES
+          * **no LIVE carrier** — the item MINTS a fresh opaque id, inherits NO
+            holder axis, and its declared status is what gets stored. This is
+            ONE shape whether or not TERMINAL carriers exist (#3590 review
+            P2-3: treating ANY-status carriers as "shared" failed open here);
+          * **exactly one LIVE carrier** — the item RESOLVES to that holder
+            (idempotent re-mention), so THAT node's axes decide; a declared
+            status is dropped by the ``ON CREATE``-only status write. Terminal
+            siblings of the name are irrelevant to the write: they are other
+            incarnations (R5), never the target;
+          * **2+ LIVE carriers** — the create REFUSES
             (``AmbiguousEntityName``); no carrier is the target and no holder
             axis applies.
+
+        ⛔ ``carrier_count`` counts carriers of ANY status (the raw row count,
+        what a caller reports) while ``live_count`` is the predicate the WRITE
+        obeys. A caller branching on ``carrier_count`` is wrong for the shape
+        "1 live + >=1 terminal": every axis came back ``None`` for it, so the
+        operator/terminal legs never read the landing node and the
+        endpoint-collision key was skipped — a fail-open on exactly the shape
+        ``test_remention_of_a_superseded_name_mints_a_new_incarnation``
+        constructs.
 
         Reading the axes from "any carrier" or from "none of them" both fail:
         the first over-rejects (another carrier's terminal status is not the
@@ -18939,15 +18955,18 @@ class TortoiseSDK:
         exists to close (measured: the canonical carrier terminal → Phase 1
         ``[]``, then ``Phase2Error`` with the earlier point committed).
 
-        So the axes returned here are the MERGE TARGET's, and are ``None`` when
-        the item mints; ``merges`` says which of the two happened, and
-        ``target_id`` is that node's STORED id — which is NOT always
-        ``entity_name_id(label, name)``: with one carrier, and with a carrier
-        whose id a legacy/foreign writer left non-canonical, the fold MERGEs by
-        name onto the node that exists and its ``ON MATCH`` clause rewrites the
-        stored ``id`` to the canonical one. Anything predicting the endpoint the
-        write addresses must therefore use ``target_id`` when it is set. Callers
-        must branch on ``merges`` rather than on ``carrier_count``.
+        So the axes returned here are the CREATE TARGET's, and are ``None``
+        when the item mints; ``merges`` says which of the two happened, and
+        ``target_id`` is that node's STORED id — **not** a value derived from
+        the name. #3590 retired the name-derived id, so there is no canonical
+        spelling for a node to be rewritten onto: the create resolves to the
+        holder's own id or mints a new one, and NOTHING re-addresses an
+        existing node during the write. (The paragraph that stood here
+        described the fold MERGEing by name and its ``ON MATCH`` clause
+        rewriting the stored ``id`` to the canonical one — an adoption path
+        that no longer exists anywhere in the tree; leaving the description
+        behind is what once justified a ``merges``-vs-``carrier_count``
+        branch.)
 
         ``operator_holder_id`` is the same test on the OTHER axis (#7925 review
         round 3): an operator-shaped merge target is not a connection endpoint
@@ -18976,14 +18995,22 @@ class TortoiseSDK:
             params={"name": name},
         ).result_set
         if not rows:
-            return False, None, None, None, 0, False, None
-        # #3590: the node the item lands on. A shared name has NO target — the
-        # create refuses rather than picking one, so no holder axis applies (the
-        # previous "the carrier holding the derived canonical id" answer existed
-        # only because the id was a function of the name).
-        if len(rows) > 1:
-            return True, None, None, None, len(rows), False, None
-        target = rows[0]
+            return False, None, None, None, 0, False, None, 0
+        # #3590 review P2-3: the node the item lands on. `resolve_or_mint`
+        # resolves against LIVE holders only, so this branch MUST too — with 2+
+        # LIVE carriers the create refuses rather than picking one, and a
+        # TERMINAL carrier is a different incarnation the write never addresses
+        # (R5): it neither blocks a mint nor becomes a target.
+        live_rows = [r for r in rows if not r[1]]
+        live_count = len(live_rows)
+        if live_count > 1:
+            return (True, None, None, None, len(rows), False, None,
+                    live_count)
+        if not live_rows:
+            # MINTS: no LIVE carrier to land on. Terminal carriers of the name
+            # are other incarnations — no axis, not a target.
+            return (True, None, None, None, len(rows), False, None, 0)
+        target = live_rows[0]
         # All three axes in ONE pass (#7925 review round 4 — an early return per
         # axis made a holder that matched two of them report only the first, so
         # e.g. an operator-shaped holder with an array status lost the operator
@@ -18999,6 +19026,7 @@ class TortoiseSDK:
             len(rows),
             True,
             _holder_id,
+            live_count,
         )
 
     def _endpoint_not_id_addressed(self, index: int, v: str,
@@ -19270,12 +19298,12 @@ class TortoiseSDK:
         holders: dict[
             tuple[str, str],
             tuple[bool, str | None, str | None, str | None, int, bool,
-                  str | None],
+                  str | None, int],
         ] = {}
 
         def _name_holders(elabel: str, name: str) \
                 -> tuple[bool, str | None, str | None, str | None, int, bool,
-                         str | None]:
+                         str | None, int]:
             key = (elabel, name)
             if key not in holders:
                 holders[key] = self._entity_name_holders(elabel, name)
@@ -19309,18 +19337,17 @@ class TortoiseSDK:
         #     for `:Object`), so the declaration is dropped and the writer
         #     accepts it — the HOLDER's own array status is caught by the
         #     direct-route leg below (`bad_status`), which is where the raise
-        #     would actually come from. An item that MINTS (a shared name whose
-        #     canonical id no carrier holds) is NOT skipped: #8864/#8902 key that
-        #     merge on the item's own id, so its declared array IS stored.
+        #     would actually come from. An item that MINTS (no LIVE carrier of
+        #     the name) is NOT skipped: its own registration is what stores its
+        #     declared status, so its declared array IS stored.
         #
         # Scoped by the ORDERED simulation the fold performs: an item's declared
         # status is stored only when its write CREATES the node, and only the
-        # FIRST bundle item naming a `(label, name)` can — its id
-        # (`entity_name_id`) is deterministic, so every later same-name item
-        # lands on the node the first one created (or on the canonical carrier)
-        # and `status` is written `ON CREATE` only. Checking every item
-        # over-rejected a writer-accepted bundle (measured), and checking only
-        # the first-per-name via a `seen` set skipped a genuine create.
+        # FIRST bundle item naming a `(label, name)` can — every later same-name
+        # item resolves to the node the first one created and `status` is
+        # written `ON CREATE` only. Checking every item over-rejected a
+        # writer-accepted bundle (measured), and checking only the first-per-name
+        # via a `seen` set skipped a genuine create.
         _minted_names: set[tuple[str, str]] = set()
         for i, item in enumerate(bundle.get("entities") or []):
             if not isinstance(item, dict):
@@ -19342,7 +19369,7 @@ class TortoiseSDK:
                     # out of `_validate_bundle` — review round 4).
                     continue
                 (_existing, _hit, _op, _bad, _carriers, _merges,
-                 _target) = _name_holders(_elabel, _name)
+                 _target, _live) = _name_holders(_elabel, _name)
                 _key = (_elabel, _name)
                 # MERGES (a carrier holds the canonical id) or not the first
                 # naming item (the first one creates it) ⇒ this write does not
@@ -19423,10 +19450,12 @@ class TortoiseSDK:
                                 tainted_by_bundle = _op_val
                             else:
                                 _h = _name_holders(elabel, ep_name)
-                                # The axes are the MERGE TARGET's, and are None
-                                # when the item mints its own node (a shared
-                                # name whose canonical id no carrier holds), so
-                                # no carrier-count branch is needed here.
+                                # The axes are the CREATE TARGET's (the single
+                                # LIVE holder), and are None when the item mints
+                                # or when 2+ live carriers refuse the create — so
+                                # no carrier-count branch is needed here, and a
+                                # terminal sibling of the name contributes no
+                                # axis (#3590 R5, review P2-3).
                                 operator_shaped = _h[2] is not None
                     plain_point = section == "points" and not operator_shaped
                     epistemic_entity = section == "entities" \
@@ -19577,17 +19606,18 @@ class TortoiseSDK:
         for i, conn, route, vals in conns:  # noqa: B007
             if route != "direct":
                 continue
-            # #7925 review P1: endpoints that resolve to the same NAME-MERGED
-            # node are ONE node (`ids.entity_name_id` + the name MERGE), so a
-            # direct edge between them is a self-edge that
+            # #7925 review P1: endpoints that resolve to the same NODE are ONE
+            # node, so a direct edge between them is a self-edge that
             # `create_direct_edge` refuses with a raw ValueError — after steps
             # 2-3 committed (measured). `_check_connection`'s self-edge test
-            # compares REF STRINGS, so it cannot see this identity. The identity
-            # is (label, name) on BOTH sides of the bundle/external boundary
-            # (review round 3): a bundle-local ref and the same node addressed
-            # by its id share it. Only the direct route is affected — a reified
-            # pair goes through `create_operator`, which tolerates the shared
-            # node (measured).
+            # compares REF STRINGS, so it cannot see this identity. #3590: the
+            # shared node is whatever the WRITE lands on — the single LIVE
+            # holder of a name, or the minted id — and it is resolved below,
+            # never predicted from the name. The identity is the LANDING id on
+            # BOTH sides of the bundle/external boundary (review round 3): a
+            # bundle-local ref and the same node addressed by its id share it.
+            # Only the direct route is affected — a reified pair goes through
+            # `create_operator`, which tolerates the shared node (measured).
             merged: dict[tuple[str, str], str] = {}
             for v in vals:
                 if not isinstance(v, str):
@@ -19609,11 +19639,11 @@ class TortoiseSDK:
                 # Compare the NODE each endpoint will land on, never the NAME.
                 # The landing id is what `create_direct_edge` sees, and it
                 # differs by ref kind:
-                #   * a bundle-local entity item writes the deterministic
-                #     `entity_name_id(label, name)` — the SAME id for every item
-                #     naming that name, so two such refs are one node whether the
-                #     first one created it or landed on a carrier (#8864/#8902
-                #     key the fold on the record's own id, which IS that id);
+                #   * a bundle-local entity item RESOLVES to the single LIVE
+                #     holder of its name (or mints a fresh id), so two such
+                #     refs naming one name land on ONE node — the landing id is
+                #     read from `_name_holders` below, never predicted from the
+                #     name (#3590 retired the name-derived id);
                 #   * an external ref lands on the node its id names, so two
                 #     carriers that share a NAME are two different endpoints and
                 #     the edge between them is legal (measured over-rejection:
@@ -19621,26 +19651,30 @@ class TortoiseSDK:
                 # Comparing (label, name) got both of these backwards.
                 if v in local:
                     # The node this item lands on. #3590: the create either
-                    # RESOLVES to the single live holder (id unchanged) or mints
-                    # a fresh id — and a shared name has no target at all, so no
-                    # landing id can be computed for it (the write refuses that
-                    # item; the connection is left to the per-item refusal).
+                    # RESOLVES to the single LIVE holder (id unchanged) or mints
+                    # a fresh id — and 2+ LIVE carriers have no target at all,
+                    # so no landing id can be computed for that item (the write
+                    # refuses it; the connection is left to the per-item
+                    # refusal). ⛔ Branch on `live_count`, never on
+                    # `exists_by_name`/`carrier_count`: a TERMINAL carrier is a
+                    # different incarnation (R5), so "a name with one live and
+                    # one superseded carrier" is a RESOLVE, not a refusal — and
+                    # "terminal carriers only" is a MINT, not a skip (#3590
+                    # review P2-3; both were wrong here).
                     _h = _name_holders(ep_label, ep_name)
-                    if _h[6] is None:
-                        if _h[0]:
-                            # 2+ live carriers: the create REFUSES this item
-                            # (`AmbiguousEntityName`), so it has no landing id.
-                            # The per-item refusal reports it; this guard must
-                            # not invent a target.
-                            continue
-                        # No carrier: the item MINTS. Two minting refs naming
-                        # the SAME name resolve to ONE node (the first create
-                        # makes the holder, the second resolves to it), so the
-                        # name is still a valid endpoint-collision key here —
-                        # it is the node's landing identity, not an id.
-                        lid = f"mint\x00{ep_name}"
-                    else:
-                        lid = _h[6]
+                    if _h[7] > 1:
+                        # 2+ live carriers: the create REFUSES this item
+                        # (`AmbiguousEntityName`), so it has no landing id.
+                        # The per-item refusal reports it; this guard must not
+                        # invent a target.
+                        continue
+                    # No LIVE carrier: the item MINTS. Two minting refs
+                    # naming the SAME name resolve to ONE node (the first
+                    # create makes the holder, the second resolves to it), so
+                    # the name is still a valid endpoint-collision key here —
+                    # it is the node's landing identity, not an id.
+                    lid = _h[6] if _h[6] is not None \
+                        else f"mint\x00{ep_name}"
                 else:
                     lid = (node_info.get(v) or {}).get("id")
                 if not isinstance(lid, str) or not lid:
@@ -19728,19 +19762,17 @@ class TortoiseSDK:
                     if elabel in ("Subject", "Object") \
                             and isinstance(name, str) and name:
                         (exists, hit, _, bad_status, _carriers, merges,
-                         _target) = _name_holders(elabel, name)
-                        # #8864/#8902: the fold keys the merge on NAME while the
-                        # name has ONE carrier, and on the record's own `id` once
-                        # it has 2+. Every ingest entity item's id IS
-                        # `ids.entity_name_id(label, name)`, so with 2+ carriers
-                        # the item still LANDS on a carrier holding that
-                        # canonical id (ON MATCH) and only MINTS when none does.
-                        # `merges` is that answer and the axes above are the
-                        # merge target's — so a merge reads the target's
+                         _target, _live) = _name_holders(elabel, name)
+                        # #3590 R5/D2: a create resolves against LIVE holders
+                        # only, so the merge-vs-mint answer is the LIVE count's
+                        # (`merges` is True for exactly one live carrier, and a
+                        # terminal carrier neither blocks a mint nor becomes a
+                        # target). `merges` is that answer and the axes above
+                        # are the landing node's — so a merge reads the target's
                         # terminal/unevaluable axes, while a mint keeps its own
-                        # declared status. Branching on the carrier count instead
-                        # fails open on the first case and over-rejects on the
-                        # second (both measured).
+                        # declared status. Branching on the carrier COUNT instead
+                        # (any status) fails open on the 1-live+N-terminal shape
+                        # and over-rejects on the mint (both measured).
                         name_merge = merges
                         # The operator axis is settled by the label gate above
                         # (`tainted_by_bundle`), and the `outdated` flag
@@ -33993,9 +34025,13 @@ class TortoiseSDK:
         """Generic entity creation. Applies to graph via projection
         (FalkorDB); SDK-created Events additionally journal EventRecorded
         via ``_emit_event`` (#2061); SDK-created Objects journal
-        ``ObjectRegistered`` on first canonical registration (probe-gated,
-        #2194 — a canonical re-mention never double-journals); SDK-created
-        Subjects journal ``SubjectAdded`` the same way (probe-gated, #2295);
+        ``ObjectRegistered`` on EVERY create (#3590 retired the first-
+        registration probe: with a minted id, "the node exists" no longer
+        implies "this name was registered", so probing could skip the
+        registration of a live node and ``rebuild_all`` would destroy it; the
+        duplicate line is replay-idempotent — the fold MERGEs by id and
+        ``createdAt`` adopts first-wins); SDK-created Subjects journal
+        ``SubjectAdded`` the same way (#3590 likewise retired its probe, #2295);
         Documents journal ``DocumentCreated`` on EVERY create (#2296 —
         emit-on-every-write, since each create mints a fresh ulid and
         ``_upsert_document`` MERGEs by that id). Source journals via

@@ -295,6 +295,13 @@ def resolve_fold_name(g, label: str, name: str, *,
     * no live holder (or only a terminal/id-less one) -> ``unregistered-
       reference`` recorded, nothing folded.
 
+    ⚠️ The singular shape is for a fold that needs **the identity** of the
+    record it applies. An ATTRIBUTION site must not use it: a mention that a
+    shared name addresses is wired to EVERY live carrier (D2 legalises
+    same-name coexistence), so a mention site calls
+    :func:`resolve_fold_name_ids` — this function answers ``None`` for a legal
+    two-carrier name and would drop both links.
+
     ``mention=True`` classifies the caller's reference as loose ATTRIBUTION (an
     Event's ``subject``/``object``/``uses[]``, an ``about_entities`` status-fold
     target, an about-edge name) rather than the identity of the record being
@@ -315,10 +322,39 @@ def resolve_fold_name(g, label: str, name: str, *,
     The remedy for NEW journals is on the producer: register what you reference
     before referencing it (D9) — the SDK's entity doors do exactly that.
     """
+    ids = resolve_fold_name_ids(g, label, name, context=context,
+                                mention=mention)
+    return ids[0] if len(ids) == 1 else None
+
+
+def resolve_fold_name_ids(g, label: str, name: str, *,
+                          context: str = "", mention: bool = False) -> list[str]:
+    """EVERY live id a NAME reference addresses — the plural fold resolver.
+
+    A mention is loose ATTRIBUTION, and this repo legalises **two live entities
+    holding one name** (D2 / #8864). So a mention site must wire the link to
+    every live carrier — one edge per carrier — exactly as the `:Point` /
+    Event about-edge cascade does (`edges.resolve_about_link`: *"target_internal_ids
+    … A LIST because a name may legally have several carriers, and EVERY one of
+    them is"*). Answering only for the single-holder shape is how the hosted
+    session-commit door (``hosted_api`` step 6a) silently dropped the edge for a
+    name two live entities hold, where ``origin/main``'s
+    ``MERGE (o:Object {name:$name})`` bound to both (#3590 review P1-1).
+
+    Returns ``[]`` — and records the SAME non-folded shape
+    :func:`resolve_fold_name` would — when no live id-carrying holder exists.
+    The classification is the caller's ``mention`` flag, not a guess: an
+    attribution miss is the exempt ``unfolded-mention``; anything that must be
+    an identity stays non-exempt.
+
+    ``resolve_fold_name`` is the SINGULAR form (one live holder or nothing),
+    for a fold that needs *the* identity of the record it is applying. Callers
+    that only link an attribution must use THIS one.
+    """
     holders = live_name_holder_ids(g, label, name)
     ids = [str(h) for h in holders if h]
-    if len(holders) == 1 and ids:
-        return ids[0]
+    if ids:
+        return ids
     from tortoise.projection.nonfolded import (
         SHAPE_AMBIGUOUS_ENTITY_NAME,
         SHAPE_UNFOLDED_MENTION,
@@ -348,7 +384,7 @@ def resolve_fold_name(g, label: str, name: str, *,
         "deterministic); the producer must register what it references "
         "(#3590 D9).%s", label, name, len(ids), ids,
         f" context={context}" if context else "")
-    return None
+    return []
 
 
 def _require_name_properties(name_props: tuple) -> tuple:
