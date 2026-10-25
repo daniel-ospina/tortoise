@@ -37,7 +37,10 @@ anchor), finding 9 (#5236), finding 11 (the ruling-B `:Source` guard).
   * the **`transcript` genre-vocabulary** decision (issue comment
     2026-10-22T00:49; `owner-decision` label).
 
-Hermetic: an embedded FalkorDB per test (`sdk_factory`), no live Docker.
+Hermetic: an embedded FalkorDB per test (`sdk_factory`), no live Docker. The
+fixture is URI-AWARE, so a leg that sets `TORTOISE_DB_URI` redirects the graph
+to that server; the tier-2 PR legs are URI-empty by design, so it runs embedded
+there.
 """
 
 from __future__ import annotations
@@ -174,3 +177,47 @@ def test_document_created_fragment_variants_collapse_to_one_node(sdk_factory):
     # a reading: the node's KEY is the first writer's, the identity is canonical.
     assert rows[0][1] == ["https://example.com/doc#section-one"], rows
     assert rows[0][2] == ["https://example.com/doc"], rows
+
+
+def test_document_created_appends_the_raw_spelling_to_url_aliases(sdk_factory):
+    """The alias set `_upsert_source` keeps, kept here too: the fold records the
+    RAW spelling this record named, so the resolver can re-find the node from a
+    spelling it has not been handed before.
+
+    DISCRIMINATING, and it is the only case here that is: the pre-canonical node
+    below is stored under the CANONICAL spelling, so `resolve_source_key` adopts
+    it in step 2 — which writes `urlAliases=[canonical]` ITSELF — and the raw
+    variant reaches `urlAliases` only through `_upsert_document`'s own clause.
+    Delete that clause and this test fails while the other five still pass.
+    """
+    sdk = sdk_factory()
+    proj = sdk._get_proj()
+    canonical = "https://example.com/a/b"
+    raw = "https://Example.COM/a/b/?utm_source=x#frag"
+    # A node registered BEFORE S0a: the canonical spelling as its `url`, no
+    # `canonicalUrl` yet — exactly the shape the resolver's step 2 adopts.
+    proj.g.query(
+        "MERGE (s:Source {url:$url}) ON CREATE SET s.id=$url, "
+        "s.sourceKind='document', s.version=1",
+        params={"url": canonical},
+    )
+    proj.apply(
+        {
+            "type": "DocumentCreated",
+            "id": raw,
+            "title": "X",
+            "document_kind": "report",
+        }
+    )
+    rows = proj.g.query(
+        "MATCH (s:Source) WHERE toLower(s.url) CONTAINS 'example.com/a/b' "
+        "RETURN s.url, s.canonicalUrl, s.urlAliases"
+    ).result_set
+    assert len(rows) == 1, f"the adopting write minted a sibling: {rows}"
+    url, stored_canonical, aliases = rows[0]
+    assert url == canonical, rows
+    assert stored_canonical == canonical, rows
+    assert sorted(aliases or []) == sorted([canonical, raw]), (
+        f"the raw spelling was not recorded — a later variant of it would mint a "
+        f"second node: {rows}"
+    )
