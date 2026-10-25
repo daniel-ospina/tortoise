@@ -83,6 +83,10 @@ MIGRATIONS = [
     # — applied so this list stays EQUAL to `RECORD_MIGRATIONS` (#9550), which
     # keeps the measured row width the SHIPPED schema's.
     "20261025000001_record_tenancy_role_and_guc.sql",
+    # #9881: the Object/Subject key move (node_key = id, `node_identity`'s
+    # `key_property` re-declared). A probe Postgres without it keys the semantic
+    # layer by `name` while the read parses `id` from these files.
+    "20261027000001_record_semantic_id_key.sql",
 ]
 
 #: §17.4.1's published rates, restated so the arithmetic below is auditable and

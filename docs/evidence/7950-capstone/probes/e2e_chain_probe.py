@@ -70,6 +70,10 @@ RECORD_MIGRATIONS = [
     # table (ten, since #9555's `session_narrative`). No column
     # — kept in step with `e2e_postgres_bootstrap.py` for the same reason.
     "20261025000001_record_tenancy_role_and_guc.sql",
+    # #9881: the Object/Subject key move (node_key = id, `node_identity`'s
+    # `key_property` re-declared). A probe Postgres without it keys the semantic
+    # layer by `name` while the read parses `id` from these files.
+    "20261027000001_record_semantic_id_key.sql",
 ]
 DSN = os.environ.get(
     "CAPSTONE_PG_DSN", "postgresql://postgres:cap@127.0.0.1:15499/capstone")

@@ -227,6 +227,14 @@ RECORD_MIGRATIONS: tuple[str, ...] = (
     # `tests/test_9231_record_migrations_trigger.py` reds on the omission, so
     # the registry is the tuple or it is nothing.
     "20261025000001_record_tenancy_role_and_guc.sql",
+    # #9881 — the KEY MOVE: `Object`/`Subject` key on the stable `id` instead of
+    # the mutable `name`, which is what lets `EntityMutated op=rename` be a patch.
+    # It is listed for the registry reason above AND because it RE-DECLARES
+    # `node_identity.key_property`, which `key_properties()` must be able to see:
+    # a reader stuck on the CREATE TABLE would hand the cache projection the
+    # pre-move contract (`Object -> name`) while the database enforced the
+    # post-move one.
+    "20261027000001_record_semantic_id_key.sql",
 )
 
 #: The tenancy GUC every record RLS policy reads (`*_read_org`, `*_app_tenant`).
@@ -361,15 +369,21 @@ NODE_TABLES: dict[str, tuple[str, str]] = {
     "source": ("Source", "url"),
     "event": ("Event", "event_id"),
     "session": ("Session", "id"),
-    "object": ("Object", "name"),
-    "subject": ("Subject", "name"),
+    # #9881 — `Object`/`Subject` key on the STABLE `id`, not on `name`. Under
+    # #3590 the name is a MUTABLE natural key that two live entities may share,
+    # so a name-keyed row cannot distinguish two incarnations, and a rename
+    # either duplicates a row or orphans the one it replaced. With `id` as the
+    # key a rename is an ordinary column patch (`name = $new`): the key never
+    # moves, so nothing has to cascade through `node_identity` and `relation`.
+    "object": ("Object", "id"),
+    "subject": ("Subject", "id"),
     "point": ("Point", "id"),
 }
 
 #: node label → the record table that materializes it (the inverse of
 #: :data:`NODE_TABLES`). An edge endpoint names its label, and the relation's
 #: `(label, key)` FK is into `node_identity`, so the endpoint's key must be the
-#: label's CANONICAL key (`Object`/`Subject`→`name`, `Source`→`url`,
+#: label's CANONICAL key (`Object`/`Subject`→`id` since #9881, `Source`→`url`,
 #: `Point`/`Session`→`id`, `Event`→`event_id`), resolved from the projection's
 #: own node row — never the raw journal id.
 _LABEL_TABLES: dict[str, str] = {
@@ -378,12 +392,20 @@ _LABEL_TABLES: dict[str, str] = {
 
 #: The columns an `EntityMutated` record's identity (`payload["id"]`) is matched
 #: against, per node table. The graph fold matches the label's OR-set identity
-#: (`_ENTITY_ID_PROP` + `_CANONICAL_ENTITY_SECONDARY_ID_PROPS`), NOT the table's
-#: `node_key` column: a Point/Session/Event keys `node_key` on its id/eventId,
-#: but an Object/Subject keys `node_key` on `name` (its record identity is the
-#: `id` column) and a Source keys `node_key` on `url` while its record identity
-#: is usually `id`. Matching `node_key` against the record's `id` silently
-#: touches 0 rows.
+#: (`_ENTITY_ID_PROP` + `_CANONICAL_ENTITY_SECONDARY_ID_PROPS`), and the record
+#: matches the identity it STORES.
+#:
+#: ⚠️ `object`/`subject` still match on `id` alone, and the #9881 key move did
+#: not change that — it made the match and the KEY agree. Before the move the
+#: resolve found the row by `id` and then wrote the row's `node_key` (which was
+#: its NAME) into the edge: `relation.src_key`/`tgt_key` are an FK into
+#: `node_identity`, so the endpoint is filed by whatever key that label holds.
+#: The key is the `id` now, so an `aboutObject`/`ownedBy` endpoint carrying the
+#: journal id lands the id — and the two rebuild routes agree instead of one
+#: filing by name and the other resolving by id.
+#:
+#: `source` keeps both: a Source's key is `url` while its record identity is
+#: usually `id` (`add_document` emits `id` and no `url`).
 _ENTITY_MATCH_COLUMNS: dict[str, tuple[str, ...]] = {
     "point": ("node_key",),
     "session": ("node_key",),
@@ -560,8 +582,8 @@ class NodesDelete:
     ``match`` is the identity the graph fold deletes by, and it is stated per
     declaration for the same reason :data:`_ENTITY_MATCH_COLUMNS` exists: the
     record's ``node_key`` column IS the journal id for Point/Session/Event, but
-    Object/Subject key on ``name`` and Source on ``url``, so a ``node_key``
-    predicate against a journal id silently touches 0 rows.
+    Object/Subject key on their ``id`` (since #9881) and Source on ``url``, so a
+    ``node_key`` predicate against a journal id silently touches 0 rows.
     """
 
     node: Node
@@ -608,7 +630,12 @@ class OpDispatch:
 
     `#3299` chose one record type over one-per-label×operation; the replay
     dispatches on ``op``. Ops not produced by any writer are declared and
-    REFUSED rather than guessed (`#3377`/`#4769`).
+    REFUSED rather than guessed (`#3377`/`#4769`) — and since `#9881` that set is
+    **empty**: the one member it had, `rename`, was refused on the premise that
+    a rename moves the canonical key, and the key moved to the stable `id`
+    instead (`NODE_TABLES`), which makes the rename a patch. `refused_ops` stays
+    as a field because the declaration is still a decision: an op some future
+    writer produces and the fold cannot apply belongs here, with its reason.
 
     ``never_store`` is the record's own half of the §2.6 split: `Object.status`
     and `Subject.status` are **projection-owned caches** (the fold's docstring),
@@ -836,43 +863,59 @@ RECORD_MUTATIONS: dict[str, Mutation] = {
                 "Source": "source",
                 "Session": "session",
             },
-            patch_ops=frozenset({"revise", "restatus", "supersede"}),
+            patch_ops=frozenset({"revise", "restatus", "supersede", "rename"}),
             delete_ops=frozenset({"delete"}),
-            refused_ops={
-                "rename": "#3377/#4769 — the fold supports `rename` but no "
-                          "writer produces it, deliberately: a name-bearing "
-                          "write withholds its record because journalling it "
-                          "drops a legacy name-keyed ObjectSuperseded on "
-                          "replay. On the record side a rename MOVES the "
-                          "canonical key (Object/Subject key = `name`), so it "
-                          "is a key migration, not a patch.",
-            },
+            # #9881 — EMPTY, deliberately, and it was emptied by a decision, not
+            # by drift. `rename` was the only declared refusal here (#3377/#4769:
+            # *"a rename MOVES the canonical key (Object/Subject key = `name`), so
+            # it is a key migration, not a patch"*). That premise is now false: the
+            # key is the stable `id` (see `NODE_TABLES`), so a rename is the one
+            # thing the record CAN express as a patch — `UPDATE … SET name=$new
+            # WHERE id=$id`, key untouched, nothing to cascade through
+            # `node_identity` or `relation`. The op is listed in `patch_ops` above
+            # with the other state ops; the graph fold has implemented this arm all
+            # along (`_ENTITY_MUTATION_STATE_OPS`), which is why the record's
+            # refusal was the only thing between the producer (#3590's write
+            # surface) and its own journal.
+            refused_ops={},
             never_store={
                 "object": frozenset({"status"}),
                 "subject": frozenset({"status"}),
             },
         ),
-        note="#3299/#3300/#3311/#3312/#1423 — one record type, dispatched on "
-             "`op`; `state` carries absolute values the graph STORED",
+        note="#3299/#3300/#3311/#3312/#1423/#9881 — one record type, dispatched "
+             "on `op`; `state` carries absolute values the graph STORED, and each "
+             "state op is a patch against the node's stable KEY (an `op=rename` "
+             "writes `state.name` into the `name` COLUMN and leaves `node_key` "
+             "alone — the key is the `id`)",
     ),
     # ── Semantic layer ───────────────────────────────────────────────────────
     "ObjectRegistered": Mutation(
-        NodeSnapshot(Node("object", "Object", "name"), path=None, key_from="name"),
+        # #9881 — keyed on the id, not the name: under #3590 `name` is mutable and
+        # two live entities may share it, so it cannot be a key. A payload with no
+        # `id` is REFUSED here (`_key_value`) rather than materializing an id-less
+        # row the schema would then reject mid-transaction — the id-less legacy
+        # journal line is #3590's open decision D2, and the record cannot represent
+        # it, so it says so at the door instead of dropping it.
+        NodeSnapshot(Node("object", "Object", "id"), path=None, key_from="id"),
     ),
     "ObjectSuperseded": Mutation(
         NodePatch(
-            Node("object", "Object", "name"),
-            key_from="name",
+            Node("object", "Object", "id"),
+            key_from="id",
             from_payload=frozenset(),
             renames=(("superseded_by", "supersedes_by"),
                      ("superseded_at", "ts")),
         ),
         note="#1350 — `supersededBy` is journal-carried verbatim (PRIMARY); "
              "`Object.status` is NOT written (projection-owned cache, §2.6) "
-             "and `supersededAt` comes from the record's own envelope `ts`",
+             "and `supersededAt` comes from the record's own envelope `ts`; "
+             "#9881 — keyed by the node's `id`, with the `name` column kept as "
+             "the natural-key match so a legacy line carrying no id still "
+             "resolves",
     ),
     "SubjectAdded": Mutation(
-        NodeSnapshot(Node("subject", "Subject", "name"), path=None, key_from="name"),
+        NodeSnapshot(Node("subject", "Subject", "id"), path=None, key_from="id"),
     ),
     # ── The event stream, materialized (the episodic layer) ──────────────────
     "EventRecorded": Mutation(
@@ -1125,6 +1168,52 @@ def table_columns(migrations_dir: Path | None = None) -> dict[str, frozenset[str
             "record's migrations there)."
         )
     return tables
+
+
+#: `WHEN '<label>' THEN '<key property>'` — the pairs of `node_identity`'s
+#: GENERATED CASE. Anchored on the column definition below rather than applied to
+#: the whole SQL, because other record DDL carries CASE expressions of its own
+#: (the procedural VIEWs) and an unanchored scan would read those as contract
+#: declarations.
+_KEY_PROPERTY_WHEN_RE = re.compile(r"WHEN\s+'(\w+)'\s+THEN\s+'([^']+)'")
+_KEY_PROPERTY_ANCHOR_RE = re.compile(
+    r"key_property\s+text\s+NOT NULL\s+GENERATED ALWAYS AS\s*\(")
+
+
+def key_properties(migrations_dir: Path | None = None) -> dict[str, str]:
+    """`{label: the property that is the label's canonical key}` — from the DDL.
+
+    Read from `public.node_identity`'s generated CASE, never restated: a store
+    that disagrees with the W1 contract is not supposed to be able to write the
+    row at all, so the DDL is the contract's one home (`#7955`).
+
+    ⚠️ **The LAST declaration wins.** Migrations are append-only history, so a
+    key move arrives as a forward `ALTER TABLE … ADD COLUMN … GENERATED …`
+    re-declaring the CASE (`#9881` moved `Object`/`Subject` from `name` to `id`),
+    not as an edit of the `CREATE TABLE`. A reader that read only the original
+    file would report the PRE-move contract while the live database enforced the
+    post-move one — the record would key a node by a property its own `node_key`
+    no longer holds. This is the same rule `refused_props_names()` applies to a
+    forward refusal, applied to a declaration that can CHANGE rather than only
+    grow, which is why it takes the last block instead of a union.
+    """
+    sql = _read_migrations(migrations_dir)
+    blocks: list[str] = []
+    for anchor in _KEY_PROPERTY_ANCHOR_RE.finditer(sql):
+        start = anchor.end()
+        end = sql.find("END", start)
+        if end > start:
+            blocks.append(sql[start:end])
+    found = dict(_KEY_PROPERTY_WHEN_RE.findall(blocks[-1])) if blocks else {}
+    missing = [label for _table, (label, _col) in NODE_TABLES.items()
+               if label not in found]
+    if missing:
+        raise RecordProjectionError(
+            f"public.node_identity declares no key_property for {missing} — the "
+            "cache projection's key contract has no home; re-read the parser "
+            f"against {_migrations_dir()}"
+        )
+    return found
 
 
 def refused_props_names(migrations_dir: Path | None = None) -> dict[str, frozenset[str]]:
@@ -1841,11 +1930,11 @@ def _op_dispatch_statements(
     state = payload.get("state")
     state = state if isinstance(state, Mapping) else {}
     # The record's identity is the journal `id` — the SAME key the graph fold
-    # matches (`_ENTITY_ID_PROP`), NOT the table's `node_key` column. For
-    # Object/Subject `node_key` is `name` and for Source it is `url`, so a
-    # `node_key = id` predicate silently touches 0 rows and the state op is
-    # lost. `state.name`/`state.url` are a defensive fallback for a record that
-    # omits `id`.
+    # matches (`_ENTITY_ID_PROP`). Since #9881 that is also the table's `node_key`
+    # for every label this dispatch reaches; `state.name`/`state.url` remain a
+    # defensive fallback for a LEGACY state record that carries no id (a Source
+    # keys `node_key` on `url`, an Object/Subject row written before the key move
+    # still resolves through its `name` column).
     key = (payload.get("id") or payload.get("key")
            or state.get("name") or state.get("url"))
     if not isinstance(key, str) or not key:
@@ -1854,8 +1943,28 @@ def _op_dispatch_statements(
     if op in dispatch.delete_ops:
         return _delete_statements(org_id, graph_id, node, key, match=match)
     if op in dispatch.patch_ops:
+        # #9881 — `state` is the write's FULL applied map, and for a rename that
+        # map contains the new `name`. It used to be filtered out of the patch
+        # because `name` WAS the key: writing it would have moved the key without
+        # moving `node_key`, which the schema's `chk_*_node_key_is_contract_key`
+        # refuses. The key is the `id` now, so `name` is an ORDINARY mutable
+        # column and the applied map is written as it stands — a rename moves the
+        # name and nothing else.
+        #
+        # ⛔ A rename names its entity by its STABLE ID and nothing else. The
+        # `state.name` fallback below exists for state ops that name a legacy
+        # node; for a rename it would be exactly backwards ("rename the entity
+        # whose name is X to Y" is the pre-#3590 model, and it cannot say WHICH
+        # of two same-name entities was renamed). Refuse it here, where the
+        # record is known, instead of emitting a patch that matches 0 rows.
+        if op == "rename" and not isinstance(payload.get("id"), str):
+            raise RecordProjectionError(
+                "EntityMutated op='rename' carries no `id`: a rename names its "
+                "entity by the STABLE id (#3590/#9881), so a record that only "
+                "carries a name cannot say which entity moved, and patching by "
+                "name would rename 0 rows — or the wrong one — in silence")
         col_values, tail = _split_properties(
-            table, {k: v for k, v in state.items() if k != "name"},
+            table, dict(state),
             columns=columns, refused=refused,
             drop=dispatch.never_store.get(table, frozenset()),
         )
@@ -2631,12 +2740,12 @@ def _epistemic_endpoint(
     statement built for it below.
 
     The probe is the fold's, `s.id = $sid`, over the four tables; first label in
-    :data:`_EPISTEMIC_LABELS` order wins. The KEY is each label's canonical one
-    (`point.node_key` = the id; `subject`/`object` → `name`; `event` →
-    `node_key` = the `eventId`), because `relation.src_key`/`tgt_key` are
-    composite FKs into `node_identity` — writing the raw journal id for a
-    Subject would address a phantom identity the hard-delete cascade can never
-    reach (the same defect `_endpoint_resolution` exists to prevent).
+    :data:`_EPISTEMIC_LABELS` order wins. The KEY is each label's canonical one,
+    read from :data:`NODE_TABLES` (`Point`/`Subject`/`Object` → `id`, `Event` →
+    `event_id`), because `relation.src_key`/`tgt_key` are composite FKs into
+    `node_identity` — writing the raw journal id for a Subject would address a
+    phantom identity the hard-delete cascade can never reach (the same defect
+    `_endpoint_resolution` exists to prevent).
 
     ⛔ WHICH COLUMN carries `s.id` is per label, and it is NOT always the
     table's `id` column — :data:`_ENTITY_MATCH_COLUMNS` is the one answer, and
@@ -2677,10 +2786,19 @@ def _epistemic_endpoint(
     params: list[Any] = []
     for pref, label in enumerate(_EPISTEMIC_LABELS):
         table = _LABEL_TABLES[label]
-        # Each label's CANONICAL key (`node_identity.key_property`, migration
-        # `20261012000001`): `Point`/`Event` → `node_key` (the id / the
-        # `eventId`), `Subject`/`Object` → `name`.
-        key_column = "node_key" if label in ("Point", "Event") else "name"
+        # Each label's CANONICAL key, taken from :data:`NODE_TABLES` — the table's
+        # declared key column, the same one `_key_value` writes.
+        #
+        # ⛔ DERIVED, not spelled. This line used to read
+        # `"node_key" if label in ("Point","Event") else "name"`, a SECOND
+        # declaration of the key contract, and #9881's key move (Object/Subject
+        # `name` → `id`) made it wrong: the resolver selected the row's `name`
+        # while `node_identity` held its `id`, so every operator edge over a
+        # Subject/Object landed a `tgt_key` the FK refused. `Point`→`id` and
+        # `Event`→`event_id` are the same columns the old expression reached (a
+        # Point's `id` IS its `node_key`, `event_id` is the Event's pin), so this
+        # is one rule for every label rather than a special case per label.
+        key_column = NODE_TABLES[table][1]
         # The FOLD's match column is `s.id`, and WHICH record column carries it
         # is `_ENTITY_MATCH_COLUMNS`' own answer — DERIVED here, never restated.
         # A second spelling of that fact is exactly how the Event arm came to

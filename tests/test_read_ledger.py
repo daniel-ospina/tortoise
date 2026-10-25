@@ -41,7 +41,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -51,6 +50,7 @@ from typing import ClassVar
 import pytest
 
 from tortoise import read_ledger
+from tortoise import record_projection as rp
 from tortoise.read_ledger import (
     KEY_FIELDS,
     LEDGER_FLAG_ENV,
@@ -212,17 +212,19 @@ def test_a_read_for_a_key_never_registered_still_reports_unregistered(ledger):
     assert f.read_keys == 0 and f.zero_read_keys == 1
 
 
-def test_a_subject_row_keyed_only_by_id_is_unresolved_not_mis_keyed(ledger):
-    """`Subject`/`Object` are keyed by `name` in the record; an `id`-only row is a HOLE.
+def test_a_subject_row_keyed_only_by_name_is_unresolved_not_mis_keyed(ledger):
+    """`Subject`/`Object` are keyed by `id` in the record; a name-only row is a HOLE.
 
-    Recording such a row under `id` would put it outside the stock coordinate
-    (registered by `name`) and leave the key at `read_count = 0` — silently
-    inflating the zero-read mass for exactly the labels the label coordinate
-    exists for. It is counted instead.
+    The name is a MUTABLE natural key since #3590/#9881, so the record's
+    coordinate is the stable `id`. Recording such a row under `name` would put it
+    outside the stock coordinate and leave the real key at `read_count = 0` —
+    silently inflating the zero-read mass for exactly the labels the label
+    coordinate exists for, and the flattering direction is the wrong direction
+    for a measurement. It is counted instead.
     """
-    assert row_key("Subject", {"id": "abc", "content": "x"}) is None
-    assert row_key("Subject", {"name": "acme", "id": "abc"}) == "acme"
-    recorded = read_ledger.record_rows("Subject", [{"id": "abc", "content": "x"}])
+    assert row_key("Subject", {"name": "acme", "content": "x"}) is None
+    assert row_key("Subject", {"name": "acme", "id": "abc"}) == "abc"
+    recorded = read_ledger.record_rows("Subject", [{"name": "acme", "content": "x"}])
     assert recorded == 0
     assert fold(ledger).unresolved_reads == 1
 
@@ -411,17 +413,19 @@ def test_key_fields_match_the_record_identity_contract():
     One home beats a copy: if the record's contract changes, this test fails
     rather than the ledger silently recording a key nobody can join on.
     """
-    sql = (ROOT / "supabase/migrations/20261012000001_record_event_stream.sql").read_text()
-    block = sql.split("key_property text NOT NULL GENERATED ALWAYS AS (", 1)[1]
-    block = block.split(") STORED", 1)[0]
-    pairs = dict(re.findall(r"WHEN\s+'(\w+)'\s+THEN\s+'(\w+)'", block))
-    assert pairs == KEY_FIELDS
+    # ⚠️ Through `key_properties()`, which walks the WHOLE migration chain and
+    # takes the LAST declaration — a single-file parse (what this test used to
+    # do) reported the pre-move contract after #9881 re-declared Object/Subject
+    # as `id` in a FORWARD migration, so the ledger and its pin agreed on a key
+    # the database no longer held.
+    assert rp.key_properties() == KEY_FIELDS
 
 
 def test_row_key_resolves_each_label_and_reports_the_unaddressable():
     assert row_key("Point", {"id": "p1"}) == "p1"
     assert row_key("Event", {"eventId": "e1"}) == "e1"
-    assert row_key("Subject", {"name": "acme"}) == "acme"
+    # #9881: a Subject's contract key is its id, not its (mutable) name.
+    assert row_key("Subject", {"id": "s1", "name": "acme"}) == "s1"
     assert row_key("Source", {"url": "https://x/y"}) == "https://x/y"
     # A row carrying no key at all is not silently dropped: it is `None`, which
     # the fold counts as unresolved rather than as a read of nothing.
@@ -1069,7 +1073,7 @@ def test_a_falsy_filters_value_still_means_no_filters():
 
 def test_an_undated_unresolved_event_is_counted_not_dropped(ledger):
     """The coverage-hole counter may not be the one thing that vanishes."""
-    read_ledger.record_rows("Subject", [{"id": "no-name-key"}], path=ledger, at="not-a-date")
+    read_ledger.record_rows("Subject", [{"name": "no-id-key"}], path=ledger, at="not-a-date")
     folded = fold(ledger, window_days=7, now=datetime.fromisoformat("2026-10-18T18:00:00+00:00"))
     assert folded.unresolved_reads == 1
 

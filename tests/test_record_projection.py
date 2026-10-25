@@ -305,13 +305,143 @@ def test_entity_mutated_dispatches_on_op_and_refuses_undeclared_ops():
     assert len(patch) == 1 and patch[0].sql.startswith("UPDATE public.point")
     assert "status" in patch[0].sql and "retracted" in patch[0].params
 
-    with pytest.raises(rp.RefusedJournalOperation) as excinfo:
-        rp.mutations_for({**base, "op": "rename", "name": "n2"},
+    # #9881 — a rename is a PATCH against the node's stable key. This pair used
+    # to assert a `RefusedJournalOperation` (`#3377`/`#4769`) because `node_key`
+    # WAS the name, so applying it would have moved the key. The key is the id
+    # now, so the applied `state` is written as it stands.
+    rename = rp.mutations_for(
+        {**base, "op": "rename", "state": {"name": "n2"}},
+        org_id="o", graph_id="g",
+    )
+    assert len(rename) == 1 and rename[0].sql.startswith("UPDATE public.point")
+    # A Point has no `name` column, so the applied value lands where the graph
+    # itself puts it — the node's property tail (`SET n += $state`).
+    assert "n2" in str(rename[0].params)
+    _renamed = rename[0].sql.split(" SET ", 1)[1].split(" WHERE ", 1)[0]
+    assert "node_key" not in _renamed, (
+        "a rename moved the row's KEY — the one thing #9881 establishes it must "
+        f"never do; the key is the stable id ({_renamed})")
+
+    # ...and a rename that names no id is REFUSED, not silently applied to 0
+    # rows: pre-#3590 "rename the entity whose name is X" cannot say WHICH of
+    # two same-name entities was renamed.
+    with pytest.raises(rp.RecordProjectionError) as excinfo:
+        rp.mutations_for({**base, "id": None, "op": "rename",
+                          "state": {"name": "n2"}},
                          org_id="o", graph_id="g")
-    assert "#3377" in str(excinfo.value)
+    assert "STABLE id" in str(excinfo.value)
 
     with pytest.raises(rp.RecordProjectionError):
         rp.mutations_for({**base, "op": "levitate"}, org_id="o", graph_id="g")
+
+
+def test_9881_a_rename_moves_the_name_and_never_the_objects_key():
+    """The keystone: the record ACCEPTS the producer's rename record (#9881).
+
+    Measured before the fix — this is the reproduction, and it is the reason the
+    test is written against the exact record `sdk._update_entity` journals:
+
+        >>> rp.mutations_for({"type": "EntityMutated", "id": "obj-1",
+        ...                   "label": "Object", "op": "rename",
+        ...                   "state": {"name": "AcmeRenamed"}}, ...)
+        RefusedJournalOperation: EntityMutated op='rename': #3377/#4769 — ... a
+        rename MOVES the canonical key (Object/Subject key = `name`), so it is a
+        key migration, not a patch.
+
+    So the whole write half of #3590 could not land: the first public
+    `update_entity(id, name=…)` on a record-armed deployment raised.
+
+    What the fix establishes, in one sentence: the row's key is the STABLE ID, so
+    the rename is an ordinary column patch. Three assertions, one per clause —
+    it applies (not refused), it writes the NAME column, and it never touches
+    `node_key` (which is what made the old refusal honest).
+    """
+    record = {
+        "type": "EntityMutated", "ts": "T",
+        "id": "1a16d368511-efb0", "label": "Object",
+        "op": "rename", "state": {"name": "AcmeRenamed"},
+    }
+    statements = rp.mutations_for(record, org_id="o", graph_id="g")
+    assert len(statements) == 1, statements
+    sql, params = statements[0].sql, statements[0].params
+    assert sql.startswith("UPDATE public.object"), sql
+    assert "name = %s" in sql, f"the rename did not write the name column: {sql}"
+    assert "AcmeRenamed" in params, params
+    sets_clause = sql.split(" SET ", 1)[1].split(" WHERE ", 1)[0]
+    assert "node_key" not in sets_clause, (
+        "the rename moved the row's KEY. Under the id key a rename is a patch; a "
+        "key move would have to cascade `node_identity` and every incident "
+        "`relation` endpoint, which is exactly the migration #9881 removes")
+    # Matched by the stable id, and the name spelling is still accepted (a
+    # structural edge's descriptor names an Object by NAME — §1.3).
+    assert "id = %s" in sql, sql
+
+    # TWO incarnations, ONE name. This is what a name-keyed row could not do, and
+    # it is the whole point of moving the key: the second rename targets a
+    # DIFFERENT row with the SAME new name and produces its own UPDATE, so no
+    # primary-key collision and no duplicated/orphaned row is possible.
+    second = rp.mutations_for(
+        {**record, "id": "1a16d368512-aa11"}, org_id="o", graph_id="g")
+    assert len(second) == 1, second
+    assert second[0].params != statements[0].params, (
+        "two entities renaming to one name produced the SAME statement — a "
+        "name-keyed record would collapse them into one row")
+    assert second[0].params[-1] == "1a16d368512-aa11", second[0].params
+
+
+def test_the_declared_refusal_mechanism_still_refuses(monkeypatch):
+    """`refused_ops` is EMPTY after #9881 — the MECHANISM must still bite.
+
+    Empty is not the same as absent. The declaration is how a future op the fold
+    cannot apply is refused loudly instead of guessed (`#5285`'s silent-skip
+    rule), and an empty mapping that nothing exercises is a mapping that could
+    quietly stop being consulted. So this constructs one:
+
+    the real record is re-dispatched with a synthetic refusal, proving that an
+    entry in that mapping raises :class:`rp.RefusedJournalOperation` — and that
+    the REAL registry has no member left, which is the #9881 outcome (a refusal
+    that reappears where it does not belong reds this leg too).
+    """
+    import dataclasses
+
+    assert rp.RECORD_MUTATIONS["EntityMutated"].effect.refused_ops == {}, (
+        "a declared refusal came back to `EntityMutated` — #9881 established "
+        "that every state op the fold implements, `rename` included, is "
+        "representable once the key is the stable id")
+
+    effect = dataclasses.replace(
+        rp.RECORD_MUTATIONS["EntityMutated"].effect,
+        refused_ops={"levitate": "synthetic — a test owns this reason"})
+    patched = dataclasses.replace(rp.RECORD_MUTATIONS["EntityMutated"], effect=effect)
+    monkeypatch.setitem(rp.RECORD_MUTATIONS, "EntityMutated", patched)
+
+    with pytest.raises(rp.RefusedJournalOperation) as excinfo:
+        rp.mutations_for(
+            {"type": "EntityMutated", "ts": "T", "id": "o1", "label": "Object",
+             "op": "levitate", "state": {}},
+            org_id="o", graph_id="g")
+    assert "synthetic" in str(excinfo.value)
+
+
+def test_9881_the_semantic_layer_keys_on_id_and_the_reader_sees_the_forward_ddl():
+    """Indicator (3) on the Python side: the key column, and the DDL as read.
+
+    The schema half is pinned in `supabase/tests/` (the CHECK is rewritten and
+    two same-name ids persist); this leg pins that the PROJECTION agrees with it
+    — a projection keyed by `name` against a schema keyed by `id` writes a row
+    its own CHECK refuses, mid-transaction.
+    """
+    assert rp.NODE_TABLES["object"] == ("Object", "id")
+    assert rp.NODE_TABLES["subject"] == ("Subject", "id")
+    key_props = rp.key_properties()
+    assert key_props["Object"] == "id", key_props
+    assert key_props["Subject"] == "id", key_props
+    # The OTHER labels are untouched: this was a two-label key move, not a
+    # re-spelling of the whole contract.
+    assert key_props["Point"] == "id"
+    assert key_props["Event"] == "eventId"
+    assert key_props["Source"] == "url"
+    assert key_props["Session"] == "id"
 
 
 def test_points_merged_deletes_the_losers_and_leaves_the_survivor():
@@ -3170,27 +3300,37 @@ def test_the_epistemic_label_order_is_the_folds_own():
 
 
 def test_the_input_endpoint_resolves_each_labels_canonical_key():
-    """`relation.src_key` is a `node_identity` FK: Subject/Object key on `name`.
+    """`relation.src_key` is a `node_identity` FK: the key is each label's own.
 
     Writing the raw journal id for a Subject would address a phantom identity
     the hard-delete cascade can never reach — the defect
     `_endpoint_resolution` exists to prevent.
+
+    ⚠️ The SELECTed key column is DERIVED from :data:`rp.NODE_TABLES` since
+    #9881, because it used to be spelled here as `"node_key" if label in
+    ("Point","Event") else "name"` — a second declaration of the key contract,
+    which the `Object`/`Subject` → `id` move made wrong (the resolver wrote the
+    row's NAME while `node_identity` held its `id`, and the FK refused every
+    operator edge over a Subject). The fragments below are therefore one rule per
+    label rather than two spellings.
     """
     sql = _relation_statements(_operator_added(
         {"op_type": "IMPL", "inputs": ["p1"]}))[0].sql
     for fragment in (
-        # Point: keyed on its own identity, matched on the SAME column.
-        "SELECT 'Point' AS node_label, node_key AS node_key, 0 AS pref "
+        # Point: keyed on `id` (== `node_key`, the schema's own pin), matched on
+        # `node_key` — the fold's `s.id` probe is `_ENTITY_MATCH_COLUMNS`' call.
+        "SELECT 'Point' AS node_label, id AS node_key, 0 AS pref "
         "FROM public.point WHERE org_id = %s AND graph_id = %s AND node_key = %s",
-        # Subject/Object: matched on the graph id, keyed on the canonical name.
-        "SELECT 'Subject' AS node_label, name AS node_key, 1 AS pref "
+        # Subject/Object: matched on the graph id, keyed on `id` too — the name
+        # is a mutable column since #9881, never an identity.
+        "SELECT 'Subject' AS node_label, id AS node_key, 1 AS pref "
         "FROM public.subject WHERE org_id = %s AND graph_id = %s AND id = %s",
-        "SELECT 'Object' AS node_label, name AS node_key, 2 AS pref "
+        "SELECT 'Object' AS node_label, id AS node_key, 2 AS pref "
         "FROM public.object WHERE org_id = %s AND graph_id = %s AND id = %s",
-        # Event: keyed on the `eventId` (node_key) and matched on the SAME
-        # column — `event.id` is nullable and the dominant producers leave it
-        # NULL (`test_the_event_endpoint_matches_a_column_the_record_fills`).
-        "SELECT 'Event' AS node_label, node_key AS node_key, 3 AS pref "
+        # Event: keyed on `event_id` and matched on the SAME column — `event.id`
+        # is nullable and the dominant producers leave it NULL
+        # (`test_the_event_endpoint_matches_a_column_the_record_fills`).
+        "SELECT 'Event' AS node_label, event_id AS node_key, 3 AS pref "
         "FROM public.event WHERE org_id = %s AND graph_id = %s AND node_key = %s",
         # First label wins; the whole probe is one derived table per endpoint.
         "ORDER BY pref LIMIT 1) src",

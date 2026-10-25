@@ -7962,7 +7962,7 @@ class TortoiseSDK:
         `record_projection` needs — `relation.src_label`/`tgt_label` are bound as
         VALUES and `relation` carries composite FKs into `node_identity`, so the
         record must know WHICH table to resolve the endpoint in (a `Point` keys
-        `node_key = id`, a `Subject` keys `name`) — while the journal fold
+        `node_key = id`, a `Subject` keys `id` since #9881) — while the journal fold
         IGNORES them and resolves labels itself by an id-anchored sweep
         (`rebuild_all` pass-2b). Adding them therefore changes nothing for the
         journal route and is what makes the record route agree with it.

@@ -314,22 +314,30 @@ def test_an_undeclared_record_type_raises_and_executes_no_statement() -> None:
 
 
 def test_a_refused_operation_raises_and_executes_no_statement() -> None:
-    """A DECLARED refusal is a failure, not a skip — through the seam too.
+    """A REFUSAL is a failure, not a skip — through the seam too.
 
-    The refusal named here is `EntityMutated op=rename` — `PointsMerged` used
-    to carry this leg, and since #9892 it projects (one delete per loser),
-    so it can no longer stand in for a refusal. `rename` is the remaining
-    declared refusal (`#3377`/`#4769`: no writer produces it, and on the record
-    side a rename MOVES the canonical key of Object/Subject).
+    The refusal named here is `EntityMutated op=rename` **with no `id`**: a
+    rename names its entity by the stable id (#3590/#9881), so a record carrying
+    only a name cannot say WHICH of two same-name entities moved, and patching by
+    name would touch 0 rows — or the wrong one — in silence. It is refused where
+    the record is known.
+
+    ⚠️ This leg used to stand on the DECLARED refusal (`refused_ops["rename"]`,
+    `#3377`/`#4769`) — the record cannot express a rename while `node_key` is the
+    name. #9881 removed that premise, so `refused_ops` is now EMPTY and the
+    mechanism is pinned separately (`tests/test_record_projection.py::
+    test_the_declared_refusal_mechanism_still_refuses`). What this leg still
+    proves, unchanged, is the seam's half: the raise is a `RecordWriteError` and
+    NOTHING was executed.
     """
     conn = FakeConnection()
-    refused = [{"type": "EntityMutated", "ts": "T", "id": "o1",
-                "label": "Object", "op": "rename", "name": "n2"}]
+    refused = [{"type": "EntityMutated", "ts": "T", "id": None,
+                "label": "Object", "op": "rename", "state": {"name": "n2"}}]
 
     with pytest.raises(rw.RecordWriteError) as excinfo:
         _armed(conn).write(refused, org_id=ORG, graph_id=GRAPH)
 
-    assert isinstance(excinfo.value.__cause__, rp.RefusedJournalOperation)
+    assert isinstance(excinfo.value.__cause__, rp.RecordProjectionError)
     assert conn.statements() == []
 
 

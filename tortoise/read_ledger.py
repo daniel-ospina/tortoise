@@ -37,13 +37,15 @@ ledger as `f`; quote it with its window, its sample and its date, which is what
 §17.4.6 requires of every figure in that table.
 
 **The coordinate is the record's own `(label, key)` contract**, never a bare id:
-`Point → id`, `Event → eventId`, `Subject`/`Object → name`, `Source → url`
+`Point`/`Subject`/`Object` → `id`, `Event → eventId`, `Source → url`
 (`public.node_identity.key_property`, generated from the label; the same set
 `cache_projection.KEY_PROPERTY` derives from the placement doc). ⚠️ The map is
-pinned against the MIGRATION only — **not** against `KEY_PROPERTY`, so that pair
-can drift without a red test (see `KEY_FIELDS` below). The label is part of the coordinate
-because `Subject` and `Object` share `name`: a key-only ledger would collapse
-`(Object, "acme")` and `(Subject, "acme")` into one row.
+pinned against the migration chain through `record_projection.key_properties()`,
+which takes the LAST declaration — `Subject`/`Object` moved from `name` to `id`
+in `20261027000001_record_semantic_id_key.sql` (#9881), and a reader stuck on the
+`CREATE TABLE` would record a coordinate the record no longer holds. The label is
+part of the coordinate because two labels may share a key string: a key-only
+ledger would collapse `(Object, "acme")` and `(Subject, "acme")` into one row.
 
 **Fail direction.** A measurement must never break the product. A ledger write
 that raises is swallowed and logged once — a read never fails because the ledger
@@ -67,7 +69,8 @@ gives each write an atomic end-of-file, so concurrent appenders add whole batche
 and never seek into each other's bytes. Individual LINES are kept under 4 KiB so
 a torn write (a crash mid-`write`) damages at most one record — and a damaged
 line is COUNTED (`lines_skipped`) and reported, never silently dropped. Created
-`0600`: the ledger carries tenant identifiers (`Subject.name`, `Source.url`), so
+`0600`: the ledger carries tenant identifiers (`Subject.name`, `Object.name`,
+`Source.url`), so
 it must not be world-readable just because the umask says so.
 """
 
@@ -137,15 +140,21 @@ def label_for_entity_type(entity_type: str) -> str:
 
 #: The record's key columns, per label — `public.node_identity.key_property`
 #: generated from the label (#7955's identity contract). The RECORD is the
-#: authority; `tests/test_read_ledger.py` pins this map against the MIGRATION (`public.node_identity`).
-#: ⚠️ It is NOT pinned against `cache_projection.KEY_PROPERTY`, which derives from
-#: the same placement doc by a different route — that is the pair that can drift,
-#: and nothing here would notice.
+#: authority; `tests/test_read_ledger.py` pins this map against
+#: `record_projection.key_properties()`, which walks the WHOLE migration chain so
+#: a forward re-declaration is visible. ⚠️ It is NOT pinned against
+#: `cache_projection.KEY_PROPERTY` (a second reader of the same contract by a
+#: different route) — that pair could drift and nothing here would notice.
+#:
+#: `Subject`/`Object` are `id` since #9881 (`20261027000001`): #3590 makes the
+#: name a MUTABLE natural key, so a ledger keyed by it would record a coordinate
+#: that stops joining to `public.node_identity` the first time anything is
+#: renamed — and be counted as never-read, which is the flattering direction.
 KEY_FIELDS: dict[str, str] = {
     "Point": "id",
     "Event": "eventId",
-    "Subject": "name",
-    "Object": "name",
+    "Subject": "id",
+    "Object": "id",
     "Source": "url",
     "Session": "id",
 }
@@ -411,8 +420,8 @@ def _append_many(records: list[dict[str, Any]], *, path: Path | None = None) -> 
                 LEDGER_MAX_BYTES_ENV,
             )
             return 0
-        # 0600 on CREATE: the ledger holds tenant identifiers (`Subject.name`,
-        # `Object.name`, `Source.url`), so it must not be world-readable just
+        # 0600 on CREATE: the ledger holds tenant identifiers (a `Subject`/
+        # `Object` NAME, a `Source` url), so it must not be world-readable just
         # because the umask says so. `os.open` is the only portable way to pass
         # a creation mode through `O_APPEND` — and it cannot TIGHTEN an existing
         # inode, so a file someone pre-created (a restored backup, an earlier run
@@ -559,11 +568,10 @@ def record_read(
 def row_key(label: str, row: Mapping[str, Any]) -> str | None:
     """The `(label, key)` coordinate of ONE returned row, or `None`.
 
-    `label` is already half the coordinate, so a name-shaped fallback cannot
-    collide across labels: `Subject.name` and `Object.name` stay distinct rows.
-    `None` means the row carries no value for the label's CONTRACT field (an FTS
-    `Object` row carries `id`, not `name`; it is not keyless, it is unaddressable
-    in this coordinate) — counted as an UNRESOLVED read
+    `label` is already half the coordinate, so two labels sharing one key string
+    stay distinct rows. `None` means the row carries no value for the label's
+    CONTRACT field (an FTS `Object` row carries neither its `id` nor its
+    `name` in the hit shape) — counted as an UNRESOLVED read
     by the report rather than dropped silently, because a read the ledger cannot
     address is a hole in the denominator as well as in the numerator.
     """
@@ -572,9 +580,9 @@ def row_key(label: str, row: Mapping[str, Any]) -> str | None:
         # For a RECORD label the contract field is REQUIRED. Falling back to any
         # other id-shaped field would record a coordinate the STOCK can never
         # join on: `Subject`/`Object` carry BOTH `id` and `name`, and the
-        # contract key is `name`, so an `id`-keyed read row would silently sit
-        # outside the denominator and be reported as "never read" — the flattering
-        # direction. `None` here is counted, not dropped.
+        # contract key is `id` (since #9881), so a name-keyed read row would
+        # silently sit outside the denominator and be reported as "never read" —
+        # the flattering direction. `None` here is counted, not dropped.
         value = row.get(field_name)
         return str(value) if value else None
     for alt in ("id", "eventId", "name", "url"):
@@ -1178,7 +1186,7 @@ def _main(argv: list[str] | None = None) -> int:
         print(
             f"⚠️ reads outside the denominator: {f.unregistered_reads} unregistered, "
             f"{f.unresolved_reads} with no value for their label's contract field "
-            f"(an FTS Subject/Object/Source row carries `id`, not `name`/`url`) — "
+            f"(an FTS Subject/Object/Source row carries neither its `id` nor its `url`) — "
             f"f undercounts the numerator by these"
         )
     if folded.lines_skipped:

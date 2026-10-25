@@ -192,6 +192,44 @@ for (const f of files) {
     if (f === '20260813000002_metering_nodes_written.sql') {
       await db.exec('DROP FUNCTION IF EXISTS public.metering_increment(text, text, integer);');
     }
+    if (f === '20261027000001_record_semantic_id_key.sql') {
+      // #9881 — seed the PRE-MOVE shape so this migration's RE-KEY runs on real
+      // rows. Without it the file is applied to empty tables, and its whole data
+      // path (identity parents, relation endpoints, node keys, orphan cleanup)
+      // could be deleted with every suite still green — which is exactly how a
+      // re-key that ABORTS on a populated table (the `node_key = name` CHECK
+      // firing against `SET node_key = id`) stayed invisible to review. The
+      // `#9881` leg below asserts the post-move state of these four rows.
+      await db.exec(`
+        INSERT INTO public.organizations (id, name, graph_name)
+          VALUES ('9881-mig-org', '9881-mig-org', 'org_9881-mig-org')
+          ON CONFLICT DO NOTHING;
+        INSERT INTO public.graphs (id, org_id, name, namespace)
+          VALUES ('9881-mig-graph', '9881-mig-org', '9881-mig-graph',
+                  'org_9881-mig-org_9881-mig-graph')
+          ON CONFLICT DO NOTHING;
+        INSERT INTO public.node_identity (org_id, graph_id, node_label, node_key)
+          VALUES ('9881-mig-org','9881-mig-graph','Object','Acme'),
+                 ('9881-mig-org','9881-mig-graph','Object','Beta'),
+                 ('9881-mig-org','9881-mig-graph','Subject','team-x')
+          ON CONFLICT DO NOTHING;
+        INSERT INTO public.object (org_id, graph_id, node_key, id, name, object_kind)
+          VALUES ('9881-mig-org','9881-mig-graph','Acme','obj-acme','Acme','org'),
+                 ('9881-mig-org','9881-mig-graph','Beta','obj-beta','Beta','org')
+          ON CONFLICT DO NOTHING;
+        INSERT INTO public.subject (org_id, graph_id, node_key, id, name, subject_kind)
+          VALUES ('9881-mig-org','9881-mig-graph','team-x','sub-team','team-x','team')
+          ON CONFLICT DO NOTHING;
+        -- BOTH endpoints are name-keyed, so the re-key has to move both halves
+        -- of the edge (and neither endpoint is a Point, which the record-count
+        -- assertions elsewhere in this harness own).
+        INSERT INTO public.relation (org_id, graph_id, rel_type, src_label, src_key,
+                                     tgt_label, tgt_key, idx)
+          VALUES ('9881-mig-org','9881-mig-graph','ownedBy','Object','Acme',
+                  'Subject','team-x',0)
+          ON CONFLICT DO NOTHING;
+      `);
+    }
     if (f === '20260919000001_metering_period_end_repair.sql') {
       // #4216: seed a HALF-KNOWN subscription anchor so this migration's
       // DEPLOY-TIME one-time SELECT is exercised. The repair suites test the
@@ -389,6 +427,72 @@ for (const f of files) {
   }
   await db.exec("DELETE FROM public.organizations WHERE id = '4216-migrate-seed'");
   console.log('✓ #4216: the migration\'s deploy-time repair completed the seeded NULL-end org');
+}
+
+// ── #9881: the KEY MOVE's re-key actually ran, on PRE-MOVE rows ─────────────
+// The seed above was inserted BEFORE `20261027000001`, so only that migration's
+// own steps can have moved it: identity parents, both `relation` endpoints, the
+// two node keys, and the cleanup of the abandoned name identities. Asserted
+// HERE, against the rows themselves, because every other suite runs AFTER the
+// migration and can only see its output — and because applying it to EMPTY
+// tables (which is what "apply every migration in order" otherwise does) leaves
+// the entire data path deletable with the harness still green.
+//
+// The measured failure this exists for: with the two `chk_*_node_key_is_contract_key`
+// pins left in force, step 3's `SET node_key = id` violates the OLD
+// `node_key = name` pin and the migration ABORTS on the first real row
+// (`new row for relation "object" violates check constraint …`) — invisible to
+// every empty-table application.
+{
+  const r = await db.query(
+    `SELECT
+       (SELECT node_key FROM public.object
+          WHERE org_id = '9881-mig-org' AND graph_id = '9881-mig-graph'
+            AND id = 'obj-acme')                                        AS object_key,
+       (SELECT name FROM public.object
+          WHERE org_id = '9881-mig-org' AND graph_id = '9881-mig-graph'
+            AND id = 'obj-acme')                                        AS object_name,
+       (SELECT node_key FROM public.subject
+          WHERE org_id = '9881-mig-org' AND graph_id = '9881-mig-graph'
+            AND id = 'sub-team')                                        AS subject_key,
+       (SELECT src_key FROM public.relation
+          WHERE org_id = '9881-mig-org' AND graph_id = '9881-mig-graph'
+            AND rel_type = 'ownedBy')                                   AS edge_src_key,
+       (SELECT tgt_key FROM public.relation
+          WHERE org_id = '9881-mig-org' AND graph_id = '9881-mig-graph'
+            AND rel_type = 'ownedBy')                                   AS edge_tgt_key,
+       (SELECT count(*) FROM public.node_identity
+          WHERE org_id = '9881-mig-org' AND graph_id = '9881-mig-graph'
+            AND node_label = 'Object' AND node_key = 'Acme')             AS stale_identity,
+       (SELECT count(*) FROM public.node_identity
+          WHERE org_id = '9881-mig-org' AND graph_id = '9881-mig-graph'
+            AND node_label = 'Object'
+            AND node_key = 'obj-acme' AND key_property = 'id')           AS new_identity`);
+  const m = r.rows[0];
+  const bad = (msg) => {
+    console.error(`✗ #9881 RE-KEY: ${msg}: ${JSON.stringify(m)}`);
+    process.exit(1);
+  };
+  if (m.object_key !== 'obj-acme' || m.subject_key !== 'sub-team') {
+    bad('a pre-move Object/Subject row is not keyed by its id — the re-key did '
+      + 'not run, or it aborted against the old `node_key = name` CHECK');
+  }
+  if (m.object_name !== 'Acme') {
+    bad('the re-key moved the NAME as well as the key');
+  }
+  if (m.edge_src_key !== 'obj-acme' || m.edge_tgt_key !== 'sub-team') {
+    bad('an incident relation endpoint did not follow its node key — a rebuild '
+      + 'would wire the edge to nodes that no longer exist');
+  }
+  if (Number(m.stale_identity) !== 0) {
+    bad('the abandoned name identity survived the re-key');
+  }
+  if (Number(m.new_identity) !== 1) {
+    bad('no node_identity row holds the new key with key_property = id');
+  }
+  await db.exec("DELETE FROM public.organizations WHERE id = '9881-mig-org'");
+  console.log('✓ #9881: the key move re-keys pre-move Object/Subject rows onto their '
+    + 'id, its relation endpoints follow, and the abandoned name identity is gone');
 }
 
 // ── #3036: the migration's DANGLING-POINTER repair actually ran ─────────────
@@ -978,10 +1082,17 @@ try {
   }
 
   // The `EntityMutated` Subject supersede is a state op whose record identity
-  // is the entity `id` — the row's `node_key` is `name`, so a `node_key`-keyed
-  // patch silently touches 0 rows (the count assertion above cannot see it).
+  // is the entity `id`. Since #9881 that IS the row's `node_key` (the name moved
+  // to a mutable column), so the assertion below reads the row by its key AND
+  // checks the name column separately — a patch that matched by name would touch
+  // 0 rows under the new key, which the count assertion above cannot see.
   const superseded = await db.query(
-    `SELECT superseded_by FROM public.subject WHERE node_key = 'team-x'`);
+    `SELECT superseded_by, name, node_key FROM public.subject
+      WHERE node_key = 'sub1'`);
+  if (superseded.rows[0]?.name !== 'team-x') {
+    console.error(`✗ #9881: the Subject row is not keyed by its id with the name kept as a column: ${JSON.stringify(superseded.rows)}`);
+    process.exit(1);
+  }
   if (superseded.rows[0]?.superseded_by !== 'team-y') {
     console.error(`✗ #7969: the Subject supersede was silently dropped: ${JSON.stringify(superseded.rows)}`);
     process.exit(1);
@@ -1038,22 +1149,29 @@ try {
   }
 
   // The `EntityLinked` endpoint is addressed by its journal `id` (`o1`,
-  // `link_entity(proj,"Point",pid,o.id)`), but the relation's endpoints are
-  // composite FKs into `node_identity`, whose key for an Object is its `name`.
-  // Writing the raw id through attached the edge to a PHANTOM `Object/o1` and
-  // left it alive when the Object was hard-deleted (the cascade resolves the
-  // id to the name-keyed row). Assert the resolution, not the row count.
+  // `link_entity(proj,"Point",pid,o.id)`), and since #9881 an Object's
+  // `node_key` IS that id — so the edge is filed by `o1` and the row it points at
+  // is the one the Object was registered under. (Before the key move the
+  // endpoint resolved by id to a NAME-keyed row; the resolution step is the same
+  // and the assertion is what pins which key it lands.)
   const objectEdge = await db.query(
     `SELECT count(*) AS n FROM public.relation
       WHERE rel_type = 'aboutObject' AND src_label = 'Point' AND src_key = 'p1'
-        AND tgt_label = 'Object' AND tgt_key = 'release-1.0'`);
+        AND tgt_label = 'Object' AND tgt_key = 'o1'`);
   if (Number(objectEdge.rows[0].n) !== 1) {
-    console.error(`✗ #7969: the EntityLinked endpoint did not resolve to the name-keyed Object: ${JSON.stringify(objectEdge.rows)}`);
+    console.error(`✗ #9881: the EntityLinked endpoint did not resolve to the id-keyed Object: ${JSON.stringify(objectEdge.rows)}`);
+    process.exit(1);
+  }
+  // ...and it is the REGISTERED row (`o1`), not a stub minted from the ref.
+  const objectName = await db.query(
+    `SELECT name FROM public.object WHERE node_key = 'o1'`);
+  if (objectName.rows[0]?.name !== 'release-1.0') {
+    console.error(`✗ #9881: the id-keyed Object row does not carry its name column: ${JSON.stringify(objectName.rows)}`);
     process.exit(1);
   }
   const phantomIdentity = await db.query(
     `SELECT count(*) AS n FROM public.node_identity
-      WHERE node_label = 'Object' AND node_key IN ('o1', 'no-such-object')`);
+      WHERE node_label = 'Object' AND node_key = 'no-such-object'`);
   if (Number(phantomIdentity.rows[0].n)) {
     console.error(`✗ #7969: an EntityLinked endpoint minted a phantom Object node_identity: ${JSON.stringify(phantomIdentity.rows)}`);
     process.exit(1);
@@ -1068,14 +1186,14 @@ try {
     process.exit(1);
   }
   // A hard-deleted Object cascades its identity row (and therefore its edges):
-  // the `aboutObject` edge to `release-2.0` must not survive `o2`'s delete.
+  // the `aboutObject` edge to `o2` must not survive `o2`'s delete.
   const o2 = await db.query(
     `SELECT
-       (SELECT count(*) FROM public.object WHERE node_key = 'release-2.0')          AS node_row,
+       (SELECT count(*) FROM public.object WHERE node_key = 'o2')                   AS node_row,
        (SELECT count(*) FROM public.node_identity
-          WHERE node_label = 'Object' AND node_key = 'release-2.0')                 AS identity_row,
+          WHERE node_label = 'Object' AND node_key = 'o2')                          AS identity_row,
        (SELECT count(*) FROM public.relation
-          WHERE tgt_label = 'Object' AND tgt_key = 'release-2.0')                   AS edges`);
+          WHERE tgt_label = 'Object' AND tgt_key = 'o2')                            AS edges`);
   if (Number(o2.rows[0].node_row) || Number(o2.rows[0].identity_row) ||
       Number(o2.rows[0].edges)) {
     console.error(`✗ #7969: the hard-deleted Object kept state: ${JSON.stringify(o2.rows)}`);
@@ -1341,12 +1459,12 @@ try {
          (SELECT count(*) FROM public.point
             WHERE org_id = $1 AND graph_id = $2 AND node_key = 'p1')     AS point_row,
          (SELECT count(*) FROM public.subject
-            WHERE org_id = $1 AND graph_id = $2 AND id = 'sub1')         AS subject_by_id,
+            WHERE org_id = $1 AND graph_id = $2 AND node_key = 'sub1')   AS subject_by_key,
          (SELECT count(*) FROM public.subject
-            WHERE org_id = $1 AND graph_id = $2 AND node_key = 'team-x') AS subject_by_name,
+            WHERE org_id = $1 AND graph_id = $2 AND name = 'team-x')     AS subject_by_name,
          (SELECT count(*) FROM public.node_identity
             WHERE org_id = $1 AND graph_id = $2
-              AND node_label = 'Subject' AND node_key = 'team-x')        AS subject_identity`,
+              AND node_label = 'Subject' AND node_key = 'sub1')          AS subject_identity`,
       tenant);
     throw new Error(
       `expected exactly 1 ownedBy relation row, got ${first.rows.length} — the `
@@ -1355,7 +1473,10 @@ try {
   }
   const row = first.rows[0];
   const got = `${row.src_label}/${row.src_key} -> ${row.tgt_label}/${row.tgt_key} idx=${row.idx}`;
-  const want = 'Point/p1 -> Subject/team-x idx=0';
+  // #9881: the Subject's key IS its id, so the edge is filed under `sub1` and
+  // the NAME it was registered with lives in the row's `name` column. A
+  // name-keyed endpoint here would be the pre-#3590 shape the key move removes.
+  const want = 'Point/p1 -> Subject/sub1 idx=0';
   if (got !== want) {
     throw new Error(
       `the ownedBy row is ${got}, expected ${want} — a `
@@ -1371,9 +1492,17 @@ try {
       + '— the relation upsert is not idempotent for this family');
   }
   unlinkSync(segment);
+  const named = await db.query(
+    `SELECT name FROM public.subject
+      WHERE org_id = $1 AND graph_id = $2 AND node_key = 'sub1'`, tenant);
+  if (named.rows[0]?.name !== 'team-x') {
+    throw new Error(
+      'the Subject row keyed by sub1 does not carry name=team-x — the name '
+      + `column is what keeps the name addressable after the key move (#9881): ${JSON.stringify(named.rows)}`);
+  }
   console.log('✓ #9553: a structural `ownedBy` edge lands one `relation` row '
-    + '(Point/p1 -> Subject/team-x, the Subject filed by its NAME), and '
-    + 're-replays idempotently');
+    + '(Point/p1 -> Subject/sub1, the Subject filed by its ID with the name kept '
+    + 'as a column — #9881), and re-replays idempotently');
 } catch (e) {
   console.error(`✗ #9553 R5/class-4 FAILED:\n  ${e.message.split('\n').slice(0, 6).join('\n  ')}`);
   process.exit(1);
@@ -1849,17 +1978,18 @@ try {
   const got = first.rows.map((r) => `${r.rel_type} ${r.src_label}/${r.src_key}`
     + ` -> ${r.tgt_label}/${r.tgt_key} idx=${r.idx}`).sort();
   const want = [
-    // The Subject input is filed under Subject/sub1 — its NODE_KEY, not the
-    // journal id — because `relation.src_key` is a `node_identity` FK.
+    // The Subject input is filed under Subject/s1 — its NODE_KEY, which is its
+    // stable `id` since #9881 (`sub1` is the NAME that row carries as a mutable
+    // column), because `relation.src_key` is a `node_identity` FK.
     'IMPL Point/op1 -> Point/p1 idx=0',
     'IMPL Point/mid -> Point/op1 idx=0',
-    'IMPL Point/op1 -> Subject/sub1 idx=1',
+    'IMPL Point/op1 -> Subject/s1 idx=1',
     // The Event input (`eventId` only, `event.id` NULL) resolves on `node_key`:
     // the row that was missing before the fix, for the shape every producer emits.
     'IMPL Point/op1 -> Event/ev1 idx=2',
     'INPUT Point/p1 -> Point/op1 idx=0',
     'INPUT Point/op1 -> Point/mid idx=0',
-    'INPUT Subject/sub1 -> Point/op1 idx=1',
+    'INPUT Subject/s1 -> Point/op1 idx=1',
     'INPUT Event/ev1 -> Point/op1 idx=2',
     'mitigated_by Point/op1 -> Point/mid idx=0',
   ].sort();
@@ -1879,6 +2009,115 @@ try {
     + 'Point, a Subject AND an Event endpoint), and re-replays idempotently');
 } catch (e) {
   console.error(`✗ #9553 R5/OPERATOR FAILED:\n  ${e.message.split('\n').slice(0, 40).join('\n  ')}`);
+  process.exit(1);
+}
+
+// ── #9881: a RENAME applies — live and on replay (the keystone leg) ────────
+//
+// The record refused `EntityMutated op=rename` outright while an Object/Subject
+// was keyed by its NAME ("a rename MOVES the canonical key, so it is a key
+// migration, not a patch"). The producer (#3590's write surface) journals
+// exactly this record on the first `update_entity(id, name=…)`, so the entire
+// write half could not land: on a record-armed deployment the durable write
+// raised and the caller had to roll back.
+//
+// What this leg measures, against a REAL database, end to end:
+//   1. the rename APPLIES — the name column moves, the key does not;
+//   2. TWO incarnations may share the new name (the reason the key is the id:
+//      under a name key the second row could not exist, and under a key MOVE it
+//      would collide on the primary key);
+//   3. replay is IDEMPOTENT and `rebuild == live` for this record — the journal
+//      replayed twice leaves the same two rows (Indicator 4).
+try {
+  const tenant = ['9881-org', '9881-graph'];
+  await db.exec(`
+    INSERT INTO public.organizations (id, name, graph_name)
+      VALUES ('9881-org', '9881-org', 'org_9881-org');
+    INSERT INTO public.graphs (id, org_id, name, namespace)
+      VALUES ('9881-graph', '9881-org', '9881-graph', 'org_9881-org_9881-graph');
+  `);
+  const segment = join(tmpdir(), `9881-rename-${process.pid}.jsonl`);
+  const records = [
+    { type: 'ObjectRegistered', ts: '2026-10-24T00:00:01Z', event_id: 'ev-9881-1',
+      projection_version: 2, id: 'obj-9881-a', name: 'Acme', objectKind: 'org' },
+    // EXACTLY the record `sdk._update_entity` journals for a rename.
+    { type: 'EntityMutated', ts: '2026-10-24T00:00:02Z', event_id: 'ev-9881-2',
+      projection_version: 2, id: 'obj-9881-a', label: 'Object',
+      op: 'rename', state: { name: 'AcmeRenamed' } },
+    // A SECOND incarnation that now holds the SAME name — legal only because
+    // the key is the id.
+    { type: 'ObjectRegistered', ts: '2026-10-24T00:00:03Z', event_id: 'ev-9881-3',
+      projection_version: 2, id: 'obj-9881-b', name: 'AcmeRenamed', objectKind: 'org' },
+  ];
+  writeFileSync(segment, records.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  const emitted = JSON.parse(execFileSync(
+    'python3',
+    ['-c', PROJECTION_PY, join(REPO_ROOT, 'tortoise', 'record_projection.py'),
+     segment, ...tenant],
+    { encoding: 'utf8' },
+  ));
+  // The fix's own shape, before any SQL runs: the rename emits an UPDATE, and it
+  // emits no refusal and no key move.
+  const renameStmt = emitted.plan.find((x) => x.sql.startsWith('UPDATE public.object'));
+  if (!renameStmt) {
+    throw new Error('the projection emitted NO `UPDATE public.object` for the '
+      + 'rename — `refused_ops` still refuses `EntityMutated op=rename`, which is '
+      + 'the refusal the whole write half of #3590 is blocked on (#9881)');
+  }
+  if (/SET[^W]*node_key/.test(renameStmt.sql)) {
+    throw new Error(`the rename statement MOVES the key: ${renameStmt.sql} — a `
+      + 'key move is the schema redesign #9881 replaces with the id key');
+  }
+  const applySegment = async () => {
+    await db.exec('BEGIN');
+    for (const statement of emitted.plan) {
+      await db.query(statement.sql, statement.params);
+    }
+    await db.exec('COMMIT');
+  };
+  const readObjects = async () => db.query(
+    `SELECT node_key, id, name FROM public.object
+      WHERE org_id = $1 AND graph_id = $2 ORDER BY node_key`, tenant);
+  await applySegment();
+  const first = await readObjects();
+  if (first.rows.length !== 2) {
+    throw new Error(`expected 2 Object rows, got ${JSON.stringify(first.rows)}`);
+  }
+  const byKey = Object.fromEntries(first.rows.map((r) => [r.node_key, r]));
+  if (byKey['obj-9881-a']?.name !== 'AcmeRenamed') {
+    throw new Error(`the renamed Object did not move its name: ${JSON.stringify(byKey['obj-9881-a'])}`);
+  }
+  if (byKey['obj-9881-a']?.id !== 'obj-9881-a') {
+    throw new Error(`the renamed Object's id column moved: ${JSON.stringify(byKey['obj-9881-a'])}`);
+  }
+  if (byKey['obj-9881-b']?.name !== 'AcmeRenamed') {
+    throw new Error(`the second incarnation lost its name: ${JSON.stringify(byKey['obj-9881-b'])}`);
+  }
+  const identities = await db.query(
+    `SELECT node_key FROM public.node_identity
+      WHERE org_id = $1 AND graph_id = $2 AND node_label = 'Object'
+      ORDER BY node_key`, tenant);
+  if (JSON.stringify(identities.rows.map((r) => r.node_key))
+      !== JSON.stringify(['obj-9881-a', 'obj-9881-b'])) {
+    throw new Error(`the Object identity rows are ${JSON.stringify(identities.rows)} — `
+      + 'a rename that re-keyed the row would have left the OLD name behind here');
+  }
+  // INDICATOR 4 — `rebuild == live`: replaying the same journal onto the same
+  // record is a no-op, so the rows above ARE the rebuild's output.
+  await applySegment();
+  const second = await readObjects();
+  if (JSON.stringify(second.rows) !== JSON.stringify(first.rows)) {
+    throw new Error('a second replay changed the Object rows: '
+      + `${JSON.stringify(first.rows)} then ${JSON.stringify(second.rows)}`);
+  }
+  unlinkSync(segment);
+
+  console.log('✓ #9881: an `EntityMutated op=rename` APPLIES (name moves, key does '
+    + 'not), two same-name incarnations coexist, and the replay is idempotent');
+  console.log('✓ #9881: the RE-KEY moves a pre-move Object/Subject onto its id, its '
+    + 'relation endpoint follows, and the abandoned name identity is gone');
+} catch (e) {
+  console.error(`✗ #9881 RENAME FAILED:\n  ${e.message.split('\n').slice(0, 20).join('\n  ')}`);
   process.exit(1);
 }
 
