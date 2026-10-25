@@ -583,6 +583,29 @@ def test_the_detail_budget_bounds_the_reads_that_decide_the_actions(sweep: Any) 
     assert report.exit_code == 0
 
 
+def test_a_queue_config_of_the_wrong_shape_is_unreadable_too(sweep: Any, tmp_path: Path) -> None:
+    """Parsing is not reading: the wrong SHAPE must refuse like a missing file.
+
+    `queue_prefixes()` wraps the read in `except Exception -> ConfigError`, and
+    the comprehension that walks `queue_rules` used to sit OUTSIDE it, so a
+    config that yaml happily parses to a list, a string rule or an int escaped
+    as AttributeError/TypeError. `main()` catches only `ConfigError`, so the
+    documented "2 = could not act" became a traceback and exit 1 — not a
+    mutation (the direction is still fail-closed) but not the refusal the
+    module contract promises (#9946 review cycle 3).
+    """
+    shapes = {
+        "top-level list": "- queue_rules:\n",
+        "string rule": "queue_rules:\n  - just-a-string\n",
+        "scalar rules": "queue_rules: 7\n",
+    }
+    for name, text in shapes.items():
+        path = tmp_path / f"{name.replace(' ', '-')}.yml"
+        path.write_text(text)
+        with pytest.raises(sweep.ConfigError):
+            sweep.queue_prefixes(path)
+
+
 def test_the_default_detail_budget_is_the_rail_that_ships(sweep: Any) -> None:
     """`main()` passes no `detail_budget`, so the CONSTANT is the shipped rail.
 
@@ -761,7 +784,17 @@ def test_every_relay_comment_step_checks_for_an_existing_comment_first(sweep: An
     The sweep applies this policy on a schedule, so by the time a HELD external
     run is approved the item may already be labelled, commented and closed. A
     read that happens after `createComment` is not a check.
+
+    ⛔ Present-and-ordered is NOT the property worth pinning on its own: measured
+    in cycle 3, replacing the predicate with `const alreadyCommented = false;`
+    left every test green, because the read and its position still existed and
+    the rail had silently become "never skip". So the DETECTION CONSTANT is bound
+    to the sweep's marker, and the predicate must actually consume it plus the
+    same author rule `already_relayed()` applies — a bot-typed comment or the
+    owner's login, never the bare string an author could paste.
     """
+    import re
+
     for script in _relay_comment_scripts():
         assert "listComments" in script, (
             "this step posts a relay comment without looking for one it already "
@@ -769,6 +802,33 @@ def test_every_relay_comment_step_checks_for_an_existing_comment_first(sweep: An
         )
         assert script.index("listComments") < script.index("createComment"), (
             "the duplicate-comment check runs AFTER the comment is posted"
+        )
+
+        consts = re.findall(r"const FOOTER = '([^']*)'", script)
+        assert consts == [sweep.RELAY_MARKER], (
+            f"the step compares against {consts!r} but the sweep recognises its "
+            f"own comment by {sweep.RELAY_MARKER!r}: the two paths would stop "
+            "recognising each other and both would post"
+        )
+
+        start = script.find("const alreadyCommented")
+        gate = script.find("if (!alreadyCommented)")
+        assert start != -1, "no `alreadyCommented` predicate to bind"
+        assert gate != -1, "the result of the check does not gate the comment"
+        assert start < gate, (
+            "the check must be decided BEFORE the gate that posts the comment"
+        )
+        # The slice, not a regex: the predicate is a multi-line arrow function
+        # whose body carries its own semicolons, so a `;`-terminated match stops
+        # at `const user = …;` and tests nothing.
+        body = script[start:gate]
+        assert "includes(FOOTER)" in body, (
+            "the predicate does not test for the footer, so it cannot tell a "
+            f"relayed item from a fresh one: {body}"
+        )
+        assert "user.type" in body and "user.login === owner" in body, (
+            "the predicate does not apply `already_relayed()`'s author rule "
+            f"(a bot comment, or the owner's own login): {body}"
         )
 
 

@@ -919,15 +919,22 @@ def queue_prefixes(path: Path = MERGIFY) -> tuple[str, ...]:
         import yaml
 
         doc = yaml.safe_load(path.read_text()) or {}
+        # ⛔ INSIDE the try: a config that PARSES to the wrong shape is exactly
+        # as unreadable as a missing one, and the comprehension below used to sit
+        # outside it — so `- queue_rules:` (a list), `queue_rules: [just-a-string]`
+        # and `queue_rules: 7` all escaped as AttributeError/TypeError, `main()`
+        # (which catches only ConfigError) died with a traceback and exit 1, and
+        # the documented "2 = could not act" contract was broken on the shapes a
+        # reconfigured queue actually produces (#9946 review cycle 3).
+        prefixes = {
+            str(rule.get("queue_branch_prefix") or DOCUMENTED_DEFAULT_PREFIX)
+            for rule in (doc.get("queue_rules") or [])
+        }
     except Exception as exc:
         raise ConfigError(
             f"cannot read the queue configuration at {path} ({exc}): the sweep "
             "cannot tell a queue batch from an external PR, so it must not act"
         ) from exc
-    prefixes = {
-        str(rule.get("queue_branch_prefix") or DOCUMENTED_DEFAULT_PREFIX)
-        for rule in (doc.get("queue_rules") or [])
-    }
     return tuple(sorted(prefixes or {DOCUMENTED_DEFAULT_PREFIX}))
 
 
