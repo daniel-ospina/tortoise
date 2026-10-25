@@ -5637,6 +5637,99 @@ def _backup_watcher_health() -> dict:
         }
 
 
+def _record_health() -> dict:
+    """#9548: is the Postgres record ARMED on THIS deployment? — for /health.
+
+    The record's arming is PRESENCE-based on purpose (`record_writer` decision
+    2): unset ⇒ ``NOT_ARMED`` ⇒ zero statements, no connection attempt, no
+    exception. That is the right default, and it has one cost that has now been
+    paid: **an unarmed deployment and an armed-and-healthy one are byte-identical
+    from outside the process** — so `TORTOISE_RECORD_DSN` stayed unset on the
+    hosted app through a P0 (#9548) without anything going red, and the runbook
+    had to tell an operator to read `fly logs` greps to discover it. This block
+    is the missing read: the facts, on the surface an operator already curls.
+
+    It reports the seam's OWN answer, never a second opinion — ``record_dsn()``
+    is the single arming rule, so this cannot say "armed" for a value the write
+    path would refuse. It collects **no I/O** (#2850): an env read, a scheme
+    check and in-memory counters — never a connection, never a thread hand-off,
+    so an unreachable record cannot delay or fail a liveness probe.
+
+    Facts, not a verdict on reachability (``armed`` says the value is present
+    and well-formed; it does NOT say the database answers — that is what the
+    write counters below are for):
+
+      * ``armed``      — a usable DSN is present. ``False`` + ``error: null`` is
+        the supported default-off state; ``False`` + ``error`` is a value that
+        was SET and cannot be used.
+      * ``dsn``        — the 8-hex fingerprint of the value, or ``None``. Never
+        the value: it names the secret without disclosing it, so an operator
+        can tell the deployed value from a stale one.
+      * ``single_tenant_declared`` — whether this deployment stated that it
+        serves exactly ONE record tenant (#9192). Multi-tenant (``False``) is
+        the fail-closed default the hosted app MUST stay on; it is what makes
+        the process-global org/graph env pair be refused instead of misused.
+      * the three record counters, under the SAME names ``metrics()`` publishes
+        (#9188/#9231/#9307) — the hosted app has no ``/metrics`` route, so
+        without them indicator (b) of #9548 (``record_write_failures`` = 0) has
+        no reader at all on the deployment it is claimed about.
+
+    ``ok`` is False ONLY for a set-but-unusable value, and that one case folds
+    into ``status`` — the ``backup_watcher`` rule: off-by-policy stays ``ok``,
+    "wanted but broken" degrades. A typo'd DSN is exactly the silent-arming
+    defect this exists to end: it is counted ``malformed_dsn`` on every capture
+    and the record stays empty while the operator believes it is armed.
+
+    Never raises and never 5xxes — a health path must always answer.
+    """
+    try:
+        from tortoise import record_writer
+        from tortoise.monitoring import (
+            record_non_journal_skip_counts,
+            record_position_unproven_count,
+            record_write_failure_counts,
+        )
+    except Exception as exc:  # liveness must answer, always
+        return {"armed": False, "ok": False, "dsn": None,
+                "single_tenant_declared": False, "error": str(exc)[:200]}
+    try:
+        counters = {
+            "record_write_failures": record_write_failure_counts(),
+            # The sibling keys, not folded into the counter above: a
+            # `no_durable_journal` decline is the HEALTHY M2 lane and a
+            # `position_unproven` append is healed by a replay, so neither may
+            # move the zero that means "no record row was lost" (#9231/#9307).
+            "record_non_journal_skips": record_non_journal_skip_counts(),
+            "record_position_unproven": record_position_unproven_count(),
+        }
+    except Exception as exc:  # liveness must answer, always
+        counters = {"error": str(exc)[:200]}
+    try:
+        single_tenant = record_writer.single_tenant_declared()
+    except Exception:
+        single_tenant = False
+    try:
+        dsn = record_writer.record_dsn()
+    except record_writer.RecordWriteError as exc:
+        # configured-but-unusable: the value is SET, so this is not "off by
+        # policy". The error already carries a fingerprint, never the value.
+        return {"armed": False, "ok": False, "dsn": None,
+                "single_tenant_declared": single_tenant,
+                "error": str(exc)[:200], **counters}
+    except Exception as exc:  # liveness must answer, always
+        return {"armed": False, "ok": False, "dsn": None,
+                "single_tenant_declared": single_tenant,
+                "error": str(exc)[:200], **counters}
+    return {
+        "armed": dsn is not None,
+        "ok": True,
+        "dsn": None if dsn is None else record_writer.dsn_fingerprint(dsn),
+        "single_tenant_declared": single_tenant,
+        "error": None,
+        **counters,
+    }
+
+
 @app.get("/health")
 async def health():
     """Liveness + deep DB check — process up and serving. NEVER gates on the DB.
@@ -5675,7 +5768,8 @@ async def health():
     # ``_health_probe_loop`` refresher, not from the check.
     #
     # The response shape is unchanged for deploy/dashboard consumers:
-    # ``{"status", "db"}`` — ``probe`` and ``loop_stale_ms`` are additive.
+    # ``{"status", "db"}`` — ``probe``, ``loop_stale_ms``, ``record`` and the
+    # other sub-blocks are additive.
     # It never 5xxes: a dead DB is "degraded", never a killed process.
 
     Watcher check (#2877): a dead/never-started backup watcher is the SAME
@@ -5694,6 +5788,14 @@ async def health():
     ``_change_feed_health``): a single tenant's refused store write is not this
     process's liveness, and restarting the worker over it would destroy the only
     place the acknowledgement can be made.
+
+    Record check (#9548): ``record`` reports whether the Postgres record is
+    ARMED on this deployment, plus the three record counters — the same class as
+    ``change_feed`` (state that lives inside the process, or in an env var only
+    the process can resolve) and the same class as ``backup_watcher`` (a
+    durability seam whose "off" state must be distinguishable from "on"). See
+    ``_record_health``; it collects no I/O, and only a set-but-unusable DSN
+    degrades ``status``.
     """
     try:
         db = _HEALTH_PROBE.snapshot()
@@ -5708,9 +5810,12 @@ async def health():
     except Exception:
         loop_age_ms = None
     watcher = _backup_watcher_health()
-    return {"status": "ok" if (db.get("ok") and watcher["ok"]) else "degraded",
+    record = _record_health()
+    return {"status": "ok" if (db.get("ok") and watcher["ok"] and record["ok"])
+            else "degraded",
             "db": db, "probe": probe_meta, "loop_stale_ms": loop_age_ms,
-            "backup_watcher": watcher, "change_feed": _change_feed_health()}
+            "backup_watcher": watcher, "change_feed": _change_feed_health(),
+            "record": record}
 
 
 @app.get("/health/ready")

@@ -3125,12 +3125,22 @@ database per team (refused on cost grounds).
 # 1. the value's ONLY home (never a file, never a shell history):
 gh secret set TORTOISE_RECORD_DSN --repo daniel-ospina/tortoise   # paste the pooler DSN
 # 2. any deploy stages it (push to main, or: gh workflow run deploy-hosted.yml)
+#    ⚠️ CHECK THAT `set-secrets` RAN. `deploy-hosted.yml` orders "Check migration
+#    drift (fail-closed)" BEFORE "Set all app secrets on Fly.io", with no bypass,
+#    so a RED drift gate SKIPS the only step that runs `flyctl secrets set --stage`
+#    — the deploy fails, the secret stays in GitHub unread, and the record stays
+#    NOT_ARMED. Confirm from the run's own step list, not from the secret existing:
+#      gh run view <id> --json jobs \
+#        --jq '.jobs[]|select(.name=="deploy-api")|.steps[]|"\(.name): \(.conclusion)"'
+#    `drift=failure` + `set-secrets=skipped` ⇒ the value never reached the app.
 # 3. confirm the machine carries it — NAME only, never the value:
 fly secrets list -a tortoise-y4mjjq | grep -E '^TORTOISE_RECORD_DSN'
 ```
 
 **Verify it is ARMED, not merely set** — a set variable that reaches an
 unreachable or misconfigured database is the one failure this cannot show you.
+The first read below answers it directly: `GET /health`'s `record` block reports
+`armed`, the value's fingerprint, and the three counters.
 
 ⛔ **There is NO `/metrics` route on the hosted app — do not go looking for one.**
 The listener on **9090** is the dedicated liveness listener
@@ -3143,10 +3153,32 @@ co-bind 9090 anyway. So
 prints **nothing in every state** — armed-and-writing, armed-and-refusing, and
 unarmed alike (`curl -s` prints the 404 body, `grep` matches none of it). An
 empty grep is **not** a passing reading: it is the silent `NOT_ARMED` class this
-section exists to close, one layer up. Hosted `GET /health` (8000) does not carry
-the counter either.
+section exists to close, one layer up. Hosted `GET /health` (8000) carries the
+record's **arming state and its three counters** in an additive `record` block
+(`hosted_api._record_health`, #9548) — but it still does not serve `/metrics`
+text, so do not grep the 9090 listener for a counter name.
 
-**Two reads that DO exist on this deployment.**
+**Three reads that DO exist on this deployment.**
+
+0. **The arming report — `GET /health`, unauthenticated, no shell needed.**
+   The `record` block answers *"is the record ARMED here?"* from the seam's own
+   `record_dsn()`, so it cannot report armed for a value the write path would
+   refuse, and it collects **no I/O** (an env read, a scheme check, in-memory
+   counters — never a connection, so an unreachable record cannot fail the probe):
+
+   ```bash
+   curl -s https://tortoise-y4mjjq.fly.dev/health | python3 -m json.tool | sed -n '/"record"/,/}/p'
+   ```
+
+   | field | what it tells you |
+   |---|---|
+   | `armed` | `true` = a usable DSN is present. `false` + `error: null` = the supported default-off state (not a fault). `false` + `error` = a value was SET and cannot be used — and that case is the ONE that flips `/health`'s `status` to `degraded`, because every capture then counts `malformed_dsn` while the record stays empty |
+   | `dsn` | the **8-hex fingerprint** of the value, never the value. To answer "is that the value I set?": `printf %s "$TORTOISE_RECORD_DSN" \| shasum -a 256 \| cut -c1-8` — equal ⇒ the machine carries THIS value; different ⇒ a stale secret, with nothing disclosed either way |
+   | `single_tenant_declared` | must be **`false`** on hosted. `true` means someone armed the process-global org/graph pair, which the multi-tenant app must refuse (#9192) |
+   | `record_write_failures` / `record_non_journal_skips` / `record_position_unproven` | the same three keys `monitoring.metrics()` publishes, under the same names — the counters this section's "pass bar" reads, now readable from the pod without `/mcp` auth |
+
+   ⚠️ `armed: true` is **not** "the database answers" — it says the value is
+   present and well-formed. Reachability is what the counters below show.
 
 1. **The failure log line** — every WARN-level non-write is logged with its reason
    (`tortoise/record_writer.py`: `malformed_dsn` / `no_tenant` / `circuit_open` /

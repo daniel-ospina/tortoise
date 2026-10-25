@@ -206,6 +206,7 @@ __all__ = [
     "RecordWriteOutcome",
     "RecordWriter",
     "current_record_tenant",
+    "dsn_fingerprint",
     "record_dsn",
     "record_tenant",
     "record_tenant_for",
@@ -421,6 +422,22 @@ class RecordWrite:
         return status_vocabulary.classify(configured=True, reached=True)
 
 
+def dsn_fingerprint(dsn: str) -> str:
+    """The 8-hex fingerprint of a DSN value — the ONLY form of it that may be published.
+
+    A DSN is secret material (#2903/#2796), so a surface that must let an
+    operator tell WHICH value a process holds (a stale secret, a value that
+    never reached the machine) publishes this instead of the value: 32 bits of
+    sha256 over a high-entropy string is a comparison handle, not a disclosure.
+
+    ONE definition, called by :func:`record_dsn`'s malformed-value error and by
+    the arming report on the hosted ``/health`` (#9548). Two copies of this
+    convention would drift, and the copy that drifts is the one that prints a
+    DSN.
+    """
+    return hashlib.sha256(dsn.encode()).hexdigest()[:8]
+
+
 def record_dsn(
     explicit: str | None = None, *, surface: str | None = None
 ) -> str | None:
@@ -444,7 +461,7 @@ def record_dsn(
     if not dsn:
         return None
     if not dsn.startswith(_DSN_SCHEMES):
-        got = hashlib.sha256(dsn.encode()).hexdigest()[:8]
+        got = dsn_fingerprint(dsn)
         raise RecordWriteError(
             f"{surface or RECORD_DSN_ENV} must start with postgresql:// or "
             f"postgres:// (got <{got}>...) — a configured-but-unusable record "
