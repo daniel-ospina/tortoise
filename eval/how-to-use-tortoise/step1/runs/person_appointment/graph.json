@@ -1,0 +1,436 @@
+{
+  "nodes": [
+    {
+      "layer": "Source",
+      "labels": [
+        "Source"
+      ],
+      "text": "Appointment note: Marta Reyes, Northwind Logistics (2026-09-08)",
+      "kind": "note",
+      "is_operator": false,
+      "op_type": "",
+      "status": "",
+      "url": "memory://note/person_appointment",
+      "id": "memory://note/person_appointment"
+    },
+    {
+      "layer": "Subject",
+      "labels": [
+        "Subject"
+      ],
+      "text": "Marta Reyes",
+      "kind": "person",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "sub-eb9b919b4481a799c078b13a86"
+    },
+    {
+      "layer": "Subject",
+      "labels": [
+        "Subject"
+      ],
+      "text": "Tobias Lund",
+      "kind": "person",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "sub-7b57a44973e85d3651c4d0cfb9"
+    },
+    {
+      "layer": "Object",
+      "labels": [
+        "Object"
+      ],
+      "text": "Northwind Logistics",
+      "kind": "organization",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "obj-84daa500364ed082b525286aad"
+    },
+    {
+      "layer": "Object",
+      "labels": [
+        "Object"
+      ],
+      "text": "Halcyon Group",
+      "kind": "organization",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "obj-0d3fcb8b3ea06b85be0efcbf73"
+    },
+    {
+      "layer": "Object",
+      "labels": [
+        "Object"
+      ],
+      "text": "CFO at Northwind Logistics",
+      "kind": "role",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "obj-5f60211b6ada817e2c119dc4f6"
+    },
+    {
+      "layer": "Object",
+      "labels": [
+        "Object"
+      ],
+      "text": "CEO at Northwind Logistics",
+      "kind": "role",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "obj-8f1d6e4dc325ced9d577bd9373"
+    },
+    {
+      "layer": "Object",
+      "labels": [
+        "Object"
+      ],
+      "text": "VP Finance at Halcyon Group",
+      "kind": "role",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "obj-62ff3593deccf7496235c2b521"
+    },
+    {
+      "layer": "Event",
+      "labels": [
+        "Event"
+      ],
+      "text": "Marta Reyes joins Northwind Logistics as CFO",
+      "kind": "employmentStart",
+      "is_operator": false,
+      "op_type": "",
+      "status": "",
+      "url": "",
+      "id": "1a16615b8b6-f247f1b39a4f"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "Marta Reyes joined Northwind Logistics as CFO on 2026-09-08.",
+      "kind": "statement",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "1a16615b99f-e6576bac58b2"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "Marta Reyes was previously VP Finance at Halcyon Group, before joining Northwind Logistics in 2026.",
+      "kind": "statement",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "1a16615b9ad-02d05001805b"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "Marta Reyes reports to Tobias Lund, the CEO of Northwind Logistics.",
+      "kind": "statement",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "1a16615b9b7-79d3a3938fa8"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "Tobias Lund is the CEO of Northwind Logistics (implied by the note: 'She reports to the CEO, Tobias Lund').",
+      "kind": "statement",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "1a16615b9c1-8c6a263ebd95"
+    }
+  ],
+  "edges": [
+    {
+      "relation": "reportsTo",
+      "from": "Marta Reyes",
+      "to": "Tobias Lund",
+      "from_layer": "Subject",
+      "to_layer": "Subject",
+      "from_id": "sub-eb9b919b4481a799c078b13a86",
+      "to_id": "sub-7b57a44973e85d3651c4d0cfb9"
+    },
+    {
+      "relation": "memberOf",
+      "from": "Marta Reyes",
+      "to": "Northwind Logistics",
+      "from_layer": "Subject",
+      "to_layer": "Object",
+      "from_id": "sub-eb9b919b4481a799c078b13a86",
+      "to_id": "obj-84daa500364ed082b525286aad"
+    },
+    {
+      "relation": "holdsRole",
+      "from": "Marta Reyes",
+      "to": "CFO at Northwind Logistics",
+      "from_layer": "Subject",
+      "to_layer": "Object",
+      "from_id": "sub-eb9b919b4481a799c078b13a86",
+      "to_id": "obj-5f60211b6ada817e2c119dc4f6"
+    },
+    {
+      "relation": "holdsRole",
+      "from": "Marta Reyes",
+      "to": "VP Finance at Halcyon Group",
+      "from_layer": "Subject",
+      "to_layer": "Object",
+      "from_id": "sub-eb9b919b4481a799c078b13a86",
+      "to_id": "obj-62ff3593deccf7496235c2b521"
+    },
+    {
+      "relation": "holdsRole",
+      "from": "Tobias Lund",
+      "to": "CEO at Northwind Logistics",
+      "from_layer": "Subject",
+      "to_layer": "Object",
+      "from_id": "sub-7b57a44973e85d3651c4d0cfb9",
+      "to_id": "obj-8f1d6e4dc325ced9d577bd9373"
+    },
+    {
+      "relation": "hasPart",
+      "from": "Northwind Logistics",
+      "to": "CFO at Northwind Logistics",
+      "from_layer": "Object",
+      "to_layer": "Object",
+      "from_id": "obj-84daa500364ed082b525286aad",
+      "to_id": "obj-5f60211b6ada817e2c119dc4f6"
+    },
+    {
+      "relation": "hasPart",
+      "from": "Northwind Logistics",
+      "to": "CEO at Northwind Logistics",
+      "from_layer": "Object",
+      "to_layer": "Object",
+      "from_id": "obj-84daa500364ed082b525286aad",
+      "to_id": "obj-8f1d6e4dc325ced9d577bd9373"
+    },
+    {
+      "relation": "related",
+      "from": "VP Finance at Halcyon Group",
+      "to": "Halcyon Group",
+      "from_layer": "Object",
+      "to_layer": "Object",
+      "from_id": "obj-62ff3593deccf7496235c2b521",
+      "to_id": "obj-0d3fcb8b3ea06b85be0efcbf73"
+    },
+    {
+      "relation": "aboutSource",
+      "from": "Marta Reyes joins Northwind Logistics as CFO",
+      "to": "",
+      "from_layer": "Event",
+      "to_layer": "Source",
+      "from_id": "1a16615b8b6-f247f1b39a4f",
+      "to_id": "memory://note/person_appointment"
+    },
+    {
+      "relation": "aboutSubject",
+      "from": "Marta Reyes joins Northwind Logistics as CFO",
+      "to": "Marta Reyes",
+      "from_layer": "Event",
+      "to_layer": "Subject",
+      "from_id": "1a16615b8b6-f247f1b39a4f",
+      "to_id": "sub-eb9b919b4481a799c078b13a86"
+    },
+    {
+      "relation": "aboutObject",
+      "from": "Marta Reyes joins Northwind Logistics as CFO",
+      "to": "Northwind Logistics",
+      "from_layer": "Event",
+      "to_layer": "Object",
+      "from_id": "1a16615b8b6-f247f1b39a4f",
+      "to_id": "obj-84daa500364ed082b525286aad"
+    },
+    {
+      "relation": "wasDerivedFrom",
+      "from": "Marta Reyes joined Northwind Logistics as CFO on 2026-09-08.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a16615b99f-e6576bac58b2",
+      "to_id": "memory://note/person_appointment"
+    },
+    {
+      "relation": "aboutSubject",
+      "from": "Marta Reyes joined Northwind Logistics as CFO on 2026-09-08.",
+      "to": "Marta Reyes",
+      "from_layer": "Point",
+      "to_layer": "Subject",
+      "from_id": "1a16615b99f-e6576bac58b2",
+      "to_id": "sub-eb9b919b4481a799c078b13a86"
+    },
+    {
+      "relation": "aboutObject",
+      "from": "Marta Reyes joined Northwind Logistics as CFO on 2026-09-08.",
+      "to": "Northwind Logistics",
+      "from_layer": "Point",
+      "to_layer": "Object",
+      "from_id": "1a16615b99f-e6576bac58b2",
+      "to_id": "obj-84daa500364ed082b525286aad"
+    },
+    {
+      "relation": "aboutEvent",
+      "from": "Marta Reyes joined Northwind Logistics as CFO on 2026-09-08.",
+      "to": "Marta Reyes joins Northwind Logistics as CFO",
+      "from_layer": "Point",
+      "to_layer": "Event",
+      "from_id": "1a16615b99f-e6576bac58b2",
+      "to_id": "1a16615b8b6-f247f1b39a4f"
+    },
+    {
+      "relation": "wasDerivedFrom",
+      "from": "Marta Reyes was previously VP Finance at Halcyon Group, before joining Northwind Logistics in 2026.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a16615b9ad-02d05001805b",
+      "to_id": "memory://note/person_appointment"
+    },
+    {
+      "relation": "aboutSubject",
+      "from": "Marta Reyes was previously VP Finance at Halcyon Group, before joining Northwind Logistics in 2026.",
+      "to": "Marta Reyes",
+      "from_layer": "Point",
+      "to_layer": "Subject",
+      "from_id": "1a16615b9ad-02d05001805b",
+      "to_id": "sub-eb9b919b4481a799c078b13a86"
+    },
+    {
+      "relation": "aboutObject",
+      "from": "Marta Reyes was previously VP Finance at Halcyon Group, before joining Northwind Logistics in 2026.",
+      "to": "Halcyon Group",
+      "from_layer": "Point",
+      "to_layer": "Object",
+      "from_id": "1a16615b9ad-02d05001805b",
+      "to_id": "obj-0d3fcb8b3ea06b85be0efcbf73"
+    },
+    {
+      "relation": "aboutObject",
+      "from": "Marta Reyes was previously VP Finance at Halcyon Group, before joining Northwind Logistics in 2026.",
+      "to": "VP Finance at Halcyon Group",
+      "from_layer": "Point",
+      "to_layer": "Object",
+      "from_id": "1a16615b9ad-02d05001805b",
+      "to_id": "obj-62ff3593deccf7496235c2b521"
+    },
+    {
+      "relation": "wasDerivedFrom",
+      "from": "Marta Reyes reports to Tobias Lund, the CEO of Northwind Logistics.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a16615b9b7-79d3a3938fa8",
+      "to_id": "memory://note/person_appointment"
+    },
+    {
+      "relation": "aboutSubject",
+      "from": "Marta Reyes reports to Tobias Lund, the CEO of Northwind Logistics.",
+      "to": "Marta Reyes",
+      "from_layer": "Point",
+      "to_layer": "Subject",
+      "from_id": "1a16615b9b7-79d3a3938fa8",
+      "to_id": "sub-eb9b919b4481a799c078b13a86"
+    },
+    {
+      "relation": "aboutObject",
+      "from": "Marta Reyes reports to Tobias Lund, the CEO of Northwind Logistics.",
+      "to": "Tobias Lund",
+      "from_layer": "Point",
+      "to_layer": "Subject",
+      "from_id": "1a16615b9b7-79d3a3938fa8",
+      "to_id": "sub-7b57a44973e85d3651c4d0cfb9"
+    },
+    {
+      "relation": "wasDerivedFrom",
+      "from": "Tobias Lund is the CEO of Northwind Logistics (implied by the note: 'She reports to the CEO, Tobias Lund').",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a16615b9c1-8c6a263ebd95",
+      "to_id": "memory://note/person_appointment"
+    },
+    {
+      "relation": "aboutSubject",
+      "from": "Tobias Lund is the CEO of Northwind Logistics (implied by the note: 'She reports to the CEO, Tobias Lund').",
+      "to": "Tobias Lund",
+      "from_layer": "Point",
+      "to_layer": "Subject",
+      "from_id": "1a16615b9c1-8c6a263ebd95",
+      "to_id": "sub-7b57a44973e85d3651c4d0cfb9"
+    },
+    {
+      "relation": "aboutObject",
+      "from": "Tobias Lund is the CEO of Northwind Logistics (implied by the note: 'She reports to the CEO, Tobias Lund').",
+      "to": "Northwind Logistics",
+      "from_layer": "Point",
+      "to_layer": "Object",
+      "from_id": "1a16615b9c1-8c6a263ebd95",
+      "to_id": "obj-84daa500364ed082b525286aad"
+    }
+  ],
+  "counts": {
+    "Point": 4,
+    "Subject": 2,
+    "Object": 5,
+    "Event": 1,
+    "Source": 1
+  },
+  "operators": [],
+  "sources": [
+    {
+      "layer": "Source",
+      "labels": [
+        "Source"
+      ],
+      "text": "Appointment note: Marta Reyes, Northwind Logistics (2026-09-08)",
+      "kind": "note",
+      "is_operator": false,
+      "op_type": "",
+      "status": "",
+      "url": "memory://note/person_appointment",
+      "id": "memory://note/person_appointment"
+    }
+  ],
+  "relations": [
+    "aboutEvent",
+    "aboutObject",
+    "aboutSource",
+    "aboutSubject",
+    "hasPart",
+    "holdsRole",
+    "memberOf",
+    "related",
+    "reportsTo",
+    "wasDerivedFrom"
+  ],
+  "mitigations": []
+}

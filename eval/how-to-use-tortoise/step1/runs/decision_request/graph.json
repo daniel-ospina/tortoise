@@ -1,0 +1,512 @@
+{
+  "nodes": [
+    {
+      "layer": "Source",
+      "labels": [
+        "Source"
+      ],
+      "text": "Decision request \u2014 platform team, 2026-09-20",
+      "kind": "conversation",
+      "is_operator": false,
+      "op_type": "",
+      "status": "",
+      "url": "tortoise://inbox/platform-team/2026-09-20-celery-to-temporal",
+      "id": "tortoise://inbox/platform-team/2026-09-20-celery-to-temporal"
+    },
+    {
+      "layer": "Subject",
+      "labels": [
+        "Subject"
+      ],
+      "text": "Platform team",
+      "kind": "team",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "sub-94556cf944dde13600df00604d"
+    },
+    {
+      "layer": "Object",
+      "labels": [
+        "Object"
+      ],
+      "text": "Ingestion pipeline",
+      "kind": "workflow",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "obj-478668de36175d2b891658f0f9"
+    },
+    {
+      "layer": "Object",
+      "labels": [
+        "Object"
+      ],
+      "text": "Ingestion workers",
+      "kind": "other",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "obj-f3d168a519e4f5ec5d5bfac1e3"
+    },
+    {
+      "layer": "Object",
+      "labels": [
+        "Object"
+      ],
+      "text": "Celery",
+      "kind": "tool",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "obj-c57289cac2c1e073857dc0de25"
+    },
+    {
+      "layer": "Object",
+      "labels": [
+        "Object"
+      ],
+      "text": "Temporal",
+      "kind": "tool",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "obj-cf8ab0f1e004135e20d4a78eee"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "Approve moving the ingestion workers from Celery to Temporal (requested 2026-09-20 by the platform team; approval required by 2026-10-15).",
+      "kind": "decision",
+      "is_operator": false,
+      "op_type": "",
+      "status": "draft",
+      "url": "",
+      "id": "1a16610c77a-932f05205927"
+    },
+    {
+      "layer": "Source",
+      "labels": [
+        "Source"
+      ],
+      "text": "session:ax-eval/run-decision_request",
+      "kind": "agentSession",
+      "is_operator": false,
+      "op_type": "",
+      "status": "",
+      "url": "session:ax-eval/run-decision_request",
+      "id": ""
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "Migrate the platform team's ingestion workers from Celery to Temporal.",
+      "kind": "option",
+      "is_operator": false,
+      "op_type": "",
+      "status": "draft",
+      "url": "",
+      "id": "1a16610c794-5908c13bbc23"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "Hard constraint: the Celery->Temporal migration must complete before the Q1 freeze on 2027-01-05.",
+      "kind": "criterion",
+      "is_operator": false,
+      "op_type": "",
+      "status": "draft",
+      "url": "",
+      "id": "1a16610c7a2-94f2231509d8"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "Hard constraint: if the migration is not approved by 2026-10-15 the migration window is missed.",
+      "kind": "criterion",
+      "is_operator": false,
+      "op_type": "",
+      "status": "draft",
+      "url": "",
+      "id": "1a16610c7b8-a17788f0f4ec"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "The Celery->Temporal migration is estimated to cost approximately 3 engineer-weeks.",
+      "kind": "evidence",
+      "is_operator": false,
+      "op_type": "",
+      "status": "draft",
+      "url": "",
+      "id": "1a16610c7c6-1ad78216f0aa"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "Platform team goal: sub-5-minute end-to-end ingestion latency by 2027-03-31.",
+      "kind": "target",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "1a16610c7d6-3727f1d9ffc9"
+    },
+    {
+      "layer": "Event",
+      "labels": [
+        "Event"
+      ],
+      "text": "Decision request raised: approve Celery->Temporal migration for ingestion workers",
+      "kind": "occurrence",
+      "is_operator": false,
+      "op_type": "",
+      "status": "",
+      "url": "",
+      "id": "1a16610c7eb-2b72f6bb2d39"
+    },
+    {
+      "layer": "Event",
+      "labels": [
+        "Event"
+      ],
+      "text": "Q1 freeze begins",
+      "kind": "milestone",
+      "is_operator": false,
+      "op_type": "",
+      "status": "",
+      "url": "",
+      "id": "1a16610c8dd-6378da0dcd6f"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "",
+      "kind": "",
+      "is_operator": true,
+      "op_type": "IMPL",
+      "status": "live",
+      "url": "",
+      "id": "1a16610caeb-8f79d5d97076"
+    }
+  ],
+  "edges": [
+    {
+      "relation": "references",
+      "from": "Platform team",
+      "to": "Platform team goal: sub-5-minute end-to-end ingestion latency by 2027-03-31.",
+      "from_layer": "Subject",
+      "to_layer": "Point",
+      "from_id": "sub-94556cf944dde13600df00604d",
+      "to_id": "1a16610c7d6-3727f1d9ffc9"
+    },
+    {
+      "relation": "participatesIn",
+      "from": "Platform team",
+      "to": "Decision request raised: approve Celery->Temporal migration for ingestion workers",
+      "from_layer": "Subject",
+      "to_layer": "Event",
+      "from_id": "sub-94556cf944dde13600df00604d",
+      "to_id": "1a16610c7eb-2b72f6bb2d39"
+    },
+    {
+      "relation": "hasPart",
+      "from": "Ingestion pipeline",
+      "to": "Ingestion workers",
+      "from_layer": "Object",
+      "to_layer": "Object",
+      "from_id": "obj-478668de36175d2b891658f0f9",
+      "to_id": "obj-f3d168a519e4f5ec5d5bfac1e3"
+    },
+    {
+      "relation": "uses",
+      "from": "Ingestion workers",
+      "to": "Celery",
+      "from_layer": "Object",
+      "to_layer": "Object",
+      "from_id": "obj-f3d168a519e4f5ec5d5bfac1e3",
+      "to_id": "obj-c57289cac2c1e073857dc0de25"
+    },
+    {
+      "relation": "extractedFrom",
+      "from": "Approve moving the ingestion workers from Celery to Temporal (requested 2026-09-20 by the platform team; approval required by 2026-10-15).",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a16610c77a-932f05205927",
+      "to_id": ""
+    },
+    {
+      "relation": "references",
+      "from": "Approve moving the ingestion workers from Celery to Temporal (requested 2026-09-20 by the platform team; approval required by 2026-10-15).",
+      "to": "Migrate the platform team's ingestion workers from Celery to Temporal.",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a16610c77a-932f05205927",
+      "to_id": "1a16610c794-5908c13bbc23"
+    },
+    {
+      "relation": "references",
+      "from": "Approve moving the ingestion workers from Celery to Temporal (requested 2026-09-20 by the platform team; approval required by 2026-10-15).",
+      "to": "Hard constraint: the Celery->Temporal migration must complete before the Q1 freeze on 2027-01-05.",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a16610c77a-932f05205927",
+      "to_id": "1a16610c7a2-94f2231509d8"
+    },
+    {
+      "relation": "references",
+      "from": "Approve moving the ingestion workers from Celery to Temporal (requested 2026-09-20 by the platform team; approval required by 2026-10-15).",
+      "to": "Hard constraint: if the migration is not approved by 2026-10-15 the migration window is missed.",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a16610c77a-932f05205927",
+      "to_id": "1a16610c7b8-a17788f0f4ec"
+    },
+    {
+      "relation": "uses",
+      "from": "Migrate the platform team's ingestion workers from Celery to Temporal.",
+      "to": "Temporal",
+      "from_layer": "Point",
+      "to_layer": "Object",
+      "from_id": "1a16610c794-5908c13bbc23",
+      "to_id": "obj-cf8ab0f1e004135e20d4a78eee"
+    },
+    {
+      "relation": "extractedFrom",
+      "from": "Migrate the platform team's ingestion workers from Celery to Temporal.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a16610c794-5908c13bbc23",
+      "to_id": ""
+    },
+    {
+      "relation": "INPUT",
+      "from": "Migrate the platform team's ingestion workers from Celery to Temporal.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a16610c794-5908c13bbc23",
+      "to_id": "1a16610caeb-8f79d5d97076"
+    },
+    {
+      "relation": "extractedFrom",
+      "from": "Hard constraint: the Celery->Temporal migration must complete before the Q1 freeze on 2027-01-05.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a16610c7a2-94f2231509d8",
+      "to_id": ""
+    },
+    {
+      "relation": "references",
+      "from": "Hard constraint: the Celery->Temporal migration must complete before the Q1 freeze on 2027-01-05.",
+      "to": "Q1 freeze begins",
+      "from_layer": "Point",
+      "to_layer": "Event",
+      "from_id": "1a16610c7a2-94f2231509d8",
+      "to_id": "1a16610c8dd-6378da0dcd6f"
+    },
+    {
+      "relation": "extractedFrom",
+      "from": "Hard constraint: if the migration is not approved by 2026-10-15 the migration window is missed.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a16610c7b8-a17788f0f4ec",
+      "to_id": ""
+    },
+    {
+      "relation": "extractedFrom",
+      "from": "The Celery->Temporal migration is estimated to cost approximately 3 engineer-weeks.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a16610c7c6-1ad78216f0aa",
+      "to_id": ""
+    },
+    {
+      "relation": "references",
+      "from": "The Celery->Temporal migration is estimated to cost approximately 3 engineer-weeks.",
+      "to": "Migrate the platform team's ingestion workers from Celery to Temporal.",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a16610c7c6-1ad78216f0aa",
+      "to_id": "1a16610c794-5908c13bbc23"
+    },
+    {
+      "relation": "aboutObject",
+      "from": "Platform team goal: sub-5-minute end-to-end ingestion latency by 2027-03-31.",
+      "to": "Ingestion pipeline",
+      "from_layer": "Point",
+      "to_layer": "Object",
+      "from_id": "1a16610c7d6-3727f1d9ffc9",
+      "to_id": "obj-478668de36175d2b891658f0f9"
+    },
+    {
+      "relation": "extractedFrom",
+      "from": "Platform team goal: sub-5-minute end-to-end ingestion latency by 2027-03-31.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a16610c7d6-3727f1d9ffc9",
+      "to_id": ""
+    },
+    {
+      "relation": "references",
+      "from": "Platform team goal: sub-5-minute end-to-end ingestion latency by 2027-03-31.",
+      "to": "Decision request raised: approve Celery->Temporal migration for ingestion workers",
+      "from_layer": "Point",
+      "to_layer": "Event",
+      "from_id": "1a16610c7d6-3727f1d9ffc9",
+      "to_id": "1a16610c7eb-2b72f6bb2d39"
+    },
+    {
+      "relation": "INPUT",
+      "from": "Platform team goal: sub-5-minute end-to-end ingestion latency by 2027-03-31.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a16610c7d6-3727f1d9ffc9",
+      "to_id": "1a16610caeb-8f79d5d97076"
+    },
+    {
+      "relation": "aboutDocument",
+      "from": "Decision request raised: approve Celery->Temporal migration for ingestion workers",
+      "to": "",
+      "from_layer": "Event",
+      "to_layer": "Source",
+      "from_id": "1a16610c7eb-2b72f6bb2d39",
+      "to_id": "tortoise://inbox/platform-team/2026-09-20-celery-to-temporal"
+    },
+    {
+      "relation": "aboutSubject",
+      "from": "Decision request raised: approve Celery->Temporal migration for ingestion workers",
+      "to": "Platform team",
+      "from_layer": "Event",
+      "to_layer": "Subject",
+      "from_id": "1a16610c7eb-2b72f6bb2d39",
+      "to_id": "sub-94556cf944dde13600df00604d"
+    },
+    {
+      "relation": "aboutObject",
+      "from": "Decision request raised: approve Celery->Temporal migration for ingestion workers",
+      "to": "Ingestion pipeline",
+      "from_layer": "Event",
+      "to_layer": "Object",
+      "from_id": "1a16610c7eb-2b72f6bb2d39",
+      "to_id": "obj-478668de36175d2b891658f0f9"
+    },
+    {
+      "relation": "aboutPoint",
+      "from": "Decision request raised: approve Celery->Temporal migration for ingestion workers",
+      "to": "Approve moving the ingestion workers from Celery to Temporal (requested 2026-09-20 by the platform team; approval required by 2026-10-15).",
+      "from_layer": "Event",
+      "to_layer": "Point",
+      "from_id": "1a16610c7eb-2b72f6bb2d39",
+      "to_id": "1a16610c77a-932f05205927"
+    },
+    {
+      "relation": "IMPL",
+      "from": "",
+      "to": "Migrate the platform team's ingestion workers from Celery to Temporal.",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a16610caeb-8f79d5d97076",
+      "to_id": "1a16610c794-5908c13bbc23"
+    },
+    {
+      "relation": "IMPL",
+      "from": "",
+      "to": "Platform team goal: sub-5-minute end-to-end ingestion latency by 2027-03-31.",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a16610caeb-8f79d5d97076",
+      "to_id": "1a16610c7d6-3727f1d9ffc9"
+    }
+  ],
+  "counts": {
+    "Point": 7,
+    "Subject": 1,
+    "Object": 4,
+    "Event": 2,
+    "Source": 2
+  },
+  "operators": [
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "",
+      "kind": "",
+      "is_operator": true,
+      "op_type": "IMPL",
+      "status": "live",
+      "url": "",
+      "id": "1a16610caeb-8f79d5d97076"
+    }
+  ],
+  "sources": [
+    {
+      "layer": "Source",
+      "labels": [
+        "Source"
+      ],
+      "text": "Decision request \u2014 platform team, 2026-09-20",
+      "kind": "conversation",
+      "is_operator": false,
+      "op_type": "",
+      "status": "",
+      "url": "tortoise://inbox/platform-team/2026-09-20-celery-to-temporal",
+      "id": "tortoise://inbox/platform-team/2026-09-20-celery-to-temporal"
+    },
+    {
+      "layer": "Source",
+      "labels": [
+        "Source"
+      ],
+      "text": "session:ax-eval/run-decision_request",
+      "kind": "agentSession",
+      "is_operator": false,
+      "op_type": "",
+      "status": "",
+      "url": "session:ax-eval/run-decision_request",
+      "id": ""
+    }
+  ],
+  "relations": [
+    "IMPL",
+    "INPUT",
+    "aboutDocument",
+    "aboutObject",
+    "aboutPoint",
+    "aboutSubject",
+    "extractedFrom",
+    "hasPart",
+    "participatesIn",
+    "references",
+    "uses"
+  ],
+  "mitigations": []
+}

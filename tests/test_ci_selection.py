@@ -2192,6 +2192,75 @@ def test_docs_lint_baseline_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_ax_write_eval_tool_change_selects_core_not_tier1():
+    """A change to the eval instrument must run the rules it pins (#9695 review).
+
+    `tests/test_ax_write_eval.py` is registered on the `core` surface and owns
+    the instrument's scoring semantics — the P0/P1 rules, the two-homes bar, the
+    one-act-one-finding guard — which is what #9675 Step 3 reads its per-input
+    delta against. That registration is INERT for a tool-only diff: `tools/` is
+    a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches
+    `tools/ax_write_eval.py`, so `select()` returned NO surface and fell back to
+    the tier-1 smoke set, which does not contain the file. Weakening a rule would
+    therefore be the one PR that never ran the tests pinning it — the same
+    #1349/#3332/#3616 silent-drop class as the entries beside it.
+
+    Mutation check: removing the CORE_ALSO entry fails the FIRST assert
+    (`"core" in r["surfaces"]`); the docs-only early return then returns
+    `full: False` with no pin, so the later asserts pass unexercised.
+    """
+    r = _sel(["tools/ax_write_eval.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_ax_write_eval.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
+def test_the_step1_eval_evidence_doc_selects_core_not_tier1():
+    """The evidence doc must not be editable without the pin that re-derives it.
+
+    #9695 review P1 — the OTHER half of the entry above, and the one the doc
+    itself exposes: `docs/ax/how-to-use-tortoise-step1-eval.md` publishes every
+    measured number of the Step-1 eval — the aggregate headline, all ten
+    per-input P0/P1 rows, the class census and every `kind` ×N multiplier — and
+    the only file that re-derives them from the committed `runs/*/score.json`
+    records is `tests/test_ax_write_eval.py`, registered on `core` only.
+
+    MEASURED before the CORE_ALSO entry (`select()` in-process):
+    `select(["docs/ax/how-to-use-tortoise-step1-eval.md"])` → `surfaces=[]`,
+    `full=False`, pin ABSENT. `docs/` is a flat NON_PYTHON_PREFIXES
+    entry and `_is_non_code_doc` recognises four exact paths, so the changed
+    list came back empty and `select()` took the docs-only early return. A
+    one-file PR could therefore re-cut the headline to any number and merge with
+    the guard that re-measures it never having run — the #1349/#3332/#3616
+    silent-drop class, reached through the early return rather than through
+    `_selection_relevant`.
+
+    Mutation check: removing the CORE_ALSO entry fails the FIRST assert
+    (`surfaces == ["core"]`); dropping the pin from `core` fails the SECOND
+    (`test_ax_write_eval.py` in `test_files`). The non-vacuity clause below
+    exists for that second one: it re-selects from a manifest copy with the pin
+    stripped from `core`, which proves the second assert turns on the `core`
+    registration alone (the pin is the ONLY difference; the file counts move
+    with every manifest edit, so they are not restated here).
+    """
+    r = _sel(["docs/ax/how-to-use-tortoise-step1-eval.md"])
+    assert r["surfaces"] == ["core"], r
+    assert "test_ax_write_eval.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+    # Non-vacuous: the pin's presence turns on its `core` registration alone —
+    # strip that entry and the same selection loses the pin and NOTHING else.
+    # This makes the assert above a claim about `core` being the pin's ONLY
+    # home: a `tier1` dual-registration would keep it selected and red this.
+    stripped = copy.deepcopy(load_manifest())
+    stripped["surfaces"]["core"] = [
+        t for t in stripped["surfaces"]["core"] if t != "test_ax_write_eval.py"
+    ]
+    assert "test_ax_write_eval.py" not in select(
+        ["docs/ax/how-to-use-tortoise-step1-eval.md"], "pull_request", stripped
+    )["test_files"]
+
+
 def test_extractor_tooling_change_selects_core_and_ep_not_tier1():
     # #2786 review P2: `tools/probe_extractor.py` (the classification prompt put
     # in front of the model) and `tools/calibration_harness.py` (the harness whose

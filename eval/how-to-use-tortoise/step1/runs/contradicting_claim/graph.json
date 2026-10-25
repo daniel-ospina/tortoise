@@ -1,0 +1,268 @@
+{
+  "nodes": [
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "Solstice Robotics passed its safety audit on 2026-08-28.",
+      "kind": "statement",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "1a1660ca005-deacc7abfd22"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "Acme released tranche 2.",
+      "kind": "statement",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "1a1660ca020-56da3faef0b5"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "",
+      "kind": "",
+      "is_operator": true,
+      "op_type": "IMPL",
+      "status": "live",
+      "url": "",
+      "id": "1a1660ca027-f7d58fb90b42"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "The safety audit Solstice Robotics passed on 2026-08-28 was scoped to hardware only; it did not cover the firmware.",
+      "kind": "statement",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "1a16614997e-824a1715d839"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "A second safety audit covering Solstice Robotics' firmware was still open as of 2026-10-06; it has not concluded.",
+      "kind": "statement",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "1a166149bb0-e2c13ad8e7af"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "Auditors have flagged two open findings in the Solstice Robotics firmware-scope audit (as of 2026-10-06).",
+      "kind": "issue",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "1a166149bc7-005fcfb7ac02"
+    },
+    {
+      "layer": "Event",
+      "labels": [
+        "Event"
+      ],
+      "text": "Solstice Robotics audit scope disclosed: 2026-08-28 audit was hardware-only, firmware audit still open with two open findings",
+      "kind": "observation",
+      "is_operator": false,
+      "op_type": "",
+      "status": "",
+      "url": "",
+      "id": "1a166153bd1-795c621035fb"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "[MITIGATION] The 2026-08-28 audit was scoped to hardware only and did not cover firmware (point 1a16614997e-824a1715d839); the firmware audit is still open with two open findings (points 1a166149bb0-e2c13ad8e7af, 1a166149bc7-005fcfb7ac02) as of 2026-10-06. The audit therefore cannot vouch for the firmware portion of what the tranche-2 release rests on.",
+      "kind": "statement",
+      "is_operator": false,
+      "op_type": "",
+      "status": "",
+      "url": "",
+      "id": "1a166149cf1-29b3442e535a"
+    }
+  ],
+  "edges": [
+    {
+      "relation": "INPUT",
+      "from": "Solstice Robotics passed its safety audit on 2026-08-28.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a1660ca005-deacc7abfd22",
+      "to_id": "1a1660ca027-f7d58fb90b42"
+    },
+    {
+      "relation": "INPUT",
+      "from": "Acme released tranche 2.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a1660ca020-56da3faef0b5",
+      "to_id": "1a1660ca027-f7d58fb90b42"
+    },
+    {
+      "relation": "IMPL",
+      "from": "",
+      "to": "Solstice Robotics passed its safety audit on 2026-08-28.",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a1660ca027-f7d58fb90b42",
+      "to_id": "1a1660ca005-deacc7abfd22"
+    },
+    {
+      "relation": "IMPL",
+      "from": "",
+      "to": "Acme released tranche 2.",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a1660ca027-f7d58fb90b42",
+      "to_id": "1a1660ca020-56da3faef0b5"
+    },
+    {
+      "relation": "mitigated_by",
+      "from": "",
+      "to": "[MITIGATION] The 2026-08-28 audit was scoped to hardware only and did not cover firmware (point 1a16614997e-824a1715d839); the firmware audit is still open with two open findings (points 1a166149bb0-e2c13ad8e7af, 1a166149bc7-005fcfb7ac02) as of 2026-10-06. The audit therefore cannot vouch for the firmware portion of what the tranche-2 release rests on.",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a1660ca027-f7d58fb90b42",
+      "to_id": "1a166149cf1-29b3442e535a"
+    },
+    {
+      "relation": "related",
+      "from": "The safety audit Solstice Robotics passed on 2026-08-28 was scoped to hardware only; it did not cover the firmware.",
+      "to": "Solstice Robotics passed its safety audit on 2026-08-28.",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a16614997e-824a1715d839",
+      "to_id": "1a1660ca005-deacc7abfd22"
+    },
+    {
+      "relation": "related",
+      "from": "A second safety audit covering Solstice Robotics' firmware was still open as of 2026-10-06; it has not concluded.",
+      "to": "Solstice Robotics passed its safety audit on 2026-08-28.",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a166149bb0-e2c13ad8e7af",
+      "to_id": "1a1660ca005-deacc7abfd22"
+    },
+    {
+      "relation": "related",
+      "from": "A second safety audit covering Solstice Robotics' firmware was still open as of 2026-10-06; it has not concluded.",
+      "to": "Acme released tranche 2.",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a166149bb0-e2c13ad8e7af",
+      "to_id": "1a1660ca020-56da3faef0b5"
+    },
+    {
+      "relation": "related",
+      "from": "Auditors have flagged two open findings in the Solstice Robotics firmware-scope audit (as of 2026-10-06).",
+      "to": "A second safety audit covering Solstice Robotics' firmware was still open as of 2026-10-06; it has not concluded.",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a166149bc7-005fcfb7ac02",
+      "to_id": "1a166149bb0-e2c13ad8e7af"
+    },
+    {
+      "relation": "aboutPoint",
+      "from": "Solstice Robotics audit scope disclosed: 2026-08-28 audit was hardware-only, firmware audit still open with two open findings",
+      "to": "The safety audit Solstice Robotics passed on 2026-08-28 was scoped to hardware only; it did not cover the firmware.",
+      "from_layer": "Event",
+      "to_layer": "Point",
+      "from_id": "1a166153bd1-795c621035fb",
+      "to_id": "1a16614997e-824a1715d839"
+    },
+    {
+      "relation": "related",
+      "from": "Solstice Robotics audit scope disclosed: 2026-08-28 audit was hardware-only, firmware audit still open with two open findings",
+      "to": "A second safety audit covering Solstice Robotics' firmware was still open as of 2026-10-06; it has not concluded.",
+      "from_layer": "Event",
+      "to_layer": "Point",
+      "from_id": "1a166153bd1-795c621035fb",
+      "to_id": "1a166149bb0-e2c13ad8e7af"
+    },
+    {
+      "relation": "related",
+      "from": "Solstice Robotics audit scope disclosed: 2026-08-28 audit was hardware-only, firmware audit still open with two open findings",
+      "to": "Auditors have flagged two open findings in the Solstice Robotics firmware-scope audit (as of 2026-10-06).",
+      "from_layer": "Event",
+      "to_layer": "Point",
+      "from_id": "1a166153bd1-795c621035fb",
+      "to_id": "1a166149bc7-005fcfb7ac02"
+    },
+    {
+      "relation": "IMPL",
+      "from": "[MITIGATION] The 2026-08-28 audit was scoped to hardware only and did not cover firmware (point 1a16614997e-824a1715d839); the firmware audit is still open with two open findings (points 1a166149bb0-e2c13ad8e7af, 1a166149bc7-005fcfb7ac02) as of 2026-10-06. The audit therefore cannot vouch for the firmware portion of what the tranche-2 release rests on.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a166149cf1-29b3442e535a",
+      "to_id": "1a1660ca027-f7d58fb90b42"
+    }
+  ],
+  "counts": {
+    "Point": 7,
+    "Subject": 0,
+    "Object": 0,
+    "Event": 1,
+    "Source": 0
+  },
+  "operators": [
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "",
+      "kind": "",
+      "is_operator": true,
+      "op_type": "IMPL",
+      "status": "live",
+      "url": "",
+      "id": "1a1660ca027-f7d58fb90b42"
+    }
+  ],
+  "sources": [],
+  "relations": [
+    "IMPL",
+    "INPUT",
+    "aboutPoint",
+    "mitigated_by",
+    "related"
+  ],
+  "mitigations": [
+    {
+      "relation": "mitigated_by",
+      "from": "",
+      "to": "[MITIGATION] The 2026-08-28 audit was scoped to hardware only and did not cover firmware (point 1a16614997e-824a1715d839); the firmware audit is still open with two open findings (points 1a166149bb0-e2c13ad8e7af, 1a166149bc7-005fcfb7ac02) as of 2026-10-06. The audit therefore cannot vouch for the firmware portion of what the tranche-2 release rests on.",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a1660ca027-f7d58fb90b42",
+      "to_id": "1a166149cf1-29b3442e535a"
+    }
+  ]
+}

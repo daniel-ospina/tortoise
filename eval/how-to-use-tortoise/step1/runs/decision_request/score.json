@@ -1,0 +1,134 @@
+{
+  "input": "decision_request",
+  "cell": "decision request",
+  "confuses": [
+    "Object-vs-Point",
+    "Event-vs-Object"
+  ],
+  "counts": {
+    "Point": 7,
+    "Subject": 1,
+    "Object": 4,
+    "Event": 2,
+    "Source": 2
+  },
+  "item_rows": [
+    {
+      "item": "moving the ingestion workers from Celery to Temporal",
+      "expected": "event",
+      "written": "BOTH event:occurrence and Point:decision",
+      "node": "Approve moving the ingestion workers from Celery to Temporal (requested 2026-09-",
+      "verdict": "TWO-HOMES"
+    },
+    {
+      "item": "sub-5-minute end-to-end ingestion latency",
+      "expected": "object",
+      "written": "Point:target",
+      "node": "Platform team goal: sub-5-minute end-to-end ingestion latency by 2027-03-31.",
+      "verdict": "LAYER"
+    },
+    {
+      "item": "before the Q1 freeze",
+      "expected": "object",
+      "written": "Event:milestone",
+      "node": "Q1 freeze begins",
+      "verdict": "LAYER"
+    },
+    {
+      "item": "3 engineer-weeks",
+      "expected": "object",
+      "written": "Point:evidence",
+      "node": "The Celery->Temporal migration is estimated to cost approximately 3 engineer-wee",
+      "verdict": "LAYER"
+    }
+  ],
+  "findings": [
+    {
+      "severity": "P1",
+      "item": "moving the ingestion workers from Celery to Temporal",
+      "finding": "two homes: Point 'Approve moving the ingestion workers from Celery t' holds this item, and so does event 'Decision request raised: approve Celery->Temporal ' \u2014 one fact, two layers, so neither answers alone",
+      "fix": "keep the event node and express the Point reading as a claim ABOUT it (\u00a73 edges), never as a second home"
+    },
+    {
+      "severity": "P0",
+      "item": "sub-5-minute end-to-end ingestion latency",
+      "finding": "LAYER confusion: expected object, written as Point ('Platform team goal: sub-5-minute end-to-end ingestion latency by 2027-') \u2014 a commitment-state \u2014 \u00a75 commitment-state family (goal/target are Object kinds; the canonical representation of a goal is an Object)",
+      "fix": "re-file as object; a wrong layer cannot be rescued downstream (kind_classifier partitions by type before choosing a kind)"
+    },
+    {
+      "severity": "P0",
+      "item": "before the Q1 freeze",
+      "finding": "LAYER confusion: expected object, written as Event ('Q1 freeze begins') \u2014 a dated constraint on the state is part of the commitment, not a belief",
+      "fix": "re-file as object; a wrong layer cannot be rescued downstream (kind_classifier partitions by type before choosing a kind)"
+    },
+    {
+      "severity": "P0",
+      "item": "3 engineer-weeks",
+      "finding": "LAYER confusion: expected object, written as Point ('The Celery->Temporal migration is estimated to cost approximately 3 en') \u2014 an estimate attached to the work \u2014 if it is asserted as belief it belongs on a Point; if it is a commitment it belongs on the Object. Passing requires it lands on exactly one layer with a stated reason, not on both halves.",
+      "fix": "re-file as object; a wrong layer cannot be rescued downstream (kind_classifier partitions by type before choosing a kind)"
+    }
+  ],
+  "relations": [
+    "IMPL",
+    "INPUT",
+    "aboutDocument",
+    "aboutObject",
+    "aboutPoint",
+    "aboutSubject",
+    "extractedFrom",
+    "hasPart",
+    "participatesIn",
+    "references",
+    "uses"
+  ],
+  "operators": [
+    "IMPL"
+  ],
+  "sources": [
+    "tortoise://inbox/platform-team/2026-09-20-celery-to-temporal",
+    "session:ax-eval/run-decision_request"
+  ],
+  "mitigations": [],
+  "kind_census": {},
+  "wrong_axis_kinds": [],
+  "cross_axis_kinds": [],
+  "kind_sources": {
+    "Point": {
+      "criterion": "LEGACY",
+      "decision": "CORE",
+      "evidence": "LEGACY",
+      "option": "LEGACY",
+      "target": "CORE"
+    },
+    "Subject": {
+      "team": "CORE"
+    },
+    "Object": {
+      "other": "CORE",
+      "tool": "CORE",
+      "workflow": "CORE"
+    },
+    "Event": {
+      "milestone": "CORE",
+      "occurrence": "CORE"
+    },
+    "Source": {
+      "agentSession": "CORE",
+      "conversation": "CORE"
+    }
+  },
+  "packs": [
+    "agent-ops",
+    "dev",
+    "marketing",
+    "pm",
+    "portfolio",
+    "product-strategy",
+    "venture"
+  ],
+  "severity_counts": {
+    "P0": 3,
+    "P1": 1,
+    "P2": 0
+  }
+}
