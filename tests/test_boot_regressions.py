@@ -122,9 +122,17 @@ def _redact_under(uri: str, locale_name: str, *, export_lc_all: bool = True) -> 
     if export_lc_all:
         env["LC_ALL"] = locale_name
     else:
-        # LANG-only: the ambient-LC_ALL-absent shape. Drop it from the inherited
-        # environment too, or this arm silently becomes the exported case.
+        # LANG-only: the ambient-LC_ALL-absent shape. Drop the variables that
+        # would otherwise reach the child and make this arm a no-op — the same
+        # reasoning as the LC_ALL pop, applied to the categories that SHADOW
+        # `LANG`. LC_CTYPE takes precedence over LANG for `case`/`sed`
+        # collation (measured: with `LC_CTYPE=C` ambient, `[[:alpha:]]` stops
+        # matching `é` and a `local`-only pin reads GREEN here), so leaving it
+        # would let a future revert of `export LC_ALL` ship green. LC_COLLATE
+        # is popped for the same reason by name, and is harmless either way.
         env.pop("LC_ALL", None)
+        env.pop("LC_CTYPE", None)
+        env.pop("LC_COLLATE", None)
     proc = subprocess.run(
         [
             "bash",
@@ -629,9 +637,13 @@ def test_shell_redactor_agrees_with_the_canonical_python_masker():
 # ASCII predicate rejects. Measured on the pre-fix `entrypoint.sh` under
 # `LC_ALL=en_US.UTF-8`:
 #
-#   `[!0-9]`        matched U+0660 — `rediss://[::1]:\u0660` read as a numeric
-#                   port and was echoed VERBATIM, while the canonical helper
-#                   failed closed on it.
+#   `[!0-9]`        matched nothing for U+0660 — under a UTF-8 locale bash reads
+#                   the Arabic-Indic digit as INSIDE the collated `0-9` range,
+#                   so `*[!0-9]*` does NOT match and `rediss://[::1]:\u0660`
+#                   was read as a numeric port and echoed VERBATIM, while the
+#                   canonical helper failed closed on it. (Under `C` the same
+#                   `case` DOES match and rejects it — that inversion is the
+#                   defect.)
 #   sed `[a-zA-Z]`  matched `\u00e9` — `r\u00e9diss://user:pw@host:6379` was masked
 #                   as a scheme while the canonical failed closed.
 #

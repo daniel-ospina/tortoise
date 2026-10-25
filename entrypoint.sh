@@ -79,8 +79,14 @@ _redact_uri() {
     # bracket RANGES and character CLASSES are collation-sensitive, so under
     # a UTF-8 locale they admit code points the ASCII predicate rejects.
     # Measured, under `LC_ALL=en_US.UTF-8`:
-    #   `[!0-9]`   matched U+0660  → port read as numeric, value echoed
-    #                                while the canonical failed closed
+    #   `[!0-9]`   did NOT reject U+0660 — under a UTF-8 locale bash reads the
+    #                                Arabic-Indic digit as INSIDE the collated
+    #                                0-9 range, so `*[!0-9]*` does not match
+    #                                and the port was read as numeric and the
+    #                                value echoed, while the canonical failed
+    #                                closed. (Under `C` the same `case` DOES
+    #                                match and rejects it — that inversion is
+    #                                the whole defect.)
     #   `sed -E s/^[a-zA-Z]$/…/` MATCHED `é` → `rédiss://user:pw@host:6379`
     #                                masked as a scheme while the canonical
     #                                failed closed
