@@ -328,7 +328,9 @@ ANCHORED_READS: dict[str, AnchoredRead] = {
         cypher="TortoiseSDK.get_entity(id) -> tortoise_get_entity(id)",
         reason="a SECOND internal accessor, and the same mid-write hazard: the "
                "write paths call it to echo a written entity back "
-               "(sdk._get_entity at three write sites), so a record-served answer "
+               "(`sdk._get_entity` at two write sites — a write echo and a "
+               "post-write read-back — plus the read accessor's own delegation), "
+               "so a record-served answer "
                "would read a store the same write has not finished projecting. "
                "Its caller-facing surface is the MCP tool tortoise_get_entity, "
                "which is EXCLUDED for the same reason as tortoise_get_point: no "

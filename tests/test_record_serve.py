@@ -1024,6 +1024,11 @@ def test_an_armed_mode_with_no_dsn_is_structural_not_an_outage(monkeypatch):
     `prefer` read incremented `record-unavailable` forever.
     """
     monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
+    # The counts are process-global, so this test must own its baseline: without
+    # it the assertion at the end reddens for any selection/order where a
+    # counting test ran first (measured: `-k` selecting a counting test + this
+    # one → `{'record-tenant-unresolved': 1}`).
+    rs.reset_fallback_counts()
     with pytest.raises(rs.RecordServeError) as caught:
         rs.open_record(None)
     assert not isinstance(caught.value, rs.RecordUnavailable), (
