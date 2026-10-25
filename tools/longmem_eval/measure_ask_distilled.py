@@ -1985,22 +1985,13 @@ def _main(argv: list[str] | None = None) -> int:
             for reason in binding_reasons:
                 print(f"  - {reason}", file=sys.stderr)
             return 2
-        # (0b) THE OTHER HALF OF "the run is reproducible from the recorded sha
-        # alone": the binding proves the sha carries this corpus and this
-        # protocol, and says nothing about the tree the NUMBERS came from. A run
-        # made at tree A and published under a byte-identical-corpus commit B
-        # would pass (0) while `git checkout B` re-runs different code. Refused
-        # here, against the run's own record — never re-derived from the disk at
-        # publish time, which is the tree that may have moved.
-        run_identity = scored.get("code_identity") or {}
-        identity_issues = _validate_code_identity({
-            "commit": binding["run_commit"], "code_identity": run_identity})
-        if identity_issues:
-            print("refusing to publish — the run does not record the tree that "
-                  "produced these numbers:", file=sys.stderr)
-            for issue in identity_issues:
-                print(f"  - {issue}", file=sys.stderr)
-            return 2
+        # (0b) THE OTHER HALF — "the run is reproducible from the recorded sha
+        # alone" — is enforced by `_validate_code_identity` inside the receipt
+        # validation below, not by a second check here: the run's own
+        # `code_identity` record either agrees with the commit this receipt
+        # names and is clean, or the receipt is invalid. ONE implementation, so
+        # the two cannot drift; the binding above is separate because it asks
+        # the repository a question the receipt cannot answer.
         # Re-bind the verdict to the CURRENT corpus: a report published over a
         # drifted corpus, or against a pre-registration that no longer
         # describes it, is refuse-to-publish, not a footnote.

@@ -108,6 +108,24 @@ rendered into §1/§6 of the run report, so a reviewer can re-check it from the
 report alone. It adds no clause to the pre-registration's decision rule: it is
 a publishing precondition, not a scoring change.
 
+### The other half: the run records the tree it ran from
+
+The binding above makes the named sha vouch for the **corpus** and the
+**protocol** at that sha. It says nothing about the tree the **numbers** came
+from, so a run made at tree A could be published under a commit B whose corpus
+and protocol are byte-identical — any `main` merge between the run and the
+publish has exactly that shape — and `git checkout B` would re-run different
+code while every corpus check passed. So `run_sealed()` records its own
+`code_identity`: the resolved `HEAD` commit and whether the tree was clean.
+That record is carried through `score` into the receipt, and `publish` refuses
+when it is missing, when it is not a full 40-hex sha, when it names a
+**different** commit than the report is about to name, or when the tree had
+**uncommitted paths** (a sha reproduces *sha plus a patch nobody recorded*,
+which is not the recorded sha alone). A `git status` that fails is recorded as
+not-provably-clean, never as clean: the check must not fail open on an
+unreadable index. Both rows — the commit and the tree state — are rendered in
+§1/§6 beside the binding.
+
 ## Why this is a separate tree from `tests/eval/write_path/`
 
 Mechanical, not stylistic: the write-path corpus's own integrity gate derives
