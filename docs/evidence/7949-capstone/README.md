@@ -129,8 +129,10 @@ itself.
 `tortoise/sdk.py` (+86 lines) moved the symbols this bundle cites, so the `file:line` numbers in the
 probe's `E3_RULE` and in the S2.2/S2.3 cause strings were re-derived — and those strings RENDER into
 a log. The frozen `capstone-measured-e0fc940b.log` therefore still carries the cites **as-of its own
-stamp** (`sdk.py:12401`, `sdk.py:12682`, `edges.py:467`, `edges.py:2168-2192`), which no longer
-resolve on `main` — and it renders `tortoise/extractor_v2.py:8278-8285`, whose END was already one
+stamp** (`sdk.py:12401`, `sdk.py:12682`, `edges.py:467`, `edges.py:2168-2192`, **`edges.py:494-503`** —
+the `_anchor_on_create` / `_DERIVATION_ANCHOR_SET` cite, re-derived by this bundle to `502`/`510`), which
+no longer resolve on `main`; every rendered cite this bundle re-derives is listed here, including the
+one the E3 rule itself renders — and it renders `tortoise/extractor_v2.py:8278-8285`, whose END was already one
 line long at that stamp (`8284` closes the block; `8285` opens the next one) and is corrected to
 `8823-8829` here, not in the log. That is deliberate: a scored log is a measurement record and the bundle's rule is
 that a row moves only by RE-RUNNING the probe and removing the file it replaces, never by editing a

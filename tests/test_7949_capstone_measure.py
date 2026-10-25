@@ -1178,7 +1178,7 @@ _BUNDLE_CITE = re.compile(
 _BUNDLE_HISTORICAL = {
     r"no longer\s+resolve": (
         "sdk.py:12401", "sdk.py:12682", "edges.py:467", "edges.py:2168-2192",
-        "tortoise/extractor_v2.py:8278-8285"),
+        "edges.py:494-503", "tortoise/extractor_v2.py:8278-8285"),
     r"SUPERSEDED and its file is gone": ("sdk.py:12196",),
 }
 

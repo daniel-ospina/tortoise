@@ -55,7 +55,7 @@ already exist and contradict an owner-approved basis.
    verdict), publish missing rows (#2522-#2525)"*. It is a consumer umbrella, not a duplicate.
 3. **Is the whole epic waste if the verdict is "not unique"?** No — align §"the differentiation PROFILE"
    makes a negative profile a deliverable, and the profile is what the comparison-systems table consumes.
-4. **Cost.** The one real run's **published** figure of `$1.07` at `deepseek-v4-flash` is retracted by the verdict doc this brief extends: that number came from a price basis matching no provider price, and re-pricing the run's OWN token counts puts the true cost at **≈$0.17–0.29** (`docs/claims/agent-reasoning-verdict.md:59–79`, #2874/#2906 — the published figure *"overstates the leg by 3.7-6.4x"*). Order-of-magnitude: tens of cents per arm-run, not thousands.
+4. **Cost.** The one real run's **published** figure of `$1.07` at `deepseek-v4-flash` is retracted by the verdict doc this brief extends: that number came from a price basis matching no provider price, and re-pricing the run's OWN token counts puts the true cost at **≈$0.17–0.29** (`docs/claims/agent-reasoning-verdict.md:59–79`, #2874/#2906 — the published figure *"overstates the leg by 3.7-6.4x"*). Order-of-magnitude: tens of cents per arm-run, not thousands. That range is derived from the executed run's arm **`a0` alone**; the `a4` leg was deliberately not run (`docs/claims/agent-reasoning-verdict.md:93`), and `a4` also drives the product extraction path per episode, so its token count is unmeasured and strictly larger — §8 prices the two-arm delta as a floor, not a symmetric estimate.
 
 ### Eisenhower / profit alignment
 
@@ -271,17 +271,20 @@ is forbidden is a silent zero or an absent family. `n` is a per-metric MAP, and 
 readable is claimed here: there is no minimum-n policy in `battery/config/thresholds.yaml`.
 `metric_values` is the **per-episode** artifact field (`battery/runner/artifacts.py:86`), not a family
 field, so an assertion written against it reds on a healthy run.
-**And** `report_status` is **never `complete`**, and the value it carries names its cause: the base rule
+**And** `report_status` is **not `complete` on this delta run**, and the value it carries names its cause: the base rule
 sets `incomplete_missing_metrics` when any expected family is unmeasured
 (`battery/report/assemble.py:113–117`), and `compose_run_status` OVERRIDES it with an `incomplete_*` —
 `incomplete_real_partial` whenever any cell is `insufficient_n` OR any episode is excluded (`:218–219`,
 applied over the base rule at `:116–117`), which an honest real run legitimately reads (this brief records
-the exclusion rate as fixed to 6.4% — §3's blocker table, :131). `complete` is **not** the criterion and
-must not be: the expected set is the fixed 14-family `METRIC_FAMILIES` (`battery/cli.py:551`), and
-`compose_run_status` never returns `complete` — it returns `None` (leaving the base rule) or an
-`incomplete_*` (`:166–220`). A criterion demanding `complete` on a run that measures five of fourteen
-families is unsatisfiable, so the only way to satisfy it would be to emit a false status — the exact
-failure this case exists to catch. What IS required of the status: it is an `incomplete_*` whose cause is
+the exclusion rate as fixed to 6.4% — §3's blocker table, :131). **`complete` is reachable in general** —
+`REPORT_STATUS_OK = "complete"` (`battery/report/assemble.py:49`) is what the base rule returns whenever
+no expected family is missing (`:115`), and `compose_run_status` returns `None` in several branches
+(`:166–220`), leaving that rule to decide. It is unreachable **for this delta run** for one measured
+reason: the expected set is the fixed 14-family `METRIC_FAMILIES` (`battery/cli.py:551`) and this run
+measures five of them, so the base rule's missing set is non-empty by construction. A criterion demanding
+`complete` on such a run is unsatisfiable, so the only way to satisfy it would be to emit a false status —
+the exact failure this case exists to catch. A future full-battery run that genuinely measures all 14
+families SHOULD read `complete`, and that is not a defect. What IS required of the status: it is an `incomplete_*` whose cause is
 recorded, and whenever it is `incomplete_real_partial` the excluded episodes / `insufficient_n` cells are
 itemised by family.
 **And** a `complete` claim, an itemised per-family residual presented AS the pass, or a family that is
@@ -305,10 +308,14 @@ see E2E-D1.) The deferred status is the one this
 delta adds, and it exists for L1–L6 and D2–D4: they are approved `03-scope.md` deliverables that this delta
 SEQUENCES out of the first slice, not exclusions, so "not measured yet" must render as a named status rather
 than as an absent row or a false `blocked-by`. A family that is neither measured nor explicitly deferred
-fails this criterion. (Deliberate departure, recorded per the `OVERRIDES:` practice: comparable harnesses are
-omission-oriented — `lm-evaluation-harness` leaves a task it did not run simply absent from `results.json`,
-with no documented status vocabulary — checked 2026-10-25 via `web_search` (rung 2). We require the row
-because the failure this gate exists to catch is a profile that READS as a finding when it is a gap.)
+fails this criterion.
+
+**OVERRIDES:** the omission-oriented eval-harness reporting default (a task the harness did not run is
+simply absent from the results file — e.g. `lm-evaluation-harness`'s `results.json`, which documents no
+"not run" status vocabulary) — a gap must never read as a finding, so every family this delta does not
+measure gets a NAMED row (`deferred-by-gate` / `insufficient_n` / `blocked-by-#issue`), not a blank.
+(Default checked 2026-10-25 via `web_search` (rung 2); the literal marker is also recorded on #1402,
+where the next lane reads it.)
 **And** the outcome is the branch the measured profile supports, and a **no-data profile can never
 render as a substantive branch** (the `MECHANISM-NOT-UNIQUE`-as-fallback hazard is closed or explicitly
 carried by `report_status`)
@@ -362,7 +369,7 @@ edges/labels. Listed for the owner gate.
 
 | # | Work unit | O/I/T (one line) | State |
 |---|---|---|---|
-| 1 | **#1416** battery execution + verdict re-file | O: run tier-1 `a4,a0` on the real lane (one invocation per arm, all five probe scorers — R2 included) and re-file the claim doc / I: `cells[primary] == "measured"` for R1/R4 (R2/R3/R5 present as `insufficient_n` until §7 row 9's judge, never absent) on each arm's own profile, and `report_status` an honest `incomplete_*` naming its cause (E2E-D1 — `complete` is unreachable and is not the criterion) / T: E2E-D1, D2 | OPEN — **the delta's critical path**. Its own DoD is the full battery (Tier-1, Tier-2, Tier-3, parity) and is **unchanged** by this brief |
+| 1 | **#1416** battery execution + verdict re-file | O: run tier-1 `a4,a0` on the real lane (one invocation per arm, all five probe scorers — R2 included) and re-file the claim doc / I: `cells[primary] == "measured"` for R1/R4 (R2/R3/R5 present as `insufficient_n` until §7 row 9's judge, never absent) on each arm's own profile, and `report_status` an honest `incomplete_*` naming its cause (E2E-D1 — `complete` is unreachable for THIS delta run, not for the harness, and is not the criterion) / T: E2E-D1, D2 | OPEN — **the delta's critical path**. Its own DoD is the full battery (Tier-1, Tier-2, Tier-3, parity) and is **unchanged** by this brief |
 | 2 | **#2525** comparator-arm real-run readiness | O: produce the comparator-arm readiness package — backend state, cost ceiling, determinism and the `ArmUnavailable` path per arm, plus matched-recall pre-pass data (factual top-K F1, K=5) per RUNNABLE arm / I: every comparator arm is runnable-with-evidence or honestly declared unavailable EX ANTE, plus a dated A2b go/no-go; **the sweep itself is #1416's Tier-3 wave, not this row's** / T: E2E-D3 | OPEN (in #2515 umbrella) — **not data-only**: blocked on **#3327** (four open decision points; its title says it blocks #2525 indicator 2) and **#3437** (`a1`'s pre-pass factual recall is 0.0 by construction, so the matched control may be unreachable for `a1` — §4 item 3) |
 | 3 | **#1419** capstone clickthrough | O: walk scope E2E-1…7 on the real run / I: all pass or gated-with-name, artifacts reproducible / T: E2E-D4 | OPEN |
 | 4 | **#1404** test-design integration-surface map | O: close the S1–S8 verification map the children cite / I: every surface has an assigned layer / T: cited by #1416/#1419 checklists | OPEN |
@@ -392,7 +399,7 @@ the split and the sealed fixtures, never the run — which is why it is not a te
 
 | Option | What happens | Cost |
 |---|---|---|
-| **A (recommended)** | Execute the delta as a SEQUENCE, not as a closure: #1416 re-run (one invocation per arm) → re-file verdict → #2525 → #1419. **#1402 does NOT close here** — it stays OPEN until `03-scope.md` deliverables 4/5/6 (Tier-2, the Tier-3 six-arm sweep, parity) are measured, per the 2026-08-14 owner override (all probes × all arms, no exclusions). The delta is how that ruling gets started, not a substitute for it. | ≈$0.34–0.58 for the two tier-1 arm-runs (2 × ≈$0.17–0.29 per arm-run at the corrected provider-reported basis — §1, adversarial test item 4), + §7 rows 8–9 (code, not spend) + a few sessions |
+| **A (recommended)** | Execute the delta as a SEQUENCE, not as a closure: #1416 re-run (one invocation per arm) → re-file verdict → #2525 → #1419. **#1402 does NOT close here** — it stays OPEN until `03-scope.md` deliverables 4/5/6 (Tier-2, the Tier-3 six-arm sweep, parity) are measured, per the 2026-08-14 owner override (all probes × all arms, no exclusions). The delta is how that ruling gets started, not a substitute for it. | **≈$0.34–0.58 is a FLOOR** — 2 × ≈$0.17–0.29, where the per-arm figure is `a0`-derived (the `a4` leg was deliberately not run — `docs/claims/agent-reasoning-verdict.md:93`) and `a4` drives the extraction path per episode, so its token count is unmeasured and strictly larger. Basis is the corrected **declared/estimated** price (`battery/config/prices.py`, 0.084/0.168), NOT `provider_reported`: the receipt carries no `usage.cost`, which is the gap #2906 closes (§1, adversarial test item 4; verdict doc `:59–79`). Plus §7 rows 8–9 (code, not spend) + a few sessions |
 | **B** | Declare the reclassification trigger fired (positioning leads with reasoning-uniqueness) and promote #1416 to launch-relevant, which by 01-align's own wording moves the epic Do-now. | Same work, different priority/labelling |
 | **C** | Defer again: leave the verdict as the stale no-data doc. | Cheapest now; the claim stays unsaid while the doc reads as a negative finding |
 
