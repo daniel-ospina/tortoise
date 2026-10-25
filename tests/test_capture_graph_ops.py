@@ -176,7 +176,15 @@ def _metered_scope(handle) -> tuple | None:
     ``tortoise``, so scoping on the name alone would bill one store's traffic to
     the other. ``_GuardedGraph`` wraps ONE projection (``__slots__ = ("_g",
     "_proj")``), so the projection is the authoritative witness — ``_path`` for
-    the embedded lane, ``_host`` for the server lane.
+    the embedded lane, ``_host`` for the server lane; ``FalkorProjection`` sets
+    one of them or raises, so those two ARE the identity.
+
+    ``None`` when neither is readable: an unresolvable handle is then counted
+    as foreign (a loud under-count against ``total``) instead of collapsing
+    into a shared sentinel key, which is exactly the name-only conflation this
+    function exists to prevent. There is deliberately no ``id(proj.db)``
+    fallback — ``id(None)`` is the SAME key for every projection without a
+    ``db``, and ``id()`` is recyclable, so such a key can alias a dead object.
     """
     proj = getattr(handle, "_proj", None)
     if proj is None:
@@ -185,13 +193,21 @@ def _metered_scope(handle) -> tuple | None:
     if store is None:
         store = getattr(proj, "_host", None)
     if store is None:
-        store = id(getattr(proj, "db", None))
+        return None
     return (store, getattr(proj, "_graph_name", None))
 
 
 # ── integration: a real capture reports a non-zero, phase-attributed count ──
-def test_capture_reports_nonzero_phase_attributed_ops(tmp_path, monkeypatch):
+def test_capture_reports_nonzero_phase_attributed_ops(tmp_path, monkeypatch, *, stats=None):
     """A real capture reports a non-zero, phase-attributed, EXACT op count.
+
+    ``stats`` is an opt-in sink for the caller's use — the pin below runs this
+    same body and must observe that the foreign population it manufactures
+    actually existed. A sink rather than a return value, because pytest turns
+    a non-``None`` return into ``PytestReturnNotNoneWarning``, which this
+    repo's config does not raise. Nothing here asserts on ``foreign``: during a
+    one-store capture a foreign op is #10004's generator, not this test's
+    contract.
 
     ⛔ Read the oracle's SCOPE before its numbers (main-red, cf15bded5). CI
     reported ``98 ops recorded for 614 guarded queries issued during the
@@ -277,6 +293,9 @@ def test_capture_reports_nonzero_phase_attributed_ops(tmp_path, monkeypatch):
     finally:
         sdk.close()
 
+    if stats is not None:
+        stats.update(measured=measured, foreign=foreign, unmetered=unmetered)
+
     ops = res["graph_ops"]
     assert ops["total"] > 0, "capture issued no counted graph ops"
     assert ops["read"] + ops["write"] == ops["total"]
@@ -316,6 +335,12 @@ def test_capture_reports_nonzero_phase_attributed_ops(tmp_path, monkeypatch):
     # the choke point, in ``projection._assert_test_graph``), this REDs with an
     # under-count on a correct meter — so read the failure before assuming the
     # meter is wrong.
+    #
+    # ⛔ This is ALSO the guard that makes an UNSCOPED oracle fail loud, so the
+    # pin below depends on it staying: a neighbour's op arrives with ``_ACTIVE``
+    # unset, lands in ``unmetered``, and trips here BEFORE ``total`` is ever
+    # compared to its denominator. Remove it and the unscoped oracle is still
+    # RED, but through the less direct total comparison.
     assert unmetered == 0, (
         f"{unmetered} guarded queries on this capture's own graph were issued "
         "with no capture counter in context — they are silently unmetered "
@@ -348,23 +373,46 @@ def test_the_capture_report_survives_a_foreign_population_in_the_window(
       untouched (the foreign ops are counted separately, never compared to
       ``total``).
 
-    Falsified by reverting the oracle to a bare ``issued["n"] += 1``: the
-    neighbour's ops re-enter the denominator and this fails with a phantom
-    "double count" on a meter that recorded every one of its own ops once.
+    ⛔ THE POPULATION IS ASSERTED, NOT ASSUMED. Everything this pin
+    discriminates comes from the neighbour: with no foreign traffic it is a
+    second copy of the integration test and proves nothing about scoping. So
+    the nested run reports through the ``stats`` sink, and the pin demands the
+    count be non-zero — plus the neighbour's thread must still be alive and
+    must not have raised, because a thread that dies takes its population with
+    it and the exception is only a ``PytestUnhandledThreadExceptionWarning``
+    (this repo's pytest config sets no ``filterwarnings``, so that is not an
+    error).
+
+    Falsified by reverting the oracle to a bare ``issued["n"] += 1`` (measured):
+    the neighbour's ops re-enter the denominator, and because the neighbour
+    carries no capture counter they all land in ``unmetered`` — so the run
+    fails FIRST at ``unmetered == 0`` (``N guarded queries on this capture's
+    own graph were issued with no capture counter in context``), before the
+    ``total`` comparison is ever reached. With that diagnostic removed the
+    ``total == measured`` comparison catches it instead. Both are RED on a
+    meter that recorded every one of its own ops once; ``unmetered`` is simply
+    the assertion that fires first.
     """
     import threading
 
     foreign = TortoiseSDK(db_path=str(tmp_path / "foreign.db"))
     stop = threading.Event()
     worker = None
+    foreign_errors: list[Exception] = []
 
     try:
         foreign_graph = foreign._get_proj().g   # open it HERE, not on the worker
 
         def _foreign_work():
-            while not stop.is_set():
-                for _ in range(5):
-                    foreign_graph.query("MATCH (n:Point) RETURN count(n)")
+            try:
+                while not stop.is_set():
+                    for _ in range(5):
+                        foreign_graph.query("MATCH (n:Point) RETURN count(n)")
+            except Exception as exc:  # recorded, then re-surfaced by the pin
+                # A dying neighbour is SILENT here (pytest only WARNS), and an
+                # absent population is the one failure that turns this pin into
+                # a duplicate of the integration test. Recorded, asserted below.
+                foreign_errors.append(exc)
 
         worker = threading.Thread(
             target=_foreign_work, name="foreign-tenant", daemon=True)
@@ -372,7 +420,23 @@ def test_the_capture_report_survives_a_foreign_population_in_the_window(
         scoped = tmp_path / "scoped"   # a fresh store for the nested capture
         scoped.mkdir()
         # The integration test's OWN body, under a foreign population.
-        test_capture_reports_nonzero_phase_attributed_ops(scoped, monkeypatch)
+        stats: dict = {}
+        test_capture_reports_nonzero_phase_attributed_ops(
+            scoped, monkeypatch, stats=stats)
+        # The population must have ACTUALLY been there, and its thread must
+        # still be running — otherwise the nested run proved nothing about
+        # scoping (see the docstring).
+        assert not foreign_errors, (
+            "the foreign tenant raised, so this pin ran without the population "
+            f"it exists to survive: {foreign_errors!r}")
+        assert worker.is_alive(), (
+            "the foreign tenant's thread is not running — the population this "
+            "pin depends on was absent for part of the measured window")
+        assert stats["foreign"] > 0, (
+            "the foreign tenant issued no guarded query in the measured window "
+            f"(the oracle saw {stats['measured']} own-graph ops and 0 foreign) "
+            "— with no foreign traffic this pin is a duplicate of the "
+            "integration test and proves nothing about scoping")
     finally:
         stop.set()
         if worker is not None:
