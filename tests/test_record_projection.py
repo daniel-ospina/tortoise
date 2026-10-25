@@ -924,20 +924,28 @@ _EXTRACTED_RECORD = {
 
 
 def test_a_document_source_row_derives_its_canonical_identity_too():
-    """DELIBERATE, PINNED divergence (#9553 review P2). Pin it, do not infer it.
+    """DELIBERATE, PINNED derive (#9553 review P2). Pin it, do not infer it.
 
     The record's `canonical_url` is a pure function of the row's own key, and it
-    is derived for EVERY `source` row — including a `DocumentCreated` one, whose
-    live fold (`_upsert_document`) writes no `canonicalUrl` at all. A restored
-    document `:Source` therefore carries a property live leaves unset until
-    something touches it: the record is richer, on one property, on that path.
+    is derived for EVERY `source` row — including a `DocumentCreated` one.
 
-    This is NOT fixed by scoping the derive to the types whose fold writes it,
-    because a variant `extractedFrom` ref resolving onto a DOCUMENT target is
-    exactly the silent provenance loss the resolver exists to prevent — and
-    `resolve_source_key`'s adopt-on-touch backfills the same value on the first
-    touch, so the two states converge on use. Both halves are asserted here so a
-    later "tidy-up" that narrows the derive has to delete a named decision.
+    #5140 finding 12 UPDATE: the live `_upsert_document` fold now writes
+    `canonicalUrl` as well (it adopts `resolve_source_key`), so this is no longer
+    a live-vs-record PROPERTY divergence. What remains is ROW-LEVEL: this layer
+    keys the row on the record's RAW id, so a URL-variant `DocumentCreated` plans
+    a second `public.source` row for the identity the graph folds onto ONE node.
+    Named on #5140 finding 12, not fixed here.
+
+    The derive is NOT narrowed to the record types OTHER than `DocumentCreated`
+    — the tempting reading now that the doc fold writes `canonicalUrl` itself —
+    because the records resolver can only match a variant `extractedFrom` ref
+    against the row's own `canonical_url` (`_relation_upsert_statement`'s
+    `tgt_match=("node_key", "canonical_url")`) and a document row without it
+    would silently drop that edge — exactly the silent provenance loss the
+    resolver exists to prevent. `resolve_source_key`'s adopt-on-touch backfills
+    the same value on the first touch, so the two states converge on use.
+    Asserted here so a later "tidy-up" that narrows the derive has to delete a
+    named decision.
     """
     document = {
         "type": "DocumentCreated", "ts": "2026-10-12T00:00:00Z",
