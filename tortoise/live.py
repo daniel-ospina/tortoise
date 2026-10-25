@@ -14,13 +14,20 @@ terminal states; #2422). The canonical set is ``TERMINAL_EXCLUDED_STATUSES``
 UNCONDITIONAL: ``include_draft=True`` re-includes DRAFTS only, never terminal
 points.
 
-The predicate is shared across ALL FOUR call sites so ``include_draft=True``
-re-includes drafts identically everywhere:
+NO reader re-spells the predicate: ``_live_only`` is the ONE spelling, and it is
+called from every factor-extraction, pricing and display site (``ep``, ``sdk``,
+``analyze``, ``why``, ``projection``, ``weights`` — the census grows with every
+reader, so it is deliberately NOT restated here; this header said "ALL FOUR",
+then "ALL FIVE", and each number was stale within a release). The list below
+is the factor-extraction family that must agree on ``include_draft``, so
+``include_draft=True`` re-includes drafts identically everywhere:
 
 - ``TortoiseEP._affected_claims`` / ``TortoiseEP._affected_factors`` (ep.py)
 - ``extract_svbp_factors`` (projection/__init__.py — graph-wide SVBP path)
 - ``_bfs_select_operators`` (analyze.py)
 - ``_select_subgraph`` (sdk.py)
+- ``compute_operator_weight`` (weights.py — the ONE dampener read, #9962: a
+  withdrawn or draft mitigation must not price an operator either)
 """
 
 from __future__ import annotations
@@ -283,6 +290,89 @@ def is_terminal_status(status, outdated: bool = False) -> bool:
     Cypher). Out of contract; no in-repo writer can produce such a value
     (#7075)."""
     return (status or "") in TERMINAL_EXCLUDED_STATUSES or bool(outdated)
+
+
+#: The display prefix a mitigation's stored content carries.
+#: ``sdk.mitigate_operator`` writes ``content='[MITIGATION] <reason>'`` (both
+#: its CREATE and its in-place UPDATE); ``why._mitigation_text`` strips exactly
+#: one for display.
+MITIGATION_REASON_PREFIX = "[MITIGATION] "
+
+#: The strength a mitigation with NO stored ``mitigation_strength`` prices at.
+#: ``weights.mitigation_dampening_factor`` is the reader that OWNS this rule (a
+#: pre-convention import may omit the property) and re-exports this name; the
+#: declaration lives HERE because assertion IDENTITY has to agree with that read
+#: rule — a redelivery at the documented default must match the withdrawn node —
+#: and ``live.py`` is the leaf module ``weights.py`` imports, never the reverse.
+MITIGATION_STRENGTH_DEFAULT = 0.30
+
+
+def mitigation_reason(content) -> str:
+    """The REASON a stored mitigation's ``content`` carries, prefix stripped.
+
+    Assertion identity compares REASONS; the ``[MITIGATION] `` wrap is display
+    punctuation that ``why.py`` strips on the way out, so a comparison against
+    the wrapped string would never match.
+    """
+    return (content or "").removeprefix(MITIGATION_REASON_PREFIX)
+
+
+def same_mitigation_assertion(stored_content, stored_strength,
+                              reason, strength) -> bool:
+    """True when a stored mitigation carries the SAME assertion.
+
+    A mitigation IS an assertion — "(reason, strength) damps this operator" —
+    and its identity is that PAIR, never the node id. That is what makes a
+    machine re-delivery distinguishable from a re-assertion (#9962):
+
+    * identical pair → the graph has ALREADY recorded this assertion, so a
+      machine re-submission (crash-retry, redelivery, re-extraction) writes
+      nothing. Reviving a withdrawn node silently reverses a human's
+      retraction, and minting a second Point falsifies ``INGEST_CONTRACT``
+      §3.2 key 6 ("never duplicated"). The silence is the same one an
+      unchanged re-submission already has.
+    * different pair → NEW evidence. On the event this predicate exists for —
+      an operator whose mitigations are all WITHDRAWN — no write door may drop
+      it: it reaches ``mitigate_operator``, which mints a live mitigation (a
+      retraction is terminal, never revived in place — #9962/#432/#2422; a
+      draft is never retro-promoted — #1088).
+
+    BOTH machine write doors decide THAT EVENT from this one predicate —
+    ``sdk._apply_ingest_mitigation`` (the ingest bundle route) and
+    ``hosted_api._load_commit_graph_state``'s MITIGATES MERGE key (the hosted
+    commit route) — so a redelivery cannot reinstate a withdrawn mitigation on
+    one route while the other mints a fresh one for the identical record, which
+    is exactly what they did before it.
+
+    ⚠️ The parity is scoped to the withdrawn event, and the scope is stated
+    because the hosted key has a SECOND arm this predicate does not govern: any
+    CURRENT mitigation satisfies it (``hosted_api``'s arm 1, pre-existing), so a
+    DIFFERENT pair submitted against an operator that already carries a live
+    mitigation reconciles ``merge`` there with no write, while ``ingest``
+    rewrites the live node in place and reports ``mitigation_strength_change``.
+    That divergence predates #9962 and is not what this predicate closes; the
+    claim here is bounded to the withdrawn-node event on purpose.
+
+    STRENGTH identity follows the same read rule the dampener uses, so the two
+    cannot disagree about what the graph records: a mitigation with NO stored
+    ``mitigation_strength`` is priced at ``MITIGATION_STRENGTH_DEFAULT`` (0.30)
+    by ``weights.mitigation_dampening_factor``, so its assertion IS
+    ``(reason, 0.30)`` and a redelivery at 0.30 matches it. Reading an absent
+    strength as "different" left the one hole in "a human ``retract_point`` is
+    never undone by a machine redelivery": the guard fell through and
+    ``mitigate_operator`` minted a live duplicate beside the withdrawn node.
+    Values that cannot be COERCED to a float remain "different" — that is a
+    different answer from "absent", which has a documented reading (never a
+    silent match on unrepresentable data).
+    """
+    if mitigation_reason(stored_content) != (reason or ""):
+        return False
+    try:
+        stored = (MITIGATION_STRENGTH_DEFAULT if stored_strength is None
+                  else float(stored_strength))
+        return stored == float(strength)
+    except (TypeError, ValueError):  # unrepresentable legacy value
+        return False
 
 
 #: The ONE statement that reads a Point id's lifecycle fan-out. It is run by

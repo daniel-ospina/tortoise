@@ -16,7 +16,7 @@ import difflib
 import logging
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
 import yaml
 
@@ -397,6 +397,44 @@ SEMANTICS_DIRECTIONS: dict[str, str] = {
     "related": "-",
 }
 
+# ── Layer 1 — the MECHANISM each meaning declares (#9963) ──────────────
+# `mechanism` is the model's "how does it act" leg: IMPL raises the target's
+# confidence, NAND lowers it. ONTOLOGY §8's semantics table states it per
+# meaning (#7852's canonical table), and it is RULED, not inferred: `addresses`
+# and `causes` are IMPL, `hasPart` is IMPL, `refutes` and `mutuallyExclusive`
+# are NAND. Over the values that declare one, the OPPOSITE spelling is a logic
+# INVERSION: an IMPL wire labelled `refutes` RAISES the target exactly where the
+# meaning says it must lower it (#9963 measured 0.6693602 vs 0.1314086 on one
+# claim pair — identical declared meaning, only the mechanism differing — and
+# the node recorded `direction_basis: 'semantics'`, i.e. the graph claimed the
+# declared meaning WAS honoured).
+#
+# The four values ONTOLOGY §8 gives NO mechanism (`—`) are deliberately ABSENT:
+# `related`, `transacts`, `ownedBy`, `managedBy` are structural/neutral — they
+# say what the connection IS, not which way belief moves — so either mechanism
+# may be spelled over them and reporting one would invent a ruling the model
+# never made. (The layer-3 predicate is where `ownedBy`/`managedBy` carry their
+# §3.6 shape; the Layer-2 meaning does not fix a belief polarity.)
+#
+# ⛔ Read to COMPARE, never to gate (#1934 governance D1/D2 — a recorded
+# decision). A mismatched write LANDS with the caller's `op_type` and returns a
+# structured warning; converting it into a refusal is a reopen for the owner,
+# not a lane change (#9963 states the contract explicitly).
+#
+# Pinned by test to exactly ONTOLOGY §8's table (the mechanism column) and to a
+# subset of `SEMANTICS_VALUES` / `CORE_PREDICATES`, so a vocabulary move cannot
+# leave this map behind.
+SEMANTICS_MECHANISMS: dict[str, str] = {
+    "addresses": "IMPL",
+    "causes": "IMPL",
+    "dependsOn": "IMPL",
+    "hasPart": "IMPL",
+    "supports": "IMPL",
+    "mutuallySupportive": "IMPL",
+    "refutes": "NAND",
+    "mutuallyExclusive": "NAND",
+}
+
 # Values shipped packs still declare, ruled to collapse onto the core
 # vocabulary. Recognised (never an error, so a pack is not dropped
 # mid-transition) and warned naming the canonical word. The pack alignment
@@ -539,6 +577,305 @@ def relation_write_verdict(rel: dict) -> tuple[str, tuple[str, ...]]:
     if rel.get("declarationOnly") is True:
         return RELATION_DECLARATION_ONLY, ()
     return RELATION_PREDICATE_NOT_IN_ALLOWLIST, ()
+
+
+class _Unset:
+    """Sentinel for `declared_mechanisms(registry=…)` (#9963).
+
+    ⛔ A plain ``None`` default cannot say "I already know there is no
+    registry": it made a caller that HAS ruled a registry out trigger a second
+    `_get_registry()` load, i.e. repeating the exact work it just avoided. Three
+    states need three values — unset (load it), ``None`` (known absent), an
+    object (use it).
+    """
+
+    __slots__ = ()
+
+
+_UNSET = _Unset()
+
+
+def declared_mechanisms(
+    *,
+    label: str | None = None,
+    semantics: str | None = None,
+    registry: object | _Unset | None = _UNSET,
+) -> list[tuple[str, str]]:
+    """The mechanism(s) a relation write's OWN declaration fixes (#9963).
+
+    ONE lookup, because the three-layer triple (#7852: mechanism + semantics +
+    direction) is checked by more than one creator and a per-call-site copy is
+    how the legs drift apart. `create_operator` is the only caller TODAY; a
+    second creator that checks two legs of the triple reads this instead of
+    re-deriving it (the defect #9963 records is exactly a re-derivation that
+    read `predicate` and THREW `mechanism` away — the rows it iterated already
+    carried it).
+
+    Returns ``[(mechanism, human-readable source), …]`` — the mechanisms the
+    write DECLARES, each with where it came from. Empty means the write declares
+    none, and then there is nothing to compare against.
+
+    The sources, and why only these:
+
+    * **the pack relation named by `label`** (indicator 2 of #9963). Its
+      declaration IS the authority on what op_type that verb means, so a
+      declared ``mechanism`` in :data:`CORE_PREDICATES` is returned verbatim.
+      Matched on the PREDICATE only: a pack row that merely shares a semantics
+      value is a different relation, and treating it as the meaning's
+      mechanism would invent an ontology ruling #7852 never made (that is the
+      over-warning :data:`SEMANTICS_MECHANISMS` exists to avoid).
+    * **the declared `semantics`**, then the `label` read AS a meaning (the
+      pre-#7852 spelling, where the Layer-2 word rode the label) — both only
+      when the word is in :data:`SEMANTICS_MECHANISMS`, i.e. when ONTOLOGY §8
+      gives the meaning a mechanism at all.
+
+    A retired semantics word is canonicalized HERE, through
+    :data:`SEMANTICS_TRANSITION`, on BOTH spellings — ``opposes`` is compared as
+    ``mutuallyExclusive`` (NAND) whether it arrived as ``semantics`` or as the
+    pre-#7852 ``label``. The write door already canonicalizes its `semantics`
+    local before calling, and nothing canonicalizes `label` anywhere, so doing
+    it on one side only disclosed the same meaning differently by spelling: the
+    retired word as ``semantics`` warned and the same word as ``label`` was
+    silent. Comparing the pre-canonical spelling would compare nothing, which is
+    the wrong-order shape #9963 says to avoid — so this function does not depend
+    on the caller's order to get it right.
+
+    A pack relation's own ``mechanism`` is AUTHORITATIVE for its predicate, even
+    when the relation's ``semantics`` is one ONTOLOGY §8 gives no mechanism
+    (§8's ``—`` column is about the MEANING, and a pack overriding it states a
+    ruling of its own: ``investment-portfolio-manager`` declares ``marks`` as
+    ``mechanism: IMPL`` with ``semantics: related``). So a NAND write of `marks`
+    IS reported — the pack says what that verb means, and §8-neutrality of its
+    underlying meaning does not override the pack's declaration (pinned by test).
+
+    ⛔ NEVER raises and never refuses: a registry that will not load, or one that
+    yields a row this walk cannot read, degrades to what could be read (the core
+    map alone in the worst case). The warn-not-block path must not turn a load
+    failure — or a malformed row — into a write failure, so the ROW WALK is
+    inside the guard, not just the load, and an unhashable `mechanism` is
+    rejected rather than raising out of a frozenset membership test. Every
+    degradation is LOGGED (`_warn_packs_once`), never silent: a pack leg that
+    stopped disclosing must be visible somewhere other than the missing warning
+    it would have produced. That covers all FIVE arms of the walk — the registry
+    load, `list_relations()` raising, a row that is not a mapping, a row whose
+    ``mechanism`` is present but unusable (not a `str`, or not in
+    :data:`CORE_PREDICATES`), and a row whose read itself raises (the per-row
+    `except`, e.g. one whose `.get` throws) — because "logged" is a claim about
+    the code, not about the arm someone happened to be thinking of. The ONE drop
+    that is deliberately silent is a row carrying no ``mechanism`` at all: that
+    is the old-format shape (``project-management``), where nothing was declared
+    and so nothing was lost. One outcome is PARTIAL rather than skipped: a
+    ``list_relations()`` that raises MID-ITERATION loses the rows already
+    materialised, so the warning reports the read as FAILED — never as "there
+    was nothing to read".
+
+    The same refusal covers the ARGUMENTS: `SEMANTICS_TRANSITION.get` is itself a
+    dict lookup, so an unhashable `label`/`semantics` raises `TypeError` — the
+    identical exception class the row walk is guarded against, on values this
+    function never validated. A non-`str` argument therefore declares nothing
+    (it is not a meaning) instead of aborting the caller's write; a good argument
+    BESIDE a bad one is still read, so the caller keeps every declaration the
+    walk could read. Unreachable from `create_operator`, which tests the same
+    values against a set and a dict before calling — but the `registry=` seam
+    exists for a second creator, and a contract stated as NEVER must hold for
+    every input the signature admits, not only today's caller's.
+    """
+    found: list[tuple[str, str]] = []
+
+    def _key_text(value: object) -> str:
+        # Every warn-once KEY component must be a `str` that is BUILDABLE without
+        # raising. This function never raises, and a key is hashed on the warn
+        # path, so a value whose `__repr__` throws would abort the caller's
+        # WRITE — from inside the very `except` that was catching something else.
+        # `repr` is also the right identity: the messages interpolate `%r`.
+        try:
+            text = repr(value)
+            # `repr()` may return a `str` SUBCLASS (legal Python): normalise to an
+            # exact `str`, or a subclass carrying `__hash__ = None` makes the KEY
+            # unhashable — the same escape, one layer further down.
+            return text if type(text) is str else str(text)
+        except Exception:  # noqa: BLE001, RUF100 — warn-only path, never raise
+            pass
+        try:
+            return f"<unrepr {type(value).__name__}>"
+        except Exception:  # noqa: BLE001, RUF100 — even the FALLBACK is guarded:
+            # a metaclass can refuse `__name__`, and this whole function's
+            # contract is that nothing here can abort the caller's write.
+            return "<unrepr object>"
+
+    label_key = _key_text(label)
+
+    def _safe_text(value: object) -> str:
+        # The RETURN-path `source` strings are interpolated text too, so a `str`
+        # SUBCLASS whose `__str__` raises would abort the caller's write from
+        # inside a plain f-string — the read half of the same hazard `_key_text`
+        # guards on the warn path. A plain `str` is returned byte-identically
+        # (so no returned pair changes); the fallback is the guarded repr.
+        try:
+            text = str(value)
+            return text if type(text) is str else str(text)
+        except Exception:  # noqa: BLE001, RUF100 — warn-only path, never raise
+            return _key_text(value)
+
+    def _usable(mechanism: object) -> TypeGuard[str]:
+        # `isinstance` BEFORE the membership test: `mechanism in CORE_PREDICATES`
+        # raises TypeError on an unhashable value (a list from a malformed row),
+        # which would abort the caller's write from a comparison documented never
+        # to refuse one. A non-str is simply not a mechanism.
+        return isinstance(mechanism, str) and mechanism in CORE_PREDICATES
+
+    def _add(mechanism: object, source: str) -> None:
+        if _usable(mechanism) and (mechanism, source) not in found:
+            found.append((mechanism, source))
+
+    # 1. the pack relation the caller NAMED, by predicate.
+    if label and isinstance(registry, _Unset):
+        try:
+            from .domain_loader import _get_registry
+
+            registry = _get_registry()
+        except Exception as exc:  # noqa: BLE001, RUF100 — warn-not-block path, never raise
+            # DEGRADE AND SAY SO (the norm this repo states at
+            # `domain_loader.py:103`): swallowing this silently disables the
+            # pack-declared half of a governance disclosure permanently, with no
+            # instrument anywhere reporting it. Warn-only, once per (arm,
+            # exception CLASS): a later, DIFFERENT failure is a different
+            # degradation and must not be suppressed by the first for the life
+            # of the process — the same rule the row arms below state.
+            # Warn-only, once per (arm, exception CLASS). ⛔ Both the KEY and the
+            # MESSAGE carry the GUARDED text (`_key_text`): `log.warning`'s
+            # deferred `%`-formatting is swallowed by the logging machinery, so a
+            # raw value whose `__str__`/`__repr__` throws would emit an EMPTY
+            # record — while the key was already added, poisoning it for the
+            # life of the process. That is a silent disable, which is the one
+            # thing these arms exist to prevent.
+            _warn_packs_once(
+                ("declared-mechanisms", "registry", type(exc).__name__),
+                "declared_mechanisms: the pack registry would not load (%s: %s) "
+                "— only the semantics/label half of the mechanism disclosure is "
+                "available for this write",
+                type(exc).__name__, _key_text(exc))
+            registry = None
+    if label and registry is not None:
+        try:
+            rows = list(registry.list_relations())  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001, RUF100 — the WALK is warn-only too
+            # The raise may come MID-ITERATION (`list()` is materialised): rows
+            # already yielded are discarded with it, so the pack leg can lose
+            # declarations it HAS read. The warning therefore reports the read
+            # as failed — never as "there was nothing to read", because a
+            # silent skip reads as "no pack declares anything".
+            _warn_packs_once(
+                ("declared-mechanisms", "relations", type(exc).__name__),
+                "declared_mechanisms: pack relations could not be read (%s: %s) "
+                "— the pack-declared half of the mechanism disclosure is "
+                "SKIPPED for this write",
+                type(exc).__name__, _key_text(exc))
+            rows = []
+        for rel in rows:
+            # Per-ROW isolation, not one guard around the walk: a single bad row
+            # must not truncate the ones after it. The caller renders what this
+            # returns as the mechanism(s) the write declares, so quietly losing a
+            # later declaration is a wrong disclosure, not a shorter one. A row
+            # that cannot be read — OR that states a mechanism this walk cannot
+            # use — is named in the log rather than dropped, because the
+            # docstring's "every degradation is LOGGED" is a claim about the
+            # code: a silently skipped row disables part of a governance
+            # disclosure with no instrument anywhere reporting it (2026-10-25
+            # review, P2).
+            try:
+                if not isinstance(rel, dict):
+                    # The warn-once KEY carries the lookup and the row's type:
+                    # `_WARN_ONCE` is a module-level set never cleared in
+                    # production, so a key of the type alone would suppress the
+                    # FIRST degradation of a process for every later label —
+                    # the same silence, one row later. `label_key` is the
+                    # GUARDED repr of the argument (admitted unhashable, and this
+                    # function NEVER raises): a raw list in a key would raise out
+                    # of the walk — and again out of the `except` catching it.
+                    _warn_packs_once(
+                        ("declared-mechanisms", "row-type", label_key,
+                         type(rel).__name__),
+                        "declared_mechanisms: skipped a pack relation row that is "
+                        "not a mapping (%s) while looking up %s — that row's "
+                        "declaration is SKIPPED for this write",
+                        type(rel).__name__, label_key)
+                    continue
+                if rel.get("predicate") != label:
+                    continue
+                mechanism = rel.get("mechanism")
+                # KEY PRESENCE, not nullness: an explicit `mechanism: null` is
+                # PRESENT and is not a `str`, so it belongs to the arm the
+                # docstring promises to log; only a row with no `mechanism` key
+                # at all (the old-format shape) legitimately declares nothing.
+                if "mechanism" in rel and not _usable(mechanism):
+                    # Present-but-unusable, as opposed to ABSENT: a row that
+                    # names a mechanism just said something, and dropping it
+                    # unread is the silent disable the docstring rules out. The
+                    # key carries the label AND the value, so a second, DIFFERENT
+                    # bad declaration is not suppressed by the first.
+                    _warn_packs_once(
+                        ("declared-mechanisms", "row-mechanism", label_key,
+                         _key_text(mechanism)),
+                        "declared_mechanisms: the pack relation %s declares a "
+                        "mechanism this walk cannot use (%s: %s) — that "
+                        "declaration is SKIPPED for this write",
+                        label_key, type(mechanism).__name__,
+                        _key_text(mechanism))
+                    continue
+                _add(mechanism,
+                     f"the pack relation '{_safe_text(label)}' "
+                     f"({rel.get('pack') or 'pack'})")
+            except Exception as exc:  # noqa: BLE001, RUF100 — warn-only, per row
+                _warn_packs_once(
+                    ("declared-mechanisms", "row", label_key,
+                     type(rel).__name__, type(exc).__name__),
+                    "declared_mechanisms: skipped an unreadable pack relation row "
+                    "for %s (%s: %s)", label_key, type(exc).__name__,
+                    _key_text(exc))
+
+    # 2. the declared MEANING — the Layer-2 word, whether it arrived as
+    #    `semantics` or (pre-#7852 spelling) as the `label` itself. Both are
+    #    canonicalized, so a retired word cannot mean two different things
+    #    depending on which parameter carried it.
+    def _canonical(word: object) -> str | None:
+        # `isinstance` BEFORE the lookup, exactly as `_add` does before its
+        # frozenset test: `SEMANTICS_TRANSITION.get` raises TypeError on an
+        # unhashable key, and this runs on the warn-only write path — a
+        # malformed argument must degrade to "declares nothing", not abort the
+        # caller's write (see the NEVER-raises paragraph in the docstring).
+        if not isinstance(word, str) or not word:
+            return None
+        try:
+            return SEMANTICS_TRANSITION.get(word, word)
+        except Exception as exc:  # noqa: BLE001, RUF100 — a `str` SUBCLASS may
+            # carry a `__hash__` that raises anything at all, and this is the
+            # argument half of the NEVER-raises contract: the value is only ever
+            # returned or discarded, so NO lookup failure may abort the caller's
+            # write. LOGGED rather than merely swallowed: an argument this lookup
+            # cannot read declares nothing, which is a degradation of the same
+            # disclosure ("logged" is a claim about the code).
+            _warn_packs_once(
+                ("declared-mechanisms", "word", type(exc).__name__,
+                 _key_text(word)),
+                "declared_mechanisms: an argument this lookup cannot read "
+                "(%s: %s) declares nothing for this write",
+                type(exc).__name__, _key_text(word))
+            return None
+
+    semantics_c = _canonical(semantics)
+    label_c = _canonical(label)
+    if semantics_c in SEMANTICS_MECHANISMS:
+        retired = ("" if semantics_c == semantics
+                   else f" (retired → '{_safe_text(semantics_c)}')")
+        _add(SEMANTICS_MECHANISMS[semantics_c],
+             f"the semantics '{_safe_text(semantics)}'{retired}")
+    if label_c in SEMANTICS_MECHANISMS and label_c != semantics_c:
+        retired = "" if label_c == label else f" (retired → '{_safe_text(label_c)}')"
+        _add(SEMANTICS_MECHANISMS[label_c],
+             f"the label '{_safe_text(label)}' (a Layer-2 meaning){retired}")
+
+    return found
 
 # ── Manifest v3.1 (epic #909 §1.4/§1.5): extraction behaviour slots (#1026) ──
 # Per-pack slots that let a pack shape extraction for its own domain while the

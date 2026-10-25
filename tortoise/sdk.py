@@ -84,6 +84,7 @@ from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
 from .live import _live_only  # #6597 dream coverage closure mirrors EP liveness
 from .live import decay_clause, _terminal_excluded  # #2490 vacuity decay + terminal predicate
 from .live import _current_status_clause  # #4058 canonical current-status allow-list
+from .live import same_mitigation_assertion  # #9962 redelivery vs re-assertion
 from .live import epistemic_label_queries  # #7853 epistemic-label id sweep
 from .live import epistemic_disjunction  # #7853 epistemic-label traversal clause
 from .live import ACCEPTED_DIRECTION_VALUES  # #7852 Layer-1 four-value direction set
@@ -16698,6 +16699,14 @@ class TortoiseSDK:
             a mitigation is a SEPARATE Point that attacks the operator bridge
             it damps, so it can express neither an op_type nor a bridge. It is
             created by ``mitigate_operator`` AFTER the operator exists.
+            The mechanism is the Layer-1 leg of the #7852 triple and it is
+            COMPARED to what the write declares (#9963): a pack relation's own
+            ``mechanism`` for the ``label`` it names, else the mechanism the
+            declared ``semantics`` fixes (``supports`` → IMPL, ``refutes`` →
+            NAND, ``mutuallySupportive``/``mutuallyExclusive`` likewise —
+            ``pack_registry.SEMANTICS_MECHANISMS``). A contradiction returns a
+            ``mechanism_mismatch`` warning and the write PROCEEDS with the
+            caller's op_type stored verbatim (warn-not-block, #1934).
           - label: Layer-3 predicate — the domain verb ("fixes", "bearsOn", …).
           - semantics: Layer-2 meaning — the closed vocabulary in
             ``pack_registry.SEMANTICS_VALUES`` (``addresses``, ``supports``,
@@ -16770,6 +16779,10 @@ class TortoiseSDK:
         # predicate read as undeclared and the warning carried no information:
         # `supports` — the graph's own evidence→claim convention — warned
         # exactly like an invented name, which is how `measures` accumulated.
+        #
+        # This block answers DECLAREDNESS only. The MECHANISM leg of the same
+        # triple (#9963) reads these same rows for their `mechanism` — see the
+        # mechanism block below, after the semantics canonicalization.
         #
         # #2030 (verified, NOT a bug): relation predicates are declared and
         # matched BARE by contract — manifests declare bare `relations[]
@@ -16866,6 +16879,128 @@ class TortoiseSDK:
                     # the Layer-3 `label` predicate — a different input.)
                     direction = derived
                     direction_basis = "semantics"
+        # ── mechanism: the THIRD leg of the #7852 triple (#9963) ────────────
+        # The door checked the triple's other two legs and never this one: the
+        # `label` block above tests MEMBERSHIP (is the word declared?) and the
+        # `semantics` block resolves DIRECTION (which way does the meaning run?),
+        # while `op_type` — the mechanism, HOW it acts — was compared to nothing.
+        # The datum was already in the loop and discarded: the declared set the
+        # label block builds was `{r.get("predicate") for r in
+        # reg.list_relations()}`, and those same rows carry `mechanism`
+        # (measured: {'predicate': 'groundedIn', 'mechanism': 'IMPL',
+        # 'semantics': 'supports', …}). So the one combination that INVERTS the
+        # logic — a write declaring "this evidence refutes that claim" spelled
+        # `op_type='IMPL'` — was accepted in silence and EP then RAISED the
+        # target (#9963: 0.6693602 vs the correctly-typed NAND's 0.1314086),
+        # with `direction_basis: 'semantics'` on the node asserting the declared
+        # meaning had been honoured.
+        #
+        # ORDER (#9963): AFTER the semantics block on purpose — a retired word
+        # (`opposes`) is canonicalized to `mutuallyExclusive` there, so the
+        # comparison reads the meaning the write will actually be recorded as.
+        # Comparing the pre-canonical spelling would compare nothing.
+        #
+        # ⛔ WARN-NOT-BLOCK. #1934's ruling is a recorded decision, and this is
+        # an EXTENSION of it, not a replacement: the write proceeds with the
+        # caller's op_type stored verbatim and the contradiction is disclosed in
+        # `warnings`. Making it refuse is a reopen for the owner.
+        #
+        # A part/whole op_type (`composedOf` / `hasPart`-class) declares NO
+        # mechanism — it is not IMPL and not NAND — so there is nothing to
+        # compare and silence is the honest answer; only a mechanism-vs-mechanism
+        # contradiction is reported.
+        # `emit_violation` is imported HERE as well, exactly as the two blocks
+        # above do: it is otherwise bound only inside `if label:` (:16798) or
+        # `if semantics is not None:` (:16832), so today's reachability rests on
+        # `declared_mechanisms` returning `[]` when both are absent. That coupling
+        # is invisible to every static checker, and its failure mode is a
+        # NameError raised BEFORE the node is written (`pid = ulid()` below) —
+        # i.e. a refused write on the path this block documents as warn-not-block.
+        from tortoise.enforcement import emit_violation
+        from tortoise.pack_registry import CORE_PREDICATES, declared_mechanisms
+
+        if op_type in CORE_PREDICATES:
+            contradictions = [
+                (mechanism, source)
+                for mechanism, source in declared_mechanisms(
+                    label=label, semantics=semantics)
+                if mechanism != op_type
+            ]
+            if contradictions:
+                _declared = "; ".join(
+                    f"{source} declares {mechanism!r}"
+                    for mechanism, source in contradictions)
+                # The worked example is DIRECTION-SPECIFIC (#9963 review): one
+                # hardcoded sentence can only describe one of the two
+                # directions, and read as the wrong claim for the other —
+                # `test_mismatch_still_writes` exercises BOTH (NAND + `supports`).
+                #
+                # It is ALSO source-aware (2026-10-25 review, P3). The example
+                # names a LAYER-2 MEANING, so it may only appear when a meaning
+                # the caller actually declared produced the contradiction. A pack
+                # relation contradicts on its own with no `semantics` at all:
+                # `investment-portfolio-manager` declares `marks` as
+                # `mechanism: IMPL` over `semantics: related`, and `related` is
+                # one of §8's four mechanism-free meanings — so a
+                # `create_operator("NAND", a, [b], label="marks")` is told its
+                # wire carried "an IMPL meaning (e.g. 'supports')", i.e. it is
+                # pointed at an argument its call does not contain. A warning an
+                # agent ACTS on must not describe an input that was never given.
+                #
+                # Provenance is read off `declared_mechanisms` itself, not off
+                # the `source` prose: the meaning legs are exactly the ones keyed
+                # on a MEANING, and asking with the word as `semantics` puts the
+                # pack leg structurally out of reach (that walk only reads packs
+                # when a `label` is given), so each probe returns the Layer-2
+                # half alone. That covers the pre-#7852 spelling too, where the
+                # meaning arrived as `label` — a caller who DID declare the
+                # meaning keeps its worked example.
+                _meaning_mechanisms = {
+                    mechanism
+                    for meaning in (semantics, label)
+                    for mechanism, _ in declared_mechanisms(semantics=meaning)
+                }
+                _from_meaning = any(
+                    mechanism in _meaning_mechanisms
+                    for mechanism, _ in contradictions)
+                if op_type == "IMPL" and _from_meaning:
+                    _inversion = (
+                        "An IMPL wire carrying a NAND meaning (e.g. 'refutes') "
+                        "RAISES the target's confidence where the meaning says "
+                        "it must LOWER it")
+                elif op_type == "IMPL":
+                    _inversion = (
+                        "An IMPL wire fed a relation declared NAND RAISES the "
+                        "target's confidence where the declaration says it must "
+                        "LOWER it")
+                elif _from_meaning:
+                    _inversion = (
+                        "A NAND wire carrying an IMPL meaning (e.g. 'supports') "
+                        "LOWERS the target's confidence where the meaning says "
+                        "it must RAISE it")
+                else:
+                    _inversion = (
+                        "A NAND wire fed a relation declared IMPL LOWERS the "
+                        "target's confidence where the declaration says it must "
+                        "RAISE it")
+                warnings.append({
+                    "code": "mechanism_mismatch",
+                    "message": (
+                        f"op_type {op_type!r} contradicts a mechanism this "
+                        f"write declares: {_declared}. {_inversion}. "
+                        f"The mechanism each meaning declares lives in "
+                        f"pack_registry.SEMANTICS_MECHANISMS (a pack relation's "
+                        f"own `mechanism` is authoritative for its predicate) — "
+                        f"#7852's three-layer model. The write proceeded with "
+                        f"op_type unchanged (warn-not-block, #1934)"
+                    ),
+                    "op_type": op_type,
+                    "declared_mechanism": contradictions[0][0],
+                })
+                emit_violation(
+                    code="mechanism_mismatch", relation=label or semantics,
+                    detail=(f"op_type={op_type} declared="
+                            f"{','.join(m for m, _ in contradictions)}"))
         # Direction default (CYCLE-25 per-op_type, ontology v3.6 #5):
         # direction-absent canonicalizes per op_type — IMPL → "bidirectional"
         # (unchanged), NAND → "unidirectional" (extraction default — ingest IS
@@ -17236,8 +17371,29 @@ class TortoiseSDK:
 
         Raises ValueError if id not found, not an operator, strength out of
         [0, 1], or credibility outside the ladder.
-        Idempotent: second call updates existing mitigation (reason + strength),
-        does not create a duplicate.
+        Idempotent: a second call updates the existing CURRENT mitigation
+        (reason + strength), does not create a duplicate. A mitigation the graph
+        records as terminal (retracted/superseded/outdated/archived) is never
+        revived in place — a re-assertion creates a NEW mitigation Point, since
+        retraction is terminal (#432/#2422). A REDELIVERY through ``ingest()``
+        is not a re-assertion, so it writes nothing in that state (see
+        ``_apply_ingest_mitigation``). A ``draft`` mitigation is not TERMINAL —
+        ``live.CURRENT_POINT_STATUS_VALUES`` includes draft, so it IS the node
+        this lookup finds: the call updates it in place and does NOT promote it
+        (#1088 — no retro-promotion), which means a draft-only operator accepts
+        the call and does not dampen (a draft is CURRENT but EP-INERT:
+        ``live._live_only`` excludes it from the dampener read). The reply
+        carries its ``status`` so a caller can tell those two arms apart instead
+        of reading the update as "this now dampens".
+
+        The created mitigation Point is a CURRENT point (`status='live'`,
+        #5089/#9962) — the `weights.py` dampener read prices `m.status`, so a
+        terminal mitigation stops dampening and a retracted one restores the
+        operator's undamped weight without deleting it. It is born `live` on
+        EVERY route, `ingest()` under the default gated policy included: this
+        door is the single-writer mitigation gate, not the bundle's point
+        policy, and a mitigation that does not dampen is not an assertion.
+        `docs/INGEST_CONTRACT.md` §2.1 records that exemption (#9962).
         """
         # #4647: guard before the range check — ``0 <= Decimal('NaN') <= 1``
         # raises ``decimal.InvalidOperation``, so the check would raise an
@@ -17274,10 +17430,24 @@ class TortoiseSDK:
             _mit_default = credibility_prior(DECIDE_DEFAULT_CREDIBILITY)
             author_prior = (_mit_default[0] + AUTHOR_ASSERTION_WEAK_PC,
                             _mit_default[1])
-        # Idempotency: check for existing mitigation
+        # Idempotency: check for an existing CURRENT mitigation.
+        # #9962: a TERMINAL mitigation (retracted / superseded / outdated /
+        # archived, or the legacy `outdated` flag) is EXCLUDED from this
+        # lookup. The dampener read prices `m.status`, so updating a terminal
+        # node in place would leave it dead: the call would report success and
+        # dampen nothing — the same silent no-op this door's missing status
+        # created in the first place (measured: mitigate → retract →
+        # mitigate(strength=0.3) left the weight at 1.0000 with the node still
+        # `retracted`). Retraction is TERMINAL (#432/#2422), so the node is NOT
+        # revived in place: a re-assertion mints a NEW mitigation Point and the
+        # retracted one keeps its state and its history. The read composes
+        # several mitigations by max strength (#2315), so after the
+        # re-assertion exactly the live one prices the operator.
         proj = self._get_proj()
         existing = proj.g.query(
-            "MATCH (op:Point {id:$id})-[r:mitigated_by]->(m:Point) RETURN m.id",
+            "MATCH (op:Point {id:$id})-[r:mitigated_by]->(m:Point) "
+            f"WHERE {_terminal_excluded('m.status')} "
+            "RETURN m.id",
             params={"id": id},
         ).result_set
         if existing:
@@ -17363,10 +17533,21 @@ class TortoiseSDK:
         # parameter, and the abort means the statement did not land — so a
         # re-issue cannot mint a second mitigation Point. Bare CREATE ⇒
         # `retryable_aborted_write` only.
+        # #9962 / #5089: the mitigation is born `status:'live'` — a CURRENT
+        # point, which is what the dampener read prices (`weights.py` honours
+        # `m.status`, so a status-less node would lean on the legacy NULL-is-
+        # live rule forever) and what every other write path already emits
+        # (`create_point` defaults to draft|live). Measured before the fix:
+        # `get_point(mid)['status'] is None`, so the node was neither staged
+        # nor current for any reader of `status` — the #6107 root, on this
+        # door. It is `live`, not `draft`: the mitigation is created by an
+        # explicit operator-mitigating call, exactly like the IMPL/NAND
+        # operator it damps (this is NOT an extraction staging path).
         self._graph_write_with_retry(
             lambda: proj.g.query(
                 "CREATE (m:Point {id:$id, content:$c, pointKind:'statement', "
-                "mitigation_strength:$s, is_operator:false, createdAt:$now, updatedAt:$now})",
+                "mitigation_strength:$s, is_operator:false, status:'live', "
+                "createdAt:$now, updatedAt:$now})",
                 params={"id": mid, "c": f"[MITIGATION] {reason}", "s": strength, "now": now},
             ),
             what="mitigate_operator CREATE(:Point)",
@@ -21174,7 +21355,10 @@ class TortoiseSDK:
                 # target id is only known here) and on EVERY submission, so a
                 # re-submission re-applies too — `mitigate_operator` is
                 # idempotent: it UPDATES the existing mitigation in place,
-                # never duplicates (INGEST_CONTRACT §3.2 key 6). The helper
+                # never duplicates (INGEST_CONTRACT §3.2 key 6). #9962: a
+                # mitigation the graph records as WITHDRAWN is neither
+                # revived nor re-minted here — a redelivery is not a
+                # re-assertion (see `_apply_ingest_mitigation`). The helper
                 # stamps the mitigation Point with this bundle's batch_id.
                 mitigation = conn.get("mitigation")
                 if isinstance(mitigation, dict):
@@ -21913,6 +22097,27 @@ class TortoiseSDK:
         update actually changed something. An unchanged re-submission is
         silent, as are incident retries (the crash-retry contract, §7).
 
+        ⛔ #9962 — A REDELIVERY IS NOT A RE-ASSERTION. ``mitigate_operator``
+        deliberately mints a NEW mitigation Point when the one it finds is
+        terminal (retraction is terminal, the node is never revived). That is
+        right for a caller and WRONG for a crash-retry/redelivery, which is
+        exactly what this route is: the bundle would silently reinstate a
+        dampening a human withdrew, and ship a duplicated mitigation Point
+        (§3.2 key 6's *"never duplicated"*) with no warning, because the
+        change-warning compares against identical reason/strength.
+
+        So when every mitigation the operator carries is terminal, this route
+        decides on the ASSERTION, not on arrival (§live.same_mitigation_assertion):
+        the SAME ``(reason, strength)`` the withdrawn Point already records is
+        a true redelivery — NOTHING is written, and the withdrawn Point is
+        returned unchanged (no re-link, no batch stamp: this bundle created
+        nothing). A DIFFERENT ``(reason, strength)`` is new evidence and falls
+        through to the writer, which mints a live mitigation and emits
+        ``mitigation_strength_change`` against the withdrawn row — dropping it
+        would silently discard a mitigation the connection declares (§13 row 8).
+        The writer's mint is not a revival: the withdrawn Point keeps its state
+        and its history.
+
         The mitigation Point is stamped with the bundle's ``batch_id`` (§16:
         "every **new** Point the bundle creates — plain points, operator
         Points, mitigation Points"), carrying the two record fields
@@ -21927,15 +22132,51 @@ class TortoiseSDK:
         # Read the mitigation this operator already carries BEFORE the write,
         # so the in-place update is observable (§3.2 key 6). One query, only on
         # a connection that declared a mitigation.
+        #
+        # #9962: the read also reports whether each attached mitigation is
+        # CURRENT, using `_terminal_excluded` — the SAME predicate
+        # `mitigate_operator`'s idempotency lookup applies, so "no current
+        # row" means "the writer would mint a new Point". Two behaviours hang
+        # off it:
+        #   * a redelivery must NOT mint. If every attached mitigation is
+        #     terminal, this route writes nothing and returns the withdrawn
+        #     Point: reinstating a human's retraction on a crash-retry is
+        #     silent (identical reason/strength ⇒ no
+        #     `mitigation_strength_change`) and duplicates the Point (§3.2
+        #     key 6).
+        #   * the divergence comparison below reads the CURRENT row — the
+        #     node the write actually updated — never a withdrawn sibling.
         prior = self._get_proj().g.query(
             "MATCH (op:Point {id:$oid})-[:mitigated_by]->(m:Point) "
-            "RETURN m.id, m.content, m.mitigation_strength",
+            "RETURN m.id, m.content, m.mitigation_strength, "
+            f"{_terminal_excluded('m.status')} AS is_current "
+            "ORDER BY m.id",
             params={"oid": operator_id},
         ).result_set
+        _current = [row for row in prior if bool(row[3])]
+        if prior and not _current and any(
+                same_mitigation_assertion(row[1], row[2], reason, strength)
+                for row in prior):
+            # Every attached mitigation is WITHDRAWN and one of them records
+            # THIS assertion: a true redelivery (crash-retry, redelivery,
+            # re-extraction). Write NOTHING (no revive, no duplicate, no batch
+            # stamp) and return the withdrawn Point.
+            #
+            # A DIFFERENT (reason, strength) is NEW evidence, which this route
+            # must not swallow (§13 row 8 promises a declared mitigation is
+            # written). It falls through to `mitigate_operator`, which mints a
+            # live Point beside the withdrawn one, and the change-warning below
+            # fires against the withdrawn row so the divergence is disclosed.
+            # `or None`: a hand-written/imported id-less mitigation (#9262) is
+            # a shape the min() must not crash on, and this return value is
+            # discarded by the caller (`ingest`).
+            _ids = [row[0] for row in prior if row[0]]
+            return min(_ids) if _ids else None
         mid = self.mitigate_operator(
             operator_id, reason=reason, strength=strength)["id"]
-        if prior:
-            _old_id, _old_content, _old_strength = prior[0]
+        _prior_row = (_current or prior or [None])[0]
+        if _prior_row is not None:
+            _old_id, _old_content, _old_strength = _prior_row[:3]
             _old_reason = (_old_content or "").removeprefix("[MITIGATION] ")
             try:
                 _same_strength = (_old_strength is not None
@@ -32021,11 +32262,21 @@ class TortoiseSDK:
 
     def _state_mitigations(self, arguments: dict[str, list[dict]],
                            nands: dict[str, list[dict]] | None = None) -> dict[str, list[dict]]:
-        """Mitigation points attached to surfaced operators (top points).
+        """Mitigation points DAMPENING the surfaced operators (top points).
 
         Includes operators surfaced as arguments AND as high-contention NANDs
         — a mitigation on the very NAND that contradicts a surfaced claim is
         exactly the epistemic context the state view should show.
+
+        ⛔ #9962 — the read honours the dampener's own predicate
+        (``live._live_only``: terminal AND draft excluded, absent status =
+        live). Before it did, this surface kept presenting a WITHDRAWN
+        mitigation at its live strength, so an agent consuming the state view
+        inferred a dampening the engine no longer applies — the mirror of the
+        defect #9962 fixes in ``weights.py`` (there a confidence nobody can
+        justify, here a dampening that is not applied). ``search_engine``
+        publishes ``m.status`` on its legs, so an unfiltered read here also
+        left the two display surfaces disagreeing.
         """
         op_ids = sorted({op["id"] for ops in arguments.values() for op in ops}
                         | {op["id"] for ops in (nands or {}).values() for op in ops})
@@ -32033,7 +32284,9 @@ class TortoiseSDK:
             return {}
         rows = self._get_proj().g.query(
             "MATCH (op:Point {is_operator:true})-[r:mitigated_by]->(m:Point) "
-            "WHERE op.id IN $ids RETURN op.id, m.id, m.content, m.mitigation_strength",
+            "WHERE op.id IN $ids "
+            f"AND {_live_only('m.status')} "
+            "RETURN op.id, m.id, m.content, m.mitigation_strength",
             params={"ids": op_ids},
         ).result_set
         out: dict[str, list[dict]] = {}

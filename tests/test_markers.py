@@ -920,6 +920,15 @@ def test_no_redirect_stems_registry_exact():
         # TEST_NO_REDIRECT_STEMS and this declaration — so the pin reding on
         # the addition is the pin working as designed.
         "test_cli_extraction",
+        # #9963: the MECHANISM leg of the #7852 triple at the `create_operator`
+        # write door. The fixture builds `TortoiseSDK(<tmpfile>)` and reads the
+        # stored `op_type` back off the graph, so a URI-set lane would redirect
+        # the construction to the server. Registered in all THREE homes —
+        # config/ci-surfaces.yml:carve_out, TEST_NO_REDIRECT_STEMS and this
+        # declaration — and this pin is the one that caught the omission: the
+        # first registration pass added the other two and missed this, reding
+        # `test-slow (c)` at edd8f7ee (the pin working as designed).
+        "test_mechanism_write_path_9963",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "

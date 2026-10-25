@@ -441,6 +441,16 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # config/ci-surfaces.yml; the two registries are one set in two homes
     # (tests/test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems).
     "test_direction_storage_7852",
+    # #9963: the MECHANISM leg of the #7852 triple at the `create_operator` write
+    # door — the write's `op_type` is compared to the mechanism its declared
+    # meaning (or the pack relation it names) DECLARES, warning without
+    # blocking (#1934). The fixture builds `TortoiseSDK(<tmpfile>)` and reads
+    # the stored `op_type` back off the graph, so a URI-set lane would redirect
+    # the construction to the server and the embedded assertions would be gone.
+    # Mirror of the `carve_out:` entry in config/ci-surfaces.yml; the two
+    # registries are one set in two homes
+    # (tests/test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems).
+    "test_mechanism_write_path_9963",
     # #6871: the operator's INPUT set (idx=0 source, idx>=1 targets), the source
     # edge being EP's factor source slot, and the canonical evidence read never
     # surfacing a point as its own supporter. The fixture builds

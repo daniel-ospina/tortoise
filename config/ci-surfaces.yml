@@ -4625,6 +4625,13 @@ surfaces:
   # shape guard above (`.github/workflows/inbound-relay.yml`), so it is
   # registered for the same reason.
   - test_inbound_relay_guard.py
+  # The relay's CONVERGING path (#2409/#2441): the 15-minute sweep that applies
+  # the same policy when the event-time run never executes — measured 8/8
+  # external triggers `startup_failure`, 0 executions in 800 runs. Its subject is
+  # `.github/workflows/inbound-relay-sweep.yml` and `tools/inbound_relay_sweep.py`
+  # (which has no SOURCE_PATTERNS entry), so it is registered for the same reason
+  # as the guard above: the matrix must run it on a workflow-only diff.
+  - test_inbound_relay_sweep.py
   - test_write_path_unreachable_seam_5148.py
   - test_write_verb.py
   - test_write_consolidation.py
@@ -5675,6 +5682,21 @@ surfaces:
   # (the fixture builds `TortoiseSDK(<tmpfile>)`), so it is ALSO registered in
   # `carve_out` below.
   - test_direction_storage_7852.py
+  # #9963: the MECHANISM leg at the SAME door — `create_operator` compares the
+  # written `op_type` to the mechanism the write's declared meaning (or the pack
+  # relation it names) DECLARES, and returns a `mechanism_mismatch` warning
+  # without refusing the write (#1934's warn-not-block ruling). `sdk` owns it
+  # because the door is `tortoise/sdk.py`, exactly as it owns the two #7852
+  # siblings above.
+  # ⛔ The surface arm is for CLASSIFICATION (manifest-integrity refuses a test
+  # file no surface claims — and a file registered ONLY in `carve_out`
+  # classifies as None), NOT for selection: the file is a carve-out member, and
+  # the carve-out leg is diff-GATED (`carve_out_run`) but never diff-SIZED
+  # (python-ci.yml), so it runs on every gated diff regardless of which surface
+  # the diff selects. Measured: `select()` for `tortoise/pack_registry.py` (which
+  # is `core`) is byte-identical with or without this arm. Embedded-only (the
+  # fixture builds `TortoiseSDK(<tmpfile>)`), so it is ALSO in `carve_out` below.
+  - test_mechanism_write_path_9963.py
   # #3849: the ask_lane-only selection leg. `tortoise/ask_lane.py` maps to
   # `sdk`, so these two must be dual-registered here or they stop running on
   # an ask_lane-only PR (a SOURCE_PATTERNS match REPLACES the core fallback).
@@ -6778,6 +6800,13 @@ carve_out:
 # live graph, so a URI-set lane would redirect it. Also in the `sdk` surface
 # above, which is where a diff selects it.
 - test_direction_storage_7852.py
+# #9963: the mechanism comparison is embedded-only in the same way as the two
+# files above — the fixture builds `TortoiseSDK(<tmpfile>)` and reads the stored
+# `op_type` back off the graph, so a URI-set lane would redirect the construction
+# to the server and the assertions would grade a graph this test never seeded.
+# Also in the `sdk` surface above (its door is `tortoise/sdk.py`), which is where
+# a diff selects it.
+- test_mechanism_write_path_9963.py
 # #6871: embedded-only — the fixture builds `TortoiseSDK(<tmpfile>)`, so a
 # URI-set lane would redirect it. Also in the `sdk` surface above, which is
 # where the diff selects it.
@@ -6946,6 +6975,7 @@ push_extra: []
 # value moves or it is held, so an unchanged row keeps the figure it was given.
 durations_captured_at: "2026-10-21T09:30:00Z"
 durations:
+  test_inbound_relay_sweep.py: 2.0  # unmeasured — the inbound-relay CONVERGENCE fix (#2409/#2441): the 15-minute sweep that applies the relay's own policy when its event-time run never executes (measured 8/8 external triggers `startup_failure`, 0 executions in 800 runs). No CI sweep has collected it, so it carries the flat `DEFAULT_FAST_WEIGHT` for an unmeasured file (the #2818/#3419/#9121 convention) rather than a local reading, which this map forbids as a SHARD-LAYOUT input. What the weight covers: DB-free, graph-free and network-free — it loads `tools/inbound_relay_sweep.py` by path, drives a recording fake GitHub client, and evaluates the REAL job-level `if:` of `.github/workflows/inbound-relay.yml` through `tests/test_inbound_relay_guard.py`'s expression parser; no `gh`, no docker, no FalkorDB, no model, and the only file reads are the two workflow YAMLs plus `.mergify.yml`. The row must EXIST, not merely default: the `core` registration puts one more fast file in the pool, and `--integrity`'s `duration_coverage_issues` measures the ratio against the pool's own size. ⚠️ The counterfactual this row was written with ("without the row: 925/1028 = 0.8998") is a SNAPSHOT OF A MOVING DENOMINATOR, not a current requirement, and it no longer reproduces — re-measured after the `origin/main` merge the pool is 1032 and `duration_coverage_issues()` is `[]` BOTH ways: 930/1032 = 0.901163 with the row, 929/1032 = 0.900194 without it. `tools/ci_selection.py --integrity` is the authority; the row is kept because a fast file added by a PR must carry a weight at all (the #3400/#4348 trap) and because one unweighted fast file is all the headroom this pool has. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   eval/write_path/test_value_span_census_2684.py: 2.0  # unmeasured — added by the #2684 Slice-B census PR (#3400/#4348 trap): a file a PR ADDS can never carry a CI junit measurement yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419). The row has to EXIST, not merely default: adding the file to the `core`/`eval`/`sdk` surfaces puts it in `fast_pool()`, and `--integrity`'s duration-coverage floor is measured against that pool's own size. MEASURED at this head in BOTH states, because they differ by exactly this row: WITH it `fast_pool` is 1032 files with 102 unweighted = 930/1032 = 0.901163 (`duration_coverage_issues() == []`, ONE unweighted row of headroom); WITHOUT it 103 are unweighted = 929/1032 = 0.900194 — still above the inclusive 0.90 floor, so the row is not what makes the gate pass, it is the headroom: the NEXT unweighted fast file lands on exactly that 103/1032 = 0.900194 (green), and the one after it reds at 104/1032 = 0.899225. ⚠️ Read that pair as a SNAPSHOT of a moving denominator, not a constant: main keeps adding fast files, so `tools/ci_selection.py --integrity` is the authority. What the weight covers: hermetic and cheap — committed #7947 arms receipts + `tests/eval/write_path/fixtures/` JSON only, plus the shipped `extractor_v2`/`retrieval` predicates; no DB, no network, no model, ~4 s measured. `tools/ci_timing.py --refresh-durations` replaces this from junit once a sweep collects it.
   test_5140_d10_code_half_residuals.py: 2.0  # unmeasured — new in the #5140 residual harvest (#3400/#4348 trap): a file ADDED BY A PR can never carry a CI junit measurement (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419). What the weight covers: 7 cases, ALL SEVEN taking the URI-aware `sdk_factory` graph fixture — a throwaway embedded FalkorDB each (the tier-2 PR legs this file is registered in are URI-empty BY DESIGN, so that is how it runs there; only a leg that DOES set `TORTOISE_DB_URI` redirects the graph to that server, under `TORTOISE_TEST_MODE=1` + `TORTOISE_DB_URI`); no Postgres, no network, no model. The row is kept because a fast file added by a PR must carry a weight at all, and because the floor it feeds is a moving target: adding the file to the `core` and `sdk` surfaces puts it in `fast_pool()`, and `--integrity`'s duration-coverage floor is measured against the pool's own size. ⚠️ The counterfactual below is a SNAPSHOT OF A MOVING DENOMINATOR, not a current requirement, and the SHA matters — at this branch's PRE-REBASE head `ed33730a0` (base `ee9edbffc`), `--integrity` reported `❌ manifest drift: … 925/1028 … below the 90% floor` WITHOUT it. At the rebased head that ADDS the row (`99e4e472c`, base `90fe82ea4`) the pool had grown to 1030 and WITHOUT the row coverage was 927/1030 = 0.900000, i.e. `duration_coverage_issues()` was `[]` — already green with ZERO headroom, so a claim that the row is REQUIRED at that head is false. `tools/ci_selection.py --integrity` is the authority, and one file of headroom is not headroom. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_4282_memory_graph_surface.py: 2.0  # unmeasured — new in #4282 (phase 2.3); no CI sweep has collected it, so it carries the flat default for an unmeasured file (the #2818/#3400/#9121 convention) rather than a local reading, which this map forbids as a SHARD-LAYOUT input. What the weight covers: 17 cases — 13 taking the derived `sdk` graph fixture (a team created and torn down per test; EMBEDDED locally, redirected by `tests/_embedded.py` to the docker/server lane under `TORTOISE_TEST_MODE=1` + `TORTOISE_DB_URI`, so the flat weight is the same either way) and 4 that need no graph (the retirement hint, the class check, the tool-name check, and one source scan of EVERY tracked `*.py` for retired call sites, deliberately wider than `tortoise/` because `graph-scripts/` held a live caller) — no Postgres, no network, no model. The row has to EXIST, not merely default: one more unweighted fast file moves the coverage ratio, and `--integrity`'s duration-coverage issue list is measured against the pool's own size. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
@@ -8702,6 +8732,13 @@ durations:
   test_8089_expired_invitation_sweep.py: 11.0  # unmeasured — local wall reading, added by #8089; refresh from the next sweep
   test_5142_ontology_record.py: 4.5  # ci-timing top-15 2026-10-20 (run 39467226356); was 3.7
   test_direction_storage_7852.py: 5.4
+  # #9963: unmeasured — a file ADDED BY A PR has no CI junit measurement (the
+  # refresher samples push-to-main runs only), so it carries the flat default
+  # exactly as an absent key would (the #3419/#2788 rule). Do NOT substitute a
+  # local timing: the weight is a SHARD-LAYOUT input. Refresh from the first
+  # post-merge sweep that collects it. The test count is deliberately NOT stated
+  # — a hand-written count here goes stale the moment a test is added.
+  test_mechanism_write_path_9963.py: 2.0
   test_incident_kinds.py: 5.1  # ci-timing top-15 2026-10-20 (run 39467226356); was 4.0
   # #9217 (#3400 trap): both files are ADDED BY THIS PR, so no CI junit measurement can exist for
   # them (the refresher samples push-to-main runs only) — 2.0 is the flat default, NOT a local

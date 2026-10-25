@@ -83,6 +83,11 @@ MIGRATIONS = [
     # — applied so this list stays EQUAL to `RECORD_MIGRATIONS` (#9550), which
     # keeps the measured row width the SHIPPED schema's.
     "20261025000001_record_tenancy_role_and_guc.sql",
+    # #9967: `idx_source_canonical_scope`. A COST probe above all others — the
+    # `canonical_url` arm of the `:Source` resolver runs once per source write,
+    # and measuring it on a tenant carrying no index would publish the
+    # unindexed figure as the shipped one.
+    "20261025000002_record_source_canonical_index.sql",
     # #9881: the Object/Subject key move (node_key = id, `node_identity`'s
     # `key_property` re-declared). A probe Postgres without it keys the semantic
     # layer by `name` while the read parses `id` from these files.

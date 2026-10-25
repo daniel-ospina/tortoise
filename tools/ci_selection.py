@@ -1284,6 +1284,28 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # test_ax_write_eval.py ABSENT. Pinned by
              # tests/test_ci_selection.py::test_ax_write_eval_tool_change_selects_core_not_tier1.
              "tools/ax_write_eval.py",
+             # #9943: tools/inbound_relay_sweep.py owns
+             # tests/test_inbound_relay_sweep.py (registered `core`), and the
+             # same silent drop bit it: `tools/` is swallowed by
+             # NON_PYTHON_PREFIXES and no SOURCE_PATTERNS row matches the tool,
+             # so a TOOL-ONLY change selected NO surface, took the docs-only
+             # early return and landed on tier-1 smoke, where that file is not
+             # registered — the very PR that can weaken the sweep's rails would
+             # be the one that never ran the tests pinning them, and the
+             # 15-minute cron would then close contributors' items with the rail
+             # removed. MEASURED before this entry: `--changed-files
+             # tools/inbound_relay_sweep.py --event pull_request` ->
+             # surfaces=[], full=False, n=64, test_inbound_relay_sweep.py ABSENT;
+             # after -> surfaces=['core'], n=669, present. ⚠️ n is a SNAPSHOT taken
+             # at the head that measured it: it moves with `main`'s surface
+             # registrations (it has read 663 and 667 at earlier heads), so treat
+             # the two LOAD-BEARING halves — `surfaces=[], ABSENT` before vs
+             # `surfaces=['core'], present` after — as the claim, and re-measure
+             # the count rather than trusting it. Same
+             # #1349/#3332/#3616 class as the entries above. Pinned by
+             # tests/test_ci_selection.py::
+             # test_inbound_relay_sweep_tool_change_selects_core_not_tier1.
+             "tools/inbound_relay_sweep.py",
              # #7814 review P2: the queue-reconcile schedule installer owns
              # tests/test_install_queue_reconcile_schedule.py, registered
              # `core`, but `tools/` is swallowed by NON_PYTHON_PREFIXES and no
@@ -1540,6 +1562,20 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # had no entry.) Pinned by
              # tests/test_ci_selection.py::test_the_tenancy_migration_selects_the_posture_pins.
              "supabase/migrations/20261025000001_record_tenancy_role_and_guc.sql",
+             # #9967 review cycle 2 (P1-follow-through): the INDEX migration behind
+             # the `:Source` resolver's `canonical_url` arm. It adds no column and
+             # no policy — so no schema reader changes what it reports — but it is
+             # the file that makes the resolver's third arm a seek, and
+             # `tortoise/record_projection.py`'s own cost comment plus
+             # `tests/test_record_projection.py`'s resolver pin are the tests that
+             # would go stale if the arm were dropped or the index renamed. It
+             # sorts outside every `2026101200000` prefix and `supabase/` is a
+             # NON_PYTHON_PREFIX, so a diff touching ONLY this file selected NO
+             # surface (`surfaces: []`, `full: false`) — the same
+             # #1349/#3332/#3616 silent-drop class as its two neighbours here.
+             # Pinned by tests/test_ci_selection.py::
+             # test_the_source_canonical_index_migration_selects_the_resolver_pins.
+             "supabase/migrations/20261025000002_record_source_canonical_index.sql",
              # #9881 / PR #9948 review P2: the FORWARD migration that
              # RE-DECLARES the Object/Subject key contract — the
              # `node_identity.key_property` CASE and both

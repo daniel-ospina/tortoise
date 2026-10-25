@@ -689,7 +689,9 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_mitigate_operator",
         id="surface.mitigate_operator",
         description="Create a mitigation Point that modulates an operator's edge strength. "
-                    "Idempotent — second call updates existing mitigation.",
+                    "Idempotent for a CURRENT mitigation — a second call updates it in place; "
+                    "once it has been withdrawn (retracted/superseded/outdated/archived) a "
+                    "re-assertion mints a NEW mitigation Point and returns its id.",
         risk="destructive",
         idempotent=True,
         http_policy=True,
