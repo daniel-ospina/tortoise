@@ -433,7 +433,8 @@ def test_undeclared_nil_and_absent_kinds_are_silent(sdk):
 
 # ── #1934: an ADVISORY must never refuse a write ─────────────────────────
 
-def test_a_malformed_pack_manifest_cannot_refuse_a_write(sdk, tmp_path, monkeypatch):
+def test_a_malformed_pack_manifest_cannot_refuse_a_write(sdk, tmp_path,
+                                                         monkeypatch, caplog):
     """The spec COMPILES the installed manifests, so a broken one raises.
 
     MEASURED on the pre-fix head with a structurally valid pack directory whose
@@ -444,6 +445,15 @@ def test_a_malformed_pack_manifest_cannot_refuse_a_write(sdk, tmp_path, monkeypa
     that; its neighbours on the path are deliberately fail-open:
     `domain_loader._get_registry` catches `Exception`, and `create_point`'s
     sibling advisory (#5516) degrades to "no notice").
+
+    ⛔ AND THE MESSAGE MUST NOT OVERSTATE WHAT WAS LOST (#9964 review P2).
+    `section_of` is only ONE of the two routing authorities: `routing_layers`
+    also reads `declares_subject`, so a §5 Subject kind still routes when the
+    catalog cannot compile. The logged text used to say "THE KIND<->LAYER
+    NOTICE AND ROUTING WERE SKIPPED for this write: it kept the door's label" —
+    false for exactly the case it prints for, and it sent the operator hunting a
+    mis-labelled node that was labelled correctly. The `:Subject` assertion
+    below and these log assertions must agree, so the message cannot drift back.
     """
     packs = tmp_path / "packs"
     (packs / "dev").mkdir(parents=True)
@@ -466,6 +476,26 @@ def test_a_malformed_pack_manifest_cannot_refuse_a_write(sdk, tmp_path, monkeypa
     # The advisory degrades to "no section" — the write still lands on the layer
     # the kind declares, exactly as it does with a readable catalog.
     assert _node(sdk, obj["id"])[0] == ["Subject"], obj
+
+    # ── …and the message must say only what is actually lost (#9964 review P2).
+    # `core:organization` is a §5 Subject kind, and it ROUTED anyway, above. A
+    # message claiming routing was skipped contradicts that assertion, and the
+    # operator reading it would chase a node that is in fact correct.
+    degraded = [r.getMessage() for r in caplog.records
+                if "kind_layers.section_of" in r.getMessage()]
+    assert degraded, (
+        "the compile failure was silent — the operator never hears about it: "
+        f"{[r.getMessage() for r in caplog.records]}")
+    for msg in degraded:
+        assert "ROUTING WERE" not in msg, msg
+        assert "SKIPPED for this write" not in msg, msg
+        # It must still name BOTH halves honestly: the half that degraded…
+        assert "CATALOG-SECTION half" in msg, msg
+        assert "keeps the door's label" in msg, msg
+        # …and the authority that survives it, so the reader is not left
+        # believing nothing routes.
+        assert "declares_subject" in msg, msg
+        assert "still routes" in msg, msg
 
 
 def test_the_mcp_nested_props_shape_is_reported(sdk):
@@ -625,6 +655,15 @@ def test_ingest_dedup_follows_the_label_the_write_lands_on(sdk):
     by the kind, so re-ingesting ``{"type": "object", "objectKind": "core:team"}``
     probed `:Object`, found nothing (the first run minted a `:Subject`) and
     reported **created** while the write MERGED — on every run, forever.
+
+    ⛔ The probe must ask at the DOOR's fold depth, not at depth 0 (#9964 review
+    P2). The entity doors fold the item TWICE (`create_subject`/`create_object`
+    apply `_coerce_props`, then relay `**props` to `create_entity`, which folds
+    again — `_ENTITY_ITEM_FLATTEN_DEPTH`), so a probe reading the RAW item was
+    blind to both supported nested spellings while the write still re-labelled
+    by the kind. That is why the flat shape and each nested spelling below are
+    exercised separately: a depth-1-only fix leaves `props: {props: {kind}}`
+    wrong, and the flat case passing is not evidence for either.
     """
     bundle = {"entities": [{"type": "object", "name": "Ingest Team",
                             "objectKind": "core:team"}]}
@@ -650,6 +689,41 @@ def test_ingest_dedup_follows_the_label_the_write_lands_on(sdk):
     assert _graph(sdk).query(
         "MATCH (n {name:'Ingest Widget'}) RETURN count(n)").result_set[0][0] == 1
 
+    # ── The NESTED-`props` spellings, at every depth the write door folds
+    # (#9964 review P2). The entity doors fold TWICE (`create_subject`/
+    # `create_object` apply `_coerce_props`, then relay `**props` to
+    # `create_entity`, which folds again — `_ENTITY_ITEM_FLATTEN_DEPTH`), so a
+    # probe that reads the RAW item is blind to the kind one level down AND two
+    # levels down, while the write still re-labels: `created` is then reported
+    # on every run, forever, exactly as the flat shape did before the fix.
+    for spelling, nested_props in (
+            ("props: {kind}", {"objectKind": "core:team"}),
+            ("props: {props: {kind}}", {"props": {"objectKind": "core:team"}})):
+        name = f"Ingest Nested {len(spelling)}"
+
+        def _bundle(props=nested_props, name=name):
+            # A FRESH bundle per run: `ingest` is allowed to consume the item it
+            # is handed, so re-feeding one object would test the probe against
+            # residue rather than against the same input twice.
+            return {"entities": [{"type": "object", "name": name,
+                                  "props": dict(props)}]}
+
+        n1 = sdk.ingest(_bundle())
+        assert n1["created"]["entities"] == 1, (spelling, n1)
+        assert _node(sdk, n1["ids"]["entities"][0])[0] == ["Subject"], (
+            f"{spelling}: the nested kind did not re-label the write, so this "
+            f"case has stopped exercising the probe", n1)
+        n2 = sdk.ingest(_bundle())
+        assert n2["created"]["entities"] == 0, (
+            f"{spelling}: the probe missed the node the first run created — the "
+            f"write MERGED onto the routed label while the probe read the "
+            f"item's own: {n2}")
+        assert n2["deduped"]["entities"] == 1, (spelling, n2)
+        assert n2["ids"]["entities"] == n1["ids"]["entities"], spelling
+        assert _graph(sdk).query(
+            "MATCH (n {name:$n}) RETURN count(n)",
+            params={"n": name}).result_set[0][0] == 1, (
+            f"{spelling}: a second identical ingest minted a twin: {n2}")
 
 def test_the_dedup_hit_keeps_the_layer_advisory(sdk):
     """The DEDUP-hit branch must not drop the layer notice (#9964 review).

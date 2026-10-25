@@ -69,6 +69,25 @@ This module answers it ONCE, and every consumer derives from it:
 and the fold's ON CREATE default for every entity label — so it is never
 routed and never warned about.
 
+⛔ **Source and Operator are OUT OF SCOPE here, and this is deliberate — stated
+because the owner ruling on #9964 (Scope 1) requires it to be stated rather than
+left implicit.** Both are real layers (``docs/ONTOLOGY.md`` §1/§2), and their
+records carry real kind props (``sourceKind``/``documentKind`` on the Source and
+document legs; the operator has no kind prop at all), so they are *not* excluded
+because they lack a kind. They are excluded because **nothing in this module
+could decide them**: the partition this module reads has no section for either —
+measured at the #9964 head, ``kind_index_sections()`` is
+``{objects: 70, subjects: 5, events: 26, points: 1}`` and
+``kind_classifier.TYPE_SECTIONS`` is ``{entity: (objects, subjects),
+ event: (events,), point: (points,)}``. A route could therefore never fire for a
+Source or an operator, and inventing a table for them here would be a SECOND
+authority for the kind↔layer question — the exact drift this module exists to
+remove. Giving them routing means adding them to the CLASSIFIER's partition
+first, then deriving from it; the ruling's "a Source/document genre re-files
+losslessly" is a statement that re-filing them is SAFE, not that this module can
+decide it today. ``LAYERS`` therefore names only the four layers a section
+exists for.
+
 Deliberately stdlib-only at module scope (like ``kind_fallbacks``): this module
 is imported by the SDK doors, the binder and the classifier's spec builder, and
 each of those would otherwise inherit a cycle. Every vocabulary read is lazy.
@@ -240,9 +259,11 @@ def section_of(kind: Any) -> str | None:
         _logger.warning(
             "kind_layers.section_of: the kind-index spec could not be compiled "
             "(%s: %s) — answering 'no section' so the write is not refused "
-            "(#1934), which also means THE KIND<->LAYER NOTICE AND ROUTING WERE "
-            "SKIPPED for this write: it kept the door's label. Fix the installed "
-            "pack manifests to restore the classifier's partition.",
+            "(#1934), so the CATALOG-SECTION half of the kind<->layer decision is "
+            "unavailable for this write: a kind ONLY this section declares keeps "
+            "the door's label, while a §5 Subject kind still routes "
+            "(routing_layers reads declares_subject, not this spec). Fix the "
+            "installed pack manifests to restore the classifier's partition.",
             type(exc).__name__, exc)
         return None
 

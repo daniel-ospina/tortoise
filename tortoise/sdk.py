@@ -3757,11 +3757,26 @@ def _existing_entity_ids(g, etype: str, props: dict, name: Any) -> list:
     type→label here, on a COPY (that function MUTATES ``props`` on the routed
     case), and fails open to ``etype`` (#1934: a probe must never refuse a
     write).
+
+    Folded to the DOOR's depth first — the SAME rule ``_item_prop_at_depth``
+    states for every other ingest reader (#7925 review P2). The entity doors
+    flatten the item TWICE (``create_subject``/``create_object`` apply
+    ``_coerce_props``, then relay ``**props`` to ``create_entity``, which folds
+    again — ``_ENTITY_ITEM_FLATTEN_DEPTH``), so probing the RAW item was blind
+    to BOTH supported nested spellings (``props: {kind: …}`` and
+    ``props: {props: {kind: …}}``) while the write still re-labelled by the
+    kind: ``created`` was reported on every re-ingest of a nested bundle,
+    exactly as the FLAT shape was before this probe existed (#9964 review P2).
+    A shallower fold leaves the depth-2 spelling wrong; a deeper one would read
+    a kind the door never applies.
     """
     if not isinstance(name, str) or not name:
         return []
     try:
-        probe = _kind_layer_note(etype, dict(props))[0]
+        probe_props = dict(props)
+        for _ in range(_ENTITY_ITEM_FLATTEN_DEPTH.get(etype, 2)):
+            probe_props = _coerce_props(probe_props)
+        probe = _kind_layer_note(etype, probe_props)[0]
     except Exception:  # noqa: BLE001, RUF100 — probe only, never refuses a write
         probe = etype
     label = _ENTITY_LAYER_LABEL.get(probe) or _ENTITY_LAYER_LABEL.get(etype)
