@@ -202,6 +202,19 @@ surfaces:
   - test_7950_capstone_probe.py
   # #9557 (R9): the record's BACKUP and the drill that proves it restores (`tortoise/record_backup.py` + the `record-backup` CLI verb). DUAL-REGISTERED with `core`, and THIS arm is the one that carries a verb-only diff: `tortoise/__main__.py` is an EXACT `api` SOURCE_PATTERN that REPLACES the `core` fallback in `select()`, so a diff that changes the verb alone selects `api` and a `core`-only entry would never run the file pinning the verb's exit codes — the #1349/#2938/#3154 silent-drop class, the same argument as the `test_record_reconcile_trigger.py` rows above. `record_backup.py` itself matches no SOURCE_PATTERN, so a mechanism-only diff takes `core`. DB-free (pg_dump/pg_restore and the row counts are injected), so it is deliberately NOT carve_out-registered.
   - test_record_backup.py
+  # #7970 (epic #7879, interface D): the ANCHORED read surface the record
+  # serves — the `GET /v1/points/{id}` handler is the first read answered by the
+  # record with the graph stopped, and its failure arms (`record` mode is 503 on
+  # an impaired record, NEVER 404; `prefer` mode's fallback is named and
+  # counted; OFF stays byte-identical) live in `tortoise/hosted_api.py`, an EXACT
+  # `api` SOURCE_PATTERNS match that REPLACES the `core` fallback in `select()`.
+  # A hosted_api-only diff therefore selects `api`+`onboarding` and a `core`-only
+  # entry would never run the endpoint pins — the #1349/#2938/#3154 silent-drop
+  # class. DUAL-REGISTERED with `core` below, where `record_serve.py`
+  # (no SOURCE_PATTERN) is the subject. DB-free: every connection is a recording
+  # fake, so it needs no graph, no URI and no carve-out registration; the live
+  # half is `test_record_serve_live.py`.
+  - test_record_serve.py
   # #7809: DUAL-REGISTERED with `core` AND `eval` — without this `api` arm the
   # guard is SKIPPED on the exact change it exists to guard. The pre-warm it
   # pins lives in `tortoise/hosted_api.py`, an EXACT `api` SOURCE_PATTERNS match
@@ -2376,6 +2389,23 @@ surfaces:
   # `supabase/tests/20261022000001_record_tenancy_posture.sql`, registered in
   # `supabase/tests/pglite/validate.mjs`.
   - test_record_tenancy_guc.py
+  # #7970 (epic #7879, interface D) — the record-served ANCHORED read
+  # (`tortoise/record_serve.py`) and the two test files that pin it. `core` is
+  # the arm that carries the mechanism: `record_serve.py` matches no named
+  # SOURCE_PATTERN, and the modules it reuses (`cache_projection.py`,
+  # `record_projection.py`) are `core`-selected too. `test_record_serve.py` is
+  # DUAL-REGISTERED with `api` above (it drives the `GET /v1/points/{id}`
+  # handler); this arm is load-bearing for the module-only diff, the `api` arm
+  # for the handler-only one.
+  - test_record_serve.py
+  # The LIVE half: parity on a real Postgres and S9 with the cache copy
+  # destroyed. It needs BOTH stores (`TORTOISE_DB_URI` + `TEST_RECORD_DB_URI`)
+  # and no CI job provides both, so it SKIPS VISIBLY (per-test `pytest.skip`,
+  # not an import-time module skip — which is why it is deliberately NOT in
+  # `uri_requiring`: that list is for modules that COLLECT nothing on a
+  # URI-empty leg, and this one collects). Registered here so the file is
+  # classified rather than drifting unregistered (`integrity_problems`).
+  - test_record_serve_live.py
   # #7968 / PR #8179 review P1: guards the org-erasure wiring — `purge_org_control_plane`
   # must route the organizations delete through the `purge_org_record` RPC
   # (migration 20261012000005), which sets app.record_journal_purge so the
@@ -7165,6 +7195,8 @@ durations:
   # Both are measured locally under the same `# unmeasured` convention; refresh from
   # the first post-merge run that includes them.
   test_7936_reference_fold_label_rekey.py: 8.0  # #7936 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). The row is added for the HEADROOM the gate no longer has — main sits just above the 90% floor, so one more unmeasured fast file can tip `duration_coverage_issues()`, and an absent row is also what reds `tests/test_ci_timing.py`'s `validate_refreshed_manifest` assertions. Local embedded-lane reading 7.0-10.1 s (15 tests; `FalkorProjection(path=…)` graphs, plus one SDK live-build case). Refresh from the first post-merge run that includes it.
+  test_record_serve.py: 2.0  # #7970 (#3400/#4348 trap): a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it takes the flat 2.0s default, and the surface half alone is not enough — an unregistered new test file reds `integrity_problems` on the DURATIONS map too. The file is DB-free; NO local time and no test COUNT is asserted here (both drift between rounds — `pytest --collect-only` is the authority); no local time is substituted for the CI weight (the #3400 method cannot attribute a session total per file, and a local wall-clock reading has not reproduced across lanes), so the flat default stands until the first post-merge sweep measures it. Refresh from the first post-merge run that includes it.
+  test_record_serve_live.py: 2.0  # #7970, same #3400/#4348 trap as the row above. The file SKIPS on every CI leg today (no job provides both a Postgres carrying the record migrations and a FalkorDB), so its CI weight is the skip-time floor, not a measurement; it is registered because an unclassified file reds `integrity_problems`, and the flat default is what an unmeasured file takes. Run by hand on a lane with both stores armed: 2 passed (parity clean, cache 11 record 8; S9 answered from the record). No wall-clock weight is derived from that single-lane reading.
   test_record_backup.py: 2.0  # #9557 (#3400/#4348 trap): a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it takes the flat 2.0s default — and the row is required for the DURATIONS half as well as the surface half, because an unregistered new test file reds `integrity_problems`. Locally the file is DB-free and runs in seconds; the session total cannot be attributed per file by the #3400 method, so no local number is substituted for a CI weight. Refresh from the first post-merge run that includes it; do not drop the row without re-deriving the coverage floor at that head.
   eval/retrieval/test_integration.py: 1523.4
   # #3553: this file is NEW on this branch, so main's sweep has no junit measurement for it.
