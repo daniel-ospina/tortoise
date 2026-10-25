@@ -44,7 +44,11 @@ commit_ops, audit) references THIS docstring for the band + formula.
 
 import math
 
-from .live import _live_only
+# ``MITIGATION_STRENGTH_DEFAULT`` is DECLARED in ``live.py`` (#9962): the
+# assertion-identity predicate there must price an absent strength exactly as
+# this module does, and ``live`` is the leaf. Re-exported through this module's
+# namespace because the band below is what callers import.
+from .live import MITIGATION_STRENGTH_DEFAULT, _live_only
 
 # ── Mitigation strength band (#2315) ──────────────────────────────────
 MITIGATION_STRENGTH_MIN = 0.10  # 0.10: minor caveat — weakest dampening
@@ -53,7 +57,9 @@ MITIGATION_STRENGTH_MAX = 0.50  # 0.50: major counter-evidence — strongest
 # ``mitigation_strength`` property is missing (mitigate_operator always
 # writes it; pre-convention imports may not). Matches graph-scripts/
 # decide.py's default strength. Conservative, never silent-max.
-MITIGATION_STRENGTH_DEFAULT = 0.30
+# ⛔ #9962: the ONE declaration lives in ``live.py`` (imported above) —
+# ``live.same_mitigation_assertion`` has to agree with this read rule, and a
+# second copy here is how the identity check and the dampener would drift.
 
 
 def mitigation_dampening_factor(strength: float | None) -> float:

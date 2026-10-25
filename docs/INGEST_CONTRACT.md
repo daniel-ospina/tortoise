@@ -141,6 +141,16 @@ Rules that hold regardless of granularity or policy:
   [§11 Promotion & EP](#11-promotion--ep)). Pass `status: "live"` only with
   `promotion_policy: "auto"` — under gated, an explicit `status:"live"` is a
   violation (no bypass of the gated contract).
+- ⛔ **A mitigation Point is the ONE exemption from that born-draft rule**
+  (#9962): a connection's `mitigation: {reason, strength}` is written by the
+  single-writer mitigation gate (`mitigate_operator`), not by the bundle's
+  point policy, so the mitigation Point is born `status: "live"` under **both**
+  policies — gated included. The reason is definitional: a mitigation that does
+  not dampen is not an assertion, and a `draft` node is EP-inert
+  (`live._live_only` excludes it from the dampener read), so staging one as a
+  draft would silently discard the dampening this section promises was applied.
+  It is not an extraction-staged claim awaiting promotion, and nothing else in a
+  bundle is exempt — every other Point a gated bundle creates is `draft`.
 
 ### 2.2 Bulk + gated (the default) — expected response
 

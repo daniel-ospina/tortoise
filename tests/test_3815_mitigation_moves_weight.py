@@ -47,6 +47,7 @@ import pytest
 
 from tests import _live_utils
 from tortoise.ep import TortoiseEP
+from tortoise.live import same_mitigation_assertion
 from tortoise.sdk import TortoiseSDK
 from tortoise.weights import (
     MITIGATION_STRENGTH_DEFAULT,
@@ -772,20 +773,41 @@ def _mitigates_payload(src_id: str, dst_id: str, strength: float):
 
 
 class TestTheRetractionIsDurableOnEveryRoute:
-    """#9962 — a withdrawn mitigation stays withdrawn wherever the write lands.
+    """#9962 — a WITHDRAWN mitigation stays withdrawn, and NEW evidence still lands.
 
-    Each test reads an observable the pre-#9962 code path cannot produce, on a
-    route a direct SDK caller does not go through:
+    Two opposite halves, and every test here holds one of them: a machine
+    REDELIVERY of the assertion a withdrawn node already records writes nothing
+    on either route, while a DIFFERENT assertion is new evidence and must reach
+    the writer (so the guard cannot be "fixed" by suppressing writes). Each
+    test reads an observable the pre-#9962 code path cannot produce, on a route
+    a direct SDK caller does not go through.
 
     MUTATIONS THAT MUST RED:
     * drop the terminal arm from ``_apply_ingest_mitigation``'s ``prior`` read
       → the redelivery re-mints a live mitigation (2 rows, weight 0.5, silent);
+    * make the guard fire on "everything attached is terminal" alone (round 2's
+      defect) → a DIFFERENT assertion is swallowed and
+      ``test_a_new_assertion_on_a_withdrawn_operator_is_written`` reds;
+    * read an ABSENT stored strength as "different" (the predicate before this
+      round) → a redelivery against a strength-less legacy mitigation mints a
+      duplicate beside the withdrawn node (``test_a_redelivery_of_a_
+      strengthless_legacy_mitigation_is_a_redelivery``);
     * drop the liveness predicate from ``_load_commit_graph_state``'s MITIGATES
       count → the record reconciles ``merge`` and the operator stays undamped;
+    * key that count on a CURRENT mitigation only (round 2's other mutation) → a
+      redelivery re-mints on the hosted route
+      (``test_hosted_commit_redelivery_does_not_reinstate_a_retraction``);
     * drop ``_live_only`` from ``why.py``'s optional mitigation leg → the
       why-block names the retracted node (lowest ULID wins the tie-break);
     * drop it from ``_state_mitigations`` → the state view reports a dampening
       the engine no longer applies.
+
+    NOT pinned here, stated so a reader does not assume otherwise: the hosted
+    key's arm 1 is satisfied by ANY current mitigation, so a DIFFERENT assertion
+    against an operator that still carries a live mitigation reconciles
+    ``merge`` with no write there while ``ingest`` rewrites the live node in
+    place. That divergence predates #9962 (see ``live.same_mitigation_
+    assertion``'s scope note).
     """
 
     def test_ingest_redelivery_does_not_reinstate_a_retraction(self):
@@ -834,6 +856,68 @@ class TestTheRetractionIsDurableOnEveryRoute:
             "a crash-retry reinstated a retraction a human made: "
             f"undamped=1.0, after redelivery={after}")
         assert second["warnings"] == [], second["warnings"]
+
+    def test_a_redelivery_of_a_strengthless_legacy_mitigation_is_a_redelivery(
+            self):
+        """An ABSENT stored strength IS the documented 0.30 — not "unknown".
+
+        A pre-convention / imported mitigation may carry no
+        ``mitigation_strength``, and ``weights.mitigation_dampening_factor``
+        prices that at ``MITIGATION_STRENGTH_DEFAULT`` (0.30) — so the assertion
+        the withdrawn node records is ``(reason, 0.30)`` and a redelivery at
+        0.30 matches it.
+
+        Failing state (measured at the predicate before this arm): a NULL stored
+        strength compared as "different", the guard fell through,
+        ``mitigate_operator`` minted a LIVE duplicate beside the withdrawn node,
+        and a machine redelivery reinstated the retraction — the one hole left
+        in "a human ``retract_point`` is never undone by a redelivery". The
+        observable is the ROW SET, not the weight: a duplicate at the same
+        strength would re-damp by exactly what the withdrawn node priced, so
+        only the row count and the surviving id discriminate.
+        """
+        sdk = fresh_sdk()
+        first = sdk.ingest(_ingest_mitigation_bundle())
+        op_id = first["ids"]["connections"][0]
+        assert isinstance(op_id, str), first["ids"]["connections"]
+        proj = sdk._get_proj()
+        reason = "p1 is unreliable"
+        # Remove the mitigation the ingest wrote and plant the LEGACY shape this
+        # case is about: a mitigation Point with no `mitigation_strength` at
+        # all (the shape pre-convention imports carry, #9262's neighbour).
+        for written, _status, _strength in _ingest_mitigation_rows(sdk, op_id):
+            sdk.delete_point(written)
+        legacy_id = f"legacy-mit-{uuid.uuid4().hex[:10]}"
+        proj.g.query(
+            "MATCH (op:Point {id:$op}) "
+            "CREATE (m:Point {id:$mid, content:$c, pointKind:'statement', "
+            "is_operator:false, status:'live'}), "
+            "(m)-[:IMPL]->(op), (op)-[:mitigated_by]->(m)",
+            params={"op": op_id, "mid": legacy_id,
+                    "c": f"[MITIGATION] {reason}"},
+        )
+        rows = _ingest_mitigation_rows(sdk, op_id)
+        assert [(r[0], r[2]) for r in rows] == [(legacy_id, None)], rows
+        assert compute_operator_weight(proj, op_id) == pytest.approx(
+            mitigation_dampening_factor(MITIGATION_STRENGTH_DEFAULT)), (
+            "the dampener must price the strength-less mitigation at the "
+            "documented default — that reading is what makes 0.30 its "
+            "assertion")
+
+        sdk.retract_point(legacy_id)
+        assert compute_operator_weight(proj, op_id) == pytest.approx(1.0)
+
+        sdk.ingest(_ingest_mitigation_bundle(
+            strength=MITIGATION_STRENGTH_DEFAULT, reason=reason))
+        rows_after = _ingest_mitigation_rows(sdk, op_id)
+        assert len(rows_after) == 1, (
+            "a redelivery at the documented default strength must not mint a "
+            f"duplicate beside the withdrawn mitigation: {rows_after}")
+        assert rows_after[0][0] == legacy_id
+        assert rows_after[0][1] == "retracted", (
+            f"a redelivery revived a withdrawn mitigation: {rows_after}")
+        assert compute_operator_weight(proj, op_id) == pytest.approx(1.0), (
+            "a redelivery reinstated a retraction on a legacy mitigation")
 
     def test_hosted_commit_re_assertion_reaches_the_mitigation_writer(self):
         """The hosted route must not swallow a re-assertion as ``merge``.
@@ -1086,3 +1170,33 @@ class TestTheRetractionIsDurableOnEveryRoute:
         sdk.mitigate_operator(op1, "communicate the delay", 0.30)
         assert named()[opt1["id"]] == "communicate the delay", (
             "the tradeoffs leg must surface the CURRENT mitigation: " f"{named()}")
+
+
+class TestTheAssertionIdentity:
+    """``live.same_mitigation_assertion`` — the pair, and the absent-strength rule.
+
+    Pure (no graph), so it pins the predicate the two write doors share without
+    going through either of them. The end-to-end consequence lives in
+    ``TestTheRetractionIsDurableOnEveryRoute::test_a_redelivery_of_a_
+    strengthless_legacy_mitigation_is_a_redelivery``.
+    """
+
+    def test_an_absent_stored_strength_is_the_documented_default(self):
+        """NO stored strength reads as ``MITIGATION_STRENGTH_DEFAULT`` (0.30).
+
+        Failing state (pre-fix): the predicate required
+        ``stored_strength is not None``, so the first two assertions returned
+        False and the third/fourth were green for the wrong reason.
+        """
+        assert same_mitigation_assertion("[MITIGATION] R", None, "R", 0.30)
+        assert same_mitigation_assertion(
+            "[MITIGATION] R", None, "R", MITIGATION_STRENGTH_DEFAULT)
+        assert not same_mitigation_assertion("[MITIGATION] R", None, "R", 0.40)
+        assert not same_mitigation_assertion(
+            "[MITIGATION] R", None, "OTHER", 0.30)
+
+    def test_an_unrepresentable_stored_strength_is_never_a_silent_match(self):
+        """"Absent" has a documented reading; "uncoercible" does not."""
+        assert not same_mitigation_assertion("[MITIGATION] R", "n/a", "R", 0.30)
+        assert not same_mitigation_assertion(
+            "[MITIGATION] R", object(), "R", 0.30)

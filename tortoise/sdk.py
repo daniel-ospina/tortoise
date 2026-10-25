@@ -17243,18 +17243,23 @@ class TortoiseSDK:
         revived in place — a re-assertion creates a NEW mitigation Point, since
         retraction is terminal (#432/#2422). A REDELIVERY through ``ingest()``
         is not a re-assertion, so it writes nothing in that state (see
-        ``_apply_ingest_mitigation``). A ``draft`` mitigation is neither
-        terminal nor current: it IS the node this lookup finds, so the call
-        updates it in place and does NOT promote it (#1088 — no retro-
-        promotion), which means a draft-only operator accepts the call and does
-        not dampen. The reply carries its ``status``, because ``current`` in
-        ``live.py`` includes draft and a caller would otherwise read the update
-        as "this now dampens".
+        ``_apply_ingest_mitigation``). A ``draft`` mitigation is not TERMINAL —
+        ``live.CURRENT_POINT_STATUS_VALUES`` includes draft, so it IS the node
+        this lookup finds: the call updates it in place and does NOT promote it
+        (#1088 — no retro-promotion), which means a draft-only operator accepts
+        the call and does not dampen (a draft is CURRENT but EP-INERT:
+        ``live._live_only`` excludes it from the dampener read). The reply
+        carries its ``status`` so a caller can tell those two arms apart instead
+        of reading the update as "this now dampens".
 
         The created mitigation Point is a CURRENT point (`status='live'`,
         #5089/#9962) — the `weights.py` dampener read prices `m.status`, so a
         terminal mitigation stops dampening and a retracted one restores the
-        operator's undamped weight without deleting it.
+        operator's undamped weight without deleting it. It is born `live` on
+        EVERY route, `ingest()` under the default gated policy included: this
+        door is the single-writer mitigation gate, not the bundle's point
+        policy, and a mitigation that does not dampen is not an assertion.
+        `docs/INGEST_CONTRACT.md` §2.1 records that exemption (#9962).
         """
         # #4647: guard before the range check — ``0 <= Decimal('NaN') <= 1``
         # raises ``decimal.InvalidOperation``, so the check would raise an
