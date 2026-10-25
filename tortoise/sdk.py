@@ -16908,6 +16908,14 @@ class TortoiseSDK:
         # mechanism — it is not IMPL and not NAND — so there is nothing to
         # compare and silence is the honest answer; only a mechanism-vs-mechanism
         # contradiction is reported.
+        # `emit_violation` is imported HERE as well, exactly as the two blocks
+        # above do: it is otherwise bound only inside `if label:` (:16798) or
+        # `if semantics is not None:` (:16832), so today's reachability rests on
+        # `declared_mechanisms` returning `[]` when both are absent. That coupling
+        # is invisible to every static checker, and its failure mode is a
+        # NameError raised BEFORE the node is written (`pid = ulid()` below) —
+        # i.e. a refused write on the path this block documents as warn-not-block.
+        from tortoise.enforcement import emit_violation
         from tortoise.pack_registry import CORE_PREDICATES, declared_mechanisms
 
         if op_type in CORE_PREDICATES:
@@ -16938,7 +16946,7 @@ class TortoiseSDK:
                 warnings.append({
                     "code": "mechanism_mismatch",
                     "message": (
-                        f"op_type {op_type!r} contradicts the mechanism this "
+                        f"op_type {op_type!r} contradicts a mechanism this "
                         f"write declares: {_declared}. {_inversion}. "
                         f"The mechanism each meaning declares lives in "
                         f"pack_registry.SEMANTICS_MECHANISMS (a pack relation's "

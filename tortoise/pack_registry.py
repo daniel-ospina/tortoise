@@ -653,7 +653,10 @@ def declared_mechanisms(
     map alone in the worst case). The warn-not-block path must not turn a load
     failure — or a malformed row — into a write failure, so the ROW WALK is
     inside the guard, not just the load, and an unhashable `mechanism` is
-    rejected rather than raising out of a frozenset membership test.
+    rejected rather than raising out of a frozenset membership test. Every
+    degradation is LOGGED (`_warn_packs_once`), never silent: a pack leg that
+    stopped disclosing must be visible somewhere other than the missing warning
+    it would have produced.
 
     The same refusal covers the ARGUMENTS: `SEMANTICS_TRANSITION.get` is itself a
     dict lookup, so an unhashable `label`/`semantics` raises `TypeError` — the
@@ -683,22 +686,50 @@ def declared_mechanisms(
             from .domain_loader import _get_registry
 
             registry = _get_registry()
-        except Exception:  # noqa: BLE001, RUF100 — warn-not-block path, never raise
+        except Exception as exc:  # noqa: BLE001, RUF100 — warn-not-block path, never raise
+            # DEGRADE AND SAY SO (the norm this repo states at
+            # `domain_loader.py:103`): swallowing this silently disables the
+            # pack-declared half of a governance disclosure permanently, with no
+            # instrument anywhere reporting it. Warn-only, once per key.
+            _warn_packs_once(
+                ("declared-mechanisms", "registry"),
+                "declared_mechanisms: the pack registry would not load (%s: %s) "
+                "— only the semantics/label half of the mechanism disclosure is "
+                "available for this write",
+                type(exc).__name__, exc)
             registry = None
     if label and registry is not None:
         try:
             rows = list(registry.list_relations())  # type: ignore[attr-defined]
-            for rel in rows:
+        except Exception as exc:  # noqa: BLE001, RUF100 — the WALK is warn-only too
+            # No row was read at all, so nothing here is PARTIAL: the pack leg
+            # contributes no declaration, exactly as when there is no registry.
+            # Say so — a silent skip reads as "no pack declares anything".
+            _warn_packs_once(
+                ("declared-mechanisms", "relations"),
+                "declared_mechanisms: pack relations could not be read (%s: %s) "
+                "— the pack-declared half of the mechanism disclosure is "
+                "SKIPPED for this write",
+                type(exc).__name__, exc)
+            rows = []
+        for rel in rows:
+            # Per-ROW isolation, not one guard around the walk: a single bad row
+            # must not truncate the ones after it. The caller renders what this
+            # returns as the mechanism(s) the write declares, so quietly losing a
+            # later declaration is a wrong disclosure, not a shorter one. A row
+            # that cannot be read is named in the log rather than dropped.
+            try:
                 if not isinstance(rel, dict):
                     continue
                 if rel.get("predicate") != label:
                     continue
                 _add(rel.get("mechanism"),
                      f"the pack relation '{label}' ({rel.get('pack') or 'pack'})")
-        except Exception:  # noqa: BLE001, RUF100 — the WALK is warn-only too
-            # Keep whatever was read before the bad row: a partial declaration
-            # still discloses, and an exception here would abort the write.
-            pass
+            except Exception as exc:  # noqa: BLE001, RUF100 — warn-only, per row
+                _warn_packs_once(
+                    ("declared-mechanisms", "row", type(rel).__name__),
+                    "declared_mechanisms: skipped an unreadable pack relation row "
+                    "for %r (%s: %s)", label, type(exc).__name__, exc)
 
     # 2. the declared MEANING — the Layer-2 word, whether it arrived as
     #    `semantics` or (pre-#7852 spelling) as the `label` itself. Both are

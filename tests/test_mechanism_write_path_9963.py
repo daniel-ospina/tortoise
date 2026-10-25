@@ -27,6 +27,8 @@ Runnable embedded:
 """
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from tortoise.pack_registry import (
@@ -193,6 +195,71 @@ def test_declared_mechanisms_never_raises_on_a_broken_registry(registry):
     OUTSIDE it. Each case here RAISES on the pre-fix code (AttributeError /
     TypeError), so this test is the non-vacuous proof of the guard."""
     assert declared_mechanisms(label="marks", registry=registry) == []
+
+
+class _ExplodingRow(dict):
+    """A row that is a `dict` (so the isinstance guard passes it) but whose
+    `.get` raises — the shape that used to truncate the walk SILENTLY."""
+
+    def get(self, *args, **kwargs):
+        raise RuntimeError("the row exploded")
+
+
+@pytest.mark.parametrize("registry,needle", [
+    (_StubRegistry(raises=RuntimeError("registry will not load")),
+     "pack relations could not be read"),
+    (_StubRegistry(rows=[_ExplodingRow()]),
+     "unreadable pack relation row"),
+], ids=["relations-raise", "row-raises"])
+def test_a_degraded_pack_walk_is_logged_not_swallowed(registry, needle, caplog):
+    """Degrade AND SAY SO (the norm `domain_loader.py:103` states for exactly
+    this situation): the pack half of the disclosure is the only thing that
+    reports a pack-declared inversion, so a `list_relations()` that starts
+    raising must not disable it permanently and invisibly. Both failure arms
+    were a bare `except Exception: pass` — nothing logged, so no instrument
+    anywhere could report the gap. Pre-fix this test finds NO warning record."""
+    with caplog.at_level(logging.WARNING, logger="tortoise.pack_registry"):
+        assert declared_mechanisms(label="marks", registry=registry) == []
+    assert any(needle in rec.getMessage() for rec in caplog.records), caplog.text
+
+
+def test_an_unreadable_row_does_not_truncate_the_walk(caplog):
+    """A row this walk cannot read must not discard the rows AFTER it: the
+    caller renders the result as the mechanism the write declares, so a
+    truncated walk reads as a complete one. One guard around the whole loop
+    kept whatever had been read BEFORE the bad row and said nothing — the same
+    disclosure silently losing a declaration. Per-row isolation reads on, and
+    the skipped row is named in the log."""
+    rows = [_ExplodingRow(),
+            {"predicate": "marks", "mechanism": "IMPL", "pack": "portfolio"}]
+    with caplog.at_level(logging.WARNING, logger="tortoise.pack_registry"):
+        got = declared_mechanisms(label="marks", registry=_StubRegistry(rows=rows))
+    assert got == [("IMPL", "the pack relation 'marks' (portfolio)")], got
+    assert any("unreadable pack relation row" in rec.getMessage()
+               for rec in caplog.records), caplog.text
+
+
+def test_the_mechanism_leg_binds_its_own_emit_violation(sdk, monkeypatch):
+    """The mechanism block must not DEPEND on an earlier block's import.
+    `emit_violation` was bound only inside `if label:` / `if semantics is not
+    None:`, so the block worked solely because `declared_mechanisms` returns
+    `[]` when both are absent — a coupling no static checker sees. Its failure
+    mode is a `NameError` raised BEFORE the node is written, i.e. a REFUSED
+    write on the path this block documents as warn-not-block. Forcing a
+    contradiction with neither argument supplied reproduces exactly that: on the
+    pre-fix code this write raises `NameError` and nothing is written."""
+    import tortoise.pack_registry as pack_registry
+
+    monkeypatch.setattr(
+        pack_registry, "declared_mechanisms",
+        lambda **_: [("NAND", "a stub declaration (no label, no semantics)")],
+    )
+    a, b = _two_points(sdk)
+    op = sdk.create_operator("IMPL", a, [b])          # no label, no semantics
+    warns = _mechanism_warnings(op)
+    assert warns, op.get("warnings")
+    assert warns[0]["declared_mechanism"] == "NAND"
+    assert _stored_op_type(sdk, op["id"]) == "IMPL"   # warn-not-block intact
 
 
 def test_a_known_absent_registry_is_not_reloaded():

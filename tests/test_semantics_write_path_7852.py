@@ -35,8 +35,27 @@ import os
 
 import pytest
 
-from tortoise.pack_registry import SEMANTICS_DIRECTIONS, SEMANTICS_VALUES
+from tortoise.pack_registry import (
+    SEMANTICS_DIRECTIONS,
+    SEMANTICS_MECHANISMS,
+    SEMANTICS_VALUES,
+)
 from tortoise.sdk import TortoiseSDK
+
+
+def _mechanism_warnings(op: dict) -> list[dict]:
+    """The #9963 mechanism-leg warnings on a write result.
+
+    These tests exercise the DIRECTION chain, so the `op_type` they write is
+    derived from the meaning's own mechanism (`SEMANTICS_MECHANISMS`, i.e.
+    ONTOLOGY §8's mechanism column) instead of being fixed. A fixed `NAND`/`IMPL`
+    over the whole vocabulary wrote mechanism-contradictory operators on every
+    run, so the door emitted `mechanism_mismatch` violation events that nothing
+    here asserted — permanent, unattributed noise. Deriving it also pins the
+    silent half of #9963: a write whose op_type AGREES with its meaning warns
+    nothing.
+    """
+    return [w for w in op.get("warnings") or [] if w.get("code") == "mechanism_mismatch"]
 
 
 def _point(sdk, content: str) -> dict:
@@ -74,13 +93,19 @@ def sdk(tmp_path):
 def test_semantics_resolves_direction(sdk, semantics, expected):
     """A declared Layer-2 meaning records the direction it carries — the chain
     step that had no way to run before W1, now in the model's four-value
-    vocabulary (not the interim legacy pair)."""
+    vocabulary (not the interim legacy pair).
+
+    `op_type` is the mechanism the meaning declares (#9963), so this write is
+    mechanism-consistent: it still resolves the direction the semantics fixes,
+    and it must stay SILENT on the mechanism leg."""
     a, b = _point(sdk, "a"), _point(sdk, "b")
-    op = sdk.create_operator("NAND", a["id"], [b["id"]], semantics=semantics)
+    op = sdk.create_operator(SEMANTICS_MECHANISMS.get(semantics, "NAND"),
+                             a["id"], [b["id"]], semantics=semantics)
     direction, basis = _stored(sdk, op["id"])
     assert direction == expected, (semantics, direction)
     assert basis == "semantics", basis
     assert op.get("direction") == expected
+    assert _mechanism_warnings(op) == [], op.get("warnings")
 
 
 def test_explicit_direction_outranks_semantics(sdk):
@@ -175,9 +200,13 @@ def test_every_ruled_semantics_records_its_model_direction(sdk):
     passing a two-valued smoke assertion."""
     a, b = _point(sdk, "a"), _point(sdk, "b")
     for semantics in sorted(SEMANTICS_VALUES):
-        op = sdk.create_operator("IMPL", a["id"], [b["id"]], semantics=semantics)
+        # The mechanism the meaning declares (#9963), so the write is
+        # consistent on all three legs and the mechanism leg stays silent.
+        op = sdk.create_operator(SEMANTICS_MECHANISMS.get(semantics, "IMPL"),
+                                 a["id"], [b["id"]], semantics=semantics)
         assert _stored(sdk, op["id"]) == (SEMANTICS_DIRECTIONS[semantics],
                                            "semantics"), semantics
+        assert _mechanism_warnings(op) == [], (semantics, op.get("warnings"))
 
 
 # ── the MCP surface exposes it ────────────────────────────────────────────
