@@ -4319,8 +4319,10 @@ class _EntityHandlers:
         # 'https://example.com/a/b')` then `DocumentCreated` on
         # `'https://Example.COM/a/b/?utm_source=x#frag'` → two nodes) — the
         # S0a/S0b invariant D10 made load-bearing when it folded the document
-        # node into `:Source`. Non-network ids (`doc_<rel-path>` from
-        # `derive_document_id`, `corpus://…` from the CLI) are returned
+        # node into `:Source`. Non-network document ids (`doc_<rel-path>` from
+        # `derive_document_id`, and the BARE FILENAME the CLI passes as
+        # `args.transcript.name` — `corpus://…` is the index path's SOURCE URL,
+        # not a document id) are returned
         # UNCHANGED by the resolver (identity there), so the index and CLI
         # paths are unaffected; the fold stamps `canonicalUrl`/`urlAliases`
         # exactly as `_upsert_source` does. The resolved key is re-checked

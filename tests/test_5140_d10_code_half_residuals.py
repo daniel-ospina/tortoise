@@ -104,20 +104,23 @@ def test_document_created_then_source_still_one_node(sdk_factory):
 
 def test_document_created_non_url_id_keeps_its_identity(sdk_factory):
     """Non-over-reach: the resolver is IDENTITY for the two non-URL document-id
-    shapes the live producers emit (`doc_<rel-path>` from `derive_document_id`,
-    `corpus://…` from the CLI), so their node keys must not move."""
+    shapes the live producers actually emit — `doc_<rel-path>` from
+    `derive_document_id` (the underscore form: `doc_notes/5140.md`, not
+    `doc/notes/…`) and a BARE FILENAME, which is what the CLI passes
+    (`ingest.py` uses `args.transcript.name`; `corpus://…` is the index path's
+    SOURCE URL, not a document id). Their node keys must not move."""
     sdk = sdk_factory()
     proj = sdk._get_proj()
-    dids = ("doc/notes/5140.md", "corpus://5140/cli-doc.md")
+    dids = ("doc_notes/5140.md", "5140.md")
     for did in dids:
         proj.apply({"type": "DocumentCreated", "id": did, "title": did, "document_kind": "brief"})
     rows = proj.g.query(
-        "MATCH (s:Source) WHERE s.url IN ['doc/notes/5140.md', "
-        "'corpus://5140/cli-doc.md'] RETURN s.url, s.documentKind"
+        "MATCH (s:Source) WHERE s.url IN ['doc_notes/5140.md', '5140.md'] "
+        "RETURN s.url, s.documentKind"
     ).result_set
     assert sorted(rows) == [
-        ["corpus://5140/cli-doc.md", "brief"],
-        ["doc/notes/5140.md", "brief"],
+        ["5140.md", "brief"],
+        ["doc_notes/5140.md", "brief"],
     ], rows
 
 
