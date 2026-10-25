@@ -115,6 +115,27 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
 
+      # ── THE RUNNER TOOL CONTRACT (#9018) ──────────────────────────────
+      # `tools/inbound_relay_sweep.py` does ALL of its work through `gh api`.
+      # `runs-on: ubuntu-latest` can land this job on the fallback pool, whose
+      # service environment is a minimal NON-login `PATH` with no `gh` — and
+      # then the sweep dies `exit 127` and reads as a PRODUCT regression (a dead
+      # intake) instead of the runner fault it is. Measured 2026-10-24: 38 of 39
+      # `finding-provenance` failures plus every availability monitor were this
+      # exact shape on `pi-runner-vm-*`, none on GitHub-hosted.
+      #
+      # ⛔ FIRST shell step, deliberately: a `gh` call that precedes it still
+      # dies with 127, and the ordering is invisible from the exit code
+      # (`tests/test_runner_tool_contract.py` pins the position).
+      #
+      # This job holds `issues: write` + `pull-requests: write` plus the intake
+      # secret, so the provisioner is not a free-floating download: it is pinned
+      # by `gh` VERSION and by the release asset's `sha256`
+      # (`.github/scripts/runner-tools.sh`), and refuses an archive that does not
+      # match the pin.
+      - name: Runner tool contract — provide gh (#9018)
+        run: bash .github/scripts/runner-tools.sh ensure gh
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
