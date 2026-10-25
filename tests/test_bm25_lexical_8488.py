@@ -920,16 +920,19 @@ class TestDeclineIsNotAReadDegradation:
 
     * restore ``degraded=True`` on the decline branch →
       ``test_a_declined_arm_does_not_report_the_read_degraded``,
-      ``test_a_declined_arm_entry_is_not_itself_degraded`` and
+      ``test_a_declined_arm_entry_is_not_itself_degraded``,
       ``test_the_shared_trace_fold_does_not_read_the_decline_as_a_degradation``
-      red, along with the two older decline assertions
+      and the two eval-fold tests
+      (``test_the_leg_health_predicate_does_not_read_the_decline_as_a_dead_leg``,
+      ``test_enabling_the_arm_does_not_move_the_resume_gate``) red, along with
+      the two older decline assertions
       (``TestCorpusCap.test_over_the_cap_the_leg_declines_instead_of_window_ranking``
       and ``TestReadPath.test_a_windowed_corpus_read_never_replaces_the_shipped_rows``);
     * restore ``mechanism=LEXICAL_MECHANISM_BM25`` for a declined entry →
       ``test_a_declined_arm_claims_no_bm25_mechanism`` reds (as does
       ``TestCorpusCap``'s mechanism assertion);
     * delete the ``declined=declined`` passthrough in ``_record`` → the
-      decline becomes invisible and ALL FOUR decline tests above red on their
+      decline becomes invisible and ALL FIVE decline tests above red on their
       guards (the control test below does not trigger a decline, so it is
       deliberately unaffected by all three mutations — that is what makes it a
       control).
@@ -1064,6 +1067,99 @@ class TestDeclineIsNotAReadDegradation:
         assert "fts" in legs, (
             f"the declined arm still RAN that leg slot; legs={legs}")
 
+    def test_the_leg_health_predicate_does_not_read_the_decline_as_a_dead_leg(
+            self, force_sparse_tfidf):
+        """The eval-side fold: ``_leg_entry_dead`` / ``_legs_degraded``.
+
+        ``tools/longmem_eval/run.py`` reads the SAME trace shape one layer out,
+        and its predicate keys on ``reason``+``count`` rather than on
+        ``degraded``: ``empty_results`` at ``count == 0`` is a DEAD leg. A
+        declined arm entry is exactly that shape, so both
+        ``_leg_entry_dead`` (which feeds ``_legs_degraded`` → the mid-run
+        watchdog's leg-deadness arm) and the resume gate's inline ``dead_fts``
+        filter read a decline as a dead retrieval leg.
+
+        The rule the entry already follows is that a decline ASSERTS NOTHING:
+        it writes no ``mechanism`` because it produced no rows. By the same
+        rule it may not claim the leg was dead — the shipped leg's own entry is
+        the one that speaks for the slot. A decline must therefore be
+        indistinguishable from the arm never having run, to BOTH predicates.
+        """
+        from tools.longmem_eval.run import _leg_entry_dead, _legs_degraded
+
+        graph, _ids = _graph_with_corpus()
+        arm: list[dict] = []
+        run_bm25_query(graph, QUERY, entity_type="point", limit=20,
+                       corpus_cap=1, leg_trace=arm)
+        entry = arm[-1]
+        assert entry.get(LEXICAL_DECLINED_KEY) is True, (
+            f"guard: the arm must have declined; {arm}")
+        assert entry["reason"] == "empty_results" and entry["count"] == 0, (
+            "guard: the decline carries the DEAD-leg shape this predicate "
+            f"keys on, or the test proves nothing; {entry}")
+        assert _leg_entry_dead(entry) is False, (
+            "a declined arm asserts nothing about the leg and must not be "
+            f"classified a dead leg; {entry}")
+        degraded = _legs_degraded({"legs": [entry]})
+        assert degraded == [], (
+            "the leg-health predicate feeds the watchdog's leg-deadness arm; "
+            f"a decline must not degrade the leg; {degraded}")
+
+    def test_enabling_the_arm_does_not_move_the_resume_gate(
+            self, force_sparse_tfidf):
+        """The differential: the lever must not change the resume VERDICT.
+
+        Arm-off and arm-declined are the same retrieval — the arm declined to
+        rank, so the shipped leg served the slot either way (or did not, on its
+        own entry's terms). So an outcome carrying the decline entry must get
+        the SAME ``resume_gate_reject_reason`` as the identical outcome without
+        it. Anything else is an instrument artifact: a lever that provably did
+        not change retrieval flipping a gate's verdict, which on a live run
+        re-encodes a good outcome on every resume (the ``index_missing``
+        livelock) and, sustained, aborts the run with ``leg_dead``.
+
+        The shipped entry is constructed, not produced: which benign non-live
+        reason the embedded lane records (``index_missing`` when the build has
+        no FTS index — the shape #1764's note names) is a property of the
+        FalkorDBLite build under test, and the assertion here is the
+        DIFFERENTIAL, which is indifferent to which benign reason it is.
+        """
+        from tools.longmem_eval.run import resume_gate_reject_reason
+
+        graph, _ids = _graph_with_corpus()
+        arm: list[dict] = []
+        run_bm25_query(graph, QUERY, entity_type="point", limit=20,
+                       corpus_cap=1, leg_trace=arm)
+        declined = arm[-1]
+        assert declined.get(LEXICAL_DECLINED_KEY) is True, (
+            f"guard: the arm must have declined; {arm}")
+
+        shipped = {"leg": "fts", "ran": True, "degraded": True,
+                   "reason": "index_missing", "count": 0}
+        # BOTH session states, because the gate has an INDEPENDENT session-zero
+        # trigger: on an all-zero recall the outcome is refused either way, so
+        # the invariant is the VERDICT being identical — not the verdict being
+        # None. Asserting only the surfaced case would let a wrong-but-equal
+        # pair pass, and asserting None would re-specify the #1764 gate here
+        # instead of the lever's own neutrality.
+        for recall in ({"any@5": 0.5}, {"any@5": 0.0}):
+            base = {"session_recall@k": dict(recall),
+                    "turn_recall@k": {"any@5": 0.5}}
+            without_arm = dict(base, legs=[dict(shipped)])
+            with_arm = dict(base, legs=[dict(shipped), dict(declined)])
+            off = resume_gate_reject_reason(without_arm)
+            on = resume_gate_reject_reason(with_arm)
+            assert on == off, (
+                "enabling the lexical arm must not change the resume verdict "
+                "— the decline asserts nothing about the leg. recall="
+                f"{recall} arm-on {on!r} vs arm-off {off!r}")
+        assert resume_gate_reject_reason(dict(
+            {"session_recall@k": {"any@5": 0.5},
+             "turn_recall@k": {"any@5": 0.5}},
+            legs=[dict(shipped), dict(declined)])) is None, (
+            "guard: a surfaced session with a benign shipped entry and a "
+            "declined arm is a resumable outcome")
+
     def test_a_clean_arm_loss_is_not_a_decline(
             self, force_sparse_tfidf):
         """Control: the non-declining empty arm is untouched by this change.
@@ -1083,6 +1179,15 @@ class TestDeclineIsNotAReadDegradation:
             f"a clean empty arm did not DECLINE anything; {entry}")
         assert entry.get("mechanism") == LEXICAL_MECHANISM_BM25, (
             f"the arm ran its scorer (and found nothing): {entry}")
+        # And the exemption must not have swallowed this shape: an arm that ran
+        # and matched nothing is still a DEAD lexical leg to the eval folds, or
+        # the decline exemption would be "every empty fts entry is healthy" —
+        # which is the #1764 gate itself, deleted.
+        from tools.longmem_eval.run import _leg_entry_dead
+
+        assert _leg_entry_dead(entry) is True, (
+            "a non-declining empty arm is a genuine dead-leg signal and must "
+            f"stay classified as one; {entry}")
 
 
 class TestCorpusCap:
