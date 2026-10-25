@@ -533,10 +533,10 @@ def sweep(
             # record at all. `source_item_id` keys the POST, so a repeat is a
             # no-op intake-side; closing without a record is unrecoverable.
             resume = client.already_relayed(number)
-            if getattr(client, "comment_read_truncated", False):
-                # A SHORT read is not an absent marker. Say so, or a thread longer
-                # than the page budget looks like "never relayed" and the item
-                # gets a second identical comment on every run.
+            if not resume and getattr(client, "comment_read_truncated", False):
+                # A SHORT read is not an absent marker — but only the VERDICT
+                # matters: when the marker was found, nothing is re-posted and
+                # there is nothing to warn about.
                 report.notes.append(
                     f"{kind} #{number}: the resume read stopped at its page budget "
                     "before the thread ended, so it was treated as NOT relayed — a "
@@ -760,23 +760,32 @@ class GhClient:
         comments: list[dict[str, Any]] = []
         self.comment_read_truncated = False
         for page in range(1, self.comment_page_budget + 1):
-            try:
-                raw = _gh(["api", f"{path}?per_page={self.per_page}&page={page}"])
-                chunk = json.loads(raw)
-            except Exception as exc:
-                raise ListingError(f"issues/{number}/comments page {page}: {exc}") from exc
-            if not isinstance(chunk, list):
-                raise ListingError(f"issues/{number}/comments: expected a list")
+            chunk = self._comment_page(path, number, page)
             if not chunk:
                 break
             comments.extend(chunk)
             if len(chunk) < self.per_page:
                 break
         else:
-            # The loop ran to completion: every page was FULL, so the thread
-            # continues past the budget and the verdict is not trustworthy.
-            self.comment_read_truncated = True
+            # Every page this read was allowed came back FULL. Probe ONE page
+            # past the budget so the flag states a FACT rather than a guess: a
+            # thread of exactly `budget * per_page` comments ends there and its
+            # last page is full, so without the probe the note would claim a
+            # shortfall that does not exist.
+            if self._comment_page(path, number, self.comment_page_budget + 1):
+                self.comment_read_truncated = True
         return comments
+
+    def _comment_page(self, path: str, number: int, page: int) -> list[dict[str, Any]]:
+        """One comment page. A failure RAISES: a short read is not an end."""
+        try:
+            raw = _gh(["api", f"{path}?per_page={self.per_page}&page={page}"])
+            chunk = json.loads(raw)
+        except Exception as exc:
+            raise ListingError(f"issues/{number}/comments page {page}: {exc}") from exc
+        if not isinstance(chunk, list):
+            raise ListingError(f"issues/{number}/comments: expected a list")
+        return chunk
 
     def post_intake(self, payload: dict[str, Any]) -> None:
         url = os.environ.get("INBOUND_URL", "")

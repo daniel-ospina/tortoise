@@ -1366,35 +1366,86 @@ def test_a_failed_comment_page_raises_before_any_mutation(sweep: Any, monkeypatc
 
 
 def test_a_resume_read_that_hits_its_budget_says_so(sweep: Any, monkeypatch: Any) -> None:
-    """A SHORT read is not a confident verdict.
+    """A SHORT read is not a confident verdict — but only when the verdict is used.
 
     `comment_page_budget` bounds the resume read; a thread longer than the budget
     finds no marker and the run re-comments. Raising would make a long thread
     permanently un-relayable, but returning False in SILENCE is the worst option:
     the read was short while the verdict was confident. The client sets
-    `comment_read_truncated` and the sweep turns it into a note.
+    `comment_read_truncated` (probed against the page PAST the budget, so the
+    flag is a fact and not a guess) and the sweep turns it into a note — only
+    when the verdict is `not relayed`, since when the marker WAS found nothing is
+    re-posted and a warning would name a duplicate that cannot exist.
     """
     client = sweep.GhClient(f"{OWNER}/tortoise", per_page=2, comment_page_budget=2)
-    chatter = [
-        {"body": f"chatter {i}", "user": {"login": f"u{i}", "type": "User"}} for i in range(4)
-    ]
+
+    def chatter(count: int, start: int = 0) -> list[dict[str, Any]]:
+        return [
+            {"body": f"chatter {start + i}", "user": {"login": f"u{start + i}", "type": "User"}}
+            for i in range(count)
+        ]
+
+    marker = {
+        "body": f"👋 Thanks for the contribution!\n\n{sweep.RELAY_MARKER}",
+        "user": {"login": "github-actions[bot]", "type": "Bot"},
+    }
+    window = {
+        "labels=queued-for-triage&per_page=2&page=1": [],
+        "sort=created&direction=desc&per_page=2&page=1": [issue(7)],
+    }
+
+    # (a) budget exhausted, no marker in what was read ⇒ the verdict is announced.
     _stub_gh_json(
         sweep,
         monkeypatch,
         {
-            "labels=queued-for-triage&per_page=2&page=1": [],
-            "sort=created&direction=desc&per_page=2&page=1": [issue(7)],
-            "7/comments?per_page=2&page=1": chatter[:2],
-            "7/comments?per_page=2&page=2": chatter[2:],
+            **window,
+            "7/comments?per_page=2&page=1": chatter(2, start=10),
+            "7/comments?per_page=2&page=2": chatter(2, start=20),
+            # The PROBE past the budget: a thread really continues here.
+            "7/comments?per_page=2&page=3": chatter(1, start=30),
         },
     )
-
     report = run(sweep, client)
-
     assert any("page budget" in note for note in report.notes), report.notes
     assert any("duplicate comment" in note for note in report.notes), report.notes
-    # …and the flag is per-call, never sticky: a later short read clears it.
-    _stub_gh_json(sweep, monkeypatch, {"7/comments?per_page=2&page=1": chatter[:1]})
+
+    # (b) budget exhausted but the marker IS on the pages read ⇒ no note, and no
+    # comment is posted: the warning would name a duplicate that cannot happen.
+    _stub_gh_json(
+        sweep,
+        monkeypatch,
+        {
+            **window,
+            "7/comments?per_page=2&page=1": [marker, *chatter(1, start=40)],
+            "7/comments?per_page=2&page=2": chatter(2, start=50),
+            "7/comments?per_page=2&page=3": chatter(1, start=60),
+        },
+    )
+    resumed = run(sweep, client)
+    assert client.comment_read_truncated is True, "the read really was short"
+    assert not any("duplicate comment" in note for note in resumed.notes), resumed.notes
+
+    # (c) an EMPTY probe page means the thread ended exactly at the budget: the
+    # flag stays clear, so an exact multiple of `budget * per_page` is not
+    # reported as a shortfall.
+    _stub_gh_json(
+        sweep,
+        monkeypatch,
+        {
+            **window,
+            "7/comments?per_page=2&page=1": chatter(2, start=70),
+            "7/comments?per_page=2&page=2": chatter(2, start=80),
+            "7/comments?per_page=2&page=3": [],
+        },
+    )
+    client.already_relayed(7)
+    assert client.comment_read_truncated is False, (
+        "a full final page at the budget is the END of the thread, not a shortfall"
+    )
+
+    # (d) …and the flag is per-call, never sticky.
+    _stub_gh_json(sweep, monkeypatch, {"7/comments?per_page=2&page=1": chatter(1, start=90)})
     client.already_relayed(7)
     assert client.comment_read_truncated is False
 

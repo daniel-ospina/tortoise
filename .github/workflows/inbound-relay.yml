@@ -113,12 +113,14 @@ jobs:
     # `pull_request_target` event and carries belts 1-2 as OR ARMS inside it
     # (`!(pr_event && (belt1 || belt2))`); the other is gated on `issues` and
     # carries belt 3 (`!(issues && user.type == 'Bot')`), deliberately separate
-    # because it applies to issues only. Each negation is fail-closed: an event
-    # whose payload is missing or unreadable (no `pull_request`, a null
-    # `head.repo`, an absent `user.type`, no `base.ref`, no `default_branch`)
-    # makes that belt false, so the negation is TRUE and the relay CLOSES the PR —
-    # the pre-existing behaviour for anything it cannot classify as the queue's
-    # own batch. Note the belt-2 base arm's `!= ''`: without it, TWO unreadable
+    # because it applies to issues only. Each negation is fail-closed in the same
+    # direction but on its OWN kind: an event whose payload is missing or
+    # unreadable (no `pull_request`, a null `head.repo`, an absent `user.type`, no
+    # `base.ref`, no `default_branch`) makes that belt false, so that negation is
+    # TRUE and the relay CLOSES the item — the PR for belts 1-2, the ISSUE for
+    # belt 3. That is the pre-existing behaviour for anything it cannot classify
+    # as the queue's own batch (PRs) or as our own automation's alarm thread
+    # (issues). Note the belt-2 base arm's `!= ''`: without it, TWO unreadable
     # fields compare equal (`null == null` is true in Actions' loose equality)
     # and an all-absent payload would read as a match (review B, cycle 2). Only
     # the two NON-negated conjuncts — the event allow-list and the owner
