@@ -411,7 +411,13 @@ case "$1 $2" in
       echo "GraphQL: API rate limit already exceeded for user ID 81560491." >&2
       exit 1
     fi
-    f="$d/issue.json"; printf '%s\n' "$@" > "$d/issue-argv.txt" ;;
+    # #9957: a PRE-FLIGHT THAT RESOLVES A PR NUMBER reads TWO different issues in
+    # one run (the PR-as-issue it refused, then the work item it resolved to), so
+    # the stub must be able to answer a NUMBER-SPECIFIC payload. `issue-<N>.json`
+    # wins when present; `issue.json` stays the default, so every pre-existing
+    # test — and every fixture that models one issue — is untouched.
+    f="$d/issue-$3.json"; [ -f "$f" ] || f="$d/issue.json"
+    printf '%s\n' "$@" > "$d/issue-argv.txt" ;;
   *) echo "gh-stub: unexpected argv: $*" >&2; exit 64 ;;
 esac
 if [ ! -f "$f" ]; then echo "gh-stub: no fixture: $f" >&2; exit 1; fi
@@ -741,7 +747,7 @@ class CollisionPreflightTest(unittest.TestCase):
     # ── fixtures ────────────────────────────────────────────────────────────
 
     def issue_payload(self, title="florfenicol dosing audit", assignees=(),
-                      state="OPEN", state_reason=None) -> dict:
+                      state="OPEN", state_reason=None, number=ISSUE) -> dict:
         """The issue payload `gh issue view --json
         number,title,state,stateReason,assignees,url` returns.
 
@@ -751,18 +757,34 @@ class CollisionPreflightTest(unittest.TestCase):
         payload gh cannot produce. Tests that want the CLOSED-as-NOT_PLANNED
         wording pass it explicitly (#8560 review).
 
+        `number` exists for #9957: a run that RESOLVES a PR number reads the
+        work item's own payload as a SECOND issue, and a fixture that answered
+        every number with one object would model a GitHub that does not exist.
+
         ⛔ NO COMMENT BODIES (#8175): the claim gate reads the HOLDER from the
         fleet board, and `gh issue view` no longer requests `comments` at all,
         so a fixture that carried them would model a payload nothing reads.
         """
         return {
-            "number": ISSUE,
+            "number": number,
             "title": title,
             "state": state,
             "stateReason": state_reason,
-            "url": f"https://example.invalid/issues/{ISSUE}",
+            "url": f"https://example.invalid/issues/{number}",
             "assignees": [{"login": a} for a in assignees],
         }
+
+    def gh_issue_for(self, number: int, **kwargs) -> dict:
+        """Write a NUMBER-SPECIFIC `gh issue view <N>` payload (#9957).
+
+        `gh_fixtures(issue=…)` writes `issue.json`, which answers EVERY number —
+        fine for the single-issue runs that make up almost every test, wrong for
+        a run that reads both the PR-as-issue it was asked about and the work
+        item it resolved to. The stub prefers `issue-<N>.json` when it exists.
+        """
+        payload = self.issue_payload(number=number, **kwargs)
+        (self.gh_dir / f"issue-{number}.json").write_text(json.dumps(payload))
+        return payload
 
     def gh_fixtures(self, open_prs=None, closed_prs=None, issue=None) -> None:
         if open_prs is not None:
@@ -871,6 +893,11 @@ class CollisionPreflightTest(unittest.TestCase):
         for name in ("open_prs.json", "closed_prs.json", "open_prs_rest.json",
                      "issue.json", "timeline.json"):
             (self.gh_dir / name).unlink(missing_ok=True)
+        # #9957: the number-specific issue payloads (``issue-<N>.json``) are a
+        # SECOND fixture family, so a clear must not leave one behind to answer a
+        # later test's resolved read.
+        for stale in self.gh_dir.glob("issue-*.json"):
+            stale.unlink(missing_ok=True)
 
     def timeline_fixture(self, events=None, pages=None) -> None:
         """Write the landed surface's timeline fixture (#8560).
@@ -1028,6 +1055,10 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("VERDICT: CLEAN", out)
         self.assertIn("no in-flight work found for #3061", out)
         self.assertNotIn("VERDICT: COLLISION", out)
+        # #9957: an ISSUE number is not resolved, and must not pay the resolution
+        # path or print its header. The issue arm is today's behaviour, exactly.
+        self.assertNotIn("a PULL REQUEST number was given", out)
+        self.assertNotIn("RESOLUTION:", out)
         # `VERDICT:`-scoped: the `claim gate:` rules line legitimately names the
         # INCOMPLETE outcome (and its fail-closed causes), so a bare substring
         # check would read the RULES as a verdict.
@@ -1257,7 +1288,7 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotIn("It names no closing issue", message)
 
     def test_open_pr_own_number_REFUSES_instead_of_cleaning(self):
-        """An OPEN PR's number is not a work item — the run must refuse (#7009).
+        """An OPEN PR's number is not a work item — an UNRESOLVABLE one must refuse (#7009).
 
         The test above pins `CLEAN` for a TERMINAL PR, and both answers are
         correct: a merged/closed PR is immutable history, while an OPEN PR names
@@ -1276,11 +1307,20 @@ class CollisionPreflightTest(unittest.TestCase):
         Exit 2 is pinned deliberately rather than 1: it is the protocol's own
         "could not be completed — do not start on a guess" verdict, so the
         refusal lands in a channel lanes already know how to obey.
+
+        ⛔ THE HEAD REF IS NUMBER-FREE ON PURPOSE (#9957). This fixture used a
+        `fix/2712-…` branch, and a branch naming an issue is now one of the three
+        signals the gate RESOLVES a PR number with — so that shape no longer
+        refuses at all; it is gated as #2712 and exits 1. The resolvable shape is
+        pinned end to end by
+        `test_a_pull_request_number_is_gated_as_the_work_item_it_serves`; THIS
+        test keeps the residual property, which is the one that must never rot:
+        when no arm yields a work item, the answer is a refusal, NEVER clean.
         """
         self.gh_fixtures(open_prs=[{
             "number": 3061, "title": "fix(battery): restore the pin test",
             "body": "no closing reference in this body", "state": "open",
-            "headRefName": "fix/2712-pin-preflight-test",
+            "headRefName": "chore/record-reads",
         }])
         rc, out = self.run_tool()
         self.assertEqual(rc, 2, out)
@@ -1305,6 +1345,15 @@ class CollisionPreflightTest(unittest.TestCase):
         # construction, as is "is an OPEN PULL REQUEST". What it does catch is a
         # regression that drops the number from the message.
         self.assertIn("#3061", out)
+        # ⛔ #9957: THE REFUSAL MUST NAME WHAT IT COULD NOT RESOLVE. "could not
+        # resolve" with no evidence is the thing this issue files — the gate held
+        # the datum and did not say it. All three arms are named, so a reader can
+        # see which signal was missing and supply it (the branch or the title).
+        self.assertIn("could not resolve #3061 to a work item", out)
+        self.assertIn("closing references name nothing", out)
+        self.assertIn("names no issue as `(#N)`", out)
+        self.assertIn("names no issue as `<type>/<n>-<slug>`", out)
+        self.assertIn("NEVER clean", out)
 
     def test_open_pr_own_number_REFUSES_even_when_its_branch_is_the_callers(self):
         """The refusal must not be suppressible by the caller's OWN branch (#7009).
@@ -1328,14 +1377,21 @@ class CollisionPreflightTest(unittest.TestCase):
 
         The refusal is an INPUT-VALIDITY test, not a match test, so the
         "self before match" ordering (#4567) does not apply to it.
+
+        ⛔ THE HEAD REF IS NUMBER-FREE, for the reason the sibling test records
+        (#9957): a `fix/2712-…` branch is now a RESOLUTION signal, so the shape
+        resolves instead of refusing. What this test pins is unchanged — that a
+        caller's own branch cannot suppress the fail-closed answer — and the
+        resolution runs BEFORE identity is consulted at all, so a resolvable
+        number cannot be suppressed either.
         """
         self.gh_fixtures(open_prs=[{
             "number": 3061, "title": "fix(battery): restore the pin test",
             "body": "no closing reference in this body", "state": "open",
-            "headRefName": "fix/2712-pin-preflight-test",
+            "headRefName": "chore/record-reads",
         }])
         rc, out = self.run_tool(
-            self_branches=("fix/2712-pin-preflight-test",))
+            self_branches=("chore/record-reads",))
         self.assertEqual(rc, 2, out)
         self.assertIn("is an OPEN PULL REQUEST, not a work item", out)
         # No `VERDICT` line at all — see the sibling test for why "not CLEAN"
@@ -1367,11 +1423,16 @@ class CollisionPreflightTest(unittest.TestCase):
         It also pins the SECOND fix here: the message must not assert "it names no
         closing issue" for a field that was merely UNREADABLE. A wrong reason for a
         right decision is the defect class this whole change is about.
+
+        ⛔ THE HEAD REF IS NUMBER-FREE (#9957) — see the siblings — so the run
+        still ends in the refusal. The resolution message repeats the unread
+        cause in its own words ("the computed field could not be read"), which is
+        why the assertion below matches both sentences.
         """
         self.gh_fixtures(open_prs=[{
             "number": 3061, "title": "fix(battery): restore the pin test",
             "body": "no closing reference in this body", "state": "open",
-            "headRefName": "fix/2712-pin-preflight-test",
+            "headRefName": "chore/record-reads",
         }])
         # The harness normalizes `closingIssuesReferences` IN (setdefault, ~20
         # call sites) so no call site can forget it, which means the key must be
@@ -1396,28 +1457,258 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("could not be read", out)
         self.assertNotIn("It names no closing issue", out)
 
-    def test_open_pr_own_number_with_a_closing_reference_names_it(self):
-        """The linked arm of the refusal message is exercised (#7009).
+    def test_open_pr_own_number_with_a_closing_reference_RESOLVES_both(self):
+        """A PR number whose closing references name TWO issues gates BOTH (#9957).
 
-        The message's `where` clause has three arms — a NAMED linked issue, an
-        UNREADABLE field, and a field that names nothing. The last two are pinned
-        by their own tests; without this one the linked arm would be unpinned,
-        and that arm is the one most pull requests hit (this repo puts
-        `Closes #N` in the body). TWO linked issues, deliberately: with one, the
-        `", ".join` separator is unexercised, so a regression in it would leave
-        this test green (measured — `" and "` passed a single-issue version).
+        ⛔ THIS TEST USED TO PIN THE REFUSAL MESSAGE'S LINKED arm (`It closes
+        #999, #1000.`). Since #9957 that arm is not where the run ends: the
+        closing references ARE the resolution, so the gate computes a verdict for
+        each named work item and takes the WORST. Two references are kept for the
+        original reason — with one, the `", ".join` separator (then in the
+        message, now in the header and the summary) is unexercised, so a
+        regression in it would leave this test green (measured — `" and "` passed
+        a single-issue version).
+
+        Both work items COLLIDE here, for the reason that makes the whole fix
+        safe: each resolved number is matched against the PR that named it (this
+        one closes both), so a resolved run can only ever RAISE the verdict.
         """
         self.gh_fixtures(open_prs=[{
             "number": 3061, "title": "fix(battery): restore the pin test",
             "body": "Closes #999, closes #1000.", "state": "open",
-            "headRefName": "fix/2712-pin-preflight-test",
+            "headRefName": "chore/record-reads",
             "closingIssuesReferences": [{"number": 999}, {"number": 1000}],
         }])
         rc, out = self.run_tool()
-        self.assertEqual(rc, 2, out)
-        self.assertIn("is an OPEN PULL REQUEST, not a work item", out)
-        self.assertIn("It closes #999, #1000.", out)
-        self.assertNotIn("VERDICT", out)
+        self.assertEqual(rc, 1, out)
+        # The mapping is PRINTED — a resolution the caller cannot see is a
+        # resolution it cannot verify against the brief it was handed.
+        self.assertIn("a PULL REQUEST number was given — #3061", out)
+        self.assertIn("Resolved via closing reference: #3061 → #999, #1000", out)
+        # ONE report per work item, and the aggregate names them all.
+        self.assertIn("collision-preflight: issue #999", out)
+        self.assertIn("collision-preflight: issue #1000", out)
+        self.assertIn("RESOLUTION: PR #3061 → 2 work item(s)", out)
+        self.assertIn("#999 COLLISION", out)
+        self.assertIn("#1000 COLLISION", out)
+        self.assertIn("the WORST decides COLLISION (exit 1)", out)
+        self.assertNotIn("could not resolve", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+
+    # ── #9957: a PR number is a dispatch input, so RESOLVE it ───────────────
+
+    def test_a_pull_request_number_is_gated_as_the_work_item_it_serves(self):
+        """The reported defect, end to end: a PR-numbered dispatch is gated by
+        the SAME rule as its issue, so it can never read CLEAN past a holder.
+
+        Measured 2026-10-25 (#9957): #9941 served #7970, THREE lanes held #7970,
+        and a fourth dispatch keyed on `#9941` was one keystroke from being
+        allowed — `collision_preflight 7970` returned `COLLISION (4 blocking
+        hits)` while the same call with the PR number returned a refusal that
+        named #7970 and then asked the dispatcher to re-read it. The gate had the
+        mapping in its own message and did not use it.
+
+        ⛔ THIS TEST IS RED ON `origin/main` (exit 2, no report) and green only
+        when the number is RESOLVED. It asserts the HOLDER surface fired for the
+        resolved number — not merely that the verdict is non-zero — because "the
+        PR is still open, so exit 1 anyway" would pass a fix that resolved
+        nothing at all.
+        """
+        self.gh_fixtures(open_prs=[{
+            "number": 7000,
+            "title": "feat(storage): serve reads from the record (#2712)",
+            # NO closing keyword: the live #9941 carried none either, so the
+            # title/branch arms are what must resolve it. A fixture with a
+            # `Closes #N` body would pin only the field arm.
+            "body": "Automated follow-up work.",
+            "state": "open",
+            "headRefName": "feat/2712-record-serves-anchored-reads",
+        }])
+        # The PR-as-issue payload `gh issue view 7000` really returns, and the
+        # work item's own payload — two different objects in one run.
+        self.gh_issue_for(7000,
+                          title="feat(storage): serve reads from the record (#2712)")
+        self.gh_issue_for(2712, title="feat(storage): serve reads from the record")
+        self.fleet_board(issues={2712: [("holder-live", "branch slug")]},
+                         lanes=[{"label": "holder-live", "live": True}])
+
+        rc, out = self.run_tool(issue=7000)
+        self.assertEqual(rc, 1, out)
+        # The mapping is PRINTED, and it names the arm it came from — a reader can
+        # check the resolution against the brief it was handed.
+        self.assertIn("a PULL REQUEST number was given — #7000", out)
+        self.assertIn("Resolved via title `(#N)`: #7000 → #2712", out)
+        # The verdict is about the WORK ITEM, on every surface.
+        self.assertIn("collision-preflight: issue #2712", out)
+        self.assertIn("title: feat(storage): serve reads from the record", out)
+        self.assertIn("holder:holder-live", out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("do NOT dispatch", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+        self.assertNotIn("could not resolve", out)
+        # A refusal is no longer what a resolvable PR number gets.
+        self.assertNotIn("is an OPEN PULL REQUEST", out)
+
+    def test_a_pull_request_number_whose_work_item_is_landed_exits_4(self):
+        """A PR number whose work item is CLOSED keeps LANDED's own exit code.
+
+        #9957 keeps the protocol's four codes intact: resolving a PR number must
+        not flatten "already shipped" into "someone is on it" (1) or into "the
+        world could not be read" (2), because the three remedies differ — verify
+        and close, coordinate, or re-run.
+        """
+        self.gh_fixtures(open_prs=[{
+            "number": 7000,
+            "title": "feat(storage): serve reads from the record (#2712)",
+            "body": "Automated follow-up work.",
+            "state": "open",
+            "headRefName": "feat/2712-record-serves-anchored-reads",
+        }])
+        self.gh_issue_for(7000,
+                          title="feat(storage): serve reads from the record (#2712)")
+        self.gh_issue_for(2712, title="feat(storage): serve reads from the record",
+                          state="CLOSED", state_reason="COMPLETED")
+
+        rc, out = self.run_tool(issue=7000)
+        self.assertEqual(rc, 4, out)
+        self.assertIn("Resolved via title `(#N)`: #7000 → #2712", out)
+        self.assertIn("VERDICT: LANDED (exit 4)", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+
+    def test_the_resolver_reads_every_arm_and_prefers_the_source(self):
+        """`resolve_pull_request_work_items` in isolation (#9957).
+
+        Driven DIRECTLY so each arm is exercised without a subprocess (and
+        without the open-PR list, which is what supplies the record in
+        production). Every case here is a shape a real PR carries.
+        """
+        cp = _tool_module()
+        resolve = cp.resolve_pull_request_work_items
+
+        # The SOURCE first: GitHub's computed field wins over the title/branch
+        # conventions, which are re-derivations (#3504).
+        got = resolve({
+            "number": 7000, "title": "feat: thing (#2712)", "body": "",
+            "headRefName": "feat/2712-thing",
+            "closingIssuesReferences": [{"number": 3000}],
+        }, 7000)
+        self.assertEqual(got.issues, (3000,))
+        self.assertEqual(got.arm, cp._ARM_CLOSING)
+
+        # ...and when it speaks for nothing, the title convention (#9941's own
+        # shape — no closing keyword, the tag in the title).
+        got = resolve({
+            "number": 9941,
+            "title": "feat(storage): serve reads (#7970)", "body": "",
+            "headRefName": "feat/7970-record-serves-anchored-reads",
+            "closingIssuesReferences": [],
+        }, 9941)
+        self.assertEqual(got.issues, (7970,))
+        self.assertEqual(got.arm, cp._ARM_TITLE)
+
+        # ...and then the branch, which is what a PR with neither still carries.
+        got = resolve({
+            "number": 7000, "title": "fix(storage): reads", "body": "",
+            "headRefName": "feat/2712-record-serves-anchored-reads",
+            "closingIssuesReferences": [],
+        }, 7000)
+        self.assertEqual(got.issues, (2712,))
+        self.assertEqual(got.arm, cp._ARM_BRANCH)
+
+        # An UNREADABLE closing field is not an empty one: the arm says so and
+        # resolution falls through to the next signal instead of asserting.
+        got = resolve({
+            "number": 7000, "title": "fix: reads (#2712)", "body": "",
+            "headRefName": "feat/2712-reads",
+        }, 7000)
+        self.assertEqual(got.issues, (2712,))
+        self.assertIn("the computed field could not be read", " ".join(got.checked))
+
+        # A tool-generated branch claims nothing (the same rule the surfaces use).
+        got = resolve({
+            "number": 7000, "title": "chore: refresh", "body": "",
+            "headRefName": "mergify/merge-queue/6160bad001",
+            "closingIssuesReferences": [],
+        }, 7000)
+        self.assertEqual(got.issues, ())
+        self.assertIsNone(got.arm)
+        self.assertIn("tool-generated", " ".join(got.checked))
+
+        # THE ARMS ANCHOR THEIR DIGITS, which is what makes the grammar safe on
+        # arbitrary PR text: `(#N)` needs the closing paren, so a hex-ish run that
+        # merely starts with a number is not a title tag. (This case is why the
+        # arms need no `_inside_hex_digest` guard — see `_arm_numbers`. A case
+        # that carried no digest at all would pin nothing: it was found VACUOUS by
+        # review in cycle 1 and replaced with this one.)
+        got = resolve({
+            "number": 7000, "title": "feat: thing (#2712cafe)", "body": "",
+            "headRefName": "chore/reads",
+            "closingIssuesReferences": [],
+        }, 7000)
+        self.assertEqual(got.issues, ())
+        self.assertIsNone(got.arm)
+
+        # THE PR'S OWN NUMBER IS NEVER A WORK ITEM — it is the same object the
+        # run refused, and handing it back either loops or re-refuses with a
+        # misleading reason. `dropped_self` is what lets the refusal say so.
+        got = resolve({
+            "number": 3061, "title": "feat: thing (#3061)", "body": "Closes #3061",
+            "headRefName": "feat/3061-thing",
+            "closingIssuesReferences": [{"number": 3061}],
+        }, 3061)
+        self.assertEqual(got.issues, ())
+        self.assertTrue(got.dropped_self)
+        self.assertIn("the PR's OWN number", cp._resolution_failure(got))
+
+    def test_closing_reference_still_sees_short_issue_numbers(self):
+        """`closing_reference` must not lose the SHORT end of the range (#9957).
+
+        ⛔ THE FAIL-OPEN A REVIEW CYCLE FOUND. `closing_reference` was rewritten to
+        delegate to the resolver's shared grammar, and the first version of that
+        grammar was `#(\\d{3,7})` — copied from the branch-slug width. The
+        predicate it replaced was `#{issue}(?![0-9])` with NO width bound, so the
+        delegation silently stopped matching `Closes #42` for issue 42, `#7` for
+        issue 7, `#99` for issue 99 (measured: True -> False for all three).
+
+        On the REST-rescued open-PR surface the body keyword is the ONLY closing
+        signal and its non-terminal hits are `strong`/blocking, so that narrowing
+        DROPS a blocking hit — a false CLEAN authorising a dispatch, which is the
+        failure the whole gate exists to prevent. Nothing pinned it: the rest of
+        the suite uses four-digit issue numbers.
+        """
+        cp = _tool_module()
+        for text, issue, expected in (
+            ("Closes #42.", 42, True),
+            ("Fixes #7", 7, True),
+            ("resolves #99", 99, True),
+            ("Closes #420.", 42, False),
+            ("Closes #3061.", 3061, True),
+            ("Closes #30610.", 3061, False),
+            ("no keyword here #42", 42, False),
+            ("Closes #12345678901.", 12345678901, True),
+        ):
+            with self.subTest(text=text, issue=issue):
+                self.assertEqual(cp.closing_reference(text, issue), expected)
+        # And the inverse reader agrees with the predicate it inverts.
+        self.assertEqual(cp._closing_numbers_in_text("Closes #42, fixes #7."),
+                         [42, 7])
+
+    def test_the_resolver_is_NOT_table_driven(self):
+        """No mapping table: an arbitrary, unseen number resolves correctly.
+
+        #9957's own warning — "a mapping table of known numbers is not a fix" —
+        is what this pins. A table keyed by the numbers someone happened to
+        record answers for those and silently stops answering for the next one,
+        which is the same class of defect as the one being fixed.
+        """
+        cp = _tool_module()
+        got = cp.resolve_pull_request_work_items({
+            "number": 8888, "title": "", "body": "Closes #8887.",
+            "headRefName": "chore/unrelated",
+            "closingIssuesReferences": [{"number": 8887}],
+        }, 8888)
+        self.assertEqual(got.issues, (8887,))
+        self.assertEqual(got.arm, cp._ARM_CLOSING)
 
     def test_terminal_pr_closing_reference_is_reported_but_non_blocking(self):
         # The contractual "Closes #N" is the strongest statement a PR body can
@@ -3384,11 +3675,18 @@ class CollisionPreflightTest(unittest.TestCase):
         NAMED refusal, not a traceback and not a VERDICT line mis-remedied as a
         broken surface. Nothing exercised this shape before, which is why the
         stale claims could sit next to a green suite.
+
+        ⛔ THE HEAD REF IS NUMBER-FREE (#9957): a `fix/2712-…` branch would now
+        RESOLVE the number and the run would stop being a refusal at all. The
+        property this test pins is the residual one, and it still holds on this
+        route — the rescue cannot supply the closing field, so a PR that names no
+        issue anywhere cannot be resolved, and "could not be read" must never
+        become a claim about a field that was never requested.
         """
         self.gh_fixtures(open_prs=[{
             "number": ISSUE, "title": "fix(battery): restore the pin test",
             "body": "no closing reference in this body", "state": "open",
-            "headRefName": "fix/2712-pin-preflight-test",
+            "headRefName": "chore/record-reads",
         }])
         rc, out = self.run_tool(env_extra={"GH_STUB_PR_LIST_RATE_LIMITED": "1"})
         self.assertEqual(rc, 2, out)
@@ -3400,6 +3698,10 @@ class CollisionPreflightTest(unittest.TestCase):
         # The UNREAD wording, never a claim about a field that was not requested.
         self.assertIn("closing-reference field could not be read", out)
         self.assertNotIn("It names no closing issue", out)
+        # #9957: the resolver repeats the cause in its own words, and it must
+        # ALSO not invent a reading of the field it never got.
+        self.assertIn("the computed field could not be read", out)
+        self.assertNotIn("closing references name nothing", out)
         # A refusal, not a crash and not a surface-level INCOMPLETE: `main()`
         # prints the refusal and returns BEFORE `format_report`, so the caller
         # keys its remedy on the cause instead of on a broken read.
@@ -4295,6 +4597,15 @@ class CollisionPreflightTest(unittest.TestCase):
         # would pass a regression ending in `VERDICT: INCOMPLETE` (still exit
         # 2) — the exact mis-remedy the distinction exists to prevent.
         self.assertNotIn("VERDICT", out)
+        # ⛔ AND IT STAYS A REFUSAL AFTER #9957, because every reference this PR
+        # carries is ITS OWN number. Resolution must not hand the refused number
+        # back: it would either loop (the re-run refuses again) or, worse, gate a
+        # "work item" that is the PR itself. It also must not be re-resolved
+        # recursively — `_verdict_for_pull_request` refuses a resolved number that
+        # is itself an open PR.
+        self.assertIn("could not resolve #3061 to a work item", out)
+        self.assertIn("is #3061 — the PR's OWN number", out)
+        self.assertIn("NEVER clean", out)
 
     def test_found_clone_is_not_the_callers_checkout(self):
         # P1-2, and it is the FAIL-OPEN direction. With `--repo owner/name` and a
