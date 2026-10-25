@@ -10,7 +10,10 @@ over-reach:
     #5012/#5053) that every other `:Source` writer uses, so a caller-supplied
     URL variant minted a SECOND `:Source` for one identity. The node also
     carried none of the S0a identity props, so the SAME identity in the OTHER
-    order still diverged — both orders are pinned here.
+    order still diverged — both orders are pinned here, and the collapse a
+    NETWORK document id now inherits from S0a (two ids differing only in
+    `#fragment` are one `:Source`) is pinned as INTENDED, so it cannot be
+    "tidied" back into per-fragment nodes.
 
 LANDED, and therefore deliberately NOT re-pinned here (the `file:line` evidence
 is on the issue): finding 1 (`search_engine.py`'s `documentKind` discriminator
@@ -136,3 +139,38 @@ def test_document_created_replays_to_the_same_node(sdk_factory):
         "RETURN count(s), collect(s.documentKind)"
     ).result_set
     assert rows[0] == [1, ["report"]], rows
+
+
+def test_document_created_fragment_variants_collapse_to_one_node(sdk_factory):
+    """PINNED AS INTENDED (S0a, #5012/#5053): a FRAGMENT does not select a
+    different document, so two document ids differing only in `#fragment` are
+    ONE `:Source` — and the `documents` meter therefore counts one.
+
+    This is the consequence of adopting the shared resolver rather than a
+    side effect to be "fixed": a fragment- or query-only variant is the same
+    resource, and minting a second node per anchor is the defect S0a removed
+    for every other `:Source` writer. Pinned so a later tidy-up cannot
+    re-introduce per-fragment document nodes without deleting a named decision.
+    """
+    sdk = sdk_factory()
+    proj = sdk._get_proj()
+    for frag in ("one", "two"):
+        proj.apply(
+            {
+                "type": "DocumentCreated",
+                "id": f"https://example.com/doc#section-{frag}",
+                "title": f"t-{frag}",
+                "document_kind": "report",
+            }
+        )
+    rows = proj.g.query(
+        "MATCH (s:Source) WHERE toLower(s.url) CONTAINS 'example.com/doc' "
+        "RETURN count(s), collect(s.url), collect(s.canonicalUrl)"
+    ).result_set
+    assert rows[0][0] == 1, f"fragment variants minted separate nodes: {rows}"
+    # The second variant resolves onto the first node, and the stored `url` is
+    # NOT rewritten — adopt-on-touch keeps the first writer's raw id and carries
+    # the identity in `canonicalUrl`. Asserted so this is a stated contract, not
+    # a reading: the node's KEY is the first writer's, the identity is canonical.
+    assert rows[0][1] == ["https://example.com/doc#section-one"], rows
+    assert rows[0][2] == ["https://example.com/doc"], rows

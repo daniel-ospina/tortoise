@@ -4270,7 +4270,15 @@ class _EntityHandlers:
         source_url``), which keeps its ``references`` edge — the
         index-completeness gate's ``edge`` clause depends on it, so collapsing
         the two into one node would make the edge a dropped self-loop and every
-        doc unit permanently incomplete. `content`, `doc_status` and
+        doc unit permanently incomplete. **That is the index path's guarantee,
+        and it is scoped to it**: the index path's document id is
+        ``doc_<rel-path>`` and its ``source_url`` is ``corpus://…``, so the two
+        are never one identity. A caller that supplies a NETWORK URL as the
+        document id and the SAME url's variant as ``source_url`` IS one
+        identity — the resolver below (S0a, #5012/#5053) folds it onto one node
+        and the ``#205`` guard skips the self-loop, which is the correct
+        outcome for a document that is its own corpus source, not a topology
+        regression. `content`, `doc_status` and
         `objectKind` are RETIRED and are never written (nor re-admissible via
         the open passthrough).
 
@@ -4307,8 +4315,21 @@ class _EntityHandlers:
         # node into `:Source`. Non-network ids (`doc_<rel-path>` from
         # `derive_document_id`, `corpus://…` from the CLI) are returned
         # UNCHANGED by the resolver (identity there), so the index and CLI
-        # paths are unaffected. The resolved key is re-checked because it is a
-        # DIFFERENT value from the one checked above.
+        # paths are unaffected; the fold stamps `canonicalUrl`/`urlAliases`
+        # exactly as `_upsert_source` does. The resolved key is re-checked
+        # because it is a DIFFERENT value from the one checked above.
+        # ⚠️ WHAT IT DOES CHANGE, stated because it is a consequence of the
+        # identity rule rather than an accident: a NETWORK document id is
+        # canonicalised by S0a, so two ids differing only in
+        # fragment/query/trailing-slash are ONE document `:Source` (S0a's own
+        # rule — a fragment never selects a different document). Two "documents"
+        # a caller named that way therefore become one node, and the `documents`
+        # meter counts one. ⚠️ And like every other resolving writer, the MERGE
+        # key here is a RESOLUTION: if the stored `url` moves between the live
+        # write and its replay (an unjournaled writer touching the node in
+        # between), live and replay can land on different keys — the exposure
+        # `edges.py::resolve_source_versions` names, already present on
+        # `_upsert_source`/`_mint_source_stub`, not introduced here.
         raw_did = did
         did = resolve_source_key(self.g, did)
         if not _writable_id(did):

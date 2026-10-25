@@ -14,20 +14,26 @@ governingAgreement: "#133"
 > ⚠️ **PARTIALLY RETIRED — D10 (ONTOLOGY v3.15 §4.4, #5026).** The `doc_status`
 > state machine this plan builds (§Solution 1, §Design, the Integration Surface
 > Map rows for `doc_status`, and the backfill task below) was retired when
-> `:Document` folded into `:Source`: the stored extraction signal is now
-> **`needs_extraction`** alone, and **`graph-scripts/backfill_doc_status.py` was
-> DELETED** — the backfill instruction in §Solution 6 / §Task 4 is a historical
-> record and **must not be executed or re-created**. The upgrade path
-> (`_do_upgrade` / `_do_upgrade_all`) is live, and since #9874 a MISSING
-> `needs_extraction` is read as *pending* rather than *extracted*.
+> `:Document` folded into `:Source`, and
+> **`graph-scripts/backfill_doc_status.py` was DELETED** — the backfill
+> instruction in §Solution 6 / §Task 4 is a historical record and **must not be
+> executed or re-created**. The upgrade path (`_do_upgrade` /
+> `_do_upgrade_all`) is live.
 >
-> ⛔ **That fix does not make the pre-D10 population discoverable, and this note
-> must not claim it does** (#5140 finding 3, measured on #9874): every pre-D10
-> writer MERGEd a `:Document` node, D10 shipped no label relabel, and a rebuilt
-> graph replays the old record's boilerplate `needs_extraction=false` onto a
-> `:Source` — so the legacy backlog is still invisible to both readers. The
-> relabel is #5140 finding 8 and is not done. Read the residual on #5140 (the
-> 2026-10-24T09:03 comment) before treating a document as upgraded.
+> ⛔ **The stored signal is NOT `needs_extraction` alone, and this note must not
+> say it is.** `doc_status` is retired on the WRITE side only: both extraction
+> readers still honour a value they find, and `captured`/`extracted` **outrank**
+> `needs_extraction` (§4.4, implemented as the first two arms of
+> `ingest.py::_document_is_pending`). Since #9874 an ABSENT
+> `needs_extraction` no longer reads as "already extracted" — but only where the
+> caller asked for that: the explicitly named `--upgrade` document, and
+> `--upgrade-all --include-unstamped`. The default `--upgrade-all` sweep does NOT
+> select an unmarked document, and a rebuilt graph replays the old record's
+> boilerplate `needs_extraction=false`, which reads as done. **So the pre-D10
+> population the deleted backfill stamped is still not discoverable** — that
+> needs the `:Document` → `:Source` relabel, which is #5140 finding 8 and has
+> not shipped. Read the residual on #5140 (the 2026-10-24T09:03 comment) before
+> treating a document as upgraded.
 
 ## Context
 

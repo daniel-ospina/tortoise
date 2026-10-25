@@ -4436,10 +4436,14 @@ def _refuse_document_kind_demotion(stored_kinds, props, *, surface: str,
     one metered genre to another (`report` -> `brief`, both metered), but a
     caller surface may not move a metered document OUT of the metered class
     (`None` / `'transcript'`). Demotion is the escape; the forgery direction
-    (`documentKind` added to a provenance Source) only over-counts — it fails
-    closed — and is deliberately left alone (`tests/test_quota.py`'s
-    NON-OVER-REACH arm pins it: "SETTING a genre where none is stored is how a
-    document `:Source` is minted through these surfaces at all").
+    (`documentKind` added to a provenance Source) is deliberately left alone
+    (`tests/test_quota.py`'s NON-OVER-REACH arm pins it: "SETTING a genre where
+    none is stored is how a document `:Source` is minted through these surfaces
+    at all"). ⚠️ It over-counts rather than under-counts, so it does NOT defeat
+    the cap — but it is not harmless, and "fails closed" would overstate it: the
+    node leaves `list_sources()` (`documentKind IS NULL`) and becomes a valid
+    `aboutDocument` target. That is #5140 finding 7's forge direction, left open
+    by that decision, not by an oversight.
 
     Both spellings are refused on a METERED document, for DIFFERENT reasons —
     stated truthfully because the earlier wording claimed a mechanism the code
