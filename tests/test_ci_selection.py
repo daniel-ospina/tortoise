@@ -615,6 +615,53 @@ def test_the_engine_pin_guards_are_selected_on_the_files_they_pin():
         )
 
 
+def test_the_2684_census_is_selected_on_every_surface_that_moves_it():
+    """#2684 review P2: the census must run on EVERY diff that can move it.
+
+    `tests/eval/write_path/test_value_span_census_2684.py` re-derives numbers
+    from THREE inputs, and each selects a different surface:
+
+      * `tortoise/extractor_v2.py` -> `core` (the span mechanism),
+      * `tortoise/retrieval.py` -> `sdk` (the dedupe half: `_pkg_overlap`,
+        `_pkg_differ_value_critical`, `_pkg_turn_key` and both
+        `DEFAULT_PACKAGE_*` thresholds) — an EXACT match that REPLACES the
+        `core` fallback in `select()` (#2938),
+      * the committed #7947 receipts + fixtures -> `eval` (the population).
+
+    With only `core` + `eval` registered, a `tortoise/retrieval.py`-only diff
+    selected `sdk` and 158 test files with the census ABSENT (measured), so
+    §2.3's four published readings could go stale with the guard never running
+    — the #1349/#2938 silent-drop class. The row is needed because the census
+    would not run AT ALL on that diff, not because every predicate it uses is
+    otherwise unpinned: `_pkg_turn_key`'s `0`-vs-`""` normalisation is pinned
+    elsewhere, hermetically, by
+    `tests/test_8658_product_hit_provenance.py::test_the_first_source_turn_is_a_turn`.
+
+    Asserted on the SURFACE and the guard FILE, not on non-emptiness: every
+    one of these diffs selects its surface without the census entry, so a bare
+    `surfaces` check can only pass.
+    """
+    guard = "eval/write_path/test_value_span_census_2684.py"
+    for changed, surface in (
+            ("tortoise/extractor_v2.py", "core"),
+            ("tortoise/retrieval.py", "sdk"),
+            ("tests/eval/write_path/receipts/7947-arms-2026-10-18/"
+             "wp01_quarry_debug.arms.json", "eval"),
+            ("tests/eval/write_path/fixtures/wp01_quarry_debug.json",
+             "eval")):
+        assert (REPO / changed).exists(), f"pinned file is gone: {changed}"
+        r = _sel([changed])
+        assert surface in r["surfaces"], (
+            f"{changed} selects {r['surfaces']}, not {surface} — the premise "
+            "of this pin changed; re-derive it"
+        )
+        assert guard in r["test_files"], (
+            f"{changed} does not select {guard} — the census sleeps on the "
+            "diff that can out-date the numbers it publishes "
+            f"(selected: {r['test_files']})"
+        )
+
+
 def test_the_9572_seed_surface_pins_are_selected_on_their_own_modules():
     """#9572 review P2-2: a seed-surface pin must run on the module it pins.
 
