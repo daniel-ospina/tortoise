@@ -2964,18 +2964,17 @@ def _declared_mutations(
         # #5140 finding 12 UPDATE: the live `_upsert_document` fold now WRITES
         # `canonicalUrl` too (it adopts the shared `resolve_source_key`), so the
         # PROPERTY divergence this note used to record is gone — both rebuild
-        # routes agree on the IDENTITY PROPERTY (`canonical_url`). What remains,
-        # and is the sentence below, is the ROW KEY. It is
-        # is why the derive stays UNCONDITIONAL: this layer keys the row on the
-        # record's RAW id (it is journal-derived and reads no graph), so a
-        # URL-VARIANT `DocumentCreated` plans a second `public.source` row for an
-        # identity the graph folds onto one node (measured: record 2 rows, graph
-        # 1 node). That is the class #9553's derive exists to bound and it is NOT
-        # closed here — named on #5140 finding 12 so a records rebuild does not
-        # resurrect a duplicate source row silently. Narrowing the derive would
-        # make it worse: it would LOSE the variant resolution for document
-        # targets, the silent provenance loss this path exists to avoid. Pinned
-        # by `test_a_document_source_row_derives_its_canonical_identity_too`.
+        # routes agree on the IDENTITY PROPERTY (`canonical_url`). What that
+        # leaves, and it is a different axis, is the ROW KEY: this layer keys the
+        # row on the record's RAW id (it is journal-derived and reads no graph),
+        # so a URL-VARIANT `DocumentCreated` plans a second `public.source` row
+        # for an identity the graph folds onto one node (measured: record 2 rows,
+        # graph 1 node). That is the class #9553's derive exists to bound and it
+        # is NOT closed here — named on #5140 finding 12 so a records rebuild
+        # does not resurrect a duplicate source row silently. The derive is
+        # UNCONDITIONAL because narrowing it would LOSE the variant resolution
+        # for document targets, the silent provenance loss this path exists to
+        # avoid. Pinned by `test_a_document_source_row_derives_its_canonical_identity_too`.
         if (node.table == "source"
                 and "canonical_url" in columns.get("source", frozenset())):
             col_values.setdefault("canonical_url", _normalize_source_url(key))

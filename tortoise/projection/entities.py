@@ -4280,8 +4280,10 @@ class _EntityHandlers:
         source, not a topology regression. The self-loop is then suppressed by
         ``link_source_to_entity``'s own #5151 guard, NOT by this method's
         ``#205`` test: ``ref != did`` compares the RAW ref to the RESOLVED id,
-        so it is TRUE for exactly the variant case and false only for an
-        identically-spelled one — which is the caller-side guard
+        so BETWEEN TWO SPELLINGS OF ONE IDENTITY it is TRUE for the variant and
+        false only for the identically-spelled one (it is also TRUE for every
+        genuinely distinct source, which is what wires the legitimate
+        ``references`` edge) — the variant case is the caller-side guard
         ``projection/edges.py`` records as defeated by resolution, and the
         reason #5151 keeps the guard inside the callee. `content`, `doc_status` and
         `objectKind` are RETIRED and are never written (nor re-admissible via

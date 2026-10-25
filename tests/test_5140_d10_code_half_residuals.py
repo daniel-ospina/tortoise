@@ -185,11 +185,12 @@ def test_document_created_appends_the_raw_spelling_to_url_aliases(sdk_factory):
     RAW spelling this record named, so the resolver can re-find the node from a
     spelling it has not been handed before.
 
-    DISCRIMINATING, and it is the only case here that is: the pre-canonical node
-    below is stored under the CANONICAL spelling, so `resolve_source_key` adopts
-    it in step 2 — which writes `urlAliases=[canonical]` ITSELF — and the raw
-    variant reaches `urlAliases` only through `_upsert_document`'s own clause.
-    Delete that clause and this test fails while the other five still pass.
+    DISCRIMINATING, and it is the ONLY case here that pins the ALIAS clause: the
+    pre-canonical node below is stored under the CANONICAL spelling, so
+    `resolve_source_key` adopts it in step 2 — which writes
+    `urlAliases=[canonical]` ITSELF — and the raw variant reaches `urlAliases`
+    only through `_upsert_document`'s own clause. Delete that clause and this test
+    fails while the other six still pass.
     """
     sdk = sdk_factory()
     proj = sdk._get_proj()

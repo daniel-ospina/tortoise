@@ -5442,9 +5442,9 @@ surfaces:
   sdk:
   # #5140 finding 12 (the `sdk` arm; the `core` row is in that block). NOT
   # because of `tortoise/sdk.py`: that module is a `SHARED_MODULES` entry, so a
-  # `sdk.py`-only diff selects the FULL matrix anyway (the same note at
-  # `test_9079_event_writers_journal.py`'s `sdk` row, the one place it is
-  # written down). This row follows
+  # `sdk.py`-only diff selects the FULL matrix anyway (the same NOTE sits above
+  # that file's `api`/`core`/`sdk` rows, so it is stated in three places, not
+  # one). This row follows
   # `tortoise/projection/edges.py`, whose two docstrings the PR corrected and
   # which IS an `sdk` SOURCE_PATTERN — but measured,
   # `--changed-files tortoise/projection/edges.py` selects `["core", "sdk"]`
