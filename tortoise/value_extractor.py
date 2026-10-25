@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from pathlib import Path
 
 from tortoise._gate_memo import GateMemo
@@ -386,19 +386,26 @@ def compile_kind_index_spec(packs_dir: Path | str | None = None,
     """
     import copy
 
-    from tortoise.pack_registry import default_packs_dir
-    packs_dir = (Path(packs_dir) if packs_dir else default_packs_dir()).resolve()
-    # #5163: the graph gate. None = no gate (catalog union). Frozen so the
-    # memo key is hashable and two equal gates share one slot.
-    _gate = (None if installed_namespaces is None
-             else frozenset(installed_namespaces))
-    _memo_key = (str(packs_dir), _gate)
+    _memo_key = _resolved_kind_spec_key(packs_dir, installed_namespaces)
+    # The RESOLVED dir is the first half of the memo key — re-read it from there so
+    # this accessor and `kind_index_sections()` cannot resolve it differently.
+    packs_dir = Path(_memo_key[0])
+    #: #5163: the graph gate. None = no gate (catalog union); the frozen half of
+    #: the memo key.
+    _gate = _memo_key[1]
     cached = _KIND_SPEC_CACHE.get(_memo_key)
     if cached is not None:
         # deep copy — callers must never mutate the shared cache (the
         # build/load paths treat the spec as read-only).
         return copy.deepcopy(cached)
-    from tortoise.extractor_v2 import CORE_OBJECT_KEYS, EVENTS, POINTS, SUBJECTS
+    from tortoise.extractor_v2 import EVENTS, POINTS, SUBJECTS
+
+    # #9964: the CORE section assignment comes from ONE authority
+    # (`kind_layers.core_sections`) — the same map `kind_layers.declared_layers`
+    # answers the write doors from, so the classifier's partition and the door's
+    # label cannot disagree. The four per-section descriptions stay here: they are
+    # this accessor's own surface (the classification TEXT).
+    from tortoise.kind_layers import core_sections
 
     def _surface(kind: str, desc: str, syns: list, exs: list) -> str:
         parts = [f"{kind}: {desc}"] if desc else [kind]
@@ -411,22 +418,25 @@ def compile_kind_index_spec(packs_dir: Path | str | None = None,
     brief = compile_value_brief(packs_dir,
                                installed_namespaces=installed_namespaces)
     spec: dict[str, dict] = {}
-    for k in CORE_OBJECT_KEYS:
-        desc = str(brief.get(k, "") or "")
-        spec[k] = {"text": _surface(k, desc, [], []), "section": "objects",
+    #: section → the declared description source for a CORE kind. Kept beside the
+    #: section assignment (never re-spelled) so a new section cannot arrive with
+    #: a silent description fallback.
+    _declared_desc = {
+        "objects": lambda k: str(brief.get(k, "") or ""),
+        "subjects": lambda k: str(SUBJECTS[k]),
+        "points": lambda k: str(POINTS[k]),
+        "events": lambda k: str(EVENTS[k]),
+    }
+    # `core_sections()`'s insertion order IS this spec's historic key order
+    # (objects → subjects → points → events) — a STABILITY convention pinned by
+    # `tests/test_kind_layer_partition_9964.py`, ⛔ not a cache-key dependency:
+    # `kind_index.cache_key_for` serializes with `sort_keys=True`, so key order
+    # cannot reach the digest (#9964 review — the old "#2818 hashes the spec
+    # JSON" rationale was measured false and is corrected, not repeated).
+    for k, section in core_sections().items():
+        desc = _declared_desc[section](k)
+        spec[k] = {"text": _surface(k, desc, [], []), "section": section,
                    "description": desc, "synonyms": [], "examples": [],
-                   "nearMisses": []}
-    for k, desc in SUBJECTS.items():
-        spec[k] = {"text": _surface(k, str(desc), [], []), "section": "subjects",
-                   "description": str(desc), "synonyms": [], "examples": [],
-                   "nearMisses": []}
-    for k, desc in POINTS.items():
-        spec[k] = {"text": _surface(k, str(desc), [], []), "section": "points",
-                   "description": str(desc), "synonyms": [], "examples": [],
-                   "nearMisses": []}
-    for k, desc in EVENTS.items():
-        spec[k] = {"text": _surface(k, str(desc), [], []), "section": "events",
-                   "description": str(desc), "synonyms": [], "examples": [],
                    "nearMisses": []}
     # packs: the kindDefs FULL key set (compile_value_brief drops
     # synonyms/examples — read the manifests directly); the section is
@@ -520,10 +530,66 @@ _VOCAB_CACHE = GateMemo()
 _KIND_SPEC_CACHE = GateMemo()
 
 
+#: ``{kind: section}`` for the kind-index spec, keyed by the SAME
+#: ``(resolved packs dir, gate)`` as ``_KIND_SPEC_CACHE`` — so a change that
+#: invalidates one invalidates the other by construction. #9964: the write doors
+#: ask ``kind_layers.section_of`` once per kind-named write, and rebuilding the
+#: reversed map (or deep-copying a 100-entry spec) per write is measurable, so
+#: the reversal is memoized rather than recomputed. It is DERIVED from
+#: ``compile_kind_index_spec`` — never restated — so the classifier's partition
+#: and this map cannot drift.
+_KIND_SECTION_CACHE = GateMemo()
+
+
+def _resolved_kind_spec_key(packs_dir, installed_namespaces) -> tuple[str, object]:
+    """The ONE memo key for the kind spec (and its reversed section map).
+
+    Resolution is part of the key: a custom ``packs_dir`` or a different
+    installed-namespace gate is its own slot, so neither can poison the other
+    (cycle-3 P2 / #5163).
+    """
+    from tortoise.pack_registry import default_packs_dir
+
+    resolved = str((Path(packs_dir) if packs_dir else default_packs_dir()).resolve())
+    gate = (None if installed_namespaces is None
+            else frozenset(installed_namespaces))
+    return (resolved, gate)
+
+
+def kind_index_sections(installed_namespaces: Collection[str] | None = None
+                        ) -> Mapping[str, str]:
+    """``{kind: section}`` — the map the kind classifier partitions by (#9964).
+
+    Readers must treat it as READ-ONLY (a ``MappingProxyType`` over the memo).
+    Derived from ``compile_kind_index_spec`` so a section assigned there is the
+    section read here; the write doors consume it through
+    ``kind_layers.section_of``, which is what makes the classifier's partition
+    the ONE decision about a kind's layer instead of a second opinion the write
+    path could contradict.
+    """
+    from types import MappingProxyType
+
+    key = _resolved_kind_spec_key(None, installed_namespaces)
+    cached = _KIND_SECTION_CACHE.get(key)
+    if cached is None:
+        spec = compile_kind_index_spec(installed_namespaces=installed_namespaces)
+        cached = _KIND_SECTION_CACHE.put_if_absent(
+            key,
+            {kind: str(md.get("section") or "")
+             for kind, md in spec.items() if isinstance(md, dict)},
+        )
+    return MappingProxyType(cached)
+
+
 def _clear_kind_spec_cache() -> None:
     """Test hook — clear ALL memoized kind-index specs (cross-test
-    isolation; the per-session re-parse is exactly what the memo avoids)."""
+    isolation; the per-session re-parse is exactly what the memo avoids).
+
+    The reverse section map is keyed identically and is cleared with it: a test
+    that re-injects a packs dir must not be served the previous dir's sections.
+    """
     _KIND_SPEC_CACHE.clear()
+    _KIND_SECTION_CACHE.clear()
 
 
 def _object_kind_vocab(installed_namespaces: Collection[str] | None = None
