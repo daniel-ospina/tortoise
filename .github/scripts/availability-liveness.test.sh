@@ -398,7 +398,8 @@ assert_eq "$(count_calls 'GH PATCH')" "0" "16: …and does NOT close anything on
 # the heartbeat arm was taught the new shape: with a literal `__ERR__)` match the
 # error string fell through as if it were an issue number, and the run PATCHed
 # `issues/__ERR__|gh: …`.
-assert_contains "$OUT" "gh said:" "16: …and the failure names what gh actually said (#9018)"
+assert_contains "$OUT" "reason:" "16: …and the failure names its reason (#9018)"
+assert_contains "$OUT" "gh: alert search failed" "16: …the reason is what gh itself said"
 # (The sentinel's OTHER guarantee — that it is never used as an issue number — is
 # pinned where it can actually fail: case 30's non-numeric number, which is the
 # only reachable path that could hand `__ERR__|…` to a PATCH. An assertion here
@@ -588,6 +589,9 @@ assert_contains "$OUT" "heartbeat search failed" "29: …and names the search fa
 # fault. The reason must be jq's OWN words — the same rule the gh arm follows.
 assert_contains "$OUT" "jq:" "29: …and carries jq's own words, not a guessed cause"
 assert_not_contains "$OUT" "was not parseable JSON" "29: …never the fabricated JSON-fault claim"
+# …and the speaker must not be `gh`: jq is what failed here ("gh said: jq: …" put the
+# wrong tool's name on the sentence — the attribution defect this PR exists to remove).
+assert_contains "$OUT" "— reason:" "29: …attributed with a neutral reason: prefix, not gh said:"
 assert_eq "$(count_calls 'GH POST')" "0" "29: …and files NO false page (the arm is an EXIT, not a fall-through)"
 
 # 30. a search result whose issue NUMBER is not numeric is a search failure, not

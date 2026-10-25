@@ -360,7 +360,9 @@ search_issue() { # <body-marker> <exact-title>
   # the operator needs is what jq said, on the branch where jq is what failed.
   if ! n="$(printf '%s' "$out" | jq -rs --arg login 'github-actions[bot]' --arg title "$2" --arg marker "$1" \
       '[.[].items[]? | select((.user.login // "") == $login) | select((.title // "") == $title) | select(((.body // "") | contains($marker)))][0].number // empty' 2>"$errf")"; then
-    printf '__ERR__|jq: %s' "$(head -3 "$errf" 2>/dev/null | tr '\n' ' ')"
+    # ⛔ NO OWN PREFIX: `jq: …` in the message must be jq's OWN stderr, or the assertion
+    # that pins it would be satisfied by a label this script prints itself (#9939 review).
+    printf '__ERR__|%s' "$(head -3 "$errf" 2>/dev/null | tr '\n' ' ')"
     rm -f "$errf"
     return 0
   fi
@@ -372,7 +374,7 @@ search_issue() { # <body-marker> <exact-title>
   case "$n" in
     # ⛔ UNIFORM SENTINEL. Every failure form is `__ERR__|<reason>` — a bare
     # `__ERR__` would reach the caller's `${…\#__ERR__|}` strip unchanged and print
-    # `— gh said: __ERR__`, i.e. a false attribution of exactly the kind this
+    # `— reason: __ERR__`, i.e. a false attribution of exactly the kind this
     # change exists to remove (reachable: harness case 30, a non-numeric number).
     *[!0-9]*) printf '__ERR__|search returned a non-numeric issue number'; return 0 ;;
   esac
@@ -513,7 +515,12 @@ main() {
       # checker's own blindness is visible and retried next run. The tool's own
       # words ride along when the sentinel carries them (#9018) — without them
       # this line cannot be told apart from "the runner has no gh".
-      fail "heartbeat search failed — cannot assess the pager's liveness this run (not treated as fresh; retried on the next run)${search_error:+ — gh said: ${search_error}}"
+      # ⛔ `reason:`, not `gh said:` (#9018 review). The sentinel now carries the words
+      # of whichever tool failed — `gh`, `jq`, or this checker's own non-numeric guard —
+      # so a fixed `gh said:` prefix put the wrong speaker's name on two of the three
+      # shapes (measured: `— gh said: jq: parse error: …`). Only the words moved; the
+      # false speaker had not.
+      fail "heartbeat search failed — cannot assess the pager's liveness this run (not treated as fresh; retried on the next run)${search_error:+ — reason: ${search_error}}"
       exit 1 ;;
   esac
 
@@ -600,7 +607,7 @@ liveness_workflow_age_min=unknown"
     # in shape, or one of them silently stops guarding.
     __ERR__*)
       search_error="${alert#__ERR__|}"
-      fail "liveness-alert search failed — refusing to file or resolve (never duplicate); cannot confirm the alert state${search_error:+ — gh said: ${search_error}}"
+      fail "liveness-alert search failed — refusing to file or resolve (never duplicate); cannot confirm the alert state${search_error:+ — reason: ${search_error}}"
       exit 1 ;;
   esac
 

@@ -45,11 +45,19 @@ WORKFLOWS = REPO / ".github" / "workflows"
 MARKER = "RUNNER-TOOL-CONTRACT-UNSATISFIED"
 
 #: Jobs that NEED `gh` and MAY land on the pool, each carrying the contract step.
-#: Two entries are the measured 2026-10-24 reds and four are the same hazard found by
-#: the scan at the bottom of this file (a job that shells out to `gh` and asks for a
-#: label the pool has served). Each one calls `gh` either inline or through
-#: `tools/ci_check_repair.py` / `tools/ci_queue_health.py` / `tools/ci_timing.py` /
-#: `.github/scripts/availability-*.sh`.
+#: Three are the measured 2026-10-24 reds (`canary-streak`, `finding-provenance`,
+#: `availability-watchdog`) and the rest are the same hazard found by the scan at the
+#: bottom of this file (a job that shells out to `gh` and asks for a label the pool has
+#: served). Each reaches `gh` one of two ways, and which one is not obvious from the
+#: entry, so: INLINE in the workflow's own `run:` blocks (`canary-streak`,
+#: `finding-provenance`, `ci-timing`, `supabase-deploy`, `mergify-guard-recut`'s digest
+#: step), or THROUGH a helper — `ci_check_repair.py` (`ci-check-repair`),
+#: `ci_queue_health.py` (`ci-queue-health`), `ci_timing.py` (`ci-timing`),
+#: `availability-watchdog.sh` / `availability-liveness.sh` / `availability-record.sh`,
+#: `auto-file-issue.sh` (`e2e-live-reconcile`, `prod-csp-monitor`,
+#: `tenant-provision-monitor`), `welcome-e2e-monitor.sh` (`welcome-e2e-monitor`),
+#: `mergify_config_guard.py` (`mergify-guard-recut`). The set is 16 jobs across 14
+#: workflows; count it from the literal, not from this sentence.
 GH_JOBS = {
     "python-ci.yml": ["canary-streak"],
     "finding-provenance.yml": ["classify", "provenance"],
@@ -74,12 +82,15 @@ GH_JOBS = {
 KNOWN_UNCOVERED = {
     # The job has NO `actions/checkout`, so `.github/scripts/runner-tools.sh` is not in
     # the workspace and the step cannot run. It is a required context, so a 127 here
-    # blocks every merge — closing it means adding a checkout (`persist-credentials:
-    # false`, since the token it carries is `pull-requests: read` only) or inlining the
-    # provisioner, and that is a change to a gate #1224 documents carefully. Filed as
-    # its own task — #9942 — rather than smuggled into this one.
+    # blocks every merge — closing it means adding a checkout to a gate #1224 documents
+    # carefully, or inlining the provisioner, and that is its own reviewed change. NOTE
+    # on the checkout: the job DOES grant `contents: read` (`ai-review-gate.yml:242-244`),
+    # so a checkout would work — `persist-credentials: false` is hygiene (the same job
+    # carries `pull-requests: read`), not the obstacle. The obstacle is that a gate's
+    # step list is not a drive-by edit. Filed as #9942 — that number is the claim that
+    # this is owned; an earlier round said "filed as its own task" with no issue behind it.
     "ai-review-gate.yml": {
-        "ai-review-gate": "no checkout in the job — the contract script is not in the workspace"
+        "ai-review-gate": "no checkout in the job — the contract script is not in the workspace (#9942)"
     },
     # `mergify_config_guard.py` executes `gh` only in `--live` mode, whose own docstring
     # records that CI must never use it (a fail-closed admin read inside CI would
@@ -134,7 +145,20 @@ def _stub_tool_dir(tmp_path: Path, name: str) -> Path:
 #: these carries the utilities but NOT `gh` — which is the whole point: on this
 #: repo's hosts `gh` lives in `/usr/bin` beside them, so "absent" cannot be
 #: spelled by dropping `/usr/bin`.
-TOOLBOX = ("bash", "gzip", "mkdir", "rm", "find", "head", "tar", "ln", "sha256sum", "cut", "uname", "curl")
+TOOLBOX = (
+    "bash",
+    "gzip",
+    "mkdir",
+    "rm",
+    "find",
+    "head",
+    "tar",
+    "ln",
+    "sha256sum",
+    "cut",
+    "uname",
+    "curl",
+)
 
 
 def _toolbox_without_gh(tmp_path: Path) -> str:
@@ -378,14 +402,38 @@ _GH_CMD = re.compile(
 #: `gh` at an EXECUTION site, used to DERIVE which helper scripts carry the hazard.
 #: A text list of script names was the first attempt and it under-counted: five
 #: poolable jobs run scripts it did not name (`availability-record.sh`,
-#: `welcome-e2e-monitor.sh`, `auto-file-issue.sh`). Deriving the set means a new
-#: script cannot be forgotten — it is found, or it is not executing `gh`.
+#: `welcome-e2e-monitor.sh`, `auto-file-issue.sh`). Deriving the set means less can
+#: be forgotten — but a DERIVATION IS ONLY AS GOOD AS ITS IDIOMS, so the claim is
+#: scoped to them (stated in `_gh_executing_scripts`, and re-measured by
+#: `test_the_gh_script_derivation_has_no_visible_blind_spot`):
+#:   * a command substitution / subshell:      `$(gh api …)`, `( gh … )`
+#:   * a shell operator or statement start:    `| gh …`, `; gh …`, `&& gh …`, `gh …`
+#:   * an argv literal / env default:          `["gh", "api", …]`, `get("X_GH", "gh")`
+#:   * a resolved binary variable:             `GH_BIN` (and `*_GH` siblings)
 _GH_EXEC = (
-    re.compile(r"\(\s*gh\s"),                                  # command substitution / subshell
+    re.compile(r"\(\s*gh\s"),  # command substitution / subshell
     re.compile(r"[;&|(]\s*gh\s+(api|run|pr|issue|search|workflow|label|release|repo)"),
     re.compile(r"^\s*gh\s+(api|run|pr|issue|search|workflow|label|release|repo)", re.M),
-    re.compile(r'''["']gh["']\s*,'''),                        # subprocess argv literal
-    re.compile(r"\bGH_BIN\b"),                                   # resolved, then exec'd
+    # ⛔ `[),\]]`, not `,`: the repo resolves the binary TWO ways — an argv literal
+    # (`subprocess.run(["gh", "api", …])`) and an env default
+    # (`os.environ.get("BRANCH_REAPER_GH", "gh")`). Requiring the comma saw only the
+    # first, so `branch_reaper.py` / `run_reaper.py` were invisible despite really
+    # executing `gh` (#9939 review).
+    re.compile(r"""["']gh["']\s*[),\]]"""),
+    re.compile(r"\bGH_BIN\b"),  # resolved, then exec'd
+)
+#: A harness is not what a workflow runs IN ANGER, and three of them legitimately
+#: exercise `gh` (they install a STUB on PATH). They are excluded by NAME, not by
+#: which glob they came from, so the exclusion cannot drift with the directory.
+_NOT_A_HARNESS = re.compile(r"\.test\.|^test_")
+#: Everywhere a script that shells out to `gh` can live. `graph-scripts/` was missing and
+#: is a real home for one (`e2e_live_reconcile.py` runs in `e2e-live-reconcile`).
+_SCRIPT_GLOBS = (
+    ".github/scripts/*.sh",
+    ".github/scripts/*.py",
+    "tools/*.py",
+    "tools/*.sh",
+    "graph-scripts/*.py",
 )
 #: Labels the fallback pool has been observed to serve. Not `ubuntu-latest` only:
 #: the 2026-10-24 measurement shows the pool serving `ubuntu-24.04` as well.
@@ -393,12 +441,24 @@ _POOLABLE_LABEL = re.compile(r"ubuntu-(latest|\d+\.\d+)")
 
 
 def _gh_executing_scripts() -> frozenset[str]:
-    """Basenames of the helper scripts that INVOKE `gh` (derived, never listed)."""
+    """Basenames of the helper scripts that INVOKE `gh` (derived, never listed).
+
+    WHAT THIS CANNOT SEE, stated so nobody reads a green run as proof of absence:
+    a script that builds the command in a way none of `_GH_EXEC`'s idioms describe
+    (a `subprocess.run(shlex.split($CMD))`, a shell `$GH` variable, a wrapper that
+    takes the binary name as an argument). The direction of that miss is the RARE
+    one — every script in this repo that execs `gh` does it through one of the four
+    idioms, which `test_the_gh_script_derivation_has_no_visible_blind_spot`
+    re-measures against the tree instead of trusting this sentence.
+    """
     out = set()
-    for pattern in (".github/scripts/*.sh", "tools/*.py", "tools/*.sh"):
+    for pattern in _SCRIPT_GLOBS:
         for path in REPO.glob(pattern):
+            if _NOT_A_HARNESS.search(path.name):
+                continue
             code = "\n".join(
-                line for line in path.read_text(errors="ignore").splitlines()
+                line
+                for line in path.read_text(errors="ignore").splitlines()
                 if not line.strip().startswith("#")
             )
             if any(rule.search(code) for rule in _GH_EXEC):
@@ -437,14 +497,55 @@ def _code_only(line: str) -> str:
     return re.sub(r"'[^']*'|\"[^\"]*\"", "''", line)
 
 
+def _poolable_label(text: str) -> bool:
+    """Does this job's `runs-on` ask for a label the fallback pool has served?
+
+    BOTH YAML shapes: the inline scalar (`runs-on: ubuntu-latest`) and the block list
+    (`runs-on:` then `- self-hosted` / `- ubuntu-latest`). The first version read only
+    the INLINE form, so a job written as a list — the shape a `self-hosted` job usually
+    takes — was invisible and could have joined the gap with the suite green (#9939
+    review).
+    """
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        m = re.match(r"^\s+runs-on:\s*(.*)$", line)
+        if not m:
+            continue
+        inline = m.group(1).strip()
+        if inline:
+            return bool(_POOLABLE_LABEL.search(inline))
+        for follow in lines[i + 1 :]:
+            if not follow.strip():
+                continue
+            item = re.match(r"^\s*-\s*(.+)$", follow)
+            if not item:
+                break  # the next key: the list ended with no poolable label
+            if _POOLABLE_LABEL.search(item.group(1)):
+                return True
+        return False
+    return False
+
+
 def _gh_hazards(body: list[str], scripts: frozenset[str]) -> list[str]:
     hits = []
+    # ⛔ BOUNDARY-MATCHED, not `name in code`. A substring test made
+    # `python3 -m pytest tests/test_ci_timing.py` look like a `gh` user (the helper
+    # name `ci_timing.py` sits inside the test module's name), and the remedy it
+    # demands — `ensure gh` — FAILS CLOSED, so on a no-egress pool runner it would
+    # red a healthy job. 15 such test modules exist (#9939 review).
+    script_ref = (
+        re.compile(
+            r"(?<![\w.-])(?:" + "|".join(re.escape(s) for s in sorted(scripts)) + r")(?![\w.-])"
+        )
+        if scripts
+        else None
+    )
     for line in body:
         stripped = line.strip()
         if stripped.startswith("#") or stripped.startswith("- name:"):
             continue
         code = _code_only(line)
-        if _GH_CMD.search(code) or any(name in code for name in scripts):
+        if _GH_CMD.search(code) or (script_ref is not None and script_ref.search(line)):
             hits.append(stripped)
     return hits
 
@@ -466,8 +567,7 @@ def test_every_pool_eligible_gh_job_is_declared():
     for path in sorted(WORKFLOWS.glob("*.yml")):
         for job, body in _jobs(path):
             text = "\n".join(body)
-            label = re.search(r"^\s+runs-on:\s*(.+)$", text, re.M)
-            if not label or not _POOLABLE_LABEL.search(label.group(1)):
+            if not _poolable_label(text):
                 continue
             if not _gh_hazards(body, scripts):
                 continue
@@ -487,3 +587,59 @@ def test_every_pool_eligible_gh_job_is_declared():
     for wf, jobs in KNOWN_UNCOVERED.items():
         for job, why in jobs.items():
             assert why.strip(), f"{wf}::{job}: a declared gap must say WHY"
+
+
+# ── the derivation's own blind spots and false positives ─────────────────────
+
+#: Scripts that DO exec `gh` through a shape the first derivation missed: an
+#: env-defaulted binary name (`os.environ.get("BRANCH_REAPER_GH", "gh")`), and a
+#: directory the glob did not reach (`graph-scripts/`). Pinned by NAME so a pattern
+#: edit that loses them fails here instead of silently shrinking the scan.
+_ENV_DEFAULTED_GH = ("branch_reaper.py", "run_reaper.py", "e2e_live_reconcile.py")
+
+
+def test_the_gh_script_derivation_has_no_visible_blind_spot():
+    """Re-measure the idiom claim against the tree — do not trust its docstring."""
+    scripts = _gh_executing_scripts()
+    missing = [name for name in _ENV_DEFAULTED_GH if name not in scripts]
+    assert not missing, (
+        f"the derivation no longer sees {missing}, which really do exec `gh` — a new "
+        "poolable job running one would join the #9018 gap with the suite green (#9939 "
+        "review)"
+    )
+    # And the three the earlier round measured through, so neither fix undid the other.
+    for name in (
+        "auto-file-issue.sh",
+        "availability-record.sh",
+        "welcome-e2e-monitor.sh",
+        "ci_check_repair.py",
+        "ci_queue_health.py",
+        "ci_timing.py",
+    ):
+        assert name in scripts, f"the derivation lost {name}"
+
+
+def test_a_test_module_named_like_a_helper_is_not_a_gh_hazard():
+    """The false positive that matters: `ensure gh` FAILS CLOSED.
+
+    `any(name in code)` matched `ci_timing.py` inside `tests/test_ci_timing.py`, so a
+    job naming that test module was told to add a contract step — and on a no-egress
+    pool runner that step exits 1 and reds a healthy job. Boundary matching, not
+    substring: the helper name must not be part of a longer path component.
+    """
+    scripts = _gh_executing_scripts()
+    assert _gh_hazards(["        run: python3 -m pytest tests/test_ci_timing.py -q"], scripts) == []
+    assert _gh_hazards(["        run: bash .github/scripts/ci_timing.test.sh"], scripts) == []
+    # …while a REAL invocation of the helper is still a hazard, in both shapes.
+    assert _gh_hazards(["        run: python3 tools/ci_timing.py --refresh-durations"], scripts)
+    assert _gh_hazards(['        run: python3 "$GITHUB_WORKSPACE/tools/ci_timing.py"'], scripts)
+
+
+def test_the_poolable_label_reader_sees_both_yaml_shapes():
+    """`runs-on` as a block list is the shape a self-hosted job usually takes."""
+    inline = "    runs-on: ubuntu-latest\n    steps:\n"
+    block = "    runs-on:\n      - self-hosted\n      - ubuntu-24.04\n    steps:\n"
+    block_pool_free = "    runs-on:\n      - self-hosted\n      - linux\n    steps:\n"
+    assert _poolable_label(inline)
+    assert _poolable_label(block)
+    assert not _poolable_label(block_pool_free)
