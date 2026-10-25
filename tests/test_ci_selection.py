@@ -2170,6 +2170,33 @@ def test_tmpdir_sweep_tool_change_selects_core_not_tier1():
     assert set(r["test_files"]) != _tier1()
 
 
+def test_cli_extraction_engine_change_selects_core_and_carve_out_leg():
+    # #9929 review #2: the CORE_ALSO entry for
+    # integrations/cli-extraction/extract_turns.py exists only to stop the
+    # #6138 silent drop — `integrations/` is a flat NON_PYTHON_PREFIXES entry,
+    # so without it an extractor-only diff comes back changed=[], select()
+    # takes the docs-only early return and NOT ONE of the lane's guards runs on
+    # the very diff that can break the extractor.
+    #
+    # The guard runs in the CARVE-OUT leg, not `test_files`:
+    # tests/test_cli_extraction.py is a carve_out member, so it is excluded
+    # from the docker legs by construction and `carve_out_run` (a matched
+    # surface owns a carve-out file) is what actually schedules it. Asserting
+    # on `test_files` here would be the wrong half of the contract.
+    #
+    # Mutation check (verified by dropping the CORE_ALSO entry in a REPL):
+    # select() then returns surfaces=[], full=False and carve_out_run=False on
+    # the 64-file tier-1 smoke set, so asserts 2, 3 and 5 below go RED. Assert 1
+    # (`full is False`) survives and assert 4 is manifest-driven
+    # (`carve_out_files()` reads config/ci-surfaces.yml, not this selection).
+    r = _sel(["integrations/cli-extraction/extract_turns.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert r["carve_out_run"] is True, r
+    assert "test_cli_extraction.py" in cs.carve_out_files(load_manifest()), r
+    assert set(r["test_files"]) != _tier1(), r
+
+
 def test_docs_lint_baseline_tool_change_selects_core_not_tier1():
     # #7435 review P1: tools/docs_lint_baseline.py owns
     # tests/test_docs_lint_baseline.py (`core`), whose 58 cases pin the differ's
@@ -3222,6 +3249,43 @@ def test_install_ci_runner_x64_tool_change_selects_core_not_tier1():
     assert r["carve_out_run"] is True, r
     # and it is not merely tier-1 smoke: the selection carries core's own members too
     assert set(r["test_files"]) != _tier1(), r
+
+
+def test_runner_autoscale_guard_change_selects_core_not_tier1():
+    # tools/runner_autoscale.py owns tests/test_runner_autoscale.py (the measured
+    # ceiling, the five-way classification, the fail-closed measurement arms and
+    # the mutation family that proves each gate load-bearing).
+    #
+    # `tools/` is a flat NON_PYTHON_PREFIXES entry, so without the CORE_ALSO row a
+    # tool-only change came back with `changed == []`, took the docs-only early
+    # return and the guard's own pins never ran on the file they guard — the
+    # #1349/#3332/#3616 silent-drop class. Mutation check: removing the CORE_ALSO
+    # entry selects no surface, so assert 1 below fails.
+    r = _sel(["tools/runner_autoscale.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_runner_autoscale.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
+def test_runner_autoscale_installer_change_selects_core_not_tier1():
+    # tools/install-runner-autoscale-schedule.sh owns
+    # tests/test_install_runner_autoscale_schedule.py (the refusals with nothing
+    # written, the rendered systemd/cron/launchd artifacts, the install-time
+    # measurement probe, and the drift check). It ALARMS the guard, so an
+    # installer-only diff that selects nothing is the worst case of this class:
+    # the wiring could be broken while every tool test still passes.
+    #
+    # Measured before the fix (PR #9685 review round 9, P1-2):
+    # `_sel(["tools/install-runner-autoscale-schedule.sh"])` -> surfaces=[],
+    # full=False, test_install_runner_autoscale_schedule.py absent.
+    #
+    # CORE_ALSO (not TOOL_CARVEOUTS): the suite is hermetic and `core`-registered,
+    # so selecting `core` runs it at the lowest CI cost. Mutation check: removing
+    # the CORE_ALSO entry selects no surface, so assert 1 below fails.
+    r = _sel(["tools/install-runner-autoscale-schedule.sh"])
+    assert "core" in r["surfaces"], r
+    assert "test_install_runner_autoscale_schedule.py" in r["test_files"], r
+    assert r["full"] is False, r
 
 
 def test_ci_queue_health_tool_change_selects_core_not_tier1():
