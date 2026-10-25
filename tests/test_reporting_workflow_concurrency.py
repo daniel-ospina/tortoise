@@ -106,9 +106,12 @@ and ``test_workflow_secret_interpolation.py``.
 from __future__ import annotations
 
 import fnmatch
+import os
 import posixpath
 import re
 import shlex
+import subprocess
+import tempfile
 import tomllib
 from copy import deepcopy
 from pathlib import Path
@@ -1731,14 +1734,35 @@ _OUTCOME_REF = re.compile(r"\$\{\{\s*steps\.([A-Za-z0-9_.-]+)\.(?:outcome|conclu
 _NONZERO_EXIT = re.compile(r"\bexit\s+[1-9]\d*\b")
 
 
-def _shell_code(run: str) -> list[str]:
-    """``run:`` lines with shell comments removed.
+_SHELL_TRAILING_COMMENT = re.compile(r"(?:^|(?<=\s))#.*$")
 
-    A `# exit 1` in a comment is not an exit: the shipped `run:` carries several
-    comment lines that NAME the semantics (`# The ONLY arm that fails this step`),
-    so a pin reading the raw text can be satisfied by prose.
+
+def _shell_code(run: str) -> list[str]:
+    """``run:`` lines with shell comments removed, TRAILING ones included.
+
+    A `# exit 1` in a comment is not an exit, and the shipped `run:` carries both
+    full-line comments that NAME the semantics and trailing ones — so a pin reading
+    raw text can be satisfied by prose (`true  # exit 1` exits 0; a summary write
+    mentioned only after `#` writes nothing). Quotes are respected, so an `echo
+    "# …"` keeps its text.
     """
-    return [line for line in run.splitlines() if not line.lstrip().startswith("#")]
+    lines: list[str] = []
+    for raw in run.splitlines():
+        quote: str | None = None
+        cut = len(raw)
+        for index, char in enumerate(raw):
+            if quote:
+                if char == quote:
+                    quote = None
+            elif char in "\"'":
+                quote = char
+            elif char == "#" and (index == 0 or raw[index - 1].isspace()):
+                cut = index
+                break
+        line = raw[:cut].rstrip()
+        if line:
+            lines.append(line)
+    return lines
 
 
 def _case_selector(run: str) -> str | None:
@@ -1778,12 +1802,82 @@ def _case_arms(run: str) -> dict[str, list[str]] | None:
     return None  # no `esac`: this is not a `case` this pin can read
 
 
-def _exits_nonzero(body: list[str]) -> bool:
-    """True when the arm body really exits non-zero (not an `echo` that names one)."""
-    return any(
-        _NONZERO_EXIT.search(line) and "echo" not in line and "||" not in line
-        for line in body
-    )
+_VERDICT_OUTCOMES = (None, "success", "failure", "skipped", "weird-conclusion")
+
+
+def _verdict_behaviour_problem(run: str, outcome_var: str) -> str | None:
+    """What the verdict step DOES for each conclusion, executed under bash.
+
+    Text cannot answer the questions this pin asks. Measured in review cycles 4:
+    `case "${OUTCOME:-success}" in` mentions the outcome and maps the EMPTY value
+    into the PASS arm; `true  # exit 1` contains an exit it never runs; a summary
+    write mentioned after `#` writes nothing. Every one of those satisfied a
+    text-shaped check while an unmeasured tree finished GREEN. So the step is RUN,
+    once per conclusion, and judged on its exit code, its step summary and its
+    annotations — the three things a reader of the run actually gets.
+
+    The expected behaviour is the artifact's own contract (#5120):
+
+    * `success` → exit 0, a `PASS` in the summary, a `::notice` annotation;
+    * `failure` → exit 0 (the lint step already owns that red), `FAIL`, `::error`;
+    * `skipped` / an unset outcome / an undocumented conclusion → exit NON-ZERO,
+      `NO VERDICT`, `::error` — absence of a verdict is never a pass.
+    """
+    expected = {
+        None: (False, "NO VERDICT", "::error"),
+        "skipped": (False, "NO VERDICT", "::error"),
+        "weird-conclusion": (False, "NO VERDICT", "::error"),
+        "success": (True, "PASS", "::notice"),
+        "failure": (True, "FAIL", "::error"),
+    }
+    for outcome, (should_pass, verdict, annotation) in expected.items():
+        label = "an UNSET outcome" if outcome is None else f"outcome {outcome!r}"
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                summary = Path(tmp, "summary.md")
+                summary.write_text("")
+                env = {
+                    "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                    "GITHUB_SHA": "deadbeef",
+                    "GITHUB_STEP_SUMMARY": str(summary),
+                }
+                if outcome is not None:
+                    env[outcome_var] = outcome
+                proc = subprocess.run(
+                    ["bash", "-c", run],
+                    cwd=tmp,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+                written = summary.read_text() + proc.stdout + proc.stderr
+        except (OSError, subprocess.SubprocessError) as exc:  # pragma: no cover - env
+            return f"the verdict step could not be executed to be judged: {exc}"
+        if should_pass and proc.returncode != 0:
+            return (
+                f"the verdict step EXITS {proc.returncode} on {label} — that path is "
+                "not a failure of the lint gate, so a green tree is reported red"
+            )
+        if not should_pass and proc.returncode == 0:
+            return (
+                f"the verdict step EXITS 0 on {label} and writes {verdict!r} — an "
+                "unmeasured tree finishes the run GREEN with a verdict nobody reads, "
+                "which is the #5120 fail-open"
+            )
+        if verdict not in written:
+            return (
+                f"the verdict step publishes no {verdict!r} for {label} (its summary "
+                f"and annotations read {written.strip()[:80]!r}) — the verdict is then "
+                "inferred from an exit code, which is what #5120 removes"
+            )
+        if annotation not in written:
+            return (
+                f"the verdict step emits no `{annotation}` annotation on {label} — the "
+                "run page names neither direction, so a reader sees only a bare exit"
+            )
+    return None
 
 
 def _verdict_step_problem(steps: list, ruff_index: int, ruff_id: str) -> str | None:
@@ -1808,13 +1902,16 @@ def _verdict_step_problem(steps: list, ruff_index: int, ruff_id: str) -> str | N
       `always()` removes the implicit `success()` that skips it on exactly the
       failing path;
     * the ``run:`` writes ``$GITHUB_STEP_SUMMARY`` and emits BOTH ``::notice`` and
-      ``::error``, so each direction is named where the run page shows it;
-    * the ``run:`` really reads that outcome variable (a `case` keyed on nothing
-      publishes whatever the shell last saw);
-    * it reads that outcome as an ALLOW-LIST — only ``success`` passes, and every
-      other arm (the default included) exits non-zero, so an unmeasured tree
-      (``skipped``/null/an undocumented conclusion) can never leave the run green
-      with a verdict nobody reads.
+      ``::error`` (comment-stripped text, so prose cannot satisfy it);
+    * its `case` SELECTOR reads that outcome variable (a constant selector, or a
+      ``${OUTCOME:-success}`` default, publishes PASS without measuring);
+    * and — the decisive one — the ``run:`` is EXECUTED once per conclusion
+      (``success``, ``failure``, ``skipped``, unset, an undocumented one) and must
+      exit 0 with a ``PASS``/``FAIL`` verdict for the measured ones and exit
+      NON-ZERO with ``NO VERDICT`` for the rest. Polarity is judged by running it,
+      because text cannot answer these questions: `true  # exit 1` contains an exit
+      it never runs, and `${OUTCOME:-success}` mentions the outcome while mapping
+      the empty value into the PASS arm (both measured in review cycle 4).
     """
     derivers = [
         (index, step)
@@ -1957,7 +2054,6 @@ def _verdict_step_problem(steps: list, ruff_index: int, ruff_id: str) -> str | N
         )
     tokens = {pattern: {tok.strip("'\"") for tok in pattern.split("|")} for pattern in arms}
     pass_arms = [pattern for pattern, toks in tokens.items() if toks == {"success"}]
-    fail_arms = [pattern for pattern, toks in tokens.items() if toks == {"failure"}]
     merged_success = [
         pattern for pattern, toks in tokens.items() if "success" in toks and toks != {"success"}
     ]
@@ -1981,31 +2077,13 @@ def _verdict_step_problem(steps: list, ruff_index: int, ruff_id: str) -> str | N
             "conclusion GitHub has not documented yet, and a `skipped` lint step, "
             "then match nothing and the step exits 0 with no verdict published"
         )
-    for pattern in pass_arms:
-        if _exits_nonzero(arms[pattern]):
-            return (
-                f"the verdict `case` `{pattern})` arm exits non-zero — a PASS must not "
-                "fail the step, or every green tree is red"
-            )
-    for pattern in tokens:
-        if pattern in pass_arms:
-            continue
-        if pattern in fail_arms:
-            # ONLY the genuine `failure)` arm is exempt: the lint step already owns
-            # that red. An arm that MERGES `failure` with another conclusion —
-            # `*|failure)`, `failure|skipped)` — is not this arm: it routes the
-            # other conclusion to a pass, which is the #5120 fail-open.
-            continue
-        # ALLOW-LIST polarity: every arm that is neither the PASS nor the plain FAIL
-        # arm (the default included) must fail the step. A `skipped)` arm that
-        # passes, or a default that passes, turns "nothing measured this tree" green.
-        if not _exits_nonzero(arms[pattern]):
-            return (
-                f"the verdict `case` `{pattern})` arm does not exit non-zero — only "
-                "the `success` arm may pass; `skipped`, null and an unrecognised "
-                "conclusion must be NO VERDICT, never green"
-            )
-    return None
+    # POLARITY, JUDGED BY RUNNING IT (see `_verdict_behaviour_problem`): "the arm
+    # exits non-zero" is not readable from text — `true  # exit 1` contains an exit
+    # it never runs, `${OUTCOME:-success}` maps the empty value into PASS, and
+    # `echo "not measured"; exit 1` is an honest arm a text pattern rejects. The
+    # arm SHAPES are checked above; only the `success` and plain `failure` outcomes
+    # may end green, and execution is what decides that.
+    return _verdict_behaviour_problem(run, outcome_vars[0])
 
 
 def _merged_tree_guard_problem(doc: dict) -> str | None:
@@ -3188,6 +3266,38 @@ def _set_verdict_skipped_rides_failure(doc: dict) -> None:
     step["run"] = step["run"].replace("  failure)\n", "  failure|skipped)\n", 1)
 
 
+def _set_verdict_selector_defaults_success(doc: dict) -> None:
+    """`${OUTCOME:-success}`: the selector MENTIONS the outcome but maps unset to PASS."""
+    step = _verdict_step(doc)
+    step["run"] = step["run"].replace(
+        'case "${OUTCOME:-}" in', 'case "${OUTCOME:-success}" in', 1
+    )
+
+
+def _set_verdict_summary_trailing_comment(doc: dict) -> None:
+    """The summary write named only AFTER `#`: the verdict reaches no summary."""
+    step = _verdict_step(doc)
+    step["run"] = step["run"].replace(
+        '>> "$GITHUB_STEP_SUMMARY"', '> /dev/null  # "$GITHUB_STEP_SUMMARY"'
+    )
+
+
+def _set_verdict_notice_trailing_comment(doc: dict) -> None:
+    """The `::notice` named only AFTER `#`: the passing direction is never announced."""
+    step = _verdict_step(doc)
+    step["run"] = "\n".join(
+        "true  # ::notice (was here)" if "::notice" in line and line.strip().startswith("echo")
+        else line
+        for line in step["run"].splitlines()
+    )
+
+
+def _set_verdict_exit_never_run(doc: dict) -> None:
+    """`true  # exit 1`: the text contains an exit that never executes."""
+    step = _verdict_step(doc)
+    step["run"] = step["run"].replace("exit 1", "true  # exit 1", 1)
+
+
 def _set_verdict_case_selector_constant(doc: dict) -> None:
     """ONE line: the `case` selector becomes a constant, every echo left alone.
 
@@ -3392,6 +3502,10 @@ _STARVED_SHAPES = [
     ("a default arm merged with `failure`", _set_verdict_default_merges_failure),
     ("`skipped` merged into the passing FAIL arm", _set_verdict_skipped_rides_failure),
     ("the `case` selector made a constant", _set_verdict_case_selector_constant),
+    ("a selector that defaults to PASS", _set_verdict_selector_defaults_success),
+    ("a summary write only in a trailing comment", _set_verdict_summary_trailing_comment),
+    ("an `::notice` only in a trailing comment", _set_verdict_notice_trailing_comment),
+    ("an `exit 1` that never runs", _set_verdict_exit_never_run),
     ("the outcome variable overridden in `run:`", _set_verdict_outcome_overridden),
     ("`always()` plus a false conjunct", _set_verdict_if_always_and_false),
     ("a verdict step whose default arm is green", _set_verdict_default_green),
@@ -3462,6 +3576,16 @@ def _set_verdict_if_spaced_always(doc: dict) -> None:
     _verdict_step(doc)["if"] = "${{ always() }}"
 
 
+def _set_verdict_one_line_echo_then_exit(doc: dict) -> None:
+    """An HONEST arm: `echo …; exit 1` on one line really does exit non-zero."""
+    step = _verdict_step(doc)
+    step["run"] = step["run"].replace(
+        'echo "::error title=main-lint NO VERDICT',
+        'echo "not measured"; echo "::error title=main-lint NO VERDICT',
+        1,
+    )
+
+
 def _set_verdict_inert_continue_on_error(doc: dict) -> None:
     _verdict_step(doc)["continue-on-error"] = False
 
@@ -3477,8 +3601,14 @@ def _set_verdict_exit_2(doc: dict) -> None:
         ("the spaced form `if: ${{ always() }}`", _set_verdict_if_spaced_always),
         ("an honest non-zero `exit 2` in the default arm", _set_verdict_exit_2),
         ("the inert `continue-on-error: false`", _set_verdict_inert_continue_on_error),
+        ("an honest `echo …; exit 1` one-liner", _set_verdict_one_line_echo_then_exit),
     ],
-    ids=["spaced-always", "exit-2", "inert-continue-on-error"],
+    ids=[
+        "spaced-always",
+        "exit-2",
+        "inert-continue-on-error",
+        "one-line-echo-then-exit",
+    ],
 )
 def test_the_verdict_pin_accepts_honest_spellings(label: str, mutate) -> None:
     """The verdict pin must not red spellings that are equally correct.

@@ -73,13 +73,18 @@ name: main-lint
 #      PINNED: the step exists after the lint step, is the one step deriving
 #      `steps.ruff.outcome` through `env:`, carries no active `continue-on-error`,
 #      carries `if: always()` as its WHOLE condition (a conjunct could skip it),
-#      SELECTS on that outcome (a constant `case` selector is refused) and cannot
-#      override it in its own `run:`, writes `$GITHUB_STEP_SUMMARY`, emits both
-#      `::notice` and `::error`, and its default arm exits non-zero while its
-#      `success` arm does not. EVERY one of those halves has a mutant in the
-#      pin's `_STARVED_SHAPES`, and the honest spellings (`if: ${{ always() }}`,
-#      an `exit 2` fallback, an inert `continue-on-error: false`, a renamed
-#      outcome variable) stay green.
+#      SELECTS on that outcome (a constant selector, or a `${OUTCOME:-success}`
+#      default, is refused) and cannot override it in its own `run:`, writes
+#      `$GITHUB_STEP_SUMMARY`, emits both `::notice` and `::error` — and the pin
+#      then EXECUTES the step once per conclusion and judges it on its exit code,
+#      its step summary and its annotation: `success`/`failure` pass with
+#      PASS/FAIL, `skipped`/unset/an undocumented conclusion exit NON-ZERO with
+#      NO VERDICT. Polarity is decided by running it, not by reading it (`true #
+#      exit 1` and `${OUTCOME:-success}` both defeat a text-shaped check). EVERY
+#      one of those halves has a mutant in `_STARVED_SHAPES`, and the honest
+#      spellings (`if: ${{ always() }}`, an `exit 2` fallback, an inert
+#      `continue-on-error: false`, a renamed outcome variable, `echo …; exit 1` on
+#      one line) stay green.
 #   2. the verdict IS the lint step's own outcome, so a finding still fails the
 #      job — including when the notification ALSO fails. The notification cannot
 #      change the verdict in either direction. PINNED: exactly ONE step keys on
