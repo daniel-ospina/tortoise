@@ -96,8 +96,12 @@ asserting them (`measure_ask_distilled.verify_commit_binding`):
    protocol);
 3. the commit that last touched the pre-registration at or before the run
    commit must be a **proper ancestor** of it (`git merge-base
-   --is-ancestor`), and its recorded time must not be later. A clone whose
-   shallow boundary is that commit reports **UNPROVABLE** and refuses.
+   --is-ancestor`), and its committer instant must not be later — compared on
+   `%ct` epoch seconds, which are recorded in the binding beside the `%cI`
+   strings. (`%cI` renders each commit in its own UTC offset, so those strings
+   do not sort chronologically across an offset change; the epochs do.) A
+   clone whose shallow boundary is that commit reports **UNPROVABLE** and
+   refuses, as does one whose commit times cannot be read.
 
 The verified binding is written into the receipt (`commit_binding`) and
 rendered into §1/§6 of the run report, so a reviewer can re-check it from the

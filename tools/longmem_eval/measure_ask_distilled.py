@@ -487,6 +487,31 @@ def _resolve_commit(repo_root: Path, rev: str) -> str | None:
                     f"{(rev or '').strip()}^{{commit}}") or None
 
 
+def _commit_epoch(repo_root: Path, commit: str) -> int | None:
+    """The committer date as epoch seconds — the INSTANT, not the wall clock.
+
+    ``%cI`` renders each commit in the committer's OWN UTC offset
+    (``2026-10-24T13:16:58+00:00`` and ``2026-10-24T09:08:02-05:00`` are 8
+    minutes apart, not 4 hours), so a ``<``/``>`` on two ``%cI`` strings
+    compares wall clocks: it orders instants only when both commits carry the
+    same offset. Mixed offsets are the norm in this repository (lane commits
+    land ``-05:00``, others ``+00:00``), so the ordering cross-check compares
+    ``%ct`` — epoch seconds, one integer per instant — and keeps the ISO string
+    beside it only for a human reader. Same datum, same reason, as the recorded
+    lesson in ``tools/lane_stash.py`` ("`epoch` (`%ct`) is carried beside the
+    ISO date because `%cI` strings from different UTC offsets do not sort
+    chronologically as text") and as
+    ``tools/capstone_preregistration_check.py`` compares its commit ordering.
+    """
+    raw = _git_out(repo_root, "show", "-s", "--format=%ct", commit)
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
 def _is_ancestor(repo_root: Path, ancestor: str, descendant: str) -> bool:
     """`git merge-base --is-ancestor` (reflexive: A is an ancestor of A).
 
@@ -581,8 +606,9 @@ def verify_commit_binding(*, commit: str, repo_root: str | Path,
 
     The binding records, so a reviewer can re-verify without re-deriving them:
     the resolved run commit, the pre-registration's own commit and both commit
-    times, the corpus hash AT the run commit, and the pre-registration blob's
-    sha256 AT the run commit.
+    times (ISO for a human reader, epoch seconds for the ordering comparison),
+    the corpus hash AT the run commit, and the pre-registration blob's sha256
+    AT the run commit.
     """
     repo_root = Path(repo_root)
     corpus_root = Path(corpus_root)
@@ -643,6 +669,7 @@ def verify_commit_binding(*, commit: str, repo_root: str | Path,
     # (c) the pre-registration PRECEDES the run in the commit graph.
     prereg_commit = None
     prereg_time = run_time = None
+    prereg_epoch = run_epoch = None
     if committed_prereg_sha is not None:
         prereg_commit = _git_out(repo_root, "rev-list", "-1", run_commit,
                                  "--", prereg_rel)
@@ -675,16 +702,30 @@ def verify_commit_binding(*, commit: str, repo_root: str | Path,
                                    prereg_commit)
             run_time = _git_out(repo_root, "show", "-s", "--format=%cI",
                                 run_commit)
+            prereg_epoch = _commit_epoch(repo_root, prereg_commit)
+            run_epoch = _commit_epoch(repo_root, run_commit)
             # Ancestry is the proof (a property of the graph); the clock is a
-            # cross-check. `prereg_time <= run_time` non-strict: a scripted
-            # lane can land two commits inside one second, and refusing that
-            # would be a stuck light rather than a finding.
-            if prereg_time and run_time and prereg_time > run_time:
+            # cross-check, and it is compared on the EPOCH (one integer per
+            # instant), never on the `%cI` text: those strings carry their own
+            # offsets, so text order is wall-clock order and inverts across an
+            # offset change (see `_commit_epoch`). `prereg_epoch <= run_epoch`
+            # non-strict: a scripted lane can land two commits inside one
+            # second, and refusing that would be a stuck light rather than a
+            # finding.
+            if prereg_epoch is None or run_epoch is None:
+                reasons.append(
+                    f"ordering UNPROVABLE: cannot read the commit times of "
+                    f"{prereg_commit[:12]} / {run_commit[:12]} (epochs "
+                    f"{prereg_epoch!r} / {run_epoch!r}) — an ordering that "
+                    f"cannot be shown is not an ordering, and a clock check "
+                    f"that silently skips itself is not a cross-check")
+            elif prereg_epoch > run_epoch:
                 reasons.append(
                     f"ordering NOT proven: the pre-registration's commit time "
-                    f"({prereg_time}) is LATER than the run commit's "
-                    f"({run_time}) — history was rewritten (or the clock is "
-                    f"wrong), so precedence is not shown")
+                    f"({prereg_time}, epoch {prereg_epoch}) is LATER than the "
+                    f"run commit's ({run_time}, epoch {run_epoch}) — history "
+                    f"was rewritten (or the clock is wrong), so precedence is "
+                    f"not shown")
 
     if reasons:
         return None, reasons
@@ -700,6 +741,11 @@ def verify_commit_binding(*, commit: str, repo_root: str | Path,
         "prereg_commit": prereg_commit,
         "prereg_commit_time": prereg_time,
         "run_commit_time": run_time,
+        # Carried beside the ISO dates because `%cI` text does not sort
+        # chronologically across UTC offsets: these two ARE the comparison, and
+        # they let a receipt-only auditor re-check the polarity without git.
+        "prereg_commit_epoch": prereg_epoch,
+        "run_commit_epoch": run_epoch,
         "ordering": "proven",
         "ordering_proof": (
             f"{prereg_commit} (the commit that last touched {prereg_rel} at or "
@@ -1367,6 +1413,27 @@ def _validate_commit_binding(receipt: dict) -> list[str]:
         issues.append(
             "receipt.commit_binding.prereg_commit: equals the run commit — the "
             "protocol and the run share a commit, so precedence is not shown")
+    # The ordering is a claim about INSTANTS, so the receipt has to carry the
+    # comparable datum and it has to point the right way. Checked here (no git
+    # needed) because the ISO strings beside them cannot decide it: they carry
+    # their own UTC offsets, so their text order is wall-clock order.
+    for key in ("prereg_commit_epoch", "run_commit_epoch"):
+        value = binding.get(key)
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            issues.append(
+                f"receipt.commit_binding.{key}: expected epoch seconds, got "
+                f"{value!r} — the ordering cross-check compares instants, and "
+                f"the `%cI` strings beside them do not order chronologically "
+                f"across UTC offsets")
+    prereg_epoch = binding.get("prereg_commit_epoch")
+    run_epoch = binding.get("run_commit_epoch")
+    if (isinstance(prereg_epoch, int) and not isinstance(prereg_epoch, bool)
+            and isinstance(run_epoch, int) and not isinstance(run_epoch, bool)
+            and prereg_epoch > run_epoch):
+        issues.append(
+            f"receipt.commit_binding: the pre-registration's commit epoch "
+            f"({prereg_epoch}) is LATER than the run commit's ({run_epoch}) — "
+            f"the protocol could have been written after the numbers were seen")
     return issues
 
 

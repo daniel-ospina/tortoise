@@ -30,6 +30,8 @@ These tests cover, one per verification-checklist row of the issue:
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -196,6 +198,8 @@ def _binding(commit: str, corpus_hash: str,
         "prereg_commit": "b" * 40,
         "prereg_commit_time": "2026-01-01T00:00:00+00:00",
         "run_commit_time": "2026-01-02T00:00:00+00:00",
+        "prereg_commit_epoch": 1767225600,
+        "run_commit_epoch": 1767312000,
         "ordering": "proven",
         "ordering_proof": "synthetic — the verified-binding test is the real one",
     }
@@ -237,16 +241,84 @@ def _mock_prereg(root: Path | None = None,
     return record
 
 
-def _git_commit(repo: Path, message: str) -> str:
-    """Commit the worktree in a throwaway repo; return the full sha."""
-    assert m._git(repo, "add", "-A").returncode == 0
-    proc = m._git(repo, "-c", "user.name=pi-test",
-                  "-c", "user.email=pi-test@example.invalid",
-                  "commit", "-q", "-m", message)
+def _git_env() -> dict[str, str]:
+    """Host-independent env for the fixture's own git calls.
+
+    The throwaway repositories are built with the INHERITED environment, so
+    nothing in them is hermetic by default: a global ``commit.gpgsign = true``
+    makes ``git commit`` fail (the ``assert`` below then reads as an ERROR, not
+    a finding), a global ``core.hooksPath`` (this fleet's harness sets one) runs
+    the HOST's hooks inside the fixture, and ``init.defaultBranch`` /
+    ``init.templateDir`` are ambient too. Both config files are pointed at
+    ``os.devnull`` and every inherited ``GIT_*`` variable is dropped — the same
+    shape as ``tests/test_who_is_on.py::_git_env`` and
+    ``tests/test_lane_stash.py::_env``.
+    """
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_SYSTEM"] = os.devnull
+    return env
+
+
+def _git_hermetic(repo: Path, *args: str, date: str | None = None
+                  ) -> subprocess.CompletedProcess:
+    """``git -C repo <args>`` under :func:`_git_env`.
+
+    ``date`` pins BOTH the author and committer date to one explicit ISO
+    timestamp carrying an explicit UTC offset — the ordering tests need two
+    commits whose offsets differ, which is exactly what a real lane history
+    looks like here.
+    """
+    env = _git_env()
+    if date is not None:
+        env["GIT_COMMITTER_DATE"] = date
+        env["GIT_AUTHOR_DATE"] = date
+    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True,
+                          text=True, check=False, env=env)
+
+
+def _git_commit(repo: Path, message: str, *, date: str | None = None) -> str:
+    """Commit the worktree in a throwaway repo; return the full sha.
+
+    ``-c commit.gpgsign=false`` AND the ``os.devnull`` config env (see
+    :func:`_git_env`): signing is refused by name, and every ambient config
+    knob — hooks, init defaults — never reaches the fixture at all.
+    """
+    assert _git_hermetic(repo, "add", "-A").returncode == 0
+    proc = _git_hermetic(
+        repo, "-c", "user.name=pi-test",
+        "-c", "user.email=pi-test@example.invalid",
+        "-c", "commit.gpgsign=false",
+        "commit", "-q", "-m", message, date=date)
     assert proc.returncode == 0, proc.stderr
     sha = m._git_out(repo, "rev-parse", "HEAD")
     assert sha
     return sha
+
+
+def _make_dated_repo(base: Path, *, prereg_date: str, run_date: str) -> dict:
+    """A two-commit repo whose commits carry EXPLICIT committer dates.
+
+    The two ``%cI`` strings are decided by the dates, not by commit order, so a
+    caller can build a parent/child pair whose TEXT order and EPOCH order
+    disagree — the shape mixed UTC offsets produce in this repository.
+    """
+    repo = base / "dated-repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    assert _git_hermetic(repo, "init", "-q", "-b", "main",
+                         "--template=").returncode == 0
+    corpus_dir = repo / "tests" / "eval" / "ask"
+    generate_corpus.write_corpus(corpus_dir, _small_cases())
+    prereg_path = corpus_dir / "preregistration.json"
+    prereg_path.write_text(json.dumps(_mock_prereg(corpus_dir)),
+                           encoding="utf-8")
+    prereg_commit = _git_commit(repo, "protocol: the pre-registration",
+                               date=prereg_date)
+    (repo / "run.marker").write_text("the run happened here\n", encoding="utf-8")
+    run_commit = _git_commit(repo, "run: the sealed corpus executed",
+                             date=run_date)
+    return {"repo": repo, "corpus_dir": corpus_dir, "prereg_path": prereg_path,
+            "prereg_commit": prereg_commit, "run_commit": run_commit}
 
 
 def _make_bound_repo(base: Path) -> dict:
@@ -262,7 +334,8 @@ def _make_bound_repo(base: Path) -> dict:
     """
     repo = base / "repo"
     repo.mkdir(parents=True, exist_ok=True)
-    assert m._git(repo, "init", "-q").returncode == 0
+    assert _git_hermetic(repo, "init", "-q", "-b", "main",
+                         "--template=").returncode == 0
     corpus_dir = repo / "tests" / "eval" / "ask"
     generate_corpus.write_corpus(corpus_dir, _small_cases())
     prereg_path = corpus_dir / "preregistration.json"
@@ -1171,6 +1244,135 @@ def test_the_ordering_claim_is_not_satisfied_when_the_protocol_shares_the_run_co
     assert any("ordering NOT proven" in reason for reason in reasons), reasons
 
 
+def test_the_ordering_cross_check_compares_instants_not_wall_clock_text(
+        tmp_path):
+    """FAIL-BEFORE: the clock cross-check refused a correctly ordered pair.
+
+    `%cI` renders each commit in its OWN UTC offset, so comparing two `%cI`
+    strings compares wall clocks: `"…T12:00+02:00" > "…T10:30-05:00"` is True
+    even though the first instant (10:00Z) is 5h30m EARLIER than the second
+    (15:30Z). The ancestry check at the same site passes; only the text
+    comparison refused — with a false accusation of rewritten history. Mixed
+    offsets are the norm here (lane commits `-05:00`, others `+00:00`).
+    """
+    repo = _make_dated_repo(
+        tmp_path, prereg_date="2026-01-01T12:00:00+02:00",
+        run_date="2026-01-01T10:30:00-05:00")
+    binding, reasons = m.verify_commit_binding(
+        commit=repo["run_commit"], repo_root=repo["repo"],
+        corpus_root=repo["corpus_dir"], prereg=repo["prereg_path"])
+    assert reasons == []
+    assert binding is not None
+    assert binding["ordering"] == "proven"
+    # Non-vacuity: the ISO TEXT really does sort the wrong way (that is what
+    # the pre-fix `>` compared), while the EPOCHS — the instants — do not.
+    assert binding["prereg_commit_time"] > binding["run_commit_time"]
+    assert binding["prereg_commit_epoch"] < binding["run_commit_epoch"]
+
+
+def test_the_ordering_cross_check_catches_a_rewritten_clock_across_offsets(
+        tmp_path):
+    """FAIL-BEFORE (the worse direction): it FAILED OPEN.
+
+    The text comparison is symmetric, so when the pre-registration's committer
+    date is genuinely LATER than the run's — rewritten history, the one thing
+    this cross-check exists to catch — an offset difference can order the
+    strings the other way and the check stayed silent while the binding was
+    recorded `proven` and rendered into §6 as evidence.
+    """
+    repo = _make_dated_repo(
+        tmp_path, prereg_date="2026-01-01T09:00:00-05:00",
+        run_date="2026-01-01T12:00:00+02:00")
+    binding, reasons = m.verify_commit_binding(
+        commit=repo["run_commit"], repo_root=repo["repo"],
+        corpus_root=repo["corpus_dir"], prereg=repo["prereg_path"])
+    assert binding is None
+    assert any("ordering NOT proven" in reason for reason in reasons), reasons
+    assert any("LATER than the run commit" in reason for reason in reasons)
+    # Non-vacuity: the ISO text sorts the way a text comparison reads as fine.
+    prereg_text = m._git_out(repo["repo"], "show", "-s", "--format=%cI",
+                             repo["prereg_commit"])
+    run_text = m._git_out(repo["repo"], "show", "-s", "--format=%cI",
+                          repo["run_commit"])
+    assert prereg_text < run_text, (prereg_text, run_text)
+    assert m._commit_epoch(repo["repo"], repo["prereg_commit"]) > \
+        m._commit_epoch(repo["repo"], repo["run_commit"])
+
+
+def test_the_commit_times_are_recorded_as_epochs_beside_the_iso_strings(
+        bound_repo):
+    """A receipt-only auditor re-checks the polarity without running git.
+
+    The ISO strings cannot decide it (they carry their own offsets), so the
+    comparable datum has to travel IN the binding: both epochs, ordered the
+    same way the ancestry proof orders the commits.
+    """
+    binding, reasons = m.verify_commit_binding(
+        commit=bound_repo["run_commit"], repo_root=bound_repo["repo"],
+        corpus_root=bound_repo["corpus_dir"], prereg=bound_repo["prereg_path"])
+    assert reasons == []
+    assert isinstance(binding["prereg_commit_epoch"], int)
+    assert isinstance(binding["run_commit_epoch"], int)
+    assert binding["prereg_commit_epoch"] <= binding["run_commit_epoch"]
+    # Each epoch IS the epoch of the commit whose ISO string travels beside it.
+    assert m._commit_epoch(bound_repo["repo"], binding["prereg_commit"]) == \
+        binding["prereg_commit_epoch"]
+    assert m._commit_epoch(bound_repo["repo"], binding["run_commit"]) == \
+        binding["run_commit_epoch"]
+    assert binding["prereg_commit_time"] and binding["run_commit_time"]
+
+
+def test_the_fixture_commits_are_hermetic_against_ambient_git_config(
+        tmp_path, monkeypatch):
+    """A HOSTILE global git config must not turn the fixtures into errors.
+
+    `_git_commit` used to be a bare `git commit` inheriting the environment, so
+    `commit.gpgsign = true` made the `assert` fire (an ERROR, not a finding) and
+    a global `core.hooksPath` ran the host's hooks inside the fixture this fleet
+    builds. The two probes prove the config really is live — so the fixture's
+    success below is not luck — and a bare `git init` under `init.defaultBranch
+    = trunk` proves the branch pin is load-bearing.
+    """
+    hooks = tmp_path / "hostile-hooks"
+    hooks.mkdir()
+    (hooks / "pre-commit").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    (hooks / "pre-commit").chmod(0o755)
+    hostile = tmp_path / "hostile-gitconfig"
+    hostile.write_text(
+        f"[commit]\n\tgpgsign = true\n[init]\n\tdefaultBranch = trunk\n"
+        f"[core]\n\thooksPath = {hooks}\n", encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(hostile))
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.txt").write_text("x\n", encoding="utf-8")
+    # A BARE init leaves the ambient default branch in place — the hostile one.
+    assert m._git(repo, "init", "-q").returncode == 0
+    # `symbolic-ref` reads the unborn branch; `rev-parse --abbrev-ref HEAD`
+    # needs a commit and errors on a fresh repo.
+    assert m._git_out(repo, "symbolic-ref", "--short", "HEAD") == "trunk"
+    assert m._git(repo, "add", "-A").returncode == 0
+    # Probe 1: signing is live, so a bare commit fails.
+    bare = m._git(repo, "-c", "user.name=pi-test",
+                  "-c", "user.email=pi-test@example.invalid",
+                  "commit", "-q", "-m", "bare")
+    assert bare.returncode != 0, (
+        "the hostile config is not live — this test would pass for the wrong "
+        f"reason (stdout={bare.stdout!r})")
+    # Probe 2: the hook is live too, so even an unsigned bare commit fails.
+    hooked = m._git(repo, "-c", "commit.gpgsign=false",
+                    "-c", "user.name=pi-test",
+                    "-c", "user.email=pi-test@example.invalid",
+                    "commit", "-q", "-m", "hooked")
+    assert hooked.returncode != 0, (
+        "the hooksPath is not live — this test would pass for the wrong "
+        f"reason (stdout={hooked.stdout!r})")
+
+    # ... and the fixture's own path ignores every one of those knobs.
+    sha = _git_commit(repo, "hermetic")
+    assert len(sha) == 40
+
+
 def test_a_published_report_carries_the_verified_binding(published, bound_repo):
     """The artifact a reviewer reads must carry the proof, not the assertion.
 
@@ -1225,3 +1427,18 @@ def test_a_receipt_may_not_publish_an_unproven_ordering(shared_run):
     other_corpus["commit_binding"]["corpus_hash"] = "sha256:" + "9" * 64
     assert any("does not vouch for the corpus" in issue
                for issue in m.validate_ask_receipt(other_corpus))
+
+    # The ordering is a claim about INSTANTS: an ISO pair alone cannot decide
+    # it, so a receipt that drops the epochs is not re-checkable.
+    no_epochs = _receipt(scored)
+    del no_epochs["commit_binding"]["prereg_commit_epoch"]
+    del no_epochs["commit_binding"]["run_commit_epoch"]
+    assert any("expected epoch seconds" in issue
+               for issue in m.validate_ask_receipt(no_epochs))
+
+    # ... and the polarity is checked, not just the presence.
+    inverted = _receipt(scored)
+    inverted["commit_binding"]["prereg_commit_epoch"] = 1767312000
+    inverted["commit_binding"]["run_commit_epoch"] = 1767225600
+    assert any("is LATER than the run commit's" in issue
+               for issue in m.validate_ask_receipt(inverted))
