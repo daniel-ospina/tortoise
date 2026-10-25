@@ -4797,16 +4797,9 @@ surfaces:
   - test_3815_mitigation_moves_weight.py
   - test_6151_annotation_band.py
   # #8169: the SUPPORT direction of the band (a rated operator counts MORE) must
-  # move the propagated BELIEF. Registered `core` for the reason its two siblings
-  # just above carry: the file reaches the band TRANSITIVELY (`tortoise.ep` ->
-  # `tortoise.weights`), so a `weights.py` change — which selects `core` via the
-  # fallback — is the change that must run it, and without this arm a weights.py
-  # change would run none of the four tests that guard the band. Its own two
-  # imports need no arm of their own: `tortoise/ep.py` and `tortoise/sdk.py` are
-  # SHARED_MODULES and select the FULL matrix by themselves (measured:
-  # `--changed-files -` with `tortoise/ep.py` -> `"full": true`). The `ep`
-  # membership below is what `--integrity` requires — a file in no leg runs
-  # nowhere — NOT the arm that keeps `ep.py` covered.
+  # move the propagated BELIEF. Registered `core` because a `weights.py` change —
+  # which selects `core` via the fallback — must run it; the file reaches the band
+  # through `tortoise/ep.py`, which imports it.
   - test_8169_support_direction_moves_belief.py
   # #7846: a graph-key `DUMP`/`RESTORE` of a VECTOR-INDEXED graph. The issue
   # (P0) reports the restore permanently wedging the whole instance; measured
