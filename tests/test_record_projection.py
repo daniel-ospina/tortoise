@@ -1130,6 +1130,60 @@ def test_a_non_network_source_key_resolves_onto_itself():
         assert expr.sql.startswith("COALESCE((SELECT node_key FROM public.source")
 
 
+def test_the_design_records_state_the_three_arms_the_resolver_binds():
+    """#9967 review (cycle 4, P2): the design RECORDS must not fall back to TWO.
+
+    The parity passages in `04-projection.md` and `08-hosted-prerequisites.md`
+    are what a future lane re-derives `extractedFrom` parity from. Both said
+    "matched on `url` **or** `canonical_url`" — two arms — after the code had
+    moved to THREE (`node_key = <raw>`, `node_key = <canonical spelling>`,
+    `canonical_url = <canonical>`), and an implementation faithful to that
+    sentence reinstates the invisible-pre-`#9553`-row defect the third arm
+    exists to close. The tiebreak is pinned too: the graph's `ORDER BY s.url`
+    is BYTE order, so a doc that drops the `COLLATE "C"` clause would let a
+    locale-collated rewrite look parity-preserving.
+
+    This is the docs half of `test_the_source_row_key_reuses_the_layers_ONE_
+    source_resolver` (which pins the emitted SQL to the same three arms): the
+    two cannot drift apart without one of them going red.
+    """
+    passages = {
+        "04-projection.md": (
+            REPO_ROOT / "docs" / "epics" / "2026-10-10-7879-postgres-record"
+            / "04-projection.md"),
+        "08-hosted-prerequisites.md": (
+            REPO_ROOT / "docs" / "epics" / "2026-10-10-7879-postgres-record"
+            / "08-hosted-prerequisites.md"),
+    }
+    for name, path in passages.items():
+        text = path.read_text(encoding="utf-8")
+        anchor = text.find("canonical identity")
+        assert anchor != -1, (
+            f"{name} no longer states the `extractedFrom` parity rule at all — "
+            "the passage this pin reads is gone, so re-point it, do not delete it"
+        )
+        # The passage runs from the identity claim to the tiebreak's end; the
+        # window is generous on purpose, so a reflow does not red it while a
+        # rewrite that drops a candidate does.
+        passage = text[anchor:anchor + 1400]
+        assert "canonical spelling" in passage, (
+            f"{name} describes the match arms without the CANONICAL SPELLING "
+            "candidate — the two-arm rule that leaves every pre-#9553 row filed "
+            f"under the canonical spelling invisible (#9956): {passage[:400]!r}"
+        )
+        assert "canonical_url" in passage, (
+            f"{name} no longer names the `canonical_url` arm: {passage[:400]!r}"
+        )
+        assert 'COLLATE "C"' in passage, (
+            f"{name} names the tiebreak without `COLLATE \"C\"` — a bare "
+            "`ORDER BY` is the DATABASE's locale, not the graph's byte order "
+            f"(#9967): {passage[:400]!r}"
+        )
+        assert "byte" in passage.lower(), (
+            f"{name} must say the tiebreak is BYTE order: {passage[:400]!r}"
+        )
+
+
 
 def test_a_document_source_row_derives_its_canonical_identity_too():
     """DELIBERATE, PINNED derive (#9553 review P2). Pin it, do not infer it.

@@ -353,10 +353,15 @@ fan-out `_link_source` performs (many-to-many, `#3263`), and the `#5256` read-ve
 `relation.source_version` — the PRIMARY column the cache projection maps back to `r.sourceVersion`
 — from the Point's own `sourceVersionTransit` carrier. Three parity details are load-bearing: the
 target resolves to the SAME Source the fold picks — `resolve_source_key`'s canonical identity,
-matched on `url` **or** `canonical_url`, PREFERRING the canonical match and ordered by `node_key`
-within it — which is that resolver's own order (it queries `canonicalUrl` first and returns there;
-the raw spelling is the adopt-on-touch fallback) and its own tiebreak (`ORDER BY s.url LIMIT 1`),
-never the `EntityLinked` `id` fallback; that parity also required the projection to DERIVE
+matched on `url`, on the **canonical spelling**, **or** on `canonical_url` (THREE candidates — the
+same triple `_source_key_resolution` binds for the row key: the graph's step 2 adopts by EITHER
+spelling, and a pre-`#9553` row filed under the canonical spelling carries `canonical_url IS NULL`, so
+a two-arm rule leaves exactly that population invisible and a variant then files a SECOND row),
+PREFERRING the canonical match and ordered by `node_key` in **byte** order
+(`ORDER BY node_key COLLATE "C"`) — which is that resolver's own order (it queries `canonicalUrl`
+first and returns there; the raw spelling is the adopt-on-touch fallback) and its own tiebreak
+(`ORDER BY s.url LIMIT 1`, whose comparator is byte order — a bare `ORDER BY`'s LOCALE collation is
+not the graph's answer), never the `EntityLinked` `id` fallback; that parity also required the projection to DERIVE
 `source.canonical_url`, because `projection/entities.py::_EntityHandlers._SOURCE_HANDLED` lists `canonicalUrl` as writer-derived and
 no payload may carry it; the ref
 container and per-member gates mirror `_link_source`'s (a dict fans out to nothing, `#8171`); and
