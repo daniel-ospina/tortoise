@@ -115,16 +115,19 @@ not in this record.
 
 **What "reported" means, and what it does not.** It means a consumer of the
 warnings sees the absence — every counted outcome surfaces in the warning
-stream, none is a silent drop. For three of the four classes the warning also
-names the class (`band`, `carries no value`, `no resolvable source turn`), and
-that per-class ownership is what `test_every_absence_in_the_census_is_REPORTED`
-asserts. It does **not** mean every warning identifies its class, nor that it is
-actionable in every case: the empty-quote report says "no resolvable source
-turn", which is true (there is no quote to resolve against) but is the SAME
-string a `no_turn` absence emits, so it neither names the class nor the *reason*
-(an empty quote). For that one class the identification is carried by this
-table and by the census's own `_absence_class` derivation from the quote — not
-by the warning text.
+stream, none is a silent drop. For **two** of the four classes the warning also
+names the class (`band` via "token-overlap band", `valuefree_quote` via
+"carries no value"), and that per-class ownership is what
+`test_every_absence_in_the_census_is_REPORTED` asserts. It does **not** mean
+every warning identifies its class, nor that it is actionable in every case.
+The string "no resolvable source turn" is emitted by the resolver's step-4
+fail-open for **both** `no_turn` and `empty_quote`, so it names a *condition the
+two classes share* — true in both (no verbatim match / no quote to resolve
+against) but it identifies neither, and for the empty quote it also does not
+name the *reason*. `_absence_class` never derives a class from that text:
+`empty_quote` comes from the quote being empty, `no_turn` from
+`turn_idx is None`. So for those two classes the identification is carried by
+this table and by the census's own derivation — not by the warning text.
 
 **The guards, and which one discriminates what.**
 
@@ -143,9 +146,10 @@ by the warning text.
   "fixed" with a false address.
 * `test_every_absence_in_the_census_is_REPORTED` — the **absence-report** guard,
   and the failing path behind this section's "0 silent" claim: every one of the
-  11 absences must carry the warning its own class allows (a stray warning does
-  not count — and for `empty_quote` that allowed set contains the `no_turn`
-  string, which is why the warning proves *reported* but not *which class*).
+  11 absences must carry a warning within its own class's allowed set (a stray
+  warning does not count — and `empty_quote`'s allowed set contains the
+  `no_turn` string, which is why that warning proves *reported* but not *which
+  class*).
   Measured discriminating: deleting the resolver's step-4 absence
   warning turns 5 of the 11 silent (the 4 `no_turn` + the empty quote) and the
   test fails naming them; deleting the band-route warning turns the 3 `band`
@@ -333,9 +337,10 @@ printf 'tests/eval/write_path/receipts/7947-arms-2026-10-18/wp01_quarry_debug.ar
 the read path to the package, and on real extractions stamps a truthful
 address for **90.2%** of value-bearing points with **zero silent absences** —
 each of the 11 carries a warning the census attributes to its class, pinned by
-`test_every_absence_in_the_census_is_REPORTED` (with the `empty_quote` caveat in
-§2.2: its warning text is shared with `no_turn`, so the class is carried by the
-census's derivation, not by the string); the
+`test_every_absence_in_the_census_is_REPORTED` (with the §2.2 caveat: the
+`no_turn` and `empty_quote` classes both report through the resolver's *shared*
+"no resolvable source turn" string, so for those two the class is carried by the
+census's derivation from `quote`/`turn_idx`, not by the warning text); the
 obvious relaxation is measured on both readings and refused; the degraded-tier
 boundary is declared (@ `sdk.py:30340-30356`), not an oversight.
 

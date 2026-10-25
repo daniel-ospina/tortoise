@@ -65,6 +65,7 @@ from pathlib import Path
 from tortoise import extractor_v2 as v2
 from tortoise.retrieval import (
     DEFAULT_PACKAGE_SAME_TURN_OVERLAP,
+    DEFAULT_PACKAGE_VERBATIM_OVERLAP,
     _pkg_differ_value_critical,
     _pkg_overlap,
     _pkg_turn_key,
@@ -183,10 +184,16 @@ def _edus(session: str) -> list[dict]:
     DROPS empty-content turns while PRESERVING their original indices, and the
     resolver resolves by index VALUE rather than list position (see
     ``_resolve_source_turn`` — "position and value can diverge"). A hand-rolled
-    copy keeps the empty turns, so its index universe diverges from
-    production's the moment a fixture carries one, silently re-classing a point
-    between ``empty_quote`` and ``no_turn`` while every pinned number stays
-    green. Byte-identical on all 7 sealed fixtures today — none has an
+    copy keeps the empty turns, so its list is LONGER and the divergence lands
+    on the resolver's in-range bound, ``0 <= model_idx < len(edus)``
+    (``extractor_v2.py:6878``): a model index that fell inside the hand-rolled
+    list can fall outside production's, so the resolved ``turn_idx`` differs for
+    exactly those points. That flips them between ``no_turn`` (``turn_idx is
+    None``) and ``band``/``valuefree_quote``, changes which warning variant an
+    ``empty_quote`` point emits (in-range "unverified (empty quote) — using it"
+    vs the shared step-4 string), and moves the E3 contradiction check and the
+    ``moved``/``ADVISORY_MISATTRIBUTED`` pin — all while every pinned number
+    stays green. Byte-identical on all 7 sealed fixtures today — none has an
     empty-content turn — which is exactly what would let the divergence ship
     unnoticed: build the turns the way the write path builds them.
     """
@@ -430,7 +437,7 @@ def test_every_stamped_span_addresses_the_whole_quote_and_carries_a_value():
 # `_pkg_differ_value_critical`.
 
 PAIRS_PER_ARM = 433          # Σ C(n, 2) over the 14 session-arms
-NEAR_DUPE_PAIRS_PER_ARM = 0  # ≥0.9 content overlap
+NEAR_DUPE_PAIRS_PER_ARM = 0  # ≥DEFAULT_PACKAGE_VERBATIM_OVERLAP overlap
 NEAR_DUPE_VALUE_CONFLICTS_PER_ARM = 0
 
 #: The dedupe half's SAME-SOURCE-TURN route (``_same_fact``'s second leg), over
@@ -504,7 +511,8 @@ def test_the_dedupe_leg_is_measured_on_BOTH_legs():
     TWO routes, and this corpus treats them differently:
 
     * **content-ratio** — in the guard's own per-arm universe there is **no**
-      ≥ 0.9-overlap pair at all, so THAT route cannot be exercised here; the
+      ≥ ``DEFAULT_PACKAGE_VERBATIM_OVERLAP`` overlap pair at all, so THAT route
+      cannot be exercised here; the
       property rests on Slice A's unit guards
       (``tests/test_evidence_assembly.py``). Checked over EVERY per-arm pair of
       extracted points, not just the value-bearing narrowing
@@ -558,7 +566,7 @@ def test_the_dedupe_leg_is_measured_on_BOTH_legs():
                 # content-ratio zero over the population dedupe actually sees
                 all_pairs += 1
                 if _pkg_overlap(a.get("content") or "",
-                                b.get("content") or "") >= 0.9:
+                                b.get("content") or "") >= DEFAULT_PACKAGE_VERBATIM_OVERLAP:
                     all_near_dupe += 1
                 _same_turn(same_turn, a, b, edus)
                 # advisory-key control: same pairs, WRONG key
@@ -572,7 +580,7 @@ def test_the_dedupe_leg_is_measured_on_BOTH_legs():
                 pairs += 1
                 _same_turn(same_turn_vb, a, b, edus)
                 if _pkg_overlap(a.get("content") or "",
-                                b.get("content") or "") >= 0.9:
+                                b.get("content") or "") >= DEFAULT_PACKAGE_VERBATIM_OVERLAP:
                     near_dupe += 1
                     if _pkg_differ_value_critical(a.get("content") or "",
                                                   b.get("content") or ""):
@@ -581,7 +589,7 @@ def test_the_dedupe_leg_is_measured_on_BOTH_legs():
         for a, b in itertools.combinations(pooled, 2):
             pooled_pairs += 1
             if _pkg_overlap(a.get("content") or "",
-                            b.get("content") or "") >= 0.9:
+                            b.get("content") or "") >= DEFAULT_PACKAGE_VERBATIM_OVERLAP:
                 pooled_near_dupe += 1
     assert pairs == PAIRS_PER_ARM, (
         f"the per-arm within-session pair count moved: {pairs} != "
@@ -590,12 +598,14 @@ def test_the_dedupe_leg_is_measured_on_BOTH_legs():
         f"the ALL-POINTS per-arm pair count moved: {all_pairs} != "
         f"{PAIRS_PER_ARM_ALL_POINTS} — §2.3's wider reading must be re-measured")
     assert all_near_dupe == 0, (
-        f"{all_near_dupe} pairs reach ≥0.9 content overlap over ALL extracted "
+        f"{all_near_dupe} pairs reach "
+        f"≥{DEFAULT_PACKAGE_VERBATIM_OVERLAP} content overlap over ALL extracted "
         "points — the content-ratio route is now reachable in the population "
         "dedupe sees, so the value-bearing zero in §2.3 is no longer the "
         "strongest reading and the section must be re-measured")
     assert near_dupe == NEAR_DUPE_PAIRS_PER_ARM, (
-        f"{near_dupe} pairs reach ≥0.9 content overlap in the guard's own "
+        f"{near_dupe} pairs reach ≥{DEFAULT_PACKAGE_VERBATIM_OVERLAP} content "
+        "overlap in the guard's own "
         "universe — the CONTENT-RATIO route can now be exercised here, so §2.3 "
         "must be re-measured (it currently says that route cannot be)")
     assert conflicts == NEAR_DUPE_VALUE_CONFLICTS_PER_ARM, (
@@ -621,7 +631,8 @@ def test_the_dedupe_leg_is_measured_on_BOTH_legs():
     # pool no package holds) does produce near-dupes — a lane must not restate
     # the zero as "this corpus has no near-dupes".
     assert pooled_near_dupe > 0, (
-        "pooling the two arms produced no ≥0.9 pair — the universe note in "
+        f"pooling the two arms produced no "
+        f"≥{DEFAULT_PACKAGE_VERBATIM_OVERLAP} pair — the universe note in "
         f"§2.3 (pooled pairs={pooled_pairs}) no longer holds")
 
 
