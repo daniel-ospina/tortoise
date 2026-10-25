@@ -614,6 +614,8 @@ class GhClient:
         per_page: int = 100,
         max_pages: int = 10,
         comment_page_budget: int = 10,
+        intake_url: str | None = None,
+        intake_secret: str | None = None,
     ) -> None:
         self.repo = repo
         #: The repository OWNER, from the repo slug — used only to attribute a
@@ -621,6 +623,16 @@ class GhClient:
         self.owner = repo.split("/")[0]
         self.per_page = per_page
         self.max_pages = max_pages
+        #: The intake credential. ONE SOURCE: the caller's `Config` when it is
+        #: given (that is what `main()` does, and `sweep()`'s fail-closed "no
+        #: credential, no action" rail reads the SAME two values), the process
+        #: environment only as the fallback for a direct construction. Two
+        #: independent reads is how a caller passes the rail and then fails the
+        #: POST with "unset".
+        self.intake_url = os.environ.get("INBOUND_URL", "") if intake_url is None else intake_url
+        self.intake_secret = (
+            os.environ.get("INBOUND_SECRET_GITHUB", "") if intake_secret is None else intake_secret
+        )
         #: How many comment pages one resume read may walk. The relay's comment
         #: is LAST in the endpoint's ascending order, so the read has to reach
         #: the end of the thread; 10 × 100 covers any thread this repo has seen.
@@ -799,16 +811,16 @@ class GhClient:
         return chunk
 
     def post_intake(self, payload: dict[str, Any]) -> None:
-        """POST the relay record. Creds come from the PROCESS ENV, not `Config`.
+        """POST the relay record from the credential the CLIENT was built with.
 
-        `main()` builds `Config` from the same two variables, so the two agree in
-        production — but the divergence is visible to anything that constructs a
-        `Config` and drives this client directly, which is why
+        That is the caller's `Config` in production (`main()`), the same values
+        `sweep()`'s credential rail reads — so "the rail passed" and "the POST has
+        a credential" can never disagree. A directly-constructed client falls back
+        to `INBOUND_URL` / `INBOUND_SECRET_GITHUB`, which is why
         `tests/test_inbound_relay_sweep.py` scrubs the pair for every test in an
         autouse fixture rather than letting an ambient shell reach this method.
         """
-        url = os.environ.get("INBOUND_URL", "")
-        secret = os.environ.get("INBOUND_SECRET_GITHUB", "")
+        url, secret = self.intake_url, self.intake_secret
         if not url or not secret:
             raise RuntimeError("INBOUND_URL / INBOUND_SECRET_GITHUB unset")
         request = urllib.request.Request(
@@ -930,7 +942,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     try:
         report = sweep(
-            GhClient(args.repo),
+            GhClient(
+                args.repo,
+                intake_url=cfg.intake_url,
+                intake_secret=cfg.intake_secret,
+            ),
             cfg,
             now=datetime.now(UTC),
             since_hours=args.since_hours,

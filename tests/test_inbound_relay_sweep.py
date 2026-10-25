@@ -769,17 +769,22 @@ def test_dry_run_needs_no_intake_credential(sweep: Any) -> None:
     assert report.exit_code == 0
 
 
-def test_no_test_can_post_a_real_intake_record_from_the_shell(sweep: Any, monkeypatch: Any) -> None:
-    """`post_intake` reads `os.environ`, so a unit test could hit the live intake.
+def test_the_intake_scrubbing_fixture_is_installed_and_the_post_path_is_live(
+    sweep: Any, monkeypatch: Any
+) -> None:
+    """The autouse scrub is in place, and the path it closes really reaches the wire.
 
-    `GhClient.post_intake` takes the URL and secret from the PROCESS environment
-    rather than from `Config`, so a developer or CI environment that happens to
-    export the pair makes every test driving the REAL client (the resume-read
-    cases, the stub-`gh` cases) POST a live record before it fails on a stub — a
-    write to a production system, produced by a unit test. The autouse
-    `_scrubbed_intake_env` fixture is the guard; this test pins it, and proves
-    the path it closes is the one that really reaches the transport (stubbed
-    here, so nothing leaves the machine in either half).
+    Named for what it PINS, not for the class of hazard: the absence asserts below
+    are a self-check of `_scrubbed_intake_env` (they can only fail when the fixture
+    is gone AND the shell exports the pair — a mutation of this file, not of the
+    product). What the product can be pinned on is the second half: with a
+    credential, `post_intake` builds a request and hands it to `urlopen`, so a test
+    that drives the real client would POST a live record before failing on a stub.
+    The transport is stubbed, so neither half leaves the machine.
+
+    The client's credential is ONE source (`GhClient(intake_url=…, intake_secret=…)`,
+    which is what `main()` passes from `Config`) — the env fallback is only for a
+    direct construction, asserted by the first client below.
     """
     # The guard is proved by ABSENCE, asserted first: with the fixture removed
     # and the ambient shell exporting the pair, this fails before any request is
@@ -787,14 +792,9 @@ def test_no_test_can_post_a_real_intake_record_from_the_shell(sweep: Any, monkey
     assert "INBOUND_URL" not in os.environ, "autouse intake scrubbing is gone"
     assert "INBOUND_SECRET_GITHUB" not in os.environ, "autouse intake scrubbing is gone"
 
-    client = sweep.GhClient(f"{OWNER}/tortoise")
     with pytest.raises(RuntimeError, match="unset"):
-        client.post_intake({"source_item_id": "issue-1"})
+        sweep.GhClient(f"{OWNER}/tortoise").post_intake({"source_item_id": "issue-1"})
 
-    # …and the hazard is real, not hypothetical: with the pair present,
-    # `post_intake` builds a request and hands it to `urlopen`.
-    monkeypatch.setenv("INBOUND_URL", "https://intake.example/live")
-    monkeypatch.setenv("INBOUND_SECRET_GITHUB", "live-secret")
     posted: list[Any] = []
 
     class _Response:
@@ -811,14 +811,35 @@ def test_no_test_can_post_a_real_intake_record_from_the_shell(sweep: Any, monkey
         "urlopen",
         lambda request, timeout=0: posted.append(request) or _Response(),
     )
-    client.post_intake({"source_item_id": "issue-1"})
 
-    assert len(posted) == 1, "with the env pair set, post_intake reaches the transport"
+    # (1) the ENV fallback a directly-constructed client uses …
+    monkeypatch.setenv("INBOUND_URL", "https://intake.example/live")
+    monkeypatch.setenv("INBOUND_SECRET_GITHUB", "live-secret")
+    sweep.GhClient(f"{OWNER}/tortoise").post_intake({"source_item_id": "issue-1"})
+
+    # (2) … and the CONFIG the caller passes, which wins over the environment —
+    # `sweep()`'s credential rail reads that same `Config`, so "the rail passed"
+    # and "the POST has a credential" cannot disagree.
+    sweep.GhClient(
+        f"{OWNER}/tortoise",
+        intake_url="https://intake.example/from-config",
+        intake_secret="config-secret",
+    ).post_intake({"source_item_id": "issue-2"})
+
+    assert len(posted) == 2, "post_intake reaches the transport once per call"
     assert posted[0].full_url == "https://intake.example/live"
     assert any(
         name.casefold() == "x-inbound-secret" and value == "live-secret"
         for name, value in posted[0].headers.items()
     ), posted[0].headers
+    assert posted[1].full_url == "https://intake.example/from-config", (
+        "a Config-supplied credential must own the POST — reading os.environ here "
+        "is how the rail passes and the POST then fails with 'unset'"
+    )
+    assert any(
+        name.casefold() == "x-inbound-secret" and value == "config-secret"
+        for name, value in posted[1].headers.items()
+    ), posted[1].headers
 
 
 def test_the_short_read_note_is_a_truth_table(sweep: Any) -> None:
@@ -1479,7 +1500,7 @@ def test_a_resume_read_that_hits_its_budget_says_so(sweep: Any, monkeypatch: Any
     # The intake POST goes through `urlopen`, so it is stubbed on the instance:
     # every other step in `sweep()` then completes and `report.relayed` is
     # meaningful. No test in this file may reach the real endpoint — see the
-    # autouse `_scrubbed_intake_env` fixture below.
+    # autouse `_scrubbed_intake_env` fixture above.
     monkeypatch.setattr(client, "post_intake", lambda payload: None)
 
     def chatter(count: int, start: int = 0) -> list[dict[str, Any]]:
