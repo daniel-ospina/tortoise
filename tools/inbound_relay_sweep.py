@@ -95,6 +95,12 @@ SAFETY RAILS (each pinned by a test) — a sweeper is riskier than a per-event r
   * A bounded WINDOW (`--since-hours`, default 24) and a bounded run
     (`--max`, default 20). The window is what keeps a first run from reaching
     back through history; the cap reports the remainder instead of hiding it.
+  * TWO budgets, because a READ can cost as much as an ACTION. `--max` bounds
+    the mutations; `DEFAULT_DETAIL_BUDGET` bounds the per-PR detail fetches that
+    decide them (one `gh api` call each, against a REST budget of ~1,000/hour).
+    Candidates beyond either budget are counted as `unexamined` and reported —
+    a run that spent its reads would otherwise 403 on its mutations and re-relay
+    the same items every 15 minutes without ever closing them.
   * `--dry-run` prints the plan and performs nothing.
 
 It carries no merge capability at all: it closes and relays, and it never
@@ -108,11 +114,21 @@ EXIT CODES
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/inbound_relay_sweep.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/inbound_relay_sweep.py`"
+    )
+
 import argparse
 import json
 import os
 import subprocess
-import sys
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -130,6 +146,14 @@ DOCUMENTED_DEFAULT_PREFIX = "mergify/merge-queue/"
 LABEL = "queued-for-triage"
 OWNER = "daniel-ospina"
 DEFAULT_REPO = f"{OWNER}/tortoise"
+
+#: How many per-PR detail fetches one run may spend. `--max` bounds the MUTATIONS;
+#: this bounds the READS that decide them, because a detail is one `gh api` call
+#: and the page budget alone admits up to 1,000 candidates. Without it the run
+#: spends the whole REST budget on reads, then 403s on the mutations — and a
+#: mutation that fails after its intake POST re-relays the item every 15 minutes
+#: without ever closing it (#9946 review, round 2).
+DEFAULT_DETAIL_BUDGET = 60
 
 _COMMENT_PULL = (
     "👋 Thanks for the contribution!",
@@ -177,6 +201,10 @@ class Report:
     failed: list[tuple[str, int]] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     deferred: int = 0
+    #: Candidates whose per-PR detail was never fetched (detail budget spent, or
+    #: the action cap already reached), so they were neither acted on nor
+    #: classified. Reported, never silently dropped.
+    unexamined: int = 0
     #: The window held more items than the page budget: the prefix was acted on
     #: and the unread remainder is deferred (never "nothing may be closed").
     truncated: bool = False
@@ -306,6 +334,21 @@ def intake_payload(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _needs_detail(item: dict[str, Any]) -> bool:
+    """True ⇔ classifying this item costs a per-PR detail fetch.
+
+    Only the queue-owned head branch needs one (it is the sole marker that lives
+    on the detail). Owner, already-labelled and BOT-authored items are decided
+    from the listing alone, and `should_relay` returns `False` for a bot-typed
+    item BEFORE it ever looks at the head — so skipping the fetch here cannot
+    change the decision, it only stops the run spending its REST budget on items
+    it will spare.
+    """
+    if "pull_request" not in item:
+        return False
+    return _author_type(item).casefold() != "bot"
+
+
 # ── the sweep ───────────────────────────────────────────────────────────────
 
 
@@ -325,6 +368,7 @@ def sweep(
     now: datetime,
     since_hours: int = 24,
     max_actions: int = 20,
+    detail_budget: int = DEFAULT_DETAIL_BUDGET,
     dry_run: bool = False,
 ) -> Report:
     report = Report(dry_run=dry_run)
@@ -350,13 +394,35 @@ def sweep(
         # queue batch from an external PR. Fetched per candidate (a handful per
         # run) rather than paging the whole `/pulls` backlog, which is both slow
         # (a 60 s timeout is a real measurement, not a hypothetical) and heavy.
-        items = [
-            client.pull_detail(int(item["number"])) if "pull_request" in item else item
-            for item in candidates
-        ]
+        # OLDEST FIRST, and only until the actable prefix is known: the detail is
+        # one REST call each, and the page budget admits up to 1,000 candidates.
+        candidates.sort(key=_created_at)
+        resolved: list[dict[str, Any]] = []
+        actable = 0
+        details = 0
+        unexamined = 0
+        for item in candidates:
+            if not _needs_detail(item):
+                resolved.append(item)
+                if should_relay(item, cfg):
+                    actable += 1
+                continue
+            if actable >= max(0, max_actions) or details >= max(0, detail_budget):
+                # No detail will be spent on this one: report it rather than
+                # classify it blind, and never let it abort the items before it.
+                unexamined += 1
+                continue
+            details += 1
+            detail = client.pull_detail(int(item["number"]))
+            resolved.append(detail)
+            if should_relay(detail, cfg):
+                actable += 1
+        items = resolved
     except Exception as exc:  # any read failure is "incomplete"
         report.errors.append(f"listing incomplete, no action taken: {exc}")
         return report
+
+    report.unexamined = unexamined
 
     if getattr(client, "window_truncated", False):
         # NOT an error: a dense window acts on the prefix it read. Aborting here
@@ -374,7 +440,7 @@ def sweep(
     report.selected = [(_kind(item), int(item["number"])) for item in selected]
 
     actionable = selected[: max(0, max_actions)]
-    report.deferred = len(selected) - len(actionable)
+    report.deferred = len(selected) - len(actionable) + report.unexamined
 
     for item in actionable:
         kind, number = _kind(item), int(item["number"])
@@ -398,10 +464,21 @@ def sweep(
             client.add_label(number, cfg.label)
         except Exception as exc:
             report.failed.append((kind, number))
-            report.notes.append(
-                f"{kind} #{number}: {step} failed (item left unlabelled so a "
-                f"later run retries it): {exc}"
-            )
+            if step == "label":
+                # ⛔ NOT retried by anyone: the close succeeded, so the item is no
+                # longer in the open listing and no later run re-selects it. Say
+                # so, instead of claiming it self-heals.
+                report.notes.append(
+                    f"{kind} #{number}: label failed AFTER the close succeeded — "
+                    f"the item is relayed and closed but NOT labelled, so no "
+                    f"later run will select it again; apply `{cfg.label}` by "
+                    f"hand: {exc}"
+                )
+            else:
+                report.notes.append(
+                    f"{kind} #{number}: {step} failed (item is still open and "
+                    f"unlabelled, so a later run retries it): {exc}"
+                )
             continue
         report.relayed.append((kind, number))
 
@@ -646,11 +723,14 @@ def main(argv: list[str] | None = None) -> int:
     for kind, number in report.relayed:
         print(f"{verb} {kind} #{number}")
     for kind, number in report.failed:
-        print(f"FAILED   {kind} #{number} (unlabelled — see note; a later run retries it)")
+        print(f"FAILED   {kind} #{number} (unlabelled — see the note)")
     for note in report.notes:
         print(f"note: {note}", file=sys.stderr)
     if report.deferred:
-        print(f"deferred {report.deferred} item(s) past --max={args.max_actions}")
+        print(
+            f"deferred {report.deferred} item(s) past --max={args.max_actions} "
+            "or not examined within the detail budget"
+        )
     if report.truncated:
         print(
             "deferred: the unread remainder of the window (the page budget was "

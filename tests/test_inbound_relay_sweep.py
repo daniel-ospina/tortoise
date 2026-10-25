@@ -490,6 +490,8 @@ def test_a_failed_label_is_reported_without_losing_the_rest_of_the_batch(
     # Every item still got its record, comment and close — the label failed for
     # all three, and the run reported it instead of raising.
     assert ("close", 3) in client.mutations()
+    # …and the operator is told the truth: this state is NOT retried.
+    assert all("by hand" in note for note in report.notes if "failed" in note)
 
 
 def test_a_dense_window_acts_on_the_prefix_and_defers_the_rest(sweep: Any) -> None:
@@ -509,6 +511,77 @@ def test_a_dense_window_acts_on_the_prefix_and_defers_the_rest(sweep: Any) -> No
     assert report.errors == []
     assert report.exit_code == 0
     assert any("deferred" in note for note in report.notes), report.notes
+
+
+def test_the_detail_budget_bounds_the_reads_that_decide_the_actions(sweep: Any) -> None:
+    """`--max` bounds the mutations; the detail budget bounds the reads.
+
+    A detail fetch is one `gh api` call, and the page budget alone admits up to
+    1,000 candidates. Unbounded, a dense window spends the whole REST budget on
+    reads and then 403s on the mutations — and a mutation that fails after its
+    intake POST re-relays the item every 15 minutes without ever closing it.
+    """
+    client = FakeClient(pulls=[pull(n, author="someone") for n in range(1, 21)])
+    report = run(sweep, client, max_actions=20, detail_budget=3)
+
+    fetches = [call for call in client.calls if call[0] == "detail"]
+    assert len(fetches) == 3, fetches
+    assert report.unexamined == 17
+    assert report.deferred == 17
+    assert report.exit_code == 0
+
+
+def test_the_detail_fetch_stops_once_the_action_cap_is_met(sweep: Any) -> None:
+    """Once `--max` actable items are known, more reads buy nothing."""
+    client = FakeClient(pulls=[pull(n, author="someone") for n in range(1, 41)])
+    report = run(sweep, client, max_actions=2)
+
+    fetches = [call for call in client.calls if call[0] == "detail"]
+    assert len(fetches) == 2, fetches
+    assert report.unexamined == 38
+    assert [n for _, n in report.relayed] == [1, 2]
+
+
+def test_a_spared_queue_batch_does_not_exhaust_the_action_cap(sweep: Any) -> None:
+    """The cap counts ACTABLE items, not examined ones.
+
+    A pile of queue batches at the head of the window must not stop the sweep
+    from reaching the external items behind them.
+    """
+    batches = [
+        pull(
+            n,
+            author="mergify[bot]",
+            author_type="Bot",
+            head_ref="mergify/merge-queue/6e89cfe947",
+            head_repo=f"{OWNER}/tortoise",
+        )
+        for n in range(1, 6)
+    ]
+    client = FakeClient(pulls=[*batches, pull(900, author="outsider")])
+    report = run(sweep, client, max_actions=1)
+
+    assert [n for _, n in report.relayed] == [900]
+    # Bot-authored items cost NO detail fetch at all — `should_relay` decides
+    # them from the listing, so the reads are spent only where they can change
+    # the answer.
+    assert [n for name, n in client.calls if name == "detail"] == [900]
+
+
+def test_a_failed_label_says_it_will_not_be_retried(sweep: Any) -> None:
+    """The label step is last: its failure is the one that is NOT self-healing.
+
+    The close already succeeded, so the item is no longer in the open listing and
+    no later run re-selects it. The note must say that instead of claiming a
+    retry that cannot happen.
+    """
+    client = FakeClient(pulls=[pull(9883, author="Maiiiry")], fail_label=True)
+    report = run(sweep, client)
+
+    assert [n for _, n in report.failed] == [9883]
+    note = next(n for n in report.notes if "9883" in n)
+    assert "by hand" in note and "no later run" in note, note
+    assert "retries it" not in note, note
 
 
 def test_run_is_capped_and_reports_the_remainder(sweep: Any) -> None:
@@ -835,6 +908,23 @@ def _stub_gh(sweep: Any, monkeypatch: Any, pages: dict[int, Any]) -> list[str]:
 
     monkeypatch.setattr(sweep, "_gh", fake)
     return seen
+
+
+def test_every_entry_point_guards_the_interpreter_first(sweep: Any) -> None:
+    """#5128: a tracked `tools/*.py` entry point must refuse <3.12 up front.
+
+    This file imports `from datetime import UTC` at module level, so on an
+    ambient 3.9 interpreter it dies with an unattributed ImportError before any
+    guard could run. `tests/test_entry_point_python_guard.py` enumerates tracked
+    entry points, so the guard has to live in the file itself.
+    """
+    text = MODULE_PATH.read_text()
+    guard = text.index("sys.version_info < (3, 12)")
+    assert guard < text.index("import argparse"), (
+        "the interpreter guard must precede the imports it protects"
+    )
+    for required in (">= 3.12", "tools/inbound_relay_sweep.py", "uv run python"):
+        assert required in text[: text.index("import argparse")], required
 
 
 def test_client_stops_paging_at_the_window(sweep: Any, monkeypatch: Any) -> None:
