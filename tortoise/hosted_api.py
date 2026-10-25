@@ -124,7 +124,11 @@ from tortoise.incident_kinds import (  # #4780: the one kind declaration site
 # home, shared with the SDK doors, EventAPI and the seed surfaces, so the two
 # spellings cannot be drawn differently at the next door.
 from tortoise.kind_fallbacks import named_kind
-from tortoise.live import epistemic_disjunction  # #7902: the shared label set
+from tortoise.live import (
+    _terminal_excluded,  # #9962: the MITIGATES key's liveness
+    epistemic_disjunction,  # #7902: the shared label set
+    same_mitigation_assertion,  # #9962: redelivery vs re-assertion
+)
 from tortoise.mcp_server import create_http_app
 from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
     HEALTH_PROBE_REFRESH_S,  # noqa: F401 — re-exported (tests import it here)
@@ -16197,22 +16201,64 @@ def _load_commit_graph_state(sdk: TortoiseSDK, payload: CommitPayload):  # noqa:
         if 0 in inputs and 1 in inputs:
             state.operators.add((inputs[0], inputs[1], op["op_type"]))
     # MITIGATES — the payload key (src, dst, MITIGATES) exists when the target
-    # IMPL edge (target triple) already has a mitigation attached.
+    # IMPL edge already records THIS assertion.
+    #
+    # ⛔ #9962 — "records this assertion" has two arms, and both are the
+    # WRITER's own question (``live.same_mitigation_assertion`` — the SAME
+    # predicate the ingest route decides on, so the two machine doors cannot
+    # apply opposite policies to one event):
+    #
+    #   1. a CURRENT mitigation exists (``live._terminal_excluded`` —
+    #      ``mitigate_operator``'s idempotency predicate, so "none current"
+    #      means "the writer would mint"). The key is satisfied: the operator
+    #      is already damped. Deliberately the writer's predicate and not the
+    #      dampener's ``_live_only``: a ``draft`` is admitted by the writer
+    #      (updated in place, never retro-promoted — #1088), so keying on
+    #      ``_live_only`` would re-send that record on every commit and still
+    #      write no dampening.
+    #   2. no current mitigation, but a WITHDRAWN one already records the same
+    #      ``(reason, strength)``. The record is a re-delivery of an assertion
+    #      the graph holds (a re-extraction of the same corpus carries the same
+    #      MITIGATES record and a NEW ``client_commit_id``, so the L1
+    #      ``:CommitRecord`` dedup does not cover it). The key is satisfied:
+    #      minting here would silently reinstate a dampening a human withdrew —
+    #      the exact harm the ingest guard exists to prevent, and the two doors
+    #      DID diverge before this arm (measured: identical record, retracted
+    #      node ⇒ ingest wrote nothing, commit minted a live Point).
+    #
+    # A DIFFERENT ``(reason, strength)`` satisfies neither arm, so the record
+    # reconciles ``new`` and reaches ``apply_payload_operators`` →
+    # ``mitigate_operator``, which mints a live mitigation beside the withdrawn
+    # one. Before #9962 a retracted node satisfied the bare ``count(m)`` and
+    # that re-assertion was reported ``merge`` — 200, zero writes, the new
+    # "a re-assertion mints a NEW mitigation" contract false on this route.
     for op in payload.operators:
         if op.op_type != "MITIGATES" or op.target is None:
             continue
         t = op.target
+        # The assertion THIS record carries, resolved exactly as
+        # ``apply_payload_operators`` will resolve it: the payload point's
+        # content (the reason), else the raw ref fallback it uses when the
+        # content cannot be resolved. Same strength default (0.5), same
+        # wrapper - the stored side is compared with ``mitigation_reason``.
+        _reason = _point_content_by_id(payload, op.src) or str(op.src)
+        _strength = op.strength or 0.5
         mit_rows = proj.g.query(
             "MATCH (o:Point {is_operator:true, op_type:'IMPL'}) "
             "MATCH (o)-[:IMPL {idx:0}]->(s) "
             f"WHERE {epistemic_disjunction('s')} AND s.id = $src "
             "MATCH (o)-[:IMPL {idx:1}]->(d) "
             f"WHERE {epistemic_disjunction('d')} AND d.id = $dst "
-            "MATCH (o)-[:mitigated_by]->(m) RETURN count(m)",
+            "MATCH (o)-[:mitigated_by]->(m) "
+            "RETURN m.content, m.mitigation_strength, "
+            f"{_terminal_excluded('m.status')}",
             params={"src": t.src, "dst": t.dst},
         ).result_set
-        if mit_rows and mit_rows[0][0]:
-            state.operators.add((op.src, op.dst, "MITIGATES"))
+        for _content, _stored_strength, _is_current in mit_rows:
+            if bool(_is_current) or same_mitigation_assertion(
+                    _content, _stored_strength, _reason, _strength):
+                state.operators.add((op.src, op.dst, "MITIGATES"))
+                break
     return state
 
 
