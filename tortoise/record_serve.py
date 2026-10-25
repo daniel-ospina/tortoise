@@ -54,10 +54,18 @@ in the same artifact is indistinguishable from an omission:
   accessor: write paths call it mid-write to build journal events, so serving it
   from the record would make a writer read a store that the same write has not
   finished projecting. The caller-facing reads are the hosted endpoint served
-  here and the MCP tools built on the same accessor (``tortoise_get_point``,
-  ``tortoise_get_entity``) — those are not wired, because an MCP call carries
-  no hosted org credential to resolve a record tenant from. (#8877 names the
-  same internal/caller-facing separation.)
+  here and the MCP tool built on the same accessor (``tortoise_get_point``) —
+  those are not wired, because an MCP call carries no hosted org credential to
+  resolve a record tenant from. (#8877 names the same internal/caller-facing
+  separation.) ``tortoise_get_entity`` is NOT built on this accessor — it
+  reaches ``TortoiseSDK.get_entity``, a different read with its own coordinate,
+  and it is excluded under ``entity-accessor`` below rather than folded in here.
+* ``entity-accessor`` — ``TortoiseSDK.get_entity``. A different coordinate (a
+  name/alias resolution), not a node id, so a record answer would have to
+  re-decide the resolution order to claim parity.
+* ``selfhost-endpoint`` — the self-host server's point route. It carries no
+  hosted org credential either, so there is no record tenant to scope the read
+  to; serving it would answer ACROSS tenants.
 * ``whole-graph`` — the 377 sites that name no node. They have no coordinate, so
   a record answer cannot be shown to be the same SET as the cache's; the issue
   scopes this unit to the anchored surface.
@@ -173,7 +181,12 @@ RECORD_SERVE_ENV = "TORTOISE_RECORD_SERVE"
 #: ``off``     the cache answers; the record is never consulted (the default).
 #: ``record``  the record answers; there is no cache branch at all.
 #: ``prefer``  the record answers first, and a NAMED, COUNTED fallback covers a
-#:             record that is unavailable or (still) incomplete.
+#:             record that ANSWERS and cannot serve (`record-miss`) or cannot be
+#:             reached (`record-unavailable`). It does NOT cover a record that
+#:             was never armed or is misconfigured: an absent/malformed DSN, an
+#:             unresolvable tenant, an unprojectable row and a bad tenancy are
+#:             structural and answer 500 — retrying never repairs them, and a
+#:             permanent increment of the outage counter would hide that.
 MODE_OFF = "off"
 MODE_RECORD = "record"
 MODE_PREFER = "prefer"
@@ -261,11 +274,14 @@ ANCHORED_READS: dict[str, AnchoredRead] = {
                "but that router has no non-test caller yet). The endpoint this "
                "unit wires serves point-by-id. "
                "⚠️ THE PARITY CLAIM IS MEASURED FOR `Point` ONLY, and this "
-               "registry must not be read as 'parity proven for every label': a "
-               "record-sourced `:Event` loses seven fold ON CREATE properties a "
-               "record row cannot carry (including the ONTOLOGY §4.5-REQUIRED "
-               "`eventKind`), so `parity_difference(label='Event')` reports them "
-               "as UNEXPLAINED today — the open gap in #9721, not something this "
+               "registry must not be read as 'parity proven for every label': "
+               "the cache fold WRITES `ON CREATE` defaults for keys a producer "
+               "omitted (the ONTOLOGY §4.5-REQUIRED `eventKind` becomes ``''``), "
+               "while the record stores the ABSENCE — so a record-sourced "
+               "`:Event` that a producer under-filled loses those keys, and "
+               "`parity_difference(label='Event')` reports them as UNEXPLAINED "
+               "(`FOLD_ON_CREATE_DEFAULTS` does not cover them) — the open gap in "
+               "#9721, not something this "
                "module papers over. A consumer wiring this capability for "
                "another label must run the parity rule on that label first and "
                "read a red result as 'not yet served'.",
@@ -760,7 +776,13 @@ def serve_point(*, tenant: tuple[str, str], point_id: str,
         if mode == MODE_RECORD:
             raise
         return _fell_back(FALLBACK_RECORD_UNAVAILABLE)
-    except Exception as e:  # the driver, the wiring, anything the door raised
+    except Exception as e:
+        # The arm is DELIBERATELY wide: any failure while reading is surfaced as
+        # an outage (retryable) rather than a fault, because mis-reporting a real
+        # outage as a defect takes the read path down, while mis-reporting a
+        # defect as an outage is corrected by the retry that then succeeds. The
+        # reading is never silent either way — `servedFrom`/`fallbackReason`
+        # reach the caller and the count reaches `fallback_counts()`.
         if mode == MODE_RECORD:
             raise RecordUnavailable(
                 f"the record could not answer {coordinate} "

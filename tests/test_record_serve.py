@@ -557,7 +557,7 @@ def test_the_endpoint_never_turns_an_impaired_record_into_404(monkeypatch):
     assert body is None and err is not None
     assert err.status_code == 503, (
         "'the record could not be asked' is NOT 'no such point' — a 404 here "
-        "would be a false absence (§17.2's rule, mirrored)")  
+        "would be a false absence (§17.2's rule, mirrored)")
 
 
 def test_a_preferred_miss_keeps_its_attribution_on_the_404(monkeypatch):
@@ -587,7 +587,11 @@ def test_the_default_path_carries_no_attribution_at_all(monkeypatch):
 
 
 def test_the_endpoint_passes_the_mode_it_routed_on(monkeypatch):
-    """The seam reads the flag ONCE — `serve_point` must not re-read it."""
+    """The routed mode reaches `serve_point` as a PARAMETER, not re-derived.
+
+    It pins the wiring, not the absence of a re-read: the env and the parameter
+    agree here, so a `serve_point` that ignored `mode` would still agree.
+    """
     monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_RECORD)
     monkeypatch.setattr(rs, "open_record", _opener(_FakeConn(rows=[_row()])))
     seen = {}
@@ -746,6 +750,10 @@ def test_node_by_key_parity_is_declared_measured_for_point_only():
     reason = rs.ANCHORED_READS[rs.READ_NODE_BY_KEY].reason
     assert "9721" in reason and "Point" in reason
 
+    # The claim is about the fold's `ON CREATE` DEFAULT, not about a field the
+    # row cannot carry: the record DOES map `event_kind` (so the second half
+    # below must be clean). What it does not do is invent `''` for a key the
+    # producer omitted, which is the difference pinned here.
     diff = rs.parity_difference(
         {"eventId": "e-1", "eventKind": "", "startedAt": "",
          "participants": []},
@@ -753,6 +761,13 @@ def test_node_by_key_parity_is_declared_measured_for_point_only():
     assert diff.clean is False, (
         "the declared #9721 gap did not redden — the disclosure is stale")
     assert "eventKind" in diff.unexplained_missing
+
+    carried = rs.parity_difference(
+        {"eventId": "e-1", "eventKind": "AgentSession"},
+        {"eventId": "e-1", "eventKind": "AgentSession"}, label="Event")
+    assert carried.clean is True and not carried.unexplained_missing, (
+        "the record DOES carry eventKind — a disclosure that says otherwise "
+        "sends the next consumer away from a capability the record has")
 
 
 def test_a_misconfigured_tenancy_is_structural_not_a_fallback(monkeypatch):
@@ -817,6 +832,7 @@ def test_off_mode_leaks_no_attribution_and_keeps_a_stored_name(monkeypatch):
     must stay byte-identical to the pre-#7970 response — no wrapper, no keys, and
     the point's own property untouched.
     """
+    monkeypatch.delenv(rs.RECORD_SERVE_ENV, raising=False)
     body, err, built = _call_endpoint(monkeypatch, cache="props")
     assert err is None
     assert body["servedFrom"] == "user-owned", (
@@ -996,3 +1012,29 @@ def test_an_armed_record_served_read_cannot_take_a_stored_fallback_reason(monkey
     assert body["servedFrom"] == "record"
     assert body["fallbackReason"] is None, (
         "a stored property manufactured a fallback attribution")
+
+
+def test_an_armed_mode_with_no_dsn_is_structural_not_an_outage(monkeypatch):
+    """`RecordUnavailable` here would answer 503 and COUNT a permanent outage.
+
+    This was `RecordUnavailable` until review round 5. Nothing pinned it: every
+    other `open_record` test either passes a DSN or fails earlier at the scheme
+    check, so reverting the classification left the suite green while `record`
+    mode answered "retry" to a deployment that never becomes armed — and every
+    `prefer` read incremented `record-unavailable` forever.
+    """
+    monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
+    with pytest.raises(rs.RecordServeError) as caught:
+        rs.open_record(None)
+    assert not isinstance(caught.value, rs.RecordUnavailable), (
+        "an unarmed record is a misconfiguration, not an impairment")
+    assert "TORTOISE_RECORD_DSN" in str(caught.value), (
+        "the refusal must name the fix")
+
+    # And the mode that must NOT fall back on it.
+    with pytest.raises(rs.RecordServeError):
+        rs.serve_point(tenant=TENANT, point_id="p-1",
+                       cache_answer=_cache({"id": "p-1"}),
+                       mode=rs.MODE_PREFER)
+    assert rs.fallback_counts() == {}, (
+        "a misconfiguration was counted as a record outage")
