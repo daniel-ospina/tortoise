@@ -3348,10 +3348,20 @@ def _norm_kind(k: str) -> str:
 #: The write path's identity content cap — the three sites ``execute_embed``
 #: keys content identities on (event content, point content, minted endpoint
 #: refs) all truncate with ``str(x).strip()[:1000]``. Other fields carry their
-#: own, unrelated caps (a point's 200-char ``quote``, a summary's 2000).
+#: own, unrelated caps (a point's ``_MAX_QUOTE``-char ``quote``, a summary's 2000).
 #: ``vet_gate._MAX_CONTENT`` mirrors this value (that module must not import
 #: this one — see its header), and a parity test pins the two together.
 _MAX_CONTENT = 1000
+
+#: The point-QUOTE cap — distinct from ``_MAX_CONTENT`` (the identity cap) and
+#: from a summary's 2000. Every site that stores a point's ``quote`` truncates
+#: with it, so the cap is single-sourced rather than repeated as a bare ``200``
+#: literal at each site. That matters because a MEASUREMENT mirror may not hold
+#: its own copy: ``tests/eval/write_path/test_value_span_census_2684.py``
+#: (``_stamp_inputs``) reproduces production's clamped inputs, and while it
+#: carried its own ``[:200]`` a change to this cap would have left the census
+#: green and reporting addresses production never writes (#2684 review P1).
+_MAX_QUOTE = 200
 
 
 def _endpoint_keys(ref: object) -> frozenset[str]:
@@ -7370,7 +7380,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         if len(sents) > 1:
             warnings.append(f"point '{content[:60]}' has {len(sents)} sentences — "
                             "E3 atomicity expects ONE claim per point")
-        quote = str(p.get("quote") or "").strip()[:200]
+        quote = str(p.get("quote") or "").strip()[:_MAX_QUOTE]
         search_keys = _clean_search_keys(p.get("search_keys"), warnings,
                                          f"point '{content[:60]}'")
         # E7 (D1): the consolidation decision vs the S3-retrieved priors — pure
@@ -7714,7 +7724,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         # point losing its E3 anchor — not what happened) never reaches the
         # payload's warnings.
         if edus:
-            _probe = {"content": content, "quote": content[:200]}
+            _probe = {"content": content, "quote": content[:_MAX_QUOTE]}
             _scratch: list[str] = []
             _turn = _resolve_source_turn(_probe, edus, warnings=_scratch)
             if _turn is None:
@@ -7723,12 +7733,12 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                     "left unquoted (no source_turn_id)")
             else:
                 _turn_text = _turn_text_by_index(edus, _turn)
-                _anchor = re.sub(r"\s+", " ", content[:200].strip().lower())
+                _anchor = re.sub(r"\s+", " ", content[:_MAX_QUOTE].strip().lower())
                 _verbatim = bool(_anchor) and re.sub(
                     r"\s+", " ", _turn_text.lower()).find(_anchor) >= 0
                 pt_entry["source_turn_id"] = _turn
                 if _verbatim:
-                    pt_entry["quote"] = content[:200]
+                    pt_entry["quote"] = content[:_MAX_QUOTE]
         payload_points.append(pt_entry)
         point_ids[n] = pid
         # `_resolve` probes the UNTRUNCATED ref, so register that key too when

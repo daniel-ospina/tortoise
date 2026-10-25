@@ -30,7 +30,7 @@ are a guard test and this record.
 three inputs select: `extractor_v2` -> `core`, `retrieval` -> `sdk`, the
 committed receipts/fixtures -> `eval`). It re-derives the published **totals**
 below from the committed receipts and **fails on drift**; §2.1's per-session
-split is a reading of the same population, not an assertion (see §2.1).
+split is pinned the same way, so no published figure below is a bare reading.
 
 ---
 
@@ -39,12 +39,12 @@ split is a reading of the same population, not an assertion (see §2.1).
 | | |
 |---|---|
 | **What is measured** | whether a value-bearing point can be **re-read verbatim** from an address: the point carries `span_start`/`span_end`, the addressed text carries a value, and that text is the point's own quoted words |
-| **On which code** | the **shipped** `tortoise.extractor_v2._value_verbatim_span` / `_carries_value` / `_verbatim_span_in_turn`, on the **clamped** inputs production hands them: the content trimmed to `_MAX_CONTENT` (`extractor_v2.py:7340`) and the quote to 200 chars (`:7373`), while `_resolve_source_turn` deliberately receives the RAW point (`:7478`). The census applies the same two clamps (`_stamp_inputs`), so the addresses it reports are the ones production writes — a census on the raw strings reports a span production cannot stamp (measured: 3 of the 217 points carry a >200-char quote, 1 of them value-bearing **and** spanned, census `(0, 201)` vs production `(0, 200)`; no published count moves) |
+| **On which code** | the **shipped** `tortoise.extractor_v2._value_verbatim_span` / `_carries_value` / `_verbatim_span_in_turn`, on the **clamped** inputs production hands them: the content trimmed to `_MAX_CONTENT` (`extractor_v2.py:7350`) and the quote to `_MAX_QUOTE` (`:7383`), while `_resolve_source_turn` deliberately receives the RAW point (`:7488`). The census applies the same two clamps (`_stamp_inputs`) — and it **imports both caps from production** (`v2._MAX_CONTENT` / `v2._MAX_QUOTE`) instead of re-typing either literal, so the addresses it reports are the ones production writes *by construction*: a change to either cap moves the census with it and reds the clamp pin below, rather than leaving the census green on addresses production never writes (measured: exactly 3 of the 217 points carry a >`_MAX_QUOTE`-char quote, 1 of them value-bearing **and** spanned, census `(0, 201)` vs production `(0, 200)`; no published count moves) |
 | **Population** | the **7 sealed write-path sessions × 2 arms** (`receipts/7947-arms-2026-10-18/`), whose points are real `deepseek-v4-flash` S2 extractions — **not** the frozen 50-Q LongMemEval slice |
 | **Paid calls** | **0**. No reader, no judge, no graph, no network |
 | **Reader** | **none** — and none may be substituted: wave §3 freezes GPT-4o + the official judge for every product measurement |
 | **Answer accuracy** | **NOT measured.** No accuracy number exists here and none may be inferred from it. The census counts whether a value is *addressable*, not whether a reader then *sums* it |
-| **Derivation, not observation** | the receipts carry **no** span keys, so the census answers *"what does the shipped mechanism stamp on these committed points?"*. The reason is **structural, not chronological**: the measuring harness persists `ev2.run_s2(...)` — the S2 *model* output — and the span is stamped later, when `pt_entry` is built (`extractor_v2.py:7482-7496`), so no re-ingest through that harness can put a span key in a receipt. (The receipts are **not** pre-#8659: they were committed `ecc7bc8ca8` on 2026-10-19, #8659 landed `2312845b6` on 2026-10-14.) Pinned by `test_the_census_is_a_rederivation_not_an_observation` so it is never published as an observed extraction rate |
+| **Derivation, not observation** | the receipts carry **no** span keys, so the census answers *"what does the shipped mechanism stamp on these committed points?"*. The reason is **structural, not chronological**: the measuring harness persists `ev2.run_s2(...)` — the S2 *model* output — and the span is stamped later, when `pt_entry` is built (`extractor_v2.py:7489-7496`, stamped at `:7504-7507`), so no re-ingest through that harness can put a span key in a receipt. (The receipts are **not** pre-#8659: they were committed `ecc7bc8ca8` on 2026-10-19, #8659 landed `2312845b6` on 2026-10-14.) Pinned by `test_the_census_is_a_rederivation_not_an_observation` so it is never published as an observed extraction rate |
 
 ---
 
@@ -52,7 +52,7 @@ split is a reading of the same population, not an assertion (see §2.1).
 
 | Body claim (verbatim only where quoted) | Measured at this worktree | Evidence |
 |---|---|---|
-| "extend the value-fidelity discipline … in extraction" | **landed** — `_value_verbatim_span` stamps only a VERBATIM anchor whose addressed text carries a value; the two absence routes are reported, not silent | `tortoise/extractor_v2.py:3502` (`_verbatim_span_in_turn`), `:3530` (`_carries_value`), `:3563` (`_value_verbatim_span`), call site `:7494-7498`; commits `2312845b6` (#8659), `fda19cf93` (#8966) |
+| "extend the value-fidelity discipline … in extraction" | **landed** — `_value_verbatim_span` stamps only a VERBATIM anchor whose addressed text carries a value; the two absence routes are reported, not silent | `tortoise/extractor_v2.py:3512` (`_verbatim_span_in_turn`), `:3540` (`_carries_value`), `:3573` (`_value_verbatim_span`), call site `:7504-7507`; commits `2312845b6` (#8659), `fda19cf93` (#8966) |
 | "a span-carrying schema field" | **landed** — `Point.span_start`/`span_end`, all-or-nothing, `end > start`, `>= 0`, validated on the model AND every write path | `tortoise/commit_schema.py:589-608` (fields + `_span_is_an_address`), `:445` (`validate_span`) — the field itself is #5007's (`2ff8c3c88`) |
 | "the assembly surfaces the span with the point" | **landed on the read path** — the eval lane annotates the offsets onto the hit the package reads, and `package_evidence_pool` copies the kept anchor's keys; the product ask lane's hit carries `quote`/`source_turn_id`/`span_*` since #8658 | `tools/longmem_eval/retrieve.py:839-847`; `tortoise/sdk.py:30379` (the four columns are read — the `RETURN` continuation that appends `n.quote, n.source_turn_id, n.span_start, n.span_end`, six lines past the `rows = graph.query(` opener at `:30373`); `e70a5ff17` (#8658 / #9543) |
 | "Requires ONE extractor re-ingest (~4 h) then cached cycles" | **true for T-2 only**; the per-question leg needs **no** re-ingest — the committed receipts + fixtures are the population (§2) | this runbook §2 |
@@ -90,9 +90,16 @@ asserted here:
 | wp07_bluepeak_followup | narrative | 8 | 7 | value-free quote 1 |
 | **total** | | **112** | **101** | **band 3 · value-free quote 3 · no turn 4 · empty quote 1** |
 
+**Every row above is pinned, not just the totals.** `test_the_per_session_split_is_pinned`
+re-derives this whole split from the committed population and fails if any single arm's
+value-bearing / spanned / absence-class counts move. That matters because the totals alone are
+not a sufficient guard: a corpus change can preserve `112`/`101` and all four class counts while
+moving points *between* sessions, and this table is the only published figure that says **which**
+session lost which class.
+
 ⛔ **The turn is the RESOLVED one, never the receipt's `source_turn_id`.**
 The write path resolves the anchor from the quote first (`_resolve_source_turn`,
-`extractor_v2.py:7478`) and stamps against THAT turn (`:7494`); the receipt's
+`extractor_v2.py:7488`) and stamps against THAT turn (`:7504`); the receipt's
 field is the model's **advisory** index. Reading it straight through puts three
 `wp06_quarry_rollout`/`narrative` points on turns production refuses
 (quote-overlap < 0.6), which hides the resolver's E3 warning and reports them as
@@ -111,7 +118,7 @@ published exactly that (`band 6 · no turn 1`). Pinned by
 
 ⚠️ **One shape is silent BY CONSTRUCTION and is not in this census**: with an
 EMPTY `edus` list `_resolve_source_turn` returns `None` before any warning
-(`extractor_v2.py:6860-6861`), so a value-bearing point extracted from no turns at all
+(`extractor_v2.py:6870-6871`), so a value-bearing point extracted from no turns at all
 would be a silent absence. Declared here rather than measured, because the
 census has no such point — and the fix belongs in the resolver (warn there),
 not in this record.
@@ -121,7 +128,11 @@ warnings sees the absence — every counted outcome surfaces in the warning
 stream, none is a silent drop. For **two** of the four classes the warning also
 names the class (`band` via "token-overlap band", `valuefree_quote` via
 "carries no value"), and that per-class ownership is what
-`test_every_absence_in_the_census_is_REPORTED` asserts. It does **not** mean
+`test_every_absence_in_the_census_is_REPORTED` asserts — the test derives each
+absence's class from **settled facts** (the resolved turn's own text against the
+quote, and whether the addressed text carries a value), *then* requires the
+warning to name that class, so the assertion cannot be satisfied by a classifier
+reading the same string it checks. It does **not** mean
 every warning identifies its class, nor that it is actionable in every case.
 The string "no resolvable source turn" is emitted by the resolver's step-4
 fail-open for **both** `no_turn` and `empty_quote`, so it names a *condition the
@@ -194,8 +205,8 @@ reachable **and decisive**:
 
 ⛔ **The key is the RESOLVED turn, never the receipt's `source_turn_id`** —
 §2.1's rule, one leg over. Production overwrites the model's advisory index with
-the resolver's answer before the point is committed (`extractor_v2.py:7478` →
-`:7485`), and `_same_fact` groups on the committed field
+the resolver's answer before the point is committed (`extractor_v2.py:7488` →
+`:7495`), and `_same_fact` groups on the committed field
 (`retrieval.py:2403-2405`). Grouping by the advisory index instead gives
 `43 / 26 / 1 / 2` over all extracted points — a population no package holds, and
 this section's third population error. That reading is **published here and
@@ -359,7 +370,7 @@ every Point") is **CLOSED as COMPLETED (2026-09-25T01:23:27Z)** — but only its
 **FIELD** landed (`span_start`/`span_end` + `validate_span`, `2ff8c3c88`, §1).
 Its **widening — every committed Point carries a span, not just a value-bearing
 one — is UNSHIPPED**: `_value_verbatim_span` returns `None` before any span work
-unless `_carries_value(content, quote)` (`extractor_v2.py:3603-3604`), so no
+unless `_carries_value(content, quote)` (`extractor_v2.py:3613-3614`), so no
 value-free point can carry an address at this head (105 of the 217 committed
 points are value-free — both figures pinned by
 `test_the_census_is_a_rederivation_not_an_observation`'s `TOTAL_POINTS` /
