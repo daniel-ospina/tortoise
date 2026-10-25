@@ -33,6 +33,7 @@ from tortoise.pack_registry import (
     CORE_PREDICATES,
     SEMANTICS_MECHANISMS,
     SEMANTICS_VALUES,
+    declared_mechanisms,
 )
 from tortoise.sdk import TortoiseSDK
 
@@ -91,10 +92,135 @@ def test_mechanism_map_is_ontology_s8s_table():
 
 def test_semantics_refutes_on_impl_is_refused_or_warned(sdk):
     """The measured defect, verbatim: a write declaring `refutes` with the
-    mechanism `IMPL` must not be silent (warn-not-block, per #1934)."""
+    mechanism `IMPL` must not be silent (warn-not-block, per #1934).
+
+    The assertion is MECHANISM-SPECIFIC on purpose: `op["warnings"]` alone is
+    satisfied by any of the four producers on this path (the retired-word and
+    out-of-vocabulary notices, `undeclared_relation`, or this one), so a bare
+    truthiness check would keep passing if the mechanism leg disappeared."""
     a, b = _two_points(sdk)
     op = sdk.create_operator("IMPL", a, [b], label="refutes", semantics="refutes")
-    assert op.get("warnings")
+    assert _mechanism_warnings(op), op.get("warnings")
+    assert _mechanism_warnings(op)[0]["declared_mechanism"] == "NAND"
+
+
+# ── the two stated contract points, pinned ───────────────────────────────
+
+def test_part_whole_op_type_declares_no_mechanism(sdk):
+    """A part/whole `op_type` is NEITHER mechanism, so there is nothing to
+    compare and silence is the honest answer (ONTOLOGY §8 blesses
+    `composedOf` + `hasPart`). The guard is `op_type in CORE_PREDICATES`; a
+    tidy-up that drops or widens it would report `op_type 'composedOf'
+    contradicts … 'IMPL'` on every such write, and before this test NOTHING
+    failed — so the exclusion was a stated contract with zero coverage."""
+    assert frozenset({"IMPL", "NAND"}) == CORE_PREDICATES
+    a, b = _two_points(sdk)
+    for op_type in ("composedOf", "decomposesInto", "contains", "wraps"):
+        # `hasPart` and `supports` both declare IMPL: the loudest possible
+        # declaration, so a leaked comparison would certainly fire.
+        for semantics in ("hasPart", "supports"):
+            op = sdk.create_operator(op_type, a, [b], semantics=semantics)
+            assert not _mechanism_warnings(op), (op_type, semantics, op["warnings"])
+
+
+def test_retired_word_is_compared_as_its_canonical_meaning(sdk):
+    """`opposes` is RETIRED in favour of `mutuallyExclusive` (NAND), and a
+    shipped pack still declares it — so the comparison must read the meaning the
+    write will be RECORDED as, not the pre-canonical spelling. Compared
+    pre-canonical, `opposes` is not in the map and the inversion goes silent
+    again. The same word must behave identically whichever parameter carries it:
+    `semantics='opposes'` warned from the first cut, `label='opposes'` did not,
+    which is the same meaning disclosing differently by spelling."""
+    a, b = _two_points(sdk)
+    for kwargs in ({"semantics": "opposes"}, {"label": "opposes"}):
+        op = sdk.create_operator("IMPL", a, [b], **kwargs)
+        warns = _mechanism_warnings(op)
+        assert warns, (kwargs, op.get("warnings"))
+        assert warns[0]["declared_mechanism"] == "NAND", (kwargs, warns[0])
+        # ... and the NAND spelling of the same meaning agrees, so the warning
+        # above is about the meaning, not about the parameter.
+        op_ok = sdk.create_operator("NAND", a, [b], **kwargs)
+        assert not _mechanism_warnings(op_ok), (kwargs, op_ok.get("warnings"))
+
+
+def test_pack_declaration_outranks_s8_neutrality(sdk):
+    """A pack relation's own `mechanism` is authoritative for its PREDICATE even
+    when its `semantics` is one ONTOLOGY §8 gives no mechanism: `marks`
+    (investment-portfolio-manager) declares `mechanism: IMPL` over
+    `semantics: related`, and §8's `—` column is about the MEANING, not about a
+    pack's ruling on its own verb. The two rules are reconciled by the pack
+    leg winning, and this test PINS that choice so it cannot drift silently in
+    either direction (the alternative — skipping rows whose semantics is
+    mechanism-free — would let a NAND `marks` edge through unwarned)."""
+    assert "related" not in SEMANTICS_MECHANISMS  # §8 gives the meaning none
+    assert declared_mechanisms(label="marks") == [
+        ("IMPL", "the pack relation 'marks' (portfolio)")]
+    a, b = _two_points(sdk)
+    warns = _mechanism_warnings(sdk.create_operator("NAND", a, [b], label="marks"))
+    assert warns, "the pack says IMPL, so a NAND `marks` is the same inversion"
+    assert warns[0]["declared_mechanism"] == "IMPL"
+    assert not _mechanism_warnings(sdk.create_operator("IMPL", a, [b], label="marks"))
+
+
+# ── "NEVER raises": the fail-open path, exercised ────────────────────────
+
+class _StubRegistry:
+    """The `registry=` seam a second creator would use (#9963): the warn-not-
+    block path must survive a registry that will not load or yields junk."""
+
+    def __init__(self, rows=None, raises=None):
+        self._rows = rows
+        self._raises = raises
+
+    def list_relations(self):
+        if self._raises is not None:
+            raise self._raises
+        return self._rows
+
+
+@pytest.mark.parametrize("registry", [
+    _StubRegistry(raises=RuntimeError("registry will not load")),
+    _StubRegistry(rows=["not-a-row"]),                       # non-dict row
+    _StubRegistry(rows=[{"predicate": "marks", "mechanism": ["IMPL"]}]),
+    _StubRegistry(rows=[{"predicate": "marks", "mechanism": {"kind": "IMPL"}}]),
+], ids=["load-raises", "row-not-a-dict", "mechanism-list", "mechanism-dict"])
+def test_declared_mechanisms_never_raises_on_a_broken_registry(registry):
+    """The docstring promises this function NEVER raises, because it runs on the
+    warn-not-block write path: an exception here aborts the caller's WRITE from
+    a comparison that is documented never to refuse one. Only the load used to
+    be guarded — the row walk and `mechanism in CORE_PREDICATES` (a frozenset
+    membership test, which raises `TypeError` on an unhashable value) were
+    OUTSIDE it. Each case here RAISES on the pre-fix code (AttributeError /
+    TypeError), so this test is the non-vacuous proof of the guard."""
+    assert declared_mechanisms(label="marks", registry=registry) == []
+
+
+def test_a_known_absent_registry_is_not_reloaded():
+    """`registry=None` means "there is no registry" — a caller that has already
+    ruled one out must not trigger a second `_get_registry()` load by saying so.
+    An `object | None = None` signature cannot tell that apart from "not
+    supplied", and the difference is observable: with the real registry loaded,
+    `marks` declares IMPL."""
+    assert declared_mechanisms(label="marks", registry=None) == []
+    assert declared_mechanisms(label="marks")          # unset -> loads the real one
+
+
+# ── the message must not misdescribe the direction ───────────────────────
+
+def test_message_describes_each_direction_correctly(sdk):
+    """One hardcoded example only fits one of the two directions. The suite
+    writes `NAND` + `supports` as well (see `test_mismatch_still_writes`), and
+    the IMPL-worded sentence told that caller the opposite of what it had done.
+    Each direction gets its own worked example, and each is asserted."""
+    a, b = _two_points(sdk)
+    impl_case = _mechanism_warnings(
+        sdk.create_operator("IMPL", a, [b], semantics="refutes"))[0]["message"]
+    assert "IMPL wire" in impl_case and "RAISES" in impl_case, impl_case
+    nand_case = _mechanism_warnings(
+        sdk.create_operator("NAND", a, [b], semantics="supports"))[0]["message"]
+    assert "NAND wire" in nand_case and "LOWERS" in nand_case, nand_case
+    assert "RAISES" not in nand_case.replace(
+        "must RAISE it", ""), nand_case
 
 
 # ── the mechanism leg: meaning → mechanism ────────────────────────────────
@@ -115,13 +241,26 @@ def test_semantics_refutes_on_impl_names_the_declared_mechanism(sdk):
 
 
 def test_label_spelling_is_compared_too(sdk):
-    """The mirror spelling from the issue: `label='refutes'` with NO
-    `semantics`. The label is a Layer-2 value the core ontology declares, so
-    the same comparison applies — and the direction taken from a contradictory
-    `semantics` must not hide it."""
+    """The mirror spelling from the issue: the meaning rides the `label` while a
+    DIFFERENT meaning arrives as `semantics`. Both are read, so the label's
+    mechanism is compared even though the direction came from `semantics` — a
+    contradictory `semantics` must not hide it."""
     a, b = _two_points(sdk)
     op = sdk.create_operator("IMPL", a, [b], label="refutes", semantics="supports")
     assert _mechanism_warnings(op), op.get("warnings")
+
+
+def test_label_alone_is_read_as_a_meaning(sdk):
+    """The pre-#7852 spelling with NO `semantics` at all: the Layer-2 word rides
+    the label and nothing else is declared. That is the case the sibling's
+    docstring used to CLAIM while passing `semantics="supports"` — the arm was
+    untested, and `refutes` is in the core label vocabulary, so the only
+    declaration in play is the meaning itself."""
+    a, b = _two_points(sdk)
+    op = sdk.create_operator("IMPL", a, [b], label="refutes")
+    warns = _mechanism_warnings(op)
+    assert warns, op.get("warnings")
+    assert warns[0]["declared_mechanism"] == "NAND"
 
 
 def test_pack_declared_relation_mechanism_is_compared(sdk):

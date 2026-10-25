@@ -163,9 +163,21 @@ class TestWritePathDeclaredness:
 
     def test_retired_spelling_and_unknown_name_still_warn(self, sdk, pair):
         a, b = pair
-        for label in ("opposes", "does_not_support"):
+        # `opposes` is the RETIRED spelling of `mutuallyExclusive` (NAND), so as of
+        # #9963 an IMPL write of it carries TWO disclosures: the retired-word
+        # notice (this test's original subject) and the mechanism mismatch — the
+        # meaning declares NAND, the write declares IMPL. The mechanism leg reads
+        # the CANONICAL meaning on both spellings (`label="opposes"` behaves like
+        # `semantics="opposes"`, which already warned before this change), so the
+        # second code is the new leg working, and it is APPENDED after membership
+        # rather than replacing it. An unknown name still declares nothing about
+        # belief polarity, so it carries the membership warning alone.
+        for label, codes in (
+            ("opposes", ["undeclared_relation", "mechanism_mismatch"]),
+            ("does_not_support", ["undeclared_relation"]),
+        ):
             out = sdk.create_operator("IMPL", a, [b], label=label)
-            assert self._codes(out) == ["undeclared_relation"], (label, out)
+            assert self._codes(out) == codes, (label, out)
 
     def test_mitigates_is_still_not_an_operator_label(self, sdk, pair):
         # #4937: MITIGATES is a capability, not a predicate — it must not ride

@@ -579,11 +579,27 @@ def relation_write_verdict(rel: dict) -> tuple[str, tuple[str, ...]]:
     return RELATION_PREDICATE_NOT_IN_ALLOWLIST, ()
 
 
+class _Unset:
+    """Sentinel for `declared_mechanisms(registry=…)` (#9963).
+
+    ⛔ A plain ``None`` default cannot say "I already know there is no
+    registry": it made a caller that HAS ruled a registry out trigger a second
+    `_get_registry()` load, i.e. repeating the exact work it just avoided. Three
+    states need three values — unset (load it), ``None`` (known absent), an
+    object (use it).
+    """
+
+    __slots__ = ()
+
+
+_UNSET = _Unset()
+
+
 def declared_mechanisms(
     *,
     label: str | None = None,
     semantics: str | None = None,
-    registry: object | None = None,
+    registry: object | _Unset | None = _UNSET,
 ) -> list[tuple[str, str]]:
     """The mechanism(s) a relation write's OWN declaration fixes (#9963).
 
@@ -613,24 +629,45 @@ def declared_mechanisms(
       when the word is in :data:`SEMANTICS_MECHANISMS`, i.e. when ONTOLOGY §8
       gives the meaning a mechanism at all.
 
-    A retired semantics word is the caller's problem, not this function's: the
-    write door canonicalizes it through :data:`SEMANTICS_TRANSITION` FIRST and
-    passes the canonical value here, so `opposes` is compared as
-    `mutuallyExclusive` (NAND) — comparing the pre-canonical spelling would
-    compare nothing, which is the wrong-order shape #9963 says to avoid.
+    A retired semantics word is canonicalized HERE, through
+    :data:`SEMANTICS_TRANSITION`, on BOTH spellings — ``opposes`` is compared as
+    ``mutuallyExclusive`` (NAND) whether it arrived as ``semantics`` or as the
+    pre-#7852 ``label``. The write door already canonicalizes its `semantics`
+    local before calling, and nothing canonicalizes `label` anywhere, so doing
+    it on one side only disclosed the same meaning differently by spelling: the
+    retired word as ``semantics`` warned and the same word as ``label`` was
+    silent. Comparing the pre-canonical spelling would compare nothing, which is
+    the wrong-order shape #9963 says to avoid — so this function does not depend
+    on the caller's order to get it right.
 
-    ⛔ NEVER raises and never refuses: a registry that will not load degrades to
-    the core map alone (the warn-not-block path must not turn a load failure
-    into a write failure).
+    A pack relation's own ``mechanism`` is AUTHORITATIVE for its predicate, even
+    when the relation's ``semantics`` is one ONTOLOGY §8 gives no mechanism
+    (§8's ``—`` column is about the MEANING, and a pack overriding it states a
+    ruling of its own: ``investment-portfolio-manager`` declares ``marks`` as
+    ``mechanism: IMPL`` with ``semantics: related``). So a NAND write of `marks`
+    IS reported — the pack says what that verb means, and §8-neutrality of its
+    underlying meaning does not override the pack's declaration (pinned by test).
+
+    ⛔ NEVER raises and never refuses: a registry that will not load, or one that
+    yields a row this walk cannot read, degrades to what could be read (the core
+    map alone in the worst case). The warn-not-block path must not turn a load
+    failure — or a malformed row — into a write failure, so the ROW WALK is
+    inside the guard, not just the load, and an unhashable `mechanism` is
+    rejected rather than raising out of a frozenset membership test.
     """
     found: list[tuple[str, str]] = []
 
     def _add(mechanism: object, source: str) -> None:
-        if mechanism in CORE_PREDICATES and (mechanism, source) not in found:
+        # `isinstance` BEFORE the membership test: `mechanism in CORE_PREDICATES`
+        # raises TypeError on an unhashable value (a list from a malformed row),
+        # which would abort the caller's write from a comparison documented never
+        # to refuse one. A non-str is simply not a mechanism.
+        if (isinstance(mechanism, str) and mechanism in CORE_PREDICATES
+                and (mechanism, source) not in found):
             found.append((mechanism, source))
 
     # 1. the pack relation the caller NAMED, by predicate.
-    if label and registry is None:
+    if label and isinstance(registry, _Unset):
         try:
             from .domain_loader import _get_registry
 
@@ -640,21 +677,32 @@ def declared_mechanisms(
     if label and registry is not None:
         try:
             rows = list(registry.list_relations())  # type: ignore[attr-defined]
-        except Exception:  # noqa: BLE001, RUF100 — same contract
-            rows = []
-        for rel in rows:
-            if rel.get("predicate") != label:
-                continue
-            _add(rel.get("mechanism"),
-                 f"the pack relation '{label}' ({rel.get('pack') or 'pack'})")
+            for rel in rows:
+                if not isinstance(rel, dict):
+                    continue
+                if rel.get("predicate") != label:
+                    continue
+                _add(rel.get("mechanism"),
+                     f"the pack relation '{label}' ({rel.get('pack') or 'pack'})")
+        except Exception:  # noqa: BLE001, RUF100 — the WALK is warn-only too
+            # Keep whatever was read before the bad row: a partial declaration
+            # still discloses, and an exception here would abort the write.
+            pass
 
     # 2. the declared MEANING — the Layer-2 word, whether it arrived as
-    #    `semantics` or (pre-#7852 spelling) as the `label` itself.
-    if semantics in SEMANTICS_MECHANISMS:
-        _add(SEMANTICS_MECHANISMS[semantics], f"the semantics '{semantics}'")
-    if label in SEMANTICS_MECHANISMS and label != semantics:
-        _add(SEMANTICS_MECHANISMS[label],
-             f"the label '{label}' (a Layer-2 meaning)")
+    #    `semantics` or (pre-#7852 spelling) as the `label` itself. Both are
+    #    canonicalized, so a retired word cannot mean two different things
+    #    depending on which parameter carried it.
+    semantics_c = SEMANTICS_TRANSITION.get(semantics, semantics) if semantics else None
+    label_c = SEMANTICS_TRANSITION.get(label, label) if label else None
+    if semantics_c in SEMANTICS_MECHANISMS:
+        retired = "" if semantics_c == semantics else f" (retired → '{semantics_c}')"
+        _add(SEMANTICS_MECHANISMS[semantics_c],
+             f"the semantics '{semantics}'{retired}")
+    if label_c in SEMANTICS_MECHANISMS and label_c != semantics_c:
+        retired = "" if label_c == label else f" (retired → '{label_c}')"
+        _add(SEMANTICS_MECHANISMS[label_c],
+             f"the label '{label}' (a Layer-2 meaning){retired}")
 
     return found
 

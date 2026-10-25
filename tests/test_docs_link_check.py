@@ -430,20 +430,20 @@ def test_a_stale_report_from_an_earlier_step_never_survives_a_failure(tmp_path: 
     a consumer that ever ran anyway (`if: always()`, a future reordering) would
     grade a STALE verdict — the same silent-wrong-answer class as the empty file.
     """
-    proc, report = _run_step("Link check (changed files)", tmp_path)
+    proc, _report = _run_step("Link check (changed files)", tmp_path)
     assert proc.returncode != 0
 
     stale = tmp_path / "runner_temp" / STEPS["Link check (changed files)"][1]
     stale.write_text('{"total": 0, "error_map": {}, "timeout_map": {}}', encoding="utf-8")
     proc, report = _run_step_for_existing(tmp_path)
     assert proc.returncode != 0
-    # `report` is the SAME path `stale` was written to (the helper derives it
-    # from the same RUNNER_TEMP + step name), so asserting on it too keeps the
-    # producer's own return value in the test instead of discarding it — an
-    # unused unpacked variable is RUF059, and `ruff check .` fails the whole
-    # repo on it (this file's pre-fix form reddened `agent-infra-ci / lint` on
-    # main, which reddens the merge ref of every open PR).
-    assert report == stale, "the re-run must report the path the stale file sat at"
+    # The first unpack is `_report`: that binding is genuinely unused and an
+    # underscore name is what says so (`ruff check .` fails the whole repo on an
+    # unused unpacked variable — RUF059 — which is what reddened
+    # `agent-infra-ci / lint` on main). The DISCRIMINATING assertion is the
+    # existence check below; `report == stale` would have been a tautology
+    # (both sides are built from the same RUNNER_TEMP + step-name expression by
+    # the helper and by this line), i.e. an assertion that cannot fail.
     assert not report.exists(), "a stale report must be cleared before the producer can fail"
 
 

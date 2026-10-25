@@ -16921,13 +16921,25 @@ class TortoiseSDK:
                 _declared = "; ".join(
                     f"{source} declares {mechanism!r}"
                     for mechanism, source in contradictions)
+                # The worked example is DIRECTION-SPECIFIC (#9963 review): one
+                # hardcoded sentence can only describe one of the two
+                # directions, and read as the wrong claim for the other —
+                # `test_mismatch_still_writes` exercises BOTH (NAND + `supports`).
+                if op_type == "IMPL":
+                    _inversion = (
+                        "An IMPL wire carrying a NAND meaning (e.g. 'refutes') "
+                        "RAISES the target's confidence where the meaning says "
+                        "it must LOWER it")
+                else:
+                    _inversion = (
+                        "A NAND wire carrying an IMPL meaning (e.g. 'supports') "
+                        "LOWERS the target's confidence where the meaning says "
+                        "it must RAISE it")
                 warnings.append({
                     "code": "mechanism_mismatch",
                     "message": (
                         f"op_type {op_type!r} contradicts the mechanism this "
-                        f"write declares: {_declared}. An IMPL wire carrying a "
-                        f"'refutes' meaning RAISES the target's confidence where "
-                        f"the meaning says it must LOWER it (and vice versa). "
+                        f"write declares: {_declared}. {_inversion}. "
                         f"The mechanism each meaning declares lives in "
                         f"pack_registry.SEMANTICS_MECHANISMS (a pack relation's "
                         f"own `mechanism` is authoritative for its predicate) — "
