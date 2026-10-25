@@ -81,6 +81,44 @@ Changing the corpus **intentionally** means re-writing the pre-registration
 (`measure_ask_distilled preregister`) in its own commit — the pre-registration
 that fixed the bar is required to precede the run it governs.
 
+## Publishing is bound to the commit the report records
+
+The run report's central claim is that it is *reproducible from the recorded
+sha alone*, and that the protocol was committed **before** the run. Both are
+properties of git history, so `publish` asks the repository instead of
+asserting them (`measure_ask_distilled.verify_commit_binding`):
+
+1. `--commit` must **resolve** to a commit in the repository — a sha that
+   resolves to nothing is refused, never printed;
+2. the corpus **at that sha** must re-hash to the published `corpus_hash`, and
+   the pre-registration blob at that sha must be byte-identical to the
+   published one (so `git checkout <sha>` reproduces *this* corpus and *this*
+   protocol);
+3. the commit that last touched the pre-registration at or before the run
+   commit must be a **proper ancestor** of it (`git merge-base
+   --is-ancestor`), and its committer instant must not be later — compared on
+   `%ct` epoch seconds, which are recorded in the binding beside the `%cI`
+   strings. (`%cI` renders each commit in its own UTC offset, so those strings
+   do not sort chronologically across an offset change; the epochs do.) A
+   clone whose shallow boundary is that commit reports **UNPROVABLE** and
+   refuses, as does one whose commit times cannot be read — and so does one
+   whose shallow file exists but cannot be **read**: an unreadable boundary is
+   an unknown boundary, and assuming it is absent would silently pass the very
+   check it disengages.
+
+The receipt `publish` writes is then re-checkable **without a checkout**
+(`validate_ask_receipt`): it must carry the binding at all, its own run commit
+and full 40-hex pre-registration commit, the corpus hash the binding re-hashed
+at that sha, the pre-registration's sha256 matching `resolved_config`'s, both
+commit epochs ordered the right way, and — because `ordering: proven` is a claim
+that rests on a proof — the proof sentence itself. Removing a field a
+cross-check compares against invalidates the receipt; it never skips the check.
+
+The verified binding is written into the receipt (`commit_binding`) and
+rendered into §1/§6 of the run report, so a reviewer can re-check it from the
+report alone. It adds no clause to the pre-registration's decision rule: it is
+a publishing precondition, not a scoring change.
+
 ## Why this is a separate tree from `tests/eval/write_path/`
 
 Mechanical, not stylistic: the write-path corpus's own integrity gate derives
