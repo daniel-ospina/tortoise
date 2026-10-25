@@ -320,6 +320,64 @@ def test_the_census_is_a_rederivation_not_an_observation():
         "distinction explicit")
 
 
+def test_the_census_stamps_on_the_inputs_production_hands_it():
+    """The clamps are the FIX, so they must be pinned by a re-derivation.
+
+    ``_stamp_inputs`` trims the content to ``_MAX_CONTENT`` and the quote to
+    200 chars because that is what ``extractor_v2`` hands
+    ``_value_verbatim_span`` (``:7340`` / ``:7373`` -> ``:7494``). Measured at
+    this head: exactly ONE point in the population is value-bearing AND
+    spanned AND carries a >200-char quote — ``wp04_aurora_perf``/``raw`` — and
+    it is the only place the two readings differ, ``(0, 201)`` raw vs
+    ``(0, 200)`` clamped.
+
+    ⛔ **This test exists because nothing else reds without the clamps.**
+    Reverting ``_stamp_inputs`` to the raw receipt strings leaves the whole
+    suite green: no published COUNT moves (census ``112/101`` and all four
+    absence totals are byte-identical under both readings), so only the span
+    END of that one point differs — and the runbook publishes that pair. A
+    count-only census therefore lets "the addresses it reports are the ones
+    production writes" become false silently. Pinned as a re-derivation of
+    both readings, not as a constant: if the clamps are removed the clamped
+    arm returns ``(0, 201)`` and reds here."""
+    found = []
+    for session in SESSIONS:
+        for arm in ARMS:
+            edus = _edus(session)
+            for point in _points(session, arm):
+                raw_content = str(point.get("content") or "").strip()
+                raw_quote = str(point.get("quote") or "").strip()
+                if len(raw_quote) <= 200:
+                    continue
+                content, quote = _stamp_inputs(point)
+                if not v2._carries_value(content, quote):
+                    continue
+                turn = v2._resolve_source_turn(point, edus, warnings=[])
+                clamped = v2._value_verbatim_span(
+                    content, quote, turn, edus, warnings=[])
+                raw = v2._value_verbatim_span(
+                    raw_content, raw_quote, turn, edus, warnings=[])
+                found.append((session, arm, raw, clamped))
+    assert len(found) == 1, (
+        "the >200-char value-bearing quote population moved: "
+        f"{found} — re-measure before trusting (0, 200) below")
+    session, arm, raw, clamped = found[0]
+    assert (session, arm) == ("wp04_aurora_perf", "raw")
+    assert raw == (0, 201), (
+        f"the RAW reading is {raw}, not (0, 201) — this pin's premise changed")
+    assert clamped == (0, 200), (
+        f"the census stamps {clamped}, not production's (0, 200) — "
+        "_stamp_inputs is not applying the quote clamp")
+    # the CONTENT clamp is unexercised on this corpus (declared, not assumed):
+    # every point's raw content already fits under _MAX_CONTENT.
+    over = [p for s in SESSIONS for a in ARMS for p in _points(s, a)
+            if len(str(p.get("content") or "").strip()) > v2._MAX_CONTENT]
+    assert over == [], (
+        f"{len(over)} point(s) now exceed _MAX_CONTENT, so the content clamp "
+        "is exercised and the (0, 200) pin above no longer covers it: "
+        "re-measure and pin that leg too")
+
+
 def test_the_census_resolves_the_turn_the_way_the_write_path_does():
     """The census must not measure a population production never produces.
 
