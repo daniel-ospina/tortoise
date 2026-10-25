@@ -2412,9 +2412,9 @@ def test_a_degraded_poll_files_no_new_stale_for_an_unmeasured_org():
     # `_Channels` allocates increasing keys, so a NEWLY filed issue is appended:
     # the ONLY new key this poll may add is R2_DOWN (the outage's own kind).
     added = set(ch.issues) - set(before)
-    assert all(ch.issues[n] == "[DR] R2_DOWN" for n in added), (
-        "a degraded poll filed something other than the outage's own kind — "
-        f"it must not file a STALE it never measured: {ch.issues}")
+    assert [ch.issues[n] for n in added] == ["[DR] R2_DOWN"], (
+        "a degraded poll must file the outage's own kind and nothing else — it "
+        f"must not file a STALE it never measured: {ch.issues}")
     assert set(before) <= set(ch.issues), (
         f"nothing was cleared either: {ch.issues}")
     assert not any("STALE" in t for t in ch.issues.values()), ch.issues
@@ -2440,7 +2440,7 @@ def test_a_measured_stale_org_keeps_its_incident_across_a_degraded_poll():
     assert stale_titles == ["[DR] STALE — team_a"], ch.issues
     assert set(before) <= set(ch.issues), ch.issues
     added = set(ch.issues) - set(before)
-    assert all(ch.issues[n] == "[DR] R2_DOWN" for n in added), (
+    assert [ch.issues[n] for n in added] == ["[DR] R2_DOWN"], (
         "the outage's own incident files and nothing else, so the per-org gate "
         f"silences nothing: {ch.issues}")
 
@@ -2471,9 +2471,11 @@ def test_a_degraded_poll_after_a_fresh_reading_still_files_the_age_it_measured()
     assert len(stale) == 1, ch.issues
     detail = json.loads(ch.bodies[stale[0]].split("```")[1])
     assert detail["age_min"] == 180, detail        # the CONFIRMED reading, aged
-    # …and it must NOT present that as an exact this-poll measurement.
-    assert detail["age_is_lower_bound"] is True, detail
+    # …and it must NOT present that as an exact this-poll measurement: a newer
+    # archive may have landed unobserved, so the age may OVERSTATE the staleness.
+    assert detail["age_is_upper_bound"] is True, detail
     assert "did NOT answer" in detail["measurement"], detail
+    assert "OVERSTATE" in detail["measurement"], detail
 
 
 def test_stale_filing_carries_the_measurement_that_justified_it():
@@ -2502,6 +2504,21 @@ def test_stale_filing_carries_the_measurement_that_justified_it():
     assert "this closes and NOTHING is opened" in body, body
     assert "universe-shrink: the subject is gone" in body, body
     assert "consecutive confirming poll(s) before it is applied" in body, body
+    # ⚠️ The window clause is CONDITIONAL, and this fixture pins the window to 1
+    # (#3146's "clear now" lever) — so the self-contradicting "held for 1 poll …
+    # never clears on one poll" must NOT appear. It shipped once and nothing
+    # noticed; `test_the_close_window_clause_can_state_the_declared_window`
+    # covers the other direction.
+    assert "never clears" not in body, body
+    # …and this is a CONFIRMED measured reading, so its measurement must say so
+    # rather than reusing the degraded/cache-miss text (a false statement there
+    # was green until this assertion existed).
+    assert "CONFIRMED listing found this org's newest" in body, body
+    # …and it must not borrow the ABSENCE branch's text either (the negative form
+    # of that sentence is "not a cache miss", so match on the absence claims).
+    detail = json.loads(body.split("```")[1])
+    assert "may OVERSTATE" not in detail["measurement"], detail
+    assert "did NOT answer" not in detail["measurement"], detail
 
 
 def test_a_simulated_stale_files_the_DRILL_as_the_trigger_not_a_fake_archive():
@@ -2527,12 +2544,123 @@ def test_a_simulated_stale_files_the_DRILL_as_the_trigger_not_a_fake_archive():
     detail = json.loads(body.split("```")[1])
     assert detail["simulated"] is True, detail
     assert "simulated_age" in detail, detail
+    # The PUBLISHED value, not just the key: a field whose name states a unit that
+    # nothing checks can silently become seconds (mutation G3 was green).
+    assert detail["simulated_age_min"] == 12000, detail   # the drill's _ts(200)
     # The real archive is what is published, with its REAL age (1h)…
     assert detail["newest_default_archive"] != detail["simulated_age"], detail
     assert detail["age_min"] == 60, detail
     # …and the body says a drill, not an outage, is the trigger.
     assert "ops/simulate" in detail["measurement"], detail
     assert "the drill ends" in detail["closes_when"], detail
+
+
+class _ToggledBackups(MemoryStorage):
+    """The DR archive listing fails only when told to, while `ops/simulate/` keeps
+    answering — two separate `list()` calls, so one prefix can be denied alone."""
+
+    def __init__(self):
+        super().__init__()
+        self.fail_backups = False
+
+    def list(self, prefix):
+        if self.fail_backups and prefix.startswith("backups/"):
+            raise ConnectionError("503 SlowDown")
+        return super().list(prefix)
+
+
+def test_a_degraded_poll_says_UPPER_bound_EVEN_when_a_drill_is_the_trigger():
+    """The degraded qualifier must be independent of WHICH trigger fired. The
+    drill branch used to be an `elif`, so an unconfirmed poll carrying a live
+    simulate object published the cached age as an exact measurement — the same
+    "blind reading presented as measured" class, one branch over."""
+    ch = _Channels()
+    storage = _ToggledBackups()
+    _seed_archive(storage, "team_a", 1)            # 60m — fresh, and confirmed once
+    _seed_state(storage, "team_a")
+    w = _watcher(storage, ch, simulate_enabled=True)
+    # Poll 1 is healthy, so nothing is filed and the drill's payload is observed
+    # on its FIRST filing — the store adopts an existing issue instead of
+    # rewriting its body, so a body can only be read from a new filing.
+    assert w.poll()["per_team"]["team_a"] == "ok"
+    assert not ch.issues, ch.issues
+
+    storage.upload("ops/simulate/default.json", json.dumps({
+        "age_ts": _ts(200).isoformat(),
+        "expires_at": (FIXED + timedelta(hours=1)).isoformat(),
+    }).encode())
+    storage.fail_backups = True                    # `backups/` now fails too
+    w.poll()
+
+    stale = [n for n, t in ch.issues.items() if "STALE" in t]
+    assert len(stale) == 1, ch.issues            # plus the outage's own R2_DOWN
+    detail = json.loads(ch.bodies[stale[0]].split("```")[1])
+    assert detail["simulated"] is True, detail
+    assert detail["age_is_upper_bound"] is True, detail
+    assert "did NOT answer" in detail["measurement"], detail
+
+
+def test_the_close_window_clause_can_state_the_declared_window(monkeypatch):
+    """The other direction of the conditional clause. At the DECLARED window (2)
+    the payload says a single poll cannot clear it — a claim that is TRUE there and
+    false at `ALERT_RECOVERY_STREAK=1`, so one fixture asserting only its absence
+    would leave the sentence deletable."""
+    monkeypatch.delenv("ALERT_RECOVERY_STREAK", raising=False)
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 200)
+    _seed_state(storage, "team_a")
+    w = _watcher(storage, ch)
+    w.poll()
+    (body,) = (ch.bodies[n] for n in ch.issues)
+    assert "held for 2 consecutive confirming poll(s)" in body, body
+    assert "so a single poll never clears this." in body, body
+
+
+def test_a_payload_less_leg_keeps_the_two_argument_call_shape():
+    """`_alert_leg` must not widen every leg's call shape: a store whose
+    `open_incident(kind, subject)` takes exactly two positional parameters would
+    raise a TypeError INSIDE the per-leg `except`, which logs and drops the leg
+    while the heartbeat stays healthy — i.e. a silent, all-kinds alert outage."""
+    calls = []
+
+    class _TwoArgStore:
+        def open_incident(self, kind, subject):   # no third parameter, on purpose
+            calls.append((kind, subject))
+
+        def resolve_incident(self, kind, subject):
+            return False
+
+    ch = _Channels()
+    storage = MemoryStorage()
+    w = _watcher(storage, ch)
+    w._alerts = _TwoArgStore()
+    assert w._alert_leg("open_incident", "R2_DOWN") is True
+    assert calls == [("R2_DOWN", "")], calls
+
+
+def test_a_drill_NEWER_than_a_stale_archive_is_not_named_as_the_trigger():
+    """`compute_status` takes the OLDEST of {newest archive, drill} (newest-primary
+    by age), so a drill that is NEWER than a genuinely stale archive is not what
+    made the org stale. The payload must not tell a triager a drill caused it —
+    mutation `simulate_age is not None` (dropping the `< newest` half) stayed green
+    because only the drill-wins direction had a test."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 200)          # 200h: genuinely stale
+    _seed_state(storage, "team_a")
+    storage.upload("ops/simulate/default.json", json.dumps({
+        "age_ts": _ts(1).isoformat(),              # 1h: NEWER than the archive
+        "expires_at": (FIXED + timedelta(hours=1)).isoformat(),
+    }).encode())
+    w = _watcher(storage, ch, simulate_enabled=True)
+    assert w.poll()["per_team"]["team_a"] == "stale"
+
+    (body,) = (ch.bodies[n] for n in ch.issues)
+    detail = json.loads(body.split("```")[1])
+    assert "simulated" not in detail, detail
+    assert "FORCED BY" not in detail["measurement"], detail
+    assert detail["age_min"] == 12000, detail      # the archive's own age
 
 
 def test_the_reported_age_does_not_floor_below_the_threshold():
