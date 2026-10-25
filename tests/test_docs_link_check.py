@@ -91,6 +91,43 @@ STEPS = {
     "Link check (main health, changed files)": ("changed-md.txt", "lychee-mh.json"),
 }
 
+def _generator_lychee_argv() -> list[str]:
+    """The lychee argv `tools/docs_lint_baseline.py::_run_lychee` builds, from its AST.
+
+    Read from the source rather than restated, so the producer's recorded
+    invocation can be compared to the GENERATOR's real request as an ordered list
+    — a flag added on either side alone reds the contract test below, which a
+    membership check would miss.
+    """
+    tree = ast.parse((ROOT / "tools" / "docs_lint_baseline.py").read_text(encoding="utf-8"))
+    run_lychee = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_run_lychee"
+    )
+    # The argv IS a list literal in that function. Read its elements in ORDER and
+    # keep the string constants: the binary path and the temp list path are a Name
+    # and a Call (substituted at runtime), so they drop out, while every flag and
+    # its value survive — including a flag ADDED later, which is the case an
+    # ordered comparison must catch and a membership check does not.
+    argv_node = next(
+        node
+        for node in ast.walk(run_lychee)
+        if isinstance(node, ast.List)
+        and any(
+            isinstance(element, ast.Constant) and element.value == "--files-from"
+            for element in node.elts
+        )
+    )
+    return [
+        element.value
+        for element in argv_node.elts
+        if isinstance(element, ast.Constant) and isinstance(element.value, str)
+    ]
+
+
+_GENERATOR_LYCHEE_ARGV = _generator_lychee_argv()
+
 REPORT_NO_FINDINGS = (
     '{"total": 2, "unique": 2, "successful": 2, "errors": 0,\n'
     ' "error_map": {}, "timeout_map": {}, "success_map": {}}'
@@ -360,31 +397,17 @@ def test_the_producer_asks_lychee_exactly_what_the_snapshot_generator_asks(tmp_p
     assert proc.returncode == 0, proc.stderr
 
     argv = record.read_text(encoding="utf-8").splitlines()
-    assert argv[:2] == ["--mode", "task"], f"the producer ran lychee as {argv}"
-    assert "--no-progress" in argv
-    assert argv[argv.index("--format") + 1] == "json"
-    assert Path(argv[argv.index("--files-from") + 1]).name == "pr-md.txt"
+    assert Path(argv[-1]).name == "pr-md.txt", f"the producer ran lychee as {argv}"
+    # The whole flag list is compared as an ORDERED LIST, not by membership:
+    # a membership check passes on an ADDED flag (say `--include-fragments`),
+    # which changes what lychee asks for and so the population — the exact drift
+    # this test exists to catch. An addition must red it, from either side.
+    assert argv[:-1] == _GENERATOR_LYCHEE_ARGV, (
+        f"the producer ran lychee as {argv[:-1]}, the snapshot generator asks "
+        f"{_GENERATOR_LYCHEE_ARGV}"
+    )
 
-    # The other half of the contract: what the GENERATOR asks for, from its AST.
-    tree = ast.parse((ROOT / "tools" / "docs_lint_baseline.py").read_text(encoding="utf-8"))
-    run_lychee = next(
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name == "_run_lychee"
-    )
-    flags = ["--mode", "task", "--no-progress", "--format", "json", "--files-from"]
-    generator = [
-        value
-        for _line, _col, value in sorted(
-            (n.lineno, n.col_offset, n.value)
-            for n in ast.walk(run_lychee)
-            if isinstance(n, ast.Constant) and isinstance(n.value, str)
-        )
-        if value in flags
-    ]
-    assert generator == flags, (
-        "the snapshot generator's lychee argv changed; the producer must move with it"
-    )
+    assert _GENERATOR_LYCHEE_ARGV, "the generator's argv could not be read off its AST"
 
 
 def test_a_report_the_differ_cannot_read_is_the_producers_failure(tmp_path: Path):
