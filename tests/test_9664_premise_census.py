@@ -53,6 +53,10 @@ WHAT THIS PINS
    never raises.
 8. Rows 2c and 2e evaluate the whole clause they print — "**NOT** the catalog
    union" and "merges the **starter set**" — not a narrowed-ness proxy.
+9. Row 2b's printed "data leg: not consulted — the arm returns early" is a claim
+   about the reader's CONTROL FLOW, and `_require_served` cannot see it (it is a
+   lower bound). A reader that consults the data leg on that arm must leave the
+   section UNMEASURED (exit 3), not print the opposite of what it did.
 
 Non-vacuity: on the pre-fix probe, (1) has no ``tortoise_health`` /
 ``tortoise_overview`` / ``tortoise_onboarding_state`` row, (2) has no
@@ -537,6 +541,66 @@ def test_a_data_leg_refusal_cannot_be_swallowed_into_a_green_section(
     assert "`configured=False` is NOT the catalog union" not in out, (
         "the arm whose data leg was refused must not be printed at all — a row "
         f"that appears while its read was swallowed is the defect: {out}")
+
+
+def test_the_union_arm_absence_clause_is_measured_not_asserted(
+    probe, monkeypatch, capsys
+) -> None:
+    """Review round 3, P1 — row 2b prints an ABSENCE: "data leg: not consulted".
+
+    That clause is an unconditional literal, and `_require_served` is a LOWER
+    bound — it fails on a shape that was not read and says nothing about one
+    that was. So a reader that consults the data leg on the record-less arm
+    (hoisting `graph_kind_namespaces(g)` above the early return,
+    `pack_state.py:974-975`) keeps every expectation satisfied while the row
+    prints the opposite of what happened. Measured at `9d8350652`: the whole
+    census reported `25 premises, 0 unmeasured sections`, exit 0, and this
+    file was 18/18 green.
+
+    The wrapper keeps the REAL resolution's reads (so the arms stay
+    measurable) and only adds the read the clause says does not happen —
+    replacing the function outright would leave the section unmeasured for a
+    different reason.
+    """
+    from tortoise import pack_state
+
+    real = pack_state.resolved_pack_set_for_graph
+
+    def _also_consults_the_data_leg(graph):
+        out = real(graph)
+        if out.namespaces is None:  # the record-less arm, whose clause is printed
+            pack_state.graph_kind_namespaces(graph)
+        return out
+
+    monkeypatch.setattr(pack_state, "resolved_pack_set_for_graph",
+                        _also_consults_the_data_leg)
+    rc = probe.main()
+    out = capsys.readouterr().out
+    assert rc == 3, (
+        "a union arm that consults the data leg can no longer measure the "
+        f"clause it prints, so the section must fail closed; got exit {rc}: {out}")
+    assert "consulted the data leg" in out, out
+    assert "no `:PackInstall` records" not in out, (
+        f"the row must not print the clause it could not measure: {out}")
+
+
+def test_the_stand_in_records_a_query_it_cannot_model(probe) -> None:
+    """A swallowed refusal must still REACH `_require_served`.
+
+    Both readers that consult the packs stand-in swallow a raise
+    (`graph_kind_namespaces`' `except Exception: continue`, `pack_state.py:803-812`,
+    and `ensure_tenant_packs`' best-effort seed at `:482`), so the raise alone
+    is invisible to the instrument — and silence is what a row prints as "not
+    consulted" or "none in the probe graph". The record is the only signal that
+    a read was ATTEMPTED and refused.
+    """
+    graph = probe._FakeGraph()
+    with pytest.raises(AssertionError, match="do not model this query"):
+        graph.query("MATCH (z:BrandNewLabel) RETURN z")
+    assert graph.refused == {"unmodelled"}, (
+        "a refused query that its caller swallows must be recorded, or the "
+        f"section cannot fail closed: {graph.refused!r}")
+    assert not graph.served, "a refused query must not be counted as served"
 
 
 def test_the_seeding_stand_in_refuses_a_changed_seed_write(probe) -> None:

@@ -203,11 +203,14 @@ class _FakeGraph:
     readable assertion instead of a coincidence. A row that depends on it says
     so in the row itself.
 
-    A refusal is also RECORDED (`refused`), not only raised: the seeding write
-    is wrapped in `except Exception: … best-effort` by `ensure_tenant_packs`
-    (`pack_state.py:482`), so a raise from the SEED branch never reaches the
-    instrument — it turns into an empty activation, which the self-heal row
-    would print as a broken product rather than as an unmeasurable one.
+    A refusal is also RECORDED (`refused`), not only raised — for EVERY branch,
+    not just the seed: a raise from inside `graph_kind_namespaces`
+    (`pack_state.py:803-812`) or from `ensure_tenant_packs`' per-namespace
+    best-effort guard (`pack_state.py:482`) never reaches the instrument, so
+    only the record can tell `_require_served` that a read was attempted and
+    refused. Without it an unmodelled query in either swallow site is
+    indistinguishable from a read that never happened, and the row prints
+    either a broken-product verdict or a leg it never measured.
     """
 
     def __init__(self, installs=(), marker=None) -> None:
@@ -253,6 +256,10 @@ class _FakeGraph:
         if "RETURN DISTINCT n." in cypher:  # graph_kind_namespaces — no data
             self.served.add("kind_scan")
             return _FakeResult([])
+        # Recorded before raising, for the same reason as the seed branch: both
+        # swallow sites above turn a raise into silence, and silence is exactly
+        # what a row prints as "not consulted" / "none in the probe graph".
+        self.refused.add("unmodelled")
         raise AssertionError(
             "the packs rows do not model this query, so they cannot measure "
             f"what depends on it: {cypher[:100]!r}")
@@ -336,9 +343,30 @@ def census_packs() -> None:
     union_arm = pack_state.resolved_pack_set_for_graph(union)
     # Only TWO shapes: the union arm RETURNS EARLY (`pack_state.py:974-975`,
     # `if not rows and selection is None`) and never consults the data leg — so
-    # requiring `kind_scan` here would be an assertion about a read that does
-    # not happen, and the row says so below.
+    # `kind_scan` is not in the REQUIRED set here; it is checked as an ABSENCE
+    # immediately below, which is the direction `_require_served` cannot see.
     _require_served(union, {"installs", "selection"}, "the union arm")
+    # THE CLAUSE BELOW IS A CLAIM ABOUT CONTROL FLOW, so it is checked here and
+    # it fails closed. `_require_served` is a LOWER bound — it fails on a shape
+    # that was NOT read and says nothing about one that WAS — so a reader that
+    # consults the data leg on this arm would still print "data leg: not
+    # consulted — the arm returns early" with every expectation satisfied
+    # (measured: all rows CONFIRMED, `25 premises, 0 unmeasured sections`,
+    # exit 0, the whole test file green).
+    # Deriving the WORD instead (`'consulted' if 'kind_scan' in union.served`)
+    # would stop it lying and stay green over a changed contract, which is the
+    # fail-open direction here: without the early return, `namespaces=None` no
+    # longer means "the catalog union regardless of data" (#2714 indicator 3)
+    # — a record-less graph that HOLDS data would resolve to that data — and
+    # this probe graph holds none, so no row below could tell the difference.
+    # The early return is part of the premise. When it moves, re-derive.
+    if "kind_scan" in union.served:
+        raise RuntimeError(
+            "the union arm consulted the data leg — `resolved_pack_set_for_graph` "
+            "no longer returns early for a record-less graph "
+            "(`pack_state.py:974-975`), so the row's 'not consulted' clause is "
+            "false and this section's two-shape expectation is stale: re-derive "
+            "the section")
     row("2", "no `:PackInstall` records AND no `:PackSelection` marker → "
              "`namespaces=None`, the catalog union (#2714 indicator 3)",
         f"{'CONFIRMED' if union_arm.namespaces is None and not union_arm.configured else 'FALSIFIED'}"
