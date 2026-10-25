@@ -133,15 +133,15 @@ under-planned epics. Filed as **#9701** (see §7).
 | #2702 `cal`/`bct` empty-position envelope contract | **CLOSED** 2026-09-12 |
 
 ⇒ **The re-run the filed verdict specifies is unblocked — but it is not yet runnable from the CLI, and it
-will still return the no-data sentinel for R3/R5.** Three gaps sit between "the blocker closed" and "a
+will still return the no-data sentinel for R2/R3/R5.** Three gaps sit between "the blocker closed" and "a
 measured profile". None is a regression; each is delta work (§7 rows 8–9):
 
 1. **No production truth judge.** `RunConfig.truth_judge` (`battery/runner/run.py:116,164`) is the seam the
    #2740 emitter leg reads (`battery/runner/run.py:1158` → `probe_scorer.derive_judged_truth`,
    `battery/runner/probe_scorer.py:494–513`), and that function returns immediately on `judge is None`. The
    only assignments in the tree are in tests: **nothing in production supplies one** — no CLI flag, no
-   runner default — so R3's `outcomes` and R5's `update_correct_direction` stay absent from any CLI run and
-   score `insufficient_n`.
+   runner default — so R2's `coverage_subscore`, R3's `outcomes` and R5's `update_correct_direction` stay
+   absent from any CLI run and score `insufficient_n`.
 2. **Probe aggregation is single-arm in this slice.** `battery/runner/run.py:619–622` raises `ConfigError`
    for a probe-scorer run whose arms span more than one, and `battery/runner/probe_scorer.py:754–758`
    raises again at aggregate time (*"aggregation is single-arm in this slice … multi-arm probe runs land
@@ -182,7 +182,8 @@ stands unchanged.
    an implemented probe and `tier: probe` scenarios (`battery/probes/r2_coverage.py`, `family: R2` in
    `battery/config/corpus.yaml`), and the 2026-08-14 owner ruling names "ALL probes (R1–R5; L1–L6; D2–D4)" — so a
    four-scorer command silently drops one of the five R probes. What a CLI run can produce **today** is
-   R1/R4 per-episode `metric_values` on each arm plus the no-data sentinel for the judge-gated families
+   R1/R4 per-family `values`/`cells` in `family_R1.json`/`family_R4.json` on each arm plus the no-data
+   sentinel for the judge-gated families
    (R3 `outcomes`, R5 `update_correct_direction`, and R2's `coverage-subscore`, which the probe reads from
    a validated-rubric judge: `battery/probes/r2_coverage.py:1–7,33–37`); those need §7 row 9 (the
    production truth judge) first. That limit is a property of the harness at this head, not of the corpus,
@@ -212,8 +213,9 @@ stands unchanged.
    pre-battery factual recall is **0.0 by construction** (`battery/arms/a1_longctx.py` resets
    `_history`, which `record()` only fills during episodes, i.e. after the pre-pass), so for `a1` the
    matched control may be unreachable and would re-create the constant-True trigger #3327 removed.
-   Comparator-arm data for A1/A2/A2b/A3 is #2525's scope in the #2515 umbrella **and inherits those
-   two blockers**. This corrects a claim in the
+   Comparator-arm **readiness** for A1/A2/A2b/A3 — which can run, at what cost ceiling, and the
+   matched-recall data for each RUNNABLE arm — is #2525's scope in the #2515 umbrella; the sweep itself is
+   #1416's Tier-3 wave, **and the readiness package inherits those two blockers**. This corrects a claim in the
    verdict doc — the delta is to fix that claim, not to build a missing producer.
 4. **Capstone** — #1419 walks scope E2E-1…7 on the real run and gates epic completion.
 5. **Test-design map closure** — #1404 (open) is cited as the verification basis by #1416/#1419.
@@ -361,14 +363,14 @@ edges/labels. Listed for the owner gate.
 | # | Work unit | O/I/T (one line) | State |
 |---|---|---|---|
 | 1 | **#1416** battery execution + verdict re-file | O: run tier-1 `a4,a0` on the real lane (one invocation per arm, all five probe scorers — R2 included) and re-file the claim doc / I: `cells[primary] == "measured"` for R1/R4 (R2/R3/R5 present as `insufficient_n` until §7 row 9's judge, never absent) on each arm's own profile, and `report_status` an honest `incomplete_*` naming its cause (E2E-D1 — `complete` is unreachable and is not the criterion) / T: E2E-D1, D2 | OPEN — **the delta's critical path**. Its own DoD is the full battery (Tier-1, Tier-2, Tier-3, parity) and is **unchanged** by this brief |
-| 2 | **#2525** comparator-arm real-run readiness | O: run A1/A2/A2b/A3 on the real lane with matched-recall data / I: every comparator arm has real numbers + A2b go/no-go / T: E2E-D3 | OPEN (in #2515 umbrella) — **not data-only**: blocked on **#3327** (four open decision points; its title says it blocks #2525 indicator 2) and **#3437** (`a1`'s pre-pass factual recall is 0.0 by construction, so the matched control may be unreachable for `a1` — §4 item 3) |
+| 2 | **#2525** comparator-arm real-run readiness | O: produce the comparator-arm readiness package — backend state, cost ceiling, determinism and the `ArmUnavailable` path per arm, plus matched-recall pre-pass data (factual top-K F1, K=5) per RUNNABLE arm / I: every comparator arm is runnable-with-evidence or honestly declared unavailable EX ANTE, plus a dated A2b go/no-go; **the sweep itself is #1416's Tier-3 wave, not this row's** / T: E2E-D3 | OPEN (in #2515 umbrella) — **not data-only**: blocked on **#3327** (four open decision points; its title says it blocks #2525 indicator 2) and **#3437** (`a1`'s pre-pass factual recall is 0.0 by construction, so the matched control may be unreachable for `a1` — §4 item 3) |
 | 3 | **#1419** capstone clickthrough | O: walk scope E2E-1…7 on the real run / I: all pass or gated-with-name, artifacts reproducible / T: E2E-D4 | OPEN |
 | 4 | **#1404** test-design integration-surface map | O: close the S1–S8 verification map the children cite / I: every surface has an assigned layer / T: cited by #1416/#1419 checklists | OPEN |
 | 5 | **#2702** `cal`/`bct` envelope contract | O: fix the empty-position envelope class / I: long-prompt deadline class no longer aborts calibration / T: calibration leg clean | CLOSED 2026-09-12 — no action |
 | 6 | *(new, optional)* re-label #1416 not-launch-relevant → launch-relevant | O: reflect the reclassification trigger in labels / I: one label change with the 01-align trigger quoted / T: n/a | — |
 | 7 | *(new, mandated)* fleet audit instrument: sub-issue relation | O: make epic→child linkage read reliably by audits / I: an audit of epics reports true child counts / T: §2 evidence | **#9701** (filed 2026-10-22) |
 | 8 | *(sub-unit of #1416 — no new issue)* lift the single-arm probe guard | O: let one probe-scored run aggregate across arms / I: `--arms a4,a0` with probe scorers yields per-arm families instead of `ConfigError` before the attempt dir (`battery/runner/run.py:619–622`, `battery/runner/probe_scorer.py:754–758`) / T: the ONE-run, two-arm `profile.json` that §4 item 1 says two invocations cannot produce | OPEN — **code**; until it lands, "both arms in one run" is not a command that exists |
-| 9 | *(sub-unit of #1416 — no new issue)* wire a production truth judge | O: set `RunConfig.truth_judge` from something other than a test / I: a CLI run emits R3 `outcomes`, R5 `update_correct_direction` **and R2 `coverage_subscore`** — the third judge-gated family this row unlocks, which §4 item 1 and E2E-D1 both state — with evidence, or refuses naming the missing judge (`battery/runner/run.py:1158`; `battery/runner/probe_scorer.py:418`, `:494–513`) / T: E2E-D1's R3/R5/R2 `cells[primary] == "measured"` / `values[primary]`, with the per-episode `metric_values` they unlock | OPEN — **code**; this is why "one re-run" is not yet enough |
+| 9 | *(sub-unit of #1416 — no new issue)* wire a production truth judge | O: set `RunConfig.truth_judge` from something other than a test / I: a CLI run emits R3 `outcomes`, R5 `update_correct_direction` **and R2 `coverage_subscore`** — the third judge-gated family this row unlocks, which §4 item 1 and E2E-D1 both state — with evidence, or refuses naming the missing judge (`battery/runner/run.py:1158`; `battery/runner/probe_scorer.py:418`, `:494–513`) / T: E2E-D1's R3/R5/R2 `cells[primary] == "measured"` / `values[primary]`, with the per-family payloads they unlock | OPEN — **code**; this is why "one re-run" is not yet enough |
 
 **MECE check:** (1) is execution + claim re-file, (2) is comparator data, (3) is verification, (4) is the
 verification basis, (5) is closed history — no two own the same artifact. (1) and (2) touch the same
