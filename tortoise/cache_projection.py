@@ -975,8 +975,9 @@ def declared_key(label: str, key: str, *, scope: str = "") -> str:
     """The declared coordinate for ONE record node — ``label:key``, scoped.
 
     ⛔ **The LABEL is part of the coordinate, never discarded.** ``KEY_PROPERTY``
-    gives ``Subject`` and ``Object`` the same key (``name``) and ``Point`` and
-    ``Session`` the same key (``id``), so a bare key string is **not unique
+    keys ``Object``, ``Subject``, ``Point`` and ``Session`` all on ``id`` (#9881
+    moved ``Object``/``Subject`` off ``name``, which is a mutable natural key —
+    two live entities may share it), so a bare key string is **not unique
     across labels**: a key-only declaration collapses ``(Object, "acme")`` and
     ``(Subject, "acme")`` into ONE hot key, and a projection that wrote only one
     of them then declares ``complete`` — the fail-OPEN polarity this module
