@@ -104,7 +104,7 @@ keeps the endpoint's own `content_hash` re-derivation honest.
 Measured 2026-10-24 on Postgres 16 (record) + a live FalkorDB (cache), the point created by the
 production SDK and written to the record by the production projection (`record_projection.replay`):
 
-```
+```text
 PARITY MEASUREMENT {"cache_fields": 11, "record_fields": 8,
   "diff": {"clean": true, "changed": [], "invented": [],
            "unexplained_missing": [],
@@ -115,7 +115,7 @@ The three absences are exactly the refused names the live point carried; nothing
 `S9` — the same read with the cache copy **destroyed** (`DETACH DELETE`, then a cache callback that
 raises if touched at all):
 
-```
+```text
 S9 {"fields": ["content","createdAt","id","is_operator","key","pointKind","status","updatedAt"],
     "read": "point-by-id", "served_from": "record"}
 ```
