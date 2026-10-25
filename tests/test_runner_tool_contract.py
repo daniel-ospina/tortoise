@@ -56,8 +56,9 @@ MARKER = "RUNNER-TOOL-CONTRACT-UNSATISFIED"
 #: `availability-watchdog.sh` / `availability-liveness.sh` / `availability-record.sh`,
 #: `auto-file-issue.sh` (`e2e-live-reconcile`, `prod-csp-monitor`,
 #: `tenant-provision-monitor`), `welcome-e2e-monitor.sh` (`welcome-e2e-monitor`),
-#: `mergify_config_guard.py` (`mergify-guard-recut`). The set is 16 jobs across 14
-#: workflows; count it from the literal, not from this sentence.
+#: `mergify_config_guard.py` (`mergify-guard-recut`), `inbound_relay_sweep.py`
+#: (`inbound-relay-sweep`). The set is 17 jobs across 15 workflows; count it from
+#: the literal, not from this sentence.
 GH_JOBS = {
     "python-ci.yml": ["canary-streak"],
     "finding-provenance.yml": ["classify", "provenance"],
@@ -73,6 +74,12 @@ GH_JOBS = {
     "e2e-live-reconcile.yml": ["reconcile"],
     "prod-csp-monitor.yml": ["audit"],
     "supabase-deploy.yml": ["deploy"],
+    # `tools/inbound_relay_sweep.py` reaches `gh` for EVERY read and EVERY
+    # mutation (label, comment, close, relay) — the job has no other channel to
+    # the repo. Found by the scan at the bottom of this file when the sweep was
+    # added (#9943/#9946); the job does carry a checkout, so the step can run and
+    # this is coverage, not a declared gap.
+    "inbound-relay-sweep.yml": ["sweep"],
 }
 
 #: Jobs that use `gh` and are NOT covered, with the reason each one cannot simply take
