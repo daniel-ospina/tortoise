@@ -202,6 +202,19 @@ surfaces:
   - test_7950_capstone_probe.py
   # #9557 (R9): the record's BACKUP and the drill that proves it restores (`tortoise/record_backup.py` + the `record-backup` CLI verb). DUAL-REGISTERED with `core`, and THIS arm is the one that carries a verb-only diff: `tortoise/__main__.py` is an EXACT `api` SOURCE_PATTERN that REPLACES the `core` fallback in `select()`, so a diff that changes the verb alone selects `api` and a `core`-only entry would never run the file pinning the verb's exit codes — the #1349/#2938/#3154 silent-drop class, the same argument as the `test_record_reconcile_trigger.py` rows above. `record_backup.py` itself matches no SOURCE_PATTERN, so a mechanism-only diff takes `core`. DB-free (pg_dump/pg_restore and the row counts are injected), so it is deliberately NOT carve_out-registered.
   - test_record_backup.py
+  # #7970 (epic #7879, interface D): the ANCHORED read surface the record
+  # serves — the `GET /v1/points/{id}` handler is the first read answered by the
+  # record with the graph stopped, and its failure arms (`record` mode is 503 on
+  # an impaired record, NEVER 404; `prefer` mode's fallback is named and
+  # counted; OFF stays byte-identical) live in `tortoise/hosted_api.py`, an EXACT
+  # `api` SOURCE_PATTERNS match that REPLACES the `core` fallback in `select()`.
+  # A hosted_api-only diff therefore selects `api`+`onboarding` and a `core`-only
+  # entry would never run the endpoint pins — the #1349/#2938/#3154 silent-drop
+  # class. DUAL-REGISTERED with `core` below, where `record_serve.py`
+  # (no SOURCE_PATTERN) is the subject. DB-free: every connection is a recording
+  # fake, so it needs no graph, no URI and no carve-out registration; the live
+  # half is `test_record_serve_live.py`.
+  - test_record_serve.py
   # #7809: DUAL-REGISTERED with `core` AND `eval` — without this `api` arm the
   # guard is SKIPPED on the exact change it exists to guard. The pre-warm it
   # pins lives in `tortoise/hosted_api.py`, an EXACT `api` SOURCE_PATTERNS match
@@ -2376,6 +2389,23 @@ surfaces:
   # `supabase/tests/20261022000001_record_tenancy_posture.sql`, registered in
   # `supabase/tests/pglite/validate.mjs`.
   - test_record_tenancy_guc.py
+  # #7970 (epic #7879, interface D) — the record-served ANCHORED read
+  # (`tortoise/record_serve.py`) and the two test files that pin it. `core` is
+  # the arm that carries the mechanism: `record_serve.py` matches no named
+  # SOURCE_PATTERN, and the modules it reuses (`cache_projection.py`,
+  # `record_projection.py`) are `core`-selected too. `test_record_serve.py` is
+  # DUAL-REGISTERED with `api` above (it drives the `GET /v1/points/{id}`
+  # handler); this arm is load-bearing for the module-only diff, the `api` arm
+  # for the handler-only one.
+  - test_record_serve.py
+  # The LIVE half: parity on a real Postgres and S9 with the cache copy
+  # destroyed. It needs BOTH stores (`TORTOISE_DB_URI` + `TEST_RECORD_DB_URI`)
+  # and no CI job provides both, so it SKIPS VISIBLY (per-test `pytest.skip`,
+  # not an import-time module skip — which is why it is deliberately NOT in
+  # `uri_requiring`: that list is for modules that COLLECT nothing on a
+  # URI-empty leg, and this one collects). Registered here so the file is
+  # classified rather than drifting unregistered (`integrity_problems`).
+  - test_record_serve_live.py
   # #7968 / PR #8179 review P1: guards the org-erasure wiring — `purge_org_control_plane`
   # must route the organizations delete through the `purge_org_record` RPC
   # (migration 20261012000005), which sets app.record_journal_purge so the
@@ -3541,6 +3571,15 @@ surfaces:
   - test_extractor_reliability.py
   - test_extractor_embed_coerce_5060.py  # #5060: execute_embed must not raise on a non-string name/content (whole-session payload loss)
   - test_extractor_v2.py
+  # #2684 (Slice B): the value-span census — the wave's per-question T leg
+  # ("the value-bearing evidence is verbatim-present") measured over the
+  # COMMITTED #7947 arms receipts with the shipped `_carries_value` /
+  # `_value_verbatim_span`, zero paid calls. Registered HERE because the
+  # mechanism it pins is `tortoise/extractor_v2.py` (the default `core`
+  # surface, not a SHARED_MODULE) — and on `eval` below, where
+  # `tests/eval/write_path/` is a SOURCE_PATTERNS entry (so a receipts/fixture
+  # change selects it). Hermetic: committed JSON only, no DB/network/model.
+  - eval/write_path/test_value_span_census_2684.py
   # #8503 (code-review round 9, P1): the evidence bundle's DOC pins — the
   # `docs/00_index.md` registration row and the verdict banner's bound. They
   # lived in `test_extractor_v2.py` above, which is `core` AND a `slow_files`
@@ -5817,6 +5856,26 @@ surfaces:
   # (`tortoise/hosted_api.py` -> api), the guarded handle it must use
   # (`tortoise/projection/__init__.py` -> core) and `TortoiseSDK.org_create` (sdk).
   - test_9157_eager_init_declared.py
+  # #2684 (Slice B) review P2: the value-span census is ALSO registered here,
+  # because the third thing that can move it selects `sdk` and NEITHER of its
+  # other two rows: `tortoise/retrieval.py` supplies the whole dedupe half
+  # (§2.3's `_pkg_overlap` / `_pkg_differ_value_critical` / `_pkg_turn_key` and
+  # both `DEFAULT_PACKAGE_*` thresholds) and selects `sdk` — REPLACING the
+  # `core` fallback (#2938). Measured with the row withheld:
+  # `--changed-files tortoise/retrieval.py` -> `surfaces=['sdk']`, 158 test
+  # files, census ABSENT. The row is needed because the census would not run
+  # AT ALL on such a diff — NOT because every predicate is otherwise
+  # unpinned: `_pkg_turn_key`'s `0`-vs-`""` normalisation IS pinned elsewhere,
+  # hermetically, by
+  # `tests/test_8658_product_hit_provenance.py::test_the_first_source_turn_is_a_turn`
+  # (that module's docstring calls itself the only pin for it). A
+  # retrieval-side change could re-stale §2.3's four published readings with
+  # the guard never running — the #1349/#2938 silent-drop class, on the half
+  # of the census that is not `core`. The file is hermetic (committed receipts
+  # + fixtures only: no DB, no network, no model; ~4 s measured), so the row is
+  # cheap. Pinned by
+  # `tests/test_ci_selection.py::test_the_2684_census_is_selected_on_every_surface_that_moves_it`.
+  - eval/write_path/test_value_span_census_2684.py
   classify:
   # Issue #1695 (extractor-v3 classify-later): the kind-classification and
   # chain-enforcement surface. Pure-logic files (stub encoders, golden
@@ -6012,6 +6071,24 @@ surfaces:
   # test_extractor_v2.py / test_salience_labels_4917.py read those sources.
   # Pinned by tests/test_ci_selection.py::test_write_path_measurement_source_edit_selects_eval.
   - eval/write_path/test_score_qualifiers.py
+  # #2684 (Slice B): the value-span census (see the `core` entry for why it is
+  # registered there too). MULTI-REGISTERED because the three things that can
+  # move it select DIFFERENT surfaces: `tortoise/extractor_v2.py` selects
+  # `core` (where the mechanism's own unit pins live), `tortoise/retrieval.py`
+  # selects `sdk` (the dedupe half — see the `sdk` entry), while the population
+  # it measures is the committed #7947 arms receipts + fixtures under
+  # `tests/eval/write_path/` — a SOURCE_PATTERNS entry of THIS surface. This
+  # row records the file's OWN surface, which is what keeps the manifest a
+  # complete statement of where each test runs. It is NOT what carries a
+  # receipts-only diff: the explicit `core` row above does that, because
+  # `CORE_ALSO` keeps `core` on these `tests/eval/write_path/` paths. MEASURED
+  # with this row withheld: `integrity()` is still `[]` (the file is classified
+  # by the `core` row, so `manifest-integrity` cannot red) and
+  # `select(["…/wp01_quarry_debug.arms.json"])` still returns
+  # `['core','eval']` with the census present. So do not delete the `core` row
+  # on the strength of this one — this row is surface completeness, `core` is
+  # coverage.
+  - eval/write_path/test_value_span_census_2684.py
   # #5085: the additive blind BANDED semantic judge + calibration harness
   # (hermetic unit/contract layer — no DB/network/LLM; the real judged run is
   # opt-in via `runner run --judge semantic`).
@@ -6869,6 +6946,7 @@ push_extra: []
 # value moves or it is held, so an unchanged row keeps the figure it was given.
 durations_captured_at: "2026-10-21T09:30:00Z"
 durations:
+  eval/write_path/test_value_span_census_2684.py: 2.0  # unmeasured — added by the #2684 Slice-B census PR (#3400/#4348 trap): a file a PR ADDS can never carry a CI junit measurement yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419). The row has to EXIST, not merely default: adding the file to the `core`/`eval`/`sdk` surfaces puts it in `fast_pool()`, and `--integrity`'s duration-coverage floor is measured against that pool's own size. MEASURED at this head in BOTH states, because they differ by exactly this row: WITH it `fast_pool` is 1032 files with 102 unweighted = 930/1032 = 0.901163 (`duration_coverage_issues() == []`, ONE unweighted row of headroom); WITHOUT it 103 are unweighted = 929/1032 = 0.900194 — still above the inclusive 0.90 floor, so the row is not what makes the gate pass, it is the headroom: the NEXT unweighted fast file lands on exactly that 103/1032 = 0.900194 (green), and the one after it reds at 104/1032 = 0.899225. ⚠️ Read that pair as a SNAPSHOT of a moving denominator, not a constant: main keeps adding fast files, so `tools/ci_selection.py --integrity` is the authority. What the weight covers: hermetic and cheap — committed #7947 arms receipts + `tests/eval/write_path/fixtures/` JSON only, plus the shipped `extractor_v2`/`retrieval` predicates; no DB, no network, no model, ~4 s measured. `tools/ci_timing.py --refresh-durations` replaces this from junit once a sweep collects it.
   test_5140_d10_code_half_residuals.py: 2.0  # unmeasured — new in the #5140 residual harvest (#3400/#4348 trap): a file ADDED BY A PR can never carry a CI junit measurement (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419). What the weight covers: 7 cases, ALL SEVEN taking the URI-aware `sdk_factory` graph fixture — a throwaway embedded FalkorDB each (the tier-2 PR legs this file is registered in are URI-empty BY DESIGN, so that is how it runs there; only a leg that DOES set `TORTOISE_DB_URI` redirects the graph to that server, under `TORTOISE_TEST_MODE=1` + `TORTOISE_DB_URI`); no Postgres, no network, no model. The row is kept because a fast file added by a PR must carry a weight at all, and because the floor it feeds is a moving target: adding the file to the `core` and `sdk` surfaces puts it in `fast_pool()`, and `--integrity`'s duration-coverage floor is measured against the pool's own size. ⚠️ The counterfactual below is a SNAPSHOT OF A MOVING DENOMINATOR, not a current requirement, and the SHA matters — at this branch's PRE-REBASE head `ed33730a0` (base `ee9edbffc`), `--integrity` reported `❌ manifest drift: … 925/1028 … below the 90% floor` WITHOUT it. At the rebased head that ADDS the row (`99e4e472c`, base `90fe82ea4`) the pool had grown to 1030 and WITHOUT the row coverage was 927/1030 = 0.900000, i.e. `duration_coverage_issues()` was `[]` — already green with ZERO headroom, so a claim that the row is REQUIRED at that head is false. `tools/ci_selection.py --integrity` is the authority, and one file of headroom is not headroom. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_4282_memory_graph_surface.py: 2.0  # unmeasured — new in #4282 (phase 2.3); no CI sweep has collected it, so it carries the flat default for an unmeasured file (the #2818/#3400/#9121 convention) rather than a local reading, which this map forbids as a SHARD-LAYOUT input. What the weight covers: 17 cases — 13 taking the derived `sdk` graph fixture (a team created and torn down per test; EMBEDDED locally, redirected by `tests/_embedded.py` to the docker/server lane under `TORTOISE_TEST_MODE=1` + `TORTOISE_DB_URI`, so the flat weight is the same either way) and 4 that need no graph (the retirement hint, the class check, the tool-name check, and one source scan of EVERY tracked `*.py` for retired call sites, deliberately wider than `tortoise/` because `graph-scripts/` held a live caller) — no Postgres, no network, no model. The row has to EXIST, not merely default: one more unweighted fast file moves the coverage ratio, and `--integrity`'s duration-coverage issue list is measured against the pool's own size. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_evidence_8503_claims.py: 2.0  # unmeasured — new in #8503 round 9 (#3400/#4348 trap): a file ADDED by a PR can never carry a CI junit reading (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` rather than a local reading, which this map forbids as a SHARD-LAYOUT input. What the weight covers: TWO file scans and nothing else — `docs/00_index.md` (one row, its artifact list and its published figures) and `docs/evidence/8503/README.md` (the verdict banner's over-claim absence + the scoped claim it was replaced with). No graph, no DB, no network, and no import of `tortoise.extractor_v2`, which is why it is safe in `tier1`. The row must EXIST, not merely default: this file is added to the fast pool by this PR, and an unweighted fast file is what `--integrity`'s `duration_coverage_issues` measures against the pool's own size. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
@@ -7117,6 +7195,8 @@ durations:
   # Both are measured locally under the same `# unmeasured` convention; refresh from
   # the first post-merge run that includes them.
   test_7936_reference_fold_label_rekey.py: 8.0  # #7936 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). The row is added for the HEADROOM the gate no longer has — main sits just above the 90% floor, so one more unmeasured fast file can tip `duration_coverage_issues()`, and an absent row is also what reds `tests/test_ci_timing.py`'s `validate_refreshed_manifest` assertions. Local embedded-lane reading 7.0-10.1 s (15 tests; `FalkorProjection(path=…)` graphs, plus one SDK live-build case). Refresh from the first post-merge run that includes it.
+  test_record_serve.py: 2.0  # #7970 (#3400/#4348 trap): a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it takes the flat 2.0s default, and the surface half alone is not enough — an unregistered new test file reds `integrity_problems` on the DURATIONS map too. The file is DB-free; NO local time and no test COUNT is asserted here (both drift between rounds — `pytest --collect-only` is the authority); no local time is substituted for the CI weight (the #3400 method cannot attribute a session total per file, and a local wall-clock reading has not reproduced across lanes), so the flat default stands until the first post-merge sweep measures it. Refresh from the first post-merge run that includes it.
+  test_record_serve_live.py: 2.0  # #7970, same #3400/#4348 trap as the row above. The file SKIPS on every CI leg today (no job provides both a Postgres carrying the record migrations and a FalkorDB), so its CI weight is the skip-time floor, not a measurement; it is registered because an unclassified file reds `integrity_problems`, and the flat default is what an unmeasured file takes. Run by hand on a lane with both stores armed: 2 passed (parity clean, cache 11 record 8; S9 answered from the record). No wall-clock weight is derived from that single-lane reading.
   test_record_backup.py: 2.0  # #9557 (#3400/#4348 trap): a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it takes the flat 2.0s default — and the row is required for the DURATIONS half as well as the surface half, because an unregistered new test file reds `integrity_problems`. Locally the file is DB-free and runs in seconds; the session total cannot be attributed per file by the #3400 method, so no local number is substituted for a CI weight. Refresh from the first post-merge run that includes it; do not drop the row without re-deriving the coverage floor at that head.
   eval/retrieval/test_integration.py: 1523.4
   # #3553: this file is NEW on this branch, so main's sweep has no junit measurement for it.
