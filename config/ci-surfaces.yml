@@ -4805,6 +4805,15 @@ surfaces:
   # the URI-unset leg is its natural home. No `durations` row is needed: `fast_pool()` drops every
   # carve-out member, so registration here cannot move the durations coverage ratio.
   - test_ci_runner_x64_install.py
+  # #9018: THE RUNNER TOOL CONTRACT. `runs-on: ubuntu-latest` names a GitHub-hosted IMAGE;
+  # the fallback pool carries the same label on a bare runner whose service PATH is a
+  # minimal non-login one. Six jobs called `gh` and died `exit code 127` there, which reads
+  # as a test failure. This file proves `.github/scripts/runner-tools.sh` DISCRIMINATES —
+  # present passes, absent fails NAMING the tool, an unpinned archive is refused — and
+  # asserts every job known to need `gh` runs the contract step FIRST. Hermetic: a stub
+  # binary and a locally built tarball, no network, no URI, nothing imported from the
+  # package. `core` is what classifies the file at all (integrity rglobs `tests/test_*.py`).
+  - test_runner_tool_contract.py
   ep:
   # #7951 (remaining doors) / review P1: DUAL-REGISTERED with `core` (below)
   # and the other exact-match surfaces. The write-door INVENTORY scans ALL of
@@ -6679,6 +6688,11 @@ carve_out:
 # tests/_embedded.TEST_NO_REDIRECT_STEMS (the pin is
 # tests/test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems).
 - test_ci_runner_x64_install.py
+# #9018: THE RUNNER TOOL CONTRACT probe — subprocess-only (a stub binary and a locally built
+# tarball, no network, no graph, nothing imported from the package), so the URI-unset leg is its
+# natural home and `fast_pool()` drops it, which keeps this registration out of the durations
+# map's coverage ratio. The stem is mirrored in tests/_embedded.TEST_NO_REDIRECT_STEMS.
+- test_runner_tool_contract.py
 # #6884: modules that REQUIRE the docker lane — each one module-skips at import
 # when `TORTOISE_DB_URI` is not a usable URI — in the tier-2 PR legs that means
 # present and EMPTY (`URI=""`), not absent (`if not _is_db_uri(...): pytest.skip(...)`

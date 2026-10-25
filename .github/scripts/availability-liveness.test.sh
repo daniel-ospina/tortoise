@@ -393,6 +393,13 @@ run_checker
 assert_eq "$RC" "1" "16: a failed alert search → exit 1 (refuses to create or resolve)"
 assert_eq "$(count_calls 'GH POST')" "0" "16: …does NOT duplicate-file the alert on an unreadable search"
 assert_eq "$(count_calls 'GH PATCH')" "0" "16: …and does NOT close anything on a bad read"
+# #9018: the faillure must carry the TOOL's own words, and the arm must match the
+# `__ERR__|<reason>` sentinel. This is the pin for the P0 that shipped when only
+# the heartbeat arm was taught the new shape: with a literal `__ERR__)` match the
+# error string fell through as if it were an issue number, and the run PATCHed
+# `issues/__ERR__|gh: …`.
+assert_contains "$OUT" "gh said:" "16: …and the failure names what gh actually said (#9018)"
+assert_eq "$(count_calls 'GH PATCH')" "0" "16: …the __ERR__|<reason> sentinel is never used as an issue number"
 
 # 17. missing GH_TOKEN → fail before any gh call.
 reset_case

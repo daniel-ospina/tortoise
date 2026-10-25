@@ -312,7 +312,11 @@ redact_text() {
 
 # ── GitHub issue helpers ────────────────────────────────────────────────────
 # Echoes a positive issue number, "" when none is open, or "__ERR__" when the
-# search failed or answered something unparseable. SECURITY: this is a PUBLIC
+# search failed or answered something unparseable. Since #9018 the failure form
+# is `__ERR__|<the tool's own stderr>` — the reason rides on the SENTINEL because
+# the caller reads this function through `$(…)`, so an assignment made in here is
+# discarded with the subshell. EVERY caller must therefore match `__ERR__*`.
+# SECURITY: this is a PUBLIC
 # repo, so "an open issue whose title matches" is NOT ours. Any account can open
 # an issue with our title and a FORGED heartbeat body; adopting it would let a
 # stranger claim the pager is alive (a fail-OPEN mute of the liveness check).
@@ -329,12 +333,28 @@ search_issue() { # <body-marker> <exact-title>
   # issue from another producer is never adopted).
   q="repo:${REPO} is:issue is:open in:title author:app/github-actions \"$2\""
   enc="$(urlencode "$q")"
-  if ! out="$(gh api "search/issues?q=${enc}&per_page=100" --paginate 2>/dev/null)"; then
-    printf '__ERR__'; return 0
+  # ⛔ NEVER `2>/dev/null` HERE (#9018). That redirect is how a RUNNER fault was
+  # re-reported as this checker's own verdict: on the fallback pool `gh` is
+  # absent from the service PATH, the shell wrote `gh: command not found` to
+  # stderr, the redirect ate it, and the only surviving line was the fail-closed
+  # message below — indistinguishable from "the search call failed". Measured
+  # 2026-10-24 on `pi-runner-vm-3`. The verdict was right; the attribution was
+  # fiction, and it cost a forensics pass to recover. Keep the tool's own words.
+  local errf
+  errf="$(mktemp 2>/dev/null || printf '%s' "/tmp/avail-liveness-search.$$")"
+  if ! out="$(gh api "search/issues?q=${enc}&per_page=100" --paginate 2>"$errf")"; then
+    # The reason RIDES ON THE SENTINEL. It cannot be a shell variable: the
+    # caller reads this function through `$(…)`, i.e. in a subshell, so any
+    # assignment made here is discarded before the error path can use it.
+    printf '__ERR__|%s' "$(head -3 "$errf" 2>/dev/null | tr '\n' ' ')"
+    rm -f "$errf"
+    return 0
   fi
+  rm -f "$errf"
   if ! n="$(printf '%s' "$out" | jq -rs --arg login 'github-actions[bot]' --arg title "$2" --arg marker "$1" \
       '[.[].items[]? | select((.user.login // "") == $login) | select((.title // "") == $title) | select(((.body // "") | contains($marker)))][0].number // empty' 2>/dev/null)"; then
-    printf '__ERR__'; return 0
+    printf '__ERR__|search response was not parseable JSON'
+    return 0
   fi
   # EMPTY = "not found" (a real answer: the caller may create one or fall back
   # to the bootstrap path). Only a NON-EMPTY non-numeric value is ERR. Collapsing
@@ -453,7 +473,7 @@ BODY
 
 # ── main ────────────────────────────────────────────────────────────────────
 main() {
-  local hb_issue body hb_epoch age_min reason age_clause wf_created wf_epoch wf_age alert state
+  local hb_issue body hb_epoch age_min reason age_clause wf_created wf_epoch wf_age alert state search_error
 
   # Fail closed: a checker that cannot alert is a deaf checker.
   if [ -z "$GH_TOKEN" ]; then
@@ -472,12 +492,15 @@ main() {
 
   hb_issue="$(search_issue "$HEARTBEAT_MARKER" "$HEARTBEAT_TITLE")"
   case "$hb_issue" in
-    __ERR__)
+    __ERR__*)
+      search_error="${hb_issue#__ERR__|}"
       # "cannot read the heartbeat" is NOT "the pager is dead", and it is not
       # "all clear" either. Do not file a liveness-alert issue on a transient
       # search failure (that would be a false page); fail the run loudly so the
-      # checker's own blindness is visible and retried next run.
-      fail "heartbeat search failed — cannot assess the pager's liveness this run (not treated as fresh; retried on the next run)"
+      # checker's own blindness is visible and retried next run. The tool's own
+      # words ride along when the sentinel carries them (#9018) — without them
+      # this line cannot be told apart from "the runner has no gh".
+      fail "heartbeat search failed — cannot assess the pager's liveness this run (not treated as fresh; retried on the next run)${search_error:+ — gh said: ${search_error}}"
       exit 1 ;;
   esac
 
@@ -555,8 +578,16 @@ liveness_workflow_age_min=unknown"
 
   alert="$(search_issue "$LIVENESS_ALERT_MARKER" "$LIVENESS_ALERT_TITLE")"
   case "$alert" in
-    __ERR__)
-      fail "liveness-alert search failed — refusing to file or resolve (never duplicate); cannot confirm the alert state"
+    # ⛔ `__ERR__*`, not `__ERR__` — since #9018 the sentinel carries the tool's
+    # own words (`__ERR__|<stderr>`). A literal match here leaves this arm dead
+    # for every new error shape AND lets the non-empty error string fall through
+    # as though it were an issue number, so the run goes on to PATCH/CLOSE
+    # `issues/__ERR__|gh: …`. This exact defect shipped once: the heartbeat arm
+    # was taught the new shape and this one was not. Keep the two arms identical
+    # in shape, or one of them silently stops guarding.
+    __ERR__*)
+      search_error="${alert#__ERR__|}"
+      fail "liveness-alert search failed — refusing to file or resolve (never duplicate); cannot confirm the alert state${search_error:+ — gh said: ${search_error}}"
       exit 1 ;;
   esac
 
