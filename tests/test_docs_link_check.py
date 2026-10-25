@@ -435,7 +435,7 @@ def test_a_stale_report_from_an_earlier_step_never_survives_a_failure(tmp_path: 
 
     stale = tmp_path / "runner_temp" / STEPS["Link check (changed files)"][1]
     stale.write_text('{"total": 0, "error_map": {}, "timeout_map": {}}', encoding="utf-8")
-    proc, report = _run_step_for_existing(tmp_path)
+    proc, _report = _run_step_for_existing(tmp_path)
     assert proc.returncode != 0
     # The first unpack is `_report`: that binding is genuinely unused and an
     # underscore name is what says so (`ruff check .` fails the whole repo on an
