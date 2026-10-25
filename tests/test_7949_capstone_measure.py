@@ -830,7 +830,8 @@ def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
     nothing counted — and blamed `extract_session_v2`, which in fact BUILDS
     `result["vet"]` (:8833-8837) and `result["classify_later"]` (:8823-8829). The
     drop is the meta fold at `tortoise/sdk.py:12744` — the cite was `:12196` until
-    this round, and `:12738` until the #9109 merge moved the fold 6 lines down, so
+    this round, and `:12738` until #9952 (`43a6eee6a`, the `:Source` MERGE-key resolver
+    adopting S0a/S0b) moved the fold 6 lines down, so
     each round the bundle sent the #9116 fixer somewhere else. Getting it wrong sends
     the next lane to the wrong file; getting the ARITHMETIC wrong sends it to a
     claim nothing supports.

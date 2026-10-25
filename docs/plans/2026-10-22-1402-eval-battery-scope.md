@@ -92,7 +92,7 @@ modules**. The harness is not a plan; it ships.
 
 ### Root cause of the false "zero children" audit
 
-`gh issue view 1402 --json subIssues,parent` →
+`gh issue view 1402 --json subIssues,parent,subIssuesSummary` →
 
 ```json
 {"parent":null,"subIssues":{"nodes":[],"totalCount":0},
@@ -362,7 +362,7 @@ edges/labels. Listed for the owner gate.
 | 6 | *(new, optional)* re-label #1416 not-launch-relevant → launch-relevant | O: reflect the reclassification trigger in labels / I: one label change with the 01-align trigger quoted / T: n/a | — |
 | 7 | *(new, mandated)* fleet audit instrument: sub-issue relation | O: make epic→child linkage read reliably by audits / I: an audit of epics reports true child counts / T: §2 evidence | **#9701** (filed 2026-10-22) |
 | 8 | *(sub-unit of #1416 — no new issue)* lift the single-arm probe guard | O: let one probe-scored run aggregate across arms / I: `--arms a4,a0` with probe scorers yields per-arm families instead of `ConfigError` before the attempt dir (`battery/runner/run.py:619–622`, `battery/runner/probe_scorer.py:754–758`) / T: the ONE-run, two-arm `profile.json` that §4 item 1 says two invocations cannot produce | OPEN — **code**; until it lands, "both arms in one run" is not a command that exists |
-| 9 | *(sub-unit of #1416 — no new issue)* wire a production truth judge | O: set `RunConfig.truth_judge` from something other than a test / I: a CLI run emits R3 `outcomes` and R5 `update_correct_direction` with evidence, or refuses naming the missing judge (`battery/runner/run.py:1158`; `battery/runner/probe_scorer.py:494–513`) / T: E2E-D1's R3/R5 `cells[primary] == "measured"` / `values[primary]`, with the per-episode `metric_values` they unlock | OPEN — **code**; this is why "one re-run" is not yet enough |
+| 9 | *(sub-unit of #1416 — no new issue)* wire a production truth judge | O: set `RunConfig.truth_judge` from something other than a test / I: a CLI run emits R3 `outcomes`, R5 `update_correct_direction` **and R2 `coverage_subscore`** — the third judge-gated family this row unlocks, which §4 item 1 and E2E-D1 both state — with evidence, or refuses naming the missing judge (`battery/runner/run.py:1158`; `battery/runner/probe_scorer.py:418`, `:494–513`) / T: E2E-D1's R3/R5/R2 `cells[primary] == "measured"` / `values[primary]`, with the per-episode `metric_values` they unlock | OPEN — **code**; this is why "one re-run" is not yet enough |
 
 **MECE check:** (1) is execution + claim re-file, (2) is comparator data, (3) is verification, (4) is the
 verification basis, (5) is closed history — no two own the same artifact. (1) and (2) touch the same
@@ -372,8 +372,11 @@ peers of (1) — they are its sub-units**: they own no artifact (1) does not own
 deltas that make (1)'s indicator REACHABLE, which is why they take no issue number and why (1) cannot be
 called "one re-run away" without them.
 
-**Explicit non-duplicate:** #2515 / #2522 / #2524 are a *consumer* umbrella (publish rows, sequence
-temporal legs); they consume #1416's verdict output and do not re-own the battery.
+**Explicit non-duplicate:** #2515 / #2522 are a *consumer* umbrella (publish rows); they consume that
+epic's verdict output and do not re-own the battery. **#2524 is NOT a consumer — it PRECEDES row 1.**
+Its own indicator (3) files a sequencing recommendation on #1416 *before* its Tier-2 execution wave, and
+row 1's DoD names the full battery, so #2524's runnable/blocked split gates row 1's Tier-2 half. It owns
+the split and the sealed fixtures, never the run — which is why it is not a tenth work unit here.
 
 ---
 
@@ -381,7 +384,7 @@ temporal legs); they consume #1416's verdict output and do not re-own the batter
 
 | Option | What happens | Cost |
 |---|---|---|
-| **A (recommended)** | Execute the delta as a SEQUENCE, not as a closure: #1416 re-run (one invocation per arm) → re-file verdict → #2525 → #1419. **#1402 does NOT close here** — it stays OPEN until `03-scope.md` deliverables 4/5/6 (Tier-2, the Tier-3 six-arm sweep, parity) are measured, per the 2026-08-14 owner override (all probes × all arms, no exclusions). The delta is how that ruling gets started, not a substitute for it. | ≈$0.2–0.6 for the two tier-1 arm-runs at the corrected provider-reported basis (§1, adversarial test item 4), + §7 rows 8–9 (code, not spend) + a few sessions |
+| **A (recommended)** | Execute the delta as a SEQUENCE, not as a closure: #1416 re-run (one invocation per arm) → re-file verdict → #2525 → #1419. **#1402 does NOT close here** — it stays OPEN until `03-scope.md` deliverables 4/5/6 (Tier-2, the Tier-3 six-arm sweep, parity) are measured, per the 2026-08-14 owner override (all probes × all arms, no exclusions). The delta is how that ruling gets started, not a substitute for it. | ≈$0.34–0.58 for the two tier-1 arm-runs (2 × ≈$0.17–0.29 per arm-run at the corrected provider-reported basis — §1, adversarial test item 4), + §7 rows 8–9 (code, not spend) + a few sessions |
 | **B** | Declare the reclassification trigger fired (positioning leads with reasoning-uniqueness) and promote #1416 to launch-relevant, which by 01-align's own wording moves the epic Do-now. | Same work, different priority/labelling |
 | **C** | Defer again: leave the verdict as the stale no-data doc. | Cheapest now; the claim stays unsaid while the doc reads as a negative finding |
 
