@@ -570,9 +570,15 @@ class TestWriterValidation(unittest.TestCase):
         #   * weaken it to `not isinstance(_rel, dict)` -> the dict-with-None
         #     subtest reds, which is how that half was found unpinned
         #   * delete the not-converged raise      -> "did not converge"
+        #   * delete the converged presence guard -> "no boolean `converged`"
+        #   * delete the truncated presence guard -> "no boolean `truncated`"
         #   * delete the truncated raise          -> "run truncated"
-        #   * `ep['truncated']` -> `bool(ep.get('truncated'))` -> the
-        #     absent-key subtest reds (fail-open on SDK drift)
+        # NOT a mutation: re-coercing the receipt (`ep['truncated']` ->
+        # `bool(ep.get('truncated'))`) reds NOTHING on its own, because the
+        # presence guard rejects the absent-key case first. The receipt
+        # coercion is only observable once the guard is gone, so it is not
+        # claimed as independently pinned here (measured — claiming it was
+        # false in an earlier revision of this comment).
         def _sdk(*, domain="d", reliability=None, ep=None):
             class _S:
                 def __init__(self, **kw):
@@ -620,6 +626,13 @@ class TestWriterValidation(unittest.TestCase):
             (dict(reliability=ok_rel,
                   ep={"converged": True, "iterations": 1, "diagnostic": None}),
              "no boolean `truncated`"),
+            # a truthy NON-bool `converged` (`"false"`): `not ep.get(...)`
+            # accepts it and the receipt re-asserts `true` while the adjacent
+            # diagnostic says the run hit the iteration cap (#9929 review P2).
+            (dict(reliability=ok_rel,
+                  ep={"converged": "false", "iterations": 3,
+                      "diagnostic": "max_iterations", "truncated": False}),
+             "no boolean `converged`"),
         ]
         for kwargs, message in cases:
             with self.subTest(read_back=message):

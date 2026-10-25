@@ -568,23 +568,28 @@ try:
         raise RuntimeError('read-back failed: source still untiered after set_source_tier')
 
     ep = sdk.compute_confidence(anchors=made)
-    # `truncated` is REQUIRED and must be a real bool. The other guard here
-    # fails closed by accident of `not`; this one does not — an absent or
-    # renamed key reads as "not truncated", so a topology-reduced result
-    # would sail through AND the receipt would positively record `false`, a
-    # value compute_confidence never returned. That is a silent success of
-    # exactly the class this read-back exists to catch, so it is checked
-    # explicitly rather than defaulted.
+    # Both EP flags are REQUIRED and must be real bools. Without this, an
+    # absent or renamed key reads as "not truncated" / "not converged" and
+    # the receipt positively records a value compute_confidence never
+    # returned; a truthy NON-bool (`"false"`) would even be re-asserted as
+    # `true` while the diagnostic beside it says the run hit the iteration
+    # cap. Silent success of exactly the class this read-back exists to
+    # catch, so both are checked explicitly rather than defaulted or coerced.
     if ep.get('truncated') is not True and ep.get('truncated') is not False:
         raise RuntimeError(
             'EP read-back: result carries no boolean `truncated` '
             f'(got {ep.get("truncated")!r}) — SDK signature drift; defaulting it '
             'to False would certify a topology nobody measured')
-    receipt['ep'] = {'converged': bool(ep.get('converged')),
+    if ep.get('converged') is not True and ep.get('converged') is not False:
+        raise RuntimeError(
+            'EP read-back: result carries no boolean `converged` '
+            f'(got {ep.get("converged")!r}) — SDK signature drift; a truthy '
+            'non-bool would be recorded as a converged run')
+    receipt['ep'] = {'converged': ep['converged'],
                      'iterations': ep.get('iterations'),
                      'diagnostic': ep.get('diagnostic'),
                      'truncated': ep['truncated']}
-    if not ep.get('converged'):
+    if not ep['converged']:
         raise RuntimeError(f'EP did not converge: {str(ep)[:200]}')
     if ep['truncated']:
         raise RuntimeError('EP run truncated — result not trustworthy, treat as failure')
