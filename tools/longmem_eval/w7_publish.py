@@ -91,6 +91,49 @@ FAILURE_ORIGIN_VALUES = (None, "config_mismatch", "hash_mismatch",
 #: report's ``judge_rubric_id_hash``.
 JUDGE_PIN = "longmemeval-official-anscheck-gpt4o-2024-08-06-v1"
 
+#: The pin a MOCK-graded run carries. The pin is DERIVED from the judge the
+#: report records (``judge_pin_for``), never passed in independently, so a
+#: receipt cannot carry the official pin while a stub graded the answers.
+MOCK_JUDGE_PIN = "longmemeval-mock-judge"
+
+#: The official judge MODEL id (the transport serving it is a routing detail:
+#: ``openrouter:openai/gpt-4o-2024-08-06`` is the same judge).
+OFFICIAL_JUDGE_MODEL_ID = "gpt-4o-2024-08-06"
+
+
+def _judge_model_id(spec: Any) -> str:
+    """``provider:model`` → ``model``; a bare id is its own model id."""
+    return str(spec or "").strip().split(":", 1)[-1]
+
+
+def judge_pin_for(judge_model: Any) -> str:
+    """The pin belonging to the judge identity a report RECORDS — an
+    ALLOW-LIST, never a default.
+
+    ``JUDGE_PIN`` used to be minted for every run, so a report graded by
+    ``mock-judge`` — zero network, zero cost, ``run.py --mock`` — produced a
+    receipt carrying the OFFICIAL pin with ``receipt_valid: True`` and
+    ``verdict: pass`` (measured at #8486). The same shape covers the tempting
+    substitution this issue's thread keeps returning to (grade the graded run
+    with a cheaper model): a substituted judge recorded as its own model id
+    was published under the official pin. R12 forbids substituting the judge in
+    the official number, so the pin has to travel with the judge that actually
+    graded: the official pin belongs to the OFFICIAL MODEL, a stub gets the
+    mock pin, and everything else records ``unpinned:<model>``.
+
+    Mirrors ``measure_ask_distilled.judge_pin_for``, which closed the same hole
+    for the ask-exit measurement.
+    """
+    model = _judge_model_id(judge_model)
+    if not model:
+        return "unpinned:<unrecorded>"
+    if model in ("mock", "mock-judge"):
+        return MOCK_JUDGE_PIN
+    if model == OFFICIAL_JUDGE_MODEL_ID or model.endswith(
+            "/" + OFFICIAL_JUDGE_MODEL_ID):
+        return JUDGE_PIN
+    return f"unpinned:{model}"
+
 
 # ── official metric derivation ─────────────────────────────────────────────
 
@@ -489,6 +532,27 @@ def validate_receipt(receipt: dict) -> list[str]:
             issues.append(
                 "receipt.judge_model: completed run requires the resolved "
                 "judge model identity")
+        # #8486 (R12): the pin must belong to the judge the report records. A
+        # pin/model pair that cannot both be true is how a stub-graded or
+        # substituted-judge run is published under the OFFICIAL pin — the
+        # receipt is the artifact J7 audits, so this is checked there.
+        recorded_judge = receipt.get("judge_model")
+        expected_pin = judge_pin_for(recorded_judge)
+        recorded_pin = receipt.get("judge_pin")
+        if isinstance(recorded_pin, str) and recorded_pin.strip() \
+                and recorded_pin != expected_pin:
+            issues.append(
+                f"receipt.judge_pin: {recorded_pin!r} does not belong to the "
+                f"judge the report records ({recorded_judge!r} — expected "
+                f"{expected_pin!r}) (#8486)")
+        # The official pin is the licence to publish a comparable number; a run
+        # graded by anything else may record its result, never a 'pass'.
+        if receipt.get("verdict") == "pass" and expected_pin != JUDGE_PIN:
+            issues.append(
+                "receipt.verdict: a run graded by "
+                f"{recorded_judge!r} (pin {expected_pin!r}) cannot publish "
+                "'pass' — R12 forbids substituting the judge in the official "
+                "number (#8486)")
         if not isinstance(receipt.get("judge_rubric_id_hash"), str) or not (
                 receipt.get("judge_rubric_id_hash") or "").strip():
             issues.append(
@@ -569,7 +633,9 @@ def _main(argv: list[str] | None = None) -> None:
              or (methodology.get("run_at_utc") or ""),
         commit=args.commit,
         corpus_hash=args.corpus_hash,
-        judge_pin=JUDGE_PIN,
+        # #8486: DERIVED from the judge the report recorded — never the
+        # constant (a mock/substituted judge must not mint the official pin).
+        judge_pin=judge_pin_for(methodology.get("judge_model", "")),
         judge_model=methodology.get("judge_model", ""),
         judge_rubric_id_hash=methodology.get("judge_rubric_id_hash", ""),
         reader_model_spec=methodology.get("reader_model_spec", ""),

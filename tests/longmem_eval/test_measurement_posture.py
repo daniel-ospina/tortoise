@@ -357,12 +357,19 @@ def test_completed_receipt_refuses_every_undisclosed_posture():
     refused; a posture whose ingest mode disagrees with the receipt's →
     refused.
     """
-    from tools.longmem_eval.w7_publish import build_receipt, validate_receipt
+    from tools.longmem_eval.w7_publish import (
+        JUDGE_PIN,
+        build_receipt,
+        validate_receipt,
+    )
 
     def _receipt(**over):
         kwargs = dict(
             run_id="r", date="d", commit="c", corpus_hash="sha256:x",
-            judge_pin="pin", judge_model="m", judge_rubric_id_hash="h",
+            # #8486: the pin must belong to the recorded judge — an arbitrary
+            # pin with an arbitrary judge is the pairing the validator refuses.
+            judge_pin=JUDGE_PIN, judge_model="gpt-4o-2024-08-06",
+            judge_rubric_id_hash="h",
             reader_model_spec="s", reader_pinned=True, ingest_mode="v2",
             run_status="completed", verdict="pass", failure_origin=None,
             cost_usd=1.0, notes=[], resolved_config={},

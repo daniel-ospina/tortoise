@@ -15,10 +15,12 @@ import pytest
 from tools.longmem_eval import measurement_posture
 from tools.longmem_eval.w7_publish import (
     JUDGE_PIN,
+    MOCK_JUDGE_PIN,
     _fraction_at_k,
     binary_projections,
     build_receipt,
     category_variant_rows,
+    judge_pin_for,
     seal_answer_keys,
     validate_receipt,
     variant_rows,
@@ -168,7 +170,11 @@ def test_receipt_completed_requires_the_per_category_rows():
     """
     base = dict(
         run_id="r", date="d", commit="c", corpus_hash="sha256:x",
-        judge_pin="pin", judge_model="m", judge_rubric_id_hash="h",
+        # #8486: the pin must belong to the recorded judge — the fixture uses
+        # the real pair rather than an arbitrary pin, which is exactly the
+        # pairing the validator now refuses (see the judge-identity tests).
+        judge_pin=JUDGE_PIN, judge_model="gpt-4o-2024-08-06",
+        judge_rubric_id_hash="h",
         reader_model_spec="s", reader_pinned=True, ingest_mode="det",
         run_status="completed", verdict="pass", failure_origin=None,
         cost_usd=1.0, metrics={"official_recall_all@5": 0.5},
@@ -206,7 +212,10 @@ def _base_receipt_metrics(**over) -> dict:
 def test_receipt_completed_requires_pins():
     base = dict(
         run_id="r", date="d", commit="c", corpus_hash="sha256:x",
-        judge_pin="pin", judge_model="m", judge_rubric_id_hash="h",
+        # #8486: real pin/judge pair — an arbitrary pin with an arbitrary judge
+        # is the pairing the validator now refuses.
+        judge_pin=JUDGE_PIN, judge_model="gpt-4o-2024-08-06",
+        judge_rubric_id_hash="h",
         reader_model_spec="s", reader_pinned=True, ingest_mode="det",
         run_status="completed", verdict="pass", failure_origin=None,
         cost_usd=1.0, metrics=_base_receipt_metrics(),
@@ -225,6 +234,109 @@ def test_receipt_completed_requires_pins():
     # a failed run does not demand the completed-run pins
     failed = dict(base, run_status="failed", metrics={"x": 1})
     assert validate_receipt(failed) == []
+
+
+def test_judge_pin_is_derived_from_the_recorded_judge():
+    """#8486 (R12): the pin follows the judge that graded — allow-list, never a
+    default. ``JUDGE_PIN`` was minted for every run, so a stub-graded or
+    substituted-judge report published under the OFFICIAL pin."""
+    # the official MODEL keeps the official pin, over either transport
+    assert judge_pin_for("gpt-4o-2024-08-06") == JUDGE_PIN
+    assert judge_pin_for("openrouter:openai/gpt-4o-2024-08-06") == JUDGE_PIN
+    assert judge_pin_for("openai:gpt-4o-2024-08-06") == JUDGE_PIN
+    # a stub is never the official judge
+    assert judge_pin_for("mock-judge") == MOCK_JUDGE_PIN
+    assert judge_pin_for("mock") == MOCK_JUDGE_PIN
+    assert judge_pin_for("mock-judge") != JUDGE_PIN
+    # any substituted model travels as an UNPINNED record, never the official
+    assert judge_pin_for("deepseek-v4-flash") == "unpinned:deepseek-v4-flash"
+    assert judge_pin_for("variant-containment") == \
+        "unpinned:variant-containment"
+    assert judge_pin_for("gpt-4o") == "unpinned:gpt-4o"
+    assert judge_pin_for("") == "unpinned:<unrecorded>"
+    assert judge_pin_for(None) == "unpinned:<unrecorded>"
+
+
+def test_receipt_pin_must_belong_to_the_recorded_judge():
+    """A pin/model pair that cannot both be true is refused — that pairing is
+    how a stub-graded run is published under the official pin."""
+    base = dict(
+        run_id="r", date="d", commit="c", corpus_hash="sha256:x",
+        judge_pin=JUDGE_PIN, judge_model="mock-judge",
+        judge_rubric_id_hash="h",
+        reader_model_spec="s", reader_pinned=True, ingest_mode="det",
+        run_status="completed", verdict="inconclusive", failure_origin=None,
+        cost_usd=1.0, metrics=_base_receipt_metrics(),
+        measurement_posture=_posture("det"),
+        resolved_config={}, notes=[])
+    issues = validate_receipt(base)
+    assert any("judge_pin" in i and "does not belong" in i for i in issues)
+    # the honest pair for the same run validates clean
+    assert validate_receipt(dict(base, judge_pin=MOCK_JUDGE_PIN)) == []
+
+
+def _cli_artifact(tmp_path, judge_model: str) -> dict:
+    """Run the publication CLI over a minimal completed report whose recorded
+    judge is ``judge_model`` (offline, no keys)."""
+    from tools.longmem_eval.w7_publish import _main
+    report = {
+        "outcomes": [_outcome("q1", 1.0), _outcome("q2", 0.0)],
+        "retrieval": {"session_recall@k": {"5": 0.5}},
+        "methodology": {"judge_model": judge_model,
+                        "judge_rubric_id_hash": "hash",
+                        "reader_model_spec": "mock-reader",
+                        "reader_pinned": True, "ingest_mode": "v2",
+                        "run_at_utc": "2026-10-01T00:00:00Z",
+                        "measurement_posture": _posture("v2"),
+                        "dataset_semantics_audit": {"verdict": "trusted"}},
+        "integrity": {"valid": True}, "accuracy": {"overall": 1.0},
+        "split": "s", "updated_at_utc": "2026-10-01T00:00:00Z",
+    }
+    rp = tmp_path / "report.json"
+    rp.write_text(json.dumps(report), encoding="utf-8")
+    ds = tmp_path / "data.json"
+    ds.write_text(json.dumps(
+        [{"question_id": "q1", "answer": "a",
+          "answer_session_ids": ["s1"]}]), encoding="utf-8")
+    out = tmp_path / "artifact.json"
+    _main(["--report", str(rp), "--dataset", str(ds), "--commit", "abc123",
+           "--corpus-hash", "sha256:" + "0" * 64, "--cost-usd", "1.5",
+           "--out", str(out)])
+    return json.loads(out.read_text(encoding="utf-8"))
+
+
+def test_mock_graded_run_cannot_publish_the_official_pin(tmp_path):
+    """#8486 (R12) — the defect this pins: a ``--mock`` report (zero network,
+    zero cost) used to mint a receipt carrying the OFFICIAL judge pin with
+    ``receipt_valid: True`` and ``verdict: pass``. Measured before the fix:
+    judge_pin ``longmemeval-official-anscheck-gpt4o-2024-08-06-v1``,
+    receipt_valid True, [] issues."""
+    artifact = _cli_artifact(tmp_path, "mock-judge")
+    receipt = artifact["receipt"]
+    assert receipt["judge_pin"] == MOCK_JUDGE_PIN
+    assert receipt["judge_pin"] != JUDGE_PIN
+    assert artifact["receipt_valid"] is False
+    assert any("cannot publish 'pass'" in i for i in artifact["receipt_issues"])
+
+
+def test_substituted_judge_run_is_unpinned_and_cannot_pass(tmp_path):
+    """A cheaper model grading the graded run (the substitution this issue
+    forbids) records ``unpinned:<model>`` and cannot publish a 'pass'."""
+    artifact = _cli_artifact(tmp_path, "deepseek-v4-flash")
+    receipt = artifact["receipt"]
+    assert receipt["judge_pin"] == "unpinned:deepseek-v4-flash"
+    assert artifact["receipt_valid"] is False
+    assert any("cannot publish 'pass'" in i for i in artifact["receipt_issues"])
+
+
+def test_cli_keeps_the_official_pin_for_the_official_judge(tmp_path):
+    """No false block: the official judge (routed through another provider)
+    still publishes a valid, passing receipt under the official pin."""
+    artifact = _cli_artifact(tmp_path, "openrouter:openai/gpt-4o-2024-08-06")
+    assert artifact["receipt"]["judge_pin"] == JUDGE_PIN
+    assert artifact["receipt"]["verdict"] == "pass"
+    assert artifact["receipt_valid"] is True
+    assert artifact["receipt_issues"] == []
 
 
 def test_cli_emits_valid_artifact(tmp_path):
