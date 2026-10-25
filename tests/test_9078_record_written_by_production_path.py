@@ -372,8 +372,40 @@ def _no_ambient_record_env(monkeypatch):
 
 
 @pytest.fixture()
-def capture_sdk(tmp_path):
-    """A real SDK with its own graph and journal. No record DSN is set here."""
+def capture_sdk(tmp_path, monkeypatch):
+    """A real SDK with its own graph and journal. No record DSN is set here.
+
+    ⛔ HERMETIC EXTRACTION, pinned for EVERY capture leg in this file (#3695/
+    #5477 class). A capture's ``receipt["ok"]`` is computed from the
+    EXTRACTION's outcome, not from the record write — ``tortoise/sdk.py:11297``:
+    ``ok = not extraction_errors and meta.get("mode") != "empty"`` — so on a
+    box that exports a provider key each capture makes a LIVE LLM call whose
+    result decides the precondition these legs assert.
+
+    MEASURED, and reproducible in three steps (this PR's own
+    ``test-record-postgres`` leg, run 40172546555, head 4309dda9):
+
+    1. ``test_an_armed_capture_without_a_tenant_is_refused_and_counted`` and
+       ``test_an_armed_capture_without_a_journal_is_counted_not_silent`` were 2
+       of the job's 115 tests, and its ONLY reds — ``assert False is True`` on
+       ``receipt["ok"]``, with no socket or connection error anywhere in that
+       job's log, so the graph is not what failed.
+    2. Keyless, the same capture returns ``mode="no-provider"`` and ``ok=True``
+       (the #3892 skip-extraction path), so ``ok=False`` there REQUIRED a
+       provider to be reachable: ``.github/workflows/python-ci.yml`` sets no
+       provider key, and these are self-hosted runner boxes that export one.
+    3. Verbatim: with a provider key exported and NO pin, both legs redden;
+       with the pin they do not.
+
+    ``TORTOISE_SESSION_LLM_MOCK=1`` is the repo's documented deterministic,
+    ZERO-NETWORK extractor — the same seam ``_capture()`` below pins on these
+    exact grounds — so a leg whose subject is the RECORD WRITE refuses the same
+    way on every box, keyed or keyless. Pinned on the FIXTURE, not per test, so
+    an arm-gate leg that never goes through ``_capture()`` cannot reopen the
+    hole.
+    """
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+
     def _make(*, journal: bool = True):
         path = str(tmp_path / "journal.jsonl")
         sdk = TortoiseSDK(
