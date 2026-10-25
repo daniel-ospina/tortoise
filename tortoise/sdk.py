@@ -3720,8 +3720,17 @@ def _named_layer_kinds(props: dict) -> list[tuple[str, str, str]]:
     ``sourceKind``/``documentKind``/``actionKind``/``kind`` are NOT layer
     properties (a document is a ``:Source``; genre and action are other axes)
     and are deliberately out of scope.
+
+    ⛔ A NIL kind (``other``/``core:other``) is NOT a layer kind and is never
+    returned (#9964 review P2). ``kind_layers.NIL_KINDS`` says it asserts
+    NOTHING about the layer — it is the fold's ON CREATE default on EVERY
+    entity label — so letting it into ``named`` made the agreement test below
+    read a disagreement between a value that names no layer and the one that
+    does, and the write kept a §5 Subject kind on an ``:Object``. Dropping it
+    here also leaves a write that names ONLY ``other`` with ``named == []``,
+    i.e. silent, which is that constant's published contract.
     """
-    from tortoise.kind_layers import PROP_LAYER
+    from tortoise.kind_layers import NIL_KINDS, PROP_LAYER
     from tortoise.pack_state import _KIND_PROP_SPELLINGS
 
     named: list[tuple[str, str, str]] = []
@@ -3730,6 +3739,8 @@ def _named_layer_kinds(props: dict) -> list[tuple[str, str, str]]:
             continue
         value = props.get(spelling)
         if not isinstance(value, str) or not value.strip():
+            continue
+        if value.strip() in NIL_KINDS:
             continue
         named.append((PROP_LAYER[canonical], spelling, value))
     return named
@@ -3740,6 +3751,65 @@ def _named_layer_kinds(props: dict) -> list[tuple[str, str, str]]:
 #: same name under the two entity labels is TWO nodes, never one entity seen
 #: twice — which is why a re-route can SPLIT an entity (#9964 review).
 _ENTITY_LAYER_LABEL: dict[str, str] = {"subject": "Subject", "object": "Object"}
+
+
+def _door_relayed_props(etype: str, item: dict) -> dict:
+    """The props the ENTITY door RELAYS to ``create_entity``, from a raw item.
+
+    ⛔ The door does not hand ``create_entity`` the item it was given (#9964
+    review P2, second round). ``create_subject``/``create_object``
+
+    1. **bind** their OWN camel kind param out of the item, so it is not part
+       of the ``**props`` they relay,
+    2. ``_coerce_props`` the rest (the alias's fold),
+    3. put the param back **through ``named_kind``** — a padded
+       ``objectKind=" core:team "`` becomes ``core:team`` before the routing
+       authority ever sees it,
+
+    and only then does ``create_entity`` fold a second time. The strip is
+    POSITIONAL and NARROW — only the alias's OWN top-level kind param is
+    normalised: the sibling camel key (``subjectKind`` at the object door), the
+    snake spellings (``object_kind``) and a kind one or two ``props:`` levels
+    down all reach ``_kind_layer_note`` RAW, because the alias normalises only
+    its own param, after its own fold and before the relay.
+
+    MEASURED (embedded lane, pre-fix) — the two shapes whose predicted label
+    disagreed with the label the write LANDED on, each re-reporting ``created``
+    on every re-ingest forever because the probe queried the other entity
+    label:
+
+        {"type": "object",  "objectKind": " core:team "}   -> :Subject
+        {"type": "subject", "subjectKind": " core:skill "} -> :Object
+
+    and, in the other direction, the shapes a blanket "normalise every kind
+    prop" repair would BREAK — they do NOT re-file on this head, so a probe
+    that stripped them would query a label the write never lands on:
+
+        {"type": "object", "object_kind": " core:team "}           -> :Object
+        {"type": "object", "props": {"objectKind": " core:team "}} -> :Object
+
+    That is why this mirrors the door's PIPELINE instead of normalising the
+    fold's output: the probe must predict the door, not an idealised door.
+    """
+    from tortoise.kind_layers import KIND_PROP
+
+    depth = _ENTITY_ITEM_FLATTEN_DEPTH.get(etype, 2)
+    # Only the two ENTITY doors this probe predicts have a bind-and-normalise
+    # alias; anything else is faithfully just the fold(s).
+    kind_key = KIND_PROP.get(etype) if etype in _ENTITY_LAYER_LABEL else None
+    if kind_key is None or depth < 1:
+        relayed = dict(item)
+        for _ in range(depth):
+            relayed = _coerce_props(relayed)
+        return relayed
+    relayed = {k: v for k, v in item.items() if k != kind_key}  # 1. the bind
+    relayed = _coerce_props(relayed)                           # 2. alias fold
+    normalized = named_kind(item.get(kind_key))
+    if normalized is not None:
+        relayed[kind_key] = normalized                         # 3. the re-add
+    for _ in range(depth - 1):
+        relayed = _coerce_props(relayed)                       # create_entity
+    return relayed
 
 
 def _existing_entity_ids(g, etype: str, props: dict, name: Any) -> list:
@@ -3770,13 +3840,21 @@ def _existing_entity_ids(g, etype: str, props: dict, name: Any) -> list:
     exactly as the FLAT shape was before this probe existed (#9964 review P2).
     A shallower fold leaves the depth-2 spelling wrong; a deeper one would read
     a kind the door never applies.
+
+    ⛔ Folding is not enough, because the door NORMALISES its own kind param
+    between its fold and the relay (#9964 review P2, second round):
+    ``objectKind=" core:team "`` is ``core:team`` by the time routing sees it,
+    so the write re-files to ``:Subject`` while a fold-only probe answered
+    ``object`` and queried ``:Object`` — ``created`` on every re-ingest, forever
+    (and the mirror on the subject door: ``subjectKind=" core:skill "`` writes
+    an ``:Object`` the probe never looked for). ``_door_relayed_props`` replays
+    the door's pipeline, at the door's positions, so the prediction cannot drift
+    from the write.
     """
     if not isinstance(name, str) or not name:
         return []
     try:
-        probe_props = dict(props)
-        for _ in range(_ENTITY_ITEM_FLATTEN_DEPTH.get(etype, 2)):
-            probe_props = _coerce_props(probe_props)
+        probe_props = _door_relayed_props(etype, props)
         probe = _kind_layer_note(etype, probe_props)[0]
     except Exception:  # noqa: BLE001, RUF100 — probe only, never refuses a write
         probe = etype
@@ -3821,8 +3899,11 @@ def _kind_layer_note(t: str, props: dict) -> tuple[str, dict | None]:
     #    vocabulary), NOT the write-gate vocabularies — see that function for the
     #    P1 that ruled the latter out. Every named
     #    kind must be THE SAME kind, so a write that names two different layers
-    #    is never routed on a coin flip. Nor is a write that names ONE property
-    #    under two spellings whose values disagree (`objectKind="core:organization",
+    #    is never routed on a coin flip. A NIL kind never reaches this test: a
+    #    value that declares no layer cannot veto the one that does (it is
+    #    dropped in `_named_layer_kinds`, #9964 review P2). Nor is a write that
+    #    names ONE property under two spellings whose values disagree
+    #    (`objectKind="core:organization",
     #    object_kind="core:team"`): routing would have to pick one of two values
     #    the caller gave for the same property — a silent rewrite of a prop to
     #    fit, and `named` is ordered by ``_KIND_PROP_SPELLINGS``'s dict iteration,

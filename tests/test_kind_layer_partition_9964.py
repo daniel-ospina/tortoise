@@ -52,7 +52,9 @@ The contract these tests pin:
   must never be "corrected".
 * ``other``/``core:other`` asserts nothing about the layer (it is the fold's
   ON CREATE default on every entity label), and an UNDECLARED kind is the open
-  vocabulary — both stay silent.
+  vocabulary — both stay silent. A NIL kind is also **not a vote**: it cannot
+  veto a sibling prop that does name a layer (``create_object`` with
+  ``subjectKind="other"`` beside an Object kind still re-files).
 
 Runnable embedded:
   TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_kind_layer_partition_9964.py -q
@@ -177,8 +179,17 @@ def test_a_vocabulary_only_kind_stays_on_the_door_the_caller_chose(sdk):
     The write LANDS where the caller asked (#1934 warn-not-block) and the
     disagreement is REPORTED, which is the most a vocabulary-only declaration
     can justify.
+
+    ⚠️ About the BARE spelling only (#9964 review P2-2): the namespaced
+    ``core:agent`` IS in the classifier's ``objects`` section, so it DOES route
+    this same door to ``:Object``. Both answers are correct — the catalog is
+    keyed by the namespaced kind, and the bare legacy name reaches only the
+    write-gate bucket — and the assertion below is the bare one.
     """
     assert section_of("agent") is None
+    assert section_of("core:agent") == "objects", (
+        "the caveat in this docstring is what this pin protects: the bare form "
+        "has no section, the namespaced one does")
     assert entity_route("agent") is None
     r = sdk.create_subject("pi-agent", subjectKind="agent")
     labels, object_kind, subject_kind, _pk, _ek = _node(sdk, r["id"])
@@ -231,6 +242,52 @@ def test_no_object_carries_a_subject_kind_through_the_doors(sdk):
         params={"kinds": SUBJECT_KINDS},
     ).result_set
     assert seen[0][0] == len(SUBJECT_KINDS), seen
+
+
+def test_a_nil_kind_does_not_veto_the_kind_that_names_a_layer(sdk):
+    """`other` declares NOTHING about the layer, so it cannot veto the kind.
+
+    #9964 review P2. ``_named_layer_kinds`` used to return EVERY layer prop the
+    write named, ``other``/``core:other`` included — and ``other`` is the fold's
+    ON CREATE default on every entity label, i.e. a value the caller (or a
+    schema-filling agent) supplies without asserting anything. The agreement
+    test then read ``[None, 'subject']``, refused to route ("never on a coin
+    flip"), and landed a §5 Subject kind on an ``:Object`` with only a
+    ``kind_other_layer`` note — the permanently-unrepairable shape #2489
+    records no repair path for, and the shape ruling **A** says must be
+    re-filed (`kind_layers.NIL_KINDS`: ``other`` "asserts nothing about the
+    layer, so it never routes and never warns about").
+
+    ⛔ Non-vacuous: pre-fix this write stays ``:Object`` carrying
+    ``objectKind='core:organization'`` (measured by reverting the filter).
+    """
+    r = sdk.create_object("Acme Nil Peer", objectKind="core:organization",
+                          subjectKind="other")
+    labels, object_kind, subject_kind, _pk, _ek = _node(sdk, r["id"])
+    assert labels == ["Subject"], r
+    assert subject_kind == "core:organization"
+    assert object_kind is None
+    assert [n["code"] for n in _layer_notes(r)] == ["kind_layer_routed"], \
+        r.get("advisories")
+    # The graph-level indicator the issue measures: the write landed on the
+    # layer its kind declares, so the Subject read sees it and no Object carries
+    # the Subject kind any more.
+    assert _graph(sdk).query(
+        "MATCH (s:Subject {subjectKind:'core:organization'}) RETURN count(s)"
+    ).result_set[0][0] == 1
+    assert _graph(sdk).query(
+        "MATCH (o:Object) WHERE o.objectKind = 'core:organization' "
+        "RETURN count(o)").result_set[0][0] == 0
+
+    # The mirror door, the other NIL spelling: `core:other` is equally silent.
+    m = sdk.create_subject("Skill Nil Peer", subjectKind="core:skill",
+                           objectKind="core:other")
+    labels2, object_kind2, subject_kind2, _pk2, _ek2 = _node(sdk, m["id"])
+    assert labels2 == ["Object"], m
+    assert object_kind2 == "core:skill"
+    assert subject_kind2 is None
+    assert [n["code"] for n in _layer_notes(m)] == ["kind_layer_routed"], \
+        m.get("advisories")
 
 
 # ── one partition: the classifier's sections are the door's authority ─────
@@ -724,6 +781,66 @@ def test_ingest_dedup_follows_the_label_the_write_lands_on(sdk):
             "MATCH (n {name:$n}) RETURN count(n)",
             params={"n": name}).result_set[0][0] == 1, (
             f"{spelling}: a second identical ingest minted a twin: {n2}")
+
+
+def test_ingest_dedup_predicts_the_door_not_an_idealised_door(sdk):
+    """The probe must replay the door's PIPELINE, not normalise its fold output.
+
+    The entity aliases BIND their own camel kind param out of the item, fold the
+    rest, and then put the param back **through ``named_kind``** — so
+    ``objectKind=" core:team "`` reaches the routing authority as ``core:team``
+    and the write re-files to ``:Subject``, while the dedup probe (folding only)
+    still answered ``object`` and queried ``:Object``: ``created`` on every
+    re-ingest, forever (#9964 review P2). The mirror is the same defect on the
+    other door — ``subjectKind=" core:skill "`` writes an ``:Object``.
+
+    ⛔ The two CONTROL shapes carry the other half of the finding, and they are
+    why the repair is positional rather than a blanket "strip every kind prop":
+    the snake spelling and a NESTED ``props`` kind are normalised by NO door on
+    this head (the strip happens before ``create_entity`` folds again), so their
+    writes stay ``:Object``. A probe that stripped the FOLD's output would
+    predict ``:Subject`` for them and re-open the same void in the opposite
+    direction — the controls red that fix.
+    """
+    cases = (
+        # (shape, raw item WITHOUT the name, the label the WRITE lands on)
+        ("top-level camel subject kind, object door",
+         {"type": "object", "objectKind": " core:team "}, "Subject"),
+        ("top-level camel object kind, subject door",
+         {"type": "subject", "subjectKind": " core:skill "}, "Object"),
+        # CONTROLS — normalised by no door, so the write stays on the door's
+        # own entity layer and the probe must NOT strip them.
+        ("snake spelling (no alias normalises it)",
+         {"type": "object", "object_kind": " core:team "}, "Object"),
+        ("nested props (strip happens before create_entity folds)",
+         {"type": "object", "props": {"objectKind": " core:team "}}, "Object"),
+    )
+    for i, (shape, raw, landed) in enumerate(cases):
+        name = f"Ingest Door Normalised {i}"
+
+        def _bundle(raw=raw, name=name):
+            # A FRESH item per run: `ingest` consumes the item it is handed.
+            return {"entities": [dict(raw, name=name)]}
+
+        first = sdk.ingest(_bundle())
+        assert first["created"]["entities"] == 1, (shape, first)
+        assert _node(sdk, first["ids"]["entities"][0])[0] == [landed], (
+            f"{shape}: the write landed on {landed}, not where this case "
+            f"expects it — the shape no longer exercises the probe", first)
+
+        second = sdk.ingest(_bundle())
+        assert second["created"]["entities"] == 0, (
+            f"{shape}: the probe queried the wrong entity label — the write "
+            f"MERGED onto the {landed} the first run created while the probe "
+            f"looked elsewhere, so every re-ingest reports a phantom `created`: "
+            f"{second}")
+        assert second["deduped"]["entities"] == 1, (shape, second)
+        assert second["ids"]["entities"] == first["ids"]["entities"], shape
+        assert _graph(sdk).query(
+            "MATCH (n {name:$n}) RETURN count(n)",
+            params={"n": name}).result_set[0][0] == 1, (
+            f"{shape}: a second identical ingest minted a twin: {second}")
+
 
 def test_the_dedup_hit_keeps_the_layer_advisory(sdk):
     """The DEDUP-hit branch must not drop the layer notice (#9964 review).

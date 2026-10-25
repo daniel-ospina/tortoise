@@ -64,6 +64,13 @@ This module answers it ONCE, and every consumer derives from it:
   and redded two shipped tests. A kind only the write-gate vocabulary knows is
   REPORTED by the door (``kind_other_layer``, warn-not-block #1934), never
   used to overrule the door the caller chose (#9964 review).
+  ⚠️ That claim is about the BARE spelling: ``section_of('agent')`` is ``None``
+  (the catalog declares nothing for it), while the NAMESPACED
+  ``core:agent`` IS in the classifier's ``objects`` section and therefore DOES
+  route a subject door to ``:Object``. Two different answers for two different
+  strings, both correct — the catalog is keyed by the namespaced kind
+  (``extractor_v2.CORE_OBJECT_KEYS``), and the legacy bare form reaches only
+  the write-gate bucket.
 
 ``other`` / ``core:other`` declares NOTHING about the layer — §5's catch-all,
 and the fold's ON CREATE default for every entity label — so it is never
@@ -343,8 +350,10 @@ def routing_layers(kind: Any) -> frozenset[str]:
     ADVISORY. They are the wrong authority for deciding a label:
     ``objectKind``'s bucket accepts the bare form of 56 legacy names, and
     ``kind_is_known`` strips a namespace before matching, so an OBJECT kind
-    (``agent`` — a §5 Object key with no classifier section) was declared
-    "object only" and a Subject-typed write naming it was re-labelled into an
+    (``agent`` — a §5 Object key with NO classifier section in its bare form;
+    the namespaced ``core:agent`` IS in the ``objects`` section, see the module
+    docstring's caveat) was declared "object only" and a Subject-typed write
+    naming it was re-labelled into an
     ``:Object``. Measured at the #9964 review head: that broke
     ``create_subject('pi-agent', 'agent')`` — an explicitly Subject-typed write
     whose door AND property say Subject, which ``provenance`` and
