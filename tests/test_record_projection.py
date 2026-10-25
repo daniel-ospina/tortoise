@@ -763,12 +763,16 @@ def test_a_document_source_row_derives_its_canonical_identity_too():
     a second `public.source` row for the identity the graph folds onto ONE node.
     Named on #5140 finding 12, not fixed here.
 
-    The derive is NOT narrowed to the types whose fold writes it, because a
-    variant `extractedFrom` ref resolving onto a DOCUMENT target is exactly the
-    silent provenance loss the resolver exists to prevent — and
-    `resolve_source_key`'s adopt-on-touch backfills the same value on the first
-    touch, so the two states converge on use. Asserted here so a later
-    "tidy-up" that narrows the derive has to delete a named decision.
+    The derive is NOT narrowed to the record types OTHER than `DocumentCreated`
+    — the tempting reading now that the doc fold writes `canonicalUrl` itself —
+    because the records resolver can only match a variant `extractedFrom` ref
+    against the row's own `canonical_url` (`_relation_upsert_statement`'s
+    `tgt_match=("node_key", "canonical_url")`) and a document row without it
+    would silently drop that edge — exactly the silent provenance loss the
+    resolver exists to prevent. `resolve_source_key`'s adopt-on-touch backfills
+    the same value on the first touch, so the two states converge on use.
+    Asserted here so a later "tidy-up" that narrows the derive has to delete a
+    named decision.
     """
     document = {
         "type": "DocumentCreated", "ts": "2026-10-12T00:00:00Z",

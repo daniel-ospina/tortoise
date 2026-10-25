@@ -2972,8 +2972,13 @@ def _declared_mutations(
         # graph 1 node). That is the class #9553's derive exists to bound and it
         # is NOT closed here — named on #5140 finding 12 so a records rebuild
         # does not resurrect a duplicate source row silently. The derive is
-        # UNCONDITIONAL because narrowing it would LOSE the variant resolution
-        # for document targets, the silent provenance loss this path exists to
+        # UNCONDITIONAL because narrowing it to the record types OTHER than
+        # `DocumentCreated` — the tempting reading now that the doc fold writes
+        # `canonicalUrl` itself — would LOSE the variant resolution for document
+        # targets: this resolver can only match a variant `extractedFrom` ref
+        # against the row's own `canonical_url` (`_relation_upsert_statement`'s
+        # `tgt_match=("node_key", "canonical_url")`), so a document row without
+        # it silently drops the edge — the provenance loss this path exists to
         # avoid. Pinned by `test_a_document_source_row_derives_its_canonical_identity_too`.
         if (node.table == "source"
                 and "canonical_url" in columns.get("source", frozenset())):
