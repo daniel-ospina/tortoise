@@ -176,6 +176,11 @@ PREREG_SCHEMA = "ask-distilled-preregistration/v1"
 RUN_SCHEMA = "ask-distilled-observations/v1"
 SCORED_SCHEMA = "ask-distilled-scored/v1"
 COMMIT_BINDING_SCHEMA = "ask-distilled-commit-binding/v1"
+#: What the RUN records about the tree it executed from. The publish-time
+#: binding (:func:`verify_commit_binding`) makes the named sha vouch for the
+#: corpus and the protocol; this makes the run say WHICH tree produced the
+#: numbers, so publish can refuse a run from a different one.
+CODE_IDENTITY_SCHEMA = "ask-distilled-code-identity/v1"
 
 ISSUE = "9097"
 EPIC = "2281"
@@ -604,6 +609,54 @@ def _shallow_boundary(repo_root: Path) -> set[str] | None:
         return None
 
 
+def code_identity(repo_root: str | Path | None) -> dict:
+    """The tree the RUN was made from, as the repository reports it.
+
+    The publish-time binding makes the named sha vouch for the corpus and the
+    protocol. That is only half of "reproducible from the recorded sha alone":
+    nothing tied the NUMBERS to that sha, so a publisher could run the corpus
+    at tree A, then name a commit B whose corpus and protocol are byte-identical
+    (any merge of ``main`` between the run and the publish produces exactly
+    that) and still emit a report telling a reader to ``git checkout B`` — where
+    a re-run would execute different code. The corpus the numbers came from is
+    not the only input to those numbers.
+
+    So the run records the commit it ran at **and** whether the tree was clean.
+    A dirty tree is the same defect in another form: the sha then reproduces
+    *sha plus an uncommitted patch*, which is not the recorded sha alone. Both
+    are recorded here and refused at publish (:func:`_validate_code_identity`),
+    never guessed.
+    """
+    if repo_root is None:
+        return {
+            "schema": CODE_IDENTITY_SCHEMA,
+            "commit": None,
+            "dirty_paths": [],
+            "repo": None,
+            "reason": "no repository was supplied to the run — a run that does "
+                      "not record the tree it executed from cannot be "
+                      "reproduced from a sha, so publish refuses it",
+        }
+    repo_root = Path(repo_root)
+    commit = _resolve_commit(repo_root, "HEAD")
+    status = _git(repo_root, "status", "--porcelain")
+    # A status that FAILS is not a clean tree: a non-zero exit (not a
+    # repository, unreadable index) leaves stdout empty, which would otherwise
+    # read as "nothing modified" — a fail-open on the one question this asks.
+    if status.returncode != 0:
+        dirty_paths = ["<git status failed: the tree is not provably clean>"]
+    else:
+        dirty_paths = [line[3:] for line in status.stdout.splitlines()
+                       if line.strip()]
+    return {
+        "schema": CODE_IDENTITY_SCHEMA,
+        "commit": commit,
+        "dirty_paths": dirty_paths,
+        "repo": str(repo_root),
+        "reason": None if commit else f"{repo_root} is not a git repository",
+    }
+
+
 def verify_commit_binding(*, commit: str, repo_root: str | Path,
                           corpus_root: str | Path = corpus.ASK_DIR,
                           prereg: str | Path = corpus.PREREGISTRATION_PATH,
@@ -828,7 +881,8 @@ def _run_arm(*, fixture: dict, arm: str, sdk_factory, reader_factory,
 def run_sealed(*, corpus_root: Path = corpus.ASK_DIR,
                arms: tuple[str, ...] = ARMS,
                reader_factory=None, sdk_factory=None, mutate=None,
-               mutate_label: str | None = None) -> dict:
+               mutate_label: str | None = None,
+               repo_root: str | Path | None = None) -> dict:
     """Run the sealed corpus: both arms per case, fixtures ONLY.
 
     ⛔ The inputs are ``corpus.load_fixtures`` — ``fixtures/*.json``. The gold
@@ -839,10 +893,22 @@ def run_sealed(*, corpus_root: Path = corpus.ASK_DIR,
     ``mutate`` is the falsification hook (applied to the distilled arm after
     seeding): drop the supersession and the D8 gate must go RED, which is what
     proves the gate can say no.
+
+    The tree is recorded **before** the first case runs, and re-read after the
+    last one: a run whose ``HEAD`` or cleanliness changed while it was running
+    straddled two trees, and no single sha reproduces it (see
+    :func:`code_identity`).
     """
     fixtures = corpus.load_fixtures(corpus_root)
     if not fixtures:
         raise ValueError(f"sealed corpus at {corpus_root} has no fixtures")
+    # ⛔ BEFORE the case loop, not after it. The measurement takes minutes and a
+    # real reader call takes seconds-to-minutes; a checkout that moves while the
+    # run is in flight would otherwise be recorded as the tree the NUMBERS came
+    # from, which is the false PASS this record exists to prevent. The library
+    # accepts a repository because the tests exercise real git repos in tmp
+    # directories; the CLI always passes this module's own tree.
+    identity = code_identity(repo_root)
     sdk_factory = sdk_factory or _default_sdk_factory
     records: list[dict] = []
     for fixture in fixtures:
@@ -853,6 +919,14 @@ def run_sealed(*, corpus_root: Path = corpus.ASK_DIR,
                 fixture=fixture, arm=arm, sdk_factory=sdk_factory,
                 reader_factory=reader_factory, mutate=mutate)
         records.append(case)
+    # The same questions again, AFTER the run: a commit that landed mid-run (or a
+    # path dirtied by the run itself) means these numbers came from no single
+    # tree, and that is a refusal rather than a footnote — recorded here because
+    # only the run knows when it started.
+    identity["at_end"] = code_identity(repo_root)
+    if (identity["at_end"]["commit"] != identity["commit"]
+            or identity["at_end"]["dirty_paths"] != identity["dirty_paths"]):
+        identity["drifted_during_run"] = True
     report = {
         "schema": RUN_SCHEMA,
         # FIXTURES ONLY — deliberately NOT the full corpus hash, which digests
@@ -869,6 +943,11 @@ def run_sealed(*, corpus_root: Path = corpus.ASK_DIR,
         "arms": list(arms),
         "seed": {"turns_embedded": SEED_TURNS_EMBEDDED_BY_DEFAULT,
                  "search_keys": SEED_SEARCH_KEYS_BY_DEFAULT},
+        # WHICH TREE produced these observations, recorded by the step that ran
+        # before it ran, rather than supplied later by whoever writes the
+        # report: a publisher that could NAME the commit would be back to
+        # asserting it.
+        "code_identity": identity,
         "cases": records,
     }
     if mutate is not None:
@@ -1017,6 +1096,11 @@ def score(*, run_report: dict, corpus_root: Path = corpus.ASK_DIR,
     }
     if run_report.get("mutated"):
         scored["mutated"] = run_report["mutated"]
+    # Carried through the score step so PUBLISH can compare it with the commit
+    # it is about to name. ``copy.deepcopy``: the scored artifact must not alias
+    # the run's record, or an audit that edits one silently rewrites the other.
+    if "code_identity" in run_report:
+        scored["code_identity"] = copy.deepcopy(run_report["code_identity"])
     return scored
 
 
@@ -1313,6 +1397,11 @@ def build_receipt(*, scored: dict, commit: str, cost_usd: float,
     why :func:`validate_ask_receipt` treats a receipt without one as invalid:
     the published claim's reproducibility has to come from the repository, and
     a receipt that merely *states* a sha is the defect this replaces.
+
+    The run's own ``code_identity`` (:func:`code_identity`) travels with the
+    scored artifact and is recorded here too: the binding proves the sha carries
+    this corpus and this protocol, the identity proves the numbers were produced
+    by that tree.
     """
     bar = scored["bar"]
     note_list = [
@@ -1369,7 +1458,78 @@ def build_receipt(*, scored: dict, commit: str, cost_usd: float,
     # produced by the repository, and a receipt must not alias it either.
     if commit_binding is not None:
         receipt["commit_binding"] = copy.deepcopy(commit_binding)
+    if scored.get("code_identity") is not None:
+        receipt["code_identity"] = copy.deepcopy(scored["code_identity"])
     return receipt
+
+
+def _validate_code_identity(receipt: dict) -> list[str]:
+    """The receipt must carry the tree the RUN recorded, and that tree must be
+    the receipt's own commit, clean.
+
+    ``commit_binding`` (publish time) answers *"does this sha carry the corpus
+    and the protocol these numbers came from?"*. This answers the question it
+    leaves open: *"were these numbers produced by that tree?"* Without it a    publisher can run the corpus at tree A and name a commit B whose corpus and
+    protocol are byte-identical — any ``main`` merge between the run and the
+    publish produces exactly that shape — and the report's §6 would tell a
+    reader to `git checkout B`, where a re-run executes different code.
+    """
+    issues: list[str] = []
+    identity = receipt.get("code_identity")
+    if not isinstance(identity, dict) or not identity:
+        return ["receipt.code_identity: missing — a published run must record "
+                "the tree it executed from (the commit, and whether that tree "
+                "was clean). Without it the recorded sha says where the CORPUS "
+                "came from, never where the numbers did"]
+    if identity.get("schema") != CODE_IDENTITY_SCHEMA:
+        issues.append(
+            f"receipt.code_identity.schema: unexpected "
+            f"{identity.get('schema')!r} (expected {CODE_IDENTITY_SCHEMA!r})")
+    run_tree = str(identity.get("commit") or "")
+    if len(run_tree) != 40 or not all(c in "0123456789abcdef"
+                                      for c in run_tree):
+        issues.append(
+            f"receipt.code_identity.commit: {run_tree!r} is not a full 40-hex "
+            f"sha — the run did not record the tree it executed from, so no "
+            f"sha can be said to reproduce these numbers")
+    elif run_tree != str(receipt.get("commit") or ""):
+        issues.append(
+            f"receipt.code_identity.commit: {run_tree!r} is not the receipt's "
+            f"own commit ({receipt.get('commit')!r}) — the run executed a "
+            f"DIFFERENT tree than the one this report names, so `git checkout "
+            f"<sha>` would re-run code these numbers did not come from")
+    dirty = identity.get("dirty_paths")
+    if not isinstance(dirty, list):
+        issues.append(
+            f"receipt.code_identity.dirty_paths: expected a list, got "
+            f"{dirty!r}")
+    elif dirty:
+        issues.append(
+            f"receipt.code_identity.dirty_paths: the run executed from a tree "
+            f"with {len(dirty)} uncommitted path(s) {dirty[:5]}" +
+            (" …" if len(dirty) > 5 else "") +
+            " — 'reproducible from the recorded sha alone' is false over an "
+            "uncommitted patch: commit the tree and re-run")
+    # The run records the tree at BOTH ends. A commit that landed mid-run (or a
+    # path the run itself dirtied) means these numbers came from no single tree,
+    # so no sha reproduces them — and the run is the only witness that it
+    # started before the change. A missing ``at_end`` is not "unchanged": a run
+    # from an older record cannot show it stayed put, so it is refused too.
+    at_end = identity.get("at_end")
+    if not isinstance(at_end, dict) or not at_end:
+        issues.append(
+            "receipt.code_identity.at_end: missing — the run did not record the "
+            "tree AFTER it finished, so nothing shows the measurement stayed on "
+            "one tree; a sha cannot reproduce a run that may have straddled two")
+    elif (at_end.get("commit") != run_tree
+            or (at_end.get("dirty_paths") or []) != (dirty or [])):
+        issues.append(
+            f"receipt.code_identity.at_end: the tree CHANGED while the run was "
+            f"in progress ({run_tree!r}/{dirty!r} at start → "
+            f"{at_end.get('commit')!r}/{at_end.get('dirty_paths')!r} at end) — "
+            f"these numbers came from no single tree, so `git checkout <sha>` "
+            f"reproduces neither half: commit first, then re-run")
+    return issues
 
 
 def _validate_commit_binding(receipt: dict) -> list[str]:
@@ -1526,6 +1686,7 @@ def validate_ask_receipt(receipt: dict) -> list[str]:
     if not isinstance(receipt.get("resolved_config"), dict):
         issues.append("receipt.resolved_config: expected an object")
     issues.extend(_validate_commit_binding(receipt))
+    issues.extend(_validate_code_identity(receipt))
     if isinstance(receipt.get("cost_usd"), bool) or not isinstance(
             receipt.get("cost_usd"), (int, float)):
         issues.append("receipt.cost_usd: expected a number")
@@ -1640,6 +1801,32 @@ def render_report(*, receipt: dict, scored: dict, prereg: dict,
     # reader audits is what the publisher verified.
     binding = receipt.get("commit_binding") or {}
     run_commit = binding.get("run_commit") or receipt["commit"]
+    identity = receipt.get("code_identity") or {}
+    run_tree = identity.get("commit") or "—"
+    dirty_paths = identity.get("dirty_paths")
+    # ⛔ "clean" is claimed only on a RECORDED clean tree. `(identity or {}).get(
+    # 'dirty_paths') or []` made an absent record render identically to a
+    # verified clean one — a fail-open default in the function the README calls
+    # the audit surface, which is the one place it must not be.
+    if not isinstance(dirty_paths, list):
+        tree_state = ("NOT RECORDED — the run did not say which tree it "
+                      "executed from")
+    elif dirty_paths:
+        tree_state = (f"DIRTY at run time: {len(dirty_paths)} uncommitted "
+                      f"path(s) {dirty_paths[:5]}")
+    else:
+        tree_state = "clean at run time (no uncommitted paths)"
+    # A run that straddled two trees renders the fact rather than a tidy
+    # sentence: publish refuses it, and a receipt rendered by anything else
+    # still has to say so.
+    at_end = identity.get("at_end")
+    if isinstance(at_end, dict) and at_end.get("commit"):
+        end_dirty = at_end.get("dirty_paths")
+        if (at_end.get("commit") != identity.get("commit")
+                or end_dirty != dirty_paths):
+            tree_state += (f" — ⛔ the tree CHANGED during the run (at end: "
+                           f"{at_end.get('commit')!r}, uncommitted "
+                           f"{end_dirty!r})")
     prereg_commit = binding.get("prereg_commit") or "—"
     committed_corpus_hash = binding.get("corpus_hash") or "—"
     committed_prereg_sha = binding.get("prereg_sha256") or "—"
@@ -1679,6 +1866,7 @@ extends: tools/longmem_eval/measure_ask_distilled.py, tests/eval/ask/README.md
 | Reader | `{receipt["reader_model_spec"]}` (temperature {prereg["reader"]["temperature"]}, max_tokens {prereg["reader"]["max_tokens"]}, pinned: {receipt["reader_pinned"]}) |
 | Judge | `{receipt["judge_model"]}` — pin `{receipt["judge_pin"]}`, rubric id `{prereg["judge"]["rubric_id"]}` (hash `{receipt["judge_rubric_id_hash"]}`) |
 | Commit (exact) | `{run_commit}` — **commit binding verified at publish time** (§6) |
+| Tree the run executed from | `{run_tree}` — {tree_state} |
 | Corpus hash | `{receipt["corpus_hash"]}` (re-hashed from the tree AT that commit: `{committed_corpus_hash}`) |
 | Pre-registration | `{prereg_rel}` — sha256 `{prereg_sha256}` (re-hashed from the tree AT that commit: `{committed_prereg_sha}`) |
 | Verdict | **{receipt["verdict"].upper()}** (run_status `{receipt["run_status"]}`, failure_origin `{receipt["failure_origin"]}`) |
@@ -1739,9 +1927,16 @@ pre-registration **at that sha** hash to the ones published above (so
 pre-registration's own commit is a **proper ancestor** of the run commit
 (ordering `{ordering}`).
 
+A fourth fact comes from the RUN step, not from this publishing pass: the run
+recorded that it executed from tree `{run_tree}` and that the tree was
+{tree_state}. That is what makes the re-run below reproduce *these numbers*
+rather than merely the same corpus — a report whose numbers came from one tree
+and whose sha names another would pass every corpus check and still be false.
+
 | Binding | Value |
 |---|---|
 | Run commit (resolved) | `{run_commit}` |
+| Tree the run executed from | `{run_tree}` — {tree_state} |
 | Corpus at that commit (`{corpus_rel}`) | `{committed_corpus_hash}` |
 | Pre-registration at that commit (`{prereg_rel}`) | `{committed_prereg_sha}` |
 | Pre-registration commit | `{prereg_commit}` |
@@ -1854,13 +2049,22 @@ def _main(argv: list[str] | None = None) -> int:
         report = run_sealed(
             corpus_root=Path(args.corpus_root),
             mutate=(_drop_supersession if args.mutate else None),
-            mutate_label="planted supersessions dropped on the gate arm")
+            mutate_label="planted supersessions dropped on the gate arm",
+            # ⛔ NOT a flag. The numbers come from THIS module's tree, so the
+            # run records THIS module's tree — a `--repo` flag could only ever
+            # name a different one, which is the false PASS the record exists
+            # to close (`run --repo <main checkout>` would be the one-flag way
+            # around the refusal it is supposed to trip).
+            repo_root=_REPO_ROOT)
         _dump(args.out, report)
         measured = sum(1 for c in report["cases"]
                        for arm in report["arms"] if c["arms"][arm]["ok"])
         total = len(report["cases"]) * len(report["arms"])
+        identity = report["code_identity"]
         print(f"ran {measured}/{total} case-arms over {len(report['cases'])} "
-              f"cases → {args.out}")
+              f"cases from {(identity.get('commit') or 'NO COMMIT')[:12]} "
+              f"({len(identity.get('dirty_paths') or [])} uncommitted path(s)) "
+              f"→ {args.out}")
         return 0
 
     if args.cmd == "score":
@@ -1895,6 +2099,13 @@ def _main(argv: list[str] | None = None) -> int:
             for reason in binding_reasons:
                 print(f"  - {reason}", file=sys.stderr)
             return 2
+        # (0b) THE OTHER HALF — "the run is reproducible from the recorded sha
+        # alone" — is enforced by `_validate_code_identity` inside the receipt
+        # validation below, not by a second check here: the run's own
+        # `code_identity` record either agrees with the commit this receipt
+        # names and is clean, or the receipt is invalid. ONE implementation, so
+        # the two cannot drift; the binding above is separate because it asks
+        # the repository a question the receipt cannot answer.
         # Re-bind the verdict to the CURRENT corpus: a report published over a
         # drifted corpus, or against a pre-registration that no longer
         # describes it, is refuse-to-publish, not a footnote.
