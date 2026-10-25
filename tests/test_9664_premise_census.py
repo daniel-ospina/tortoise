@@ -24,10 +24,12 @@ rows and a coverage overclaim:
    ``tortoise_overview(section="health")``. That omission is why the PR's own
    correction could name a RETIRED tool and the instrument stayed silent.
 4. Step **2** had no row at all (``row("2"`` → 0 hits), so the bundle recorded
-   its premise as ``STATIC`` while the other nine were measured — and #9691 then
-   falsified it *by hand*, finding that ``configured: false`` is **not** the
-   catalog union on a hosted default graph. A premise the instrument does not
-   read is a premise the instrument cannot falsify.
+   its premise as ``STATIC`` — the only step whose basis it recorded that way
+   (steps 3 and 10 have no census row either, but their premises are measured
+   by other logs, ``01``/``05``) — and #9691 then falsified it *by hand*,
+   finding that ``configured: false`` is **not** the catalog union on a hosted
+   default graph. A premise no artifact re-reads is a premise nothing can
+   falsify.
 
 WHAT THIS PINS
 --------------
@@ -44,7 +46,13 @@ WHAT THIS PINS
    exists to catch: records resolving to the union (#9691), a starter set equal
    to the catalog, a first packs read that does not narrow a record-less graph.
 6. A query the packs rows do not model leaves that section UNMEASURED (exit 3),
-   never a satisfied row.
+   never a satisfied row — including a query whose raise its caller SWALLOWS
+   (the data leg, and the best-effort seeding write).
+7. An unreadable pack catalog is UNMEASURED (exit 3), never a section of
+   confident inverse verdicts: ``_resolve_catalog`` degrades to ``{}`` and
+   never raises.
+8. Rows 2c and 2e evaluate the whole clause they print — "**NOT** the catalog
+   union" and "merges the **starter set**" — not a narrowed-ness proxy.
 
 Non-vacuity: on the pre-fix probe, (1) has no ``tortoise_health`` /
 ``tortoise_overview`` / ``tortoise_onboarding_state`` row, (2) has no
@@ -291,9 +299,10 @@ STEP2_ARMS = (
 def test_step_2_has_a_measured_row_for_every_resolution_arm(probe) -> None:
     """Non-vacuity: the census had ZERO step-2 rows before this guard.
 
-    Step 2 was the only step in the ten-step table whose premise the census
-    never read (`row("2"` had 0 hits; the bundle called it "premise STATIC"),
-    so the instrument could not falsify it — #9691 had to be caught by hand.
+    Step 2's basis was the only one the bundle recorded as ``STATIC``
+    (``row("2"`` had 0 hits; steps 3 and 10 have no census row either and are
+    measured by other logs), i.e. the one premise nothing re-read — so the
+    instrument could not falsify it and #9691 had to be caught by hand.
     """
     probe.census_packs()
     still_two = [(premise, measured) for step, premise, measured in probe.rows
@@ -356,6 +365,14 @@ def test_the_starter_row_falsifies_when_the_starter_set_is_the_catalog(
         f"a starter set spanning the catalog does not narrow anything: {verdict!r}")
     assert "catalog−starter=NONE" in verdict, (
         f"the row must print the difference it measured, got {verdict!r}")
+    # Review round 2, P2: the same state reaches row 2c, whose verdict must
+    # include its own "NOT the catalog union" clause. It used to print
+    # CONFIRMED while its evidence line read `catalog−resolved=NONE`.
+    record_verdict = _measured(probe, "`configured=False` is NOT the catalog union")
+    assert record_verdict.startswith("FALSIFIED"), (
+        "a resolved set equal to the catalog IS the catalog union, so the row "
+        f"must not claim the opposite: {record_verdict!r}")
+    assert "catalog−resolved=NONE" in record_verdict, record_verdict
 
 
 def test_the_self_heal_row_falsifies_when_the_read_does_not_seed(
@@ -376,6 +393,91 @@ def test_the_self_heal_row_falsifies_when_the_read_does_not_seed(
         f"a read that seeds nothing leaves the union arm in place: {verdict!r}")
     assert "still the union" in verdict, (
         f"the row must say the graph is still un-narrowed, got {verdict!r}")
+
+
+def test_the_self_heal_row_falsifies_when_only_part_of_the_starter_set_is_seeded(
+    probe, monkeypatch
+) -> None:
+    """Review round 2, P2: "merges the starter set" is not "narrows at all".
+
+    The verdict was `listed and after.namespaces is not None and not
+    after.configured`, so a seeding change recording ONE of the five starter
+    namespaces printed CONFIRMED with `resolved=['dev']` — a clause about the
+    starter set satisfied by a strictly weaker observation.
+    """
+    from tortoise import pack_state
+
+    real_ensure = pack_state.ensure_tenant_packs
+
+    def _one_pack(sdk, *, starter=None, graph_name=None):
+        return real_ensure(sdk, starter=["dev"], graph_name=graph_name)
+
+    monkeypatch.setattr(pack_state, "ensure_tenant_packs", _one_pack)
+    probe.census_packs()
+    verdict = _measured(probe, "the FIRST packs read on a record-less unconfigured graph")
+    assert verdict.startswith("FALSIFIED"), (
+        f"one seeded namespace is not the starter set: {verdict!r}")
+    assert "resolved=['dev']" in verdict, (
+        f"the row must print the set it resolved, got {verdict!r}")
+
+
+def test_an_unreadable_catalog_leaves_the_packs_section_unmeasured(
+    probe, monkeypatch, capsys
+) -> None:
+    """Review round 2, P2 — `_resolve_catalog` degrades to `{}`, it never raises.
+
+    Unguarded, an unavailable pack registry made the section print confident
+    verdicts under exit 0: 2a and 2e FALSIFIED (both false — nothing was
+    readable) and 2c CONFIRMED while printing `catalog−resolved=NONE`, the
+    inverse of the finding this PR records. The file's own contract is exit 3.
+    """
+    from tortoise import pack_state
+
+    monkeypatch.setattr(pack_state, "_resolve_catalog", lambda: {})
+    rc = probe.main()
+    out = capsys.readouterr().out
+    assert rc == 3, f"an unreadable catalog is unmeasurable, got exit {rc}: {out}"
+    assert "census_packs" in out, out
+    assert "could not be read" in out, out
+    assert "`configured=False` is NOT the catalog union" not in out, (
+        f"no row may print when its input could not be read: {out}")
+
+
+def test_a_seed_refusal_swallowed_by_the_best_effort_seeder_is_unmeasured(
+    probe, monkeypatch, capsys
+) -> None:
+    """Review round 2, P2 — the seed leg's refusal is swallowed one layer up.
+
+    `ensure_tenant_packs` wraps its seeding write in `except Exception: …
+    best-effort` (`pack_state.py:482`), so a changed seed write returns an
+    EMPTY activation instead of raising into `main()`: the row then printed
+    `FALSIFIED (0 records after the read)` — the log recording a broken product
+    self-heal that the probe never read. The fake now RECORDS the refusal and
+    `_require_served` raises on it regardless of `listed`.
+
+    The subclass rewrites the seed text the stand-in sees, so the REAL
+    ensure-then-read path runs against the write a regressed `pack_state`
+    would issue.
+    """
+    base = probe._FakeGraph
+
+    class _ChangedSeed(base):
+        def query(self, cypher, params=None, **kw):
+            if "MERGE (p:PackInstall" in cypher:
+                cypher = cypher.replace("p.status = 'active'",
+                                        "p.status = 'removed'")
+            return super().query(cypher, params, **kw)
+
+    monkeypatch.setattr(probe, "_FakeGraph", _ChangedSeed)
+    rc = probe.main()
+    out = capsys.readouterr().out
+    assert rc == 3, (
+        f"a seed write the stand-in refused must fail closed, got exit {rc}: {out}")
+    assert "census_packs" in out, out
+    assert "REFUSED ['seed']" in out, out
+    assert "the FIRST packs read on a record-less unconfigured graph" not in out, (
+        "the self-heal row must not print a verdict for a read whose write was "
+        f"refused: {out}")
 
 
 def test_an_unmodelled_pack_query_leaves_the_packs_section_unmeasured(

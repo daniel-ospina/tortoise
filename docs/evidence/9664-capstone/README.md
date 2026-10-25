@@ -35,8 +35,11 @@ tree that a re-run must re-verify). A step with no measurement is `NOT COVERED` 
 
 Measured at `git HEAD 653980445f` (2026-10-22), with the census (`02`) re-run at
 `b39c70d8c` after its rows were made to measure the clause they print, and again at
-`b966664db` (2026-10-25) when step 2 became a MEASURED row instead of a `STATIC`
-one; deployed
+`2227e52de` (2026-10-25) — the head its own `Measured at:` line names — when step 2
+became a MEASURED row instead of a `STATIC` one (the rows were first added at
+`b966664db`; the shipped log is the re-run after the round-1 review fix, whose
+fail-closed guards change no printed row — the log body is byte-identical under
+them); deployed
 `commit_sha 81f5594dce` — an
 ancestor of `origin/main` `2bf86487c1`, **39 commits behind** it
 (`git rev-list --count 81f5594dce..2bf86487c1` → `39`; deploy lag, not a stale or
@@ -64,8 +67,10 @@ contradicts the shipped system; the corrected wording follows the table) · **BL
 | 10 | capture disclosure card: capture unavailable for ChatGPT, not silence | VERIFIED-HERE (copy) | `HARNESS_CAPTURE_SUPPORT.chatgpt === false` renders `HARNESS_CAPTURE_REASON.chatgpt` = *"ChatGPT connects from its own cloud — session capture isn't available for it"* (`harnessStatusCard.jsx:120`), pinned by 38 green tests (`05` log). Not silence. |
 
 **Step 2's premise became `MEASURED` last** (census rows 2a-2e). It was the only step
-in the ten-step table the census did not read (`row("2"` matched nothing, and this
-table used to call its basis `STATIC`), which is how #9691 falsified step 2's
+whose basis this table recorded as `STATIC` — the state in which nothing re-read the
+premise (steps 3 and 10 have no census row either; their premises are measured by
+`01` and `05`, and no step row has ever carried `STATIC` but step 2's) — which is how
+#9691 falsified step 2's
 parenthetical — *"the default is catalog union + core"* — by hand instead of by the
 instrument. The rows now drive the real `pack_state.resolved_pack_set` through all
 three arms over a fake graph handle that supplies only the INPUTS, so the same defect
