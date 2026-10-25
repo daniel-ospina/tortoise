@@ -81,6 +81,29 @@ Changing the corpus **intentionally** means re-writing the pre-registration
 (`measure_ask_distilled preregister`) in its own commit — the pre-registration
 that fixed the bar is required to precede the run it governs.
 
+## Publishing is bound to the commit the report records
+
+The run report's central claim is that it is *reproducible from the recorded
+sha alone*, and that the protocol was committed **before** the run. Both are
+properties of git history, so `publish` asks the repository instead of
+asserting them (`measure_ask_distilled.verify_commit_binding`):
+
+1. `--commit` must **resolve** to a commit in the repository — a sha that
+   resolves to nothing is refused, never printed;
+2. the corpus **at that sha** must re-hash to the published `corpus_hash`, and
+   the pre-registration blob at that sha must be byte-identical to the
+   published one (so `git checkout <sha>` reproduces *this* corpus and *this*
+   protocol);
+3. the commit that last touched the pre-registration at or before the run
+   commit must be a **proper ancestor** of it (`git merge-base
+   --is-ancestor`), and its recorded time must not be later. A clone whose
+   shallow boundary is that commit reports **UNPROVABLE** and refuses.
+
+The verified binding is written into the receipt (`commit_binding`) and
+rendered into §1/§6 of the run report, so a reviewer can re-check it from the
+report alone. It adds no clause to the pre-registration's decision rule: it is
+a publishing precondition, not a scoring change.
+
 ## Why this is a separate tree from `tests/eval/write_path/`
 
 Mechanical, not stylistic: the write-path corpus's own integrity gate derives

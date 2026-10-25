@@ -59,6 +59,33 @@ stronger than they are:
   every field the protocol fixes is a field the bar refuses to run without, so
   the protocol cannot be quietly re-worded after the fact and still pass.
 
+5. **A verified commit binding** (:func:`verify_commit_binding`) — the run's
+   ``--commit`` is not free text. At publish time the repository itself is
+   asked three questions the issue's targets assert in prose:
+
+   * does that sha RESOLVE (:func:`_resolve_commit`)? A report naming a sha
+     nothing can resolve is not "reproducible from the recorded sha alone",
+     it is a claim with a hole in it;
+   * does the corpus AT THAT SHA hash to the published ``corpus_hash``, and is
+     the pre-registration blob at that sha byte-identical to the published
+     one? Otherwise `git checkout <sha>` reproduces a different corpus, or a
+     different protocol, than the numbers came from;
+   * is the pre-registration's own commit a PROPER ANCESTOR of the run commit?
+     That is target 1's *"precedes … (verifiable, not asserted)"*: ancestry is
+     a property of the commit graph, so it cannot be satisfied by a lane
+     writing "written_before_any_arm_run: true" into a file.
+
+   ⛔ **This is a publishing precondition, NOT a protocol amendment.** It adds
+   no clause to ``decision_rule``, changes no corpus, no scoring and no
+   verdict: it refuses to *emit the report* when the report's own
+   reproducibility sentence would be false. The precedent is in-tree —
+   ``tools/capstone_preregistration_check.py`` ("the commit that adds
+   PRE-REGISTRATION.md must be older than the commit that adds each *.log … an
+   ordering that cannot be shown is not an ordering") and
+   ``tools/finding_provenance.py`` (an ancestry test, never an equality test).
+   Amending the pre-registration itself to name this check would be a lane
+   editing a protocol that already has a run behind it — out of scope here.
+
 Sibling module, not an extension of ``run_protocol.py``: that protocol's steps
 are LongMemEval-shaped (500-Q run, vs-V3-baseline delta, 1k benchmark, its own
 step numbering). Extending it would couple two benchmarks' pre-registrations.
@@ -79,6 +106,11 @@ CLI:
         --run <observations> --out <scored>
 
     # 4. publish the receipt + the run report
+    #    --commit is RESOLVED and VERIFIED against the repository (see
+    #    `verify_commit_binding`): the corpus and the pre-registration at that
+    #    sha must be the ones published, and the pre-registration's commit must
+    #    be a proper ancestor of it. A sha that does not vouch for the run is
+    #    refused, never published.
     uv run python -m tools.longmem_eval.measure_ask_distilled publish \\
         --scored <scored> --commit <sha> --cost-usd 0.02 \\
         --out docs/benchmarks/ask-distilled/run-report.md \\
@@ -100,8 +132,12 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 import argparse
 import copy
 import hashlib
+import io
 import json
 import os
+import subprocess
+import tarfile
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -139,6 +175,7 @@ from tortoise.ask_lane import run_ask_lane  # noqa: E402
 PREREG_SCHEMA = "ask-distilled-preregistration/v1"
 RUN_SCHEMA = "ask-distilled-observations/v1"
 SCORED_SCHEMA = "ask-distilled-scored/v1"
+COMMIT_BINDING_SCHEMA = "ask-distilled-commit-binding/v1"
 
 ISSUE = "9097"
 EPIC = "2281"
@@ -417,6 +454,258 @@ def load_preregistration(path: str | Path = corpus.PREREGISTRATION_PATH) -> dict
 
 def preregistration_sha256(path: str | Path = corpus.PREREGISTRATION_PATH) -> str:
     return corpus.sha256_file(path)
+
+
+# ── 0. the COMMIT BINDING — the sha must vouch for the run ────────────────
+#
+# The issue's targets 1 and 2 are both claims about history:
+#   (1) "pre-registration committed BEFORE the run … verifiable, not asserted"
+#   (2) "the run is reproducible from the recorded sha alone"
+#
+# Both are satisfied by prose today: `--commit` is a free-text field, so a
+# report could name a sha that does not exist, a sha whose tree carries a
+# DIFFERENT corpus or a DIFFERENT protocol, or a sha at which the
+# pre-registration was introduced in that very commit (i.e. possibly written
+# after the numbers). The report would still render, and its §6 would still
+# tell a reader to `git checkout <sha>`. This section makes the repository
+# answer those questions instead of the report asserting them.
+
+def _git(repo_root: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", str(repo_root), *args],
+                          capture_output=True, text=True, check=False)
+
+
+def _git_out(repo_root: Path, *args: str) -> str | None:
+    """stdout of a git command, or None when it fails (a failure is not ''.)."""
+    proc = _git(repo_root, *args)
+    return proc.stdout.strip() if proc.returncode == 0 else None
+
+
+def _resolve_commit(repo_root: Path, rev: str) -> str | None:
+    """Full sha of ``rev`` when it is a commit in this repository, else None."""
+    return _git_out(repo_root, "rev-parse", "--verify", "--quiet",
+                    f"{(rev or '').strip()}^{{commit}}") or None
+
+
+def _is_ancestor(repo_root: Path, ancestor: str, descendant: str) -> bool:
+    """`git merge-base --is-ancestor` (reflexive: A is an ancestor of A).
+
+    Ancestry, never equality: an equality test passes only when the two shas
+    are identical, so it cannot express "the protocol came earlier in this
+    history" for the case that actually matters (the protocol commit is behind
+    the run commit, not equal to it).
+    """
+    return _git(repo_root, "merge-base", "--is-ancestor", ancestor,
+                descendant).returncode == 0
+
+
+def _rel_inside(repo_root: Path, path: Path) -> str | None:
+    """Repo-relative posix path, or None when ``path`` is outside the repo."""
+    try:
+        return Path(path).resolve().relative_to(
+            Path(repo_root).resolve()).as_posix()
+    except ValueError:
+        return None
+
+
+def _corpus_hash_at_commit(repo_root: Path, commit: str,
+                           corpus_rel: str) -> str | None:
+    """The corpus hash of the corpus AS COMMITTED at ``commit``.
+
+    Materialised through ``git archive`` and hashed with the SAME
+    :func:`corpus.compute_corpus_hash` the rest of the pipeline uses — one
+    implementation, so "the corpus at that sha" and "the corpus on disk"
+    cannot drift apart through a second, subtly different hasher.
+    """
+    proc = subprocess.run(["git", "-C", str(repo_root), "archive",
+                           "--format=tar", commit, "--", corpus_rel],
+                          capture_output=True, check=False)
+    if proc.returncode != 0 or not proc.stdout:
+        return None
+    with tempfile.TemporaryDirectory(prefix="ask_commit_corpus_") as tmp:
+        try:
+            with tarfile.open(fileobj=io.BytesIO(proc.stdout)) as tar:
+                tar.extractall(tmp, filter="data")
+        except tarfile.TarError:
+            return None
+        root = Path(tmp) / corpus_rel
+        if not (root / "fixtures").is_dir() or not (root / "gold").is_dir():
+            return None
+        return corpus.compute_corpus_hash(root)
+
+
+def _blob_sha256_at_commit(repo_root: Path, commit: str,
+                           rel: str) -> str | None:
+    """sha256 of the blob at ``commit:rel`` (None when the path is absent)."""
+    proc = subprocess.run(["git", "-C", str(repo_root), "show",
+                           f"{commit}:{rel}"], capture_output=True, check=False)
+    if proc.returncode != 0:
+        return None
+    return corpus.sha256_bytes(proc.stdout)
+
+
+def _shallow_boundary(repo_root: Path) -> set[str]:
+    """The grafted boundary commits of a shallow clone (empty when not shallow).
+
+    ``git rev-parse --is-shallow-repository`` alone is the wrong question: it is
+    true whenever the clone was EVER truncated, even if the boundary sits 500
+    commits behind HEAD — which is the normal state of a lane worktree here, and
+    in that shape history is perfectly usable. What makes an ordering UNPROVABLE
+    is a boundary commit that IS the one being dated, because git reports a
+    grafted commit's parents as none and every path then looks added by it.
+    """
+    git_path = _git_out(repo_root, "rev-parse", "--git-path", "shallow")
+    if not git_path:
+        return set()
+    path = Path(git_path)
+    if not path.is_absolute():
+        path = repo_root / path
+    try:
+        return {line.strip() for line in
+                path.read_text(encoding="utf-8").splitlines() if line.strip()}
+    except OSError:
+        return set()
+
+
+def verify_commit_binding(*, commit: str, repo_root: str | Path,
+                          corpus_root: str | Path = corpus.ASK_DIR,
+                          prereg: str | Path = corpus.PREREGISTRATION_PATH,
+                          ) -> tuple[dict | None, list[str]]:
+    """Bind the published artifacts to the commit they claim to come from.
+
+    Returns ``(binding, reasons)``: ``binding`` is None when ANY check fails,
+    and ``reasons`` then names every failure (not just the first) — a
+    publishable claim has to be reproducible in every part, and fixing them one
+    round trip at a time is how a lane talks itself into publishing the first
+    two.
+
+    The binding records, so a reviewer can re-verify without re-deriving them:
+    the resolved run commit, the pre-registration's own commit and both commit
+    times, the corpus hash AT the run commit, and the pre-registration blob's
+    sha256 AT the run commit.
+    """
+    repo_root = Path(repo_root)
+    corpus_root = Path(corpus_root)
+    prereg = Path(prereg)
+    reasons: list[str] = []
+
+    run_commit = _resolve_commit(repo_root, commit)
+    if run_commit is None:
+        return None, [
+            f"the recorded commit {commit!r} is not a commit in {repo_root} — "
+            f"'reproducible from the recorded sha alone' is exactly what the "
+            f"sha has to support, and this one resolves to nothing"]
+
+    corpus_rel = _rel_inside(repo_root, corpus_root)
+    prereg_rel = _rel_inside(repo_root, prereg)
+    if corpus_rel is None:
+        reasons.append(
+            f"the corpus {corpus_root} is outside the repository {repo_root}, "
+            f"so the recorded commit cannot vouch for it")
+    if prereg_rel is None:
+        reasons.append(
+            f"the pre-registration {prereg} is outside the repository "
+            f"{repo_root}, so the recorded commit cannot vouch for it")
+    if reasons:
+        return None, reasons
+
+    # (a) the corpus AT the recorded sha is the corpus that was scored.
+    committed_corpus_hash = _corpus_hash_at_commit(
+        repo_root, run_commit, corpus_rel)
+    local_corpus_hash = corpus.compute_corpus_hash(corpus_root)
+    if committed_corpus_hash is None:
+        reasons.append(
+            f"{corpus_rel} does not exist at {run_commit} — `git checkout "
+            f"{run_commit[:12]}` cannot reproduce the corpus these numbers "
+            f"came from")
+    elif committed_corpus_hash != local_corpus_hash:
+        reasons.append(
+            f"the corpus at {run_commit[:12]} hashes to "
+            f"{committed_corpus_hash}, but the scored corpus hashes to "
+            f"{local_corpus_hash} — the recorded sha reproduces a DIFFERENT "
+            f"corpus than the one these numbers came from")
+
+    # (b) the pre-registration AT the recorded sha is the protocol published.
+    committed_prereg_sha = _blob_sha256_at_commit(
+        repo_root, run_commit, prereg_rel)
+    local_prereg_sha = corpus.sha256_file(prereg)
+    if committed_prereg_sha is None:
+        reasons.append(
+            f"{prereg_rel} does not exist at {run_commit} — the protocol that "
+            f"fixed the bar was not committed at the sha the run records")
+    elif committed_prereg_sha != local_prereg_sha:
+        reasons.append(
+            f"the pre-registration at {run_commit[:12]} hashes to "
+            f"{committed_prereg_sha}, but the published one hashes to "
+            f"{local_prereg_sha} — the report would cite a sha carrying a "
+            f"different protocol than the one published")
+
+    # (c) the pre-registration PRECEDES the run in the commit graph.
+    prereg_commit = None
+    prereg_time = run_time = None
+    if committed_prereg_sha is not None:
+        prereg_commit = _git_out(repo_root, "rev-list", "-1", run_commit,
+                                 "--", prereg_rel)
+        if not prereg_commit:
+            reasons.append(
+                f"cannot determine which commit introduced {prereg_rel} at or "
+                f"before {run_commit[:12]} — an ordering that cannot be "
+                f"established is not an ordering")
+        elif prereg_commit in _shallow_boundary(repo_root):
+            reasons.append(
+                f"ordering UNPROVABLE: {prereg_commit[:12]} (the commit the "
+                f"pre-registration dates to) is this clone's SHALLOW boundary "
+                f"— git grafts its parents away, so 'the protocol came first' "
+                f"cannot be shown here. UNPROVABLE is never a pass: run "
+                f"`git fetch --unshallow` and re-publish")
+        elif prereg_commit == run_commit:
+            reasons.append(
+                f"ordering NOT proven: the pre-registration enters history in "
+                f"{run_commit[:12]}, the same commit recorded as the run — the "
+                f"protocol could have been written after the numbers were "
+                f"seen. Record the run at a COMMIT THAT CONTAINS the "
+                f"pre-registration commit as an ancestor")
+        elif not _is_ancestor(repo_root, prereg_commit, run_commit):
+            reasons.append(
+                f"ordering NOT proven: {prereg_commit[:12]} (the "
+                f"pre-registration's commit) is not an ancestor of "
+                f"{run_commit[:12]} (the run's commit)")
+        else:
+            prereg_time = _git_out(repo_root, "show", "-s", "--format=%cI",
+                                   prereg_commit)
+            run_time = _git_out(repo_root, "show", "-s", "--format=%cI",
+                                run_commit)
+            # Ancestry is the proof (a property of the graph); the clock is a
+            # cross-check. `prereg_time <= run_time` non-strict: a scripted
+            # lane can land two commits inside one second, and refusing that
+            # would be a stuck light rather than a finding.
+            if prereg_time and run_time and prereg_time > run_time:
+                reasons.append(
+                    f"ordering NOT proven: the pre-registration's commit time "
+                    f"({prereg_time}) is LATER than the run commit's "
+                    f"({run_time}) — history was rewritten (or the clock is "
+                    f"wrong), so precedence is not shown")
+
+    if reasons:
+        return None, reasons
+
+    return {
+        "schema": COMMIT_BINDING_SCHEMA,
+        "run_commit": run_commit,
+        "run_commit_requested": str(commit),
+        "corpus_path": corpus_rel,
+        "corpus_hash": committed_corpus_hash,
+        "prereg_path": prereg_rel,
+        "prereg_sha256": committed_prereg_sha,
+        "prereg_commit": prereg_commit,
+        "prereg_commit_time": prereg_time,
+        "run_commit_time": run_time,
+        "ordering": "proven",
+        "ordering_proof": (
+            f"{prereg_commit} (the commit that last touched {prereg_rel} at or "
+            f"before the run commit) is a proper ancestor of {run_commit}; "
+            f"ancestry verified with `git merge-base --is-ancestor`"),
+    }, []
 
 
 # ── 1. the RUN step — fixtures only, observations only ────────────────────
@@ -948,8 +1237,16 @@ def build_receipt(*, scored: dict, commit: str, cost_usd: float,
                   run_id: str | None = None,
                   date: str | None = None,
                   prereg_sha256: str | None = None,
+                  commit_binding: dict | None = None,
                   notes: list[str] | None = None) -> dict:
-    """The validated receipt (W7 vocabulary, ask metric set)."""
+    """The validated receipt (W7 vocabulary, ask metric set).
+
+    ``commit_binding`` is the record :func:`verify_commit_binding` produced at
+    publish time. It is not derivable here (this function is pure), which is
+    why :func:`validate_ask_receipt` treats a receipt without one as invalid:
+    the published claim's reproducibility has to come from the repository, and
+    a receipt that merely *states* a sha is the defect this replaces.
+    """
     bar = scored["bar"]
     note_list = [
         "ask lane (run_ask_lane, EVAL-ONLY per #3849) — the product's own "
@@ -964,7 +1261,7 @@ def build_receipt(*, scored: dict, commit: str, cost_usd: float,
     if prereg_sha256:
         note_list.append(f"pre-registration sha256: {prereg_sha256}")
     note_list.extend(notes or [])
-    return _w7_build_receipt(
+    receipt = _w7_build_receipt(
         run_id=run_id or f"ask-distilled-{scored['corpus_hash'][7:19]}",
         date=date or datetime.now(UTC).strftime("%Y-%m-%d"),
         commit=commit,
@@ -1001,6 +1298,76 @@ def build_receipt(*, scored: dict, commit: str, cost_usd: float,
             "preregistration_sha256": prereg_sha256,
         },
     )
+    # Recorded verbatim (deep-copied, like the metrics): the binding is evidence
+    # produced by the repository, and a receipt must not alias it either.
+    if commit_binding is not None:
+        receipt["commit_binding"] = copy.deepcopy(commit_binding)
+    return receipt
+
+
+def _validate_commit_binding(receipt: dict) -> list[str]:
+    """The receipt must carry the binding the PUBLISHER verified, and agree
+    with it.
+
+    This half cannot re-run git (a receipt is read without a checkout), so it
+    checks the properties that make a hand-edited or hand-assembled receipt
+    visible: the binding is present, its run commit IS the receipt's commit and
+    is a full sha, its corpus hash and pre-registration sha ARE the receipt's,
+    the ordering is recorded as proven, and the pre-registration's commit is
+    not the run commit. A receipt that states a sha without a binding is the
+    exact shape of the old defect ("trust the free-text commit").
+    """
+    issues: list[str] = []
+    binding = receipt.get("commit_binding")
+    if not isinstance(binding, dict) or not binding:
+        return ["receipt.commit_binding: missing — a published run must carry "
+                "the commit binding verified at publish time (the resolved "
+                "run sha, the corpus + pre-registration AT that sha, and the "
+                "ordering proof). A receipt that only NAMES a commit asserts "
+                "the reproducibility it is supposed to demonstrate"]
+    for key in ("schema", "run_commit", "prereg_commit", "corpus_hash",
+                "prereg_sha256", "ordering"):
+        value = binding.get(key)
+        if key == "ordering":
+            if value != "proven":
+                issues.append(
+                    f"receipt.commit_binding.ordering: {value!r} — only a "
+                    f"PROVEN ordering may be published (the report claims the "
+                    f"protocol was committed before the run)")
+        elif not isinstance(value, str) or not value.strip():
+            issues.append(
+                f"receipt.commit_binding.{key}: expected a non-empty string, "
+                f"got {value!r}")
+    run_commit = str(binding.get("run_commit") or "")
+    if run_commit and (len(run_commit) != 40
+                       or not all(c in "0123456789abcdef" for c in run_commit)):
+        issues.append(
+            f"receipt.commit_binding.run_commit: {run_commit!r} is not a full "
+            f"40-hex sha — a placeholder is not a resolved commit")
+    if run_commit and run_commit != str(receipt.get("commit") or ""):
+        issues.append(
+            f"receipt.commit_binding.run_commit: {run_commit!r} is not the "
+            f"receipt's own commit ({receipt.get('commit')!r}) — the binding "
+            f"must describe the sha the receipt publishes")
+    if binding.get("corpus_hash") != receipt.get("corpus_hash"):
+        issues.append(
+            f"receipt.commit_binding.corpus_hash: {binding.get('corpus_hash')!r}"
+            f" is not the receipt's corpus hash "
+            f"({receipt.get('corpus_hash')!r}) — the sha does not vouch for "
+            f"the corpus these numbers came from")
+    resolved = receipt.get("resolved_config") or {}
+    prereg_sha = resolved.get("preregistration_sha256")
+    if prereg_sha and binding.get("prereg_sha256") != prereg_sha:
+        issues.append(
+            f"receipt.commit_binding.prereg_sha256: "
+            f"{binding.get('prereg_sha256')!r} is not the published "
+            f"pre-registration's sha256 ({prereg_sha!r})")
+    if binding.get("prereg_commit") and (
+            binding.get("prereg_commit") == run_commit):
+        issues.append(
+            "receipt.commit_binding.prereg_commit: equals the run commit — the "
+            "protocol and the run share a commit, so precedence is not shown")
+    return issues
 
 
 def validate_ask_receipt(receipt: dict) -> list[str]:
@@ -1036,6 +1403,7 @@ def validate_ask_receipt(receipt: dict) -> list[str]:
             f"receipt.failure_origin: unexpected {receipt.get('failure_origin')!r}")
     if not isinstance(receipt.get("resolved_config"), dict):
         issues.append("receipt.resolved_config: expected an object")
+    issues.extend(_validate_commit_binding(receipt))
     if isinstance(receipt.get("cost_usd"), bool) or not isinstance(
             receipt.get("cost_usd"), (int, float)):
         issues.append("receipt.cost_usd: expected a number")
@@ -1146,6 +1514,17 @@ def render_report(*, receipt: dict, scored: dict, prereg: dict,
         f"{_claim_cell(row['superseded'])} |"
         for row in scored["cases"])
     notes = "\n".join(f"- {note}" for note in receipt["notes"])
+    # The binding is rendered from the receipt, never re-derived here: what a
+    # reader audits is what the publisher verified.
+    binding = receipt.get("commit_binding") or {}
+    run_commit = binding.get("run_commit") or receipt["commit"]
+    prereg_commit = binding.get("prereg_commit") or "—"
+    committed_corpus_hash = binding.get("corpus_hash") or "—"
+    committed_prereg_sha = binding.get("prereg_sha256") or "—"
+    ordering = (binding.get("ordering") or "—").upper()
+    ordering_proof = binding.get("ordering_proof") or "—"
+    corpus_rel = binding.get("corpus_path") or "tests/eval/ask"
+    prereg_rel = binding.get("prereg_path") or "tests/eval/ask/preregistration.json"
     return f"""---
 title: "Ask lane: sealed distilled + planted-supersession exit measurement (epic #2281 Q3 exit bar)"
 type: benchmarks
@@ -1177,9 +1556,9 @@ extends: tools/longmem_eval/measure_ask_distilled.py, tests/eval/ask/README.md
 | Gate arm | `{prereg["gate_arm"]}` |
 | Reader | `{receipt["reader_model_spec"]}` (temperature {prereg["reader"]["temperature"]}, max_tokens {prereg["reader"]["max_tokens"]}, pinned: {receipt["reader_pinned"]}) |
 | Judge | `{receipt["judge_model"]}` — pin `{receipt["judge_pin"]}`, rubric id `{prereg["judge"]["rubric_id"]}` (hash `{receipt["judge_rubric_id_hash"]}`) |
-| Commit (exact) | `{receipt["commit"]}` |
-| Corpus hash | `{receipt["corpus_hash"]}` |
-| Pre-registration | `tests/eval/ask/preregistration.json` — sha256 `{prereg_sha256}` |
+| Commit (exact) | `{run_commit}` — **commit binding verified at publish time** (§6) |
+| Corpus hash | `{receipt["corpus_hash"]}` (re-hashed from the tree AT that commit: `{committed_corpus_hash}`) |
+| Pre-registration | `{prereg_rel}` — sha256 `{prereg_sha256}` (re-hashed from the tree AT that commit: `{committed_prereg_sha}`) |
 | Verdict | **{receipt["verdict"].upper()}** (run_status `{receipt["run_status"]}`, failure_origin `{receipt["failure_origin"]}`) |
 | Cost | ${receipt["cost_usd"]:.4f} |
 
@@ -1230,12 +1609,30 @@ have) — the reuse boundary is recorded in the module docstring.
 
 ## 6. Reproduction
 
+The commit binding below was **verified against the repository at publish
+time** (`verify_commit_binding`) — not asserted by this document. Three things
+were established: the recorded sha resolves to a commit; the corpus and the
+pre-registration **at that sha** hash to the ones published above (so
+`git checkout <sha>` reproduces this corpus and this protocol); and the
+pre-registration's own commit is a **proper ancestor** of the run commit
+(ordering `{ordering}`).
+
+| Binding | Value |
+|---|---|
+| Run commit (resolved) | `{run_commit}` |
+| Corpus at that commit (`{corpus_rel}`) | `{committed_corpus_hash}` |
+| Pre-registration at that commit (`{prereg_rel}`) | `{committed_prereg_sha}` |
+| Pre-registration commit | `{prereg_commit}` |
+| Ordering | **{ordering}** — {ordering_proof} |
+
 ```bash
-# 1. the protocol was committed BEFORE the run (this is the ordering claim)
-git log --oneline -- tests/eval/ask/preregistration.json
+# 1. the run commit, and the protocol commit that must precede it
+#    (both recorded in the receipt's commit_binding — re-verify with
+#     `git merge-base --is-ancestor <prereg_commit> <run_commit>`)
+git checkout {run_commit}
+git merge-base --is-ancestor {prereg_commit} {run_commit} && echo "ordering: proven"
 
 # 2. re-run the sealed corpus from the recorded commit
-git checkout {receipt["commit"]}
 uv run python -m tools.longmem_eval.measure_ask_distilled run \\
     --out /tmp/ask-observations.json
 uv run python -m tools.longmem_eval.measure_ask_distilled score \\
@@ -1306,7 +1703,15 @@ def _main(argv: list[str] | None = None) -> int:
 
     pub = sub.add_parser("publish", help="render the receipt + run report")
     pub.add_argument("--scored", required=True)
-    pub.add_argument("--commit", required=True)
+    pub.add_argument("--commit", required=True,
+                     help="the exact commit the run was made from — RESOLVED "
+                          "and verified against the repository (the corpus and "
+                          "pre-registration at that sha must match, and the "
+                          "pre-registration's commit must be a proper "
+                          "ancestor of it)")
+    pub.add_argument("--repo", default=str(_REPO_ROOT),
+                     help="repository the commit is resolved in (default: this "
+                          "checkout's root)")
     pub.add_argument("--cost-usd", type=float, required=True)
     pub.add_argument("--out", required=True)
     pub.add_argument("--receipt", required=True)
@@ -1353,17 +1758,32 @@ def _main(argv: list[str] | None = None) -> int:
         scored = _load(args.scored)
         prereg = _load(args.prereg)
         prereg_sha = corpus.sha256_file(args.prereg)
+        root = Path(args.corpus_root)
+        # (0) THE COMMIT BINDING — asked of the repository, before anything is
+        # published: a report whose "reproducible from the recorded sha alone"
+        # sentence is false is worse than no report, because it reads as
+        # evidence. Checked FIRST so the refusal names the binding failure
+        # rather than a receipt field that is merely downstream of it.
+        binding, binding_reasons = verify_commit_binding(
+            commit=args.commit, repo_root=Path(args.repo),
+            corpus_root=root, prereg=Path(args.prereg))
+        if binding is None:
+            print("refusing to publish — the recorded commit does not vouch "
+                  "for this run:", file=sys.stderr)
+            for reason in binding_reasons:
+                print(f"  - {reason}", file=sys.stderr)
+            return 2
         # Re-bind the verdict to the CURRENT corpus: a report published over a
         # drifted corpus, or against a pre-registration that no longer
         # describes it, is refuse-to-publish, not a footnote.
-        root = Path(args.corpus_root)
         bar = evaluate_exit_bar(
             scored=scored, manifest=corpus.verify_manifest(root),
             prereg=prereg)
         scored["bar"] = bar
-        receipt = build_receipt(scored=scored, commit=args.commit,
+        receipt = build_receipt(scored=scored, commit=binding["run_commit"],
                                 cost_usd=args.cost_usd,
-                                prereg_sha256=prereg_sha)
+                                prereg_sha256=prereg_sha,
+                                commit_binding=binding)
         issues = validate_ask_receipt(receipt)
         if issues:
             print("refusing to publish — receipt invalid:", file=sys.stderr)
