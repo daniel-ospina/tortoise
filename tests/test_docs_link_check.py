@@ -67,6 +67,7 @@ WHAT IS DELIBERATELY NOT CHANGED
 """
 from __future__ import annotations
 
+import ast
 import os
 import shutil
 import subprocess
@@ -92,6 +93,13 @@ STEPS = {
 
 REPORT_NO_FINDINGS = (
     '{"total": 2, "unique": 2, "successful": 2, "errors": 0,\n'
+    ' "error_map": {}, "timeout_map": {}, "success_map": {}}'
+)
+# A link-free document: lychee ran, listed the file, and found nothing to check.
+# `total: 0` is a VERDICT (site healthy), never an absent measurement — the
+# nightly's main-health step must pass on it.
+REPORT_EMPTY_POPULATION = (
+    '{"total": 0, "unique": 0, "successful": 0, "errors": 0,\n'
     ' "error_map": {}, "timeout_map": {}, "success_map": {}}'
 )
 REPORT_WITH_FINDING = (
@@ -299,6 +307,84 @@ def test_a_linter_that_runs_and_writes_nothing_fails_naming_the_producer(
     assert f"::error::{name}: lychee produced no report: exit 2" in proc.stderr
     assert "boom: no config" in proc.stderr, "the producer must carry the linter's own stderr"
     assert not report.exists()
+
+
+@pytest.mark.parametrize("name", list(STEPS))
+def test_a_link_free_document_is_a_healthy_verdict_not_an_absent_one(name: str, tmp_path: Path):
+    """`total: 0` means "nothing to check", and it must NOT fail the step.
+
+    The `failIfEmpty: false` this producer replaced was about an empty *file
+    list*; the producer's refusal is on the population file being empty/blank.
+    A non-empty list whose linter reports `total: 0` is a real measurement of a
+    link-free document — the nightly's main-health step runs on exactly that
+    shape, so a future tightening to "refuse an empty report" would red `main`
+    every night rather than catch anything. Pinned on both steps, because the
+    consumer the nightly feeds (`tools/docs_lint_baseline.py`) is the one that
+    would be handed a zero-finding report.
+    """
+    stub = _stub(
+        tmp_path / "bin", "cat <<'JSON'\n" + REPORT_EMPTY_POPULATION + "\nJSON\nexit 0\n"
+    )
+    proc, report = _run_step(name, tmp_path, path_prefix=stub.parent)
+
+    assert proc.returncode == 0, (
+        f"{name} failed a link-free document:\n{proc.stdout}\n{proc.stderr}"
+    )
+    assert report.is_file(), "a real verdict must be published, total: 0 included"
+    assert dlb.load_lychee(report, ROOT) == [], "zero findings must load as zero findings"
+    assert f"{name}: lychee 0.24.2 exit=0" in proc.stdout
+    assert "total=0 errors=0 timeouts=0" in proc.stdout
+
+
+def test_the_producer_asks_lychee_exactly_what_the_snapshot_generator_asks(tmp_path: Path):
+    """Producer and generator cannot drift in what they ASK for.
+
+    `tools/docs_lint_baseline.py::_run_lychee` builds the committed snapshot, and
+    `.github/scripts/docs-link-check.sh` must request the same shape or its report
+    is not comparable to the baseline. A dropped `--format json` is at least
+    caught by the runtime shape gate; a dropped `--mode task` is caught by
+    NOTHING — the JSON stays readable while the population silently differs from
+    the snapshot's. So the argv is pinned on BOTH sides: the recorded invocation
+    of the real script, and the generator's own argv read off its AST (a source
+    edit that changes one without the other reds this test).
+    """
+    record = tmp_path / "argv.txt"
+    stub = _stub(
+        tmp_path / "bin",
+        f'printf "%s\\n" "$@" > "{record}"\n'
+        "cat <<'JSON'\n" + REPORT_NO_FINDINGS + "\nJSON\nexit 0\n",
+    )
+    proc, _report = _run_step(
+        "Link check (changed files)", tmp_path, path_prefix=stub.parent
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    argv = record.read_text(encoding="utf-8").splitlines()
+    assert argv[:2] == ["--mode", "task"], f"the producer ran lychee as {argv}"
+    assert "--no-progress" in argv
+    assert argv[argv.index("--format") + 1] == "json"
+    assert Path(argv[argv.index("--files-from") + 1]).name == "pr-md.txt"
+
+    # The other half of the contract: what the GENERATOR asks for, from its AST.
+    tree = ast.parse((ROOT / "tools" / "docs_lint_baseline.py").read_text(encoding="utf-8"))
+    run_lychee = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_run_lychee"
+    )
+    flags = ["--mode", "task", "--no-progress", "--format", "json", "--files-from"]
+    generator = [
+        value
+        for _line, _col, value in sorted(
+            (n.lineno, n.col_offset, n.value)
+            for n in ast.walk(run_lychee)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)
+        )
+        if value in flags
+    ]
+    assert generator == flags, (
+        "the snapshot generator's lychee argv changed; the producer must move with it"
+    )
 
 
 def test_a_report_the_differ_cannot_read_is_the_producers_failure(tmp_path: Path):
