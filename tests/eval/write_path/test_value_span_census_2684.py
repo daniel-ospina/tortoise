@@ -18,16 +18,35 @@ The T's per-question leg is *"the value-bearing evidence is verbatim-present"*
   (7 sealed sessions x 2 arms, real ``deepseek-v4-flash`` S2 extractions),
 * the turns the quotes must anchor in:
   ``fixtures/<session>.json`` → ``conversation`` (index = turn id),
-* the predicate + the stamp under test: the SHIPPED
-  ``tortoise.extractor_v2._carries_value`` / ``_value_verbatim_span``.
+* the resolution + the predicate + the stamp under test: the SHIPPED
+  ``tortoise.extractor_v2._resolve_source_turn`` / ``_carries_value`` /
+  ``_value_verbatim_span``, called in the SHIPPED ORDER (resolve, then stamp
+  against the resolved turn).
 
-The receipts predate #8659, so the census is a **re-derivation**, not an
+⛔ **The resolver is not optional in this census.** The receipt's
+``source_turn_id`` is the model's ADVISORY index; the write path resolves the
+turn from the quote first and never lets a wrong model index win
+(``_resolve_source_turn`` docstring; call site ``extractor_v2.py:7478`` →
+``:7494``). Passing the receipt field straight through measures a population
+production never produces *and* never fires the resolver's own E3 anchor
+warning — it under-counts ``no_turn`` and over-counts ``band`` (measured: 3
+points, all ``wp06_quarry_rollout``/``narrative``, which the resolver reports
+as unresolvable). This is pinned by
+``test_the_census_resolves_the_turn_the_way_the_write_path_does``.
+
+The receipts carry **no** span key, so the census is a **re-derivation**, not an
 observation: it answers *"what would the shipped mechanism stamp on these
-committed points?"*. ``test_the_census_is_a_rederivation_not_an_observation``
-pins that reading so the number is never mistaken for a measured extraction
-run. (Re-ingesting the corpus with the span code and re-measuring is the
-end-to-end half — wave scoping §6's T-2, re-homed to #8486; see
-``docs/runbook/2684-slice-b-t-gate.md``.)
+committed points?"*. The structural reason is that the measuring harness
+persists the S2 *model* output (``tests/eval/write_path/raw_vs_narrative.py`` →
+``ev2.run_s2(...)``), which is pre-``pt_entry``; the span is stamped later, when
+``pt_entry`` is built (``extractor_v2.py:7482-7496``). It is NOT a question of
+dates — the receipts (committed 2026-10-19, ``ecc7bc8ca8``) postdate #8659
+(``2312845b6``, 2026-10-14) — so no re-ingest through that harness can ever put
+a span key in a receipt.
+``test_the_census_is_a_rederivation_not_an_observation`` pins that reading so
+the number is never mistaken for a measured extraction run. (Re-measuring the
+OBSERVED rate needs an end-to-end run — wave scoping §6's T-2, re-homed to
+#8486; see ``docs/runbook/2684-slice-b-t-gate.md``.)
 
 **What the numbers are NOT.** No reader, no judge, no answer accuracy. The
 census counts whether a value can be re-read verbatim from an address; it says
@@ -38,10 +57,13 @@ Hermetic: no DB, no network, no model. Reads committed JSON only.
 
 from __future__ import annotations
 
+import itertools
 import json
+import re
 from pathlib import Path
 
 from tortoise import extractor_v2 as v2
+from tortoise.retrieval import _pkg_differ_value_critical, _pkg_overlap
 
 WRITE_PATH = Path(__file__).resolve().parent
 COMMITTED_ARMS = WRITE_PATH / "receipts" / "7947-arms-2026-10-18"
@@ -77,17 +99,48 @@ ARMS = ("raw", "narrative")
 #:                          ``test_extractor_v2.py::test_empty_quote_model_index_path_carries_no_span``.
 ABSENCE_CLASSES = ("band", "valuefree_quote", "no_turn", "empty_quote")
 
-#: The census, measured 2026-10-24 at main + this branch's changes. Any change
-#: here is a change in the SHIPPED mechanism's reach on real extractions or in
-#: the committed corpus — re-run the census, then update this tuple AND the
-#: table in ``docs/runbook/2684-slice-b-t-gate.md``. Do not "fix" a drift by
-#: loosening an assertion: a lower span count is the finding.
+#: The census, measured 2026-10-25 at main + this branch's changes, through the
+#: SHIPPED resolution order. Any change here is a change in the SHIPPED
+#: mechanism's reach on real extractions or in the committed corpus — re-run the
+#: census, then update this tuple AND the table in
+#: ``docs/runbook/2684-slice-b-t-gate.md``. Do not "fix" a drift by loosening an
+#: assertion: a lower span count is the finding.
 CENSUS = {
     "value_bearing": 112,
     "spanned": 101,
-    "absences": {"band": 6, "valuefree_quote": 3, "no_turn": 1,
+    "absences": {"band": 3, "valuefree_quote": 3, "no_turn": 4,
                  "empty_quote": 1},
 }
+
+#: The three points the receipt's ADVISORY index puts in one turn and the
+#: shipped resolver reports as unresolvable (quote-overlap < 0.6). Recorded so
+#: the resolver's presence in the census is pinned as a MEASUREMENT and not as
+#: a refactor detail.
+ADVISORY_MISATTRIBUTED = 3
+
+#: An INDEPENDENT value detector — deliberately NOT ``_carries_value``, which is
+#: the predicate under test. A currency amount, a numeral, a month name, a
+#: number word, or a unit of time/quantity. Used to prove the addressed text
+#: carries a value even if ``_carries_value`` itself regresses to always-True.
+INDEPENDENT_VALUE_RE = re.compile(
+    r"(?:[$€£]\s?\d"
+    r"|\d[\d.,]*\s?%?"
+    r"|\b(?:January|February|March|April|May|June|July|August|September"
+    r"|October|November|December)\b"
+    r"|\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven"
+    r"|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen"
+    r"|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred"
+    r"|thousand|million|billion|dozen|half|quarter|double|triple|twice"
+    r"|second|seconds|minute|minutes|hour|hours|day|days|week|weeks"
+    r"|month|months|year|years)\b)",
+    re.IGNORECASE,
+)
+
+
+def _norm(text: object) -> str:
+    """Whitespace-collapsed, lowercased — the normalisation the E3 anchor and
+    ``_verbatim_span_in_turn`` apply, so the two cannot disagree."""
+    return " ".join(str(text).lower().split())
 
 
 def _receipt(session: str) -> dict:
@@ -104,10 +157,11 @@ def _points(session: str, arm: str) -> list[dict]:
     return _receipt(session)["embed_list"][arm]["points"]
 
 
-def _absence_class(point: dict, quote: str, warnings: list[str]) -> str:
+def _absence_class(turn_idx: int | None, quote: str,
+                   warnings: list[str]) -> str:
     if not quote:
         return "empty_quote"
-    if point.get("source_turn_id") is None:
+    if turn_idx is None:
         return "no_turn"
     if any("token-overlap band" in w for w in warnings):
         return "band"
@@ -117,9 +171,10 @@ def _absence_class(point: dict, quote: str, warnings: list[str]) -> str:
 
 
 def _census() -> dict:
-    """Bucket every value-bearing point in the committed receipts."""
+    """Bucket every value-bearing point in the committed receipts, in the
+    SHIPPED order: resolve the turn from the quote, then stamp against it."""
     out = {"value_bearing": 0, "spanned": 0, "absences": {},
-           "spans": [], "unclassified": []}
+           "spans": [], "unclassified": [], "moved": []}
     for session in SESSIONS:
         edus = _edus(session)
         for arm in ARMS:
@@ -130,15 +185,21 @@ def _census() -> dict:
                     continue
                 out["value_bearing"] += 1
                 warnings: list[str] = []
+                turn_idx = v2._resolve_source_turn(point, edus,
+                                                   warnings=warnings)
                 span = v2._value_verbatim_span(
-                    content, quote, point.get("source_turn_id"), edus,
-                    warnings=warnings)
+                    content, quote, turn_idx, edus, warnings=warnings)
                 if span is not None:
                     out["spanned"] += 1
                     out["spans"].append(
-                        (session, arm, content, quote, span, edus))
+                        (session, arm, content, quote, span, turn_idx,
+                         v2._turn_text_by_index(edus, turn_idx)))
                     continue
-                klass = _absence_class(point, quote, warnings)
+                if turn_idx is None and point.get("source_turn_id") is not None:
+                    # the advisory index named a turn the resolver refuses
+                    out["moved"].append((session, arm, point.get("source_turn_id"),
+                                         content[:70]))
+                klass = _absence_class(turn_idx, quote, warnings)
                 if klass == "unclassified":
                     out["unclassified"].append((session, arm, content, quote))
                 out["absences"][klass] = out["absences"].get(klass, 0) + 1
@@ -146,11 +207,16 @@ def _census() -> dict:
 
 
 def test_the_census_is_a_rederivation_not_an_observation():
-    """The committed receipts carry NO span keys at all — they were extracted
-    before #8659. Pinned so the census below is never read as "the extractor
-    stamped 101 spans in this run": it is what the SHIPPED mechanism stamps on
-    points that were produced without it. The observation needs a re-ingest
-    (the T-2 half, re-homed to #8486)."""
+    """The committed receipts carry NO span keys at all.
+
+    Pinned so the census below is never read as "the extractor stamped 101
+    spans in this run": it is what the SHIPPED mechanism stamps on points that
+    were produced without it. The reason is STRUCTURAL, not chronological — the
+    harness persists ``ev2.run_s2(...)``, the S2 model output, and the span is
+    stamped later when ``pt_entry`` is built. A span key appearing here means
+    the HARNESS changed (it now persists committed points), not that a date
+    passed; retire the derivation caveat only after re-measuring through the
+    new harness."""
     total = spanned = 0
     for session in SESSIONS:
         for arm in ARMS:
@@ -159,9 +225,33 @@ def test_the_census_is_a_rederivation_not_an_observation():
                 spanned += int("span_start" in point or "span_end" in point)
     assert total, "the census has no population — the receipts did not load"
     assert spanned == 0, (
-        f"{spanned} of {total} committed points carry a span — the receipts "
-        "now postdate #8659, so this census IS an observation and the "
-        "derivation caveat in the runbook must be retired")
+        f"{spanned} of {total} committed points carry a span key — the "
+        "measuring harness now persists committed points (it used to persist "
+        "the pre-pt_entry S2 model output), so this census became an "
+        "OBSERVATION: re-measure the rate end-to-end, update CENSUS + the "
+        "runbook's derivation caveat, and keep the observation/derivation "
+        "distinction explicit")
+
+
+def test_the_census_resolves_the_turn_the_way_the_write_path_does():
+    """The census must not measure a population production never produces.
+
+    The write path resolves the source turn from the quote BEFORE stamping
+    (``extractor_v2.py:7478`` → ``:7494``), and the receipt's
+    ``source_turn_id`` is only the model's ADVISORY index. Reading that field
+    straight through puts three ``wp06_quarry_rollout``/``narrative`` points on
+    turns the resolver refuses (quote-overlap < 0.6), which (a) hides the
+    resolver's E3 anchor warning, (b) reports them as ``band`` when production
+    reports ``no_turn``, and (c) inflates the ``band`` class by 2x."""
+    census = _census()
+    assert len(census["moved"]) == ADVISORY_MISATTRIBUTED, (
+        "the advisory-index divergence moved: "
+        f"{census['moved']} — re-measure before updating the runbook")
+    assert {s for s, _a, _idx, _c in census["moved"]} == {"wp06_quarry_rollout"}
+    assert all(a == "narrative" for _s, a, _idx, _c in census["moved"])
+    # and the class they land in is the RESOLVER's verdict, not the band's
+    assert census["absences"].get("no_turn") == CENSUS["absences"]["no_turn"]
+    assert census["absences"].get("band") == CENSUS["absences"]["band"]
 
 
 def test_every_value_bearing_point_carries_a_span_or_is_a_REPORTED_class():
@@ -187,80 +277,159 @@ def test_every_value_bearing_point_carries_a_span_or_is_a_REPORTED_class():
         " — a NEW class here means a silent drop, check it before updating")
 
 
-def test_every_stamped_span_re_reads_the_quotes_own_words_and_a_value():
+def test_every_stamped_span_addresses_the_whole_quote_and_carries_a_value():
     """The invariant the slice exists for, asserted over the whole committed
-    population (not just the unit cases): each span is in bounds, forward, its
-    text carries a value, and that text is the point's OWN quoted words — a
-    consumer re-reading it gets the value verbatim, not a neighbouring number."""
+    population (not just the unit cases).
+
+    Three legs, each of which a WRONG implementation fails:
+
+    1. **in bounds and forward** — ``0 <= start < end <= len(turn)``;
+    2. **the address is the WHOLE quote**, not a fragment of it
+       (``_norm(addressed) == _norm(quote)``). ⛔ Not ``in``: a fragment of the
+       quote satisfies containment, and a fragment is exactly the false-address
+       shape §3 of the runbook refuses (``"four shards"``, ``"One flag"``,
+       ``"One"``). Equality is what pins the refusal.
+    3. **the address carries a value** — by an INDEPENDENT detector in this
+       file, so the leg still discriminates if ``_carries_value`` regresses to
+       always-True (the three ``valuefree_quote`` points would then be stamped
+       and this leg would fire)."""
     census = _census()
     assert census["spans"], "no spans to check — the census is empty"
-    for session, arm, content, quote, span, edus in census["spans"]:
+    for session, arm, content, quote, span, _turn_idx, turn in census["spans"]:
         start, end = span
-        assert 0 <= start < end, (session, arm, content[:60], span)
-        turn = v2._turn_text_by_index(edus, _turn_of(census, session, arm,
-                                                     content, quote))
+        assert 0 <= start < end <= len(turn), (session, arm, content[:60], span,
+                                               len(turn))
         addressed = turn[start:end]
-        assert end <= len(turn), (session, arm, span, len(turn))
-        assert v2._carries_value(addressed), (
+        assert _norm(addressed) == _norm(quote), (
+            f"{session}/{arm}: span addresses {addressed!r}, which is not the "
+            f"point's WHOLE quoted words ({quote[:80]!r}) — a partial address "
+            "hands a consumer text it cannot tell apart from the value it is "
+            "summing")
+        assert INDEPENDENT_VALUE_RE.search(addressed), (
             f"{session}/{arm}: span addresses value-free text {addressed!r} "
-            f"for {content[:60]!r}")
-        norm = lambda s: " ".join(str(s).lower().split())
-        assert norm(addressed) in norm(quote), (
-            f"{session}/{arm}: span {addressed!r} is not the point's quoted "
-            f"words ({quote[:80]!r})")
+            f"for {content[:60]!r} (independent value detector found nothing)")
 
 
-def _turn_of(census: dict, session: str, arm: str, content: str,
-             quote: str) -> int:
-    """The ``source_turn_id`` of the point this span came from (the receipt is
-    the authority; the span's own turn text is whatever the function read)."""
-    for point in _points(session, arm):
-        if (point.get("content") or "") == content and \
-                (point.get("quote") or "") == quote:
-            return point.get("source_turn_id")
-    raise AssertionError(f"point not found in {session}/{arm}: {content[:60]}")
-
-
-# ── the relaxation a future lane will reach for — MEASURED UNSAFE ─────────
+# ── the dedupe half of T-1 — MEASURED, and NOT discriminating here ────────
 #
-# The ``band`` class (6 points) is the visible cost of the strict anchor: a
+# "Verbatim-present **+ deduped**" is two properties. The dedupe half is Slice
+# A's (#2683, merged): a point and its own source collapse to ≤
+# `1 + max_verbatim` slots, and a differing number/currency/negation token
+# refuses the collapse at ANY content overlap.
+#
+# The universe is the one the guard actually runs in: ONE package, i.e. one
+# ingest = ONE ARM of one session. Pooling the two arms would compare two
+# INDEPENDENT ingests of the same session — a pool no package ever holds — and
+# that pooled reading is measured below as a separate, explicitly non-guard
+# number.
+#
+# Value-bearing points only (the census population), pairwise within each
+# session-arm, using the shipped guard predicates `_pkg_overlap` +
+# `_pkg_differ_value_critical`.
+
+PAIRS_PER_ARM = 433          # Σ C(n, 2) over the 14 session-arms
+NEAR_DUPE_PAIRS_PER_ARM = 0  # ≥0.9 content overlap
+NEAR_DUPE_VALUE_CONFLICTS_PER_ARM = 0
+
+
+def _value_bearing_points(session: str, arm: str) -> list[dict]:
+    return [p for p in _points(session, arm)
+            if v2._carries_value(p.get("content") or "",
+                                 p.get("quote") or "")]
+
+
+def test_the_dedupe_leg_is_measured_and_NOT_discriminating_on_this_corpus():
+    """Pinned so no future lane reads "deduped: PASS" off this census, and so
+    the numbers the runbook quotes are re-derived rather than asserted.
+
+    In the guard's own universe there is **no** ≥0.9-overlap pair at all, so
+    the value-safety leg cannot be exercised here: the property rests on Slice
+    A's unit guards (``tests/test_evidence_assembly.py``)."""
+    pairs = near_dupe = conflicts = 0
+    pooled_pairs = pooled_near_dupe = 0
+    for session in SESSIONS:
+        for arm in ARMS:
+            points = _value_bearing_points(session, arm)
+            for a, b in itertools.combinations(points, 2):
+                pairs += 1
+                if _pkg_overlap(a.get("content") or "",
+                                b.get("content") or "") >= 0.9:
+                    near_dupe += 1
+                    if _pkg_differ_value_critical(a.get("content") or "",
+                                                  b.get("content") or ""):
+                        conflicts += 1
+        pooled = [p for arm in ARMS for p in _value_bearing_points(session, arm)]
+        for a, b in itertools.combinations(pooled, 2):
+            pooled_pairs += 1
+            if _pkg_overlap(a.get("content") or "",
+                            b.get("content") or "") >= 0.9:
+                pooled_near_dupe += 1
+    assert pairs == PAIRS_PER_ARM, (
+        f"the per-arm within-session pair count moved: {pairs} != "
+        f"{PAIRS_PER_ARM} — re-run and update the runbook §2.3")
+    assert near_dupe == NEAR_DUPE_PAIRS_PER_ARM, (
+        f"{near_dupe} pairs reach ≥0.9 content overlap in the guard's own "
+        "universe — the corpus can now exercise the value-safety leg, so §2.3 "
+        "must be re-measured (it currently says it cannot)")
+    assert conflicts == NEAR_DUPE_VALUE_CONFLICTS_PER_ARM, (
+        f"{conflicts} near-dupe pairs differ in a value-critical token — §2.3 "
+        "must be re-measured")
+    # Measured context, deliberately loose: the zero above is a property of the
+    # PER-ARM universe, not of the corpus in general. Pooling the two arms (a
+    # pool no package holds) does produce near-dupes — a lane must not restate
+    # the zero as "this corpus has no near-dupes".
+    assert pooled_near_dupe > 0, (
+        "pooling the two arms produced no ≥0.9 pair — the universe note in "
+        f"§2.3 (pooled pairs={pooled_pairs}) no longer holds")
+
+
+# ── the relaxation a future lane will reach for — MEASURED ON BOTH READINGS ─
+#
+# The ``band`` class (3 points) is the visible cost of the strict anchor: a
 # quote rewritten by one word keeps no address even though the value IS
 # verbatim in the turn ("The cutoff stays September 30 as agreed" vs the turn's
 # "Cutoff stays September 30 as agreed, …"). The obvious "improvement" is to
 # trim the quote's leading/trailing tokens until a verbatim run is found. This
-# pins what that relaxation actually produces on the committed corpus, so the
-# next lane inherits the measurement instead of re-deriving it.
+# pins what that relaxation actually produces on the committed corpus.
 #
-# Measured: 5 candidates for the 6 band-class points (one has none), and only
-# TWO are whole-assertion addresses:
+# ⛔ TWO readings, because only one of them is production:
 #
-#   CLEAN    "two workers grabbed the same batch twice …"   (full sentence)
-#   CLEAN    "Cutoff stays September 30 as agreed"          (the value, whole)
-#   FRAGMENT "four shards"     — one of the point's two quantities; a consumer
-#                                cannot tell which value it is summing
-#   FRAGMENT "One flag"        — a number WORD that is a determiner, not a
-#                                quantity
-#   FRAGMENT "One"             — the SAME defect at its shortest: the search
-#                                matches a shared word at the turn's start, in
-#                                a sentence the point never quoted (#8966's
-#                                false-address class, reintroduced)
+#   SHIPPED (resolver first — what the write path does): 2 candidates, BOTH
+#   whole-assertion CLEAN —
+#       "two workers grabbed the same batch twice …"   (full sentence)
+#       "Cutoff stays September 30 as agreed"          (the value, whole)
+#   So on the shipped band class this corpus does NOT make the relaxation look
+#   unsafe: the refusal rests on the fragment SHAPE (below) and on #8966's unit
+#   guards, not on this census.
 #
-# 3 of 5 are partial or wrong, so the relaxation is refused and the absence
-# stays a REPORTED class. A red here means the candidate set moved — re-run
-# the census and update the runbook, do not narrow the assertion.
+#   ADVISORY-INDEX reading (the receipt's model index — NOT production): 3 more
+#   candidates, ALL fragments —
+#       "four shards"  — one of the point's two quantities
+#       "One flag"     — a number WORD that is a determiner, not a quantity
+#       "One"          — the SAME defect at its shortest: the search matches a
+#                        shared word at the turn's start, in a sentence the
+#                        point never quoted (#8966's false-address class,
+#                        reintroduced)
+#   Those three points are exactly the ones the SHIPPED resolver reports as
+#   unresolvable, so the fragments are reachable only by a lane that applies the
+#   relaxation to the raw model index instead of the resolved turn — which is
+#   the population-production mistake the census itself had (see the resolver
+#   test above).
+#
+# A red here means a candidate set moved — re-measure and update the runbook,
+# do not narrow the assertion.
 
-EXPECTED_RELAXED_ADDRESSES = {
+EXPECTED_SHIPPED_RELAXATIONS = {
     "two workers grabbed the same batch twice from the ingest queue and each "
     "marked its own copy complete.",
-    "four shards",
-    "One flag",
-    "One",
     "Cutoff stays September 30 as agreed",
 }
+EXPECTED_ADVISORY_FRAGMENTS = {"four shards", "One flag", "One"}
 
 
-def test_the_trimmed_anchor_relaxation_is_measured_unsafe():
-    recovered: list[tuple[str, str, str, tuple[int, int]]] = []
+def test_the_trimmed_anchor_relaxation_is_pinned_on_both_readings():
+    shipped: set[str] = set()
+    advisory: set[str] = set()
     for session in SESSIONS:
         edus = _edus(session)
         for arm in ARMS:
@@ -269,29 +438,45 @@ def test_the_trimmed_anchor_relaxation_is_measured_unsafe():
                 quote = point.get("quote") or ""
                 if not v2._carries_value(content, quote):
                     continue
+                # SHIPPED order: resolve, then stamp.
                 warnings: list[str] = []
-                if v2._value_verbatim_span(
-                        content, quote, point.get("source_turn_id"), edus,
-                        warnings=warnings) is not None:
+                turn_idx = v2._resolve_source_turn(point, edus,
+                                                   warnings=warnings)
+                if v2._value_verbatim_span(content, quote, turn_idx, edus,
+                                           warnings=warnings) is not None:
                     continue
-                if _absence_class(point, quote, warnings) != "band":
-                    continue
-                turn = v2._turn_text_by_index(edus, point.get("source_turn_id"))
-                cand = _longest_quote_run(turn, quote)
-                if cand is not None:
-                    recovered.append((session, arm, cand[2], cand[0]))
-    addressed = {t for _s, _a, t, _sp in recovered}
-    assert addressed == EXPECTED_RELAXED_ADDRESSES, (
-        "the relaxed-anchor candidate set moved — re-measure it and update "
-        f"the runbook: {sorted(addressed)}")
-    fragments = {t for t in addressed if len(t.split()) <= 2}
-    assert fragments == {"four shards", "One flag", "One"}, (
-        f"the FRAGMENT class changed: {sorted(fragments)} — these are the "
-        "addresses that make the relaxation unsafe (a consumer cannot tell "
-        "whether the fragment holds the quantity it is summing)")
-    assert len(addressed - fragments) == 2, (
-        "the two clean recoveries the strict rule refuses are the cases the "
-        f"runbook cites: {sorted(addressed - fragments)}")
+                # The relaxation only applies where production HAS a turn.
+                if turn_idx is not None and _absence_class(
+                        turn_idx, quote, warnings) == "band":
+                    cand = _longest_quote_run(
+                        v2._turn_text_by_index(edus, turn_idx), quote)
+                    if cand is not None:
+                        shipped.add(cand[2])
+                # The ADVISORY-INDEX reading, kept as a counter-example.
+                adv_idx = point.get("source_turn_id")
+                adv_warnings: list[str] = []
+                if adv_idx is not None and v2._value_verbatim_span(
+                        content, quote, adv_idx, edus,
+                        warnings=adv_warnings) is None and _absence_class(
+                        adv_idx, quote, adv_warnings) == "band":
+                    cand = _longest_quote_run(
+                        v2._turn_text_by_index(edus, adv_idx), quote)
+                    if cand is not None:
+                        advisory.add(cand[2])
+    assert shipped == EXPECTED_SHIPPED_RELAXATIONS, (
+        "the shipped-population relaxation candidates moved — re-measure and "
+        f"update the runbook §3: {sorted(shipped)}")
+    fragments = {t for t in shipped if len(t.split()) <= 2}
+    assert fragments == set(), (
+        f"the shipped band class now yields FRAGMENT addresses {fragments} — "
+        "the relaxation is unsafe on the population production produces, "
+        "which is a stronger finding than §3 records")
+    assert advisory == EXPECTED_SHIPPED_RELAXATIONS | EXPECTED_ADVISORY_FRAGMENTS, (
+        "the advisory-index candidate set moved — re-measure it and update "
+        f"the runbook §3: {sorted(advisory)}")
+    assert advisory - shipped == EXPECTED_ADVISORY_FRAGMENTS, (
+        "the candidates that exist ONLY on the advisory reading moved — those "
+        f"are the #8966 false-address class: {sorted(advisory - shipped)}")
 
 
 def _longest_quote_run(turn: str, quote: str):
