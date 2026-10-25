@@ -352,11 +352,19 @@ search_issue() { # <body-marker> <exact-title>
     return 0
   fi
   rm -f "$errf"
+  # ⛔ THE jq ARM KEEPS jq's OWN WORDS TOO (#9018 review). It used to hardcode
+  # `search response was not parseable JSON` while DISCARDING jq's stderr, so a
+  # runner-side fault (jq missing or broken on this host) was re-reported as a
+  # GitHub/JSON fault — the same misattribution the `gh` arm above was fixed for,
+  # one layer down. The response is the tool's INPUT here, not its verdict: what
+  # the operator needs is what jq said, on the branch where jq is what failed.
   if ! n="$(printf '%s' "$out" | jq -rs --arg login 'github-actions[bot]' --arg title "$2" --arg marker "$1" \
-      '[.[].items[]? | select((.user.login // "") == $login) | select((.title // "") == $title) | select(((.body // "") | contains($marker)))][0].number // empty' 2>/dev/null)"; then
-    printf '__ERR__|search response was not parseable JSON'
+      '[.[].items[]? | select((.user.login // "") == $login) | select((.title // "") == $title) | select(((.body // "") | contains($marker)))][0].number // empty' 2>"$errf")"; then
+    printf '__ERR__|jq: %s' "$(head -3 "$errf" 2>/dev/null | tr '\n' ' ')"
+    rm -f "$errf"
     return 0
   fi
+  rm -f "$errf"
   # EMPTY = "not found" (a real answer: the caller may create one or fall back
   # to the bootstrap path). Only a NON-EMPTY non-numeric value is ERR. Collapsing
   # the two would make "no heartbeat issue yet" read as "the search is broken".

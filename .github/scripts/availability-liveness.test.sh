@@ -399,7 +399,11 @@ assert_eq "$(count_calls 'GH PATCH')" "0" "16: …and does NOT close anything on
 # error string fell through as if it were an issue number, and the run PATCHed
 # `issues/__ERR__|gh: …`.
 assert_contains "$OUT" "gh said:" "16: …and the failure names what gh actually said (#9018)"
-assert_eq "$(count_calls 'GH PATCH')" "0" "16: …the __ERR__|<reason> sentinel is never used as an issue number"
+# (The sentinel's OTHER guarantee — that it is never used as an issue number — is
+# pinned where it can actually fail: case 30's non-numeric number, which is the
+# only reachable path that could hand `__ERR__|…` to a PATCH. An assertion here
+# would be a byte-identical duplicate of the `GH PATCH` == 0 line above, and would
+# pass on the pre-fix tree: a count that overstates what is pinned.)
 
 # 17. missing GH_TOKEN → fail before any gh call.
 reset_case
@@ -579,6 +583,11 @@ export STUB_WF_CREATED_AT="$WF_RECENT"
 run_checker
 assert_eq "$RC" "1" "29: an unparseable heartbeat search → exit 1 (NOT downgraded to no-record)"
 assert_contains "$OUT" "heartbeat search failed" "29: …and names the search failure"
+# #9018 review: this arm hardcoded `search response was not parseable JSON` while
+# discarding jq's stderr, so a runner-side jq fault was reported as a GitHub/JSON
+# fault. The reason must be jq's OWN words — the same rule the gh arm follows.
+assert_contains "$OUT" "jq:" "29: …and carries jq's own words, not a guessed cause"
+assert_not_contains "$OUT" "was not parseable JSON" "29: …never the fabricated JSON-fault claim"
 assert_eq "$(count_calls 'GH POST')" "0" "29: …and files NO false page (the arm is an EXIT, not a fall-through)"
 
 # 30. a search result whose issue NUMBER is not numeric is a search failure, not

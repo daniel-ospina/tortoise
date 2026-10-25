@@ -77,7 +77,7 @@ KNOWN_UNCOVERED = {
     # blocks every merge — closing it means adding a checkout (`persist-credentials:
     # false`, since the token it carries is `pull-requests: read` only) or inlining the
     # provisioner, and that is a change to a gate #1224 documents carefully. Filed as
-    # its own task rather than smuggled into this one.
+    # its own task — #9942 — rather than smuggled into this one.
     "ai-review-gate.yml": {
         "ai-review-gate": "no checkout in the job — the contract script is not in the workspace"
     },
