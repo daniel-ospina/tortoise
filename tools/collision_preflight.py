@@ -8452,7 +8452,10 @@ def _verdict_for_pull_request(
       * a resolved number is ITSELF an open PR -> refused, not re-resolved.
         Recurse and a PR whose only reference is a peer PR loops; refuse and
         the caller gets the same "re-run with the issue number" remedy it
-        would have got before, which is the safe end of that shape;
+        would have got before, which is the safe end of that shape. ⛔ That
+        refusal is ONE ITEM's verdict (`EXIT_INCOMPLETE`), never the whole
+        run's: the other items have already run, and the aggregate below must
+        still decide over them — a LANDED item outranks it (#9970 review);
       * several work items -> EVERY one is gated and the WORST verdict decides
         (`_EXIT_SEVERITY`), so a resolution can add a refusal and can never
         authorise a dispatch one of its work items would have refused. The run
@@ -8479,14 +8482,29 @@ def _verdict_for_pull_request(
         try:
             text, code = run_one(issue)
         except NotAWorkItem as inner:
-            print(
-                f"collision-preflight: #{number} resolves to #{issue}, which is "
-                f"itself an open pull request — {inner} The work item could not "
-                "be established, so nothing was checked and this is NEVER "
-                "clean.",
-                file=sys.stderr,
+            # A resolved number that is ITSELF an open PR is never RE-resolved
+            # (a PR whose only reference is a peer PR would recurse), so there
+            # is no verdict for THIS item — but that is one item's problem, and
+            # it must not discard the items that DID run. #9970 review measured
+            # the shipped shape returning from inside this loop, BEFORE the
+            # aggregate: over `[#100 LANDED, #8000 <an open PR>]` it reported
+            # "nothing was checked" (exit 2) while `#100` had been checked and
+            # its terminal LANDED was already computed — losing the precedence
+            # the exit-code docstring gives 4 over 2 AND claiming a check that
+            # ran never happened. So the refusal becomes THIS item's report, an
+            # item-level `EXIT_INCOMPLETE`, and `_EXIT_SEVERITY` decides as it
+            # does for every other item. The line is ANCHORED so the one-item
+            # shape also leaves a text-keyed reader a verdict instead of an
+            # empty value.
+            text = (
+                f"{_VERDICT_LINE_PREFIX}{_EXIT_LABEL[EXIT_INCOMPLETE]} "
+                f"(exit {EXIT_INCOMPLETE}) — the work item #{issue}, which "
+                f"#{number} resolves to, is ITSELF an open pull request — "
+                f"{inner} It is not re-resolved (that can recurse), so THIS "
+                "work item could not be gated; ask again with the issue it "
+                "serves. Do NOT dispatch.\n"
             )
-            return None, EXIT_INCOMPLETE
+            code = EXIT_INCOMPLETE
         results.append((code, issue, text))
 
     worst_code = max(results, key=lambda row: _EXIT_SEVERITY[row[0]])[0]

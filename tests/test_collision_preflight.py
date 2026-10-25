@@ -2022,6 +2022,97 @@ class CollisionPreflightTest(unittest.TestCase):
                 # and worst-first, instead of being dropped to fix the reader.
                 self._assert_per_item_verdicts_are_visible(cp, text, codes)
 
+    def _aggregate_with_an_unrunnable_item(self, codes, unrunnable_issue):
+        """Drive the aggregate when ONE resolved number is ITSELF an open PR.
+
+        `run_one` is the real single-number pre-flight: handed a number that is
+        an open pull request, it raises `NotAWorkItem` — which is exactly what a
+        resolved work item can be (`#7000` resolving to `[#100, #8000]` where
+        `#8000` is a PR). The other item still gets a real verdict, and the
+        aggregator is expected to decide over BOTH.
+        """
+        cp = _tool_module()
+        pr = {
+            "number": 7000, "title": "fix(x)",
+            "body": "Closes " + ", closes ".join(f"#{n}" for n in codes) + ".",
+            "headRefName": "chore/unrunnable",
+            "closingIssuesReferences": [{"number": n} for n in codes],
+        }
+
+        def run_one(issue):
+            if issue == unrunnable_issue:
+                raise cp.NotAWorkItem(
+                    f"#{issue} is an open pull request, not a work item."
+                )
+            code = codes[issue]
+            return (
+                f"collision-preflight: issue #{issue}\n\n"
+                f"VERDICT: {cp._EXIT_LABEL[code]} (exit {code}) — stubbed #{issue}\n",
+                code,
+            )
+
+        text, rc = cp._verdict_for_pull_request(
+            cp.NotAWorkItem("refused", pr=pr), 7000, run_one,
+        )
+        return cp, text, rc
+
+    def test_an_unrunnable_resolved_item_cannot_discard_the_other_items(self):
+        """A refused item is ONE item's verdict, never the whole run's (#9970).
+
+        Review measured this on the shipped shape: the loop returned from
+        inside itself on `NotAWorkItem`, BEFORE the aggregate, so a resolution
+        over `[#100 LANDED, #8000 <an open PR>]` reported `exit 2` and the
+        sentence "so nothing was checked" — while `#100` HAD been checked and
+        its LANDED had already been computed. Two things went wrong at once:
+
+        * a terminal fact (`EXIT_LANDED`, which the module's own precedence rule
+          says outranks 2) was thrown away, so the caller was told to "re-run"
+          instead of to "verify and close";
+        * the refusal claimed a check that DID run never happened — the standard
+          `_resolution_failure`'s docstring sets for every refusal in this file.
+
+        The fix folds the refusal in as THIS ITEM's `EXIT_INCOMPLETE` and lets
+        `_EXIT_SEVERITY` decide, for either order of the two items.
+        """
+        for codes, unrunnable in (
+            ({100: 4, 8000: 4}, 8000),   # LANDED first, unrunnable second
+            ({8000: 4, 100: 4}, 8000),   # unrunnable first
+        ):
+            with self.subTest(order=list(codes), unrunnable=unrunnable):
+                cp, text, rc = self._aggregate_with_an_unrunnable_item(
+                    codes, unrunnable,
+                )
+                # The terminal fact wins: `4` is decisive, so exit 2 is wrong.
+                self.assertEqual(rc, cp.EXIT_LANDED, text)
+                anchored = [line for line in text.splitlines()
+                            if line.startswith(cp._VERDICT_LINE_PREFIX)]
+                self.assertEqual(len(anchored), 1, text)
+                self.assertIn("VERDICT: LANDED (exit 4)", anchored[0])
+                # The run did NOT forget the item it could not gate.
+                self.assertIn(f"#{unrunnable} INCOMPLETE", text)
+                # ...and it must not claim the checked item was never checked.
+                self.assertNotIn("nothing was checked", text)
+                self.assertIn("VERDICT: LANDED (exit 4) — stubbed #100", text)
+
+    def test_a_single_unrunnable_resolved_item_still_prints_one_anchored_verdict(
+        self,
+    ):
+        """The one-item refusal keeps an anchored verdict (#9970).
+
+        `#7000` resolving ONLY to `#8000` (itself an open PR) is the shape that
+        used to print nothing to stdout at all. A text-keyed consumer greps
+        `^VERDICT` and reads an EMPTY value, which is indistinguishable from a
+        report that never ran. The refusal must therefore carry the anchored
+        line itself, exactly as a single-item resolved run does.
+        """
+        cp, text, rc = self._aggregate_with_an_unrunnable_item({8000: 4}, 8000)
+        self.assertEqual(rc, cp.EXIT_INCOMPLETE, text)
+        anchored = [line for line in text.splitlines()
+                    if line.startswith(cp._VERDICT_LINE_PREFIX)]
+        self.assertEqual(len(anchored), 1, text)
+        self.assertIn("VERDICT: INCOMPLETE (exit 2)", anchored[0])
+        self.assertIn("open pull request", anchored[0])
+
     def _assert_per_item_verdicts_are_visible(self, cp, text, codes):
         """Each work item keeps a verdict line, demoted and worst-first."""
         issues = [100, 200][:len(codes)]
