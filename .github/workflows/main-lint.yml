@@ -40,9 +40,15 @@ name: main-lint
 # folded in here). The `warning` was this workflow failing to post its own
 # notification, and THAT is what this change is about. What is MEASURED is only:
 # the runner printed `Issues: write`, the notification still answered "Resource not
-# accessible by integration", and the only channel that tells a merged PR its tree
-# broke main had therefore NEVER posted — the step shipped with this workflow
-# (c72c66be2, #9630) and no run reached it before main went red on 2026-10-25.
+# accessible by integration" — and it did so on EVERY failing run, not just this
+# one. It was first observed on run 39827884237 (2026-10-22T18:02Z, ~3h after the
+# step shipped in c72c66be2) and still reproduced on 40080049465 (2026-10-24) and
+# 40154972406 (2026-10-25); 28 of the 34 failing `main-lint` runs in the most
+# recent 100 predate 2026-10-25. So the only channel that tells a merged PR its
+# tree broke main had NEVER posted, for three days of red mains — an earlier
+# revision of this comment said "no run reached it before 2026-10-25", which was
+# wrong and understated exactly the evidence that is hardest to dismiss as a
+# transient (corrected in review of #9960).
 #
 # ⚠️ THE MECHANISM IS A HYPOTHESIS, STATED AS ONE. The old step wrapped
 # `issues.listComments` AND `issues.createComment` in ONE catch, so the log does
@@ -155,7 +161,9 @@ jobs:
         # deliberately NOT keyed on `steps.ruff.outcome` in its `if:` — the pin
         # asserts the ONE step keying on that outcome is the github-script comment
         # below (a second such step is how the notification stops being the thing
-        # that notifies). It never fails the job: the ruff step already did.
+        # that notifies). It fails the job in the NO VERDICT arm ONLY; in the FAIL
+        # arm the ruff step already owns the red, so this step's own exit can never
+        # be what reddens a tree whose lint passed.
         if: always()
         env:
           OUTCOME: ${{ steps.ruff.outcome }}

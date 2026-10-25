@@ -2120,22 +2120,27 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
     # "grant nothing" and REPLACES the workflow grant — `or` read it as absent.
     perms = job["permissions"] if "permissions" in job else doc.get("permissions", {})
     if isinstance(perms, str):
-        # GitHub accepts `read-all` / `write-all` at this scope. `write-all` grants
-        # strictly more than the pin needs (so the comment works); `read-all` grants
+        # GitHub accepts `read-all` / `write-all` at this scope. `read-all` grants
         # no `issues: write`, so it 403s on a push event; anything else is invalid
-        # and means no run exists at all — three different facts, three messages.
-        if perms == "write-all":
-            return None
+        # and means no run exists at all — two different facts, two messages.
         if perms == "read-all":
             return (
                 "its `permissions: read-all` grants no `issues: write`, so "
                 "`issues.createComment` 403s on a push event (the default token is "
                 "read-only) and a lint-red main is reported into a run nobody sees"
             )
-        return (
-            f"its `permissions: {perms}` is not a form GitHub accepts — the workflow "
-            "is invalid, so no run exists at all and nothing reports red"
-        )
+        if perms != "write-all":
+            return (
+                f"its `permissions: {perms}` is not a form GitHub accepts — the workflow "
+                "is invalid, so no run exists at all and nothing reports red"
+            )
+        # `write-all` grants every scope, so none is missing — but it must NOT
+        # return early: doing so skipped the VERDICT pin below entirely, so
+        # `write-all` PLUS a deleted/silenced/inverted verdict step was ACCEPTED
+        # (found in review of #9960, and it is the same "a blessed edit switches
+        # the gate off" class this module exists to catch). Fall through with the
+        # equivalent grant and let every later check run.
+        perms = {"contents": "read", "issues": "write", "pull-requests": "write"}
     if not isinstance(perms, dict):
         return (
             f"its `permissions:` block is {perms!r}, which is not a form GitHub accepts "
@@ -2227,14 +2232,15 @@ def _verdict_step_problem(job: dict, lint_id: str) -> str | None:
     a mutant in `_STARVED_SHAPES`.
     """
     def reads_the_outcome(step: dict) -> bool:
+        # BOTH live styles publish a verdict: an `env:` indirection, and a `run:`
+        # that interpolates the outcome inline (`case "${{ steps.lint.outcome }}"`,
+        # the form deploy-hosted.yml uses). Scanning only `env:` rejected the second
+        # one with a message that was false about it — the classic route by which a
+        # pin gets deleted (review of #9960).
         env = step.get("env")
-        if not isinstance(env, dict):
-            return False
-        return any(
-            reference == lint_id
-            for value in env.values()
-            for reference in _OUTCOME_REF.findall(str(value))
-        )
+        haystack = " ".join(str(value) for value in env.values()) if isinstance(env, dict) else ""
+        haystack = f"{haystack} {step.get('run') or ''}"
+        return any(reference == lint_id for reference in _OUTCOME_REF.findall(haystack))
 
     steps = [step for step in (job.get("steps") or []) if isinstance(step, dict)]
     verdicts = [step for step in steps if reads_the_outcome(step)]
@@ -2940,8 +2946,23 @@ def _set_permissions_without_pull_requests_write(doc: dict) -> None:
 
 
 def _verdict_step(doc: dict) -> dict:
+    """The verdict step, found the SAME structural way the pin finds it.
+
+    Looking it up by the literal `id: verdict` made an honest rename
+    (`publish-verdict`) — accepted by the pin — red five tests, four of them with
+    "the live artifact lost its verdict step", which was false about the artifact
+    (review of #9960).
+    """
+    lint_id = _ruff_step(doc).get("id")
     for step in doc["jobs"]["lint"]["steps"]:
-        if isinstance(step, dict) and step.get("id") == "verdict":
+        if not isinstance(step, dict):
+            continue
+        env = step.get("env")
+        haystack = (
+            " ".join(str(value) for value in env.values()) if isinstance(env, dict) else ""
+        )
+        haystack = f"{haystack} {step.get('run') or ''}"
+        if any(reference == lint_id for reference in _OUTCOME_REF.findall(haystack)):
             return step
     raise AssertionError(
         "the live artifact lost its verdict step — the mutant is unbuildable"
@@ -2950,11 +2971,21 @@ def _verdict_step(doc: dict) -> dict:
 
 def _set_no_verdict_step(doc: dict) -> None:
     job = doc["jobs"]["lint"]
-    job["steps"] = [
-        step
-        for step in job["steps"]
-        if not (isinstance(step, dict) and step.get("id") == "verdict")
-    ]
+    keep = _verdict_step(doc)
+    job["steps"] = [step for step in job["steps"] if step is not keep]
+
+
+def _set_write_all_without_verdict(doc: dict) -> None:
+    """`write-all` is an ACCEPTED spelling — and it used to short-circuit the pin.
+
+    `if perms == "write-all": return None` sat ABOVE the verdict pin, so a tree
+    carrying `write-all` could have its verdict step deleted, silenced or inverted
+    with this whole module green (found in review of #9960). Consolidating the
+    grant to `write-all` while tidying the steps is a plausible single edit, which
+    is why the mutant is the PAIR.
+    """
+    doc["permissions"] = "write-all"
+    _set_no_verdict_step(doc)
 
 
 def _set_verdict_step_never_runs(doc: dict) -> None:
@@ -3049,6 +3080,7 @@ _STARVED_SHAPES = [
     ),
     # ── the verdict must be PUBLISHED, not inferred (#5120) ──
     ("no verdict step at all (#5120)", _set_no_verdict_step),
+    ("`write-all` PLUS no verdict step (#5120)", _set_write_all_without_verdict),
     ("a verdict step that never runs", _set_verdict_step_never_runs),
     ("a verdict step silenced by `continue-on-error`", _set_verdict_step_silenced),
     ("a verdict step whose default arm is green", _set_verdict_default_green),
