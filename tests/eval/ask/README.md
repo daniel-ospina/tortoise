@@ -154,15 +154,23 @@ modified file's content, and an ignore rule (`.gitignore`, `.git/info/exclude`,
 a global `core.excludesFile`) hides an untracked, importable module. Both are
 recorded defeats of a status/diff check elsewhere in this package
 (`guard_measured_revision.py`), so the record also puts the question to git
-with no filter in it, over the **executed surface** (`tortoise/` + `tools/`):
-the untracked set is enumerated **without** `--exclude-standard`, and every
-tracked file's index tag is read — `H` is ordinary, a lowercase tag is
+with no filter in it, over the **executed surface** — `tortoise/` (the SDK
+under measurement), `tools/` (the measurement tooling) and `tests/eval/ask/`
+(the corpus loader that tooling imports, so it EXECUTES on every run): the
+untracked set is enumerated **without** `--exclude-standard`, and every tracked
+file's index tag is read — `H` is ordinary, a lowercase tag is
 assume-unchanged, `S` is skip-worktree, and anything else is refused. Each such
 path is recorded as an uncommitted path, so publish refuses the run. A path the
 surface scan finds that `git status` **already reported** is not recorded
 twice: one file is one uncommitted path, and the "an ignore rule hides it"
 wording is used only for a path status did not list. A failed `git ls-files` is
 recorded as not-provably-clean, exactly as a failed `git status` is.
+
+The surface is not hand-curated: `tests/test_measure_ask_distilled.py::
+test_the_recorded_surface_COVERS_every_module_the_run_imports` imports the
+runner in a fresh interpreter and fails, naming the file, if anything it loads
+sits outside the list. That is how the corpus loader came to be in it — without
+it, an `--assume-unchanged` patch to that loader published under a clean record.
 
 Only the editor/VCS suffixes (`.orig`, `.rej`, `.swp`, `.swo`, `.DS_Store`) are
 excused from the untracked scan, taken from the guard's own predicate

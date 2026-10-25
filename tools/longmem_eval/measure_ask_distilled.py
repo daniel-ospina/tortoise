@@ -201,12 +201,25 @@ COMMIT_BINDING_SCHEMA = "ask-distilled-commit-binding/v1"
 #: numbers, so publish can refuse a run from a different one.
 CODE_IDENTITY_SCHEMA = "ask-distilled-code-identity/v1"
 
-#: The surface a measurement run can EXECUTE: the SDK under measurement and the
-#: measurement tooling itself. Mirrors ``DEFAULT_PATHS`` in
-#: :mod:`tools.longmem_eval.guard_measured_revision` — that guard and this
-#: record ask different questions about the SAME surface, so a surface named in
-#: one and not the other would be a hole shaped like the difference.
-EXECUTED_SURFACE: tuple[str, ...] = ("tortoise/", "tools/")
+#: The surface a measurement run can EXECUTE: the SDK under measurement, the
+#: measurement tooling itself, and the corpus loader that tooling imports. It
+#: mirrors ``DEFAULT_PATHS`` in :mod:`tools.longmem_eval.guard_measured_revision`
+#: — that guard and this record ask different questions about the SAME surface,
+#: so a surface named in one and not the other would be a hole shaped like the
+#: difference.
+#:
+#: ⛔ ``tests/eval/ask/`` is IN it, and that entry is not decoration: the runner
+#: imports ``tests.eval.ask.corpus`` at module load (``from tests.eval.ask import
+#: corpus``, :148), so a patched corpus loader EXECUTES on every run while
+#: producing no corpus-hash difference — the hash digests the corpus FILES, not
+#: the code that reads them. Measured: with ``tortoise/`` + ``tools/`` only, an
+#: ``--assume-unchanged`` patch to ``tests/eval/ask/corpus.py`` left
+#: ``dirty_paths == []`` and publish ACCEPTED it. The list is therefore PINNED
+#: BY MEASUREMENT, not by hand —
+#: ``test_the_recorded_surface_COVERS_every_module_the_run_imports`` imports the
+#: runner in a fresh interpreter and fails, naming the module, if anything it
+#: loads sits outside these prefixes.
+EXECUTED_SURFACE: tuple[str, ...] = ("tortoise/", "tools/", "tests/eval/ask/")
 
 ISSUE = "9097"
 EPIC = "2281"
@@ -765,7 +778,8 @@ def _paths_hidden_from_status(
             f"matches its source by construction (PEP 552), so the recorded "
             f"sha cannot vouch for what CPython loads. Re-run over a "
             f"byte-code-free tree (remove them first: `find tortoise tools "
-            f"-name __pycache__ -type d -prune -exec rm -rf {{}} +`)")
+            f"tests/eval/ask -name __pycache__ -type d -prune -exec rm -rf "
+            f"{{}} +`)")
     return hidden
 
 

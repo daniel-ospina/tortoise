@@ -1760,26 +1760,83 @@ def test_the_published_report_names_the_tree_the_run_executed_from(published,
 # renderer that turns an absent record into the word "clean".
 
 def _make_surface_repo(base: Path) -> Path:
-    """A throwaway repo that HAS the executed surface (``tortoise/``+``tools/``).
+    """A throwaway repo that HAS the executed surface (``EXECUTED_SURFACE``).
 
     ``code_identity`` asks git about the surface a measurement run can import,
     so a mechanism test needs a repository where that surface EXISTS — the
     corpus fixtures in this file (a corpus, a pre-registration and a marker) do
-    not. Also asserts the surface is clean before a test dirties it, which is
-    the other half of the discriminating power: the new scan must not refuse a
-    tree that is actually clean.
+    not. The corpus loader is included because the RUNNER imports it
+    (``tests.eval.ask.corpus``), which is the entry an earlier hand-written
+    surface missed. Also asserts the surface is clean before a test dirties it,
+    which is the other half of the discriminating power: the new scan must not
+    refuse a tree that is actually clean.
     """
     repo = base / "surface-repo"
     (repo / "tools").mkdir(parents=True)
     (repo / "tortoise").mkdir()
+    (repo / "tests" / "eval" / "ask").mkdir(parents=True)
     _git_init(repo)
     (repo / "tools" / "probe_step.py").write_text("VALUE = 1\n",
                                                    encoding="utf-8")
     (repo / "tortoise" / "ask_lane.py").write_text("VALUE = 1\n",
                                                     encoding="utf-8")
+    (repo / "tests" / "eval" / "ask" / "corpus.py").write_text(
+        "def load_fixtures(root):\n    return []\n", encoding="utf-8")
     assert _git_commit(repo, "the executed surface")
     assert m.code_identity(repo)["dirty_paths"] == []
     return repo
+
+
+def test_the_recorded_surface_COVERS_every_module_the_run_imports():
+    """The surface is MEASURED here, because listing it by hand was WRONG.
+
+    ``EXECUTED_SURFACE`` is the set of paths :func:`code_identity` asks git
+    about, and the claim it carries is "the modules a run can execute". A
+    hand-written list is an ASSERTION about that claim, and it was wrong in the
+    way this whole class of defect takes: the runner imports
+    ``tests.eval.ask.corpus`` at module load, so with the list at
+    ``tortoise/`` + ``tools/`` an ``--assume-unchanged`` patch to that loader
+    produced ``dirty_paths == []`` and publish ACCEPTED it — numbers produced by
+    code the recorded sha does not contain, with the corpus hash unchanged
+    (it digests the corpus files, not the code that reads them).
+
+    So a fresh interpreter imports the runner and every repository module it
+    loaded must sit under these prefixes. A future import from outside the
+    surface fails HERE, naming the file, instead of silently becoming a way for
+    a run to claim an identity it did not have.
+    """
+    repo_root = Path(m.__file__).resolve().parents[2]
+    census = (
+        "import json, pathlib, sys\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "import tools.longmem_eval.measure_ask_distilled\n"
+        "root = pathlib.Path(sys.argv[1]).resolve()\n"
+        "loaded = set()\n"
+        "for name, mod in list(sys.modules.items()):\n"
+        "    where = getattr(mod, '__file__', None)\n"
+        "    if not where:\n"
+        "        continue\n"
+        "    try:\n"
+        "        rel = pathlib.Path(where).resolve().relative_to(root)\n"
+        "    except ValueError:\n"
+        "        continue\n"
+        "    loaded.add(rel.as_posix())\n"
+        "print(json.dumps(sorted(loaded)))\n")
+    proc = subprocess.run(
+        [sys.executable, "-B", "-c", census, str(repo_root)],
+        capture_output=True, text=True, check=False, cwd=str(repo_root),
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+    assert proc.returncode == 0, proc.stderr
+    loaded = json.loads(proc.stdout)
+    # A census that loaded nothing would make this test pass by being blind —
+    # the same shape of vacuity the record itself exists to refuse.
+    assert loaded, "the surface census loaded no repository module"
+    outside = [path for path in loaded
+               if not path.startswith(m.EXECUTED_SURFACE)]
+    assert not outside, (
+        f"the run imports {outside}, which is OUTSIDE the recorded surface "
+        f"{m.EXECUTED_SURFACE} — an index flag or an ignore rule can then hide "
+        f"a modified executed module while this record reads CLEAN")
 
 
 def test_an_IGNORE_RULE_cannot_hide_an_untracked_executed_module(tmp_path):
@@ -1815,25 +1872,32 @@ def test_an_INDEX_FLAG_cannot_hide_a_modified_executed_module(tmp_path):
     PASS this record exists to close, with no receipt field tampered with.
     Both flags are exercised: they are different mechanisms (the tag is `h`
     versus `S`) and a check that reads only one of them leaves the other open.
+
+    Both SURFACES are exercised too, and the second one is the case that was
+    still open: `tests/eval/ask/corpus.py` is imported by the runner but sat
+    outside a hand-written surface, so this patch published.
     """
     for flag in ("--assume-unchanged", "--skip-worktree"):
-        repo = _make_surface_repo(tmp_path / flag.lstrip("-"))
-        target = "tools/probe_step.py"
-        assert m._git(repo, "update-index", flag, target).returncode == 0
-        (repo / target).write_text("VALUE = 999  # unrecorded patch\n",
-                                   encoding="utf-8")
-        assert m._git(repo, "status", "--porcelain",
-                      "--untracked-files=normal").stdout.strip() == "", (
-            f"the fixture did not reproduce the {flag} hiding flag")
-        identity = m.code_identity(repo)
-        assert any("tools/probe_step.py" in path
-                   for path in identity["dirty_paths"]), (flag, identity)
-        # ... and clearing the flag clears the refusal: the record is about the
-        # suppression, not about the file having a patch someone could see.
-        assert m._git(repo, "update-index", "--no" + flag[1:],
-                      target).returncode == 0
-        assert m._git(repo, "checkout", "--", target).returncode == 0
-        assert m.code_identity(repo)["dirty_paths"] == [], flag
+        for target in ("tools/probe_step.py", "tests/eval/ask/corpus.py"):
+            label = f"{flag.lstrip('-')}-{target.replace('/', '-')}"
+            repo = _make_surface_repo(tmp_path / label)
+            assert m._git(repo, "update-index", flag, target).returncode == 0
+            (repo / target).write_text("VALUE = 999  # unrecorded patch\n",
+                                       encoding="utf-8")
+            assert m._git(repo, "status", "--porcelain",
+                          "--untracked-files=normal").stdout.strip() == "", (
+                f"the fixture did not reproduce the {flag} hiding flag")
+            identity = m.code_identity(repo)
+            assert any(target in path
+                       for path in identity["dirty_paths"]), (
+                flag, target, identity)
+            # ... and clearing the flag clears the refusal: the record is about
+            # the suppression, not about the file having a patch someone could
+            # see.
+            assert m._git(repo, "update-index", "--no" + flag[1:],
+                          target).returncode == 0
+            assert m._git(repo, "checkout", "--", target).returncode == 0
+            assert m.code_identity(repo)["dirty_paths"] == [], (flag, target)
 
 
 def test_a_BYTE_CACHE_under_the_executed_surface_is_refused(tmp_path):
