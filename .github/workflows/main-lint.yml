@@ -66,12 +66,14 @@ name: main-lint
 #      green, so a new/unrecognised conclusion cannot fall through to a pass.
 #      PINNED: the step exists after the lint step, is the one step deriving
 #      `steps.ruff.outcome` through `env:`, carries no active `continue-on-error`,
-#      carries `if: always()`, really READS the outcome variable (an override in
-#      its own `run:` is refused), writes `$GITHUB_STEP_SUMMARY`, emits both
+#      carries `if: always()` as its WHOLE condition (a conjunct could skip it),
+#      SELECTS on that outcome (a constant `case` selector is refused) and cannot
+#      override it in its own `run:`, writes `$GITHUB_STEP_SUMMARY`, emits both
 #      `::notice` and `::error`, and its default arm exits non-zero while its
 #      `success` arm does not. EVERY one of those halves has a mutant in the
 #      pin's `_STARVED_SHAPES`, and the honest spellings (`if: ${{ always() }}`,
-#      an `exit 2` fallback, an inert `continue-on-error: false`) stay green.
+#      an `exit 2` fallback, an inert `continue-on-error: false`, a renamed
+#      outcome variable) stay green.
 #   2. the verdict IS the lint step's own outcome, so a finding still fails the
 #      job — including when the notification ALSO fails. The notification cannot
 #      change the verdict in either direction. PINNED: exactly ONE step keys on

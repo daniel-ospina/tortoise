@@ -1741,6 +1741,15 @@ def _shell_code(run: str) -> list[str]:
     return [line for line in run.splitlines() if not line.lstrip().startswith("#")]
 
 
+def _case_selector(run: str) -> str | None:
+    """The word after ``case`` (up to ``in``) — what the branches actually SELECT on."""
+    for line in _shell_code(run):
+        match = re.match(r"^\s*case\s+(.*?)\s+in\s*$", line)
+        if match:
+            return match.group(1).strip()
+    return None
+
+
 def _case_arms(run: str) -> dict[str, list[str]] | None:
     """The arms of the first ``case … esac`` in ``run``, or ``None`` if it has none.
 
@@ -1870,8 +1879,26 @@ def _verdict_step_problem(steps: list, ruff_index: int, ruff_id: str) -> str | N
             "SKIPPED on the failing path and the header's 'published in BOTH "
             "directions' is false about the artifact"
         )
+    # NAMING `always()` is not the property: `always() && false`, `always() && (1 ==
+    # 2)` and `always() && <an event filter>` all skip the step on the paths that
+    # need a verdict, and each leaves the run green with no verdict at all. The
+    # expression must BE `always()` (GitHub's `${{ }}` wrapper is the same pin).
+    bare = condition.strip()
+    if bare.startswith("${{") and bare.endswith("}}"):
+        bare = bare[3:-2].strip()
+    if bare != "always()":
+        return (
+            f"the verdict-publishing step has `if: {condition}` — `always()` must be "
+            "the WHOLE condition; an extra conjunct can only narrow it, and one that "
+            "is false on the failing path skips the step and leaves the run green "
+            "with no verdict at all"
+        )
     run = str(verdict.get("run", ""))
-    code = "".join(_shell_code(run))
+    # NEWLINE-joined, never "".join: an anchored (`re.M`) check needs the line
+    # starts back, and a bare concatenation made `^` unreachable mid-string — the
+    # guard then fired only when the previous line happened to end in a space
+    # (measured in review: `set -u\nOUTCOME=success` was ACCEPTED).
+    code = "\n".join(_shell_code(run))
     if "GITHUB_STEP_SUMMARY" not in code:
         return (
             "the verdict-publishing step never writes `$GITHUB_STEP_SUMMARY` — the "
@@ -1893,16 +1920,29 @@ def _verdict_step_problem(steps: list, ruff_index: int, ruff_id: str) -> str | N
     # COMMENT-STRIPPED `code`, like every neighbouring check: a `${OUTCOME}` that
     # appears only in a comment satisfies a raw-text test while the `case` is keyed
     # on something else — the check would read prose, not behaviour.
-    if not any(f"${{{key}" in code for key in outcome_vars):
+    if not any(f"${{{key}" in code or f"${key}" in code for key in outcome_vars):
         return (
             f"the verdict-publishing step sets {outcome_vars} but never READS it in "
             "its `run:` — the `case` is not keyed on the ruff step's own outcome, "
             "so it publishes whatever the shell last saw"
         )
+    selector = _case_selector(run)
+    if selector is None or not any(
+        f"${{{key}" in selector or f"${key}" in selector for key in outcome_vars
+    ):
+        # PRESENCE is not the property: the default arm's own message interpolates
+        # the variable, so a one-line edit to `case "success" in` leaves every
+        # `${OUTCOME}` in place and the step publishes PASS for EVERY conclusion.
+        return (
+            f"the verdict `case` selector is `{selector}` and does not read "
+            f"{outcome_vars} — the outcome is printed but never SELECTED on, so the "
+            "verdict is a constant (PASS) even when the lint step failed or never ran"
+        )
     for key in outcome_vars:
         # An ASSIGNMENT before the `case` decides the verdict without measuring:
         # `OUTCOME=success` publishes PASS on every run, including a red lint step.
-        if re.search(rf"(^|[\s;])(export\s+)?{re.escape(key)}=", code, re.M):
+        # `^\s*` because every line of a `run:` block is indented to its base.
+        if re.search(rf"^\s*(export\s+)?{re.escape(key)}=", code, re.M):
             return (
                 f"the verdict-publishing step ASSIGNS `{key}` in its own `run:` — the "
                 "published verdict is then a constant, not the lint step's outcome, "
@@ -3148,26 +3188,32 @@ def _set_verdict_skipped_rides_failure(doc: dict) -> None:
     step["run"] = step["run"].replace("  failure)\n", "  failure|skipped)\n", 1)
 
 
-def _set_verdict_outcome_only_in_a_comment(doc: dict) -> None:
-    """The `case` keyed on a constant; `${OUTCOME}` survives only in a comment/echo.
+def _set_verdict_case_selector_constant(doc: dict) -> None:
+    """ONE line: the `case` selector becomes a constant, every echo left alone.
 
-    The default arm's message also interpolates `${OUTCOME}`, so a one-line edit to
-    the `case` selector alone would still READ the variable — the mutation has to
-    take the measuring out of the run, which is what a "make it always pass" edit
-    does. A raw-text check is satisfied by the echo; a comment-stripped one is not.
+    The default arm's message still interpolates `${OUTCOME}`, so a presence-only
+    check is satisfied while the step publishes PASS for every conclusion —
+    `success`, `failure`, `skipped` and unset all exit 0, and the NO VERDICT arm is
+    unreachable (measured in review cycle 3: `case "success" in` was ACCEPTED).
     """
     step = _verdict_step(doc)
-    step["run"] = (
-        step["run"]
-        .replace('case "${OUTCOME:-}" in', '# case "${OUTCOME:-}" in\n          case "success" in', 1)
-        .replace("${OUTCOME:-null}", "null")
-    )
+    step["run"] = step["run"].replace('case "${OUTCOME:-}" in', 'case "success" in', 1)
 
 
 def _set_verdict_outcome_overridden(doc: dict) -> None:
-    """`OUTCOME=success` before the `case`: the verdict is a constant, not a measure."""
+    """`OUTCOME=success` at the run-block's BASE indent: the verdict becomes constant.
+
+    The base indent is what a maintainer writes — a mutant carrying extra spaces
+    only proves the guard can match an alignment the artifact never has (review
+    cycle 3 measured exactly that: 0 columns accepted, 2/4/10 rejected).
+    """
     step = _verdict_step(doc)
-    step["run"] = step["run"].replace("set -u", "set -u\n          OUTCOME=success", 1)
+    step["run"] = step["run"].replace("set -u\n", "set -u\nOUTCOME=success\n", 1)
+
+
+def _set_verdict_if_always_and_false(doc: dict) -> None:
+    """`always()` NAMED but a false conjunct appended — the step never runs."""
+    _verdict_step(doc)["if"] = "always() && false"
 
 
 def _set_second_keyed_notifier(doc: dict) -> None:
@@ -3345,8 +3391,9 @@ _STARVED_SHAPES = [
     ("a verdict `success)` arm that exits non-zero", _set_verdict_success_arm_fails),
     ("a default arm merged with `failure`", _set_verdict_default_merges_failure),
     ("`skipped` merged into the passing FAIL arm", _set_verdict_skipped_rides_failure),
-    ("the outcome read only in a comment", _set_verdict_outcome_only_in_a_comment),
+    ("the `case` selector made a constant", _set_verdict_case_selector_constant),
     ("the outcome variable overridden in `run:`", _set_verdict_outcome_overridden),
+    ("`always()` plus a false conjunct", _set_verdict_if_always_and_false),
     ("a verdict step whose default arm is green", _set_verdict_default_green),
     ("a verdict `case` with no `success)` arm", _set_verdict_without_success_arm),
     ("a second reader of the ruff outcome", _set_second_outcome_reader),
