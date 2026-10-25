@@ -228,11 +228,12 @@ class Report:
     notes: list[str] = field(default_factory=list)
     deferred: int = 0
     #: Open items that ALREADY carry the label. The label means "fully handled",
-    #: so an open+labelled item is a half-applied relay — the one state nothing
-    #: repairs (the event path only listens for `opened`, and this sweep skips
-    #: the label as its idempotence marker). Counted and reported, never
-    #: auto-closed: a human may have labelled an item deliberately to keep it
-    #: open for manual triage.
+    #: so an open+labelled item is EITHER a half-applied relay (the event path
+    #: labels FIRST, and nothing retries it) OR an item relayed and then
+    #: REOPENED for review — the flow the relay's PR comment promises, and
+    #: nothing removes the label. Counted and reported, never auto-closed: this
+    #: sweep cannot tell the two apart, and a human may have labelled an item
+    #: deliberately to keep it open for manual triage.
     stranded: int = 0
     #: Candidates whose per-PR detail was never fetched (detail budget spent, or
     #: the action cap already reached), so they were neither acted on nor
@@ -478,15 +479,15 @@ def sweep(
         labelled = list(client.list_labelled(cfg.label))
         report.stranded = sum(1 for item in labelled if _canon(_author(item)) != _canon(cfg.owner))
     except Exception as exc:
-        report.notes.append(f"could not check for half-applied (open+labelled) items: {exc}")
+        report.notes.append(f"could not check for open+labelled items: {exc}")
 
     if report.stranded:
         report.notes.append(
             f"{report.stranded} open item(s) already carry {cfg.label!r}: the label "
             "means 'fully handled', so this is EITHER a half-applied relay (the "
             "event path labels FIRST, then comments and closes) OR an item that was "
-            "relayed and then REOPENED for review — the flow the relay's own comment "
-            "promises, and nothing in this repo removes the label. This sweep cannot "
+            "relayed and then REOPENED for review — the flow the relay's PR "
+            "comment promises, and nothing in this repo removes the label. This sweep cannot "
             "tell them apart and will not touch either (a human may also have "
             "labelled it deliberately), so this is a count to verify, not a verdict"
         )
@@ -532,6 +533,15 @@ def sweep(
             # record at all. `source_item_id` keys the POST, so a repeat is a
             # no-op intake-side; closing without a record is unrecoverable.
             resume = client.already_relayed(number)
+            if getattr(client, "comment_read_truncated", False):
+                # A SHORT read is not an absent marker. Say so, or a thread longer
+                # than the page budget looks like "never relayed" and the item
+                # gets a second identical comment on every run.
+                report.notes.append(
+                    f"{kind} #{number}: the resume read stopped at its page budget "
+                    "before the thread ended, so it was treated as NOT relayed — a "
+                    "duplicate comment may be posted; the item is still acted on"
+                )
             step = "intake POST"
             client.post_intake(intake_payload(item))
             if not resume:
@@ -615,6 +625,11 @@ class GhClient:
         #: is LAST in the endpoint's ascending order, so the read has to reach
         #: the end of the thread; 10 × 100 covers any thread this repo has seen.
         self.comment_page_budget = comment_page_budget
+        #: True ⇔ the last RESUME READ stopped at the page budget before the
+        #: thread ended, so "no marker found" may only mean "not in the pages I
+        #: read". Per-call, never sticky; the sweep turns it into a note, because
+        #: a silent short read re-posts the comment it failed to see.
+        self.comment_read_truncated = False
         #: True ⇔ the last listing stopped at the page budget with the window
         #: possibly continuing past it (the unread remainder is deferred).
         self.window_truncated = False
@@ -735,13 +750,15 @@ class GhClient:
 
         An empty page is the end of the thread (stop, keep what was read); a
         FAILED page raises, so a partial read never looks like a complete one.
-        On exhausting the budget the deepest pages read are scanned — the best
-        evidence available — rather than raising: an `ListingError` here would
-        make a long thread permanently un-relayable, which is worse than the
-        duplicate comment this guards against.
+        On exhausting the budget the pages read are returned with
+        `comment_read_truncated` set: raising there would make a long thread
+        permanently un-relayable, but a SILENT short read would report "not
+        relayed" for a marker that is simply further down — so the caller is
+        told, and the note names the possible duplicate comment.
         """
         path = f"repos/{self.repo}/issues/{number}/comments"
         comments: list[dict[str, Any]] = []
+        self.comment_read_truncated = False
         for page in range(1, self.comment_page_budget + 1):
             try:
                 raw = _gh(["api", f"{path}?per_page={self.per_page}&page={page}"])
@@ -755,6 +772,10 @@ class GhClient:
             comments.extend(chunk)
             if len(chunk) < self.per_page:
                 break
+        else:
+            # The loop ran to completion: every page was FULL, so the thread
+            # continues past the budget and the verdict is not trustworthy.
+            self.comment_read_truncated = True
         return comments
 
     def post_intake(self, payload: dict[str, Any]) -> None:
@@ -910,7 +931,8 @@ def main(argv: list[str] | None = None) -> int:
     if report.stranded:
         print(
             f"STRANDED {report.stranded} open item(s) already carry {LABEL!r} "
-            "— half-applied, nothing retries them; see the note"
+            "— half-applied OR relayed-then-reopened; this run cannot tell them "
+            "apart, so nothing was closed. See the note"
         )
     if report.truncated:
         print(

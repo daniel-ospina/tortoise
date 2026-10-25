@@ -749,6 +749,34 @@ def test_dry_run_needs_no_intake_credential(sweep: Any) -> None:
     assert report.exit_code == 0
 
 
+def test_the_stranded_summary_matches_the_note_it_points_at(
+    sweep: Any, monkeypatch: Any, capsys: Any
+) -> None:
+    """The loud line must not re-assert the one cause the note just removed.
+
+    Open + labelled is EITHER a half-applied relay OR an item relayed and then
+    REOPENED for review. The note says so and refuses to pick a cause; the run's
+    summary line still printed `half-applied, nothing retries them` — one
+    verdict, wrong for every item under review, four times an hour, and it is the
+    line an operator reads first. The note was pinned; this was not.
+    """
+    report = sweep.Report(dry_run=False, stranded=2)
+    report.notes.append("2 open item(s) already carry 'queued-for-triage': EITHER …")
+    monkeypatch.setattr(sweep, "sweep", lambda *a, **k: report)
+
+    assert sweep.main(["--repo", f"{OWNER}/tortoise"]) == 0
+
+    summary = next(
+        line for line in capsys.readouterr().out.splitlines() if line.startswith("STRANDED")
+    )
+    assert "half-applied" in summary.casefold(), summary
+    assert "reopened" in summary.casefold(), (
+        f"the other cause must be named: an item reopened for review is not a "
+        f"half-applied relay, and closing it is the wrong action: {summary}"
+    )
+    assert "cannot tell them apart" in summary, summary
+
+
 def test_main_reports_a_crashing_sweep_instead_of_dying(sweep: Any, monkeypatch: Any) -> None:
     """`main()` must render the failure — a traceback loses the whole report."""
 
@@ -1312,6 +1340,63 @@ def test_a_dense_window_is_reported_through_the_real_client(sweep: Any, monkeypa
     # The ACTION half still holds: the prefix it read is acted on, not aborted.
     assert report.selected == [("issue", 1), ("issue", 2), ("issue", 3), ("issue", 4)]
     assert report.errors == []
+
+
+def test_a_failed_comment_page_raises_before_any_mutation(sweep: Any, monkeypatch: Any) -> None:
+    """An unreadable page is not an absent marker.
+
+    If the resume read swallowed a failed page, "no footer found" would be
+    indistinguishable from "I did not finish reading" — and the item would be
+    re-commented. The read must raise instead; `sweep()` turns that into
+    `resume check failed` with every mutation skipped.
+    """
+    client = sweep.GhClient(f"{OWNER}/tortoise", per_page=2, comment_page_budget=4)
+    chatter = {"body": "chatter", "user": {"login": "u", "type": "User"}}
+    _stub_gh_json(
+        sweep,
+        monkeypatch,
+        {
+            "7/comments?per_page=2&page=1": [chatter, chatter],
+            "7/comments?per_page=2&page=2": RuntimeError("gh api failed (rc=1): 502"),
+        },
+    )
+
+    with pytest.raises(sweep.ListingError):
+        client.already_relayed(7)
+
+
+def test_a_resume_read_that_hits_its_budget_says_so(sweep: Any, monkeypatch: Any) -> None:
+    """A SHORT read is not a confident verdict.
+
+    `comment_page_budget` bounds the resume read; a thread longer than the budget
+    finds no marker and the run re-comments. Raising would make a long thread
+    permanently un-relayable, but returning False in SILENCE is the worst option:
+    the read was short while the verdict was confident. The client sets
+    `comment_read_truncated` and the sweep turns it into a note.
+    """
+    client = sweep.GhClient(f"{OWNER}/tortoise", per_page=2, comment_page_budget=2)
+    chatter = [
+        {"body": f"chatter {i}", "user": {"login": f"u{i}", "type": "User"}} for i in range(4)
+    ]
+    _stub_gh_json(
+        sweep,
+        monkeypatch,
+        {
+            "labels=queued-for-triage&per_page=2&page=1": [],
+            "sort=created&direction=desc&per_page=2&page=1": [issue(7)],
+            "7/comments?per_page=2&page=1": chatter[:2],
+            "7/comments?per_page=2&page=2": chatter[2:],
+        },
+    )
+
+    report = run(sweep, client)
+
+    assert any("page budget" in note for note in report.notes), report.notes
+    assert any("duplicate comment" in note for note in report.notes), report.notes
+    # …and the flag is per-call, never sticky: a later short read clears it.
+    _stub_gh_json(sweep, monkeypatch, {"7/comments?per_page=2&page=1": chatter[:1]})
+    client.already_relayed(7)
+    assert client.comment_read_truncated is False
 
 
 def test_the_resume_marker_must_be_our_own_comment(sweep: Any, monkeypatch: Any) -> None:
