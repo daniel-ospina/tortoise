@@ -104,7 +104,7 @@ keeps the endpoint's own `content_hash` re-derivation honest.
 Measured 2026-10-24 on Postgres 16 (record) + a live FalkorDB (cache), the point created by the
 production SDK and written to the record by the production projection (`record_projection.replay`):
 
-```
+```text
 PARITY MEASUREMENT {"cache_fields": 11, "record_fields": 8,
   "diff": {"clean": true, "changed": [], "invented": [],
            "unexplained_missing": [],
@@ -115,19 +115,28 @@ The three absences are exactly the refused names the live point carried; nothing
 `S9` — the same read with the cache copy **destroyed** (`DETACH DELETE`, then a cache callback that
 raises if touched at all):
 
-```
+```text
 S9 {"fields": ["content","createdAt","id","is_operator","key","pointKind","status","updatedAt"],
     "read": "point-by-id", "served_from": "record"}
 ```
 
-**Two caller-visible differences, both deliberate**, on a record-served answer:
-`content_hash` is **re-derived** at the endpoint with the writer's own function (#2795 D2 — the
-schema refuses it as a column), and the EP dirty flags (`ep_dirty`, `ep_dirty_at`) are **absent**,
-because they are the cache's own fold state and a record-served answer must not claim to know it.
+**The differences on a record-served answer, all disclosed at the endpoint**: `content_hash` is
+**re-derived** with the writer's own function (#2795 D2 — the schema refuses it as a column), and
+**every other name the schema refuses as derived is ABSENT rather than recomputed** — `confidence`,
+`ep_*`, `posterior_*`, `version`, `inherited_at`, `c_cal`, `baseline_set`, `lastDreamedAt`, `reason`,
+and the EP dirty flags (`ep_dirty`, `ep_dirty_at` — the cache's own fold state, so a record-served
+answer must not claim to know it, §17.5). The set is `cache_projection._refused("point")`.
+
+⚠️ **`confidence` is the load-bearing member of that set**, because it is a supported field of this
+very route: `off` mode round-trips it (#4032), and the arm this unit adds does not. `servedFrom` says
+which STORE answered, never which FIELDS it could not — so the omission is named in
+`hosted_api.get_point`'s docstring (where an operator arming the mode reads it) and pinned by
+`test_an_armed_read_drops_the_refused_names_the_cache_answer_carries`. Re-deriving it instead is
+what §17.5 forbids at this layer.
 
 ## 3. Mutation arms — the guards, and the edits that turn them RED
 
-Run 2026-10-24 against `tests/test_record_serve.py` (51 tests) and the live file (2 tests):
+Run 2026-10-24 against `tests/test_record_serve.py` (53 tests, re-derived with `pytest --collect-only`; the file declares no `skip`/`xfail`) and the live file (2 tests):
 
 | edit | result |
 |---|---|
@@ -145,10 +154,12 @@ Run 2026-10-24 against `tests/test_record_serve.py` (51 tests) and the live file
 | a tenancy misconfiguration is downgraded to a fallback | 1 RED (`test_a_misconfigured_tenancy_is_structural_not_a_fallback`) |
 | a permanent missing tenant is answered 503 | 1 RED (`test_a_credential_without_a_record_tenant_is_a_fault_not_an_outage`) |
 | `off` mode overwrites a stored `servedFrom` | 1 RED (`test_off_mode_leaks_no_attribution_and_keeps_a_stored_name`) |
-| `prefer` builds the cache handle before asking the record | 1 RED (`test_prefer_answers_from_the_record_when_the_cache_cannot_be_opened`) |
+| `prefer` lets the handle-construction failure PROPAGATE instead of capturing it | 1 RED (`test_prefer_answers_from_the_record_when_the_cache_cannot_be_opened`) |
 | a permanent missing tenant is counted as an outage | 1 RED (`test_prefer_counts_an_unresolved_tenant_under_its_own_reason`) |
 | a tenancy misconfiguration escapes the endpoint | 1 RED (`test_the_endpoint_answers_500_for_a_tenancy_misconfiguration`) |
 | the documented interface-E coordinate drifts from the schema reader | 1 RED (`test_the_documented_coordinates_match_the_schema_reader` — #9881 moved `Subject`/`Object` from `name` to `id`) |
+| the endpoint's docstring claims the record-served differences are exactly two (the pre-fix text: `content_hash` + the EP dirty flags, omitting `confidence`) | 1 RED (`test_an_armed_read_drops_the_refused_names_the_cache_answer_carries`) |
+| the tenant-unresolved fallback arm counts BEFORE the cache answers | 1 RED (`test_the_unresolved_tenant_arm_counts_only_when_the_cache_answers`) |
 
 ## 4. What this does not decide, and where the decision could overturn it
 

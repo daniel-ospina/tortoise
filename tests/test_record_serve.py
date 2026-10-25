@@ -488,7 +488,10 @@ def _call_endpoint(monkeypatch, point_id="p-1", *, cache="unusable"):
     ``unusable`` (the default) raises the moment the cache is touched — the
     record-served read must never reach it. ``empty`` answers "no such point",
     which is what a `prefer`-mode fallback needs in order to produce a 404 that
-    still carries its attribution.
+    still carries its attribution. ``props`` answers a point carrying its own
+    property named like an attribution field, and ``confidence`` answers one
+    carrying the schema-refused `confidence` that `off` mode round-trips (#4032)
+    while an armed read cannot.
     """
     from fastapi import HTTPException
 
@@ -508,7 +511,11 @@ def _call_endpoint(monkeypatch, point_id="p-1", *, cache="unusable"):
                         result_set: ClassVar[list] = (
                             [[{"id": "p-1", "content": "cache",
                                "pointKind": "claim", "status": "live",
-                               "servedFrom": "user-owned"}]] if cache == "props"
+                               "servedFrom": "user-owned",
+                               "confidence": 0.8}]] if cache == "props"
+                            else [[{"id": "p-1", "content": "cache",
+                                   "pointKind": "claim", "status": "live",
+                                   "confidence": 0.8}]] if cache == "confidence"
                             else [])
                     return _R()
             return type("P", (), {"g": _G()})()
@@ -552,6 +559,40 @@ def test_the_endpoint_answers_from_the_record_with_the_cache_unusable(monkeypatc
 
     assert body["content_hash"] == _content_hash("c")
     assert "ep_dirty" not in body
+
+
+def test_an_armed_read_drops_the_refused_names_the_cache_answer_carries(monkeypatch):
+    """An ARMED read omits `confidence`; the SAME read in `off` mode carries it.
+
+    `public.point` has no `confidence` column and `chk_point_props_no_derived`
+    refuses it as a `props` key, so the record cannot answer it — but it is a
+    first-class field of THIS route in `off` mode (added for #4032 precisely
+    because the REST boundary had been silently dropping it). An armed
+    deployment therefore answers a point without a field the same route answers
+    with, and `servedFrom` says which STORE answered, never which FIELDS it could
+    not: the omission is invisible on the wire, so the endpoint's docstring must
+    name it. This pins both halves — the disclosure half is what reddens on the
+    pre-fix text, which claimed the differences were exactly two.
+    """
+    import tortoise.hosted_api as api
+
+    rs.reset_fallback_counts()
+    monkeypatch.delenv(rs.RECORD_SERVE_ENV, raising=False)
+    off_body, err, _built = _call_endpoint(monkeypatch, cache="confidence")
+    assert err is None
+    assert off_body["confidence"] == 0.8, (
+        "off mode is byte-identical: a stored `confidence` still passes through")
+
+    monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_RECORD)
+    monkeypatch.setattr(rs, "open_record", _opener(_FakeConn(rows=[_row()])))
+    body, err, _built = _call_endpoint(monkeypatch)
+    assert err is None and body["servedFrom"] == "record"
+    assert "confidence" not in body, (
+        "the record cannot answer a schema-refused name, so it must be ABSENT")
+    doc = api.get_point.__doc__ or ""
+    assert "confidence" in doc, (
+        "the ONLY artifact a caller/operator reads to learn what arming changes "
+        "omitted the one difference they can see on the wire")
 
 
 def test_the_endpoint_never_turns_an_impaired_record_into_404(monkeypatch):
@@ -912,6 +953,40 @@ def test_prefer_counts_an_unresolved_tenant_under_its_own_reason(monkeypatch):
             == rs.FALLBACK_RECORD_TENANT_UNRESOLVED)
     assert caught.value.detail["message"] == "Point not found"
     assert rs.fallback_counts() == {rs.FALLBACK_RECORD_TENANT_UNRESOLVED: 1}
+
+
+def test_the_unresolved_tenant_arm_counts_only_when_the_cache_answers(monkeypatch):
+    """The count lands with the ANSWER, not with the intent — this arm too.
+
+    `prefer` with an unresolvable tenant takes the fallback branch, and
+    `record_tenant_for` returns `None` for EVERY session/JWT read, so this is the
+    most-travelled counting path in `prefer` mode. If the cache read itself
+    raises — the ordinary case on a self-host deployment whose graph is down —
+    the client gets that error and NO fallback may be counted: the metric means
+    "answered by the cache". The sibling test on this arm supplies a cache that
+    ANSWERS, so it cannot observe the read/count order; this one does.
+    """
+    from fastapi import HTTPException
+
+    import tortoise.hosted_api as api
+
+    rs.reset_fallback_counts()
+    monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_PREFER)
+    monkeypatch.setattr(api, "_resolve_record_tenant", lambda _org: None)
+    monkeypatch.setattr(api, "_require_scope", lambda *_a, **_k: None)
+
+    async def _graph_down(_org):
+        raise HTTPException(status_code=403,
+                            detail={"error_code": "GRAPH_NOT_FOUND"})
+
+    monkeypatch.setattr(api, "_data_sdk_offloaded", _graph_down)
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(api.get_point("p-1", org={"id": "org_t",
+                                              "org_id": "org_t"}))
+    assert caught.value.status_code == 403, (
+        "the client gets the cache's own error, never an invented absence")
+    assert rs.fallback_counts() == {}, (
+        "a fallback the cache never answered was counted")
 
 
 def test_the_endpoint_answers_500_for_a_tenancy_misconfiguration(monkeypatch):

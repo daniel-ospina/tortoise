@@ -48,11 +48,16 @@ in the same artifact is indistinguishable from an omission:
   a real defect in this family — #6976, an operator-hop requirement that hid
   operator-less direct edges; fixed by #8991. It is the reason this module
   treats an unbound anchor as an error rather than a plausible answer.)
-* ``anchored-ep-scalars`` — any read whose answer includes ``confidence`` /
-  ``ep_*`` / ``posterior_*``. These are **recomputed from the structure** and the
-  record REFUSES them as columns and as ``props`` keys (the carve-out,
-  ``chk_point_props_no_derived``). A record read cannot answer them, and
-  answering them from a stored copy is the exact thing §17.5 forbids.
+* ``anchored-ep-scalars`` — a read whose answer IS the epistemic scalars
+  (``confidence`` / ``ep_*`` / ``posterior_*``), e.g. an EP ranking. These are
+  **recomputed from the structure** and the record REFUSES them as columns and as
+  ``props`` keys (the carve-out, ``chk_point_props_no_derived``). A record read
+  cannot answer them, and answering them from a stored copy is the exact thing
+  §17.5 forbids. ⚠️ ``point-by-id`` IS served and its CACHE answer may carry
+  ``confidence`` as a stored prop; the RECORD answer omits it. That omission is
+  disclosed at the endpoint (``hosted_api.get_point``'s docstring), because the
+  exclusion below is about a read whose answer *is* the scalars, not about every
+  read that could carry one.
 * ``internal-accessor`` — ``TortoiseSDK.get_point``. It is the SDK's INTERNAL
   accessor: write paths call it mid-write to build journal events, so serving it
   from the record would make a writer read a store that the same write has not
@@ -312,12 +317,16 @@ ANCHORED_READS: dict[str, AnchoredRead] = {
     "anchored-ep-scalars": AnchoredRead(
         name="anchored-ep-scalars",
         status=NOT_SERVED,
-        cypher="any read whose answer carries confidence / ep_* / posterior_*",
+        cypher="any read whose ANSWER IS confidence / ep_* / posterior_*",
         reason="these are RECOMPUTED from the structure (§2.0 clause (a), "
                "§17.5): the schema refuses them as columns AND as props keys "
                "(chk_point_props_no_derived), so a record read cannot answer "
                "them and answering them from a stored copy is what the "
-               "carve-out forbids.",
+               "carve-out forbids. This excludes a read whose answer IS the "
+               "scalars; `point-by-id` is SERVED and its cache answer may carry "
+               "`confidence` as a stored prop, so the record answer omits it — "
+               "disclosed in `hosted_api.get_point`'s docstring, not hidden "
+               "behind `servedFrom`.",
     ),
     "internal-accessor": AnchoredRead(
         name="internal-accessor",
@@ -462,7 +471,9 @@ _FALLBACKS: dict[str, int] = {}
 #: `asyncio.to_thread`), so the read-modify-write needs a lock. Without it two
 #: concurrent fallbacks can both read N and write N+1 — silently under-reporting
 #: exactly the events this module's "the fallback is MEASURABLE" argument rests
-#: on.
+#: on. This is REASONED, not proven: no test pins the interleaving (a threaded
+#: stress test would assert a schedule it cannot guarantee), so it is stated as
+#: unproven here rather than implied to be covered.
 _FALLBACKS_LOCK = threading.Lock()
 
 

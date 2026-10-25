@@ -9605,12 +9605,19 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
     fall back to) while in `prefer` mode it is a NAMED, COUNTED fallback —
     `record-tenant-unresolved`, the third of the three reasons.
 
-    ⚠️ A record-served answer carries the record's PRIMARY field set. Two
-    differences from the cache answer, both deliberate: `content_hash` is
-    RE-DERIVED here (a pure function of `content`, #2795 D2 — the schema refuses
-    it as a stored column), and the EP dirty flags (`ep_dirty`,
-    `ep_dirty_at`) are ABSENT, because they are the cache's own fold state and a
-    record-served answer must not claim to know it (§17.5's carve-out).
+    ⚠️ A record-served answer carries the record's PRIMARY field set, and the
+    differences from the cache answer are named here in full. `content_hash` is
+    RE-DERIVED (a pure function of `content`, #2795 D2 — the schema refuses it as
+    a stored column). Every OTHER name the schema refuses as derived is **ABSENT
+    rather than recomputed** — `confidence`, `ep_*`, `posterior_*`, `version`,
+    `inherited_at`, `c_cal`, `baseline_set`, `lastDreamedAt`, `reason`, and the EP
+    dirty flags (`ep_dirty`, `ep_dirty_at`, the cache's own fold state, §17.5);
+    the full set is `cache_projection._refused("point")`. ⚠️ `confidence` is a
+    supported field of THIS route (`off` mode round-trips it, #4032), so an armed
+    deployment answers a point WITHOUT it: `servedFrom` says which STORE
+    answered, never which FIELDS that store could not, so a caller cannot infer
+    the omission from the wire. Re-deriving any of them is what §17.5 forbids at
+    this layer — hence disclosure, not recomputation.
 
     ⚠️ `servedFrom` / `fallbackReason` are RESERVED response fields whenever a
     mode is armed: the attribution always wins, because a caller that cannot

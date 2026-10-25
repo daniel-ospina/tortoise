@@ -433,11 +433,11 @@ def test_a_stale_report_from_an_earlier_step_never_survives_a_failure(tmp_path: 
     proc, report = _run_step("Link check (changed files)", tmp_path)
     assert proc.returncode != 0
 
-    stale = tmp_path / "runner_temp" / STEPS["Link check (changed files)"][1]
+    stale = report  # the exact path the producer publishes to
     stale.write_text('{"total": 0, "error_map": {}, "timeout_map": {}}', encoding="utf-8")
     proc, report = _run_step_for_existing(tmp_path)
     assert proc.returncode != 0
-    assert not stale.exists(), "a stale report must be cleared before the producer can fail"
+    assert not report.exists(), "a stale report must be cleared before the producer can fail"
 
 
 def _run_step_for_existing(tmp_path: Path) -> tuple[subprocess.CompletedProcess, Path]:
