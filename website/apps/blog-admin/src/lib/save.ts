@@ -9,7 +9,7 @@
  */
 
 import { buildSaveRecord, createPost, updatePost, purgePostCache, notifyPublished, type SaveFormFields } from '@/lib/blog-api';
-import { becomesLive } from '@/lib/publish-transition';
+import { consoleSaveMakesUrlLive } from '@/lib/publish-transition';
 
 export type SaveMode = 'draft' | 'publish';
 
@@ -68,7 +68,10 @@ export function createSaveHandler(getState: GetSaveContext) {
     // #9680 item 3 / indicator (c): notify only when THIS save makes the URL
     // live — the same predicate the agent API applies in its PATCH handler
     // (`becameLive`, `functions/blog/api/posts/[[path]].ts`). One rule, one home
-    // (`lib/publish-transition.ts`).
+    // (`lib/publish-transition.ts`), and the DERIVATION lives there too so the
+    // Python gate can execute it: composing the two states inline here made every
+    // assertion about them a regex, and swapping the arguments then kept the
+    // whole suite green while silently disabling the publish submission.
     //
     // The form this replaces fired on `mode === 'publish'` alone, and on an
     // already-published post that mode is the "Save & Republish" button: an
@@ -80,11 +83,7 @@ export function createSaveHandler(getState: GetSaveContext) {
     // The create path above needs none of this: a row that did not exist before
     // cannot have been live, so a create always transitions. Do not "unify" the
     // two into an unconditional call for symmetry.
-    const publishedAfter = record.status ?? 'draft';
-    const makesUrlLive = becomesLive(
-      { status: ctx.wasPublished ? 'published' : 'draft', hold_for_review: ctx.wasHeld === true },
-      { status: publishedAfter, hold_for_review: ctx.form.hold_for_review === true },
-    );
+    const makesUrlLive = consoleSaveMakesUrlLive(ctx, ctx.form, record.status ?? 'draft');
     if (makesUrlLive && ctx.form.slug) {
       void notifyPublished(ctx.form.slug);
     }

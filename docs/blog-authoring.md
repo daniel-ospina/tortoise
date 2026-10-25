@@ -220,8 +220,11 @@ has four call sites across three user actions):
      actually published through. Its button is rendered only for a `draft` row, so the call is a
      transition by construction;
    - **clearing a hold** on a published post (`clearHoldPost`) — the transition that makes a held
-     post's URL live, since the hold itself is not cleared by publishing. Its button is rendered only
-     for a held row, so this call is a transition by construction too.
+     post's URL live, since the hold itself is not cleared by publishing. The binding guard here is in
+     the **function**, not the button: `clearHoldPost` notifies only when the row it just wrote is
+     `published` (`blog-api.ts`), so clearing the hold on a held *draft* submits nothing — the status
+     is unchanged and the URL stays 404 either way. (The button is *also* rendered only for a held
+     row, but a render state cannot classify a transition: it is true for a held draft too.)
 
    The endpoint does not write the post: it re-reads the row with the service role and answers **409
    `not_live`** for anything not live, so a slug from the browser can never nominate a draft URL.

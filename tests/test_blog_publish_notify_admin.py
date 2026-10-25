@@ -40,13 +40,23 @@ WHAT IS PINNED, AND WHY EACH CASE CAN FAIL
   * V2d a NULL `hold_for_review` is refused, because the renderer serves only
     `= false`. The pre-fix `!== true` predicate passes V2c and reds this: a NULL
     row 404s on the site, so submitting it is the same failure as a held row.
-  * V6 `save.ts` fires the notification on `mode === 'publish'` for BOTH the
-    create path and the update path, and NOT on a draft save; and
-    `clearHoldPost` fires it when clearing a hold makes a published post live —
-    the mirror transition, without which the hold fix would leave a real
-    publish un-notified; and `publishPost` fires it on the drafts-queue one-click
-    Publish, which is the console's other publish entry point and never passes
-    through the editor form's save.
+  * V6 `save.ts` notifies ALWAYS on the create path (a row that did not exist
+    cannot have been live), and on the UPDATE path ONLY when the save makes the
+    URL live — `consoleSaveMakesUrlLive` in `lib/publish-transition.ts`, the same
+    rule the agent API applies. Saving an already-published post, including via
+    the editor's "Save & Republish" button, notifies nothing (#9680 item 3);
+    clearing a hold on a published post does. `clearHoldPost` fires it when the
+    row it just wrote is `published` (a held DRAFT's clear-hold notifies
+    nothing — that bound is in the function, not in the button), and
+    `publishPost` fires it on the drafts-queue one-click Publish, which is the
+    console's other publish entry point and never passes through the editor
+    form's save.
+  * #9680's console half decides by EXECUTION, not by source text: the two
+    predicates are driven case by case (`_run_predicate`), and the derivation of
+    the console's two `VisibilityState`s lives in the import-free module for that
+    reason — composing them inline in `save.ts` left the whole composition pinned
+    by regex, where swapping the two arguments stayed green while disabling the
+    publish submission.
 
 The real exported `onRequestPost` runs under Node's type-stripping loader (the
 convention of `tests/test_blog_indexnow.py`), with `globalThis.fetch` stubbed as
@@ -416,15 +426,16 @@ def test_v6_editor_fires_on_publish_only_for_both_paths():
     assert re.search(r"if \(mode === 'publish' && created\.slug\) void notifyPublished\(created\.slug\)", src), (
         "the create path must notify on publish"
     )
-    # update path: guarded by the ONE transition rule, fed by BOTH facts.
-    assert re.search(r"const makesUrlLive = becomesLive\(", src), (
-        "the update path must decide through becomesLive (lib/publish-transition.ts), not on `mode` alone"
-    )
-    assert re.search(r"ctx\.wasPublished \? 'published' : 'draft'", src), (
-        "the rule needs the row's PRIOR status — without it every publish save looks like a transition"
-    )
-    assert re.search(r"hold_for_review: ctx\.wasHeld === true", src), (
-        "the rule needs the row's PRIOR hold state, or clearing a hold on a published post goes un-notified (#9830)"
+    # update path: guarded by the ONE transition rule, whose DERIVATION lives in
+    # the import-free module so the tests below EXECUTE the composition. This is
+    # the only thing `save.ts` keeps — the call itself. (Drop it and nothing
+    # submits at all; the executed arm cannot see that, which is why this one
+    # regex exists.)
+    assert re.search(
+        r"const makesUrlLive = consoleSaveMakesUrlLive\(ctx, ctx\.form, record\.status \?\? 'draft'\);", src
+    ), (
+        "the update path must decide through consoleSaveMakesUrlLive (lib/publish-transition.ts), "
+        "not on `mode` alone"
     )
     assert re.search(r"if \(makesUrlLive && ctx\.form\.slug\) \{\s*\n\s*void notifyPublished\(ctx\.form\.slug\);", src), (
         "the notify call must be guarded by the transition decision, not by `mode`"
@@ -458,19 +469,38 @@ def test_v6_editor_fires_on_publish_only_for_both_paths():
 # `mode === 'publish'`, every test asserting "one submission" used a fresh row,
 # and the 24h window in `_shared/indexnow.ts` made an edit-only save look
 # identical to a publish. A regex can pin the SHAPE of the fix and can never say
-# what it decides, so the predicate itself is executed, case by case, over the
-# whole visibility transition space.
+# what it decides, so both predicates are executed, case by case — over every
+# visibility transition `becomesLive` answers, and over every CONTEXT shape the
+# console's save can hand `consoleSaveMakesUrlLive`.
 #
-# The rule has ONE home (`lib/publish-transition.ts`) and two readers: this test,
-# and `save.ts`. It mirrors the agent API's `becameLive`
-# (`website/functions/blog/api/posts/[[path]].ts`), whose own comment already
-# states it — "Everything else submits nothing: a draft write, an unpublish, an
-# edit that leaves a live row live." The console was the one path out of step.
+# That second arm is not decoration (review finding on the first cut): with only
+# `becomesLive` executed, `save.ts` composed the two `VisibilityState` literals
+# inline and every assertion about that composition was text. Swapping the two
+# arguments kept all of them green — same expressions, other object literal, and
+# TypeScript cannot object because both parameters are the same type — while
+# `becomesLive(after, before)` made publishing a DRAFT submit nothing. The
+# derivation therefore lives in the import-free module, and what `save.ts` keeps
+# is one regex: that it calls it.
+#
+# The rule has ONE home (`lib/publish-transition.ts`). It mirrors the agent API's
+# `becameLive` (`website/functions/blog/api/posts/[[path]].ts`), whose own comment
+# already states it — "Everything else submits nothing: a draft write, an
+# unpublish, an edit that leaves a live row live." The console was the one path
+# out of step.
 
 _TRANSITION_DRIVER = """
 const mod = await import(process.argv[2]);
 const cases = JSON.parse(process.argv[3]);
 console.log(JSON.stringify(cases.map((c) => mod.becomesLive(c.before, c.after))));
+"""
+
+# The console's save decision, driven through the SAME import-free module. See the
+# header block above: composing these two states inside `save.ts` left this whole
+# composition pinned by text, and swapping the arguments then stayed green.
+_CONSOLE_SAVE_DRIVER = """
+const mod = await import(process.argv[2]);
+const cases = JSON.parse(process.argv[3]);
+console.log(JSON.stringify(cases.map((c) => mod.consoleSaveMakesUrlLive(c.ctx, c.form, c.statusAfter))));
 """
 
 # (before, after, expected, what the case IS)
@@ -521,6 +551,15 @@ TRANSITION_CASES: list[tuple[dict, dict, bool, str]] = [
         "a save that HIDES a live article — nothing to notify, and IndexNow has no retraction",
     ),
     (
+        {"status": "draft", "hold_for_review": True},
+        {"status": "published", "hold_for_review": True},
+        True,
+        "publish a held draft with the hold still on — arm 1 answers TRUE while the URL is 404 on "
+        "both sides. BOUNDED, not harmless-by-accident: `api/notify-publish.ts` re-reads the row and "
+        "answers 409 not_live, so nothing is submitted. Kept as-is because tightening arm 1 would "
+        "change the AGENT API's behaviour; recorded here so the space is complete rather than assumed.",
+    ),
+    (
         {"status": "published", "hold_for_review": False},
         {"status": "draft", "hold_for_review": False},
         False,
@@ -541,17 +580,17 @@ TRANSITION_CASES: list[tuple[dict, dict, bool, str]] = [
 ]
 
 
-def _run_transition(cases: list[tuple[dict, dict, bool, str]]) -> list[bool]:
-    """Execute the SHIPPED predicate once for every case (one node, not ten)."""
-    driver = _driver_path().parent / "transition.mjs"
-    driver.write_text(_TRANSITION_DRIVER)
+def _run_predicate(driver_src: str, driver_name: str, payload: list) -> list[bool]:
+    """Execute the SHIPPED predicates once for every case (one node, not ten)."""
+    driver = _driver_path().parent / driver_name
+    driver.write_text(driver_src)
     proc = subprocess.run(
         [
             "node",
             "--experimental-strip-types",
             str(driver),
             str(PUBLISH_TRANSITION),
-            json.dumps([{"before": c[0], "after": c[1]} for c in cases]),
+            json.dumps(payload),
         ],
         capture_output=True,
         text=True,
@@ -560,6 +599,101 @@ def _run_transition(cases: list[tuple[dict, dict, bool, str]]) -> list[bool]:
     )
     assert proc.returncode == 0, proc.stderr[-3000:]
     return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def _run_transition(cases: list[tuple[dict, dict, bool, str]]) -> list[bool]:
+    return _run_predicate(
+        _TRANSITION_DRIVER,
+        "transition.mjs",
+        [{"before": c[0], "after": c[1]} for c in cases],
+    )
+
+
+# (ctx, form, statusAfter, expected, what the console SAVE state IS)
+CONSOLE_SAVE_CASES: list[tuple[dict, dict, str, bool, str]] = [
+    (
+        {"wasPublished": False, "wasHeld": False},
+        {"hold_for_review": False},
+        "published",
+        True,
+        "publishing a draft from the editor MUST submit — the capability, not a guard. "
+        "SWAPPING `becomesLive`'s two arguments reds exactly this case.",
+    ),
+    (
+        {"wasPublished": True, "wasHeld": False},
+        {"hold_for_review": False},
+        "published",
+        False,
+        "'Save & Republish' on a live post — an edit that leaves status published (#9680 item 3)",
+    ),
+    (
+        {"wasPublished": True, "wasHeld": True},
+        {"hold_for_review": False},
+        "published",
+        True,
+        "clearing the hold on a published post (#9830) — status unchanged, URL goes 404 → 200. "
+        "Making the prior hold always false reds this case.",
+    ),
+    (
+        {"wasPublished": True, "wasHeld": True},
+        {"hold_for_review": True},
+        "published",
+        False,
+        "a save that leaves it held — 404 before, 404 after. Hard-coding the AFTER hold to false "
+        "reds this case.",
+    ),
+    (
+        {"wasPublished": True},
+        {"hold_for_review": False},
+        "published",
+        False,
+        "`wasHeld` ABSENT — the forgotten-input default. It must skip the notification, never "
+        "submit on an ordinary edit.",
+    ),
+    (
+        {"wasPublished": True, "wasHeld": False},
+        {"hold_for_review": False},
+        "draft",
+        False,
+        "unpublish (the editor's 'Save as draft' on a live post)",
+    ),
+    (
+        {"wasPublished": False, "wasHeld": False},
+        {"hold_for_review": False},
+        "draft",
+        False,
+        "draft save",
+    ),
+]
+
+
+def test_the_console_save_decision_is_executed_over_every_context_shape():
+    """The composition `save.ts` performs, decided by running it, not read as text.
+
+    MUTATION THIS CATCHES (the review's P2, and the reason this test exists): with
+    only `becomesLive` executed, `save.ts` built the two states inline and every
+    assertion about them was a regex. Swapping the two arguments kept all six
+    green — both parameters are `VisibilityState`, so TypeScript cannot object —
+    while publishing a DRAFT from the editor submitted nothing, i.e. the suite
+    reported OK over a disabled capability. The first case reds on that swap; the
+    third on a prior-hold hard-coded to false; the fourth on an after-hold
+    hard-coded to false; the fifth on the forgotten-input default flipping.
+    """
+    actual = _run_predicate(
+        _CONSOLE_SAVE_DRIVER,
+        "console-save.mjs",
+        [
+            {"ctx": c[0], "form": c[1], "statusAfter": c[2]}
+            for c in CONSOLE_SAVE_CASES
+        ],
+    )
+    mismatches = [
+        f"{case[4]}\n    ctx={case[0]} form={case[1]} statusAfter={case[2]!r}\n"
+        f"    expected {case[3]}, console decision said {got}"
+        for case, got in zip(CONSOLE_SAVE_CASES, actual, strict=True)
+        if got != case[3]
+    ]
+    assert not mismatches, "the console save decision is wrong for:\n  " + "\n  ".join(mismatches)
 
 
 def test_the_transition_predicate_admits_only_a_write_that_makes_the_url_live():
@@ -602,14 +736,22 @@ def test_the_editor_supplies_the_hold_state_the_rule_needs():
 
 def test_the_console_call_sites_that_keep_the_coarse_guard_are_transition_only_by_construction():
     """Why `publishPost` / `clearHoldPost` may fire on every call while the editor
-    save may not: their BUTTONS are rendered only for the transitional state.
+    save may not — and the mechanism is NOT the same for both.
 
-    `test_v6_...` pins that those two functions notify. That is safe only because
-    the drafts-queue Publish renders for `status === 'draft'` and Clear-hold
-    renders for a truthy `hold_for_review`. MUTATION THIS CATCHES: rendering
-    Publish on a published row (or Clear-hold on a non-held one) turns those call
-    sites into non-transition submitters — the same defect this PR fixed in
-    `save.ts`, one button away.
+    `test_v6_...` pins that those two functions notify unconditionally. What bounds
+    them differs, and the first cut of this test named only the render guards:
+
+    * `publishPost` — bounded by its BUTTON, rendered only for `status === 'draft'`.
+    * `clearHoldPost` — bounded by the FUNCTION, which notifies only when the row it
+      just wrote is `published` (`updated.status === 'published' &&`). The render
+      guard alone would not do it: Clear-hold also renders for a held DRAFT, where
+      clearing the hold changes no status and the URL stays 404. A render state
+      cannot classify a transition — the same reasoning this PR applies to the
+      editor's button, one button over.
+
+    MUTATION THIS CATCHES: rendering Publish on a published row, or dropping the
+    `status === 'published'` half of `clearHoldPost`'s condition, turns that call
+    site into a non-transition submitter — the defect this PR fixed in `save.ts`.
     """
     src = POSTS_LIST.read_text()
     assert re.search(r"\{post\.status === 'draft' && \(\s*\n\s*<Button[^>]*onClick=\{\(\) => doPublish\.mutate\(\)\}", src), (
@@ -617,4 +759,14 @@ def test_the_console_call_sites_that_keep_the_coarse_guard_are_transition_only_b
     )
     assert re.search(r"\{post\.hold_for_review && post\.status !== 'archived' && \(", src), (
         "Clear-hold must be rendered only for a held row"
+    )
+    # …but the render guard is NOT what bounds clearHoldPost: the function's own
+    # status check is, and it is the half that survives a held draft.
+    assert re.search(
+        r"export async function clearHoldPost[\s\S]{0,900}?"
+        r"if \(updated\.status === 'published' && updated\.slug\) void notifyPublished\(updated\.slug\);",
+        BLOG_API.read_text(),
+    ), (
+        "clearHoldPost's binding guard is `updated.status === 'published'` — without it a clear on a "
+        "held DRAFT notifies (and the URL is 404 before and after)"
     )

@@ -65,8 +65,47 @@ export function becomesLive(before: VisibilityState, after: VisibilityState): bo
   // to notify — and note an unpublish has no retraction to send either.
   if (after.status !== 'published') return false;
   // The publish transition itself: the row was not published before this write.
+  // ⚠️ This arm deliberately ignores the hold, which means draft+held →
+  // published+held answers `true` even though the URL is 404 on both sides. That
+  // matches the agent API's `becameLive` arm for arm, and it is BOUNDED rather
+  // than harmful: `api/notify-publish.ts` re-reads the row and answers 409
+  // `not_live`, so nothing is submitted. Making arm 1 require
+  // `after.hold_for_review === false` would change the AGENT API's behaviour and
+  // belongs in its own issue, not a console fix.
   if (before.status !== 'published') return true;
   // Already published and STILL published: the only remaining way this write
   // makes the URL live is clearing a hold that was hiding it.
   return before.hold_for_review !== false && after.hold_for_review === false;
+}
+
+/**
+ * The console editor save's DECISION, in the import-free module so the executed
+ * test arm covers it — `save.ts` itself imports `@/lib/blog-api` and cannot be
+ * loaded by the Python gate.
+ *
+ * ⚠️ WHY THIS WRAPPER EXISTS AT ALL (a review finding, #9680). With only
+ * `becomesLive` here, `save.ts` composed the two 
+ * `VisibilityState` literals inline and every assertion about that composition was
+ * TEXT over source (`tests/test_blog_publish_notify_admin.py`). Swapping the two
+ * arguments then kept all of them green while breaking the capability this very
+ * guard exists to preserve: `becomesLive(after, before)` reads as "the row was
+ * published and this write makes it a draft", i.e. publishing a DRAFT from the
+ * editor would submit nothing — with the suite reporting OK. Both parameters are
+ * the same type, so TypeScript cannot object either. Deriving the two states
+ * HERE makes the composition executable, and leaves exactly one regex to pin that
+ * `save.ts` calls it at all.
+ *
+ * `wasHeld` absent means "not held" — so a caller that forgets it SKIPS a
+ * notification rather than submitting on an ordinary edit. A skipped
+ * notification is recoverable; a submission on an edit is the defect.
+ */
+export function consoleSaveMakesUrlLive(
+  ctx: { wasPublished?: boolean; wasHeld?: boolean },
+  form: { hold_for_review?: boolean },
+  statusAfter: string,
+): boolean {
+  return becomesLive(
+    { status: ctx.wasPublished ? 'published' : 'draft', hold_for_review: ctx.wasHeld === true },
+    { status: statusAfter, hold_for_review: form.hold_for_review === true },
+  );
 }
