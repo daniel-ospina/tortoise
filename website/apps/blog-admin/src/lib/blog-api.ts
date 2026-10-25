@@ -392,14 +392,19 @@ export async function purgePostCache(slug: string): Promise<void> {
 //
 // ⚠️ EACH CALLER DECIDES WHETHER ITS WRITE IS A TRANSITION; this function does
 // not, and neither does the endpoint (it answers "is this row live NOW?"). The
-// editor save is the only one of the three reachable on an ALREADY-PUBLISHED
-// post — its publish button reads "Save & Republish" — so it gates on
-// `lib/publish-transition.ts` (#9680 item 3: an edit that leaves status
-// published submits nothing). The other two are transition-only by construction:
-// the drafts-queue Publish renders only for `status === 'draft'` and
-// Clear-hold only for a truthy `hold_for_review`, both pinned in
-// `tests/test_blog_publish_notify_admin.py`. Those render guards are load-bearing;
-// widening either one makes its call site an untransitioned submitter.
+// editor save is the only one of the three reachable on a post that is BOTH
+// published AND already live — its publish button reads "Save & Republish" — so
+// no transition can be inferred from the fact that it fired, and it is the one
+// that must gate on the rule (`lib/publish-transition.ts`). The other two are
+// transition-only by construction, and NOT for the same reason as each other:
+// the drafts-queue Publish is bounded by its render guard (`status === 'draft'`),
+// while Clear-hold IS reachable on a published row by design and is bounded by
+// its own function's `updated.status === 'published'` — a render state cannot
+// classify a transition, and that button is rendered for a held draft too.
+//
+// ⚠️ Do not read the paragraph above as "the other two are safe because of their
+// buttons". Widening either bound makes that call site an untransitioned
+// submitter; both are pinned in `tests/test_blog_publish_notify_admin.py`.
 //
 // Repeat calls are SERIALISED, not dropped. The pair that makes dropping visible
 // is queue-Publish-then-clear-hold: the first submission is refused 409
