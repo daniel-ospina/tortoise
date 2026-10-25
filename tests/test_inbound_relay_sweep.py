@@ -583,6 +583,45 @@ def test_the_detail_budget_bounds_the_reads_that_decide_the_actions(sweep: Any) 
     assert report.exit_code == 0
 
 
+def test_the_default_detail_budget_is_the_rail_that_ships(sweep: Any) -> None:
+    """`main()` passes no `detail_budget`, so the CONSTANT is the shipped rail.
+
+    Every other case here passes a budget explicitly, so raising or deleting
+    `DEFAULT_DETAIL_BUDGET` left the suite green while the read budget — the
+    only thing between a dense window and a 403 on the mutations — went to
+    infinity in production (#9946 review P2). The candidates are queue batches
+    so `should_relay()` is false for all of them: the ACTION cap can never bind,
+    which isolates the detail budget as the one that stops the reads.
+    """
+    # ⛔ A FIXED candidate count, NOT `DEFAULT_DETAIL_BUDGET + 5`: a fixture that
+    # scales with the constant makes the test blind to the constant itself —
+    # raising it to 500 moved the fixture to 505 and the assertion still held,
+    # which is exactly the non-discrimination this case exists to remove.
+    candidates = 200
+    assert candidates > sweep.DEFAULT_DETAIL_BUDGET, (
+        "the fixture must exceed the shipped budget, or the budget is not what "
+        "bounds the reads"
+    )
+    client = FakeClient(pulls=[
+        # Mergify's `draft_bot_account` shape: a USER-authored PR whose queue
+        # ownership lives ONLY on the head branch, so it needs a detail fetch and
+        # `should_relay()` still says no — the action cap therefore never binds.
+        pull(
+            2000 + n,
+            author="some-user",
+            head_ref="mergify/merge-queue/6e89cfe947",
+            head_repo=f"{OWNER}/tortoise",
+        )
+        for n in range(candidates)
+    ])
+    report = run(sweep, client)  # NO detail_budget — `main()`'s own call shape
+
+    fetches = [call for call in client.calls if call[0] == "detail"]
+    assert len(fetches) == sweep.DEFAULT_DETAIL_BUDGET, len(fetches)
+    assert report.unexamined == candidates - sweep.DEFAULT_DETAIL_BUDGET
+    assert report.relayed == []
+
+
 def test_the_detail_fetch_stops_once_the_action_cap_is_met(sweep: Any) -> None:
     """Once `--max` actable items are known, more reads buy nothing."""
     client = FakeClient(pulls=[pull(n, author="someone") for n in range(1, 41)])
@@ -664,6 +703,100 @@ def test_the_resume_marker_is_the_comment_the_relay_actually_posts(sweep: Any) -
     """A literal that drifts would silently turn every retry back into a re-post."""
     assert sweep.RELAY_MARKER in "\n".join(sweep._COMMENT_PULL)
     assert sweep.RELAY_MARKER in "\n".join(sweep._COMMENT_ISSUE)
+
+
+def _relay_comment_scripts() -> list[str]:
+    """The `actions/github-script` bodies of `inbound-relay.yml` that POST a comment.
+
+    Derived, never listed: a third comment-posting step must not be able to
+    appear without the checks below covering it.
+    """
+    import yaml
+
+    jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
+    return [
+        step["with"]["script"]
+        for job in jobs.values()
+        for step in job.get("steps", [])
+        if isinstance(step.get("with"), dict)
+        and "createComment" in str(step["with"].get("script", ""))
+    ]
+
+
+def test_the_resume_footer_is_bound_to_the_EVENT_path_copies_too(sweep: Any) -> None:
+    """The footer has THREE copies; only the sweep's two were bound.
+
+    `test_the_resume_marker_is_the_comment_the_relay_actually_posts` pins the
+    sweep's own templates. The event path posts the same footer from
+    `inbound-relay.yml` — its issue step AND its pull-request step — and that is
+    the copy a LATE-APPROVED external run compares against to recognise work the
+    sweep already did. Drifting it turns every such approval back into a second
+    identical comment on a contributor's item (#9946 review P2).
+
+    ⛔ The assertion reads the POSTED BODY, not just "the marker appears in this
+    script": a first version accepted any occurrence, so drifting the body while
+    the idempotence constant stayed put kept the test green — the exact failure
+    it is here to catch.
+    """
+    import re
+
+    scripts = _relay_comment_scripts()
+    assert len(scripts) == 2, f"expected the issue and PR comment steps: {len(scripts)}"
+    for script in scripts:
+        bodies = re.findall(r"body:\s*\[(.*?)\]\.join\('\\n'\)", script, re.DOTALL)
+        assert len(bodies) == 1, f"expected exactly one posted comment body: {len(bodies)}"
+        entries = re.findall(r"'((?:[^'\\]|\\.)*)'", bodies[0])
+        assert entries, bodies[0]
+        assert sweep.RELAY_MARKER in entries[-1], (
+            "the comment this step POSTS does not end with the sweep's "
+            f"RELAY_MARKER ({sweep.RELAY_MARKER!r}), so neither path can "
+            f"recognise the other's comment and both will post one — the body "
+            f"ends {entries[-1]!r}"
+        )
+
+
+def test_every_relay_comment_step_checks_for_an_existing_comment_first(sweep: Any) -> None:
+    """The idempotence read must be BEFORE the write, in the event path too.
+
+    The sweep applies this policy on a schedule, so by the time a HELD external
+    run is approved the item may already be labelled, commented and closed. A
+    read that happens after `createComment` is not a check.
+    """
+    for script in _relay_comment_scripts():
+        assert "listComments" in script, (
+            "this step posts a relay comment without looking for one it already "
+            "posted: a late-approved run would double-comment"
+        )
+        assert script.index("listComments") < script.index("createComment"), (
+            "the duplicate-comment check runs AFTER the comment is posted"
+        )
+
+
+def test_every_relay_script_declares_the_payload_it_reads(sweep: Any) -> None:
+    """An undeclared payload root is a ReferenceError AFTER the mutations.
+
+    Measured 2026-10-25 (#9946): the issue step read `issue.title` / `issue.user`
+    with no `const issue = …` — the sibling PR step declares its own `pr` at the
+    same point — so a real issue relay threw at the `return`, i.e. AFTER the
+    label, the comment and the close had landed, and the intake POST (the next
+    step of the job) never ran. The item was then closed, labelled and
+    unrecorded: invisible to the sweep (it selects OPEN items) and retried by
+    nothing. Latent only because the relay never executed for an external actor.
+    """
+    import re
+
+    for script in _relay_comment_scripts():
+        for root in ("issue", "pr"):
+            # `issue.number` after a dot is `context.issue`, and `issueNumber`
+            # has no dot — neither is a payload read.
+            if re.search(rf"(?<![\w.$]){root}\.", script) is None:
+                continue
+            assert f"const {root} =" in script, (
+                f"this script reads `{root}.…` without declaring it: the "
+                "ReferenceError fires at the RETURN, after the label/comment/"
+                "close and before the intake POST, leaving the item closed but "
+                "never recorded"
+            )
 
 
 def test_an_open_labelled_item_is_reported_and_rules_nothing(sweep: Any) -> None:
@@ -909,6 +1042,49 @@ def test_main_reports_a_crashing_sweep_instead_of_dying(sweep: Any, monkeypatch:
     assert sweep.main(["--repo", f"{OWNER}/tortoise"]) == 2
 
 
+def test_main_refuses_when_the_queue_config_is_unreadable(sweep: Any, monkeypatch: Any,
+                                                        tmp_path: Path,
+                                                        capsys: Any) -> None:
+    """The refusal has to exist in `main()` too, not only in `queue_prefixes()`.
+
+    `test_unreadable_queue_config_refuses_to_act` drives the reader directly, so
+    replacing `main()`'s `except ConfigError: return 2` with a fallback to
+    `DOCUMENTED_DEFAULT_PREFIX` — the guess the reader's own docstring forbids —
+    left the suite green while a reconfigured queue's batch PR became
+    "external" and got closed, dequeuing every in-flight merge (#5185, #9946
+    review P2).
+
+    ⛔ The reader is STUBBED, and that is the point rather than a shortcut:
+    `queue_prefixes(path: Path = MERGIFY)` binds its default at def time, so
+    monkeypatching the module's `MERGIFY` cannot make the call `main()` makes
+    fail — the first version of this case patched `MERGIFY`, silently read the
+    REAL `.mergify.yml`, and passed for the wrong reason.
+    """
+
+    def unreadable(*args: Any, **kwargs: Any) -> Any:
+        raise sweep.ConfigError(
+            "cannot read the queue configuration at /absent.yml (missing)"
+        )
+
+    monkeypatch.setattr(sweep, "queue_prefixes", unreadable)
+    monkeypatch.setenv("INBOUND_URL", "https://intake.example/relay")
+    monkeypatch.setenv("INBOUND_SECRET_GITHUB", "s3cret")
+
+    # ⛔ RECORDED, not raising: `main()` wraps the sweep in its own
+    # `except Exception -> 2`, so a raising stub is swallowed and the assertion
+    # on the exit code alone cannot tell the refusal from the fallback. The
+    # question is whether ANY read reached GitHub.
+    reads: list[Any] = []
+    monkeypatch.setattr(sweep, "_gh", lambda *a, **k: reads.append(a) or "{}")
+
+    assert sweep.main(["--repo", f"{OWNER}/tortoise"]) == 2
+    assert reads == [], (
+        "no `gh` read may happen when the queue config is unreadable: the sweep "
+        "cannot tell a queue batch from an external PR"
+    )
+    assert "cannot read the queue configuration" in capsys.readouterr().err
+
+
 def test_missing_intake_configuration_takes_no_action(sweep: Any) -> None:
     """No URL or no secret is not a reason to close without a record."""
     client = FakeClient(pulls=[pull(9883)])
@@ -961,8 +1137,20 @@ def test_policy_agrees_with_the_event_guard(sweep: Any) -> None:
 
     cases: list[tuple[str, dict[str, Any], dict[str, Any]]] = [
         (
+            # ⛔ A FORK on BOTH sides — that is the shape the label names, and it
+            # is the most common external one. `guard._event` defaults
+            # `head_repo=REPO`, so this case used to compare the sweep's fork
+            # item against a SAME-repo event: measured, teaching the guard to
+            # spare non-bot forks left this case green and the bot-fork pin
+            # green, i.e. the parity gate could not see the two paths diverge on
+            # the very shape it is labelled for (#9946 review P2).
             "external fork PR",
-            guard._event(actor="outsider", login="outsider"),
+            guard._event(
+                actor="outsider",
+                login="outsider",
+                head_repo="someone/tortoise",
+                fork=True,
+            ),
             pull(10, author="outsider"),
         ),
         (

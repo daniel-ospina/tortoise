@@ -151,10 +151,23 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
+            // ⛔ BELT-3 REVIEW (#9946): this script referenced `issue` at the
+            // return below — `title`/`body`/`user`/`labels`/`html_url` — but
+            // never declared it, so EVERY issue relay threw
+            // `ReferenceError: issue is not defined` AFTER the label, comment
+            // and close had already landed. The step's failure is what skipped
+            // the intake POST, i.e. the item was closed with NO record: exactly
+            // the one state the sweep calls unrecoverable, and invisible to it
+            // (it selects OPEN items only, and this one is closed AND
+            // labelled). Latent only because the relay never executed for an
+            // external actor; the sibling pull-request step declares its own
+            // `pr` at the same point. Pinned by
+            // `test_every_relay_script_declares_the_payload_it_reads`.
             const repoFull = context.payload.repository;
             const owner = repoFull.owner.login;
             const repo = repoFull.name;
             const issueNumber = context.issue.number;
+            const issue = context.payload.issue;
 
             // Add label
             await github.rest.issues.addLabels({
@@ -162,18 +175,39 @@ jobs:
               labels: ['queued-for-triage'],
             });
 
-            // Comment
-            await github.rest.issues.createComment({
-              owner, repo, issue_number: issueNumber,
-              body: [
-                '👋 Thanks for submitting!',
-                '',
-                'This has been **queued for triage** and will be processed by our intake agent.',
-                'You\'ll be notified when an agent picks it up.',
-                '',
-                '— Premise Labs (automated relay)',
-              ].join('\n'),
+            // ⛔ IDEMPOTENCE WITH THE SWEEP (#9946). A run started by an
+            // external actor is HELD until a maintainer approves it, and the
+            // 15-minute sweep may have commented, closed and labelled in the
+            // meantime. Looking for the footer FIRST is what stops one
+            // contributor receiving two identical comments for one
+            // submission. The rule is the sweep's `already_relayed()`: a
+            // BOT-typed comment or the owner's own login — never the bare
+            // string, which an author could paste into their own comment.
+            const FOOTER = '— Premise Labs (automated relay)';
+            const comments = await github.paginate(
+              github.rest.issues.listComments,
+              { owner, repo, issue_number: issueNumber, per_page: 100 },
+            );
+            const alreadyCommented = comments.some((c) => {
+              const user = c.user || {};
+              return String(c.body || '').includes(FOOTER) &&
+                (String(user.type || '').toLowerCase() === 'bot' || user.login === owner);
             });
+
+            // Comment (only if this item has not been relayed already)
+            if (!alreadyCommented) {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: issueNumber,
+                body: [
+                  '👋 Thanks for submitting!',
+                  '',
+                  'This has been **queued for triage** and will be processed by our intake agent.',
+                  'You\'ll be notified when an agent picks it up.',
+                  '',
+                  '— Premise Labs (automated relay)',
+                ].join('\n'),
+              });
+            }
 
             // Close
             await github.rest.issues.update({
@@ -213,21 +247,42 @@ jobs:
               labels: ['queued-for-triage'],
             });
 
-            // Comment
-            await github.rest.issues.createComment({
-              owner, repo, issue_number: prNumber,
-              body: [
-                '👋 Thanks for the contribution!',
-                '',
-                'This PR has been **queued for review** and will be processed by our intake agent.',
-                'You\'ll be notified when an agent picks it up.',
-                '',
-                '> ⚠️ **Note:** External PRs are close-only in v1. If your PR is selected for',
-                '> review, it will be reopened for the review process.',
-                '',
-                '— Premise Labs (automated relay)',
-              ].join('\n'),
+            // ⛔ IDEMPOTENCE WITH THE SWEEP (#9946). A run started by an
+            // external actor is HELD until a maintainer approves it, and the
+            // 15-minute sweep may have commented, closed and labelled in the
+            // meantime. Looking for the footer FIRST is what stops one
+            // contributor receiving two identical comments for one
+            // submission. The rule is the sweep's `already_relayed()`: a
+            // BOT-typed comment or the owner's own login — never the bare
+            // string, which an author could paste into their own comment.
+            const FOOTER = '— Premise Labs (automated relay)';
+            const comments = await github.paginate(
+              github.rest.issues.listComments,
+              { owner, repo, issue_number: prNumber, per_page: 100 },
+            );
+            const alreadyCommented = comments.some((c) => {
+              const user = c.user || {};
+              return String(c.body || '').includes(FOOTER) &&
+                (String(user.type || '').toLowerCase() === 'bot' || user.login === owner);
             });
+
+            // Comment (only if this item has not been relayed already)
+            if (!alreadyCommented) {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: prNumber,
+                body: [
+                  '👋 Thanks for the contribution!',
+                  '',
+                  'This PR has been **queued for review** and will be processed by our intake agent.',
+                  'You\'ll be notified when an agent picks it up.',
+                  '',
+                  '> ⚠️ **Note:** External PRs are close-only in v1. If your PR is selected for',
+                  '> review, it will be reopened for the review process.',
+                  '',
+                  '— Premise Labs (automated relay)',
+                ].join('\n'),
+              });
+            }
 
             // Close
             await github.rest.pulls.update({

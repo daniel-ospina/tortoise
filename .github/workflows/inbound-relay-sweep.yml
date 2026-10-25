@@ -91,9 +91,17 @@ permissions:
   issues: write
   pull-requests: write
 
-# One sweep at a time, and never cancel one in flight: a cancel between the
-# intake POST and the close would leave a relayed-but-open item that the label
-# does not mark (a half-applied action no re-run repairs).
+# One sweep at a time, and never cancel one in flight — because a SWEEP is a
+# batch, not because one item would be left unrepaired. A cancelled sweep
+# silently drops every candidate it had not reached yet (the next run only sees
+# a 24 h window, so a long outage loses them), and two overlapping sweepers can
+# act on the same candidate in one window.
+# ⛔ NOT the repair story: a half-applied item IS repaired. A cancel before the
+# close leaves it open and UNLABELLED, so the next run selects it again and
+# `already_relayed()` resumes it — relay, close, label, with no second comment
+# (pinned by `test_a_retry_resumes_instead_of_re_posting`). The state nothing
+# repairs is the opposite one, open and ALREADY labelled (the event path labels
+# FIRST): `_prefilter` drops it and `main()` reports it as `stranded`.
 concurrency:
   group: inbound-relay-sweep
   cancel-in-progress: false
