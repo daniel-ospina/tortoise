@@ -26,8 +26,11 @@ artefacts and asserts on the shipped functions; the only code-shaped additions
 are a guard test and this record.
 
 **Guard:** `tests/eval/write_path/test_value_span_census_2684.py` (registered on
-`core` + `eval` in `config/ci-surfaces.yml`). It re-derives every number below
-from the committed receipts and **fails on drift**.
+`core` + `sdk` + `eval` in `config/ci-surfaces.yml` — the three surfaces its
+three inputs select: `extractor_v2` -> `core`, `retrieval` -> `sdk`, the
+committed receipts/fixtures -> `eval`). It re-derives the published **totals**
+below from the committed receipts and **fails on drift**; §2.1's per-session
+split is a reading of the same population, not an assertion (see §2.1).
 
 ---
 

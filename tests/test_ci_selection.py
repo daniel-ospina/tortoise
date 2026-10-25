@@ -631,8 +631,11 @@ def test_the_2684_census_is_selected_on_every_surface_that_moves_it():
     With only `core` + `eval` registered, a `tortoise/retrieval.py`-only diff
     selected `sdk` and 158 test files with the census ABSENT (measured), so
     §2.3's four published readings could go stale with the guard never running
-    — the #1349/#2938 silent-drop class. `git grep -n _pkg_turn_key tests/`
-    finds no other test pinning that normalisation.
+    — the #1349/#2938 silent-drop class. The row is needed because the census
+    would not run AT ALL on that diff, not because every predicate it uses is
+    otherwise unpinned: `_pkg_turn_key`'s `0`-vs-`""` normalisation is pinned
+    elsewhere, hermetically, by
+    `tests/test_8658_product_hit_provenance.py::test_the_first_source_turn_is_a_turn`.
 
     Asserted on the SURFACE and the guard FILE, not on non-emptiness: every
     one of these diffs selects its surface without the census entry, so a bare
