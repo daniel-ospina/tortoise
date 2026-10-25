@@ -3390,6 +3390,11 @@ surfaces:
   # (`ci.yml` → `docs` job) and its cli2/config contract. Repo-tooling change,
   # so `core` (the fallback surface) is the home.
   - test_docs_lint_gate.py
+  # #9708: the `docs` job's link-check PRODUCER (`.github/scripts/docs-link-check.sh`)
+  # — exit-code polarity, the empty/blank-population and stale-report gates, and
+  # the producer↔baseline-generator invocation contract. Same `core` home as its
+  # two docs-lint siblings above.
+  - test_docs_link_check.py
   - test_doctor.py
   - test_domain_loader_adapter.py
   - test_domain_validators.py
@@ -8239,6 +8244,7 @@ durations:
   test_queue_dispatch_fail_closed.py: 2.0  # unmeasured
   test_docs_lint_baseline.py: 2.7
   test_docs_lint_gate.py: 2.0  # unmeasured (#5476: registered under core)
+  test_docs_link_check.py: 2.0  # #9708: registered under core; measured ~1.4s locally, entered at the flat default per the #3400/#4221 convention above until a CI junit artifact carries the weight
   # #6137: register the fast pool's unmeasured files. Registering them is
   # what keeps `duration_coverage_issues` at 100% — the 43-file relocation
   # on its own takes it to 89.5% (624/697 of this head's fast pool), under

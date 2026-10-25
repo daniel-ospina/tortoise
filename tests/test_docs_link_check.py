@@ -429,6 +429,19 @@ def test_an_explicit_linter_override_is_a_contract_not_a_hint(tmp_path: Path):
 # ── provisioning: the pinned install, tested rather than trusted ─────────────
 
 
+def _pin_host_arch(directory: Path, arch: str = "x86_64") -> Path:
+    """Stub `uname` so a provisioning test does not inherit the developer's host.
+
+    `install_pinned_lychee` maps `uname -m` to a pinned linux-gnu asset, and the
+    pins are `x86_64`/`aarch64` ONLY. A test that leaves `uname` alone is
+    host-dependent: on an Apple Silicon checkout `uname -m` is `arm64`, so the
+    arch refusal fires BEFORE the download/digest path under test and the test
+    fails on the laptop while passing on the runner. Every test that asserts a
+    behaviour of provisioning must pin the arch it is provisioning for.
+    """
+    return _stub(directory, f'echo {arch}\nexit 0\n', name="uname")
+
+
 def test_the_pinned_download_is_refused_when_the_digest_does_not_match(tmp_path: Path):
     """The sha256 pin is the only thing making "download a binary" acceptable.
 
@@ -436,6 +449,7 @@ def test_the_pinned_download_is_refused_when_the_digest_does_not_match(tmp_path:
     BEFORE extraction, whatever the network does.
     """
     bin_dir = tmp_path / "bin"
+    _pin_host_arch(bin_dir)
     _stub(
         bin_dir,
         'out=""\n'
@@ -450,6 +464,7 @@ def test_the_pinned_download_is_refused_when_the_digest_does_not_match(tmp_path:
     assert proc.returncode != 0
     assert "has sha256" in proc.stderr and "expected" in proc.stderr
     assert "refusing to run it" in proc.stderr
+    assert "no pinned lychee" not in proc.stderr, "the arch gate fired instead of the digest gate"
     assert not report.exists()
     assert not (tmp_path / "runner_temp" / "lychee/bin/lychee").exists()
 
@@ -457,6 +472,7 @@ def test_the_pinned_download_is_refused_when_the_digest_does_not_match(tmp_path:
 def test_a_failed_download_fails_naming_the_producer(tmp_path: Path):
     """No network is an absent measurement — never a silent pass."""
     bin_dir = tmp_path / "bin"
+    _pin_host_arch(bin_dir)
     _stub(bin_dir, "exit 7\n", name="curl")
     proc, report = _run_step(
         "Link check (changed files)", tmp_path, path_prefix=bin_dir, allow_download=True
@@ -466,6 +482,9 @@ def test_a_failed_download_fails_naming_the_producer(tmp_path: Path):
     assert "could not download lychee 0.24.2" in proc.stderr
     assert "(curl exit 7)" in proc.stderr
     assert "not a finding about the diff" in proc.stderr
+    # The pinned arch must have PASSED the arch gate: if the stub regressed this
+    # test would still be red, but for the wrong reason (the mirror-image bug).
+    assert "no pinned lychee" not in proc.stderr
     assert not report.exists()
 
 
