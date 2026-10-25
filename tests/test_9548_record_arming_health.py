@@ -208,8 +208,18 @@ def test_a_set_but_unusable_dsn_degrades_health(monkeypatch):
     assert dsn_fingerprint(bad) in record["error"], (
         "the error names the value by fingerprint, never by content"
     )
-    assert bad not in json.dumps(body)
-    assert "pw" not in json.dumps(body["record"])[len(record["error"]):]
+    # ⛔ The REFUSED path is the one an operator actually reaches with a mangled
+    # paste, and it is the path with no disclosure guard until this line (#9548
+    # review P2). It has to name the secret's own material directly: the previous
+    # `json.dumps(...)[len(error):]` slice was offset from the FRONT of a JSON
+    # object while `error` is its LAST key, so it constrained nothing, and
+    # `bad not in payload` cannot see a PREFIX or a password-only disclosure.
+    payload = json.dumps(body)
+    assert _PASSWORD not in payload, "the health payload disclosed the password"
+    assert "pw@" not in payload, (
+        "the health payload disclosed the password's tail — the shape a prefix "
+        "or a partial value leaks in"
+    )
 
 
 # ── (d) the block collects NO I/O ────────────────────────────────────────────
@@ -223,22 +233,43 @@ def test_the_health_path_opens_no_connection_to_the_record(monkeypatch):
     bounds a WRITE, and a probe that paid 10 s per call would take the machine
     out of service over a monitoring nicety.
 
-    TWO nets, deliberately (#9548 review P3): the seam's driver hook is what the
-    write path uses, but a connect written directly in the handler
-    (`psycopg2.connect`, `socket.create_connection`, a `to_thread` hand-off)
-    never touches it — and the old single-net version passed all of those.
+    The net RECORDS and only then raises (#9548 review P1): `_record_health` is
+    deliberately per-step `try/except` — a health path must never 5xx — so an
+    `_explode` that only raises is swallowed by the code under test and the test
+    passes over a real connect. The assertion is on the RECORD, which no
+    `except` inside the handler can erase.
+
+    ⚠️ The boundary this net can actually see, stated rather than implied: it
+    covers every **Python-level** connect on this path — the seam's own
+    `_default_connect` hook (what `RecordWriter.write` uses) and the `socket`
+    module entry points. It cannot see a C-level connect (`psycopg2.connect`
+    reaches libpq, which does not call back into Python's `socket`), nor a
+    `to_thread` hand-off. What rules those out is structural, not a net: the
+    block's only imports are `record_writer` and `monitoring`, and the body a few
+    lines below contains no driver call at all — so a future one would be visible
+    in review as a new call, not as a regression this test would silently bless.
     """
     monkeypatch.setenv(record_writer.RECORD_DSN_ENV, RECORD_DSN)
 
-    def _explode(*_a, **_kw):  # pragma: no cover - the assertion IS the raise
-        raise AssertionError("/health opened a connection to the record")
+    attempts: list[tuple] = []
 
-    monkeypatch.setattr(record_writer, "_default_connect", _explode)
-    monkeypatch.setattr(socket.socket, "connect", _explode)
-    monkeypatch.setattr(socket, "create_connection", _explode)
+    def _note(name):
+        def _hook(*a, **_kw):  # pragma: no cover - the assertion IS the record
+            attempts.append((name, a, _kw))
+            raise AssertionError(f"/health called {name}")
+
+        return _hook
+
+    monkeypatch.setattr(record_writer, "_default_connect", _note("_default_connect"))
+    monkeypatch.setattr(socket.socket, "connect", _note("socket.socket.connect"))
+    monkeypatch.setattr(socket, "create_connection", _note("socket.create_connection"))
 
     body = _health(monkeypatch)
 
+    assert attempts == [], (
+        "/health opened a connection to the record — an unreachable record can "
+        f"then delay or fail a liveness probe (#2850). Observed: {attempts}"
+    )
     assert body["status"] == "ok"
     assert body["record"]["ok"] is True
     assert body["record"]["armed"] is True
@@ -313,6 +344,38 @@ def test_a_declared_single_tenant_deployment_is_reported(monkeypatch):
     monkeypatch.setenv(record_writer.RECORD_SINGLE_TENANT_ENV, "1")
 
     assert _health(monkeypatch)["record"]["single_tenant_declared"] is True
+
+
+def test_an_unread_tenancy_resolution_does_not_publish_the_safe_value(monkeypatch):
+    """#9548 review P2: `False` here means "multi-tenant", i.e. the SAFE answer.
+
+    A swallowed read therefore renders a broken tenancy safety check as a PASS —
+    `status: ok`, `single_tenant_declared: false`, no marker anywhere in the
+    payload — which is the same fail-open shape the counters one screen up were
+    just fixed for. ``ok`` must be false and the reason must be published in its
+    own key, so `error` keeps meaning *a value was SET and refused*.
+    """
+    monkeypatch.setenv(record_writer.RECORD_DSN_ENV, RECORD_DSN)
+
+    def _explode():
+        raise RuntimeError("tenancy resolution exploded")
+
+    monkeypatch.setattr(record_writer, "single_tenant_declared", _explode)
+
+    body = _health(monkeypatch)
+
+    assert body["status"] == "degraded", (
+        "an unreadable tenancy check reported a healthy deployment"
+    )
+    record = body["record"]
+    assert record["ok"] is False
+    assert record["error"] is None, (
+        "a tenancy failure was published as a DSN problem"
+    )
+    assert "tenancy resolution exploded" in record["tenancy_error"]
+    assert record["armed"] is True, (
+        "the arming fact was correct and must survive a tenancy failure"
+    )
 
 
 # ── (g) a value no connection can USE must not read `armed` ──────────────────

@@ -5693,18 +5693,23 @@ def _record_health() -> dict:
         does NOT evidence that a row was written. An armed-and-writing
         deployment and one that has never written both read ``{}``; indicator
         (b) needs the runbook's SQL row count beside it.
-      * ``counters_error`` — why the snapshot could not be read, or ``None``.
+      * ``counters_error`` — why the counter snapshot could not be read, or ``None``.
         Kept distinct from ``error`` so the documented pairing
         (*``error`` non-null ⇔ set-but-unusable value*) stays true.
+      * ``tenancy_error`` — why ``single_tenant_declared`` could not be read, or
+        ``None``. ``False`` means "multi-tenant", which is the SAFE answer, so
+        publishing it for a read that failed would render a broken safety check
+        as a pass — the same fail-open shape as an unread counter, one field
+        over (#9548 review P2).
 
-    ``ok`` is False when the value was SET and refused, AND when the counters
-    could not be read — a monitoring surface that cannot read its own counters
-    must not report healthy, that being fail-open on the monitoring path itself.
-    Both fold into ``status`` (the ``backup_watcher`` rule: off-by-policy stays
-    ``ok``, "wanted but broken" degrades). A refused DSN is exactly the
-    silent-arming defect this exists to end: it is counted ``malformed_dsn`` on
-    every capture and the record stays empty while the operator believes it is
-    armed.
+    ``ok`` is False when the value was SET and refused, when the counters could
+    not be read, and when the tenancy resolution could not be read — a
+    monitoring surface that cannot read its own state must not report healthy,
+    that being fail-open on the monitoring path itself. All three fold into
+    ``status`` (the ``backup_watcher`` rule: off-by-policy stays ``ok``,
+    "wanted but broken" degrades). A refused DSN is exactly the silent-arming
+    defect this exists to end: it is counted ``malformed_dsn`` on every capture
+    and the record stays empty while the operator believes it is armed.
 
     Never raises and never 5xxes — a health path must always answer.
     """
@@ -5726,7 +5731,8 @@ def _record_health() -> dict:
                 "record_write_failures": None,
                 "record_non_journal_skips": None,
                 "record_position_unproven": None,
-                "counters_error": reason, "error": reason}
+                "counters_error": reason, "tenancy_error": reason,
+                "error": reason}
     # NOTE the shape: keys are assigned, never `**counters`-spread. A spread
     # placed after `"error": None` silently OVERWROTE the record-level error
     # with a counter error and dropped the three counter keys entirely (#9548
@@ -5740,6 +5746,7 @@ def _record_health() -> dict:
         "record_non_journal_skips": None,
         "record_position_unproven": None,
         "counters_error": None,
+        "tenancy_error": None,
         "error": None,
     }
     try:
@@ -5755,8 +5762,13 @@ def _record_health() -> dict:
         block["ok"] = False
     try:
         block["single_tenant_declared"] = record_writer.single_tenant_declared()
-    except Exception:
-        block["single_tenant_declared"] = False
+    except Exception as exc:
+        # `False` means "multi-tenant", which is the SAFE and expected hosted
+        # answer (#9192) — so swallowing a failed read here publishes a broken
+        # safety check as a PASS, with no marker anywhere in the payload
+        # (#9548 review P2, the same shape fixed for the counters above).
+        block["ok"] = False
+        block["tenancy_error"] = str(exc)[:200]
     try:
         dsn = record_writer.record_dsn()
     except record_writer.RecordWriteError as exc:
@@ -5839,8 +5851,8 @@ async def health():
     ``change_feed`` (state that lives inside the process, or in an env var only
     the process can resolve) and the same class as ``backup_watcher`` (a
     durability seam whose "off" state must be distinguishable from "on"). See
-    ``_record_health``; it collects no I/O, and only a REFUSED DSN (or a
-    counter snapshot it could not read) degrades ``status``.
+    ``_record_health``; it collects no I/O, and only a REFUSED DSN, an unread
+    counter snapshot, or an unread tenancy resolution degrades ``status``.
     """
     try:
         db = _HEALTH_PROBE.snapshot()

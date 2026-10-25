@@ -3177,6 +3177,13 @@ text, so do not grep the 9090 listener for a counter name.
    | `single_tenant_declared` | must be **`false`** on hosted. `true` means someone armed the process-global org/graph pair, which the multi-tenant app must refuse (#9192) |
    | `record_write_failures` / `record_non_journal_skips` / `record_position_unproven` | the same three keys `monitoring.metrics()` publishes, under the same names — the counters this section's "pass bar" reads, now readable from the pod without `/mcp` auth |
    | `counters_error` | why the counter snapshot could not be read, or `null`. Kept apart from `error` so the pairing above stays true; non-null also flips `status` to `degraded` |
+   | `tenancy_error` | why `single_tenant_declared` could not be read, or `null`. `false` is the SAFE answer (multi-tenant), so a swallowed read would look like a pass; non-null also flips `status` to `degraded`, and `error` stays `null` |
+
+   ⚠️ A value that is SET but **blank** (`TORTOISE_RECORD_DSN="   "`) reads as
+   `armed: false, error: null` — the default-off state. That is
+   `record_dsn()`'s documented `blank ⇒ None` rule, not a gap here: blank is
+   unarmed by decision, so `fly secrets list` (name only) is the read that tells
+   you a name exists at all.
 
    ⚠️ `armed: true` is **not** "the database answers". It means the value is
    present, well-formed **and names a host** — the one unusable shape decidable

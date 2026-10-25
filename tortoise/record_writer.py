@@ -430,10 +430,17 @@ def dsn_fingerprint(dsn: str) -> str:
     never reached the machine) publishes this instead of the value: 32 bits of
     sha256 over a high-entropy string is a comparison handle, not a disclosure.
 
-    ONE definition, called by :func:`record_dsn`'s malformed-value error and by
-    the arming report on the hosted ``/health`` (#9548). Two copies of this
-    convention would drift, and the copy that drifts is the one that prints a
-    DSN.
+    ONE definition **inside the record seam**, called by :func:`record_dsn`'s
+    refusal messages and by the arming report on the hosted ``/health`` (#9548).
+    Two copies of this convention would drift, and the copy that drifts is the
+    one that prints a DSN.
+
+    Not the tree's only fingerprint, and this docstring does not claim to be:
+    ``audit_events``, ``hosted_backup`` and ``backup_config`` each have their own
+    for their own variable, and all three hash ``raw.strip()`` while this one is
+    handed an already-stripped value (`record_dsn()`'s ``.strip()``). Folding them
+    together is a separate change with its own blast radius (#9997), so the honest
+    statement is the scoped one.
     """
     return hashlib.sha256(dsn.encode()).hexdigest()[:8]
 
