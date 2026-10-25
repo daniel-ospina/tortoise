@@ -51,10 +51,14 @@ The three properties that make "no silent fallback" structural rather than remem
    and the module imports no graph driver (pinned by AST, not by grep over prose). ⚠️ The
    **endpoint** must hold the same property, and it did not at first: the route built its data SDK
    *before* reading the mode, and `_data_sdk` runs `_assert_graph_owned`, whose probe failure is a
-   **403 GRAPH_NOT_FOUND** — an impairment answered as absence. The handle is now constructed
-   lazily, inside the cache callback, so `record` mode makes **zero** cache calls and the epic's
-   *"answers from Postgres with the graph engine stopped"* is true of the shipped route rather
-   than only of `serve_point`. Pinned by `test_record_mode_builds_no_cache_handle_at_all`.
+   **403 GRAPH_NOT_FOUND** — an impairment answered as absence. `record` mode now constructs **no**
+   handle at all, so it makes zero cache calls and the epic's *"answers from Postgres with the graph
+   engine stopped"* is true of the shipped route and not only of `serve_point`. `off` and `prefer`
+   still construct through the #3498 seam (`_data_sdk_offloaded` — pool slot, wait bound, fail-closed
+   503); `prefer` additionally **captures** a construction failure and re-raises it only when the
+   cache is actually needed, so a stopped graph cannot make the lenient mode answer 403 before the
+   record is asked. Pinned by `test_record_mode_builds_no_cache_handle_at_all` and
+   `test_prefer_answers_from_the_record_when_the_cache_cannot_be_opened`.
 2. **The anchor must BIND.** The row query carries `org_id` + `graph_id` + `node_key` and asks for
    **two** rows; a second row means the predicate did not restrict and raises `AnchorDidNotBind`.
    The cache's own version of this class had no tell at all — #6976 returned an EMPTY list for
@@ -122,7 +126,7 @@ because they are the cache's own fold state and a record-served answer must not 
 
 ## 3. Mutation arms — the guards, and the edits that turn them RED
 
-Run 2026-10-24 against `tests/test_record_serve.py` (45 tests) and the live file (2 tests):
+Run 2026-10-24 against `tests/test_record_serve.py` (47 tests) and the live file (2 tests):
 
 | edit | result |
 |---|---|

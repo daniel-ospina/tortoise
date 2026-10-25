@@ -644,12 +644,19 @@ class ServedAnswer:
     def found(self) -> bool:
         return self.props is not None
 
-    def as_wire(self) -> dict[str, str]:
-        """The attribution fields a caller puts on the response."""
-        out = {"servedFrom": self.served_from}
-        if self.fallback_reason:
-            out["fallbackReason"] = self.fallback_reason
-        return out
+    def as_wire(self) -> dict[str, Any]:
+        """The attribution fields a caller puts on the response.
+
+        ⚠️ BOTH names are emitted on every ARMED read, ``fallbackReason`` as
+        ``None`` when no fallback happened. Omitting the null would let a point
+        whose own ``props`` carry that name ship a FAKE fallback attribution —
+        the same confusion (attribution vs stored data) in the other direction,
+        and the dangerous one: it could drive an ops/backfill signal from
+        customer data. ``off`` never calls this, so the default response is
+        untouched.
+        """
+        return {"servedFrom": self.served_from,
+                "fallbackReason": self.fallback_reason}
 
 
 def serve_point(*, tenant: tuple[str, str], point_id: str,
@@ -707,9 +714,15 @@ def serve_point(*, tenant: tuple[str, str], point_id: str,
                 conn.close()
 
     def _fell_back(reason: str) -> ServedAnswer:
+        # The count happens AFTER the cache answers: a fallback that itself
+        # failed did not land, and counting it would report a served read that
+        # never existed (the metric's meaning is "answered by the cache", which
+        # is what an operator alerts on). A cache failure raises out of here, so
+        # this request contributes no increment.
+        props = cache_answer()
         note_fallback(reason)
         return ServedAnswer(read=READ_POINT_BY_ID, coordinate=coordinate,
-                            served_from="cache", props=cache_answer(),
+                            served_from="cache", props=props,
                             fallback_reason=reason)
 
     from .cache_projection import CacheProjectionError
