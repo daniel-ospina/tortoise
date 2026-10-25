@@ -69,10 +69,9 @@ contradicts the shipped system; the corrected wording follows the table) · **BL
 **Step 2's premise became `MEASURED` last** (census rows 2a-2e). It was the only step
 whose basis this table recorded as `STATIC` — the state in which nothing re-read the
 premise (steps 3 and 10 have no census row either; their premises are measured by
-`01` and `05`, and no step row has ever carried `STATIC` but step 2's) — which is how
-#9691 falsified step 2's
-parenthetical — *"the default is catalog union + core"* — by hand instead of by the
-instrument. The rows now drive the real `pack_state.resolved_pack_set` through all
+`01` and `05`, and no step row has ever carried `STATIC` but step 2's) — which is how #9691
+falsified step 2's parenthetical — *"the default is catalog union + core"* — by hand instead
+of by the instrument. The rows now drive the real `pack_state.resolved_pack_set` through all
 three arms over a fake graph handle that supplies only the INPUTS, so the same defect
 prints `FALSIFIED`; the pack surface's own pins
 (`tests/test_pack_selection_by_graph.py`, 52 passed) agree with every row. What the rows
