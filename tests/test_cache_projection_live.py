@@ -60,7 +60,11 @@ def _view():
 
     `content` and `status` are PRIMARY columns; `openSetProp` rides the `props`
     tail; the edge is a `mitigated_by`-free `aboutObject` from p-1 to the
-    `:Object` keyed by `name` (the Interface E rule at the edge).
+    `:Object` — whose contract key is its stable `id` since #9881, the `name`
+    being a MUTABLE natural key and never the identity (the Interface E rule at
+    the edge). The id and the name are deliberately DIFFERENT strings, so the
+    edge restored below can only resolve by the id: a `{name: $tgt_key}`
+    binding — the pre-#9881 contract — would find nothing and the test reds.
     """
     nodes = [
         cp.node_from_row("Point", {"id": "p-1", "content": "the first claim",
@@ -69,12 +73,12 @@ def _view():
         cp.node_from_row("Point", {"id": "p-2", "content": "the second claim",
                                    "point_kind": "claim", "status": "live",
                                    "props": {}}),
-        cp.node_from_row("Object", {"name": "acme", "object_kind": "org",
-                                    "props": {}}),
+        cp.node_from_row("Object", {"id": "o-acme", "name": "acme",
+                                    "object_kind": "org", "props": {}}),
     ]
     rels = [cp.RecordRelation(
         rel_type="aboutObject", src_label="Point", src_key="p-1",
-        tgt_label="Object", tgt_key="acme", idx=0, props={})]
+        tgt_label="Object", tgt_key="o-acme", idx=0, props={})]
     return cp.RecordView(nodes=tuple(nodes), relations=tuple(rels))
 
 
@@ -111,7 +115,10 @@ def test_a_record_sourced_rebuild_survives_the_cache_being_destroyed():
     assert second["p-1"]["pointKind"] == "claim"
     assert second["p-1"]["openSetProp"] == 7
 
-    # The edge is restored, bound to the :Object by `name` (never by an id).
+    # The edge is restored, bound to the :Object by its `id` — never by the
+    # `name`, which has not been the key since #9881. This reads back `b.name`,
+    # so it can only pass if the id-keyed endpoint resolved to the node NAMED
+    # `acme`: the fixture's id is `o-acme`, and nothing binds by a name.
     rels = proj.query(
         "MATCH (a:Point {id:'p-1'})-[:aboutObject]->(b:Object) "
         "RETURN b.name").result_set
@@ -235,8 +242,9 @@ def test_a_bounded_projection_declares_partial_and_reads_not_hot():
 def test_a_homonymous_pair_bounded_between_labels_declares_partial():
     """⛔ THE IDENTITY IS `(label, key)`, proven through the real API.
 
-    `Object 'acme'` and `Subject 'acme'` are two record nodes with ONE key
-    string (`KEY_PROPERTY` gives both `name`). A bound that cuts between them —
+    `Object` and `Subject` are two record nodes with ONE key string — both keyed
+    `id` since #9881 (`KEY_PROPERTY` no longer gives either one `name`), and both
+    given the id `acme` here. A bound that cuts between them —
     the documented `limit` mode, nodes sorted by `(label, key)` — writes one and
     omits the other. A key-only declaration calls that `complete`, and a miss on
     the OMITTED label then stands as `empty`: the §17.2 *"no such node"* false
@@ -244,10 +252,10 @@ def test_a_homonymous_pair_bounded_between_labels_declares_partial():
     """
     proj = _projection()
     view = cp.RecordView(nodes=(
-        cp.node_from_row("Object", {"name": "acme", "object_kind": "org",
-                                    "props": {}}),
-        cp.node_from_row("Subject", {"name": "acme", "subject_kind": "org",
-                                     "props": {}}),
+        cp.node_from_row("Object", {"id": "acme", "name": "acme",
+                                    "object_kind": "org", "props": {}}),
+        cp.node_from_row("Subject", {"id": "acme", "name": "acme",
+                                     "subject_kind": "org", "props": {}}),
     ))
     report = proj.rebuild_from_record(view, confirm_destructive=True, limit=1)
     assert report["nodes_written"] == 1
