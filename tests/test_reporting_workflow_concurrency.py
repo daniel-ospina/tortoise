@@ -1947,6 +1947,20 @@ def _verdict_behaviour_problem(run: str, outcome_var: str) -> str | None:
                 f"the verdict step emits no `{annotation}` annotation on {label} — the "
                 "run page names neither direction, so a reader sees only a bare exit"
             )
+        # The annotation surface is judged for EXCLUSIVITY too: presence alone accepted
+        # `::notice … PASS` hoisted above the `case`, so a lint-red (or unmeasured) tree
+        # announced PASS beside its FAIL/NO VERDICT annotation — and the hoisted `::error`
+        # told every GREEN run that main is lint-red. That is the exact #5120 complaint
+        # ("its annotations could not tell the two apart") restored with a green pin
+        # (measured in review cycle 9).
+        opposite = "::error" if annotation == "::notice" else "::notice"
+        if opposite in output:
+            return (
+                f"the verdict step emits `{opposite}` as well as `{annotation}` on "
+                f"{label} — a reader of the annotations cannot tell which verdict this "
+                "run has, and an announcement hoisted above the `case` claims the "
+                "opposite direction on the surface this PR exists to make readable"
+            )
     return None
 
 
@@ -2055,7 +2069,15 @@ def _verdict_step_problem(steps: list, ruff_index: int, ruff_id: str) -> str | N
             "is published in, so the run page shows nothing while this pin reads the "
             "file the harness wrote"
         )
-    if verdict.get("continue-on-error") not in (None, False, "false"):
+    coe = verdict.get("continue-on-error")
+    if not (
+        coe is None
+        or coe is False
+        or (isinstance(coe, str) and coe.strip().lower() == "false")
+    ):
+        # `is False` rather than `in (None, False, "false")`: `0` and `0.0` are `== False`
+        # in Python, so the membership form accepted a numeric scalar GitHub's schema may
+        # reject (an invalid workflow is a run that does not exist — a fail-open).
         # PRESENCE is not the property: `continue-on-error: false` is inert (the
         # same spelling `_inert_step_key` accepts on the ruff step), and a pin that
         # reds it gets deleted by the next tidy-up. Only an ACTIVE silencing value
@@ -3662,6 +3684,31 @@ def _set_notifier_guard_after_write(doc: dict) -> None:
     _set_notifier_script_lines(doc, rest[: write_at + 1] + guard + rest[write_at + 1 :])
 
 
+def _set_verdict_notice_hoisted(doc: dict) -> None:
+    """The `::notice … PASS` annotation moved above the `case`.
+
+    Every conclusion then carries a PASS annotation — beside its FAIL or NO VERDICT
+    one — which is the #5120 read-back: annotations that cannot tell a finding from
+    a pass (measured accepted in review cycle 9).
+    """
+    step = _verdict_step(doc)
+    lines = step["run"].splitlines()
+    notice = next(line for line in lines if "::notice" in line)
+    case_at = next(i for i, line in enumerate(lines) if line.lstrip().startswith("case "))
+    moved = [line for line in lines if line is not notice]
+    step["run"] = "\n".join([*moved[:case_at], notice.strip(), *moved[case_at:]]) + "\n"
+
+
+def _set_verdict_error_hoisted(doc: dict) -> None:
+    """The FAIL `::error` annotation moved above the `case` — every green run says lint-red."""
+    step = _verdict_step(doc)
+    lines = step["run"].splitlines()
+    error = next(line for line in lines if "::error title=main-lint FAIL" in line)
+    case_at = next(i for i, line in enumerate(lines) if line.lstrip().startswith("case "))
+    moved = [line for line in lines if line is not error]
+    step["run"] = "\n".join([*moved[:case_at], error.strip(), *moved[case_at:]]) + "\n"
+
+
 def _set_notifier_without_status_diagnostic(doc: dict) -> None:
     """The HTTP status dropped from the warning — the datum #5120 could not recover."""
     lines = _notifier_script_lines(doc)
@@ -3881,6 +3928,8 @@ _STARVED_SHAPES = [
     ("an `exit 1` that never runs", _set_verdict_exit_never_run),
     ("a summary write behind `if false`", _set_verdict_summary_behind_false),
     ("a PASS sentence announced unconditionally", _set_verdict_pass_announced_unconditionally),
+    ("a `::notice` annotation hoisted above the `case`", _set_verdict_notice_hoisted),
+    ("a `::error` annotation hoisted above the `case`", _set_verdict_error_hoisted),
     ("a command that aborts the arm mid-way", _set_verdict_arm_aborts_midway),
     ("the outcome variable overridden in `run:`", _set_verdict_outcome_overridden),
     ("`always()` plus a false conjunct", _set_verdict_if_always_and_false),
