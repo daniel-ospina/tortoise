@@ -1162,7 +1162,7 @@ def _bundle_in_scope(doc_name: str, line: str) -> bool:
     scope = _BUNDLE_ROW_FILTER.get(doc_name)
     return scope is None or bool(scope.search(line))
 
-# `tortoise/sdk.py:12744`, ``tortoise/projection/edges.py:2424-2449``, `edges.py:468`,
+# `tortoise/sdk.py:12744`, ``tortoise/projection/edges.py:2432-2457``, `edges.py:475`,
 # ``tortoise/extractor_v2.py:8833-8837``
 _BUNDLE_CITE = re.compile(
     r"(?<![\w.])(?:tortoise/)?(?:projection/)?"
