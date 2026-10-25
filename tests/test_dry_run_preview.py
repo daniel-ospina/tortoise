@@ -161,8 +161,16 @@ class TestDefaultPathUnchanged:
         }
         return ids, results
 
-    def _assert_default_path(self, ids, results):
+    def _assert_default_path(self, ids, results, sdk):
         for tool, result in results.items():
+            if tool == "tortoise_delete":
+                # #9660 (owner ruling 2026-10-25): permanent deletion is the ONE
+                # destructive tool whose default path is a PREVIEW. The owner
+                # approved a confirmation step precisely because a bare flag is
+                # set by the assistant in the same breath as the call. So this
+                # tool is asserted separately, below, on what it must now do —
+                # not exempted from the check.
+                continue
             if isinstance(result, dict):
                 assert "preview_sentinel" not in result, (
                     f"{tool} reached its dry-run preview on the default path: "
@@ -174,8 +182,14 @@ class TestDefaultPathUnchanged:
         # the sentinel (e.g. an error dict) must not pass.
         assert results["tortoise_delete_point"] == {
             "deleted": True, "id": ids["a"]}, results["tortoise_delete_point"]
-        assert results["tortoise_delete"] == {
-            "deleted": True, "id": ids["b"]}, results["tortoise_delete"]
+        # #9660: the default path previews and changes nothing...
+        assertion = results["tortoise_delete"]
+        assert assertion["deleted"] is False, assertion
+        assert assertion["preview"] is True, assertion
+        assert assertion["id"] == ids["b"], assertion
+        assert assertion["confirmation"], assertion
+        # ...and the item is still there, which is the whole point.
+        assert sdk.get_point(ids["b"]) is not None, "the default path deleted the item"
         assert results["tortoise_delete_entity"] is True, (
             results["tortoise_delete_entity"])
         assert results["tortoise_retract_point"]["status"] == "retracted", (
@@ -189,13 +203,13 @@ class TestDefaultPathUnchanged:
             self, mcp, monkeypatch):
         self._install_sentinels(mcp, monkeypatch)
         ids, results = self._default_path_calls(mcp, explicit_false=False)
-        self._assert_default_path(ids, results)
+        self._assert_default_path(ids, results, mcp._get_org_sdk())
 
     def test_previews_are_unreachable_when_dry_run_is_false(
             self, mcp, monkeypatch):
         self._install_sentinels(mcp, monkeypatch)
         ids, results = self._default_path_calls(mcp, explicit_false=True)
-        self._assert_default_path(ids, results)
+        self._assert_default_path(ids, results, mcp._get_org_sdk())
 
     def test_dry_run_defaults_to_false_in_every_signature(self):
         import tortoise.mcp_server as m
