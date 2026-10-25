@@ -103,29 +103,57 @@ def test_document_created_then_source_still_one_node(sdk_factory):
 
 
 def test_document_created_non_url_id_keeps_its_identity(sdk_factory):
-    """Non-over-reach: the resolver is IDENTITY for the two non-URL document-id
-    shapes the live producers emit (`doc_<rel-path>` from `derive_document_id`,
-    `corpus://…` from the CLI), so their node keys must not move."""
+    """Non-over-reach: the resolver is IDENTITY for the non-network ids this
+    path carries, so their node keys must not move. Both ids below are the
+    REAL producer shapes, spelled character-for-character:
+
+      * ``doc_notes/5140.md`` — what ``file_indexer.derive_document_id`` returns
+        for ``notes/5140.md`` under the corpus root (``f"doc_{rel.as_posix()}"``,
+        ``file_indexer.py:454``) — UNDERSCORE, not ``doc/…``.
+      * ``corpus://5140/cli-doc.md`` — a ``corpus://`` id
+        (``corpus://<name>/<rel-path>``, the scheme
+        ``file_indexer.derive_source_url`` mints for the indexer's
+        ``source_url``). Its scheme is not in ``_NETWORK_SCHEMES``, so
+        ``normalize_source_url`` returns it verbatim (``source_identity.py``).
+
+    Nothing here is rewritten by ``resolve_source_key``: no colon ⇒ no scheme ⇒
+    identity, and a non-network scheme ⇒ identity. A resolver that started
+    canonicalising either would RE-KEY the index and CLI paths, which is the
+    over-reach this case exists to catch.
+    """
     sdk = sdk_factory()
     proj = sdk._get_proj()
-    dids = ("doc/notes/5140.md", "corpus://5140/cli-doc.md")
+    dids = ("doc_notes/5140.md", "corpus://5140/cli-doc.md")
     for did in dids:
         proj.apply({"type": "DocumentCreated", "id": did, "title": did, "document_kind": "brief"})
     rows = proj.g.query(
-        "MATCH (s:Source) WHERE s.url IN ['doc/notes/5140.md', "
+        "MATCH (s:Source) WHERE s.url IN ['doc_notes/5140.md', "
         "'corpus://5140/cli-doc.md'] RETURN s.url, s.documentKind"
     ).result_set
     assert sorted(rows) == [
         ["corpus://5140/cli-doc.md", "brief"],
-        ["doc/notes/5140.md", "brief"],
+        ["doc_notes/5140.md", "brief"],
     ], rows
 
 
 def test_document_created_replays_to_the_same_node(sdk_factory):
-    """Durability: the resolved key and the identity props are written by the
-    FOLD, so a rebuild of the same record is a no-op — the node count must not
-    grow on replay, which is what a resolver applied only on the live path
-    would have produced."""
+    """Replay idempotence — plus the identity the FOLD alone writes.
+
+    Three applications of ONE journaled record leave ONE node, and it still
+    carries the identity the first application derived from the record's own id
+    (`canonicalUrl` = the pure canonical form). That is the property a
+    journal→fold rebuild needs: the key and the identity are re-DERIVED from the
+    record, never remembered from a live-only step.
+
+    ⚠️ WHICH HALF DISCRIMINATES, stated rather than implied. The node-count half
+    does NOT fail on a tree without this fix: a CONSTANT id is a one-node MERGE
+    either way, so it was already green on `main` (this PR's own base run shows
+    this case passing there). Do not read it as a pre-fix-failing pin, and do
+    not treat the two ORDER tests above as redundant with it — THOSE are the
+    ones that red on `main`. The discriminating half is the `canonicalUrl`
+    assertion: without the fix that property is never written, so the value
+    collected here is empty rather than the `[canonical]` asserted.
+    """
     sdk = sdk_factory()
     proj = sdk._get_proj()
     rec = {
@@ -139,9 +167,14 @@ def test_document_created_replays_to_the_same_node(sdk_factory):
     proj.apply(rec)
     rows = proj.g.query(
         "MATCH (s:Source) WHERE toLower(s.url) CONTAINS 'example.com/a/b' "
-        "RETURN count(s), collect(s.documentKind)"
+        "RETURN count(s), collect(s.documentKind), collect(s.canonicalUrl)"
     ).result_set
-    assert rows[0] == [1, ["report"]], rows
+    assert rows[0][0] == 1, f"replay minted a second node: {rows}"
+    assert rows[0][1] == ["report"], f"replay lost the genre: {rows}"
+    assert rows[0][2] == ["https://example.com/a/b"], (
+        f"the fold did not stamp the identity it derived from the record's own "
+        f"id, so a rebuild cannot re-derive it: {rows}"
+    )
 
 
 def test_document_created_fragment_variants_collapse_to_one_node(sdk_factory):

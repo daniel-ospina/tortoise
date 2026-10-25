@@ -2970,8 +2970,9 @@ def _declared_mutations(
         # so a URL-VARIANT `DocumentCreated` plans a second `public.source` row
         # for an identity the graph folds onto one node (measured: record 2 rows,
         # graph 1 node). That is the class #9553's derive exists to bound and it
-        # is NOT closed here — named on #5140 finding 12 so a records rebuild
-        # does not resurrect a duplicate source row silently. The derive is
+        # is NOT closed here — and it is its own defect, not #5140 finding 12's:
+        # finding 12 records the GRAPH half only, so the row half is tracked at
+        # #9956, where a records rebuild cannot lose it. The derive is
         # UNCONDITIONAL because narrowing it to the record types OTHER than
         # `DocumentCreated` — the tempting reading now that the doc fold writes
         # `canonicalUrl` itself — would LOSE the variant resolution for document
