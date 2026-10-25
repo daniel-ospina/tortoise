@@ -89,9 +89,16 @@ name: main-lint
 #      job — including when the notification ALSO fails. The notification cannot
 #      change the verdict in either direction. PINNED: exactly ONE step keys on
 #      that outcome in its `if:` (a second keyed step is how the notifier stops
-#      being the thing that notifies), it carries `failure()`, and its
-#      `continue-on-error: true` is required (a reporter that throws cannot red
-#      the job). NOT pinned: that each API call is individually try/catch'd —
+#      being the thing that notifies), it carries a status function that removes
+#      the implicit `success()`, and its `continue-on-error: true` is required (a
+#      reporter that throws cannot red the job). The pin is the STATUS SLOT, not
+#      the spelling: `failure()` is what this file writes, and `always()` — which
+#      is the same pin, ANDed with the same outcome conjunct — is a pinned
+#      ACCEPTANCE case, so a tidy-up that writes it stays green instead of
+#      teaching the next lane that an honest spelling is a violation. Only
+#      `success()`/`cancelled()` (never fires on the failing path) and a
+#      status-free `if:` (implicit `success()`) are refused. NOT pinned: that
+#      each API call is individually try/catch'd —
 #      the pin reads the shape, not the call graph; the `wrapped` behaviour is
 #      measured on real runs (see the PR's Evidence table), not asserted here.
 #   3. the notification is `continue-on-error: true` and every API call is
@@ -232,7 +239,9 @@ jobs:
         # promise — a reporter that throws before its own try/catch cannot red the
         # job either (#5120).
         continue-on-error: true
-        # `failure()` must be NAMED: an `if:` with no status function gets an
+        # A status function must be NAMED (this file writes `failure()`, which
+        # also keeps the distinction below; `always()` is the pin's other accepted
+        # spelling): an `if:` with no status function gets an
         # implicit `success()` prepended, and `success()` is false once the ruff
         # step has failed — so the bare `steps.ruff.outcome == 'failure'` form was
         # SKIPPED on exactly the path it exists for (measured on run 39734942845:
