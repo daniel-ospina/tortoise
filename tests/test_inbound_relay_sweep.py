@@ -61,6 +61,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 MODULE_PATH = REPO_ROOT / "tools" / "inbound_relay_sweep.py"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "inbound-relay.yml"
 SWEEP_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "inbound-relay-sweep.yml"
+SCOPING_DOC = REPO_ROOT / "docs" / "scoping" / "2026-09-06-2409-inbound-channel-scoping.md"
 
 OWNER = "daniel-ospina"
 LABEL = "queued-for-triage"
@@ -792,6 +793,10 @@ def test_every_relay_comment_step_checks_for_an_existing_comment_first(sweep: An
     to the sweep's marker, and the predicate must actually consume it plus the
     same author rule `already_relayed()` applies — a bot-typed comment or the
     owner's login, never the bare string an author could paste.
+
+    ⛔ And binding its TOKENS is not enough (#9946 review, measured): see the
+    normalised-literal assertion below — three inversions of this predicate
+    passed a substring pin, so what is pinned now is the exact expression.
     """
     import re
 
@@ -822,13 +827,34 @@ def test_every_relay_comment_step_checks_for_an_existing_comment_first(sweep: An
         # whose body carries its own semicolons, so a `;`-terminated match stops
         # at `const user = …;` and tests nothing.
         body = script[start:gate]
-        assert "includes(FOOTER)" in body, (
-            "the predicate does not test for the footer, so it cannot tell a "
-            f"relayed item from a fresh one: {body}"
-        )
-        assert "user.type" in body and "user.login === owner" in body, (
-            "the predicate does not apply `already_relayed()`'s author rule "
-            f"(a bot comment, or the owner's own login): {body}"
+        # ⛔ THE WHOLE EXPRESSION, NOT ITS VOCABULARY. Measured 2026-10-25
+        # (#9946 review, on this file's own previous form): substring asserts on
+        # `includes(FOOTER)` / `user.type` / `user.login === owner` stayed GREEN
+        # under all three inversions that matter — `!String(...).includes(FOOTER)`
+        # (a fresh item is never commented, an already-relayed one is commented
+        # AGAIN: the double comment this rail exists to prevent), `!== 'bot'`
+        # (any comment carrying the footer counts as bot-typed, so an author who
+        # pastes the footer suppresses the relay's comment), and a
+        # `false && comments.some(...)` short-circuit (the rail silently becomes
+        # "never skip"). A substring constrains the words; POLARITY is the
+        # behaviour, so the normalised slice is compared to one literal body.
+        squashed = " ".join(body.split())
+        # The slice runs to the gate, so it also carries the line comment that
+        # introduces the gate. Drop it — the predicate is what is pinned.
+        predicate = squashed.split(" //", 1)[0]
+        assert predicate == (
+            "const alreadyCommented = comments.some((c) => { "
+            "const user = c.user || {}; "
+            "return String(c.body || '').includes(FOOTER) && "
+            "(String(user.type || '').toLowerCase() === 'bot' || "
+            "user.login === owner); });"
+        ), (
+            "the duplicate-comment predicate changed meaning. Whitespace is "
+            "normalised, so re-wrapping is fine — but a different expression "
+            "is not: an inverted `includes(FOOTER)`, an inverted bot test or a "
+            "short-circuit all leave the rail doing something other than "
+            "`already_relayed()`. If the change is intended, pin the new "
+            f"literal deliberately: {predicate!r}"
         )
 
 
@@ -1049,6 +1075,38 @@ def test_the_rails_promise_no_retry_that_the_label_step_cannot_get(
         "re-selectable, including the label step that runs after the close"
     )
     assert "BEFORE THE CLOSE" in block_text, block_text
+
+    # ⛔ AND THE OTHER COPIES OF THE SAME SENTENCE. `41c3452f0` scoped the
+    # docstring, `EXIT CODES` and the code's own note, and stopped there — the
+    # sweep workflow's rails (the file an operator opens to read what the control
+    # does) and the scoping doc (what a human triaging a red run reads before
+    # deciding whether to act by hand) still promised an unconditional re-select.
+    # Prose, so it cannot be executed: what is pinned is that the claim is
+    # SCOPED in each copy, and that the unscoped form is gone.
+    def _prose(path: Any) -> str:
+        return " ".join(path.read_text(encoding="utf-8").split())
+
+    sweep_workflow = _prose(SWEEP_WORKFLOW)
+    assert "so the next run selects it again and reds this workflow" not in (
+        sweep_workflow
+    ), (
+        "the sweep workflow still promises an unconditional re-select, so an "
+        "item that fails in the last cadence of the window reads as retried"
+    )
+    assert "STILL INSIDE" in sweep_workflow and "ages out" in sweep_workflow, (
+        "the sweep workflow's rails must scope the re-select to the "
+        "`--since-hours` window and name the age-out, like the docstring does"
+    )
+
+    scoping_doc = _prose(SCOPING_DOC)
+    assert "therefore retryable rather than open-and-marked" not in scoping_doc, (
+        "the scoping doc still calls a pre-close failure 'therefore retryable' "
+        "with no window, which is the over-claim this change removed elsewhere"
+    )
+    assert "ages out" in scoping_doc and "still inside" in scoping_doc, (
+        "the scoping doc must scope the re-select to the `--since-hours` window "
+        "and name the age-out, like the docstring does"
+    )
 
 
 def test_run_is_capped_and_reports_the_remainder(sweep: Any) -> None:

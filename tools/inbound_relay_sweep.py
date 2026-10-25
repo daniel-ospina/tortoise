@@ -227,9 +227,11 @@ _COMMENT_ISSUE = (
 
 #: The footer both comment templates end with. It is how a RETRY recognises a
 #: comment this relay already posted: the sequence is relay → comment → close →
-#: label, so a failed close leaves an item that the next run selects again, and
-#: without this marker that retry would post a SECOND identical comment (and a
-#: duplicate intake record) every 15 minutes until the close succeeds.
+#: label, so a failed close leaves an item that the next run re-selects WHILE IT
+#: IS STILL INSIDE the `--since-hours` window (`created_at` never moves, so the
+#: re-select stops at `created_at + since_hours`), and without this marker that
+#: retry would post a SECOND identical comment (and a duplicate intake record)
+#: every 15 minutes until the close succeeds — or until the item ages out.
 RELAY_MARKER = "— Premise Labs (automated relay)"
 
 
