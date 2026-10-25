@@ -126,8 +126,16 @@ merges (#8375's property for `ci_check_repair.py`, kept here).
 
 EXIT CODES
   0  complete: every selected item was relayed (or the run was a dry run)
-  1  at least one item's intake POST failed — that item was left untouched
-  2  could not act: intake not configured, or the listing was incomplete
+  1  at least one item failed somewhere in its SEQUENCE — the resume read, the
+     intake POST, the comment, the close, or the label. Every one of those
+     leaves the item UNLABELLED and therefore re-selectable by a later run,
+     EXCEPT a label that failed AFTER a successful close: that item is relayed
+     and closed but no later run selects it again, and the note says to apply
+     the label by hand. (Narrower claims here — "the intake POST failed", "the
+     item was left untouched" — were wrong for the comment/close/label paths
+     the guarded sequence actually has; #9946 review.)
+  2  could not act: intake not configured, the queue config was unreadable, or
+     the listing was incomplete — nothing was mutated
 """
 
 from __future__ import annotations
