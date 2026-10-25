@@ -3671,7 +3671,8 @@ def _entity_door_props(kind_key: str, name: str, props: dict) -> dict:
 # ── #9964: the kind decides the layer ──────────────────────────────────────
 #
 # ONE authority answers "which layer does this kind belong to?"
-# (``kind_layers``, derived from the classifier's own section partition plus the
+# (``kind_layers``, derived from the classifier's CATALOG-UNION section partition
+# — a superset of any graph-gated one, see ``kind_layers.section_of`` — plus the
 # §5 vocabularies). Before this, the SDK doors labelled a node from their own
 # ``type`` ARGUMENT and never looked at the kind, while the classifier's
 # ``entity`` partition and the two write lanes that route by kind
@@ -3775,6 +3776,12 @@ def _kind_layer_note(t: str, props: dict) -> tuple[str, dict | None]:
     ``{"code", "kind", "layer" (requested), "actual" (declaring layers)}``
     for the caller to materialize as an advisory once the node id exists.
 
+    ⚠️ It reads the CATALOG-UNION partition, not this graph's: the graph gate
+    is not threaded through (see ``kind_layers.section_of``), so a pack that
+    ``packs/`` carries but this graph has not installed can still decide a
+    label. Anything that states this answer IS the classifier's own partition
+    is stating more than the code does.
+
     MUTATES ``props`` on the ONE routable case: every layer spelling the write
     named is removed and the kind is re-declared under the routed layer's
     canonical prop, so the fold writes the routed property and no stale
@@ -3792,7 +3799,9 @@ def _kind_layer_note(t: str, props: dict) -> tuple[str, dict | None]:
         return t, _first_layer_mismatch(named, t)
     # 1. Kinds that belong EXCLUSIVELY to one entity layer ROUTE the label — the
     #    kind is the decision, the door's `type` was only a hint. The authority is
-    #    `kind_layers.routing_layers` (the classifier's section + the §5 Subject
+    #    `kind_layers.routing_layers` (the classifier's CATALOG-UNION section —
+    #    no graph gate, so a SUPERSET of this graph's; see
+    #    `kind_layers.section_of` — plus the §5 Subject
     #    vocabulary), NOT the write-gate vocabularies — see that function for the
     #    P1 that ruled the latter out. Every named
     #    kind must be THE SAME kind, so a write that names two different layers
@@ -35887,7 +35896,9 @@ class TortoiseSDK:
         except Exception as _layer_exc:  # noqa: BLE001, RUF100 — advisory must never raise
             _logger.warning(
                 "create_entity: the kind<->layer advisory could not be "
-                "computed (%s: %s) — the write proceeds without the notice "
+                "computed (%s: %s) — the write proceeds without the notice, AND "
+                "the kind<->layer ROUTING was skipped too, so the write kept the "
+                "door's label "
                 "(#1934: an advisory never refuses a write).",
                 type(_layer_exc).__name__, _layer_exc)
             _layer_note = None

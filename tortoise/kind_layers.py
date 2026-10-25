@@ -28,9 +28,15 @@ existing graph).
 This module answers it ONCE, and every consumer derives from it:
 
 * ``section_of(kind)`` — the kind's section in the kind-index spec, i.e. the
-  classifier's OWN partition. (The spec's core sections come from
-  ``core_sections()`` here, so the classifier's partition and this answer
-  cannot drift.)
+  classifier's partition. ⚠️ The spec it reads is compiled with **no graph
+  gate** (``installed_namespaces=None`` — the CATALOG union), so it is a
+  SUPERSET of the partition any ONE graph's classifier works with (#5163): a
+  pack present in ``packs/`` but not installed here contributes a section this
+  answer uses, while the classifier would never return that kind at all. Its
+  core sections come from ``core_sections()`` here, so for a kind both sets
+  carry the two cannot drift; for a gated-out kind this answer is the broader
+  one. Threading the graph's installed-namespace set through (``section_of``
+  and the doors that ask it) is what would make the two sets identical.
 * ``declared_layers(kind)`` — every layer that DECLARES the kind: its index
   section, the §5 Subject vocabulary, and each layer's write-gate vocabulary
   (``domain_loader.known_kinds(bucket)``). It is a SET, not one value, because
@@ -198,7 +204,12 @@ def declares_subject(kind: Any) -> bool:
 # ── the classifiers partition, read from the spec ─────────────────────────
 
 def section_of(kind: Any) -> str | None:
-    """The kind's section in the kind-index spec (the classifier's partition).
+    """The kind's section in the kind-index spec — the CATALOG-UNION partition.
+
+    ⚠️ NOT this graph's partition: the spec is compiled with no graph gate, so
+    this is a SUPERSET of the set the classifier partitions with (#5163) — see
+    the module docstring. Read it as "the catalog says this section", never as
+    "the classifier would return this kind here".
 
     ``None`` for a kind the spec does not carry (a legacy/registered/pack kind
     with no classification entry) — the caller then answers from the write-gate
@@ -229,8 +240,10 @@ def section_of(kind: Any) -> str | None:
         _logger.warning(
             "kind_layers.section_of: the kind-index spec could not be compiled "
             "(%s: %s) — answering 'no section' so the write is not refused "
-            "(#1934). Fix the installed pack manifests to restore the "
-            "classifier's partition.", type(exc).__name__, exc)
+            "(#1934), which also means THE KIND<->LAYER NOTICE AND ROUTING WERE "
+            "SKIPPED for this write: it kept the door's label. Fix the installed "
+            "pack manifests to restore the classifier's partition.",
+            type(exc).__name__, exc)
         return None
 
 
