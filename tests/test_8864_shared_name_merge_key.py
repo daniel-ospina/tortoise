@@ -30,7 +30,8 @@ sys.path.insert(0, sys_path)
 
 import pytest  # noqa: E402
 
-from tortoise.sdk import TortoiseSDK, _entity_name_id  # noqa: E402
+from _node_ids import node_id  # noqa: E402
+from tortoise.sdk import TortoiseSDK  # noqa: E402
 
 
 def _nodes(proj, label, *props):
@@ -66,7 +67,7 @@ class TestSharedNameDoesNotCollapseIds:
 
             created = sdk.create_object("Acme", "company")
             created_id = created["id"]
-            assert created_id == _entity_name_id("Object", "Acme")
+            assert created_id == node_id(proj, "Object", "Acme")
 
             rows = _nodes(proj, "Object", "name")
             ids = _ids(rows)
@@ -198,7 +199,10 @@ class TestFoldSeam:
             proj = sdk._get_proj()
             proj.g.query("CREATE (o:Object {id:'decoy-1', name:'Acme', status:'live'})")
             proj.g.query("CREATE (o:Object {id:'decoy-2', name:'Acme', status:'live'})")
-            canonical = _entity_name_id("Object", "Acme")
+            # The id this registration carries is the fixture's own choice:
+            # #3590 retired the name-derived id, and the test's point is that
+            # the fold writes the record's OWN id, never a carrier it guesses.
+            canonical = "obj-applied-acme"
             proj.apply(
                 {
                     "type": "ObjectRegistered",
@@ -241,7 +245,7 @@ class TestReplayModelsSeeTheMentionStubs:
         )
 
         name = "Acme"
-        stub = _entity_name_id("Object", name)
+        stub = "obj-stub-acme"      # a journal fixture states its own id
         events = [
             # Mints `(stub, name)` — a carrier with NO registration record.
             {"type": "EventRecorded", "eventId": "ev-1",
@@ -287,7 +291,7 @@ class TestReplayModelsSeeTheMentionStubs:
         )
 
         name = "Bob"
-        stub = _entity_name_id("Subject", name)
+        stub = "sub-stub-bob"       # a journal fixture states its own id
         events = [
             {"type": "EventRecorded", "eventId": "ev-1",
              "event": {"eventId": "ev-1", "eventKind": "mentioned",
@@ -346,7 +350,7 @@ class TestReplayModelsSeeTheMentionStubs:
             refused_events,
         )
 
-        stub = _entity_name_id(label, name)
+        stub = f"fixture-stub-{label.lower()}"   # a fixture-owned id
         other = "obj-x" if label == "Object" else "sub-x"
         creation = ("ObjectRegistered" if label == "Object" else "SubjectAdded")
         events = [

@@ -4796,9 +4796,18 @@ class _EntityHandlers:
             for about in about_names or ():
                 if not (isinstance(about, str) and about and about != name):
                     continue
+                # #3590 review P1: NO `mention=True` here. The exemption's
+                # recorded bound is "attribution only … a fold that must MOVE an
+                # entity's state can never take this exemption"
+                # (`nonfolded.EXEMPT_SHAPES`), and this resolved id is used two
+                # lines later to `SET o.status` — entity state. Taking the
+                # exempt shape made a miss a silent no-op behind a GREEN run
+                # (no write, no `status_fold_unapplied`, no refusal), where the
+                # pre-#3590 name-keyed read at least applied it. As a
+                # non-exempt identity miss it is recorded and fails the run,
+                # which is what the bound promises.
                 about_id = resolve_fold_name(self.g, "Object", about,
-                                             context="status fold about",
-                                             mention=True)
+                                             context="status fold about")
                 if about_id:
                     out.append(("id", about_id, False, about))
             return out
@@ -4807,9 +4816,12 @@ class _EntityHandlers:
             # The explicit target is REPORTED on a miss — as long as it has a
             # resolved id to miss on (#3590): an unresolved name was already
             # recorded by `resolve_fold_name`, and `_targets()` drops it rather
-            # than reporting twice. An `about_entities` target is folded
-            # silently (see the docstring). `name` wins when it is also present
-            # in the list — one write, one report.
+            # than reporting twice. A RESOLVED `about_entities` target is folded
+            # silently (`report=False`); an UNRESOLVED one is no longer exempt,
+            # so the resolver's own non-fold fails the run (#3590 review P1 —
+            # the exemption is attribution only, and this fold moves state).
+            # `name` wins when it is also present in the list — one write, one
+            # report.
             targets = _targets()
             # #2729 review P2: the event-kind key is form-widened (namespaced
             # AND bare), so two packs that declare the same bare event name

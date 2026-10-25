@@ -296,16 +296,20 @@ def resolve_fold_name(g, label: str, name: str, *,
       reference`` recorded, nothing folded.
 
     ``mention=True`` classifies the caller's reference as loose ATTRIBUTION (an
-    Event's ``subject``/``object``/``uses[]``, an ``about_entities`` status-fold
-    target, an about-edge name) rather than the identity of the record being
-    folded, and records the EXEMPT :data:`SHAPE_UNFOLDED_MENTION` instead. The
+    Event's ``subject``/``object``/``uses[]``, an about-edge name) rather than
+    the identity of the record being folded, and records the EXEMPT
+    :data:`SHAPE_UNFOLDED_MENTION` instead. The
     distinction is load-bearing: a mention that cannot resolve drops ONE link
     and moves no entity's state, and the live pass and the replay pass drop the
     same one (they run this same resolver) — so it is a producer omission, not a
     live/replay divergence. The IDENTITY shapes stay NON-exempt: a record whose
     own target cannot be resolved (an id-less ``ObjectSuperseded``, a rename/
     delete/restatus miss) must still fail the run rather than silently not
-    apply.
+    apply. ⛔ A caller whose resolved id is then used to WRITE entity state —
+    ``_fold_object_status``'s ``about_entities`` target (``SET o.status``) —
+    must therefore NOT pass ``mention=True``: the exemption is attribution only,
+    and taking it there turned a miss into a silent no-op behind a green run
+    (#3590 review P1).
 
     Why the mention exemption exists at all: this repo's own journal writer
     (``EventAPI.add_event``, and pre-#3590 journals generally) references names

@@ -39291,8 +39291,30 @@ class TortoiseSDK:
                     # it through the SDK create door, so the registration is
                     # JOURNALED and `rebuild_all` reproduces the node (the raw
                     # MERGE below journals nothing).
-                    from .entity_identity import resolve_or_mint
-                    oid, _created = resolve_or_mint(proj.g, "Object", name)
+                    #
+                    # #3590 review P1: `AmbiguousEntityName` is NOT an error
+                    # here, for the same reason `_register_referenced_entity`
+                    # catches it — a name held by two or more LIVE entities is
+                    # the legal same-name coexistence (D2/#8864), and this is a
+                    # REFERENCE-wiring loop, not a create. Letting the create
+                    # door's refusal escape aborted the whole write
+                    # (`ingest_corpus`/`_index_sessions` mark the file complete
+                    # and then raise, and `_session_event_write` raises between
+                    # the live Event MERGE and its journal record — a live node
+                    # with no durable record). The documented contract of this
+                    # method is "a resolution failure is logged at debug";
+                    # skipping the item is that contract.
+                    from .entity_identity import (
+                        AmbiguousEntityName,
+                        resolve_or_mint,
+                    )
+                    try:
+                        oid, _created = resolve_or_mint(proj.g, "Object", name)
+                    except AmbiguousEntityName as exc:
+                        _logger.debug(
+                            "_connect_issue_objects: skipping reference %r — "
+                            "%s", name, exc)
+                        continue
                     self._create_entity(
                         "Object", oid,
                         {"name": name, "objectKind": okind, "repo": repo,

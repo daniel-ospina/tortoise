@@ -46,7 +46,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
-from tortoise.ids import entity_name_id
 from tortoise.legacy_ids import (
     CANONICAL,
     DECLARED_OUT_OF_SCOPE,
@@ -241,8 +240,12 @@ def test_every_legacy_id_is_mapped_exactly_once():
 
 def test_the_target_is_the_existing_canonical_minter():
     # §1.4 rule 1: the rewrite renames the node's key VALUE; it does not mint a
-    # second identity space. `entity_name_id` is `_entity_name_id`'s (§1.2).
-    assert canonical_id("Point", "p-0000438") == entity_name_id("Point", "p-0000438")
+    # second identity space. The value is pinned as a FROZEN LITERAL — the
+    # retired entity minter's spelling (`label[:3]-<sha256[:26]>`, #3590 retired
+    # it as an ENTITY id and `legacy_ids._derived_legacy_handle` kept it for
+    # this migration only). The literal is the point: a change to the
+    # derivation would silently re-target every existing plan.
+    assert canonical_id("Point", "p-0000438") == "poi-0eab7bc5fcd2b21f5afc10a7a9"
     assert canonical_id("Point", "p-0000438") != canonical_id("Object", "p-0000438")
 
 

@@ -2902,7 +2902,7 @@ def test_apply_supersessions_legacy_idless_object_journaled_and_folded(sdk):
     — the event journaled NOWHERE (silent drop, the M2 provenance gap)
     and the live status never flipped."""
     from tortoise.commit_ops import apply_supersessions
-    from tortoise.sdk import _entity_name_id
+    from _node_ids import node_id
 
     proj = sdk._get_proj()
     # successor must be visible (the payload-entities equivalent)
@@ -2928,7 +2928,7 @@ def test_apply_supersessions_legacy_idless_object_journaled_and_folded(sdk):
     ).result_set
     assert events, "ObjectSuperseded must reach the :GraphEvent store"
     payload = json.loads(events[-1][0])
-    assert payload["id"] == _entity_name_id("Object", "legacy-X"), payload
+    assert payload["id"] == node_id(proj, "Object", "legacy-X"), payload
     assert payload["name"] == "legacy-X", payload
     assert payload["supersedes_by"] == "successor-B", payload
     assert payload["session_id"] == "sess_legacy", payload
@@ -2942,7 +2942,7 @@ def test_apply_supersessions_legacy_idless_object_reaches_jsonl(tmp_path):
     the legacy Object's supersession left NO journal line — a wipe+rebuild
     could never restore (or even show) the fold."""
     from tortoise.commit_ops import apply_supersessions
-    from tortoise.sdk import _entity_name_id
+    from _node_ids import node_id
 
     events = tmp_path / "events"
     events.mkdir()
@@ -2965,7 +2965,7 @@ def test_apply_supersessions_legacy_idless_object_reaches_jsonl(tmp_path):
         assert superseded_lines, ("ObjectSuperseded must be journaled to the "
                                   "JSONL log for a legacy no-id Object")
         ev = json.loads(superseded_lines[-1])
-        assert ev["id"] == _entity_name_id("Object", "legacy-Y"), ev
+        assert ev["id"] == node_id(proj, "Object", "legacy-Y"), ev
         assert ev["name"] == "legacy-Y", ev
         assert ev["supersedes_by"] == "successor-C", ev
     finally:
@@ -3342,13 +3342,13 @@ def test_apply_supersessions_chain_mixed_id_name_forms(sdk):
     (id-form ref + name-form successor) — raw string comparison would miss
     the edge (name != id string)."""
     from tortoise.commit_ops import apply_supersessions
-    from tortoise.sdk import _entity_name_id
+    from _node_ids import node_id
 
     proj = sdk._get_proj()
     sdk.create_entity("object", "mx-A", objectKind="core:strategy")
     sdk.create_entity("object", "mx-B", objectKind="core:strategy")
     sdk.create_entity("object", "mx-C", objectKind="core:strategy")
-    b_id = _entity_name_id("Object", "mx-B")
+    b_id = node_id(proj, "Object", "mx-B")
     warns: list[str] = []
     applied = apply_supersessions(
         proj, sdk,

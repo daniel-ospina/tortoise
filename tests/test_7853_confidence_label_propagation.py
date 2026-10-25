@@ -29,7 +29,6 @@ import logging
 import pytest
 
 from tortoise.ep import TortoiseEP
-from tortoise.ids import entity_name_id as _entity_name_id
 from tortoise.live import (
     EPISTEMIC_LABELS,
     epistemic_disjunction,
@@ -1198,7 +1197,7 @@ _BOUNDARY_MATRIX = [
      [_m_mention("matrix-mention"),
       _m_object(_MATRIX_ID, "matrix-other-name"),
       _m_rename(_MATRIX_ID, new_name="matrix-mention"),
-      _m_object(_entity_name_id("Object", "matrix-mention"),"matrix-mention"),
+      _m_object("matrix-mention-stub","matrix-mention"),
       _m_restatus(_MATRIX_ID),
       _m_belief(_MATRIX_ID)], False),
     # The :Subject twin (`_upsert_subject` follows the same #8864 rule, and the
@@ -1207,7 +1206,7 @@ _BOUNDARY_MATRIX = [
      [_m_mention("matrix-sub-mention", subject=True),
       _m_subject(_MATRIX_ID, "matrix-sub-other-name"),
       _m_rename(_MATRIX_ID, new_name="matrix-sub-mention", label="Subject"),
-      _m_subject(_entity_name_id("Subject", "matrix-sub-mention"),
+      _m_subject("matrix-sub-mention-stub",
                  "matrix-sub-mention"),
       _m_restatus(_MATRIX_ID, label="Subject"),
       _m_belief(_MATRIX_ID)], False),

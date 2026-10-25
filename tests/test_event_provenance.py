@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: I001
 from tests import _live_utils
-from tortoise.ids import entity_name_id as _entity_name_id
+from _node_ids import node_id
 from tortoise.sdk import TortoiseSDK
 
 TEST_DB = os.environ.get("TEST_DB_PATH", "/tmp/tortoise_test_122.db")
@@ -1070,7 +1070,7 @@ class TestStubEntityIdIsNotTheName:
         assert len(r) == 1
         sid, name = r[0][0], r[0][1]
         assert name == "stub-agent-1"
-        assert sid == _entity_name_id("Subject", "stub-agent-1"), sid
+        assert sid == node_id(proj, "Subject", "stub-agent-1"), sid
         assert sid != name, f"id must not be the entity name ({sid!r} == {name!r})"
 
     def test_produces_stub_object_has_entity_name_id(self, sdk):
@@ -1092,7 +1092,7 @@ class TestStubEntityIdIsNotTheName:
         assert len(r) == 1
         oid, name = r[0][0], r[0][1]
         assert name == "artifact-stub-1"
-        assert oid == _entity_name_id("Object", "artifact-stub-1"), oid
+        assert oid == node_id(proj, "Object", "artifact-stub-1"), oid
         assert oid != name, f"id must not be the entity name ({oid!r} == {name!r})"
 
     def test_uses_stub_object_has_entity_name_id(self, sdk):
@@ -1114,7 +1114,7 @@ class TestStubEntityIdIsNotTheName:
         assert len(r) == 1
         oid, name = r[0][0], r[0][1]
         assert name == "input-stub-1"
-        assert oid == _entity_name_id("Object", "input-stub-1"), oid
+        assert oid == node_id(proj, "Object", "input-stub-1"), oid
         assert oid != name, f"id must not be the entity name ({oid!r} == {name!r})"
 
     def test_stub_preserves_existing_id_on_merge(self, sdk):

@@ -280,25 +280,97 @@ def test_a_mention_no_door_registered_does_not_make_the_journal_unrebuildable(
 
 
 def test_an_unregistered_mention_is_exempt_but_an_identity_miss_is_not(sdk):
-    """The exemption's BOUND: mentions only — never a record's own identity.
+    """The exemption's BOUND — exercised against the fold, not asserted about a
+    constant table (#3590 review: the constant-only form passed on any tree
+    that merely DEFINES the two shapes, including one where no fold ever
+    records them).
 
-    The degraded guarantee recorded in ``EXEMPT_SHAPES`` is worth nothing
-    unless the neighbouring shape still fails the run. An id-less
-    ``ObjectSuperseded`` addresses an ENTITY (it must move its status), so it
-    keeps the non-exempt ``unregistered-reference`` shape and still refuses —
-    a mention exemption that leaked into that class would let a supersede be
-    silently not applied.
+    The degraded guarantee recorded in ``EXEMPT_SHAPES`` is worth nothing unless
+    the neighbouring shape still fails the run. An id-less ``ObjectSuperseded``
+    addresses an ENTITY (it must move its status), so it keeps the non-exempt
+    ``unregistered-reference`` shape — a mention exemption that leaked into that
+    class would let a supersede be silently not applied.
+
+    Mutation that must red this: changing ``_fold_object_superseded``'s id-less
+    ``record_non_folded(SHAPE_UNREGISTERED_REFERENCE, …)`` to
+    ``SHAPE_UNFOLDED_MENTION`` — the leak the test names — leaves the constants
+    unchanged and is caught only by the fold-level assertions below.
     """
+    from tortoise.projection import _replay_write_scope
     from tortoise.projection.nonfolded import (
         EXEMPT_SHAPES,
         SHAPE_UNFOLDED_MENTION,
         SHAPE_UNREGISTERED_REFERENCE,
+        collect_non_folded,
     )
 
+    client, _events = sdk
+    proj = client._get_proj()
+
+    # 1. A mention that resolves to nothing: the EXEMPT attribution shape.
+    with _replay_write_scope(), collect_non_folded() as entries:
+        proj.apply({"type": "EventRecorded", "eventId": "ev-bound",
+                    "event": {"eventId": "ev-bound",
+                              "eventKind": "meeting",
+                              "subject": "Nobody At All"}})
+    mention_shapes = [e.shape for e in entries]
+    assert SHAPE_UNFOLDED_MENTION in mention_shapes, mention_shapes
+
+    # 2. An id-less ObjectSuperseded: an ENTITY the fold must move, so the
+    #    NON-exempt shape — recorded by the fold, observed at the run boundary.
+    with _replay_write_scope(), collect_non_folded() as entries:
+        proj.apply({"type": "ObjectSuperseded", "name": "Nobody Two",
+                    "supersededBy": "someone-else"})
+    identity_shapes = [e.shape for e in entries]
+    assert SHAPE_UNREGISTERED_REFERENCE in identity_shapes, identity_shapes
+    assert SHAPE_UNFOLDED_MENTION not in identity_shapes, (
+        "the identity miss took the mention exemption — a fold that must "
+        "move an entity's state is now skippable with a green run")
+
+    # …and the classification the fold just demonstrated is the table's own:
     assert SHAPE_UNFOLDED_MENTION in EXEMPT_SHAPES
     assert SHAPE_UNREGISTERED_REFERENCE not in EXEMPT_SHAPES, (
         "the identity shape became exempt — a fold that must move an entity's "
-        "state can now be skipped with a green run")
+        "state can be skipped with a green run")
+
+
+def test_an_unresolvable_status_fold_target_may_not_take_the_mention_exemption(sdk):
+    """#3590 review P1: a fold that MOVES entity state is not a mention.
+
+    ``_fold_object_status`` resolves an ``about_entities`` target and then
+    ``SET o.status`` on it — entity state. ``nonfolded.EXEMPT_SHAPES`` records
+    the exemption's bound as *"a fold that must MOVE an entity's state can
+    never take this exemption"*, so this site may not resolve with
+    ``mention=True``: doing so made an unresolvable target a silent no-op
+    behind a GREEN run (nothing written, nothing reported, nothing refused)
+    where the pre-#3590 name-keyed read at least applied it.
+
+    Mutation that must red this: adding ``mention=True`` back to the
+    ``resolve_fold_name`` call in ``_fold_object_status._targets`` — the record
+    becomes the EXEMPT ``unfolded-mention`` and the run stops failing.
+    """
+    from tortoise.projection import _replay_write_scope
+    from tortoise.projection.nonfolded import (
+        SHAPE_UNFOLDED_MENTION,
+        collect_non_folded,
+    )
+
+    client, _events = sdk
+    proj = client._get_proj()
+    with _replay_write_scope(), collect_non_folded() as entries:
+        proj.apply({"type": "EventRecorded", "eventId": "ev-status-fold",
+                    "event": {"eventId": "ev-status-fold",
+                              "eventKind": "venture:disbursement",
+                              # a DECLARED lifecycle kind whose target is named
+                              # only here, and is registered nowhere
+                              "aboutEntities": ["Nothing Registered"]}})
+    shapes = [e.shape for e in entries]
+    assert shapes, (
+        "the declared fold resolved an unregistered target and recorded "
+        "NOTHING — a state-moving miss must be recorded")
+    assert SHAPE_UNFOLDED_MENTION not in shapes, (
+        "a state-moving status fold took the ATTRIBUTION exemption — an "
+        f"unresolvable target is now a silent no-op behind a green run: {shapes}")
 
 
 def test_a_declared_objecttype_object_still_folds_the_work_item_status(sdk):

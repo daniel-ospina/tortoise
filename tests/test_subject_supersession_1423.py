@@ -58,7 +58,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tests import _live_utils
 from tortoise.embeddings import EMBEDDING_DIM
 from tortoise.log import EventLog
-from tortoise.sdk import TortoiseSDK, _entity_name_id
+from _node_ids import node_id
+from tortoise.sdk import TortoiseSDK
 from tortoise.search_engine import (
     reset_circuit_breakers,
     run_fts_query,
@@ -155,7 +156,7 @@ class TestSubjectSupersessionWritePath:
         assert len(recs) == 1, recs
         rec = recs[0]
         assert rec["label"] == "Subject"
-        assert rec["id"] == _entity_name_id("Subject", "Team Alpha")
+        assert rec["id"] == node_id(sdk, "Subject", "Team Alpha")
         assert rec["state"]["status"] == "superseded"
         assert rec["state"]["supersededBy"] == "Team Beta"
         assert rec["state"].get("supersededAt"), rec
@@ -362,7 +363,7 @@ class TestKeepFirstAndNeverGuess:
         """No VISIBLE successor ⇒ burying the target would leave nothing a
         recall surface can show. Mirrors the Object lane's gate."""
         sdk, proj, _events, _journal_path = env
-        sdk._update_entity(_entity_name_id("Subject", "Team Beta"),
+        sdk._update_entity(node_id(sdk, "Subject", "Team Beta"),
                            status="superseded")
         applied, warns, skips = _apply(proj, sdk, [RECORD])
         assert applied == 0
@@ -387,7 +388,7 @@ class TestSubjectStatusWriteIsValidated:
     def test_update_entity_refuses_an_undeclared_subject_status(
             self, env, bad):
         sdk, proj, _events, _journal_path = env
-        sid = _entity_name_id("Subject", "Team Alpha")
+        sid = node_id(sdk, "Subject", "Team Alpha")
         with pytest.raises(ValueError, match="Invalid status"):
             sdk.update_entity(sid, status=bad)
         # refused BEFORE any write: the stored value is untouched.
@@ -409,7 +410,7 @@ class TestSubjectStatusWriteIsValidated:
         """Anti-vacuity: the guard refuses only UNDECLARED values, so the
         §4.2 lifecycle (including the terminal members) still writes."""
         sdk, proj, _events, _journal_path = env
-        sid = _entity_name_id("Subject", "Team Alpha")
+        sid = node_id(sdk, "Subject", "Team Alpha")
         for st in ("draft", "live", "superseded", "deprecated", "archived"):
             sdk.update_entity(sid, status=st)
             (got,), = _subject_row(proj, "Team Alpha", "status")
@@ -443,7 +444,7 @@ class TestStatusIsProjectionOwnedOnSubject:
         then created again) must carry `status='live'` rather than the
         `status`-less node the extras-only design would leave."""
         sdk, proj, _events, _journal_path = env
-        sdk.delete_entity(_entity_name_id("Subject", "Team Alpha"))
+        sdk.delete_entity(node_id(sdk, "Subject", "Team Alpha"))
         sdk.create_entity("subject", "Team Alpha", subjectKind="core:team")
         (status,), = _subject_row(proj, "Team Alpha", "status")
         assert status == "live", status
@@ -524,7 +525,7 @@ def test_provenance_chain_surfaces_the_subject_status(env):
     longer live (`shape=no-live-holder`), which is #3633's own route-then-
     refuse discipline and not this lane's."""
     sdk, proj, _events, _journal_path = env
-    sid = _entity_name_id("Subject", "Team Alpha")
+    sid = node_id(sdk, "Subject", "Team Alpha")
     pt = sdk.create_point("statement", "Rollout is approved by the team",
                           authoredBy=sid)
     chain = sdk.provenance(pt["id"])

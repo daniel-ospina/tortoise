@@ -2030,9 +2030,13 @@ def test_single_carrier_declared_terminal_status_is_still_dropped(sdk):
 
 
 def _canonical(label: str, name: str) -> str:
-    from tortoise.ids import entity_name_id
+    """A fixture-owned carrier id (#3590 retired the name-derived one).
 
-    return entity_name_id(label, name)
+    Nothing in `tortoise/` derives an id from a name any more, so the fixture
+    states the id it wants its carrier to hold; it only has to be stable and
+    distinct from the decoy's.
+    """
+    return f"carrier-{label.lower()}-{name.lower()}"
 
 
 def _two_carriers(sdk, canonical_status: str | None = "live", **extra) -> None:

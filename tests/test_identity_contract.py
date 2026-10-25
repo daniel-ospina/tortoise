@@ -34,7 +34,6 @@ from tortoise.sdk import (
     _CANONICAL_ENTITY_ID_RE,
     _ENTITY_ID_RE,
     _ULID_RE,
-    _entity_name_id,
     _is_canonical_entity_id,
     _is_entity_id,
     _is_ulid,
@@ -70,18 +69,33 @@ def test_ulid_and_crockford_accepted_junk_rejected():
         assert not _is_ulid(junk), junk
 
 
-def test_entity_handle_shape_and_determinism():
-    eid = _entity_name_id("Object", "acme")
-    assert ENTITY_HANDLE_RE.match(eid), eid
-    assert eid.startswith("obj-")
-    assert _CANONICAL_ENTITY_ID_RE.match(eid)
-    assert _ENTITY_ID_RE.match(eid)
-    assert _is_canonical_entity_id(eid)
-    assert _is_entity_id(eid)
-    # determinism = the idempotent MERGE-by-name guarantee (#452): the same
-    # label+name always yields the same id; a different label does not.
-    assert _entity_name_id("Object", "acme") == eid
-    assert _entity_name_id("Subject", "acme") != eid
+def test_the_legacy_entity_handle_is_recognised_but_never_minted():
+    """The handle spelling survives ONLY as a legacy id (#3590 retired it).
+
+    #3590 item 6 retired `obj-<sha26(name)>` as an ENTITY id: identity is an
+    opaque ULID minted at creation, so nothing in `tortoise/` derives an id from
+    a name (the only survivor is `legacy_ids._derived_legacy_handle`, reachable
+    from no write path). The RECOGNISERS must still accept the handle, because
+    an existing journal and a `legacy_ids` plan both carry it — so this pins the
+    two identity spaces rather than the retired derivation: the handle is a
+    recognised `_is_canonical_entity_id` value and is NOT the minted shape.
+
+    The derivation itself is frozen as a literal in
+    `tests/test_8607_legacy_id_normaliser.py::test_the_target_is_the_existing_
+    canonical_minter`; a test cannot recompute it without re-implementing it.
+    """
+    handle = "obj-c64daa148b39390702266ea93d"     # a legacy (retired) handle
+    assert ENTITY_HANDLE_RE.match(handle), handle
+    assert handle.startswith("obj-")
+    assert _CANONICAL_ENTITY_ID_RE.match(handle)
+    assert _ENTITY_ID_RE.match(handle)
+    assert _is_canonical_entity_id(handle)
+    assert _is_entity_id(handle)
+    # … and it is a DIFFERENT identity space from the minted one: a create
+    # produces this shape, never the handle above.
+    assert not _is_ulid(handle), handle
+    assert _is_ulid(ulid())
+    assert not ENTITY_HANDLE_RE.match(ulid())
 
 
 # ── the stable-name replay keys ─────────────────────────────────────────────

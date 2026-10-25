@@ -325,8 +325,11 @@ class TestProjectionFold:
             # id (no live node exists yet — the id-branch fold must match the
             # node the later auto-registration recreates), then create_entity
             # auto-journals the registration AFTER the fold.
-            from tortoise.sdk import _entity_name_id
-            oid = _entity_name_id("Object", "strategy-A")
+            # #3590: the fold no longer SYNTHESIZES a name-derived id, so
+            # this fixture states the one its journal addresses. The record is
+            # harness-written (not folded live), which is the point: the
+            # adversarial [ObjectSuperseded, ObjectRegistered] order.
+            oid = "fixture-strategy-A"
             # FOLD FIRST — the adversarial journal order (a later journaled
             # producer re-creates the Object AFTER the supersession event).
             sdk._emit_event("ObjectSuperseded", id=oid, name="strategy-A",
@@ -414,7 +417,6 @@ class TestProjectionFold:
         RED-capability: pre-fix this test fails at the final status assert
         (post-rebuild status is 'live', the fold replay no-op'd)."""
         from tortoise.commit_ops import apply_supersessions
-        from tortoise.sdk import _entity_name_id
 
         events = tmp_path / "events"
         events.mkdir()
@@ -455,7 +457,7 @@ class TestProjectionFold:
                          if ev.get("type") == "ObjectSuperseded"]
             assert journaled, "ObjectSuperseded must reach the JSONL log"
             ev = journaled[-1]
-            assert ev["id"] == _entity_name_id("Object", name), ev
+            assert ev["id"] == f"fixture-{name}", ev
             assert ev["name"] == name, ev
             assert ev["supersedes_by"] == successor, ev
             assert ev["id"] != legacy_reg_id, \
@@ -482,8 +484,6 @@ class TestProjectionFold:
         no-op returning 0 — the live fold in apply_supersessions sidesteps
         it by omitting the id, but the rebuild replay of the journaled event
         (id + name) cannot."""
-        from tortoise.sdk import _entity_name_id
-
         sdk = _fresh_sdk()
         try:
             proj = sdk._get_proj()
@@ -496,7 +496,7 @@ class TestProjectionFold:
                 # raw legacy Object — NO id property at all
                 proj.g.query("CREATE (o:Object {name:$n, status:'live'})",
                              params={"n": name})
-                matched = fold({"id": _entity_name_id("Object", name),
+                matched = fold({"id": f"fixture-{name}",
                                 "name": name,
                                 "supersedes_by": "successor-F"}, cas=cas)
                 assert matched == (1, 1), \

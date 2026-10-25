@@ -2471,18 +2471,9 @@ def test_resolver_docker_fts_survives_retracted_crowd(_docker_sdk):
     """
     proj = _docker_sdk._get_proj()
     qid = "q4061r2"
-    from tortoise.sdk import _entity_name_id
+    from _node_ids import node_id
 
     live_name = "widget variant zz"
-    variant_ids = [_entity_name_id("Object", f"widget variant {i}")
-                   for i in range(10)]
-    # Non-vacuity premise: with the live Object sorting BEHIND the crowd
-    # under the ``id ASC`` tie-break, a post-truncation filter (the pre-#4061
-    # shape) would return nothing — so this test cannot pass against the
-    # regression it guards.
-    assert _entity_name_id("Object", live_name) > max(variant_ids), (
-        "the fixture's premise: the live Object must sort BEHIND the crowd "
-        "under the id tie-break, or the crowd no longer fills the bound")
     for i in range(10):
         name = f"widget variant {i}"
         _docker_sdk.create_entity("object", name, objectKind="core:other",
@@ -2491,6 +2482,17 @@ def test_resolver_docker_fts_survives_retracted_crowd(_docker_sdk):
                      params={"n": name})
     _docker_sdk.create_entity("object", live_name, objectKind="core:other",
                               lme_question_id=qid, is_episodic=True)
+    # Non-vacuity premise: with the live Object sorting BEHIND the crowd
+    # under the ``id ASC`` tie-break, a post-truncation filter (the pre-#4061
+    # shape) would return nothing — so this test cannot pass against the
+    # regression it guards. #3590 mints ids (ULIDs, time-sortable), so the
+    # ordering comes from creation order and is READ from the graph rather
+    # than predicted from the name.
+    variant_ids = [node_id(proj, "Object", f"widget variant {i}")
+                   for i in range(10)]
+    assert node_id(proj, "Object", live_name) > max(variant_ids), (
+        "the fixture's premise: the live Object must sort BEHIND the crowd "
+        "under the id tie-break, or the crowd no longer fills the bound")
     from tortoise.assembly import docker_resolver_port
     port = docker_resolver_port(_docker_sdk)
     got = port.fts_objects("widget", 8)

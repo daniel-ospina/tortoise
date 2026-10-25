@@ -60,7 +60,8 @@ from tortoise.projection.nonfolded import (
     collect_non_folded,
     refused_events,
 )
-from tortoise.sdk import TortoiseSDK, _entity_name_id
+from _node_ids import node_id
+from tortoise.sdk import TortoiseSDK
 
 
 def _unique(name: str) -> str:
@@ -131,7 +132,7 @@ class TestShapeAUnjournaledRenameThenDelete:
     def _build(self, sdk):
         sdk.create_entity("object", name="NAME_A")
         sdk.create_entity("object", name="SHARED")
-        x = _entity_name_id("Object", "NAME_A")
+        x = node_id(sdk, "Object", "NAME_A")
         sdk.update_entity(x, name="SHARED")   # unjournaled (#3377)
         sdk.delete_entity(x)
         return x

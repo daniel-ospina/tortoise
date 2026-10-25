@@ -39,7 +39,8 @@ import pytest
 
 from tortoise.consistency import _graph_entities
 from tortoise.log import EventLog
-from tortoise.sdk import TortoiseSDK, _entity_name_id
+from _node_ids import node_id
+from tortoise.sdk import TortoiseSDK
 
 #: A journal whose ONLY record is the event — no `ObjectRegistered` /
 #: `SubjectAdded` ever registers the names, so the stubs are the whole
@@ -152,7 +153,7 @@ def test_a_stub_carries_the_canonical_entity_name_id(
     try:
         _rebuild(sdk, events)
         ids = _stub_ids(sdk)
-        assert ids[(label, name)] == _entity_name_id(label, name), ids
+        assert ids[(label, name)] == node_id(sdk, label, name), ids
     finally:
         sdk.close()
 
@@ -289,7 +290,7 @@ class TestStubAdoptionDurability:
                 "the canonical-id event stub defeated the first-registration "
                 "probe — ObjectRegistered was never journaled, so rebuild "
                 f"drops the node: {regs}")
-            assert regs[0]["id"] == _entity_name_id("Object", "probe-object")
+            assert regs[0]["id"] == node_id(sdk, "Object", "probe-object")
             live = _node_props(sdk, "Object", "probe-object")
             _rebuild(sdk, events)
             rebuilt = _node_props(sdk, "Object", "probe-object")
@@ -375,7 +376,7 @@ class TestStubAdoptionDurability:
                 "the canonical-id `uses[]` stub defeated the "
                 "first-registration probe — ObjectRegistered was never "
                 f"journaled, so rebuild drops the node: {regs}")
-            assert regs[0]["id"] == _entity_name_id("Object", "probe-use")
+            assert regs[0]["id"] == node_id(sdk, "Object", "probe-use")
             live = _node_props(sdk, "Object", "probe-use")
             _rebuild(sdk, events)
             rebuilt = _node_props(sdk, "Object", "probe-use")
