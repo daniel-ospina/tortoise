@@ -599,7 +599,11 @@ def _read_row(conn: Any, *, org_id: str, graph_id: str, table: str,
     scope, R6) + ``node_key`` — the record's identity-contract column, which is
     the primary key's last member and is pinned to the label's key PROPERTY by
     the schema's own CHECK (``chk_point_node_key_is_contract_key`` and its
-    siblings: ``node_key = id`` / ``name`` / ``url`` / ``eventId``). Anchoring on
+    siblings). ⚠️ The CHECK's token list is NOT restated here: it moves — #9881
+    dropped the ``name`` pins and re-added ``Subject``/``Object`` as
+    ``node_key = id`` — and a stale list in this docstring would be read as the
+    predicate to bind. :func:`record_projection.key_properties` is the reader
+    that decides it. Anchoring on
     ``node_key`` rather than on the property column is deliberate: the property
     column is a plain text column with no index, while ``node_key`` is the PK,
     and the CHECK makes the two the same value by construction. ``table`` comes
