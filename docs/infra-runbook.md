@@ -3113,7 +3113,7 @@ customer data. The role, its grants and its login credential are
 [The record's connecting role](#the-records-connecting-role-r6-decision-2026-10-22-9554) below.
 ⚠️ **URL-encode the password** (`@`, `:`, `#`, `/` and `?` are DSN delimiters): a
 raw `p@ss:word` does not fail — it parses into a *different* host/user, and
-`record_dsn()` cannot catch it beyond the scheme check, so the failure surfaces as
+`record_dsn()` cannot catch it beyond the scheme and host checks, so the failure surfaces as
 `circuit_open` / `write_failed` writes rather than as a configuration error.
 §4 of `docs/architecture/STORAGE-ARCHITECTURE.md` decides **one project with
 tenant-scoped rows**, so this is the existing Supabase project — *not* a second
@@ -3163,7 +3163,7 @@ text, so do not grep the 9090 listener for a counter name.
 0. **The arming report — `GET /health`, unauthenticated, no shell needed.**
    The `record` block answers *"is the record ARMED here?"* from the seam's own
    `record_dsn()`, so it cannot report armed for a value the write path would
-   refuse, and it collects **no I/O** (an env read, a scheme check, in-memory
+   refuse, and it collects **no I/O** (an env read, a scheme + host check, in-memory
    counters — never a connection, so an unreachable record cannot fail the probe):
 
    ```bash

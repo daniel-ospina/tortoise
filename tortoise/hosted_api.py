@@ -5716,12 +5716,17 @@ def _record_health() -> dict:
             record_write_failure_counts,
         )
     except Exception as exc:  # liveness must answer, always
+        # NOTHING could be evaluated — the seam itself did not import. So `error`
+        # here does not carry the pairing's meaning (*a value was SET and the
+        # seam REFUSED it*); it says so in words, because an operator must not
+        # be sent to rotate a secret over an import failure (#9548 review P2).
+        reason = f"the record's arming state could not be read: {exc}"[:200]
         return {"armed": False, "ok": False, "dsn": None,
                 "single_tenant_declared": False,
                 "record_write_failures": None,
                 "record_non_journal_skips": None,
                 "record_position_unproven": None,
-                "counters_error": str(exc)[:200], "error": str(exc)[:200]}
+                "counters_error": reason, "error": reason}
     # NOTE the shape: keys are assigned, never `**counters`-spread. A spread
     # placed after `"error": None` silently OVERWROTE the record-level error
     # with a counter error and dropped the three counter keys entirely (#9548
