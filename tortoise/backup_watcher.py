@@ -1091,7 +1091,9 @@ class BackupWatcher:
           * the ``departed`` universe-shrink leg -> the subject is gone;
           * the ``ok`` arm -> a measured-fresh reading.
         Every one goes through ``resolve_incident_state``, so each is held for
-        the same recovery window: a single poll never clears an incident.
+        the same recovery window — at the declared default (2) a single poll
+        never clears an incident; ``ALERT_RECOVERY_STREAK=1`` is the documented
+        "clear now" lever, and then one poll does.
         """
         window = resolve_streak_for(KIND_STALE)
         return (
@@ -1143,13 +1145,19 @@ class BackupWatcher:
                 evidence["age_min"] = age_min
                 evidence["age_human"] = (
                     f"{age_min}m" if age_min < 120 else f"{age_min / 60:.1f}h")
-            # A degraded poll's kept measurement is a LOWER BOUND, whether or not
-            # a drill is also the trigger — the drill branch used to be an `elif`,
-            # so an unconfirmed poll carrying a live simulate object published the
-            # cached age as an exact one.
-            lower_bound = not r2_confirmed
-            if lower_bound:
-                evidence["age_is_lower_bound"] = True
+            # A degraded poll's kept measurement is a STALE CACHED one, so the age
+            # it yields may OVERSTATE the staleness (a newer archive can have
+            # landed unobserved: the true newest is >= this one, so the true age
+            # is <= this age) — an UPPER bound, not a lower one. It is still
+            # reported, because it is real evidence; it just says what it is.
+            # Independent of the trigger: the drill branch used to be an `elif`, so
+            # an unconfirmed poll carrying a live simulate object also published
+            # the cached age as an exact one.
+            # One writer for this key: the qualifier is a property of the READING,
+            # not of the branch that happened to be taken.
+            upper_bound = not r2_confirmed
+            if upper_bound:
+                evidence["age_is_upper_bound"] = True
             if simulate_age is not None and (
                     now is None or simulate_age < newest):
                 # Same newest-primary rule ``compute_status`` applies. Reported
@@ -1167,8 +1175,10 @@ class BackupWatcher:
                     + "), and the simulated age is the incident's trigger. Do "
                     "not hunt for a `backups/` key dated `simulated_age`."
                     + (" The archive listing did NOT answer this poll, so the "
-                       "age above is the last CONFIRMED reading and a LOWER "
-                       "bound." if lower_bound else ""))
+                       "age above is the last CONFIRMED reading and may "
+                       "OVERSTATE the staleness: a newer archive may have landed "
+                       "unobserved." if upper_bound
+                       and evidence.get("age_min") is not None else ""))
                 evidence["closes_when"] = self._stale_closes_when(
                     "the drill ends (the `ops/simulate` object is deleted, "
                     "refreshed or expires) AND the real archive above is itself "
@@ -1176,18 +1186,18 @@ class BackupWatcher:
                     "archive is stale too, this stays open FOR THAT REASON:",)
             elif not r2_confirmed:
                 # A degraded poll keeps the last CONFIRMED measurement, so this
-                # timestamp is real but is not necessarily the newest, and the
-                # age is only a LOWER bound: a newer archive may have landed
-                # while the listing was not answering. Saying so is the whole
-                # point — an exact-looking age off a blind poll is the same
-                # "presented as measured" defect this change removes.
-                evidence["age_is_lower_bound"] = True
+                # timestamp is real but is not necessarily the newest: a newer
+                # archive may have landed while the listing was not answering, so
+                # the reported age may OVERSTATE the staleness (an UPPER bound on
+                # the true newest's age). Saying so is the whole point — an
+                # exact-looking age off a blind poll is the same "presented as
+                # measured" defect this change removes.
                 evidence["measurement"] = (
                     "the archive listing did NOT answer this poll: "
                     "`newest_default_archive` is the last CONFIRMED listing's "
-                    "newest, so `age_min` is a LOWER BOUND — a newer archive may "
-                    "exist unobserved (#3658: a degraded read is not a fresh "
-                    "one).")
+                    "newest, so `age_min` may OVERSTATE the staleness — a newer "
+                    "archive may exist unobserved (#3658: a degraded read is not "
+                    "a fresh one).")
                 evidence["closes_when"] = self._stale_closes_when(
                     f"{fresh_arm}:")
             else:
