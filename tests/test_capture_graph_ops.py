@@ -169,8 +169,55 @@ def test_distribution_distinct_sessions_dedupes_a_retry():
     assert d["distinct_sessions"] == 2
 
 
+def _metered_scope(handle) -> tuple | None:
+    """The (STORE, graph) a ``_GuardedGraph`` handle belongs to.
+
+    A graph NAME is not an identity: two embedded stores both call their graph
+    ``tortoise``, so scoping on the name alone would bill one store's traffic to
+    the other. ``_GuardedGraph`` wraps ONE projection (``__slots__ = ("_g",
+    "_proj")``), so the projection is the authoritative witness — ``_path`` for
+    the embedded lane, ``_host`` for the server lane.
+    """
+    proj = getattr(handle, "_proj", None)
+    if proj is None:
+        return None
+    store = getattr(proj, "_path", None)
+    if store is None:
+        store = getattr(proj, "_host", None)
+    if store is None:
+        store = id(getattr(proj, "db", None))
+    return (store, getattr(proj, "_graph_name", None))
+
+
 # ── integration: a real capture reports a non-zero, phase-attributed count ──
 def test_capture_reports_nonzero_phase_attributed_ops(tmp_path, monkeypatch):
+    """A real capture reports a non-zero, phase-attributed, EXACT op count.
+
+    ⛔ Read the oracle's SCOPE before its numbers (main-red, cf15bded5). CI
+    reported ``98 ops recorded for 614 guarded queries issued during the
+    capture — a double count`` and that reading is WRONG twice over:
+
+    * it is not a double count — 98 is not 2x 614 (nor 614 of 98); a double
+      count at the choke point shows as ``total ≈ 2x``, and the recorded
+      number was the SMALLER one;
+    * the 614 was never this capture's traffic. ``monkeypatch.setattr`` on
+      ``_GuardedGraph.query`` patches a CLASS, so an unscoped counter sees
+      every guarded query in the PROCESS: other tenants' handles, unbound
+      worker threads, a concurrent sweep. In that CI session the captured log
+      shows 34 foreign tenant graphs (``org_ev-000728…000761``) being opened
+      for the FIRST time inside the measured window — a population the capture
+      does not own, and the shape of the surplus (516 ≈ 15 per graph). A
+      process-wide total can only ever measure "all graph work in the process
+      while a capture ran", which is not the figure this module publishes.
+
+    ⛔ THE ASSERTION IS THEREFORE SCOPED, NOT RELAXED. It still demands exact
+    equality — but against the guarded queries issued ON THIS CAPTURE'S OWN
+    GRAPH, which is the population the choke point is supposed to meter. A
+    double count still shows here (2x), a dropped record still shows here
+    (under-count), and neither can be hidden by a busy neighbour: an op on
+    another graph is counted as ``foreign`` and is never compared to ``total``.
+    """
+    import tortoise.graph_ops as graph_ops
     from tortoise.projection import _GuardedGraph
 
     # An INDEPENDENT ORACLE for the headline number. ``total`` is BY
@@ -179,21 +226,39 @@ def test_capture_reports_nonzero_phase_attributed_ops(tmp_path, monkeypatch):
     # earlier version of this test could not fail for that reason. Counting the
     # guarded queries ACTUALLY ISSUED does: if the choke point recorded one op
     # twice, ``total`` would be 2x this number.
-    issued = {"n": 0}
+    own = {"scope": None}
+    issued = {"n": 0, "unmetered": 0, "foreign": 0}
     _real_query = _GuardedGraph.query
 
     def _counting_query(self, cypher, *args, **kwargs):
+        if own["scope"] is not None and _metered_scope(self) != own["scope"]:
+            # ANOTHER (store, graph)'s op: not this capture's work, and no
+            # capture meters it. Counted apart so a busy process can never be
+            # mistaken for a double count (see the docstring).
+            issued["foreign"] += 1
+            return _real_query(self, cypher, *args, **kwargs)
         issued["n"] += 1
+        if graph_ops._ACTIVE.get() is None:
+            # On OUR graph but with no counter in context: the op is issued
+            # and silently unmetered (an unbound thread — the failure
+            # ``bind_metering_context`` exists to prevent). Separated out so
+            # the message names it instead of blaming a phantom double count.
+            issued["unmetered"] += 1
         return _real_query(self, cypher, *args, **kwargs)
 
     monkeypatch.setattr(_GuardedGraph, "query", _counting_query)
 
     sdk = TortoiseSDK(db_path=str(tmp_path / "gops.db"))
     try:
+        # Resolve the capture's own (store, graph) BEFORE anything is measured —
+        # `_get_proj()` issues setup queries of its own, and until the scope is
+        # known no query can be classified.
+        own["scope"] = _metered_scope(sdk._get_proj().g)
+        assert own["scope"] is not None, "could not resolve the capture's store"
         # warm-up: index creation etc. is NOT a captured session and must not
         # leak into any capture's count.
         sdk.capture_session(CONV, session_id="warmup_000")
-        issued["n"] = 0  # measure ONLY the capture below
+        issued.update(n=0, unmetered=0, foreign=0)  # measure ONLY the capture
         res = sdk.capture_session(CONV, session_id="gops_000")
         # Snapshot HERE, before ``close()`` — the close is teardown, not
         # capture, so it must not enter the oracle's denominator.
@@ -207,6 +272,8 @@ def test_capture_reports_nonzero_phase_attributed_ops(tmp_path, monkeypatch):
         # moved with the environment, so it read as "an accident of the embedded
         # lane" if you only ever ran this file on this machine.
         measured = issued["n"]
+        unmetered = issued["unmetered"]
+        foreign = issued["foreign"]
     finally:
         sdk.close()
 
@@ -230,28 +297,87 @@ def test_capture_reports_nonzero_phase_attributed_ops(tmp_path, monkeypatch):
         "commit bucket")
     assert ops["by_phase"]["belief"]["total"] > 0
     # No op is double-counted — checked against the guarded queries ACTUALLY
-    # ISSUED **during the capture**, not against a restatement of the
+    # ISSUED **on this capture's graph**, not against a restatement of the
     # counter's own definition (``total`` is BY CONSTRUCTION
     # ``sum(by_phase)``, so that comparison moves both sides together and
     # cannot fail).
     #
     # Equality is the right assertion *for this capture*, but not because every
-    # guarded query is metered — two paths are deliberately unmetered and this
-    # capture happens to take neither:
-    #   * a refused bulk wipe is checked BEFORE the choke point
-    #     (``projection._assert_test_graph``) and is not work the capture
-    #     caused, so it is counted by the oracle and not by the meter;
-    #   * ``record_graph_op`` is fail-soft (``except Exception`` → WARNING), so
-    #     a drop is possible by design.
-    # The honest form of the claim is therefore: every guarded query that
-    # REACHES ``record_graph_op`` is recorded, and it neither drops nor doubles
-    # for this capture. If a future capture issues a refused wipe, this REDs
-    # with an under-count on a correct meter — so read the failure before
-    # assuming the meter is wrong.
+    # guarded query in the process belongs to it — two populations are
+    # deliberately outside it, and each is now counted apart rather than
+    # conflated into the total (which is what made cf15bded5 red):
+    #   * a query on ANOTHER graph (another tenant's handle, a concurrent
+    #     sweep) is someone else's work and no capture meters it — `foreign`;
+    #   * a query on THIS graph from a context with no counter in it is the
+    #     real "silently unmetered" failure — `unmetered`, which must be 0.
+    # The honest form of the claim is therefore: every guarded query this
+    # capture issued on its own graph is recorded, and it neither drops nor
+    # doubles. If a future capture issues a refused bulk wipe (checked BEFORE
+    # the choke point, in ``projection._assert_test_graph``), this REDs with an
+    # under-count on a correct meter — so read the failure before assuming the
+    # meter is wrong.
+    assert unmetered == 0, (
+        f"{unmetered} guarded queries on this capture's own graph were issued "
+        "with no capture counter in context — they are silently unmetered "
+        "(an unbound thread; see graph_ops.bind_metering_context)")
     assert ops["total"] == measured, (
-        f"{ops['total']} ops recorded for {measured} guarded queries issued "
-        "during the capture — a double count at the choke point shows exactly "
-        "here (2x), and a dropped record shows as an under-count")
+        f"{ops['total']} ops recorded for {measured} guarded queries issued on "
+        f"this capture's own graph ({foreign} more were issued on OTHER "
+        "(store, graph) pairs and belong to no capture) — a double count at the "
+        "choke point shows exactly here (2x), and a dropped record shows as an "
+        "under-count")
+
+
+def test_the_capture_report_survives_a_foreign_population_in_the_window(
+        tmp_path, monkeypatch):
+    """The oracle must be scoped to the capture's OWN graph — cf15bded5 was red.
+
+    This is the cf15bded5 red, made deterministic. ``test (c)`` reported ``98
+    ops recorded for 614 guarded queries issued ... a double count``; the
+    capture's own traffic was the 98. ``monkeypatch.setattr`` on
+    ``_GuardedGraph.query`` patches a CLASS, so an unscoped oracle bills every
+    tenant's traffic to the capture — and the more work the process is doing,
+    the redder a CORRECT meter looks.
+
+    So: a second tenant's handle hammers its own graph for the whole measured
+    window, and this test runs the integration test's own body through it.
+
+    * with an unscoped (process-wide) oracle this REDs — ``total`` is exact and
+      the oracle also counted the neighbour, which is what cf15bded5 did;
+    * with the graph-scoped oracle it passes, and the exactness it asserts is
+      untouched (the foreign ops are counted separately, never compared to
+      ``total``).
+
+    Falsified by reverting the oracle to a bare ``issued["n"] += 1``: the
+    neighbour's ops re-enter the denominator and this fails with a phantom
+    "double count" on a meter that recorded every one of its own ops once.
+    """
+    import threading
+
+    foreign = TortoiseSDK(db_path=str(tmp_path / "foreign.db"))
+    stop = threading.Event()
+    worker = None
+
+    try:
+        foreign_graph = foreign._get_proj().g   # open it HERE, not on the worker
+
+        def _foreign_work():
+            while not stop.is_set():
+                for _ in range(5):
+                    foreign_graph.query("MATCH (n:Point) RETURN count(n)")
+
+        worker = threading.Thread(
+            target=_foreign_work, name="foreign-tenant", daemon=True)
+        worker.start()
+        scoped = tmp_path / "scoped"   # a fresh store for the nested capture
+        scoped.mkdir()
+        # The integration test's OWN body, under a foreign population.
+        test_capture_reports_nonzero_phase_attributed_ops(scoped, monkeypatch)
+    finally:
+        stop.set()
+        if worker is not None:
+            worker.join(timeout=10)
+        foreign.close()
 
 
 def test_metering_context_reaches_a_worker_thread():
