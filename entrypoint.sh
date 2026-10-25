@@ -104,8 +104,16 @@ _redact_uri() {
                     *[a-zA-Z]*) ;;
                     *) return 1 ;;
                 esac
+                # `[!0-9]` is a COLLATION-SENSITIVE range: under a UTF-8
+                # locale (measured: en_US.UTF-8) bash matches U+0660 and the
+                # other Arabic-Indic digits inside `0-9`, so `host:٠` read as a
+                # numeric port and the fragment was accepted while the
+                # canonical helper refused it. The explicit character LIST is
+                # not collated, so it is ASCII-only in every locale — which is
+                # the contract `_mask_uri_userinfo` documents. Do not "tidy"
+                # this back into a range.
                 case "${1##*:}" in
-                    ''|*[!0-9]*) return 1 ;;
+                    ''|*[!0123456789]*) return 1 ;;
                 esac
                 if [ -n "${1%%:*}" ]; then
                     return 0
@@ -212,8 +220,13 @@ _redact_uri() {
                                     # (`:[0-9]*` matches `:6379:S3n`), so a
                                     # bracketed credential failed OPEN here
                                     # while the canonical masked it.
+                                    #
+                                    # The explicit list, not `[!0-9]`: a range
+                                    # is collation-sensitive and admits the
+                                    # Arabic-Indic digits under a UTF-8 locale
+                                    # (see `_fragment_tell`).
                                     case "${tail#:}" in
-                                        ''|*[!0-9]*) shaped=1 ;;
+                                        ''|*[!0123456789]*) shaped=1 ;;
                                     esac
                                     ;;
                                 *) shaped=1 ;;
@@ -232,8 +245,13 @@ _redact_uri() {
                                 # credential, so a password-less target keeps
                                 # printing unchanged. An empty or non-numeric
                                 # tail is credential material.
+                                #
+                                # The explicit list, not `[!0-9]`: a range is
+                                # collation-sensitive and admits the
+                                # Arabic-Indic digits under a UTF-8 locale
+                                # (see `_fragment_tell`).
                                 case "$rest" in
-                                    ''|*[!0-9]*) shaped=1 ;;
+                                    ''|*[!0123456789]*) shaped=1 ;;
                                 esac
                             fi
                             ;;
