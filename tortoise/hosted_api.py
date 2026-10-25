@@ -9593,6 +9593,12 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
     * `prefer` — the record first, with a NAMED, COUNTED fallback to the cache
       (`servedFrom` / `fallbackReason` on the response).
 
+    ⚠️ **503 is only for a record that cannot be REACHED.** A record that is
+    MISCONFIGURED answers **500** in either armed mode, with no fallback and no
+    count — an absent or malformed `TORTOISE_RECORD_DSN`, an unresolvable
+    tenant, an unprojectable row, a tenancy that bypasses RLS: retrying repairs
+    none of them, so `prefer` does not treat them as "still incomplete".
+
     ⚠️ A record-served answer carries the record's PRIMARY field set. Two
     differences from the cache answer, both deliberate: `content_hash` is
     RE-DERIVED here (a pure function of `content`, #2795 D2 — the schema refuses
@@ -9715,9 +9721,13 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
                 # defect §17.2 exists to forbid, mirrored onto the record.
                 raise HTTPException(
                     status_code=503,
+                    # `str(e)`, not `type(e).__name__`: `RecordUnavailable`
+                    # is built with its diagnosis inside the message ("the
+                    # record could not be opened (OperationalError)"), and the
+                    # class name alone is the one thing the caller already
+                    # knows — it is the wrapper that raised.
                     detail=(f"the record could not answer this read "
-                            f"({type(e).__name__}) — absence is NOT "
-                            f"established")) from e
+                            f"({e}) — absence is NOT established")) from e
             except record_serve.RecordServeError as e:
                 raise HTTPException(status_code=500, detail=str(e)) from e
             except Exception as e:
