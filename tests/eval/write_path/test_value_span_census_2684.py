@@ -42,7 +42,8 @@ observation: it answers *"what would the shipped mechanism stamp on these
 committed points?"*. The structural reason is that the measuring harness
 persists the S2 *model* output (``tests/eval/write_path/raw_vs_narrative.py`` →
 ``ev2.run_s2(...)``), which is pre-``pt_entry``; the span is stamped later, when
-``pt_entry`` is built (``extractor_v2.py:7482-7496``). It is NOT a question of
+``pt_entry`` is built (``extractor_v2.py:7489-7496``, stamped at
+``:7504-7507``). It is NOT a question of
 dates — the receipts (committed 2026-10-19, ``ecc7bc8ca8``) postdate #8659
 (``2312845b6``, 2026-10-14) — so no re-ingest through that harness can ever put
 a span key in a receipt.
@@ -222,32 +223,66 @@ def _stamp_inputs(point: dict) -> tuple[str, str]:
     write path clamps them.
 
     ⛔ Not the receipt's raw strings. ``extractor_v2`` trims the content to
-    ``_MAX_CONTENT`` (``:7340``) and the quote to 200 chars (``:7373``) BEFORE
-    ``_value_verbatim_span(content, quote, ...)`` is called (``:7494``); only
-    ``_resolve_source_turn`` gets the raw point (``:7478``, deliberately). A
-    census on the raw strings therefore answers a question production never
-    asks: a >200-char quote gets an address production cannot stamp. Measured
-    over the sealed corpus: 3 of the 217 points carry a >200-char quote and 1
-    of them is value-bearing AND spanned, where the raw census reports
-    ``(0, 201)`` and production writes ``(0, 200)``. No published count moves
-    (the other two are value-free, and no content reaches ``_MAX_CONTENT``),
-    which is exactly why nothing else would ever catch it."""
+    ``_MAX_CONTENT`` (``:7350``) and the quote to ``_MAX_QUOTE`` (``:7383``)
+    BEFORE ``_value_verbatim_span(content, quote, ...)`` is called (``:7504``);
+    only ``_resolve_source_turn`` gets the raw point (``:7488``, deliberately).
+    A census on the raw strings therefore answers a question production never
+    asks: a >``_MAX_QUOTE``-char quote gets an address production cannot stamp.
+    Measured over the sealed corpus: 3 of the 217 points carry a
+    >``_MAX_QUOTE``-char quote and 1 of them is value-bearing AND spanned, where
+    the raw census reports ``(0, 201)`` and production writes ``(0, 200)``. No
+    published count moves (the other two are value-free, and no content reaches
+    ``_MAX_CONTENT``), which is exactly why nothing else would ever catch it.
+
+    ⛔ BOTH caps are IMPORTED from production, never re-typed here. An earlier
+    revision of this function carried its own ``[:200]``, which made the pin
+    below self-referential: it compared the census against an expectation
+    produced by that same copy, so raising production's cap to 250 left this
+    whole file green while the census reported offsets production never writes.
+    With the caps imported, production's cap and the census's cap are one
+    object, and the literal ``(0, 200)`` in the pin is what forces a re-measure.
+    """
     content = str(point.get("content") or "").strip()[:v2._MAX_CONTENT]
-    quote = str(point.get("quote") or "").strip()[:200]
+    quote = str(point.get("quote") or "").strip()[:v2._MAX_QUOTE]
     return content, quote
 
 
 def _absence_class(turn_idx: int | None, quote: str,
-                   warnings: list[str]) -> str:
+                   edus: list[dict]) -> str:
+    """WHICH reported class an absence belongs to, derived from SETTLED FACTS.
+
+    ⛔ This must never read the warning text. Deriving the class from a warning
+    substring and then asserting that the warning carries that substring is
+    circular (``band`` ⟺ a warning saying "token-overlap band"): swapping the
+    two messages inside ``_value_verbatim_span`` would move the classifier with
+    the swap and leave both the census and the pin green. So the class comes
+    from the same inputs production decides on — the quote, the resolved turn's
+    own text, and whether the addressed text carries a value — exactly mirroring
+    ``_value_verbatim_span``'s own branch order.
+
+    The caller has already established the point is value-bearing and that
+    ``_value_verbatim_span`` returned ``None``, so a mirror that agrees with
+    production lands on one of the four classes below. ``unclassified`` is the
+    fifth, and it means the mirror DISAGREES — see its own note.
+    """
     if not quote:
         return "empty_quote"
     if turn_idx is None:
         return "no_turn"
-    if any("token-overlap band" in w for w in warnings):
+    turn_text = v2._turn_text_by_index(edus, turn_idx)
+    span = v2._verbatim_span_in_turn(turn_text, quote)
+    if span is None:
         return "band"
-    if any("carries no value" in w for w in warnings):
+    if not v2._carries_value(turn_text[span[0]:span[1]]):
+        # verbatim-present, so the stamp bailed on the ADDRESSED TEXT: the quote
+        # is the point's context, not its value sentence.
         return "valuefree_quote"
-    return "unclassified"          # never expected — see the census test
+    # ⛔ REACHABLE, and deliberately so: the mirror says a span SHOULD have been
+    # stamped (verbatim address + a value in it) yet production returned None —
+    # so `_value_verbatim_span` has a bail-out path this mirror does not model.
+    # Reporting it as `unclassified` surfaces that divergence instead of
+    # silently folding it into `valuefree_quote`.
+    return "unclassified"
 
 
 def _census() -> dict:
@@ -278,7 +313,7 @@ def _census() -> dict:
                     # the advisory index named a turn the resolver refuses
                     out["moved"].append((session, arm, point.get("source_turn_id"),
                                          content[:70]))
-                klass = _absence_class(turn_idx, quote, warnings)
+                klass = _absence_class(turn_idx, quote, edus)
                 if klass == "unclassified":
                     out["unclassified"].append((session, arm, content, quote))
                 out["absences"][klass] = out["absences"].get(klass, 0) + 1
@@ -324,12 +359,18 @@ def test_the_census_stamps_on_the_inputs_production_hands_it():
     """The clamps are the FIX, so they must be pinned by a re-derivation.
 
     ``_stamp_inputs`` trims the content to ``_MAX_CONTENT`` and the quote to
-    200 chars because that is what ``extractor_v2`` hands
-    ``_value_verbatim_span`` (``:7340`` / ``:7373`` -> ``:7494``). Measured at
-    this head: exactly ONE point in the population is value-bearing AND
-    spanned AND carries a >200-char quote — ``wp04_aurora_perf``/``raw`` — and
-    it is the only place the two readings differ, ``(0, 201)`` raw vs
+    ``_MAX_QUOTE`` because that is what ``extractor_v2`` hands
+    ``_value_verbatim_span`` (``:7350`` / ``:7383`` -> ``:7504``). Measured at
+    this head: 3 points in the population carry a >``_MAX_QUOTE``-char quote and
+    exactly ONE of them is value-bearing AND spanned — ``wp04_aurora_perf``/``raw``
+    — and it is the only place the two readings differ, ``(0, 201)`` raw vs
     ``(0, 200)`` clamped.
+
+    ⛔ **The runbook's "3" is pinned HERE, over ALL long quotes** — not over the
+    value-bearing subset the ``found`` pin below uses. Pinning only the subset
+    would let a fourth, value-FREE long quote appear and make the runbook's
+    "3 of the 217" false while this test stayed green (the value-bearing count
+    would be unmoved at 1).
 
     ⛔ **This test exists because nothing else reds without the clamps.**
     Reverting ``_stamp_inputs`` to the raw receipt strings leaves the whole
@@ -341,14 +382,16 @@ def test_the_census_stamps_on_the_inputs_production_hands_it():
     both readings, not as a constant: if the clamps are removed the clamped
     arm returns ``(0, 201)`` and reds here."""
     found = []
+    long_quotes: list[tuple[str, str]] = []
     for session in SESSIONS:
         for arm in ARMS:
             edus = _edus(session)
             for point in _points(session, arm):
                 raw_content = str(point.get("content") or "").strip()
                 raw_quote = str(point.get("quote") or "").strip()
-                if len(raw_quote) <= 200:
+                if len(raw_quote) <= v2._MAX_QUOTE:
                     continue
+                long_quotes.append((session, arm))
                 content, quote = _stamp_inputs(point)
                 if not v2._carries_value(content, quote):
                     continue
@@ -358,8 +401,13 @@ def test_the_census_stamps_on_the_inputs_production_hands_it():
                 raw = v2._value_verbatim_span(
                     raw_content, raw_quote, turn, edus, warnings=[])
                 found.append((session, arm, raw, clamped))
+    assert len(long_quotes) == 3, (
+        f"the >_MAX_QUOTE-char quote population is {len(long_quotes)} "
+        f"({sorted(long_quotes)}), pinned 3 — the runbook publishes "
+        "\"3 of the 217 points carry a >_MAX_QUOTE-char quote\"; re-measure "
+        "it before changing this pin")
     assert len(found) == 1, (
-        "the >200-char value-bearing quote population moved: "
+        "the >_MAX_QUOTE-char value-bearing quote population moved: "
         f"{found} — re-measure before trusting (0, 200) below")
     session, arm, raw, clamped = found[0]
     assert (session, arm) == ("wp04_aurora_perf", "raw")
@@ -421,6 +469,83 @@ def test_every_value_bearing_point_carries_a_span_or_is_a_REPORTED_class():
         " — a NEW class here means a silent drop, check it before updating")
 
 
+def _per_session_split() -> dict[tuple[str, str], tuple]:
+    """Runbook §2.1's table, re-derived: ``(value_bearing, spanned, absences)``
+    per ``(session, arm)`` arm, in the SHIPPED order."""
+    out: dict[tuple[str, str], tuple] = {}
+    for session in SESSIONS:
+        edus = _edus(session)
+        for arm in ARMS:
+            value_bearing = spanned = 0
+            absences: dict[str, int] = {}
+            for point in _points(session, arm):
+                content, quote = _stamp_inputs(point)
+                if not v2._carries_value(content, quote):
+                    continue
+                value_bearing += 1
+                warnings: list[str] = []
+                turn_idx = v2._resolve_source_turn(point, edus,
+                                                   warnings=warnings)
+                if v2._value_verbatim_span(content, quote, turn_idx, edus,
+                                           warnings=warnings) is not None:
+                    spanned += 1
+                    continue
+                klass = _absence_class(turn_idx, quote, edus)
+                absences[klass] = absences.get(klass, 0) + 1
+            out[(session, arm)] = (value_bearing, spanned,
+                                   tuple(sorted(absences.items())))
+    return out
+
+
+#: Runbook §2.1's 14-row split, VERBATIM. This is the only published census
+#: figure that says WHICH session lost WHICH class, so it is pinned row-for-row
+#: rather than only through the totals: a corpus change can preserve `112`/`101`
+#: and all four class counts while moving points BETWEEN sessions, which would
+#: leave the table stale under a green suite.
+EXPECTED_PER_SESSION_SPLIT = {
+    ("wp01_quarry_debug", "raw"): (9, 8, (("band", 1),)),
+    ("wp01_quarry_debug", "narrative"): (10, 9, (("band", 1),)),
+    ("wp02_lumen_refactor", "raw"): (6, 6, ()),
+    ("wp02_lumen_refactor", "narrative"): (7, 5, (("valuefree_quote", 2),)),
+    ("wp03_ember_design", "raw"): (6, 6, ()),
+    ("wp03_ember_design", "narrative"): (5, 5, ()),
+    ("wp04_aurora_perf", "raw"): (9, 9, ()),
+    ("wp04_aurora_perf", "narrative"): (12, 12, ()),
+    ("wp05_retro_writeup", "raw"): (10, 10, ()),
+    ("wp05_retro_writeup", "narrative"): (11, 10, (("no_turn", 1),)),
+    ("wp06_quarry_rollout", "raw"): (10, 10, ()),
+    ("wp06_quarry_rollout", "narrative"): (5, 1, (("band", 1), ("no_turn", 3))),
+    ("wp07_bluepeak_followup", "raw"): (4, 3, (("empty_quote", 1),)),
+    ("wp07_bluepeak_followup", "narrative"): (8, 7, (("valuefree_quote", 1),)),
+}
+
+
+def test_the_per_session_split_is_pinned():
+    """Runbook §2.1 is a MEASUREMENT, not a reading.
+
+    The totals alone are not a sufficient guard: a corpus change can preserve
+    ``112``/``101`` and the four absence totals while moving a point from one
+    session's arm to another's, and §2.1 is the only published figure that says
+    which session lost which class. Diffed row-for-row, and the diff names the
+    rows that moved.
+    """
+    split = _per_session_split()
+    moved = {k: (split.get(k), EXPECTED_PER_SESSION_SPLIT[k])
+             for k in EXPECTED_PER_SESSION_SPLIT
+             if split.get(k) != EXPECTED_PER_SESSION_SPLIT[k]}
+    assert not moved, (
+        "runbook §2.1's per-session split moved (got, pinned): "
+        f"{moved} — re-measure the table before publishing it")
+    assert split.keys() == EXPECTED_PER_SESSION_SPLIT.keys(), (
+        "the measured arms no longer match §2.1's rows: "
+        f"extra={sorted(split.keys() - EXPECTED_PER_SESSION_SPLIT.keys())} "
+        f"missing={sorted(EXPECTED_PER_SESSION_SPLIT.keys() - split.keys())}")
+    # and the split must still sum to the pinned totals — the two guards are
+    # independent, so agreement here cannot mask a moved row above.
+    assert sum(v[0] for v in split.values()) == CENSUS["value_bearing"]
+    assert sum(v[1] for v in split.values()) == CENSUS["spanned"]
+
+
 def test_every_absence_in_the_census_is_REPORTED():
     """**0 silent absences** — the claim the runbook and the index row publish.
 
@@ -435,9 +560,13 @@ def test_every_absence_in_the_census_is_REPORTED():
 
     ⚠️ That second form is the string a ``no_turn`` absence emits, so for this
     corpus's single ``empty_quote`` point the warning proves the absence is
-    REPORTED but does not identify the class — the class rides on
-    ``_absence_class``'s derivation from the (empty) quote. The doc claims say
-    exactly that; do not read this assertion as class-identification.
+    REPORTED but does not identify the class — ``_absence_class`` derives the
+    class from the point's own settled facts (it has no quote at all) while the
+    warning comes from the resolver. The doc claims say exactly that; do not
+    read this assertion as class-identification *for this class*. For
+    ``band``/``valuefree_quote`` the assertion IS class-identification, because
+    those classes are derived from the resolved turn's text and the addressed
+    text's own value reading — never from the warning string being checked.
 
     ⛔ One shape is silent BY CONSTRUCTION and is NOT exercised here: with an
     EMPTY ``edus`` list ``_resolve_source_turn`` returns ``None`` before any
@@ -459,7 +588,7 @@ def test_every_absence_in_the_census_is_REPORTED():
                 if v2._value_verbatim_span(content, quote, turn_idx, edus,
                                            warnings=warnings) is not None:
                     continue
-                klass = _absence_class(turn_idx, quote, warnings)
+                klass = _absence_class(turn_idx, quote, edus)
                 if not warnings:
                     silent.append((klass, session, arm, content[:60]))
                     continue
@@ -821,7 +950,7 @@ def test_the_trimmed_anchor_relaxation_is_pinned_on_both_readings():
                     continue
                 # The relaxation only applies where production HAS a turn.
                 if turn_idx is not None and _absence_class(
-                        turn_idx, quote, warnings) == "band":
+                        turn_idx, quote, edus) == "band":
                     cand = _longest_quote_run(
                         v2._turn_text_by_index(edus, turn_idx), quote)
                     if cand is not None:
@@ -832,7 +961,7 @@ def test_the_trimmed_anchor_relaxation_is_pinned_on_both_readings():
                 if adv_idx is not None and v2._value_verbatim_span(
                         content, quote, adv_idx, edus,
                         warnings=adv_warnings) is None and _absence_class(
-                        adv_idx, quote, adv_warnings) == "band":
+                        adv_idx, quote, edus) == "band":
                     cand = _longest_quote_run(
                         v2._turn_text_by_index(edus, adv_idx), quote)
                     if cand is not None:
