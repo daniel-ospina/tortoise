@@ -147,6 +147,23 @@ mode is pinned (`--untracked-files=normal`) rather than read from the
 operator's git config, so a repository configured not to report untracked
 files cannot make a dirty tree look clean.
 
+`git status` is **not the only oracle**, because it can be told to say
+"clean" in two ways that have nothing to do with the tree: an index flag
+(`git update-index --assume-unchanged` / `--skip-worktree`) makes git skip a
+modified file's content, and an ignore rule (`.gitignore`, `.git/info/exclude`,
+a global `core.excludesFile`) hides an untracked, importable module. Both are
+recorded defeats of a status/diff check elsewhere in this package
+(`guard_measured_revision.py`), so the record also puts the question to git
+with no filter in it, over the **executed surface** (`tortoise/` + `tools/`):
+the untracked set is enumerated **without** `--exclude-standard`, and every
+tracked file's index tag is read — `H` is ordinary, a lowercase tag is
+assume-unchanged, `S` is skip-worktree, and anything else is refused. Each such
+path is recorded as an uncommitted path, so publish refuses the run. Only noise
+suffixes (editor/VCS droppings and byte-caches — the set
+`guard_measured_revision` excuses, imported rather than re-listed) are excused
+from the untracked scan; a failed `git ls-files` is recorded as
+not-provably-clean, exactly as a failed `git status` is.
+
 ## Why this is a separate tree from `tests/eval/write_path/`
 
 Mechanical, not stylistic: the write-path corpus's own integrity gate derives

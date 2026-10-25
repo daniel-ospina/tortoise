@@ -1759,6 +1759,83 @@ def test_the_published_report_names_the_tree_the_run_executed_from(published,
 # ways a run can escape its own record: a tree that changes WHILE it runs, and a
 # renderer that turns an absent record into the word "clean".
 
+def _make_surface_repo(base: Path) -> Path:
+    """A throwaway repo that HAS the executed surface (``tortoise/``+``tools/``).
+
+    ``code_identity`` asks git about the surface a measurement run can import,
+    so a mechanism test needs a repository where that surface EXISTS — the
+    corpus fixtures in this file (a corpus, a pre-registration and a marker) do
+    not. Also asserts the surface is clean before a test dirties it, which is
+    the other half of the discriminating power: the new scan must not refuse a
+    tree that is actually clean.
+    """
+    repo = base / "surface-repo"
+    (repo / "tools").mkdir(parents=True)
+    (repo / "tortoise").mkdir()
+    _git_init(repo)
+    (repo / "tools" / "probe_step.py").write_text("VALUE = 1\n",
+                                                   encoding="utf-8")
+    (repo / "tortoise" / "ask_lane.py").write_text("VALUE = 1\n",
+                                                    encoding="utf-8")
+    assert _git_commit(repo, "the executed surface")
+    assert m.code_identity(repo)["dirty_paths"] == []
+    return repo
+
+
+def test_an_IGNORE_RULE_cannot_hide_an_untracked_executed_module(tmp_path):
+    """FAIL-BEFORE: an ignored, importable module read as CLEAN.
+
+    `git status --untracked-files=normal` never lists an ignored path, so a
+    `.gitignore` entry (or `.git/info/exclude`, or a global `core.excludesFile`)
+    hides an untracked module that a run imports — the tree reads clean and the
+    report tells a reader the numbers came from the recorded sha. The premise is
+    asserted (`status` really prints nothing) so this cannot pass by the harness
+    failing to reproduce the hiding rule.
+    """
+    repo = _make_surface_repo(tmp_path)
+    (repo / ".gitignore").write_text("local_patch.py\n", encoding="utf-8")
+    assert _git_commit(repo, "ignore: a local patch")
+    patched = repo / "tortoise" / "local_patch.py"
+    patched.write_text("VALUE = 999  # unrecorded patch\n", encoding="utf-8")
+    assert m._git(repo, "status", "--porcelain",
+                  "--untracked-files=normal").stdout.strip() == "", (
+        "the fixture did not reproduce the hiding ignore rule")
+    identity = m.code_identity(repo)
+    assert any("tortoise/local_patch.py" in path
+               for path in identity["dirty_paths"]), identity
+
+
+def test_an_INDEX_FLAG_cannot_hide_a_modified_executed_module(tmp_path):
+    """FAIL-BEFORE: a modified module behind an index flag read as CLEAN.
+
+    `--assume-unchanged` and `--skip-worktree` both tell git not to examine a
+    file's working-tree content (git-update-index, ASSUME UNCHANGED / and
+    SKIP-WORKTREE BIT), so the patched executed module prints NOTHING in
+    `git status` while the bytes on disk are the patched ones — the exact false
+    PASS this record exists to close, with no receipt field tampered with.
+    Both flags are exercised: they are different mechanisms (the tag is `h`
+    versus `S`) and a check that reads only one of them leaves the other open.
+    """
+    for flag in ("--assume-unchanged", "--skip-worktree"):
+        repo = _make_surface_repo(tmp_path / flag.lstrip("-"))
+        target = "tools/probe_step.py"
+        assert m._git(repo, "update-index", flag, target).returncode == 0
+        (repo / target).write_text("VALUE = 999  # unrecorded patch\n",
+                                   encoding="utf-8")
+        assert m._git(repo, "status", "--porcelain",
+                      "--untracked-files=normal").stdout.strip() == "", (
+            f"the fixture did not reproduce the {flag} hiding flag")
+        identity = m.code_identity(repo)
+        assert any("tools/probe_step.py" in path
+                   for path in identity["dirty_paths"]), (flag, identity)
+        # ... and clearing the flag clears the refusal: the record is about the
+        # suppression, not about the file having a patch someone could see.
+        assert m._git(repo, "update-index", "--no" + flag[1:],
+                      target).returncode == 0
+        assert m._git(repo, "checkout", "--", target).returncode == 0
+        assert m.code_identity(repo)["dirty_paths"] == [], flag
+
+
 def test_a_dirty_tree_is_DETECTED_and_refused_end_to_end(bound_repo, tmp_path,
                                                          capsys):
     """FAIL-BEFORE with `code_identity` forced clean: this published (rc 0).
@@ -1773,30 +1850,35 @@ def test_a_dirty_tree_is_DETECTED_and_refused_end_to_end(bound_repo, tmp_path,
     tracked.write_text("edited after the run\n", encoding="utf-8")
     (repo / "untracked_note.txt").write_text("never committed\n",
                                               encoding="utf-8")
-    identity = m.code_identity(repo)
-    assert "run.marker" in identity["dirty_paths"], identity
-    assert "untracked_note.txt" in identity["dirty_paths"], identity
+    # ⛔ try/finally: `bound_repo` is MODULE-scoped, so an assertion that fires
+    # below would otherwise leave HEAD dirty and fail every later test in the
+    # file for a reason that is not its own subject.
+    try:
+        identity = m.code_identity(repo)
+        assert "run.marker" in identity["dirty_paths"], identity
+        assert "untracked_note.txt" in identity["dirty_paths"], identity
 
-    run = m.run_sealed(corpus_root=bound_repo["corpus_dir"], repo_root=repo,
-                       reader_factory=_factory(_RecordingReader(_answer_map(), [])))
-    assert run["code_identity"]["dirty_paths"], "the run lost the dirty paths"
-    scored = m.score(run_report=run, corpus_root=bound_repo["corpus_dir"],
-                     judge=_StubJudge(), judge_spec=_StubJudge.model_id)
-    scored_path = tmp_path / "scored.json"
-    scored_path.write_text(json.dumps(scored), encoding="utf-8")
-    report = tmp_path / "run-report.md"
-    receipt = tmp_path / "receipt.json"
-    rc = m._main(_publish_argv(
-        scored_path=scored_path, commit=bound_repo["run_commit"], report=report,
-        receipt=receipt, corpus_root=bound_repo["corpus_dir"],
-        prereg=bound_repo["prereg_path"], repo=repo))
-    err = capsys.readouterr().err
-    assert rc == 2, "a run from a dirty tree must never be published"
-    assert "uncommitted path" in err and "untracked_note.txt" in err, err
-    assert not report.exists() and not receipt.exists()
-    # Leave the fixture as the other tests expect it (the module is scoped).
-    m._git(repo, "checkout", "--", "run.marker")
-    (repo / "untracked_note.txt").unlink()
+        run = m.run_sealed(corpus_root=bound_repo["corpus_dir"], repo_root=repo,
+                           reader_factory=_factory(_RecordingReader(_answer_map(), [])))
+        assert run["code_identity"]["dirty_paths"], "the run lost the dirty paths"
+        scored = m.score(run_report=run, corpus_root=bound_repo["corpus_dir"],
+                         judge=_StubJudge(), judge_spec=_StubJudge.model_id)
+        scored_path = tmp_path / "scored.json"
+        scored_path.write_text(json.dumps(scored), encoding="utf-8")
+        report = tmp_path / "run-report.md"
+        receipt = tmp_path / "receipt.json"
+        rc = m._main(_publish_argv(
+            scored_path=scored_path, commit=bound_repo["run_commit"], report=report,
+            receipt=receipt, corpus_root=bound_repo["corpus_dir"],
+            prereg=bound_repo["prereg_path"], repo=repo))
+        err = capsys.readouterr().err
+        assert rc == 2, "a run from a dirty tree must never be published"
+        assert "uncommitted path" in err and "untracked_note.txt" in err, err
+        assert not report.exists() and not receipt.exists()
+    finally:
+        # Leave the fixture as the other tests expect it (the module is scoped).
+        m._git(repo, "checkout", "--", "run.marker")
+        (repo / "untracked_note.txt").unlink(missing_ok=True)
     assert m.code_identity(repo)["dirty_paths"] == []
 
 
@@ -1835,28 +1917,33 @@ def test_a_tree_that_moves_WHILE_the_run_measures_is_refused(
                        reader_factory=_factory(_RecordingReader(_answer_map(), [])),
                        mutate=_commit_mid_run,
                        mutate_label="test hook: the tree moved mid-run")
-    identity = run["code_identity"]
-    assert identity["commit"] == start_commit, (
-        "the record must name the tree the run STARTED on")
-    assert identity["at_end"]["commit"] != start_commit, (
-        "the run did not notice that HEAD moved under it")
+    # ⛔ try/finally: `bound_repo` is MODULE-scoped. Without it, one failing
+    # assertion below leaves HEAD at the mid-run commit and every later test in
+    # the file fails for a reason that is not its own subject.
+    try:
+        identity = run["code_identity"]
+        assert identity["commit"] == start_commit, (
+            "the record must name the tree the run STARTED on")
+        assert identity["at_end"]["commit"] != start_commit, (
+            "the run did not notice that HEAD moved under it")
 
-    scored = m.score(run_report=run, corpus_root=bound_repo["corpus_dir"],
-                     judge=_StubJudge(), judge_spec=_StubJudge.model_id)
-    scored_path = tmp_path / "scored.json"
-    scored_path.write_text(json.dumps(scored), encoding="utf-8")
-    report = tmp_path / "run-report.md"
-    receipt = tmp_path / "receipt.json"
-    rc = m._main(_publish_argv(
-        scored_path=scored_path, commit=start_commit, report=report,
-        receipt=receipt, corpus_root=bound_repo["corpus_dir"],
-        prereg=bound_repo["prereg_path"], repo=repo))
-    err = capsys.readouterr().err
-    assert rc == 2, "a run that straddled two trees must never be published"
-    assert "CHANGED while the run was in progress" in err, err
-    assert not report.exists() and not receipt.exists()
-    # Leave the module-scoped fixture where the other tests expect it.
-    assert m._git(repo, "checkout", "-q", start_commit).returncode == 0
+        scored = m.score(run_report=run, corpus_root=bound_repo["corpus_dir"],
+                         judge=_StubJudge(), judge_spec=_StubJudge.model_id)
+        scored_path = tmp_path / "scored.json"
+        scored_path.write_text(json.dumps(scored), encoding="utf-8")
+        report = tmp_path / "run-report.md"
+        receipt = tmp_path / "receipt.json"
+        rc = m._main(_publish_argv(
+            scored_path=scored_path, commit=start_commit, report=report,
+            receipt=receipt, corpus_root=bound_repo["corpus_dir"],
+            prereg=bound_repo["prereg_path"], repo=repo))
+        err = capsys.readouterr().err
+        assert rc == 2, "a run that straddled two trees must never be published"
+        assert "CHANGED while the run was in progress" in err, err
+        assert not report.exists() and not receipt.exists()
+    finally:
+        # Leave the module-scoped fixture where the other tests expect it.
+        m._git(repo, "checkout", "-q", start_commit)
     assert m.code_identity(repo)["commit"] == start_commit
 
 

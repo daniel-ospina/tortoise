@@ -155,6 +155,12 @@ from tools.ask_spotcheck import (  # noqa: E402
     _superseded_live_state,
     _to_iso_date,
 )
+
+# The noise-suffix policy is IMPORTED, not re-listed: the guard and this record
+# must excuse exactly the same set, and a second copy is a copy that drifts.
+from tools.longmem_eval.guard_measured_revision import (  # noqa: E402
+    NOISE_SUFFIXES_FOLDED,
+)
 from tools.longmem_eval.judge import (  # noqa: E402
     DEFAULT_JUDGE_MODEL,
     MockJudge,
@@ -181,6 +187,13 @@ COMMIT_BINDING_SCHEMA = "ask-distilled-commit-binding/v1"
 #: corpus and the protocol; this makes the run say WHICH tree produced the
 #: numbers, so publish can refuse a run from a different one.
 CODE_IDENTITY_SCHEMA = "ask-distilled-code-identity/v1"
+
+#: The surface a measurement run can EXECUTE: the SDK under measurement and the
+#: measurement tooling itself. Mirrors ``DEFAULT_PATHS`` in
+#: :mod:`tools.longmem_eval.guard_measured_revision` — that guard and this
+#: record ask different questions about the SAME surface, so a surface named in
+#: one and not the other would be a hole shaped like the difference.
+EXECUTED_SURFACE: tuple[str, ...] = ("tortoise/", "tools/")
 
 ISSUE = "9097"
 EPIC = "2281"
@@ -609,7 +622,66 @@ def _shallow_boundary(repo_root: Path) -> set[str] | None:
         return None
 
 
-def code_identity(repo_root: str | Path | None) -> dict:
+def _paths_hidden_from_status(
+        repo_root: Path,
+        surface: tuple[str, ...] = EXECUTED_SURFACE) -> list[str] | None:
+    """Paths a ``git status`` answer cannot see, enumerated from git's records.
+
+    ``git status`` is an oracle that takes advice, and both of its advisers can
+    be told to say "clean":
+
+    * ``git update-index --assume-unchanged`` / ``--skip-worktree`` record that
+      git must not look at a file's working-tree content, so a MODIFIED,
+      executed module prints nothing while the file on disk is the patched one
+      (reproduced: status ``[]``, ``ls-files -v`` shows the ``h``/``S`` bit).
+    * an ignore rule (``.gitignore``, ``.git/info/exclude``, a global
+      ``core.excludesFile``) hides an untracked file — an importable module
+      that never even has to be committed to run.
+
+    Both are recorded defeats of a diff-and-status check in this package
+    (``guard_measured_revision``:22-32, ``:481``), which is why the question is
+    put to git here with no filter in it: the untracked set WITHOUT
+    ``--exclude-standard``, and the index TAG of every tracked file (``H``
+    ordinary; a lowercase letter is assume-unchanged, ``S`` skip-worktree,
+    anything else is not ordinary staging).
+
+    ``surface`` bounds the walk because this repo — unlike the throwaway repos
+    the tests build — carries ignored trees (``.venv/``) that are not execution
+    surface, so an unbounded no-ignore enumeration would refuse every real run.
+
+    Returns ``None`` when a git call FAILS: a failed ``ls-files`` has empty
+    stdout, and empty stdout must never read as "nothing hidden".
+    """
+    tagged = _git(repo_root, "ls-files", "-z", "-v", "--", *surface)
+    if tagged.returncode != 0:
+        return None
+    # NO --exclude-standard: an ignore rule must not hide a file from the check.
+    others = _git(repo_root, "ls-files", "-z", "--others", "--", *surface)
+    if others.returncode != 0:
+        return None
+    hidden: list[str] = []
+    for entry in tagged.stdout.split("\0"):
+        if not entry:
+            continue
+        tag, _, rel = entry.partition(" ")
+        if tag != "H":
+            hidden.append(
+                f"{rel} (index flag {tag!r} tells git not to look at this "
+                f"file's content, so the dirty state is suppressed)")
+    for rel in others.stdout.split("\0"):
+        # Excused by SUFFIX only (editor/VCS droppings, and byte-caches) — the
+        # same set ``guard_measured_revision`` excuses, reused rather than
+        # re-listed so the two cannot drift.
+        if not rel or rel.casefold().endswith(NOISE_SUFFIXES_FOLDED):
+            continue
+        hidden.append(
+            f"{rel} (untracked and hidden from `git status` by an ignore "
+            f"rule)")
+    return hidden
+
+
+def code_identity(repo_root: str | Path | None,
+                  *, surface: tuple[str, ...] = EXECUTED_SURFACE) -> dict:
     """The tree the RUN was made from, as the repository reports it.
 
     The publish-time binding makes the named sha vouch for the corpus and the
@@ -626,6 +698,23 @@ def code_identity(repo_root: str | Path | None) -> dict:
     *sha plus an uncommitted patch*, which is not the recorded sha alone. Both
     are recorded here and refused at publish (:func:`_validate_code_identity`),
     never guessed.
+
+    "Clean" is answered by TWO oracles, because the first one can be silenced:
+    the pinned ``git status`` (every tracked modification and every untracked
+    file), plus git's own records over the EXECUTED SURFACE — untracked files
+    enumerated WITHOUT ``--exclude-standard`` and the index tag of every
+    tracked file — which is the only place an ``assume-unchanged`` /
+    ``skip-worktree`` modification and an ignored, importable file are visible
+    (:func:`_paths_hidden_from_status`).
+
+    Residual, stated rather than implied: noise suffixes (``.pyc``/``.pyo``,
+    ``.orig``, ``.rej``, ``.swp``, ``.DS_Store``) are EXCUSED from the untracked
+    scan — the same suffix-only excusal ``guard_measured_revision`` applies —
+    because a byte-cache exists in any tree that has ever imported the package
+    and refusing one would make every real run unpublishable. The measured run
+    is launched byte-code-free (``run_protocol`` passes ``-B`` and
+    ``PYTHONDONTWRITEBYTECODE=1``); a pre-existing forged byte-cache is not
+    examined here.
     """
     if repo_root is None:
         return {
@@ -655,6 +744,17 @@ def code_identity(repo_root: str | Path | None) -> dict:
     else:
         dirty_paths = [line[3:] for line in status.stdout.splitlines()
                        if line.strip()]
+    # ⛔ The status answer is NOT the whole of "was the tree clean?": an index
+    # flag or an ignore rule makes a modified/untracked executed file print
+    # nothing at all. Both are asked of git's records directly, and a git
+    # failure here is recorded as not-provably-clean for the same reason a
+    # failed status is — empty stdout is not a clean tree.
+    hidden = _paths_hidden_from_status(repo_root, surface)
+    if hidden is None:
+        dirty_paths.append(
+            "<git ls-files failed: the tree is not provably clean>")
+    else:
+        dirty_paths.extend(hidden)
     return {
         "schema": CODE_IDENTITY_SCHEMA,
         "commit": commit,
