@@ -301,6 +301,21 @@ RECORD_REAPPLY_EXCLUDED: dict[str, str] = {
     # and this dict is where the decision is recorded rather than left silent.
     "20261024000001_record_session_narrative_carrier.sql":
         "COMMENT ON only — no column, refusal or policy, and the readers parse files",
+    # #9967's `idx_source_canonical_scope`. Classified by the same axis as the
+    # entry above, one migration later: it contributes NO column, NO refusal and
+    # NO policy, and every reader in this tree (`table_columns()`,
+    # `refused_props_names()`, `key_properties()`, `RECORD_MUTATIONS`) parses the
+    # migration FILES — so a container that never applies it reads IDENTICALLY
+    # and writes the same rows. What it changes is the PLAN, not the shape: the
+    # resolver's `canonical_url` arm degrades to a per-statement sequential scan
+    # without it. That is a performance residue on an old container, named here
+    # rather than papered over, and it is NOT the failure class this list exists
+    # for (a column/refusal/policy the readers emit and the container lacks).
+    # `CREATE INDEX IF NOT EXISTS` would also be re-apply safe — the exclusion is
+    # the honest classification, not a statement that re-applying would break.
+    "20261025000002_record_source_canonical_index.sql":
+        "index only — no column, refusal or policy; the readers parse files, and a "
+        "container without it is slower, not wrong",
 }
 
 #: The minimum Supabase-shaped substrate the record migrations need: the three

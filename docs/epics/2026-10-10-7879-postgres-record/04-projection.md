@@ -211,11 +211,18 @@ closed at both layers:
   (`record_projection._POINT_PROPERTY_RELATIONS`), because that is the fan-out
   the fold's `_link_source` performs (many-to-many, `#3263`). Three details make
   it parity rather than a plausible copy: the target resolves to the SAME Source
-  the fold picks — `resolve_source_key`'s canonical identity, matched on `url`
-  **or** `canonical_url`, PREFERRING the canonical match and ordered by
-  `node_key` within it, which is that resolver's own order (it queries
-  `canonicalUrl` first and returns there; the raw spelling is the adopt-on-touch
-  fallback) and its own tiebreak (`ORDER BY s.url LIMIT 1`), and never via the
+  the fold picks — `resolve_source_key`'s canonical identity, matched on `url`,
+  on the **canonical spelling**, **or** on `canonical_url` (THREE candidates,
+  the same triple `_source_key_resolution` binds for the row key: the graph's
+  step 2 adopts by EITHER spelling, and a pre-`#9553` row filed under the
+  canonical spelling carries `canonical_url IS NULL` — a two-arm rule leaves
+  exactly that population invisible and a variant then files a SECOND row),
+  PREFERRING the canonical match and ordered by `node_key` in **byte** order
+  (`ORDER BY node_key COLLATE "C"`), which is that resolver's own order (it
+  queries `canonicalUrl` first and returns there; the raw spelling is the
+  adopt-on-touch fallback) and its own tiebreak (`ORDER BY s.url LIMIT 1`, whose
+  comparator is byte order — a bare `ORDER BY`'s LOCALE collation is not the
+  graph's answer), and never via the
   `id` fallback `_ENTITY_MATCH_COLUMNS` supplies for `EntityLinked` — which also
   required the projection to DERIVE `source.canonical_url`, since no payload may
   carry it (`projection/entities.py::_EntityHandlers._SOURCE_HANDLED` lists

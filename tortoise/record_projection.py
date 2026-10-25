@@ -227,6 +227,15 @@ RECORD_MIGRATIONS: tuple[str, ...] = (
     # `tests/test_9231_record_migrations_trigger.py` reds on the omission, so
     # the registry is the tuple or it is nothing.
     "20261025000001_record_tenancy_role_and_guc.sql",
+    # #9967 review P2 — an INDEX, contributing no column and no refusal, listed
+    # for the registry reason above: `pyproject.toml`'s `*_record_*.sql` glob
+    # ships it, and `tests/test_9231_record_migrations_trigger.py` reds on the
+    # omission. It is not decorative to the projection: `#9956`'s row-key
+    # resolution adds a `canonical_url = $1` predicate to EVERY source write, and
+    # without this index that arm is a tenant-wide sequential scan once per
+    # statement (measured: ~8.7 ms per write at 20,000 rows), which makes a
+    # journal rebuild O(rows × sources) instead of O(rows).
+    "20261025000002_record_source_canonical_index.sql",
     # #9881 — the KEY MOVE: `Object`/`Subject` key on the stable `id` instead of
     # the mutable `name`, which is what lets `EntityMutated op=rename` be a patch.
     # It is listed for the registry reason above AND because it RE-DECLARES
@@ -1338,6 +1347,39 @@ class Statement:
         return f"{self.sql} -- {self.params!r}"
 
 
+@dataclass(frozen=True)
+class _SqlExpr:
+    """A value the DATABASE computes, in place of a literal parameter.
+
+    A plan statement normally binds one `%s` per parameter. Some values cannot
+    be decided when the plan is built because they are a function of the record
+    the plan is being applied ON TOP OF — the key of a URL-variant `:Source` row
+    is the name of whichever row already holds that canonical identity, and that
+    only the store can answer (#9956, ``_source_key_resolution``).
+
+    ``sql`` is a self-contained fragment (here: a scalar subquery) whose own
+    placeholders are ``params``; the statement builders interleave it in place
+    of the `%s` they would otherwise emit. Executed inside the caller's
+    transaction, AFTER ``replay``'s tenant prologue, so it reads exactly what the
+    plan is about to write against — and it sees rows written by EARLIER
+    statements of the same replay, which is what makes journal order the fold's
+    order.
+
+    ``_render_value`` is the ONLY reader: a builder that stringified an
+    `_SqlExpr` instead would emit a dataclass repr into SQL.
+    """
+
+    sql: str
+    params: tuple[Any, ...] = ()
+
+
+def _render_value(value: Any) -> tuple[str, tuple[Any, ...]]:
+    """`(placeholder, params)` for a literal OR a database-computed value."""
+    if isinstance(value, _SqlExpr):
+        return value.sql, value.params
+    return "%s", (value,)
+
+
 def _jsonb_or_scalar(column: str, value: Any) -> Any:
     """`jsonb` columns take serialized JSON; everything else passes through.
 
@@ -1530,18 +1572,26 @@ def _key_list(record: Mapping[str, Any], keys_from: str) -> list[str]:
     return [key for key in value if isinstance(key, str)]
 
 
-def _identity_statement(org_id: str, graph_id: str, node: Node, key: str) -> Statement:
+def _identity_statement(org_id: str, graph_id: str, node: Node,
+                        key: str | _SqlExpr) -> Statement:
     """The `(label, key)` FK parent. Written first, always.
 
     `public.node_identity` is why a relation's endpoints are real composite
     foreign keys (S6). Every node write is preceded by its identity row, and
     the insert is `DO NOTHING` on conflict so a re-replay is a no-op.
+
+    *key* may be an `_SqlExpr` (#9956): a `:Source` row's key is a RESOLUTION of
+    the record's raw spelling, so the identity parent must be filed under the
+    same resolved key as the node row — a literal here and a resolution there
+    would put the two rows under two identities and the composite FK on
+    `public.source` would refuse the pair.
     """
+    key_sql, key_params = _render_value(key)
     return Statement(
         "INSERT INTO public.node_identity "
-        "(org_id, graph_id, node_label, node_key) VALUES (%s, %s, %s, %s) "
+        f"(org_id, graph_id, node_label, node_key) VALUES (%s, %s, %s, {key_sql}) "
         "ON CONFLICT (org_id, graph_id, node_label, node_key) DO NOTHING",
-        (org_id, graph_id, node.label, key),
+        (org_id, graph_id, node.label, *key_params),
     )
 
 
@@ -1549,17 +1599,25 @@ def _upsert_statement(
     org_id: str,
     graph_id: str,
     node: Node,
-    key: str,
+    key: str | _SqlExpr,
     col_values: Mapping[str, Any],
     tail: Mapping[str, Any],
 ) -> Statement:
     columns = ["org_id", "graph_id", "node_label", "node_key", *col_values, "props"]
-    params: list[Any] = [
-        org_id, graph_id, node.label, key,
-        *(_jsonb_or_scalar(c, v) for c, v in col_values.items()),
-        json.dumps(tail),
-    ]
-    placeholders = ", ".join(["%s"] * len(columns))
+    # `key` and any column value may be a database-computed `_SqlExpr` (#9956);
+    # `_render_value` is the one place that turns either shape into SQL+params.
+    key_sql, key_params = _render_value(key)
+    placeholders_list: list[str] = ["%s", "%s", "%s", key_sql]
+    params: list[Any] = [org_id, graph_id, node.label, *key_params]
+    for column, value in col_values.items():
+        fragment, values = _render_value(
+            value if isinstance(value, _SqlExpr)
+            else _jsonb_or_scalar(column, value))
+        placeholders_list.append(fragment)
+        params.extend(values)
+    placeholders_list.append("%s")
+    params.append(json.dumps(tail))
+    placeholders = ", ".join(placeholders_list)
     # IDEMPOTENCE, stated once: re-applying the same record writes the same
     # absolute values onto the same row. A second replay of the journal
     # therefore produces the same record (Interface A's second clause).
@@ -1710,7 +1768,7 @@ def _endpoint_resolution(
     graph_id: str,
     label: str,
     journal_id: str,
-    alias: str,
+    alias: str = "",
     *,
     match: tuple[str, ...] | None = None,
     values: Sequence[Any] | None = None,
@@ -1756,11 +1814,33 @@ def _endpoint_resolution(
     mirror `source_identity.resolve_source_key`, which the fold calls before it
     MERGEs (see `_point_property_relation_statements`).
 
-    *order_by* appends `ORDER BY <column> LIMIT 1`. A multi-column match can hit
-    more than one row (several Sources may share a canonical form), and
-    `resolve_source_key` picks the LOWEST `url` on ties — without the clause the
-    record would pick arbitrarily and could wire the edge to a different Source
-    than the graph did, on the same journal line.
+    *order_by* appends `ORDER BY <column> COLLATE "C" LIMIT 1`. A multi-column
+    match can hit more than one row (several Sources may share a canonical
+    form), and `resolve_source_key` picks the LOWEST `url` on ties — without the
+    clause the record would pick arbitrarily and could wire the edge to a
+    different Source than the graph did, on the same journal line.
+
+    ⚠️ THE `COLLATE "C"` IS LOAD-BEARING, NOT DECORATION (#9967 review P1).
+    `resolve_source_key`'s `ORDER BY s.url LIMIT 1` is the GRAPH's ordering, and
+    FalkorDB compares strings by BYTE order. A bare `ORDER BY node_key` is
+    ordered by the DATABASE's collation instead, and that is neither byte order
+    nor even stable across builds — measured on the exact pair this file's
+    `#9956` tests use (`https://example.com/a/b` + the `Example.COM/…` variant,
+    both sharing the canonical form):
+
+    * `postgres:16` (glibc `en_US.utf8`) → the lowercase spelling sorts first;
+    * `postgres:16-alpine` (musl `en_US.utf8`) → the `Example.COM` spelling
+      sorts first;
+    * both images with `COLLATE "C"` → `Example.COM` first, which is byte order
+      ('E' = 0x45 < 'e' = 0x65) and therefore FalkorDB's answer.
+
+    So a host-case variant — the COMMONEST URL variant, and the shape of the
+    pre-`#9956` duplicate population this resolver folds — would pick a
+    DIFFERENT row than the graph depending only on which Postgres image the
+    record runs on. The row COUNT was never affected; WHICH row absorbs the
+    folded `title`/`document_kind` was. `COLLATE "C"` is the one spelling of
+    "the graph's own order" that both consumers (row key and edge endpoint)
+    inherit from this single fragment.
 
     *prefer* orders one matched COLUMN ahead of the rest: `ORDER BY CASE WHEN
     <column> = %s THEN 0 ELSE 1 END[, <order_by>] LIMIT 1`. A `match` predicate
@@ -1790,7 +1870,11 @@ def _endpoint_resolution(
         ordering.append(f"CASE WHEN {preferred_column} = %s THEN 0 ELSE 1 END")
         preferred.append(preferred_value)
     if order_by:
-        ordering.append(order_by)
+        # BYTE order, always (#9967 review P1): the tiebreak is
+        # `resolve_source_key`'s `ORDER BY s.url LIMIT 1`, and FalkorDB orders
+        # strings by bytes while a default-collation `ORDER BY` orders them by
+        # the DATABASE's locale — which differs between glibc and musl builds.
+        ordering.append(f'{order_by} COLLATE "C"')
     tail = f" ORDER BY {', '.join(ordering)} LIMIT 1" if ordering else ""
     bound = list(values) if values is not None else [journal_id] * len(match)
     if len(bound) != len(match):
@@ -1798,11 +1882,119 @@ def _endpoint_resolution(
             f"endpoint {alias} binds {len(bound)} value(s) for "
             f"{len(match)} match column(s) {match!r}"
         )
+    # An empty *alias* yields a bare parenthesised SELECT — i.e. a SCALAR
+    # subquery, which is how the node-key resolver below reuses this one
+    # resolution rule instead of restating it (#9956).
     return (
         f"(SELECT node_key FROM public.{table} "
-        f"WHERE org_id = %s AND graph_id = %s AND {predicate}{tail}) {alias}",
+        f"WHERE org_id = %s AND graph_id = %s AND {predicate}{tail})"
+        f"{' ' + alias if alias else ''}",
         [org_id, graph_id, *bound, *preferred],
     )
+
+
+def _source_key_resolution(org_id: str, graph_id: str,
+                           raw_key: str) -> _SqlExpr:
+    """`source_identity.resolve_source_key` as a SQL scalar subquery (#9956).
+
+    THE DEFECT THIS CLOSES. The graph folds a URL-VARIANT document identity onto
+    ONE `:Source`: `_upsert_document` (`projection/entities.py`) passes its id
+    through `source_identity.resolve_source_key` before it MERGEs (#5140 finding
+    12, #9952). The record layer does not read a graph — it is journal-derived —
+    so it keyed `public.source` on the record's RAW id, and a `DocumentCreated`
+    whose id is a variant of an already-registered source planned a SECOND row
+    for the identity the graph keeps as ONE node. Measured on a real Postgres
+    16: `SourceCreated('https://example.com/a/b')` + `DocumentCreated` on
+    `'https://Example.COM/a/b/?utm_source=x#frag'` → **2 record rows, 1 graph
+    node** — so a record-sourced rebuild resurrected a duplicate source row, in
+    silence, with the graph's variant resolution lost on the record side.
+
+    WHY THIS IS A SQL TWIN AND NOT A CALL TO THE RESOLVER. `resolve_source_key`
+    takes a projection graph handle `g` and queries the GRAPH. This layer holds
+    a Postgres connection and no graph at all (Interface A: journal → record,
+    rebuildable from the journal alone), so importing it would either require a
+    graph handle the record seam does not have or make the record's rebuild
+    depend on the graph it must be independent of. The smallest honest move is
+    therefore the one already taken in this file for the EDGE endpoint of the
+    same identity: `_endpoint_resolution` resolves a `Source` from the record's
+    own rows, in SQL, with the resolver's own precedence. This function is that
+    resolver applied to the ROW KEY — not a second rule:
+
+    * **step 1/3** — an already-registered row whose `canonical_url` is this
+      identity's canonical form, returning ITS key (`resolve_source_key` queries
+      `MATCH (s:Source {canonicalUrl:$cu}) RETURN s.url`);
+    * on ties, the LOWEST key — `resolve_source_key`'s `ORDER BY s.url LIMIT 1`,
+      and `chk_source_node_key_is_contract_key` makes `node_key` the `url`;
+    * **step 2** (adopt-on-touch) — a row stored under the inbound RAW spelling
+      **or under the canonical spelling itself**.
+      Both candidates, because the graph has both: `resolve_source_key`
+      (`source_identity.py`, "for candidate in ([url, canonical] …)") adopts by
+      either spelling, and its own comment says the canonical one is "the common
+      API/connector case — its url was already canonical, so the inbound variant
+      never matches it by url". Dropping the second candidate would leave every
+      row this layer wrote before the `canonical_url` derive (2026-10-23, #9553)
+      invisible to a variant — a duplicate for exactly the population the graph
+      adopts. This is the SAME triple `_endpoint_resolution` binds for an
+      `extractedFrom` edge endpoint, so the row key and the edge can never
+      resolve one identity onto two different rows. (The graph's tier re-reads
+      after adopting; the record does not need to — its predicate is a union of
+      the same three match columns in ONE statement.)
+
+      ⚠️ **THE EMITTED PREDICATE CARRIES NO `canonical_url IS NULL` GUARD, and
+      that is a DELIBERATE divergence from the graph's step 2 — stated here
+      because an earlier cycle claimed the guard was bound when it was not
+      (#9967 review P2).** The graph's adopt query has the guard because
+      ADOPTING IS A WRITE there (it sets `canonicalUrl`, and the predicate makes
+      the re-run a no-op); here the tier only SELECTS.
+
+      The two are equivalent for every row THIS LAYER writes, by an invariant
+      the writer holds: `canonical_url` is derived unconditionally as
+      `_normalize_source_url(node_key)` (the `col_values.setdefault` in
+      `_declared_mutations`), so `node_key = <raw>` implies
+      `canonical_url = normalize(<raw>) = <canonical>` — the row is then a
+      CANONICAL match, which the `prefer` clause ranks first, exactly as the
+      graph returns from its `canonicalUrl` query before it adopts. And a
+      pre-#9553 row has `canonical_url IS NULL`, which is the state the graph's
+      guard admits.
+
+      The declared residual: that invariant is not ENFORCED by the schema. A
+      journal line whose payload carries an explicit `canonicalUrl` reaches the
+      column through `_split_properties` (the `column in cols` arm runs BEFORE
+      the refused-key check), so it can produce a row with
+      `canonical_url != normalize(node_key)`. Against such a row this subquery
+      adopts where the graph would MERGE a new node. That population is not
+      producible by any writer in this repo, and binding the guard here would
+      break the row-key/edge parity above, so the divergence is NAMED rather
+      than papered over.
+    * **step 4** — nothing registered: the raw key, exactly as the graph MERGEs
+      a new node. `COALESCE(…, %s)` is that fallback; without it a miss would
+      bind NULL to `node_key` (NOT NULL) instead of creating the row.
+
+    `canonical_url` is `_normalize_source_url` — the record's pinned twin of
+    `normalize_source_url` (`test_the_source_canonicaliser_is_the_folds_own`),
+    so the canonicaliser is not duplicated here either.
+
+    Consequences, stated rather than left to be discovered (see
+    `_declared_mutations` and the PR): this is a RESOLUTION at execution time,
+    so it inherits the live-vs-replay exposure #9952 names for every resolving
+    writer; it does not re-key a single existing row; and it makes the record
+    agree with the graph on WHICH row one identity is.
+    """
+    canonical = _normalize_source_url(raw_key)
+    select, params = _endpoint_resolution(
+        org_id, graph_id, "Source", raw_key,
+        # Three candidates, in the resolver's own order of concern: the RAW
+        # spelling, the CANONICAL spelling (both pre-canonical-adoption), then a
+        # row already stamped with the canonical identity — which `prefer`
+        # ranks first, because a union has no precedence and
+        # `resolve_source_key` returns from its `canonicalUrl` query BEFORE it
+        # considers either spelling.
+        match=("node_key", "node_key", "canonical_url"),
+        values=(raw_key, canonical, canonical),
+        order_by="node_key",
+        prefer=("canonical_url", canonical),
+    )
+    return _SqlExpr(f"COALESCE({select}, %s)", (*params, raw_key))
 
 
 def _relation_upsert_statement(
@@ -2449,8 +2641,10 @@ def _point_property_relation_statements(
     address a `:Source` by the raw ref: `_mint_source_stub` calls
     `resolve_source_key` first (canonicalise, then take the `url` of any Source
     already registered under that canonical form) and only then MERGEs
-    `(s:Source {url:$url})`. So the record matches `node_key = <raw ref>` OR
-    `canonical_url = <normalised ref>`, PREFERRING the canonical match and
+    `(s:Source {url:$url})`. So the record matches `node_key = <raw ref>`, OR
+    `node_key = <canonical ref>` (the graph's adopt-on-touch by the canonical
+    spelling — `source_identity.py`: "for candidate in ([url, canonical] …)"),
+    OR `canonical_url = <normalised ref>`, PREFERRING the canonical match and
     ordered by `node_key` within it — which is `resolve_source_key`'s own order
     (it queries `canonicalUrl` first and returns there; the raw spelling is
     consulted afterwards, adopt-on-touch) and its own tiebreak
@@ -2518,11 +2712,20 @@ def _point_property_relation_statements(
     for prop, rel_type, tgt_label in declared:
         versions = _point_source_versions(snapshot)
         for ref in _point_property_refs(snapshot.get(prop)):
-            # Mirror `resolve_source_key`: the raw ref, AND its canonical form,
-            # with the CANONICAL match preferred (that is the order it queries
-            # in: canonicalUrl first, return there; the raw spelling is the
-            # adopt-on-touch fallback). `node_key` is the tiebreak inside each
-            # tier, exactly as its `ORDER BY s.url LIMIT 1`.
+            # Mirror `resolve_source_key`: the raw ref, the canonical SPELLING,
+            # and its canonical FORM, with the CANONICAL match preferred (that
+            # is the order it queries in: canonicalUrl first, return there;
+            # the raw spelling is the adopt-on-touch fallback). All THREE
+            # candidates, because the resolver adopts a pre-canonical node by
+            # either spelling (`source_identity.py`: "for candidate in ([url,
+            # canonical] …)") — a target that bound only the raw spelling
+            # would leave a row filed under the canonical spelling invisible,
+            # and the edge would land nowhere while a variant `DocumentCreated`
+            # folded onto that very row (#9956). It is the same triple
+            # `_source_key_resolution` binds for the ROW KEY, so one identity
+            # cannot resolve to two different rows inside this layer.
+            # `node_key` is the tiebreak inside each tier, exactly as its
+            # `ORDER BY s.url LIMIT 1`.
             canonical = _normalize_source_url(ref)
             payload: dict[str, Any] = {
                 "edge_type": rel_type,
@@ -2544,8 +2747,8 @@ def _point_property_relation_statements(
             statements.extend(_relation_upsert_statement(
                 org_id, graph_id, RelationUpsert(), payload,
                 columns=columns, refused=refused,
-                tgt_match=("node_key", "canonical_url"),
-                tgt_values=(ref, canonical),
+                tgt_match=("node_key", "node_key", "canonical_url"),
+                tgt_values=(ref, canonical, canonical),
                 tgt_order_by="node_key",
                 tgt_prefer=("canonical_url", canonical),
             ))
@@ -3072,6 +3275,62 @@ def _declared_mutations(
                                             refused=refused, drop=effect.drop)
         if node.key_column not in col_values:
             col_values[node.key_column] = key
+        # ⛔ THE `:Source` ROW KEY IS A RESOLUTION, NOT THE RECORD'S RAW SPELLING
+        # (#9956 — the record half of #5140 finding 12, whose graph half landed
+        # in #9952). The graph folds a URL-variant document identity onto ONE
+        # `:Source`; this layer keyed the row on the record's raw id, so a
+        # `DocumentCreated` whose id was a variant of an already-registered
+        # source planned a SECOND `public.source` row for one graph node
+        # (measured on Postgres 16: 2 rows / 1 node), and a record-sourced
+        # rebuild resurrected the duplicate in silence.
+        #
+        # `_source_key_resolution` is this layer's SQL twin of
+        # `source_identity.resolve_source_key` — the SAME resolution the edge
+        # endpoints below already apply, per its own docstring — applied to the
+        # ROW KEY. It is a subquery, so it is answered at EXECUTION time against
+        # the rows earlier statements of this replay already wrote: journal
+        # order is the fold's order, and a live single-record write resolves
+        # against the committed rows the same way. The fallback inside
+        # `COALESCE` is the raw key — the graph's own step 4 (MERGE a new node).
+        #
+        # It applies to EVERY `source` NodeSnapshot (`SourceCreated`,
+        # `DocumentCreated`, `SourceVersioned`), not just documents: the graph
+        # resolves on every source writer (`_upsert_source`, `_mint_source_stub`,
+        # `link_source_to_entity`, `_upsert_document`), and a record that
+        # resolved only one of them would drift on the others. Non-network ids
+        # (`session:<id>`, `corpus://…`, `doc_<path>`) come back from the
+        # canonicaliser unchanged and resolve onto themselves.
+        #
+        # ⚠️ `chk_source_node_key_is_contract_key` makes the `url` COLUMN equal
+        # `node_key`, so `url` must take the resolved key too — the raw spelling
+        # is the identity this row is filed UNDER, not a column of it. Where the
+        # graph keeps the raw spelling it keeps it in `urlAliases`, which this
+        # layer does not populate: that is #9710's class (a non-constant property
+        # missing on a rebuilt node), NOT this issue's (a row that should not
+        # exist at all), and it is named here so the loss is not silent. The
+        # same sentence covers the `id` column, which the upsert overwrites with
+        # the folded record's id where the fold `coalesce`s.
+        #
+        # ⚠️ AND THE COLLISION THIS MAKES REACHABLE ON THE RECORD, the same one
+        # the graph half names (`_upsert_document`): a document id whose canonical
+        # form equals an EXISTING non-document `:Source` now folds onto that row
+        # too, so the record's `public.source` row gains `document_kind`/`title`
+        # exactly as the node gains `documentKind`/`title`. It is not a new rule
+        # here — the identically-spelled form already behaved this way, and #9952
+        # pinned the graph side as CURRENT behaviour — but a VARIANT now reaches
+        # it. Whether promotion should also move the type axis is #9536's
+        # contract, not this projection's.
+        #
+        # ⚠️ REPLAY AXIS, stated where the next reader will ask: this changes
+        # what a plan COMPUTES, never the meaning of a row already written. No
+        # re-key, no backfill, no migration — an existing record keeps every row
+        # it has (a STORE that already holds the duplicate keeps it until
+        # someone coalesces it deliberately; a rebuild from an empty record now
+        # yields ONE row, where it used to yield two).
+        resolved_key: str | _SqlExpr = key
+        if node.table == "source":
+            resolved_key = _source_key_resolution(org_id, graph_id, key)
+            col_values[node.key_column] = resolved_key
         # #9553 review P1: the Source's CANONICAL identity is a pure function of
         # its MERGE key (`normalize_source_url(url)`), and the record's
         # `canonical_url` column is fed by NO payload:
@@ -3092,29 +3351,25 @@ def _declared_mutations(
         #
         # #5140 finding 12 UPDATE: the live `_upsert_document` fold now WRITES
         # `canonicalUrl` too (it adopts the shared `resolve_source_key`), so the
-        # PROPERTY divergence this note used to record is gone — both rebuild
-        # routes agree on the IDENTITY PROPERTY (`canonical_url`). What that
-        # leaves, and it is a different axis, is the ROW KEY: this layer keys the
-        # row on the record's RAW id (it is journal-derived and reads no graph),
-        # so a URL-VARIANT `DocumentCreated` plans a second `public.source` row
-        # for an identity the graph folds onto one node (measured: record 2 rows,
-        # graph 1 node). That is the class #9553's derive exists to bound and it
-        # is NOT closed here — named on #5140 finding 12 so a records rebuild
-        # does not resurrect a duplicate source row silently. The derive is
-        # UNCONDITIONAL because narrowing it to the record types OTHER than
-        # `DocumentCreated` — the tempting reading now that the doc fold writes
-        # `canonicalUrl` itself — would LOSE the variant resolution for document
-        # targets: this resolver can only match a variant `extractedFrom` ref
-        # against the row's own `canonical_url` (`_relation_upsert_statement`'s
-        # `tgt_match=("node_key", "canonical_url")`), so a document row without
-        # it silently drops the edge — the provenance loss this path exists to
-        # avoid. Pinned by `test_a_document_source_row_derives_its_canonical_identity_too`.
+        # PROPERTY divergence this note used to record is gone. #9956 (above)
+        # closed the second axis — the ROW KEY — by resolving it through this
+        # layer's own SQL twin of that resolver, so a URL-VARIANT
+        # `DocumentCreated` now FOLDS onto the registered row instead of
+        # planning a second one. The derive is still UNCONDITIONAL, and for a
+        # sharper reason than before: the resolution above MATCHES on
+        # `canonical_url`, so a `source` row without it would be invisible to the
+        # very subquery that now decides every source row's key (and, for edges,
+        # to `_relation_upsert_statement`'s `tgt_match=("node_key",
+        # "canonical_url")`). Its value is the pure canonical form of the
+        # record's own key, so it is the same value the resolved key would give.
+        # Pinned by `test_a_document_source_row_derives_its_canonical_identity_too`.
         if (node.table == "source"
                 and "canonical_url" in columns.get("source", frozenset())):
             col_values.setdefault("canonical_url", _normalize_source_url(key))
         return [
-            _identity_statement(org_id, graph_id, node, key),
-            _upsert_statement(org_id, graph_id, node, key, col_values, tail),
+            _identity_statement(org_id, graph_id, node, resolved_key),
+            _upsert_statement(org_id, graph_id, node, resolved_key, col_values,
+                              tail),
             # AFTER the identity + node upsert: an edge endpoint must already
             # be in `node_identity` or the composite FK refuses the insert.
             *_envelope_relation_statements(
