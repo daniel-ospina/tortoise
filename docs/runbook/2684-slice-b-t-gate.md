@@ -18,7 +18,7 @@ legs, and they are not in the same state:
 
 | Leg | Statement (wave §6) | State |
 |---|---|---|
-| **T-1** per-question | *the value-bearing evidence is **verbatim-present** + **deduped** in the reader's package* | **verbatim half MEASURED** on the sealed corpus — 101 of 112 value-bearing points carry an address that re-reads the point's own words **and a value**; all 11 absences are a **reported** class — **0 silent**, each carrying the warning of its own class, measured rather than asserted (§2.2) — **0 unclassified**. **dedupe half NOT discriminating on this corpus** (in the guard's own per-arm universe, **0 of 433** pairs reach 0.9 content overlap at all — so no pair can differ in a value-critical token) — it is pinned by Slice A's unit guards instead (§2.3) |
+| **T-1** per-question | *the value-bearing evidence is **verbatim-present** + **deduped** in the reader's package* | **verbatim half MEASURED** on the sealed corpus — 101 of 112 value-bearing points carry an address that re-reads the point's own words **and a value**; all 11 absences are a **reported** class — **0 silent**, each carrying the warning of its own class, measured rather than asserted (§2.2) — **0 unclassified**. **dedupe half: the CONTENT-RATIO leg is not reachable on this corpus** (in the guard's own per-arm universe, **0 of 433** pairs reach 0.9 content overlap at all, so no pair can differ in a value-critical token *on that leg*), while the **same-source-turn** leg IS reachable and is measured (**12** quote pairs consulted, **9** refused by the value guard, **1** collapse) — the dedupe property itself still rests on Slice A's unit guards (§2.3) |
 | **T-2** end-to-end | *aggregation-class accuracy **moves** on the same slice with the SAME reader* | **VOID AS WRITTEN** — there is no committed pre-span baseline, and the span mechanism has **no arm to flip** (it is unconditional in extraction since #8659), so "moves" is unfalsifiable rather than failed. Re-specified and re-homed to the end-to-end run **#8486** (§4) |
 
 **No product behaviour changed by this lane.** The census reads committed
@@ -51,9 +51,9 @@ from the committed receipts and **fails on drift**.
 |---|---|---|
 | "extend the value-fidelity discipline … in extraction" | **landed** — `_value_verbatim_span` stamps only a VERBATIM anchor whose addressed text carries a value; the two absence routes are reported, not silent | `tortoise/extractor_v2.py:3502` (`_verbatim_span_in_turn`), `:3530` (`_carries_value`), `:3563` (`_value_verbatim_span`), call site `:7494-7498`; commits `2312845b6` (#8659), `fda19cf93` (#8966) |
 | "a span-carrying schema field" | **landed** — `Point.span_start`/`span_end`, all-or-nothing, `end > start`, `>= 0`, validated on the model AND every write path | `tortoise/commit_schema.py:589-608` (fields + `_span_is_an_address`), `:445` (`validate_span`) — the field itself is #5007's (`2ff8c3c88`) |
-| "the assembly surfaces the span with the point" | **landed on the read path** — the eval lane annotates the offsets onto the hit the package reads, and `package_evidence_pool` copies the kept anchor's keys; the product ask lane's hit carries `quote`/`source_turn_id`/`span_*` since #8658 | `tools/longmem_eval/retrieve.py:839-847`; `tortoise/sdk.py:30342-30373` (the four columns are read); `e70a5ff17` (#8658 / #9543) |
+| "the assembly surfaces the span with the point" | **landed on the read path** — the eval lane annotates the offsets onto the hit the package reads, and `package_evidence_pool` copies the kept anchor's keys; the product ask lane's hit carries `quote`/`source_turn_id`/`span_*` since #8658 | `tools/longmem_eval/retrieve.py:839-847`; `tortoise/sdk.py:30379` (the four columns are read — the `RETURN` continuation that appends `n.quote, n.source_turn_id, n.span_start, n.span_end`, six lines past the `rows = graph.query(` opener at `:30373`); `e70a5ff17` (#8658 / #9543) |
 | "Requires ONE extractor re-ingest (~4 h) then cached cycles" | **true for T-2 only**; the per-question leg needs **no** re-ingest — the committed receipts + fixtures are the population (§2) | this runbook §2 |
-| the `⛔` residual: the two DEGRADED fallback tiers keep lean projections | **confirmed, and it is a DECLARED boundary** — `fallback_snapshot`/`fallback_tfidf` return before the provenance fetch, so a degraded hit carries no `quote`/`span_*` and Slice A's own-source leg is inert there | `tortoise/sdk.py:30336-30350` (the comment names #8658's columns and the boundary) |
+| the `⛔` residual: the two DEGRADED fallback tiers keep lean projections | **confirmed, and it is a DECLARED boundary** — `fallback_snapshot`/`fallback_tfidf` return before the provenance fetch, so a degraded hit carries no `quote`/`span_*` and Slice A's own-source leg is inert there | `tortoise/sdk.py:30340-30356` (the `⛔ KNOWN LIMITATION` comment: it names #8658's four columns and the declared boundary) |
 
 **Nothing in the ontology or the SDK/MCP surface is touched by this slice.**
 
@@ -158,17 +158,27 @@ ANY content overlap.
 package = one ingest = **one arm of one session**. Over that universe
 (value-bearing points only, pairwise within each of the 14 session-arms):
 **433 pairs = Σ C(n,2)**, and **0** of them reach 0.9 content overlap — so no
-pair *could* differ in a value-critical token, and the corpus cannot exercise
-the value-safety leg at all. ⚠️ That zero is a property of the **per-arm**
+pair *could* differ in a value-critical token **on the content-ratio leg**. ⚠️ That zero is a property of the **per-arm**
 universe, not of the corpus: pooling the two arms (a pool **no package ever
 holds** — they are two independent ingests of the same session) does produce
 ≥0.9 pairs, which the guard pins as measured context so the zero is never
 restated as "this corpus has no near-duplicates".
 
+⛔ **That zero is about ONE leg, and reading it as the whole leg set was this
+section's first error.** `_same_fact` has a second, content-overlap-INDEPENDENT
+route (`retrieval.py:2405-2413`): same `source_turn_id` **and** quote overlap ≥
+0.75, with `_pkg_differ_value_critical(qa, qb)` consulted on the **quotes**
+first. On this same per-arm universe that route IS reachable, so "the corpus
+cannot exercise the value-safety leg at all" was false: measured **12**
+same-turn quote pairs, **9** refused by the quote-value guard, **1** collapse
+(quote `_pkg_overlap` 1.00) and 2 that neither collapse nor are refused. Pinned
+by `test_the_dedupe_leg_is_measured_on_BOTH_legs`, so the reachable route cannot
+be described as inert here again.
+
 So the property rests on Slice A's unit guards — `tests/test_evidence_assembly.py`
 (300-vs-400 survives as its own slot; the `_pkg_differ_value_critical` ratio
 guard). Pinned here by
-`test_the_dedupe_leg_is_measured_and_NOT_discriminating_on_this_corpus`,
+`test_the_dedupe_leg_is_measured_on_BOTH_legs`,
 recorded so no future lane reads "deduped: PASS" off this census.
 
 ---
@@ -283,7 +293,7 @@ address for **90.2%** of value-bearing points with **zero silent absences** —
 each of the 11 carries the warning of its own class, pinned by
 `test_every_absence_in_the_census_is_REPORTED`; the
 obvious relaxation is measured on both readings and refused; the degraded-tier
-boundary is declared (@ `sdk.py:30336-30350`), not an oversight.
+boundary is declared (@ `sdk.py:30340-30356`), not an oversight.
 
 **Not settled, and it needs a home.** The accuracy movement (T-2, re-homed to
 **#8486**), the *observed* — rather than re-derived — stamping rate (needs an

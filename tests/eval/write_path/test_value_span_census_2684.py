@@ -63,7 +63,12 @@ import re
 from pathlib import Path
 
 from tortoise import extractor_v2 as v2
-from tortoise.retrieval import _pkg_differ_value_critical, _pkg_overlap
+from tortoise.retrieval import (
+    DEFAULT_PACKAGE_SAME_TURN_OVERLAP,
+    _pkg_differ_value_critical,
+    _pkg_overlap,
+    _pkg_turn_key,
+)
 
 WRITE_PATH = Path(__file__).resolve().parent
 COMMITTED_ARMS = WRITE_PATH / "receipts" / "7947-arms-2026-10-18"
@@ -410,6 +415,17 @@ PAIRS_PER_ARM = 433          # Σ C(n, 2) over the 14 session-arms
 NEAR_DUPE_PAIRS_PER_ARM = 0  # ≥0.9 content overlap
 NEAR_DUPE_VALUE_CONFLICTS_PER_ARM = 0
 
+#: The dedupe half's SAME-SOURCE-TURN route (``_same_fact``'s second leg),
+#: measured on the SAME per-arm universe as ``PAIRS_PER_ARM``: of those 433
+#: pairs, the ones whose two ``source_turn_id`` keys are present and equal AND
+#: whose two quotes are non-empty — the point at which the shipped predicate
+#: consults its quote-level value guard — then split by that guard and by
+#: ``DEFAULT_PACKAGE_SAME_TURN_OVERLAP``.
+#: ⛔ This is the route the CONTENT-RATIO zero above says NOTHING about; the
+#: runbook once generalised that zero to "the corpus cannot exercise the
+#: value-safety leg at all", which these three numbers falsify.
+SAME_TURN_DEDUPE = {"consulted": 12, "value_refused": 9, "collapsed": 1}
+
 
 def _value_bearing_points(session: str, arm: str) -> list[dict]:
     return [p for p in _points(session, arm)
@@ -417,15 +433,29 @@ def _value_bearing_points(session: str, arm: str) -> list[dict]:
                                  p.get("quote") or "")]
 
 
-def test_the_dedupe_leg_is_measured_and_NOT_discriminating_on_this_corpus():
+def test_the_dedupe_leg_is_measured_on_BOTH_legs():
     """Pinned so no future lane reads "deduped: PASS" off this census, and so
     the numbers the runbook quotes are re-derived rather than asserted.
 
-    In the guard's own universe there is **no** ≥0.9-overlap pair at all, so
-    the value-safety leg cannot be exercised here: the property rests on Slice
-    A's unit guards (``tests/test_evidence_assembly.py``)."""
+    TWO routes, and this corpus treats them differently:
+
+    * **content-ratio** — in the guard's own per-arm universe there is **no**
+      ≥ 0.9-overlap pair at all, so THAT route cannot be exercised here; the
+      property rests on Slice A's unit guards
+      (``tests/test_evidence_assembly.py``);
+    * **same-source-turn** (``retrieval._same_fact``'s second route: same
+      ``source_turn_id``, quote overlap ≥
+      ``DEFAULT_PACKAGE_SAME_TURN_OVERLAP``, with
+      ``_pkg_differ_value_critical`` consulted on the QUOTES first) — reachable
+      HERE, and measured: ``SAME_TURN_DEDUPE``.
+
+    ⛔ The distinction is the point of this test. §2.3 once generalised the
+    content-ratio zero to "the corpus cannot exercise the value-safety leg at
+    all", which is false and would tell a lane that a change to the
+    same-turn/quote route is unmeasurable on this corpus."""
     pairs = near_dupe = conflicts = 0
     pooled_pairs = pooled_near_dupe = 0
+    same_turn = {"consulted": 0, "value_refused": 0, "collapsed": 0}
     for session in SESSIONS:
         for arm in ARMS:
             points = _value_bearing_points(session, arm)
@@ -437,6 +467,17 @@ def test_the_dedupe_leg_is_measured_and_NOT_discriminating_on_this_corpus():
                     if _pkg_differ_value_critical(a.get("content") or "",
                                                   b.get("content") or ""):
                         conflicts += 1
+                # the second route: same source turn, both quotes present
+                at = _pkg_turn_key(a)
+                qa = str(a.get("quote") or "")
+                qb = str(b.get("quote") or "")
+                if not (at and at == _pkg_turn_key(b) and qa and qb):
+                    continue
+                same_turn["consulted"] += 1
+                if _pkg_differ_value_critical(qa, qb):
+                    same_turn["value_refused"] += 1
+                elif _pkg_overlap(qa, qb) >= DEFAULT_PACKAGE_SAME_TURN_OVERLAP:
+                    same_turn["collapsed"] += 1
         pooled = [p for arm in ARMS for p in _value_bearing_points(session, arm)]
         for a, b in itertools.combinations(pooled, 2):
             pooled_pairs += 1
@@ -448,11 +489,16 @@ def test_the_dedupe_leg_is_measured_and_NOT_discriminating_on_this_corpus():
         f"{PAIRS_PER_ARM} — re-run and update the runbook §2.3")
     assert near_dupe == NEAR_DUPE_PAIRS_PER_ARM, (
         f"{near_dupe} pairs reach ≥0.9 content overlap in the guard's own "
-        "universe — the corpus can now exercise the value-safety leg, so §2.3 "
-        "must be re-measured (it currently says it cannot)")
+        "universe — the CONTENT-RATIO route can now be exercised here, so §2.3 "
+        "must be re-measured (it currently says that route cannot be)")
     assert conflicts == NEAR_DUPE_VALUE_CONFLICTS_PER_ARM, (
         f"{conflicts} near-dupe pairs differ in a value-critical token — §2.3 "
         "must be re-measured")
+    assert same_turn == SAME_TURN_DEDUPE, (
+        "the SAME-SOURCE-TURN route moved (measured before: "
+        f"{SAME_TURN_DEDUPE}) — §2.3 quotes these three numbers, and this is the "
+        "route the content-ratio zero says nothing about: re-measure both and "
+        "update the runbook")
     # Measured context, deliberately loose: the zero above is a property of the
     # PER-ARM universe, not of the corpus in general. Pooling the two arms (a
     # pool no package holds) does produce near-dupes — a lane must not restate
