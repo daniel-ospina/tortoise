@@ -401,10 +401,9 @@ def test_the_census_resolves_the_turn_the_way_the_write_path_does():
 
 def test_every_value_bearing_point_carries_a_span_or_is_a_REPORTED_class():
     """The census: 101 of 112 value-bearing points get an address, and the 11
-    absences are all in a reported (or by-design-silent) class. An
-    ``unclassified`` absence is the failure this test exists for: a
-    value-bearing point whose value cannot be re-read AND whose absence no
-    consumer can see."""
+    absences are all in a REPORTED class. An ``unclassified`` absence is the
+    failure this test exists for: a value-bearing point whose value cannot be
+    re-read AND whose absence no consumer can see."""
     census = _census()
     assert census["unclassified"] == [], (
         "value-bearing points with NO span and NO reported class: "
