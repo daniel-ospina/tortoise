@@ -90,12 +90,25 @@ _redact_uri() {
     #   `sed -E s/^[a-zA-Z]$/…/` MATCHED `é` → `rédiss://user:pw@host:6379`
     #                                masked as a scheme while the canonical
     #                                failed closed
-    #   `[[:alpha:]]` MATCHED `é` (and `[[:upper:]]` `É`) under `en_US.UTF-8`
-    #                                and neither matches under `C` — classes
-    #                                are collated exactly as ranges are.
-    #                                (NBSP is NOT the example: `[[:space:]]`
-    #                                does not match U+00A0 in either bash
-    #                                `case` or sed on glibc — measured.)
+    #   `[[:alpha:]]` MATCHED `é` (and `[[:upper:]]` `É`) under a UTF-8
+    #                                locale, and neither matches under `C`.
+    #
+    # ⛔ RANGES ARE NOT ONE THING — do not generalise this to "ranges are
+    # collated". Measured on this host (bash 5.2.21, glibc en_US.utf8), as the
+    # behaviour of each CONSTRUCT on `é` / U+0660:
+    #   bash `case` class  `[[:alpha:]]`  MATCHES `é` under a UTF-8 locale,
+    #                                     not under `C`      -> COLLATED
+    #   bash `case` range  `[a-zA-Z]`     does NOT match `é` in any locale
+    #                                     (bash's `globasciiranges` is on by
+    #                                     default)          -> NOT collated
+    #   bash `case` range  `[0-9]`        treats U+0660 as a DIGIT under a
+    #                                     collating UTF-8 locale -> COLLATED
+    #   sed ERE range      `[a-zA-Z]`     MATCHES `é` under `en_US.UTF-8`, not
+    #                                     under `C` or `C.UTF-8` -> COLLATED
+    # So the pin is needed for three different reasons, not one, and `C.UTF-8`
+    # is NOT a substitute for `C` on the sed path. (NBSP is NOT an example here:
+    # `[[:space:]]` does not match U+00A0 in bash `case`, `sed` or `grep` on
+    # glibc — measured.)
     #
     # ⛔ BOTH LINES BELOW ARE REQUIRED — `local` IS NOT `export`. `local`
     # restores the caller's locale on return, but it only PRESERVES the export

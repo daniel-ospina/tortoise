@@ -632,10 +632,10 @@ def test_shell_redactor_agrees_with_the_canonical_python_masker():
         assert _redact(uri) == _mask_uri_userinfo(uri), f"maskers disagree on {uri!r}"
 
 
-# #9978: bracket RANGES and character CLASSES are COLLATION-SENSITIVE in both
-# bash's `case` and sed's ERE, so under a UTF-8 locale they admit code points an
-# ASCII predicate rejects. Measured on the pre-fix `entrypoint.sh` under
-# `LC_ALL=en_US.UTF-8`:
+# #9978: bracket RANGES and character CLASSES can be COLLATION-SENSITIVE in
+# both bash's `case` and sed's ERE, so under a UTF-8 locale they admit code
+# points an ASCII predicate rejects. Measured on the pre-fix `entrypoint.sh`
+# under `LC_ALL=en_US.UTF-8`:
 #
 #   `[!0-9]`        matched nothing for U+0660 — under a UTF-8 locale bash reads
 #                   the Arabic-Indic digit as INSIDE the collated `0-9` range,
@@ -646,6 +646,22 @@ def test_shell_redactor_agrees_with_the_canonical_python_masker():
 #                   defect.)
 #   sed `[a-zA-Z]`  matched `\u00e9` — `r\u00e9diss://user:pw@host:6379` was masked
 #                   as a scheme while the canonical failed closed.
+#
+# ⛔ These are THREE different constructs and they do not all behave alike — do
+# not generalise to "ranges are collated". Measured on this host (bash 5.2.21,
+# glibc en_US.utf8), on `\u00e9` and U+0660:
+#
+#   bash `case` class `[[:alpha:]]`  matches `\u00e9` under a UTF-8 locale, not
+#                                    under `C`                            -> COLLATED
+#   bash `case` range `[a-zA-Z]`     never matches `\u00e9` (bash's
+#                                    `globasciiranges` is on by default)  -> NOT collated
+#   bash `case` range `[0-9]`        treats U+0660 as a DIGIT under a
+#                                    collating UTF-8 locale             -> COLLATED
+#   sed ERE range     `[a-zA-Z]`     matches `\u00e9` under `en_US.UTF-8`, not
+#                                    under `C`/`C.UTF-8`                 -> COLLATED
+#
+# So `C.UTF-8` is NOT a substitute for `C` on the sed path, and a test that
+# only pinned one construct would miss the others.
 #
 # `_redact_uri` now pins `LC_ALL=C`, so both implementations agree in every
 # locale and the redactor cannot report on the runner's collation. This case is

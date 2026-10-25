@@ -2619,14 +2619,46 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
                             "to nobody, and posts on the dispatch path that must not "
                             "notify at all"
                         )
-                    if "return" not in "\n".join(gate_lines[guard_start : guard_end + 1]):
-                        return (
-                            f"the github-script step keyed on `steps.{step_id}.outcome` "
-                            "guards on `context.eventName` but its guard body never "
-                            "RETURNS — it logs and falls through to the POST, so a "
-                            "dispatch on a branch posts \"main is lint-red\" onto that "
-                            "branch's OPEN pull request"
+                    # ⛔ The body of this test is read from the LITERALS-STRIPPED
+                    # `script`, NOT from `raw_script`. A `return` inside string
+                    # content satisfies a substring test over `raw_script` — and the
+                    # shipped log line is one word away from the hole (`not
+                    # notifying`), so deleting the guard's own `return` while saying
+                    # "returning early" in the message kept this suite GREEN: the
+                    # exact fail-open this block exists to catch (review cycle 7).
+                    # `_JS_LITERALS.sub` can remove newlines, so the indices are NOT
+                    # shared with `gate_lines` — the window is re-derived here.
+                    code_lines = script.splitlines()
+                    code_start = next(
+                        (
+                            i
+                            for i, line in enumerate(code_lines)
+                            if "context.eventName" in line
+                        ),
+                        None,
+                    )
+                    code_end = (
+                        next(
+                            (
+                                i
+                                for i in range(code_start + 1, len(code_lines))
+                                if code_lines[i].strip() == "}"
+                            ),
+                            None,
                         )
+                        if code_start is not None
+                        else None
+                    )
+                    if code_start is not None and code_end is not None:
+                        guard_body = "\n".join(code_lines[code_start : code_end + 1])
+                        if "return" not in guard_body:
+                            return (
+                                f"the github-script step keyed on `steps.{step_id}.outcome` "
+                                "guards on `context.eventName` but its guard body never "
+                                "RETURNS — it logs and falls through to the POST, so a "
+                                "dispatch on a branch posts \"main is lint-red\" onto that "
+                                "branch's OPEN pull request"
+                            )
             # Property 3 is claimed for this step, so it is asserted here: the two
             # datums the 2026-10-25 lane could not recover are the ENDPOINT and the
             # HTTP STATUS, and a warning that drops `err.status` is that failure again.
@@ -3724,6 +3756,27 @@ def _set_notifier_guard_falls_through(doc: dict) -> None:
     _set_notifier_script_lines(doc, lines[:start] + body + lines[end + 1 :])
 
 
+def _set_notifier_guard_falls_through_behind_prose(doc: dict) -> None:
+    """The guard's `return;` deleted AND the log line claiming it returns.
+
+    This is the mutant the substring test could not see: `\"return\" not in
+    <guard body of the LITERALS-KEPT script>` was satisfied by the word
+    `returning` in the message, so a guard that gates NOTHING while its own
+    prose says otherwise was ACCEPTED — a false PASS on the one property that
+    stops a branch `workflow_dispatch` from posting \"main is lint-red\" onto an
+    unmerged PR (review cycle 7). The shipped line is one word away from the
+    hole (`not notifying`), so this is a plausible tidy-up, not an exotic one.
+    """
+    _set_notifier_guard_falls_through(doc)
+    lines = _notifier_script_lines(doc)
+    for i, line in enumerate(lines):
+        if "not notifying" in line:
+            lines[i] = line.replace("not notifying", "returning early without notifying")
+            _set_notifier_script_lines(doc, lines)
+            return
+    raise AssertionError("the live artifact's guard log line moved — mutant is unbuildable")
+
+
 def _set_notifier_guard_inverted(doc: dict) -> None:
     """`=== 'push'`: returns on every real push (a red main is silent) and posts on a dispatch."""
     lines = _notifier_script_lines(doc)
@@ -3914,6 +3967,10 @@ _STARVED_SHAPES = [
         _set_notifier_without_status_diagnostic,
     ),
     ("a notifier whose guard logs but never returns", _set_notifier_guard_falls_through),
+    (
+        "a notifier guard that falls through behind a `returning` log line",
+        _set_notifier_guard_falls_through_behind_prose,
+    ),
     ("a notifier whose event guard is inverted (`=== 'push'`)", _set_notifier_guard_inverted),
     ("a verdict step that never writes the summary", _set_verdict_without_summary),
     ("a verdict step that emits no `::notice`", _set_verdict_without_notice),
