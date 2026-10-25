@@ -84,17 +84,22 @@ SAFETY RAILS (each pinned by a test) — a sweeper is riskier than a per-event r
     (the event path only listens for `opened`).
   * A RETRY RESUMES ITS COMMENT, never its silence: before re-commenting, the
     run checks for this relay's OWN comment footer (`RELAY_MARKER`, bot-typed or
-    the owner's own login — the string alone is forgeable), reading the NEWEST
-    page of the thread — the comments endpoint ignores `sort`/`direction`, so its
-    first page is the OLDEST and the relay's comment (posted at close time) is
-    only on the last. The intake POST is still made on a resume: a marker proves
-    we commented, never that the record landed (the event path posts intake
-    LAST), and `source_item_id` keys it.
-  * THE UNREPAIRABLE STATE IS REPORTED. An open item that already carries the
-    label is a half-applied relay — the event path labels FIRST — and nothing
-    retries it, so it is counted (`stranded`) by its own filtered read (the
-    window read cannot see an item that aged out) and named in the notes. It is
-    never auto-closed: a human may have labelled it deliberately.
+    the owner's own login — the string alone is forgeable), reading the thread
+    NEWEST-FIRST — the comments endpoint ignores `sort`/`direction`, so its first
+    page is the OLDEST while the relay's comment (posted at close time) is at the
+    end; every page up to the thread's end is read (bounded), because an exact
+    multiple of `per_page` puts the marker on a page followed by an EMPTY one and
+    a later reply can push it off the terminal page. The intake POST is still
+    made on a resume: a marker proves we commented, never that the record
+    landed (the event path posts intake LAST), and `source_item_id` keys it.
+  * THE AMBIGUOUS STATE IS REPORTED, NOT DIAGNOSED. An open item that already
+    carries the label is EITHER a half-applied relay (the event path labels
+    FIRST and nothing retries it) OR an item relayed and then REOPENED for
+    review — the flow the relay's own comment promises, and nothing removes the
+    label. It is counted (`stranded`) by its own filtered read (the window read
+    cannot see an item that aged out) and named in the notes as something to
+    verify. It is never auto-closed: the sweep cannot tell the two apart, and a
+    human may also have labelled it deliberately.
   * COMPLETENESS — a FAILED page aborts. An unreadable page is not an empty
     page: a partial read (rate limit, transient 5xx, timeout) aborts the whole
     run BEFORE any mutation (exit 2). This is the "never bulk-close on a
@@ -417,6 +422,13 @@ def sweep(
     cutoff = now - timedelta(hours=since_hours)
     try:
         listing = list(client.list_open(stop_before=cutoff))
+        # CAPTURED HERE, not read later: `window_truncated` is a per-LISTING flag,
+        # and the `list_labelled` read below resets it. Reading it after that call
+        # (as this did) meant the dense-window report could only ever be a
+        # FakeClient artefact — with the real client the prefix's truncation was
+        # always erased before it was read, so a run that saw a fraction of the
+        # window reported a clean run.
+        window_truncated = bool(getattr(client, "window_truncated", False))
         candidates = [
             item for item in listing if _created_at(item) >= cutoff and _prefilter(item, cfg)
         ]
@@ -471,13 +483,15 @@ def sweep(
     if report.stranded:
         report.notes.append(
             f"{report.stranded} open item(s) already carry {cfg.label!r}: the label "
-            "means 'fully handled', so this is a HALF-APPLIED relay (the event "
-            "path labels FIRST, then comments and closes) — nothing retries it, "
-            "and this sweep will not touch it because a human may have labelled "
-            "it deliberately. Verify and close by hand"
+            "means 'fully handled', so this is EITHER a half-applied relay (the "
+            "event path labels FIRST, then comments and closes) OR an item that was "
+            "relayed and then REOPENED for review — the flow the relay's own comment "
+            "promises, and nothing in this repo removes the label. This sweep cannot "
+            "tell them apart and will not touch either (a human may also have "
+            "labelled it deliberately), so this is a count to verify, not a verdict"
         )
 
-    if getattr(client, "window_truncated", False):
+    if window_truncated:
         # NOT an error: a dense window acts on the prefix it read. Aborting here
         # would hand any flooder an off-switch for the whole control.
         report.truncated = True
@@ -693,8 +707,8 @@ class GhClient:
         raises before any mutation, so the item is left untouched rather than
         acted on with a guess.
         """
-        comments = self._newest_comment_page(number)
-        for comment in comments:
+        comments = self._comment_pages(number)
+        for comment in reversed(comments):
             if RELAY_MARKER not in str(comment.get("body") or ""):
                 continue
             user = comment.get("user") or {}
@@ -704,16 +718,30 @@ class GhClient:
                 return True
         return False
 
-    def _newest_comment_page(self, number: int) -> list[dict[str, Any]]:
-        """The LAST page of the item's comments — the one holding ours.
+    def _comment_pages(self, number: int) -> list[dict[str, Any]]:
+        """Every comment the thread's pages hold, up to `comment_page_budget`.
 
-        Bounded by `comment_page_budget` so a thread nobody has pruned cannot
-        make a resume read unbounded. On exhausting the budget the deepest page
-        read is scanned (the best evidence available) rather than raising: an
-        `ListingError` here would make a long thread permanently un-relayable,
-        which is worse than the duplicate comment this guards against.
+        The endpoint is ASCENDING by id and ignores `sort`/`direction`, so the
+        relay's own footer — posted at close time — is on the LAST page, and a
+        read that stops early misses it. Two shapes make the terminal page the
+        wrong page to scan on its own, so ALL pages read are kept and scanned
+        newest-first:
+
+        * an EXACT multiple of `per_page` comments has a FULL last page followed
+          by an EMPTY one, so "the page past the end" is empty while the marker
+          sits on the page before it;
+        * a contributor can reply AFTER our comment, pushing it off the terminal
+          page entirely.
+
+        An empty page is the end of the thread (stop, keep what was read); a
+        FAILED page raises, so a partial read never looks like a complete one.
+        On exhausting the budget the deepest pages read are scanned — the best
+        evidence available — rather than raising: an `ListingError` here would
+        make a long thread permanently un-relayable, which is worse than the
+        duplicate comment this guards against.
         """
         path = f"repos/{self.repo}/issues/{number}/comments"
+        comments: list[dict[str, Any]] = []
         for page in range(1, self.comment_page_budget + 1):
             try:
                 raw = _gh(["api", f"{path}?per_page={self.per_page}&page={page}"])
@@ -722,9 +750,12 @@ class GhClient:
                 raise ListingError(f"issues/{number}/comments page {page}: {exc}") from exc
             if not isinstance(chunk, list):
                 raise ListingError(f"issues/{number}/comments: expected a list")
+            if not chunk:
+                break
+            comments.extend(chunk)
             if len(chunk) < self.per_page:
-                return chunk
-        return chunk
+                break
+        return comments
 
     def post_intake(self, payload: dict[str, Any]) -> None:
         url = os.environ.get("INBOUND_URL", "")

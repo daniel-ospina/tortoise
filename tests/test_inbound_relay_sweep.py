@@ -245,7 +245,12 @@ def config(sweep: Any) -> Any:
     )
 
 
-def run(sweep: Any, client: FakeClient, **kwargs: Any) -> Any:
+def _stranded_note(report: Any) -> str:
+    """The note about open+labelled items — one note, so its wording is pinnable."""
+    return next(note for note in report.notes if "already carry" in note)
+
+
+def run(sweep: Any, client: Any, **kwargs: Any) -> Any:
     params: dict[str, Any] = {"since_hours": 24, "max_actions": 20, "dry_run": False}
     params.update(kwargs)
     return sweep.sweep(client, config(sweep), now=NOW, **params)
@@ -656,7 +661,15 @@ def test_an_open_labelled_item_is_reported_and_rules_nothing(sweep: Any) -> None
     assert report.stranded == 2
     assert report.relayed == []
     assert client.mutations() == [], "a stranded item is never auto-closed"
-    assert any("HALF-APPLIED" in note for note in report.notes), report.notes
+    note = _stranded_note(report)
+    assert "half-applied" in note.casefold(), note
+    assert "REOPENED" in note, (
+        "the state is AMBIGUOUS: an approved item REOPENED for review keeps the "
+        f"label and is not a half-applied relay — the note must say so: {note}"
+    )
+    assert "close by hand" not in note.casefold(), (
+        f"closing an item under review is the opposite of correct: {note}"
+    )
     assert report.exit_code == 0, "a note, not a red run every 15 minutes"
 
 
@@ -666,7 +679,7 @@ def test_a_labelled_owner_item_is_not_called_stranded(sweep: Any) -> None:
     report = run(sweep, client)
 
     assert report.stranded == 0
-    assert not any("HALF-APPLIED" in note for note in report.notes)
+    assert not any("already carry" in note for note in report.notes)
 
 
 def test_a_failed_label_says_it_will_not_be_retried(sweep: Any) -> None:
@@ -1261,9 +1274,44 @@ def test_sweep_reports_a_stranded_item_outside_the_window(sweep: Any) -> None:
 
     assert client.labelled_reads == [LABEL], "one dedicated filtered read"
     assert report.stranded == 1
-    assert any("HALF-APPLIED" in note for note in report.notes), report.notes
+    assert "half-applied" in _stranded_note(report).casefold()
     # …and the stale labelled item is NOT dragged into the action set.
     assert report.relayed == [("issue", 1)]
+
+
+def test_a_dense_window_is_reported_through_the_real_client(sweep: Any, monkeypatch: Any) -> None:
+    """The truncation must survive the SECOND listing, or the report is a fake.
+
+    `window_truncated` is PER-LISTING: `GhClient._paginate` resets it on every
+    call, and `sweep()` makes the stranded (`state=open&labels=…`) read after the
+    window read — so reading the flag at the end saw the LABELLED read's `False`
+    and the dense-window note could never print in production. The run then read
+    as a clean pass over a window it had only partly read, which is exactly the
+    silence the rail exists to break. This drives the REAL client (the fake's
+    `list_labelled` never touches the attribute, so a FakeClient test is vacuous
+    here) and asserts the prefix is still acted on.
+    """
+    client = sweep.GhClient(f"{OWNER}/tortoise", per_page=2, max_pages=2)
+    _stub_gh_json(
+        sweep,
+        monkeypatch,
+        {
+            "labels=queued-for-triage&per_page=2&page=1": [],
+            "sort=created&direction=desc&per_page=2&page=1": [issue(1), issue(2)],
+            "sort=created&direction=desc&per_page=2&page=2": [issue(3), issue(4)],
+        },
+    )
+
+    report = run(sweep, client, dry_run=True)
+
+    assert report.truncated is True, (
+        "the open-window truncation was erased by the stranded read before it "
+        "was read — the operator is told the window was covered when it was not"
+    )
+    assert any("deferred" in note for note in report.notes), report.notes
+    # The ACTION half still holds: the prefix it read is acted on, not aborted.
+    assert report.selected == [("issue", 1), ("issue", 2), ("issue", 3), ("issue", 4)]
+    assert report.errors == []
 
 
 def test_the_resume_marker_must_be_our_own_comment(sweep: Any, monkeypatch: Any) -> None:
@@ -1316,21 +1364,58 @@ def test_the_resume_read_walks_to_the_newest_comments(sweep: Any, monkeypatch: A
     item with more than `per_page` comments. The retry then re-posts the
     identical comment every 15 minutes for as long as the close keeps failing,
     which is the exact failure this marker exists to prevent.
+
+    Three shapes, because the terminal page is not enough on its own: the marker
+    sits mid-thread once a contributor replies after it, and an EXACT multiple of
+    `per_page` comments ends on a full page followed by an EMPTY one.
     """
     client = sweep.GhClient(f"{OWNER}/tortoise")
-    oldest = [
-        {"body": f"chatter {i}", "user": {"login": f"u{i}", "type": "User"}}
-        for i in range(client.per_page)
-    ]
+
+    def chatter(count: int, start: int = 0) -> list[dict[str, Any]]:
+        return [
+            {"body": f"chatter {start + i}", "user": {"login": f"u{start + i}", "type": "User"}}
+            for i in range(count)
+        ]
+
     marker = {
         "body": f"👋 Thanks for the contribution!\n\n{sweep.RELAY_MARKER}",
         "user": {"login": "github-actions[bot]", "type": "Bot"},
     }
-    # `&page=N` (not `page=N`): `per_page=100` itself contains `page=1`.
-    seen = _stub_gh_json(sweep, monkeypatch, {"&page=1": oldest, "&page=2": [marker]})
 
+    # (a) the marker on page 2 of a short thread.
+    # `&page=N` (not `page=N`): `per_page=100` itself contains `page=1`.
+    seen = _stub_gh_json(
+        sweep, monkeypatch, {"&page=1": chatter(client.per_page), "&page=2": [marker]}
+    )
     assert client.already_relayed(9883) is True, (
-        "the marker lives on the LAST page — a read that stops at page 1 misses "
-        "it and re-posts the comment"
+        "the marker lives past page 1 — a read that stops there misses it and re-posts the comment"
     )
     assert any("&page=2" in call for call in seen), seen
+
+    # (b) an EXACT multiple of `per_page`: the last page is FULL and the page
+    # after it is EMPTY, so "the page past the end" is not the newest page.
+    _stub_gh_json(
+        sweep,
+        monkeypatch,
+        {"&page=1": [*chatter(client.per_page - 1), marker], "&page=2": []},
+    )
+    assert client.already_relayed(9883) is True, (
+        "a 100-comment thread ends on a full page followed by an empty one; "
+        "scanning only the empty page reports 'not relayed' and re-posts"
+    )
+
+    # (c) a contributor replied AFTER our comment, pushing it off the terminal
+    # page entirely.
+    _stub_gh_json(
+        sweep,
+        monkeypatch,
+        {
+            "&page=1": chatter(client.per_page),
+            "&page=2": [marker, *chatter(client.per_page - 1, start=200)],
+            "&page=3": chatter(1, start=400),
+        },
+    )
+    assert client.already_relayed(9883) is True, (
+        "a reply after ours leaves the marker on an EARLIER page — the scan must "
+        "not be limited to the terminal page"
+    )

@@ -109,18 +109,19 @@ jobs:
     #     spares bots on BOTH kinds for the same reason, so the two paths agree
     #     here and the parity test in `tests/test_inbound_relay_sweep.py` says so.
     #
-    # FAIL CLOSED. Every EXEMPTION clause lives inside the `!( … )`, so an event
-    # whose payload is missing or unreadable (no `pull_request`, a null
-    # `head.repo`, an absent `user.type`, no `base.ref`, no `default_branch`)
-    # makes the exemption false and the relay CLOSES the PR — the pre-existing
-    # behaviour for anything it cannot classify as the queue's own batch. Note
-    # the belt-2 base arm's `!= ''`: without it, TWO unreadable fields compare
-    # equal (`null == null` is true in Actions' loose equality) and an all-absent
-    # payload would read as a match (review B, cycle 2). The two clauses OUTSIDE
-    # the negation (the event allow-list and the owner exclusion) have the
-    # opposite polarity on purpose: false there suppresses the relay entirely,
-    # and moving an exemption clause out there would invert it. Each fail-closed
-    # case is pinned by a test.
+    # FAIL CLOSED. Every EXEMPTION is its own NEGATED conjunct, and a negation is
+    # fail-closed in both directions: an event whose payload is missing or
+    # unreadable (no `pull_request`, a null `head.repo`, an absent `user.type`,
+    # no `base.ref`, no `default_branch`) makes the exemption false and the relay
+    # CLOSES the PR — the pre-existing behaviour for anything it cannot classify
+    # as the queue's own batch. Belt 3 (`!(issues && user.type == 'Bot')`) is such
+    # a top-level negated conjunct, deliberately NOT folded into belts 1-2 because
+    # it is ISSUES-only. Note the belt-2 base arm's `!= ''`: without it, TWO
+    # unreadable fields compare equal (`null == null` is true in Actions' loose
+    # equality) and an all-absent payload would read as a match (review B, cycle
+    # 2). Only the two NON-negated conjuncts — the event allow-list and the owner
+    # exclusion — have the opposite polarity: false there suppresses the relay
+    # entirely. Each fail-closed case is pinned by a test.
     if: |
       (github.event_name == 'issues' || github.event_name == 'pull_request_target') &&
       github.actor != 'daniel-ospina' &&
