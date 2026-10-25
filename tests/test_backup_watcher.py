@@ -44,6 +44,7 @@ def _ts(hours_ago: float) -> datetime:
 class _Channels:
     def __init__(self):
         self.issues: dict[int, str] = {}
+        self.bodies: dict[int, str] = {}
         self.telegram: list[str] = []
         self._next = 1
 
@@ -51,6 +52,9 @@ class _Channels:
         n = self._next
         self._next += 1
         self.issues[n] = title
+        # The FILED ARTIFACT, not the call: the #5047 payload assertions read
+        # what the tracker would actually hold.
+        self.bodies[n] = body
         return n
 
     def close_issue(self, number, comment=None):
@@ -2250,3 +2254,221 @@ def test_recovery_window_is_not_defeated_by_a_not_eligible_double_resolve(monkey
 
     w.poll()
     assert ch.issues == {}, "the second consecutive healthy poll closes it"
+
+
+# ── #9937: a half-written archive is not an AGE measurement ───────────────────
+#
+# Measured on the live tracker 2026-10-24T23:52Z (`daniel-ospina/tortoise`,
+# `gh api search/issues` total_count — the number DRIFTS, re-measure it):
+# **1,399** `[DR] STALE` issues, **34** open, ~10–19 filed and ~10–19 closed
+# per day. Two generations: 721 were filed by the DRIVER (`app/github-actions`,
+# carrying a measured age — the per-tenant cardinality #4994 pooled into
+# `POOL_STALE`), and 678 by the WATCHER since #4994 landed (2026-09-24), whose
+# body is `Detail: {}` and whose title is an opaque org id.
+#
+# One org (`0902a99e…`) holds **11 issues over 27 days for one unchanged
+# condition**, alternating with 3–5 second hand-offs:
+#   #6015 NEVER 09-28T07:16:17 → closed 10-01T02:51:40
+#   #6827 STALE 10-01T02:51:43 → closed 10-01T03:03:23
+#   #6832 NEVER 10-01T03:03:26 → closed 10-02T17:32:29
+#   #6965 STALE 10-02T17:32:33 → … → #7717 NEVER 10-08T11:44:56 (still open)
+# Each transition closes one kind and FILES THE OTHER as a new issue.
+#
+# The mechanism, end to end:
+#   * `create_backup` uploads `dump.enc` FIRST and `manifest.json` LAST
+#     (#5062 review F3), so between a dump starting and its manifest landing
+#     the org prefix is non-empty with no manifest (a guard-rejected archive is
+#     deleted again afterwards, with its manifest present, so that is not the
+#     window);
+#   * `_default_graph_newest` only reads `/manifest.json`, so that window has
+#     `newest is None` — no timestamp was measured at all;
+#   * `compute_status` nevertheless classified it `stale`, i.e. it asserted
+#     "the newest archive is older than the threshold" about an archive whose
+#     age was never measured, while the next poll (prefix gone) said `never`.
+#
+# `stale` is an AGE claim, so the confirmed-listing arm may only reach it from a
+# measured age — the rule the per-graph twin already applies (#2313, #2374).
+
+
+def _seed_partial_archive(storage, team: str, hours_ago: float = 0.1) -> str:
+    """The MID-SWEEP key shape: `dump.enc` uploaded, `manifest.json` not yet."""
+    ts = _ts(hours_ago)
+    key = (f"{ts.strftime('%Y%m%dT%H%M%S')}{ts.microsecond // 1000:03d}Z_"
+           f"{secrets.token_hex(4)}")
+    storage.upload(f"backups/{team}/{key}/dump.enc", b"x")
+    return f"{team}/{key}"
+
+
+def test_status_newest_none_on_a_confirmed_listing_is_never_not_stale():
+    """A listing that ANSWERED and found no default manifest measured no age.
+
+    `stale` asserts an age over the threshold; nothing was measured, so the
+    honest class is the absence it actually observed. This is the per-graph
+    twin's rule applied to the per-org table (#2313)."""
+    s = _status(orgs=["team_a"], r2_orgs=["team_a"], state_orgs=[],
+                newest_ts_by_org={})
+    assert s["per_team"]["team_a"] == "never"
+
+
+def test_status_newest_none_on_a_degraded_listing_stays_stale():
+    """The counterpart, and the reason this cannot be a blanket re-label: on a
+    degraded poll the prefix list IS the census/cache, so a cache miss is not a
+    measurement and must never fabricate `NEVER_BACKED_UP` (#3658 — see
+    `test_watcher_degraded_poll_does_not_resolve_a_real_never_incident`)."""
+    s = _status(orgs=["team_a"], r2_orgs=["team_a"], state_orgs=[],
+                newest_ts_by_org={}, r2_ok=False)
+    assert s["per_team"]["team_a"] == "stale"
+
+
+def test_a_mid_sweep_archive_does_not_refile_a_new_issue_for_one_unchanged_org():
+    """THE GRAIN PIN: one org, one unchanged condition, ONE issue — the same
+    issue number, across the whole sweep window.
+
+    Pre-fix this test fails on the issue NUMBER, not the count: poll 2 read
+    `stale`, so it resolved `NEVER_BACKED_UP` and filed a *new* `STALE` issue
+    (the sentinel was deleted with the resolve), and poll 3 resolved that and
+    re-filed `NEVER_BACKED_UP`. At each step one issue is open, which is why the
+    open count looked stable while the tracker filled with over a thousand.
+    """
+    ch = _Channels()
+    storage = MemoryStorage()
+    w = _watcher(storage, ch)
+
+    w.poll()                      # no archive anywhere → NEVER_BACKED_UP
+    assert sorted(ch.issues.values()) == ["[DR] NEVER_BACKED_UP — team_a"], ch.issues
+    first = list(ch.issues)
+
+    _seed_partial_archive(storage, "team_a")   # the sweep's mid-flight window
+    status = w.poll()
+    assert status["per_team"]["team_a"] == "never", status["per_team"]
+    assert list(ch.issues) == first, (
+        "a half-written archive is not a new incident state — resolving and "
+        f"re-filing here is the flood (#5047): {ch.issues}")
+
+    for k in list(storage.list("backups/team_a/")):   # the sweep deletes it
+        storage.delete(k)
+    w.poll()
+    assert list(ch.issues) == first, ch.issues
+
+
+def test_a_confirmed_no_manifest_org_that_HAS_state_is_not_called_never():
+    """The three-way split on `newest is None` must not collapse case 3 into
+    `never`: team state is written only after a SUCCESSFUL dump (#2374), so
+    "never backed up" is false for an org that has state — what is missing is
+    the archive SET, which the separate `backup_set_missing` census owns. This
+    table has no class for it yet (#9938), so the pre-existing label stands
+    rather than gaining a new false one."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_state(storage, "team_a")                 # a dump succeeded once
+    _seed_partial_archive(storage, "team_a")       # …and the prefix survives
+    w = BackupWatcher(
+        storage, _store(ch),
+        org_provider=lambda: ["team_a"],
+        state_reader=lambda t: {"last_backup_at": "2026-01-01"},
+        driver_heartbeat_reader=lambda: {},
+        stale_threshold_min=90, driver_down_threshold_min=240,
+        grace_min=0, now=lambda: FIXED,
+    )
+    status = w.poll()
+    assert status["per_team"]["team_a"] == "stale", status["per_team"]
+    assert not any("NEVER_BACKED_UP" in t for t in ch.issues.values()), ch.issues
+    # …and the filed payload must not send the triager to R2 connectivity: this
+    # poll's listing DID answer, so the absence is a missing archive SET, not a
+    # cache miss. (Two different absences must not share one string.)
+    (body,) = (ch.bodies[n] for n in ch.issues)
+    assert "CONFIRMED listing" in body, body
+    assert "cache miss" not in body, body
+
+
+def test_a_degraded_poll_files_no_new_stale_for_an_unmeasured_org():
+    """The open side of an UNMEASURED `stale` (the sibling of #3658's resolve
+    side). On a degraded poll `compute_status` substitutes `r2_orgs = orgs`, so
+    every no-archive org lands in the cache-miss `stale` arm — and opening STALE
+    off that filed a NEW issue per org per R2 blip for a condition nobody
+    measured. Nothing is silenced: the pool kinds are the incidents for that
+    poll (asserted below)."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    w = _watcher(storage, ch)
+    w.poll()                                    # no archive → NEVER_BACKED_UP
+    assert sorted(ch.issues.values()) == ["[DR] NEVER_BACKED_UP — team_a"], ch.issues
+    before = list(ch.issues)
+
+    w._storage = _R2Unreachable()
+    status = w.poll()
+    assert status["per_team"]["team_a"] == "stale", status["per_team"]  # cache-miss label stands
+    # R2_DOWN is the incident for this poll and IS expected to open; the point
+    # is that no STALE is invented for an org nobody measured.
+    assert list(ch.issues)[: len(before)] == before, (
+        "a degraded poll must not file a STALE it never measured: " f"{ch.issues}")
+    titles = set(ch.issues.values())
+    assert "[DR] R2_DOWN" in titles, (
+        "nothing is silenced by the gate — the pool kind is the outage's "
+        f"incident: {titles}")
+    assert not any("STALE" in t for t in titles), titles
+
+
+def test_a_measured_stale_org_keeps_its_incident_across_a_degraded_poll():
+    """The counterpart: an org measured stale BEFORE the outage keeps its open
+    STALE (no fabricated resolve). The degraded poll DOES add the kind that
+    measures the outage itself — `R2_DOWN` — which is the point: the pool kind
+    carries the outage, so no per-org age claim has to be invented."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 200)
+    _seed_state(storage, "team_a")
+    w = _watcher(storage, ch)
+    w.poll()
+    assert len(ch.issues) == 1 and "STALE" in next(iter(ch.issues.values()))
+    before = list(ch.issues)
+
+    w._storage = _R2Unreachable()
+    w.poll()
+    stale_titles = [t for t in ch.issues.values() if "STALE" in t]
+    assert stale_titles == ["[DR] STALE — team_a"], ch.issues
+    assert list(ch.issues)[: len(before)] == before, ch.issues
+    assert "[DR] R2_DOWN" in set(ch.issues.values()), (
+        "the outage's own incident files, so the per-org gate silences "
+        f"nothing: {ch.issues}")
+
+
+def test_stale_filing_carries_the_measurement_that_justified_it():
+    """#5047's diagnostic-payload symptom: `Detail: {}` made the watcher's per-org
+    filings unassessable — no age, no archive, no close condition."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 200)   # 200h = 12000 min
+    _seed_state(storage, "team_a")
+    w = _watcher(storage, ch)
+
+    w.poll()
+    (body,) = (ch.bodies[n] for n in ch.issues)
+    assert "**Detail:** ```{}" not in body, body
+    assert '"age_min": 12000' in body, body
+    assert '"newest_default_archive": "' in body, body
+    assert '"stale_threshold_min": 90' in body, body
+    assert '"closes_when": "' in body, body
+    # The close condition states the MEASUREMENT, not a menu of classes.
+    assert "METADATA_LOST is NOT a recovery" in body, body
+
+
+def test_stale_payload_does_not_change_the_title_shape():
+    """The title SHAPE is the adoption contract (`incident_title_matches`), so a
+    diagnostic field must not reach it: a resolver that cannot re-find the issue
+    it filed duplicates it. `alert_store._title` renders `detail["age"]` /
+    `detail["age_minutes"]` into the title, which is exactly why the payload
+    uses `age_min` / `age_human`."""
+    from tortoise.github_issue import incident_title_matches
+
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 200)
+    _seed_state(storage, "team_a")
+    w = _watcher(storage, ch)
+
+    w.poll()
+    (title,) = ch.issues.values()
+    assert title == "[DR] STALE — team_a", title
+    assert incident_title_matches(title, "STALE", "team_a")
+    assert not incident_title_matches(title, "STALE", "team_b")
