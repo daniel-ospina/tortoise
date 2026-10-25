@@ -36,8 +36,11 @@ name: main-lint
 #     failure: Process completed with exit code 1.
 #
 # The `failure` was a REAL ruff finding (`RUF059`, `tests/test_docs_link_check.py`
-# — the #5203/#4298/#5130 family, NOT this workflow's defect and deliberately not
-# folded in here). The `warning` was this workflow failing to post its own
+# — the #5203/#4298/#5130 family, NOT this workflow's defect). It was outside the
+# first revision of this change; it is cleared HERE, in its own commit, so the
+# branch's tree is genuinely `ruff check .`-clean instead of trading on an
+# unrelated red — #5203 remains the tracker for that class on `main`. The `warning`
+# was this workflow failing to post its own
 # notification, and THAT is what this change is about. What is MEASURED is only:
 # the runner printed `Issues: write`, the notification still answered "Resource not
 # accessible by integration" — and it did so on EVERY failing run, not just this
@@ -103,8 +106,9 @@ name: main-lint
 #      NEGATIVE test (`!== 'push'` — an inverted one returns on every real push and
 #      notifies on a dispatch) and RETURNS inside its own body, so a dispatch on a
 #      branch cannot post "main is lint-red" onto an unmerged PR (idempotent by the
-#      commit marker, so no re-run corrects it). and its `continue-on-error: true` is required (a
-#      reporter that throws cannot red the job). The pin is the STATUS SLOT, not
+#      commit marker, so no re-run corrects it). It also carries
+#      `continue-on-error: true` (a reporter that throws cannot red the job). The
+#      pin is the STATUS SLOT, not
 #      the spelling: `failure()` is what this file writes, and `always()` — which
 #      is the same pin, ANDed with the same outcome conjunct — is a pinned
 #      ACCEPTANCE case, so a tidy-up that writes it stays green instead of

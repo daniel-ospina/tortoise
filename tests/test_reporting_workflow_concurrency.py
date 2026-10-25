@@ -1737,9 +1737,6 @@ _OUTCOME_REF = re.compile(r"\$\{\{\s*steps\.([A-Za-z0-9_.-]+)\.(?:outcome|conclu
 _NONZERO_EXIT = re.compile(r"\bexit\s+[1-9]\d*\b")
 
 
-_SHELL_TRAILING_COMMENT = re.compile(r"(?:^|(?<=\s))#.*$")
-
-
 def _shell_code(run: str) -> list[str]:
     """``run:`` lines with shell comments removed, TRAILING ones included.
 
