@@ -87,13 +87,21 @@ name: main-lint
 #      `_STARVED_SHAPES`, and the honest spellings (`if: ${{ always() }}`, an
 #      `exit 2` fallback, an inert `continue-on-error: false`, a renamed outcome
 #      variable, `echo …; exit 1` on one line, compact `success) … ;;` arms) stay
-#      green.
+#      green. The step's OTHER keys are an allow-list for the same reason the ruff
+#      step's are: the harness above supplies its own shell and summary, so it is
+#      blind to `shell: echo`/`shell: python`, a real `working-directory:` and an
+#      `env: GITHUB_STEP_SUMMARY` — each of which stops the runner publishing the
+#      verdict while every executed case still passes. Those are REFUSED.
 #   2. the verdict IS the lint step's own outcome, so a finding still fails the
 #      job — including when the notification ALSO fails. The notification cannot
 #      change the verdict in either direction. PINNED: exactly ONE step keys on
 #      that outcome in its `if:` (a second keyed step is how the notifier stops
 #      being the thing that notifies), it carries a status function that removes
-#      the implicit `success()`, and its `continue-on-error: true` is required (a
+#      the implicit `success()`, and its WRITE PATH is gated: the non-push
+#      `context.eventName` test precedes the `issues.createComment` call and
+#      RETURNS before it, so a dispatch on a branch cannot post "main is lint-red"
+#      onto an unmerged PR (idempotent by the commit marker, so no re-run
+#      corrects it). and its `continue-on-error: true` is required (a
 #      reporter that throws cannot red the job). The pin is the STATUS SLOT, not
 #      the spelling: `failure()` is what this file writes, and `always()` — which
 #      is the same pin, ANDed with the same outcome conjunct — is a pinned
@@ -107,7 +115,10 @@ name: main-lint
 #   3. the notification is `continue-on-error: true` and every API call is
 #      wrapped, so a reporter failure is a warning that NAMES the endpoint and
 #      the token error instead of a bare "Resource not accessible by
-#      integration" nobody can act on.
+#      integration" nobody can act on. PINNED: the reporter's `warn` interpolates
+#      `err.status` — the HTTP status is the one datum this defect could not
+#      recover, so a warning that drops it is the same failure again. NOT pinned:
+#      the wording around it.
 #
 # ONE job. The `permissions:` below is the job's scope: this workflow has exactly
 # one job, so a job-level block would be the same grant under a name that shadows

@@ -1814,7 +1814,13 @@ def _case_arms(run: str) -> dict[str, list[str]] | None:
     return None  # no `esac`: this is not a `case` this pin can read
 
 
-_VERDICT_OUTCOMES = (None, "success", "failure", "skipped", "weird-conclusion")
+# The null conclusion is modelled as the EMPTY STRING, which is what GitHub
+# interpolates (`${{ steps.x.outcome }}` on a skipped step yields `""`, never an
+# unset variable). Review cycle 6 measured that modelling it by OMISSION redded an
+# equally correct step — `case "${OUTCOME}" in` under `set -u` — with a diagnosis
+# naming the summary write, which was already right, because the artifact's own
+# `set -u` aborted the shell on a state a runner cannot produce.
+_VERDICT_OUTCOMES = ("", "success", "failure", "skipped", "weird-conclusion")
 
 
 def _verdict_behaviour_problem(run: str, outcome_var: str) -> str | None:
@@ -1832,22 +1838,29 @@ def _verdict_behaviour_problem(run: str, outcome_var: str) -> str | None:
 
     * `success` → exit 0, a `PASS` in the summary, a `::notice` annotation;
     * `failure` → exit 0 (the lint step already owns that red), `FAIL`, `::error`;
-    * `skipped` / an unset outcome / an undocumented conclusion → exit NON-ZERO,
-      `NO VERDICT`, `::error` — absence of a verdict is never a pass.
+    * `skipped` / an EMPTY outcome (a null conclusion — GitHub interpolates the
+      variable to `""`, it is never unset) / an undocumented conclusion → exit
+      NON-ZERO, `NO VERDICT`, `::error` — absence of a verdict is never a pass.
     """
     # `exit_rule`: the exit code a run of this path must have. Only the PASS arm
     # must be 0 and only the unmeasured paths must be non-zero; the FAIL arm may do
     # either (the lint step already owns that red), so it is unconstrained — a pin
     # that reds `failure)` + `exit 1` reports a green tree as red when it is red.
     expected = [
-        (None, "nonzero", "NO VERDICT", "::error"),
+        ("", "nonzero", "NO VERDICT", "::error"),
         ("skipped", "nonzero", "NO VERDICT", "::error"),
         ("weird-conclusion", "nonzero", "NO VERDICT", "::error"),
         ("success", "zero", "PASS", "::notice"),
         ("failure", "any", "FAIL", "::error"),
     ]
     for outcome, exit_rule, verdict, annotation in expected:
-        label = "an UNSET outcome" if outcome is None else f"outcome {outcome!r}"
+        if outcome == "":
+            label = (
+                "an EMPTY outcome (GitHub's interpolation of a null conclusion) — "
+                "the state a skipped or never-reached lint step produces"
+            )
+        else:
+            label = f"outcome {outcome!r}"
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 summary = Path(tmp, "summary.md")
@@ -1856,9 +1869,11 @@ def _verdict_behaviour_problem(run: str, outcome_var: str) -> str | None:
                     "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
                     "GITHUB_SHA": "deadbeef",
                     "GITHUB_STEP_SUMMARY": str(summary),
+                    # ALWAYS set, empty for a null conclusion: GitHub interpolates
+                    # `${{ steps.x.outcome }}` into `env:` as `""`. Modelling it by
+                    # omission redded a correct `${OUTCOME}` under `set -u`.
+                    outcome_var: outcome,
                 }
-                if outcome is not None:
-                    env[outcome_var] = outcome
                 # `bash -e`: GitHub runs an unspecified `shell:` on Linux as
                 # `bash -e {0}`, so a command that returns non-zero mid-arm ABORTS
                 # the real step. Running `bash -c` judged a script GitHub would fail
@@ -1983,6 +1998,41 @@ def _verdict_step_problem(steps: list, ruff_index: int, ruff_id: str) -> str | N
         return (
             "the verdict-publishing step has no `run:` — it publishes nothing, and "
             "the verdict a reader needs is back to being inferred from an exit code"
+        )
+    # ── the step's OTHER keys are pinned too (review cycle 6, F2) ──────────────
+    # The execution harness below builds its OWN env and shell and runs the `run:`
+    # text, so it is blind to the step's own keys: measured accepted-and-inert were
+    # `shell: python`, `shell: echo`, `working-directory: /nonexistent` on this step
+    # (the runner never executes the block — no summary, no annotation — while all
+    # six executed polarity cases pass) and an `env:` entry named
+    # `GITHUB_STEP_SUMMARY` (the real summary stays empty while the pin reads the
+    # one it wrote). The ruff step is protected by exactly this allow-list for
+    # exactly this reason, so the same discipline applies here.
+    unmodelled = sorted(
+        key
+        for key, value in verdict.items()
+        if key not in _RUFF_STEP_KEYS | {"if", "env"} and not _inert_step_key(key, value)
+    )
+    if unmodelled:
+        return (
+            f"the verdict-publishing step carries {unmodelled}, which this pin does "
+            "not model. The inert spellings are accepted (`continue-on-error: "
+            "false`, `shell: bash|sh`, `working-directory: .`); anything else — "
+            "`shell: echo`, a real `working-directory` — stops the runner executing "
+            "the block, so no verdict is published while every executed case still "
+            "passes. Remove it, or extend `_inert_step_key` with the reason"
+        )
+    redirected = sorted(
+        key
+        for key in (verdict.get("env") or {})
+        if str(key).strip() == "GITHUB_STEP_SUMMARY"
+    )
+    if redirected:
+        return (
+            "the verdict-publishing step sets "
+            f"{redirected} in its own `env:` — that diverts the summary the verdict "
+            "is published in, so the run page shows nothing while this pin reads the "
+            "file the harness wrote"
         )
     if verdict.get("continue-on-error") not in (None, False, "false"):
         # PRESENCE is not the property: `continue-on-error: false` is inert (the
@@ -2460,14 +2510,50 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
             # test was satisfied by `core.info("see the issues.createComment docs")`,
             # a valid no-op — the same class as the commented-out call, one spelling
             # further on. What remains is code.
-            script = _JS_LITERALS.sub(
-                "", _JS_COMMENTS.sub("", str((other.get("with") or {}).get("script", "")))
+            raw_script = _JS_COMMENTS.sub(
+                "", str((other.get("with") or {}).get("script", ""))
             )
+            script = _JS_LITERALS.sub("", raw_script)
             if "issues.createComment" not in script:
                 return (
                     f"the github-script step keyed on `steps.{step_id}.outcome` never "
                     "calls `issues.createComment` — the notification the guard exists "
                     "for is not in it"
+                )
+            # ── the WRITE is GATED, not merely present (review cycle 6, F1) ────
+            # Deleting the non-push guard left this suite green: a `workflow_dispatch`
+            # on a branch resolves to that branch's OPEN PR, so the body below — "This
+            # PR **failed post-merge ruff lint on main** … Main is now lint-red" — is
+            # posted onto an UNMERGED PR, and the `commit <sha>` marker makes it
+            # idempotent, so no re-run corrects it. Presence of the call is not the
+            # property; the call has to be behind the gate.
+            write_at = script.find("issues.createComment")
+            gate_at = script.find("context.eventName")
+            if gate_at == -1 or gate_at > write_at:
+                return (
+                    f"the github-script step keyed on `steps.{step_id}.outcome` checks "
+                    "`context.eventName` nowhere before it POSTS (or only after the "
+                    "call) — a `workflow_dispatch` run on a branch then posts \"main is "
+                    "lint-red\" onto that branch's OPEN pull request, permanently: the "
+                    "body claims a post-merge failure of a PR that has not merged"
+                )
+            if "return" not in script[gate_at:write_at]:
+                return (
+                    f"the github-script step keyed on `steps.{step_id}.outcome` tests "
+                    "`context.eventName` but does not RETURN on the non-push arm before "
+                    "it POSTS — naming the event without acting on it gates nothing"
+                )
+            # Property 3 is claimed for this step, so it is asserted here: the two
+            # datums the 2026-10-25 lane could not recover are the ENDPOINT and the
+            # HTTP STATUS, and a warning that drops `err.status` is that failure again.
+            # Read with string literals KEPT (the interpolation lives in a template
+            # literal, which `script` strips) and comments removed (prose is not code).
+            if "err.status" not in raw_script:
+                return (
+                    f"the github-script step keyed on `steps.{step_id}.outcome` reports "
+                    "failures without `err.status` — the next 403 yields "
+                    "`Resource not accessible by integration` with no HTTP status, "
+                    "which is the datum #5120 could not recover from"
                 )
             outcome_term = f"steps.{step_id}.outcome == 'failure'"
             condition_text = str(other["if"])
@@ -3457,6 +3543,69 @@ def _set_verdict_step_silenced(doc: dict) -> None:
     _verdict_step(doc)["continue-on-error"] = True
 
 
+def _set_verdict_echo_shell(doc: dict) -> None:
+    """A step-level `shell:` that runs something other than bash.
+
+    The runner then never executes the `run:` block — no summary, no annotation —
+    while the pin's execution harness, which supplies its own shell, stays green
+    (measured accepted in review cycle 6, F2).
+    """
+    _verdict_step(doc)["shell"] = "echo"
+
+
+def _set_verdict_step_working_directory(doc: dict) -> None:
+    """A `working-directory:` the runner cannot enter: the step fails to start."""
+    _verdict_step(doc)["working-directory"] = "/nonexistent"
+
+
+def _set_verdict_summary_redirected_by_env(doc: dict) -> None:
+    """`env: GITHUB_STEP_SUMMARY` diverts the surface the verdict is published in."""
+    env = _verdict_step(doc).setdefault("env", {})
+    env["GITHUB_STEP_SUMMARY"] = "/dev/null"
+
+
+def _notifier_step(doc: dict) -> dict:
+    """The live artifact's notification step (the one keyed on the outcome in `if:`)."""
+    ruff_id = _ruff_step(doc)["id"]
+    for step in doc["jobs"]["lint"]["steps"]:
+        if isinstance(step, dict) and f"steps.{ruff_id}.outcome" in str(step.get("if", "")):
+            return step
+    raise AssertionError("the live artifact lost its notification step — mutant unbuildable")
+
+
+def _notifier_script_lines(doc: dict) -> list[str]:
+    return str(_notifier_step(doc)["with"]["script"]).splitlines()
+
+
+def _set_notifier_script_lines(doc: dict, lines: list[str]) -> None:
+    _notifier_step(doc)["with"]["script"] = "\n".join(lines) + "\n"
+
+
+def _set_notifier_without_event_guard(doc: dict) -> None:
+    """The non-push guard deleted: a dispatch on a branch posts onto its OPEN PR."""
+    lines = _notifier_script_lines(doc)
+    start = next(i for i, line in enumerate(lines) if "context.eventName !== 'push'" in line)
+    end = next(i for i in range(start, len(lines)) if lines[i].strip() == "}")
+    _set_notifier_script_lines(doc, lines[:start] + lines[end + 1 :])
+
+
+def _set_notifier_guard_after_write(doc: dict) -> None:
+    """The same guard, moved BELOW the call it is supposed to gate."""
+    lines = _notifier_script_lines(doc)
+    start = next(i for i, line in enumerate(lines) if "context.eventName !== 'push'" in line)
+    end = next(i for i in range(start, len(lines)) if lines[i].strip() == "}")
+    guard = lines[start : end + 1]
+    rest = lines[:start] + lines[end + 1 :]
+    write_at = next(i for i, line in enumerate(rest) if "issues.createComment" in line)
+    _set_notifier_script_lines(doc, rest[: write_at + 1] + guard + rest[write_at + 1 :])
+
+
+def _set_notifier_without_status_diagnostic(doc: dict) -> None:
+    """The HTTP status dropped from the warning — the datum #5120 could not recover."""
+    lines = _notifier_script_lines(doc)
+    _set_notifier_script_lines(doc, [line for line in lines if "err.status" not in line])
+
+
 def _set_verdict_default_green(doc: dict) -> None:
     step = _verdict_step(doc)
     step["run"] = step["run"].replace("exit 1", "exit 0")
@@ -3624,6 +3773,18 @@ _STARVED_SHAPES = [
     ("a verdict `if:` gated on success", _set_verdict_if_success),
     ("a verdict step that never runs", _set_verdict_step_never_runs),
     ("a verdict step silenced by `continue-on-error`", _set_verdict_step_silenced),
+    ("a verdict step with a `shell:` that runs something else", _set_verdict_echo_shell),
+    ("a verdict step with an unreachable `working-directory`", _set_verdict_step_working_directory),
+    (
+        "a verdict step whose summary is redirected by its own `env:`",
+        _set_verdict_summary_redirected_by_env,
+    ),
+    ("a notifier with no non-push guard", _set_notifier_without_event_guard),
+    ("a notifier whose event guard sits AFTER the write", _set_notifier_guard_after_write),
+    (
+        "a notifier whose warning drops the HTTP status",
+        _set_notifier_without_status_diagnostic,
+    ),
     ("a verdict step that never writes the summary", _set_verdict_without_summary),
     ("a verdict step that emits no `::notice`", _set_verdict_without_notice),
     ("a verdict step that emits no `::error`", _set_verdict_without_error),
