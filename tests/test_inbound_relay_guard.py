@@ -288,7 +288,13 @@ def _event(
         },
     }
     if event_name == "issues":
-        github["event"]["issue"] = {"number": 99, "title": "t", "body": "b"}
+        # The real webhook body carries `issue.user` — belt 3 reads it (#9613).
+        github["event"]["issue"] = {
+            "number": 99,
+            "title": "t",
+            "body": "b",
+            "user": {"login": login, "type": user_type},
+        }
         github["event"].pop("pull_request")
     return github
 
@@ -413,6 +419,46 @@ def test_mergify_bot_on_a_fork_pr_is_closed() -> None:
         fork=True,
     )
     assert closes(event) is True
+
+
+def test_bot_authored_issue_is_never_relayed() -> None:
+    """#9613: our own monitor issues are alarm threads, not inbound triage.
+
+    `deploy-hosted: deploy-api failed at 'drift'` is opened by
+    `github-actions[bot]`, carries the `bug` label and stays open as a live
+    record. Before belt 3 the issue branch had no bot exclusion — its only spare
+    was the owner's login — so the relay would have closed it, and every sibling
+    the monitor opens, the moment it ran.
+    """
+    assert closes(
+        _event(
+            event_name="issues",
+            actor="github-actions[bot]",
+            login="github-actions[bot]",
+            user_type="Bot",
+        )
+    ) is False
+
+
+def test_a_bot_on_a_pull_request_is_still_closed() -> None:
+    """Belt 3 is ISSUES only. On a PR the queue's batch is spared by belt 1 and
+    belt 2, and a bot's fork PR is still an external contribution (#5185)."""
+    assert closes(
+        _event(
+            actor="some-app[bot]",
+            login="some-app[bot]",
+            user_type="Bot",
+            head_repo="someone-else/tortoise",
+        )
+    ) is True
+
+
+def test_an_issue_with_an_unreadable_author_type_fails_closed() -> None:
+    """No `user.type` is not evidence of a bot: an unclassifiable issue is still
+    relayed — the fail-closed polarity the PR branch already has."""
+    assert closes(
+        _event(event_name="issues", actor="outsider", login="outsider", user_type="")
+    ) is True
 
 
 def test_owner_prs_are_never_relayed() -> None:
