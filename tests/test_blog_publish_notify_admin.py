@@ -454,8 +454,21 @@ def test_v6_editor_fires_on_publish_only_for_both_paths():
     assert re.search(r"export async function clearHoldPost[\s\S]{0,900}?void notifyPublished\(updated\.slug\)", api), (
         "clearHoldPost must notify when it makes a published post live"
     )
-    assert re.search(r"export async function publishPost[\s\S]{0,900}?void notifyPublished\(updated\.slug\)", api), (
-        "publishPost (the drafts-queue one-click Publish) must notify"
+    # …and the GUARD around it, not merely an occurrence of it. A count is
+    # satisfied by a call that can never run: `if (false) void
+    # notifyPublished(updated.slug)` kept this suite at 22/22 green while the
+    # drafts-queue one-click Publish — the path the agent-draft backlog is
+    # actually published through (`docs/blog-authoring.md`) — submitted nothing,
+    # which is the same "disabled capability, green suite" shape as above. The
+    # count below pins how MANY call sites exist; this pins that this one is the
+    # unconditional call its render guard bounds.
+    assert re.search(
+        r"export async function publishPost[\s\S]{0,900}?"
+        r"if \(updated\.slug\) void notifyPublished\(updated\.slug\);",
+        api,
+    ), (
+        "publishPost's notify must be the unconditional `if (updated.slug)` call its render guard "
+        "bounds — a call that can never run satisfies a count and submits nothing"
     )
     assert api.count("void notifyPublished(") == 2, (
         "expected exactly two console call sites: publishPost and clearHoldPost"
@@ -731,6 +744,42 @@ def test_the_editor_supplies_the_hold_state_the_rule_needs():
     ), "PostEditor must pass the stored hold state (`!== false`: NULL counts as held)"
     assert re.search(r"\bhold_for_review\b", (BLOG_API.read_text().split("POST_SELECT")[1])[:900]), (
         "POST_SELECT must select hold_for_review, or the editor's `existingPost` cannot carry it"
+    )
+
+
+def test_the_editor_supplies_the_before_state_the_rule_needs():
+    """The BEFORE-state — the input `becomesLive` actually branches on — pinned as
+    what it IS, because nothing else reads it.
+
+    WHY THIS TEST EXISTS (review at 35fd45bce, P0). `wasPublished` is the input
+    that turns "Save & Republish" on a live post into a NON-transition: everything
+    else about this fix is executed (the module, the composition), but the line
+    that FILLS this input was pinned by nothing. Measured at 35fd45bce, in a
+    throwaway copy: deleting `wasPublished: existingPost?.status === 'published',`
+    left the suite at 22/22 green, and so did `wasPublished: false`. Both
+    re-instate the exact defect this PR exists to stop — with no before-state the
+    rule reads before = `draft`, so `becomesLive`'s first arm answers `true` for a
+    save that leaves the post published, and the editor submits on an edit again
+    (#9680 item 3, indicator (c)).
+
+    THE INSTRUMENT IS TEXT, and that limit is worth naming rather than hiding:
+    `PostEditor.tsx` is a React component, and this repo's console gate executes
+    only the import-free `lib/publish-transition.ts` under `node
+    --experimental-strip-types`. So the pin is EXACT — the whole assignment, not a
+    substring — which is why a hard-coded value, a swapped operator, a dropped
+    optional chain and an appended `|| true` all red it, where a substring regex
+    would have accepted several of them. The cost is the usual one for an exact
+    pin: a reformat of this line reds it too, which is the fail-closed direction.
+    """
+    editor = POST_EDITOR.read_text()
+    before_state = [line.strip() for line in editor.splitlines() if line.strip().startswith("wasPublished:")]
+    assert before_state == ["wasPublished: existingPost?.status === 'published',"], (
+        "PostEditor must pass the STORED published-ness as the rule's before-state — the rule reads "
+        "it to decide whether this save is a transition, so a missing or hard-coded value makes an "
+        f"edit to a live post submit again (#9680 item 3). Found: {before_state!r}"
+    )
+    assert re.search(r"\bstatus\b", (BLOG_API.read_text().split("POST_SELECT")[1])[:300]), (
+        "POST_SELECT must select status, or the editor's `existingPost` cannot carry the before-state"
     )
 
 
