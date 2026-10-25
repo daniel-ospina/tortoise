@@ -162,9 +162,10 @@ file's index tag is read — `H` is ordinary, a lowercase tag is
 assume-unchanged, `S` is skip-worktree, and anything else is refused. Each such
 path is recorded as an uncommitted path, so publish refuses the run. A path the
 surface scan finds that `git status` **already reported** is not recorded
-twice: one file is one uncommitted path, and the "an ignore rule hides it"
-wording is used only for a path status did not list. A failed `git ls-files` is
-recorded as not-provably-clean, exactly as a failed `git status` is.
+twice (byte-caches included): one file is one uncommitted path, and the "an
+ignore rule hides it" wording is used only for a path status did not list. A
+failed `git ls-files` is recorded as not-provably-clean, exactly as a failed
+`git status` is.
 
 The surface is not hand-curated: `tests/test_measure_ask_distilled.py::
 test_the_recorded_surface_COVERS_every_module_the_run_imports` imports the
@@ -180,10 +181,15 @@ are executable code this record does not verify, a forged one's header matches
 its source by construction, and CPython prefers a matching `.pyc` over the
 `.py` beside it — so a tree carrying one is not a tree the recorded sha
 reproduces, however clean `git status` looks. Tracked/committed byte-caches are
-refused on the same ground. The run is launched byte-code-free
-(`run_protocol` passes `-B` and `PYTHONDONTWRITEBYTECODE=1`), which stops caches
-being written but not one being read — so the refusal names the removal
-command, and a run is publishable once the surface carries no byte-caches.
+refused on the same ground. The byte-code-free requirement that makes a run
+publishable is **this command's own**, not an inherited property:
+`run_protocol` launches `tools.longmem_eval.run` and `full_context` with `-B`,
+not this module. A bare interpreter launch writes `.pyc` files under the
+surface on import — before any identity is taken — so `run` **refuses to
+start** when `sys.dont_write_bytecode` is False, naming the removal command
+and the invocation that works. That refusal is not advisory: `-B` stops caches
+being written but not one being read, so a run is publishable only once the
+surface carries no byte-caches.
 
 ## Why this is a separate tree from `tests/eval/write_path/`
 

@@ -722,8 +722,10 @@ def _paths_hidden_from_status(
     hundred byte-caches, and a hundred rows would bury the reason.
 
     ``status_paths`` are the paths ``git status`` already reported, used ONLY
-    to dedupe: a path status saw needs no second row, and the ignore-rule
-    wording is reserved for a path status did NOT list.
+    to dedupe: a path status saw needs no second row — of ANY kind, byte-cache
+    included, or one untracked ``.pyc`` in a repository that does not ignore
+    caches would be "2 uncommitted path(s)". The ignore-rule wording is
+    reserved for a path status did NOT list.
 
     Returns ``None`` when a git call FAILS: a failed ``ls-files`` has empty
     stdout, and empty stdout must never read as "nothing hidden".
@@ -745,7 +747,10 @@ def _paths_hidden_from_status(
             # Tracked (committed/staged) byte-cache: git calls it clean, and
             # the index tag says "ordinary", so neither oracle below nor the
             # status answer can see that CPython may load it over the source.
-            byte_caches.append(rel)
+            # ... unless it is MODIFIED, in which case status did list it and
+            # one file must still be one row.
+            if not (status_paths and _status_covered(rel, status_paths)):
+                byte_caches.append(rel)
         elif tag != "H":
             hidden.append(
                 f"{rel} (index flag {tag!r} tells git not to look at this "
@@ -754,7 +759,11 @@ def _paths_hidden_from_status(
         if not rel:
             continue
         if _is_bytecode(rel):
-            byte_caches.append(rel)
+            # Same dedupe as the ordinary branch below: `ls-files --others`
+            # without `--exclude-standard` also returns caches `git status`
+            # already printed, and a second row inflates the count.
+            if not (status_paths and _status_covered(rel, status_paths)):
+                byte_caches.append(rel)
             continue
         # Excused by SUFFIX only (editor/VCS droppings) — the same suffix-only
         # excusal ``guard_measured_revision`` applies, taken from its own
@@ -773,14 +782,73 @@ def _paths_hidden_from_status(
         examples = ", ".join(listed[:3]) + (" …" if len(listed) > 3 else "")
         hidden.append(
             f"{len(listed)} byte-cache file(s) under the executed surface "
-            f"(e.g. {examples}) — a ``.pyc``/``.pyo`` is executable code that "
+            f"that `git status` does not list (e.g. {examples}) — a "
+            f"``.pyc``/``.pyo`` is executable code that "
             f"this record does not verify, and a forged byte-cache's header "
             f"matches its source by construction (PEP 552), so the recorded "
             f"sha cannot vouch for what CPython loads. Re-run over a "
-            f"byte-code-free tree (remove them first: `find tortoise tools "
-            f"tests/eval/ask -name __pycache__ -type d -prune -exec rm -rf "
-            f"{{}} +`)")
+            f"byte-code-free tree (remove them first: `{_BYTECODE_REMOVAL}`)")
     return hidden
+
+
+#: The removal command every byte-cache refusal names. ONE spelling, so the
+#: refusal raised at run start and the row ``code_identity`` records cannot tell
+#: an operator two different things.
+_BYTECODE_REMOVAL = ("find tortoise tools tests/eval/ask -name __pycache__ "
+                     "-type d -prune -exec rm -rf {} +")
+
+#: The invocation that satisfies the byte-code-free requirement, named by the
+#: run-start refusal. ``uv run python -B`` is equivalent and named beside it.
+_BYTECODE_FREE_RUN = ("PYTHONDONTWRITEBYTECODE=1 uv run python -m "
+                      "tools.longmem_eval.measure_ask_distilled run --out "
+                      "<observations.json>")
+
+
+def _require_byte_code_free() -> None:
+    """Refuse to START a measured run that could never be published.
+
+    ⛔ ``tools/longmem_eval/run_protocol.py`` does NOT launch this module. It
+    launches ``tools.longmem_eval.run`` (:func:`run_protocol._run_cmd`) and
+    ``tools.longmem_eval.full_context`` (:func:`run_protocol._cell_cmd`) with
+    ``-B`` and ``PYTHONDONTWRITEBYTECODE=1``, and this module's own header says
+    it is a sibling of that protocol, not an extension of it. The
+    byte-code-free requirement those launchers satisfy for THEIR steps is
+    therefore **this command's own obligation** — an earlier revision of the
+    docstrings and of ``tests/eval/ask/README.md`` claimed it was inherited,
+    which was false.
+
+    Without it the interpreter compiles and caches this module **and its
+    imports** before this function can run, so ``.pyc`` files appear under the
+    executed surface and :func:`code_identity` (correctly, #3712) records them:
+    the run measures for minutes, and ``publish`` then refuses it. Worse, the
+    refusal's own remedy — delete the caches — is undone by the next identical
+    launch, so an operator following it loops with no exit signposted. Refusing
+    HERE puts the refusal before the measurement, where it costs nothing, and
+    names the invocation that works.
+    """
+    if sys.dont_write_bytecode:
+        # `python -B` and `PYTHONDONTWRITEBYTECODE=1` both set this, and under
+        # it importing this module writes no cache at all.
+        return
+    raise SystemExit(
+        "refusing to start the run: this interpreter WRITES byte-caches "
+        "(`sys.dont_write_bytecode` is False), so importing the runner has "
+        "already put `.pyc` files under the executed surface — before the "
+        "first code identity was taken — and `code_identity` refuses a tree "
+        "carrying them (#3712: a byte-cache is executable code this record "
+        "does not verify). The run would measure for minutes and then be "
+        "refused at publish, and deleting the caches would be undone by the "
+        "next identical launch.\n"
+        "This module is NOT launched by `tools/longmem_eval/run_protocol.py` "
+        "(that launches `tools.longmem_eval.run` and `full_context` with "
+        "`-B` and `PYTHONDONTWRITEBYTECODE=1`); the byte-code-free "
+        "requirement is this command's own.\n"
+        "Re-run byte-code-free over a tree with no byte-caches left in it:\n"
+        f"  {_BYTECODE_REMOVAL}\n"
+        f"  {_BYTECODE_FREE_RUN}\n"
+        "(equivalently `uv run python -B -m "
+        "tools.longmem_eval.measure_ask_distilled run --out "
+        "<observations.json>`)")
 
 
 def code_identity(repo_root: str | Path | None,
@@ -815,10 +883,13 @@ def code_identity(repo_root: str | Path | None,
     executable code, this record does not verify its contents, and a forged
     one's header matches its source by construction — so a tree carrying one is
     not a tree the recorded sha reproduces, even though ``git status`` calls it
-    clean. The remedy is the guard's: run byte-code-free (``run_protocol``
-    already passes ``-B`` and ``PYTHONDONTWRITEBYTECODE=1``, which stops caches
-    being WRITTEN) over a tree with no byte-caches left in it, which is why the
-    refusal names the command that removes them.
+    clean. Because a byte-cache is what an ordinary interpreter launch
+    CREATES, the refusal is only reachable if the run is launched
+    byte-code-free — and that requirement is **this command's own**, not an
+    inherited property: ``run_protocol`` does not launch this module
+    (:func:`_require_byte_code_free`), so the CLI ``run`` REFUSES to start
+    rather than measuring for minutes and then refusing at publish, and it
+    names the working invocation.
 
     The remaining suffix exemptions are the editor/VCS droppings
     (``.orig``/``.rej``/``.swp``/``.swo``/``.DS_Store``) — taken from
@@ -2275,6 +2346,11 @@ def _main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "run":
+        # ⛔ BEFORE the measurement, not after it: a run that cannot be
+        # published is refused at the start rather than after minutes of work,
+        # and the refusal names the invocation that works
+        # (:func:`_require_byte_code_free`).
+        _require_byte_code_free()
         report = run_sealed(
             corpus_root=Path(args.corpus_root),
             mutate=(_drop_supersession if args.mutate else None),

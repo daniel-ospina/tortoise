@@ -812,6 +812,13 @@ def test_cli_preregister_run_score_publish(tmp_path, monkeypatch, capsys):
 
     monkeypatch.setattr(ask_lane_mod, "_default_ask_reader_factory",
                         lambda: _RecordingReader(_answer_map(), []))
+    # ⛔ The CLI `run` refuses an interpreter that WRITES byte-caches: it would
+    # cache the runner under the executed surface before the identity is taken,
+    # so the run could never be published (see
+    # `test_the_run_REFUSES_to_start_when_the_interpreter_would_write_byte_caches`).
+    # A real lane launches it `-B` / `PYTHONDONTWRITEBYTECODE=1`, and this test
+    # drives the same path rather than dodging it.
+    monkeypatch.setattr(sys, "dont_write_bytecode", True)
     obs_path = tmp_path / "obs.json"
     assert m._main(["run", "--out", str(obs_path),
                     "--corpus-root", str(corpus_dir)]) == 0
@@ -1806,6 +1813,14 @@ def test_the_recorded_surface_COVERS_every_module_the_run_imports():
     a run to claim an identity it did not have.
     """
     repo_root = Path(m.__file__).resolve().parents[2]
+    # A checkout can carry its OWN virtualenv (``uv sync`` puts ``.venv`` at the
+    # repository root, and it is gitignored), so "physically under the repo
+    # root" is NOT the same question as "a module of this repository". The
+    # surface is what ``code_identity`` asks git about; a dependency installed
+    # under ``.venv``/``site-packages`` is neither a repository module nor
+    # something the record claims to vouch for, and counting it made this test
+    # fail under ``uv run pytest`` while passing where deps live outside the
+    # tree — a false failure on the repository's own documented command.
     census = (
         "import json, pathlib, sys\n"
         "sys.path.insert(0, sys.argv[1])\n"
@@ -1819,6 +1834,8 @@ def test_the_recorded_surface_COVERS_every_module_the_run_imports():
         "    try:\n"
         "        rel = pathlib.Path(where).resolve().relative_to(root)\n"
         "    except ValueError:\n"
+        "        continue\n"
+        "    if 'site-packages' in rel.parts or rel.parts[0].startswith('.'):\n"
         "        continue\n"
         "    loaded.add(rel.as_posix())\n"
         "print(json.dumps(sorted(loaded)))\n")
@@ -1990,6 +2007,87 @@ def test_an_ordinary_untracked_module_is_reported_ONCE_without_an_ignore_claim(
     assert dirty.count("tools/new_tool.py") == 1, dirty
     assert not any("nested_module.py" in path for path in dirty), dirty
     assert not any("ignore rule" in path for path in dirty), dirty
+
+
+def test_an_UNTRACKED_byte_cache_is_reported_ONCE(tmp_path):
+    """FAIL-BEFORE: ONE untracked ``.pyc`` became "2 uncommitted path(s)".
+
+    ``git ls-files --others`` without ``--exclude-standard`` returns EVERY
+    untracked file, so in a repository that does NOT gitignore byte-caches
+    ``git status`` prints the same ``?? tools/probe_step.pyc`` the surface scan
+    finds. The byte-cache branch appended BEFORE the status dedupe, so the one
+    file got a status row and the aggregate byte-cache row — the exact
+    inflation the ordinary-module test above pins, one branch over, and the
+    opposite of the docstring's promise that a path status saw needs no second
+    row. The repository here deliberately has NO ``.gitignore``: that is what
+    makes status list the cache, and the premise is asserted before the
+    count so the test cannot pass because status happened to stay silent.
+    """
+    repo = _make_surface_repo(tmp_path)
+    cache = repo / "tools" / "probe_step.pyc"
+    cache.write_bytes(b"\x00forged byte-cache: uncommitted\n")
+    status = m._git(repo, "status", "--porcelain",
+                    "--untracked-files=normal").stdout
+    assert "tools/probe_step.pyc" in status, (
+        "the fixture did not reproduce a byte-cache git status DOES list")
+    dirty = m.code_identity(repo)["dirty_paths"]
+    # One file, one row: the status row stands alone, the aggregate row must
+    # not re-count it.
+    assert dirty == ["tools/probe_step.pyc"], dirty
+
+
+def test_the_run_REFUSES_to_start_when_the_interpreter_would_write_byte_caches(
+        tmp_path, monkeypatch):
+    """FAIL-BEFORE: the documented ``run`` command measured for minutes and
+    then could not be published — and the remedy it printed LOOPED.
+
+    ``run_protocol`` launches ``tools.longmem_eval.run`` and ``full_context``
+    with ``-B``; it never launches this module, so the byte-code-free property
+    the docstrings and the README claimed was inherited is this command's OWN.
+    A bare interpreter caches this module (and its imports) BEFORE any code here
+    runs, so the recorded identity carries byte-caches, ``publish`` refuses, and
+    deleting them is undone by the next identical launch.
+
+    ``run_sealed`` is stubbed: the assertion is that the refusal lands BEFORE
+    the measurement, which a test that actually ran the corpus could not.
+    A stub also makes the pre-fix behaviour fail loudly (the stub report has no
+    cases) instead of measuring for minutes.
+    """
+    calls: list[dict] = []
+    monkeypatch.setattr(m, "run_sealed", lambda **kw: calls.append(kw) or {})
+    monkeypatch.setattr(sys, "dont_write_bytecode", False)
+    out = tmp_path / "obs.json"
+    with pytest.raises(SystemExit) as exc:
+        m._main(["run", "--out", str(out)])
+    assert calls == [], "the refusal must land BEFORE the measurement"
+    assert not out.exists(), "a refused run writes no observations"
+    message = str(exc.value)
+    # The refusal must carry the REMEDY, not just the objection: earlier
+    # revisions made the operator loop, because the only printed remedy was
+    # "delete the caches" — which the next identical launch undoes.
+    assert "__pycache__" in message, message
+    assert "PYTHONDONTWRITEBYTECODE=1" in message, message
+    assert "byte-cache" in message, message
+    # …and the corrected claim about WHO launches this module, since the false
+    # "run_protocol already passes -B" is what left the requirement unwired.
+    assert ("NOT launched by `tools/longmem_eval/run_protocol.py`" in message), \
+        message
+
+
+def test_the_run_PROCEEDS_when_the_interpreter_is_byte_code_free(
+        tmp_path, monkeypatch):
+    """The other half of the refusal: ``-B`` / ``PYTHONDONTWRITEBYTECODE=1`` is
+    ACCEPTED, so the guard refuses the launch that loses the record — not the
+    one that keeps it."""
+    calls: list[dict] = []
+    report = {"schema": m.RUN_SCHEMA, "cases": [], "arms": [],
+              "code_identity": {"commit": None, "dirty_paths": []}}
+    monkeypatch.setattr(m, "run_sealed", lambda **kw: calls.append(kw) or report)
+    monkeypatch.setattr(sys, "dont_write_bytecode", True)
+    out = tmp_path / "obs.json"
+    assert m._main(["run", "--out", str(out)]) == 0
+    assert len(calls) == 1, "a byte-code-free launch must reach the measurement"
+    assert json.loads(out.read_text(encoding="utf-8"))["schema"] == m.RUN_SCHEMA
 
 
 def test_a_dirty_tree_is_DETECTED_and_refused_end_to_end(bound_repo, tmp_path,
