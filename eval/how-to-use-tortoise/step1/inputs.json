@@ -1,0 +1,569 @@
+{
+  "eval": "how-to-use-tortoise/write-pipeline/step1",
+  "issue": 9675,
+  "version": 1,
+  "frozen_at": "2026-10-22",
+  "method": "Ten representative inputs run against an agent that HAS the write tools and NO skill. The gold below was frozen BEFORE any run so the delta cannot be retrofitted to whatever the agent did. Gold is derived from docs/ONTOLOGY.md (the definitions owner, #9675 'Boundaries') \u2014 \u00a74.1 Point, \u00a74.2 Subject, \u00a74.3 Object, \u00a74.5 Event, \u00a74.6 Source, and the \u00a75 state-centric vocabulary (2026-08-12, option B) plus the #7813 owner ruling. This file is the reference standard, NOT a restatement of the ontology.",
+  "layer_test": "Each input names the ADJACENT layer pair it is designed to confuse (Event-vs-Object, Subject-vs-Point, Object-vs-Point, Point-vs-Event) \u2014 a per-layer positive test does not catch the agent that saw the right word and picked the neighbouring layer.",
+  "inputs": [
+    {
+      "id": "portfolio_update",
+      "cell": "portfolio update",
+      "confuses": [
+        "Object-vs-Event",
+        "Event-vs-Object"
+      ],
+      "text": "Quarterly portfolio update, 2026-08: Northwind Logistics closed a Series B on 2026-07-30. Their ARR is now $8.4M, up from $5.1M at our entry. The board seat we hold is unchanged. Acme Capital released tranche 2 to Solstice Robotics on 2026-09-02, after the safety audit passed. Solstice's headcount is 74 people as of 2026-09-30 (it was 61 in Q1). We are not adding new names this quarter.",
+      "expect": [
+        {
+          "item": "Northwind Logistics",
+          "layer": "subject",
+          "kind": [
+            "organization"
+          ],
+          "why": "an actor we hold a position in \u2014 \u00a74.2; the company is not a claim"
+        },
+        {
+          "item": "Acme Capital",
+          "layer": "subject",
+          "kind": [
+            "organization"
+          ],
+          "why": "\u00a74.2"
+        },
+        {
+          "item": "Solstice Robotics",
+          "layer": "subject",
+          "kind": [
+            "organization"
+          ],
+          "why": "\u00a74.2"
+        },
+        {
+          "item": "Series B",
+          "layer": "event",
+          "kind": [
+            "occurrence",
+            "milestone"
+          ],
+          "why": "a closed round is a dated occurrence \u2014 \u00a74.5, never an Object; the timeline must survive"
+        },
+        {
+          "item": "tranche 2",
+          "layer": "event",
+          "kind": [
+            "occurrence",
+            "milestone"
+          ],
+          "why": "the RELEASE is the occurrence; \u00a74.5"
+        },
+        {
+          "item": "$8.4M",
+          "layer": "object",
+          "kind": [
+            "other",
+            "Project",
+            "target"
+          ],
+          "why": "current state of the company \u2014 \u00a74.3 holds *now*; a released tranche / passed audit is what makes it true (Event\u2192fold)"
+        },
+        {
+          "item": "74 people",
+          "layer": "object",
+          "kind": [
+            "other",
+            "Project"
+          ],
+          "why": "now-state, not a claim"
+        }
+      ],
+      "expect_source": true,
+      "expect_supersede": false,
+      "notes": "The trap is writing 'Northwind closed a Series B' as a Point (statement) and 'Northwind Logistics' as a Point. A second trap is writing the $8.4M ARR as a Point with no state fold, so 'what is Northwind's ARR now' cannot be answered by reading the Object.",
+      "expect_nand": false
+    },
+    {
+      "id": "meeting_transcript",
+      "cell": "meeting transcript",
+      "confuses": [
+        "Point-vs-Event",
+        "Event-vs-Object"
+      ],
+      "text": "[2026-09-14 10:00] Dana (CEO): We're killing the self-serve tier. Decision made today, effective Q4. Ravi, you own the migration comms. Ravi (PM): Understood. Migration comms are mine, first draft 2026-09-25. Priya (Eng): I'll need the pricing page rewrite before that \u2014 I'd say it's an 80% chance we slip a week. Dana: Fine. Also: we should probably look at the EU data-residency question at some point.",
+      "expect": [
+        {
+          "item": "self-serve tier",
+          "layer": "object",
+          "kind": [
+            "plan",
+            "strategy",
+            "other"
+          ],
+          "why": "a commitment's state \u2014 killed by a decision, so the OBJECT carries the fold; the decision is the Event"
+        },
+        {
+          "item": "killing the self-serve tier",
+          "layer": "event",
+          "kind": [
+            "decision"
+          ],
+          "why": "a decision made at a moment is a TIMELINE record (\u00a75 state-centric: decision is an eventKind), not a Point"
+        },
+        {
+          "item": "Dana",
+          "layer": "subject",
+          "kind": [
+            "naturalPerson",
+            "role"
+          ],
+          "why": "\u00a74.2 \u2014 an actor"
+        },
+        {
+          "item": "Ravi",
+          "layer": "subject",
+          "kind": [
+            "naturalPerson",
+            "role"
+          ],
+          "why": "\u00a74.2"
+        },
+        {
+          "item": "Priya",
+          "layer": "subject",
+          "kind": [
+            "naturalPerson",
+            "role"
+          ],
+          "why": "\u00a74.2"
+        },
+        {
+          "item": "80% chance we slip a week",
+          "layer": "point",
+          "kind": [
+            "statement"
+          ],
+          "why": "a forecast is a belief \u2014 \u00a74.1; it is the ONE thing in this transcript that belongs on the logic layer"
+        },
+        {
+          "item": "EU data-residency question",
+          "layer": "point",
+          "kind": [
+            "statement",
+            "observation"
+          ],
+          "why": "an open question is a claim about what we should look at \u2014 belief, not occurrence"
+        }
+      ],
+      "expect_source": true,
+      "expect_supersede": false,
+      "notes": "The trap is the reverse of the portfolio update: everything that sounds like a commitment ('we're killing X') gets written as a Point, and the decision is lost as a timeline record. Second trap: '80% chance' written as an Object or with a hard confidence overwrite instead of a low-confidence statement.",
+      "expect_nand": false
+    },
+    {
+      "id": "research_paper",
+      "cell": "research paper",
+      "confuses": [
+        "Subject-vs-Point",
+        "Object-vs-Point"
+      ],
+      "text": "Paper: 'Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks' (Lewis et al., 2020, arXiv:2005.11401, NeurIPS 2020). Finding: RAG models outperform a parametric-only seq2seq baseline by 44.2% on Exact Match on Natural Questions. The authors report the gain is unstable when the retriever is frozen. The paper argues \u2014 with a single ablation \u2014 that joint fine-tuning of retriever and generator is necessary for the reported gains.",
+      "expect": [
+        {
+          "item": "Retrieval-Augmented Generation",
+          "layer": "source",
+          "kind": [
+            "document"
+          ],
+          "why": "\u00a74.6 \u2014 the paper is a Source with a URL, a sourceKind and a tier; it is not an entity"
+        },
+        {
+          "item": "Lewis",
+          "layer": "subject",
+          "kind": [
+            "naturalPerson"
+          ],
+          "why": "\u00a74.2 author"
+        },
+        {
+          "item": "44.2% on Exact Match",
+          "layer": "point",
+          "kind": [
+            "statement"
+          ],
+          "why": "a reported result is a claim we may believe or not \u2014 \u00a74.1, with a source edge"
+        },
+        {
+          "item": "unstable when the retriever is frozen",
+          "layer": "point",
+          "kind": [
+            "statement"
+          ],
+          "why": "a reported observation about a condition \u2014 belief"
+        },
+        {
+          "item": "joint fine-tuning is necessary",
+          "layer": "point",
+          "kind": [
+            "statement"
+          ],
+          "why": "the paper's ARGUMENT is a belief backed by one ablation \u2014 a claim, and one that deserves a lowish confidence"
+        }
+      ],
+      "expect_source": true,
+      "expect_supersede": false,
+      "notes": "The trap is writing the paper as an Object (a 'document' object), or writing 'RAG' as a Subject because it is a named thing. The measurement that matters is whether each claim carries a provenance edge to the Source.",
+      "expect_nand": false
+    },
+    {
+      "id": "decision_request",
+      "cell": "decision request",
+      "confuses": [
+        "Object-vs-Point",
+        "Event-vs-Object"
+      ],
+      "text": "Decision request from the platform team, 2026-09-20: approve moving the ingestion workers from Celery to Temporal. Constraint: the migration must complete before the Q1 freeze (2027-01-05). Cost of the migration is ~3 engineer-weeks. The team's goal is sub-5-minute end-to-end ingestion latency by 2027-03-31. If not approved by 2026-10-15 the window is missed.",
+      "expect": [
+        {
+          "item": "moving the ingestion workers from Celery to Temporal",
+          "layer": "event",
+          "kind": [
+            "decision"
+          ],
+          "why": "the REQUEST is an ask for a resolution \u2014 the record that it was asked at a moment is a timeline Event"
+        },
+        {
+          "item": "sub-5-minute end-to-end ingestion latency",
+          "layer": "object",
+          "kind": [
+            "goal",
+            "target"
+          ],
+          "why": "a commitment-state \u2014 \u00a75 commitment-state family (goal/target are Object kinds; the canonical representation of a goal is an Object)"
+        },
+        {
+          "item": "before the Q1 freeze",
+          "layer": "object",
+          "kind": [
+            "target",
+            "plan"
+          ],
+          "why": "a dated constraint on the state is part of the commitment, not a belief"
+        },
+        {
+          "item": "3 engineer-weeks",
+          "layer": "object",
+          "kind": [
+            "other",
+            "target"
+          ],
+          "why": "an estimate attached to the work \u2014 if it is asserted as belief it belongs on a Point; if it is a commitment it belongs on the Object. Passing requires it lands on exactly one layer with a stated reason, not on both halves."
+        }
+      ],
+      "expect_source": true,
+      "expect_supersede": false,
+      "notes": "This is the Object-vs-Point discriminator with a twist: a request is neither state nor belief \u2014 it is an occurrence of asking. The trap is a Point named 'Approve Celery\u2192Temporal migration' with no Event, so 'was this decided?' and 'when' both become unanswerable.",
+      "expect_nand": false
+    },
+    {
+      "id": "correction_existing_claim",
+      "cell": "correction to an existing claim",
+      "confuses": [
+        "Point-vs-Event",
+        "truth-vs-relevance"
+      ],
+      "setup": "The graph already contains Point P1: 'Our Q3 churn was 4.1%.' (pointKind statement, source: internal dashboard, tier T1).",
+      "text": "Correction, 2026-10-03: the Q3 churn figure we published was wrong. The 4.1% included a duplicate account. The correct figure is 3.2%. The earlier number came from the same dashboard before the dedupe fix landed.",
+      "expect": [
+        {
+          "item": "3.2%",
+          "layer": "point",
+          "kind": [
+            "statement"
+          ],
+          "why": "the corrected claim is a NEW Point that supersedes the old one \u2014 \u00a74.1 supersede, never an edit"
+        },
+        {
+          "item": "4.1%",
+          "layer": "point",
+          "kind": [
+            "statement"
+          ],
+          "why": "the old Point must still exist with status=superseded and a validTo \u2014 'what did we believe then' must remain answerable"
+        }
+      ],
+      "expect_source": true,
+      "expect_supersede": "3.2% over 4.1%",
+      "notes": "Measures supersession vs edit. Editing the old Point's content or inventing a new node without an edge transfer fails this input: the before-state is destroyed. A NAND/INVALIDATES edge here is NOT the right answer \u2014 that is a truth ATTACK, while a correction is a replacement.",
+      "expect_nand": false
+    },
+    {
+      "id": "duplicate_entity",
+      "cell": "duplicate entity",
+      "confuses": [
+        "Object-vs-Point",
+        "identity-vs-belief"
+      ],
+      "setup": "The graph already contains Object O1: 'Northwind Logistics' (objectKind other) — exactly what eval/how-to-use-tortoise/step1/setup.py seeds, so a re-run rebuilt from this note has the before-graph the measured run had.",
+      "text": "2026-10-04: Northwind Logistics (also written 'Northwind Logistics Ltd' in the signed SOW) confirmed they will renew in January. Their new CFO is Marta Reyes.",
+      "expect": [
+        {
+          "item": "Northwind Logistics",
+          "layer": "object",
+          "kind": [
+            "other",
+            "organization"
+          ],
+          "why": "the SAME node must be re-mentioned, not a second node created \u2014 otherwise nothing ever updates (Object-vs-Point failure mode)"
+        },
+        {
+          "item": "Marta Reyes",
+          "layer": "subject",
+          "kind": [
+            "naturalPerson"
+          ],
+          "why": "\u00a74.2 an actor, distinct from the company"
+        },
+        {
+          "item": "renew in January",
+          "layer": "event",
+          "kind": [
+            "occurrence",
+            "milestone"
+          ],
+          "why": "a confirmed future occurrence \u2014 the state ('renewal status') folds from it"
+        }
+      ],
+      "expect_source": true,
+      "expect_supersede": false,
+      "duplicate_expected": {
+        "of": "Northwind Logistics",
+        "max_nodes": 1
+      },
+      "notes": "The measurable is node COUNT for the entity name. >1 node named Northwind means the duplicate was written as a Point (or as an Object under the alternate spelling), which is the single most consequential write failure: no update ever lands.",
+      "expect_nand": false
+    },
+    {
+      "id": "regulatory_filing",
+      "cell": "source document with provenance",
+      "confuses": [
+        "Source-vs-Object",
+        "Point-vs-Source"
+      ],
+      "text": "SEC Form D filed 2026-06-11 by Solstice Robotics Inc. Total offering amount $40,000,000; total amount sold $12,500,000; number of investors 14. The filing is signed by the CFO. Retrieved from https://www.sec.gov/Archives/edgar/data/0001234567/000123456726000001/xslFormDX01/primary_doc.xml on 2026-10-05.",
+      "expect": [
+        {
+          "item": "SEC Form D",
+          "layer": "source",
+          "kind": [
+            "document"
+          ],
+          "why": "\u00a74.6 \u2014 a filing is a Source with URL + sourceKind + tier; the SEC is a high-tier primary source"
+        },
+        {
+          "item": "$12,500,000",
+          "layer": "point",
+          "kind": [
+            "statement"
+          ],
+          "why": "an extracted figure is a claim drawn FROM the filing, carrying extractedFrom"
+        },
+        {
+          "item": "14 investors",
+          "layer": "point",
+          "kind": [
+            "statement"
+          ],
+          "why": "same"
+        },
+        {
+          "item": "Solstice Robotics",
+          "layer": "subject",
+          "kind": [
+            "organization"
+          ],
+          "why": "\u00a74.2 the filer is an actor"
+        }
+      ],
+      "expect_source": true,
+      "expect_supersede": false,
+      "notes": "Measures whether a Source node exists at all with the canonical URL + sourceKind, and whether every extracted numeric claim carries a provenance edge. A Source written as an Object is a P0 (the claim becomes uncheckable).",
+      "expect_nand": false
+    },
+    {
+      "id": "person_appointment",
+      "cell": "person appointment",
+      "confuses": [
+        "Subject-vs-Point",
+        "Subject-vs-Event"
+      ],
+      "text": "2026-09-08: Marta Reyes joined Northwind Logistics as CFO. She was previously VP Finance at Halcyon Group. She reports to the CEO, Tobias Lund.",
+      "expect": [
+        {
+          "item": "Marta Reyes",
+          "layer": "subject",
+          "kind": [
+            "naturalPerson"
+          ],
+          "why": "\u00a74.2 a person is an actor, never a claim"
+        },
+        {
+          "item": "Tobias Lund",
+          "layer": "subject",
+          "kind": [
+            "naturalPerson"
+          ],
+          "why": "\u00a74.2"
+        },
+        {
+          "item": "Halcyon Group",
+          "layer": "subject",
+          "kind": [
+            "organization"
+          ],
+          "why": "\u00a74.2"
+        },
+        {
+          "item": "CFO",
+          "layer": "subject",
+          "kind": [
+            "role"
+          ],
+          "why": "\u00a74.2 role"
+        },
+        {
+          "item": "joined Northwind Logistics",
+          "layer": "event",
+          "kind": [
+            "roleCreated",
+            "occurrence"
+          ],
+          "why": "\u00a74.5/\u00a73.5 Subject\u2192Event\u2192Object: the appointment is the dated occurrence; the employment edge is current state"
+        },
+        {
+          "item": "reports to",
+          "layer": "edge",
+          "kind": [
+            "reportsTo",
+            "memberOf"
+          ],
+          "endpoints": {
+            "from": [
+              "Subject"
+            ],
+            "to": [
+              "Subject"
+            ]
+          },
+          "why": "\u00a73.6 \u2014 an ORG edge between Subjects, not a node and not a Point"
+        }
+      ],
+      "expect_source": true,
+      "expect_supersede": false,
+      "notes": "The Subject-vs-Point discriminator. 'Marta Reyes as CFO of Northwind' is the archetype of the failure the issue quotes: if the person becomes a Point, 'who do we know at Northwind' stops working.",
+      "expect_nand": false
+    },
+    {
+      "id": "contradicting_claim",
+      "cell": "contradicting claim",
+      "confuses": [
+        "truth-vs-relevance",
+        "NAND-vs-mitigation"
+      ],
+      "setup": "The graph already contains Point P2: 'Solstice Robotics passed its safety audit on 2026-08-28.' and an IMPL operator from P2 to P3 ('Acme released tranche 2').",
+      "text": "2026-10-06: the safety audit Solstice passed in August was scoped to the hardware only \u2014 it did not cover the firmware. A second audit covering firmware is still open, and the auditors have flagged two open findings.",
+      "expect": [
+        {
+          "item": "scoped to the hardware only",
+          "layer": "point",
+          "kind": [
+            "statement"
+          ],
+          "why": "this ATTACKS THE TRUTH of P2 \u2014 a NAND/contradicts operator against the Point, not a decay of an edge"
+        },
+        {
+          "item": "two open findings",
+          "layer": "point",
+          "kind": [
+            "statement"
+          ],
+          "why": "a belief that weakens the tranche release's support \u2014 truth side"
+        }
+      ],
+      "expect_source": true,
+      "expect_mitigation": false,
+      "expect_nand": true,
+      "notes": "The single most important discriminator in step 5 of the pipeline: truth attacks the Point (NAND), relevance attacks the OPERATOR (mitigate_operator with strength 0.10-0.50). Applying a mitigation here, or writing the finding as an Object, both fail. If the agent mitigates the IMPL operator instead of NANDing P2, that is a P0 for this input."
+    },
+    {
+      "id": "product_spec_object",
+      "cell": "product spec / commitment",
+      "confuses": [
+        "Object-vs-Point",
+        "state-vs-occurrence"
+      ],
+      "text": "Spec v2, 2026-09-30: the beta plan is to ship the memory API on 2026-11-15. Success means 40% of beta orgs write at least one memory per week, measured over a rolling 4-week window. v1 of this plan said 2026-10-15 and 25% \u2014 v2 replaces it entirely. The plan is owned by the platform team.",
+      "expect": [
+        {
+          "item": "ship the memory API",
+          "layer": "object",
+          "kind": [
+            "plan"
+          ],
+          "why": "\u00a75 commitment-state: a plan is an Object; the milestone date is the state's window, not a belief"
+        },
+        {
+          "item": "40% of beta orgs",
+          "layer": "object",
+          "kind": [
+            "target"
+          ],
+          "why": "a success criterion is a target \u2014 a commitment-state Object, not a Point"
+        },
+        {
+          "item": "v1 said 2026-10-15",
+          "layer": "object",
+          "kind": [
+            "plan"
+          ],
+          "why": "the superseded v1 must exist with status=superseded \u2014 the plan-vs-plan replacement is a lifecycle fold on the state layer"
+        },
+        {
+          "item": "platform team",
+          "layer": "subject",
+          "kind": [
+            "team"
+          ],
+          "why": "\u00a74.2"
+        },
+        {
+          "item": "owned by",
+          "layer": "edge",
+          "kind": [
+            "ownedBy"
+          ],
+          "endpoints": {
+            "from": [
+              "Subject",
+              "Object",
+              "Source"
+            ],
+            "to": [
+              "Subject"
+            ]
+          },
+          "why": "\u00a73.5-3.6 \u2014 responsibility is an EDGE to a Subject, never a node property (\u00a74.3 note)"
+        }
+      ],
+      "expect_source": true,
+      "expect_supersede": "v2 over v1",
+      "notes": "Measures three things at once: commitment-states on the Object layer, v1 superseded rather than overwritten, and ownership written as an edge rather than a string property.",
+      "expect_nand": false,
+      "setup": "The graph already contains Object 'Beta memory API plan v1' (objectKind plan, status live, goalState active) \u2014 built by eval/how-to-use-tortoise/step1/setup.py."
+    }
+  ],
+  "scoring": {
+    "expect_nand": "true = a NAND is required; false = a NAND is forbidden (nothing in the input contradicts). Absent = not scored.",
+    "expect_mitigation": "true = a dampener is required; false = a dampener is forbidden (truth is at issue). Absent = not scored \u2014 do NOT set it as boilerplate, or a sanctioned mitigation reads as a failure.",
+    "kind_vocabulary": "a kind is judged CORE (imported \u00a75 sets) / PACK (loaded pack manifests) / UNDECLARED. Only UNDECLARED is a finding."
+  }
+}

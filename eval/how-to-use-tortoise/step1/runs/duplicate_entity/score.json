@@ -1,0 +1,119 @@
+{
+  "input": "duplicate_entity",
+  "cell": "duplicate entity",
+  "confuses": [
+    "Object-vs-Point",
+    "identity-vs-belief"
+  ],
+  "counts": {
+    "Point": 3,
+    "Subject": 1,
+    "Object": 1,
+    "Event": 1,
+    "Source": 1
+  },
+  "item_rows": [
+    {
+      "item": "Northwind Logistics",
+      "expected": "object:other|organization",
+      "written": "Object:other",
+      "node": "Northwind Logistics",
+      "fuzzy": false,
+      "verdict": "OK"
+    },
+    {
+      "item": "Marta Reyes",
+      "expected": "subject:naturalPerson",
+      "written": "Subject:person",
+      "node": "Marta Reyes",
+      "fuzzy": false,
+      "verdict": "KIND-UNDECLARED"
+    },
+    {
+      "item": "renew in January",
+      "expected": "event:occurrence|milestone",
+      "written": "Event:customerCommitment",
+      "node": "Northwind Logistics confirmed January renewal (2026-10-04)",
+      "fuzzy": true,
+      "verdict": "KIND-UNDECLARED"
+    }
+  ],
+  "findings": [
+    {
+      "severity": "P1",
+      "item": "Marta Reyes",
+      "layer": "Subject",
+      "kind": "person",
+      "finding": "UNDECLARED kind 'person' on a Subject ('Marta Reyes') \u2014 not a core \u00a75 kind, not one the SDK registers, and not one any loaded pack declares; nothing routes to, finds or classifies it",
+      "fix": "use a declared Subject kind (\u00a75 core, or a pack kind spelled as the pack declares it)"
+    },
+    {
+      "severity": "P1",
+      "item": "renew in January",
+      "layer": "Event",
+      "kind": "customerCommitment",
+      "finding": "UNDECLARED kind 'customerCommitment' on a Event ('Northwind Logistics confirmed January renewal (202') \u2014 not a core \u00a75 kind, not one the SDK registers, and not one any loaded pack declares; nothing routes to, finds or classifies it",
+      "fix": "use a declared Event kind (\u00a75 core, or a pack kind spelled as the pack declares it)"
+    },
+    {
+      "severity": "P1",
+      "item": "(kinds)",
+      "finding": "graph-wide: kinds no vocabulary reads on the layer they were written to, beyond the gold items \u2014 Source: ['contract']",
+      "fix": "every node needs a kind on ITS OWN layer's property, from the core \u00a75 vocabulary, the SDK's registered kinds, or a loaded pack"
+    }
+  ],
+  "relations": [
+    "aboutDocument",
+    "aboutEvent",
+    "aboutObject",
+    "aboutSource",
+    "aboutSubject",
+    "extractedFrom",
+    "hasMember",
+    "managedBy",
+    "wasDerivedFrom"
+  ],
+  "operators": [],
+  "sources": [
+    "urn:document:northwind-logistics-sow"
+  ],
+  "mitigations": [],
+  "kind_census": {
+    "Source": [
+      "contract"
+    ]
+  },
+  "wrong_axis_kinds": [],
+  "cross_axis_kinds": [],
+  "kind_sources": {
+    "Point": {
+      "statement": "CORE"
+    },
+    "Subject": {
+      "person": "UNDECLARED"
+    },
+    "Object": {
+      "other": "CORE"
+    },
+    "Event": {
+      "customerCommitment": "UNDECLARED"
+    },
+    "Source": {
+      "contract": "UNDECLARED"
+    }
+  },
+  "packs": [
+    "agent-ops",
+    "dev",
+    "marketing",
+    "pm",
+    "portfolio",
+    "product-strategy",
+    "venture"
+  ],
+  "severity_counts": {
+    "P0": 0,
+    "P1": 3,
+    "P2": 0
+  }
+}

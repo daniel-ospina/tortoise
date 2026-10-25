@@ -1,0 +1,180 @@
+{
+  "input": "portfolio_update",
+  "cell": "portfolio update",
+  "confuses": [
+    "Object-vs-Event",
+    "Event-vs-Object"
+  ],
+  "counts": {
+    "Point": 5,
+    "Subject": 3,
+    "Object": 2,
+    "Event": 3,
+    "Source": 1
+  },
+  "item_rows": [
+    {
+      "item": "Northwind Logistics",
+      "expected": "subject:organization",
+      "written": "Subject:company",
+      "node": "Northwind Logistics",
+      "fuzzy": false,
+      "verdict": "KIND-UNDECLARED"
+    },
+    {
+      "item": "Acme Capital",
+      "expected": "subject:organization",
+      "written": "Subject:investor",
+      "node": "Acme Capital",
+      "fuzzy": false,
+      "verdict": "KIND-UNDECLARED"
+    },
+    {
+      "item": "Solstice Robotics",
+      "expected": "subject:organization",
+      "written": "Subject:company",
+      "node": "Solstice Robotics",
+      "fuzzy": false,
+      "verdict": "KIND-UNDECLARED"
+    },
+    {
+      "item": "Series B",
+      "expected": "event:occurrence|milestone",
+      "written": "Event:milestone",
+      "node": "Northwind Logistics closed a Series B round",
+      "fuzzy": true,
+      "verdict": "OK"
+    },
+    {
+      "item": "tranche 2",
+      "expected": "event:occurrence|milestone",
+      "written": "Event:disbursement",
+      "node": "Acme Capital released tranche 2 to Solstice Robotics",
+      "fuzzy": true,
+      "verdict": "KIND"
+    },
+    {
+      "item": "$8.4M",
+      "expected": "object",
+      "written": "Point:observation",
+      "node": "Northwind Logistics ARR is $8.4M as of 2026-08, up from $5.1M at our entry.",
+      "verdict": "LAYER"
+    },
+    {
+      "item": "74 people",
+      "expected": "object",
+      "written": "Point:observation",
+      "node": "Solstice Robotics headcount is 74 people as of 2026-09-30, up from 61 in Q1 2026",
+      "verdict": "LAYER"
+    }
+  ],
+  "findings": [
+    {
+      "severity": "P1",
+      "item": "Northwind Logistics",
+      "layer": "Subject",
+      "kind": "company",
+      "finding": "UNDECLARED kind 'company' on a Subject ('Northwind Logistics') \u2014 not a core \u00a75 kind, not one the SDK registers, and not one any loaded pack declares; nothing routes to, finds or classifies it",
+      "fix": "use a declared Subject kind (\u00a75 core, or a pack kind spelled as the pack declares it)"
+    },
+    {
+      "severity": "P1",
+      "item": "Acme Capital",
+      "layer": "Subject",
+      "kind": "investor",
+      "finding": "UNDECLARED kind 'investor' on a Subject ('Acme Capital') \u2014 not a core \u00a75 kind, not one the SDK registers, and not one any loaded pack declares; nothing routes to, finds or classifies it",
+      "fix": "use a declared Subject kind (\u00a75 core, or a pack kind spelled as the pack declares it)"
+    },
+    {
+      "severity": "P1",
+      "item": "Solstice Robotics",
+      "layer": "Subject",
+      "kind": "company",
+      "finding": "UNDECLARED kind 'company' on a Subject ('Solstice Robotics') \u2014 not a core \u00a75 kind, not one the SDK registers, and not one any loaded pack declares; nothing routes to, finds or classifies it",
+      "fix": "use a declared Subject kind (\u00a75 core, or a pack kind spelled as the pack declares it)"
+    },
+    {
+      "severity": "P1",
+      "item": "tranche 2",
+      "finding": "kind outside the frozen set: expected one of ['occurrence', 'milestone'], written 'disbursement' ('Acme Capital released tranche 2 to Solstice Robotics') \u2014 declared, but not the kind this item is",
+      "fix": "pick a kind the active vocabulary declares for this layer (\u00a75)"
+    },
+    {
+      "severity": "P0",
+      "item": "$8.4M",
+      "finding": "LAYER confusion: expected object, written as Point ('Northwind Logistics ARR is $8.4M as of 2026-08, up from $5.1M at our e') \u2014 current state of the company \u2014 \u00a74.3 holds *now*; a released tranche / passed audit is what makes it true (Event\u2192fold)",
+      "fix": "re-file as object; a wrong layer cannot be rescued downstream (kind_classifier partitions by type before choosing a kind)"
+    },
+    {
+      "severity": "P0",
+      "item": "74 people",
+      "finding": "LAYER confusion: expected object, written as Point ('Solstice Robotics headcount is 74 people as of 2026-09-30, up from 61 ') \u2014 now-state, not a claim",
+      "fix": "re-file as object; a wrong layer cannot be rescued downstream (kind_classifier partitions by type before choosing a kind)"
+    },
+    {
+      "severity": "P1",
+      "item": "(kinds)",
+      "finding": "graph-wide: kinds no vocabulary reads on the layer they were written to, beyond the gold items \u2014 Source: ['portfolioUpdateMemo']; Object: ['governanceSeat']",
+      "fix": "every node needs a kind on ITS OWN layer's property, from the core \u00a75 vocabulary, the SDK's registered kinds, or a loaded pack"
+    }
+  ],
+  "relations": [
+    "IMPL",
+    "aboutObject",
+    "aboutSource",
+    "aboutSubject",
+    "extractedFrom",
+    "related"
+  ],
+  "operators": [],
+  "sources": [
+    "memo://our-fund/portfolio/2026-08-quarterly-update"
+  ],
+  "mitigations": [],
+  "kind_census": {
+    "Source": [
+      "portfolioUpdateMemo"
+    ],
+    "Object": [
+      "governanceSeat"
+    ]
+  },
+  "wrong_axis_kinds": [],
+  "cross_axis_kinds": [],
+  "kind_sources": {
+    "Point": {
+      "decision": "CORE",
+      "observation": "CORE"
+    },
+    "Subject": {
+      "company": "UNDECLARED",
+      "investor": "UNDECLARED"
+    },
+    "Object": {
+      "governanceSeat": "UNDECLARED",
+      "tranche": "PACK"
+    },
+    "Event": {
+      "conditionMet": "PACK",
+      "disbursement": "PACK",
+      "milestone": "CORE"
+    },
+    "Source": {
+      "portfolioUpdateMemo": "UNDECLARED"
+    }
+  },
+  "packs": [
+    "agent-ops",
+    "dev",
+    "marketing",
+    "pm",
+    "portfolio",
+    "product-strategy",
+    "venture"
+  ],
+  "severity_counts": {
+    "P0": 2,
+    "P1": 5,
+    "P2": 0
+  }
+}

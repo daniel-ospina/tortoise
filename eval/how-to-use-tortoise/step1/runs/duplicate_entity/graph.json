@@ -1,0 +1,267 @@
+{
+  "nodes": [
+    {
+      "layer": "Object",
+      "labels": [
+        "Object"
+      ],
+      "text": "Northwind Logistics",
+      "kind": "other",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "obj-84daa500364ed082b525286aad"
+    },
+    {
+      "layer": "Source",
+      "labels": [
+        "Source"
+      ],
+      "text": "Northwind Logistics \u2014 signed Statement of Work (SOW)",
+      "kind": "contract",
+      "is_operator": false,
+      "op_type": "",
+      "status": "",
+      "url": "urn:document:northwind-logistics-sow",
+      "id": "urn:document:northwind-logistics-sow"
+    },
+    {
+      "layer": "Subject",
+      "labels": [
+        "Subject"
+      ],
+      "text": "Marta Reyes",
+      "kind": "person",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "sub-eb9b919b4481a799c078b13a86"
+    },
+    {
+      "layer": "Event",
+      "labels": [
+        "Event"
+      ],
+      "text": "Northwind Logistics confirmed January renewal (2026-10-04)",
+      "kind": "customerCommitment",
+      "is_operator": false,
+      "op_type": "",
+      "status": "",
+      "url": "",
+      "id": "1a16614cdd8-4746c97c2b94"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "Northwind Logistics confirmed on 2026-10-04 that it will renew in January 2027.",
+      "kind": "statement",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "1a16614cf68-8b8cf4501747"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "Northwind Logistics is also written 'Northwind Logistics Ltd' in the signed SOW; the two names denote the same entity.",
+      "kind": "statement",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "1a16614cf82-0ab136c961ac"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "Marta Reyes is the new CFO of Northwind Logistics (as of 2026-10-04).",
+      "kind": "statement",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "1a16614cf93-874bce418efc"
+    }
+  ],
+  "edges": [
+    {
+      "relation": "hasMember",
+      "from": "Northwind Logistics",
+      "to": "Marta Reyes",
+      "from_layer": "Object",
+      "to_layer": "Subject",
+      "from_id": "obj-84daa500364ed082b525286aad",
+      "to_id": "sub-eb9b919b4481a799c078b13a86"
+    },
+    {
+      "relation": "managedBy",
+      "from": "Northwind Logistics",
+      "to": "Marta Reyes",
+      "from_layer": "Object",
+      "to_layer": "Subject",
+      "from_id": "obj-84daa500364ed082b525286aad",
+      "to_id": "sub-eb9b919b4481a799c078b13a86"
+    },
+    {
+      "relation": "aboutObject",
+      "from": "Northwind Logistics confirmed January renewal (2026-10-04)",
+      "to": "Northwind Logistics",
+      "from_layer": "Event",
+      "to_layer": "Object",
+      "from_id": "1a16614cdd8-4746c97c2b94",
+      "to_id": "obj-84daa500364ed082b525286aad"
+    },
+    {
+      "relation": "aboutDocument",
+      "from": "Northwind Logistics confirmed January renewal (2026-10-04)",
+      "to": "",
+      "from_layer": "Event",
+      "to_layer": "Source",
+      "from_id": "1a16614cdd8-4746c97c2b94",
+      "to_id": "urn:document:northwind-logistics-sow"
+    },
+    {
+      "relation": "aboutSource",
+      "from": "Northwind Logistics confirmed January renewal (2026-10-04)",
+      "to": "",
+      "from_layer": "Event",
+      "to_layer": "Source",
+      "from_id": "1a16614cdd8-4746c97c2b94",
+      "to_id": "urn:document:northwind-logistics-sow"
+    },
+    {
+      "relation": "aboutObject",
+      "from": "Northwind Logistics confirmed on 2026-10-04 that it will renew in January 2027.",
+      "to": "Northwind Logistics",
+      "from_layer": "Point",
+      "to_layer": "Object",
+      "from_id": "1a16614cf68-8b8cf4501747",
+      "to_id": "obj-84daa500364ed082b525286aad"
+    },
+    {
+      "relation": "wasDerivedFrom",
+      "from": "Northwind Logistics confirmed on 2026-10-04 that it will renew in January 2027.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a16614cf68-8b8cf4501747",
+      "to_id": "urn:document:northwind-logistics-sow"
+    },
+    {
+      "relation": "extractedFrom",
+      "from": "Northwind Logistics confirmed on 2026-10-04 that it will renew in January 2027.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a16614cf68-8b8cf4501747",
+      "to_id": "urn:document:northwind-logistics-sow"
+    },
+    {
+      "relation": "aboutEvent",
+      "from": "Northwind Logistics confirmed on 2026-10-04 that it will renew in January 2027.",
+      "to": "Northwind Logistics confirmed January renewal (2026-10-04)",
+      "from_layer": "Point",
+      "to_layer": "Event",
+      "from_id": "1a16614cf68-8b8cf4501747",
+      "to_id": "1a16614cdd8-4746c97c2b94"
+    },
+    {
+      "relation": "aboutObject",
+      "from": "Northwind Logistics is also written 'Northwind Logistics Ltd' in the signed SOW; the two names denote the same entity.",
+      "to": "Northwind Logistics",
+      "from_layer": "Point",
+      "to_layer": "Object",
+      "from_id": "1a16614cf82-0ab136c961ac",
+      "to_id": "obj-84daa500364ed082b525286aad"
+    },
+    {
+      "relation": "wasDerivedFrom",
+      "from": "Northwind Logistics is also written 'Northwind Logistics Ltd' in the signed SOW; the two names denote the same entity.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a16614cf82-0ab136c961ac",
+      "to_id": "urn:document:northwind-logistics-sow"
+    },
+    {
+      "relation": "extractedFrom",
+      "from": "Northwind Logistics is also written 'Northwind Logistics Ltd' in the signed SOW; the two names denote the same entity.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a16614cf82-0ab136c961ac",
+      "to_id": "urn:document:northwind-logistics-sow"
+    },
+    {
+      "relation": "aboutObject",
+      "from": "Marta Reyes is the new CFO of Northwind Logistics (as of 2026-10-04).",
+      "to": "Northwind Logistics",
+      "from_layer": "Point",
+      "to_layer": "Object",
+      "from_id": "1a16614cf93-874bce418efc",
+      "to_id": "obj-84daa500364ed082b525286aad"
+    },
+    {
+      "relation": "aboutSubject",
+      "from": "Marta Reyes is the new CFO of Northwind Logistics (as of 2026-10-04).",
+      "to": "Marta Reyes",
+      "from_layer": "Point",
+      "to_layer": "Subject",
+      "from_id": "1a16614cf93-874bce418efc",
+      "to_id": "sub-eb9b919b4481a799c078b13a86"
+    },
+    {
+      "relation": "aboutEvent",
+      "from": "Marta Reyes is the new CFO of Northwind Logistics (as of 2026-10-04).",
+      "to": "Northwind Logistics confirmed January renewal (2026-10-04)",
+      "from_layer": "Point",
+      "to_layer": "Event",
+      "from_id": "1a16614cf93-874bce418efc",
+      "to_id": "1a16614cdd8-4746c97c2b94"
+    }
+  ],
+  "counts": {
+    "Point": 3,
+    "Subject": 1,
+    "Object": 1,
+    "Event": 1,
+    "Source": 1
+  },
+  "operators": [],
+  "sources": [
+    {
+      "layer": "Source",
+      "labels": [
+        "Source"
+      ],
+      "text": "Northwind Logistics \u2014 signed Statement of Work (SOW)",
+      "kind": "contract",
+      "is_operator": false,
+      "op_type": "",
+      "status": "",
+      "url": "urn:document:northwind-logistics-sow",
+      "id": "urn:document:northwind-logistics-sow"
+    }
+  ],
+  "relations": [
+    "aboutDocument",
+    "aboutEvent",
+    "aboutObject",
+    "aboutSource",
+    "aboutSubject",
+    "extractedFrom",
+    "hasMember",
+    "managedBy",
+    "wasDerivedFrom"
+  ],
+  "mitigations": []
+}

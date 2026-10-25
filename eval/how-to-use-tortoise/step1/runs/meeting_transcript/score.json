@@ -1,0 +1,203 @@
+{
+  "input": "meeting_transcript",
+  "cell": "meeting transcript",
+  "confuses": [
+    "Point-vs-Event",
+    "Event-vs-Object"
+  ],
+  "counts": {
+    "Point": 7,
+    "Subject": 3,
+    "Object": 4,
+    "Event": 1,
+    "Source": 1
+  },
+  "item_rows": [
+    {
+      "item": "self-serve tier",
+      "expected": "object:plan|strategy|other",
+      "written": "Object:offering",
+      "node": "self-serve tier",
+      "fuzzy": false,
+      "verdict": "KIND-UNDECLARED"
+    },
+    {
+      "item": "killing the self-serve tier",
+      "expected": "event",
+      "written": "Point:decision",
+      "node": "The self-serve tier is being killed. Decision made 2026-09-14 by Dana (CEO), eff",
+      "verdict": "LAYER"
+    },
+    {
+      "item": "Dana",
+      "expected": "subject:naturalPerson|role",
+      "written": "Subject:person",
+      "node": "Dana",
+      "fuzzy": false,
+      "verdict": "KIND-UNDECLARED"
+    },
+    {
+      "item": "Ravi",
+      "expected": "subject:naturalPerson|role",
+      "written": "Subject:person",
+      "node": "Ravi",
+      "fuzzy": false,
+      "verdict": "KIND-UNDECLARED"
+    },
+    {
+      "item": "Priya",
+      "expected": "subject:naturalPerson|role",
+      "written": "Subject:person",
+      "node": "Priya",
+      "fuzzy": false,
+      "verdict": "KIND-UNDECLARED"
+    },
+    {
+      "item": "80% chance we slip a week",
+      "expected": "point",
+      "written": "(nothing)",
+      "verdict": "MISSING"
+    },
+    {
+      "item": "EU data-residency question",
+      "expected": "point:statement|observation",
+      "written": "Point:issue",
+      "node": "Open question: EU data residency requirements. Raised by Dana 2026-09-14, explic",
+      "fuzzy": true,
+      "verdict": "KIND"
+    }
+  ],
+  "findings": [
+    {
+      "severity": "P1",
+      "item": "self-serve tier",
+      "layer": "Object",
+      "kind": "offering",
+      "finding": "UNDECLARED kind 'offering' on a Object ('self-serve tier') \u2014 not a core \u00a75 kind, not one the SDK registers, and not one any loaded pack declares; nothing routes to, finds or classifies it",
+      "fix": "use a declared Object kind (\u00a75 core, or a pack kind spelled as the pack declares it)"
+    },
+    {
+      "severity": "P0",
+      "item": "killing the self-serve tier",
+      "finding": "LAYER confusion: expected event, written as Point ('The self-serve tier is being killed. Decision made 2026-09-14 by Dana ') \u2014 a decision made at a moment is a TIMELINE record (\u00a75 state-centric: decision is an eventKind), not a Point",
+      "fix": "re-file as event; a wrong layer cannot be rescued downstream (kind_classifier partitions by type before choosing a kind)"
+    },
+    {
+      "severity": "P1",
+      "item": "Dana",
+      "layer": "Subject",
+      "kind": "person",
+      "finding": "UNDECLARED kind 'person' on a Subject ('Dana') \u2014 not a core \u00a75 kind, not one the SDK registers, and not one any loaded pack declares; nothing routes to, finds or classifies it",
+      "fix": "use a declared Subject kind (\u00a75 core, or a pack kind spelled as the pack declares it)"
+    },
+    {
+      "severity": "P1",
+      "item": "Ravi",
+      "layer": "Subject",
+      "kind": "person",
+      "finding": "UNDECLARED kind 'person' on a Subject ('Ravi') \u2014 not a core \u00a75 kind, not one the SDK registers, and not one any loaded pack declares; nothing routes to, finds or classifies it",
+      "fix": "use a declared Subject kind (\u00a75 core, or a pack kind spelled as the pack declares it)"
+    },
+    {
+      "severity": "P1",
+      "item": "Priya",
+      "layer": "Subject",
+      "kind": "person",
+      "finding": "UNDECLARED kind 'person' on a Subject ('Priya') \u2014 not a core \u00a75 kind, not one the SDK registers, and not one any loaded pack declares; nothing routes to, finds or classifies it",
+      "fix": "use a declared Subject kind (\u00a75 core, or a pack kind spelled as the pack declares it)"
+    },
+    {
+      "severity": "P0",
+      "item": "80% chance we slip a week",
+      "finding": "expected point \u2014 no node represents it (best overlap 0.38)",
+      "fix": "the item was absorbed into prose or written under a name nothing can find"
+    },
+    {
+      "severity": "P1",
+      "item": "EU data-residency question",
+      "finding": "kind outside the frozen set: expected one of ['statement', 'observation'], written 'issue' ('Open question: EU data residency requirements. Raised by Dan') \u2014 declared, but not the kind this item is",
+      "fix": "pick a kind the active vocabulary declares for this layer (\u00a75)"
+    },
+    {
+      "severity": "P1",
+      "item": "(truth-vs-relevance)",
+      "finding": "a NAND was written where nothing contradicts \u2014 a contradiction operator on a claim that was never attacked computes a wrong confidence, not a missing one",
+      "fix": "NAND is for a claim that is WRONG; anything else is either plain support (IMPL) or a relevance question (mitigation on the operator)"
+    },
+    {
+      "severity": "P1",
+      "item": "(kinds)",
+      "finding": "graph-wide: kinds no vocabulary reads on the layer they were written to, beyond the gold items \u2014 Source: ['meetingTranscript']; Object: ['deliverable', 'openQuestion', 'productSurface']",
+      "fix": "every node needs a kind on ITS OWN layer's property, from the core \u00a75 vocabulary, the SDK's registered kinds, or a loaded pack"
+    }
+  ],
+  "relations": [
+    "IMPL",
+    "INPUT",
+    "NAND",
+    "aboutEvent",
+    "aboutObject",
+    "aboutSubject",
+    "dependsOn",
+    "extractedFrom",
+    "ownedBy",
+    "participatesIn"
+  ],
+  "operators": [
+    "IMPL",
+    "NAND"
+  ],
+  "sources": [
+    "transcript://meetings/2026-09-14-pricing"
+  ],
+  "mitigations": [],
+  "kind_census": {
+    "Source": [
+      "meetingTranscript"
+    ],
+    "Object": [
+      "deliverable",
+      "productSurface",
+      "openQuestion"
+    ]
+  },
+  "wrong_axis_kinds": [],
+  "cross_axis_kinds": [],
+  "kind_sources": {
+    "Point": {
+      "decision": "CORE",
+      "estimate": "PACK",
+      "issue": "OTHER-AXIS",
+      "plan": "CORE"
+    },
+    "Subject": {
+      "person": "UNDECLARED"
+    },
+    "Object": {
+      "deliverable": "UNDECLARED",
+      "offering": "UNDECLARED",
+      "openQuestion": "UNDECLARED",
+      "productSurface": "UNDECLARED"
+    },
+    "Event": {
+      "meeting": "CORE"
+    },
+    "Source": {
+      "meetingTranscript": "UNDECLARED"
+    }
+  },
+  "packs": [
+    "agent-ops",
+    "dev",
+    "marketing",
+    "pm",
+    "portfolio",
+    "product-strategy",
+    "venture"
+  ],
+  "severity_counts": {
+    "P0": 2,
+    "P1": 7,
+    "P2": 0
+  }
+}
