@@ -1403,13 +1403,22 @@ def test_member_without_key_reaches_keyless_claude_connectors(
         f"{surface}: the beta Request-headers caveat must be gone"
     assert "use the Claude Code surface instead" not in body, \
         f"{surface}: the divert-to-Claude-Code escape hatch must be gone"
-    # (d) The OAuth recipe: connector URL → sign-in → Authorize → org.
+    # (d) The OAuth recipe: connector URL → sign-in → Organization → Authorize.
+    #     These assertions are presence-only; the ORDER is pinned by
+    #     tests/test_harness_mcp_config.py::test_9660_the_org_choice_precedes_authorize_on_every_recipe_carrier.
     assert connector_lead in body, f"{surface}: the connector lead-in must render"
     assert "https://api.premiselabs.co/mcp" in body, \
         f"{surface}: the canonical connector URL must render"
     assert "sign-in" in body or "sign in" in body, \
         f"{surface}: the OAuth recipe must state the sign-in step"
     assert "Authorize" in body, f"{surface}: the OAuth recipe must state the Authorize step"
+    # Case-SENSITIVE, because the tenant noun IS capitalised in the recipe copy on
+    # every surface — and it is pinned upstream, on the SOURCE carriers, by
+    # `test_9660_the_recipe_carriers_use_one_casing_for_the_tenant_noun`. This pin
+    # only asserts the step is STATED on the rendered page: `body` is the whole
+    # surface's text, so it can say nothing about which card the string came from and
+    # neither can it catch per-surface copy drift. What keeps the casing honest is the
+    # source pin; this line would red only if the sentence vanished altogether.
     assert "Pick the Organization" in body, \
         f"{surface}: the OAuth recipe must state the org chooser step"
     # (e) Continue is reachable and ENABLED without a key — the guarantee that

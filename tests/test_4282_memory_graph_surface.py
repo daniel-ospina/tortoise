@@ -25,8 +25,9 @@ WHAT THIS FILE IS THE GATE ON (one test per property, so a regression names itse
   4. **No caller was left behind.** A rename that misses one call site leaves a live
      `AttributeError` in a route or tool; this scans the package for the retired tokens.
 """
-from __future__ import annotations  # noqa: I001
+from __future__ import annotations
 
+import contextlib
 import re
 import subprocess
 from pathlib import Path
@@ -57,10 +58,8 @@ def team(sdk):
     """A team to own the graphs; torn down so the registry does not accumulate."""
     result = sdk.org_create("memory-graph-surface")
     yield result
-    try:  # noqa: SIM105
+    with contextlib.suppress(Exception):
         sdk.org_delete(result["id"], confirmation="memory-graph-surface")
-    except Exception:
-        pass
 
 
 def _recording(sdk: TortoiseSDK, org_id: str, graph_id: str):

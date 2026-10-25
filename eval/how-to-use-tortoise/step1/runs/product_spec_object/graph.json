@@ -1,0 +1,266 @@
+{
+  "nodes": [
+    {
+      "layer": "Object",
+      "labels": [
+        "Object"
+      ],
+      "text": "Beta memory API plan v1",
+      "kind": "plan",
+      "is_operator": false,
+      "op_type": "",
+      "status": "superseded",
+      "url": "",
+      "id": "obj-3607bd9d876997f7ea1f29d195"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "Plan v2 success = 40% of beta orgs write at least one memory per week, measured over a rolling 4-week window.",
+      "kind": "target",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "1a166161cc7-10bd786ec605"
+    },
+    {
+      "layer": "Source",
+      "labels": [
+        "Source"
+      ],
+      "text": "Beta memory API plan - spec v2 (2026-09-30)",
+      "kind": "spec",
+      "is_operator": false,
+      "op_type": "",
+      "status": "",
+      "url": "internal://premise-labs/beta-memory-api/plan-spec-v2-2026-09-30",
+      "id": "internal://premise-labs/beta-memory-api/plan-spec-v2-2026-09-30"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "The beta memory API ships on 2026-11-15 (plan v2 ship target).",
+      "kind": "target",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "1a166161caf-7a032c98edb4"
+    },
+    {
+      "layer": "Object",
+      "labels": [
+        "Object"
+      ],
+      "text": "Beta memory API plan v2",
+      "kind": "plan",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "obj-f9937bf00003d57613196002f1"
+    },
+    {
+      "layer": "Subject",
+      "labels": [
+        "Subject"
+      ],
+      "text": "Platform team",
+      "kind": "team",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "sub-94556cf944dde13600df00604d"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "The beta memory API ships on 2026-10-15 (plan v1 ship target, superseded by v2).",
+      "kind": "target",
+      "is_operator": false,
+      "op_type": "",
+      "status": "superseded",
+      "url": "",
+      "id": "1a166161cd7-25e978fd2d08"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "Plan v1 success = 25% of beta orgs write at least one memory per week, measured over a rolling 4-week window (superseded by v2).",
+      "kind": "target",
+      "is_operator": false,
+      "op_type": "",
+      "status": "superseded",
+      "url": "",
+      "id": "1a166161cea-ab65d0d60a6b"
+    },
+    {
+      "layer": "Event",
+      "labels": [
+        "Event"
+      ],
+      "text": "Beta memory API plan revised to v2 (spec dated 2026-09-30): ship date moves 2026-10-15 -> 2026-11-15 and the success bar moves 25% -> 40% of beta orgs writing at least one memory per week over a rolling 4-week window. v2 replaces v1 entirely; the plan is owned by the platform team.",
+      "kind": "planRevision",
+      "is_operator": false,
+      "op_type": "",
+      "status": "",
+      "url": "",
+      "id": "1a166161f97-12e44fbcf878"
+    }
+  ],
+  "edges": [
+    {
+      "relation": "extractedFrom",
+      "from": "Plan v2 success = 40% of beta orgs write at least one memory per week, measured over a rolling 4-week window.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a166161cc7-10bd786ec605",
+      "to_id": "internal://premise-labs/beta-memory-api/plan-spec-v2-2026-09-30"
+    },
+    {
+      "relation": "CORRECTS",
+      "from": "Plan v2 success = 40% of beta orgs write at least one memory per week, measured over a rolling 4-week window.",
+      "to": "Plan v1 success = 25% of beta orgs write at least one memory per week, measured over a rolling 4-week window (superseded by v2).",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a166161cc7-10bd786ec605",
+      "to_id": "1a166161cea-ab65d0d60a6b"
+    },
+    {
+      "relation": "references",
+      "from": "",
+      "to": "Beta memory API plan v2",
+      "from_layer": "Source",
+      "to_layer": "Object",
+      "from_id": "internal://premise-labs/beta-memory-api/plan-spec-v2-2026-09-30",
+      "to_id": "obj-f9937bf00003d57613196002f1"
+    },
+    {
+      "relation": "extractedFrom",
+      "from": "The beta memory API ships on 2026-11-15 (plan v2 ship target).",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a166161caf-7a032c98edb4",
+      "to_id": "internal://premise-labs/beta-memory-api/plan-spec-v2-2026-09-30"
+    },
+    {
+      "relation": "CORRECTS",
+      "from": "The beta memory API ships on 2026-11-15 (plan v2 ship target).",
+      "to": "The beta memory API ships on 2026-10-15 (plan v1 ship target, superseded by v2).",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a166161caf-7a032c98edb4",
+      "to_id": "1a166161cd7-25e978fd2d08"
+    },
+    {
+      "relation": "wasDerivedFrom",
+      "from": "Beta memory API plan v2",
+      "to": "Beta memory API plan v1",
+      "from_layer": "Object",
+      "to_layer": "Object",
+      "from_id": "obj-f9937bf00003d57613196002f1",
+      "to_id": "obj-3607bd9d876997f7ea1f29d195"
+    },
+    {
+      "relation": "hasPart",
+      "from": "Beta memory API plan v2",
+      "to": "Plan v2 success = 40% of beta orgs write at least one memory per week, measured over a rolling 4-week window.",
+      "from_layer": "Object",
+      "to_layer": "Point",
+      "from_id": "obj-f9937bf00003d57613196002f1",
+      "to_id": "1a166161cc7-10bd786ec605"
+    },
+    {
+      "relation": "hasPart",
+      "from": "Beta memory API plan v2",
+      "to": "The beta memory API ships on 2026-11-15 (plan v2 ship target).",
+      "from_layer": "Object",
+      "to_layer": "Point",
+      "from_id": "obj-f9937bf00003d57613196002f1",
+      "to_id": "1a166161caf-7a032c98edb4"
+    },
+    {
+      "relation": "ownedBy",
+      "from": "Beta memory API plan v2",
+      "to": "Platform team",
+      "from_layer": "Object",
+      "to_layer": "Subject",
+      "from_id": "obj-f9937bf00003d57613196002f1",
+      "to_id": "sub-94556cf944dde13600df00604d"
+    },
+    {
+      "relation": "aboutDocument",
+      "from": "Beta memory API plan revised to v2 (spec dated 2026-09-30): ship date moves 2026-10-15 -> 2026-11-15 and the success bar moves 25% -> 40% of beta orgs writing at least one memory per week over a rolling 4-week window. v2 replaces v1 entirely; the plan is owned by the platform team.",
+      "to": "",
+      "from_layer": "Event",
+      "to_layer": "Source",
+      "from_id": "1a166161f97-12e44fbcf878",
+      "to_id": "internal://premise-labs/beta-memory-api/plan-spec-v2-2026-09-30"
+    },
+    {
+      "relation": "aboutObject",
+      "from": "Beta memory API plan revised to v2 (spec dated 2026-09-30): ship date moves 2026-10-15 -> 2026-11-15 and the success bar moves 25% -> 40% of beta orgs writing at least one memory per week over a rolling 4-week window. v2 replaces v1 entirely; the plan is owned by the platform team.",
+      "to": "Beta memory API plan v2",
+      "from_layer": "Event",
+      "to_layer": "Object",
+      "from_id": "1a166161f97-12e44fbcf878",
+      "to_id": "obj-f9937bf00003d57613196002f1"
+    },
+    {
+      "relation": "aboutSubject",
+      "from": "Beta memory API plan revised to v2 (spec dated 2026-09-30): ship date moves 2026-10-15 -> 2026-11-15 and the success bar moves 25% -> 40% of beta orgs writing at least one memory per week over a rolling 4-week window. v2 replaces v1 entirely; the plan is owned by the platform team.",
+      "to": "Platform team",
+      "from_layer": "Event",
+      "to_layer": "Subject",
+      "from_id": "1a166161f97-12e44fbcf878",
+      "to_id": "sub-94556cf944dde13600df00604d"
+    }
+  ],
+  "counts": {
+    "Point": 4,
+    "Subject": 1,
+    "Object": 2,
+    "Event": 1,
+    "Source": 1
+  },
+  "operators": [],
+  "sources": [
+    {
+      "layer": "Source",
+      "labels": [
+        "Source"
+      ],
+      "text": "Beta memory API plan - spec v2 (2026-09-30)",
+      "kind": "spec",
+      "is_operator": false,
+      "op_type": "",
+      "status": "",
+      "url": "internal://premise-labs/beta-memory-api/plan-spec-v2-2026-09-30",
+      "id": "internal://premise-labs/beta-memory-api/plan-spec-v2-2026-09-30"
+    }
+  ],
+  "relations": [
+    "CORRECTS",
+    "aboutDocument",
+    "aboutObject",
+    "aboutSubject",
+    "extractedFrom",
+    "hasPart",
+    "ownedBy",
+    "references",
+    "wasDerivedFrom"
+  ],
+  "mitigations": []
+}

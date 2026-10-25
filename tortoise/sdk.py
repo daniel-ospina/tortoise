@@ -4435,8 +4435,14 @@ def _refuse_document_kind_demotion(stored_kinds, props, *, surface: str,
     one metered genre to another (`report` -> `brief`, both metered), but a
     caller surface may not move a metered document OUT of the metered class
     (`None` / `'transcript'`). Demotion is the escape; the forgery direction
-    (`documentKind` added to a provenance Source) only over-counts — it fails
-    closed — and is deliberately left alone.
+    (`documentKind` added to a provenance Source) is deliberately left alone
+    (`tests/test_quota.py`'s NON-OVER-REACH arm pins it: "SETTING a genre where
+    none is stored is how a document `:Source` is minted through these surfaces
+    at all"). ⚠️ It over-counts rather than under-counts, so it does NOT defeat
+    the cap — but it is not harmless, and "fails closed" would overstate it: the
+    node leaves `list_sources()` (`documentKind IS NULL`) and becomes a valid
+    `aboutDocument` target. That is #5140 finding 7's forge direction, left open
+    by that decision, not by an oversight.
 
     Both spellings are refused on a METERED document, for DIFFERENT reasons —
     stated truthfully because the earlier wording claimed a mechanism the code
@@ -6431,13 +6437,26 @@ def _refuse_inverted_point_window(g, props: dict, *,
     if "validFrom" not in props and "validTo" not in props:
         return
     # #6140 option C, as the owner ruled it — a WARNING, not a refusal. A
-    # caller handing us a start that names no instant (`""`, `"TBD"`) is told
-    # what that value MEANS (reading A: no start recorded ⇒ the window is open
-    # below), and the write proceeds: refusing would make a legacy point
-    # impossible to update or supersede until its window was repaired. Only the
-    # CALLER's value warns — a bound merged in from the stored opposite side is
-    # not being written, so `commit_schema.validate_validity_window` (which sees
-    # only the merged pair) deliberately stays silent.
+    # caller handing us a bound that names no instant (`""`, `"TBD"`) is told
+    # what that value MEANS, and the write proceeds: refusing would make a
+    # legacy point impossible to update or supersede until its window was
+    # repaired. Only the CALLER's value warns — a bound merged in from the
+    # stored opposite side is not being written, so
+    # `commit_schema.validate_validity_window` (which sees only the merged pair)
+    # deliberately stays silent.
+    #
+    # ⚠️ BOTH ENDS (#9202). The ruling named the START, and the START was the
+    # only side wired — so `create_point(validFrom="TBD")` spoke while
+    # `create_point(validTo="TBD")` said nothing, and the silent one is the
+    # more consequential mistake: the reply then reports `end_state: "known"`
+    # and `get_historical_knowledge` answers `found` about the year 2050 with no
+    # field distinguishing it from a dated end. The COVERAGE rule for that value
+    # is settled and shared (ONTOLOGY §4.7: a bound that names no instant is not
+    # a bound — the #6140 start reading, extended to the end by #9408), and the
+    # write door now says so on either side. The end's REPORTED STATE
+    # (`known` vs `unknown`) is #9202's OWNER decision and is deliberately NOT
+    # touched here: this warning changes no read, which is why it is safe to
+    # ship ahead of that ruling.
     #
     # Warn ONCE per value per WRITE. Two re-entry shapes reach this function
     # for a single write: a dedup-hit `create_point` (create leg, then
@@ -6445,26 +6464,62 @@ def _refuse_inverted_point_window(g, props: dict, *,
     # create leg sets ``_WARN_SUPPRESS`` for the re-entry it causes, and the
     # update leg stays silent for a value the stored node already carries — an
     # unrelated update of a legacy point re-reads a value nobody is writing.
-    def _warn_unorderable_caller_start(caller_vf: object) -> None:
-        if caller_vf is None:
+    def _warn_unorderable_caller_bound(prop: str, bound: object) -> None:
+        """Say what a caller bound that names no instant MEANS, once per write.
+
+        The gate is ``_created_sort_key`` — the very measure ``_covers``,
+        ``validity.effective_precision`` and the inversion guard order with, so
+        a warning cannot disagree with the read path about which values are
+        instants (``key[0] == 0``). No second notion of "parseable" is
+        introduced (#9201's rule), and the value is neither refused nor
+        rewritten (#6140's ruling: a warning, never a refusal).
+        """
+        if bound is None:
             return
         from tortoise.search_engine import _created_sort_key  # lazy — no cycle
-        if _created_sort_key(caller_vf)[0] == 0:
+        if _created_sort_key(bound)[0] == 0:
             return
         suppressed = _WARN_SUPPRESS.get()
-        if suppressed is not None and repr(caller_vf) in suppressed:
+        if suppressed is not None and repr(bound) in suppressed:
+            return
+        if prop == "validTo":
+            # The END text must state the END's meaning. Reusing the start's
+            # "OPEN below" wording would tell the operator the opposite of what
+            # this value does (it bounds nothing ABOVE), which is worse than
+            # the silence it replaces.
+            #
+            # ⚠️ The remedy must name `validTo=None` for the UPDATE leg, which is
+            # where this warning also fires: `_refuse_inconsistent_validity_precision`
+            # resolves the pair an update will persist, so OMITTING `validTo` keeps
+            # the stored un-datable value and then refuses the declaration beside it
+            # (a `ValueError` where the caller was following this advice).
+            #
+            # The end's REPORTED STATE is deliberately not asserted here: it is
+            # #9202's pending owner decision, and a warning that recited today's
+            # `known` would be stale the moment the ruling lands.
+            _logger.warning(
+                "validTo %r names no instant — it bounds NOTHING, so the "
+                "window is UNBOUNDED above (ONTOLOGY §4.7, #9202). If the "
+                "end is known but un-datable, pass validToPrecision='unknown' "
+                "with NO validTo (on an update pass validTo=None explicitly — "
+                "omitting it keeps the stored value); otherwise pass an "
+                "ISO-8601 instant. What the reply should call such an end is "
+                "#9202's pending owner decision.",
+                bound,
+            )
             return
         _logger.warning(
             "validFrom %r names no instant — it means NO START WAS "
             "RECORDED, so the window is OPEN below (ONTOLOGY §4.7, "
             "#6140). Pass an ISO-8601 instant, or omit the property, to "
             "make the intent explicit.",
-            caller_vf,
+            bound,
         )
 
     from tortoise.commit_schema import validate_validity_window
     if point_id is None:
-        _warn_unorderable_caller_start(props.get("validFrom"))
+        _warn_unorderable_caller_bound("validFrom", props.get("validFrom"))
+        _warn_unorderable_caller_bound("validTo", props.get("validTo"))
         validate_validity_window(props.get("validFrom"), props.get("validTo"))
         return
     rows = g.query(
@@ -6473,16 +6528,24 @@ def _refuse_inverted_point_window(g, props: dict, *,
     ).result_set
     if not rows:
         return
-    warned = False
+    warned_start = False
+    warned_end = False
     for stored_vf, stored_vt in rows:
         # ``get(key, default)`` uses the default only when the key is ABSENT,
         # so a key present with value None still clears the bound (matching
         # `SET n += $props`), while an absent key keeps the stored one.
         effective_vf = props.get("validFrom", stored_vf)
         effective_vt = props.get("validTo", stored_vt)
-        if not warned and "validFrom" in props and props["validFrom"] != stored_vf:
-            _warn_unorderable_caller_start(props["validFrom"])
-            warned = True
+        if not warned_start and "validFrom" in props and props["validFrom"] != stored_vf:
+            _warn_unorderable_caller_bound("validFrom", props["validFrom"])
+            warned_start = True
+        # #9202: the END arm is gated exactly like the start's — the CALLER's own
+        # value, and only when it differs from what the node already carries (a
+        # duplicate-id fan-out must not re-warn per sibling; an unrelated update
+        # of a legacy point re-reads a value nobody is writing).
+        if not warned_end and "validTo" in props and props["validTo"] != stored_vt:
+            _warn_unorderable_caller_bound("validTo", props["validTo"])
+            warned_end = True
         validate_validity_window(effective_vf, effective_vt)
 
 
@@ -7909,7 +7972,7 @@ class TortoiseSDK:
         `record_projection` needs — `relation.src_label`/`tgt_label` are bound as
         VALUES and `relation` carries composite FKs into `node_identity`, so the
         record must know WHICH table to resolve the endpoint in (a `Point` keys
-        `node_key = id`, a `Subject` keys `name`) — while the journal fold
+        `node_key = id`, a `Subject` keys `id` since #9881) — while the journal fold
         IGNORES them and resolves labels itself by an id-anchored sweep
         (`rebuild_all` pass-2b). Adding them therefore changes nothing for the
         journal route and is what makes the record route agree with it.
@@ -9418,13 +9481,15 @@ class TortoiseSDK:
                     # dirty-marking (#490 review P2-1: re-capture would churn
                     # confidence for every point).
                     props["updatedAt"] = now
-                    # #6140: the CREATE leg of this call already warned about
-                    # an unorderable caller `validFrom` if it had one, and this
-                    # update leg writes the same value — so suppress the repeat
-                    # for the duration of THIS write only.
+                    # #6140 / #9202: the CREATE leg of this call already warned
+                    # about an unorderable caller `validFrom` / `validTo` if it
+                    # had one, and this update leg writes the same value — so
+                    # suppress the repeat for the duration of THIS write only.
                     _vf = props.get("validFrom")
+                    _vt = props.get("validTo")
                     _tok = _WARN_SUPPRESS.set(
-                        frozenset({repr(_vf)}) if _vf is not None else None)
+                        frozenset({repr(_vf), repr(_vt)})
+                        if (_vf is not None or _vt is not None) else None)
                     try:
                         self.update_point(pid, **props)
                     finally:
@@ -22402,9 +22467,17 @@ class TortoiseSDK:
         mode=add: find relevant-but-MISSING connections. Pairs of Points that
             are semantically related (embedding cosine similarity above
             ``similarity_threshold``) but NOT yet connected (no shared
-            operator, no direct edge) are surfaced as suggested connections:
-            {from, to, suggested_relation: "IMPL", reason, similarity}.
-            Suggestions only — nudge, don't enforce (design principle 4).
+            operator, no direct edge — and not extracted from the same
+            DOCUMENT Source: same-document pairs are near-duplicates by
+            construction and are excluded, see _review_add) are surfaced as
+            suggested connections: {from, to, suggested_relation: "IMPL",
+            reason, similarity}. Suggestions only — nudge, don't enforce
+            (design principle 4). A capture-session Source — the canonical
+            ``session:<session_id>`` ref, or a pre-#4005 bare-filename
+            ``agentSession`` Source — is capture provenance, not co-authorship
+            of one document, so it does NOT exclude a pair; nor does a Source
+            whose url is corrupt (a legacy list-valued url), which contributes
+            nothing.
             Scope: ``scope`` (topic text or Point id) narrows the candidate
             pool via hybrid retrieval; None = whole graph, capped at
             REVIEW_ADD_POOL_CAP most-recently-updated non-terminal,
@@ -22769,16 +22842,72 @@ class TortoiseSDK:
             "WHERE n.is_operator = false "
             f"  AND {_current_status_clause('n.status')} "
             "  AND (n.outdated IS NULL OR n.outdated = false) "
-            "RETURN n.id, n.content, n.status, n.updatedAt",
+            "OPTIONAL MATCH (n)-[:extractedFrom]->(src:Source) "
+            "RETURN n.id, n.content, n.status, n.updatedAt, "
+            "       collect([src.url, src.sourceKind])",
         ).result_set
         pool = {}
-        for pid, content, status, updated_at in rows:
+        for pid, content, status, updated_at, source_rows in rows:
             content = content or ""
             if content.startswith("[MITIGATION]"):
                 continue  # mitigation bookkeeping — not a standalone claim
+            # Point→Source is many-to-many (ontology §3.3, #3263), so collect
+            # every pair, never a single url. Keep the DOCUMENT sources only:
+            # session provenance is NOT document provenance, so it never
+            # enters the set — ``_extract_session_v2`` stamps EVERY point it
+            # mines with ONE ref (``session:{session_id}``), so a single
+            # capture call shares a Source across a whole conversation and
+            # intersecting on it would skip every pair on the flagship capture
+            # route.
+            #
+            # Two session signals, both narrow enough to BE the identity:
+            #   * the ``session:`` PREFIX. Every writer that goes through a
+            #     derivation lands on it (``derive_session_source_url`` in
+            #     file_indexer.py is what ``session_source_migration._canonical_url``
+            #     uses, so a migrated node keeps it), and ``_extract_session_v2``
+            #     concatenates the same prefix — the prefix holds either way.
+            #   * a pre-#4005 BARE-FILENAME ``agentSession`` url (the old
+            #     ``os.path.basename(ref.path)`` — literally ``session.md``).
+            #     The session-source migration leaves such a node in place when
+            #     it cannot attribute it, so part of that population survives
+            #     indefinitely; ``session_source_migration._LEGACY_CANDIDATES``
+            #     is its definition, and the arm below mirrors it so the two
+            #     agree.
+            # The FLAGS alone are not signals, and keying on them silently
+            # disabled this exclusion on the corpus #9914 targets (a document
+            # dropped out of the set ⇒ empty intersection ⇒ its same-document
+            # pairs came back):
+            #   * ``sourceKind='agentSession'`` — the indexer stamps the
+            #     classifier's kind on per-FILE ``corpus://`` permalinks
+            #     (``source_kind_for_classifier``), so a transcript file is an
+            #     ``agentSession`` Source though it is one document. That is
+            #     why the legacy arm additionally requires a separator-free
+            #     url;
+            #   * ``is_episodic=true`` — the capture commit stamps it on every
+            #     EXTERNAL source of ``payload.sources`` (hosted_api.py step 4)
+            #     and ``backfill_is_episodic.py`` statement 4 on EVERY Source
+            #     reachable from a session point.
+            # A non-string url (a :Source minted before #3263 can hold an
+            # ARRAY) is unhashable and is no identity, so it contributes
+            # nothing — fail OPEN, like every other missing provenance here,
+            # and never let corrupt data crash a read-only review.
+            document_sources = set()
+            for src_row in (source_rows or []):
+                if not isinstance(src_row, (list, tuple)) or len(src_row) != 2:
+                    continue
+                src_url, src_kind = src_row
+                if not isinstance(src_url, str) or not src_url:
+                    continue  # corrupt/absent url is not an identity
+                if src_url.startswith("session:"):
+                    continue  # canonical capture session (ONTOLOGY §4.6)
+                if (src_kind == "agentSession" and "://" not in src_url
+                        and "/" not in src_url):
+                    continue  # legacy bare-filename session Source
+                document_sources.add(src_url)
             pool[pid] = {"id": pid, "content": content,
                           "status": status or "draft",
-                          "updated_at": updated_at or ""}
+                          "updated_at": updated_at or "",
+                          "document_sources": document_sources}
         if not scope:
             # Whole-graph scan: cap at the most-recently-updated points so
             # the O(n²) pairwise pass stays bounded (REVIEW_ADD_POOL_CAP).
@@ -22880,6 +23009,29 @@ class TortoiseSDK:
                 continue
             if frozenset((a, b)) in connected:
                 continue  # already connected — nothing to suggest
+            # Same-DOCUMENT pairs are excluded: two Points extracted from ONE
+            # document are near-duplicates by construction — consecutive
+            # sections of a file sit in the 0.89+ band embeddings.py reserves
+            # for near-duplicates and clear any add threshold — so on a mined
+            # corpus they crowd the suggestion queue with pairs that can
+            # never be a useful *connection*: they already share provenance.
+            # Measured on a ~7.7k-point corpus: add-mode suggestions were
+            # dominated by 1.00-similarity pairs from the identical doc_…md
+            # source, and mode=add was effectively unusable at scale. A shared
+            # document is not a relationship an agent needs to be told to add.
+            #
+            # ``document_sources`` deliberately excludes ``session:``
+            # provenance (_review_pool's query drops it): a capture session is
+            # a WINDOW, not a document — ``_extract_session_v2`` stamps every
+            # point of one capture with the same ``session:<id>`` ref whatever
+            # document it came from, so intersecting on that ref alone would
+            # skip every pair on the flagship capture route and return an
+            # EMPTY add list, including the cross-document pairs mode=add
+            # exists to surface. The exclusion needs a shared DOCUMENT, and a
+            # missing/mismatched provenance fails OPEN (empty intersection ⇒
+            # pair kept).
+            if pool[a]["document_sources"] & pool[b]["document_sources"]:
+                continue  # same document — provenance, not a connection
             try:
                 score = float(s)
             except (TypeError, ValueError):
@@ -31683,9 +31835,14 @@ class TortoiseSDK:
         _ledger_record(
             "Point", [i for i in out if i.get("entity_type") == "point"]
         )
-        # NOT the Object leg: an Object's key is `name`, and these rows carry
-        # `id`, so recording them could only emit `unresolved` — reported as
-        # "rows with no key at all", which is false. Named as a hole instead.
+        # NOT the Object leg — and since #9881 that is a WIRING choice (#8877),
+        # not a shape limit. Before the move an Object's key was `name` and these
+        # rows carry `id`, so recording them could only emit `unresolved`
+        # ("rows with no key at all", which was false); the key IS the `id` now,
+        # so those rows ARE addressable and hooking this leg is #8877's
+        # follow-up. It is left unhooked here deliberately — this change is the
+        # key move, and turning on a new read leg is a measurement decision for
+        # that issue, not a silent side effect of it.
         if read_status_out is not None:
             # B6 (#3892): the composite is derived AFTER the pipeline, from the
             # rows the caller actually RECEIVES. The filters, the rerank and
@@ -32605,7 +32762,7 @@ class TortoiseSDK:
 
     def update_memory_graph(self, org_id: str, graph_id: str, *,
                             name: str | None = None,
-                            recording: bool | None | _Unset = _UNSET) -> bool:
+                            recording: bool | _Unset | None = _UNSET) -> bool:
         """The ONE partial update a memory graph has — rename it, and/or
         set/clear its session-recording override.
 
@@ -37517,9 +37674,11 @@ class TortoiseSDK:
         proj.apply honors the source_url override (#205 auto-wire onto the REAL
         Source — no phantom) and the embedding-suppression flag (cycle-19); the
         event rides the JSONL so replay reproduces the edge. Frontmatter→ev-dict
-        WHITELIST (cycle-7/8): doc handled set only — title/documentKind/domain/
-        doc_status/topics; everything else DROPPED (authoredBy never persisted;
-        date/startedAt whitelisted-but-dropped → sourceDate falls to ingestedAt)."""
+        WHITELIST (cycle-7/8): doc handled set only — title/documentKind/format/
+        domain/topics; everything else DROPPED (authoredBy never persisted;
+        `doc_status` is RETIRED by D10 (ONTOLOGY §4.4) and is neither read nor
+        emitted; date/startedAt whitelisted-but-dropped → sourceDate falls to
+        ingestedAt)."""
         # Optional frontmatter-metadata validation (#1362) — warn-only, gated
         # by TORTOISE_VALIDATE_FRONTMATTER=1 (default OFF). The write logic
         # below is UNCHANGED — this only reports missing/malformed required

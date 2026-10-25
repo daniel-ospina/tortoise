@@ -184,7 +184,10 @@ ratio     = cache line ÷ record disk line, in DOLLARS (the closed form's input)
   value for the label's contract field, which for a successful Object read would be a mis-statement); and **the
   `Subject`/`Object`/`Source` legs of the FTS funnel**, whose rows are `SearchResult.to_dict()` and
   carry `id`/`eventId`/`sourcePath` — never `name`/`url` — so they land in `unresolved` rather than in
-  a joinable coordinate. **Every one of them leaves a read out of the numerator, so every one biases
+  a joinable coordinate. **⚠️ #9881 (2026-10-27) moved `Subject`/`Object` to `id`**, so the
+  `recall_state` OBJECT leg and the FTS funnel's `Subject`/`Object` rows are now ADDRESSABLE — the
+  readings above stand as measurements, but this exclusion reason no longer holds for them, and
+  hooking those legs is a follow-up on #8877, not an unavoidable hole. **Every one of them leaves a read out of the numerator, so every one biases
   `f` LOW — flattering the split**; the byte-unit hole above is the only **TWO-SIDED** one. All are
   **#8877**.
 

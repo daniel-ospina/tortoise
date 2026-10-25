@@ -44,6 +44,7 @@ def _ts(hours_ago: float) -> datetime:
 class _Channels:
     def __init__(self):
         self.issues: dict[int, str] = {}
+        self.bodies: dict[int, str] = {}
         self.telegram: list[str] = []
         self._next = 1
 
@@ -51,6 +52,9 @@ class _Channels:
         n = self._next
         self._next += 1
         self.issues[n] = title
+        # The FILED ARTIFACT, not the call: the #5047 payload assertions read
+        # what the tracker would actually hold.
+        self.bodies[n] = body
         return n
 
     def close_issue(self, number, comment=None):
@@ -225,10 +229,12 @@ def _seed_state(storage, team: str) -> None:
 
 
 def _watcher(storage, ch, *, grace_min=0, orgs=("team_a",), now_fn=None,
-              graph_provider=None, eligible_provider=None) -> BackupWatcher:
+              graph_provider=None, eligible_provider=None,
+              simulate_enabled=False) -> BackupWatcher:
     store = _store(ch)
     return BackupWatcher(
         storage, store,
+        simulate_enabled=simulate_enabled,
         org_provider=lambda: list(orgs),
         state_reader=lambda t: {},
         graph_provider=graph_provider,
@@ -2250,3 +2256,447 @@ def test_recovery_window_is_not_defeated_by_a_not_eligible_double_resolve(monkey
 
     w.poll()
     assert ch.issues == {}, "the second consecutive healthy poll closes it"
+
+
+# ── #9937: a half-written archive is not an AGE measurement ───────────────────
+#
+# Measured on the live tracker 2026-10-24T23:52Z (`daniel-ospina/tortoise`,
+# `gh api search/issues` total_count — the number DRIFTS, re-measure it):
+# **1,399** `[DR] STALE` issues, **34** open, ~10–19 filed and ~10–19 closed
+# per day. Two generations: 721 were filed by the DRIVER (`app/github-actions`,
+# carrying a measured age — the per-tenant cardinality #4994 pooled into
+# `POOL_STALE`), and 678 by the WATCHER since #4994 landed (2026-09-24), whose
+# body is `Detail: {}` and whose title is an opaque org id.
+#
+# One org (`0902a99e…`) holds **11 issues over 27 days for one unchanged
+# condition**, alternating with 3–5 second hand-offs:
+#   #6015 NEVER 09-28T07:16:17 → closed 10-01T02:51:40
+#   #6827 STALE 10-01T02:51:43 → closed 10-01T03:03:23
+#   #6832 NEVER 10-01T03:03:26 → closed 10-02T17:32:29
+#   #6965 STALE 10-02T17:32:33 → … → #7717 NEVER 10-08T11:44:56 (still open)
+# Each transition closes one kind and FILES THE OTHER as a new issue.
+#
+# The mechanism, end to end:
+#   * `create_backup` uploads `dump.enc` FIRST and `manifest.json` LAST
+#     (#5062 review F3), so between a dump starting and its manifest landing
+#     the org prefix is non-empty with no manifest (a guard-rejected archive is
+#     deleted again afterwards, with its manifest present, so that is not the
+#     window);
+#   * `_default_graph_newest` only reads `/manifest.json`, so that window has
+#     `newest is None` — no timestamp was measured at all;
+#   * `compute_status` nevertheless classified it `stale`, i.e. it asserted
+#     "the newest archive is older than the threshold" about an archive whose
+#     age was never measured, while the next poll (prefix gone) said `never`.
+#
+# `stale` is an AGE claim, so the confirmed-listing arm may only reach it from a
+# measured age — the rule the per-graph twin already applies (#2313, #2374).
+
+
+def _seed_partial_archive(storage, team: str, hours_ago: float = 0.1) -> str:
+    """The MID-SWEEP key shape: `dump.enc` uploaded, `manifest.json` not yet."""
+    ts = _ts(hours_ago)
+    key = (f"{ts.strftime('%Y%m%dT%H%M%S')}{ts.microsecond // 1000:03d}Z_"
+           f"{secrets.token_hex(4)}")
+    storage.upload(f"backups/{team}/{key}/dump.enc", b"x")
+    return f"{team}/{key}"
+
+
+def test_status_newest_none_on_a_confirmed_listing_is_never_not_stale():
+    """A listing that ANSWERED and found no default manifest measured no age.
+
+    `stale` asserts an age over the threshold; nothing was measured, so the
+    honest class is the absence it actually observed. This is the per-graph
+    twin's rule applied to the per-org table (#2313)."""
+    s = _status(orgs=["team_a"], r2_orgs=["team_a"], state_orgs=[],
+                newest_ts_by_org={})
+    assert s["per_team"]["team_a"] == "never"
+
+
+def test_status_newest_none_on_a_degraded_listing_stays_stale():
+    """The counterpart, and the reason this cannot be a blanket re-label: on a
+    degraded poll the prefix list IS the census/cache, so a cache miss is not a
+    measurement and must never fabricate `NEVER_BACKED_UP` (#3658 — see
+    `test_watcher_degraded_poll_does_not_resolve_a_real_never_incident`)."""
+    s = _status(orgs=["team_a"], r2_orgs=["team_a"], state_orgs=[],
+                newest_ts_by_org={}, r2_ok=False)
+    assert s["per_team"]["team_a"] == "stale"
+
+
+def test_a_mid_sweep_archive_does_not_refile_a_new_issue_for_one_unchanged_org():
+    """THE GRAIN PIN: one org, one unchanged condition, ONE issue — the same
+    issue number, across the whole sweep window.
+
+    Pre-fix this test fails on the issue NUMBER, not the count: poll 2 read
+    `stale`, so it resolved `NEVER_BACKED_UP` and filed a *new* `STALE` issue
+    (the sentinel was deleted with the resolve), and poll 3 resolved that and
+    re-filed `NEVER_BACKED_UP`. At each step one issue is open, which is why the
+    open count looked stable while the tracker filled with over a thousand.
+    """
+    ch = _Channels()
+    storage = MemoryStorage()
+    w = _watcher(storage, ch)
+
+    w.poll()                      # no archive anywhere → NEVER_BACKED_UP
+    assert sorted(ch.issues.values()) == ["[DR] NEVER_BACKED_UP — team_a"], ch.issues
+    first = list(ch.issues)
+
+    _seed_partial_archive(storage, "team_a")   # the sweep's mid-flight window
+    status = w.poll()
+    assert status["per_team"]["team_a"] == "never", status["per_team"]
+    assert list(ch.issues) == first, (
+        "a half-written archive is not a new incident state — resolving and "
+        f"re-filing here is the flood (#5047): {ch.issues}")
+
+    for k in list(storage.list("backups/team_a/")):   # the sweep deletes it
+        storage.delete(k)
+    w.poll()
+    assert list(ch.issues) == first, ch.issues
+
+
+def test_a_confirmed_no_manifest_org_that_HAS_state_is_not_called_never():
+    """The three-way split on `newest is None` must not collapse case 3 into
+    `never`: team state is written only after a SUCCESSFUL dump (#2374), so
+    "never backed up" is false for an org that has state — what is missing is
+    the archive SET, which the separate `backup_set_missing` census owns. This
+    table has no class for it yet (#9938), so the pre-existing label stands
+    rather than gaining a new false one."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_state(storage, "team_a")                 # a dump succeeded once
+    _seed_partial_archive(storage, "team_a")       # …and the prefix survives
+    w = BackupWatcher(
+        storage, _store(ch),
+        org_provider=lambda: ["team_a"],
+        state_reader=lambda t: {"last_backup_at": "2026-01-01"},
+        driver_heartbeat_reader=lambda: {},
+        stale_threshold_min=90, driver_down_threshold_min=240,
+        grace_min=0, now=lambda: FIXED,
+    )
+    status = w.poll()
+    assert status["per_team"]["team_a"] == "stale", status["per_team"]
+    assert not any("NEVER_BACKED_UP" in t for t in ch.issues.values()), ch.issues
+    # …and the filed payload must not send the triager to R2 connectivity: this
+    # poll's listing DID answer, so the absence is a missing archive SET, not a
+    # cache miss. (Two different absences must not share one string.)
+    (body,) = (ch.bodies[n] for n in ch.issues)
+    assert "CONFIRMED listing" in body, body
+    assert "cache miss" not in body, body
+    # …and it names EVERY arm that can close it. The branch used to assign its own
+    # `closes_when`, which silently dropped `not_eligible` and the universe-shrink
+    # leg — a list of some closers reads as exhaustive, so an issue that closed for
+    # an unlisted reason makes the watcher look like it lies.
+    assert "IN FLIGHT" in body, body          # the benign cause leads
+    assert "merely REAPPEARS does not close it" in body, body  # an OLD key is not freshness
+    assert "not_eligible" in body, body
+    assert "universe-shrink: the subject is gone" in body, body
+    assert "ALSO: the org's class changes to NEVER_BACKED_UP" in body, body
+
+
+def test_a_degraded_poll_files_no_new_stale_for_an_unmeasured_org():
+    """The open side of an UNMEASURED `stale` (the sibling of #3658's resolve
+    side). On a degraded poll `compute_status` substitutes `r2_orgs = orgs`, so
+    every no-archive org lands in the cache-miss `stale` arm — and opening STALE
+    off that filed a NEW issue per org per R2 blip for a condition nobody
+    measured. Nothing is silenced: the pool kinds are the incidents for that
+    poll (asserted below)."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    w = _watcher(storage, ch)
+    w.poll()                                    # no archive → NEVER_BACKED_UP
+    assert sorted(ch.issues.values()) == ["[DR] NEVER_BACKED_UP — team_a"], ch.issues
+    before = list(ch.issues)
+
+    w._storage = _R2Unreachable()
+    status = w.poll()
+    assert status["per_team"]["team_a"] == "stale", status["per_team"]  # cache-miss label stands
+    # `_Channels` allocates increasing keys, so a NEWLY filed issue is appended:
+    # the ONLY new key this poll may add is R2_DOWN (the outage's own kind).
+    added = set(ch.issues) - set(before)
+    assert [ch.issues[n] for n in added] == ["[DR] R2_DOWN"], (
+        "a degraded poll must file the outage's own kind and nothing else — it "
+        f"must not file a STALE it never measured: {ch.issues}")
+    assert set(before) <= set(ch.issues), (
+        f"nothing was cleared either: {ch.issues}")
+    assert not any("STALE" in t for t in ch.issues.values()), ch.issues
+
+
+def test_a_measured_stale_org_keeps_its_incident_across_a_degraded_poll():
+    """The counterpart: an org measured stale BEFORE the outage keeps its open
+    STALE (no fabricated resolve). The degraded poll DOES add the kind that
+    measures the outage itself — `R2_DOWN` — which is the point: the pool kind
+    carries the outage, so no per-org age claim has to be invented."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 200)
+    _seed_state(storage, "team_a")
+    w = _watcher(storage, ch)
+    w.poll()
+    assert len(ch.issues) == 1 and "STALE" in next(iter(ch.issues.values()))
+    before = list(ch.issues)
+
+    w._storage = _R2Unreachable()
+    w.poll()
+    stale_titles = [t for t in ch.issues.values() if "STALE" in t]
+    assert stale_titles == ["[DR] STALE — team_a"], ch.issues
+    assert set(before) <= set(ch.issues), ch.issues
+    added = set(ch.issues) - set(before)
+    assert [ch.issues[n] for n in added] == ["[DR] R2_DOWN"], (
+        "the outage's own incident files and nothing else, so the per-org gate "
+        f"silences nothing: {ch.issues}")
+
+
+def test_a_degraded_poll_after_a_fresh_reading_still_files_the_age_it_measured():
+    """The `or` in the open gate — the half no other test reaches.
+
+    A degraded poll keeps the last CONFIRMED measurement, so it can still say
+    "this archive is old" with evidence. Gating the open on `r2_confirmed` alone
+    (which mutation M2 does) leaves the already-open case green, because nothing
+    resolves it — but a FRESH org whose listing then fails past the threshold
+    would go unreported for the whole outage. This test starts from `ok` and flips
+    the listing, which is the only path that distinguishes the two.
+    """
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 1)            # 60m at FIXED → `ok`
+    _seed_state(storage, "team_a")
+    w = _watcher(storage, ch)
+    assert w.poll()["per_team"]["team_a"] == "ok"
+    assert not ch.issues, ch.issues
+
+    w._now = lambda: FIXED + timedelta(hours=2)    # the cached reading is now 180m
+    w._storage = _R2Unreachable()
+    status = w.poll()
+    assert status["per_team"]["team_a"] == "stale", status["per_team"]
+    stale = [n for n, t in ch.issues.items() if "STALE" in t]
+    assert len(stale) == 1, ch.issues
+    detail = json.loads(ch.bodies[stale[0]].split("```")[1])
+    assert detail["age_min"] == 180, detail        # the CONFIRMED reading, aged
+    # …and it must NOT present that as an exact this-poll measurement: a newer
+    # archive may have landed unobserved, so the age may OVERSTATE the staleness.
+    assert detail["age_is_upper_bound"] is True, detail
+    assert "did NOT answer" in detail["measurement"], detail
+    assert "OVERSTATE" in detail["measurement"], detail
+
+
+def test_stale_filing_carries_the_measurement_that_justified_it():
+    """#5047's diagnostic-payload symptom: `Detail: {}` made the watcher's per-org
+    filings unassessable — no age, no archive, no close condition."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 200)   # 200h = 12000 min
+    _seed_state(storage, "team_a")
+    w = _watcher(storage, ch)
+
+    w.poll()
+    (body,) = (ch.bodies[n] for n in ch.issues)
+    assert "**Detail:** ```{}" not in body, body
+    assert '"age_min": 12000' in body, body
+    assert '"newest_default_archive": "' in body, body
+    assert '"stale_threshold_min": 90' in body, body
+    assert '"closes_when": "' in body, body
+    # The close condition names EVERY shipped arm — the measured reading, the
+    # class change (#3294), `not_eligible` (which opens nothing) and the
+    # universe-shrink — plus the recovery window, so a triager is not told that a
+    # class change cannot close it when the `never` arm can, and not told a
+    # successor incident exists for a downgraded org when none is filed.
+    assert "a default-graph archive is MEASURED no older than" in body, body
+    assert "opens the matching kind (#3294" in body, body
+    assert "this closes and NOTHING is opened" in body, body
+    assert "universe-shrink: the subject is gone" in body, body
+    assert "consecutive confirming poll(s) before it is applied" in body, body
+    # ⚠️ The window clause is CONDITIONAL, and this fixture pins the window to 1
+    # (#3146's "clear now" lever) — so the self-contradicting "held for 1 poll …
+    # never clears on one poll" must NOT appear. It shipped once and nothing
+    # noticed; `test_the_close_window_clause_can_state_the_declared_window`
+    # covers the other direction.
+    assert "never clears" not in body, body
+    # …and this is a CONFIRMED measured reading, so its measurement must say so
+    # rather than reusing the degraded/cache-miss text (a false statement there
+    # was green until this assertion existed).
+    assert "CONFIRMED listing found this org's newest" in body, body
+    # …and it must not borrow the ABSENCE branch's text either (the negative form
+    # of that sentence is "not a cache miss", so match on the absence claims).
+    detail = json.loads(body.split("```")[1])
+    assert "may OVERSTATE" not in detail["measurement"], detail
+    assert "did NOT answer" not in detail["measurement"], detail
+
+
+def test_a_simulated_stale_files_the_DRILL_as_the_trigger_not_a_fake_archive():
+    """An `ops/simulate` drill forces the class without touching the archive. The
+    payload must not publish the simulated timestamp as `newest_default_archive`:
+    a triager would search `backups/` for a key that never existed and conclude
+    the freshness scan is broken — the same "a value nobody measured" defect this
+    change removes, re-introduced by its own diagnostic."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 1)            # REAL archive: fresh
+    _seed_state(storage, "team_a")
+    # The drill object `_simulate_age` reads: an OLD age_ts, not yet expired.
+    storage.upload("ops/simulate/default.json", json.dumps({
+        "age_ts": _ts(200).isoformat(),
+        "expires_at": (FIXED + timedelta(hours=1)).isoformat(),
+    }).encode())
+    w = _watcher(storage, ch, simulate_enabled=True)
+
+    status = w.poll()
+    assert status["per_team"]["team_a"] == "stale", status["per_team"]
+    (body,) = (ch.bodies[n] for n in ch.issues)
+    detail = json.loads(body.split("```")[1])
+    assert detail["simulated"] is True, detail
+    assert "simulated_age" in detail, detail
+    # The PUBLISHED value, not just the key: a field whose name states a unit that
+    # nothing checks can silently become seconds (mutation G3 was green).
+    assert detail["simulated_age_min"] == 12000, detail   # the drill's _ts(200)
+    # The real archive is what is published, with its REAL age (1h)…
+    assert detail["newest_default_archive"] != detail["simulated_age"], detail
+    assert detail["age_min"] == 60, detail
+    # …and the body says a drill, not an outage, is the trigger.
+    assert "ops/simulate" in detail["measurement"], detail
+    assert "the drill ends" in detail["closes_when"], detail
+
+
+class _ToggledBackups(MemoryStorage):
+    """The DR archive listing fails only when told to, while `ops/simulate/` keeps
+    answering — two separate `list()` calls, so one prefix can be denied alone."""
+
+    def __init__(self):
+        super().__init__()
+        self.fail_backups = False
+
+    def list(self, prefix):
+        if self.fail_backups and prefix.startswith("backups/"):
+            raise ConnectionError("503 SlowDown")
+        return super().list(prefix)
+
+
+def test_a_degraded_poll_says_UPPER_bound_EVEN_when_a_drill_is_the_trigger():
+    """The degraded qualifier must be independent of WHICH trigger fired. The
+    drill branch used to be an `elif`, so an unconfirmed poll carrying a live
+    simulate object published the cached age as an exact measurement — the same
+    "blind reading presented as measured" class, one branch over."""
+    ch = _Channels()
+    storage = _ToggledBackups()
+    _seed_archive(storage, "team_a", 1)            # 60m — fresh, and confirmed once
+    _seed_state(storage, "team_a")
+    w = _watcher(storage, ch, simulate_enabled=True)
+    # Poll 1 is healthy, so nothing is filed and the drill's payload is observed
+    # on its FIRST filing — the store adopts an existing issue instead of
+    # rewriting its body, so a body can only be read from a new filing.
+    assert w.poll()["per_team"]["team_a"] == "ok"
+    assert not ch.issues, ch.issues
+
+    storage.upload("ops/simulate/default.json", json.dumps({
+        "age_ts": _ts(200).isoformat(),
+        "expires_at": (FIXED + timedelta(hours=1)).isoformat(),
+    }).encode())
+    storage.fail_backups = True                    # `backups/` now fails too
+    w.poll()
+
+    stale = [n for n, t in ch.issues.items() if "STALE" in t]
+    assert len(stale) == 1, ch.issues            # plus the outage's own R2_DOWN
+    detail = json.loads(ch.bodies[stale[0]].split("```")[1])
+    assert detail["simulated"] is True, detail
+    assert detail["age_is_upper_bound"] is True, detail
+    assert "did NOT answer" in detail["measurement"], detail
+
+
+def test_the_close_window_clause_can_state_the_declared_window(monkeypatch):
+    """The other direction of the conditional clause. At the DECLARED window (2)
+    the payload says a single poll cannot clear it — a claim that is TRUE there and
+    false at `ALERT_RECOVERY_STREAK=1`, so one fixture asserting only its absence
+    would leave the sentence deletable."""
+    monkeypatch.delenv("ALERT_RECOVERY_STREAK", raising=False)
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 200)
+    _seed_state(storage, "team_a")
+    w = _watcher(storage, ch)
+    w.poll()
+    (body,) = (ch.bodies[n] for n in ch.issues)
+    assert "held for 2 consecutive confirming poll(s)" in body, body
+    assert "so a single poll never clears this." in body, body
+
+
+def test_a_payload_less_leg_keeps_the_two_argument_call_shape():
+    """`_alert_leg` must not widen every leg's call shape: a store whose
+    `open_incident(kind, subject)` takes exactly two positional parameters would
+    raise a TypeError INSIDE the per-leg `except`, which logs and drops the leg
+    while the heartbeat stays healthy — i.e. a silent, all-kinds alert outage."""
+    calls = []
+
+    class _TwoArgStore:
+        def open_incident(self, kind, subject):   # no third parameter, on purpose
+            calls.append((kind, subject))
+
+        def resolve_incident(self, kind, subject):
+            return False
+
+    ch = _Channels()
+    storage = MemoryStorage()
+    w = _watcher(storage, ch)
+    w._alerts = _TwoArgStore()
+    assert w._alert_leg("open_incident", "R2_DOWN") is True
+    assert calls == [("R2_DOWN", "")], calls
+
+
+def test_a_drill_NEWER_than_a_stale_archive_is_not_named_as_the_trigger():
+    """`compute_status` takes the OLDEST of {newest archive, drill} (newest-primary
+    by age), so a drill that is NEWER than a genuinely stale archive is not what
+    made the org stale. The payload must not tell a triager a drill caused it —
+    mutation `simulate_age is not None` (dropping the `< newest` half) stayed green
+    because only the drill-wins direction had a test."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 200)          # 200h: genuinely stale
+    _seed_state(storage, "team_a")
+    storage.upload("ops/simulate/default.json", json.dumps({
+        "age_ts": _ts(1).isoformat(),              # 1h: NEWER than the archive
+        "expires_at": (FIXED + timedelta(hours=1)).isoformat(),
+    }).encode())
+    w = _watcher(storage, ch, simulate_enabled=True)
+    assert w.poll()["per_team"]["team_a"] == "stale"
+
+    (body,) = (ch.bodies[n] for n in ch.issues)
+    detail = json.loads(body.split("```")[1])
+    assert "simulated" not in detail, detail
+    assert "FORCED BY" not in detail["measurement"], detail
+    assert detail["age_min"] == 12000, detail      # the archive's own age
+
+
+def test_the_reported_age_does_not_floor_below_the_threshold():
+    """`compute_status` compares the FLOAT age, so an archive 90m30s old is OVER a
+    90m threshold. Flooring the reported minutes to 90 would print a body whose
+    own two numbers say the condition is not met — a self-refuting issue."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 1.5)          # 90m before FIXED
+    _seed_state(storage, "team_a")
+    # Poll 30s after the archive landed, with an archive 90m30s old: over the 90m
+    # threshold, so it MUST file — and must not print 90 beside a 90 threshold.
+    w = _watcher(storage, ch, now_fn=lambda: FIXED + timedelta(seconds=30))
+    assert w.poll()["per_team"]["team_a"] == "stale"
+    (body,) = (ch.bodies[n] for n in ch.issues)
+    detail = json.loads(body.split("```")[1])
+    assert detail["age_min"] == 91, detail          # 90.5 min -> rounds UP
+    assert detail["stale_threshold_min"] == 90, detail
+
+
+def test_stale_payload_does_not_change_the_title_shape():
+    """The title SHAPE is the adoption contract (`incident_title_matches`), so a
+    diagnostic field must not reach it: a resolver that cannot re-find the issue
+    it filed duplicates it. `alert_store._title` renders `detail["age"]` /
+    `detail["age_minutes"]` into the title, which is exactly why the payload
+    uses `age_min` / `age_human`."""
+    from tortoise.github_issue import incident_title_matches
+
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 200)
+    _seed_state(storage, "team_a")
+    w = _watcher(storage, ch)
+
+    w.poll()
+    (title,) = ch.issues.values()
+    assert title == "[DR] STALE — team_a", title
+    assert incident_title_matches(title, "STALE", "team_a")
+    assert not incident_title_matches(title, "STALE", "team_b")

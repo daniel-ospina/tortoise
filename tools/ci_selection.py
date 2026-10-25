@@ -1221,6 +1221,25 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # Pinned by
              # tests/test_ci_selection.py::test_record_wiring_check_tool_change_selects_core_not_tier1.
              "tools/record_wiring_check.py",
+             # #9790 review P1: tools/batch_review.py owns
+             # tests/test_batch_review.py (registered `core`), but `tools/` is a
+             # flat NON_PYTHON_PREFIXES entry and NO SOURCE_PATTERNS row matches
+             # the tool — so a tool-only change filtered to `changed == []`,
+             # took the docs-only early return and selected tier-1 smoke, where
+             # the guard is NOT registered. Measured before this entry:
+             # `select(["tools/batch_review.py"])` -> surfaces=[], full=False,
+             # test_batch_review.py absent. That is the #1349/#3332/#3616
+             # silent-drop class on the one diff that can break the guard: a
+             # follow-up that deletes `plan_records`'s manifest-head equality
+             # (`tools/batch_review.py::plan_records`) — the single line stopping a
+             # drifted outcome from minting a record — would have merged with
+             # the guard cases that pin it never running. The `core` row that
+             # registers the file is CLASSIFICATION only (#4348); it does not
+             # make a `tools/` path select `core`. CORE_ALSO (not
+             # TOOL_CARVEOUTS) because the suite is hermetic and the FastAPI-free
+             # core pool is the lowest-cost leg it can run in. Pinned by
+             # tests/test_ci_selection.py::test_batch_review_tool_change_selects_core_not_tier1.
+             "tools/batch_review.py",
              # #4174 review P1: the drift gate's suite (test_drift_guard.py) is
              # `core`-registered, but `tools/` is swallowed by
              # NON_PYTHON_PREFIXES and no SOURCE_PATTERNS entry matches
@@ -1251,6 +1270,20 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # silent-drop class as tools/queue_resweep.py above. Pinned by
              # tests/test_ci_selection.py::test_docs_lint_baseline_tool_change_selects_core_not_tier1.
              "tools/docs_lint_baseline.py",
+             # #9695 review P1: tools/ax_write_eval.py owns
+             # tests/test_ax_write_eval.py (registered `core`), but `tools/` is
+             # swallowed by NON_PYTHON_PREFIXES and no SOURCE_PATTERNS entry
+             # matches it — so a tool-only edit selected NO surface, took the
+             # docs-only early return and fell back to tier-1 smoke, where the
+             # file pinning the instrument's P0/P1 rules is NOT registered. The
+             # eval's whole acceptance is "the delta, per input" read off this
+             # instrument, so weakening a rule had to be the one diff that ran
+             # its pins. Same #1349/#3332/#3616 silent-drop class as the entries
+             # above; MEASURED before this entry: `--changed-files
+             # tools/ax_write_eval.py` -> surfaces=[], full=False,
+             # test_ax_write_eval.py ABSENT. Pinned by
+             # tests/test_ci_selection.py::test_ax_write_eval_tool_change_selects_core_not_tier1.
+             "tools/ax_write_eval.py",
              # #7814 review P2: the queue-reconcile schedule installer owns
              # tests/test_install_queue_reconcile_schedule.py, registered
              # `core`, but `tools/` is swallowed by NON_PYTHON_PREFIXES and no
@@ -1482,6 +1515,16 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # class. Pinned by
              # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
              "supabase/migrations/20261023000001_record_session_narrative.sql",
+             # #9555 / PR #9862 review round 4: R7's CARRIER migration
+             # (`20261024000001`, `COMMENT ON` only). Measured: a diff touching
+             # ONLY this file selected `surfaces: []`, so
+             # `test_9555_session_narrative.py` — which reads this file's text and
+             # pins the schema's narrative claim by name — did not run on the one
+             # change that can make its pin false. No `2026101*` prefix applies
+             # (same reason as the tenancy row below: `supabase/` is a
+             # NON_PYTHON_PREFIX), so without this entry the arm is a silent drop
+             # of the #1349/#3332/#3616 class.
+             "supabase/migrations/20261024000001_record_session_narrative_carrier.sql",
              # #9554 / PR #9600 review cycle 1 (P2): the TENANCY POSTURE migration —
              # the app role, its grants (including `relation_id_seq`'s USAGE) and
              # the `*_app_tenant` policies, one per record table (ten, since
@@ -1497,6 +1540,25 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # had no entry.) Pinned by
              # tests/test_ci_selection.py::test_the_tenancy_migration_selects_the_posture_pins.
              "supabase/migrations/20261025000001_record_tenancy_role_and_guc.sql",
+             # #9881 / PR #9948 review P2: the FORWARD migration that
+             # RE-DECLARES the Object/Subject key contract — the
+             # `node_identity.key_property` CASE and both
+             # `chk_*_node_key_is_contract_key` pins. It is the one file that can
+             # re-declare what `record_projection.key_properties()` now reads
+             # (LAST declaration wins), and it sorts outside the
+             # `2026101200000` prefix while `supabase/` is a NON_PYTHON_PREFIX,
+             # so a diff touching only this file selected NO surface. Measured on
+             # the pre-fix head: `_sel([<this path>])` -> `surfaces: []`,
+             # `full: false`, and every reader of the contract —
+             # `test_record_projection.py`,
+             # `test_record_schema_placement.py`, `test_cache_projection.py`,
+             # `test_read_ledger.py` — absent from `test_files`. The
+             # #1349/#3332/#3616 silent-drop class, and the reason a `core`
+             # registration alone cannot fix it (a surface's test_files only run
+             # when that surface is ALREADY selected). Pinned by
+             # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change
+             # and ……::test_the_semantic_id_key_migration_selects_every_reader_of_the_contract.
+             "supabase/migrations/20261027000001_record_semantic_id_key.sql",
              # Re-stated at the migration pair, NOT replaced by it (#9638 review
              # P1): the DOC side is an independent member of this set. The
              # #9555/R7 entry above was inserted over this path, so a
@@ -1663,6 +1725,28 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # entry) it is a cost/home fix rather than a hole fix, which is
              # stated so the polarity is not misread later.
              "docs/evidence/7949-capstone/",
+             # #9695: the Step-1 eval's EVIDENCE DOC
+             # (`docs/ax/how-to-use-tortoise-step1-eval.md`) publishes every
+             # measured number of that eval — the aggregate headline, all ten
+             # per-input P0/P1 rows, the class census and every `kind` ×N
+             # multiplier — and the only thing that re-derives them from the
+             # committed `runs/*/score.json` records is
+             # `tests/test_ax_write_eval.py`, registered on `core` only.
+             #
+             # MEASURED before this entry (`select()` in-process):
+             # `select(["docs/ax/how-to-use-tortoise-step1-eval.md"])` →
+             # `surfaces=[]`, `full=False`, pin ABSENT. `docs/` is a
+             # flat NON_PYTHON_PREFIXES entry and `_is_non_code_doc` recognises
+             # four exact paths, so the changed list comes back empty and
+             # select() takes the docs-only early return — tier-1 smoke, which
+             # does not carry the pin. A one-file PR could therefore re-cut the
+             # headline to any number and merge with the guard that re-measures
+             # it NEVER RUN: the #1349/#3332/#3616 class, reached through the
+             # early return rather than `_selection_relevant`, and the same
+             # shape recorded for `docs/evidence/7950-capstone/` above.
+             # Pinned by tests/test_ci_selection.py::
+             # test_the_step1_eval_evidence_doc_selects_core_not_tier1.
+             "docs/ax/how-to-use-tortoise-step1-eval.md",
              # `tools/` is a flat NON_PYTHON_PREFIXES entry too, so the checker was
              # swallowed by the same early return; its pins are `core`-registered
              # and hermetic, so `core` is the right lane (the shape
@@ -1771,6 +1855,23 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # never ran on the bytes they hard-code. Pinned by
              # tests/test_ci_selection.py::test_journal_growth_guard_runs_on_a_tool_or_probe_change.
              "supabase/tests/fixtures/record_projection_journal.jsonl",
+             # agent-infra#2344 (owner ruling): `tools/runner_autoscale.py` is this
+             # box's runner-capacity guard and `tests/test_runner_autoscale.py`
+             # owns its pins (ceiling arithmetic + 25 mutation gates). `tools/` is a
+             # flat NON_PYTHON_PREFIXES entry, so a tool-only change came back with
+             # `changed == []` and the guard's own tests never ran on the file they
+             # guard — the #1349/#3332/#3616 silent-drop class, the same shape as
+             # `tools/lane_stash.py` above. `CORE_ALSO` (not a SOURCE_PATTERNS row)
+             # is deliberate: this is a lane/fleet-hygiene contract about a TOOL, and
+             # `core` already carries the other `tools/` pins.
+             "tools/runner_autoscale.py",
+             # PR #9685 review round 9, P1-2: the INSTALLER arms the guard, and it was
+             # missing while its `.py` was listed — so an installer-only diff selected
+             # NO surface. That is the same silent-drop class one file over: the 825
+             # lines that decide whether the timer is armed at all were verified by
+             # nothing. Pinned by
+             # tests/test_ci_selection.py::test_runner_autoscale_installer_change_selects_core_not_tier1.
+             "tools/install-runner-autoscale-schedule.sh",
              # PR #8852 review P2: `website/apps/dashboard/deploy.sh` is the
              # documented manual deploy, and the #8816 guard
              # (tests/test_e2e_wrangler_prewarm.py, registered `core`) both reads
@@ -1988,7 +2089,17 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # `tests/eval/write_path/`). Both halves are asserted by
              # tests/test_ci_selection.py::
              # test_product_root_marker_guard_runs_on_a_legal_pages_only_diff.
-             "tests/e2e/test_legal_pages.py")
+             "tests/e2e/test_legal_pages.py",
+             # CLI-extraction lane (#9915): the flat `integrations/` prefix in
+             # NON_PYTHON_PREFIXES swallows the extractor, so an
+             # extractor-only diff comes back `changed=[]`, select() takes the
+             # early return and bypasses the `matched.add("core")` fallback —
+             # not one of the lane's guards (`tests/test_cli_extraction.py`,
+             # registered under `surfaces: core:` and `carve_out:`) would run
+             # on the very change that can break them (#6138-review-P1 class).
+             # Kept here so `_selection_relevant` claims it in `_keep_changed`
+             # and the core fallback stays alive.
+             "integrations/cli-extraction/extract_turns.py")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",

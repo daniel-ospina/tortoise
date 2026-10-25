@@ -1,0 +1,144 @@
+{
+  "input": "research_paper",
+  "cell": "research paper",
+  "confuses": [
+    "Subject-vs-Point",
+    "Object-vs-Point"
+  ],
+  "counts": {
+    "Point": 6,
+    "Subject": 1,
+    "Object": 3,
+    "Event": 1,
+    "Source": 1
+  },
+  "item_rows": [
+    {
+      "item": "Retrieval-Augmented Generation",
+      "expected": "source:document",
+      "written": "Source:research",
+      "node": "Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks",
+      "fuzzy": false,
+      "verdict": "KIND-UNDECLARED"
+    },
+    {
+      "item": "Lewis",
+      "expected": "subject:naturalPerson",
+      "written": "Subject:authorGroup",
+      "node": "Lewis et al. (2020)",
+      "fuzzy": true,
+      "verdict": "KIND-UNDECLARED"
+    },
+    {
+      "item": "44.2% on Exact Match",
+      "expected": "point:statement",
+      "written": "Point:observation",
+      "node": "RAG models outperform a parametric-only seq2seq baseline by 44.2% Exact Match on",
+      "fuzzy": true,
+      "verdict": "KIND"
+    },
+    {
+      "item": "unstable when the retriever is frozen",
+      "expected": "point:statement",
+      "written": "Point:observation",
+      "node": "The reported RAG gain is unstable when the retriever is frozen.",
+      "fuzzy": false,
+      "verdict": "KIND"
+    },
+    {
+      "item": "joint fine-tuning is necessary",
+      "expected": "point:statement",
+      "written": "Point:statement",
+      "node": "Joint fine-tuning of the retriever and the generator is necessary for the report",
+      "fuzzy": false,
+      "verdict": "OK"
+    }
+  ],
+  "findings": [
+    {
+      "severity": "P1",
+      "item": "Retrieval-Augmented Generation",
+      "layer": "Source",
+      "kind": "research",
+      "finding": "UNDECLARED kind 'research' on a Source ('Retrieval-Augmented Generation for Knowledge-Inten') \u2014 not a core \u00a75 kind, not one the SDK registers, and not one any loaded pack declares; nothing routes to, finds or classifies it",
+      "fix": "use a declared Source kind (\u00a75 core, or a pack kind spelled as the pack declares it)"
+    },
+    {
+      "severity": "P1",
+      "item": "Lewis",
+      "layer": "Subject",
+      "kind": "authorGroup",
+      "finding": "UNDECLARED kind 'authorGroup' on a Subject ('Lewis et al. (2020)') \u2014 not a core \u00a75 kind, not one the SDK registers, and not one any loaded pack declares; nothing routes to, finds or classifies it",
+      "fix": "use a declared Subject kind (\u00a75 core, or a pack kind spelled as the pack declares it)"
+    },
+    {
+      "severity": "P1",
+      "item": "44.2% on Exact Match",
+      "finding": "kind outside the frozen set: expected one of ['statement'], written 'observation' ('RAG models outperform a parametric-only seq2seq baseline by ') \u2014 declared, but not the kind this item is",
+      "fix": "pick a kind the active vocabulary declares for this layer (\u00a75)"
+    },
+    {
+      "severity": "P1",
+      "item": "unstable when the retriever is frozen",
+      "finding": "kind outside the frozen set: expected one of ['statement'], written 'observation' ('The reported RAG gain is unstable when the retriever is froz') \u2014 declared, but not the kind this item is",
+      "fix": "pick a kind the active vocabulary declares for this layer (\u00a75)"
+    }
+  ],
+  "relations": [
+    "IMPL",
+    "INPUT",
+    "aboutDocument",
+    "aboutObject",
+    "aboutPoint",
+    "aboutSubject",
+    "authoredBy",
+    "extractedFrom",
+    "mitigated_by",
+    "related"
+  ],
+  "operators": [
+    "IMPL"
+  ],
+  "sources": [
+    "https://arxiv.org/abs/2005.11401"
+  ],
+  "mitigations": [
+    "mitigated_by: ? -> [MITIGATION] The instability-to-necessit"
+  ],
+  "kind_census": {},
+  "wrong_axis_kinds": [],
+  "cross_axis_kinds": [],
+  "kind_sources": {
+    "Point": {
+      "observation": "CORE",
+      "statement": "CORE"
+    },
+    "Subject": {
+      "authorGroup": "UNDECLARED"
+    },
+    "Object": {
+      "architecture": "PACK",
+      "asset": "PACK"
+    },
+    "Event": {
+      "extraction": "CORE"
+    },
+    "Source": {
+      "research": "UNDECLARED"
+    }
+  },
+  "packs": [
+    "agent-ops",
+    "dev",
+    "marketing",
+    "pm",
+    "portfolio",
+    "product-strategy",
+    "venture"
+  ],
+  "severity_counts": {
+    "P0": 0,
+    "P1": 4,
+    "P2": 0
+  }
+}

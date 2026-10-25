@@ -1,4 +1,4 @@
-// tortoise-hook-version: 6
+// tortoise-hook-version: 14
 // tortoise-capture — the in-repo Pi capture extension (#3575, #1727 T1).
 //
 // The `tortoise-hook-version` marker above is the install-contract generation
@@ -40,6 +40,88 @@
 // shipped bytes move. `session verify`'s "it captures with older logic"
 // wording is imprecise for this one generation; the classification and the
 // repair it prompts are right.
+//
+// Generation 14 (#3515 review): the clock tolerance is ONE value shared by the
+// two arms that compare a persisted `at` with our spawn stamp. Generation 13
+// added it to the exit-0 arm only, leaving the precedence arm exact — so on a
+// platform whose `at` resolves to a second (or after a backwards step) the
+// extension stopped recognising the CLI's just-written record as THIS sweep's and
+// overwrote `worker_missing` with `exit_1`, which is exactly the generation-11
+// defect. Both arms now derive the slack from `CLOCK_SLACK_S`.
+//
+// Generation 13 (#3515 review): the exit-0 corroboration gained a ONE-SECOND
+// tolerance on `at`. Without it, any writer whose stamp is second-granular in the
+// same second read as older, and this branch OVERWROTE a healthy status and
+// reported `exit_0_without_status` on a box whose backstop was working — a
+// fail-closed over-report, every sweep. The reason fallback also strips the
+// punctuation that breaks the health line's comma-delimited grammar (only known
+// classes were tokenised before), and the CLI's writer now narrows an EXISTING
+// store directory to 0700 the way the extension's does.
+//
+// Generation 12 (#3515 review): exit 0 is corroborated, and the health line's
+// reason is a TOKEN. A sweep that exits 0 without writing a fresh status left the
+// PREVIOUS verdict standing — the CLI's bookkeeping write is best-effort, and a
+// `tortoise` on PATH that is not the shipped CLI can exit 0 without sweeping — so
+// the extension now reads the status on a zero exit and records
+// `exit_0_without_status` when it is absent or older than this spawn. The
+// persisted `reason` is a TOKEN for the classes that are known
+// (`no_credential`, `no_header_id`, `permission_denied`, `no_space`, `bad_json`)
+// instead of the CLI's free-form stderr prose: the precedence fix is what made
+// that prose reach the line, where it duplicated the line's own
+// "no TORTOISE_API_KEY" and embedded an unquoted sentence in a comma-delimited
+// field. Anything unrecognised has that punctuation replaced before it is
+// persisted. The full text stays on stderr and in `--json`.
+//
+// Generation 11 (#3515 review): the extension's record is now SUBORDINATE to the
+// CLI's own, and the spawn names the directory it writes to. `close` fires AFTER
+// the CLI's `main` has already written `{ok: false, reason: "worker_missing"}`
+// and exited non-zero, so an unconditional write replaced that named diagnosis
+// with an opaque `exit_1` on every GRACEFUL failure — the seam's whole product,
+// thrown away on its commonest path. A record whose `at` is at or after this
+// sweep's spawn time is the CLI's, and it wins. The spawn also passes
+// `--cursor-dir <derived store>`, because the CLI otherwise defaults to
+// `$HOME/.tortoise/store-sync` while both legs of the line read
+// `<spool-parent>/store-sync`: under the documented `TORTOISE_CAPTURE_SPOOL_DIR`
+// override the two silently disagreed (the dead-letter count read 0 and the
+// failure degraded to `exit_N`). The bookkeeping directory is created `0o700`
+// with a `0o600` status file for the extension's own write (the CLI's writer sets
+// its own mode).
+//
+// Generation 10 (#3515 review): a sweep's failure is recorded from EVERY path
+// that can produce one, and a killed sweep names its SIGNAL. Generation 9 wired
+// the recorder to the child's `exit`, which a CLI that is ABSENT from PATH never
+// emits — it emits `error` (ENOENT) and `close` with a negative code — so a box
+// whose `tortoise` CLI disappeared kept printing `capture: OK` over an inert
+// crash/kill recovery. The listener is `close` (it fires for a child that ran
+// and for one that never started); `code === null` means the sweep was KILLED
+// (OOM, shutdown) and the reason is `signal_<SIG>` rather than the literal
+// string `exit_null`; and the outer `catch` records a failed spawn too.
+//
+// Generation 9 (#3515 review): the extension now RECORDS a sweep failure it
+// alone can observe. `sweep-status.json` was written only by the CLI's `main`,
+// so a failure BEFORE it runs — a `node` too old to parse the shipped worker, a
+// removed `node`, a truncated artifact — wrote nothing and left an EARLIER
+// healthy status on disk: the line printed `capture: OK` over a backstop that
+// had just died, which is the silent death the seam exists to end (and worse
+// than the original, because the line now looks informed). `recordSweepFailure`
+// writes `ok: false` from the child's exit path, and both legs of the line
+// render it. (The listener moved from `exit` to `close` in generation 10, and
+// generation 11 made the record subordinate to the CLI's own — see above.) Generation 8's bytes are preserved as the generation-8 digest; this is a
+// new byte set, so it is a new generation rather than a rewritten entry.
+//
+// Generation 8 (#3515 review): the `capture:` health line now also reports the
+// store-sync backstop's DEAD-LETTER count. A permanent refusal dead-letters a
+// session's window and CROSSES its cursor, so those turns can never re-ship;
+// the count lived only in the worker's receipt, and the one production caller
+// spawns it with `stdio: "ignore"` — i.e. the loss was counted into a document
+// nothing reads. The count belongs on the only line a user sees per session.
+//
+// Generation 7 (#3515): `session_start` now also starts the STORE-SYNC
+// BACKSTOP — a detached one-shot `tortoise store-sync` that drains Pi's own
+// session `.jsonl` (the death modes this hook cannot see: SIGKILL, crash,
+// closed terminal), excluding the live session. Behaviour moved, so the
+// generation moves with it: an already-installed generation-6 copy must read as
+// STALE, or the box keeps the hook-only seam that loses killed sessions.
 //
 // Generation 5 (#2100): the drain is now BOUNDED and never runs on the turn's
 // critical path, a quota refusal is a NAMED per-box state instead of a silent
@@ -91,6 +173,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createHash } from "node:crypto";
 import {
   appendFileSync,
+  chmodSync,
   closeSync,
   existsSync,
   fsyncSync,
@@ -106,6 +189,7 @@ import {
 } from "node:fs";
 import { homedir, hostname, userInfo } from "node:os";
 import { basename, dirname, join, resolve as resolvePath } from "node:path";
+import { spawn } from "node:child_process";
 
 // ── Constants ─────────────────────────────────────────────────────────────
 
@@ -307,6 +391,11 @@ export type FetchLike = (
  */
 export const _CREDENTIAL_MODE_WARNED = new Set<string>();
 
+/** #3515 piece 5: the CLI the sweep looks for, and a once-per-process flag so a
+ *  machine without it warns ONE time instead of on every session start. */
+export const CANDIDATE_CLIS = ["tortoise"];
+let _SWEEP_UNAVAILABLE_WARNED = false;
+
 /**
  * #5109 (the capture-hook half): say so when a credential store is
  * group/other-readable.
@@ -479,7 +568,15 @@ export function modelLabel(model: unknown): string | undefined {
  *  refuses is a 422, a 422 is classified PERMANENT, and the drain then unlinks
  *  the entry's turn log — the only copy. Normalising here makes that refusal
  *  unreachable from either spool leg. */
-const CLIENT_CAPTURED_AT_SOURCES = new Set(["cli_observed", "file_mtime", "unknown"]);
+const CLIENT_CAPTURED_AT_SOURCES = new Set([
+  "cli_observed",
+  // #3515 piece 12: the store-sync backstop's clock is the JSONL entry's own
+  // `timestamp` — its own member, because recording it as `file_mtime` would
+  // state a provenance the value does not have.
+  "entry_timestamp",
+  "file_mtime",
+  "unknown",
+]);
 
 /** #7708: the CLOSED producer-lane vocabulary, mirroring the server's
  *  `hosted_api._SESSION_CAPTURE_LANE_VALUES` (the set that produces the 422).
@@ -835,6 +932,10 @@ export function postCapture(
 // ONE session and issues ONE POST.
 
 export const SPOOL_DIR = join(homedir(), ".tortoise", "capture-spool");
+/** The store-sync backstop's cursor store (whose dead-letter substrate is the
+ *  count the health line reports). `tortoise/store_sync.py::default_cursor_dir`
+ *  is the same path — one directory, two readers. */
+export const STORE_SYNC_DIR = join(homedir(), ".tortoise", "store-sync");
 /**
  * Spool ceilings. Count AND bytes (the issue's contract). These are NOT a TTL —
  * see the #3870 note above.
@@ -2317,10 +2418,132 @@ export function writeCaptureStatus(dir: string, status: CaptureStatus): void {
  * behind it. A spool that cannot be LISTED is `unreadable` and is never
  * reported as empty, nor healed.
  */
+export interface CaptureHealth {
+  state: CaptureState;
+  queued: number;
+  status?: number;
+  line: string;
+}
+
+/** Rows in the store-sync backstop's dead-letter substrate. A missing file is
+ *  0 (no drops), never an error: the health line must not fail because a
+ *  bookkeeping file is absent. */
+export function countStoreSyncDeadLetters(dir: string): number {
+  try {
+    const path = join(dir, "dead-letter.jsonl");
+    if (!existsSync(path)) return 0;
+    return readFileSync(path, "utf8").split("\n").filter((l) => l.trim()).length;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * The per-box capture health line.
+ *
+ * `storeSyncDir` names the store-sync cursor store, whose DEAD LETTERS are
+ * included in the line: a permanent refusal there crosses a per-file cursor, so
+ * those turns can never re-ship — and the count otherwise exists only in the
+ * worker's receipt, which the extension throws away (`stdio: "ignore"`). A
+ * count nothing reads is a silent drop; this is the one line a user sees.
+ */
+export interface SweepStatus {
+  ok: boolean;
+  reason?: string;
+  /** When the record was written (unix seconds). Consumed for PRECEDENCE: a
+   *  record at or after this sweep's spawn time is the CLI's own name for the
+   *  failure, and the extension must not replace it with its exit code. */
+  at?: number;
+}
+
+/**
+ * The last sweep's outcome, as the CLI persisted it.
+ *
+ * The extension spawns the worker with `stdio: "ignore"`, so the CLI's stderr —
+ * where every post-spawn failure is named (`worker_status`, `no_receipt`, a
+ * non-zero exit) — is discarded. Without this the box reports `capture: OK`
+ * while the crash/kill recovery is inert: a dead backstop indistinguishable
+ * from a working one. `undefined` means "no sweep has reported yet", which is
+ * NOT a failure and must never be rendered as one.
+ */
+export function readSweepStatus(dir: string): SweepStatus | undefined {
+  try {
+    const path = join(dir, "sweep-status.json");
+    if (!existsSync(path)) return undefined;
+    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    const rec = parsed as Record<string, unknown>;
+    const ok = rec.ok === true;
+    const reason = typeof rec.reason === "string" && rec.reason ? rec.reason : undefined;
+    const at = typeof rec.at === "number" && Number.isFinite(rec.at) ? rec.at : undefined;
+    return { ok, reason, at };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Record a sweep failure the CLI could not record itself.
+ *
+ * `sweep-status.json` is written by the CLI's own `main`, so a failure that
+ * happens BEFORE it runs — `node` too old to parse the shipped worker, `node`
+ * removed, a truncated artifact — writes NOTHING, and whatever an earlier
+ * healthy sweep left stays on disk. That stale `ok: true` would render
+ * `capture: OK` over a backstop that just died, which is the exact silent death
+ * this seam exists to end. The extension is the only observer of the exit code,
+ * so it records the failure rather than merely warning about it.
+ *
+ * Best-effort by contract: bookkeeping must never fail a sweep.
+ */
+export function recordSweepFailure(storeDir: string, reason: string): void {
+  try {
+    // 0o700/0o600 like every other `~/.tortoise` writer: the directory is
+    // created here on the primary path (the CLI never ran, so it does not exist
+    // yet), and a umask-derived 0755 would be the one place in the tree that is
+    // world-readable.
+    mkdirSync(storeDir, { recursive: true, mode: 0o700 });
+    // `mkdirSync`'s `mode` applies ONLY when it creates the directory. The other
+    // way this directory comes to exist is an EARLIER generation of this
+    // extension, which created it with no mode at all (0755) — so on every
+    // upgraded box the 0700 intent was silently unmet, permanently. Narrow the
+    // existing one too; best-effort, inside the same try.
+    try {
+      chmodSync(storeDir, 0o700);
+    } catch {
+      // Windows / a directory we do not own: the write below still decides.
+    }
+    const payload = { version: 1, ok: false, reason, shipped: 0, at: Date.now() / 1000 };
+    const tmp = join(storeDir, "sweep-status.json.tmp");
+    writeFileSync(tmp, JSON.stringify(payload), { mode: 0o600 });
+    renameSync(tmp, join(storeDir, "sweep-status.json"));
+  } catch {
+    // Nothing else to do: the health line simply keeps its previous reading.
+  }
+}
+
 export function captureHealthLine(
   dir: string,
-  opts: { apiKey?: string } = {},
-): { state: CaptureState; queued: number; status?: number; line: string } {
+  opts: { apiKey?: string; storeSyncDir?: string } = {},
+): CaptureHealth {
+  const base = spoolHealthLine(dir, opts);
+  // The store is DERIVED from the spool root (both live under `~/.tortoise/`)
+  // rather than from `homedir()`: a caller that hands in a temp spool — every
+  // test does — must not read the machine's real cursor store (#3721).
+  const storeDir = opts.storeSyncDir ?? join(dirname(dir), "store-sync");
+  const deadLettered = countStoreSyncDeadLetters(storeDir);
+  const sweep = readSweepStatus(storeDir);
+  const parts: string[] = [];
+  if (deadLettered > 0) parts.push(`${deadLettered} store-sync dead-lettered`);
+  // A sweep that RAN and failed is strictly worse than a dead-letter count: the
+  // backstop is inert. Absence of the file is "not yet reported", never a fault.
+  if (sweep && !sweep.ok) {
+    parts.push(`store-sync FAILED${sweep.reason ? ` (${sweep.reason})` : ""}`);
+  }
+  if (!parts.length) return base;
+  return { ...base, line: `${base.line}, ${parts.join(", ")}` };
+}
+
+function spoolHealthLine(dir: string, opts: { apiKey?: string } = {}): CaptureHealth {
   const pending = countPendingEntries(dir);
   if (pending === undefined) {
     // A spool we cannot list is UNKNOWN, not empty. Reporting `OK` here would be
@@ -2444,6 +2667,17 @@ export interface CaptureDeps {
   bounds?: SpoolBounds;
   /** Clock seam for backoff-window tests. */
   now?: () => number;
+  /**
+   * #3515 piece 5: the recovery SWEEP seam. On `session_start` the extension
+   * asks the store-sync backstop to drain Pi's own `.jsonl` files (the death
+   * modes the in-process hook cannot see: SIGKILL, crash, closed terminal).
+   *
+   * Injected so the behavioral suite never spawns a real `tortoise` process,
+   * and so a machine with no Python install reports the skip instead of
+   * pretending the sweep ran. `undefined` in production means the real
+   * detached spawn.
+   */
+  sweepImpl?: (excludeSessionId?: string) => void;
 }
 
 function log(message: string): void {
@@ -2682,6 +2916,123 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
       .catch((err) => warn(`spool flush error: ${err instanceof Error ? err.message : String(err)}`));
   };
 
+  /**
+   * #3515 piece 5 — invoke the store-sync backstop, DETACHED.
+   *
+   * Why a spawn and not an implementation here: the backstop already exists as
+   * `tortoise/pi-hooks/store-sync.ts` (per-file cursor, branch window,
+   * advance-on-2xx) and re-implementing it inside the extension would be the
+   * second capture path this architecture exists to forbid. Why detached and
+   * unref'd: `session_start` is AWAITED by Pi, so the sweep must not be on the
+   * startup path — a network drain there is the #2100 failure (a lane that
+   * looked dead while it drained).
+   *
+   * A machine with no `tortoise` CLI has nothing to sweep with, and says so
+   * ONCE — never silently. (Pi itself always has `node`; a Python CLI is only
+   * present on a machine that installed the package.)
+   */
+  const sweepStoreSync = (excludeSessionId?: string): void => {
+    if (deps.sweepImpl) {
+      try {
+        deps.sweepImpl(excludeSessionId);
+      } catch (err) {
+        warn(`store-sync sweep (injected) failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      return;
+    }
+    const storeDir = join(dirname(spoolDir), "store-sync");
+    // ONE failure record per sweep, carrying the FIRST reason. A PATH-missing CLI
+    // reports BOTH `error` (ENOENT) and `close` (code -2) and NO `exit` event at
+    // all, so a recorder wired to `exit` alone never fires on the likeliest way
+    // this backstop stops working. Record first, warn second: the warn is
+    // deduplicated per process, the record must not be.
+    const sweepStartedAt = Date.now() / 1000;
+    // ONE tolerance for comparing a persisted `at` (whatever resolution its
+    // writer had) with our millisecond spawn stamp, used by BOTH arms below.
+    // `time.time()` is a float here, but Python documents one-second resolution
+    // on some platforms, and a backwards clock step is possible — so an
+    // exact-to-the-millisecond comparison can read a record THIS sweep wrote as
+    // older. Deriving it once is the point: the two arms drifted apart once
+    // already, and the arm that was left exact reintroduced the gen-11 defect it
+    // was written to prevent.
+    const CLOCK_SLACK_S = 1;
+    let failureRecorded = false;
+    const noteFailure = (reason: string): void => {
+      if (failureRecorded) return;
+      failureRecorded = true;
+      // SUBORDINATE to the CLI's own diagnosis. The CLI writes its
+      // `{ok: false, reason: "worker_missing"}` BEFORE it exits non-zero, and
+      // `close` fires after that — so writing unconditionally replaced the one
+      // thing this seam exists to name with an opaque `exit_1` on every GRACEFUL
+      // failure. A record stamped at or after this spawn is this sweep's, and it
+      // wins.
+      const existing = readSweepStatus(storeDir);
+      if (existing && !existing.ok && (existing.at ?? 0) >= sweepStartedAt - CLOCK_SLACK_S) return;
+      recordSweepFailure(storeDir, reason);
+    };
+    try {
+      // `--cursor-dir` is EXPLICIT on purpose: the CLI otherwise defaults to
+      // `$HOME/.tortoise/store-sync` while both legs of the line read
+      // `<spool-parent>/store-sync`, so under the documented
+      // `TORTOISE_CAPTURE_SPOOL_DIR` override the writer and the readers
+      // silently disagreed (the dead-letter count read 0, the failure degraded
+      // to `exit_N`). Naming it makes them agree by construction — and it is a
+      // no-op under the default, where the two paths are the same.
+      const args = ["store-sync", "--no-spool", "--cursor-dir", storeDir];
+      if (excludeSessionId) args.push("--exclude-session-id", excludeSessionId);
+      const child = spawn(CANDIDATE_CLIS[0], args, { detached: true, stdio: "ignore" });
+      child.on("error", () => {
+        noteFailure("cli_missing");
+        if (_SWEEP_UNAVAILABLE_WARNED) return;
+        _SWEEP_UNAVAILABLE_WARNED = true;
+        warn("store-sync sweep: no `tortoise` CLI on PATH — killed/crashed sessions "
+          + "are only caught when it is installed (`tortoise store-sync`)");
+      });
+      // `close` (not `exit`) is the listener that covers EVERY end: it fires for
+      // a child that ran and failed (`node` too old for the shipped `.ts` worker,
+      // missing artifact, no receipt) AND for one that never started. `signal` is
+      // the only diagnosis for a swept that was KILLED (OOM, shutdown): `code` is
+      // null there, and `exit_null` would throw the reason away exactly where it
+      // matters.
+      child.on("close", (code, signal) => {
+        if (code === 0) {
+          // EXIT 0 IS NOT PROOF THE SWEEP RAN. This seam's whole premise is that
+          // the status file is the truth, and the CLI's own bookkeeping write is
+          // best-effort (`except OSError: pass`) — so a healthy-looking exit can
+          // leave NO record, and the line then renders the PREVIOUS verdict over
+          // a backstop that never swept. A `tortoise` on PATH that is not the
+          // shipped CLI does the same. Corroborate with data already in hand.
+          const after = readSweepStatus(storeDir);
+          // A coarse-but-FRESH record must not read as older, or this branch
+          // OVERWRITES a healthy status and reports `exit_0_without_status` on a
+          // box whose backstop works, every sweep. A record from the previous
+          // sweep is far older than `CLOCK_SLACK_S`, so the tolerance cannot
+          // mask a genuinely stale verdict.
+          if (!after || (after.at ?? 0) < sweepStartedAt - CLOCK_SLACK_S) {
+            noteFailure("exit_0_without_status");
+            if (_SWEEP_UNAVAILABLE_WARNED) return;
+            _SWEEP_UNAVAILABLE_WARNED = true;
+            warn("store-sync sweep exited 0 but wrote no fresh status — killed/crashed "
+              + "sessions may not be recovered; run `tortoise store-sync --json`");
+          }
+          return;
+        }
+        const why = code === null ? `signal_${String(signal)}` : `exit_${String(code)}`;
+        noteFailure(why);
+        if (_SWEEP_UNAVAILABLE_WARNED) return;
+        _SWEEP_UNAVAILABLE_WARNED = true;
+        warn("store-sync sweep FAILED (" + why.replace("_", " ") + ") — killed/crashed "
+          + "sessions are not being recovered; run `tortoise store-sync --json`");
+      });
+      child.unref();
+    } catch {
+      noteFailure("spawn_failed");
+      if (_SWEEP_UNAVAILABLE_WARNED) return;
+      _SWEEP_UNAVAILABLE_WARNED = true;
+      warn("store-sync sweep could not be started");
+    }
+  };
+
   /** The one health line. Cheap enough to print per session start (a spool scan,
    *  no network), and the only surface that distinguishes a BLOCKED box from an
    *  idle one in a lane log that otherwise produced 259 B. */
@@ -2738,6 +3089,15 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
     setImmediate(() => {
       logHealth();
       drain("session_start", { excludeSessionId: current || undefined });
+      // #3515 piece 5: the recovery sweep over Pi's OWN session log. It runs
+      // here because this is the one moment the product is guaranteed to be
+      // alive and idle — and it is a SPAWN, not a scheduler: fires once per
+      // start, detached, and never awaited (Pi awaits `session_start`, so a
+      // sweep in the handler would put a network drain on the startup path).
+      // `excludeSessionId` is load-bearing for the same reason the spool drain
+      // excludes the live session: filing THIS session now would make the
+      // server skip extraction for every turn after this point.
+      sweepStoreSync(current || undefined);
     });
   });
 

@@ -3904,11 +3904,14 @@ def test_docs_job_main_health_uses_a_safe_post_merge_gate():
     link = next(
         s for s in steps if str(s.get("name", "")).startswith("Link check (main health")
     )
-    assert "--files-from" in link["with"]["args"]
-    assert "${{ steps.changed_mh" not in link["with"]["args"]
-    # A link-free markdown file is legitimate: the action's failIfEmpty default
-    # (true) would red the nightly on common prose-only commits.
-    assert link["with"].get("failIfEmpty") is False
+    # #9708: the link consumer is a `run:` step invoking the producer we own, so
+    # the file-list contract is pinned on its ARGV instead of on the composite
+    # action's `args:` (which also carried the action's silent-empty failure).
+    assert '--files-from "$RUNNER_TEMP/changed-md.txt"' in link["run"]
+    assert "${{ steps.changed_mh" not in link["run"]
+    # A link-free markdown file is legitimate: the producer treats lychee's
+    # `total: 0` as a verdict, and only an ABSENT report as a failure.
+    assert ".github/scripts/docs-link-check.sh" in link["run"]
 
 
 def test_docs_job_guards_tracked_generated_artifacts_on_every_pr():
@@ -4200,13 +4203,15 @@ def test_docs_job_pr_path_never_interpolates_filenames():
     link = next(
         s for s in steps if str(s.get("name", "")) == "Link check (changed files)"
     )
-    assert "--files-from" in link["with"]["args"], (
+    # #9708: after the composite action was replaced by a `run:` step we own, the
+    # "the list is DATA" contract is pinned on the producer's ARGV. It is the same
+    # contract — `--files-from` still reads a FILE — but the step that can now
+    # swallow it (and did: an empty report on a missing binary) is ours.
+    assert '--files-from "$RUNNER_TEMP/pr-md.txt"' in link["run"], (
         "lychee must read the list from a FILE"
     )
-    assert "steps.changed.outputs.files" not in link["with"]["args"]
-    assert "${{ steps.changed" not in link["with"]["args"]
-    # A link-free markdown file is legitimate.
-    assert link["with"].get("failIfEmpty") is False
+    assert "steps.changed.outputs.files" not in link["run"]
+    assert "${{ steps.changed" not in link["run"]
 
     # Both consumers must ALSO be guarded on the PR path: the main-health path
     # sets no `changed` output, so an unguarded `count != '0'` would be TRUE on

@@ -170,6 +170,18 @@ tortoise = ["config/routing.yaml", "../tests/sample_transcript.txt",
           # not found". Named exactly (not *.ts) so the behavioural test file is
           # NOT shipped to users.
           "pi-hooks/tortoise-capture.ts",
+          # #3515: the store-sync BACKSTOP ships too, and is named exactly for
+          # the same reason (its `.test.mjs` must not reach users). It is not
+          # copied by an installer — `tortoise store-sync` runs it from the
+          # PACKAGE — so a wheel without either file makes the recovery sweep
+          # silently unable to start, which is the loss the sweep exists to
+          # prevent. The guard is
+          # `tests/test_capture_install.py::test_every_capture_artifact_ships_in_the_wheel`,
+          # which evaluates THESE patterns against the tree; the row in
+          # `tests/test_store_sync_worker.py` asserts on source paths and cannot
+          # red a lost `package-data` entry.
+          "pi-hooks/store-sync.ts",
+          "pi-hooks/cursor-store.ts",
           # #2121: the Hermes seam ships as a directory PLUGIN (`tortoise
           # install hermes` copies plugin.yaml + __init__.py into
           # <dir>/.hermes/plugins/tortoise-volunteer/), so a wheel without it

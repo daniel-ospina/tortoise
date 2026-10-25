@@ -1073,6 +1073,227 @@ def test_an_unorderable_valid_from_warns_at_the_write_boundary(sdk, caplog):
     )
 
 
+# ── #9202: the END side of the same write-door contract ─────────────────────
+#
+# The START half was ruled by the owner (#6140: "A and C (c should be a
+# warning)") — coverage reads an unorderable start as NO START RECORDED, and the
+# write door WARNS. The END's *coverage* rule is the same and is already landed
+# (#9408, ONTOLOGY §4.7: a bound that names no instant is not a bound), but the
+# END's *reported state* — `end_state: "known"` for such a bound — is
+# #9202's OWNER decision and is deliberately NOT touched here. What this test
+# covers is the one half that is nobody's decision: a caller can currently store
+# a garbage `validTo` with NO signal from any surface, while the identical
+# mistake on `validFrom` is announced. The warning below changes no read
+# behaviour — it is the write door saying what the value means.
+
+#: The verdict matrix: the window start, the value, whether the write door must
+#: speak, and WHY. Every ``quiet`` row is a value that NAMES AN INSTANT to the
+#: ordering primitive ``_created_sort_key`` — the same measure ``_covers``,
+#: ``effective_precision`` and the inversion guard use — so it is a real bound
+#: and must stay quiet. Every ``warns`` row names no instant: it cannot bound
+#: the window above (it is not a comparison), so the operator is told rather
+#: than left to discover it from a reply that covers the year 2050. The start
+#: column exists so each window is ITSELF legal: ``validTo=0`` against a 2024
+#: start is an inverted window and is refused by #5359 before the warning
+#: question arises.
+_VALUE_NAMING_NO_INSTANT = [
+    ("2024-01-01", "2024-06-01", "quiet",
+     "a well-formed calendar date names an instant"),
+    ("2024-01-01", "2024-06-01T12:00:00+02:00", "quiet",
+     "a date-time with an explicit offset names an instant"),
+    ("2024-01-01", "2024-06-01T12:00:00", "quiet",
+     "a zone-less date-time still parses (read locally, #3982)"),
+    ("1970-01-01", 0, "quiet",
+     "numeric epoch 0 IS the 1970-01-01T00:00:00Z instant (#3985)"),
+    ("2024-01-01", 1719792000, "quiet",
+     "a numeric epoch names an instant — the mixed-format tolerance"),
+    ("2024-01-01", "", "warns",
+     "the empty value is the undated convention: it orders nothing"),
+    ("2024-01-01", "   ", "warns",
+     "whitespace has no digits and no instant"),
+    ("2024-01-01", "TBD", "warns",
+     "a text placeholder is not an instant"),
+    ("2024-01-01", "not-a-date", "warns",
+     "plain nonsense is not an instant"),
+    ("2024-01-01", "2026-02-30", "warns",
+     "an impossible calendar date is not a legitimate instant"),
+    ("2024-01-01", "1719792000", "warns",
+     "an epoch passed as a STRING is not read as an epoch — _created_sort_key "
+     "takes numbers as numbers, so this string names no instant"),
+]
+
+
+@pytest.mark.parametrize(
+    ("valid_from", "stored_end", "verdict", "why"),
+    _VALUE_NAMING_NO_INSTANT,
+    ids=[repr(v) for _f, v, _a, _b in _VALUE_NAMING_NO_INSTANT],
+)
+def test_an_unorderable_valid_to_warns_at_the_write_boundary(
+        sdk, caplog, valid_from, stored_end, verdict, why):
+    """#9202 (write-door half) — a caller ``validTo`` that names no instant warns.
+
+    Measured on the unfixed head: ``create_point(..., validTo="TBD")`` is
+    stored with **no** warning from any logger, while
+    ``create_point(..., validFrom="TBD")`` warns — so the identical caller
+    mistake is announced on one end of the window and silent on the other. The
+    silent end is the more consequential one: the reply then reports
+    ``end_state: "known"`` and ``get_historical_knowledge`` answers
+    ``found`` about the year 2050, with no field distinguishing it from a dated
+    end (``tests/test_validity_windows.py``
+    ::``test_an_end_naming_no_instant_bounds_no_instant_even_for_an_unparseable_probe``).
+
+    What this pins is ONLY the warning:
+
+    * the value is still stored VERBATIM (a warning, never a refusal — the
+      #6140 ruling's shape, and a refusal here would reject writes accepted
+      today and leave every stored row unchanged anyway),
+    * the read behaviour is untouched, including the reserved
+      ``end_state: "known"``, which #9202's owner decision alone may change,
+    * the message names ``validTo`` and says the window is UNBOUNDED ABOVE — a
+      copy of the start's wording ("OPEN below") would misinform the operator,
+      so it is asserted against explicitly.
+    """
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+        p = _make_point(sdk, content=f"end recorded as {stored_end!r}",
+                        validFrom=valid_from, validTo=stored_end)
+    hits = [r.getMessage() for r in caplog.records if "no instant" in r.getMessage()]
+
+    if verdict == "quiet":
+        assert hits == [], (
+            f"{stored_end!r} names an instant ({why}), so the write door must "
+            f"be silent: {hits}"
+        )
+        return
+
+    assert len(hits) == 1, (
+        f"{stored_end!r} names no instant ({why}) and the write door said "
+        f"nothing — the caller has no signal that the window is unbounded "
+        f"above: {hits}"
+    )
+    assert "validTo" in hits[0], f"the warning must name the END: {hits[0]}"
+    assert "UNBOUNDED above" in hits[0], (
+        "the END warning must say the window is UNBOUNDED ABOVE — reusing the "
+        f"start's 'OPEN below' text would misinform the operator: {hits[0]}"
+    )
+
+    # A warning, NOT a refusal: the value is persisted exactly as given, and
+    # the read path's behaviour is unchanged (the reserved state included).
+    assert _props(sdk, p["id"])["validTo"] == stored_end
+    out = sdk.get_historical_knowledge(p["id"], "2050-01-01")
+    assert out["status"] == "found"
+    assert out["valid_point"]["end_state"] == "known", (
+        "this write-door warning must NOT pre-empt #9202's owner decision — "
+        "whether an un-datable end reads 'known' or 'unknown' is the owner's, "
+        f"and this fix changes no read: {out['valid_point']}"
+    )
+
+
+def test_the_end_warning_is_scoped_like_the_start_warning(sdk, caplog):
+    """#9202 — one warning per write, on the UPDATE leg too, and never for a
+    bound the caller did not supply.
+
+    The three scoping rules are the start's, because they are properties of the
+    boundary rather than of the field (#6140): the caller's own value is what
+    warns, a value the point ALREADY carries is not being written, and a
+    dedup-hit create reaches the boundary twice for ONE write.
+    """
+    import logging
+
+    def _end_hits():
+        return [r.getMessage() for r in caplog.records
+                if "no instant" in r.getMessage()]
+
+    # The UPDATE leg on its own: an update that INTRODUCES an unparseable end is
+    # the write, so it must speak. (Without this assertion the dedup
+    # suppression below could make the update leg silent and stay green.)
+    p = _make_point(sdk, content="end becomes undatable",
+                    validFrom="2024-01-01", validTo="2024-02-01")
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+        sdk.update_point(p["id"], validTo="TBD")
+    hits = _end_hits()
+    assert len(hits) == 1, f"an update introducing a bad end must warn: {hits}"
+    assert "validTo" in hits[0]
+    # The remedy must be executable on the leg it is printed on: on an UPDATE,
+    # omitting `validTo` keeps the stored un-datable value, so the advice has to
+    # name the explicit clear (`_refuse_inconsistent_validity_precision` requires
+    # the effective end to be ABSENT beside `validToPrecision='unknown'`).
+    assert "validTo=None" in hits[0], (
+        "the update-leg remedy must say how to actually clear the end — "
+        f"omitting the key keeps the stored value: {hits[0]}"
+    )
+
+    # Re-writing the value it ALREADY carries introduces nothing — an unrelated
+    # update of a legacy point must not re-warn about a value nobody wrote.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+        sdk.update_point(p["id"], validTo="TBD")
+    assert _end_hits() == [], "a re-write of the stored value must not re-warn"
+
+    # Clearing the end (validTo=None, the documented read of SET n += $props)
+    # is the OPEN window: legal, silent.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+        sdk.update_point(p["id"], validTo=None)
+    assert _end_hits() == [], "clearing the end is legal and must stay silent"
+    assert sdk.get_historical_knowledge(p["id"], "2050-01-01")["valid_point"][
+        "end_state"] == "open", "a cleared end is the OPEN window"
+
+    # ONE warning per write for a dedup-hit create: the create leg speaks, the
+    # re-entrant update leg stays silent.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+        first = _make_point(sdk, content="dedup bad end", validTo="TBD",
+                            dedup=True)
+    assert len(_end_hits()) == 1, (
+        f"a dedup-hit create must warn once, not twice: {_end_hits()}"
+    )
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+        second = _make_point(sdk, content="dedup bad end", validTo="TBD",
+                             dedup=True)
+    assert second["id"] == first["id"], "the fixture must reach the dedup hit"
+    assert len(_end_hits()) == 1, (
+        "a dedup hit re-entered the write boundary with a value it already "
+        f"stored — it must warn once, not twice: {_end_hits()}"
+    )
+
+    # ⚠️ The shape that is NOT silenced by the stored-value gate, and the only
+    # one that PINS the `_WARN_SUPPRESS` half of the fix: a dedup hit whose
+    # caller value DIFFERS from the stored end. The create leg speaks for the
+    # value it was given and the re-entrant update leg writes the same value, so
+    # only the suppression keeps it to one — without it this write emits TWO
+    # warnings. Measured: removing `repr(_vt)` from the frozenset in
+    # `sdk._WARN_SUPPRESS` leaves every assertion above green and reddens only
+    # this one. (The START arm carries the same row for the same reason:
+    # "deleting the update leg's warning would leave every assertion above
+    # green".)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+        third = _make_point(sdk, content="dedup bad end", validTo="",
+                            dedup=True)
+    assert third["id"] == first["id"], "the fixture must reach the dedup hit"
+    assert _props(sdk, third["id"])["validTo"] == ""
+    assert len(_end_hits()) == 1, (
+        "a dedup hit that CHANGES the stored end to an unparseable one is ONE "
+        f"write and must warn once, not twice: {_end_hits()}"
+    )
+
+    # A caller writing only validFrom gets exactly ONE warning, and it names the
+    # START: the END's arm must never fire on a bound nobody supplied.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+        _make_point(sdk, content="only a bad start", validFrom="TBD")
+    hits = [r.getMessage() for r in caplog.records
+            if "no instant" in r.getMessage()]
+    assert len(hits) == 1, f"one bad bound, one warning: {hits}"
+    assert "validFrom" in hits[0] and "validTo" not in hits[0], (
+        f"the warning must name the bound the caller wrote: {hits[0]}"
+    )
+
+
 def test_restore_missing_point(sdk):
     """Missing point → {found: false}, no crash."""
     out = sdk.get_historical_knowledge("pt_does_not_exist", "2026-06-12")

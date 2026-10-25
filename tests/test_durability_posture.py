@@ -401,6 +401,77 @@ def test_canonical_doc_is_itself_a_claim_hit():
     )
 
 
+def test_canonical_doc_gate_description_matches_the_gate():
+    """The doc is the artifact #9867's widened pattern is written FROM, so a
+    description narrower than `CLAIM_RE` fails OPEN by construction — three
+    review cycles in a row found the doc misstating the gate's reach, once in
+    the alternation COUNT, once about its own coverage, once in the determiner
+    slot. Pin the PROPERTIES a reader needs, not one spelling of them: an
+    earlier revision of this very test pinned the literal shorthand
+    `…your]? durab(le|ility)`, which reds the doc for quoting the gate's real
+    regex (`(?:the |a |…)?durab(?:le|ility)`) or for narrating the old wording
+    as a counter-example — a guard that refuses a MORE accurate doc is the same
+    defect class it exists to catch.
+
+    Non-vacuity: the pre-fix doc rendered the durability family with a MANDATORY
+    determiner (no optional marker in any notation) and claimed a matching
+    sentence in this file "is itself a wrapped hit". Both blocks below fail on
+    that text and pass on the corrected text, while `CLAIM_RE` is byte-identical
+    either way — so this pins a real doc/gate divergence.
+    """
+    text = CANONICAL_DOC.read_text(encoding="utf-8")
+
+    # 1. the determiner slot is OPTIONAL, and the doc marks it so in whatever
+    #    notation it uses (`[the|a|…]?`, `(?:the |a |…)?`, or the word
+    #    "optional" on the line that renders the shape) — the gate really does
+    #    accept the bare form, so a doc that says otherwise fails open.
+    def _optional(match: re.Match[str]) -> bool:
+        if match.group(1).endswith("?"):
+            return True
+        start = text.rfind("\n", 0, match.start()) + 1
+        end = text.find("\n", match.end())
+        return "optional" in text[start : end if end != -1 else len(text)].lower()
+
+    matches = list(
+        re.finditer(r"(\[[^\]]*\]\??|\(\?:[^)]*\)\??)\s*durab\(", text)
+    )
+    assert matches, (
+        f"{CANONICAL_DOC_REL} must render the durability family's shape so a "
+        "reader can rebuild the pattern (#9867)"
+    )
+    assert any(_optional(m) for m in matches), (
+        f"{CANONICAL_DOC_REL} renders the durability family with a mandatory "
+        f"determiner in every form found ({[m.group(0) for m in matches]}) — a "
+        "gate built from that text misses `the log is durable`, which CLAIM_RE "
+        "deliberately catches"
+    )
+    assert CLAIM_RE.search("the log is durable"), (
+        "CLAIM_RE must fire on the bare-determiner form the doc describes; if "
+        "this fails the DOC is right and the gate is the defect"
+    )
+    # …and the doc must say the `source of truth` family's durability side
+    # needs no log subject, which is where a widened pattern loses a whole arm.
+    assert CLAIM_RE.search("the source of truth for durability claims"), (
+        "CLAIM_RE's subject-free `source of truth … durab` arm is what the doc "
+        "describes; if the arm is gone, the DOC is right and the gate is loose"
+    )
+
+    # 2. this file is exempt from BOTH offender legs — say so, and never claim
+    #    the exemption's opposite. (Exact sentence, not a prose taste: it is the
+    #    false claim three cycles shipped.)
+    assert "is itself a wrapped hit" not in text, (
+        f"{CANONICAL_DOC_REL} must not claim its own text is caught by the "
+        "wrapped scan: both offender legs `continue` on CANONICAL_DOC_REL"
+    )
+    for leg in (
+        "test_no_durability_source_of_truth_claim_outside_the_canonical_doc",
+        "test_no_wrapped_durability_claim_anywhere_in_the_scanned_roots",
+    ):
+        assert leg in text, (
+            f"{CANONICAL_DOC_REL} must name {leg} as a leg that SKIPS this "
+            "file, so the repo-wide `0 anywhere` reading is checkable"
+        )
+
 # ── 4. the regex fires on the defect and not on unrelated prose ─────────────
 
 # ``CLAIM_RE`` is line-at-a-time, so wrapping is the one hole left in it. These

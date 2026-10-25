@@ -1,0 +1,166 @@
+{
+  "input": "person_appointment",
+  "cell": "person appointment",
+  "confuses": [
+    "Subject-vs-Point",
+    "Subject-vs-Event"
+  ],
+  "counts": {
+    "Point": 4,
+    "Subject": 2,
+    "Object": 5,
+    "Event": 1,
+    "Source": 1
+  },
+  "item_rows": [
+    {
+      "item": "Marta Reyes",
+      "expected": "subject:naturalPerson",
+      "written": "Subject:person",
+      "node": "Marta Reyes",
+      "fuzzy": false,
+      "verdict": "KIND-UNDECLARED"
+    },
+    {
+      "item": "Tobias Lund",
+      "expected": "subject:naturalPerson",
+      "written": "Subject:person",
+      "node": "Tobias Lund",
+      "fuzzy": false,
+      "verdict": "KIND-UNDECLARED"
+    },
+    {
+      "item": "Halcyon Group",
+      "expected": "subject",
+      "written": "Object:organization",
+      "node": "Halcyon Group",
+      "verdict": "LAYER"
+    },
+    {
+      "item": "CFO",
+      "expected": "subject",
+      "written": "Object:role",
+      "node": "CFO at Northwind Logistics",
+      "verdict": "LAYER"
+    },
+    {
+      "item": "joined Northwind Logistics",
+      "expected": "event:roleCreated|occurrence",
+      "written": "Event:employmentStart",
+      "node": "Marta Reyes joins Northwind Logistics as CFO",
+      "fuzzy": false,
+      "verdict": "KIND-UNDECLARED"
+    },
+    {
+      "item": "reports to",
+      "expected": "edge reportsTo",
+      "written": "Marta Reyes -[reportsTo]-> Tobias Lund",
+      "verdict": "OK"
+    }
+  ],
+  "findings": [
+    {
+      "severity": "P1",
+      "item": "Marta Reyes",
+      "layer": "Subject",
+      "kind": "person",
+      "finding": "UNDECLARED kind 'person' on a Subject ('Marta Reyes') \u2014 not a core \u00a75 kind, not one the SDK registers, and not one any loaded pack declares; nothing routes to, finds or classifies it",
+      "fix": "use a declared Subject kind (\u00a75 core, or a pack kind spelled as the pack declares it)"
+    },
+    {
+      "severity": "P1",
+      "item": "Tobias Lund",
+      "layer": "Subject",
+      "kind": "person",
+      "finding": "UNDECLARED kind 'person' on a Subject ('Tobias Lund') \u2014 not a core \u00a75 kind, not one the SDK registers, and not one any loaded pack declares; nothing routes to, finds or classifies it",
+      "fix": "use a declared Subject kind (\u00a75 core, or a pack kind spelled as the pack declares it)"
+    },
+    {
+      "severity": "P0",
+      "item": "Halcyon Group",
+      "finding": "LAYER confusion: expected subject, written as Object ('Halcyon Group') \u2014 \u00a74.2",
+      "fix": "re-file as subject; a wrong layer cannot be rescued downstream (kind_classifier partitions by type before choosing a kind)"
+    },
+    {
+      "severity": "P0",
+      "item": "CFO",
+      "finding": "LAYER confusion: expected subject, written as Object ('CFO at Northwind Logistics') \u2014 \u00a74.2 role",
+      "fix": "re-file as subject; a wrong layer cannot be rescued downstream (kind_classifier partitions by type before choosing a kind)"
+    },
+    {
+      "severity": "P1",
+      "item": "joined Northwind Logistics",
+      "layer": "Event",
+      "kind": "employmentStart",
+      "finding": "UNDECLARED kind 'employmentStart' on a Event ('Marta Reyes joins Northwind Logistics as CFO') \u2014 not a core \u00a75 kind, not one the SDK registers, and not one any loaded pack declares; nothing routes to, finds or classifies it",
+      "fix": "use a declared Event kind (\u00a75 core, or a pack kind spelled as the pack declares it)"
+    },
+    {
+      "severity": "P1",
+      "item": "(kinds)",
+      "finding": "graph-wide: kinds no vocabulary reads on the layer they were written to, beyond the gold items \u2014 Source: ['note']; Object: ['organization', 'role']",
+      "fix": "every node needs a kind on ITS OWN layer's property, from the core \u00a75 vocabulary, the SDK's registered kinds, or a loaded pack"
+    }
+  ],
+  "relations": [
+    "aboutEvent",
+    "aboutObject",
+    "aboutSource",
+    "aboutSubject",
+    "hasPart",
+    "holdsRole",
+    "memberOf",
+    "related",
+    "reportsTo",
+    "wasDerivedFrom"
+  ],
+  "operators": [],
+  "sources": [
+    "memory://note/person_appointment"
+  ],
+  "mitigations": [],
+  "kind_census": {
+    "Source": [
+      "note"
+    ],
+    "Object": [
+      "organization",
+      "role",
+      "role"
+    ]
+  },
+  "wrong_axis_kinds": [],
+  "cross_axis_kinds": [],
+  "kind_sources": {
+    "Point": {
+      "statement": "CORE"
+    },
+    "Subject": {
+      "person": "UNDECLARED"
+    },
+    "Object": {
+      "organization": "UNDECLARED",
+      "role": "UNDECLARED"
+    },
+    "Event": {
+      "employmentStart": "UNDECLARED"
+    },
+    "Source": {
+      "note": "UNDECLARED"
+    }
+  },
+  "packs": [
+    "agent-ops",
+    "dev",
+    "marketing",
+    "pm",
+    "portfolio",
+    "product-strategy",
+    "venture"
+  ],
+  "severity_counts": {
+    "P0": 2,
+    "P1": 4,
+    "P2": 0
+  }
+}

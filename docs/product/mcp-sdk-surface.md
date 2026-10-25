@@ -469,7 +469,6 @@ Grouped by **who reaches them**. This is the ranking that matters for cutting: e
 | `TortoiseSDK.apikey_verify` | reached by no registered MCP tool; caller categories: engine | tooling, docs | **review** | no MCP tool binds it; callers: engine |
 | `TortoiseSDK.calibration_passed` | reached by no registered MCP tool; caller categories: engine | tooling, docs | **review** | no MCP tool binds it; callers: engine |
 | `TortoiseSDK.compute_reputation` | reached by no registered MCP tool; caller categories: engine | tooling, docs | **review** | no MCP tool binds it; callers: engine |
-| `TortoiseSDK.create_direct_edge` | reached by no registered MCP tool; caller categories: engine | tooling, skill-docs, docs | **review** | no MCP tool binds it; callers: engine |
 | `TortoiseSDK.dream_health_state` | reached by no registered MCP tool; caller categories: engine | tooling, docs | **review** | no MCP tool binds it; callers: engine |
 | `TortoiseSDK.list_relations` | reached by no registered MCP tool; caller categories: engine | tooling, skill-docs, docs | **review** | no MCP tool binds it; callers: engine |
 | `TortoiseSDK.membership_get` | reached by no registered MCP tool; caller categories: engine | tooling, docs | **review** | no MCP tool binds it; callers: engine |
@@ -478,9 +477,10 @@ Grouped by **who reaches them**. This is the ranking that matters for cutting: e
 | `TortoiseSDK.ulid` | reached by no registered MCP tool; caller categories: engine | eval-harness, tooling, docs | **review** | no MCP tool binds it; callers: engine |
 | `TortoiseSDK.annotate_ask_hits` | reached by no registered MCP tool; caller categories: engine, eval-harness, other-tooling | eval-harness, tooling, docs | **review** | no MCP tool binds it; callers: engine, eval-harness, other-tooling |
 | `TortoiseSDK.supersede_point` | reached by no registered MCP tool; caller categories: engine, eval-harness, other-tooling, tenant-rest | eval-harness, tooling, skill-docs, docs | **review** | no MCP tool binds it; callers: engine, eval-harness, other-tooling, tenant-rest |
+| `TortoiseSDK.create_direct_edge` | reached by no registered MCP tool; caller categories: engine, other-tooling | tooling, skill-docs, docs | **review** | no MCP tool binds it; callers: engine, other-tooling |
+| `TortoiseSDK.link_source_to_entity` | reached by no registered MCP tool; caller categories: engine, other-tooling, tenant-rest | tooling, docs | **review** | no MCP tool binds it; callers: engine, other-tooling, tenant-rest |
 | `TortoiseSDK.list_memory_graphs` | reached by no registered MCP tool; caller categories: engine, other-tooling, tenant-rest | tooling, docs | **review** | no MCP tool binds it; callers: engine, other-tooling, tenant-rest |
 | `TortoiseSDK.invitation_get_by_id` | reached by no registered MCP tool; caller categories: engine, tenant-rest | docs | **review** | no MCP tool binds it; callers: engine, tenant-rest |
-| `TortoiseSDK.link_source_to_entity` | reached by no registered MCP tool; caller categories: engine, tenant-rest | tooling, docs | **review** | no MCP tool binds it; callers: engine, tenant-rest |
 | `TortoiseSDK.membership_create` | reached by no registered MCP tool; caller categories: engine, tenant-rest | tooling, docs | **review** | no MCP tool binds it; callers: engine, tenant-rest |
 | `TortoiseSDK.org_get` | reached by no registered MCP tool; caller categories: engine, tenant-rest | tooling, docs | **review** | no MCP tool binds it; callers: engine, tenant-rest |
 | `TortoiseSDK.signup_token_lookup` | reached by no registered MCP tool; caller categories: engine, tenant-rest | docs | **review** | no MCP tool binds it; callers: engine, tenant-rest |
@@ -526,7 +526,7 @@ Grouped by **who reaches them**. This is the ranking that matters for cutting: e
 | `TortoiseSDK.record_calibration` | reached by no registered MCP tool; caller categories: none outside tests | tooling, docs | **review** | no MCP tool binds it, and no caller outside tests was found |
 | `TortoiseSDK.retrieval_legs` | reached by no registered MCP tool; caller categories: none outside tests | eval-harness, tooling, docs | **review** | no MCP tool binds it, and no caller outside tests was found |
 | `TortoiseSDK.test_guard` | reached by no registered MCP tool; caller categories: none outside tests | eval-harness, tooling, docs | **review** | no MCP tool binds it, and no caller outside tests was found |
-| `TortoiseSDK.traverse` | reached by no registered MCP tool; caller categories: none outside tests | tooling, skill-docs, docs | **review** | no MCP tool binds it, and no caller outside tests was found |
+| `TortoiseSDK.traverse` | reached by no registered MCP tool; caller categories: none outside tests | eval-harness, tooling, skill-docs, docs | **review** | no MCP tool binds it, and no caller outside tests was found |
 | `TortoiseSDK.graph_active_key_count` | reached by no registered MCP tool; caller categories: tenant-rest | tooling, docs | **review** | no MCP tool binds it; callers: tenant-rest |
 | `TortoiseSDK.graph_count` | reached by no registered MCP tool; caller categories: tenant-rest | tooling, docs | **review** | no MCP tool binds it; callers: tenant-rest |
 | `TortoiseSDK.graph_key_ids` | reached by no registered MCP tool; caller categories: tenant-rest | tooling, docs | **review** | no MCP tool binds it; callers: tenant-rest |

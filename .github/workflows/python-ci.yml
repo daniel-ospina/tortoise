@@ -3008,6 +3008,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      # ── THE RUNNER TOOL CONTRACT (#9018) ──────────────────────────────
+      # This job calls `gh` (below, and via actions that shell out to it).
+      # `runs-on: ubuntu-latest` names a GitHub-hosted IMAGE, but the fallback
+      # pool carries that same label on a bare runner whose service PATH is a
+      # minimal non-login one — where `gh` is simply absent. Measured
+      # 2026-10-24: `canary-streak` died `line 2: gh: command not found` /
+      # `exit code 127` on `pi-runner-vm-5`, which reads as a test failure and
+      # is not one. This step provides the tool or fails NAMING it.
+      - name: Runner tool contract — provide gh (#9018)
+        run: bash .github/scripts/runner-tools.sh ensure gh
       - name: Download producer-shard artifacts (the P1-7 canary contract)
         # #6135: the fixed-name artifact written by the producer shard (the
         # matrix's `canary_producer`, positionally the last one). It replaced
@@ -3438,8 +3448,16 @@ jobs:
           mkdir -p "$SCRATCH"
           # #3470: the log is captured through `tee`, so this leg gets the same
           # attribution every captured leg gets (`pytest-attribution.sh`).
+          # #9555/R7: the record's narrative CARRIER and §9.4's VERBATIM
+          # fetch — a Postgres-only pair, so it arms in this job like the
+          # four-layer legs beside it. Its sibling
+          # `tests/test_9555_narrative_cache_rebuild.py` is deliberately NOT
+          # here: that leg destroys and rebuilds a FalkorDB cache, and this
+          # job's leg gate FAILS on ANY skip (#9551) — a leg that cannot arm
+          # here would red the job over a cache this job does not have.
           timeout -s INT -k 10 12m stdbuf -oL python -m pytest \
             tests/test_9078_record_written_by_production_path.py \
+            tests/test_9555_narrative_carrier.py \
             tests/test_9664_capstone_connector_to_record.py \
             -v --timeout=300 -p no:cacheprovider -r fEs \
             --junitxml="$SCRATCH/junit.xml" -o junit_family=xunit1 \

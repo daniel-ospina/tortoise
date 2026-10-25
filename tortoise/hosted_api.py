@@ -164,6 +164,14 @@ from tortoise.projection import (
     journal_mint_write_ahead,  # #3390: journal the intended name BEFORE the CREATE
 )
 from tortoise.quota import with_limit_contact  # #5425 refusal seam
+
+# #9555 / R7: the ONE spelling of §9.1's narrative carrier type. Its record home
+# is `public.session_narrative` and it materialises no node (§9.1: "not in the
+# graph, not a `Document` node, not a `Point`"), so the type lives with the
+# registry that projects it — a producer and a registry that spell a type
+# differently is the `create_document(type="SourceCreated")` class, which
+# journalled NOTHING.
+from tortoise.record_projection import NARRATIVE_RECORD_TYPE
 from tortoise.retention import RESTORE_WINDOW_HOURS as _RESTORE_WINDOW_HOURS  # #4179
 from tortoise.retrieval_metering import (  # #4489: pure-ASGI retrieval-work flusher
     RetrievalMeteringMiddleware as _RetrievalMeteringMiddleware,
@@ -13358,8 +13366,17 @@ _SESSION_CAPTURE_LANE_VALUES = frozenset({"hook", "store_sync"})
 # stored as a value no reader can interpret. 'unknown' is a LEGAL member: the
 # backfill/import lane admits a record with no client timestamp and records
 # this honestly, and the floor treats it as NOT passed.
+#
+# 'entry_timestamp' (#3515 piece 12, ADDED by the store-sync backstop): the
+# store-sync lane's clock is the JSONL entry's OWN ``timestamp`` field — a
+# genuinely different clock from both an mtime and an observation instant, and
+# the table's PRIMARY source for that lane. It needs its own member because
+# recording it as 'file_mtime' would state a provenance the value does not
+# have, and the floor's whole falsifiability property is that a source tells a
+# reader WHICH clock produced the number. Additive: every pre-existing value is
+# still accepted, and the plugin/CLI/backfill lanes are unchanged.
 _SESSION_CAPTURED_AT_SOURCE_VALUES = frozenset(
-    {"cli_observed", "file_mtime", "unknown"})
+    {"cli_observed", "entry_timestamp", "file_mtime", "unknown"})
 
 
 class SessionRequest(BaseModel):
@@ -16170,6 +16187,38 @@ def _sdk_register_commit_entity(sdk: TortoiseSDK, label: str, name: str, **kwarg
         return None
 
 
+def _narrative_carrier(story_arc, summary, *, session_id: str,
+                       event_id: str, captured_at) -> dict | None:
+    """The journal record that makes §9.1's narrative reach the RECORD, or None.
+
+    Returns the `**kwargs` for `sdk._emit_event(NARRATIVE_RECORD_TYPE, …)`, or
+    ``None`` when there is no narrative to carry. The gate is on the TEXT, not
+    on the commit: `story_arc` is ``""`` for a capture whose distillation
+    produced no narrative, and emitting then would put a journal line on the
+    record whose whole payload the narrative home refuses (a blank narrative is
+    not §9.1 prose) — one no-op record per such commit, forever.
+
+    Extracted from the commit path so the gate is TESTABLE without a graph: the
+    measured #9555 gap was a producer that did not exist, and a producer's
+    "nothing to carry" case is exactly the one a call-site-only pin cannot
+    reach (calling `_execute_commit_writes` needs a live projection).
+
+    ``id`` is the commit's content-addressed ``eventId`` — the same anchor the
+    `:Event` write uses — so a RE-RUN of the commit phase (the retry contract:
+    "retry with the same client_commit_id") re-states the same identity and the
+    replay's idempotent upsert lands the same row rather than a duplicate.
+    """
+    if not isinstance(story_arc, str) or not story_arc.strip():
+        return None
+    return {
+        "id": event_id,
+        "sessionId": session_id,
+        "story_arc": story_arc,
+        "summary": summary,
+        "capturedAt": captured_at,
+    }
+
+
 def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # noqa: F821
     """W-3 [5] — the graph write phase for an adjudicated (budget=ok) commit.
 
@@ -16339,6 +16388,48 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 "sid": session_id, "eid": event_id,
                 "srcpath": document_basename, "now": now},
     )
+
+    # ── 2b. THE NARRATIVE'S JOURNAL CARRIER (#9555 / R7, §9.1). ──────────────
+    # The MERGE above writes `s.story_arc` — §9.1's S1 narrative ("the connected
+    # prose form of a captured session") — by RAW CYPHER, and raw Cypher is not
+    # a journal record (§17.1's unjournalled-writer ledger). Measured for #9555:
+    # that left the record's narrative home, `public.session_narrative`, with its
+    # two COUNT columns filled and its two TEXT columns NULL on every live
+    # capture, because the shape-keyed projection that owns that home
+    # (`record_projection._narrative_statements`) reads `story_arc` off a RECORD
+    # and no producer ever journalled one. The record could therefore reproduce
+    # the rows but not the narrative — exactly the D7 gap (#9567).
+    #
+    # WHY THIS IS THE WHOLE FIX, AND WHY IT IS NOT A SECOND WRITER. The record
+    # write path is singular and unchanged: `sdk._emit_event` is the ONE journal
+    # seam, and its live door (`record_writer.write_live_record`) is the ONE
+    # boundary into Postgres, driving the ONE fold (`record_projection.replay`).
+    # This adds a RECORD, which is what a producer does; it adds no writer. What
+    # it states is the write that already landed one statement above, which is
+    # §17.1's APPLY-FIRST lane — the record describes the write's own stored
+    # result (`payload.story_arc` is what the MERGE wrote verbatim; nothing in
+    # the payload is read back from the node, and the write's failure is
+    # fail-closed above, so a record can never outlive a write that did not
+    # land).
+    #
+    # WHY A DEDICATED TYPE RATHER THAN `SourceCreated`/`EventRecorded`. §9.1
+    # places the narrative *outside* the graph — "not in the graph, not a
+    # `Document` node, not a `Point`" — so the carrier must materialise no node:
+    # a `SourceCreated` for the transcript `:Source` would ALSO write the
+    # `public.source` row, and `record_projection`'s `props` tail would land the
+    # prose on a record row that the graph node does not carry, i.e. a
+    # second, drifting data-shaped copy — the very defect R7 exists to remove.
+    # `SessionNarrated` declares `NoRecordEffect` and its record effect is the
+    # SHAPE-KEYED secondary projection, so the text has exactly ONE home.
+    #
+    # EMPTY IS AN ABSENCE, NOT A RECORD — see `_narrative_carrier`'s own
+    # docstring for why the gate is on the TEXT and not on the commit.
+    _carrier = _narrative_carrier(
+        payload.story_arc, payload.summary,
+        session_id=session_id, event_id=event_id,
+        captured_at=payload.captured_at)
+    if _carrier is not None:
+        sdk._emit_event(NARRATIVE_RECORD_TYPE, **_carrier)
 
     # ── 3. Event AgentSession (content-addressed eventId — MERGE anchor,
     # amendment §4.3 #3) — produces the Document. Written via raw Cypher:

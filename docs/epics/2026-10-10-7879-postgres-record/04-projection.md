@@ -62,10 +62,19 @@ Interface A states four properties, and the failure each one prevents:
    with no entry raises `UnknownJournalRecordType` **before any statement runs**
    (`replay_plan` materializes the whole journal first), so a replay either
    materializes the journal or leaves the record untouched.
-2. **A declared refusal is not a skip.** `PointsMerged` and
-   `EntityMutated op=rename` are *known* and *refused* with a written reason
-   (`RefusedJournalOperation`) — an approximation would silently re-point edges
-   the journal does not describe.
+2. **A declared refusal is not a skip — but a refusal is only correct when the
+   record genuinely cannot represent the operation.** `EntityMutated op=rename`
+   is *known* and *refused* with a written reason (`RefusedJournalOperation`).
+   `PointsMerged` used to sit beside it and was **wrong to**: the graph fold's
+   whole mutation for a merge is one `DETACH DELETE` per `merge_ids` entry
+   (`projection/entities.py::_EntityHandlers._delete`; `keep_id` is read nowhere
+   in `tortoise/` outside the record module), so the record *can* represent it —
+   and since `#9892` it does, emitting the same identity+node delete pair
+   `EntityMutated op=delete` emits, whose `ON DELETE CASCADE` removes the
+   loser's incident relations exactly as `DETACH` does. The refusal had also
+   never fired for the only producer (`api.py::merge_points` emits no `op`), so
+   the gap was misclassified as a generic fold failure while both merged Points
+   stayed in `public.point`.
 3. **`NoRecordEffect` is a decision with a reason**, never a hole: `IngestStarted`
    and `CalibrationRecorded` are audit-only, and `ConfidenceChanged` is the EP
    carve-out in executable form — the record's correct mutation for a recomputed
@@ -83,7 +92,7 @@ Interface A states four properties, and the failure each one prevents:
 7. **Edge endpoints are RESOLVED, never minted.** An `EntityLinked` endpoint is
    addressed by the journal `id` (the fold's own `MATCH (t:{label} {id:$tid})`),
    but `relation.src_key`/`tgt_key` are composite FKs into `node_identity`, whose
-   key is the label's canonical key (`Object`/`Subject`→`name`, `Source`→`url`,
+   key is the label's canonical key (`Object`/`Subject`→`id` since #9881, `Source`→`url`,
    `Point`/`Session`→`id`, `Event`→`event_id`). The projection joins the node row
    by `id` and takes its `node_key`; an endpoint with no row lands **no relation
    at all** — the fold's own `"absent"` verdict, not a phantom identity the hard
@@ -138,7 +147,7 @@ Interface A states four properties, and the failure each one prevents:
 | epistemic | `EntityMutated` | `OpDispatch` on `op` — patch / delete / **declared refusal** (`rename`) |
 | epistemic | `ConfidenceChanged` | **no effect** — the EP carve-out |
 | edges | `EntityLinked`, `DirectEdgeCreated`, `DirectEdgeRepoint` | `relation` upsert with `(label, key)` composite FKs |
-| epistemic | `PointsMerged` | **declared refusal** |
+| epistemic | `PointsMerged` | `NodesDelete` on `point` — one hard delete per `merge_ids` entry (the graph fold's `DETACH DELETE`; edges go with it, `keep_id` is not written because no unit reads it) |
 | bookkeeping | `IngestStarted`, `CalibrationRecorded` | **no effect**, with a reason |
 
 ## 2. Field placement — the schema is the contract
@@ -260,7 +269,7 @@ closed at both layers:
   `Subject`/`Object`/`Event`, so `relation.src_label` comes from the record's own
   node rows rather than being assumed `Point`, which is why these rows are built
   by a statement whose LABELS are subselect columns); each label resolves to its
-  CANONICAL key (`Point`/`Event` → `node_key`, `Subject`/`Object` → `name`),
+  CANONICAL key (`Point`/`Event` → `node_key`, `Subject`/`Object` → `id` since #9881),
   because `relation.src_key` is a `node_identity` FK and the raw journal id for a
   Subject would address a phantom identity; and the conflict path is
   `DO NOTHING`, not `DO UPDATE` — the fold writes `{idx}` on the typed/reverse

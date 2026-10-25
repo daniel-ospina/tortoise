@@ -98,6 +98,13 @@ jobs:
       PROD_CSP_MONITOR_TITLE: 'prod-csp-monitor: a deployed surface refuses a platform-injected origin or its same-origin RUM payload'
     steps:
       - uses: actions/checkout@v4
+      # ── THE RUNNER TOOL CONTRACT (#9018) ──────────────────────────────
+      # `auto-file-issue.sh` files/updates the bleed issue through `gh`, and its
+      # fail-closed message is the same shape #9018 fixed elsewhere. On a pool
+      # runner with no `gh` the audit dies `exit 127` and reads as a monitoring
+      # failure that never happened.
+      - name: Runner tool contract — provide gh (#9018)
+        run: bash .github/scripts/runner-tools.sh ensure gh
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'

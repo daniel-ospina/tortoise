@@ -76,6 +76,15 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      # ── THE RUNNER TOOL CONTRACT (#9018) ──────────────────────────────
+      # tools/ci_check_repair.py drives `gh` for the whole measurement. On a
+      # pool runner without it the tool reports, honestly but uselessly,
+      # `{"error": "could not run gh: [Errno 2] No such file or directory"}` and
+      # exits 2 ("could not measure") — measured 2026-10-24 on
+      # `pi-runner-vm-5`. A repair loop that cannot see the queue is not a
+      # verdict about the queue. Provide the tool or fail NAMING it.
+      - name: Runner tool contract — provide gh (#9018)
+        run: bash .github/scripts/runner-tools.sh ensure gh
       # tools/ci_check_repair.py is stdlib-only; this pin is what supplies the
       # >=3.12 interpreter the repo's tools expect (#5128).
       - uses: actions/setup-python@v5

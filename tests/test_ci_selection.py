@@ -303,6 +303,60 @@ def test_the_record_arming_runbook_pins_run_on_a_runbook_only_diff():
     )
 
 
+def test_the_8503_docs_pins_run_on_a_docs_only_diff():
+    """#8503 round 9 (P1): the bundle's own pins must run on the bundle.
+
+    `tests/test_evidence_8503_claims.py` binds two DOC claims: the single
+    `docs/00_index.md` row that routes a reader into
+    `docs/evidence/8503/README.md`, and that README's verdict banner (the zero
+    operator-drop count `does NOT make every edge_missing a selection miss`;
+    the pre-fix banner said the opposite). `docs/` is in
+    NON_PYTHON_PREFIXES and `docs/evidence/8503/` matches no CORE_ALSO entry,
+    so a bundle-README-only diff filters to `changed == []` and takes the
+    docs-only early return — tier1 ONLY, measured: `surfaces == []`,
+    `slow_run is False`, 63 test files.
+
+    Both pins used to live in `tests/test_extractor_v2.py`, registered `core`
+    AND a `slow_files` member — and slow files are SUBTRACTED from tier1, so
+    on that diff they ran in NO leg (adding them to tier1 there would have
+    been a no-op). Deleting the index row, or restoring the banner's
+    "so no edge_missing is an extractor-side drop" over-claim, therefore
+    merged GREEN and only reddened `main` post-merge — the #1349/#3332/#3616/
+    #4309 silent-drop class, the same shape as `test_fly_secret_drift.py`
+    above.
+
+    Non-vacuity: dropping the `tier1` entry below re-opens exactly that hole,
+    and the second half asserts it by driving `select()` on a manifest copy
+    with the entry removed.
+    """
+    r = _sel(["docs/evidence/8503/README.md"])
+    assert r["full"] is False
+    assert r["surfaces"] == []
+    assert "test_evidence_8503_claims.py" in r["test_files"], (
+        "a bundle-README-only diff must select the pins that bind its prose "
+        "(`test_evidence_8503_claims.py`) — otherwise a docs-only edit that "
+        "deletes the index row or restores the banner's over-claim merges "
+        "green (#8503 round 9, #4309 class)"
+    )
+    # the `docs/00_index.md` half rides the same lane
+    idx = _sel(["docs/00_index.md"])
+    assert "test_evidence_8503_claims.py" in idx["test_files"], (
+        "a docs/00_index.md-only diff must select the row pin too"
+    )
+    # ... and the pre-fix home must NOT be relied on: it is a slow file, which
+    # tier1 subtracts, so it cannot cover the docs-only lane.
+    assert "test_extractor_v2.py" not in r["test_files"]
+
+    # non-vacuity: without the `tier1` entry the pin is asleep again.
+    m = copy.deepcopy(load_manifest())
+    m["tier1"] = [f for f in m["tier1"] if f != "test_evidence_8503_claims.py"]
+    blind = select(["docs/evidence/8503/README.md"], "pull_request", m)
+    assert "test_evidence_8503_claims.py" not in blind["test_files"], (
+        "the tier1 registration is what makes this pin run on a docs-only "
+        "diff; `core` alone does not reach that lane"
+    )
+
+
 def test_b7_runbook_ok_semantics_gate_runs_on_a_runbook_only_diff():
     """#8135 review (P1, two reviews): the runbook's `ok` pin must run on the runbook.
 
@@ -2116,6 +2170,33 @@ def test_tmpdir_sweep_tool_change_selects_core_not_tier1():
     assert set(r["test_files"]) != _tier1()
 
 
+def test_cli_extraction_engine_change_selects_core_and_carve_out_leg():
+    # #9929 review #2: the CORE_ALSO entry for
+    # integrations/cli-extraction/extract_turns.py exists only to stop the
+    # #6138 silent drop — `integrations/` is a flat NON_PYTHON_PREFIXES entry,
+    # so without it an extractor-only diff comes back changed=[], select()
+    # takes the docs-only early return and NOT ONE of the lane's guards runs on
+    # the very diff that can break the extractor.
+    #
+    # The guard runs in the CARVE-OUT leg, not `test_files`:
+    # tests/test_cli_extraction.py is a carve_out member, so it is excluded
+    # from the docker legs by construction and `carve_out_run` (a matched
+    # surface owns a carve-out file) is what actually schedules it. Asserting
+    # on `test_files` here would be the wrong half of the contract.
+    #
+    # Mutation check (verified by dropping the CORE_ALSO entry in a REPL):
+    # select() then returns surfaces=[], full=False and carve_out_run=False on
+    # the 64-file tier-1 smoke set, so asserts 2, 3 and 5 below go RED. Assert 1
+    # (`full is False`) survives and assert 4 is manifest-driven
+    # (`carve_out_files()` reads config/ci-surfaces.yml, not this selection).
+    r = _sel(["integrations/cli-extraction/extract_turns.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert r["carve_out_run"] is True, r
+    assert "test_cli_extraction.py" in cs.carve_out_files(load_manifest()), r
+    assert set(r["test_files"]) != _tier1(), r
+
+
 def test_docs_lint_baseline_tool_change_selects_core_not_tier1():
     # #7435 review P1: tools/docs_lint_baseline.py owns
     # tests/test_docs_lint_baseline.py (`core`), whose 58 cases pin the differ's
@@ -2136,6 +2217,75 @@ def test_docs_lint_baseline_tool_change_selects_core_not_tier1():
     assert "core" in r["surfaces"], r
     assert "test_docs_lint_baseline.py" in r["test_files"], r
     assert r["full"] is False, r
+
+
+def test_ax_write_eval_tool_change_selects_core_not_tier1():
+    """A change to the eval instrument must run the rules it pins (#9695 review).
+
+    `tests/test_ax_write_eval.py` is registered on the `core` surface and owns
+    the instrument's scoring semantics — the P0/P1 rules, the two-homes bar, the
+    one-act-one-finding guard — which is what #9675 Step 3 reads its per-input
+    delta against. That registration is INERT for a tool-only diff: `tools/` is
+    a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches
+    `tools/ax_write_eval.py`, so `select()` returned NO surface and fell back to
+    the tier-1 smoke set, which does not contain the file. Weakening a rule would
+    therefore be the one PR that never ran the tests pinning it — the same
+    #1349/#3332/#3616 silent-drop class as the entries beside it.
+
+    Mutation check: removing the CORE_ALSO entry fails the FIRST assert
+    (`"core" in r["surfaces"]`); the docs-only early return then returns
+    `full: False` with no pin, so the later asserts pass unexercised.
+    """
+    r = _sel(["tools/ax_write_eval.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_ax_write_eval.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
+def test_the_step1_eval_evidence_doc_selects_core_not_tier1():
+    """The evidence doc must not be editable without the pin that re-derives it.
+
+    #9695 review P1 — the OTHER half of the entry above, and the one the doc
+    itself exposes: `docs/ax/how-to-use-tortoise-step1-eval.md` publishes every
+    measured number of the Step-1 eval — the aggregate headline, all ten
+    per-input P0/P1 rows, the class census and every `kind` ×N multiplier — and
+    the only file that re-derives them from the committed `runs/*/score.json`
+    records is `tests/test_ax_write_eval.py`, registered on `core` only.
+
+    MEASURED before the CORE_ALSO entry (`select()` in-process):
+    `select(["docs/ax/how-to-use-tortoise-step1-eval.md"])` → `surfaces=[]`,
+    `full=False`, pin ABSENT. `docs/` is a flat NON_PYTHON_PREFIXES
+    entry and `_is_non_code_doc` recognises four exact paths, so the changed
+    list came back empty and `select()` took the docs-only early return. A
+    one-file PR could therefore re-cut the headline to any number and merge with
+    the guard that re-measures it never having run — the #1349/#3332/#3616
+    silent-drop class, reached through the early return rather than through
+    `_selection_relevant`.
+
+    Mutation check: removing the CORE_ALSO entry fails the FIRST assert
+    (`surfaces == ["core"]`); dropping the pin from `core` fails the SECOND
+    (`test_ax_write_eval.py` in `test_files`). The non-vacuity clause below
+    exists for that second one: it re-selects from a manifest copy with the pin
+    stripped from `core`, which proves the second assert turns on the `core`
+    registration alone (the pin is the ONLY difference; the file counts move
+    with every manifest edit, so they are not restated here).
+    """
+    r = _sel(["docs/ax/how-to-use-tortoise-step1-eval.md"])
+    assert r["surfaces"] == ["core"], r
+    assert "test_ax_write_eval.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+    # Non-vacuous: the pin's presence turns on its `core` registration alone —
+    # strip that entry and the same selection loses the pin and NOTHING else.
+    # This makes the assert above a claim about `core` being the pin's ONLY
+    # home: a `tier1` dual-registration would keep it selected and red this.
+    stripped = copy.deepcopy(load_manifest())
+    stripped["surfaces"]["core"] = [
+        t for t in stripped["surfaces"]["core"] if t != "test_ax_write_eval.py"
+    ]
+    assert "test_ax_write_eval.py" not in select(
+        ["docs/ax/how-to-use-tortoise-step1-eval.md"], "pull_request", stripped
+    )["test_files"]
 
 
 def test_extractor_tooling_change_selects_core_and_ep_not_tier1():
@@ -2425,6 +2575,12 @@ def test_record_schema_pin_runs_on_migration_or_doc_change():
         # column set, `test_record_schema_placement.py` pins the record schema
         # against the placement table — plus the narrative suite itself.
         "supabase/migrations/20261023000001_record_session_narrative.sql",
+        # #9555/R7 (PR #9862 review round 4): the CARRIER migration — the
+        # append-only `COMMENT ON` correction that states the schema's narrative
+        # claim, and the file `test_9555_session_narrative.py` READS to pin it.
+        # Measured on the pre-fix head: `_sel([<this path>])` -> surfaces=[],
+        # full=False, so editing the very file the pin parses ran no guard.
+        "supabase/migrations/20261024000001_record_session_narrative_carrier.sql",
         # The DOC side of the #7968 pair, restated after #9638 review P1 deleted
         # it: `test_record_schema_placement.py` reads this file's table, so a
         # docs-only edit must select `core` too. Measured on the pre-fix head:
@@ -2454,12 +2610,42 @@ def test_record_schema_pin_runs_on_migration_or_doc_change():
         # Measured on the pre-fix head: `_sel(["docs/00_index.md"])` ->
         # surfaces=[], full=False, test_record_schema_placement.py ABSENT.
         "docs/00_index.md",
+        # #9881 / PR #9948 review P2: the FORWARD migration that RE-DECLARES the
+        # Object/Subject key contract (`node_identity.key_property` plus both
+        # `chk_*_node_key_is_contract_key` pins) — the one file that can make
+        # `record_projection.key_properties()` report a contract the schema no
+        # longer holds. Measured on the pre-fix head: `_sel([<this path>])` ->
+        # surfaces=[], full=False, BOTH readers absent.
+        "supabase/migrations/20261027000001_record_semantic_id_key.sql",
     ):
         r = _sel([changed])
         assert r["full"] is False, (changed, r)
         assert r["surfaces"] == ["core"], (changed, r)
         assert "test_record_schema_placement.py" in r["test_files"], (changed, r)
         assert "test_record_projection.py" in r["test_files"], (changed, r)
+
+
+def test_the_semantic_id_key_migration_selects_every_reader_of_the_contract():
+    # PR #9948 review P2: `20261027000001_record_semantic_id_key.sql` is the one
+    # diff that can RE-DECLARE the key contract — `record_projection.
+    # key_properties()` takes the LAST declaration in the migration chain, and
+    # `cache_projection`/`read_ledger` delegate to it. So the three READERS of
+    # that contract plus the schema pin must run on a change to this file ALONE.
+    # Mutation check: removing its CORE_ALSO row (or the arm above) fails both
+    # this test and the tuple arm above with `surfaces == []`.
+    changed = "supabase/migrations/20261027000001_record_semantic_id_key.sql"
+
+    r = _sel([changed])
+
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    for reader in (
+        "test_record_schema_placement.py",  # the CHECK pins read from disk
+        "test_record_projection.py",  # key_properties()
+        "test_cache_projection.py",  # delegates to key_properties()
+        "test_read_ledger.py",  # KEY_FIELDS is pinned to it
+    ):
+        assert reader in r["test_files"], (reader, r)
 
 
 def test_the_tenancy_migration_selects_the_posture_pins():
@@ -3070,6 +3256,43 @@ def test_install_ci_runner_x64_tool_change_selects_core_not_tier1():
     assert r["carve_out_run"] is True, r
     # and it is not merely tier-1 smoke: the selection carries core's own members too
     assert set(r["test_files"]) != _tier1(), r
+
+
+def test_runner_autoscale_guard_change_selects_core_not_tier1():
+    # tools/runner_autoscale.py owns tests/test_runner_autoscale.py (the measured
+    # ceiling, the five-way classification, the fail-closed measurement arms and
+    # the mutation family that proves each gate load-bearing).
+    #
+    # `tools/` is a flat NON_PYTHON_PREFIXES entry, so without the CORE_ALSO row a
+    # tool-only change came back with `changed == []`, took the docs-only early
+    # return and the guard's own pins never ran on the file they guard — the
+    # #1349/#3332/#3616 silent-drop class. Mutation check: removing the CORE_ALSO
+    # entry selects no surface, so assert 1 below fails.
+    r = _sel(["tools/runner_autoscale.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_runner_autoscale.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
+def test_runner_autoscale_installer_change_selects_core_not_tier1():
+    # tools/install-runner-autoscale-schedule.sh owns
+    # tests/test_install_runner_autoscale_schedule.py (the refusals with nothing
+    # written, the rendered systemd/cron/launchd artifacts, the install-time
+    # measurement probe, and the drift check). It ALARMS the guard, so an
+    # installer-only diff that selects nothing is the worst case of this class:
+    # the wiring could be broken while every tool test still passes.
+    #
+    # Measured before the fix (PR #9685 review round 9, P1-2):
+    # `_sel(["tools/install-runner-autoscale-schedule.sh"])` -> surfaces=[],
+    # full=False, test_install_runner_autoscale_schedule.py absent.
+    #
+    # CORE_ALSO (not TOOL_CARVEOUTS): the suite is hermetic and `core`-registered,
+    # so selecting `core` runs it at the lowest CI cost. Mutation check: removing
+    # the CORE_ALSO entry selects no surface, so assert 1 below fails.
+    r = _sel(["tools/install-runner-autoscale-schedule.sh"])
+    assert "core" in r["surfaces"], r
+    assert "test_install_runner_autoscale_schedule.py" in r["test_files"], r
+    assert r["full"] is False, r
 
 
 def test_ci_queue_health_tool_change_selects_core_not_tier1():
@@ -10227,3 +10450,26 @@ def test_9206_lane_suites_run_on_the_diffs_that_can_break_them():
 
     r = _sel(["tortoise/sdk.py"])
     assert r["full"] is True, r
+
+
+def test_batch_review_tool_change_selects_core_not_tier1():
+    # #9790 review P1: tools/batch_review.py owns tests/test_batch_review.py
+    # (registered `core`, the guard for the fail-closed record path).
+    #
+    # `tools/` is a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row
+    # matches the tool, so a tool-only change came back with `changed == []` and
+    # took the docs-only early return — tier-1 smoke, where the guard is not
+    # registered. Measured before this entry: `select(["tools/batch_review.py"])`
+    # -> surfaces=[], full=False, test_batch_review.py absent. That is the
+    # #1349/#3332/#3616 silent-drop class on the one diff that can break the
+    # guard: deleting `plan_records`'s manifest-head equality would have merged
+    # with none of the suite running (no count in the prose: it decays every time
+    # a pin is added, and what this test pins is the SELECTION, not the number).
+    #
+    # CORE_ALSO (not TOOL_CARVEOUTS): the suite is hermetic, so `core` is the
+    # cheapest leg that can carry it. Mutation check: removing the CORE_ALSO
+    # entry fails assert 2 below.
+    r = _sel(["tools/batch_review.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_batch_review.py" in r["test_files"], r
+    assert r["full"] is False, r

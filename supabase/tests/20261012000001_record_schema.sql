@@ -135,6 +135,71 @@ SELECT tests.assert(
      AND pg_get_constraintdef(con.oid) LIKE '%node_key = id%') = 1,
   '7968: point.node_key is pinned to id (W1: :Point -> id)');
 
+-- ── 3b. #9881: the SEMANTIC layer's key is the stable id, not the name ─────
+-- Under #3590 a `name` is a mutable natural key two live entities may share, so
+-- it cannot be a key — and while it WAS the key a rename was unrepresentable
+-- (the projection refused `EntityMutated op=rename`). These pins are what make
+-- a rename an ordinary column patch: the key never moves.
+SELECT tests.assert(
+  (SELECT count(*) FROM pg_constraint con
+   JOIN pg_class rel ON rel.oid = con.conrelid
+   WHERE con.contype = 'c' AND rel.relname = 'object'
+     AND pg_get_constraintdef(con.oid) LIKE '%node_key = id%') = 1,
+  '9881: object.node_key is pinned to id (a rename is a patch, not a key move)');
+
+SELECT tests.assert(
+  (SELECT count(*) FROM pg_constraint con
+   JOIN pg_class rel ON rel.oid = con.conrelid
+   WHERE con.contype = 'c' AND rel.relname = 'subject'
+     AND pg_get_constraintdef(con.oid) LIKE '%node_key = id%') = 1,
+  '9881: subject.node_key is pinned to id');
+
+-- `node_identity`'s generated CASE is the contract every composite FK endpoint
+-- is filed by, and it is declared TWICE on disk (the CREATE TABLE, then the
+-- forward re-declaration 20261027000001). The LIVE one must say `id`.
+INSERT INTO public.node_identity (org_id, graph_id, node_label, node_key)
+VALUES ('org_7968','g_7968','Object','obj-9881-a'),
+       ('org_7968','g_7968','Object','obj-9881-b'),
+       ('org_7968','g_7968','Subject','subj-9881')
+ON CONFLICT DO NOTHING;
+
+SELECT tests.assert(
+  (SELECT count(*) FROM public.node_identity
+    WHERE org_id = 'org_7968' AND graph_id = 'g_7968'
+      AND node_label = 'Object' AND key_property = 'id') = 2,
+  '9881: node_identity declares Object''s contract key as id');
+
+SELECT tests.assert(
+  (SELECT count(*) FROM public.node_identity
+    WHERE org_id = 'org_7968' AND graph_id = 'g_7968'
+      AND node_label = 'Subject' AND key_property = 'id') = 1,
+  '9881: node_identity declares Subject''s contract key as id');
+
+-- TWO incarnations, ONE name — the whole reason the key is the id. Under the
+-- name-keyed schema the second row could not exist at all, and under a key-MOVE
+-- rename it would collide with the first on the primary key.
+INSERT INTO public.object (org_id, graph_id, node_key, id, name)
+VALUES ('org_7968','g_7968','obj-9881-a','obj-9881-a','twin'),
+       ('org_7968','g_7968','obj-9881-b','obj-9881-b','twin')
+ON CONFLICT DO NOTHING;
+
+SELECT tests.assert(
+  (SELECT count(*) FROM public.object
+    WHERE org_id = 'org_7968' AND graph_id = 'g_7968' AND name = 'twin') = 2,
+  '9881: two same-name Objects both persist (a name is not an identity)');
+
+-- ...and the `name` column is MUTABLE under a fixed key: this is the statement
+-- the record projection emits for `EntityMutated op=rename`, and it must be
+-- accepted by the schema without touching `node_key`.
+UPDATE public.object SET name = 'twin-renamed'
+ WHERE org_id = 'org_7968' AND graph_id = 'g_7968' AND id = 'obj-9881-a';
+
+SELECT tests.assert(
+  (SELECT count(*) FROM public.object
+    WHERE org_id = 'org_7968' AND graph_id = 'g_7968'
+      AND node_key = 'obj-9881-a' AND name = 'twin-renamed') = 1,
+  '9881: a rename moves the name column and keeps the node_key');
+
 -- ── 4. The carve-out CHECKS actually refuse a derived value ────────────────
 INSERT INTO public.node_identity (org_id, graph_id, node_label, node_key)
 VALUES ('org_7968','g_7968','Point','01HX0000000000000000000001'),
@@ -165,9 +230,9 @@ END $$;
 DO $$
 BEGIN
   BEGIN
-    INSERT INTO public.subject (org_id, graph_id, node_key, name, props)
+    INSERT INTO public.subject (org_id, graph_id, node_key, id, name, props)
     VALUES ('org_7968','g_7968','rec-schema-subject','rec-schema-subject',
-            '{"status":"superseded"}'::jsonb);
+            'rec-schema-subject','{"status":"superseded"}'::jsonb);
     RAISE EXCEPTION '8263: chk_subject_props_no_derived accepted `status`' USING ERRCODE = 'P0002';
   EXCEPTION WHEN check_violation THEN NULL;
   END;
@@ -180,9 +245,9 @@ END $$;
 DO $$
 BEGIN
   BEGIN
-    INSERT INTO public.subject (org_id, graph_id, node_key, name, props)
+    INSERT INTO public.subject (org_id, graph_id, node_key, id, name, props)
     VALUES ('org_7968','g_7968','rec-schema-subject','rec-schema-subject',
-            '{"embedding":[0.1]}'::jsonb);
+            'rec-schema-subject','{"embedding":[0.1]}'::jsonb);
     RAISE EXCEPTION '8263: the forward ALTER re-opened `embedding` on subject.props' USING ERRCODE = 'P0002';
   EXCEPTION WHEN check_violation THEN NULL;
   END;
@@ -191,9 +256,9 @@ END $$;
 DO $$
 BEGIN
   BEGIN
-    INSERT INTO public.object (org_id, graph_id, node_key, name, props)
+    INSERT INTO public.object (org_id, graph_id, node_key, id, name, props)
     VALUES ('org_7968','g_7968','rec-schema-object','rec-schema-object',
-            '{"status":"live"}'::jsonb);
+            'rec-schema-object','{"status":"live"}'::jsonb);
     RAISE EXCEPTION '8263: chk_object_props_no_derived accepted `status`' USING ERRCODE = 'P0002';
   EXCEPTION WHEN check_violation THEN NULL;
   END;
@@ -282,12 +347,19 @@ SELECT tests.assert(
       AND column_name = 'capture_redactions') = 'integer',
   '9264: session.capture_redactions is integer, not jsonb');
 
+-- #9881: the pin MOVED. `Object`/`Subject` are keyed by the stable `id`, and
+-- `name` is an ordinary mutable column — so the fail-open shape to refuse is now
+-- a NULL `id` (a bare `node_key = id` is SQL NULL, not FALSE, and would be
+-- silently satisfied: the same hole #8179 P1 closed for `name`).
 DO $$
 BEGIN
   BEGIN
-    INSERT INTO public.object (org_id, graph_id, node_key, name)
-    VALUES ('org_7968','g_7968','obj-null-name', NULL);
-    RAISE EXCEPTION '7968: object accepted a NULL name (fail-open key pin)' USING ERRCODE = 'P0002';
+    INSERT INTO public.node_identity (org_id, graph_id, node_label, node_key)
+    VALUES ('org_7968','g_7968','Object','obj-null-id')
+    ON CONFLICT DO NOTHING;
+    INSERT INTO public.object (org_id, graph_id, node_key, id, name)
+    VALUES ('org_7968','g_7968','obj-null-id', NULL, 'a name cannot save it');
+    RAISE EXCEPTION '9881: object accepted a NULL id (fail-open key pin)' USING ERRCODE = 'P0002';
   EXCEPTION WHEN check_violation THEN NULL;
   END;
 END $$;
@@ -295,9 +367,59 @@ END $$;
 DO $$
 BEGIN
   BEGIN
-    INSERT INTO public.subject (org_id, graph_id, node_key, name)
-    VALUES ('org_7968','g_7968','subj-null-name', NULL);
-    RAISE EXCEPTION '7968: subject accepted a NULL name (fail-open key pin)' USING ERRCODE = 'P0002';
+    INSERT INTO public.node_identity (org_id, graph_id, node_label, node_key)
+    VALUES ('org_7968','g_7968','Subject','subj-null-id')
+    ON CONFLICT DO NOTHING;
+    INSERT INTO public.subject (org_id, graph_id, node_key, id, name)
+    VALUES ('org_7968','g_7968','subj-null-id', NULL, 'a name cannot save it');
+    RAISE EXCEPTION '9881: subject accepted a NULL id (fail-open key pin)' USING ERRCODE = 'P0002';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+END $$;
+
+-- #9881 KEPT this pin from #8179 P1: the key moved, the name did not become
+-- optional. `name IS NOT NULL` still holds in the new CHECK, and a schema that
+-- dropped it would let a rename blank the only human-readable handle a record
+-- has — an Object you can no longer name.
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO public.node_identity (org_id, graph_id, node_label, node_key)
+    VALUES ('org_7968','g_7968','Object','obj-null-name')
+    ON CONFLICT DO NOTHING;
+    INSERT INTO public.object (org_id, graph_id, node_key, id, name)
+    VALUES ('org_7968','g_7968','obj-null-name','obj-null-name', NULL);
+    RAISE EXCEPTION '9881: object accepted a NULL name (a record with no handle)' USING ERRCODE = 'P0002';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+END $$;
+
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO public.node_identity (org_id, graph_id, node_label, node_key)
+    VALUES ('org_7968','g_7968','Subject','subj-null-name')
+    ON CONFLICT DO NOTHING;
+    INSERT INTO public.subject (org_id, graph_id, node_key, id, name)
+    VALUES ('org_7968','g_7968','subj-null-name','subj-null-name', NULL);
+    RAISE EXCEPTION '9881: subject accepted a NULL name (a record with no handle)' USING ERRCODE = 'P0002';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+END $$;
+
+-- ...and a NAME-KEYED row is refused outright: `node_key = name` is the shape
+-- this migration removes, and a schema that still accepted it would let a rename
+-- move the key behind the projection's back.
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO public.node_identity (org_id, graph_id, node_label, node_key)
+    VALUES ('org_7968','g_7968','Object','a-name-not-an-id')
+    ON CONFLICT DO NOTHING;
+    INSERT INTO public.object (org_id, graph_id, node_key, id, name)
+    VALUES ('org_7968','g_7968','a-name-not-an-id','obj-real-id','a-name-not-an-id');
+    RAISE EXCEPTION '9881: object accepted node_key = name while its id was something else'
+      USING ERRCODE = 'P0002';
   EXCEPTION WHEN check_violation THEN NULL;
   END;
 END $$;
@@ -321,8 +443,9 @@ ON CONFLICT DO NOTHING;
 INSERT INTO public.source (org_id, graph_id, node_key, url)
 VALUES ('org_7968','g_7968','https://example.test/7968','https://example.test/7968')
 ON CONFLICT DO NOTHING;
-INSERT INTO public.object (org_id, graph_id, node_key, name, object_kind)
-VALUES ('org_7968','g_7968','rec-schema-object','rec-schema-object','other')
+INSERT INTO public.object (org_id, graph_id, node_key, id, name, object_kind)
+VALUES ('org_7968','g_7968','rec-schema-object','rec-schema-object',
+        'rec-schema-object','other')
 ON CONFLICT DO NOTHING;
 INSERT INTO public.event (org_id, graph_id, node_key, event_id, event_kind, content)
 VALUES ('org_7968','g_7968','evt_7968','evt_7968','decision','an occurrence')

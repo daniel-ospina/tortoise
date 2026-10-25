@@ -1,0 +1,8 @@
+# Scratch and output artifacts must never reach git history — they contain
+# captured session content and extracted claims. Defaults live in the state
+# dir (~/.tortoise/cli-extraction) and engine scratch dirs are fresh mkdtemp
+# directories, but --out can point here; these patterns cover the
+# integration's own directory.
+turns_raw.jsonl
+ex.json
+*.extraction.json

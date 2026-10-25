@@ -1350,8 +1350,8 @@ class _EntityHandlers:
         # one of these lands on the document `:Source`). They are the same
         # undeclared-drop class as the line above and were found by reading what
         # that writer actually emits rather than what this declaration assumed:
-        # `needs_extraction` is read back by `ingest` (`coalesce(s.needs_extraction,
-        # false)`) as the extraction signal, and `authored_by`/`owned_by`/
+        # `needs_extraction` is read back by `ingest` RAW — absent is not
+        # `false`, #5140 — as the extraction signal, and `authored_by`/`owned_by`/
         # `managed_by`/`governing_agreement`/`document_knowledge_domain`/`createdAt`
         # are the document's own provenance metadata. Both spellings are listed
         # for the session/source pair because the document writer emits the
@@ -4208,7 +4208,22 @@ class _EntityHandlers:
         source_url``), which keeps its ``references`` edge — the
         index-completeness gate's ``edge`` clause depends on it, so collapsing
         the two into one node would make the edge a dropped self-loop and every
-        doc unit permanently incomplete. `content`, `doc_status` and
+        doc unit permanently incomplete. **That is the index path's guarantee,
+        and it is scoped to it**: the index path's document id is
+        ``doc_<rel-path>`` and its ``source_url`` is ``corpus://…``, so the two
+        are never one identity. A caller that supplies a NETWORK URL as the
+        document id and the SAME url's variant as ``source_url`` IS one
+        identity — the resolver below (S0a, #5012/#5053) folds it onto one node,
+        which is the correct outcome for a document that is its own corpus
+        source, not a topology regression. The self-loop is then suppressed by
+        ``link_source_to_entity``'s own #5151 guard, NOT by this method's
+        ``#205`` test: ``ref != did`` compares the RAW ref to the RESOLVED id,
+        so BETWEEN TWO SPELLINGS OF ONE IDENTITY it is TRUE for the variant and
+        false only for the identically-spelled one (it is also TRUE for every
+        genuinely distinct source, which is what wires the legitimate
+        ``references`` edge) — the variant case is the caller-side guard
+        ``projection/edges.py`` records as defeated by resolution, and the
+        reason #5151 keeps the guard inside the callee. `content`, `doc_status` and
         `objectKind` are RETIRED and are never written (nor re-admissible via
         the open passthrough).
 
@@ -4232,6 +4247,54 @@ class _EntityHandlers:
         from tortoise.projection import _log_identity_skip, _writable_id
         if not _writable_id(did):
             _log_identity_skip("Document", did, "id (MERGE key)")
+            return
+        # #5140 finding 12: the document MERGE key adopts the SAME S0a/S0b
+        # canonical-identity resolver (`resolve_source_key`, #5012/#5053) as
+        # every other `:Source` write path (`_upsert_source`,
+        # `_mint_source_stub`, `link_source_to_entity`). Before this the RAW
+        # event id was the MERGE key, so a caller-supplied URL variant minted a
+        # SECOND `:Source` for one identity (measured: `create_source(
+        # 'https://example.com/a/b')` then `DocumentCreated` on
+        # `'https://Example.COM/a/b/?utm_source=x#frag'` → two nodes) — the
+        # S0a/S0b invariant D10 made load-bearing when it folded the document
+        # node into `:Source`. Non-network document ids (`doc_<rel-path>` from
+        # `derive_document_id`, and the BARE FILENAME the CLI passes as
+        # `args.transcript.name` — `corpus://…` is the index path's SOURCE URL,
+        # not a document id) are returned
+        # UNCHANGED by the resolver (identity there), so the index and CLI
+        # paths are unaffected; the fold stamps `canonicalUrl`/`urlAliases`
+        # exactly as `_upsert_source` does. The resolved key is re-checked
+        # because it is a DIFFERENT value from the one checked above.
+        # ⚠️ WHAT IT DOES CHANGE, stated because it is a consequence of the
+        # identity rule rather than an accident: a NETWORK document id is
+        # canonicalised by S0a, so two ids differing only in
+        # fragment/query/trailing-slash are ONE document `:Source` (S0a's own
+        # rule — a fragment never selects a different document). Two "documents"
+        # a caller named that way therefore become one node, and the `documents`
+        # meter counts one. ⚠️ And like every other resolving writer, the MERGE
+        # key here is a RESOLUTION: if the stored `url` moves between the live
+        # write and its replay (an unjournaled writer touching the node in
+        # between), live and replay can land on different keys — the exposure
+        # `edges.py::resolve_source_versions` names, already present on
+        # `_upsert_source`/`_mint_source_stub`, not introduced here.
+        # ⚠️ AND THE COLLISION IT MAKES REACHABLE, which is NOT limited to
+        # another document: a document id whose canonical form equals an
+        # EXISTING `:Source` — including a non-document provenance source —
+        # folds onto that source and overwrites its `title`/`documentKind`. The
+        # node then leaves `list_sources()` (`documentKind IS NULL`) and enters
+        # the `documents` meter. Measured: `create_source(url,'web')` + a
+        # `DocumentCreated` for a VARIANT of that url → ONE node
+        # (`sourceKind='web'`, `documentKind='report'`, promoted title),
+        # `list_sources()` 1 → 0. It is not a new RULE — the identically
+        # spelled form already behaves this way on `main` (measured there) —
+        # but a variant now reaches it, and `EventAPI.add_document(doc_id=…)`
+        # takes a caller-supplied id. Whether promotion should also move
+        # `sourceKind` to `'document'` is #9536's contract, not this fold's;
+        # pinned by `test_document_id_that_canonicalises_onto_a_web_source`.
+        raw_did = did
+        did = resolve_source_key(self.g, did)
+        if not _writable_id(did):
+            _log_identity_skip("Document", did, "url (resolved MERGE key)")
             return
         # Compute embedding from title+content for semantic search (#7845).
         # Epic #900 T3 cycle-19: the NEW index path carries a suppress flag in
@@ -4316,6 +4379,17 @@ class _EntityHandlers:
         self.g.query(
             "MERGE (s:Source {url:$id}) " + clear_then_set_prefix("s") +
             "SET s.id=coalesce(s.id, $id), "
+            # S0a/S0b (#5012/#5053) identity, parity with `_upsert_source`'s
+            # clauses (#5140 finding 12): without them this node is INVISIBLE
+            # to the shared resolver, so the SAME identity in the other ORDER
+            # still minted a second `:Source` — a `DocumentCreated` on a URL
+            # variant, then `create_source` on the plain url, produced two
+            # nodes because `resolve_source_key` had no `canonicalUrl` to match
+            # on (measured). `coalesce` = never overwrite a stored identity.
+            "    s.canonicalUrl=coalesce(s.canonicalUrl, $cu), "
+            "    s.urlAliases=CASE WHEN $raw_url IN coalesce(s.urlAliases, []) "
+            "        THEN coalesce(s.urlAliases, []) "
+            "        ELSE coalesce(s.urlAliases, []) + [$raw_url] END, "
             # ⛔ `_searchText` is written BEFORE `s.title` (#8870): its
             # last-resort fallback READS `s.title`, and on the server engine a
             # same-clause read observes the value an earlier item just wrote.
@@ -4465,6 +4539,11 @@ class _EntityHandlers:
             "REMOVE " + ", ".join(
                 f"s.{k}" for k in sorted(self._DOC_RETIRED_KEYS)),
             params={"id": did, "title": ev.get("title", did),
+                    # S0a/S0b: the identity form and the RAW spelling this
+                    # record named (the alias set `_upsert_source` keeps), from
+                    # the event's own id — deterministic on replay.
+                    "cu": normalize_source_url(raw_did),
+                    "raw_url": raw_did,
                     # NO "" default here: a present null and an omitted key
                     # both stay Cypher null and fall to the third coalesce
                     # term ("") only on CREATE, so a partial re-write cannot
@@ -4481,8 +4560,19 @@ class _EntityHandlers:
         # so that extra props land on the Source node regardless of edge
         # success). D10 retired keys (content/doc_status/objectKind) are denied
         # here — the fixed clause above already covers every other doc key.
+        # ⚠️ The skip-set reached by this call is the FULL
+        # `_SOURCE_HANDLED | _DOC_PASSTHROUGH_HANDLED | _DOC_RETIRED_KEYS`
+        # reserve, not only the retired keys: server-managed keys such as
+        # `version` and `ingestedAt` are owned by the fixed clause (version is
+        # the §4.6 ordinal — 1 at creation, +1 on a content-hash change — and
+        # advances off `content_hash`, never off the caller), so a caller-
+        # supplied `version=` / `ingestedAt=` on a `DocumentCreated` is DROPPED
+        # rather than persisted verbatim. `documentKind` is skipped for the
+        # same reason (#5140 finding 7): the fixed clause above owns it. That is
+        # deliberate, and it is why this call needs no `allow_keys` closed set
+        # (#228).
         #
-        # This call passes NO `allow_keys` DELIBERATELY: `test_create_document_
+        # ⛔ This call passes NO `allow_keys` DELIBERATELY: `test_create_document_
         # persists_arbitrary_props` (#228) pins the document route as a caller
         # passthrough. It is therefore NOT the same contract as `_upsert_source`
         # (which passes `_SOURCE_EXTRA_PROPS`), and the disagreement between the

@@ -1,0 +1,296 @@
+{
+  "nodes": [
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "Our Q3 churn was 4.1%.",
+      "kind": "statement",
+      "is_operator": false,
+      "op_type": "",
+      "status": "superseded",
+      "url": "",
+      "id": "1a1660d461c-819425aa07b0"
+    },
+    {
+      "layer": "Source",
+      "labels": [
+        "Source"
+      ],
+      "text": "Internal churn dashboard, Q3 export",
+      "kind": "document",
+      "is_operator": false,
+      "op_type": "",
+      "status": "",
+      "url": "https://dash.internal.example/churn/q3",
+      "id": "https://dash.internal.example/churn/q3"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "Our Q3 churn was 3.2%.",
+      "kind": "statement",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "1a1660f86d8-7d25de07a224"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "The 4.1% Q3 churn figure was wrong because it included a duplicate account; 3.2% is the figure with the duplicate excluded.",
+      "kind": "rationale",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "1a1660f86fd-34b769af3c3a"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "The Q3 churn dashboard double-counted one account, which inflated the published Q3 churn figure to 4.1%; the dedupe fix landed only after that figure had been read from the dashboard.",
+      "kind": "incident",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "1a1660f8729-5cd7c7d10d24"
+    },
+    {
+      "layer": "Event",
+      "labels": [
+        "Event"
+      ],
+      "text": "Q3 churn figure correction (4.1% -> 3.2%)",
+      "kind": "correction",
+      "is_operator": false,
+      "op_type": "",
+      "status": "",
+      "url": "",
+      "id": "1a166101ed8-8faad9c5ef3f"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "",
+      "kind": "",
+      "is_operator": true,
+      "op_type": "IMPL",
+      "status": "live",
+      "url": "",
+      "id": "1a1660f8bbb-01744eae77c5"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "",
+      "kind": "",
+      "is_operator": true,
+      "op_type": "IMPL",
+      "status": "live",
+      "url": "",
+      "id": "1a1660f8c56-223dba450078"
+    }
+  ],
+  "edges": [
+    {
+      "relation": "wasDerivedFrom",
+      "from": "Our Q3 churn was 4.1%.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a1660d461c-819425aa07b0",
+      "to_id": "https://dash.internal.example/churn/q3"
+    },
+    {
+      "relation": "INPUT",
+      "from": "Our Q3 churn was 4.1%.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a1660d461c-819425aa07b0",
+      "to_id": "1a1660f8c56-223dba450078"
+    },
+    {
+      "relation": "CORRECTS",
+      "from": "Our Q3 churn was 3.2%.",
+      "to": "Our Q3 churn was 4.1%.",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a1660f86d8-7d25de07a224",
+      "to_id": "1a1660d461c-819425aa07b0"
+    },
+    {
+      "relation": "wasDerivedFrom",
+      "from": "Our Q3 churn was 3.2%.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a1660f86d8-7d25de07a224",
+      "to_id": "https://dash.internal.example/churn/q3"
+    },
+    {
+      "relation": "INPUT",
+      "from": "Our Q3 churn was 3.2%.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a1660f86d8-7d25de07a224",
+      "to_id": "1a1660f8bbb-01744eae77c5"
+    },
+    {
+      "relation": "INPUT",
+      "from": "The 4.1% Q3 churn figure was wrong because it included a duplicate account; 3.2% is the figure with the duplicate excluded.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a1660f86fd-34b769af3c3a",
+      "to_id": "1a1660f8bbb-01744eae77c5"
+    },
+    {
+      "relation": "references",
+      "from": "The Q3 churn dashboard double-counted one account, which inflated the published Q3 churn figure to 4.1%; the dedupe fix landed only after that figure had been read from the dashboard.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a1660f8729-5cd7c7d10d24",
+      "to_id": "https://dash.internal.example/churn/q3"
+    },
+    {
+      "relation": "INPUT",
+      "from": "The Q3 churn dashboard double-counted one account, which inflated the published Q3 churn figure to 4.1%; the dedupe fix landed only after that figure had been read from the dashboard.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a1660f8729-5cd7c7d10d24",
+      "to_id": "1a1660f8c56-223dba450078"
+    },
+    {
+      "relation": "aboutDocument",
+      "from": "Q3 churn figure correction (4.1% -> 3.2%)",
+      "to": "",
+      "from_layer": "Event",
+      "to_layer": "Source",
+      "from_id": "1a166101ed8-8faad9c5ef3f",
+      "to_id": "https://dash.internal.example/churn/q3"
+    },
+    {
+      "relation": "aboutPoint",
+      "from": "Q3 churn figure correction (4.1% -> 3.2%)",
+      "to": "Our Q3 churn was 3.2%.",
+      "from_layer": "Event",
+      "to_layer": "Point",
+      "from_id": "1a166101ed8-8faad9c5ef3f",
+      "to_id": "1a1660f86d8-7d25de07a224"
+    },
+    {
+      "relation": "IMPL",
+      "from": "",
+      "to": "Our Q3 churn was 3.2%.",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a1660f8bbb-01744eae77c5",
+      "to_id": "1a1660f86d8-7d25de07a224"
+    },
+    {
+      "relation": "IMPL",
+      "from": "",
+      "to": "The 4.1% Q3 churn figure was wrong because it included a duplicate account; 3.2% is the figure with the duplicate excluded.",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a1660f8bbb-01744eae77c5",
+      "to_id": "1a1660f86fd-34b769af3c3a"
+    },
+    {
+      "relation": "IMPL",
+      "from": "",
+      "to": "Our Q3 churn was 4.1%.",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a1660f8c56-223dba450078",
+      "to_id": "1a1660d461c-819425aa07b0"
+    },
+    {
+      "relation": "IMPL",
+      "from": "",
+      "to": "The Q3 churn dashboard double-counted one account, which inflated the published Q3 churn figure to 4.1%; the dedupe fix landed only after that figure had been read from the dashboard.",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a1660f8c56-223dba450078",
+      "to_id": "1a1660f8729-5cd7c7d10d24"
+    }
+  ],
+  "counts": {
+    "Point": 6,
+    "Subject": 0,
+    "Object": 0,
+    "Event": 1,
+    "Source": 1
+  },
+  "operators": [
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "",
+      "kind": "",
+      "is_operator": true,
+      "op_type": "IMPL",
+      "status": "live",
+      "url": "",
+      "id": "1a1660f8bbb-01744eae77c5"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "",
+      "kind": "",
+      "is_operator": true,
+      "op_type": "IMPL",
+      "status": "live",
+      "url": "",
+      "id": "1a1660f8c56-223dba450078"
+    }
+  ],
+  "sources": [
+    {
+      "layer": "Source",
+      "labels": [
+        "Source"
+      ],
+      "text": "Internal churn dashboard, Q3 export",
+      "kind": "document",
+      "is_operator": false,
+      "op_type": "",
+      "status": "",
+      "url": "https://dash.internal.example/churn/q3",
+      "id": "https://dash.internal.example/churn/q3"
+    }
+  ],
+  "relations": [
+    "CORRECTS",
+    "IMPL",
+    "INPUT",
+    "aboutDocument",
+    "aboutPoint",
+    "references",
+    "wasDerivedFrom"
+  ],
+  "mitigations": []
+}

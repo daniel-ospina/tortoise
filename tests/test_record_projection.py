@@ -196,6 +196,13 @@ _MINIMAL_RECORDS: dict[str, dict] = {
     "PointRevised": {"id": "p1", "new_content": "c2"},
     "OperatorAnnotated": {"id": "p1", "annotator_bias": 0.5},
     "PointRetracted": {"id": "p1"},
+    # #9892: the PRODUCER's shape (`api.py::merge_points`), which carries no
+    # `op` — the fixture that used to stand in for this type (in the refusal
+    # test) invented `op: "merge"`, a key no writer emits, so the declared
+    # refusal never fired for the only producer and the type was neither
+    # refused nor projected. A fixture that cannot be produced pins nothing.
+    "PointsMerged": {"keep_id": "p1", "merge_ids": ["p2"],
+                     "corrects": None},
     "PointSuperseded": {"id": "p1", "new_id": "p2",
                         # The real producer payload (#2423): the bi-temporal
                         # stamps the fold replays verbatim.
@@ -221,6 +228,15 @@ _MINIMAL_RECORDS: dict[str, dict] = {
                         "previousContentHash": "h1", "previousValidTo": "t0"},
     "DocumentCreated": {"id": "u1", "url": "u1"},
     "SessionRecorded": {"id": "sess1", "turn_count": 2, "is_episodic": True},
+    # #9555/R7: the narrative carrier's PRODUCER shape
+    # (`hosted_api._execute_commit_writes` → `sdk._emit_event("SessionNarrated",
+    # id=event_id, sessionId=, story_arc=, summary=, capturedAt=)`), not an
+    # invented one. It carries the narrative, so it DOES produce a statement
+    # through the shape-keyed secondary projection while declaring
+    # `NoRecordEffect` — see the branch in the totality test below.
+    "SessionNarrated": {"id": "e1", "sessionId": "sess1",
+                       "story_arc": "the session, told as prose",
+                       "summary": "one line"},
     "SessionDeleted": {"id": "sess1"},
     "EntityLinked": {"id": "p1", "source_label": "Point", "source_id": "p1",
                      "target_label": "Object", "target_id": "o1",
@@ -237,7 +253,7 @@ _MINIMAL_RECORDS: dict[str, dict] = {
 def test_there_is_a_minimal_record_for_every_declared_mutation():
     """The fixture below must not silently lag the registry."""
     assert set(_MINIMAL_RECORDS) == set(rp.JOURNAL_EVENT_TYPES) - {
-        "EntityMutated", "PointsMerged",
+        "EntityMutated",
     }
 
 
@@ -248,7 +264,21 @@ def test_each_declared_type_materializes_or_declares_a_no_effect(record_type):
     statements = rp.mutations_for(record, org_id="o", graph_id="g")
     effect = rp.RECORD_MUTATIONS[record_type].effect
     if isinstance(effect, rp.NoRecordEffect):
-        assert statements == []
+        # #9555/R7: a declared no-effect record can still carry a SECONDARY
+        # projection's payload — the §9.1 narrative home is shape-keyed on
+        # purpose (any producer carrying `story_arc` lands it, including one
+        # nobody listed in a type whitelist), so "no declared NODE effect" does
+        # not mean "no statements". Asserting `statements == []` unconditionally
+        # would force every future narrative carrier into the very whitelist
+        # #9555 removed.
+        if record.get("story_arc"):
+            assert statements, (
+                f"{record_type} carries the §9.1 narrative and produced no "
+                "statement — the shape-keyed secondary projection did not fire")
+            assert any(rp.NARRATIVE_TABLE in s.sql for s in statements), (
+                f"{record_type}'s statements do not touch {rp.NARRATIVE_TABLE}")
+        else:
+            assert statements == []
         # A declared no-op must say WHY. "No reason" is the silent skip.
         assert len(effect.reason) > 40, (
             f"{record_type} declares NoRecordEffect with a reason too thin to "
@@ -275,23 +305,302 @@ def test_entity_mutated_dispatches_on_op_and_refuses_undeclared_ops():
     assert len(patch) == 1 and patch[0].sql.startswith("UPDATE public.point")
     assert "status" in patch[0].sql and "retracted" in patch[0].params
 
-    with pytest.raises(rp.RefusedJournalOperation) as excinfo:
-        rp.mutations_for({**base, "op": "rename", "name": "n2"},
+    # #9881 — a rename is a PATCH against the node's stable key. This pair used
+    # to assert a `RefusedJournalOperation` (`#3377`/`#4769`) because `node_key`
+    # WAS the name, so applying it would have moved the key. The key is the id
+    # now, so the applied `state` is written as it stands.
+    rename = rp.mutations_for(
+        {**base, "op": "rename", "state": {"name": "n2"}},
+        org_id="o", graph_id="g",
+    )
+    assert len(rename) == 1 and rename[0].sql.startswith("UPDATE public.point")
+    # A Point has no `name` column, so the applied value lands where the graph
+    # itself puts it — the node's property tail (`SET n += $state`).
+    assert "n2" in str(rename[0].params)
+    _renamed = rename[0].sql.split(" SET ", 1)[1].split(" WHERE ", 1)[0]
+    assert "node_key" not in _renamed, (
+        "a rename moved the row's KEY — the one thing #9881 establishes it must "
+        f"never do; the key is the stable id ({_renamed})")
+
+    # ...and a rename that names no id is REFUSED, not silently applied to 0
+    # rows: pre-#3590 "rename the entity whose name is X" cannot say WHICH of
+    # two same-name entities was renamed.
+    with pytest.raises(rp.RecordProjectionError) as excinfo:
+        rp.mutations_for({**base, "id": None, "op": "rename",
+                          "state": {"name": "n2"}},
                          org_id="o", graph_id="g")
-    assert "#3377" in str(excinfo.value)
+    assert "STABLE id" in str(excinfo.value)
 
     with pytest.raises(rp.RecordProjectionError):
         rp.mutations_for({**base, "op": "levitate"}, org_id="o", graph_id="g")
 
 
-def test_points_merged_is_refused_not_approximated():
+def test_9881_a_rename_moves_the_name_and_never_the_objects_key():
+    """The keystone: the record ACCEPTS the producer's rename record (#9881).
+
+    Measured before the fix — this is the reproduction, and it is the reason the
+    test is written against the exact record `sdk._update_entity` journals:
+
+        >>> rp.mutations_for({"type": "EntityMutated", "id": "obj-1",
+        ...                   "label": "Object", "op": "rename",
+        ...                   "state": {"name": "AcmeRenamed"}}, ...)
+        RefusedJournalOperation: EntityMutated op='rename': #3377/#4769 — ... a
+        rename MOVES the canonical key (Object/Subject key = `name`), so it is a
+        key migration, not a patch.
+
+    So the whole write half of #3590 could not land: the first public
+    `update_entity(id, name=…)` on a record-armed deployment raised.
+
+    What the fix establishes, in one sentence: the row's key is the STABLE ID, so
+    the rename is an ordinary column patch. Three assertions, one per clause —
+    it applies (not refused), it writes the NAME column, and it never touches
+    `node_key` (which is what made the old refusal honest).
+    """
+    record = {
+        "type": "EntityMutated", "ts": "T",
+        "id": "1a16d368511-efb0", "label": "Object",
+        "op": "rename", "state": {"name": "AcmeRenamed"},
+    }
+    statements = rp.mutations_for(record, org_id="o", graph_id="g")
+    assert len(statements) == 1, statements
+    sql, params = statements[0].sql, statements[0].params
+    assert sql.startswith("UPDATE public.object"), sql
+    assert "name = %s" in sql, f"the rename did not write the name column: {sql}"
+    assert "AcmeRenamed" in params, params
+    sets_clause = sql.split(" SET ", 1)[1].split(" WHERE ", 1)[0]
+    assert "node_key" not in sets_clause, (
+        "the rename moved the row's KEY. Under the id key a rename is a patch; a "
+        "key move would have to cascade `node_identity` and every incident "
+        "`relation` endpoint, which is exactly the migration #9881 removes")
+    # Matched by the stable id, and the name spelling is still accepted (a
+    # structural edge's descriptor names an Object by NAME — §1.3).
+    assert "id = %s" in sql, sql
+
+    # TWO incarnations, ONE name. This is what a name-keyed row could not do, and
+    # it is the whole point of moving the key: the second rename targets a
+    # DIFFERENT row with the SAME new name and produces its own UPDATE, so no
+    # primary-key collision and no duplicated/orphaned row is possible.
+    second = rp.mutations_for(
+        {**record, "id": "1a16d368512-aa11"}, org_id="o", graph_id="g")
+    assert len(second) == 1, second
+    assert second[0].params != statements[0].params, (
+        "two entities renaming to one name produced the SAME statement — a "
+        "name-keyed record would collapse them into one row")
+    assert second[0].params[-1] == "1a16d368512-aa11", second[0].params
+
+
+def test_9881_an_objects_patch_with_no_id_is_refused_and_never_name_matched():
+    """#9948 review P3 — `ObjectSuperseded`'s note described a fallback that
+    does not exist, in the direction that matters (fail-OPEN).
+
+    The note said the `name` column is *"kept as the natural-key match so a
+    legacy line carrying no id still resolves"*. Neither half is true after
+    #9881: `_key_value(node, record, "id")` has NO `name` fallback (that
+    absence-keyed fallback exists only for `url`/`eventId`), so a name-only
+    record RAISES `RecordProjectionError`; and the patch goes through
+    `_patch_statement`'s default `match=("node_key",)`, which IS the id — never
+    `name`.
+
+    Why the refusal has to be at the DOOR, measured: a name-matched patch would
+    match ZERO rows now that `node_key` is the id — silence, not an error. The
+    schema is not a backstop here either: this mutation emits exactly ONE
+    statement (the `NodePatch` branch; there is no `node_identity` insert on this
+    path, unlike the snapshot branch), and its `SET` never rewrites
+    `name`/`id`/`node_key`, so `chk_object_node_key_is_contract_key` is
+    re-evaluated on an unchanged key triple and can never fire.
+
+    Non-vacuity: on the pre-#9881 tree the SAME record is accepted
+    (`Node("object", "Object", "name")`, `key_from="name"`) and returns an
+    UPDATE — so the `pytest.raises` below fails.
+    """
+    record = {"type": "ObjectSuperseded", "ts": "T", "name": "acme",
+              "superseded_by": "o2"}
+    with pytest.raises(rp.RecordProjectionError) as excinfo:
+        rp.mutations_for(record, org_id="o", graph_id="g")
+    assert "'id'" in str(excinfo.value), excinfo.value
+
+    statements = rp.mutations_for({**record, "id": "o1"}, org_id="o", graph_id="g")
+    assert len(statements) == 1, statements
+    sql = statements[0].sql
+    assert sql.startswith("UPDATE public.object"), sql
+    where = sql.split(" WHERE ", 1)[1]
+    assert "node_key = %s" in where, (
+        "the patch is not matched on `node_key` (the contract key since "
+        f"20261027000001): {where}")
+    assert "name" not in where, (
+        "the patch matched on `name` — a name is a MUTABLE natural key since "
+        f"#3590, so it can address a different row: {where}")
+
+
+def test_the_declared_refusal_mechanism_still_refuses(monkeypatch):
+    """`refused_ops` is EMPTY after #9881 — the MECHANISM must still bite.
+
+    Empty is not the same as absent. The declaration is how a future op the fold
+    cannot apply is refused loudly instead of guessed (`#5285`'s silent-skip
+    rule), and an empty mapping that nothing exercises is a mapping that could
+    quietly stop being consulted. So this constructs one:
+
+    the real record is re-dispatched with a synthetic refusal, proving that an
+    entry in that mapping raises :class:`rp.RefusedJournalOperation` — and that
+    the REAL registry has no member left, which is the #9881 outcome (a refusal
+    that reappears where it does not belong reds this leg too).
+    """
+    import dataclasses
+
+    assert rp.RECORD_MUTATIONS["EntityMutated"].effect.refused_ops == {}, (
+        "a declared refusal came back to `EntityMutated` — #9881 established "
+        "that every state op the fold implements, `rename` included, is "
+        "representable once the key is the stable id")
+
+    effect = dataclasses.replace(
+        rp.RECORD_MUTATIONS["EntityMutated"].effect,
+        refused_ops={"levitate": "synthetic — a test owns this reason"})
+    patched = dataclasses.replace(rp.RECORD_MUTATIONS["EntityMutated"], effect=effect)
+    monkeypatch.setitem(rp.RECORD_MUTATIONS, "EntityMutated", patched)
+
     with pytest.raises(rp.RefusedJournalOperation) as excinfo:
         rp.mutations_for(
-            {"type": "PointsMerged", "ts": "T", "op": "merge", "keep_id": "p1",
-             "merge_ids": ["p2"]},
-            org_id="o", graph_id="g",
-        )
-    assert "REFUSED" in str(excinfo.value)
+            {"type": "EntityMutated", "ts": "T", "id": "o1", "label": "Object",
+             "op": "levitate", "state": {}},
+            org_id="o", graph_id="g")
+    assert "synthetic" in str(excinfo.value)
+
+
+def test_9881_the_semantic_layer_keys_on_id_and_the_reader_sees_the_forward_ddl():
+    """Indicator (3) on the Python side: the key column, and the DDL as read.
+
+    The schema half is pinned in `supabase/tests/` (the CHECK is rewritten and
+    two same-name ids persist); this leg pins that the PROJECTION agrees with it
+    — a projection keyed by `name` against a schema keyed by `id` writes a row
+    its own CHECK refuses, mid-transaction.
+    """
+    assert rp.NODE_TABLES["object"] == ("Object", "id")
+    assert rp.NODE_TABLES["subject"] == ("Subject", "id")
+    key_props = rp.key_properties()
+    assert key_props["Object"] == "id", key_props
+    assert key_props["Subject"] == "id", key_props
+    # The OTHER labels are untouched: this was a two-label key move, not a
+    # re-spelling of the whole contract.
+    assert key_props["Point"] == "id"
+    assert key_props["Event"] == "eventId"
+    assert key_props["Source"] == "url"
+    assert key_props["Session"] == "id"
+
+
+def test_points_merged_deletes_the_losers_and_leaves_the_survivor():
+    """#9892 — the merge's record mutation is the GRAPH fold's, and it fires.
+
+    The declared refusal this replaces (a) never fired for the only producer
+    (`api.py::merge_points` emits no `op`, so the record raised a generic "no
+    `op`" fold failure instead — the gap was misclassified, not declared), and
+    (b) described a mutation no code performs: `keep_id` is read nowhere in
+    `tortoise/` outside the record module, and the graph's `PointsMerged` arm is
+    one `DETACH DELETE` per `merge_ids` entry.
+
+    What the record must therefore emit per loser is the pair
+    `EntityMutated op=delete` emits — the `node_identity` parent (whose
+    composite FKs cascade the incident relation rows, the record's `DETACH`)
+    and then the node row.
+    """
+    statements = rp.mutations_for(
+        {"type": "PointsMerged", "ts": "T", "keep_id": "p1",
+         "merge_ids": ["p2", "p3"]},
+        org_id="o", graph_id="g",
+    )
+    assert len(statements) == 4, statements          # 2 per loser
+    assert statements[0].sql.startswith("DELETE FROM public.node_identity")
+    assert statements[1].sql.startswith("DELETE FROM public.point")
+    assert "p2" in statements[1].params
+    assert statements[2].sql.startswith("DELETE FROM public.node_identity")
+    assert statements[3].sql.startswith("DELETE FROM public.point")
+    assert "p3" in statements[3].params
+    # The survivor is NOT patched: no statement names it, so the record cannot
+    # invent a state the graph fold never writes.
+    assert not any("p1" in s.params for s in statements), statements
+    assert not any(s.sql.startswith("UPDATE") for s in statements), statements
+
+
+def test_points_merged_reads_the_nested_carrier_too():
+    """#325's nested shape is a SUPPORTED journal shape — the record too.
+
+    `_norm` splices `ev["point"]` over the envelope before the fold reads
+    `merge_ids`, and `tests/test_projection.py::test_falkor_apply_points_merged_
+    nested_format` pins that the graph deletes from it. A record that read only
+    the flat carrier would leave the loser in Postgres while the graph dropped
+    it — the two rebuild routes disagreeing, in silence.
+    """
+    flat = rp.mutations_for(
+        {"type": "PointsMerged", "ts": "T", "keep_id": "p1",
+         "merge_ids": ["p2"]}, org_id="o", graph_id="g")
+    nested = rp.mutations_for(
+        {"type": "PointsMerged", "ts": "T",
+         "point": {"keep_id": "p1", "merge_ids": ["p2"]}},
+        org_id="o", graph_id="g")
+    assert [s.params for s in flat] == [s.params for s in nested]
+    assert [s.sql for s in flat] == [s.sql for s in nested]
+
+
+def test_a_nested_carrier_wins_over_an_envelope_copy():
+    """`_norm` is `{**ev, **ev["point"]}` — the NESTED value wins.
+
+    A record read flat-first would delete by the envelope's `merge_ids` on a
+    journal whose `point` sub-dict says something else, while the graph deletes
+    by the nested one: two rebuilds, two different graphs, from one journal.
+    """
+    statements = rp.mutations_for(
+        {"type": "PointsMerged", "ts": "T",
+         "merge_ids": ["envelope-loser"],
+         "point": {"keep_id": "p1", "merge_ids": ["nested-loser"]}},
+        org_id="o", graph_id="g")
+    deleted = {s.params[-1] for s in statements
+               if s.sql.startswith("DELETE FROM public.point")}
+    assert deleted == {"nested-loser"}, deleted
+
+
+def test_points_merged_with_no_ids_is_the_folds_no_op():
+    """`merge_ids: []`/absent deletes nothing and does not raise.
+
+    The graph fold's arm is `for mid in ev.get("merge_ids") or []`, so an empty
+    merge is a 0-row no-op on both sides (`tests/test_projection.py` applies a
+    bare `{"type": "PointsMerged"}` and requires no error). A record that
+    refused it would fail a write the graph completes.
+    """
+    for record in ({"type": "PointsMerged", "ts": "T"},
+                   {"type": "PointsMerged", "ts": "T", "merge_ids": []},
+                   {"type": "PointsMerged", "ts": "T",
+                    "merge_ids": [None, 3]}):
+        assert rp.mutations_for(record, org_id="o", graph_id="g") == [], record
+
+
+def test_the_record_deletes_exactly_the_points_the_fold_removes():
+    """The parity pin, stated as the one question that matters.
+
+    Not "does the record emit a delete" — *does the record delete the same
+    points the graph fold's replay removes?* The graph side is
+    `projection.fold`, the in-memory fold every replay path is pinned against;
+    the record side is the key set its DELETE statements carry. A divergence
+    here is a record-sourced rebuild that resurrects a merged-away Point, which
+    is the data loss #9892 measured.
+    """
+    from tortoise.projection import fold
+
+    events = [
+        {"type": "PointAdded", "point": {"id": "a", "content": "A"}},
+        {"type": "PointAdded", "point": {"id": "b", "content": "B"}},
+        {"type": "PointAdded", "point": {"id": "c", "content": "C"}},
+        {"type": "PointsMerged", "keep_id": "a", "merge_ids": ["b", "c"]},
+    ]
+    surviving = set(fold(events))
+    merge = events[-1]
+    deleted = {
+        params[2]
+        for statement in rp.mutations_for(merge, org_id="o", graph_id="g")
+        for params in [statement.params]
+        if statement.sql.startswith("DELETE FROM public.point")
+    }
+    assert deleted == {"b", "c"}, deleted
+    assert surviving == {"a"}, surviving
+    assert surviving | deleted == {"a", "b", "c"}
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -300,9 +609,10 @@ def test_points_merged_is_refused_not_approximated():
 
 
 def _everything_records() -> list[dict[str, Any]]:
-    """One record per declared type — every type but the declared refusal
-    `PointsMerged`, which has its own leg — plus the `delete_only` leg of a
-    repoint. Five of the 30 carry `NoRecordEffect` (`EntityBindingRefused`,
+    """One record per declared type — every type the registry declares, since
+    #9892 removed the ONE that had no projecting leg (`PointsMerged`) — plus the
+    `delete_only` leg of a repoint. Five of the 30 carry `NoRecordEffect`
+    (`EntityBindingRefused`,
     `ConfidenceChanged`, `EdgeMessageChanged`, `IngestStarted`,
     `CalibrationRecorded`): their `mutations_for` is empty, which
     `test_each_declared_type_materializes_or_declares_a_no_effect` is the leg
@@ -614,20 +924,28 @@ _EXTRACTED_RECORD = {
 
 
 def test_a_document_source_row_derives_its_canonical_identity_too():
-    """DELIBERATE, PINNED divergence (#9553 review P2). Pin it, do not infer it.
+    """DELIBERATE, PINNED derive (#9553 review P2). Pin it, do not infer it.
 
     The record's `canonical_url` is a pure function of the row's own key, and it
-    is derived for EVERY `source` row — including a `DocumentCreated` one, whose
-    live fold (`_upsert_document`) writes no `canonicalUrl` at all. A restored
-    document `:Source` therefore carries a property live leaves unset until
-    something touches it: the record is richer, on one property, on that path.
+    is derived for EVERY `source` row — including a `DocumentCreated` one.
 
-    This is NOT fixed by scoping the derive to the types whose fold writes it,
-    because a variant `extractedFrom` ref resolving onto a DOCUMENT target is
-    exactly the silent provenance loss the resolver exists to prevent — and
-    `resolve_source_key`'s adopt-on-touch backfills the same value on the first
-    touch, so the two states converge on use. Both halves are asserted here so a
-    later "tidy-up" that narrows the derive has to delete a named decision.
+    #5140 finding 12 UPDATE: the live `_upsert_document` fold now writes
+    `canonicalUrl` as well (it adopts `resolve_source_key`), so this is no longer
+    a live-vs-record PROPERTY divergence. What remains is ROW-LEVEL: this layer
+    keys the row on the record's RAW id, so a URL-variant `DocumentCreated` plans
+    a second `public.source` row for the identity the graph folds onto ONE node.
+    Named on #5140 finding 12, not fixed here.
+
+    The derive is NOT narrowed to the record types OTHER than `DocumentCreated`
+    — the tempting reading now that the doc fold writes `canonicalUrl` itself —
+    because the records resolver can only match a variant `extractedFrom` ref
+    against the row's own `canonical_url` (`_relation_upsert_statement`'s
+    `tgt_match=("node_key", "canonical_url")`) and a document row without it
+    would silently drop that edge — exactly the silent provenance loss the
+    resolver exists to prevent. `resolve_source_key`'s adopt-on-touch backfills
+    the same value on the first touch, so the two states converge on use.
+    Asserted here so a later "tidy-up" that narrows the derive has to delete a
+    named decision.
     """
     document = {
         "type": "DocumentCreated", "ts": "2026-10-12T00:00:00Z",
@@ -1874,15 +2192,33 @@ def _producer_emit_vocabulary() -> set[str]:
     producers' half made executable, so a new `_emit_event("NewType", ...)`
     (or a new `_*_RECORD_TYPE = "NewType"` constant it is called with) reds the
     suite even before a fold arm or a torn-tail classification names it.
+
+    ⛔ THE CONSTANT MAP IS BUILT OVER THE WHOLE PACKAGE, NOT PER FILE, and that
+    is the difference between a census and a claim (PR #9862 review, P3). A
+    producer may DECLARE the constant in one module and CALL the emit in
+    another — #9555 does exactly that: `NARRATIVE_RECORD_TYPE = "SessionNarrated"`
+    lives in `record_projection.py` and the
+    `sdk._emit_event(NARRATIVE_RECORD_TYPE, ...)` call lives in `hosted_api.py`.
+    Two per-file scans pair the two halves in no file at all, so the type was
+    INVISIBLE here and a second carrier of that shape would be too. The emit
+    regex was already package-wide; the constant map now is as well.
     """
+    texts = {path: path.read_text(encoding="utf-8")
+             for path in sorted((REPO_ROOT / "tortoise").glob("*.py"))}
+
+    # Pass 1 — every `*_RECORD_TYPE` the package declares, as ONE vocabulary.
+    constants: dict[str, str] = {}
+    for text in texts.values():
+        for name, record_type in re.findall(
+                r'([A-Za-z_][A-Za-z0-9_]*_RECORD_TYPE)\s*=\s*"([A-Z][A-Za-z0-9_]*)"',
+                text):
+            constants[name] = record_type
+
+    # Pass 2 — every emit, resolved against that vocabulary.
     found: set[str] = set()
-    for path in sorted((REPO_ROOT / "tortoise").glob("*.py")):
-        text = path.read_text(encoding="utf-8")
+    for text in texts.values():
         found |= set(re.findall(
             r'(?:_emit_event|_emit)\(\s*"([A-Z][A-Za-z0-9_]*)"', text))
-        constants = dict(re.findall(
-            r'([A-Za-z_][A-Za-z0-9_]*_RECORD_TYPE)\s*=\s*"([A-Z][A-Za-z0-9_]*)"',
-            text))
         for name, record_type in constants.items():
             if re.search(r'(?:_emit_event|_emit)\(\s*' + re.escape(name) + r'\b',
                          text):
@@ -1896,6 +2232,15 @@ def test_every_type_a_producer_emits_has_a_record_mutation():
     # the types emitted only through a `_*_RECORD_TYPE` constant. A stale regex
     # would silently stop proving anything.
     assert {"EntityMutated", "BatchIdStamped"} <= emitted
+    # ⛔ THE CROSS-MODULE CONSTANT SHAPE, named so it cannot regress silently: the
+    # declaration and the emit live in two different files, which is precisely
+    # the case a per-file scan cannot see. Without this assertion the census is
+    # green over a producer it never found (PR #9862 review, P3).
+    assert rp.NARRATIVE_RECORD_TYPE in emitted, (
+        "`SessionNarrated` is declared in `record_projection.py` and emitted "
+        "in `hosted_api.py` — a per-file scan pairs the two halves in NO file, "
+        "so the census stopped seeing this producer (and would see none of "
+        "its shape)")
     assert len(emitted) >= 28, (
         f"the producer scan found only {len(emitted)} emit types — the regex "
         "went stale and this leg stopped proving anything"
@@ -3006,27 +3351,37 @@ def test_the_epistemic_label_order_is_the_folds_own():
 
 
 def test_the_input_endpoint_resolves_each_labels_canonical_key():
-    """`relation.src_key` is a `node_identity` FK: Subject/Object key on `name`.
+    """`relation.src_key` is a `node_identity` FK: the key is each label's own.
 
     Writing the raw journal id for a Subject would address a phantom identity
     the hard-delete cascade can never reach — the defect
     `_endpoint_resolution` exists to prevent.
+
+    ⚠️ The SELECTed key column is DERIVED from :data:`rp.NODE_TABLES` since
+    #9881, because it used to be spelled here as `"node_key" if label in
+    ("Point","Event") else "name"` — a second declaration of the key contract,
+    which the `Object`/`Subject` → `id` move made wrong (the resolver wrote the
+    row's NAME while `node_identity` held its `id`, and the FK refused every
+    operator edge over a Subject). The fragments below are therefore one rule per
+    label rather than two spellings.
     """
     sql = _relation_statements(_operator_added(
         {"op_type": "IMPL", "inputs": ["p1"]}))[0].sql
     for fragment in (
-        # Point: keyed on its own identity, matched on the SAME column.
-        "SELECT 'Point' AS node_label, node_key AS node_key, 0 AS pref "
+        # Point: keyed on `id` (== `node_key`, the schema's own pin), matched on
+        # `node_key` — the fold's `s.id` probe is `_ENTITY_MATCH_COLUMNS`' call.
+        "SELECT 'Point' AS node_label, id AS node_key, 0 AS pref "
         "FROM public.point WHERE org_id = %s AND graph_id = %s AND node_key = %s",
-        # Subject/Object: matched on the graph id, keyed on the canonical name.
-        "SELECT 'Subject' AS node_label, name AS node_key, 1 AS pref "
+        # Subject/Object: matched on the graph id, keyed on `id` too — the name
+        # is a mutable column since #9881, never an identity.
+        "SELECT 'Subject' AS node_label, id AS node_key, 1 AS pref "
         "FROM public.subject WHERE org_id = %s AND graph_id = %s AND id = %s",
-        "SELECT 'Object' AS node_label, name AS node_key, 2 AS pref "
+        "SELECT 'Object' AS node_label, id AS node_key, 2 AS pref "
         "FROM public.object WHERE org_id = %s AND graph_id = %s AND id = %s",
-        # Event: keyed on the `eventId` (node_key) and matched on the SAME
-        # column — `event.id` is nullable and the dominant producers leave it
-        # NULL (`test_the_event_endpoint_matches_a_column_the_record_fills`).
-        "SELECT 'Event' AS node_label, node_key AS node_key, 3 AS pref "
+        # Event: keyed on `event_id` and matched on the SAME column — `event.id`
+        # is nullable and the dominant producers leave it NULL
+        # (`test_the_event_endpoint_matches_a_column_the_record_fills`).
+        "SELECT 'Event' AS node_label, event_id AS node_key, 3 AS pref "
         "FROM public.event WHERE org_id = %s AND graph_id = %s AND node_key = %s",
         # First label wins; the whole probe is one derived table per endpoint.
         "ORDER BY pref LIMIT 1) src",

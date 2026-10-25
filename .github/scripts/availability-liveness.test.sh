@@ -393,6 +393,18 @@ run_checker
 assert_eq "$RC" "1" "16: a failed alert search → exit 1 (refuses to create or resolve)"
 assert_eq "$(count_calls 'GH POST')" "0" "16: …does NOT duplicate-file the alert on an unreadable search"
 assert_eq "$(count_calls 'GH PATCH')" "0" "16: …and does NOT close anything on a bad read"
+# #9018: the faillure must carry the TOOL's own words, and the arm must match the
+# `__ERR__|<reason>` sentinel. This is the pin for the P0 that shipped when only
+# the heartbeat arm was taught the new shape: with a literal `__ERR__)` match the
+# error string fell through as if it were an issue number, and the run PATCHed
+# `issues/__ERR__|gh: …`.
+assert_contains "$OUT" "reason:" "16: …and the failure names its reason (#9018)"
+assert_contains "$OUT" "gh: alert search failed" "16: …the reason is what gh itself said"
+# (The sentinel's OTHER guarantee — that it is never used as an issue number — is
+# pinned where it can actually fail: case 30's non-numeric number, which is the
+# only reachable path that could hand `__ERR__|…` to a PATCH. An assertion here
+# would be a byte-identical duplicate of the `GH PATCH` == 0 line above, and would
+# pass on the pre-fix tree: a count that overstates what is pinned.)
 
 # 17. missing GH_TOKEN → fail before any gh call.
 reset_case
@@ -572,6 +584,14 @@ export STUB_WF_CREATED_AT="$WF_RECENT"
 run_checker
 assert_eq "$RC" "1" "29: an unparseable heartbeat search → exit 1 (NOT downgraded to no-record)"
 assert_contains "$OUT" "heartbeat search failed" "29: …and names the search failure"
+# #9018 review: this arm hardcoded `search response was not parseable JSON` while
+# discarding jq's stderr, so a runner-side jq fault was reported as a GitHub/JSON
+# fault. The reason must be jq's OWN words — the same rule the gh arm follows.
+assert_contains "$OUT" "jq:" "29: …and carries jq's own words, not a guessed cause"
+assert_not_contains "$OUT" "was not parseable JSON" "29: …never the fabricated JSON-fault claim"
+# …and the speaker must not be `gh`: jq is what failed here ("gh said: jq: …" put the
+# wrong tool's name on the sentence — the attribution defect this PR exists to remove).
+assert_contains "$OUT" "— reason:" "29: …attributed with a neutral reason: prefix, not gh said:"
 assert_eq "$(count_calls 'GH POST')" "0" "29: …and files NO false page (the arm is an EXIT, not a fall-through)"
 
 # 30. a search result whose issue NUMBER is not numeric is a search failure, not
@@ -582,6 +602,8 @@ export STUB_ALERT_SEARCH_JSON="$(printf '{"items":[{"number":"abc","title":"%s",
 run_checker
 assert_eq "$RC" "1" "30: a non-numeric issue number → exit 1 (never adopted as the open alert)"
 assert_contains "$OUT" "liveness-alert search failed" "30: …and refuses to file or resolve"
+assert_not_contains "$OUT" "__ERR__" "30: …and the RAW sentinel never reaches the reader (#9018)"
+assert_contains "$OUT" "non-numeric" "30: …the reason names what was wrong, not just that it failed"
 assert_eq "$(count_calls 'GH PATCH')" "0" "30: …so nothing is closed on a garbage number"
 
 # 31. a heartbeat body that does not PARSE → unreadable (the jq arm of

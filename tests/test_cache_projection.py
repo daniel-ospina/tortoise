@@ -111,7 +111,7 @@ def _view():
     nodes = [
         _node("Point", {"id": "p-1", "content": "c", "is_operator": False,
                         "point_kind": "claim", "props": {"openSetProp": 1}}),
-        _node("Object", {"name": "acme", "props": {}}),
+        _node("Object", {"id": "acme", "name": "acme", "props": {}}),
     ]
     rels = [cp.RecordRelation(
         rel_type="aboutObject", src_label="Point", src_key="p-1",
@@ -196,7 +196,8 @@ def test_a_derived_name_in_the_props_tail_is_refused():
     with pytest.raises(cp.CacheProjectionError):
         _node("Point", {"id": "p-1", "props": {"confidence": 0.9}})
     with pytest.raises(cp.CacheProjectionError):
-        _node("Object", {"name": "acme", "props": {"embedding": [0.1]}})
+        _node("Object", {"id": "acme", "name": "acme",
+                          "props": {"embedding": [0.1]}})
 
 
 def test_a_derived_column_on_a_record_row_projects_nothing():
@@ -319,22 +320,39 @@ def test_the_placement_tables_ambiguities_are_exactly_the_five_declared():
 
 
 def test_key_properties_are_the_interface_e_contract_read_from_the_ddl():
-    """Read from `node_identity`'s generated CASE, never restated here."""
+    """Read from `node_identity`'s generated CASE, never restated here.
+
+    ⚠️ The CASE is declared TWICE on disk: the CREATE TABLE in
+    `20261012000001` and the forward re-declaration in `20261027000001` (#9881
+    moved `Object`/`Subject` from `name` to `id`). The reader walks every record
+    migration and takes the LAST declaration, so the map below is the POST-move
+    contract — the one the database enforces. A reader pinned to the original
+    file reported `name` while the live schema required `id`.
+    """
     expected = {
         "Point": "id",
         "Event": "eventId",
-        "Subject": "name",
-        "Object": "name",
+        "Subject": "id",
+        "Object": "id",
         "Source": "url",
         "Session": "id",
     }
     assert expected == cp.KEY_PROPERTY
-    sql = (MIGRATIONS / "20261012000001_record_event_stream.sql").read_text()
-    assert "key_property" in sql, "the DDL moved — re-read the parser"
+    for name in ("20261012000001_record_event_stream.sql",
+                 "20261027000001_record_semantic_id_key.sql"):
+        sql = (MIGRATIONS / name).read_text()
+        assert "key_property" in sql, "the DDL moved — re-read the parser"
+    # The pre-move declaration is still ON DISK (append-only history) and the
+    # reader must NOT be reading it: this is the half that would silently revert
+    # the key if the parser went back to one file.
+    original = (MIGRATIONS / "20261012000001_record_event_stream.sql").read_text()
+    assert "WHEN 'Object'  THEN 'name'" in original
 
 
 def test_a_node_key_is_the_labels_contract_key():
-    assert _node("Subject", {"name": "acme"}).key == "acme"
+    # #9881: `Object`/`Subject` key on the stable `id`; the name is a mutable
+    # natural key, so it can no longer BE the key.
+    assert _node("Subject", {"id": "acme", "name": "acme"}).key == "acme"
     assert _node("Point", {"id": "1a-1"}).key == "1a-1"
     assert _node("Source", {"url": "https://x"}).key == "https://x"
     assert _node("Event", {"event_id": "ev-1"}).key == "ev-1"
@@ -344,7 +362,7 @@ def test_a_node_key_is_the_labels_contract_key():
 
 def test_the_key_property_is_projected_as_a_property_too():
     """`id`/`name`/`url` are PRIMARY properties, not only MERGE coordinates."""
-    assert _node("Subject", {"name": "acme"}).props["name"] == "acme"
+    assert _node("Subject", {"id": "acme", "name": "acme"}).props["name"] == "acme"
     assert _node("Source", {"url": "https://x"}).props["url"] == "https://x"
 
 
@@ -385,11 +403,13 @@ def test_a_record_row_silent_about_the_kind_gets_the_folds_own_default():
     no tail key), so the cache must fall back to the fold's own `ON CREATE`
     constant rather than materializing the node with the property MISSING.
     """
-    subject = _node("Subject", {"name": "Probe", "subject_kind": None})
+    subject = _node("Subject", {"id": "Probe", "name": "Probe",
+                                "subject_kind": None})
     assert subject.props["subjectKind"] == "other", (
         "a record-sourced :Subject lost the discriminator the live fold writes"
     )
-    obj = _node("Object", {"name": "acme", "object_kind": None, "title": None})
+    obj = _node("Object", {"id": "acme", "name": "acme",
+                           "object_kind": None, "title": None})
     assert obj.props["objectKind"] == "other"
     assert obj.props["title"] == ""
 
@@ -490,13 +510,15 @@ def test_the_subject_null_case_is_fold_parity_and_the_param_carries_no_default()
 
 def test_a_named_kind_and_a_tail_kind_are_never_overwritten_by_the_default():
     """The default is a FALLBACK, not a write — a named kind wins, wherever it rode."""
-    named = _node("Subject", {"name": "Probe", "subject_kind": "team"})
+    named = _node("Subject", {"id": "Probe", "name": "Probe",
+                             "subject_kind": "team"})
     assert named.props["subjectKind"] == "team"
     # A tail value outranks the fallback. ⚠️ The FOLD does not read a tail
     # `subjectKind` (it is in `_SUBJECT_HANDLED`, so `_persist_extra_props` skips
     # it), so this ordering is the LOADER's contract, not a parity claim: the
     # loader must never replace something the record said with a fallback.
-    from_tail = _node("Subject", {"name": "Probe", "subject_kind": None,
+    from_tail = _node("Subject", {"id": "Probe", "name": "Probe",
+                                  "subject_kind": None,
                                   "props": {"subjectKind": "role"}})
     assert from_tail.props["subjectKind"] == "role"
     # A tail NULL takes the fallback too — and since #9572 that IS fold parity:
@@ -505,11 +527,12 @@ def test_a_named_kind_and_a_tail_kind_are_never_overwritten_by_the_default():
     # silence means the same thing on both sides of the cache. Declared at
     # `cache_projection.FOLD_ON_CREATE_DEFAULTS`, and pinned by
     # `test_the_subject_null_case_is_fold_parity_and_the_param_carries_no_default`.
-    null_tail = _node("Subject", {"name": "Probe", "subject_kind": None,
+    null_tail = _node("Subject", {"id": "Probe", "name": "Probe",
+                                  "subject_kind": None,
                                   "props": {"subjectKind": None}})
     assert null_tail.props["subjectKind"] == "other"
-    named_obj = _node("Object", {"name": "acme", "object_kind": "org",
-                                 "title": "Acme"})
+    named_obj = _node("Object", {"id": "acme", "name": "acme",
+                                 "object_kind": "org", "title": "Acme"})
     assert (named_obj.props["objectKind"], named_obj.props["title"]) == (
         "org", "Acme")
 
@@ -620,14 +643,17 @@ def test_the_materializer_issues_no_cache_read():
 def test_relation_endpoints_resolve_by_label_and_key_not_by_a_bare_id():
     """Interface E's rule, at the edge: a rebuilt edge binds by `(label, key)`.
 
-    A resolver that matched `{id: $key}` would bind a `:Subject` by an opaque
-    graph id and resolve to nothing on a rebuild (`#2489`/`#5086`).
+    Since #9881 a `:Subject`'s contract key IS its `id` (the name became a
+    mutable natural key), so the rebound edge binds `Subject{id: …}` — and the
+    `relation` row's `tgt_key` holds that id, not the name. The rule this pins
+    is unchanged: the binding is the label's DECLARED key column, never a bare
+    `{id: $key}` guess (`#2489`/`#5086`); what moved is which column that is.
     """
     rel = cp.RecordRelation(
         rel_type="aboutSubject", src_label="Point", src_key="p-1",
         tgt_label="Subject", tgt_key="acme", idx=0, props={})
     compact = cp.relation_statement(rel).cypher.replace(" ", "")
-    assert "tgt:Subject{name:$tgt_key}" in compact, compact
+    assert "tgt:Subject{id:$tgt_key}" in compact, compact
     assert "src:Point{id:$src_key}" in compact, compact
 
 
@@ -953,7 +979,7 @@ def test_read_record_view_keys_by_the_contract_key():
     conn = _FakeConn({
         "point": [{"id": "p-1", "content": "c", "props": {}},
                   {"id": "p-2", "content": "d", "props": {}}],
-        "object": [{"name": "acme", "props": {}}],
+        "object": [{"id": "acme", "name": "acme", "props": {}}],
         "relation": [{"rel_type": "aboutObject", "src_label": "Point",
                       "src_key": "p-1", "tgt_label": "Object",
                       "tgt_key": "acme", "idx": 0, "props": {}}],

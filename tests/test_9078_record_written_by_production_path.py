@@ -248,6 +248,17 @@ RECORD_REAPPLY_STEPS: list[tuple[Path, str | None]] = [
     # that arms every relation the entries above reach.
     (REPO_ROOT / "supabase" / "migrations"
      / "20261025000001_record_tenancy_role_and_guc.sql", None),
+    # #9881's key move — a RE-SHAPE of a landed table, which is why it needs an
+    # entry rather than the CREATE-exists shortcut: a container migrated before
+    # it keeps `node_key = name` and a `key_property` of `name` on Object/
+    # Subject, while `key_properties()` reads the FILES and binds `id`. The
+    # armed write would then emit a rename/collision against the old pin and be
+    # refused by a CHECK the file says no longer exists. Re-apply safe by
+    # construction: every step is conditional (`ON CONFLICT DO NOTHING`, the
+    # re-key UPDATEs scoped to `node_key <> id`, `DROP … IF EXISTS` + `ADD` on
+    # the constraints, `DROP COLUMN IF EXISTS` on the generated column).
+    (REPO_ROOT / "supabase" / "migrations"
+     / "20261027000001_record_semantic_id_key.sql", None),
 ]
 
 #: Record migrations that ship AFTER the base shape yet are deliberately NOT in
@@ -281,6 +292,15 @@ RECORD_REAPPLY_EXCLUDED: dict[str, str] = {
         "base shape — created by the release that creates `journal_event`",
     "20261012000005_record_org_purge_rpc.sql":
         "base shape — created by the release that creates `journal_event`",
+    # #9555/R7: `COMMENT ON` only. It contributes NO column, no refusal and no
+    # policy, and every schema reader in this tree parses the migration FILES
+    # (`table_columns()`, `refused_props_names()`, `RECORD_MUTATIONS`), so a
+    # container that never applies it reads IDENTICALLY. Re-applying it would add
+    # a step to the reapply list for a migration that cannot change what the tests
+    # measure — an exclusion with a stated reason is the honest classification,
+    # and this dict is where the decision is recorded rather than left silent.
+    "20261024000001_record_session_narrative_carrier.sql":
+        "COMMENT ON only — no column, refusal or policy, and the readers parse files",
 }
 
 #: The minimum Supabase-shaped substrate the record migrations need: the three
@@ -2068,10 +2088,17 @@ def test_the_public_capture_path_writes_the_record(capture_sdk, monkeypatch,
       `public.record_event_stream`). The row is keyed on the ordinal
       `EventLog.append` reported (#9190), so the live write and a later replay
       give one record one number;
-    * **semantic** — `object` / `subject`, asserted against the objects the
-      capture actually emitted (counted from the journal, so the claim is
-      non-vacuous either way: a capture that emits no Object record must produce
-      no Object row);
+    * **semantic** — `object` only, asserted against the objects the capture
+      actually emitted (counted from the journal, so the claim is non-vacuous
+      either way: a capture that emits no Object record must produce no Object
+      row). The layer's **Subject** half is a SEPARATE leg below: this sentence
+      used to claim `subject` here, which was never true of this leg, and this
+      file's capture lane is its deterministic `TORTOISE_SESSION_LLM_MOCK`
+      payload, whose one entity classifies as an Object (`core:strategy`) — so
+      a `subject` assertion against THIS capture would be vacuous (#9893). A
+      capture CAN emit `SubjectAdded` (the v2 lane routes any payload entity of
+      a declared Subject kind to `create_entity("subject", …)`); it is this
+      lane's payload, not the product, that produces none.
     * **procedural** — a VIEW, never a table ("the procedural layer owns no
       table", migration 4): `object_current_status` folds the `object` rows.
 
@@ -2208,6 +2235,160 @@ def test_the_public_capture_path_writes_the_epistemic_layer(capture_sdk,
         _capture(capture_sdk, monkeypatch, tenant)
         assert _count(conn, "point", tenant) >= 1, (
             "the epistemic layer received no row from the capture")
+    finally:
+        conn.close()
+
+
+def test_the_public_subject_door_writes_the_semantic_layers_subject_half(
+        capture_sdk, monkeypatch, tenant):
+    """#9893 — `subject` receives a row from the PUBLIC door, not a probe.
+
+    The epic's acceptance names **Subjects** alongside Objects, and the semantic
+    layer's Subject half had no end-to-end leg at all: the only end-to-end
+    record test asserted `object`, and this file's capture lane emits no
+    Subject-classified entity, so the half could not be covered from the
+    capture leg (#9893 measured `subject | 0` after the whole file ran against
+    a real `postgres:16`).
+
+    This is the exact mirror of the `object` assertion above, and the mirror is
+    the point: `assert subjects` FIRST and unconditionally, because without it
+    `0 >= 0` is satisfiable by a door that journaled nothing — the pre-fix world
+    reading as a pass. Then the row count must cover the records the journal
+    actually carried.
+
+    The FALSIFIER was observed red, and the SHAPE matters — three edits, three
+    different reds. Only the FIRST is measured; the other two are derived from
+    the code and are stated as such rather than claimed as runs:
+
+    * MEASURED — replacing `RECORD_MUTATIONS["SubjectAdded"]` with a
+      `NoRecordEffect` reds at the COUNT ("the record holds 0 Subject row(s)
+      for the 1 SubjectAdded record(s)") — this is the form the PR recorded;
+    * DERIVED — deleting the key alone reaches no assertion at all:
+      `record_projection` asserts `set(RECORD_MUTATIONS) ==
+      set(JOURNAL_EVENT_TYPES)` at import, so the whole module fails at
+      COLLECTION. Only a two-edit deletion (both the dict and the type set)
+      surfaces as `UnknownJournalRecordType`, counted as `write_failed`, and
+      reds at the `lost == 0` delta below;
+    * BY CONSTRUCTION — a producer that journals nothing leaves NO journal file
+      (the SDK creates `event_log_path` lazily), so the `journal_path.exists()`
+      guard reads that as an empty record list and `assert subjects` fires with
+      `journal types: []`.
+
+    None of the three skips. Recorded in the PR body.
+    """
+    conn = _record_db()
+    try:
+        _ensure_record_schema(conn)
+        _seed_tenant(conn, tenant)
+        # The WRITER connects as the app role, exactly as `_capture` does; the
+        # superuser handle stays with the seeding/assertion connection.
+        monkeypatch.setenv(record_writer.RECORD_DSN_ENV,
+                           _app_role_dsn(os.environ[RECORD_DB_ENV]))
+        sdk, journal_path = capture_sdk()
+        before = dict(monitoring.record_write_failure_counts())
+        with use_record_tenant(*tenant):
+            created = sdk.create_subject("Acme Corp",
+                                         subjectKind="organization")
+        lost = (monitoring.record_write_failure_counts().get("write_failed", 0)
+                - before.get("write_failed", 0))
+
+        # The door returns a FLAT node (`_flat_entity_result`), so assert the
+        # key the message names — a bare truthiness check would pass on a node
+        # carrying no identity at all.
+        assert created.get("id"), (
+            f"the public subject door returned no id: {created!r}")
+        assert lost == 0, (
+            "the subject door's record write failed — `SubjectAdded` is a "
+            "declared `NodeSnapshot` on `subject`, so the row must land")
+
+        # The SDK creates the journal LAZILY, so a producer that journals
+        # nothing leaves no file at all; read that as an empty record list so
+        # the non-vacuity guard below is the thing that fires with a readable
+        # diagnostic, instead of `_journal_records` raising FileNotFoundError.
+        records = (_journal_records(journal_path)
+                   if journal_path.exists() else [])
+        subjects = [r for r in records if r.get("type") == "SubjectAdded"]
+        assert subjects, (
+            "the public subject door emitted no SubjectAdded record, so the "
+            f"semantic-layer Subject claim would be vacuous — journal types: "
+            f"{sorted({r.get('type') for r in records})}")
+        rows = _count(conn, "subject", tenant)
+        assert rows >= len(subjects), (
+            f"the record holds {rows} Subject row(s) for the "
+            f"{len(subjects)} SubjectAdded record(s) the journal carried")
+    finally:
+        conn.close()
+
+
+def test_a_merge_through_its_producer_leaves_the_losers_out_of_the_record(
+        monkeypatch, tenant, tmp_path):
+    """#9892 — `PointsMerged` projects, and the record stops resurrecting a merge.
+
+    The merge had exactly ONE producer (`tortoise/api.py::merge_points`), which
+    emits no `op`, while the registry declared the type as an `OpDispatch`
+    refusal keyed on `op: "merge"`. So on the live door the refusal never
+    fired for the real payload: the write failed generically, counted
+    `write_failed`, and left BOTH Points in `public.point` — a record-sourced
+    rebuild then resurrected the merged-away Point AND its edges (measured:
+    the record view held 3 points / 4 relations against the journal replay's
+    2 / 2).
+
+    Three claims, and the last one is the one that made the defect durable:
+    the merge's own `journal_event` POSITION row lands too, so a later replay
+    can see the record was consumed.
+    """
+    from tortoise.api import EventAPI, provenance
+    from tortoise.log import EventLog
+
+    conn = _record_db()
+    try:
+        _ensure_record_schema(conn)
+        _seed_tenant(conn, tenant)
+        monkeypatch.setenv(record_writer.RECORD_DSN_ENV,
+                           _app_role_dsn(os.environ[RECORD_DB_ENV]))
+        log_path = tmp_path / "merge-journal.jsonl"
+        api = EventAPI(EventLog(str(log_path)), initiated_by="extractor",
+                       agent_id="merge-leg")
+        prov = provenance("doc.txt", [0, 10], "quote", extracted_by="leg@0")
+
+        before = dict(monitoring.record_write_failure_counts())
+        with use_record_tenant(*tenant):
+            keep = api.add_point("the first claim", prov)
+            loser = api.add_point("the second claim", prov)
+            api.add_operator("IMPL", [loser, keep], prov)
+            api.merge_points(keep_id=keep, merge_ids=[loser])
+        lost = (monitoring.record_write_failure_counts().get("write_failed", 0)
+                - before.get("write_failed", 0))
+
+        assert lost == 0, (
+            "the merge's record write failed — `PointsMerged` is declared to "
+            "project (one delete per `merge_ids` entry), so a failure here is "
+            "the refusal coming back")
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT node_key FROM public.point WHERE org_id=%s "
+                "AND graph_id=%s", tenant)
+            keys = {row[0] for row in cur.fetchall()}
+            cur.execute(
+                "SELECT count(*) FROM public.relation WHERE org_id=%s "
+                "AND graph_id=%s AND (src_key=%s OR tgt_key=%s)",
+                (*tenant, loser, loser))
+            loser_edges = int(cur.fetchone()[0])
+            cur.execute(
+                "SELECT count(*) FROM public.journal_event WHERE org_id=%s "
+                "AND graph_id=%s AND event_type='PointsMerged'", tenant)
+            merge_positions = int(cur.fetchone()[0])
+        assert keep in keys, "the survivor's row must stay"
+        assert loser not in keys, (
+            "the merged-away Point is still in the record — a record-sourced "
+            "rebuild would resurrect it")
+        assert loser_edges == 0, (
+            f"{loser_edges} relation row(s) still name the merged-away Point; "
+            "the graph's `DETACH DELETE` drops them, so the record's cascade "
+            "must too")
+        assert merge_positions == 1, (
+            "the merge consumed no `journal_event` position row — a replay "
+            "could not even see that the record was consumed")
     finally:
         conn.close()
 
@@ -3246,59 +3427,95 @@ def yaml_jobs():
 # fixture junit XML, so what is asserted is the exit code and the named problem
 # — the effect — rather than a word appearing somewhere in a YAML string.
 
-#: A green armed run: both legs ran, nothing skipped, nothing failed.
-_JUNIT_GREEN = """<testsuites><testsuite name="pytest" tests="2" failures="0" \
+#: A green armed run: legs from BOTH files this job runs, nothing skipped,
+#: nothing failed. ⛔ The classnames are the real MODULES (not `tests.test_9078`),
+#: because the gate attributes an armed leg to its FILE and requires one from each
+#: — a fixture whose classnames collapse to one module would certify a run the
+#: gate exists to refuse (PR #9862 review round 3).
+_JUNIT_GREEN = """<testsuites><testsuite name="pytest" tests="3" failures="0" \
  errors="0" skipped="0">
-  <testcase classname="tests.test_9078" 
+  <testcase classname="tests.test_9078_record_written_by_production_path" \
             name="test_the_public_capture_path_writes_the_record"/>
-  <testcase classname="tests.test_9078"
+  <testcase classname="tests.test_9078_record_written_by_production_path" \
             name="test_the_public_capture_path_writes_the_epistemic_layer"/>
+  <testcase classname="tests.test_9555_narrative_carrier" \
+            name="test_the_public_capture_path_lands_the_narrative_in_the_record"/>
 </testsuite></testsuites>"""
 
-#: The defect #9551 exists for: the DSN (or the driver) did not arm, so BOTH
-#: legs skipped and pytest exited 0 — a run that certified nothing.
-_JUNIT_REAL_SKIP = """<testsuites><testsuite name="pytest" tests="2" failures="0" \
+#: ⛔ THE HOLE a flat leg count cannot see: three armed legs, ALL from one file.
+#: `armed = 3 >= 2` certified this; one-armed-leg-per-file does not. This is the
+#: shape PR #9862 produced by adding a second file to the job.
+_JUNIT_ONE_FILE = """<testsuites><testsuite name="pytest" tests="3" failures="0" \
+ errors="0" skipped="0">
+  <testcase classname="tests.test_9555_narrative_carrier" \
+            name="test_the_public_capture_path_lands_the_narrative_in_the_record"/>
+  <testcase classname="tests.test_9555_narrative_carrier" \
+            name="test_the_public_capture_path_serves_S9_4_text_by_SOURCE_URL"/>
+  <testcase classname="tests.test_9555_narrative_carrier" \
+            name="test_the_public_capture_path_serves_S9_4_text_through_the_VERB"/>
+</testsuite></testsuites>"""
+
+#: The defect #9551 exists for: the DSN (or the driver) did not arm, so the arms
+#: SKIPPED and pytest exited 0 — a run that certified nothing. One green leg from
+#: the OTHER file keeps the per-file rule satisfied, so the ONLY problem this
+#: fixture can produce is the skip itself.
+_JUNIT_REAL_SKIP = """<testsuites><testsuite name="pytest" tests="3" failures="0" \
  errors="0" skipped="2">
-  <testcase classname="tests.test_9078"
+  <testcase classname="tests.test_9078_record_written_by_production_path"
             name="test_the_public_capture_path_writes_the_record">
     <skipped type="pytest.skip" message="no record DSN">test_x.py:1711: skip</skipped>
   </testcase>
-  <testcase classname="tests.test_9078"
+  <testcase classname="tests.test_9078_record_written_by_production_path"
             name="test_the_public_capture_path_writes_the_epistemic_layer">
     <skipped type="pytest.skip" message="no record DSN">test_x.py:1711: skip</skipped>
   </testcase>
+  <testcase classname="tests.test_9555_narrative_carrier"
+            name="test_the_public_capture_path_lands_the_narrative_in_the_record"/>
 </testsuite></testsuites>"""
 
 #: A strict xfail of one armed leg (the engine-dependency pin). It is recorded
 #: as `type="pytest.xfail"` AND counted in the suite's `skipped` attribute, so a
 #: gate that read the attribute would red this required job for a database that
 #: armed perfectly.
-_JUNIT_XFAIL = """<testsuites><testsuite name="pytest" tests="2" failures="0" \
+_JUNIT_XFAIL = """<testsuites><testsuite name="pytest" tests="3" failures="0" \
  errors="0" skipped="1">
-  <testcase classname="tests.test_9078"
+  <testcase classname="tests.test_9078_record_written_by_production_path"
             name="test_the_public_capture_path_writes_the_record"/>
-  <testcase classname="tests.test_9078"
+  <testcase classname="tests.test_9078_record_written_by_production_path"
             name="test_the_public_capture_path_writes_the_epistemic_layer">
     <skipped type="pytest.xfail" message="the fold refuses captured Points"/>
   </testcase>
+  <testcase classname="tests.test_9555_narrative_carrier"
+            name="test_the_public_capture_path_lands_the_narrative_in_the_record"/>
 </testsuite></testsuites>"""
 
 #: One leg deselected out of the run — the Postgres proof never happened.
 _JUNIT_DESELECTED = """<testsuites><testsuite name="pytest" tests="1" \
  failures="0" errors="0" skipped="0">
-  <testcase classname="tests.test_9078"
+  <testcase classname="tests.test_9078_record_written_by_production_path"
             name="test_the_public_capture_path_writes_the_record"/>
 </testsuite></testsuites>"""
 
-#: A red leg (the ordinary failing case).
-_JUNIT_FAILED = """<testsuites><testsuite name="pytest" tests="2" failures="1" \
+#: ⛔ Two files — but not the two this job arms. A gate that counted DISTINCT
+#: files (`len(armed_files) >= 2`) would certify this; requiring the SET does not
+#: (PR #9862 review round 4). The third module is a real one from another lane.
+_JUNIT_WRONG_FILES = """<testsuites><testsuite name="pytest" tests="2" failures="0" \
  errors="0" skipped="0">
-  <testcase classname="tests.test_9078"
+  <testcase classname="tests.test_9078_record_written_by_production_path"
+            name="test_the_public_capture_path_writes_the_record"/>
+  <testcase classname="tests.test_9664_capstone"
+            name="test_the_public_capture_path_lands_the_narrative_in_the_record"/>
+</testsuite></testsuites>"""
+
+#: A red leg (the ordinary failing case).
+_JUNIT_FAILED = """<testsuites><testsuite name="pytest" tests="3" failures="1" \
+ errors="0" skipped="0">
+  <testcase classname="tests.test_9078_record_written_by_production_path"
             name="test_the_public_capture_path_writes_the_record">
     <failure message="AssertionError">boom</failure>
   </testcase>
-  <testcase classname="tests.test_9078"
-            name="test_the_public_capture_path_writes_the_epistemic_layer"/>
+  <testcase classname="tests.test_9555_narrative_carrier"
+            name="test_the_public_capture_path_lands_the_narrative_in_the_record"/>
 </testsuite></testsuites>"""
 
 #: pytest collected nothing (a bad `-k`, a broken module): nothing certified.
@@ -3336,8 +3553,42 @@ def test_the_arm_gate_reds_on_a_real_skip_and_names_it(tmp_path):
     assert _gate_errors(result) == [
         "::error::2 leg(s) SKIPPED — the record database did not arm, or the "
         "driver is missing (#9551)"], _gate_errors(result)
-    assert "skipped=2" in result.stdout and "armed_capture_legs=2" in result.stdout, (
+    assert "skipped=2" in result.stdout and "armed_capture_legs=3" in result.stdout, (
         "the gate must report the counts it decided on, not just its verdict")
+
+
+def test_the_arm_gate_reds_when_only_ONE_FILE_contributed_legs(tmp_path):
+    """⛔ The hole a flat leg count cannot see (PR #9862 review round 3).
+
+    The job now runs two files. `MIN_ARMED_LEGS = 2` was satisfied by three legs
+    from ONE file, so both of the four-layer proof's legs could be deselected and
+    the gate would still certify the run — a silent reopening of #9551's exact
+    defect, reachable by editing only the pytest argument list. The fixtures use
+    the real module classnames, so `from_files` is the discriminating number.
+    """
+    result = _run_leg_gate(tmp_path, _JUNIT_ONE_FILE)
+    assert result.returncode == 1, (
+        "the gate certified a run in which a whole FILE's armed legs never ran:\n"
+        f"{result.stdout}")
+    errors = _gate_errors(result)
+    assert any("no armed capture leg ran from "
+               "test_9078_record_written_by_production_path" in line
+               for line in errors), errors
+    assert "from_files=1" in result.stdout, result.stdout
+
+
+def test_the_arm_gate_reds_when_the_WRONG_two_files_contributed(tmp_path):
+    """A distinct-file COUNT is the same defect one level down (round 4).
+
+    `len(armed_files) >= 2` is satisfied by any two modules. The requirement is
+    the SET this job arms, so a run whose second file is some other suite's is a
+    certificate for nothing — the carrier's legs never executed.
+    """
+    result = _run_leg_gate(tmp_path, _JUNIT_WRONG_FILES)
+    assert result.returncode == 1, result.stdout
+    errors = _gate_errors(result)
+    assert any("test_9555_narrative_carrier" in line for line in errors), errors
+    assert "from_files=2" in result.stdout, result.stdout
 
 
 def test_the_arm_gate_passes_a_green_armed_run(tmp_path):
@@ -3424,7 +3675,7 @@ def test_deleting_the_skip_clause_reds_the_arm_gate(tmp_path):
     """
     source = RECORD_LEG_GATE.read_text(encoding="utf-8")
     start = source.find("    if skipped:")
-    end = source.find("    if len(armed) < MIN_ARMED_LEGS:")
+    end = source.find("    missing_files = sorted(ARMED_LEG_FILES - set(armed_files))")
     assert start != -1 and end > start, (
         "the skip clause moved — re-point this mutation test at it instead of "
         "deleting the proof that the pin discriminates")
@@ -3459,10 +3710,18 @@ def test_the_arm_gate_is_a_file_the_job_calls_never_an_inline_heredoc():
         "the gate script exposes no `decide`/`main` — a module whose logic is "
         "unreachable cannot be tested against a fixture, which is the whole "
         "point of moving it out of the YAML")
-    assert module.MIN_ARMED_LEGS == 2, (
-        "the armed leg count moved — the job exists for exactly two legs, so "
-        "a third (or a second) needs the fixture set re-derived, not a number "
-        "retyped")
+    # ⛔ BY NAME, not by count: a flat leg count was satisfiable with a whole
+    # file's legs deselected, and a COUNT of distinct files is the same defect one
+    # level down (two files that are not these two would pass). The set is a
+    # property of the JOB's pytest argument list, so adding a third file there
+    # means re-deriving this, not retyping it.
+    assert frozenset({
+        "test_9078_record_written_by_production_path",
+        "test_9555_narrative_carrier",
+    }) == module.ARMED_LEG_FILES, (
+        "the armed FILE SET moved — the job arms the four-layer proof and R7's "
+        "narrative carrier, so a third file needs the fixtures re-derived rather "
+        "than the set retyped")
     _name, job = _record_ci_job()
     called = [str(step.get("run", "")) for step in (job.get("steps") or [])]
     assert any(RECORD_LEG_GATE.name in run for run in called), (

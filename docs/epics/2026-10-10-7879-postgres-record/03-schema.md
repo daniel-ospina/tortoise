@@ -113,7 +113,7 @@ All three are `security_invoker = true`, so the caller's RLS applies at the seam
 
 ## 2. The `(label, key)` foreign key
 
-W1 fixes the key **by label** — `:Point → id`, `:Event → eventId`, `:Subject`/`:Object → name`, `:Source → url` — and states the rule that follows: **a foreign key is `(label, key)`, never a bare id**, because the same string used as a `:Subject` and as a `:Source` is two different nodes.
+W1 fixes the key **by label** — `:Point → id`, `:Event → eventId`, `:Subject`/`:Object → id` (since #9881 — `name` is a mutable natural key), `:Source → url` — and states the rule that follows: **a foreign key is `(label, key)`, never a bare id**, because the same string used as a `:Subject` and as a `:Source` is two different nodes.
 
 Three enforcements, and each closes a different hole:
 

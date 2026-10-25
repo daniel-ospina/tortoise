@@ -486,7 +486,9 @@ node TOPOLOGY (two addresses for one document), not merely the edge.
 
 **`documentKind` is not `sourceKind`.** `sourceKind` answers *what kind of source this is* (`document`, `conversation`, `github_issue`, `agentSession` — the full vocabulary is in §5); `documentKind` answers *what genre of document it is*. Different questions — **neither absorbs the other**.
 
-**Liveness is a read, not a field.** *"Is this source still good?"* is answered from the entities extracted from it — high confidence, not superseded, not under a `NAND`. **The source inherits its health from its contents**, so nothing is stored to keep in sync and nothing can drift from the graph it describes. There is no `doc_status`.
+**Liveness is a read, not a field.** *"Is this source still good?"* is answered from the entities extracted from it — high confidence, not superseded, not under a `NAND`. **The source inherits its health from its contents**, so nothing is stored to keep in sync and nothing can drift from the graph it describes.
+
+**`doc_status` is RETIRED, not absent — a surviving one is READ, and `captured`/`extracted` outrank `needs_extraction`.** D10 removed the field from the write path: the post-D10 fold never sets it, and completion **REMOVEs** it (`SET s.needs_extraction = false REMOVE s.doc_status`), so a node this product writes today carries none. Retiring a field does not delete the data already on disk, so **both extraction readers honour a `doc_status` they find**, in this order: `captured` ⇒ pending (even beside the pre-D10 writer's boilerplate `needs_extraction: false`); `extracted` ⇒ done (even beside a stale `needs_extraction: true`); an explicit `needs_extraction: true` ⇒ pending (read *before* the generic retired-value arm, so a `draft` node carrying it is still discovered); any other retired value (`draft`) ⇒ pending for `--upgrade` **only** — `--upgrade-all` does not select it and `--include-unstamped` does not change that, since that flag widens only the *no-property* arm. With no `doc_status` and no `needs_extraction`, an **ABSENT** value is "no claim", never "done". So read absence of `doc_status` as *nothing retired to honour*, never as *the strongest possible signal* — that inversion is exactly the defect #5140 fixed.
 
 **Currency is also a read, and it needs an anchor.** Whether the extracted Points are *about the current content* is decided by the **version recorded on the extraction link** against the source's current version (§4.6) — not by any stored flag.
 
@@ -574,7 +576,7 @@ suppresses operator promotion exactly as a draft Point does.
 | `eventId` | string | — | — | The Event that ingested this source — the 1-hop audit hop to the mechanism snapshot (§3.5) |
 | `story_arc` | string | — | — | Arc continuation, for a source captured as part of a longer session narrative |
 | `sourcePath` | string | — | — | Filesystem path, for locally-ingested sources |
-| `needs_extraction` | bool | — | — | Explicit signal that this source is awaiting extraction (`--upgrade-all` discovery) |
+| `needs_extraction` | bool | — | — | Explicit signal that this source is awaiting extraction (`--upgrade-all` discovery) — read **after** `doc_status`'s `captured`/`extracted` arms but **before** the generic retired-value arm, so an explicit `true` is discovered even on a `draft` node, while `captured`/`extracted` outrank it (§4.4). `true` ⇒ pending, `false` ⇒ done, and an **absent** value means "no claim", not "done" (a document Source minted with no signal is selected only by `--upgrade` or by an explicit `--include-unstamped`) |
 | `_searchText` | string | — | — | Derived full-text index field (coalesce-on-create, overwrite-on-hash-change) |
 | `reliability` | float 0..1 | — | — | DERIVED query-time projection (mean of the modulated Beta prior) — documented cache, never authoritative (v3.2, #398) |
 | `reliabilityComponents` | JSON | — | — | Cache metadata: tier, decay, factor, assessment_count, derivation time (#398) |

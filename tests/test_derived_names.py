@@ -306,6 +306,20 @@ _ROUTED_FROM_URI_SITES: dict[str, list[str]] = {
         # per-test test-prefixed path via _live_uri(test_ingest125_<uuid>)
         r"from_uri\(\s*uri\s*\)",
     ],
+    # #5140: the same two shapes as test_ingest.py above — a module availability
+    # probe over the env URI (construct + close, no DETACH at import) plus the
+    # per-test helpers (`_reset` / `_read` / `_seed_document`). SAFETY IS NOT
+    # "the handle is declared": every `uri` these helpers receive is built by
+    # `_live_uri(f"test_5140_<kind>_{os.urandom(4).hex()}")`, a per-run
+    # test-prefixed graph, so `_reset()`'s `MATCH (n) DETACH DELETE n` can only
+    # clear this test's own graph and never the shared env-URI handle. The
+    # regex is deliberately narrow to the two call shapes that exist today so a
+    # new one reds instead, and `test_env_uri_assignment_uses_live_uri_helper`
+    # pins the `from_uri(uri)` shape against a raw-env `uri =` assignment.
+    "test_5140_pending_extraction.py": [
+        r"from_uri\(_probe_uri\)",
+        r"from_uri\(\s*uri\s*\)",
+    ],
     # CLI routing unit — from_uri is stubbed by the test (never connects)
     "test_pipeline_cli.py": [r"from_uri\("],
     # #3301: module live-FalkorDB availability probe over candidate URIs
@@ -441,20 +455,29 @@ def test_from_uri_sites_resolve_test_prefixed():
         + "\n".join(violations))
 
 
-def test_env_uri_assignment_uses_live_uri_helper():
-    """Review P2: the declared pattern `from_uri(uri)` for test_ingest is a
-    loose net — a NEW `uri = os.environ.get(\"TORTOISE_DB_URI\")` + a
-    no-graph_name from_uri(uri) in that file would match the declaration and
-    pass without being a per-test graph. Pin the invariant instead: every
-    `uri = os.environ...` assignment in test_ingest must route through
-    _live_uri (the per-test test-prefixed path helper)."""
+_ENV_URI_PIN_FILES = (
+    "test_ingest.py",
+    # #5140: declares the same `from_uri(uri)` / probe shapes above, so the
+    # same loose-net hazard applies and the same invariant must hold.
+    "test_5140_pending_extraction.py",
+)
+
+
+@pytest.mark.parametrize("fname", _ENV_URI_PIN_FILES)
+def test_env_uri_assignment_uses_live_uri_helper(fname):
+    """Review P2: the declared pattern `from_uri(uri)` is a loose net — a NEW
+    `uri = os.environ.get(\"TORTOISE_DB_URI\")` + a no-graph_name from_uri(uri)
+    in a declared file would match the declaration and pass without being a
+    per-test graph. Pin the invariant instead: every `uri = os.environ...`
+    assignment in a declared file must route through _live_uri (the per-test
+    test-prefixed path helper)."""
     import re as _re
-    src = (_TESTS_ROOT / "test_ingest.py").read_text(encoding="utf-8")
+    src = (_TESTS_ROOT / fname).read_text(encoding="utf-8")
     bad = [ln for ln, line in enumerate(src.split("\n"), 1)
            if _re.search(r"(?<!_)\buri\s*=\s*os\.environ\.get\(\s*[\"']TORTOISE_DB_URI",
                          line)]
     assert not bad, (
-        f"test_ingest: uri assignment from the raw env at L{bad} — must "
+        f"{fname}: uri assignment from the raw env at L{bad} — must "
         f"route through _live_uri(test_..._<uuid>) (cycle-5 P1-6 per-test "
         f"path; the env URI path is the shared job path)")
 

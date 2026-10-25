@@ -45,6 +45,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      # ── THE RUNNER TOOL CONTRACT (#9018) ──────────────────────────────
+      # `tools/ci_timing.py --pick-run` and the `gh api` calls below are the
+      # whole measurement. `runs-on: ubuntu-latest` normally means a hosted
+      # image WITH `gh`; the fallback pool carries the same label on a bare
+      # runner whose service PATH has none, and the run dies `exit 127`. A
+      # timing probe that cannot read a run must not look like a slow run.
+      - name: Runner tool contract — provide gh (#9018)
+        run: bash .github/scripts/runner-tools.sh ensure gh
       # tools/ci_timing.py carries the inline >=3.12 guard (#5128) — this pin is
       # what supplies the >=3.12 interpreter it needs.
       # PyYAML only: the durations bridge validates the refreshed manifest with
@@ -248,6 +256,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      # ── THE RUNNER TOOL CONTRACT (#9018) ──────────────────────────────
+      # The refresh PR is opened (and de-duplicated) with `gh pr list` /
+      # `gh pr create`. `runs-on: ubuntu-latest` normally means a hosted image
+      # WITH `gh`; the fallback pool carries the same label on a bare runner
+      # whose service PATH has none, where the run dies `exit 127` and reads as a
+      # refresh failure that never happened.
+      - name: Runner tool contract — provide gh (#9018)
+        run: bash .github/scripts/runner-tools.sh ensure gh
 
       - name: Download generated timing files
         uses: actions/download-artifact@v4

@@ -131,3 +131,10 @@ data/kind_index/*
 # the committed copy (and its conflicts) is gone. The MCP half
 # (`docs/product/mcp-rename-table.md`) is a separate, still-committed artifact.
 docs/product/sdk-rename-table.md
+
+# #9790: `tools/batch_review.py prepare` writes its cached diffs, manifest and
+# prompt to `.batch-review/` in the CWD (that is the documented invocation), and
+# nothing removed them — a stray artifact in a repo whose worktrees are shared
+# across lanes. Derived state: it is re-created by `prepare`, so it must never be
+# committed.
+.batch-review/

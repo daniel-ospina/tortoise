@@ -381,27 +381,22 @@ def _read_key_property() -> dict[str, str]:
 
     Read, never restated: a store that disagrees with the W1 contract cannot
     write the row at all, so the DDL is the contract's one home (#7955).
+
+    ⚠️ This DELEGATES to :func:`record_projection.key_properties`, because the
+    CASE can be **re-declared by a forward migration** and only a reader that
+    walks every record migration in order can tell which declaration is live.
+    #9881 moved `Object`/`Subject` from `name` to `id` exactly that way; a
+    single-file parse kept reporting the pre-move contract, so this module would
+    have MERGEd an Object by the name of a row whose `node_key` is now its id.
     """
     try:
-        sql = _KEY_DDL.read_text(encoding="utf-8")
-    except OSError as e:  # pragma: no cover - deployment guard
+        return _rp.key_properties()
+    except _rp.RecordProjectionError as e:  # pragma: no cover - deployment guard
         raise CacheProjectionError(
-            f"the record schema is not on disk at {_KEY_DDL} — the cache "
-            f"projection reads the key contract from it: {e}"
+            f"the record schema's key contract could not be read from the "
+            f"record migrations (looked in `record_projection.RECORD_MIGRATIONS`, "
+            f"first choice {_KEY_DDL}): {e}"
         ) from e
-    block = sql.split("CREATE TABLE IF NOT EXISTS public.node_identity", 1)
-    if len(block) != 2:  # pragma: no cover - deployment guard
-        raise CacheProjectionError(
-            "public.node_identity is not in the record migration — the cache "
-            "projection's key contract has no home"
-        )
-    found = dict(_KEY_CASE_RE.findall(block[1].split(");", 1)[0]))
-    missing = [label for label in NODE_TABLES if label not in found]
-    if missing:  # pragma: no cover - deployment guard
-        raise CacheProjectionError(
-            f"public.node_identity declares no key_property for {missing}"
-        )
-    return found
 
 
 #: `{label: the property that is the label's canonical key}` (Interface E).

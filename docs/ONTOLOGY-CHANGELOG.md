@@ -1093,3 +1093,68 @@ flag the stored bound separately) are untouched by this entry.
 Pinned by `tests/test_validity_windows.py`
 (`test_an_end_naming_no_instant_bounds_no_instant_even_for_an_unparseable_probe`, parametrized over
 the `"TBD"` and `""` shapes because they were broken differently).
+
+---
+
+## §4.7 — the write door says what an un-datable END means (#9202, write-door half, 2026-10-24)
+
+**Build record only. The model is unchanged and the END's reported state is still the owner's
+call** (§4.7: *"Whether that state should instead read `unknown` / `open` is #9202's owner decision
+and is NOT settled by the gate"*).
+
+The #6140 ruling (`"A and C (c should be a warning)"`) wired a write-door warning for ONE side of the
+window: `sdk._refuse_inverted_point_window` told a caller that a supplied `validFrom` names no
+instant, and said nothing about a supplied `validTo`. So the identical caller mistake was announced on
+one end and wordless on the other, and the silent end is the more consequential one — the value is
+stored verbatim, bounds nothing, and the reply then reports `end_state: "known"` for it.
+
+What changed: that helper is generalised to `_warn_unorderable_caller_bound(prop, bound)` and fires for
+both ends on the same gate (`_created_sort_key(bound)[0] == 0` — the measure `_covers`,
+`validity.effective_precision` and the inversion guard order with, so the warning cannot disagree with
+the read path about what an instant is). The END carries its own text: the window is UNBOUNDED
+**above**, and a caller meaning *known-but-undatable* is steered to the declared
+`validToPrecision="unknown"` mechanism (on an update that requires an explicit `validTo=None`, because
+omitting the key keeps the stored value). A warning, never a refusal, and the value is stored
+verbatim — the #6140 shape.
+
+**Scope, stated because a build record that over-claims is worse than none.** The claim is exactly
+*two caller-prop Point doors*: `create_point` and `update_point`, both through
+`sdk._refuse_inverted_point_window`. It is NOT "no end can be stored wordlessly":
+
+- `update_entity`'s Point arms write caller props (including `validTo`) with no lifecycle guard and no
+  window guard — the same live route recorded by `docs/ONTOLOGY.md`'s Point Status Vocabulary entry
+  (§5): *"the unguarded `update_entity` Point arms above remain a live route to the same window
+  (#9649)"*. Tracked as **#9649**.
+- `supersede_point` persists the predecessor's end from its resolution chain, including the ONE
+  deliberate exemption in the `validTo` row of `docs/ONTOLOGY.md` §4.1 Point — a NUMERIC `valid_from`
+  kwarg, `str()`-ed and left unorderable (`sdk._supersede_window_end`). That path is not a caller
+  `validTo` write and does not warn; it is not in scope here.
+
+What did NOT change: coverage (already ruled — a bound that names no instant is not a bound, #9408),
+`end_state`, every read surface, and the stored values of records written before this change. A log
+line has no persisted meaning to migrate, so no rescan or read-time rule applies: a record carrying an
+unparseable end keeps reading exactly as it does today, and the reserved question covers it unchanged.
+
+Two residuals recorded rather than absorbed:
+
+- **The warning fires before `update_point`'s lifecycle guard** (#2498 / #7819). An update of a
+  TERMINAL point therefore prints the value advice and is then refused for terminality. ⚠️ The advice
+  is executable only while the claim is NON-terminal (live / draft): `_assert_lifecycle_guard` refuses
+  every prop in `_TEMPORAL_RESTAMP_PROPS` — `validTo` included — on every terminal status, and that is
+  pinned (`tests/test_lifecycle_guards.py`
+  ::`test_update_point_refuses_a_window_on_every_terminal_status`, parametrized over the statuses
+  including `superseded` and `retracted`). Superseding or retracting does NOT unlock the repair — the
+  only post-terminalisation route is the unguarded `update_entity` arm listed above (#9649). The
+  ordering itself is pre-existing and shared with the start arm; it is not reshaped here, because
+  moving the window guard past the lifecycle guard would change which refusal a caller with both
+  problems receives.
+- **`docs/ONTOLOGY.md` §4.7's END paragraph still does not say the write door warns** — it says the END
+  agrees on the gate and differs only on the state, which is true of the READ and silent about the
+  write. That file carries its own rule (*"no modification … without explicit approval of the exact
+  changes by Daniel Ospina"*), so the one sentence that would align it waits on that approval; this
+  entry is the record until then.
+
+Pinned by `tests/test_validity_windows.py`
+(`test_an_unorderable_valid_to_warns_at_the_write_boundary` — an 11-row value matrix, and
+`test_the_end_warning_is_scoped_like_the_start_warning` — caller-value-only, update leg, dedup
+re-entry once).

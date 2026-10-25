@@ -95,13 +95,15 @@ INSERT INTO public.point (org_id, graph_id, node_key, id, content) VALUES
     ('org_r6_a','g_r6_a','p_r6_a','p_r6_a','a claim from A'),
     ('org_r6_b','g_r6_b','p_r6_b','p_r6_b','a claim from B')
 ON CONFLICT DO NOTHING;
-INSERT INTO public.object (org_id, graph_id, node_key, name, object_kind) VALUES
-    ('org_r6_a','g_r6_a','o_r6_a','o_r6_a','other'),
-    ('org_r6_b','g_r6_b','o_r6_b','o_r6_b','other')
+-- #9881: `Object`/`Subject` key on the stable `id`, with `name` a mutable
+-- column — so the node_key here is the id (it always was these rows' identity).
+INSERT INTO public.object (org_id, graph_id, node_key, id, name, object_kind) VALUES
+    ('org_r6_a','g_r6_a','o_r6_a','o_r6_a','o_r6_a','other'),
+    ('org_r6_b','g_r6_b','o_r6_b','o_r6_b','o_r6_b','other')
 ON CONFLICT DO NOTHING;
-INSERT INTO public.subject (org_id, graph_id, node_key, name) VALUES
-    ('org_r6_a','g_r6_a','s_r6_a','s_r6_a'),
-    ('org_r6_b','g_r6_b','s_r6_b','s_r6_b')
+INSERT INTO public.subject (org_id, graph_id, node_key, id, name) VALUES
+    ('org_r6_a','g_r6_a','s_r6_a','s_r6_a','s_r6_a'),
+    ('org_r6_b','g_r6_b','s_r6_b','s_r6_b','s_r6_b')
 ON CONFLICT DO NOTHING;
 INSERT INTO public.source (org_id, graph_id, node_key, url) VALUES
     ('org_r6_a','g_r6_a','https://example.test/r6a','https://example.test/r6a'),
