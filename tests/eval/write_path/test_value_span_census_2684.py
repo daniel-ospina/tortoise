@@ -177,9 +177,21 @@ def _receipt(session: str) -> dict:
 
 
 def _edus(session: str) -> list[dict]:
+    """The turns the quotes anchor in, built by the SHIPPED builder.
+
+    ⛔ Deliberately NOT a local re-implementation. ``_edus_from_conversation``
+    DROPS empty-content turns while PRESERVING their original indices, and the
+    resolver resolves by index VALUE rather than list position (see
+    ``_resolve_source_turn`` — "position and value can diverge"). A hand-rolled
+    copy keeps the empty turns, so its index universe diverges from
+    production's the moment a fixture carries one, silently re-classing a point
+    between ``empty_quote`` and ``no_turn`` while every pinned number stays
+    green. Byte-identical on all 7 sealed fixtures today — none has an
+    empty-content turn — which is exactly what would let the divergence ship
+    unnoticed: build the turns the way the write path builds them.
+    """
     fixture = json.loads((WRITE_PATH / "fixtures" / f"{session}.json").read_text())
-    return [{"index": i, "role": t["role"], "text": t["content"]}
-            for i, t in enumerate(fixture["conversation"])]
+    return v2._edus_from_conversation(fixture["conversation"])
 
 
 def _points(session: str, arm: str) -> list[dict]:
@@ -311,12 +323,18 @@ def test_every_absence_in_the_census_is_REPORTED():
 
     Measured over the whole committed population, in the SHIPPED order
     (``_resolve_source_turn`` then ``_value_verbatim_span``): every value-bearing
-    absence must carry at least one warning, and it must be the warning of ITS
-    OWN class — not any warning at all. The ``empty_quote`` leg is the one that
-    matters: it has NO span-side warning (there is no verbatim text to address),
-    so the only thing that keeps it out of the silent-drop class is the resolver,
-    which runs first and reports it either as "unverified (empty quote) — using
-    it" (in-range model index) or as "no resolvable source turn".
+    absence must carry a warning drawn from ITS OWN class's allowed set — not any
+    warning at all. The ``empty_quote`` leg is the one that matters: it has NO
+    span-side warning (there is no verbatim text to address), so the only thing
+    that keeps it out of the silent-drop class is the resolver, which runs first
+    and reports it either as "unverified (empty quote) — using it" (in-range
+    model index) or as "no resolvable source turn".
+
+    ⚠️ That second form is the string a ``no_turn`` absence emits, so for this
+    corpus's single ``empty_quote`` point the warning proves the absence is
+    REPORTED but does not identify the class — the class rides on
+    ``_absence_class``'s derivation from the (empty) quote. The doc claims say
+    exactly that; do not read this assertion as class-identification.
 
     ⛔ One shape is silent BY CONSTRUCTION and is NOT exercised here: with an
     EMPTY ``edus`` list ``_resolve_source_turn`` returns ``None`` before any

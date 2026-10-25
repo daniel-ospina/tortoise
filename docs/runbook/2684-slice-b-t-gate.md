@@ -18,7 +18,7 @@ legs, and they are not in the same state:
 
 | Leg | Statement (wave §6) | State |
 |---|---|---|
-| **T-1** per-question | *the value-bearing evidence is **verbatim-present** + **deduped** in the reader's package* | **verbatim half MEASURED** on the sealed corpus — 101 of 112 value-bearing points carry an address that re-reads the point's own words **and a value**; all 11 absences are a **reported** class — **0 silent**, each carrying the warning of its own class, measured rather than asserted (§2.2) — **0 unclassified**. **dedupe half: the CONTENT-RATIO route is not reachable on this corpus** (in the guard's own per-arm universe, **0 of 433** pairs reach 0.9 content overlap at all, so no pair can differ in a value-critical token *on that route*); the **same-source-turn** route IS reachable (**12** quote pairs consulted) but the quote-value guard is decisive on **0** of them, so the value-safety leg is still un-pinned here and the dedupe property rests on Slice A's unit guards (§2.3) |
+| **T-1** per-question | *the value-bearing evidence is **verbatim-present** + **deduped** in the reader's package* | **verbatim half MEASURED** on the sealed corpus — 101 of 112 value-bearing points carry an address that re-reads the point's own words **and a value**; all 11 absences are a **reported** class — **0 silent**, each carrying a warning the census attributes to its class (the single `empty_quote` point via the resolver's *shared* fail-open "no resolvable source turn" — the same string a `no_turn` emits — so its class rides on the census's derivation from the quote, not on the warning text; §2.2), measured rather than asserted (§2.2) — **0 unclassified**. **dedupe half: the CONTENT-RATIO route is not reachable on this corpus** (in the guard's own per-arm universe, **0 of 433** pairs reach 0.9 content overlap at all, so no pair can differ in a value-critical token *on that route*); the **same-source-turn** route IS reachable (**12** quote pairs consulted) but the quote-value guard is decisive on **0** of them, so the value-safety leg is still un-pinned here and the dedupe property rests on Slice A's unit guards (§2.3) |
 | **T-2** end-to-end | *aggregation-class accuracy **moves** on the same slice with the SAME reader* | **VOID AS WRITTEN** — there is no committed pre-span baseline, and the span mechanism has **no arm to flip** (it is unconditional in extraction since #8659), so "moves" is unfalsifiable rather than failed. Re-specified and re-homed to the end-to-end run **#8486** (§4) |
 
 **No product behaviour changed by this lane.** The census reads committed
@@ -114,12 +114,17 @@ census has no such point — and the fix belongs in the resolver (warn there),
 not in this record.
 
 **What "reported" means, and what it does not.** It means a consumer of the
-warnings sees the absence and can tell WHICH class it is — that is what
-`test_every_absence_in_the_census_is_REPORTED` asserts, per class. It does not
-mean the warning is actionable in every case: the empty-quote report says
-"no resolvable source turn", which is true (there is no quote to resolve
-against) but does not name the *reason* (an empty quote). The REASON is carried
-by this table and by the census's `empty_quote` bucket.
+warnings sees the absence — every counted outcome surfaces in the warning
+stream, none is a silent drop. For three of the four classes the warning also
+names the class (`band`, `carries no value`, `no resolvable source turn`), and
+that per-class ownership is what `test_every_absence_in_the_census_is_REPORTED`
+asserts. It does **not** mean every warning identifies its class, nor that it is
+actionable in every case: the empty-quote report says "no resolvable source
+turn", which is true (there is no quote to resolve against) but is the SAME
+string a `no_turn` absence emits, so it neither names the class nor the *reason*
+(an empty quote). For that one class the identification is carried by this
+table and by the census's own `_absence_class` derivation from the quote — not
+by the warning text.
 
 **The guards, and which one discriminates what.**
 
@@ -138,8 +143,10 @@ by this table and by the census's `empty_quote` bucket.
   "fixed" with a false address.
 * `test_every_absence_in_the_census_is_REPORTED` — the **absence-report** guard,
   and the failing path behind this section's "0 silent" claim: every one of the
-  11 absences must carry the warning of ITS OWN class (a stray warning does not
-  count). Measured discriminating: deleting the resolver's step-4 absence
+  11 absences must carry the warning its own class allows (a stray warning does
+  not count — and for `empty_quote` that allowed set contains the `no_turn`
+  string, which is why the warning proves *reported* but not *which class*).
+  Measured discriminating: deleting the resolver's step-4 absence
   warning turns 5 of the 11 silent (the 4 `no_turn` + the empty quote) and the
   test fails naming them; deleting the band-route warning turns the 3 `band`
   points silent and it fails as well.
@@ -304,8 +311,10 @@ printf 'tests/eval/write_path/receipts/7947-arms-2026-10-18/wp01_quarry_debug.ar
 **Settled.** The mechanism exists, is validated at the commit boundary, rides
 the read path to the package, and on real extractions stamps a truthful
 address for **90.2%** of value-bearing points with **zero silent absences** —
-each of the 11 carries the warning of its own class, pinned by
-`test_every_absence_in_the_census_is_REPORTED`; the
+each of the 11 carries a warning the census attributes to its class, pinned by
+`test_every_absence_in_the_census_is_REPORTED` (with the `empty_quote` caveat in
+§2.2: its warning text is shared with `no_turn`, so the class is carried by the
+census's derivation, not by the string); the
 obvious relaxation is measured on both readings and refused; the degraded-tier
 boundary is declared (@ `sdk.py:30340-30356`), not an oversight.
 
