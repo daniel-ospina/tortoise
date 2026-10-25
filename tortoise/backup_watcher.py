@@ -320,7 +320,7 @@ def compute_status(
             # 2. CONFIRMED poll, NO team state: nothing was ever dumped, so
             #    ``never`` is the measured truth. This is the class that churned.
             #    ``create_backup`` uploads ``dump.enc`` FIRST and
-            #    ``manifest.json`` LAST (#5062 review F3), and
+            #    ``manifest.json`` after it (the ledger object follows) (#5062 review F3), and
             #    ``_default_graph_newest`` only reads manifests — so between a
             #    dump starting and its manifest landing the prefix is non-empty
             #    with no manifest. That window used to read ``stale`` (an AGE
@@ -1011,11 +1011,18 @@ class BackupWatcher:
             # watcher-filed per-org `[DR] STALE` issues carry (the older ones were
             # the DRIVER's per-tenant filings, which did carry a measured age and
             # were pooled by #4994).
-            # ⚠️ ``detail`` is passed to EVERY open leg (a third positional
-            # argument), so any alert store in use must accept it on
-            # ``open_incident``; a 2-argument double raises into the ``except
-            # Exception`` below and silently drops the leg.
-            getattr(self._alerts, op)(kind, subject, detail)
+            # ⚠️ ``detail`` is passed as a third positional argument ONLY where a
+            # payload exists (the per-org STALE arm), so an alert store must
+            # accept it on ``open_incident``; a 2-argument double raises into the
+            # ``except Exception`` below and silently drops that leg.
+            if detail is None:
+                # Keep every leg WITHOUT a payload on its pre-#5047 call shape: a
+                # 3-positional-argument call would fail against any 2-argument
+                # store, and the failure is contained per leg (logged, heartbeat
+                # healthy) — i.e. silent, and across all kinds at once.
+                getattr(self._alerts, op)(kind, subject)
+            else:
+                getattr(self._alerts, op)(kind, subject, detail)
             return True
         except CloseCooldown as cool:
             logger.info(
@@ -1095,8 +1102,12 @@ class BackupWatcher:
             "(the org left the DR surface: this closes and NOTHING is opened); "
             "or the org leaves the census and its archive listing entirely "
             "(universe-shrink: the subject is gone). Each is held for "
-            f"{window} consecutive confirming poll(s) before it is applied, so "
-            "a single poll never clears this.")
+            f"{window} consecutive confirming poll(s) before it is applied"
+            # ⚠️ Only when the window actually exceeds one: ALERT_RECOVERY_STREAK=1
+            # is the documented "clear now" lever, and interpolating the window
+            # into a fixed "a single poll never clears this" produced a body that
+            # contradicts itself ("held for 1 poll … never clears on one poll").
+            + (", so a single poll never clears this." if window > 1 else "."))
 
     def _stale_evidence_inner(self, org: str, newest: datetime | None,
                               now: datetime | None,
@@ -1132,6 +1143,13 @@ class BackupWatcher:
                 evidence["age_min"] = age_min
                 evidence["age_human"] = (
                     f"{age_min}m" if age_min < 120 else f"{age_min / 60:.1f}h")
+            # A degraded poll's kept measurement is a LOWER BOUND, whether or not
+            # a drill is also the trigger — the drill branch used to be an `elif`,
+            # so an unconfirmed poll carrying a live simulate object published the
+            # cached age as an exact one.
+            lower_bound = not r2_confirmed
+            if lower_bound:
+                evidence["age_is_lower_bound"] = True
             if simulate_age is not None and (
                     now is None or simulate_age < newest):
                 # Same newest-primary rule ``compute_status`` applies. Reported
@@ -1147,7 +1165,10 @@ class BackupWatcher:
                     "real newest (age "
                     + str(evidence.get("age_human", "n/a"))
                     + "), and the simulated age is the incident's trigger. Do "
-                    "not hunt for a `backups/` key dated `simulated_age`.")
+                    "not hunt for a `backups/` key dated `simulated_age`."
+                    + (" The archive listing did NOT answer this poll, so the "
+                       "age above is the last CONFIRMED reading and a LOWER "
+                       "bound." if lower_bound else ""))
                 evidence["closes_when"] = self._stale_closes_when(
                     "the drill ends (the `ops/simulate` object is deleted, "
                     "refreshed or expires) AND the real archive above is itself "
@@ -1170,6 +1191,10 @@ class BackupWatcher:
                 evidence["closes_when"] = self._stale_closes_when(
                     f"{fresh_arm}:")
             else:
+                evidence["measurement"] = (
+                    "a CONFIRMED listing found this org's newest default-graph "
+                    "archive older than the staleness threshold — a MEASURED "
+                    "age, not a cache miss.")
                 evidence["closes_when"] = self._stale_closes_when(f"{fresh_arm}:")
         elif r2_confirmed:
             evidence["newest_default_archive"] = None
@@ -1265,8 +1290,13 @@ class BackupWatcher:
                     # opening STALE off it files a NEW issue for every no-archive
                     # org on every R2 blip — the same "one unchanged condition,
                     # repeated issues" defect this change removes from the
-                    # healthy flip (the resolve side is already gated; the open
-                    # side was not). Nothing is silenced by skipping it: the
+                    # healthy flip ON THIS SURFACE (the resolve side is already
+                    # gated; the open side was not). The per-graph arm below
+                    # still opens STALE off an unmeasured `newest is None`, so
+                    # the twin surface's repeat-filing class is NOT closed here
+                    # (documented in the runbook's STALE row and recorded on
+                    # #9937 — NOT fixed here).
+                    # Nothing is silenced by skipping it: the
                     # platform-scoped kinds R2_DOWN/R2_UNLISTABLE are the incidents for that
                     # poll, and they are opened/kept by the legs below.
                     if r2_confirmed or (newest_ts_by_org or {}).get(org) is not None:
