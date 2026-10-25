@@ -2381,6 +2381,15 @@ def test_a_confirmed_no_manifest_org_that_HAS_state_is_not_called_never():
     (body,) = (ch.bodies[n] for n in ch.issues)
     assert "CONFIRMED listing" in body, body
     assert "cache miss" not in body, body
+    # …and it names EVERY arm that can close it. The branch used to assign its own
+    # `closes_when`, which silently dropped `not_eligible` and the universe-shrink
+    # leg — a list of some closers reads as exhaustive, so an issue that closed for
+    # an unlisted reason makes the watcher look like it lies.
+    assert "IN FLIGHT" in body, body          # the benign cause leads
+    assert "merely REAPPEARS does not close it" in body, body  # an OLD key is not freshness
+    assert "not_eligible" in body, body
+    assert "universe-shrink: the subject is gone" in body, body
+    assert "ALSO: the org's class changes to NEVER_BACKED_UP" in body, body
 
 
 def test_a_degraded_poll_files_no_new_stale_for_an_unmeasured_org():
@@ -2436,6 +2445,37 @@ def test_a_measured_stale_org_keeps_its_incident_across_a_degraded_poll():
         f"silences nothing: {ch.issues}")
 
 
+def test_a_degraded_poll_after_a_fresh_reading_still_files_the_age_it_measured():
+    """The `or` in the open gate — the half no other test reaches.
+
+    A degraded poll keeps the last CONFIRMED measurement, so it can still say
+    "this archive is old" with evidence. Gating the open on `r2_confirmed` alone
+    (which mutation M2 does) leaves the already-open case green, because nothing
+    resolves it — but a FRESH org whose listing then fails past the threshold
+    would go unreported for the whole outage. This test starts from `ok` and flips
+    the listing, which is the only path that distinguishes the two.
+    """
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 1)            # 60m at FIXED → `ok`
+    _seed_state(storage, "team_a")
+    w = _watcher(storage, ch)
+    assert w.poll()["per_team"]["team_a"] == "ok"
+    assert not ch.issues, ch.issues
+
+    w._now = lambda: FIXED + timedelta(hours=2)    # the cached reading is now 180m
+    w._storage = _R2Unreachable()
+    status = w.poll()
+    assert status["per_team"]["team_a"] == "stale", status["per_team"]
+    stale = [n for n, t in ch.issues.items() if "STALE" in t]
+    assert len(stale) == 1, ch.issues
+    detail = json.loads(ch.bodies[stale[0]].split("```")[1])
+    assert detail["age_min"] == 180, detail        # the CONFIRMED reading, aged
+    # …and it must NOT present that as an exact this-poll measurement.
+    assert detail["age_is_lower_bound"] is True, detail
+    assert "did NOT answer" in detail["measurement"], detail
+
+
 def test_stale_filing_carries_the_measurement_that_justified_it():
     """#5047's diagnostic-payload symptom: `Detail: {}` made the watcher's per-org
     filings unassessable — no age, no archive, no close condition."""
@@ -2457,7 +2497,7 @@ def test_stale_filing_carries_the_measurement_that_justified_it():
     # universe-shrink — plus the recovery window, so a triager is not told that a
     # class change cannot close it when the `never` arm can, and not told a
     # successor incident exists for a downgraded org when none is filed.
-    assert "EITHER a default-graph archive is MEASURED" in body, body
+    assert "a default-graph archive is MEASURED no older than" in body, body
     assert "opens the matching kind (#3294" in body, body
     assert "this closes and NOTHING is opened" in body, body
     assert "universe-shrink: the subject is gone" in body, body
@@ -2499,17 +2539,18 @@ def test_the_reported_age_does_not_floor_below_the_threshold():
     """`compute_status` compares the FLOAT age, so an archive 90m30s old is OVER a
     90m threshold. Flooring the reported minutes to 90 would print a body whose
     own two numbers say the condition is not met — a self-refuting issue."""
-    from tortoise.backup_watcher import BackupWatcher as _BW
-
     ch = _Channels()
     storage = MemoryStorage()
-    _seed_archive(storage, "team_a", 1)
+    _seed_archive(storage, "team_a", 1.5)          # 90m before FIXED
     _seed_state(storage, "team_a")
-    w = _watcher(storage, ch, now_fn=lambda: FIXED + timedelta(minutes=30))
-    newest = FIXED - timedelta(minutes=90)          # exactly 90m30s old at FIXED+30s
-    ev = _BW._stale_evidence(w, "team_a", newest, FIXED + timedelta(seconds=30))
-    assert ev["age_min"] == 91, ev                 # 90.5 min -> over the threshold
-    assert ev["stale_threshold_min"] == 90, ev
+    # Poll 30s after the archive landed, with an archive 90m30s old: over the 90m
+    # threshold, so it MUST file — and must not print 90 beside a 90 threshold.
+    w = _watcher(storage, ch, now_fn=lambda: FIXED + timedelta(seconds=30))
+    assert w.poll()["per_team"]["team_a"] == "stale"
+    (body,) = (ch.bodies[n] for n in ch.issues)
+    detail = json.loads(body.split("```")[1])
+    assert detail["age_min"] == 91, detail          # 90.5 min -> rounds UP
+    assert detail["stale_threshold_min"] == 90, detail
 
 
 def test_stale_payload_does_not_change_the_title_shape():

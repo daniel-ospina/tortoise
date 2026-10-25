@@ -252,9 +252,14 @@ def compute_status(
 ) -> dict[str, Any]:
     """Pure staleness computation. Returns the watcher's decision surface.
 
-    Per-org statuses: ``never`` (seam org with no R2 archive), ``stale``
-    (newest archive older than threshold — a non-expired simulate object
-    carries an OLD age and therefore forces the stale evaluation), ``ok``,
+    Per-org statuses: ``never`` (seam org with no R2 archive), ``stale`` — which
+    is THREE different readings, and only the first is an age (#5047/#9937):
+    (a) the newest archive is older than the threshold (a non-expired simulate
+    object carries an OLD age and forces this too); (b) the listing did not
+    answer this poll and the last CONFIRMED measurement is old (a degraded read,
+    #3658); (c) a CONFIRMED listing found no default-graph archive for an org
+    whose team state exists (an absence — the archive SET is missing, #9938).
+    Callers must not treat (c) as an age claim. ``ok``,
     ``stamp_missing`` (archives exist but no state object), ``not_eligible``
     (org the sweep will not back up — #3658). ``unknown`` when R2 is
     unreachable with no last-known-good (fresh boot — honest silence).
@@ -1006,6 +1011,10 @@ class BackupWatcher:
             # watcher-filed per-org `[DR] STALE` issues carry (the older ones were
             # the DRIVER's per-tenant filings, which did carry a measured age and
             # were pooled by #4994).
+            # ⚠️ ``detail`` is passed to EVERY open leg (a third positional
+            # argument), so any alert store in use must accept it on
+            # ``open_incident``; a 2-argument double raises into the ``except
+            # Exception`` below and silently drops the leg.
             getattr(self._alerts, op)(kind, subject, detail)
             return True
         except CloseCooldown as cool:
@@ -1058,6 +1067,37 @@ class BackupWatcher:
             logger.exception("could not build STALE evidence for %r", org)
             return {"subject": org, "stale_threshold_min": self._stale_min}
 
+    def _stale_closes_when(self, lead: str) -> str:
+        """``lead`` is the branch-specific recovery, then EVERY shipped arm.
+
+        Composed in ONE place on purpose: the previous shape let a branch assign
+        ``closes_when`` itself, and the confirmed-absence branch then silently
+        dropped ``not_eligible`` and the universe-shrink leg — a payload that
+        lists some closers reads as exhaustive, so a triager whose issue closed
+        for an unlisted reason concludes the watcher lies (#9940 review).
+
+        The arms below are the SHIPPED ones, not an aspiration:
+          * ``_drive_alerts`` ``never`` / ``stamp_missing`` -> class change, which
+            closes this one AND opens the matching kind (#3294 org exclusivity);
+          * ``_drive_alerts`` ``not_eligible`` -> closes, opens NOTHING (the org
+            left the DR surface);
+          * the ``departed`` universe-shrink leg -> the subject is gone;
+          * the ``ok`` arm -> a measured-fresh reading.
+        Every one goes through ``resolve_incident_state``, so each is held for
+        the same recovery window: a single poll never clears an incident.
+        """
+        window = resolve_streak_for(KIND_STALE)
+        return (
+            f"{lead} ALSO: the org's class changes to NEVER_BACKED_UP / "
+            "METADATA_LOST — that arm closes this one AND opens the matching "
+            "kind (#3294: exactly the incidents matching the current "
+            "classification are open); or the class changes to not_eligible "
+            "(the org left the DR surface: this closes and NOTHING is opened); "
+            "or the org leaves the census and its archive listing entirely "
+            "(universe-shrink: the subject is gone). Each is held for "
+            f"{window} consecutive confirming poll(s) before it is applied, so "
+            "a single poll never clears this.")
+
     def _stale_evidence_inner(self, org: str, newest: datetime | None,
                               now: datetime | None,
                               simulate_age: datetime | None,
@@ -1066,13 +1106,14 @@ class BackupWatcher:
             "subject": org,
             "stale_threshold_min": self._stale_min,
         }
+        fresh_arm = (
+            "a default-graph archive is MEASURED no older than "
+            f"{self._stale_min}m under this org's R2 prefix (the `ok` arm — an "
+            "archive that merely REAPPEARS does not close it: the reading must "
+            "be fresh)")
         if newest is not None:
             evidence["newest_default_archive"] = newest.isoformat()
-            if now is None:
-                evidence["measurement"] = (
-                    "an archive was listed but no poll clock was supplied, so "
-                    "its age is not reported here")
-            else:
+            if now is not None:
                 # ``compute_status`` compares the FLOAT age (``age > thr``), so
                 # the reported number must not floor down to the threshold and
                 # make the body read as a false positive — an age of 90m30s is
@@ -1107,58 +1148,54 @@ class BackupWatcher:
                     + str(evidence.get("age_human", "n/a"))
                     + "), and the simulated age is the incident's trigger. Do "
                     "not hunt for a `backups/` key dated `simulated_age`.")
-                evidence["closes_when"] = (
-                    "the drill ends: the `ops/simulate` object is deleted, "
-                    "refreshed, or expires — the real archive is already "
-                    "measured and will read `ok` again.")
+                evidence["closes_when"] = self._stale_closes_when(
+                    "the drill ends (the `ops/simulate` object is deleted, "
+                    "refreshed or expires) AND the real archive above is itself "
+                    f"measured no older than {self._stale_min}m — if that "
+                    "archive is stale too, this stays open FOR THAT REASON:",)
+            elif not r2_confirmed:
+                # A degraded poll keeps the last CONFIRMED measurement, so this
+                # timestamp is real but is not necessarily the newest, and the
+                # age is only a LOWER bound: a newer archive may have landed
+                # while the listing was not answering. Saying so is the whole
+                # point — an exact-looking age off a blind poll is the same
+                # "presented as measured" defect this change removes.
+                evidence["age_is_lower_bound"] = True
+                evidence["measurement"] = (
+                    "the archive listing did NOT answer this poll: "
+                    "`newest_default_archive` is the last CONFIRMED listing's "
+                    "newest, so `age_min` is a LOWER BOUND — a newer archive may "
+                    "exist unobserved (#3658: a degraded read is not a fresh "
+                    "one).")
+                evidence["closes_when"] = self._stale_closes_when(
+                    f"{fresh_arm}:")
+            else:
+                evidence["closes_when"] = self._stale_closes_when(f"{fresh_arm}:")
         elif r2_confirmed:
             evidence["newest_default_archive"] = None
+            # The in-flight cause comes FIRST: it is both the most common and the
+            # benign one, and sending a triager to "bulk delete" on a routine
+            # in-progress backup is worse than saying nothing. ``create_backup``
+            # uploads ``dump.enc`` then ``manifest.json``, and this watcher reads
+            # the manifest key only — so a run between the two uploads is
+            # invisible here.
             evidence["measurement"] = (
-                "a CONFIRMED listing found no default-graph archive under this "
-                "org's R2 prefix, while team state EXISTS — a dump succeeded "
-                "once, so the archive SET is what is missing (bulk delete / "
-                "prune, or a key whose timestamp does not parse). R2 "
-                "connectivity is NOT the suspect (#9938).")
-            evidence["closes_when"] = (
-                "this stops being filed when a default-graph archive is listed "
-                "under this org's R2 prefix again (the class then changes, and "
-                "the transition rule below closes it through the same recovery "
-                "window as any other resolve).")
+                "a CONFIRMED listing found no default-graph archive (manifest "
+                "key) under this org's R2 prefix, while team state EXISTS. MOST "
+                "LIKELY a backup is IN FLIGHT: `create_backup` uploads "
+                "`dump.enc` before `manifest.json`, so the newest run is "
+                "manifest-less for the duration of a dump — re-check in a few "
+                "minutes before treating this as loss. If it persists: the "
+                "archive SET is missing (bulk delete / prune) or a key's "
+                "timestamp does not parse (#9938). R2 connectivity is NOT the "
+                "suspect.")
+            evidence["closes_when"] = self._stale_closes_when(f"{fresh_arm}:")
         else:
+            # Unreachable from ``_drive_alerts`` — the open gate at the `stale`
+            # arm is exactly the complement of this predicate. Kept as keys only:
+            # a payload that TELLS a reader the filing was not made is a claim
+            # that can only mislead if it is ever published.
             evidence["newest_default_archive"] = None
-            evidence["measurement"] = (
-                "no default-graph archive timestamp was measured this poll — "
-                "the archive listing did not answer, so this is a cache miss "
-                "off the census, not an age (#3658).")
-            evidence["closes_when"] = (
-                "nothing: this filing is not made — an unmeasured `stale` opens "
-                "no incident (the pool kinds do). Present for direct callers of "
-                "this helper.")
-        window = resolve_streak_for(KIND_STALE)
-        # The close conditions below are the SHIPPED ones, not an aspiration.
-        # EVERY arm that resolves this kind is named, because a payload that
-        # lists some of them reads as exhaustive and sends a triager hunting
-        # for a recovery that never happened:
-        #   * `_drive_alerts` `never` / `stamp_missing` arms -> class change;
-        #     opens the matching kind (org exclusivity, #3294);
-        #   * `_drive_alerts` `not_eligible` arm -> closes, opens NOTHING;
-        #   * `_drive_alerts` `ok` arm -> measured-fresh;
-        #   * the `departed` universe-shrink leg -> the subject is gone.
-        # Every one of them goes through `resolve_incident_state`, so each is
-        # held for the same recovery window — a single poll never clears one.
-        evidence.setdefault(
-            "closes_when",
-            "EITHER a default-graph archive is MEASURED no older than "
-            f"{self._stale_min}m — the `ok` arm closes it; OR the org's class "
-            "changes to NEVER_BACKED_UP / METADATA_LOST — that arm closes this "
-            "one AND opens the matching kind (#3294: exactly the incidents "
-            "matching the current classification are open); OR the class "
-            "changes to not_eligible (the org left the DR surface: this closes "
-            "and NOTHING is opened); OR the org leaves the census and its "
-            "archive listing entirely (universe-shrink: the subject is gone). "
-            f"Each of those is held for {window} consecutive confirming poll(s) "
-            "before it is applied, so a single poll never clears it.",
-        )
         return evidence
 
     def _drive_alerts(self, status: dict[str, Any], r2_ok: bool | None,
@@ -1230,7 +1267,7 @@ class BackupWatcher:
                     # repeated issues" defect this change removes from the
                     # healthy flip (the resolve side is already gated; the open
                     # side was not). Nothing is silenced by skipping it: the
-                    # POOL kinds R2_DOWN/R2_UNLISTABLE are the incidents for that
+                    # platform-scoped kinds R2_DOWN/R2_UNLISTABLE are the incidents for that
                     # poll, and they are opened/kept by the legs below.
                     if r2_confirmed or (newest_ts_by_org or {}).get(org) is not None:
                         self._alert_leg(
