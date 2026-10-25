@@ -176,27 +176,182 @@ def test_rebuild_preserves_session_source_is_episodic(prov):
         "rebuilt Source lost is_episodic"
 
 
-# ── review P1: the dedup path must not leave a prop-only lie ───────────────
+# ── #7704 OWNER RULING (2026-10-25): a dedup fold KEEPS the evidence ───────
+#
+# The owner ruled the W4-b "twin" case a **duplication defect**, not a ranking
+# one: *"The dedup is the key here to solve the problem you had raised"*, and
+# *"one claim carrying N sources is the intended state"*. Until this change the
+# fold had no way to add provenance to a Point that already existed (the
+# journaled path the old warning said was "tracked separately (#3292)" — and
+# #3292 closed on its first-write INFERENCE half only, leaving the residual
+# unowned), so a re-write that carried a NEW source dropped it and said so.
+#
+# These pins are the RE-DERIVATION of that warn-and-drop trio: same intent
+# (a ref supplied to a dedup hit is never silently lost), now asserted on the
+# fact instead of on the warning that existed because the fact was impossible.
 
 
-def test_dedup_hit_does_not_leave_prop_only_provenance(prov):
-    """A dedup hit used to forward the inferred ref into ``update_point``,
-    which writes the node PROPERTY but never calls ``_link_source``.
+def _prop_refs(proj, pid: str):
+    """The Point's own ``extractedFrom`` node property (the reported surface)."""
+    got = proj.g.query(
+        "MATCH (p:Point {id:$id}) RETURN p.extractedFrom",
+        params={"id": pid}).result_set
+    return got[0][0] if got else None
 
-    Net effect was the opposite of the fix: the Point carried
-    ``extractedFrom`` with no ``:Source`` edge (still an orphan, but now
-    reported as having provenance by ``list_drafts``, which reads the prop),
-    while a rebuild dropped the prop entirely — so ``live != rebuild`` for the
-    very property this fix introduced.
 
-    SCOPE OF THE PARITY ASSERTION BELOW: ``_provenance`` reads the EDGE surface
-    ``(point, source url, sourceKind)``. That is exactly the surface this fix
-    touches, and it must agree. It is deliberately NOT a blanket
-    live==rebuild guarantee for the dedup path: the OTHER props the dedup hit
-    forwards (``session_id``, ``content_hash``, ``ep_dirty``) are still written
-    by ``update_point`` and still not replayed — the pre-existing divergence
-    tracked by #2946. Stating it here so a reader does not infer a clean-parity
-    guarantee the test does not make.
+def test_dedup_hit_accumulates_the_second_source(prov):
+    """#7704: two sources, one claim — the fold keeps BOTH.
+
+    Two writes of the SAME claim (byte-identical content, same kind) are ONE
+    Point (that is what dedup identity buys). The evidence difference between
+    them is the point: the second write's source must join the first's, not
+    replace it and not disappear.
+
+    Frozen before: Point=1, Sources=1, ``extractedFrom='https://…/alpha'`` —
+    the beta source was never even minted, and a rebuild reproduced the loss
+    because the fold journalled nothing.
+    """
+    sdk, events = prov
+    content = "quarterly revenue target raised to 40 million"
+    first = sdk.create_point("statement", content,
+                             extractedFrom="https://example.com/alpha",
+                             dedup=True)
+    second = sdk.create_point("statement", content,
+                              extractedFrom="https://example.com/beta",
+                              dedup=True)
+    assert second["id"] == first["id"], (
+        "guard: identical content + kind must be ONE claim (a dedup hit)")
+
+    proj = sdk._get_proj()
+    pid = first["id"]
+    assert sdk._get_proj().g.query(
+        "MATCH (n:Point) RETURN count(n)").result_set[0][0] == 1, \
+        "a duplicated claim must appear ONCE"
+    assert _sources_of(proj, pid) == {
+        "https://example.com/alpha", "https://example.com/beta"}, \
+        "the fold dropped the second source — the evidence difference is LOST"
+    # The prop is the surface `list_drafts` reports; it must agree with the
+    # edges (a SEQUENCE is now the accumulated list, never a scalar).
+    assert sorted(_prop_refs(proj, pid)) == [
+        "https://example.com/alpha", "https://example.com/beta"]
+
+    live = _provenance(proj)
+    proj.rebuild_all(str(events), confirm_destructive=True)
+    assert _provenance(proj) == live, \
+        "the accumulated provenance did not survive a rebuild (live != rebuild)"
+    assert sorted(_prop_refs(proj, pid)) == [
+        "https://example.com/alpha", "https://example.com/beta"]
+
+
+def test_dedup_hit_accumulates_the_inferred_session_source(prov):
+    """The same fold for the INFERRED ref (``session:<session_id>``).
+
+    This is the shape the capture/ingest lanes produce: they pass a session
+    context and no explicit ref, so the second session to restate the claim is
+    its second piece of evidence.
+    """
+    sdk, events = prov
+    content = "the enterprise pilot closes in the third quarter"
+    first = sdk.create_point("statement", content,
+                             session_id="sess-one", dedup=True)
+    second = sdk.create_point("statement", content,
+                              session_id="sess-two", dedup=True)
+    assert second["id"] == first["id"], "guard: this must be a dedup hit"
+
+    proj = sdk._get_proj()
+    assert _sources_of(proj, first["id"]) == {
+        "session:sess-one", "session:sess-two"}, \
+        "the fold dropped the second session's provenance"
+
+    live = _provenance(proj)
+    proj.rebuild_all(str(events), confirm_destructive=True)
+    assert _provenance(proj) == live, "accumulated session refs did not replay"
+
+
+def test_the_fold_journals_a_state_the_checker_agrees_with(prov):
+    """The re-emitted record must describe the graph the fold actually left.
+
+    A fold that stops at the cache puts the derived store ahead of truth: a
+    replay silently loses the evidence and no repair can recover it. The mirror
+    image is just as bad — a record that does not match the node it claims to
+    describe — and `check_consistency` is the repository's own instrument for
+    exactly that pair (journal fold vs graph). Asserting it here holds the new
+    record to the same bar as every other write, instead of to "a rebuild
+    produces some edges".
+
+    ``check_consistency`` ADOPTS a pre-existing graph on its first run, so the
+    baseline is taken after the create and the verdict is read after the fold.
+    """
+    from tortoise.consistency import check_consistency
+
+    sdk, events = prov
+    log_path = os.path.join(str(events), "events.jsonl")
+    content = "the expansion is funded through next spring"
+    first = sdk.create_point("statement", content,
+                             extractedFrom="https://example.com/first",
+                             dedup=True)
+    proj = sdk._get_proj()
+    check_consistency(log_path, proj)          # adopt the existing graph
+
+    sdk.create_point("statement", content,
+                     extractedFrom="https://example.com/second", dedup=True)
+
+    result = check_consistency(log_path, proj)
+    assert result["ok"], (
+        "the fold's journal record does not describe the graph it wrote — a "
+        f"replay would diverge from live: {result.get('divergent_points')}")
+    assert result["hash_match"], result
+    assert not result.get("divergent_points"), result["divergent_points"]
+    assert _sources_of(proj, first["id"]) == {
+        "https://example.com/first", "https://example.com/second"}
+
+
+def test_repeated_dedup_hit_neither_duplicates_nor_rejournals(prov):
+    """The fold is IDEMPOTENT: a re-write of evidence already held writes
+    nothing — no duplicate edge, no re-mint of the Source, and no journal
+    record (a re-journal on every idempotent retry would grow the log without
+    bound and make the replay non-idempotent at the log level).
+    """
+    sdk, events = prov
+    content = "idempotent source claim"
+    ref = "https://example.com/once"
+    first = sdk.create_point("statement", content, extractedFrom=ref,
+                             dedup=True)
+    journal = os.path.join(str(events), "events.jsonl")
+
+    def _point_added_for(pid: str) -> int:
+        import json
+        n = 0
+        with open(journal) as fh:
+            for line in fh:
+                if not line.strip():
+                    continue
+                rec = json.loads(line)
+                if (rec.get("type") == "PointAdded"
+                        and (rec.get("point") or {}).get("id") == pid):
+                    n += 1
+        return n
+
+    before = _point_added_for(first["id"])
+    for _ in range(3):
+        again = sdk.create_point("statement", content, extractedFrom=ref,
+                                 dedup=True)
+        assert again["id"] == first["id"]
+    assert _point_added_for(first["id"]) == before, (
+        "a no-op dedup hit journalled a record — the fold is not idempotent")
+    assert _sources_of(sdk._get_proj(), first["id"]) == {ref}
+
+
+def test_dedup_hit_keeps_prop_and_edges_truthful(prov):
+    """Re-derived from ``test_dedup_hit_does_not_leave_prop_only_provenance``.
+
+    The old test asserted the dedup hit left NO provenance, because forwarding
+    the prop into ``update_point`` wrote a prop with no ``:Source`` edge — a
+    reported provenance that does not exist, which ``list_drafts`` would show.
+    The intent was "never a prop-only lie"; the assertion was the frozen
+    consequence (drop it entirely). Now the ref is WIRED, so the intent is
+    asserted directly and more strongly: prop and edges agree, on both the
+    live graph and after a rebuild.
     """
     sdk, events = prov
     content = "identical claim text"
@@ -206,15 +361,12 @@ def test_dedup_hit_does_not_leave_prop_only_provenance(prov):
     assert second["id"] == first["id"], "guard: this must be a dedup hit"
 
     proj = sdk._get_proj()
-    # No prop-without-edge: the reported provenance must be truthful.
-    got = proj.g.query(
-        "MATCH (p:Point {id:$id}) RETURN p.extractedFrom",
-        params={"id": first["id"]}).result_set
-    assert (not got) or got[0][0] in (None, [], ""), \
-        f"prop-only provenance survived the dedup path: {got}"
-    assert _sources_of(proj, first["id"]) == set()
+    pid = first["id"]
+    assert _sources_of(proj, pid) == {"session:sess-dedup"}
+    assert _prop_refs(proj, pid) == ["session:sess-dedup"], (
+        "the property must state exactly what the edges wire — no prop-only "
+        "lie in either direction")
 
-    # And whatever the surface is, live and rebuild must still agree.
     live = _provenance(proj)
     proj.rebuild_all(str(events), confirm_destructive=True)
     assert _provenance(proj) == live
@@ -450,11 +602,16 @@ def test_reingest_with_empty_ref_list_does_not_warn(prov, caplog):
     assert noise == [], f"spurious warning for an explicit empty ref list: {noise}"
 
 
-def test_dedup_hit_with_a_CHANGED_ref_warns(prov, caplog):
-    """The gate checked only "does ANY edge exist", so a DIFFERENT ref was
-    treated as present and silently discarded — the caller believes the Point
-    was relinked when it was not. Silent provenance drops are the exact class
-    this change set exists to remove.
+def test_dedup_hit_with_a_CHANGED_ref_accumulates_it(prov, caplog):
+    """Re-derived from ``test_dedup_hit_with_a_CHANGED_ref_warns``.
+
+    A DIFFERENT ref on a dedup hit used to be treated as "some edge exists" and
+    dropped with a warning: the caller believes the Point was relinked when it
+    was not. The intent was "a changed ref must not be dropped silently"; the
+    assertion was the warning that stood in for the missing journaled path.
+    The ref is now folded in, so the intent is asserted on the graph — and the
+    absence of the old warning is asserted too, because a ref that IS applied
+    must not be reported as not-applied.
     """
     sdk, _events = prov
     content = "changed ref claim"
@@ -464,10 +621,14 @@ def test_dedup_hit_with_a_CHANGED_ref_warns(prov, caplog):
         second = sdk.create_point("statement", content,
                                   extractedFrom="session:sess-NEW", dedup=True)
     assert second["id"] == first["id"], "guard: this must be a dedup hit"
-    hits = [r.getMessage() for r in caplog.records
-            if "not applied" in r.getMessage()]
-    assert hits, "a changed ref on a dedup hit must not be dropped silently"
-    assert "sess-NEW" in hits[0], f"warning must name the dropped ref: {hits[0]}"
+    assert _sources_of(sdk._get_proj(), first["id"]) == {
+        "session:sess-OLD", "session:sess-NEW"}, \
+        "a changed ref on a dedup hit must not be dropped"
+    noise = [r.getMessage() for r in caplog.records
+             if "not applied" in r.getMessage()]
+    assert noise == [], (
+        f"the ref WAS applied, so reporting it as dropped is a false warning: "
+        f"{noise}")
 
 
 def test_create_point_rejects_non_string_extractedfrom_prewrite(prov):
@@ -497,18 +658,20 @@ def test_create_point_treats_blank_ref_as_absent(prov):
     assert _sources_of(sdk._get_proj(), p["id"]) == {"session:sess-blank"}
 
 
-def test_dedup_hit_without_the_edge_DOES_warn(prov, caplog):
-    """The flip side: when the Point genuinely has no Source edge, the skip is
-    consequential and must be visible at the shipped default level."""
+def test_dedup_hit_without_the_edge_WIRES_it(prov):
+    """Re-derived from ``test_dedup_hit_without_the_edge_DOES_warn``.
+
+    The Point genuinely had no Source edge and the dedup hit supplied one: the
+    skip was consequential, so it had to be visible. It is now visible as the
+    fact — the edge exists — rather than as a warning about its absence.
+    """
     sdk, _events = prov
     content = "warn-me claim"
     sdk.create_point("statement", content, dedup=True)          # no source ctx
-    with caplog.at_level(logging.WARNING):
-        sdk.create_point("statement", content, session_id="sess-w",
-                         dedup=True)
-    hits = [r.getMessage() for r in caplog.records
-            if "not applied" in r.getMessage()]
-    assert hits, "missing-edge dedup skip must warn"
+    hit = sdk.create_point("statement", content, session_id="sess-w",
+                           dedup=True)
+    assert _sources_of(sdk._get_proj(), hit["id"]) == {"session:sess-w"}, \
+        "a dedup hit that supplies the Point's FIRST source left it an orphan"
 
 
 def test_falsy_non_string_session_id_warns(prov, caplog):

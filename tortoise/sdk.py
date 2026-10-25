@@ -9717,56 +9717,59 @@ class TortoiseSDK:
                 # (would make the `if props:` guard always truthy and bump
                 # updatedAt on every dedup hit, #80 review).
                 props.pop("content_hash", None)
-                # #3263 (review P1): `extractedFrom` must NOT ride the
-                # update_point prop path on a dedup hit. update_point writes the
-                # node property but never calls _link_source, so the Point would
-                # end up carrying `extractedFrom` with NO `:Source` edge — still
-                # an orphan — and `list_drafts` reads that prop, so it would
-                # report provenance that does not exist as an edge. It is not
-                # replayed either (_revise_point restores content/embedding
-                # only), so the rebuilt graph drops the prop entirely and
-                # live != rebuild for the very property this path introduced.
-                # The Point already exists: if it was created with a session
-                # context it already carries the edge. Retrofitting provenance
-                # onto an existing Point needs a journaled path, which does not
-                # exist yet — tracked separately (#3292).
-                _dropped_ef = props.pop("extractedFrom", None)
-                if _dropped_ef is not None:
-                    # #3263 (re-review P2): decide per REF, not per call. Two
-                    # coarse predicates were wrong: `is not None` also matched
-                    # an explicit empty list (so a caller who supplied NO ref
-                    # got a warning on every idempotent re-ingest), and "any
-                    # edge exists" treated a CHANGED ref as present — silently
-                    # discarding the new one. Normalise to the supplied non-empty
-                    # refs, then warn only for those genuinely absent from the
-                    # Point's edges. No refs supplied => nothing to report.
+                # ── #7704 (OWNER RULING 2026-10-25): a dedup hit KEEPS the new
+                # evidence. The owner ruled the W4-b "twin" case a DUPLICATION
+                # defect — "The dedup is the key here to solve the problem you
+                # had raised" — with the intended state "one claim, N sources"
+                # (docs/ONTOLOGY.md, `extractedFrom` many→many, #3263).
+                #
+                # `extractedFrom` must NOT ride the `update_point` prop path
+                # below: that writer sets the node property but never calls
+                # `_link_source`, so the Point would carry `extractedFrom` with
+                # no `:Source` edge — a provenance `list_drafts` reports and the
+                # graph does not hold. It is not replayed either, so live and
+                # rebuild would disagree.
+                #
+                # It also must NOT be dropped, which is what this branch did
+                # until #7704: it popped the ref and WARNED, because
+                # "retrofitting provenance onto an existing Point needs a
+                # journaled path, which does not exist yet (#3292)". #3292
+                # closed on its first-write INFERENCE half (#3295) and left that
+                # residual unowned, so every re-write that carried a NEW source
+                # lost it — the duplicate's evidence vanished into the fold,
+                # which is exactly the failure the ruling sends us to fix.
+                #
+                # `_fold_source_evidence` IS that journaled path (see its
+                # docstring): it wires the missing refs, writes the accumulated
+                # property, and appends the `PointAdded` record that makes the
+                # state replayable. Decide per REF, not per call — the refs
+                # already held are a no-op, so an idempotent re-write neither
+                # writes nor journals (#3263 re-review P2).
+                _incoming_ef = props.pop("extractedFrom", None)
+                if _incoming_ef is not None:
+                    # Normalise to the supplied non-empty refs: an explicit
+                    # ``[]`` means "no provenance" (the bundle contract), and a
+                    # scalar is ONE ref, never iterated character-wise.
                     _supplied = (
-                        [_dropped_ef] if isinstance(_dropped_ef, str)
-                        else [r for r in _dropped_ef if r]
+                        [_incoming_ef] if isinstance(_incoming_ef, str)
+                        else [r for r in _incoming_ef if r]
                     )
                     if _supplied:
-                        _present = {
+                        # The EDGES are authoritative (#3263): read them, not
+                        # the convenience prop, so the fold is measured against
+                        # the provenance the graph actually holds. Ordered, so
+                        # the accumulated property is byte-stable across runs.
+                        _present = [
                             row[0] for row in proj.g.query(
                                 "MATCH (p:Point {id:$id})-[:extractedFrom]->"
-                                "(s:Source) WHERE s.url IN $refs "
-                                "RETURN DISTINCT s.url",
-                                params={"id": pid,
-                                        "refs": _supplied}).result_set
-                        }
+                                "(s:Source) RETURN DISTINCT s.url ORDER BY s.url",
+                                params={"id": pid}).result_set
+                        ]
                         _missing = [r for r in _supplied
                                     if r not in _present]
                         if _missing:
-                            _logger.warning(
-                                "create_point dedup hit on %s: extractedFrom %r "
-                                "not applied — those refs are absent from the "
-                                "Point's Source edges, and update_point cannot "
-                                "wire one (the value is not replayed, so "
-                                "applying it would diverge live from rebuild). "
-                                "Retrofitting provenance onto an existing "
-                                "Point needs a journaled path (#3292); pass the "
-                                "ref on the FIRST write, or re-create the Point",
-                                pid, _missing,
-                            )
+                            self._fold_source_evidence(
+                                pid, _present, _missing)
                 # #7980 + #398: an authored ``credibility`` is a WRITE, never a
                 # silent drop, and it obeys the SAME rule as the create path —
                 # ONE weak evidence body (the declared word is a validated
@@ -27856,6 +27859,124 @@ class TortoiseSDK:
             params=params,
         ).result_set
         return [r[0] for r in rows]
+
+    def _fold_source_evidence(self, pid: str, present: list[str],
+                              missing: list[str]) -> dict:
+        """The WRITE half of a dedup fold: add the incoming source refs to a
+        Point that already exists, and journal it so the state is replayable.
+
+        #7704 — this is the journaled retrofit path the dedup branch said did
+        not exist ("tracked separately (#3292)"; #3292 closed on its first-write
+        INFERENCE half only, so the residual had no owner). Without it a fold
+        that carried a NEW source dropped it: the duplicate's evidence
+        disappeared into the survivor, which is the duplication defect the
+        owner's 2026-10-25 ruling sends us to fix rather than an ordering one.
+
+        `present` is the survivor's CURRENT ``extractedFrom`` refs read from the
+        EDGES — authoritative (ONTOLOGY §3.3; the node's ``extractedFrom`` prop
+        is a query convenience, #3263) — and `missing` is the subset of
+        incoming refs absent from it. The caller passes both so this stays a
+        pure write of a decision already made; an empty `missing` returns
+        before any write, so a future caller cannot emit a no-op journal record.
+
+        **Journal first (§17.1).** The record is the commit point of a live
+        write. The snapshot is the full Point (``get_point`` + the accumulated
+        refs), re-emitted as a ``PointAdded`` — the SAME shape the capture
+        writer uses when it re-writes an existing turn
+        (``_write_capture_turns``), and a shape the replay already anticipates
+        (pass 2's ``operator_created_seq.setdefault`` names "a re-PointAdded of
+        the same id (upsert)"). Pass 1 folds the payload's props and pass 2
+        re-derives the ``extractedFrom`` edges from it, so a rebuild reproduces
+        the accumulated state without re-reading the graph's prior state.
+
+        **Then the fold.** ``_link_source`` mints the missing Source stubs and
+        MERGEs one edge per ref (many→many), which is why the refs are wired
+        BEFORE the property: a prop written first would report provenance the
+        edges do not hold for as long as the two writes are apart.
+
+        ``sourceVersionTransit`` (#5256) is merged, never rebuilt: the refs the
+        Point already held keep the read-version they recorded, and the new
+        refs get the version resolved NOW — the same value ``_link_source``
+        stamps on their edges — so the replay re-stamps exactly what live
+        wrote. Refs with no recorded hash contribute NO pair (honest-absent,
+        ``_valid_transit_pairs``' own rule).
+
+        Idempotent: called only with a non-empty `missing`, and every write
+        below is a MERGE/SET of the refs it names.
+        """
+        from .projection.edges import (
+            _source_version_transit,
+            resolve_source_versions,
+        )
+        proj = self._get_proj()
+        existing = self.get_point(pid)
+        if not missing:
+            # The caller already filtered the refs the Point holds. A record
+            # emitted here would be a no-op in the graph and a permanent entry
+            # in the journal, i.e. a replay that re-applies nothing on every
+            # idempotent retry — refused by construction, not by the caller's
+            # memory.
+            return existing
+        accumulated = list(present) + [r for r in missing if r not in present]
+        versions = resolve_source_versions(proj.g, missing)
+        # Keep the pairs the Point already carries for refs it still holds; add
+        # one per new ref whose Source has a recorded (non-blank) version.
+        prior = existing.get("sourceVersionTransit")
+        pairs: list[list[str]] = []
+        if isinstance(prior, list):
+            for pair in prior:
+                if (isinstance(pair, (list, tuple)) and len(pair) == 2
+                        and isinstance(pair[0], str)
+                        and isinstance(pair[1], str) and pair[1].strip()
+                        and pair[0] in accumulated):
+                    pairs.append([pair[0], pair[1]])
+        _seen = {pair[0] for pair in pairs}
+        new_pairs = _source_version_transit(versions) or []
+        pairs.extend([ref, h] for ref, h in new_pairs if ref not in _seen)
+
+        snapshot = {**existing, "extractedFrom": accumulated}
+        if pairs:
+            snapshot["sourceVersionTransit"] = pairs
+        else:
+            snapshot.pop("sourceVersionTransit", None)
+        _committed = self._emit_event(
+            "PointAdded",
+            {"id": pid,
+             "kind": existing.get("pointKind"),
+             "content_hash": existing.get("content_hash")},
+            point=snapshot)
+        if _committed is False:
+            # §17.1 / #7951: NO record ⇒ NO fold. Writing the edges here would
+            # put the cache AHEAD of truth, where a replay silently loses the
+            # evidence and no repair can recover it — the exact loss this fold
+            # exists to stop. `None` (no journal configured: embedded / dev /
+            # CI) writes as before. Same arm, same error and same reason as
+            # `update_point`'s no-record refusal.
+            from .exceptions import WriteNotLandedError
+            raise WriteNotLandedError(
+                pid, getattr(proj, "graph_name", None),
+                operation="create_point")
+
+        # The fold runs inside the live-write scope: the append above has
+        # COMMITTED, so the ordering is journal-then-cache by construction.
+        with _live_write_scope("create_point"):
+            self._graph_write_with_retry(
+                lambda: proj._link_source(pid, missing,
+                                          source_versions=versions),
+                what="create_point dedup provenance edges",
+            )
+            self._graph_write_with_retry(
+                lambda: proj.g.query(
+                    "MATCH (n:Point {id:$id}) SET n.extractedFrom = $ref",
+                    params={"id": pid, "ref": accumulated}),
+                what="create_point dedup provenance prop",
+            )
+        _logger.info(
+            "create_point dedup hit on %s: folded %d new extractedFrom ref(s) "
+            "%r onto the surviving Point — one claim, %d sources (#7704)",
+            pid, len(missing), missing, len(accumulated),
+        )
+        return snapshot
 
     def _resolve_dedup_hit(self, content: str, *,
                            pointKind: str | None = None,
