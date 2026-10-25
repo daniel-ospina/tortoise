@@ -784,13 +784,15 @@ def test_the_report_claims_no_unpre_registered_threshold(shared_run):
 
 # ── 6. the CLI writes what the pipeline reads ─────────────────────────────
 
-def test_cli_preregister_run_score_publish(tmp_path, monkeypatch):
+def test_cli_preregister_run_score_publish(tmp_path, monkeypatch, capsys):
     """End to end through the CLI, with the mock judge (wiring, not a number).
 
     A MOCK-graded run is wiring, never a measurement: publish refuses it even
-    though its bar verdict is PASS. The run is recorded at a real commit in a
-    real repository (see :func:`_make_bound_repo`), so the ONLY thing left for
-    publish to refuse is the mock pin — which is what this test is about.
+    though its bar verdict is PASS. Asserting `rc == 2` alone would NOT prove
+    that: a refusal from any other clause satisfies it, and there is now more
+    than one (the CLI `run` records THIS checkout's tree, so a publish naming a
+    tmp repository's commit also fails the code-identity check). The assertion
+    therefore names the clause this test exists for.
     """
     monkeypatch.chdir(tmp_path)
     repo = tmp_path / "repo"
@@ -835,6 +837,8 @@ def test_cli_preregister_run_score_publish(tmp_path, monkeypatch):
            "--receipt", str(receipt), "--prereg", str(prereg_path),
            "--corpus-root", str(corpus_dir), "--repo", str(repo)]
     assert m._main(pub) == 2
+    err = capsys.readouterr().err
+    assert "MOCK-graded run cannot publish" in err, err
     assert not report.exists() and not receipt.exists()
 
 
@@ -1738,8 +1742,11 @@ def test_the_published_report_names_the_tree_the_run_executed_from(published,
     assert identity["commit"] == bound_repo["run_commit"]
     assert identity["dirty_paths"] == []
     text = published["report"].read_text(encoding="utf-8")
-    assert "Tree the run executed from" in text
-    assert "clean at run time" in text
+    # TWICE: §1's provenance row AND §6's binding table. Asserting presence
+    # alone passes on §1 by itself, which would let the §6 row be deleted
+    # unnoticed — and §6 is the half a re-verifier re-checks the binding from.
+    assert text.count("Tree the run executed from") == 2
+    assert text.count("clean at run time") >= 1
 
 
 # ── 8b. the checks that ask the repository must be MEASURED, not injected ──
@@ -1865,6 +1872,22 @@ def test_an_absent_record_never_renders_as_a_clean_tree(shared_run, tmp_path):
     assert "code_identity" not in receipt, "nothing to render — that is the point"
     prereg, _ = _prereg(tmp_path)
     text = m.render_report(receipt=receipt, scored=scored, prereg=prereg,
+                           prereg_sha256="sha256:" + "0" * 64)
+    assert "NOT RECORDED" in text
+    assert "clean at run time" not in text
+
+    # ⛔ And a record that NAMES NO TREE — `code_identity(None)`, the shape a
+    # run without a repository produces — is the same assertion with an empty
+    # `dirty_paths` list: a list, and empty, so a renderer that checks only the
+    # list renders "clean at run time" beside a commit column of "—".
+    nameless = copy.deepcopy(scored)
+    nameless["code_identity"] = m.code_identity(None)
+    assert nameless["code_identity"]["commit"] is None
+    assert nameless["code_identity"]["dirty_paths"] == []
+    receipt = m.build_receipt(
+        scored=nameless, commit="a" * 40, cost_usd=0.0,
+        commit_binding=_binding("a" * 40, nameless["corpus_hash"]))
+    text = m.render_report(receipt=receipt, scored=nameless, prereg=prereg,
                            prereg_sha256="sha256:" + "0" * 64)
     assert "NOT RECORDED" in text
     assert "clean at run time" not in text

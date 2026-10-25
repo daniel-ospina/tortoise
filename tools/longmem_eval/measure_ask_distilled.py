@@ -1822,7 +1822,13 @@ def render_report(*, receipt: dict, scored: dict, prereg: dict,
     # 'dirty_paths') or []` made an absent record render identically to a
     # verified clean one — a fail-open default in the function the README calls
     # the audit surface, which is the one place it must not be.
-    if not isinstance(dirty_paths, list):
+    if not isinstance(dirty_paths, list) or not identity.get("commit"):
+        # ⛔ BOTH halves are required to say "clean": a record whose
+        # `dirty_paths` is an empty list but whose COMMIT is null (the shape
+        # `code_identity(None)` produces) rendered as "clean at run time"
+        # beside a commit column of "—", which asserts a tree that was never
+        # named. Publish refuses such a receipt first, but this is the audit
+        # surface — the one place a tidy sentence must not outrun its record.
         tree_state = ("NOT RECORDED — the run did not say which tree it "
                       "executed from")
     elif dirty_paths:
