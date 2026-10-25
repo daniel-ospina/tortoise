@@ -46,16 +46,26 @@ name: main-lint
 # broke main has therefore NEVER worked: the step shipped with this workflow
 # (c72c66be2, #9630) and no run reached it before main went red on 2026-10-25.
 #
-# Three properties are now explicit, and the first two are asserted by
-# tests/test_reporting_workflow_concurrency.py (the merged-tree-guard pin):
+# Three properties are now explicit, and the pin asserts them — the parts it does
+# NOT pin are named as such rather than implied (a claim a tidy-up can leave
+# silently false is how the contribution gets deleted with green CI):
 #   1. the VERDICT is published by its OWN step as an annotation + step summary,
 #      so a reader never infers it from an exit code. PASS, FAIL and NO VERDICT
 #      (the lint step did not run) are each NAMED — and NO VERDICT is never a
 #      pass. The `case` below is an allow-list on purpose: only `success` is
 #      green, so a new/unrecognised conclusion cannot fall through to a pass.
+#      PINNED: the step exists after the lint step, is the one step deriving
+#      `steps.ruff.outcome` through `env:`, carries `if: always()`, writes
+#      `$GITHUB_STEP_SUMMARY`, and its default arm `exit 1`s while its `success`
+#      arm does not. Each half has a mutant in the pin's `_STARVED_SHAPES`.
 #   2. the verdict IS the lint step's own outcome, so a finding still fails the
 #      job — including when the notification ALSO fails. The notification cannot
-#      change the verdict in either direction.
+#      change the verdict in either direction. PINNED: the notifier's `if:` is
+#      the one step keyed on that outcome and carries `failure()`, and its
+#      `continue-on-error: true` is required (a reporter that throws cannot red
+#      the job). NOT pinned: that each API call is individually try/catch'd —
+#      the pin reads the shape, not the call graph; the `wrapped` behaviour is
+#      measured on real runs (see the PR's Evidence table), not asserted here.
 #   3. the notification is `continue-on-error: true` and every API call is
 #      wrapped, so a reporter failure is a warning that NAMES the endpoint and
 #      the token error instead of a bare "Resource not accessible by
@@ -70,7 +80,15 @@ on:
     branches: [main]
   # Dispatch exists so the guard can be MEASURED on a branch — the shape any fix
   # to this file has to be proven in (#5120) — without waiting for main to go
-  # red. It adds no check: a dispatch run still reports the single `lint` name.
+  # red. It adds no REQUIRED check and no new check NAME — a dispatch run still
+  # reports the single `lint` name — but it is not invisible: the run creates a
+  # `lint` check-run ON THE DISPATCHED REF's sha, and a PR displays its head
+  # sha's check-runs. ⛔ So dispatch it only on a THROWAWAY ref that will be
+  # deleted, never on a branch hosting an open PR while that branch is lint-red:
+  # `simulate_comment_failure` is only reachable on a branch that is already
+  # failing, so the probe leaves a FAILING `lint` check-run there, and by this
+  # repo's own rule a re-run adds an attempt and never clears one — only a new
+  # sha can (#5120 measured itself on a throwaway that was then deleted).
   # Measured 2026-10-25: `gh workflow run main-lint.yml --ref <branch>` works
   # pre-merge BECAUSE this file already exists on the default branch; a NEW
   # workflow file cannot be dispatched at all until it is merged (the API answers
@@ -100,9 +118,12 @@ permissions:
   # listed is `none`, and a `push` event's default token is read-only. Dropping it
   # in the move here would make the notification a 403 (the pre-move job carried it
   # at workflow level). Kept alongside `pull-requests: write` because the endpoint
-  # called is the ISSUES one: the warning this step now emits names the failing
-  # call and its status, so the redundant scope can be dropped on evidence rather
-  # than on a reading of the docs.
+  # called is the ISSUES one. ⛔ This is a HARD requirement of
+  # tests/test_reporting_workflow_concurrency.py: dropping the scope here reds
+  # that pin, so a lane that believes it redundant must change the pin and the
+  # reasoning in the same commit — with a real post-merge run as the evidence that
+  # `issues.createComment` works without it. It is a superset of what the endpoint
+  # needs today, never a narrowing.
   issues: write
 
 jobs:
@@ -136,10 +157,14 @@ jobs:
       - name: "Publish the verdict — PASS / FAIL / NO VERDICT (#5120)"
         id: verdict
         # `always()`: this step is the reader's answer in BOTH directions. It is
-        # deliberately NOT keyed on `steps.ruff.outcome` in its `if:` — the pin
-        # asserts the ONE step keying on that outcome is the github-script comment
+        # deliberately NOT keyed on `steps.ruff.outcome` in its `if:` — it reads the
+        # outcome through `env: OUTCOME` instead, because the pin asserts the ONE
+        # step keying on that outcome in its `if:` is the github-script comment
         # below (a second such step is how the notification stops being the thing
-        # that notifies). It never fails the job: the ruff step already did.
+        # that notifies), and the ONE step deriving it through `env:` is this one.
+        # The FAIL arm does not fail this step — the ruff step already owns that
+        # red; only the NO VERDICT arm exits 1, because an unmeasured tree must not
+        # finish green.
         if: always()
         env:
           OUTCOME: ${{ steps.ruff.outcome }}

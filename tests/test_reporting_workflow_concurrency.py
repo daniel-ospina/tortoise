@@ -1720,6 +1720,186 @@ def _defaults_problem(defaults: object) -> str | None:
     return None
 
 
+# A `case` arm head: the pattern list, an unescaped `)`, and nothing after it on
+# the line. `*)` is the default arm; `success|failure)` is two conclusions.
+_CASE_ARM = re.compile(r"^\s*([A-Za-z0-9_.|*'\"$!-]+)\)\s*$")
+
+
+def _shell_code(run: str) -> list[str]:
+    """``run:`` lines with shell comments removed.
+
+    A `# exit 1` in a comment is not an exit: the shipped `run:` carries several
+    comment lines that NAME the semantics (`# The ONLY arm that fails this step`),
+    so a pin reading the raw text can be satisfied by prose.
+    """
+    return [line for line in run.splitlines() if not line.lstrip().startswith("#")]
+
+
+def _case_arms(run: str) -> dict[str, list[str]] | None:
+    """The arms of the first ``case … esac`` in ``run``, or ``None`` if it has none.
+
+    Keys are the arm's pattern text (`success`, `*`, `failure|error`), values the
+    code lines of the arm's body, with the `;;` terminator dropped.
+    """
+    lines = _shell_code(run)
+    start = next((i for i, line in enumerate(lines) if re.match(r"^\s*case\s", line)), None)
+    if start is None:
+        return None
+    arms: dict[str, list[str]] = {}
+    current: str | None = None
+    for line in lines[start + 1 :]:
+        if line.strip() == "esac":
+            return arms
+        if line.strip() == ";;":
+            current = None
+            continue
+        match = _CASE_ARM.match(line)
+        if match:
+            current = match.group(1)
+            arms.setdefault(current, [])
+            continue
+        if current is not None:
+            arms[current].append(line)
+    return None  # no `esac`: this is not a `case` this pin can read
+
+
+def _exits_1(body: list[str]) -> bool:
+    """True when the arm body really exits 1 (a bare `exit 1`, not `echo` of it)."""
+    return any(
+        re.search(r"(^|;|\s)exit\s+1(\s|;|$)", line) and "echo" not in line for line in body
+    )
+
+
+def _verdict_step_problem(steps: list, ruff_index: int, ruff_id: str) -> str | None:
+    """Why the steps after the ruff step do not PUBLISH the verdict, or ``None``.
+
+    #5120 measured the defect this pins: run 40154972406 was red for a real
+    finding AND for an inert notification, and its annotations could not tell the
+    two apart. The fix is a step that NAMES the verdict (`PASS`/`FAIL`/`NO
+    VERDICT`) from the ruff step's own outcome — and the pin has to read it, or a
+    tidy-up deletes the whole contribution with every test still green while the
+    header claims a test protects it.
+
+    Four properties are required, each of which a mutant below removes:
+
+    * it is the ONE step deriving ``steps.<ruff>.outcome`` through ``env:`` — the
+      notifier keys on it in its ``if:``, and a second reader of the same outcome
+      is how a step stops being the thing that reports;
+    * it sits AFTER the ruff step (before it, the outcome is null);
+    * its ``if:`` carries a status function that is not ``success()``/``cancelled()``:
+      `always()` removes the implicit `success()` that skips it on exactly the
+      failing path;
+    * the ``run:`` writes ``$GITHUB_STEP_SUMMARY`` and reads that outcome as an
+      ALLOW-LIST — only ``success`` passes, and the default arm ``exit 1``s, so an
+      unmeasured tree (``skipped``/null/an undocumented conclusion) can never leave
+      the run green with a verdict nobody reads.
+    """
+    derivers = [
+        (index, step)
+        for index, step in enumerate(steps)
+        if isinstance(step, dict)
+        and isinstance(step.get("env"), dict)
+        and any(
+            f"steps.{ruff_id}." in str(value) or f"steps['{ruff_id}']" in str(value)
+            for value in step["env"].values()
+        )
+    ]
+    if not derivers:
+        return (
+            f"nothing derives `steps.{ruff_id}.outcome` through `env:` — the step "
+            "that PUBLISHES the verdict (#5120) is gone, so a reader is back to "
+            "inferring PASS from a green exit code and cannot tell a real finding "
+            "from a reporting failure"
+        )
+    if len(derivers) > 1:
+        return (
+            f"{len(derivers)} steps derive `steps.{ruff_id}.outcome` through `env:` "
+            "— exactly one step publishes the verdict; a second reader is how a "
+            "step stops being the thing that reports"
+        )
+    index, verdict = derivers[0]
+    if index < ruff_index:
+        return (
+            f"the step deriving `steps.{ruff_id}.outcome` sits BEFORE the ruff step "
+            "— at that point the outcome is null, so the published verdict is "
+            "`NO VERDICT`/empty on every run"
+        )
+    condition = str(verdict.get("if", ""))
+    status_terms = {f"{name}()" for name in _STATUS_SCAN.findall(condition)}
+    if status_terms & {"success()", "cancelled()"}:
+        return (
+            f"the verdict-publishing step has `if: {condition}` — "
+            f"{sorted(status_terms & {'success()', 'cancelled()'})} makes it skip "
+            "exactly the paths whose verdict a reader needs (a failed or "
+            "unmeasured lint step)"
+        )
+    if "always()" not in status_terms:
+        return (
+            f"the verdict-publishing step has `if: {condition or 'none'}` — without "
+            "`always()` GitHub prepends an implicit `success()`, so the step is "
+            "SKIPPED on the failing path and the header's 'published in BOTH "
+            "directions' is false about the artifact"
+        )
+    run = str(verdict.get("run", ""))
+    if "GITHUB_STEP_SUMMARY" not in "".join(_shell_code(run)):
+        return (
+            "the verdict-publishing step never writes `$GITHUB_STEP_SUMMARY` — the "
+            "verdict exists only in the log of a step nobody opens, which is the "
+            "inference #5120 exists to remove"
+        )
+    outcome_vars = [
+        key
+        for key, value in (verdict.get("env") or {}).items()
+        if f"steps.{ruff_id}." in str(value) or f"steps['{ruff_id}']" in str(value)
+    ]
+    if not any(f"${{{key}" in run for key in outcome_vars):
+        return (
+            f"the verdict-publishing step sets {outcome_vars} but never READS it in "
+            "its `run:` — the `case` is not keyed on the ruff step's own outcome, "
+            "so it publishes whatever the shell last saw"
+        )
+    arms = _case_arms(run)
+    if not arms:
+        return (
+            "the verdict-publishing step has no `case … esac` over the outcome — the "
+            "verdict must be selected by an explicit arm per conclusion, not by an "
+            "`if` chain whose default is the pass"
+        )
+    tokens = {pattern: {tok.strip("'\"") for tok in pattern.split("|")} for pattern in arms}
+    success_arms = [pattern for pattern, toks in tokens.items() if "success" in toks]
+    default_arms = [pattern for pattern, toks in tokens.items() if "*" in toks]
+    if not success_arms:
+        return (
+            f"the verdict `case` has no `success)` arm ({sorted(arms)}) — a PASS has "
+            "no arm of its own, so `success` falls into whatever the default does "
+        )
+    if not default_arms:
+        return (
+            f"the verdict `case` has no `*)` default arm ({sorted(arms)}) — a "
+            "conclusion GitHub has not documented yet, and a `skipped` lint step, "
+            "then match nothing and the step exits 0 with no verdict published"
+        )
+    for pattern in success_arms:
+        if _exits_1(arms[pattern]):
+            return (
+                f"the verdict `case` `{pattern})` arm `exit 1`s — a PASS must not fail "
+                "the step, or every green tree is red"
+            )
+    for pattern, toks in tokens.items():
+        if pattern in success_arms or "failure" in toks:
+            continue
+        # ALLOW-LIST polarity: every arm that is neither the PASS nor the FAIL arm
+        # (the default included) must fail the step. A `skipped)` arm that passes,
+        # or a default that passes, turns "nothing measured this tree" into green.
+        if not _exits_1(arms[pattern]):
+            return (
+                f"the verdict `case` `{pattern})` arm does not `exit 1` — only the "
+                "`success` arm may pass; `skipped`, null and an unrecognised "
+                "conclusion must be NO VERDICT, never green"
+            )
+    return None
+
+
 def _merged_tree_guard_problem(doc: dict) -> str | None:
     """Why ``doc`` is not a guard that RUNS (and still FAILS) on every merged tree.
 
@@ -2041,6 +2221,14 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
                     "github-script step that POSTS the comment; any other step "
                     "satisfies the shape while notifying nobody"
                 )
+            if other.get("continue-on-error") is not True:
+                return (
+                    f"the github-script step keyed on `steps.{step_id}.outcome` does "
+                    f"not carry `continue-on-error: true` (it has "
+                    f"{other.get('continue-on-error')!r}) — a reporter that throws "
+                    "before its own try/catch then REDS the job, so the notification "
+                    "changes the verdict, which is the direction #5120 measured"
+                )
             # Comments AND string/template literals are stripped: the membership
             # test was satisfied by `core.info("see the issues.createComment docs")`,
             # a valid no-op — the same class as the commented-out call, one spelling
@@ -2099,6 +2287,15 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
                     "conjunct (a constant, another event filter) can only narrow it — "
                     "a step that never fires notifies nobody"
                 )
+        # ── #5120: the VERDICT is published by its own step, and the pin reads it ──
+        # The notification and the verdict are two different readers of the same
+        # outcome: the notifier keys on it in its `if:`, the verdict step derives it
+        # through `env:`. Both are pinned here, or the header's claim ("the first
+        # two properties are asserted by this pin") is false about the artifact —
+        # deleting the whole verdict step left this suite green.
+        verdict_problem = _verdict_step_problem(job.get("steps") or [], idx, step_id)
+        if verdict_problem is not None:
+            return verdict_problem
         # The install must be in THIS job, BEFORE the ruff step, and the LAST word:
         # a decoy pinned install in another job (or after the guard) leaves the real
         # one bare, and a second unpinned install replaces a pinned one (pip is
@@ -2806,8 +3003,89 @@ def _set_notifier_without_action(doc: dict) -> None:
             steps[index] = {"name": step["name"], "if": step["if"]}
 
 
+def _set_verdict_if_success(doc: dict) -> None:
+    _verdict_step(doc)["if"] = "success()"
+
+
+def _verdict_step(doc: dict) -> dict:
+    """The live artifact's verdict-publishing step (the one deriving the outcome via `env:`)."""
+    ruff_id = _ruff_step(doc)["id"]
+    for step in doc["jobs"]["lint"]["steps"]:
+        if (
+            isinstance(step, dict)
+            and isinstance(step.get("env"), dict)
+            and any(
+                f"steps.{ruff_id}." in str(value) for value in step["env"].values()
+            )
+        ):
+            return step
+    raise AssertionError("the live artifact lost its verdict step — the mutant is unbuildable")
+
+
+def _set_notifier_fatal(doc: dict) -> None:
+    """`continue-on-error` dropped: a reporter that throws now reds the job (#5120)."""
+    step_id = _ruff_step(doc)["id"]
+    for step in doc["jobs"]["lint"]["steps"]:
+        if isinstance(step, dict) and f"steps.{step_id}." in str(step.get("if", "")):
+            step.pop("continue-on-error", None)
+
+
+def _remove_verdict_step(doc: dict) -> None:
+    doc["jobs"]["lint"]["steps"].remove(_verdict_step(doc))
+
+
+def _set_verdict_without_summary(doc: dict) -> None:
+    """The verdict survives only in a log line, which is the inference #5120 removes."""
+    step = _verdict_step(doc)
+    step["run"] = step["run"].replace(' >> "$GITHUB_STEP_SUMMARY"', "")
+
+
+def _set_verdict_default_passes(doc: dict) -> None:
+    """Deny-list polarity: the default arm no longer fails, so NO VERDICT is green."""
+    step = _verdict_step(doc)
+    step["run"] = "\n".join(
+        line for line in step["run"].splitlines() if not re.match(r"^\s*exit 1\s*$", line)
+    )
+
+
+def _set_verdict_without_success_arm(doc: dict) -> None:
+    """`success)` removed: PASS falls into the default arm, which exits 1."""
+    step = _verdict_step(doc)
+    step["run"] = "\n".join(
+        line for line in step["run"].splitlines() if line.strip() != "success)"
+    )
+
+
+def _set_second_outcome_reader(doc: dict) -> None:
+    """A second step derives the same outcome, so the reporter is no longer THE reader."""
+    step_id = _ruff_step(doc)["id"]
+    doc["jobs"]["lint"]["steps"].append(
+        {
+            "name": "a second reader of the ruff outcome",
+            "if": "always()",
+            "env": {"OUTCOME": f"${{{{ steps.{step_id}.outcome }}}}"},
+            "run": "echo reading $OUTCOME",
+        }
+    )
+
+
+def _set_verdict_before_ruff(doc: dict) -> None:
+    """Before the ruff step the outcome is null, so the verdict is empty on every run."""
+    steps = doc["jobs"]["lint"]["steps"]
+    step = _verdict_step(doc)
+    steps.remove(step)
+    steps.insert(steps.index(_ruff_step(doc)), step)
+
+
 def _set_permissions_without_issues_write(doc: dict) -> None:
-    doc["permissions"] = {"contents": "read", "pull-requests": "read"}
+    """Missing `issues: write` and NOTHING else, so the clause is isolated.
+
+    `pull-requests: write` is present on purpose: when this mutant also carried
+    `pull-requests: read`, the shape was rejected for two reasons at once and the
+    `issues: write` requirement had no mutation proof left — a future edit dropping
+    it from the requirement list stayed green.
+    """
+    doc["permissions"] = {"contents": "read", "pull-requests": "write"}
 
 
 def _set_permissions_without_pull_requests_write(doc: dict) -> None:
@@ -2885,6 +3163,15 @@ _STARVED_SHAPES = [
     ("a notifier `if:` without `failure()`", _set_notifier_without_failure),
     ("a notifier `if:` with a false conjunct", _set_notifier_with_false_conjunct),
     ("a notifier step with no `uses:`/`run:`", _set_notifier_without_action),
+    ("a notifier that can fail the job", _set_notifier_fatal),
+    # ── the VERDICT is never published, or is published green (#5120) ──
+    ("the verdict step deleted", _remove_verdict_step),
+    ("a verdict `if:` gated on success", _set_verdict_if_success),
+    ("a verdict step that never writes the summary", _set_verdict_without_summary),
+    ("a verdict default arm that passes", _set_verdict_default_passes),
+    ("a verdict `case` with no `success)` arm", _set_verdict_without_success_arm),
+    ("a second reader of the ruff outcome", _set_second_outcome_reader),
+    ("the verdict step placed before the ruff step", _set_verdict_before_ruff),
     # ── the install is pinned, then replaced (last-write-wins) ──
     ("a second bare install step", _set_second_unpinned_install_step),
     ("a second bare install line", _set_second_unpinned_install_line),
