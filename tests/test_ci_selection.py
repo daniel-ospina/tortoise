@@ -2266,6 +2266,29 @@ def test_docs_lint_baseline_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_inbound_relay_sweep_tool_change_selects_core_not_tier1():
+    """A change to the relay sweep must run the rails it pins (#9943).
+
+    `tests/test_inbound_relay_sweep.py` is registered on the `core` surface and
+    owns the sweep's invariants — relay-before-close, the label applied LAST so a
+    failure leaves the item retryable, an unreadable page taking no action, and
+    the queue-batch exclusion — which are exactly what a PR would edit to weaken
+    the control. That registration is INERT for a tool-only diff: `tools/` is a
+    flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches the tool, so
+    `select()` returned NO surface, took the docs-only early return and fell back
+    to the tier-1 smoke set, which does not contain the file. The 15-minute cron
+    then runs the weakened tool with its rails unpinned.
+
+    Mutation check: removing the CORE_ALSO entry fails the FIRST assert
+    (`"core" in r["surfaces"]`); the docs-only early return then yields
+    `full: False` with no pin, so the later asserts pass unexercised.
+    """
+    r = _sel(["tools/inbound_relay_sweep.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_inbound_relay_sweep.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
 def test_ax_write_eval_tool_change_selects_core_not_tier1():
     """A change to the eval instrument must run the rules it pins (#9695 review).
 
@@ -2715,6 +2738,36 @@ def test_the_tenancy_migration_selects_the_posture_pins():
     assert r["full"] is False, r
     assert r["surfaces"] == ["core"], r
     assert "test_record_tenancy_guc.py" in r["test_files"], r
+
+
+def test_the_source_canonical_index_migration_selects_the_resolver_pins():
+    # #9967 review cycle 2, P1 follow-through: `20261025000002_record_source_
+    # canonical_index.sql` is the index behind the `:Source` resolver's
+    # `canonical_url` arm — the arm #9956 makes run on EVERY source write. It
+    # sorts outside every `2026101200000` CORE_ALSO prefix and `supabase/` is a
+    # NON_PYTHON_PREFIX, so before this entry a diff touching ONLY this file
+    # selected NO surface: renaming or dropping the index would have run no pin,
+    # silently (the #1349/#3332/#3616 class; `test_record_projection.py`'s
+    # registration cannot fix it, because a surface's test_files only run when
+    # that surface is ALREADY selected).
+    #
+    # Measured before the CORE_ALSO entry: `_sel([<this path>])` ->
+    # `surfaces: []`, `full: false`. Mutation check: removing the entry makes the
+    # assertions below fail with `surfaces == []`.
+    changed = "supabase/migrations/20261025000002_record_source_canonical_index.sql"
+
+    r = _sel([changed])
+
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    # The resolver itself, and the two suites that pin it to the migration
+    # REGISTRY — the closures this file's absence broke (#9967 review 1a/1b).
+    for pin in (
+        "test_record_projection.py",  # the resolver + row-key/edge parity
+        "test_7950_capstone_probe.py",  # probe lists pinned to RECORD_MIGRATIONS
+        "test_9078_record_written_by_production_path.py",  # the re-apply registry
+    ):
+        assert pin in r["test_files"], (pin, r)
 
 
 def test_postgres_storage_guard_runs_on_migration_or_doc_change():

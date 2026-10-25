@@ -437,6 +437,18 @@ def test_a_stale_report_from_an_earlier_step_never_survives_a_failure(tmp_path: 
     stale.write_text('{"total": 0, "error_map": {}, "timeout_map": {}}', encoding="utf-8")
     proc, _report = _run_step_for_existing(tmp_path)
     assert proc.returncode != 0
+    # The second unpack is `_report`: that binding is genuinely unused and an
+    # underscore name is what says so (`ruff check .` fails the whole repo on an
+    # unused unpacked variable — RUF059 — which is what reddened
+    # `agent-infra-ci / lint`). ⛔ It must stay unused BY NAME: an earlier cut of
+    # this rename left the assertion below reading `report`, an undefined name,
+    # so the test died with `NameError` instead of checking anything — that is
+    # what reddened `test (g)` on this PR (measured at e87e9db7). The path to
+    # assert on is `stale`, the file THIS test wrote. `_report == stale` would
+    # have been a tautology (both sides are built from the same RUNNER_TEMP +
+    # step-name expression by the helper and by this line), i.e. an assertion
+    # that cannot fail; the existence check on `stale` is the discriminating one
+    # and is exactly what stood here before the RUF059 rename.
     assert not stale.exists(), "a stale report must be cleared before the producer can fail"
 
 

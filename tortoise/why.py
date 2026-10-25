@@ -54,7 +54,10 @@ import os
 import re
 
 from .env_truthy import is_truthy  # #4097: the declared truthy contract
-from .live import is_terminal_status  # #2490: terminal rows override has_ep
+from .live import (
+    _live_only,  # #9962: the dampener's own predicate
+    is_terminal_status,  # #2490: terminal rows override has_ep
+)
 from .search_engine import (  # type: ignore[import-not-found]
     CONTESTED_VARIANCE_THRESHOLD,
     _exclude_status_clause,
@@ -218,7 +221,9 @@ def _assemble_supports(rows: list, by_id: dict[str, dict], *,
         # is not guaranteed, and an arbitrary pick made the surfaced operator —
         # and with it the surfaced mitigation TEXT — insertion-order dependent
         # (the same pair reported a different reason depending on which edge
-        # was written first).
+        # was written first). #9962: the mitigation leg is read live-only, so
+        # "more than once" here is several CURRENT mitigations; a withdrawn one
+        # is not a candidate and can no longer win the tie-break.
         if key < rank[(pid, sup_id)]:
             pending[pid][sup_id] = entry
             rank[(pid, sup_id)] = key
@@ -499,9 +504,20 @@ _SUPPORT_OP_CYPHER = (
     # #3990: the operator that mediates THIS support rides the same traversal
     # — objective 4 requires the operator (id + kind) plus any mitigation on
     # it, and a second query per support would be a new read on the hot path.
-    # The mitigation is OPTIONAL (an operator need not be mitigated) and uses
-    # the same ``mitigated_by`` predicate as _TRADEOFFS_CYPHER.
+    # The mitigation is OPTIONAL (an operator need not be mitigated).
+    #
+    # ⛔ #9962 — BOTH ``mitigated_by`` legs in this module (this one and
+    # ``_TRADEOFFS_CYPHER`` below) read only mitigations that PRICE the
+    # operator (``live._live_only``, the predicate ``weights.py``'s
+    # ``compute_operator_weight`` applies). Before it, this leg's tie-break
+    # (lowest mitigation id) picked the OLDEST mitigation, and ULIDs ascend —
+    # so after mitigate → retract → re-mitigate (the #9962 re-assertion, which
+    # mints a NEW Point and leaves the retracted one in place) the why-block
+    # named the WITHDRAWN mitigation while the number was damped by the live
+    # one. A predicate HERE, rather than a status field in the emitted entry,
+    # keeps the surfaced text and the arithmetic the same object.
     "OPTIONAL MATCH (op)-[:mitigated_by]->(mit:Point) "
+    f"WHERE {_live_only('mit.status')} "
     "RETURN n.id, sup.id, sup.content, "
     "  coalesce(sup.posterior_alpha, sup.ep_alpha, 1.0), "
     "  coalesce(sup.posterior_beta, sup.ep_beta, 1.0), "
@@ -576,7 +592,18 @@ _TRADEOFFS_CYPHER = (
     "MATCH (n)-[ri:INPUT]->(op:Point {is_operator:true})-[r2:IMPL]->(alt:Point) "
     f"WHERE ri.idx = 0 AND r2.idx > 0 "
     f"AND (alt.is_operator = false OR alt.is_operator IS NULL) AND {_exclude_status_clause('alt')} "
+    # #9962 — the SAME liveness predicate the support leg above applies, for
+    # the same reason: a withdrawn (or draft) mitigation computes no dampening,
+    # so it must not be presented as one. Before it, a decision point's
+    # ``tradeoffs[]`` named the retracted mitigation as the alternative's
+    # explanation — and, because ``_assemble_tradeoffs`` keeps the first row it
+    # sees per alternative, which of two attached mitigations won was row-order
+    # dependent. Only CURRENT mitigations can satisfy the filter now, so the
+    # remaining ambiguity is limited to the #2315 import artifact (two LIVE
+    # mitigations on one operator compose by max, and either explains the
+    # alternative); no SDK door mints that shape.
     "OPTIONAL MATCH (op)-[:mitigated_by]->(m:Point) "
+    f"WHERE {_live_only('m.status')} "
     "RETURN n.id, n.pointKind, alt.id, alt.content, alt.pointKind, op.id, m.content, "
     "  coalesce(alt.posterior_alpha, alt.ep_alpha, 1.0), "
     "  coalesce(alt.posterior_beta, alt.ep_beta, 1.0)"
