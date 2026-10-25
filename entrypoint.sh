@@ -68,6 +68,68 @@ set -euo pipefail
 # (`error:`, `12:30:45`, `warn: bad`, `C:\foo`, a timestamp), and failing closed
 # on those would drop the diagnostic the mask exists to preserve.
 _redact_uri() {
+    # ⛔ BYTE/ASCII SEMANTICS FOR THE WHOLE REDACTOR — this is a PARITY
+    # contract, not a preference. The canonical helper in
+    # `tortoise/__main__.py` is restricted to ASCII on purpose (`_scheme_ok`
+    # restricts to ASCII "to match entrypoint.sh's sed class
+    # `[a-zA-Z][a-zA-Z0-9+.-]*` — `str.isalpha()` alone accepts Unicode
+    # letters, which the shell does not"), and `_authority_region` spells
+    # its cut set out rather than using `[[:space:]]` "so it is
+    # locale-independent". Both of those claims are FALSE without this line:
+    # bracket RANGES and character CLASSES are collation-sensitive, so under
+    # a UTF-8 locale they admit code points the ASCII predicate rejects.
+    # Measured, under `LC_ALL=en_US.UTF-8`:
+    #   `[!0-9]`   did NOT reject U+0660 — under a UTF-8 locale bash reads the
+    #                                Arabic-Indic digit as INSIDE the collated
+    #                                0-9 range, so `*[!0-9]*` does not match
+    #                                and the port was read as numeric and the
+    #                                value echoed, while the canonical failed
+    #                                closed. (Under `C` the same `case` DOES
+    #                                match and rejects it — that inversion is
+    #                                the whole defect.)
+    #   `sed -E s/^[a-zA-Z]$/…/` MATCHED `é` → `rédiss://user:pw@host:6379`
+    #                                masked as a scheme while the canonical
+    #                                failed closed
+    #   `[[:alpha:]]` MATCHED `é` (and `[[:upper:]]` `É`) under a UTF-8
+    #                                locale, and neither matches under `C`.
+    #
+    # ⛔ RANGES ARE NOT ONE THING — do not generalise this to "ranges are
+    # collated". Measured on this host (bash 5.2.21, glibc en_US.utf8), as the
+    # behaviour of each CONSTRUCT on `é` / U+0660:
+    #   bash `case` class  `[[:alpha:]]`  MATCHES `é` under a UTF-8 locale,
+    #                                     not under `C`      -> COLLATED
+    #   bash `case` range  `[a-zA-Z]`     does NOT match `é` in any locale
+    #                                     (bash's `globasciiranges` is on by
+    #                                     default)          -> NOT collated
+    #   bash `case` range  `[0-9]`        treats U+0660 as a DIGIT under a
+    #                                     collating UTF-8 locale -> COLLATED
+    #   sed ERE range      `[a-zA-Z]`     MATCHES `é` under `en_US.UTF-8`, not
+    #                                     under `C` or `C.UTF-8` -> COLLATED
+    # So the pin is needed for three different reasons, not one, and `C.UTF-8`
+    # is NOT a substitute for `C` on the sed path. (NBSP is NOT an example here:
+    # `[[:space:]]` does not match U+00A0 in bash `case`, `sed` or `grep` on
+    # glibc — measured.)
+    #
+    # ⛔ BOTH LINES BELOW ARE REQUIRED — `local` IS NOT `export`. `local`
+    # restores the caller's locale on return, but it only PRESERVES the export
+    # attribute of an existing export; it never CONFERS one. With `LC_ALL` in
+    # the ambient environment the `sed` child inherits `LC_ALL=C`. With only
+    # `LANG=en_US.UTF-8` and `LC_ALL` ABSENT — a developer shell, and many
+    # container images — a bare `local LC_ALL=C` leaves the pin a plain shell
+    # variable and the child keeps UTF-8 collation. Measured on GNU bash
+    # 5.2.21: in that shape `rédiss://user:S3ntinel@host:6379` was masked as a
+    # scheme while the canonical helper failed closed on it, so the parity
+    # contract was still open on exactly the hosts the pin exists to protect.
+    # `export LC_ALL` closes it and exports the LOCAL value, so the caller's
+    # `LC_ALL` is still restored on return (verified: `en_US.UTF-8` in, `C`
+    # inside, `en_US.UTF-8` out; unset in, unset out). Do not remove either
+    # line to "keep the locale" — the redactor must behave identically on
+    # every runner.
+    # Regression: `tests/test_boot_regressions.py::test_the_shell_redactor_is_locale_independent`
+    # runs BOTH environments (`lc_all-set` and `lang-only`) across three
+    # locales (#9978).
+    local LC_ALL=C
+    export LC_ALL
     local uri="${1:-}" masked line out="" first=1 shaped=0 candidate \
           tail before rest cut=$'[/?#"\047 \t\v\f\r\n]' \
           region scan frag uri_has_scheme=0
@@ -104,8 +166,16 @@ _redact_uri() {
                     *[a-zA-Z]*) ;;
                     *) return 1 ;;
                 esac
+                # `[!0-9]` is a COLLATION-SENSITIVE range: under a UTF-8
+                # locale (measured: en_US.UTF-8) bash matches U+0660 and the
+                # other Arabic-Indic digits inside `0-9`, so `host:٠` read as a
+                # numeric port and the fragment was accepted while the
+                # canonical helper refused it. The explicit character LIST is
+                # not collated, so it is ASCII-only in every locale — which is
+                # the contract `_mask_uri_userinfo` documents. Do not "tidy"
+                # this back into a range.
                 case "${1##*:}" in
-                    ''|*[!0-9]*) return 1 ;;
+                    ''|*[!0123456789]*) return 1 ;;
                 esac
                 if [ -n "${1%%:*}" ]; then
                     return 0
@@ -173,9 +243,11 @@ _redact_uri() {
                 # not the authority. The set is spelled out rather than
                 # `[[:space:]]` so it is locale-independent and byte-identical
                 # to `tortoise/__main__.py::_authority_region`. Keep the two in
-                # sync — a different cut set is a divergence, and `[[:space:]]`
-                # additionally matches NBSP under a UTF-8 locale, which the
-                # canonical literal set does not (a parity break).
+                # sync — a different cut set is a divergence. (`[[:space:]]`
+                # is NOT additionally matching NBSP here: measured on glibc it
+                # does not, in bash `case`, `sed` or `grep`. The literal set
+                # is still the right choice — it is byte-exact and needs no
+                # argument about what a class means under a given locale.)
                 region="${candidate%%$cut*}"
                 # #5267: everything AFTER the bounded region is delimiter-
                 # bounded fragment material too, judged by the tell above —
@@ -212,8 +284,13 @@ _redact_uri() {
                                     # (`:[0-9]*` matches `:6379:S3n`), so a
                                     # bracketed credential failed OPEN here
                                     # while the canonical masked it.
+                                    #
+                                    # The explicit list, not `[!0-9]`: a range
+                                    # is collation-sensitive and admits the
+                                    # Arabic-Indic digits under a UTF-8 locale
+                                    # (see `_fragment_tell`).
                                     case "${tail#:}" in
-                                        ''|*[!0-9]*) shaped=1 ;;
+                                        ''|*[!0123456789]*) shaped=1 ;;
                                     esac
                                     ;;
                                 *) shaped=1 ;;
@@ -232,8 +309,13 @@ _redact_uri() {
                                 # credential, so a password-less target keeps
                                 # printing unchanged. An empty or non-numeric
                                 # tail is credential material.
+                                #
+                                # The explicit list, not `[!0-9]`: a range is
+                                # collation-sensitive and admits the
+                                # Arabic-Indic digits under a UTF-8 locale
+                                # (see `_fragment_tell`).
                                 case "$rest" in
-                                    ''|*[!0-9]*) shaped=1 ;;
+                                    ''|*[!0123456789]*) shaped=1 ;;
                                 esac
                             fi
                             ;;
