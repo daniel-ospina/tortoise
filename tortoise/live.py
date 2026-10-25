@@ -14,13 +14,15 @@ terminal states; #2422). The canonical set is ``TERMINAL_EXCLUDED_STATUSES``
 UNCONDITIONAL: ``include_draft=True`` re-includes DRAFTS only, never terminal
 points.
 
-The predicate is shared across ALL FOUR call sites so ``include_draft=True``
+The predicate is shared across ALL FIVE call sites so ``include_draft=True``
 re-includes drafts identically everywhere:
 
 - ``TortoiseEP._affected_claims`` / ``TortoiseEP._affected_factors`` (ep.py)
 - ``extract_svbp_factors`` (projection/__init__.py — graph-wide SVBP path)
 - ``_bfs_select_operators`` (analyze.py)
 - ``_select_subgraph`` (sdk.py)
+- ``compute_operator_weight`` (weights.py — the ONE dampener read, #9962: a
+  withdrawn or draft mitigation must not price an operator either)
 """
 
 from __future__ import annotations
@@ -283,6 +285,61 @@ def is_terminal_status(status, outdated: bool = False) -> bool:
     Cypher). Out of contract; no in-repo writer can produce such a value
     (#7075)."""
     return (status or "") in TERMINAL_EXCLUDED_STATUSES or bool(outdated)
+
+
+#: The display prefix a mitigation's stored content carries.
+#: ``sdk.mitigate_operator`` writes ``content='[MITIGATION] <reason>'`` (both
+#: its CREATE and its in-place UPDATE); ``why._mitigation_text`` strips exactly
+#: one for display.
+MITIGATION_REASON_PREFIX = "[MITIGATION] "
+
+
+def mitigation_reason(content) -> str:
+    """The REASON a stored mitigation's ``content`` carries, prefix stripped.
+
+    Assertion identity compares REASONS; the ``[MITIGATION] `` wrap is display
+    punctuation that ``why.py`` strips on the way out, so a comparison against
+    the wrapped string would never match.
+    """
+    return (content or "").removeprefix(MITIGATION_REASON_PREFIX)
+
+
+def same_mitigation_assertion(stored_content, stored_strength,
+                              reason, strength) -> bool:
+    """True when a stored mitigation carries the SAME assertion.
+
+    A mitigation IS an assertion — "(reason, strength) damps this operator" —
+    and its identity is that PAIR, never the node id. That is what makes a
+    machine re-delivery distinguishable from a re-assertion (#9962):
+
+    * identical pair → the graph has ALREADY recorded this assertion, so a
+      machine re-submission (crash-retry, redelivery, re-extraction) writes
+      nothing. Reviving a withdrawn node silently reverses a human's
+      retraction, and minting a second Point falsifies ``INGEST_CONTRACT``
+      §3.2 key 6 ("never duplicated"). The silence is the same one an
+      unchanged re-submission already has.
+    * different pair → NEW evidence, which no write door may drop: it reaches
+      ``mitigate_operator``, which mints a live mitigation (a retraction is
+      terminal, never revived in place — #9962/#432/#2422; a draft is never
+      retro-promoted — #1088).
+
+    BOTH machine write doors decide from this one predicate —
+    ``sdk._apply_ingest_mitigation`` (the ingest bundle route) and
+    ``hosted_api._load_commit_graph_state``'s MITIGATES MERGE key (the hosted
+    commit route) — so the two cannot apply opposite policies to the same
+    event, which they did: one refused to reinstate a withdrawn mitigation
+    while the other minted a fresh one for the identical record.
+
+    Legacy/absent strength values that cannot be coerced to a float are
+    "different" (never a silent match on unrepresentable data).
+    """
+    if mitigation_reason(stored_content) != (reason or ""):
+        return False
+    try:
+        return (stored_strength is not None
+                and float(stored_strength) == float(strength))
+    except (TypeError, ValueError):  # unrepresentable legacy value
+        return False
 
 
 #: The ONE statement that reads a Point id's lifecycle fan-out. It is run by

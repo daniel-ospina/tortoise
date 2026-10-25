@@ -598,6 +598,52 @@ class TestRetractionStopsTheDampener:
             f"observed={observed}"
         )
 
+    @pytest.mark.parametrize("terminal", ["superseded", "archived", "deprecated"])
+    def test_every_terminal_status_stops_dampening(self, terminal):
+        """The read pins the WHOLE vocabulary, not just ``retracted``.
+
+        Failing state pre-#9962: no predicate at all, so every arm damped. What
+        this arm adds is the discrimination a hand-rolled subset cannot pass:
+        ``live._terminal_excluded`` is the canonical set, and a fix written as
+        ``m.status <> 'retracted'`` would leave this arm green for the wrong
+        reason while ``superseded``/``archived``/``deprecated`` kept dampening
+        (the #2901 defect class ``live.py`` exists to stop).
+        """
+        sdk = fresh_sdk()
+        _src, claim, op_id = make_impl_chain(sdk)
+        base = resolved_weight(sdk, op_id, claim["id"])
+        mid = sdk.mitigate_operator(op_id, f"{terminal} mitigation", 0.50)["id"]
+        assert resolved_weight(sdk, op_id, claim["id"]) == pytest.approx(
+            base * mitigation_dampening_factor(0.50))
+
+        sdk._get_proj().g.query(
+            "MATCH (m:Point {id:$m}) SET m.status = $st",
+            params={"m": mid, "st": terminal})
+        assert resolved_weight(sdk, op_id, claim["id"]) == pytest.approx(base), (
+            f"a {terminal} mitigation still dampens: the dampener read is not "
+            "using the canonical terminal vocabulary")
+
+    def test_the_legacy_outdated_flag_stops_dampening(self):
+        """``invalidate_point`` writes ``outdated=true`` and leaves status.
+
+        The second dead-marker arm of the canonical predicate; a status-only
+        predicate (``m.status <> 'retracted'``, or even a full status SET) would
+        keep damping a node invalidated the legacy way.
+        """
+        sdk = fresh_sdk()
+        _src, claim, op_id = make_impl_chain(sdk)
+        base = resolved_weight(sdk, op_id, claim["id"])
+        sdk.mitigate_operator(op_id, "legacy invalidated", 0.50)
+        assert resolved_weight(sdk, op_id, claim["id"]) == pytest.approx(
+            base * mitigation_dampening_factor(0.50))
+
+        sdk._get_proj().g.query(
+            "MATCH (m:Point)-[:mitigated_by]-(:Point {id:$op}) "
+            "SET m.outdated = true", params={"op": op_id})
+        assert resolved_weight(sdk, op_id, claim["id"]) == pytest.approx(base), (
+            "an outdated=true mitigation still dampens: the dampener read "
+            "dropped the legacy flag arm of the terminal predicate")
+
 
 class TestMitigationIsBornCurrent:
     """#9962 target 2 / #5089 — the mitigation write must produce a live Point.
@@ -670,7 +716,8 @@ class TestMitigationIsBornCurrent:
 # door only is not the guarantee #9962 states ("retract_point and delete_point
 # differ only in what they remove").
 
-def _ingest_mitigation_bundle(strength: float = 0.50) -> dict:
+def _ingest_mitigation_bundle(strength: float = 0.50,
+                              reason: str = "p1 is unreliable") -> dict:
     """The crash-retry / redelivery shape (INGEST_CONTRACT §7): one connection
     carrying a mitigation."""
     return {
@@ -681,7 +728,7 @@ def _ingest_mitigation_bundle(strength: float = 0.50) -> dict:
         "entities": [], "sources": [],
         "connections": [
             {"from": "p1", "to": "p2", "operator": "IMPL",
-             "mitigation": {"reason": "p1 is unreliable", "strength": strength}},
+             "mitigation": {"reason": reason, "strength": strength}},
         ],
     }
 
@@ -893,3 +940,149 @@ class TestTheRetractionIsDurableOnEveryRoute:
         sdk._get_proj().g.query(
             "MATCH (m:Point {id:$m}) SET m.status = 'draft'", params={"m": staged})
         assert shown() == [], "the state view surfaced a DRAFT mitigation"
+
+    def test_a_new_assertion_on_a_withdrawn_operator_is_written(self):
+        """A redelivery is skipped by ASSERTION, never by arrival.
+
+        Failing state at the round-2 head: the "every attachment is terminal"
+        arm returned BEFORE the writer whatever the submission said, so a
+        LATER bundle carrying a DIFFERENT mitigation for the same operator
+        (different reason AND strength — the shape INGEST_CONTRACT §13 row 8
+        promises is written) produced no Point, no edge, no batch stamp and no
+        warning. A warned update became a silent no-op.
+        """
+        sdk = fresh_sdk()
+        first = sdk.ingest(_ingest_mitigation_bundle())
+        op_id = first["ids"]["connections"][0]
+        proj = sdk._get_proj()
+        mid = _ingest_mitigation_rows(sdk, op_id)[0][0]
+        assert compute_operator_weight(proj, op_id) == pytest.approx(
+            mitigation_dampening_factor(0.50))
+        sdk.retract_point(mid)
+        assert compute_operator_weight(proj, op_id) == pytest.approx(1.0)
+
+        second = sdk.ingest(_ingest_mitigation_bundle(
+            strength=0.30, reason="the audit found p1 reliable after all"))
+        assert second["ids"]["connections"] == [op_id]
+
+        rows = _ingest_mitigation_rows(sdk, op_id)
+        assert len(rows) == 2, (
+            "a DIFFERENT assertion on a withdrawn operator was dropped: " f"{rows}")
+        live = [r for r in rows if r[1] == "live"]
+        assert len(live) == 1, rows
+        assert compute_operator_weight(proj, op_id) == pytest.approx(
+            mitigation_dampening_factor(0.30)), (
+            "the new bundle's mitigation never priced the operator")
+        assert any(w.startswith("mitigation_strength_change:") and w.endswith("->0.3")
+                   for w in second["warnings"]), (
+            "the divergence from the withdrawn mitigation was not disclosed: "
+            f"{second['warnings']}")
+
+    def test_hosted_commit_redelivery_does_not_reinstate_a_retraction(self):
+        """The hosted door decides on the assertion too — a re-extraction is not
+        a human re-assertion.
+
+        Failing state at the round-2 head: the MITIGATES key counted only
+        CURRENT mitigations, so after a retraction the IDENTICAL record
+        reconciled ``new`` and ``mitigate_operator`` minted a fresh live
+        mitigation. A re-extraction of the same corpus (same record, new
+        ``client_commit_id``, so the L1 dedup does not cover it) therefore
+        silently reinstated a dampening a human withdrew — the exact harm the
+        ingest guard exists to prevent, and the opposite of what ingest does
+        with the same record. A DIFFERENT assertion is still new evidence and
+        must still be written.
+        """
+        from tortoise.commit_ops import apply_payload_operators
+        from tortoise.commit_schema import reconcile_payload
+        from tortoise.hosted_api import _load_commit_graph_state
+
+        sdk = fresh_sdk()
+        proj = sdk._get_proj()
+        src, claim, op_id = make_impl_chain(sdk)
+        base = resolved_weight(sdk, op_id, claim["id"])
+
+        def land(payload):
+            state = _load_commit_graph_state(sdk, payload)
+            new_ops = [r.operator for r in reconcile_payload(payload, state).operators
+                       if r.action == "new"]
+            apply_payload_operators(proj, sdk, new_ops)
+            return state
+
+        def mitigation_rows():
+            return proj.g.query(
+                "MATCH (op:Point {id:$op})-[:mitigated_by]->(m:Point) "
+                "RETURN m.id, m.status", params={"op": op_id},
+            ).result_set
+
+        land(_mitigates_payload(src["id"], claim["id"], 0.50))
+        rows = mitigation_rows()
+        assert len(rows) == 1, rows
+        mid = rows[0][0]
+        assert resolved_weight(sdk, op_id, claim["id"]) == pytest.approx(
+            base * mitigation_dampening_factor(0.50))
+
+        sdk.retract_point(mid)
+        assert resolved_weight(sdk, op_id, claim["id"]) == pytest.approx(base)
+
+        # (a) the SAME assertion arrives again: a re-delivery, not a re-assertion.
+        redelivery = _mitigates_payload(src["id"], claim["id"], 0.50)
+        state = _load_commit_graph_state(sdk, redelivery)
+        assert (src["id"], claim["id"], "MITIGATES") in state.operators, (
+            "an assertion the graph already records must reconcile as applied: "
+            f"{state.operators}")
+        land(redelivery)
+        assert len(mitigation_rows()) == 1, (
+            "a re-extraction duplicated the mitigation: " f"{mitigation_rows()}")
+        assert resolved_weight(sdk, op_id, claim["id"]) == pytest.approx(base), (
+            "a re-extraction reinstated a retraction a human made")
+
+        # (b) a DIFFERENT assertion is new evidence and still reaches the writer.
+        assert (src["id"], claim["id"], "MITIGATES") not in (
+            _load_commit_graph_state(
+                sdk, _mitigates_payload(src["id"], claim["id"], 0.30)
+            ).operators), "a DIFFERENT strength must not be treated as applied"
+        land(_mitigates_payload(src["id"], claim["id"], 0.30))
+        assert len(mitigation_rows()) == 2, mitigation_rows()
+        assert resolved_weight(sdk, op_id, claim["id"]) == pytest.approx(
+            base * mitigation_dampening_factor(0.30)), (
+            "the re-assertion's mitigation never priced the operator")
+
+    def test_why_tradeoffs_leg_hides_a_withdrawn_mitigation(self):
+        """The SECOND ``mitigated_by`` leg in ``why.py`` had no predicate either.
+
+        Failing state pre-fix: ``_TRADEOFFS_CYPHER``'s ``OPTIONAL MATCH
+        (op)-[:mitigated_by]->(m:Point)`` read any status, so a decision
+        point's ``tradeoffs[]`` presented a WITHDRAWN mitigation as the
+        alternative's explanation — the same block whose ``support_chain`` the
+        parallel test above proves is filtered, so one response could state two
+        different things about the same operator.
+        """
+        from tortoise.why import assemble_why_blocks
+
+        sdk = fresh_sdk()
+        proj = sdk._get_proj()
+        dec = make_point(sdk, "Re-raise the price or hold it?", kind="decision")
+        opt1 = make_point(sdk, "alternative: re-raise", kind="option")
+        opt2 = make_point(sdk, "alternative: hold", kind="option")
+        op1 = sdk.create_operator("IMPL", dec["id"], [opt1["id"]])["id"]
+        sdk.create_operator("IMPL", dec["id"], [opt2["id"]])
+        mid = sdk.mitigate_operator(op1, "QA gate + staged rollout", 0.50)["id"]
+
+        def named():
+            blocks = assemble_why_blocks(proj, [dec["id"]])
+            tradeoffs = blocks.get(dec["id"], {}).get("tradeoffs") or []
+            assert len(tradeoffs) >= 2, tradeoffs
+            return {t["point_id"]: t.get("mitigation") for t in tradeoffs}
+
+        assert named()[opt1["id"]] == "QA gate + staged rollout", (
+            "a live mitigation must still explain its alternative: "
+            f"{named()}")
+
+        sdk.retract_point(mid)
+        assert named()[opt1["id"]] is None, (
+            "the tradeoffs leg presents a WITHDRAWN mitigation as the "
+            f"alternative's explanation: {named()}")
+
+        sdk.mitigate_operator(op1, "communicate the delay", 0.30)
+        assert named()[opt1["id"]] == "communicate the delay", (
+            "the tradeoffs leg must surface the CURRENT mitigation: " f"{named()}")

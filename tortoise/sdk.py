@@ -84,6 +84,7 @@ from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
 from .live import _live_only  # #6597 dream coverage closure mirrors EP liveness
 from .live import decay_clause, _terminal_excluded  # #2490 vacuity decay + terminal predicate
 from .live import _current_status_clause  # #4058 canonical current-status allow-list
+from .live import same_mitigation_assertion  # #9962 redelivery vs re-assertion
 from .live import epistemic_label_queries  # #7853 epistemic-label id sweep
 from .live import epistemic_disjunction  # #7853 epistemic-label traversal clause
 from .live import ACCEPTED_DIRECTION_VALUES  # #7852 Layer-1 four-value direction set
@@ -21958,11 +21959,19 @@ class TortoiseSDK:
         exactly what this route is: the bundle would silently reinstate a
         dampening a human withdrew, and ship a duplicated mitigation Point
         (§3.2 key 6's *"never duplicated"*) with no warning, because the
-        change-warning compares against identical reason/strength. So when
-        every mitigation the operator carries is terminal, NOTHING is written
-        here — the withdrawn Point already records this bundle's mitigation,
-        so it is returned unchanged (no re-link, no batch stamp: this bundle
-        created nothing).
+        change-warning compares against identical reason/strength.
+
+        So when every mitigation the operator carries is terminal, this route
+        decides on the ASSERTION, not on arrival (§live.same_mitigation_assertion):
+        the SAME ``(reason, strength)`` the withdrawn Point already records is
+        a true redelivery — NOTHING is written, and the withdrawn Point is
+        returned unchanged (no re-link, no batch stamp: this bundle created
+        nothing). A DIFFERENT ``(reason, strength)`` is new evidence and falls
+        through to the writer, which mints a live mitigation and emits
+        ``mitigation_strength_change`` against the withdrawn row — dropping it
+        would silently discard a mitigation the connection declares (§13 row 8).
+        The writer's mint is not a revival: the withdrawn Point keeps its state
+        and its history.
 
         The mitigation Point is stamped with the bundle's ``batch_id`` (§16:
         "every **new** Point the bundle creates — plain points, operator
@@ -21995,13 +22004,29 @@ class TortoiseSDK:
         prior = self._get_proj().g.query(
             "MATCH (op:Point {id:$oid})-[:mitigated_by]->(m:Point) "
             "RETURN m.id, m.content, m.mitigation_strength, "
-            f"{_terminal_excluded('m.status')} AS is_current",
+            f"{_terminal_excluded('m.status')} AS is_current "
+            "ORDER BY m.id",
             params={"oid": operator_id},
         ).result_set
         _current = [row for row in prior if bool(row[3])]
-        if prior and not _current:
-            # Withdrawn by a human: terminal stays terminal on this route.
-            return min(row[0] for row in prior)
+        if prior and not _current and any(
+                same_mitigation_assertion(row[1], row[2], reason, strength)
+                for row in prior):
+            # Every attached mitigation is WITHDRAWN and one of them records
+            # THIS assertion: a true redelivery (crash-retry, redelivery,
+            # re-extraction). Write NOTHING (no revive, no duplicate, no batch
+            # stamp) and return the withdrawn Point.
+            #
+            # A DIFFERENT (reason, strength) is NEW evidence, which this route
+            # must not swallow (§13 row 8 promises a declared mitigation is
+            # written). It falls through to `mitigate_operator`, which mints a
+            # live Point beside the withdrawn one, and the change-warning below
+            # fires against the withdrawn row so the divergence is disclosed.
+            # `or None`: a hand-written/imported id-less mitigation (#9262) is
+            # a shape the min() must not crash on, and this return value is
+            # discarded by the caller (`ingest`).
+            _ids = [row[0] for row in prior if row[0]]
+            return min(_ids) if _ids else None
         mid = self.mitigate_operator(
             operator_id, reason=reason, strength=strength)["id"]
         _prior_row = (_current or prior or [None])[0]
