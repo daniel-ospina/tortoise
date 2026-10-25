@@ -106,8 +106,12 @@ jobs:
     #     human reads, and it is the opposite asymmetry from a triage miss: an
     #     external bot's item left open costs one step, while our own monitor
     #     issue closed is a gap in the alarm history. `tools/inbound_relay_sweep.py`
-    #     spares bots on BOTH kinds for the same reason, so the two paths agree
-    #     here and the parity test in `tests/test_inbound_relay_sweep.py` says so.
+    #     spares bots on BOTH kinds for the same reason. On ISSUES the two paths
+    #     agree exactly, and the parity test in
+    #     `tests/test_inbound_relay_sweep.py` pins it. On PULL REQUESTS they
+    #     deliberately DIVERGE: a bot's fork PR is still closed by this event
+    #     path and spared by the sweep, and the same test pins that exception so
+    #     neither side can widen it by accident.
     #
     # FAIL CLOSED. The guard has TWO negations. One is gated on the
     # `pull_request_target` event and carries belts 1-2 as OR ARMS inside it

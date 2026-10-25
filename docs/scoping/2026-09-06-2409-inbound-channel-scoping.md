@@ -142,8 +142,12 @@ Two changes close the gap, and neither changes the policy above:
   does not depend on any event surviving. It is idempotent on the label,
   window-bounded and capped, and relays BEFORE it closes (a failed intake POST
   leaves the item open for the next run and reds the workflow). The label is
-  applied LAST, so a failure anywhere in the sequence leaves the item unlabelled
-  and therefore retryable rather than open-and-marked. A page that FAILS to read
+  applied LAST, so a failure in the resume read, the intake POST, the comment or
+  the close leaves the item unlabelled and therefore retryable rather than
+  open-and-marked. A label that fails AFTER a successful close is the one state
+  nothing retries — the item is closed and off the open listing, so no later run
+  selects it again; the run says so and asks for the label to be applied by
+  hand. A page that FAILS to read
   takes no action at all; a window that merely outgrew the page budget is acted
   on as the prefix that was read — otherwise anyone willing to open more than
   `max_pages x 100` items in a day could switch the control off.

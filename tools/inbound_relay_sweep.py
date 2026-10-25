@@ -125,7 +125,12 @@ It carries no merge capability at all: it closes and relays, and it never
 merges (#8375's property for `ci_check_repair.py`, kept here).
 
 EXIT CODES
-  0  complete: every selected item was relayed (or the run was a dry run)
+  0  no item FAILED: every item this run acted on was relayed (or the run was
+     a dry run). A deliberately INCOMPLETE run is still 0 — items past `--max`,
+     past the detail budget, or past the page budget of an outgrown window are
+     counted as `deferred`/`unexamined`/`truncated` and printed on stdout. They
+     are not failures, and they do not move the exit code, so a bare "0" does
+     NOT mean nothing is pending: read the `deferred=`/`truncated` report.
   1  at least one item failed somewhere in its SEQUENCE — the resume read, the
      intake POST, the comment, the close, or the label. Every one of those
      leaves the item UNLABELLED and therefore re-selectable by a later run,
