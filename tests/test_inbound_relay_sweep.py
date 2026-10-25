@@ -102,6 +102,7 @@ class FakeClient:
         fail_close: bool = False,
         fail_label: bool = False,
         relayed: bool = False,
+        fail_resume: bool = False,
     ) -> None:
         self._issues = issues or []
         self._pulls = pulls or []
@@ -113,6 +114,8 @@ class FakeClient:
         self.fail_label = fail_label
         #: Model an item whose relay already commented (a retry, not a new item).
         self.relayed = relayed
+        self.fail_resume = fail_resume
+        self.labelled_reads: list[str] = []
         #: Set True to model a window denser than the page budget.
         self.window_truncated = False
         self.calls: list[tuple[str, Any]] = []
@@ -139,8 +142,22 @@ class FakeClient:
                 return dict(pr)
         raise RuntimeError(f"no such PR {number}")
 
+    def list_labelled(self, label: str) -> list[dict[str, Any]]:
+        self.labelled_reads.append(label)
+        return [
+            dict(item)
+            for item in [*self._issues, *self._pulls]
+            if label.casefold()
+            in {
+                str(entry.get("name") if isinstance(entry, dict) else entry).casefold()
+                for entry in (item.get("labels") or [])
+            }
+        ]
+
     def already_relayed(self, number: int) -> bool:
         self.calls.append(("check", number))
+        if self.fail_resume:
+            raise RuntimeError("gh api comments failed (rc=1): 502")
         return self.relayed
 
     # writes
@@ -579,17 +596,22 @@ def test_a_retry_resumes_instead_of_re_posting(sweep: Any) -> None:
     """A failed CLOSE must not make the next run comment a second time.
 
     The sequence is relay → comment → close → label, so an item whose close
-    failed is selected again 15 minutes later. Without a resume it would
-    re-relay AND re-post the same boilerplate comment on an external
-    contributor's PR every 15 minutes for as long as the close keeps failing.
-    The relay's own footer is the marker that says "we already spoke".
+    failed is selected again 15 minutes later. Without a resume it would re-post
+    the same boilerplate comment on an external contributor's PR every 15
+    minutes for as long as the close keeps failing. The relay's own footer is
+    the marker that says "we already spoke".
+
+    ⛔ The RECORD is still posted on a resume. The marker proves we commented,
+    never that intake accepted the record — the event path posts intake LAST
+    (label → comment → close → POST), so its footer can exist with no record at
+    all — and `source_item_id` keys the POST, so repeating it is a no-op.
     """
     client = FakeClient(pulls=[pull(9883, author="Maiiiry")], relayed=True, fail_close=True)
     report = run(sweep, client)
 
     assert [n for _, n in report.failed] == [9883]
-    assert client.mutations() == [("close", 9883)], (
-        "a retry must resume at the failed step — no second intake POST and no second comment"
+    assert client.mutations() == [("intake", "pr-9883"), ("close", 9883)], (
+        "a retry must skip only the COMMENT — never the record"
     )
 
     # …and once the close stops failing, the retry completes with the marker
@@ -597,7 +619,17 @@ def test_a_retry_resumes_instead_of_re_posting(sweep: Any) -> None:
     client = FakeClient(pulls=[pull(9883, author="Maiiiry")], relayed=True)
     report = run(sweep, client)
     assert report.relayed == [("pr", 9883)]
-    assert client.mutations() == [("close", 9883), ("label", 9883)]
+    assert client.mutations() == [("intake", "pr-9883"), ("close", 9883), ("label", 9883)]
+
+
+def test_a_failed_resume_read_is_not_blamed_on_the_intake(sweep: Any) -> None:
+    """The note names the step that actually failed — an operator debugs that."""
+    client = FakeClient(pulls=[pull(9883, author="Maiiiry")], fail_resume=True)
+    report = run(sweep, client)
+
+    assert client.mutations() == []
+    note = next(n for n in report.notes if "9883" in n)
+    assert "resume check" in note and "intake POST" not in note, note
 
 
 def test_the_resume_marker_is_the_comment_the_relay_actually_posts(sweep: Any) -> None:
@@ -1087,3 +1119,119 @@ def test_unreadable_queue_config_refuses_to_act(sweep: Any, tmp_path: Path) -> N
     custom = tmp_path / "mergify.yml"
     custom.write_text("queue_rules:\n  - name: main\n    queue_branch_prefix: mergify-\n")
     assert sweep.queue_prefixes(custom) == ("mergify-",)
+
+
+# ── (vii) the two reads that decide a RESUME and the STRANDED state ────────
+#
+# Both are real `GhClient` calls, pinned at the client level: the window-bounded
+# listing cannot answer either question, and a `FakeClient` that ignores
+# `stop_before` cannot tell that apart from a correct implementation.
+
+
+def _stub_gh_json(sweep: Any, monkeypatch: Any, answers: dict[str, Any]) -> list[str]:
+    """Stub `_gh` keyed on a substring of the requested path."""
+    seen: list[str] = []
+
+    def fake(argv: list[str], *, timeout: int = 60) -> str:
+        seen.append(argv[1])
+        for needle, value in answers.items():
+            if needle in argv[1]:
+                if isinstance(value, Exception):
+                    raise value
+                return json.dumps(value)
+        raise AssertionError(f"unexpected gh call: {argv[1]}")
+
+    monkeypatch.setattr(sweep, "_gh", fake)
+    return seen
+
+
+def test_the_stranded_read_is_filtered_and_window_independent(sweep: Any, monkeypatch: Any) -> None:
+    """An open+labelled item that aged out of the 24 h window must still be found.
+
+    The window read stops paging at the cutoff, so scanning it reported the
+    unrepairable state only while the item was recent — and then it vanished from
+    every report while staying open and retried by nothing.
+    """
+    client = sweep.GhClient(f"{OWNER}/tortoise")
+    seen = _stub_gh_json(
+        sweep,
+        monkeypatch,
+        {
+            # the window read: newest items only, none of them labelled
+            "sort=created&direction=desc": [
+                issue(n, created=timedelta(minutes=n + 1)) for n in range(1, 4)
+            ],
+            # the filtered read: the old stranded item, well past the window
+            "labels=queued-for-triage": [issue(500, author="old-timer", labels=[LABEL])],
+        },
+    )
+
+    labelled = client.list_labelled(LABEL)
+
+    assert [int(item["number"]) for item in labelled] == [500]
+    assert any("state=open" in call and "labels=queued-for-triage" in call for call in seen), seen
+    assert not any("sort=created&direction=desc" in call for call in seen), (
+        "the stranded read must not ride on the window listing"
+    )
+
+
+def test_sweep_reports_a_stranded_item_outside_the_window(sweep: Any) -> None:
+    client = FakeClient(
+        issues=[issue(1, created=timedelta(hours=1))],
+        pulls=[pull(500, author="old-timer", labels=[LABEL], created=timedelta(days=30))],
+    )
+    report = run(sweep, client)
+
+    assert client.labelled_reads == [LABEL], "one dedicated filtered read"
+    assert report.stranded == 1
+    assert any("HALF-APPLIED" in note for note in report.notes), report.notes
+    # …and the stale labelled item is NOT dragged into the action set.
+    assert report.relayed == [("issue", 1)]
+
+
+def test_the_resume_marker_must_be_our_own_comment(sweep: Any, monkeypatch: Any) -> None:
+    """The footer is a fixed public string — anyone can paste it.
+
+    Only a BOT-typed comment (an installed App / GITHUB_TOKEN, not impersonable)
+    or the owner's own login counts, so a contributor cannot silence the relay's
+    comment (or, worse, get an item closed on the strength of a quoted footer).
+    """
+    footer = {"body": f"👋 Thanks for the contribution!\n\n{sweep.RELAY_MARKER}"}
+    client = sweep.GhClient(f"{OWNER}/tortoise")
+
+    _stub_gh_json(
+        sweep,
+        monkeypatch,
+        {"comments": [{**footer, "user": {"login": "Maiiiry", "type": "User"}}]},
+    )
+    assert client.already_relayed(9883) is False
+
+    _stub_gh_json(
+        sweep,
+        monkeypatch,
+        {"comments": [{**footer, "user": {"login": "github-actions[bot]", "type": "Bot"}}]},
+    )
+    assert client.already_relayed(9883) is True
+
+    _stub_gh_json(
+        sweep,
+        monkeypatch,
+        {"comments": [{**footer, "user": {"login": OWNER, "type": "User"}}]},
+    )
+    assert client.already_relayed(9883) is True, "a local run posts as the owner"
+
+    _stub_gh_json(
+        sweep,
+        monkeypatch,
+        {"comments": [{"body": "unrelated", "user": {"login": "x", "type": "Bot"}}]},
+    )
+    assert client.already_relayed(9883) is False
+
+
+def test_the_resume_read_asks_for_the_newest_comments(sweep: Any, monkeypatch: Any) -> None:
+    """Our comment is posted at CLOSE time — page 1 of the default order is oldest."""
+    client = sweep.GhClient(f"{OWNER}/tortoise")
+    seen = _stub_gh_json(sweep, monkeypatch, {"comments": []})
+
+    assert client.already_relayed(9883) is False
+    assert "sort=created&direction=desc" in seen[0], seen

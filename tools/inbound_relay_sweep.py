@@ -82,14 +82,15 @@ SAFETY RAILS (each pinned by a test) — a sweeper is riskier than a per-event r
     before the close would invert this: the label is the idempotence marker, so
     an open+labelled item is skipped by every later run and retried by nothing
     (the event path only listens for `opened`).
-  * A RETRY RESUMES, it does not restart. Before re-relaying, the run checks for
-    this relay's own comment footer (`RELAY_MARKER`); when it is already there,
-    the record and the comment landed and only the close (or the label) failed,
-    so the retry closes and labels without posting a second identical comment on
-    an external contributor's PR.
+  * A RETRY RESUMES ITS COMMENT, never its silence: before re-commenting, the
+    run checks for this relay's OWN comment footer (`RELAY_MARKER`, bot-typed or
+    the owner's own login — the string alone is forgeable). The intake POST is
+    still made on a resume: a marker proves we commented, never that the record
+    landed (the event path posts intake LAST), and `source_item_id` keys it.
   * THE UNREPAIRABLE STATE IS REPORTED. An open item that already carries the
     label is a half-applied relay — the event path labels FIRST — and nothing
-    retries it, so it is counted (`stranded`) and named in the notes. It is
+    retries it, so it is counted (`stranded`) by its own filtered read (the
+    window read cannot see an item that aged out) and named in the notes. It is
     never auto-closed: a human may have labelled it deliberately.
   * COMPLETENESS — a FAILED page aborts. An unreadable page is not an empty
     page: a partial read (rate limit, transient 5xx, timeout) aborts the whole
@@ -144,6 +145,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import quote
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MERGIFY = REPO_ROOT / ".mergify.yml"
@@ -377,6 +379,7 @@ def _needs_detail(item: dict[str, Any]) -> bool:
 
 class Client(Protocol):
     def list_open(self, *, stop_before: datetime | None = None) -> list[dict[str, Any]]: ...
+    def list_labelled(self, label: str) -> list[dict[str, Any]]: ...
     def pull_detail(self, number: int) -> dict[str, Any]: ...
     def already_relayed(self, number: int) -> bool: ...
     def post_intake(self, payload: dict[str, Any]) -> None: ...
@@ -421,15 +424,6 @@ def sweep(
         # OLDEST FIRST, and only until the actable prefix is known: the detail is
         # one REST call each, and the page budget admits up to 1,000 candidates.
         candidates.sort(key=_created_at)
-        # The one state nothing repairs: open, and already carrying the marker
-        # that means "fully handled". Counted here (over everything read, not
-        # just the window: a stranded item ages OUT of the window and would
-        # otherwise go invisible) and reported below — never auto-closed.
-        report.stranded = sum(
-            1
-            for item in listing
-            if _canon(_author(item)) != _canon(cfg.owner) and cfg.label.casefold() in _labels(item)
-        )
         resolved: list[dict[str, Any]] = []
         actable = 0
         details = 0
@@ -456,6 +450,20 @@ def sweep(
         return report
 
     report.unexamined = unexamined
+
+    # The one state nothing repairs: OPEN and already carrying the marker that
+    # means "fully handled" (the event path labels FIRST, so a 502 on its
+    # comment/close leaves exactly this). It cannot be found in the window read:
+    # a stranded item ages OUT of the window, and paging stops at the cutoff — so
+    # it would go invisible a second time, in the very report that exists to
+    # surface it. One bounded, server-filtered read instead, and a failure here
+    # is a NOTE rather than an abort: it is a diagnostic, not a precondition for
+    # acting on the window.
+    try:
+        labelled = list(client.list_labelled(cfg.label))
+        report.stranded = sum(1 for item in labelled if _canon(_author(item)) != _canon(cfg.owner))
+    except Exception as exc:
+        report.notes.append(f"could not check for half-applied (open+labelled) items: {exc}")
 
     if report.stranded:
         report.notes.append(
@@ -495,19 +503,24 @@ def sweep(
         # by every later run and retried by nothing (the event path only listens
         # for `opened`). Applied last, any failure leaves the item unlabelled and
         # therefore re-selectable, and `main()` still prints the report.
-        step = "intake POST"
+        step = "resume check"
         try:
-            # A retry must resume, not restart: if our footer is already on the
-            # item, the record and the comment landed and only the close (or the
-            # label) failed. Re-posting both would double-comment an external
-            # contributor's PR every 15 minutes for as long as the close fails.
-            if client.already_relayed(number):
-                step = "close (resumed)"
-            else:
-                client.post_intake(intake_payload(item))
+            # A retry must RESUME, not restart: if our own footer is already on
+            # the item, the comment landed and only the close (or the label)
+            # failed, so a second identical comment on an external contributor's
+            # PR would be noise every 15 minutes for as long as the close fails.
+            # ⛔ The RECORD is still posted. A marker proves we COMMENTED, never
+            # that intake accepted the record — the event path posts intake LAST
+            # (label → comment → close → POST), so its footer can exist with no
+            # record at all. `source_item_id` keys the POST, so a repeat is a
+            # no-op intake-side; closing without a record is unrecoverable.
+            resume = client.already_relayed(number)
+            step = "intake POST"
+            client.post_intake(intake_payload(item))
+            if not resume:
                 step = "comment"
                 client.comment(number, "\n".join(_COMMENT_PULL if kind == "pr" else _COMMENT_ISSUE))
-                step = "close"
+            step = "close"
             client.close(kind, number)
             step = "label"
             client.add_label(number, cfg.label)
@@ -569,6 +582,9 @@ class GhClient:
 
     def __init__(self, repo: str, *, per_page: int = 100, max_pages: int = 10) -> None:
         self.repo = repo
+        #: The repository OWNER, from the repo slug — used only to attribute a
+        #: comment this tool posts under its own (non-bot) identity.
+        self.owner = repo.split("/")[0]
         self.per_page = per_page
         self.max_pages = max_pages
         #: True ⇔ the last listing stopped at the page budget with the window
@@ -630,22 +646,56 @@ class GhClient:
             raise ListingError(f"pulls/{number}: expected an object")
         return obj
 
-    def already_relayed(self, number: int) -> bool:
-        """True ⇔ this relay already commented on the item (see RELAY_MARKER).
+    def list_labelled(self, label: str) -> list[dict[str, Any]]:
+        """Every OPEN item carrying `label`, server-filtered and bounded.
 
-        One bounded read (`per_page=100` on the first page is enough: our own
-        comment is posted at close time and the item is within the window). It
-        only ever causes us to SKIP a side effect, and a read failure raises, so
-        the item is left untouched rather than double-commented.
+        The half-applied state (open + labelled) has to be found regardless of
+        the 24-hour window: a window read stops at the cutoff, so a stranded item
+        ages OUT of it and would go invisible for the second time — in the very
+        report that exists to surface it. Its own filtered query, not a scan.
+        """
+        return self._paginate(
+            f"repos/{self.repo}/issues?state=open&labels={quote(label, safe='')}",
+            stop_before=None,
+        )
+
+    def already_relayed(self, number: int) -> bool:
+        """True ⇔ THIS relay already commented on the item (see RELAY_MARKER).
+
+        One bounded read, NEWEST comments first: the relay's comment is posted at
+        close time, so on a busy item it is not on the first page of the default
+        (oldest-first) order.
+
+        ⛔ THE MARKER MUST BE OURS, and it proves only that we COMMENTED. The
+        footer is a fixed public string printed on every relayed item, so an
+        author could paste it into a comment of their own; only a BOT-typed
+        comment (an installed App / GITHUB_TOKEN — not impersonable by a
+        contributor) or the repository owner's own login counts. A read failure
+        raises before any mutation, so the item is left untouched rather than
+        acted on with a guess.
         """
         try:
-            raw = _gh(["api", f"repos/{self.repo}/issues/{number}/comments?per_page=100"])
+            raw = _gh(
+                [
+                    "api",
+                    f"repos/{self.repo}/issues/{number}/comments"
+                    "?per_page=100&sort=created&direction=desc",
+                ]
+            )
             comments = json.loads(raw)
         except Exception as exc:
             raise ListingError(f"issues/{number}/comments: {exc}") from exc
         if not isinstance(comments, list):
             raise ListingError(f"issues/{number}/comments: expected a list")
-        return any(RELAY_MARKER in str(comment.get("body") or "") for comment in comments)
+        for comment in comments:
+            if RELAY_MARKER not in str(comment.get("body") or ""):
+                continue
+            user = comment.get("user") or {}
+            if str(user.get("type") or "").casefold() == "bot":
+                return True
+            if _canon(user.get("login")) == _canon(self.owner):
+                return True
+        return False
 
     def post_intake(self, payload: dict[str, Any]) -> None:
         url = os.environ.get("INBOUND_URL", "")
