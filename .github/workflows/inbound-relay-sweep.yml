@@ -46,9 +46,13 @@
 #   `.mergify.yml` against the live repo while holding `issues: write`,
 #   `pull-requests: write` and the intake secret. Pinned by a test.
 # * `relay-then-close-then-label`: a failed intake POST (or a failed comment /
-#   close) leaves the item UNLABELLED, so the next run selects it again and
-#   reds this workflow — a dead intake is an alarm, never a silent "handled".
-#   The label is applied LAST because it is the idempotence marker.
+#   close) leaves the item UNLABELLED, so the next run re-selects it WHILE IT IS
+#   STILL INSIDE the `--since-hours` window — and reds this workflow, because a
+#   dead intake is an alarm, never a silent "handled". ⚠️ The window is the
+#   edge: `created_at` never moves, so an item that fails in the LAST CADENCE of
+#   the window ages out at `created_at + since_hours` and nothing selects it
+#   again (its note names that exact time and asks for it to be relayed by
+#   hand). The label is applied LAST because it is the idempotence marker.
 # * An INCOMPLETE listing (a failed page) takes NO action (`exit 2`), `--max`
 #   bounds a run, and `--since-hours` bounds the window so a first run cannot
 #   reach into history. A window holding more items than the page budget acts on
@@ -97,9 +101,10 @@ permissions:
 # a 24 h window, so a long outage loses them), and two overlapping sweepers can
 # act on the same candidate in one window.
 # ⛔ NOT the repair story: a half-applied item IS repaired. A cancel before the
-# close leaves it open and UNLABELLED, so the next run selects it again and
-# `already_relayed()` resumes it — relay, close, label, with no second comment
-# (pinned by `test_a_retry_resumes_instead_of_re_posting`). The state nothing
+# close leaves it open and UNLABELLED, so the next run re-selects it (while it
+# is still inside the `--since-hours` window) and `already_relayed()` resumes it
+# — relay, close, label, with no second comment (pinned by
+# `test_a_retry_resumes_instead_of_re_posting`). The state nothing
 # repairs is the opposite one, open and ALREADY labelled (the event path labels
 # FIRST): `_prefilter` drops it and `main()` reports it as `stranded`.
 concurrency:

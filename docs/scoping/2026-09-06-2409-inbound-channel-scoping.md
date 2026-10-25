@@ -141,9 +141,14 @@ Two changes close the gap, and neither changes the policy above:
   repository's own credential, so it is not subject to the approval policy and
   does not depend on any event surviving. It is idempotent on the label,
   window-bounded and capped, and relays BEFORE it closes (a failed intake POST
-  leaves the item open for the next run and reds the workflow). The label is
+  leaves the item open and unlabelled, so the next run re-selects it **while it
+  is still inside the `--since-hours` window** and reds the workflow — an item
+  that fails in the last cadence of the window ages out at
+  `created_at + since_hours`, after which nothing selects it and it has to be
+  relayed by hand). The label is
   applied LAST, so a failure in the resume read, the intake POST, the comment or
-  the close leaves the item unlabelled and therefore retryable rather than
+  the close leaves the item unlabelled and therefore re-selectable by a later
+  run — while it is still inside that window — rather than
   open-and-marked. A label that fails AFTER a successful close is the one state
   nothing retries — the item is closed and off the open listing, so no later run
   selects it again; the run says so and asks for the label to be applied by
