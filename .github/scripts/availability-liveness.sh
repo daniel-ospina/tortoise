@@ -311,11 +311,12 @@ redact_text() {
 }
 
 # ── GitHub issue helpers ────────────────────────────────────────────────────
-# Echoes a positive issue number, "" when none is open, or "__ERR__" when the
-# search failed or answered something unparseable. Since #9018 the failure form
-# is `__ERR__|<the tool's own stderr>` — the reason rides on the SENTINEL because
-# the caller reads this function through `$(…)`, so an assignment made in here is
-# discarded with the subshell. EVERY caller must therefore match `__ERR__*`.
+# Echoes a positive issue number, "" when none is open, or `__ERR__` when the
+# search failed or answered something unparseable. Since #9018 EVERY failure form
+# is `__ERR__|<reason>` — the reason rides on the SENTINEL because the caller
+# reads this function through `$(…)`, so an assignment made in here is discarded
+# with the subshell. EVERY caller must therefore match `__ERR__*` and strip the
+# `__ERR__|` prefix; a bare `__ERR__` never comes out of here.
 # SECURITY: this is a PUBLIC
 # repo, so "an open issue whose title matches" is NOT ours. Any account can open
 # an issue with our title and a FORGED heartbeat body; adopting it would let a
@@ -361,7 +362,11 @@ search_issue() { # <body-marker> <exact-title>
   # the two would make "no heartbeat issue yet" read as "the search is broken".
   [ -n "$n" ] || { printf ''; return 0; }
   case "$n" in
-    *[!0-9]*) printf '__ERR__'; return 0 ;;
+    # ⛔ UNIFORM SENTINEL. Every failure form is `__ERR__|<reason>` — a bare
+    # `__ERR__` would reach the caller's `${…\#__ERR__|}` strip unchanged and print
+    # `— gh said: __ERR__`, i.e. a false attribution of exactly the kind this
+    # change exists to remove (reachable: harness case 30, a non-numeric number).
+    *[!0-9]*) printf '__ERR__|search returned a non-numeric issue number'; return 0 ;;
   esac
   printf '%s' "$n"
 }

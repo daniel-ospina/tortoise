@@ -589,6 +589,8 @@ export STUB_ALERT_SEARCH_JSON="$(printf '{"items":[{"number":"abc","title":"%s",
 run_checker
 assert_eq "$RC" "1" "30: a non-numeric issue number → exit 1 (never adopted as the open alert)"
 assert_contains "$OUT" "liveness-alert search failed" "30: …and refuses to file or resolve"
+assert_not_contains "$OUT" "__ERR__" "30: …and the RAW sentinel never reaches the reader (#9018)"
+assert_contains "$OUT" "non-numeric" "30: …the reason names what was wrong, not just that it failed"
 assert_eq "$(count_calls 'GH PATCH')" "0" "30: …so nothing is closed on a garbage number"
 
 # 31. a heartbeat body that does not PARSE → unreadable (the jq arm of

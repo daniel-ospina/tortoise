@@ -227,9 +227,17 @@ MODE="${1:-}"
 shift || true
 case "$MODE" in
   ensure | assert) ;;
-  -h | --help | "")
+  -h | --help)
     usage
     exit 0
+    ;;
+  "")
+    # ⛔ A `run:` that forgets its arguments must not be a GREEN no-op step: a
+    # step that provisions nothing and exits 0 is the "no-op gate" this file's
+    # own doctrine forbids, and the exit table below says "no tool named" is 1.
+    printf 'runner-tools: no verb — nothing was ensured and nothing was checked\n' >&2
+    usage >&2
+    exit 1
     ;;
   *)
     printf 'runner-tools: unknown verb %s\n' "$MODE" >&2

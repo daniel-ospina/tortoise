@@ -46,6 +46,13 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
+      # ── THE RUNNER TOOL CONTRACT (#9018) ──────────────────────────────
+      # `auto-file-issue.sh` files the incident issue through `gh`. On a pool runner
+      # without `gh` the monitor dies `exit 127` and reads as a provisioning fault
+      # rather than a runner fault — the same mis-attribution #9018 fixed in the
+      # availability monitors.
+      - name: Runner tool contract — provide gh (#9018)
+        run: bash .github/scripts/runner-tools.sh ensure gh
       - name: Scan tenant-provision logs for incident markers
         run: |
           set -euo pipefail

@@ -89,6 +89,13 @@ jobs:
       issues: write
     steps:
       - uses: actions/checkout@v4
+      # ── THE RUNNER TOOL CONTRACT (#9018) ──────────────────────────────
+      # `welcome-e2e-monitor.sh` files its alert issue through `gh`, behind the
+      # same fail-closed shape #9018 fixed in the availability monitors ("this
+      # failing run IS the alert"). On a pool runner with no `gh` the monitor dies
+      # `exit 127` and reads as a product regression instead of a runner fault.
+      - name: Runner tool contract — provide gh (#9018)
+        run: bash .github/scripts/runner-tools.sh ensure gh
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'

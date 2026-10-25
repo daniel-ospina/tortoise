@@ -59,12 +59,18 @@ GH_JOBS = {
     "ci-queue-health.yml": ["queue-health"],
     "ci-timing.yml": ["measure", "refresh"],
     "mergify-guard-recut.yml": ["recut"],
+    "availability-record.yml": ["record"],
+    "welcome-e2e-monitor.yml": ["welcome-e2e"],
+    "tenant-provision-monitor.yml": ["monitor"],
+    "e2e-live-reconcile.yml": ["reconcile"],
+    "prod-csp-monitor.yml": ["audit"],
     "supabase-deploy.yml": ["deploy"],
 }
 
 #: Jobs that use `gh` and are NOT covered, with the reason each one cannot simply take
 #: the step. Declared rather than omitted: an undeclared gap is indistinguishable from
-#: coverage nobody checked, which is the defect class this file exists for.
+#: coverage nobody checked, which is the defect class this file exists for. The scan at
+#: the bottom of this file reports EVERY such job, so this map cannot quietly shrink.
 KNOWN_UNCOVERED = {
     # The job has NO `actions/checkout`, so `.github/scripts/runner-tools.sh` is not in
     # the workspace and the step cannot run. It is a required context, so a 127 here
@@ -72,7 +78,22 @@ KNOWN_UNCOVERED = {
     # false`, since the token it carries is `pull-requests: read` only) or inlining the
     # provisioner, and that is a change to a gate #1224 documents carefully. Filed as
     # its own task rather than smuggled into this one.
-    "ai-review-gate.yml": {"ai-review-gate": "no checkout in the job — the contract script is not in the workspace"},
+    "ai-review-gate.yml": {
+        "ai-review-gate": "no checkout in the job — the contract script is not in the workspace"
+    },
+    # `mergify_config_guard.py` executes `gh` only in `--live` mode, whose own docstring
+    # records that CI must never use it (a fail-closed admin read inside CI would
+    # deadlock every PR). The job runs `--static`, which reads committed files.
+    "python-ci.yml": {
+        "manifest-integrity": "mergify_config_guard.py touches gh only under --live, which CI never runs"
+    },
+    # These jobs run `*.test.sh` harnesses, which install a STUB `gh` on PATH
+    # (`.github/scripts/ai-review-gate.test.sh:416` writes `$T/bin/gh`). A harness that
+    # stubs its tool is not a hazard; giving it the real one would mask the stub.
+    "ci.yml": {
+        "ops-harnesses": "runs *.test.sh harnesses that stub `gh` on PATH",
+        "repo-harnesses": "runs *.test.sh harnesses that stub `gh` on PATH",
+    },
 }
 
 CONTRACT_STEP = "runner-tools.sh ensure gh"
@@ -257,6 +278,17 @@ def test_unknown_verb_is_a_usage_error():
     assert "unknown verb" in out.stderr
 
 
+def test_no_arguments_is_a_usage_error_not_a_green_no_op():
+    """A `run:` that forgets its arguments must FAIL, not silently pass.
+
+    A step that provisions nothing and exits 0 is the "no-op gate" shape: the
+    YAML looks like it enforces the contract and enforces nothing.
+    """
+    out = _run([])
+    assert out.returncode == 1, (out.stdout, out.stderr)
+    assert "no verb" in out.stderr
+
+
 def test_a_tool_that_cannot_be_provisioned_is_named_not_skipped(tmp_path):
     """`unzip` needs root; the contract must say so rather than pretend."""
     out = _run(
@@ -343,14 +375,35 @@ def test_every_gh_using_pool_job_carries_the_contract_step(workflow, job):
 _GH_CMD = re.compile(
     r"(?<![\w./-])gh\s+(api|run|pr|issue|search|workflow|label|release|repo|auth|secret|variable)"
 )
-#: Scripts that shell out to `gh` themselves, so a job running one needs it too.
-_GH_SCRIPT = re.compile(
-    r"ci_check_repair\.py|ci_queue_health\.py|ci_timing\.py"
-    r"|availability-watchdog\.sh|availability-liveness\.sh|finding_provenance\.py"
+#: `gh` at an EXECUTION site, used to DERIVE which helper scripts carry the hazard.
+#: A text list of script names was the first attempt and it under-counted: five
+#: poolable jobs run scripts it did not name (`availability-record.sh`,
+#: `welcome-e2e-monitor.sh`, `auto-file-issue.sh`). Deriving the set means a new
+#: script cannot be forgotten — it is found, or it is not executing `gh`.
+_GH_EXEC = (
+    re.compile(r"\(\s*gh\s"),                                  # command substitution / subshell
+    re.compile(r"[;&|(]\s*gh\s+(api|run|pr|issue|search|workflow|label|release|repo)"),
+    re.compile(r"^\s*gh\s+(api|run|pr|issue|search|workflow|label|release|repo)", re.M),
+    re.compile(r'''["']gh["']\s*,'''),                        # subprocess argv literal
+    re.compile(r"\bGH_BIN\b"),                                   # resolved, then exec'd
 )
 #: Labels the fallback pool has been observed to serve. Not `ubuntu-latest` only:
 #: the 2026-10-24 measurement shows the pool serving `ubuntu-24.04` as well.
 _POOLABLE_LABEL = re.compile(r"ubuntu-(latest|\d+\.\d+)")
+
+
+def _gh_executing_scripts() -> frozenset[str]:
+    """Basenames of the helper scripts that INVOKE `gh` (derived, never listed)."""
+    out = set()
+    for pattern in (".github/scripts/*.sh", "tools/*.py", "tools/*.sh"):
+        for path in REPO.glob(pattern):
+            code = "\n".join(
+                line for line in path.read_text(errors="ignore").splitlines()
+                if not line.strip().startswith("#")
+            )
+            if any(rule.search(code) for rule in _GH_EXEC):
+                out.add(path.name)
+    return frozenset(out)
 
 
 def _jobs(path: Path) -> list[tuple[str, list[str]]]:
@@ -384,14 +437,14 @@ def _code_only(line: str) -> str:
     return re.sub(r"'[^']*'|\"[^\"]*\"", "''", line)
 
 
-def _gh_hazards(body: list[str]) -> list[str]:
+def _gh_hazards(body: list[str], scripts: frozenset[str]) -> list[str]:
     hits = []
     for line in body:
         stripped = line.strip()
         if stripped.startswith("#") or stripped.startswith("- name:"):
             continue
         code = _code_only(line)
-        if _GH_CMD.search(code) or _GH_SCRIPT.search(code):
+        if _GH_CMD.search(code) or any(name in code for name in scripts):
             hits.append(stripped)
     return hits
 
@@ -408,6 +461,7 @@ def test_every_pool_eligible_gh_job_is_declared():
     """
     wired = {(wf, job) for wf, jobs in GH_JOBS.items() for job in jobs}
     declared_gaps = {(wf, job) for wf, jobs in KNOWN_UNCOVERED.items() for job in jobs}
+    scripts = _gh_executing_scripts()
     undeclared = []
     for path in sorted(WORKFLOWS.glob("*.yml")):
         for job, body in _jobs(path):
@@ -415,7 +469,11 @@ def test_every_pool_eligible_gh_job_is_declared():
             label = re.search(r"^\s+runs-on:\s*(.+)$", text, re.M)
             if not label or not _POOLABLE_LABEL.search(label.group(1)):
                 continue
-            if not _gh_hazards(body):
+            if not _gh_hazards(body, scripts):
+                continue
+            # Covered = carries the step (the property that matters) OR is declared.
+            # `GH_JOBS` is the separate POSITION pin, not the coverage record.
+            if CONTRACT_STEP in text:
                 continue
             if (path.name, job) in wired or (path.name, job) in declared_gaps:
                 continue
