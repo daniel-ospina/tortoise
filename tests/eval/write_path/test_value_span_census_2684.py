@@ -419,12 +419,23 @@ NEAR_DUPE_VALUE_CONFLICTS_PER_ARM = 0
 #: measured on the SAME per-arm universe as ``PAIRS_PER_ARM``: of those 433
 #: pairs, the ones whose two ``source_turn_id`` keys are present and equal AND
 #: whose two quotes are non-empty — the point at which the shipped predicate
-#: consults its quote-level value guard — then split by that guard and by
-#: ``DEFAULT_PACKAGE_SAME_TURN_OVERLAP``.
-#: ⛔ This is the route the CONTENT-RATIO zero above says NOTHING about; the
-#: runbook once generalised that zero to "the corpus cannot exercise the
-#: value-safety leg at all", which these three numbers falsify.
-SAME_TURN_DEDUPE = {"consulted": 12, "value_refused": 9, "collapsed": 1}
+#: consults its quote-level value guard.
+#:
+#:   consulted           — that pair count (the route IS reachable here);
+#:   value_flagged       — of them, ``_pkg_differ_value_critical(qa, qb)`` True;
+#:   value_guard_decisive— … minus the ones the OVERLAP gate would have refused
+#:                         anyway, i.e. the pairs where deleting the guard
+#:                         changes the outcome;
+#:   collapsed           — quote overlap >= the same-turn gate (value-equal).
+#:
+#: ⛔ TWO claims, and only the first is the corpus's: the route is REACHABLE, so
+#: the runbook's old "the corpus cannot exercise the value-safety leg at all"
+#: was wrong — but the value guard is never DECISIVE (``0``), so the leg is
+#: still un-pinned here and rests on Slice A's unit guards. Do not read
+#: ``value_flagged`` as "9 pairs saved by the value guard": every one of those
+#: nine has quote overlap <= 0.5, below the 0.75 gate.
+SAME_TURN_DEDUPE = {"consulted": 12, "value_flagged": 9,
+                    "value_guard_decisive": 0, "collapsed": 1}
 
 
 def _value_bearing_points(session: str, arm: str) -> list[dict]:
@@ -446,16 +457,21 @@ def test_the_dedupe_leg_is_measured_on_BOTH_legs():
     * **same-source-turn** (``retrieval._same_fact``'s second route: same
       ``source_turn_id``, quote overlap ≥
       ``DEFAULT_PACKAGE_SAME_TURN_OVERLAP``, with
-      ``_pkg_differ_value_critical`` consulted on the QUOTES first) — reachable
-      HERE, and measured: ``SAME_TURN_DEDUPE``.
+      ``_pkg_differ_value_critical`` consulted on the QUOTES first) — REACHABLE
+      here, and measured: ``SAME_TURN_DEDUPE``. But reachable is not
+      discriminating: the value guard is decisive on **0** of the 12 pairs
+      (the 9 it flags all sit below the overlap gate), so the value-safety leg
+      is still un-pinned by this corpus.
 
     ⛔ The distinction is the point of this test. §2.3 once generalised the
     content-ratio zero to "the corpus cannot exercise the value-safety leg at
-    all", which is false and would tell a lane that a change to the
-    same-turn/quote route is unmeasurable on this corpus."""
+    all", which is false — and the correction must not overshoot into "the leg
+    is exercised", which is equally unsupported: the route is reachable, the
+    guard decides nothing."""
     pairs = near_dupe = conflicts = 0
     pooled_pairs = pooled_near_dupe = 0
-    same_turn = {"consulted": 0, "value_refused": 0, "collapsed": 0}
+    same_turn = {"consulted": 0, "value_flagged": 0,
+                 "value_guard_decisive": 0, "collapsed": 0}
     for session in SESSIONS:
         for arm in ARMS:
             points = _value_bearing_points(session, arm)
@@ -474,9 +490,13 @@ def test_the_dedupe_leg_is_measured_on_BOTH_legs():
                 if not (at and at == _pkg_turn_key(b) and qa and qb):
                     continue
                 same_turn["consulted"] += 1
+                ov = _pkg_overlap(qa, qb)
+                passes_overlap = ov >= DEFAULT_PACKAGE_SAME_TURN_OVERLAP
                 if _pkg_differ_value_critical(qa, qb):
-                    same_turn["value_refused"] += 1
-                elif _pkg_overlap(qa, qb) >= DEFAULT_PACKAGE_SAME_TURN_OVERLAP:
+                    same_turn["value_flagged"] += 1
+                    if passes_overlap:      # the guard CHANGED this outcome
+                        same_turn["value_guard_decisive"] += 1
+                elif passes_overlap:
                     same_turn["collapsed"] += 1
         pooled = [p for arm in ARMS for p in _value_bearing_points(session, arm)]
         for a, b in itertools.combinations(pooled, 2):
