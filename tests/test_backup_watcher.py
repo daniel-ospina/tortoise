@@ -229,10 +229,12 @@ def _seed_state(storage, team: str) -> None:
 
 
 def _watcher(storage, ch, *, grace_min=0, orgs=("team_a",), now_fn=None,
-              graph_provider=None, eligible_provider=None) -> BackupWatcher:
+              graph_provider=None, eligible_provider=None,
+              simulate_enabled=False) -> BackupWatcher:
     store = _store(ch)
     return BackupWatcher(
         storage, store,
+        simulate_enabled=simulate_enabled,
         org_provider=lambda: list(orgs),
         state_reader=lambda t: {},
         graph_provider=graph_provider,
@@ -2450,11 +2452,64 @@ def test_stale_filing_carries_the_measurement_that_justified_it():
     assert '"newest_default_archive": "' in body, body
     assert '"stale_threshold_min": 90' in body, body
     assert '"closes_when": "' in body, body
-    # The close condition states what the shipped arms DO — both the measured
-    # reading and the org-exclusivity class change (#3294), so a triager is not
-    # told a class change cannot close it when the `never` arm can.
+    # The close condition names EVERY shipped arm — the measured reading, the
+    # class change (#3294), `not_eligible` (which opens nothing) and the
+    # universe-shrink — plus the recovery window, so a triager is not told that a
+    # class change cannot close it when the `never` arm can, and not told a
+    # successor incident exists for a downgraded org when none is filed.
     assert "EITHER a default-graph archive is MEASURED" in body, body
-    assert "org exclusivity" in body, body
+    assert "opens the matching kind (#3294" in body, body
+    assert "this closes and NOTHING is opened" in body, body
+    assert "universe-shrink: the subject is gone" in body, body
+    assert "consecutive confirming poll(s) before it is applied" in body, body
+
+
+def test_a_simulated_stale_files_the_DRILL_as_the_trigger_not_a_fake_archive():
+    """An `ops/simulate` drill forces the class without touching the archive. The
+    payload must not publish the simulated timestamp as `newest_default_archive`:
+    a triager would search `backups/` for a key that never existed and conclude
+    the freshness scan is broken — the same "a value nobody measured" defect this
+    change removes, re-introduced by its own diagnostic."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 1)            # REAL archive: fresh
+    _seed_state(storage, "team_a")
+    # The drill object `_simulate_age` reads: an OLD age_ts, not yet expired.
+    storage.upload("ops/simulate/default.json", json.dumps({
+        "age_ts": _ts(200).isoformat(),
+        "expires_at": (FIXED + timedelta(hours=1)).isoformat(),
+    }).encode())
+    w = _watcher(storage, ch, simulate_enabled=True)
+
+    status = w.poll()
+    assert status["per_team"]["team_a"] == "stale", status["per_team"]
+    (body,) = (ch.bodies[n] for n in ch.issues)
+    detail = json.loads(body.split("```")[1])
+    assert detail["simulated"] is True, detail
+    assert "simulated_age" in detail, detail
+    # The real archive is what is published, with its REAL age (1h)…
+    assert detail["newest_default_archive"] != detail["simulated_age"], detail
+    assert detail["age_min"] == 60, detail
+    # …and the body says a drill, not an outage, is the trigger.
+    assert "ops/simulate" in detail["measurement"], detail
+    assert "the drill ends" in detail["closes_when"], detail
+
+
+def test_the_reported_age_does_not_floor_below_the_threshold():
+    """`compute_status` compares the FLOAT age, so an archive 90m30s old is OVER a
+    90m threshold. Flooring the reported minutes to 90 would print a body whose
+    own two numbers say the condition is not met — a self-refuting issue."""
+    from tortoise.backup_watcher import BackupWatcher as _BW
+
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 1)
+    _seed_state(storage, "team_a")
+    w = _watcher(storage, ch, now_fn=lambda: FIXED + timedelta(minutes=30))
+    newest = FIXED - timedelta(minutes=90)          # exactly 90m30s old at FIXED+30s
+    ev = _BW._stale_evidence(w, "team_a", newest, FIXED + timedelta(seconds=30))
+    assert ev["age_min"] == 91, ev                 # 90.5 min -> over the threshold
+    assert ev["stale_threshold_min"] == 90, ev
 
 
 def test_stale_payload_does_not_change_the_title_shape():
