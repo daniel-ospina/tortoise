@@ -2073,10 +2073,26 @@ class CollisionPreflightTest(unittest.TestCase):
 
         The fix folds the refusal in as THIS ITEM's `EXIT_INCOMPLETE` and lets
         `_EXIT_SEVERITY` decide, for either order of the two items.
+
+        ⛔ EITHER ORDER MEANS TWO ORDERS THE LOOP ACTUALLY REACHES. The
+        resolver returns its work items SORTED
+        (`resolve_pull_request_work_items`: `issues=tuple(sorted(gated))`), so
+        the item LOOP order is the sorted order and nothing the fixture's dict
+        insertion order contributes reaches it. An earlier version of this test
+        passed `{100: 4, 8000: 4}` and `{8000: 4, 100: 4}` and ran `100, 8000`
+        TWICE (#9970 review) — the "unrunnable first" subTest never ran first.
+        So the unrunnable number is chosen to invert the SORTED order.
         """
-        for codes, unrunnable in (
-            ({100: 4, 8000: 4}, 8000),   # LANDED first, unrunnable second
-            ({8000: 4, 100: 4}, 8000),   # unrunnable first
+        for codes, unrunnable, runnable in (
+            # unrunnable SECOND — the loop had already COMPUTED the other
+            # item's terminal LANDED, which is the fact the shipped code
+            # discarded. Sorted order: (100, 8000).
+            ({100: 4, 8000: 4}, 8000, 100),
+            # unrunnable FIRST — nothing had been computed yet, so the old
+            # run's "nothing was checked" sentence was TRUE and the fix must
+            # not turn that case into a refusal of its own. Sorted order:
+            # (8000, 9000).
+            ({8000: 4, 9000: 4}, 8000, 9000),
         ):
             with self.subTest(order=list(codes), unrunnable=unrunnable):
                 cp, text, rc = self._aggregate_with_an_unrunnable_item(
@@ -2088,11 +2104,29 @@ class CollisionPreflightTest(unittest.TestCase):
                             if line.startswith(cp._VERDICT_LINE_PREFIX)]
                 self.assertEqual(len(anchored), 1, text)
                 self.assertIn("VERDICT: LANDED (exit 4)", anchored[0])
-                # The run did NOT forget the item it could not gate.
-                self.assertIn(f"#{unrunnable} INCOMPLETE", text)
-                # ...and it must not claim the checked item was never checked.
-                self.assertNotIn("nothing was checked", text)
-                self.assertIn("VERDICT: LANDED (exit 4) — stubbed #100", text)
+                # The run did NOT forget the item it could not gate — bound to
+                # that ITEM's own (demoted) body line. ⚠️ A bare
+                # `f"#{unrunnable} INCOMPLETE"` does NOT bind it: that substring
+                # is produced by the `RESOLUTION:` tail's per-item list, so it
+                # stays green if the item line is dropped.
+                self.assertIn(
+                    f"WORK ITEM #{unrunnable} VERDICT: INCOMPLETE", text,
+                )
+                # The item that DID run keeps its verdict and its report.
+                self.assertIn(
+                    f"WORK ITEM #{runnable} VERDICT: LANDED (exit 4) — "
+                    f"stubbed #{runnable}",
+                    text,
+                )
+                # ...and the run must not fall back to the WHOLE-RUN refusal,
+                # the shape that claimed a check which DID run never happened.
+                # Bound to the text `_resolution_failure` actually emits (both
+                # of its branches open with `could not resolve #<n>`); an
+                # earlier assertion pinned the lowercase phrase "nothing was
+                # checked", which appears NOWHERE in this tool's output — only
+                # in a source comment — so it could never fail.
+                self.assertNotIn(f"could not resolve #{7000}", text)
+                self.assertIn("could not be gated", text)
 
     def test_a_single_unrunnable_resolved_item_still_prints_one_anchored_verdict(
         self,
