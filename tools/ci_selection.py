@@ -1296,7 +1296,12 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # removed. MEASURED before this entry: `--changed-files
              # tools/inbound_relay_sweep.py --event pull_request` ->
              # surfaces=[], full=False, n=64, test_inbound_relay_sweep.py ABSENT;
-             # after -> surfaces=['core'], n=663, present. Same
+             # after -> surfaces=['core'], n=669, present. ⚠️ n is a SNAPSHOT taken
+             # at the head that measured it: it moves with `main`'s surface
+             # registrations (it has read 663 and 667 at earlier heads), so treat
+             # the two LOAD-BEARING halves — `surfaces=[], ABSENT` before vs
+             # `surfaces=['core'], present` after — as the claim, and re-measure
+             # the count rather than trusting it. Same
              # #1349/#3332/#3616 class as the entries above. Pinned by
              # tests/test_ci_selection.py::
              # test_inbound_relay_sweep_tool_change_selects_core_not_tier1.

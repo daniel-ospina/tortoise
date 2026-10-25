@@ -75,13 +75,18 @@ other fails the suite instead of silently closing the wrong class.
 SAFETY RAILS (each pinned by a test) — a sweeper is riskier than a per-event relay
 ---------------------------------------------------------------------------------
   * RELAY-THEN-CLOSE-THEN-LABEL. The intake POST happens first and the LABEL is
-    applied LAST. The whole per-item sequence is guarded: if any step fails the
-    item is left UNLABELLED (so the next 15-minute run selects it again), the
-    failure is reported, the remaining items still run, and the run exits 1 — a
-    dead intake is an alarm rather than a silent "handled". Applying the label
-    before the close would invert this: the label is the idempotence marker, so
-    an open+labelled item is skipped by every later run and retried by nothing
-    (the event path only listens for `opened`).
+    applied LAST. The whole per-item sequence is guarded: if any step BEFORE THE
+    CLOSE fails the item is left UNLABELLED (so the next 15-minute run selects it
+    again), the failure is reported, the remaining items still run, and the run
+    exits 1 — a dead intake is an alarm rather than a silent "handled".
+    ⛔ The LABEL STEP IS THE EXCEPTION, and it is the one state nothing repairs:
+    it runs AFTER a successful close, and this sweep lists `state=open` only, so
+    a label failure leaves the item relayed and CLOSED but unmarked — no later
+    run re-selects it, and the run's note says to apply the label by hand.
+    Applying the label before the close would be worse in the other direction:
+    the label is the idempotence marker, so an open+labelled item is skipped by
+    every later run and retried by nothing (the event path only listens for
+    `opened`).
   * A RETRY RESUMES ITS COMMENT, never its silence: before re-commenting, the
     run checks for this relay's OWN comment footer (`RELAY_MARKER`, bot-typed or
     the owner's own login — the string alone is forgeable), reading the thread
@@ -532,8 +537,11 @@ def sweep(
         # the idempotence marker: applying it before the comment/close would
         # mean a bookkeeping failure leaves the item OPEN AND LABELLED — skipped
         # by every later run and retried by nothing (the event path only listens
-        # for `opened`). Applied last, any failure leaves the item unlabelled and
-        # therefore re-selectable, and `main()` still prints the report.
+        # for `opened`). Applied last, any failure BEFORE THE CLOSE leaves the
+        # item unlabelled and therefore re-selectable, and `main()` still prints
+        # the report. A failure IN the label step is the exception — the close
+        # already succeeded, so nothing re-selects it and the handler below says
+        # so instead of claiming a retry that cannot happen.
         step = "resume check"
         try:
             # A retry must RESUME, not restart: if our own footer is already on
@@ -946,14 +954,34 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
 
-    owner = args.repo.split("/")[0]
+    # ⛔ REFUSE A MALFORMED `--repo` BEFORE ANYTHING IS DERIVED FROM IT. `owner`
+    # is the ONLY thing that spares this repo's own items (`should_relay`, and
+    # the `_prefilter` that keeps them out of the detail fetch), and it is
+    # `repo.split("/")[0]`. A value without a slash (`--repo tortoise`, a URL,
+    # a stray artefact) yields an owner string that matches NOTHING, so every
+    # owner-authored open item in the window becomes "external" — relayed,
+    # commented, CLOSED and labelled. The scheduled path cannot reach this
+    # (`GITHUB_REPOSITORY` is always `owner/name`), so it is a manual-invocation
+    # footgun on a tool whose closes are irreversible: refuse, and say nothing
+    # was acted on.
+    repo = args.repo.strip()
+    if repo.count("/") != 1 or not all(part for part in repo.split("/")):
+        print(
+            f"error: --repo must be exactly `owner/name` (got {args.repo!r}): "
+            "the owner half is what spares this repo's own items, so a "
+            "malformed value would close them as external — nothing was acted on",
+            file=sys.stderr,
+        )
+        return 2
+
+    owner = repo.split("/")[0]
     try:
         prefixes = queue_prefixes()
     except ConfigError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     cfg = Config(
-        repo=args.repo,
+        repo=repo,
         owner=owner,
         label=LABEL,
         queue_prefixes=prefixes,
@@ -963,7 +991,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         report = sweep(
             GhClient(
-                args.repo,
+                repo,
                 intake_url=cfg.intake_url,
                 intake_secret=cfg.intake_secret,
             ),

@@ -914,6 +914,56 @@ def test_a_failed_label_says_it_will_not_be_retried(sweep: Any) -> None:
     assert "retries it" not in note, note
 
 
+def test_the_rails_promise_no_retry_that_the_label_step_cannot_get(
+    sweep: Any,
+) -> None:
+    """The RAILS docstring must not claim a recovery the LABEL step cannot get.
+
+    `test_a_failed_label_says_it_will_not_be_retried` pins the *code's* note.
+    This pins the *document* an operator is handed, because the two drifted: the
+    docstring claimed "any step" failure leaves the item unlabelled "so the next
+    15-minute run selects it again", while the label step runs AFTER a
+    successful close and the sweep lists `state=open` only — so a label failure
+    is relayed, closed, unmarked and re-selected by nothing. `EXIT CODES` and
+    the scoping doc were corrected first and this prose was left behind, which
+    is exactly why the two halves are pinned separately here.
+
+    A docstring is prose, so this asserts the two things that can be asserted
+    about it: the exact over-claim is gone, and the exception is named where the
+    rail is described. Pre-fix it reds on the first assertion.
+    """
+    rails = (sweep.__doc__ or "").split("SAFETY RAILS", 1)[1].split(
+        "EXIT CODES", 1)
+    assert len(rails) == 2, "the docstring lost its SAFETY RAILS/EXIT CODES frame"
+    # Whitespace-normalised: the claim is prose, and re-wrapping a paragraph
+    # must not be able to hide (or fake) it.
+    rail_text = " ".join(rails[0].split())
+    assert "if any step fails the item is left UNLABELLED" not in rail_text, (
+        "the rails text still promises a re-select for EVERY step — the label "
+        "step runs after the close, so no later run can select it again"
+    )
+    assert "BEFORE THE CLOSE" in rail_text, (
+        "the rails text must scope its re-select promise to the steps before "
+        "the close"
+    )
+    assert "by hand" in rail_text, (
+        "the rails text must name the recovery for the one state nothing "
+        "retries: applying the label by hand"
+    )
+
+    # The same over-claim lived in the block comment at the sequence itself.
+    block = MODULE_PATH.read_text(encoding="utf-8").split(
+        "THE WHOLE SEQUENCE IS GUARDED", 1)[1].split('step = "resume check"', 1)[0]
+    block_text = " ".join(
+        line.lstrip(" #") for line in block.splitlines()
+    )
+    assert "any failure leaves the item unlabelled and" not in block_text, (
+        "the sequence comment still claims any failure leaves the item "
+        "re-selectable, including the label step that runs after the close"
+    )
+    assert "BEFORE THE CLOSE" in block_text, block_text
+
+
 def test_run_is_capped_and_reports_the_remainder(sweep: Any) -> None:
     client = FakeClient(issues=[issue(n) for n in range(1, 6)])
     report = run(sweep, client, max_actions=2)
@@ -1143,6 +1193,50 @@ def test_main_refuses_when_the_queue_config_is_unreadable(sweep: Any, monkeypatc
         "cannot tell a queue batch from an external PR"
     )
     assert "cannot read the queue configuration" in capsys.readouterr().err
+
+
+def test_a_malformed_repo_is_refused_before_anything_derives_the_owner(
+    sweep: Any, monkeypatch: Any, capsys: Any,
+) -> None:
+    """`--repo`'s owner half is the ONLY thing sparing this repo's own items.
+
+    `Config.owner` is `repo.split("/")[0]`, and `should_relay` spares
+    owner-authored items on it. A value with no slash (`--repo tortoise`, a
+    URL, a stray artefact) therefore derives an owner that matches NOTHING, so
+    every owner-authored open item in the window reads as "external" and gets
+    relayed, commented, CLOSED and labelled — irreversible, on a tool whose
+    whole job is irreversible closes. The scheduled path cannot reach it
+    (`GITHUB_REPOSITORY` is always `owner/name`), so this is a
+    manual-invocation guard, and it must refuse BEFORE the client is built.
+
+    ⛔ The exit code alone cannot settle it: pre-fix the run proceeded and then
+    failed for an unrelated reason (no `gh` here), which is also a 2. So the
+    sweep itself is stubbed and `AssertionError`s if it is ever entered.
+    """
+    entered: list[Any] = []
+
+    def must_not_run(*args: Any, **kwargs: Any) -> Any:
+        entered.append(args)
+        raise AssertionError("the sweep ran for a --repo it cannot parse")
+
+    monkeypatch.setattr(sweep, "sweep", must_not_run)
+    monkeypatch.setenv("INBOUND_URL", "https://intake.example/relay")
+    monkeypatch.setenv("INBOUND_SECRET_GITHUB", "s3cret")
+
+    for malformed in (
+        "tortoise",                             # no owner half at all
+        "github.com/daniel-ospina/tortoise",     # a URL, not `owner/name`
+        "https://github.com/daniel-ospina/tortoise",
+        f"{OWNER}/tortoise/",                    # a trailing artefact
+        "a/b/c",
+    ):
+        assert sweep.main(["--repo", malformed, "--dry-run"]) == 2, malformed
+
+    assert entered == [], (
+        "a malformed --repo reached sweep(): its owner half matches nothing, so "
+        "every owner-authored item would be treated as external and closed"
+    )
+    assert "owner/name" in capsys.readouterr().err
 
 
 def test_missing_intake_configuration_takes_no_action(sweep: Any) -> None:
