@@ -167,19 +167,28 @@ stands unchanged.
 
    ```bash
    python -m battery.cli run --tier 1 --arms a4 --executor real --seed 7 \
-     --scorer battery.probes.r1_contradiction --scorer battery.probes.r3_calibration \
-     --scorer battery.probes.r4_defeat --scorer battery.probes.r5_update
+     --scorer battery.probes.r1_contradiction --scorer battery.probes.r2_coverage \
+     --scorer battery.probes.r3_calibration --scorer battery.probes.r4_defeat \
+     --scorer battery.probes.r5_update
    python -m battery.cli run --tier 1 --arms a0 --executor real --seed 7 \
-     --scorer battery.probes.r1_contradiction --scorer battery.probes.r3_calibration \
-     --scorer battery.probes.r4_defeat --scorer battery.probes.r5_update
+     --scorer battery.probes.r1_contradiction --scorer battery.probes.r2_coverage \
+     --scorer battery.probes.r3_calibration --scorer battery.probes.r4_defeat \
+     --scorer battery.probes.r5_update
    ```
 
    The `--scorer` list is **not** optional: with the default `harness` scorer nothing writes `family_*.json`
-   (`battery/runner/run.py:1182–1185`). What a CLI run can produce **today** is R1/R4 per-episode
-   `metric_values` on each arm plus the R3/R5 no-data sentinel; R3 `outcomes` and R5
-   `update_correct_direction` need §7 row 9 (the production truth judge) first. That limit is a property of
-   the harness at this head, not of the corpus, and it is why this row's indicator is stated per family
-   rather than as "R1–R5".
+   (`battery/runner/run.py:1182–1185`). **R2 is passed too, and omitting it would be an exclusion by
+   omission:** `R2` is one of the 14 `METRIC_FAMILIES` (`battery/differential/d1_sweep.py:14–18`), it has
+   an implemented probe and `tier: probe` scenarios (`battery/probes/r2_coverage.py`, `family: R2` in
+   `battery/config/corpus.yaml`), and the 2026-08-14 owner ruling names "ALL probes (R1–R5; L1–L6; D2–D4)" — so a
+   four-scorer command silently drops one of the five R probes. What a CLI run can produce **today** is
+   R1/R4 per-episode `metric_values` on each arm plus the no-data sentinel for the judge-gated families
+   (R3 `outcomes`, R5 `update_correct_direction`, and R2's `coverage-subscore`, which the probe reads from
+   a validated-rubric judge: `battery/probes/r2_coverage.py:1–7,33–37`); those need §7 row 9 (the
+   production truth judge) first. That limit is a property of the harness at this head, not of the corpus,
+   and it is why this row's indicator is stated per family rather than as "R1–R5". Passed, a judge-gated
+   family writes its `family_*.json` and reports `insufficient_n`; NOT passed, it is not reported at all,
+   which is the silence E2E-D2 forbids.
 
    ⚠️ **Two invocations write two attempt directories, and `report` reads ONE.** Each `run` stamps its own
    attempt dir and writes that run's `family_*.json` into it (`battery/runner/run.py:762–763`, `:1093`),
@@ -243,21 +252,33 @@ then the same for `a0`, each with the probe `--scorer` list) — from the repo r
 `battery` console script, and one arm per run, because probe aggregation refuses more
 (`battery/runner/run.py:619–622`) — and `report` runs **once per attempt dir**, because the two invocations
 write two attempt dirs and `report` resolves only the latest (§4 item 1)
-**Then** each per-arm profile carries `family_R1`, `family_R3`, `family_R4` and `family_R5` with a
-non-empty `values[primary]` and `n[primary] ≥ threshold` — read off `family_*.json`'s own fields
-(`primary`, `n` as a per-metric MAP, `values`, `cells`: `battery/runner/probe_scorer.py:791–801`).
+**Then** each per-arm profile carries `family_R1`, `family_R2`, `family_R3`, `family_R4` and
+`family_R5` — the probe scorer is passed for all five (§4 item 1), so a family can never be ABSENT — and
+for each family the payload's own `cells[primary]` is read and recorded, because that is the field that
+decides measuredness (`battery/runner/probe_scorer.py:783–786`; the report counts a family measured only
+on it, `battery/cli.py:700`). `R1` and `R4` must read `"measured"` with a non-empty `values[primary]`
+(`:791–801`). `R2`, `R3` and `R5` must read `"measured"` once the `Given`'s judge is wired; if the wired
+judge does not cover them they read `insufficient_n` and the row names the judge that is missing — what
+is forbidden is a silent zero or an absent family. `n` is a per-metric MAP, and no `n >= threshold`
+readable is claimed here: there is no minimum-n policy in `battery/config/thresholds.yaml`.
 `metric_values` is the **per-episode** artifact field (`battery/runner/artifacts.py:86`), not a family
 field, so an assertion written against it reds on a healthy run.
-**And** `report_status` is `incomplete_missing_metrics`, and the ONLY families it reports missing or
-insufficient are the deferred set (L1–L6, D2–D4). `complete` is **not** the criterion and must not be: the
-expected set is the fixed 14-family `METRIC_FAMILIES` (`battery/cli.py:551`), `assemble` sets
-`incomplete_missing_metrics` whenever any expected family is unmeasured
-(`battery/report/assemble.py:113–117`), and `compose_run_status` never returns `complete` (it returns
-`None`, leaving the base rule, or an `incomplete_*`: `:166–220`). A criterion demanding `complete` on a
-four-family run is unsatisfiable, so the only way to satisfy it would be to emit a false status — the
-exact failure this case exists to catch.
-**And** a `complete` claim, an itemised per-family residual presented AS the pass, or any family that is
-neither measured nor explicitly deferred is a **FAILED** result, and the failure must name the blocking
+**And** `report_status` is **never `complete`**, and the value it carries names its cause: the base rule
+sets `incomplete_missing_metrics` when any expected family is unmeasured
+(`battery/report/assemble.py:113–117`), and `compose_run_status` OVERRIDES it with an `incomplete_*` —
+`incomplete_real_partial` whenever any cell is `insufficient_n` OR any episode is excluded (`:218–219`,
+applied over the base rule at `:116–117`), which an honest real run legitimately reads (this brief records
+the exclusion rate as fixed to 6.4% — §3's blocker table, :131). `complete` is **not** the criterion and
+must not be: the expected set is the fixed 14-family `METRIC_FAMILIES` (`battery/cli.py:551`), and
+`compose_run_status` never returns `complete` — it returns `None` (leaving the base rule) or an
+`incomplete_*` (`:166–220`). A criterion demanding `complete` on a run that measures five of fourteen
+families is unsatisfiable, so the only way to satisfy it would be to emit a false status — the exact
+failure this case exists to catch. What IS required of the status: it is an `incomplete_*` whose cause is
+recorded, and whenever it is `incomplete_real_partial` the excluded episodes / `insufficient_n` cells are
+itemised by family.
+**And** a `complete` claim, an itemised per-family residual presented AS the pass, or a family that is
+neither `measured` nor explicitly named in the deferred set (L1–L6, D2–D4) or the judge-gated set (R2/R3/R5
+— present as `insufficient_n`, never absent) is a **FAILED** result, and the failure must name the blocking
 issue per family — itemisation is the diagnostic, never the pass, because a criterion that accepts it
 cannot fail on a run whose families were never measured.
 
@@ -269,7 +290,9 @@ dir) and the claim doc is re-filed
 **Then** the **re-filed claim doc's** 14-family table reports a status for both arms — `measured` ·
 `insufficient_n` · `blocked-by-#issue` · `deferred-by-gate-G-1402-DELTA` — and never blank. (The deferred
 status is a status of that TABLE, i.e. a doc surface, not a new `report_status` value: `profile.json` keeps
-the harness's own vocabulary, and `incomplete_missing_metrics` is what a correctly-scoped delta run reads —
+the harness's own vocabulary, and an honest `incomplete_*` — `incomplete_missing_metrics`, or
+`incomplete_real_partial` when cells are `insufficient_n` or episodes were excluded — is what a
+correctly-scoped delta run reads —
 see E2E-D1.) The deferred status is the one this
 delta adds, and it exists for L1–L6 and D2–D4: they are approved `03-scope.md` deliverables that this delta
 SEQUENCES out of the first slice, not exclusions, so "not measured yet" must render as a named status rather
@@ -331,15 +354,15 @@ edges/labels. Listed for the owner gate.
 
 | # | Work unit | O/I/T (one line) | State |
 |---|---|---|---|
-| 1 | **#1416** battery execution + verdict re-file | O: run tier-1 `a4,a0` on the real lane (one invocation per arm) and re-file the claim doc / I: real `metric_values` for R1/R3/R4/R5 on BOTH arms and `report_status` complete / T: E2E-D1, D2 | OPEN — **the delta's critical path**. Its own DoD is the full battery (Tier-1, Tier-2, Tier-3, parity) and is **unchanged** by this brief |
+| 1 | **#1416** battery execution + verdict re-file | O: run tier-1 `a4,a0` on the real lane (one invocation per arm, all five probe scorers — R2 included) and re-file the claim doc / I: `cells[primary] == "measured"` for R1/R4 (R2/R3/R5 present as `insufficient_n` until §7 row 9's judge, never absent) on each arm's own profile, and `report_status` an honest `incomplete_*` naming its cause (E2E-D1 — `complete` is unreachable and is not the criterion) / T: E2E-D1, D2 | OPEN — **the delta's critical path**. Its own DoD is the full battery (Tier-1, Tier-2, Tier-3, parity) and is **unchanged** by this brief |
 | 2 | **#2525** comparator-arm real-run readiness | O: run A1/A2/A2b/A3 on the real lane with matched-recall data / I: every comparator arm has real numbers + A2b go/no-go / T: E2E-D3 | OPEN (in #2515 umbrella) |
 | 3 | **#1419** capstone clickthrough | O: walk scope E2E-1…7 on the real run / I: all pass or gated-with-name, artifacts reproducible / T: E2E-D4 | OPEN |
 | 4 | **#1404** test-design integration-surface map | O: close the S1–S8 verification map the children cite / I: every surface has an assigned layer / T: cited by #1416/#1419 checklists | OPEN |
 | 5 | **#2702** `cal`/`bct` envelope contract | O: fix the empty-position envelope class / I: long-prompt deadline class no longer aborts calibration / T: calibration leg clean | CLOSED 2026-09-12 — no action |
 | 6 | *(new, optional)* re-label #1416 not-launch-relevant → launch-relevant | O: reflect the reclassification trigger in labels / I: one label change with the 01-align trigger quoted / T: n/a | — |
 | 7 | *(new, mandated)* fleet audit instrument: sub-issue relation | O: make epic→child linkage read reliably by audits / I: an audit of epics reports true child counts / T: §2 evidence | **#9701** (filed 2026-10-22) |
-| 8 | *(sub-unit of #1416 — no new issue)* lift the single-arm probe guard | O: let one probe-scored run aggregate across arms / I: `--arms a4,a0` with probe scorers yields per-arm families instead of `ConfigError` before the attempt dir (`battery/runner/run.py:619–622`, `battery/runner/probe_scorer.py:754–758`) / T: E2E-D1's two-arm `Then` | OPEN — **code**; until it lands, "both arms in one run" is not a command that exists |
-| 9 | *(sub-unit of #1416 — no new issue)* wire a production truth judge | O: set `RunConfig.truth_judge` from something other than a test / I: a CLI run emits R3 `outcomes` and R5 `update_correct_direction` with evidence, or refuses naming the missing judge (`battery/runner/run.py:1158`; `battery/runner/probe_scorer.py:494–513`) / T: E2E-D1's R3/R5 `metric_values` | OPEN — **code**; this is why "one re-run" is not yet enough |
+| 8 | *(sub-unit of #1416 — no new issue)* lift the single-arm probe guard | O: let one probe-scored run aggregate across arms / I: `--arms a4,a0` with probe scorers yields per-arm families instead of `ConfigError` before the attempt dir (`battery/runner/run.py:619–622`, `battery/runner/probe_scorer.py:754–758`) / T: the ONE-run, two-arm `profile.json` that §4 item 1 says two invocations cannot produce | OPEN — **code**; until it lands, "both arms in one run" is not a command that exists |
+| 9 | *(sub-unit of #1416 — no new issue)* wire a production truth judge | O: set `RunConfig.truth_judge` from something other than a test / I: a CLI run emits R3 `outcomes` and R5 `update_correct_direction` with evidence, or refuses naming the missing judge (`battery/runner/run.py:1158`; `battery/runner/probe_scorer.py:494–513`) / T: E2E-D1's R3/R5 `cells[primary] == "measured"` / `values[primary]`, with the per-episode `metric_values` they unlock | OPEN — **code**; this is why "one re-run" is not yet enough |
 
 **MECE check:** (1) is execution + claim re-file, (2) is comparator data, (3) is verification, (4) is the
 verification basis, (5) is closed history — no two own the same artifact. (1) and (2) touch the same
