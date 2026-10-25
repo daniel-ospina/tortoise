@@ -1572,8 +1572,98 @@ class CollisionPreflightTest(unittest.TestCase):
         rc, out = self.run_tool(issue=7000)
         self.assertEqual(rc, 4, out)
         self.assertIn("Resolved via title `(#N)`: #7000 → #2712", out)
-        self.assertIn("VERDICT: LANDED (exit 4)", out)
+        # ANCHORED: a single work item must keep the plain `VERDICT:` line (only a
+        # MULTI-item run demotes its per-item lines to `WORK ITEM #N VERDICT:`).
+        self.assertIn("\nVERDICT: LANDED (exit 4)", out)
+        self.assertNotIn("WORK ITEM #", out)
         self.assertNotIn("VERDICT: CLEAN", out)
+
+    def test_a_work_item_a_LOSING_arm_named_is_still_gated(self):
+        """EVERY arm's number is gated, not only the first arm that speaks.
+
+        The shipped shape returned on the FIRST arm that spoke, so a body saying
+        `Closes #1000` hid a `(#2712)` title and a `feat/2712-…` branch: #2712 was
+        never gated, never resolved and never printed. Where the work item the
+        losing arm named is the one a lane holds (exactly #9957's measured case)
+        the run then reports about the wrong issue and can read CLEAN — `dispatch`
+        — while `collision_preflight 2712` exits 1. That is this issue's own
+        duplicate-dispatch class, reintroduced one layer up.
+
+        ⛔ THE RESOLVED WORK ITEM IS ALWAYS NAMED BY THE PR, and an OPEN PR naming
+        an issue is itself a blocking hit, so a resolved run cannot reach CLEAN
+        even when the resolution is wrong — which is why this test asserts the
+        GATED WORK ITEM and its holder hit, not only the exit code (which is 1
+        either way). The exit-code half is pinned in
+        `test_the_aggregate_is_the_WORST_and_the_ONLY_anchored_VERDICT_line`.
+        """
+        self.gh_fixtures(open_prs=[{
+            "number": 7000,
+            "title": "feat(storage): serve reads from the record (#2712)",
+            "body": "Closes #1000.",
+            "state": "open",
+            "headRefName": "feat/2712-record-serves-anchored-reads",
+            "closingIssuesReferences": [{"number": 1000}],
+        }])
+        self.gh_issue_for(
+            7000, title="feat(storage): serve reads from the record (#2712)")
+        self.gh_issue_for(1000, title="docs: tidy the index")
+        self.gh_issue_for(2712, title="feat(storage): serve reads from the record")
+        self.fleet_board(issues={2712: [("holder-live", "branch slug")]},
+                         lanes=[{"label": "holder-live", "live": True}])
+
+        rc, out = self.run_tool(issue=7000)
+        self.assertEqual(rc, 1, out)
+        # BOTH contributing arms are named, so the reader can check the union
+        # against the brief instead of trusting a single-arm sentence.
+        self.assertIn(
+            "Resolved via closing reference, title `(#N)`: #7000 → #1000, #2712",
+            out)
+        # ...and the work item the LOSING arm named is gated, with its real hit.
+        self.assertIn("collision-preflight: issue #2712", out)
+        self.assertIn("holder:holder-live", out)
+        self.assertIn("RESOLUTION: PR #7000 → 2 work item(s)", out)
+
+    def test_a_PARTIAL_closing_read_is_named_in_the_header_the_caller_sees(self):
+        """The success header must not sound authoritative over a partial read.
+
+        On the REST-rescued open-PR surface (#9402) `closingIssuesReferences` is
+        absent for EVERY entry, so the closing arm resting on the body's keyword
+        is the NORMAL route whenever the GraphQL budget is spent — and the header
+        used to print a bare `Resolved via closing reference` for it. That is a
+        sentence about evidence the tool never had; the `checked` line saying so
+        is rendered on the FAILURE path only.
+        """
+        self.gh_fixtures(open_prs=[{
+            "number": 7000, "title": "fix(storage): serve reads",
+            "body": "Closes #1000.", "state": "open",
+            "headRefName": "chore/record-reads",
+        }])
+        # The harness normalises the field IN (so no call site can forget it),
+        # so the unreadable shape must be reached by DELETING the key — the same
+        # rule the sibling refusal test records.
+        prs = json.loads((self.gh_dir / "open_prs.json").read_text())
+        del prs[0]["closingIssuesReferences"]
+        (self.gh_dir / "open_prs.json").write_text(json.dumps(prs))
+        self.gh_issue_for(7000, title="fix(storage): serve reads")
+        self.gh_issue_for(1000, title="docs: tidy the index")
+
+        rc, out = self.run_tool(issue=7000)
+        # The verdict is INCOMPLETE, not COLLISION: the same absent field makes
+        # the open-PR SURFACE unreadable, which is INCOMPLETE by design. That is
+        # the point — the run is decided on a partial read, so the header must
+        # not present the resolution as if the source had spoken.
+        self.assertEqual(rc, 2, out)
+        self.assertIn("the body's closing keyword ONLY", out)
+        self.assertIn(
+            "GitHub's computed `closingIssuesReferences` field could not be read",
+            out)
+        # The bare, authoritative form must NOT be what a caller reads.
+        self.assertNotIn("Resolved via closing reference: #7000", out)
+        # ONE work item keeps its verdict ANCHORED: demoting it (the first cut of
+        # this fix) would leave a single-item resolved run with no anchored
+        # verdict at all, so the text-keyed consumer would read an empty value.
+        self.assertIn("\nVERDICT: INCOMPLETE (exit 2)", out)
+        self.assertNotIn("WORK ITEM #1000 VERDICT", out)
 
     def test_the_resolver_reads_every_arm_and_prefers_the_source(self):
         """`resolve_pull_request_work_items` in isolation (#9957).
@@ -1581,19 +1671,29 @@ class CollisionPreflightTest(unittest.TestCase):
         Driven DIRECTLY so each arm is exercised without a subprocess (and
         without the open-PR list, which is what supplies the record in
         production). Every case here is a shape a real PR carries.
+
+        ⛔ `arms`/`arm` IS A LABEL, `issues` IS THE UNION, AND THE TWO ARE NOT
+        THE SAME QUESTION. The first case has arms that DISAGREE (the computed
+        field names #3000, the title and branch name #2712); the shipped shape
+        returned `(3000,)` and dropped #2712, which is the work item a lane
+        actually holds. SOURCE-first order decides what the header NAMES, never
+        which numbers get gated — see
+        `test_a_work_item_a_LOSING_arm_named_is_still_gated`.
         """
         cp = _tool_module()
         resolve = cp.resolve_pull_request_work_items
 
-        # The SOURCE first: GitHub's computed field wins over the title/branch
-        # conventions, which are re-derivations (#3504).
+        # The SOURCE is LABELLED first — GitHub's computed field outranks the
+        # title/branch conventions, which are re-derivations (#3504) — but every
+        # arm's number is GATED.
         got = resolve({
             "number": 7000, "title": "feat: thing (#2712)", "body": "",
             "headRefName": "feat/2712-thing",
             "closingIssuesReferences": [{"number": 3000}],
         }, 7000)
-        self.assertEqual(got.issues, (3000,))
+        self.assertEqual(got.issues, (2712, 3000))
         self.assertEqual(got.arm, cp._ARM_CLOSING)
+        self.assertEqual(got.arms, (cp._ARM_CLOSING, cp._ARM_TITLE))
 
         # ...and when it speaks for nothing, the title convention (#9941's own
         # shape — no closing keyword, the tag in the title).
@@ -1709,6 +1809,193 @@ class CollisionPreflightTest(unittest.TestCase):
         }, 8888)
         self.assertEqual(got.issues, (8887,))
         self.assertEqual(got.arm, cp._ARM_CLOSING)
+
+    def test_a_partial_closing_read_is_NAMED_and_not_dressed_as_the_source(self):
+        """An unreadable computed field must be disclosed on the SUCCESS path.
+
+        `_closing_ref_numbers` raises when `closingIssuesReferences` is absent —
+        which is the NORMAL shape on the REST-rescued open-PR surface (#9402),
+        so this is not a corner case but the route taken whenever the GraphQL
+        budget is spent. The resolver then unions in the body's closing keyword,
+        and the closing arm FIRES on that partial data. Before review the header
+        printed a bare `Resolved via closing reference` for it — an authoritative
+        sentence over evidence the tool never had, and (because the precedence
+        chain discarded the other arms) with the numbers those arms saw shown
+        nowhere at all.
+
+        `checked` said `could not be read` all along, but it is rendered only on
+        the FAILURE path, so a reader of a successful run could not see it.
+        """
+        cp = _tool_module()
+        partial = cp.resolve_pull_request_work_items({
+            "number": 7000, "title": "fix(storage): serve reads",
+            "body": "Closes #1000.",
+            "headRefName": "chore/record-reads",   # no computed field at all
+        }, 7000)
+        self.assertTrue(partial.closing_field_unreadable)
+        self.assertEqual(partial.issues, (1000,))
+        route = cp._resolution_route(partial)
+        self.assertIn("the body's closing keyword ONLY", route)
+        self.assertIn("could not be read", route)
+        # A READABLE field carries no such caveat — so the flag is a fact about
+        # the read, not a constant. (Without this half, hard-coding the caveat on
+        # would pass.)
+        whole = cp.resolve_pull_request_work_items({
+            "number": 7000, "title": "fix(storage): serve reads",
+            "body": "Closes #1000.",
+            "headRefName": "chore/record-reads",
+            "closingIssuesReferences": [{"number": 1000}],
+        }, 7000)
+        self.assertFalse(whole.closing_field_unreadable)
+        self.assertNotIn("could not be read", cp._resolution_route(whole))
+        self.assertEqual(cp._resolution_route(whole), cp._ARM_CLOSING)
+
+    def test_the_resolver_drops_a_number_it_cannot_treat_as_an_issue(self):
+        """`_ISSUE_NUMBER_MAX` is POLICY THE RESOLVER APPLIES, and it is tested.
+
+        Review found the bound had NO test at all, so deleting it was undetected.
+        It is deliberately the resolver's own (the shared grammar stays
+        unbounded — see `_arm_numbers`), because a snowflake or a timestamp in
+        `(#1234567890123)` form is not an issue and resolving one spends a
+        `gh issue view` on a number that cannot exist.
+        """
+        cp = _tool_module()
+        for value, expected in (
+            (1, True), (42, True),
+            (cp._ISSUE_NUMBER_MAX, True),
+            (cp._ISSUE_NUMBER_MAX + 1, False),
+            (0, False), (-1, False),
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(cp._is_plausible_issue_number(value), expected)
+
+        # AND IT IS APPLIED, not merely defined: the same arm resolves just
+        # inside the bound and refuses just outside it, so neither the guard nor
+        # a constant `False` can pass this pair.
+        outside = cp.resolve_pull_request_work_items({
+            "number": 7000, "title": f"feat: thing (#{cp._ISSUE_NUMBER_MAX + 1})",
+            "body": "", "headRefName": "chore/reads",
+            "closingIssuesReferences": [],
+        }, 7000)
+        self.assertEqual(outside.issues, ())
+        self.assertIsNone(outside.arm)
+        inside = cp.resolve_pull_request_work_items({
+            "number": 7000, "title": f"feat: thing (#{cp._ISSUE_NUMBER_MAX})",
+            "body": "", "headRefName": "chore/reads",
+            "closingIssuesReferences": [],
+        }, 7000)
+        self.assertEqual(inside.issues, (cp._ISSUE_NUMBER_MAX,))
+
+    def test_the_severity_order_ranks_decisiveness_not_numeric_value(self):
+        """The aggregation order is DECISIVENESS, and it is pinned (#9957).
+
+        Review measured that `_EXIT_SEVERITY` had no test anywhere in `tests/`,
+        so every permutation of it stayed green: `_EXIT_SEVERITY[EXIT_CLEAN] = 99`
+        (a plausible typo beside `: 0`) made a CLEAN+COLLISION resolution return
+        **exit 0** and print "the WORST decides CLEAN". Replacing the map with
+        `max(numeric code)` is the other silent mutant, and it is the one that
+        changes the REMEDY the caller is told to apply (INCOMPLETE — "re-run" —
+        would outrank COLLISION — "do not dispatch") — hence the
+        INCOMPLETE<COLLISION assertion, which the codes' own values invert.
+        """
+        cp = _tool_module()
+        severity = cp._EXIT_SEVERITY
+        self.assertEqual(
+            set(severity),
+            {cp.EXIT_CLEAN, cp.EXIT_COLLISION, cp.EXIT_INCOMPLETE, cp.EXIT_LANDED},
+        )
+        # EXIT_USAGE is never a report code, so it must not be in the map (a
+        # missing key there would be a KeyError in the aggregator).
+        self.assertNotIn(cp.EXIT_USAGE, severity)
+        self.assertLess(severity[cp.EXIT_CLEAN], severity[cp.EXIT_INCOMPLETE])
+        self.assertLess(severity[cp.EXIT_INCOMPLETE], severity[cp.EXIT_COLLISION])
+        self.assertLess(severity[cp.EXIT_COLLISION], severity[cp.EXIT_LANDED])
+
+    def _aggregate(self, codes):
+        """Drive `_verdict_for_pull_request` over a STUBBED per-item pre-flight.
+
+        The aggregation is what review found untested, and it cannot be reached
+        end-to-end for every combination: a resolved number is ALWAYS named by
+        the PR (that is how it resolved), and an OPEN PR naming an issue is
+        itself a blocking hit — so a resolved work item can never read CLEAN in
+        the real tool. Stubbing `run_one` is therefore the only way to exercise
+        the CLEAN+COLLISION arm the review asked for, and it exercises the REAL
+        aggregator rather than a re-implementation of it.
+        """
+        cp = _tool_module()
+        issues = [100, 200][:len(codes)]
+        pr = {
+            "number": 7000, "title": "fix(x)",
+            "body": "Closes " + ", closes ".join(f"#{n}" for n in issues) + ".",
+            "headRefName": "chore/aggregate",
+            "closingIssuesReferences": [{"number": n} for n in issues],
+        }
+        by_issue = dict(zip(issues, codes, strict=True))
+
+        def run_one(issue):
+            code = by_issue[issue]
+            return (
+                f"collision-preflight: issue #{issue}\n\n"
+                f"VERDICT: {cp._EXIT_LABEL[code]} (exit {code}) — stubbed #{issue}\n",
+                code,
+            )
+
+        text, rc = cp._verdict_for_pull_request(
+            cp.NotAWorkItem("refused", pr=pr), 7000, run_one,
+        )
+        return cp, text, rc
+
+    def test_the_aggregate_is_the_WORST_and_the_ONLY_anchored_VERDICT_line(self):
+        """ONE anchored `VERDICT:` line, and it is the deciding one (#9957).
+
+        The shipped shape sorted worst-LAST and printed every work item's
+        `VERDICT:` line, on the belief that a text-keyed caller greps the TAIL.
+        The fleet's only such caller greps the HEAD and never compares the value
+        to the exit code
+        (`agent-infra/scripts/orchestrator-harness/refresh-candidates.sh`:
+        `grep -E '^VERDICT' | head -1`), so on `[#100 CLEAN, #200 COLLISION]` it
+        read **CLEAN** — the arm that QUEUES a dispatch — out of a report whose
+        exit code refused the dispatch. Reordering alone would only reverse the
+        bug (a tail reader would then get it wrong), so the per-item lines are
+        re-prefixed instead and exactly one anchored line survives.
+        """
+        for codes, expected in (
+            ((0, 1), ("COLLISION", 1)),      # CLEAN + COLLISION
+            ((1, 4), ("LANDED", 4)),         # COLLISION + LANDED
+            ((0, 2), ("INCOMPLETE", 2)),     # CLEAN + INCOMPLETE
+            ((1, 1), ("COLLISION", 1)),      # the same verdict twice
+        ):
+            with self.subTest(codes=codes):
+                cp, text, rc = self._aggregate(codes)
+                self.assertEqual(rc, expected[1], text)
+                anchored = [line for line in text.splitlines()
+                            if line.startswith(cp._VERDICT_LINE_PREFIX)]
+                self.assertEqual(len(anchored), 1, text)
+                self.assertIn(f"VERDICT: {expected[0]} (exit {expected[1]})",
+                              anchored[0])
+                # A caller reading the FIRST anchored line gets the decision —
+                # the exact read `refresh-candidates.sh` makes.
+                self.assertIn(expected[0], anchored[0])
+                # ...and every per-item verdict is still VISIBLE, attributable,
+                # and worst-first, instead of being dropped to fix the reader.
+                self._assert_per_item_verdicts_are_visible(cp, text, codes)
+
+    def _assert_per_item_verdicts_are_visible(self, cp, text, codes):
+        """Each work item keeps a verdict line, demoted and worst-first."""
+        issues = [100, 200][:len(codes)]
+        positions = {}
+        for code, issue in zip(codes, issues, strict=True):
+            marker = f"WORK ITEM #{issue} {cp._VERDICT_LINE_PREFIX}"
+            position = text.find(marker)
+            self.assertGreaterEqual(position, 0, text)
+            self.assertIn(f"{marker}{cp._EXIT_LABEL[code]}", text)
+            positions[issue] = position
+        worst_code = max(codes, key=lambda code: cp._EXIT_SEVERITY[code])
+        worst_issue = issues[codes.index(worst_code)]
+        self.assertEqual(
+            min(positions, key=positions.get), worst_issue,
+            "the deciding work item must be printed first",
+        )
 
     def test_terminal_pr_closing_reference_is_reported_but_non_blocking(self):
         # The contractual "Closes #N" is the strongest statement a PR body can

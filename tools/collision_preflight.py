@@ -111,17 +111,35 @@ Design contract
    numbers someone happened to record and would silently stop answering for the
    next one.
 
-   ⛔ RESOLUTION CAN ONLY TIGHTEN. Every resolved number is matched against the
-   PR that produced it on the re-run (its title, branch or closing reference is
-   where the number came from), and several work items aggregate WORST-FIRST
-   (`_EXIT_SEVERITY`). So a resolution can add a refusal and can never authorise
-   a dispatch that the direct run would have refused. The residual is stated
-   rather than hidden: a MERGED or CLOSED PR number is not resolved at all (the
-   refusal this relies on is scoped to OPEN PRs, #7009), so such a number keeps
-   its old, documented behaviour — reports immutable history and can read CLEAN.
-   A lane that wants the landed answer for a terminal PR must name the issue;
-   resolving a terminal PR would need a targeted `gh pr view` on EVERY run,
-   which is a fleet-shared GraphQL cost this change does not add.
+   ⛔ RESOLUTION CAN ONLY TIGHTEN, AND THAT REQUIRES EVERY ARM TO SPEAK. The
+   three signals are UNIONED, never read as a precedence chain: a chain STOPS at
+   the first arm that speaks, so the arms after it are not gated at all, and a
+   work item nobody looks at is a dispatch nothing refused. (Measured shape: a
+   body saying `Closes #1000` with `(#7970)` in the title and `feat/7970-…` in
+   the branch resolved to `[1000]` alone — #7970, the work item three lanes held
+   in this issue's own case, was invisible.) Every resolved number is matched
+   against the PR that produced it on the re-run (its title, branch or closing
+   reference is where the number came from), and several work items aggregate
+   WORST-FIRST (`_EXIT_SEVERITY`). So a resolution can add a refusal and can
+   never authorise a dispatch that the direct run would have refused.
+   SOURCE-first order survives as the LABEL only — which arm the header names —
+   and never as which numbers are gated.
+
+   ⛔ AND A RESOLVED RUN PRINTS EXACTLY ONE `^VERDICT:` LINE — THE AGGREGATE.
+   The per-work-item lines are re-prefixed (`WORK ITEM #N VERDICT: …`) because
+   the fleet's only text-keyed consumer reads the FIRST anchored one
+   (`agent-infra/scripts/orchestrator-harness/refresh-candidates.sh`:
+   `grep -E '^VERDICT' | head -1`) and never compares it to the exit code. With
+   one anchored line per work item, a mixed resolution handed that consumer the
+   most PERMISSIVE verdict out of a report whose exit code refused the dispatch.
+
+   The residual is stated rather than hidden: a MERGED or CLOSED PR number is
+   not resolved at all (the refusal this relies on is scoped to OPEN PRs,
+   #7009), so such a number keeps its old, documented behaviour — reports
+   immutable history and can read CLEAN. A lane that wants the landed answer for
+   a terminal PR must name the issue; resolving a terminal PR would need a
+   targeted `gh pr view` on EVERY run, which is a fleet-shared GraphQL cost this
+   change does not add.
 
 Surfaces (8 rows, ALL hit-capable)
 ----------------------------------------------------------------------------
@@ -577,6 +595,11 @@ EXIT_LANDED = 4
 #: live claim, 2 is "the world could not be read", 0 authorises a dispatch.
 #: Aggregating this way can only ever RAISE the code, never lower it — so
 #: resolving to more work items can add a refusal and can never authorise one.
+#: ⛔ AND THE MAP IS ORDER, NOT ARITHMETIC: a multi-item run prints the winner of
+#: `max(…, key=_EXIT_SEVERITY[…])` as its ONE anchored `VERDICT:` line, so
+#: `max(numeric code)` (which puts INCOMPLETE above COLLISION and changes the
+#: remedy the caller is told to apply) is NOT a valid substitute.
+#: `test_the_severity_order_ranks_decisiveness_not_numeric_value` pins the order.
 _EXIT_SEVERITY = {
     EXIT_CLEAN: 0,
     EXIT_INCOMPLETE: 1,
@@ -1659,15 +1682,23 @@ def _closing_numbers_in_text(text: str | None) -> list[int]:
 # three mechanical signals a PR carries are read in the order that prefers the
 # SOURCE over a re-derivation (#3504).
 #
-# ⛔ WHY A PRECEDENCE CHAIN AND NOT A UNION OF ALL THREE. The union is SAFE —
-# `resolve_pull_request_work_items`' verdicts are aggregated worst-first, and
-# every arm's number is guaranteed to match the PR itself on the re-run, so an
-# extra arm can only ADD a refusal, never authorise one. It is noisy instead:
+# ⛔ WHY THE UNION OF ALL THREE ARMS, AND NOT A PRECEDENCE CHAIN. A precedence
+# chain STOPS at the first arm that speaks, so every arm after it is not gated at
+# all — and a number nobody gates is a dispatch nothing refused, which is the
+# one direction this tool must never move. The measured shape: a body saying
+# `Closes #1000` with `(#7970)` in the title and `feat/7970-…` in the branch
+# resolved to `[1000]` alone, so #7970 — the work item three lanes held in this
+# issue's own case — was invisible; where that mis-resolution read CLEAN the run
+# exited 0 while `collision_preflight 7970` exited 1.
+#
+# The cost of the union is NOISE, and noise here is the fail-CLOSED direction:
 # `(#2048)` in a title or `perf/1200-rps-cache` in a branch can be a SIZE or a
-# METRIC, and resolving those drags an unrelated issue into the run (where an
-# issue-absent surface makes the whole dispatch INCOMPLETE). The closing
-# reference is exact by construction; it is tried first and, when it speaks, it
-# is the answer.
+# METRIC, and resolving one drags an unrelated issue into the run (where an
+# issue-absent surface makes the whole dispatch INCOMPLETE). Over-blocking is
+# retried by the next pass; under-blocking duplicates a lane's work. So
+# SOURCE-first order survives as the LABEL — `arm` names the highest-precedence
+# contributing arm and the header names EVERY contributing arm — and never as a
+# choice of which numbers are gated.
 #
 # ⛔ WHY THE BRANCH ARM IS WIDER THAN `_LANE_BRANCH_CLAIM`. That regex is also
 # used to DEMOTE a blocking path hit, where widening is a false CLEAN (#9540) —
@@ -1708,10 +1739,23 @@ _ARM_BRANCH = "branch `<type>/<n>-<slug>`"
 class WorkItemResolution:
     """What a PULL REQUEST number resolves to (#9957).
 
-    `issues` is empty exactly when NO arm produced a work item; `checked` then
-    carries one factual line per arm, which is the refusal's evidence. It is
-    built by the resolver, never re-derived by the caller, so the message cannot
-    claim a check that did not run.
+    `issues` is the UNION of every arm's numbers, so it is empty exactly when NO
+    arm produced a work item; `checked` then carries one factual line per arm,
+    which is the refusal's evidence. It is built by the resolver, never
+    re-derived by the caller, so the message cannot claim a check that did not
+    run.
+
+    `arm` is the LABEL (the highest-precedence arm that contributed a number) and
+    `arms` every contributing arm in precedence order — labelling only. Neither
+    decides which numbers are gated: `issues` already holds them all, because a
+    precedence CHAIN over the gating set drops the losing arms' work items and a
+    work item nobody gates is a dispatch nothing refused.
+
+    `closing_field_unreadable` records that GitHub's computed
+    `closingIssuesReferences` could not be read (#9402). The closing arm then
+    rests on the body's closing keyword ALONE, which is a PARTIAL read — the
+    success header must say so, or an authoritative-sounding "Resolved via
+    closing reference" is printed over evidence the tool never had.
     """
 
     number: int
@@ -1719,9 +1763,21 @@ class WorkItemResolution:
     arm: str | None
     checked: tuple[str, ...]
     dropped_self: bool
+    arms: tuple[str, ...] = ()
+    closing_field_unreadable: bool = False
     @property
     def resolved(self) -> bool:
         return bool(self.issues)
+
+    @property
+    def contributing_arms(self) -> tuple[str, ...]:
+        """Every arm that contributed a gated number, precedence order.
+
+        Falls back to `arm` so a caller never has to know both fields exist.
+        """
+        if self.arms:
+            return self.arms
+        return (self.arm,) if self.arm else ()
 
 
 def resolve_pull_request_work_items(
@@ -1729,11 +1785,13 @@ def resolve_pull_request_work_items(
 ) -> WorkItemResolution:
     """The work item(s) a PULL REQUEST serves — the number a dispatch meant.
 
-    Three mechanical signals, read in SOURCE-FIRST order (see the section note
-    above): GitHub's own computed `closingIssuesReferences` (unioned with the
-    body's closing keyword, the same deliberate ADDING-ONLY union
-    `scan_pr_surface` documents), then the repo's own `(#N)` title convention,
-    then the `<type>/<n>-<slug>` branch convention.
+    Three mechanical signals, ALL of them read (see the section note above), in
+    SOURCE-FIRST order only for labelling: GitHub's own computed
+    `closingIssuesReferences` (unioned with the body's closing keyword, the same
+    deliberate ADDING-ONLY union `scan_pr_surface` documents), the repo's own
+    `(#N)` title convention, and the `<type>/<n>-<slug>` branch convention. The
+    returned `issues` is the UNION of the three — never the first arm that
+    speaks — because a dropped arm is a work item the caller will not gate.
 
     ⛔ THE PR'S OWN NUMBER IS NEVER A WORK ITEM. A PR that "closes" itself is
     the same object, so `number` is dropped from every arm's result — without
@@ -1745,8 +1803,11 @@ def resolve_pull_request_work_items(
     ⛔ AN UNREADABLE CLOSING FIELD IS NOT AN EMPTY ONE. `_closing_ref_numbers`
     raises on an absent/malformed field (the REST-rescued list genuinely has
     none, #9402), and reading that as "closes nothing" is the fail-OPEN
-    direction. The arm records that it could not be read and falls through to
-    the next arm — it never asserts a fact the read did not establish.
+    direction. The arm records that it could not be read — as
+    `closing_field_unreadable`, which the SUCCESS header renders too — and it
+    never asserts a fact the read did not establish. Its numbers on that path
+    are the body's closing keyword alone, so the header names that provenance
+    instead of claiming the computed field spoke.
 
     No I/O, no verdict: this answers "which work items?" and nothing else, so
     it is directly testable and cannot itself decide a dispatch.
@@ -1804,6 +1865,11 @@ def resolve_pull_request_work_items(
     checked.append(branch_note)
 
     dropped: set[int] = set()
+    #: The UNION of every arm's kept numbers, in the order the arms contributed
+    #: them; `arms` records which arm contributed each — both in SOURCE-first
+    #: order (closing, title, branch), which is the order the LABEL uses.
+    gated: list[int] = []
+    arms: list[str] = []
 
     def _keep(values: list[int]) -> list[int]:
         kept: list[int] = []
@@ -1820,16 +1886,61 @@ def resolve_pull_request_work_items(
         (_ARM_TITLE, title_numbers),
         (_ARM_BRANCH, branch_numbers),
     ):
+        # ⛔ EVERY ARM IS READ, AND THE UNION IS WHAT GETS GATED. Stopping at the
+        # first arm that speaks drops the other arms' numbers, and a work item
+        # nobody gates is one a dispatch is never refused for. An extra arm can
+        # only ADD a refusal — `_EXIT_SEVERITY` aggregates worst-first — so the
+        # union is safe and a chain is not. `arms` keeps the SOURCE-first order
+        # for the LABEL.
         kept = _keep(values)
-        if kept:
-            return WorkItemResolution(
-                number=number, issues=tuple(sorted(kept)), arm=arm,
-                checked=tuple(checked), dropped_self=bool(dropped),
-            )
+        fresh = [value for value in kept if value not in gated]
+        if fresh:
+            arms.append(arm)
+            gated.extend(fresh)
+
+    if not gated:
+        return WorkItemResolution(
+            number=number, issues=(), arm=None, checked=tuple(checked),
+            dropped_self=bool(dropped), arms=(),
+            closing_field_unreadable=unreadable,
+        )
     return WorkItemResolution(
-        number=number, issues=(), arm=None, checked=tuple(checked),
-        dropped_self=bool(dropped),
+        number=number, issues=tuple(sorted(gated)), arm=arms[0],
+        checked=tuple(checked), dropped_self=bool(dropped),
+        arms=tuple(arms), closing_field_unreadable=unreadable,
     )
+
+
+def _resolution_route(resolution: WorkItemResolution) -> str:
+    """How the resolution was REACHED, named honestly (#9957 review).
+
+    The success header is the one place a caller reads *why* a number resolved,
+    so it may never sound more authoritative than the read behind it. Two things
+    it must disclose:
+
+    * EVERY contributing arm — the union means a header naming one arm would
+      hide the others' work items from the reader;
+    * a PARTIAL closing read. On the REST-rescued open-PR surface (#9402) the
+      computed `closingIssuesReferences` is absent for EVERY entry, and the
+      closing arm then rests on the body's closing keyword alone. Printed as a
+      bare "Resolved via closing reference", that partial read is
+      indistinguishable from the authoritative one — and the numbers of the
+      arms that lost are then never shown anywhere.
+    """
+    arms = list(resolution.contributing_arms)
+    if not resolution.closing_field_unreadable:
+        return ", ".join(arms)
+    partial = (
+        "the body's closing keyword ONLY — GitHub's computed "
+        "`closingIssuesReferences` field could not be read"
+    )
+    if _ARM_CLOSING in arms:
+        arms[arms.index(_ARM_CLOSING)] = f"{_ARM_CLOSING} ({partial})"
+    else:
+        arms.append(
+            "the closing arm rested on " + partial + " and named nothing"
+        )
+    return ", ".join(arms)
 
 
 def _resolution_failure(resolution: WorkItemResolution) -> str:
@@ -8320,7 +8431,11 @@ def _verdict_for_pull_request(
         would have got before, which is the safe end of that shape;
       * several work items -> EVERY one is gated and the WORST verdict decides
         (`_EXIT_SEVERITY`), so a resolution can add a refusal and can never
-        authorise a dispatch one of its work items would have refused.
+        authorise a dispatch one of its work items would have refused. The run
+        prints ONE anchored `VERDICT:` line — that aggregate — and the per-item
+        lines are DEMOTED to `WORK ITEM #N VERDICT: …`, because the fleet's only
+        text-keyed consumer reads the first `^VERDICT` line and does not compare
+        it with the exit code (`_demote_verdict_lines`).
     """
     resolution = resolve_pull_request_work_items(exc.pr or {}, number)
     if not resolution.resolved:
@@ -8351,23 +8466,52 @@ def _verdict_for_pull_request(
         results.append((code, issue, text))
 
     worst_code = max(results, key=lambda row: _EXIT_SEVERITY[row[0]])[0]
-    # Worst LAST, so the last `VERDICT:` line a reader sees is the deciding one
-    # — a caller that greps the tail cannot be shown a CLEAN work item while a
-    # sibling refused.
-    results.sort(key=lambda row: _EXIT_SEVERITY[row[0]])
+    # Worst FIRST — the DECIDING work item is the one a reader needs.
+    #
+    # ⛔ WHAT PROTECTS A TEXT-KEYED CALLER IS NOT THIS ORDER. Sorted worst-LAST
+    # (the natural reading of "the last line decides"), a resolution over
+    # `[#100 CLEAN, #200 COLLISION]` printed CLEAN first — and the fleet's only
+    # consumer reads the FIRST anchored line
+    # (`agent-infra/scripts/orchestrator-harness/refresh-candidates.sh`:
+    # `grep -E '^VERDICT' | head -1`, never compared against the exit code), so
+    # it took CLEAN — "dispatch" — out of a report whose exit code refuses the
+    # dispatch. Reversing the order alone would leave the same bug for a tail
+    # reader.
+    #
+    # ⛔ SO A MULTI-ITEM RUN PRINTS EXACTLY ONE anchored `VERDICT:` line — the
+    # aggregate, below — and the per-item lines are re-prefixed by
+    # `_demote_verdict_lines`. An anchored `^VERDICT` read can then only ever see
+    # the decision, whichever end it reads from: the consumer is repaired without
+    # touching it (it is another repo's harness), and no caller has to know the
+    # run was a resolution.
+    results.sort(key=lambda row: _EXIT_SEVERITY[row[0]], reverse=True)
     map_text = ", ".join(f"#{issue}" for issue in resolution.issues)
     header = (
         f"collision-preflight: a PULL REQUEST number was given — #{number}. A "
         "pull request number is ALSO an issue number, so a verdict computed for "
         f"#{number} would describe the PR and never the work it serves. Resolved "
-        f"via {resolution.arm}: #{number} → {map_text}. The report(s) below are "
-        "computed for the WORK ITEM(S); exit 0 still means dispatch.\n"
+        f"via {_resolution_route(resolution)}: #{number} → {map_text}. The "
+        "report(s) below are computed for the WORK ITEM(S); exit 0 still means "
+        "dispatch.\n"
     )
-    body = "".join(text for _code, _issue, text in results)
     if len(results) == 1:
-        return header + body, worst_code
+        # One work item: its own `VERDICT:` line IS the aggregate — same label,
+        # same code — so it is left ANCHORED and nothing is added. Demoting it
+        # would leave a single-item resolved run with NO anchored verdict at all:
+        # the text-keyed consumer would read an empty value and queue nothing,
+        # the same class of silent defeat as the bug this change removes.
+        return header + results[0][2], worst_code
     per_item = ", ".join(
         f"#{issue} {_EXIT_LABEL[code]}" for code, issue, _text in results
+    )
+    body = "".join(
+        _demote_verdict_lines(text, issue) for _code, issue, text in results
+    )
+    aggregate = (
+        f"VERDICT: {_EXIT_LABEL[worst_code]} (exit {worst_code}) — PR #{number} "
+        f"resolves to {len(results)} work item(s); the WORST decides"
+        + ("; do NOT dispatch" if worst_code != EXIT_CLEAN else "")
+        + ".\n"
     )
     tail = (
         f"RESOLUTION: PR #{number} → {len(results)} work item(s) "
@@ -8376,7 +8520,36 @@ def _verdict_for_pull_request(
         + ("; do NOT dispatch" if worst_code != EXIT_CLEAN else "")
         + ".\n"
     )
-    return header + body + tail, worst_code
+    return header + aggregate + body + tail, worst_code
+
+
+#: The anchored verdict prefix every report line uses, and the ONE prefix a
+#: text-keyed caller greps. Only the aggregate may carry it in a multi-item run.
+_VERDICT_LINE_PREFIX = "VERDICT: "
+
+
+def _demote_verdict_lines(text: str, issue: int) -> str:
+    """Re-prefix a per-work-item report's `VERDICT:` line so `^VERDICT` misses it.
+
+    A run over SEVERAL resolved work items must leave exactly ONE anchored
+    `VERDICT:` line — the aggregate — because the fleet's only text-keyed
+    consumer reads the FIRST anchored one and does not compare it against the
+    exit code (see `_verdict_for_pull_request`). Re-prefixing rather than
+    reordering is what makes that true for a head reader AND a tail reader, and
+    it keeps every per-item verdict visible and attributable (`WORK ITEM #2712
+    VERDICT: COLLISION …`) instead of hiding the losing ones.
+
+    Only the anchored `VERDICT: ` prefix is touched, so the `ALSO INCOMPLETE:`
+    marker and every advisory row keep the exact shape their own consumers
+    parse.
+    """
+    if not text:
+        return text
+    return "\n".join(
+        f"WORK ITEM #{issue} {line}" if line.startswith(_VERDICT_LINE_PREFIX)
+        else line
+        for line in text.split("\n")
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -8384,7 +8557,11 @@ def main(argv: list[str] | None = None) -> int:
         prog="collision_preflight",
         description="Fail-loud, all-surface in-flight-work pre-flight for a GitHub issue (#3061).",
     )
-    parser.add_argument("issue", type=int, help="issue number to check, e.g. 3061")
+    parser.add_argument(
+        "issue", type=int,
+        help="issue number to check, e.g. 3061 — or an OPEN pull request number, "
+             "which is RESOLVED to the work item(s) it serves (#9957)",
+    )
     parser.add_argument(
         "--repo", default=None,
         help="target repo: `owner/name` (a local clone is located for the git "
