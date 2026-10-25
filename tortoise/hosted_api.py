@@ -124,7 +124,10 @@ from tortoise.incident_kinds import (  # #4780: the one kind declaration site
 # home, shared with the SDK doors, EventAPI and the seed surfaces, so the two
 # spellings cannot be drawn differently at the next door.
 from tortoise.kind_fallbacks import named_kind
-from tortoise.live import epistemic_disjunction  # #7902: the shared label set
+from tortoise.live import (
+    _terminal_excluded,  # #9962: the MITIGATES key's liveness
+    epistemic_disjunction,  # #7902: the shared label set
+)
 from tortoise.mcp_server import create_http_app
 from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
     HEALTH_PROBE_REFRESH_S,  # noqa: F401 — re-exported (tests import it here)
@@ -15981,7 +15984,19 @@ def _load_commit_graph_state(sdk: TortoiseSDK, payload: CommitPayload):  # noqa:
         if 0 in inputs and 1 in inputs:
             state.operators.add((inputs[0], inputs[1], op["op_type"]))
     # MITIGATES — the payload key (src, dst, MITIGATES) exists when the target
-    # IMPL edge (target triple) already has a mitigation attached.
+    # IMPL edge already carries a mitigation the writer would find.
+    #
+    # ⛔ #9962 — "carried" means CURRENT: the count reads
+    # ``mitigate_operator``'s own idempotency predicate
+    # (``live._terminal_excluded``), so a WITHDRAWN mitigation no longer
+    # satisfies the key. Before it, a re-asserted MITIGATES record reconciled
+    # as ``merge`` (200, zero writes, ``mitigate_operator`` never called) while
+    # the operator sat undamped — the new "a re-assertion mints a NEW
+    # mitigation" contract (``sdk.mitigate_operator``) was false on this
+    # route. The predicate is deliberately the WRITER's, not the dampener's
+    # ``_live_only``: a ``draft`` mitigation is admitted by the writer (updated
+    # in place, never retro-promoted — #1088), so keying on ``_live_only`` would
+    # re-send that record on every commit and still write no dampening.
     for op in payload.operators:
         if op.op_type != "MITIGATES" or op.target is None:
             continue
@@ -15992,7 +16007,8 @@ def _load_commit_graph_state(sdk: TortoiseSDK, payload: CommitPayload):  # noqa:
             f"WHERE {epistemic_disjunction('s')} AND s.id = $src "
             "MATCH (o)-[:IMPL {idx:1}]->(d) "
             f"WHERE {epistemic_disjunction('d')} AND d.id = $dst "
-            "MATCH (o)-[:mitigated_by]->(m) RETURN count(m)",
+            "MATCH (o)-[:mitigated_by]->(m) "
+            f"WHERE {_terminal_excluded('m.status')} RETURN count(m)",
             params={"src": t.src, "dst": t.dst},
         ).result_set
         if mit_rows and mit_rows[0][0]:

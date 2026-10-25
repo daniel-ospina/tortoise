@@ -119,6 +119,13 @@ Rules that hold regardless of granularity or policy:
   and stamped with the bundle's `batch_id` ([§16](#16-batch_id--audit)).
   Re-submission updates it **in place** (never a duplicate) and reports
   `mitigation_strength_change` ([§3.2](#32-warnings--the-twelve-keys) key 6).
+  ⛔ **A WITHDRAWN mitigation is not reinstated by a re-submission** (#9962):
+  if every mitigation the operator carries is terminal (`retracted` /
+  `superseded` / `outdated` / `archived`), the redelivery writes **nothing** —
+  the withdrawn Point already records this bundle's mitigation, and a retraction
+  is terminal everywhere (the direct-call route mints a *new* mitigation for a
+  re-assertion; a crash-retry is not a re-assertion, and it must not duplicate
+  the Point either). Same silence as any unchanged re-submission.
   On a `relation` connection `mitigation` is a **Phase-1 violation** — a
   structural edge has no operator bridge to damp ([§13](#13-acceptance-surface-breaks--migration-lines) row 4).
 - Created points default to `status: "draft"` under the gated policy (see
@@ -265,7 +272,7 @@ enumeration** — a warning key outside this table is a divergence; report it.
 | 3 | `mitigation_orphan_residue` | A mitigation Point orphaned by a crash was found; it was re-linked or left as residue (naming candidates). | None if re-linked; supersede the orphan if it should not exist. |
 | 4 | `mitigation_drift_duplicate` | A second drift event after a re-key — the mitigation was duplicated rather than silently re-keyed. | Supersede the stale duplicate. |
 | 5 | `nfc_straddle_duplicate` | An encoding-only difference (e.g. NFC vs NFD) split a dedup key; two points exist for one logical content. | Merge via supersede, or re-submit in one encoding. |
-| 6 | `mitigation_strength_change` | Re-submission changed a mitigation's reason/strength; the existing mitigation Point was updated in place (never duplicated). | None — deliberate divergence is recorded. |
+| 6 | `mitigation_strength_change` | Re-submission changed a mitigation's reason/strength; the existing mitigation Point was updated in place (never duplicated). A mitigation the graph records as **withdrawn** is the exception (#9962): the re-submission neither updates nor duplicates it, and no warning is emitted. | None — deliberate divergence is recorded. |
 | 7 | `partial_operator_residue` | A crash left a partial (incomplete input set) operator; the retry declined to absorb it (or could not), leaving residue naming candidates. On a graph written since #5089 the residue carries whatever the door wrote — `'live'` on the promoting posture, `'draft'` on the extraction one. It can still be status-less on a LEGACY/pre-#5089 graph, which is precisely why the absorb predicate keeps its `status IS NULL` limb (and why `mining.verify_no_auto_wire` still refuses a raw NULL). | Leave it (inert until promoted) or clean up via supersede of its inputs. |
 | 8 | `operator_absorb_completed` | A crash partial was absorbed — its input edges were completed to the full set (naming the operator + completed-edge count). | None — observability only. |
 | 9 | `label_dropped_resubmit` | A resubmission omitted a label its run-1 operator carried; strict matching treated it as a NEW operator (naming both). | Re-add the label to dedup, or supersede the extra operator. |
@@ -658,7 +665,7 @@ not schema — no version bump.
 | 5 | **Mitigation-reason conflict** | same-pair same-label IMPL+mitigation with differing reasons committed with an order-dependent survivor | Phase-1 violation | Unify the reason, or use label-differing pairs (legal) |
 | 6 | **Label-absent strict matching** | a no-label request was a wildcard matching labeled operators (order-dependent commit) | absent ≠ present; Phase-1 conflict for same-pair {labeled + absent}; a label-dropped resubmit creates a second operator + `label_dropped_resubmit` warning | Re-add the label, or use `reify` ×2 under auto |
 | 7 | **Direction-absent strict matching (per-op-type)** | a direction-absent lookup was a wildcard | absent ≡ op-type default for dedup (IMPL→`bidirectional`, NAND→`unidirectional`); {IMPL absent, `unidirectional`} and {NAND absent, `bidirectional`} are conflicts; a direction-dropped resubmit creates a second operator + `direction_dropped_resubmit` warning | Declare the direction, or accept the extraction default — **NAND=unidirectional, IMPL=bidirectional** |
-| 8 | **A connection's `mitigation` is applied** (#5244) | the field was validated and then DISCARDED: the operator was written, no mitigation Point, no `mitigated_by` edge, no warning | the operator is created/deduped/absorbed, then the mitigation Point + `(op)-[:mitigated_by]->(m)` edge are written and `batch_id`-stamped; a re-submission updates in place and reports `mitigation_strength_change` (row 6) | None — this is what [§3.2](#32-warnings--the-twelve-keys) already promised. Expect one extra Point in the graph and in `list_batch` counts for a mitigation-bearing bundle |
+| 8 | **A connection's `mitigation` is applied** (#5244) | the field was validated and then DISCARDED: the operator was written, no mitigation Point, no `mitigated_by` edge, no warning | the operator is created/deduped/absorbed, then the mitigation Point + `(op)-[:mitigated_by]->(m)` edge are written and `batch_id`-stamped; a re-submission updates in place and reports `mitigation_strength_change` (row 6). #9962: a re-submission whose mitigation has been WITHDRAWN writes nothing (no revive, no duplicate) | None — this is what [§3.2](#32-warnings--the-twelve-keys) already promised. Expect one extra Point in the graph and in `list_batch` counts for a mitigation-bearing bundle |
 
 ---
 

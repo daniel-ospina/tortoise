@@ -659,3 +659,237 @@ class TestMitigationIsBornCurrent:
             f"re-mitigating after a retraction dampened nothing: base={base}, "
             f"observed={observed}"
         )
+
+
+# ── #9962 round 2: the retraction must be durable on EVERY route ──────
+#
+# The predicate in ``weights.py`` (and the writer's "mint, never revive"
+# lookup) settled the SDK caller's view. These four read the routes that
+# bypass a caller — a bundle redelivery, the hosted commit reconcile, and the
+# two display surfaces — because a guarantee that holds on the direct-call
+# door only is not the guarantee #9962 states ("retract_point and delete_point
+# differ only in what they remove").
+
+def _ingest_mitigation_bundle(strength: float = 0.50) -> dict:
+    """The crash-retry / redelivery shape (INGEST_CONTRACT §7): one connection
+    carrying a mitigation."""
+    return {
+        "points": [
+            {"ref": "p1", "kind": "claim", "content": "A implies B."},
+            {"ref": "p2", "kind": "claim", "content": "B."},
+        ],
+        "entities": [], "sources": [],
+        "connections": [
+            {"from": "p1", "to": "p2", "operator": "IMPL",
+             "mitigation": {"reason": "p1 is unreliable", "strength": strength}},
+        ],
+    }
+
+
+def _ingest_mitigation_rows(sdk, op_id: str):
+    """(id, status, strength) of every mitigation attached to ``op_id``."""
+    return sdk._get_proj().g.query(
+        "MATCH (op:Point {id:$op})-[:mitigated_by]->(m:Point) "
+        "RETURN m.id, m.status, m.mitigation_strength ORDER BY m.id",
+        params={"op": op_id},
+    ).result_set
+
+
+def _mitigates_payload(src_id: str, dst_id: str, strength: float):
+    """A commit payload whose only record is a MITIGATES re-assertion."""
+    from tortoise.commit_schema import (
+        CommitPayload,
+        ExtractorInfo,
+        Operator,
+        OperatorTarget,
+        Telemetry,
+        TelemetryExtractor,
+        TelemetryModel,
+    )
+
+    session = f"s-9962-{uuid.uuid4().hex[:8]}"
+    return CommitPayload(
+        session_id=session,
+        client_commit_id=f"ccid-{session}",
+        captured_at="2026-01-01T00:00:00Z",
+        extractor=ExtractorInfo(
+            version="value@1.0.0", mode="byok", calibration_version="v3"),
+        operators=[Operator(
+            src=src_id, dst=dst_id, op_type="MITIGATES",
+            target=OperatorTarget(src=src_id, dst=dst_id), strength=strength)],
+        telemetry=Telemetry(
+            extractor=TelemetryExtractor(version="value@1.0.0", mode="byok"),
+            model=TelemetryModel(provider="anthropic", id="claude-3-7"),
+        ),
+    )
+
+
+class TestTheRetractionIsDurableOnEveryRoute:
+    """#9962 — a withdrawn mitigation stays withdrawn wherever the write lands.
+
+    Each test reads an observable the pre-#9962 code path cannot produce, on a
+    route a direct SDK caller does not go through:
+
+    MUTATIONS THAT MUST RED:
+    * drop the terminal arm from ``_apply_ingest_mitigation``'s ``prior`` read
+      → the redelivery re-mints a live mitigation (2 rows, weight 0.5, silent);
+    * drop the liveness predicate from ``_load_commit_graph_state``'s MITIGATES
+      count → the record reconciles ``merge`` and the operator stays undamped;
+    * drop ``_live_only`` from ``why.py``'s optional mitigation leg → the
+      why-block names the retracted node (lowest ULID wins the tie-break);
+    * drop it from ``_state_mitigations`` → the state view reports a dampening
+      the engine no longer applies.
+    """
+
+    def test_ingest_redelivery_does_not_reinstate_a_retraction(self):
+        """A redelivery is NOT a re-assertion: no revive, no duplicate, no write.
+
+        Failing state (measured pre-fix): after ``retract_point``, a second
+        ``ingest`` of the same bundle minted a second, LIVE mitigation — the
+        operator was damped back to 0.5 by a machine retry, with
+        ``warnings == []`` because the change-warning compares against the
+        (identical) retracted row. That also falsified INGEST_CONTRACT §3.2
+        key 6's "never duplicated".
+        """
+        sdk = fresh_sdk()
+        first = sdk.ingest(_ingest_mitigation_bundle())
+        op_id = first["ids"]["connections"][0]
+        assert isinstance(op_id, str), first["ids"]["connections"]
+        # The dampener READ, not the factor-extraction path: ingest creates its
+        # points `draft`-or-live per promotion policy, and a draft claim strips
+        # the operator's factor entirely (`_affected_factors`, #780) — the
+        # dampener read is the observable that isolates this route.
+        proj = sdk._get_proj()
+        rows = _ingest_mitigation_rows(sdk, op_id)
+        assert len(rows) == 1, rows
+        mid = rows[0][0]
+        assert compute_operator_weight(proj, op_id) == pytest.approx(
+            mitigation_dampening_factor(0.50))
+
+        sdk.retract_point(mid)
+        assert sdk.get_point(mid)["status"] == "retracted"
+        assert compute_operator_weight(proj, op_id) == pytest.approx(1.0)
+
+        second = sdk.ingest(_ingest_mitigation_bundle())
+        assert second["ids"]["connections"] == [op_id], (
+            "the operator must dedup — the mitigation is applied to the SAME "
+            f"operator: {second['ids']['connections']}")
+
+        rows_after = _ingest_mitigation_rows(sdk, op_id)
+        assert len(rows_after) == 1, (
+            "a redelivery after a retraction must not duplicate the "
+            f"mitigation Point: {rows_after}")
+        assert rows_after[0][0] == mid
+        assert rows_after[0][1] == "retracted", (
+            f"a redelivery revived a withdrawn mitigation: {rows_after}")
+        after = compute_operator_weight(proj, op_id)
+        assert after == pytest.approx(1.0), (
+            "a crash-retry reinstated a retraction a human made: "
+            f"undamped=1.0, after redelivery={after}")
+        assert second["warnings"] == [], second["warnings"]
+
+    def test_hosted_commit_re_assertion_reaches_the_mitigation_writer(self):
+        """The hosted route must not swallow a re-assertion as ``merge``.
+
+        Failing state (measured pre-fix): the MITIGATES key was satisfied by
+        the RETRACTED node (``count(m)`` had no status predicate), so
+        ``reconcile_payload`` classified the record ``merge``, only
+        ``action == "new"`` records reach ``apply_payload_operators``, and the
+        caller got a 200 with zero writes and an undamped operator.
+        """
+        from tortoise.commit_ops import apply_payload_operators
+        from tortoise.commit_schema import reconcile_payload
+        from tortoise.hosted_api import _load_commit_graph_state
+
+        sdk = fresh_sdk()
+        src, claim, op_id = make_impl_chain(sdk)
+        base = resolved_weight(sdk, op_id, claim["id"])
+        mid = sdk.mitigate_operator(
+            op_id, "the lift was from a leaked test set", 0.50)["id"]
+        sdk.retract_point(mid)
+        assert resolved_weight(sdk, op_id, claim["id"]) == pytest.approx(base)
+
+        payload = _mitigates_payload(src["id"], claim["id"], 0.30)
+        state = _load_commit_graph_state(sdk, payload)
+        assert (src["id"], claim["id"], "MITIGATES") not in state.operators, (
+            "a WITHDRAWN mitigation satisfies the MITIGATES MERGE key: "
+            f"{state.operators}")
+
+        reconciled = reconcile_payload(payload, state)
+        new_ops = [r.operator for r in reconciled.operators if r.action == "new"]
+        assert [o.op_type for o in new_ops] == ["MITIGATES"], (
+            "the re-assertion never reached the writer: "
+            f"{[(r.operator.op_type, r.action) for r in reconciled.operators]}")
+
+        apply_payload_operators(
+            sdk._get_proj(), sdk, new_ops,
+            point_content_by_id=lambda _pid: "a clean re-run reproduced the lift")
+        damped = resolved_weight(sdk, op_id, claim["id"])
+        assert damped == pytest.approx(base * mitigation_dampening_factor(0.30)), (
+            "the hosted commit dropped the re-asserted mitigation: "
+            f"base={base}, after re-assertion={damped}")
+        assert sdk.get_point(mid)["status"] == "retracted", (
+            "the re-assertion revived the withdrawn node instead of minting")
+
+    def test_why_block_names_the_live_mitigation_not_the_withdrawn_one(self):
+        """The explanation must match the arithmetic.
+
+        Failing state (measured pre-fix): ``assemble_why_blocks`` reported
+        ``mitigation: "the lift was from a leaked test set"`` — the RETRACTED
+        node — while ``compute_operator_weight`` priced the live one, because
+        the optional ``mitigated_by`` leg had no status predicate and the
+        tie-break takes the LOWEST id (ULIDs ascend, so the oldest = the dead
+        one).
+        """
+        from tortoise.why import assemble_why_blocks
+
+        sdk = fresh_sdk()
+        _src, claim, op_id = make_impl_chain(sdk)
+        base = resolved_weight(sdk, op_id, claim["id"])
+        first = sdk.mitigate_operator(
+            op_id, "the lift was from a leaked test set", 0.50)["id"]
+        sdk.retract_point(first)
+        second = sdk.mitigate_operator(
+            op_id, "a clean re-run reproduced the lift", 0.30)["id"]
+        assert second != first
+        assert resolved_weight(sdk, op_id, claim["id"]) == pytest.approx(
+            base * mitigation_dampening_factor(0.30)), "the live mitigation must price"
+
+        blocks = assemble_why_blocks(sdk._get_proj(), [claim["id"]])
+        chain = blocks.get(claim["id"], {}).get("support_chain") or []
+        assert chain, "the support chain must be assembled for this assertion"
+        named = [s.get("mitigation") for s in chain]
+        assert named == ["a clean re-run reproduced the lift"], (
+            "the why layer names a mitigation the dampener does not price "
+            f"(retracted text first): {named}")
+
+    def test_state_view_does_not_present_a_withdrawn_mitigation(self):
+        """``recall_state``'s mitigation context is the DAMPENING set.
+
+        Failing state (measured pre-fix): ``_state_mitigations`` returned the
+        retracted mitigation at its live strength (no status predicate, no
+        ``status`` key), so the state view disclosed a dampening the engine no
+        longer applies — the mirror of the defect #9962 fixes in the weight.
+        The draft arm pins ``_live_only`` (not a terminal-only predicate):
+        ``search_engine`` publishes ``m.status``, so the two display surfaces
+        must agree on what counts as live.
+        """
+        sdk = fresh_sdk()
+        _src, claim, op_id = make_impl_chain(sdk)
+        mid = sdk.mitigate_operator(op_id, "leaked test set", 0.50)["id"]
+
+        def shown():
+            return [m["id"] for m in
+                    sdk._state_mitigations({claim["id"]: [{"id": op_id}]}).get(
+                        claim["id"], [])]
+
+        assert shown() == [mid], "a live mitigation must still be surfaced"
+
+        sdk.retract_point(mid)
+        assert shown() == [], "the state view surfaced a RETRACTED mitigation"
+
+        staged = sdk.mitigate_operator(op_id, "staged, not yet reviewed", 0.50)["id"]
+        assert shown() == [staged], "the re-assertion's live mitigation is hidden"
+        sdk._get_proj().g.query(
+            "MATCH (m:Point {id:$m}) SET m.status = 'draft'", params={"m": staged})
+        assert shown() == [], "the state view surfaced a DRAFT mitigation"

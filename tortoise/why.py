@@ -54,7 +54,10 @@ import os
 import re
 
 from .env_truthy import is_truthy  # #4097: the declared truthy contract
-from .live import is_terminal_status  # #2490: terminal rows override has_ep
+from .live import (
+    _live_only,  # #9962: the dampener's own predicate
+    is_terminal_status,  # #2490: terminal rows override has_ep
+)
 from .search_engine import (  # type: ignore[import-not-found]
     CONTESTED_VARIANCE_THRESHOLD,
     _exclude_status_clause,
@@ -218,7 +221,9 @@ def _assemble_supports(rows: list, by_id: dict[str, dict], *,
         # is not guaranteed, and an arbitrary pick made the surfaced operator —
         # and with it the surfaced mitigation TEXT — insertion-order dependent
         # (the same pair reported a different reason depending on which edge
-        # was written first).
+        # was written first). #9962: the mitigation leg is read live-only, so
+        # "more than once" here is several CURRENT mitigations; a withdrawn one
+        # is not a candidate and can no longer win the tie-break.
         if key < rank[(pid, sup_id)]:
             pending[pid][sup_id] = entry
             rank[(pid, sup_id)] = key
@@ -501,7 +506,18 @@ _SUPPORT_OP_CYPHER = (
     # it, and a second query per support would be a new read on the hot path.
     # The mitigation is OPTIONAL (an operator need not be mitigated) and uses
     # the same ``mitigated_by`` predicate as _TRADEOFFS_CYPHER.
+    #
+    # ⛔ #9962 — the optional leg reads only mitigations that PRICE the
+    # operator (``live._live_only``, the predicate ``weights.py``
+    # ``compute_operator_weight`` uses). Before it, the tie-break below (lowest
+    # mitigation id) picked the OLDEST mitigation, and ULIDs ascend — so after
+    # mitigate → retract → re-mitigate (the #9962 re-assertion, which mints a
+    # NEW Point and leaves the retracted one in place) the why-block named the
+    # WITHDRAWN mitigation while the number was damped by the live one. A
+    # predicate HERE, rather than a status field in the emitted entry, keeps
+    # the surfaced text and the arithmetic the same object.
     "OPTIONAL MATCH (op)-[:mitigated_by]->(mit:Point) "
+    f"WHERE {_live_only('mit.status')} "
     "RETURN n.id, sup.id, sup.content, "
     "  coalesce(sup.posterior_alpha, sup.ep_alpha, 1.0), "
     "  coalesce(sup.posterior_beta, sup.ep_beta, 1.0), "

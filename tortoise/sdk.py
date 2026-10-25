@@ -17240,7 +17240,9 @@ class TortoiseSDK:
         (reason + strength), does not create a duplicate. A mitigation the graph
         records as terminal (retracted/superseded/outdated/archived) is never
         revived in place — a re-assertion creates a NEW mitigation Point, since
-        retraction is terminal (#432/#2422).
+        retraction is terminal (#432/#2422). A REDELIVERY through ``ingest()``
+        is not a re-assertion, so it writes nothing in that state (see
+        ``_apply_ingest_mitigation``).
 
         The created mitigation Point is a CURRENT point (`status='live'`,
         #5089/#9962) — the `weights.py` dampener read prices `m.status`, so a
@@ -21207,7 +21209,10 @@ class TortoiseSDK:
                 # target id is only known here) and on EVERY submission, so a
                 # re-submission re-applies too — `mitigate_operator` is
                 # idempotent: it UPDATES the existing mitigation in place,
-                # never duplicates (INGEST_CONTRACT §3.2 key 6). The helper
+                # never duplicates (INGEST_CONTRACT §3.2 key 6). #9962: a
+                # mitigation the graph records as WITHDRAWN is neither
+                # revived nor re-minted here — a redelivery is not a
+                # re-assertion (see `_apply_ingest_mitigation`). The helper
                 # stamps the mitigation Point with this bundle's batch_id.
                 mitigation = conn.get("mitigation")
                 if isinstance(mitigation, dict):
@@ -21946,6 +21951,19 @@ class TortoiseSDK:
         update actually changed something. An unchanged re-submission is
         silent, as are incident retries (the crash-retry contract, §7).
 
+        ⛔ #9962 — A REDELIVERY IS NOT A RE-ASSERTION. ``mitigate_operator``
+        deliberately mints a NEW mitigation Point when the one it finds is
+        terminal (retraction is terminal, the node is never revived). That is
+        right for a caller and WRONG for a crash-retry/redelivery, which is
+        exactly what this route is: the bundle would silently reinstate a
+        dampening a human withdrew, and ship a duplicated mitigation Point
+        (§3.2 key 6's *"never duplicated"*) with no warning, because the
+        change-warning compares against identical reason/strength. So when
+        every mitigation the operator carries is terminal, NOTHING is written
+        here — the withdrawn Point already records this bundle's mitigation,
+        so it is returned unchanged (no re-link, no batch stamp: this bundle
+        created nothing).
+
         The mitigation Point is stamped with the bundle's ``batch_id`` (§16:
         "every **new** Point the bundle creates — plain points, operator
         Points, mitigation Points"), carrying the two record fields
@@ -21960,15 +21978,35 @@ class TortoiseSDK:
         # Read the mitigation this operator already carries BEFORE the write,
         # so the in-place update is observable (§3.2 key 6). One query, only on
         # a connection that declared a mitigation.
+        #
+        # #9962: the read also reports whether each attached mitigation is
+        # CURRENT, using `_terminal_excluded` — the SAME predicate
+        # `mitigate_operator`'s idempotency lookup applies, so "no current
+        # row" means "the writer would mint a new Point". Two behaviours hang
+        # off it:
+        #   * a redelivery must NOT mint. If every attached mitigation is
+        #     terminal, this route writes nothing and returns the withdrawn
+        #     Point: reinstating a human's retraction on a crash-retry is
+        #     silent (identical reason/strength ⇒ no
+        #     `mitigation_strength_change`) and duplicates the Point (§3.2
+        #     key 6).
+        #   * the divergence comparison below reads the CURRENT row — the
+        #     node the write actually updated — never a withdrawn sibling.
         prior = self._get_proj().g.query(
             "MATCH (op:Point {id:$oid})-[:mitigated_by]->(m:Point) "
-            "RETURN m.id, m.content, m.mitigation_strength",
+            "RETURN m.id, m.content, m.mitigation_strength, "
+            f"{_terminal_excluded('m.status')} AS is_current",
             params={"oid": operator_id},
         ).result_set
+        _current = [row for row in prior if bool(row[3])]
+        if prior and not _current:
+            # Withdrawn by a human: terminal stays terminal on this route.
+            return min(row[0] for row in prior)
         mid = self.mitigate_operator(
             operator_id, reason=reason, strength=strength)["id"]
-        if prior:
-            _old_id, _old_content, _old_strength = prior[0]
+        _prior_row = (_current or prior or [None])[0]
+        if _prior_row is not None:
+            _old_id, _old_content, _old_strength = _prior_row[:3]
             _old_reason = (_old_content or "").removeprefix("[MITIGATION] ")
             try:
                 _same_strength = (_old_strength is not None
@@ -32054,11 +32092,21 @@ class TortoiseSDK:
 
     def _state_mitigations(self, arguments: dict[str, list[dict]],
                            nands: dict[str, list[dict]] | None = None) -> dict[str, list[dict]]:
-        """Mitigation points attached to surfaced operators (top points).
+        """Mitigation points DAMPENING the surfaced operators (top points).
 
         Includes operators surfaced as arguments AND as high-contention NANDs
         — a mitigation on the very NAND that contradicts a surfaced claim is
         exactly the epistemic context the state view should show.
+
+        ⛔ #9962 — the read honours the dampener's own predicate
+        (``live._live_only``: terminal AND draft excluded, absent status =
+        live). Before it did, this surface kept presenting a WITHDRAWN
+        mitigation at its live strength, so an agent consuming the state view
+        inferred a dampening the engine no longer applies — the mirror of the
+        defect #9962 fixes in ``weights.py`` (there a confidence nobody can
+        justify, here a dampening that is not applied). ``search_engine``
+        publishes ``m.status`` on its legs, so an unfiltered read here also
+        left the two display surfaces disagreeing.
         """
         op_ids = sorted({op["id"] for ops in arguments.values() for op in ops}
                         | {op["id"] for ops in (nands or {}).values() for op in ops})
@@ -32066,7 +32114,9 @@ class TortoiseSDK:
             return {}
         rows = self._get_proj().g.query(
             "MATCH (op:Point {is_operator:true})-[r:mitigated_by]->(m:Point) "
-            "WHERE op.id IN $ids RETURN op.id, m.id, m.content, m.mitigation_strength",
+            "WHERE op.id IN $ids "
+            f"AND {_live_only('m.status')} "
+            "RETURN op.id, m.id, m.content, m.mitigation_strength",
             params={"ids": op_ids},
         ).result_set
         out: dict[str, list[dict]] = {}
