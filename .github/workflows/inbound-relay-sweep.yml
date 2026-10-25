@@ -1,0 +1,118 @@
+# inbound-relay-sweep — the converging half of the intake relay (#2409/#2441).
+#
+# WHY THIS WORKFLOW EXISTS (measured 2026-10-24)
+# ----------------------------------------------
+# `.github/workflows/inbound-relay.yml` is the source stop for external
+# contributions: label `queued-for-triage`, comment, close, relay to intake.
+# Its only external trigger is `opened`, so every item gets exactly ONE chance,
+# and that chance does not survive this repo's settings:
+#
+#   * `approval_policy = all_external_contributors` (verified via
+#     GET /repos/…/actions/permissions/fork-pr-contributor-approval): a run
+#     started by an external actor is held until a maintainer approves it.
+#   * Measured over that workflow's 800 most recent runs
+#     (2026-10-19T05:08Z → 2026-10-24T23:53Z): 792 `skipped` (owner traffic,
+#     correctly excluded before a runner exists), 8 `startup_failure` — every
+#     one an external actor's event — and 0 EXECUTIONS. 8 of 8 external
+#     triggers died before a single step ran.
+#   * Nothing re-fires it: `tools/ci_check_repair.py` repairs REQUIRED checks
+#     only (the relay is not one), and its universal re-trigger is close+reopen,
+#     which fires `reopened` — a type the relay does not listen for.
+#
+# Measured cost of the gap: PR #9883, whose entire diff was one README comment
+# line (`README.md +3 −0`) claiming a Postgres identity migration, stayed open
+# 13h41m, ran the FULL CI matrix (6 reds, all inherited from a base two commits
+# behind main) and consumed a lane cycle. The producer is external
+# (`bot@hermes.agent` pushed through an outside contributor's account), so the
+# fix is not a producer patch and not a diff-shape heuristic — it is the control
+# this repo already promises and never ran.
+#
+# WHY A SCHEDULE
+# --------------
+# A scheduled run is started by the repository's OWN credential, not an external
+# actor's, so it is not subject to the approval policy and does not depend on
+# any event surviving. `tools/inbound_relay_sweep.py` applies the SAME policy as
+# the event path; `tests/test_inbound_relay_sweep.py` evaluates the relay
+# workflow's real job-level `if:` and asserts both paths decide identically, so
+# a new exemption in one cannot silently be missing from the other.
+#
+# SAFETY
+# ------
+# * No PR code is ever checked out: `actions/checkout` takes the DEFAULT BRANCH
+#   (this is a schedule/dispatch run, so there is no PR context at all), and the
+#   relayed metadata is read over REST.
+# * `relay-then-close`: a failed intake POST leaves the item OPEN, unlabelled and
+#   uncommented for the next run, and reds this workflow — a dead intake is an
+#   alarm, never a silent "handled".
+# * An incomplete listing takes NO action (`exit 2`), `--max` bounds a run, and
+#   `--since-hours` bounds the window so a first run cannot reach into history.
+# * It closes and relays. It never merges, and it holds no merge permission.
+
+name: "Inbound relay sweep — the converging half"
+
+on:
+  schedule:
+    # Every 15 minutes. The item this exists for (#9883) cost its full CI
+    # matrix only because a repair pass re-ran the matrix ~8 h after it opened;
+    # a 15-minute cadence stays well inside that window.
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      since_hours:
+        description: "Only consider items created within this many hours"
+        required: false
+        default: "24"
+      max_actions:
+        description: "Hard cap on items acted on in this run"
+        required: false
+        default: "20"
+      dry_run:
+        description: "Print the plan and perform nothing (true/false)"
+        required: false
+        default: "false"
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+# One sweep at a time, and never cancel one in flight: a cancel between the
+# intake POST and the close would leave a relayed-but-open item that the label
+# does not mark (a half-applied action no re-run repairs).
+concurrency:
+  group: inbound-relay-sweep
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the default branch (never a PR head)
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The queue-batch exclusion is read from `.mergify.yml`. The tool REFUSES
+      # to act without it (an unreadable config must never be read as "no
+      # prefix matches", which would close a queue batch — #5185).
+      - name: Install the one dependency (the queue config reader)
+        run: python -m pip install --disable-pip-version-check pyyaml
+
+      - name: "Sweep — relay, label, comment, close"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          INBOUND_URL: ${{ secrets.INBOUND_URL }}
+          INBOUND_SECRET_GITHUB: ${{ secrets.INBOUND_SECRET_GITHUB }}
+        run: |
+          python tools/inbound_relay_sweep.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --since-hours "${{ inputs.since_hours || 24 }}" \
+            --max "${{ inputs.max_actions || 20 }}" \
+            ${{ inputs.dry_run == 'true' && '--dry-run' || '' }}

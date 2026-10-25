@@ -111,6 +111,46 @@ relatedIssues: "#2409"
 - Full strangers abuse posture — later, when non-beta reporters appear.
 - Approval-UI/digest app — later, when GitHub-native + Telegram shows founder load above target (R9).
 
+## Status — the relay's converging path (measured 2026-10-25)
+
+Build 3 (the GitHub relay) shipped its workflow and **never executed**. Measured
+over `.github/workflows/inbound-relay.yml`'s 800 most recent runs
+(2026-10-19T05:08Z → 2026-10-24T23:53Z): 792 `skipped` (owner-authored traffic,
+correctly excluded before a runner exists), 8 `startup_failure` — every one an
+external actor's event — and **0 executions**. The repo's
+`fork-pr-contributor-approval` policy is `all_external_contributors`, so a run
+started by an external actor is held until a maintainer approves it; the relay
+is not a required check, so nothing ever approves or re-fires it (the universal
+re-trigger, close+reopen, fires `reopened` — a type the relay does not listen
+for).
+
+The consequence is the R5 guarantee being absent while it reads as present:
+external issues and pull requests are never labelled, commented, closed or
+relayed. Measured on two live items: PR #9883 — a phantom whose entire diff was
+one README comment line claiming a Postgres identity migration — stayed open
+13 h 41 m, ran the full CI matrix (6 reds, all inherited from a base two commits
+behind `main`) and consumed a lane cycle; and #9915/#9913 (a genuine external
+contribution) sat unrelayed while its content had to be re-landed base-side as
+#9929.
+
+Two changes close the gap, and neither changes the policy above:
+
+- **`tools/inbound_relay_sweep.py`** + `.github/workflows/inbound-relay-sweep.yml`
+  — a 15-minute schedule that applies the SAME policy (label, comment, close,
+  relay) to items the event path missed. A scheduled run is started by the
+  repository's own credential, so it is not subject to the approval policy and
+  does not depend on any event surviving. It is idempotent on the label,
+  window-bounded, capped, fails closed on an incomplete listing, and relays
+  BEFORE it closes (a failed intake POST leaves the item open for the next run
+  and reds the workflow).
+- **belt 3 in the event path's guard (#9613)** — a bot-authored ISSUE is never
+  relayed. The issue branch previously spared only the owner's login, so the
+  relay would have closed this repo's own monitor alarm threads
+  (`deploy-hosted: deploy-api failed at 'drift'`, `github-actions[bot]`, open)
+  the moment it ran. That is the opposite asymmetry from a triage miss: an
+  external bot's item left open costs one step, while our own monitor issue
+  closed is a gap in the alarm history.
+
 ## Review gates
 
 - Research: fresh-context verifier clean (round 1: 3 P3s fixed; round 2 appended after founder's multi-source/PR/email requirements; round 3 grounded Telegram + email mechanics).

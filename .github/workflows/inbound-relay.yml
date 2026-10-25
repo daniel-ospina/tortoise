@@ -97,6 +97,18 @@ jobs:
     #     branch is not closed by intake; that is a recoverable triage miss,
     #     while closing a batch dequeues the whole queue — the asymmetry decides.
     #
+    #   belt 3 (#9613, measured 2026-10-25): a BOT-AUTHORED ISSUE is never
+    #     relayed. The issue branch had NO bot exclusion — its only spare was the
+    #     owner's login — so the relay would have closed this repo's OWN alarm
+    #     threads the moment it ran: `deploy-hosted: deploy-api failed at 'drift'`
+    #     (#9613, open, `bug`, authored by `github-actions[bot]`) and every
+    #     sibling the monitor opens. That is silent destruction of a record a
+    #     human reads, and it is the opposite asymmetry from a triage miss: an
+    #     external bot's item left open costs one step, while our own monitor
+    #     issue closed is a gap in the alarm history. `tools/inbound_relay_sweep.py`
+    #     spares bots on BOTH kinds for the same reason, so the two paths agree
+    #     here and the parity test in `tests/test_inbound_relay_sweep.py` says so.
+    #
     # FAIL CLOSED. Every EXEMPTION clause lives inside the `!( … )`, so an event
     # whose payload is missing or unreadable (no `pull_request`, a null
     # `head.repo`, an absent `user.type`, no `base.ref`, no `default_branch`)
@@ -119,7 +131,8 @@ jobs:
          github.event.pull_request.head.repo.full_name == github.repository &&
          github.event.pull_request.base.ref != '' &&
          github.event.pull_request.base.ref == github.event.repository.default_branch)
-      ))
+      )) &&
+      !(github.event_name == 'issues' && github.event.issue.user.type == 'Bot')
     steps:
       - name: "Comment and close — issue"
         if: github.event_name == 'issues'
