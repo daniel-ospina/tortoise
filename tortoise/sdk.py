@@ -16933,16 +16933,55 @@ class TortoiseSDK:
                 # hardcoded sentence can only describe one of the two
                 # directions, and read as the wrong claim for the other —
                 # `test_mismatch_still_writes` exercises BOTH (NAND + `supports`).
-                if op_type == "IMPL":
+                #
+                # It is ALSO source-aware (2026-10-25 review, P3). The example
+                # names a LAYER-2 MEANING, so it may only appear when a meaning
+                # the caller actually declared produced the contradiction. A pack
+                # relation contradicts on its own with no `semantics` at all:
+                # `investment-portfolio-manager` declares `marks` as
+                # `mechanism: IMPL` over `semantics: related`, and `related` is
+                # one of §8's four mechanism-free meanings — so a
+                # `create_operator("NAND", a, [b], label="marks")` is told its
+                # wire carried "an IMPL meaning (e.g. 'supports')", i.e. it is
+                # pointed at an argument its call does not contain. A warning an
+                # agent ACTS on must not describe an input that was never given.
+                #
+                # Provenance is read off `declared_mechanisms` itself, not off
+                # the `source` prose: the meaning legs are exactly the ones keyed
+                # on a MEANING, and asking with the word as `semantics` puts the
+                # pack leg structurally out of reach (that walk only reads packs
+                # when a `label` is given), so each probe returns the Layer-2
+                # half alone. That covers the pre-#7852 spelling too, where the
+                # meaning arrived as `label` — a caller who DID declare the
+                # meaning keeps its worked example.
+                _meaning_mechanisms = {
+                    mechanism
+                    for meaning in (semantics, label)
+                    for mechanism, _ in declared_mechanisms(semantics=meaning)
+                }
+                _from_meaning = any(
+                    mechanism in _meaning_mechanisms
+                    for mechanism, _ in contradictions)
+                if op_type == "IMPL" and _from_meaning:
                     _inversion = (
                         "An IMPL wire carrying a NAND meaning (e.g. 'refutes') "
                         "RAISES the target's confidence where the meaning says "
                         "it must LOWER it")
-                else:
+                elif op_type == "IMPL":
+                    _inversion = (
+                        "An IMPL wire fed a relation declared NAND RAISES the "
+                        "target's confidence where the declaration says it must "
+                        "LOWER it")
+                elif _from_meaning:
                     _inversion = (
                         "A NAND wire carrying an IMPL meaning (e.g. 'supports') "
                         "LOWERS the target's confidence where the meaning says "
                         "it must RAISE it")
+                else:
+                    _inversion = (
+                        "A NAND wire fed a relation declared IMPL LOWERS the "
+                        "target's confidence where the declaration says it must "
+                        "RAISE it")
                 warnings.append({
                     "code": "mechanism_mismatch",
                     "message": (

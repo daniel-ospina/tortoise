@@ -164,6 +164,55 @@ def test_pack_declaration_outranks_s8_neutrality(sdk):
     assert not _mechanism_warnings(sdk.create_operator("IMPL", a, [b], label="marks"))
 
 
+def test_a_pack_only_contradiction_names_no_meaning_the_caller_never_gave(sdk):
+    """The worked example must describe the DECLARATION actually in play, not a
+    meaning the caller never passed (2026-10-25 review, P3).
+
+    Both rows below contradict from the PACK leg alone — the call carries no
+    `semantics` at all — and the declaration on the right of each is stated by a
+    shipped manifest: `marks` (investment-portfolio-manager) is `mechanism: IMPL`
+    over `semantics: related`, and `competesWith` (product-strategy) is
+    `mechanism: NAND`; `related` is one of ONTOLOGY §8's mechanism-free meanings.
+    The pre-fix text was picked from `op_type` only, so it told these callers
+    their wire was "carrying an IMPL meaning (e.g. 'supports')" — an argument
+    that does not exist in their call, on a verb whose meaning declares no
+    mechanism at all. The CLAIM must survive the rewording: the direction is
+    still the wire's, so a NAND wire LOWERS where the declaration demands RAISE.
+
+    Non-vacuous on the pre-fix code: it hardcoded the meaning sentence for every
+    write in a direction, so the `"carrying an IMPL meaning"` / `'supports'`
+    assertions below fail there, and its IMPL sentence contains `'refutes'`."""
+    a, b = _two_points(sdk)
+    # direction NAND: the pack declares IMPL (`marks`), no `semantics` supplied.
+    nand_case = _mechanism_warnings(
+        sdk.create_operator("NAND", a, [b], label="marks"))[0]["message"]
+    assert "NAND wire" in nand_case, nand_case
+    assert "LOWERS the target's confidence" in nand_case, nand_case
+    assert "RAISES the target's confidence" not in nand_case, nand_case
+    assert "fed a relation declared IMPL" in nand_case, nand_case
+    assert "the pack relation 'marks'" in nand_case, nand_case
+    assert "carrying an IMPL meaning" not in nand_case, nand_case
+    assert "supports" not in nand_case, nand_case
+
+    # direction IMPL: the pack declares NAND (`competesWith`), again no meaning.
+    impl_case = _mechanism_warnings(
+        sdk.create_operator("IMPL", a, [b], label="competesWith"))[0]["message"]
+    assert "IMPL wire" in impl_case, impl_case
+    assert "RAISES the target's confidence" in impl_case, impl_case
+    assert "LOWERS the target's confidence" not in impl_case, impl_case
+    assert "fed a relation declared NAND" in impl_case, impl_case
+    assert "carrying a NAND meaning" not in impl_case, impl_case
+    assert "refutes" not in impl_case, impl_case
+
+    # ... and the meaning path KEEPS its worked example, so the two sources do
+    # not collapse into one wording (the pre-#7852 `label` spelling included).
+    for kwargs in ({"semantics": "supports"}, {"label": "supports"}):
+        by_meaning = _mechanism_warnings(
+            sdk.create_operator("NAND", a, [b], **kwargs))[0]["message"]
+        assert "carrying an IMPL meaning (e.g. 'supports')" in by_meaning, (
+            kwargs, by_meaning)
+
+
 # ── "NEVER raises": the fail-open path, exercised ────────────────────────
 
 class _StubRegistry:
