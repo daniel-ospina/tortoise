@@ -101,6 +101,7 @@ class FakeClient:
         fail_comment: bool = False,
         fail_close: bool = False,
         fail_label: bool = False,
+        relayed: bool = False,
     ) -> None:
         self._issues = issues or []
         self._pulls = pulls or []
@@ -110,6 +111,8 @@ class FakeClient:
         self.fail_comment = fail_comment
         self.fail_close = fail_close
         self.fail_label = fail_label
+        #: Model an item whose relay already commented (a retry, not a new item).
+        self.relayed = relayed
         #: Set True to model a window denser than the page budget.
         self.window_truncated = False
         self.calls: list[tuple[str, Any]] = []
@@ -136,6 +139,10 @@ class FakeClient:
                 return dict(pr)
         raise RuntimeError(f"no such PR {number}")
 
+    def already_relayed(self, number: int) -> bool:
+        self.calls.append(("check", number))
+        return self.relayed
+
     # writes
     def post_intake(self, payload: dict[str, Any]) -> None:
         self.calls.append(("intake", payload["source_item_id"]))
@@ -158,8 +165,8 @@ class FakeClient:
             raise RuntimeError("gh api PATCH failed (rc=1): 502")
 
     def mutations(self) -> list[tuple[str, Any]]:
-        """Mutations only — a PR detail fetch is a read."""
-        return [call for call in self.calls if call[0] != "detail"]
+        """Mutations only — a PR detail fetch or a marker check is a read."""
+        return [call for call in self.calls if call[0] not in ("detail", "check")]
 
 
 def issue(
@@ -568,6 +575,68 @@ def test_a_spared_queue_batch_does_not_exhaust_the_action_cap(sweep: Any) -> Non
     assert [n for name, n in client.calls if name == "detail"] == [900]
 
 
+def test_a_retry_resumes_instead_of_re_posting(sweep: Any) -> None:
+    """A failed CLOSE must not make the next run comment a second time.
+
+    The sequence is relay → comment → close → label, so an item whose close
+    failed is selected again 15 minutes later. Without a resume it would
+    re-relay AND re-post the same boilerplate comment on an external
+    contributor's PR every 15 minutes for as long as the close keeps failing.
+    The relay's own footer is the marker that says "we already spoke".
+    """
+    client = FakeClient(pulls=[pull(9883, author="Maiiiry")], relayed=True, fail_close=True)
+    report = run(sweep, client)
+
+    assert [n for _, n in report.failed] == [9883]
+    assert client.mutations() == [("close", 9883)], (
+        "a retry must resume at the failed step — no second intake POST and no second comment"
+    )
+
+    # …and once the close stops failing, the retry completes with the marker
+    # applied and still only one comment on the item.
+    client = FakeClient(pulls=[pull(9883, author="Maiiiry")], relayed=True)
+    report = run(sweep, client)
+    assert report.relayed == [("pr", 9883)]
+    assert client.mutations() == [("close", 9883), ("label", 9883)]
+
+
+def test_the_resume_marker_is_the_comment_the_relay_actually_posts(sweep: Any) -> None:
+    """A literal that drifts would silently turn every retry back into a re-post."""
+    assert sweep.RELAY_MARKER in "\n".join(sweep._COMMENT_PULL)
+    assert sweep.RELAY_MARKER in "\n".join(sweep._COMMENT_ISSUE)
+
+
+def test_an_open_labelled_item_is_reported_and_rules_nothing(sweep: Any) -> None:
+    """The one state nothing repairs must be NAMED, not silently skipped.
+
+    `_prefilter` drops an open+labelled item (the label is the idempotence
+    marker), so before this it appeared in no list, no count and no note — while
+    the event path applies the label FIRST and can leave exactly this state (a
+    502 on the comment/close). It is counted and reported; never auto-closed,
+    because a human may have labelled it deliberately to keep it open.
+    """
+    client = FakeClient(
+        issues=[issue(9913, author="fr3iheit", labels=[LABEL])],
+        pulls=[pull(9884, author="Maiiiry", labels=[LABEL])],
+    )
+    report = run(sweep, client)
+
+    assert report.stranded == 2
+    assert report.relayed == []
+    assert client.mutations() == [], "a stranded item is never auto-closed"
+    assert any("HALF-APPLIED" in note for note in report.notes), report.notes
+    assert report.exit_code == 0, "a note, not a red run every 15 minutes"
+
+
+def test_a_labelled_owner_item_is_not_called_stranded(sweep: Any) -> None:
+    """Owner traffic is outside the relay entirely — its labels are not ours."""
+    client = FakeClient(issues=[issue(1, author=OWNER, labels=[LABEL])])
+    report = run(sweep, client)
+
+    assert report.stranded == 0
+    assert not any("HALF-APPLIED" in note for note in report.notes)
+
+
 def test_a_failed_label_says_it_will_not_be_retried(sweep: Any) -> None:
     """The label step is last: its failure is the one that is NOT self-healing.
 
@@ -862,9 +931,23 @@ def test_a_manual_dispatch_defaults_to_inert(sweep: Any) -> None:
     assert inputs["dry_run"]["default"] == "true", (
         "a silent live default turns 'show me the plan' into real closes"
     )
+
     # The schedule path passes no input, so `inputs.dry_run` is empty there —
-    # empty is not 'true', so the scheduled run still acts.
-    assert "inputs.dry_run == 'true'" in SWEEP_WORKFLOW.read_text()
+    # empty is not 'true', so the scheduled run still acts. That property is the
+    # WHOLE control's liveness, so assert the exact expression over the step's
+    # own `run:` script rather than a substring a polarity flip would satisfy
+    # (`!(inputs.dry_run == 'true') && '--dry-run'` makes every scheduled run
+    # dry — the worst regression this workflow can have).
+    script = next(
+        step["run"]
+        for step in doc["jobs"]["sweep"]["steps"]
+        if "inbound_relay_sweep.py" in str(step.get("run") or "")
+    )
+    assert script.count("--dry-run") == 1, script
+    assert re.search(r"\$\{\{\s*inputs\.dry_run == 'true' && '--dry-run' \|\| ''\s*\}\}", script), (
+        "the flag must be guarded by `inputs.dry_run == 'true'` with an empty "
+        "fallback: any other shape makes the SCHEDULED run dry (or unconditional)"
+    )
 
 
 def test_the_workflow_pins_its_only_dependency_to_the_lockfile(sweep: Any) -> None:
