@@ -508,10 +508,6 @@ def _call_endpoint(monkeypatch, point_id="p-1", *, cache="unusable"):
                     return _R()
             return type("P", (), {"g": _G()})()
 
-    # #7970: the route constructs its cache handle LAZILY, through the sync
-    # `_data_sdk`, so `record` mode never builds one. Patching the SDK FACTORY
-    # (not the async offload wrapper it used before) is what lets this spy prove
-    # that: a `record`-mode call that reached the cache at all would raise here.
     async def _sdk(_org):
         built.append(_org)
         return _SpySDK()
@@ -825,3 +821,101 @@ def test_off_mode_leaks_no_attribution_and_keeps_a_stored_name(monkeypatch):
         "off mode overwrote a stored property with an attribution field")
     assert "fallbackReason" not in body
     assert built != [], "off mode did not consult the cache"
+
+
+def test_prefer_answers_from_the_record_when_the_cache_cannot_be_opened(monkeypatch):
+    """`prefer` must be ABLE to answer when the cache is unavailable.
+
+    Measured defect this pins: the handle was constructed eagerly for `prefer`, so
+    `_data_sdk_offloaded` raised **403 GRAPH_NOT_FOUND** before the record was ever
+    asked — making the lenient mode strictly LESS able to answer than `record`,
+    which is the opposite of its purpose. The construction failure is captured and
+    re-raised only when the cache is actually needed.
+    """
+    from fastapi import HTTPException
+
+    import tortoise.hosted_api as api
+
+    monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_PREFER)
+    monkeypatch.setattr(rs, "open_record", _opener(_FakeConn(rows=[_row()])))
+    monkeypatch.setattr(api, "_resolve_record_tenant", lambda _org: TENANT)
+    monkeypatch.setattr(api, "_require_scope", lambda *_a, **_k: None)
+
+    async def _graph_down(_org):
+        raise HTTPException(status_code=403,
+                            detail={"error_code": "GRAPH_NOT_FOUND"})
+
+    monkeypatch.setattr(api, "_data_sdk_offloaded", _graph_down)
+    body = asyncio.run(api.get_point("p-1", org={"id": "org_t",
+                                                 "org_id": "org_t"}))
+    assert body["servedFrom"] == "record"
+    assert body["content"] == "c"
+
+
+def test_prefer_counts_an_unresolved_tenant_under_its_own_reason(monkeypatch):
+    """A permanent condition gets its own fallback reason, not the outage one.
+
+    `record_tenant_for` returns `None` for every session/JWT read and every
+    non-Supabase deployment, so counting it `record-unavailable` would fire the
+    OUTAGE counter permanently on a condition the record never caused.
+    """
+    from fastapi import HTTPException
+
+    import tortoise.hosted_api as api
+
+    rs.reset_fallback_counts()
+    monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_PREFER)
+    monkeypatch.setattr(api, "_resolve_record_tenant", lambda _org: None)
+    monkeypatch.setattr(api, "_require_scope", lambda *_a, **_k: None)
+
+    class _EmptySDK:
+        def _get_proj(self):
+            class _G:
+                def query(self, *_a, **_k):
+                    class _R:
+                        result_set: ClassVar[list] = []
+                    return _R()
+            return type("P", (), {"g": _G()})()
+
+    async def _sdk(_org):
+        return _EmptySDK()
+
+    monkeypatch.setattr(api, "_data_sdk_offloaded", _sdk)
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(api.get_point("p-1", org={"id": "org_t",
+                                              "org_id": "org_t"}))
+    assert caught.value.status_code == 404
+    assert (caught.value.detail["fallbackReason"]
+            == rs.FALLBACK_RECORD_TENANT_UNRESOLVED)
+    assert caught.value.detail["message"] == "Point not found"
+    assert rs.fallback_counts() == {rs.FALLBACK_RECORD_TENANT_UNRESOLVED: 1}
+
+
+def test_the_endpoint_answers_500_for_a_tenancy_misconfiguration(monkeypatch):
+    """The refusal's INSTRUCTION must reach the client, as a fault (500).
+
+    `RecordProjectionError` is not a `RecordServeError`, so before this arm it
+    escaped `get_point` as a raw traceback and the operator instruction ("arm
+    TORTOISE_RECORD_DSN with tortoise_record_app") never arrived. 500 — never
+    503 (unreadable) and never 404 (absence).
+    """
+    from fastapi import HTTPException
+
+    import tortoise.hosted_api as api
+    from tortoise.record_projection import RecordProjectionError
+
+    monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_RECORD)
+    monkeypatch.setattr(api, "_resolve_record_tenant", lambda _org: TENANT)
+    monkeypatch.setattr(api, "_require_scope", lambda *_a, **_k: None)
+
+    def _boom(**_kw):
+        raise RecordProjectionError(
+            "the connecting role BYPASSES RLS — arm TORTOISE_RECORD_DSN with "
+            "tortoise_record_app")
+
+    monkeypatch.setattr(rs, "serve_point", _boom)
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(api.get_point("p-1", org={"id": "org_t",
+                                              "org_id": "org_t"}))
+    assert caught.value.status_code == 500
+    assert "tortoise_record_app" in str(caught.value.detail)

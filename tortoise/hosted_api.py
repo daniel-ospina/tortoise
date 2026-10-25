@@ -9628,10 +9628,31 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
     # laziness belongs to `record` alone.
     mode = record_serve.serve_mode()
     sdk = None
-    if mode != record_serve.MODE_RECORD:
+    # ⚠️ A `prefer` read must be able to answer from the RECORD even when the
+    # CACHE cannot be opened: the lenient mode exists to survive an unavailable
+    # store, and an eager 403 GRAPH_NOT_FOUND here would make it strictly LESS
+    # able to answer than `record` — every prefer read would pay a graph-pool
+    # slot and, with the graph stopped, would never consult the record at all.
+    # So a `prefer` construction failure is CAPTURED and re-raised only when the
+    # cache is actually needed (the record missed or was unavailable). `off`
+    # keeps propagating it, exactly as before.
+    cache_open_error: BaseException | None = None
+    if mode == record_serve.MODE_PREFER:
+        try:
+            sdk = await _data_sdk_offloaded(org)
+        except Exception as e:  # the seam's 403/503, or the driver's own
+            cache_open_error = e
+    elif mode == record_serve.MODE_OFF:
         sdk = await _data_sdk_offloaded(org)
 
     def _cache_props() -> dict | None:
+        if sdk is None:
+            # The handle could not be built (see `cache_open_error`): this is
+            # only reachable when the CACHE is genuinely needed, so the caller
+            # gets the original error — the 403/503 the seam raised — rather
+            # than a plausible empty answer.
+            raise cache_open_error or RuntimeError(
+                "the cache handle is unavailable and the cache is required")
         # #3718 residual 2: sync FalkorDB read off the loop (see list_points).
         # Called from a worker thread (both call sites are off-loop), so the SDK
         # built on the loop is queried off it — the pre-#7970 shape.
@@ -9659,13 +9680,19 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
                     detail=("this credential resolves no record tenant, so the "
                             "read cannot be served from the record — absence "
                             "is NOT established"))
-            record_serve.note_fallback(
-                record_serve.FALLBACK_RECORD_UNAVAILABLE)
+            # A credential that resolves no record tenant is a PERMANENT
+            # condition — `record_tenant_for` returns None for every session/JWT
+            # read and every non-Supabase deployment — so it gets its OWN reason.
+            # Counting it `record-unavailable` would make that counter, which
+            # exists to alert on outages, fire permanently on a condition the
+            # record never caused.
+            reason = record_serve.FALLBACK_RECORD_TENANT_UNRESOLVED
+            record_serve.note_fallback(reason)
             served = record_serve.ServedAnswer(
                 read=record_serve.READ_POINT_BY_ID,
                 coordinate=f"Point:{point_id}", served_from="cache",
                 props=await asyncio.to_thread(_cache_props),
-                fallback_reason=record_serve.FALLBACK_RECORD_UNAVAILABLE)
+                fallback_reason=reason)
         else:
             try:
                 served = await asyncio.to_thread(
@@ -9682,6 +9709,24 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
                             f"established")) from e
             except record_serve.RecordServeError as e:
                 raise HTTPException(status_code=500, detail=str(e)) from e
+            except Exception as e:
+                # A STRUCTURAL refusal from the record's own projection layer is
+                # a fault, not an impairment: `RecordProjectionError` is how
+                # `scope_connection` refuses a misconfigured tenancy (its message
+                # names the fix — "arm TORTOISE_RECORD_DSN with
+                # tortoise_record_app"), and a `CacheProjectionError` means the
+                # row/column is one this reader was never taught. Neither is a
+                # `RecordServeError`, so without this arm they escape the handler
+                # as a raw traceback and the instruction never reaches the
+                # client. 500, never 503 (unreadable) and never 404 (absence).
+                from tortoise.cache_projection import CacheProjectionError
+                from tortoise.record_projection import RecordProjectionError
+
+                if isinstance(e, (CacheProjectionError,
+                                  RecordProjectionError)):
+                    raise HTTPException(
+                        status_code=500, detail=str(e)) from e
+                raise
 
     if served is None:
         props = await asyncio.to_thread(_cache_props)
@@ -9695,7 +9740,7 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
         # not a wrapper — so the default path stays byte-identical.
         if served is None:
             raise HTTPException(status_code=404, detail="Point not found")
-        absent: dict = {"detail": "Point not found"}
+        absent: dict = {"message": "Point not found"}
         absent.update(served.as_wire())  # `as_wire` OMITS a null reason
         raise HTTPException(status_code=404, detail=absent)
     # The tombstone rule is the ENDPOINT's, not the store's: a retracted point
@@ -9708,7 +9753,7 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
         # invisible on exactly the reads where it went looking.
         if served is None:  # OFF keeps the pre-#7970 shape exactly
             raise HTTPException(status_code=404, detail="Point not found")
-        retracted: dict = {"detail": "Point not found"}
+        retracted: dict = {"message": "Point not found"}
         retracted.update(served.as_wire())
         raise HTTPException(status_code=404, detail=retracted)
     props = dict(props)

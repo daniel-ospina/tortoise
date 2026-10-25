@@ -415,8 +415,15 @@ def not_served_reads() -> tuple[str, ...]:
 #: backfill/completeness question.
 FALLBACK_RECORD_UNAVAILABLE = "record-unavailable"
 FALLBACK_RECORD_MISS = "record-miss"
+#: A THIRD reason, for a condition that is neither: the credential resolves no
+#: record tenant at all. `record_tenant_for` returns `None` for every session/JWT
+#: read and every non-Supabase deployment, so folding this into
+#: `record-unavailable` would fire an OUTAGE counter permanently on a condition
+#: the record never caused — and the counter's whole purpose is to be alertable.
+FALLBACK_RECORD_TENANT_UNRESOLVED = "record-tenant-unresolved"
 FALLBACK_REASONS: tuple[str, ...] = (
-    FALLBACK_RECORD_UNAVAILABLE, FALLBACK_RECORD_MISS)
+    FALLBACK_RECORD_UNAVAILABLE, FALLBACK_RECORD_MISS,
+    FALLBACK_RECORD_TENANT_UNRESOLVED)
 
 _FALLBACKS: dict[str, int] = {}
 #: The counter is incremented from BOTH the event loop (the endpoint's

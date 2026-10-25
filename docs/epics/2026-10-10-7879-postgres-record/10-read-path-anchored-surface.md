@@ -122,7 +122,7 @@ because they are the cache's own fold state and a record-served answer must not 
 
 ## 3. Mutation arms — the guards, and the edits that turn them RED
 
-Run 2026-10-24 against `tests/test_record_serve.py` (42 tests) and the live file (2 tests):
+Run 2026-10-24 against `tests/test_record_serve.py` (45 tests) and the live file (2 tests):
 
 | edit | result |
 |---|---|
@@ -140,6 +140,9 @@ Run 2026-10-24 against `tests/test_record_serve.py` (42 tests) and the live file
 | a tenancy misconfiguration is downgraded to a fallback | 1 RED (`test_a_misconfigured_tenancy_is_structural_not_a_fallback`) |
 | a permanent missing tenant is answered 503 | 1 RED (`test_a_credential_without_a_record_tenant_is_a_fault_not_an_outage`) |
 | `off` mode overwrites a stored `servedFrom` | 1 RED (`test_off_mode_leaks_no_attribution_and_keeps_a_stored_name`) |
+| `prefer` builds the cache handle before asking the record | 1 RED (`test_prefer_answers_from_the_record_when_the_cache_cannot_be_opened`) |
+| a permanent missing tenant is counted as an outage | 1 RED (`test_prefer_counts_an_unresolved_tenant_under_its_own_reason`) |
+| a tenancy misconfiguration escapes the endpoint | 1 RED (`test_the_endpoint_answers_500_for_a_tenancy_misconfiguration`) |
 
 ## 4. What this does not decide, and where the decision could overturn it
 
@@ -157,6 +160,12 @@ Run 2026-10-24 against `tests/test_record_serve.py` (42 tests) and the live file
   never becomes resolvable by retrying, so it is **500** (a permanent fault), and
   a role/GUC misconfiguration refuses **structurally** (500) instead of being
   counted as `record-unavailable` — an ops reason for a value problem.
+* **`prefer` never lets the cache's availability decide whether the record is
+  asked.** Its handle is constructed through the #3498 seam, but a construction
+  failure is CAPTURED and re-raised only when the cache is actually needed —
+  otherwise a stopped graph would answer `403 GRAPH_NOT_FOUND` before the record
+  was consulted, making the lenient mode less able to answer than `record`. `off`
+  keeps propagating the failure, exactly as before.
 * **Not built here, named so the absence is visible:** a CLI verb (the two record verbs that exist,
   `record-reconcile` and `record-restore`, are the precedent); connection pooling for the endpoint's
   per-request record connection; `anchored-neighbours`; parity for any label other than `Point`
