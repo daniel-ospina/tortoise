@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import re
 import sys
 from datetime import UTC, datetime, timedelta
@@ -82,6 +83,25 @@ def _load() -> Any:
 @pytest.fixture(scope="module")
 def sweep() -> Any:
     return _load()
+
+
+@pytest.fixture(autouse=True)
+def _scrubbed_intake_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No unit test in this file may POST a real intake record.
+
+    `GhClient.post_intake` reads `os.environ` directly (`INBOUND_URL` /
+    `INBOUND_SECRET_GITHUB`) rather than taking the creds from `Config`, so a
+    developer shell — or CI — that happens to export the pair would make a test
+    driving the REAL client (the resume-read cases, the stub-`gh` cases) POST to
+    the live intake endpoint before it ever failed on a stub. That is a write to
+    a production system produced by a unit test.
+
+    Autouse and module-wide, so a NEW test cannot reintroduce the hazard by
+    forgetting to opt in. A test that must exercise `post_intake` re-adds the
+    pair with `monkeypatch.setenv` and stubs the transport.
+    """
+    monkeypatch.delenv("INBOUND_URL", raising=False)
+    monkeypatch.delenv("INBOUND_SECRET_GITHUB", raising=False)
 
 
 # ── a fake GitHub, recording every mutation in order ─────────────────────────
@@ -749,6 +769,84 @@ def test_dry_run_needs_no_intake_credential(sweep: Any) -> None:
     assert report.exit_code == 0
 
 
+def test_no_test_can_post_a_real_intake_record_from_the_shell(sweep: Any, monkeypatch: Any) -> None:
+    """`post_intake` reads `os.environ`, so a unit test could hit the live intake.
+
+    `GhClient.post_intake` takes the URL and secret from the PROCESS environment
+    rather than from `Config`, so a developer or CI environment that happens to
+    export the pair makes every test driving the REAL client (the resume-read
+    cases, the stub-`gh` cases) POST a live record before it fails on a stub — a
+    write to a production system, produced by a unit test. The autouse
+    `_scrubbed_intake_env` fixture is the guard; this test pins it, and proves
+    the path it closes is the one that really reaches the transport (stubbed
+    here, so nothing leaves the machine in either half).
+    """
+    # The guard is proved by ABSENCE, asserted first: with the fixture removed
+    # and the ambient shell exporting the pair, this fails before any request is
+    # built — the failure mode the fixture exists to prevent.
+    assert "INBOUND_URL" not in os.environ, "autouse intake scrubbing is gone"
+    assert "INBOUND_SECRET_GITHUB" not in os.environ, "autouse intake scrubbing is gone"
+
+    client = sweep.GhClient(f"{OWNER}/tortoise")
+    with pytest.raises(RuntimeError, match="unset"):
+        client.post_intake({"source_item_id": "issue-1"})
+
+    # …and the hazard is real, not hypothetical: with the pair present,
+    # `post_intake` builds a request and hands it to `urlopen`.
+    monkeypatch.setenv("INBOUND_URL", "https://intake.example/live")
+    monkeypatch.setenv("INBOUND_SECRET_GITHUB", "live-secret")
+    posted: list[Any] = []
+
+    class _Response:
+        status = 200
+
+        def __enter__(self) -> _Response:
+            return self
+
+        def __exit__(self, *exc: Any) -> bool:
+            return False
+
+    monkeypatch.setattr(
+        sweep.urllib.request,
+        "urlopen",
+        lambda request, timeout=0: posted.append(request) or _Response(),
+    )
+    client.post_intake({"source_item_id": "issue-1"})
+
+    assert len(posted) == 1, "with the env pair set, post_intake reaches the transport"
+    assert posted[0].full_url == "https://intake.example/live"
+    assert any(
+        name.casefold() == "x-inbound-secret" and value == "live-secret"
+        for name, value in posted[0].headers.items()
+    ), posted[0].headers
+
+
+def test_the_short_read_note_is_a_truth_table(sweep: Any) -> None:
+    """The note depends on the VERDICT *and* the read — all four rows are pinned.
+
+    A short read is only news when the verdict it fed was "not relayed": with the
+    marker found nothing is re-posted, so warning about a duplicate would name one
+    that cannot exist. The gate is
+    `not resume and getattr(client, "comment_read_truncated", False)`, and until
+    now only row 2 was asserted — a mutant dropping the second half would emit
+    "a duplicate comment may be posted" on EVERY relayed item while every other
+    assert in this file still passed.
+    """
+    rows = [
+        (False, False, False),  # complete read, nothing to announce — the missed row
+        (False, True, True),  # short read + not-relayed verdict ⇒ the note
+        (True, False, False),  # relayed, complete read
+        (True, True, False),  # relayed (marker found) ⇒ nothing is re-posted
+    ]
+    for relayed, truncated, expect_note in rows:
+        client = FakeClient(issues=[issue(7)], relayed=relayed)
+        client.comment_read_truncated = truncated
+        report = run(sweep, client)
+        assert report.relayed == [("issue", 7)], (relayed, truncated, report.failed)
+        got = any("duplicate comment" in note for note in report.notes)
+        assert got is expect_note, (relayed, truncated, report.notes)
+
+
 def test_the_stranded_summary_matches_the_note_it_points_at(
     sweep: Any, monkeypatch: Any, capsys: Any
 ) -> None:
@@ -1378,6 +1476,11 @@ def test_a_resume_read_that_hits_its_budget_says_so(sweep: Any, monkeypatch: Any
     re-posted and a warning would name a duplicate that cannot exist.
     """
     client = sweep.GhClient(f"{OWNER}/tortoise", per_page=2, comment_page_budget=2)
+    # The intake POST goes through `urlopen`, so it is stubbed on the instance:
+    # every other step in `sweep()` then completes and `report.relayed` is
+    # meaningful. No test in this file may reach the real endpoint — see the
+    # autouse `_scrubbed_intake_env` fixture below.
+    monkeypatch.setattr(client, "post_intake", lambda payload: None)
 
     def chatter(count: int, start: int = 0) -> list[dict[str, Any]]:
         return [
@@ -1428,7 +1531,11 @@ def test_a_resume_read_that_hits_its_budget_says_so(sweep: Any, monkeypatch: Any
 
     # (c) an EMPTY probe page means the thread ended exactly at the budget: the
     # flag stays clear, so an exact multiple of `budget * per_page` is not
-    # reported as a shortfall.
+    # reported as a shortfall. The REPORT half of this row (flag clear ⇒ no
+    # note) is pinned on its own in
+    # `test_the_short_read_note_is_a_truth_table`, which covers all four
+    # combinations — the real client is used here only for what it alone can
+    # produce, the flag.
     _stub_gh_json(
         sweep,
         monkeypatch,
@@ -1444,7 +1551,8 @@ def test_a_resume_read_that_hits_its_budget_says_so(sweep: Any, monkeypatch: Any
         "a full final page at the budget is the END of the thread, not a shortfall"
     )
 
-    # (d) …and the flag is per-call, never sticky.
+    # (d) …and the flag is per-call, never sticky: a later short read of a
+    # different thread cannot inherit the earlier verdict.
     _stub_gh_json(sweep, monkeypatch, {"7/comments?per_page=2&page=1": chatter(1, start=90)})
     client.already_relayed(7)
     assert client.comment_read_truncated is False

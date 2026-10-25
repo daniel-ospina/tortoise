@@ -750,11 +750,15 @@ class GhClient:
 
         An empty page is the end of the thread (stop, keep what was read); a
         FAILED page raises, so a partial read never looks like a complete one.
-        On exhausting the budget the pages read are returned with
-        `comment_read_truncated` set: raising there would make a long thread
-        permanently un-relayable, but a SILENT short read would report "not
-        relayed" for a marker that is simply further down — so the caller is
-        told, and the note names the possible duplicate comment.
+        RAISING on an exhausted budget would make a long thread permanently
+        un-relayable, but a SILENT short read would report "not relayed" for a
+        marker that is simply further down — so the budget is probed one page
+        further and `comment_read_truncated` is set only when THAT page is
+        NON-EMPTY, i.e. only when the thread really continues. A thread of
+        exactly `budget * per_page` comments therefore reads as complete (its
+        last allowed page is full, the probe is empty) and a short read states a
+        fact instead of a guess; the caller turns it into a note naming the
+        possible duplicate comment.
         """
         path = f"repos/{self.repo}/issues/{number}/comments"
         comments: list[dict[str, Any]] = []
@@ -772,6 +776,13 @@ class GhClient:
             # thread of exactly `budget * per_page` comments ends there and its
             # last page is full, so without the probe the note would claim a
             # shortfall that does not exist.
+            #
+            # The probe's payload is DELIBERATELY discarded — it is tested for
+            # emptiness and nothing else. Scanning it for the marker would make
+            # `comment_page_budget` mean `budget + 1` pages of coverage, which is
+            # the same silent budget rise the flag exists to disclose; a marker
+            # that lives on the probe page is therefore reported as a possible
+            # duplicate (the note says the item is still acted on), not resolved.
             if self._comment_page(path, number, self.comment_page_budget + 1):
                 self.comment_read_truncated = True
         return comments
@@ -788,6 +799,14 @@ class GhClient:
         return chunk
 
     def post_intake(self, payload: dict[str, Any]) -> None:
+        """POST the relay record. Creds come from the PROCESS ENV, not `Config`.
+
+        `main()` builds `Config` from the same two variables, so the two agree in
+        production — but the divergence is visible to anything that constructs a
+        `Config` and drives this client directly, which is why
+        `tests/test_inbound_relay_sweep.py` scrubs the pair for every test in an
+        autouse fixture rather than letting an ambient shell reach this method.
+        """
         url = os.environ.get("INBOUND_URL", "")
         secret = os.environ.get("INBOUND_SECRET_GITHUB", "")
         if not url or not secret:
