@@ -190,6 +190,13 @@ jobs:
             exit 1
           fi
       - uses: actions/checkout@v4
+      # ── THE RUNNER TOOL CONTRACT (#9018) ──────────────────────────────
+      # This job dispatches deploy-hosted with `gh api --method POST` and then
+      # `gh run watch`es it. On a pool runner without `gh` the dispatch dies with
+      # `exit 127` AFTER the migrations have already been applied — a red that
+      # describes the runner, not the deploy. Provide the tool or fail NAMING it.
+      - name: Runner tool contract — provide gh (#9018)
+        run: bash .github/scripts/runner-tools.sh ensure gh
       - uses: supabase/setup-cli@v1
         with:
           version: latest

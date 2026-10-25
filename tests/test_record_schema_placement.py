@@ -44,6 +44,8 @@ from pathlib import Path
 
 import pytest
 
+from tortoise import record_projection
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PLACEMENT_DOC = (
     REPO_ROOT
@@ -52,7 +54,7 @@ PLACEMENT_DOC = (
     / "2026-10-10-7879-postgres-record"
     / "02-identity-and-placement.md"
 )
-MIGRATIONS = [
+MIGRATIONS = sorted(
     REPO_ROOT / "supabase" / "migrations" / name
     for name in (
         "20261012000001_record_event_stream.sql",
@@ -64,8 +66,34 @@ MIGRATIONS = [
         # `record_projection.RECORD_MIGRATIONS` reads it: append-only history
         # means a landed `CREATE TABLE` can only ever gain a column this way.
         "20261018000001_record_point_money_value_2782.sql",
+        # #9881 / PR #9948 review P2: the FORWARD migration that RE-DECLARES the
+        # Object/Subject key contract (the `node_identity.key_property` CASE and
+        # both `chk_*_node_key_is_contract_key` pins). Leaving it out was the
+        # stale-pin defect the review measured: this file's pin then read only
+        # the PRE-move declaration in `20261012000002` and kept certifying a
+        # contract the record no longer holds. Sorted below so `last == newest`
+        # — append-only history means the LAST declaration is the one in force,
+        # the rule `record_projection.key_properties()` applies.
+        "20261027000001_record_semantic_id_key.sql",
     )
-]
+)
+
+#: `chk_<table>_node_key_is_contract_key CHECK (…)` bodies in DECLARATION ORDER.
+#: `CHECK` must follow the constraint name, so a `DROP CONSTRAINT IF EXISTS
+#: chk_…` and the prose that names the constraint in a comment both miss — only
+#: a real declaration is captured.
+_CONTRACT_KEY_PIN_RE = re.compile(
+    r"chk_(\w+)_node_key_is_contract_key\s+CHECK\s*\((.*?)\)", re.S
+)
+
+
+def contract_key_pins(text: str) -> dict[str, list[str]]:
+    """Every `node_key` pin's CHECK body, per table, in declaration order."""
+    pins: dict[str, list[str]] = {}
+    for m in _CONTRACT_KEY_PIN_RE.finditer(text):
+        pins.setdefault(m.group(1), []).append(m.group(2))
+    return pins
+
 
 # ── the placement table's section → the physical table in the record ─────────
 SECTION_TABLE = {
@@ -845,24 +873,53 @@ def test_props_checks_refuse_the_derived_names():
 
 def test_relation_is_never_a_bare_id():
     """Interface E: a foreign key is (label, key). The relation table must use it."""
-    text = "\n".join(p.read_text(encoding="utf-8") for p in MIGRATIONS)
-    assert "src_label" in text and "src_key" in text
-    assert "FOREIGN KEY (org_id, graph_id, src_label, src_key)" in text
-    assert "FOREIGN KEY (org_id, graph_id, tgt_label, tgt_key)" in text
+    # And each layer pins node_key to that label's key column. ⚠️ The
+    # expectation is DERIVED from `record_projection.NODE_TABLES` — never a
+    # hand-copied tuple. The tuple this replaces said `("object", "name")` /
+    # `("subject", "name")` and stayed GREEN across #9881, because it restated
+    # the retired contract (#9948 review P2). And the DECLARATIONS are read from
+    # the whole `supabase/migrations` directory, not from this file's
+    # `MIGRATIONS` list: that list is hand-maintained, so a future FORWARD
+    # migration that re-declares a pin would re-create exactly the same defect
+    # (the list is pinned by nothing — `RECORD_MIGRATIONS`' completeness has its
+    # own guard in `test_9231`, this one does not). Measured: over all 73 files
+    # the pin set is identical to the 6-file list's (`source 1 · event 1 ·
+    # session 1 · object 2 · subject 2 · point 1`), so reading the directory is
+    # free and closes the recurrence instead of patching this round of it.
+    # The LAST declaration wins (append-only history; the same rule
+    # `key_properties()` reads), and the files are read in filename order — which
+    # IS chronological, because the name is the migration timestamp.
+    all_text = "\n".join(
+        p.read_text(encoding="utf-8")
+        for p in sorted((REPO_ROOT / "supabase" / "migrations").glob("*.sql"))
+    )
+    assert "src_label" in all_text and "src_key" in all_text
+    assert "FOREIGN KEY (org_id, graph_id, src_label, src_key)" in all_text
+    assert "FOREIGN KEY (org_id, graph_id, tgt_label, tgt_key)" in all_text
     # the key property is generated from the label, so a store cannot disagree
-    assert "key_property" in text and "GENERATED ALWAYS AS" in text
-    # and each layer pins node_key to that label's key column
-    for table, keycol in (
-        ("source", "url"),
-        ("event", "event_id"),
-        ("session", "id"),
-        ("object", "name"),
-        ("subject", "name"),
-        ("point", "id"),
-    ):
-        assert re.search(
-            rf"chk_{table}_node_key_is_contract_key CHECK \({keycol} IS NOT NULL AND node_key = {keycol}\)", text
-        ), f"{table} does not pin node_key to {keycol} (with the NULL guard)"
+    assert "key_property" in all_text and "GENERATED ALWAYS AS" in all_text
+    pins = contract_key_pins(all_text)
+    assert set(pins) == set(record_projection.NODE_TABLES), (
+        "the tables carrying a node_key pin and the projection's NODE_TABLES "
+        f"disagree — pinned {sorted(pins)}, NODE_TABLES "
+        f"{sorted(record_projection.NODE_TABLES)}"
+    )
+    for table, (_label, keycol) in record_projection.NODE_TABLES.items():
+        bodies = pins[table]
+        body = bodies[-1]
+        assert re.search(rf"\bnode_key\s*=\s*{keycol}\b", body), (
+            f"the LAST chk_{table}_node_key_is_contract_key does not pin "
+            f"node_key to {keycol!r} — read {body.strip()!r} of {len(bodies)} "
+            "declaration(s). Under append-only history the last one is the one "
+            "in force, so a stale pin here certifies a contract the record "
+            "does not hold"
+        )
+        assert re.search(rf"\b{keycol}\s+IS\s+NOT\s+NULL\b", body), (
+            f"chk_{table}_node_key_is_contract_key lost the NULL guard on "
+            f"{keycol!r}: a bare `node_key = {keycol}` is NULL (not FALSE) for "
+            "a NULL key and is silently satisfied (#8179 review P1) — read "
+            f"{body.strip()!r}"
+        )
 
 
 MONEY_COLUMNS = ("amount_minor", "currency", "minor_unit_exponent", "verbatim", "as_of")

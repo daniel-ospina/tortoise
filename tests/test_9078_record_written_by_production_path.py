@@ -248,6 +248,17 @@ RECORD_REAPPLY_STEPS: list[tuple[Path, str | None]] = [
     # that arms every relation the entries above reach.
     (REPO_ROOT / "supabase" / "migrations"
      / "20261025000001_record_tenancy_role_and_guc.sql", None),
+    # #9881's key move — a RE-SHAPE of a landed table, which is why it needs an
+    # entry rather than the CREATE-exists shortcut: a container migrated before
+    # it keeps `node_key = name` and a `key_property` of `name` on Object/
+    # Subject, while `key_properties()` reads the FILES and binds `id`. The
+    # armed write would then emit a rename/collision against the old pin and be
+    # refused by a CHECK the file says no longer exists. Re-apply safe by
+    # construction: every step is conditional (`ON CONFLICT DO NOTHING`, the
+    # re-key UPDATEs scoped to `node_key <> id`, `DROP … IF EXISTS` + `ADD` on
+    # the constraints, `DROP COLUMN IF EXISTS` on the generated column).
+    (REPO_ROOT / "supabase" / "migrations"
+     / "20261027000001_record_semantic_id_key.sql", None),
 ]
 
 #: Record migrations that ship AFTER the base shape yet are deliberately NOT in

@@ -2633,12 +2633,42 @@ def test_record_schema_pin_runs_on_migration_or_doc_change():
         # Measured on the pre-fix head: `_sel(["docs/00_index.md"])` ->
         # surfaces=[], full=False, test_record_schema_placement.py ABSENT.
         "docs/00_index.md",
+        # #9881 / PR #9948 review P2: the FORWARD migration that RE-DECLARES the
+        # Object/Subject key contract (`node_identity.key_property` plus both
+        # `chk_*_node_key_is_contract_key` pins) — the one file that can make
+        # `record_projection.key_properties()` report a contract the schema no
+        # longer holds. Measured on the pre-fix head: `_sel([<this path>])` ->
+        # surfaces=[], full=False, BOTH readers absent.
+        "supabase/migrations/20261027000001_record_semantic_id_key.sql",
     ):
         r = _sel([changed])
         assert r["full"] is False, (changed, r)
         assert r["surfaces"] == ["core"], (changed, r)
         assert "test_record_schema_placement.py" in r["test_files"], (changed, r)
         assert "test_record_projection.py" in r["test_files"], (changed, r)
+
+
+def test_the_semantic_id_key_migration_selects_every_reader_of_the_contract():
+    # PR #9948 review P2: `20261027000001_record_semantic_id_key.sql` is the one
+    # diff that can RE-DECLARE the key contract — `record_projection.
+    # key_properties()` takes the LAST declaration in the migration chain, and
+    # `cache_projection`/`read_ledger` delegate to it. So the three READERS of
+    # that contract plus the schema pin must run on a change to this file ALONE.
+    # Mutation check: removing its CORE_ALSO row (or the arm above) fails both
+    # this test and the tuple arm above with `surfaces == []`.
+    changed = "supabase/migrations/20261027000001_record_semantic_id_key.sql"
+
+    r = _sel([changed])
+
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    for reader in (
+        "test_record_schema_placement.py",  # the CHECK pins read from disk
+        "test_record_projection.py",  # key_properties()
+        "test_cache_projection.py",  # delegates to key_properties()
+        "test_read_ledger.py",  # KEY_FIELDS is pinned to it
+    ):
+        assert reader in r["test_files"], (reader, r)
 
 
 def test_the_tenancy_migration_selects_the_posture_pins():

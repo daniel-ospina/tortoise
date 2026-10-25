@@ -58,6 +58,12 @@ MIGRATIONS = [
     # `RECORD_MIGRATIONS` in EQUALITY, and a probe whose Postgres lacks the
     # policies is not the Postgres the shipped read runs against.
     "20261025000001_record_tenancy_role_and_guc.sql",
+    # #9881's key move. It RE-DECLARES `node_identity.key_property` (Object/
+    # Subject → `id`) and rewrites the two `node_key` CHECKs, and the read
+    # projects a node by the contract key it parses from these FILES — so a
+    # probe Postgres without it keys Object/Subject by `name` while the shipped
+    # read binds `id`. Applied here for the same reason as the tenancy file.
+    "20261027000001_record_semantic_id_key.sql",
 ]
 DSN = "postgresql://postgres:cap@127.0.0.1:15499/capstone"
 

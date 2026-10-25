@@ -46,6 +46,13 @@ jobs:
       pull-requests: write
     steps:
       - uses: actions/checkout@v4
+      # ── THE RUNNER TOOL CONTRACT (#9018) ──────────────────────────────
+      # The re-cut opens its PR with `gh pr create`. `runs-on: ubuntu-latest`
+      # normally means a hosted image WITH `gh`; the fallback pool carries the
+      # same label on a bare runner whose service PATH has none, and a 127 here
+      # reads as "the guard could not re-cut", which is not a product verdict.
+      - name: Runner tool contract — provide gh (#9018)
+        run: bash .github/scripts/runner-tools.sh ensure gh
 
       - uses: actions/setup-python@v5
         with:

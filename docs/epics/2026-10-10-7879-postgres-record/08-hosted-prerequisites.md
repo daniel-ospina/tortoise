@@ -158,7 +158,7 @@ raised) and §17.1-correct (record after the append, before the cache fold).
 
 ### A5. Embeddings — **durable today, not searchable, and that is not a defect**
 
-`embedding jsonb` on `source` (`…01:175`), `event` (`…01:233`), `point` (`…03:66`). **No migration and no module uses `pgvector`** — `grep -riE 'pgvector|vector\('` over all 72
+`embedding jsonb` on `source` (`…01:175`), `event` (`…01:233`), `point` (`…03:66`). **No migration and no module uses `pgvector`** — `grep -riE 'pgvector|vector\('` over all 73
 migrations returns **0**, and `git grep -il pgvector -- 'tortoise/*'` is **0**. The word itself
 appears in prose only — e.g. this document, §12.1c's open question, this epic's
 `03-schema.md`, and the competitor notes. So the record is a **durability carrier** for vectors, not a retrieval index — which is
@@ -329,7 +329,7 @@ mirrors it value for value: the `op_type`→predicate map (four composition spel
 reverse `INPUT`, and the two mitigation gates (`is_non_operator_payload` AND
 `has_usable_mitigation_strength`, restated for the STANDALONE load and pinned value-for-value). The
 endpoints resolve across the **four** epistemic labels (#7902) with each label's CANONICAL key
-(`Point`/`Event` → `node_key`, `Subject`/`Object` → `name`), so `relation.src_label` is a fact looked
+(`Point`/`Event` → `node_key`, `Subject`/`Object` → `id` since #9881), so `relation.src_label` is a fact looked
 up rather than a `Point` assumption, and the conflict path is `DO NOTHING` because the fold attaches no
 attribute to these edges beyond `idx`. ⛔ The input gate is `_writable_id`'s (a blank key is
 ADMITTED), not the blank-refusing `_writable_endpoint_id` of the two neighbouring families: those
@@ -562,7 +562,7 @@ exactly this question and the tree cannot answer it today.
 `8767b1c8b` measurement **there was no dedicated table for it** — the text was carried as data, in the
 `point.content` column and in the layer-1 `journal_event.payload` mirror of the record that wrote it
 (see below) — `grep -riE 'narrative|raw_turn|raw_text|transcript'` over all
-65 migrations returned **0** (at this head, 72 migrations, the same command matches it on 62 lines — 7 in `20261025000001_record_tenancy_role_and_guc.sql` (R6's grants and
+65 migrations returned **0** (at this head, 73 migrations, the same command matches it on 62 lines — 7 in `20261025000001_record_tenancy_role_and_guc.sql` (R6's grants and
 tenant policy for that very table), 36 in `20261023000001_record_session_narrative.sql` and 19 in
 `20261024000001_record_session_narrative_carrier.sql` — the table this
 item's DECIDED block adds);

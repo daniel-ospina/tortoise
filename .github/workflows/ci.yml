@@ -1021,25 +1021,46 @@ jobs:
           echo "markdownlint exit=$md_rc (informational — xargs rewrites it; the differ reads the report)"
       - name: Link check (changed files)
         if: ${{ !inputs.main_health && steps.changed.outputs.count != '0' }}
-        uses: lycheeverse/lychee-action@v2
-        with:
-          # `--files-from` reads the list from a FILE — no filename reaches a
-          # shell command (#4449).
-          args: --no-progress --files-from ${{ runner.temp }}/pr-md.txt
-          # #7435: PIN the linter. `lychee-action@v2` defaults to a linter version
-          # in ITS OWN action.yml, so without this the required check's lychee is a
-          # number that changes under us while `tools/docs_lint_baseline.py`
-          # asserts the snapshot was taken with a specific one — and the snapshot's
-          # keys encode that version's status text. The markdownlint half is pinned
-          # for the same reason (`markdownlint-cli2@0.23.3`).
-          lycheeVersion: v0.24.2
-          # #7435: report JSON and do NOT fail the step here — the snapshot differ
-          # below decides, so inherited link debt in a touched file stops redding
-          # the required check while a NEW dead link still fails it.
-          format: json
-          output: ${{ runner.temp }}/lychee-pr.json
-          fail: false
-          failIfEmpty: false
+        run: |
+          # #9708: a `run:` step we own, NOT `lycheeverse/lychee-action@v2`, and
+          # the reason is measured. On pi-runner-cell3-x64-2 (job 121024630636,
+          # 2026-10-25T00:14Z) the composite action reported `outcome=success`
+          # while its OWN binary was missing —
+          #   entrypoint.sh: line 58: lychee: command not found
+          # — and `fail: false` carried that 127 to the end of the script, which
+          # then copied a `mktemp` EMPTY temp file over the consumer's report and
+          # exited 0. The required check therefore red the PR's DIFF for an absent
+          # MEASUREMENT ("is unparseable: Expecting value: line 1 column 1").
+          #
+          # The action installs into `$RUNNER_TEMP/lychee/bin` and publishes it on
+          # `$GITHUB_PATH` from INSIDE the composite; that entry did not reach the
+          # action's own later sub-steps on that runner (the same action ran
+          # normally on pi-runner-vm-2 in the same hour, and on this pool once the
+          # binary happened to be on the launcher's PATH). An ambient PATH is not
+          # a contract, so the link check no longer depends on one.
+          #
+          # `.github/scripts/docs-link-check.sh` resolves the linter by ABSOLUTE
+          # path, installs the PINNED release (sha256-verified, per host arch) when
+          # it is absent — so no runner needs lychee pre-installed and no runner
+          # provisioning step is load-bearing — and then VERIFIES the report it got.
+          # A missing, empty, unreadable or non-verdict-producing report fails THIS
+          # step with its own name, so the red lands on the producer and not on the
+          # author's markdown. `--files-from` reads the list from a FILE (#4449):
+          # no filename reaches a shell.
+          #
+          # #7435 is unchanged: lychee finding broken links does NOT fail this
+          # step. Its exit code for that is **2** (`link check failures`), not 1 —
+          # 1 is `missing inputs or any unexpected runtime failures or
+          # configuration errors`, and 3 is a config-file error. The script
+          # accepts {0, 2} and fails on everything else, so a broken link still
+          # reaches the differ, which decides whether it is NEW. The full table
+          # and its source are in the script's header; the first revision of this
+          # change had the polarity inverted ({0, 1}), which would have redded this
+          # required check on all 46 inherited findings in the snapshot.
+          bash .github/scripts/docs-link-check.sh \
+            --label "Link check (changed files)" \
+            --files-from "$RUNNER_TEMP/pr-md.txt" \
+            --output "$RUNNER_TEMP/lychee-pr.json"
       - name: Docs lint baseline (changed files)
         if: ${{ !inputs.main_health && steps.changed.outputs.count != '0' }}
         env:
@@ -1134,20 +1155,17 @@ jobs:
           echo "markdownlint exit=$md_rc (informational — xargs rewrites it; the differ reads the report)"
       - name: Link check (main health, changed files)
         if: ${{ inputs.main_health && steps.changed_mh.outputs.count != '0' }}
-        uses: lycheeverse/lychee-action@v2
-        with:
-          # `--files-from` reads the list from a FILE — no filename reaches a
-          # shell command (#4449). failIfEmpty: a link-free doc is legitimate
-          # and must not red the nightly.
-          args: --no-progress --files-from ${{ runner.temp }}/changed-md.txt
-          # #7435: pinned to the same linter as the PR path (see its comment) — the
-          # action's own default is not a contract.
-          lycheeVersion: v0.24.2
-          # #7435: captured for the snapshot differ (see the PR path above).
-          format: json
-          output: ${{ runner.temp }}/lychee-mh.json
-          fail: false
-          failIfEmpty: false
+        run: |
+          # Same producer as the PR path, same reasons (#9708 — see its comment
+          # above for the measured composite-action failure and why the pinned
+          # install lives in the script instead of on the runner's PATH).
+          # A link-free doc is legitimate: lychee reports `total: 0` and the step
+          # passes, which is why the script treats 0 as a verdict and only an
+          # ABSENT report as a producer failure.
+          bash .github/scripts/docs-link-check.sh \
+            --label "Link check (main health, changed files)" \
+            --files-from "$RUNNER_TEMP/changed-md.txt" \
+            --output "$RUNNER_TEMP/lychee-mh.json"
       - name: Docs lint baseline (main health)
         if: ${{ inputs.main_health && steps.changed_mh.outputs.count != '0' }}
         env:
