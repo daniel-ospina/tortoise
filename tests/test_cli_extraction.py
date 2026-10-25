@@ -566,9 +566,13 @@ class TestWriterValidation(unittest.TestCase):
         #
         # Mutation checks (each reds exactly one subtest):
         #   * delete the `_bad` domain raise      -> "missing domain"
-        #   * delete the untiered-source raise    -> "still untiered"
+        #   * delete the untiered-source raise    -> "still untiered" (x2)
+        #   * weaken it to `not isinstance(_rel, dict)` -> the dict-with-None
+        #     subtest reds, which is how that half was found unpinned
         #   * delete the not-converged raise      -> "did not converge"
         #   * delete the truncated raise          -> "run truncated"
+        #   * `ep['truncated']` -> `bool(ep.get('truncated'))` -> the
+        #     absent-key subtest reds (fail-open on SDK drift)
         def _sdk(*, domain="d", reliability=None, ep=None):
             class _S:
                 def __init__(self, **kw):
@@ -594,6 +598,12 @@ class TestWriterValidation(unittest.TestCase):
             # (fake-SDK kwargs, the message the writer must raise)
             (dict(domain="other-domain", reliability=ok_rel, ep=ok_ep),
              "points under source missing domain"),
+            # a dict whose reliability is None: set_source_tier silently
+            # no-opped. The `reliability=None` case below only exercises the
+            # `not isinstance(_rel, dict)` half of the guard, so without this
+            # one the realistic drift has no failing path (#9929 review P2).
+            (dict(reliability={"url": "s://t", "reliability": None}, ep=ok_ep),
+             "source still untiered after set_source_tier"),
             (dict(reliability=None, ep=ok_ep),
              "source still untiered after set_source_tier"),
             (dict(reliability=ok_rel,
@@ -604,6 +614,12 @@ class TestWriterValidation(unittest.TestCase):
                   ep={"converged": True, "iterations": 1,
                       "diagnostic": None, "truncated": True}),
              "EP run truncated"),
+            # `truncated` absent entirely: must FAIL CLOSED. `ep.get(...)`
+            # would read it as "not truncated" and the receipt would then
+            # record `false`, a value the SDK never returned (#9929 review P2).
+            (dict(reliability=ok_rel,
+                  ep={"converged": True, "iterations": 1, "diagnostic": None}),
+             "no boolean `truncated`"),
         ]
         for kwargs, message in cases:
             with self.subTest(read_back=message):

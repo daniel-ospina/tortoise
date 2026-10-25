@@ -568,13 +568,25 @@ try:
         raise RuntimeError('read-back failed: source still untiered after set_source_tier')
 
     ep = sdk.compute_confidence(anchors=made)
+    # `truncated` is REQUIRED and must be a real bool. The other guard here
+    # fails closed by accident of `not`; this one does not — an absent or
+    # renamed key reads as "not truncated", so a topology-reduced result
+    # would sail through AND the receipt would positively record `false`, a
+    # value compute_confidence never returned. That is a silent success of
+    # exactly the class this read-back exists to catch, so it is checked
+    # explicitly rather than defaulted.
+    if ep.get('truncated') is not True and ep.get('truncated') is not False:
+        raise RuntimeError(
+            'EP read-back: result carries no boolean `truncated` '
+            f'(got {ep.get("truncated")!r}) — SDK signature drift; defaulting it '
+            'to False would certify a topology nobody measured')
     receipt['ep'] = {'converged': bool(ep.get('converged')),
                      'iterations': ep.get('iterations'),
                      'diagnostic': ep.get('diagnostic'),
-                     'truncated': bool(ep.get('truncated'))}
+                     'truncated': ep['truncated']}
     if not ep.get('converged'):
         raise RuntimeError(f'EP did not converge: {str(ep)[:200]}')
-    if ep.get('truncated'):
+    if ep['truncated']:
         raise RuntimeError('EP run truncated — result not trustworthy, treat as failure')
     print(json.dumps(receipt))
     sdk.close()
