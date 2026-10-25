@@ -194,8 +194,15 @@ def resolve_structural_target(g, label: str, key: str, rel: str, *,
                               mint: bool = True):
     """Resolve the label-scoped structural target node by its replay key.
 
-    Create-if-missing semantics: Subject / Source stubs MERGE by key (the live
-    wiring precedent — _create_about_edges' fallback / _link_source). NEVER
+    Create-if-missing semantics for the ``extractedFrom`` (Source) and
+    ``aboutSubject`` (Subject) arms: those stubs MERGE by key (the live wiring
+    precedent — _create_about_edges' fallback / _link_source). **The
+    ``aboutDocument`` Source arm is an EXCEPTION — it is RESOLVE-ONLY**: a miss
+    is logged and skipped, never minted, because a phantom Source would
+    silently mis-point the resurrected edge (adversarial class B1), and D10
+    §4.4 makes the document node a ``:Source``, so this is the one label whose
+    ``rel`` decides the policy. This resolver therefore does NOT
+    create-if-missing for every Source — read the branch, not the label. NEVER
     auto-detect labels (Subject-first auto-detect would attach an aboutObject
     descriptor to a same-name Subject node) and NEVER mint Point stubs by name
     (an absent Point target => skip — absent Documents/Objects/Events return
@@ -2178,8 +2185,9 @@ class _EdgeHandlers:
         per-ref (``agentSession`` for ``session:`` refs, else ``document``) —
         connectors and the Document path pass specific values (github_issue,
         slack_message, linear_card, ...). ``label`` selects the source-side
-        entity label — Point (default) or Document (create_document provenance,
-        #394).
+        entity label — Point (default) or Source (the ``create_document``
+        provenance caller, #394). D10 §4.4 makes the document node a
+        ``:Source``, so no caller passes the retired ``Document`` label here.
 
         ``source_ref`` is **many-to-many** (ontology §3.3, amended #3263): a
         claim extracted from several sources carries one edge per source, so a

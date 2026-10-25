@@ -3085,18 +3085,29 @@ def _declared_mutations(
         # `coalesce`d on match), stated from the record's own key — so the two
         # rebuild routes agree on the node's identity instead of only on its url.
         #
-        # ⛔ DELIBERATE, PINNED DIVERGENCE — stated, not lurking. This applies to
-        # EVERY `source` row, including a `DocumentCreated` one, and the live
-        # `_upsert_document` fold writes no `canonicalUrl` at all: a RESTORED
-        # document `:Source` therefore carries a property live leaves unset until
-        # something touches it. The value is the pure canonical form of the row's
-        # own key, which `resolve_source_key`'s adopt-on-touch backfills on the
-        # FIRST touch anyway (including the touch that resolves a variant ref onto
-        # a document), so the two states converge on use; scoping the derive to
-        # the types whose fold writes it would instead LOSE the variant resolution
-        # for document targets — the silent provenance loss this whole path exists
-        # to avoid. Pinned by
-        # `test_a_document_source_row_derives_its_canonical_identity_too`.
+        # ⛔ DELIBERATE, PINNED DERIVE — stated, not lurking. `canonical_url` is
+        # derived for EVERY `source` row, including a `DocumentCreated` one. The
+        # value is the pure canonical form of the row's own key.
+        #
+        # #5140 finding 12 UPDATE: the live `_upsert_document` fold now WRITES
+        # `canonicalUrl` too (it adopts the shared `resolve_source_key`), so the
+        # PROPERTY divergence this note used to record is gone — both rebuild
+        # routes agree on the IDENTITY PROPERTY (`canonical_url`). What that
+        # leaves, and it is a different axis, is the ROW KEY: this layer keys the
+        # row on the record's RAW id (it is journal-derived and reads no graph),
+        # so a URL-VARIANT `DocumentCreated` plans a second `public.source` row
+        # for an identity the graph folds onto one node (measured: record 2 rows,
+        # graph 1 node). That is the class #9553's derive exists to bound and it
+        # is NOT closed here — named on #5140 finding 12 so a records rebuild
+        # does not resurrect a duplicate source row silently. The derive is
+        # UNCONDITIONAL because narrowing it to the record types OTHER than
+        # `DocumentCreated` — the tempting reading now that the doc fold writes
+        # `canonicalUrl` itself — would LOSE the variant resolution for document
+        # targets: this resolver can only match a variant `extractedFrom` ref
+        # against the row's own `canonical_url` (`_relation_upsert_statement`'s
+        # `tgt_match=("node_key", "canonical_url")`), so a document row without
+        # it silently drops the edge — the provenance loss this path exists to
+        # avoid. Pinned by `test_a_document_source_row_derives_its_canonical_identity_too`.
         if (node.table == "source"
                 and "canonical_url" in columns.get("source", frozenset())):
             col_values.setdefault("canonical_url", _normalize_source_url(key))
