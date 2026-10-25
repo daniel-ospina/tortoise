@@ -28,13 +28,15 @@ tree that a re-run must re-verify). A step with no measurement is `NOT COVERED` 
 | Artifact | What it measures |
 |---|---|
 | `01-production-surface.log` | the **deployed** surface (`api.premiselabs.co`, `tortoise.premiselabs.co`, `app.premiselabs.co`) — deploy state, OAuth discovery, the unauthenticated challenge, and the two live documents steps 3 and 6 actually use. Verified against **production**, not `main` (the `#2208` lesson recorded on capstone #2008). |
-| `02-step-premise-census.log` | `probes/step_premise_census.py`: the MCP tool names the steps name, the canonical onboarding gates, and the RFC 8707 resource forms a connector may declare. |
+| `02-step-premise-census.log` | `probes/step_premise_census.py`: the MCP tool names the steps name, the canonical onboarding gates, step **2**'s three pack-resolution arms (`configured: false` is not the catalog union), and the RFC 8707 resource forms a connector may declare. |
 | `03-onboarding-closure-tests.log` | steps 5/8/9's server-side closure contract, MEASURED by running its pins (`tests/test_onboarding_auto_complete.py`, 42 passed). |
 | `04-graph-scoping-tests.log` | step 7 — `tortoise_list_graphs` returns only the entitled graph (`tests/test_cross_tenant_read_isolation.py`, 9 passed, seeded present/absent pairs + negative controls). |
 | `05-dashboard-copy-tests.log` | steps 3/10's copy constants (`node --test` over the pure modules; no `node_modules` needed, 38 passed). |
 
 Measured at `git HEAD 653980445f` (2026-10-22), with the census (`02`) re-run at
-`b39c70d8c` after its rows were made to measure the clause they print; deployed
+`b39c70d8c` after its rows were made to measure the clause they print, and again at
+`b966664db` (2026-10-25) when step 2 became a MEASURED row instead of a `STATIC`
+one; deployed
 `commit_sha 81f5594dce` — an
 ancestor of `origin/main` `2bf86487c1`, **39 commits behind** it
 (`git rev-list --count 81f5594dce..2bf86487c1` → `39`; deploy lag, not a stale or
@@ -51,7 +53,7 @@ contradicts the shipped system; the corrected wording follows the table) · **BL
 | # | As written | Verdict | Basis |
 |---|---|---|---|
 | 1 | sign up, name workspace → `team-named` closes | NOT-COVERED-HERE | premise MEASURED: `team-named` is auto-satisfied at org-create and is never an agent act (`state._NON_AGENT_STEPS`, census row 1). The clickthrough itself needs a browser. |
-| 2 | create graph; Settings → Configured packs, narrow → the chosen set persists; `configured` reflects narrowing | NOT-COVERED-HERE | premise STATIC: `GET/PUT /v1/graphs/{graph_id}/packs` returns `configured`, and `false` means *never explicitly configured* — the catalog union only when the graph ALSO has no `:PackInstall` records; with records it resolves to `recorded ∪ data`, narrower than the catalog whenever a catalog namespace has neither a record nor any data in the graph (`docs/EXPANSION_PACKS.md` §"Per-graph pack selection (#2728)", #9691, `pack_state.resolved_pack_set`) — not *no packs* (`website/apps/dashboard/src/packs.js:1-30`). Persistence needs a browser. |
+| 2 | create graph; Settings → Configured packs, narrow → the chosen set persists; `configured` reflects narrowing | NOT-COVERED-HERE | premise MEASURED (census rows 2a-2e): `GET/PUT /v1/graphs/{graph_id}/packs` returns `configured`, and `false` means *never explicitly configured* — the catalog union only when the graph ALSO has no `:PackInstall` records; with records it resolves to `recorded ∪ data`, narrower than the catalog whenever a catalog namespace has neither a record nor any data in the graph (measured: catalog 7, starter 5, `catalog−resolved = portfolio, venture`). The provisioned default graph is in the records arm, and a record-less graph narrows on its FIRST packs READ (the self-heal), so step 2's *"the default is catalog union + core"* is false for the surface the user opens (`docs/EXPANSION_PACKS.md` §"Per-graph pack selection (#2728)", #9691, `pack_state.resolved_pack_set`) — not *no packs* (`website/apps/dashboard/src/packs.js:1-30`). Persistence needs a browser. |
 | 3 | Setup-guide card → choose ChatGPT → the card's steps, as rendered | **WRONG-AS-WRITTEN** | ChatGPT has **no dashboard surface at all**: `#2698` deleted its tab, `#2912`'s families exclude it, and the source says so in terms — *"chatgpt … has NO dashboard surface: … Its live carrier is the public setup docs page (#4836)"* (`harnesses.js:865-867`). MEASURED: the served door is `https://tortoise.premiselabs.co/docs#chatgpt` (HTTP 200, section present, `01` log). |
 | 4 | ChatGPT: add custom MCP server = `CANONICAL_MCP_URL` → OAuth; consent shows the right workspace; token issued | NOT-COVERED-HERE | premises MEASURED: PRM + AS metadata are live (DCR `/register`, `/oauth/authorize`, `/oauth/token`, PKCE `S256`, `resource=https://api.premiselabs.co/mcp`), an unauthenticated `POST /mcp` is **challenged** with `resource_metadata` (401, `01` log). The consent chooser is **org**-scoped (`_selectable_orgs`, `oauth.py:845`). The ChatGPT side needs the human Pro auth; the recipe differs from the step — see correction 3. |
 | 5 | `connection-written` + `harness-connected` close **at token issue** | **WRONG-AS-WRITTEN** | MEASURED (census rows 5a-5e): `connection-written` is in **no** completion gate and is a CLIENT checkpoint (`#3451`, `_NON_AGENT_STEPS`, `_CHECKPOINT_STEPS`); `harness-connected` is filed by the server on the **first successful agent write** (`#3784`/`#3913`), i.e. at step 8. Nothing closes at token issue. |
@@ -60,6 +62,15 @@ contradicts the shipped system; the corrected wording follows the table) · **BL
 | 8 | file the first points → `first-points-filed` closes | VERIFIED-HERE (server layer) | 42 tests green (`03` log), including the call-site layer (`-k handler_env`) that reds if a point write stops observing the step. Through ChatGPT: NOT COVERED. |
 | 9 | run a decision → `decide-completed` closes | VERIFIED-HERE (server layer) | same 42 tests; `decide-completed` is filed only on a decision-shaped write (`tortoise_file_decision`, or a `pointKind` in `DECISION_SHAPED_POINT_KINDS`) — both documented decide protocols. Through ChatGPT: NOT COVERED. |
 | 10 | capture disclosure card: capture unavailable for ChatGPT, not silence | VERIFIED-HERE (copy) | `HARNESS_CAPTURE_SUPPORT.chatgpt === false` renders `HARNESS_CAPTURE_REASON.chatgpt` = *"ChatGPT connects from its own cloud — session capture isn't available for it"* (`harnessStatusCard.jsx:120`), pinned by 38 green tests (`05` log). Not silence. |
+
+**Step 2's premise became `MEASURED` last** (census rows 2a-2e). It was the only step
+in the ten-step table the census did not read (`row("2"` matched nothing, and this
+table used to call its basis `STATIC`), which is how #9691 falsified step 2's
+parenthetical — *"the default is catalog union + core"* — by hand instead of by the
+instrument. The rows now drive the real `pack_state.resolved_pack_set` through all
+three arms over a fake graph handle that supplies only the INPUTS, so the same defect
+prints `FALSIFIED`; the pack surface's own pins
+(`tests/test_pack_selection_by_graph.py`, 52 passed) agree with every row.
 
 ## The three corrections
 
@@ -118,6 +129,7 @@ on them would be recording a capability we did not ship.
 
 1. Step 1 — sign-up, workspace naming, `team-named` closing (browser).
 2. Step 2 — narrowing packs and the persisted `configured` flag (browser + tenant).
+   *The premise* is MEASURED (census rows 2a-2e); what is uncovered is the click.
 3. Steps 4/6/7/8/9 **through ChatGPT** — the tool-call trace as the model actually emits it,
    the OAuth consent as ChatGPT renders it. Needs a ChatGPT Plus/Pro account and a human to
    complete the sign-in/authorize (`#9664` step 4 says so explicitly).
@@ -133,6 +145,7 @@ substitutes for them.
 uv sync --extra embeddings --extra parity
 .venv/bin/python docs/evidence/9664-capstone/probes/step_premise_census.py
 uri="$(.venv/bin/python tools/test_lane.py uri)"; eval "$uri"       # a private container — never the canonical store
+.venv/bin/python -m pytest tests/test_9664_premise_census.py -q -p no:cacheprovider   # the census's own guards
 .venv/bin/python -m pytest tests/test_onboarding_auto_complete.py -q -p no:cacheprovider
 .venv/bin/python -m pytest tests/test_cross_tenant_read_isolation.py -q -p no:cacheprovider
 (cd website/apps/dashboard && node --test src/captureStatus.test.js src/harnesses.test.js)
