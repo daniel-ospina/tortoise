@@ -50,7 +50,9 @@
 #      (`offline-and-absent`, `unsupported-arch`, a tool with no provisioner.)
 #   2  COULD-NOT-PROVIDE / COULD-NOT-CHECK — an attempt WAS made and failed, or
 #      the check itself could not run: download, sha256 mismatch, extract, link,
-#      installed-but-unresolvable, or a malformed seam. Nothing was certified.
+#      installed-but-unresolvable, provisioned-but-not-published (an install in
+#      Actions that could not reach later steps), or a malformed seam. Nothing was
+#      certified.
 #   1  is also the usage error for an unknown verb / no tool named, which the
 #      caller never reaches from a workflow (both are writer bugs, not runner
 #      state) — stated here so the table is complete rather than convenient.
@@ -188,6 +190,15 @@ install_gh() {
       unsatisfied "tool=gh runner=$(runner_name) reason=cannot-append-GITHUB_PATH"
       return 2
     }
+  elif [ -n "${GITHUB_ACTIONS:-}" ]; then
+    # ⛔ IN ACTIONS, AN UNPUBLISHED INSTALL IS A FAILURE, NOT AN INSTALL. Actions
+    # always sets `$GITHUB_PATH` for a `run:` step, so its absence means the later
+    # steps will NOT see this binary — and returning 0 there would certify a tool
+    # the job does not have, which is the "0 without the tool being proven to
+    # resolve" case this file's own doctrine forbids. Gated on `GITHUB_ACTIONS` so
+    # a local `ensure` on a dev box stays usable (it resolves in-process).
+    unsatisfied "tool=gh runner=$(runner_name) reason=provisioned-but-not-published"
+    return 2
   fi
 
   say "tool=gh action=installed version=$GH_VERSION path=$p runner=$(runner_name)"

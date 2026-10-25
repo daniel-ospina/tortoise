@@ -766,6 +766,11 @@ export STUB_WF_CREATED_AT="2026-09-13T03:34:06Z"
 run_checker
 assert_eq "$RC" "1" "47: a failed HEARTBEAT search alone → exit 1"
 assert_contains "$OUT" "heartbeat search failed" "47: …and names it"
+# The whole point of #9018: the tool's own words survive into the message. Without
+# this assertion, deleting the `gh said:` suffix leaves every other check green —
+# the prefix is static — so the half of the change on THIS arm goes unpinned while
+# the alert arm's is pinned at case 16.
+assert_contains "$OUT" "gh said:" "47: …and carries what gh said (#9018)"
 assert_eq "$(count_calls 'GH POST')" "0" "47: …and files NO alert (a fall-through would file a false page)"
 
 # 48. the created_at shape the Actions API ACTUALLY emits carries fractional

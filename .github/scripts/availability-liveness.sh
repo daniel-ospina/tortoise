@@ -342,7 +342,14 @@ search_issue() { # <body-marker> <exact-title>
   # 2026-10-24 on `pi-runner-vm-3`. The verdict was right; the attribution was
   # fiction, and it cost a forensics pass to recover. Keep the tool's own words.
   local errf
-  errf="$(mktemp 2>/dev/null || printf '%s' "/tmp/avail-liveness-search.$$")"
+  # ⛔ No `/tmp/<predictable>` fallback. `mktemp` failing is near-impossible here (this
+  # checker already requires `jq` and `gh`), and the fallback bought a fixed, world-
+  # writable path on a SHARED pool host for `2>"$errf"` to truncate — a hazard in
+  # exchange for nothing. Refuse instead, and say which reason it was.
+  if ! errf="$(mktemp 2>/dev/null)" || [ -z "$errf" ]; then
+    printf '__ERR__|could not create a temp file for the search stderr'
+    return 0
+  fi
   if ! out="$(gh api "search/issues?q=${enc}&per_page=100" --paginate 2>"$errf")"; then
     # The reason RIDES ON THE SENTINEL. It cannot be a shell variable: the
     # caller reads this function through `$(…)`, i.e. in a subshell, so any
@@ -511,7 +518,14 @@ main() {
 
   if [ -n "$hb_issue" ]; then
     body="$(get_issue_body "$hb_issue")"
-    if [ "$body" = "__ERR__" ]; then
+    # ⛔ Match the SENTINEL FAMILY, not the bare literal. `search_issue` returns
+    # `__ERR__|<reason>`; this reader deliberately returns a bare `__ERR__` (it
+    # discards gh's stderr, so it has no reason to carry). Matching the literal is
+    # correct only until someone gives this reader a reason too — the obvious next
+    # edit — and then the error string stops matching, flows into the body parser, and
+    # is mis-attributed as `heartbeat-record-unparseable`. `${body%%|*}` accepts both
+    # forms, so that edit cannot silently break this arm.
+    if [ "${body%%|*}" = "__ERR__" ]; then
       state="stale"; reason="heartbeat-record-unreadable"
       age_clause="heartbeat_issue=#${hb_issue}
 heartbeat_age_min=unknown"
