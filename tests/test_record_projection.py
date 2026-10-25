@@ -1064,8 +1064,13 @@ def test_the_source_row_key_reuses_the_layers_ONE_source_resolver():
     # CANONICAL match first, the LOWEST key on ties, then adopt-on-touch by
     # EITHER spelling (the graph's step 1/3 before step 2).
     assert "(node_key = %s OR node_key = %s OR canonical_url = %s)" in endpoint
-    assert ("ORDER BY CASE WHEN canonical_url = %s THEN 0 ELSE 1 END, node_key "
-            "LIMIT 1") in endpoint
+    # `COLLATE "C"` is the BYTE-order tiebreak (#9967 review P1): a bare
+    # `ORDER BY node_key` sorts by the DATABASE's collation, which is neither
+    # the graph's byte order nor stable across Postgres builds (glibc vs musl
+    # disagree on a host-case variant, measured). Drop the clause and this
+    # assertion is the only thing that notices.
+    assert ('ORDER BY CASE WHEN canonical_url = %s THEN 0 ELSE 1 END, '
+            'node_key COLLATE "C" LIMIT 1') in endpoint, endpoint
     assert canonical == _VARIANT_CANONICAL
 
 
@@ -1105,8 +1110,8 @@ def test_the_row_key_and_the_edge_endpoint_bind_the_same_adoption_tiers():
     # canonical form yet — is bound by BOTH, or neither is sufficient.
     for sql in (edge_sql, row_sql):
         assert "(node_key = %s OR node_key = %s OR canonical_url = %s)" in sql, sql
-        assert ("ORDER BY CASE WHEN canonical_url = %s THEN 0 ELSE 1 END, "
-                "node_key LIMIT 1") in sql, sql
+        assert ('ORDER BY CASE WHEN canonical_url = %s THEN 0 ELSE 1 END, '
+                'node_key COLLATE "C" LIMIT 1') in sql, sql
 
 
 def test_a_non_network_source_key_resolves_onto_itself():
@@ -1194,7 +1199,7 @@ def test_a_point_lands_its_extractedFrom_relation_after_the_point_identity():
     assert "public.source WHERE org_id = %s AND graph_id = %s AND " \
         "(node_key = %s OR node_key = %s OR canonical_url = %s) " \
         "ORDER BY CASE WHEN " \
-        "canonical_url = %s THEN 0 ELSE 1 END, node_key LIMIT 1" \
+        "canonical_url = %s THEN 0 ELSE 1 END, node_key COLLATE \"C\" LIMIT 1" \
         in relation.sql, relation.sql
     # params: the row's own values, then the two endpoint subquery triples/
     # quadruples the caller joins on — src, then tgt (raw ref, canonical

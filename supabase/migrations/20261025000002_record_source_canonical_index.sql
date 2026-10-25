@@ -1,0 +1,47 @@
+-- ============================================================================
+-- Migration 20261025000002: index the `canonical_url` identity lookup (#9967)
+-- ----------------------------------------------------------------------------
+-- WHY. `tortoise/record_projection.py` resolves a `:Source` identity in SQL
+-- against three candidate columns, in ONE statement:
+--
+--     (node_key = $raw OR node_key = $canonical OR canonical_url = $canonical)
+--     ORDER BY CASE WHEN canonical_url = $canonical THEN 0 ELSE 1 END,
+--              node_key COLLATE "C" LIMIT 1
+--
+-- The `canonical_url` arm arrived with #9553 for `extractedFrom` EDGE endpoints,
+-- and #9956 applies the same resolution to the ROW KEY — so it now runs on
+-- EVERY source write: once in the `node_identity` insert, and twice in the
+-- source upsert's `node_key` and `url` slots.
+--
+-- `public.source` carried only `idx_source_scope (org_id, graph_id)` plus the
+-- primary key (`20261012000001_record_event_stream.sql:214`), so the
+-- `canonical_url` arm had NO index to seek into. Because the predicate is an OR,
+-- Postgres cannot use the PK alone either: it degrades to a sequential scan of
+-- the whole tenant for that arm, evaluated as an InitPlan per statement.
+--
+-- MEASURED (record schema, one tenant, 20,000 `public.source` rows): one source
+-- write = two `Seq Scan … Rows Removed by Filter: 20002` InitPlans, ~8.7 ms. A
+-- rebuild of S source records over a tenant of N rows is therefore O(N×S) where
+-- it was O(N) before #9956. That is the record-sourced rebuild path Interface A
+-- exists for (`journal → record`, rebuildable from the journal alone), so the
+-- cost lands exactly where this subsystem is designed to be exercised.
+--
+-- THE INDEX makes all three arms seeks: the two `node_key` arms are already
+-- served by `source_pkey (org_id, graph_id, node_key)` and the `canonical_url`
+-- arm by this one, and Postgres combines them with a BitmapOr.
+--
+-- `canonical_url` is NULLABLE (every row written before #9553 has no canonical
+-- form). A btree index stores NULLs, and the predicate here is an equality, so
+-- NULL entries are never matched and cost only their own slot — the alternative,
+-- a partial index `WHERE canonical_url IS NOT NULL`, would save that space but
+-- could NOT serve the `CASE WHEN canonical_url = $1` ordering clause, which
+-- reads the column. Full index, deliberately.
+--
+-- ADDITIVE AND REVERSIBLE-BY-NEED: no data change, no rewrite of an existing
+-- row, no dependency for a reader (`record_projection` behaves identically with
+-- and without it — only the plan changes). `IF NOT EXISTS` keeps a re-apply a
+-- no-op, matching the sibling index above.
+-- ============================================================================
+
+CREATE INDEX IF NOT EXISTS idx_source_canonical_scope
+    ON public.source (org_id, graph_id, canonical_url);

@@ -227,6 +227,15 @@ RECORD_MIGRATIONS: tuple[str, ...] = (
     # `tests/test_9231_record_migrations_trigger.py` reds on the omission, so
     # the registry is the tuple or it is nothing.
     "20261025000001_record_tenancy_role_and_guc.sql",
+    # #9967 review P2 — an INDEX, contributing no column and no refusal, listed
+    # for the registry reason above: `pyproject.toml`'s `*_record_*.sql` glob
+    # ships it, and `tests/test_9231_record_migrations_trigger.py` reds on the
+    # omission. It is not decorative to the projection: `#9956`'s row-key
+    # resolution adds a `canonical_url = $1` predicate to EVERY source write, and
+    # without this index that arm is a tenant-wide sequential scan once per
+    # statement (measured: ~8.7 ms per write at 20,000 rows), which makes a
+    # journal rebuild O(rows × sources) instead of O(rows).
+    "20261025000002_record_source_canonical_index.sql",
     # #9881 — the KEY MOVE: `Object`/`Subject` key on the stable `id` instead of
     # the mutable `name`, which is what lets `EntityMutated op=rename` be a patch.
     # It is listed for the registry reason above AND because it RE-DECLARES
@@ -1804,11 +1813,33 @@ def _endpoint_resolution(
     mirror `source_identity.resolve_source_key`, which the fold calls before it
     MERGEs (see `_point_property_relation_statements`).
 
-    *order_by* appends `ORDER BY <column> LIMIT 1`. A multi-column match can hit
-    more than one row (several Sources may share a canonical form), and
-    `resolve_source_key` picks the LOWEST `url` on ties — without the clause the
-    record would pick arbitrarily and could wire the edge to a different Source
-    than the graph did, on the same journal line.
+    *order_by* appends `ORDER BY <column> COLLATE "C" LIMIT 1`. A multi-column
+    match can hit more than one row (several Sources may share a canonical
+    form), and `resolve_source_key` picks the LOWEST `url` on ties — without the
+    clause the record would pick arbitrarily and could wire the edge to a
+    different Source than the graph did, on the same journal line.
+
+    ⚠️ THE `COLLATE "C"` IS LOAD-BEARING, NOT DECORATION (#9967 review P1).
+    `resolve_source_key`'s `ORDER BY s.url LIMIT 1` is the GRAPH's ordering, and
+    FalkorDB compares strings by BYTE order. A bare `ORDER BY node_key` is
+    ordered by the DATABASE's collation instead, and that is neither byte order
+    nor even stable across builds — measured on the exact pair this file's
+    `#9956` tests use (`https://example.com/a/b` + the `Example.COM/…` variant,
+    both sharing the canonical form):
+
+    * `postgres:16` (glibc `en_US.utf8`) → the lowercase spelling sorts first;
+    * `postgres:16-alpine` (musl `en_US.utf8`) → the `Example.COM` spelling
+      sorts first;
+    * both images with `COLLATE "C"` → `Example.COM` first, which is byte order
+      ('E' = 0x45 < 'e' = 0x65) and therefore FalkorDB's answer.
+
+    So a host-case variant — the COMMONEST URL variant, and the shape of the
+    pre-`#9956` duplicate population this resolver folds — would pick a
+    DIFFERENT row than the graph depending only on which Postgres image the
+    record runs on. The row COUNT was never affected; WHICH row absorbs the
+    folded `title`/`document_kind` was. `COLLATE "C"` is the one spelling of
+    "the graph's own order" that both consumers (row key and edge endpoint)
+    inherit from this single fragment.
 
     *prefer* orders one matched COLUMN ahead of the rest: `ORDER BY CASE WHEN
     <column> = %s THEN 0 ELSE 1 END[, <order_by>] LIMIT 1`. A `match` predicate
@@ -1838,7 +1869,11 @@ def _endpoint_resolution(
         ordering.append(f"CASE WHEN {preferred_column} = %s THEN 0 ELSE 1 END")
         preferred.append(preferred_value)
     if order_by:
-        ordering.append(order_by)
+        # BYTE order, always (#9967 review P1): the tiebreak is
+        # `resolve_source_key`'s `ORDER BY s.url LIMIT 1`, and FalkorDB orders
+        # strings by bytes while a default-collation `ORDER BY` orders them by
+        # the DATABASE's locale — which differs between glibc and musl builds.
+        ordering.append(f'{order_by} COLLATE "C"')
     tail = f" ORDER BY {', '.join(ordering)} LIMIT 1" if ordering else ""
     bound = list(values) if values is not None else [journal_id] * len(match)
     if len(bound) != len(match):
@@ -1889,8 +1924,8 @@ def _source_key_resolution(org_id: str, graph_id: str,
       `MATCH (s:Source {canonicalUrl:$cu}) RETURN s.url`);
     * on ties, the LOWEST key — `resolve_source_key`'s `ORDER BY s.url LIMIT 1`,
       and `chk_source_node_key_is_contract_key` makes `node_key` the `url`;
-    * **step 2** (adopt-on-touch) — a row with no canonical form yet, stored
-      under the inbound RAW spelling **or under the canonical spelling itself**.
+    * **step 2** (adopt-on-touch) — a row stored under the inbound RAW spelling
+      **or under the canonical spelling itself**.
       Both candidates, because the graph has both: `resolve_source_key`
       (`source_identity.py`, "for candidate in ([url, canonical] …)") adopts by
       either spelling, and its own comment says the canonical one is "the common
@@ -1903,6 +1938,33 @@ def _source_key_resolution(org_id: str, graph_id: str,
       resolve one identity onto two different rows. (The graph's tier re-reads
       after adopting; the record does not need to — its predicate is a union of
       the same three match columns in ONE statement.)
+
+      ⚠️ **THE EMITTED PREDICATE CARRIES NO `canonical_url IS NULL` GUARD, and
+      that is a DELIBERATE divergence from the graph's step 2 — stated here
+      because an earlier cycle claimed the guard was bound when it was not
+      (#9967 review P2).** The graph's adopt query has the guard because
+      ADOPTING IS A WRITE there (it sets `canonicalUrl`, and the predicate makes
+      the re-run a no-op); here the tier only SELECTS.
+
+      The two are equivalent for every row THIS LAYER writes, by an invariant
+      the writer holds: `canonical_url` is derived unconditionally as
+      `_normalize_source_url(node_key)` (the `col_values.setdefault` in
+      `_declared_mutations`), so `node_key = <raw>` implies
+      `canonical_url = normalize(<raw>) = <canonical>` — the row is then a
+      CANONICAL match, which the `prefer` clause ranks first, exactly as the
+      graph returns from its `canonicalUrl` query before it adopts. And a
+      pre-#9553 row has `canonical_url IS NULL`, which is the state the graph's
+      guard admits.
+
+      The declared residual: that invariant is not ENFORCED by the schema. A
+      journal line whose payload carries an explicit `canonicalUrl` reaches the
+      column through `_split_properties` (the `column in cols` arm runs BEFORE
+      the refused-key check), so it can produce a row with
+      `canonical_url != normalize(node_key)`. Against such a row this subquery
+      adopts where the graph would MERGE a new node. That population is not
+      producible by any writer in this repo, and binding the guard here would
+      break the row-key/edge parity above, so the divergence is NAMED rather
+      than papered over.
     * **step 4** — nothing registered: the raw key, exactly as the graph MERGEs
       a new node. `COALESCE(…, %s)` is that fallback; without it a miss would
       bind NULL to `node_key` (NOT NULL) instead of creating the row.
