@@ -761,7 +761,8 @@ def test_a_document_source_row_derives_its_canonical_identity_too():
     a live-vs-record PROPERTY divergence. What remains is ROW-LEVEL: this layer
     keys the row on the record's RAW id, so a URL-variant `DocumentCreated` plans
     a second `public.source` row for the identity the graph folds onto ONE node.
-    Named on #5140 finding 12, not fixed here.
+    That is a different defect from #5140 finding 12 (which records the GRAPH
+    half), so the row half is tracked at #9956 — not fixed here.
 
     The derive is NOT narrowed to the record types OTHER than `DocumentCreated`
     — the tempting reading now that the doc fold writes `canonicalUrl` itself —
