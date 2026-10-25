@@ -30,6 +30,8 @@ These tests cover, one per verification-checklist row of the issue:
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -159,13 +161,66 @@ def _prereg(tmp_path: Path, *, judge_spec: str | None = None) -> tuple[dict, Pat
 _SMALL_CASES = ("ask01_residence", "ask04_badge")
 
 
-def _small_corpus(tmp_path: Path) -> Path:
-    root = tmp_path / "small-corpus"
+def _small_cases() -> tuple[dict, ...]:
     cases = tuple(case for case in generate_corpus._CASES
                   if case["case_id"] in _SMALL_CASES)
     assert len(cases) == len(_SMALL_CASES)
-    generate_corpus.write_corpus(root, cases)
+    return cases
+
+
+def _small_corpus(tmp_path: Path) -> Path:
+    root = tmp_path / "small-corpus"
+    generate_corpus.write_corpus(root, _small_cases())
     return root
+
+
+def _binding(commit: str, corpus_hash: str,
+             prereg_sha256: str | None = None) -> dict:
+    """A structurally valid commit binding, for the tests that grade something
+    ELSE about the receipt.
+
+    The binding these tests use is the synthetic one on purpose: the property
+    under test in each of them is a different receipt field, and building a git
+    repository per assertion would add minutes without measuring anything new.
+    That the *verified* binding is the real thing — resolved from a repository,
+    with the corpus and the protocol re-hashed at the recorded sha — is proved
+    once, end to end, by
+    ``test_a_published_report_carries_the_verified_commit_binding``.
+    """
+    return {
+        "schema": m.COMMIT_BINDING_SCHEMA,
+        "run_commit": commit,
+        "run_commit_requested": commit,
+        "corpus_path": "tests/eval/ask",
+        "corpus_hash": corpus_hash,
+        "prereg_path": "tests/eval/ask/preregistration.json",
+        "prereg_sha256": prereg_sha256 or "sha256:" + "0" * 64,
+        "prereg_commit": "b" * 40,
+        "prereg_commit_time": "2026-01-01T00:00:00+00:00",
+        "run_commit_time": "2026-01-02T00:00:00+00:00",
+        "prereg_commit_epoch": 1767225600,
+        "run_commit_epoch": 1767312000,
+        "ordering": "proven",
+        "ordering_proof": "synthetic — the verified-binding test is the real one",
+    }
+
+
+def _receipt(scored: dict, *, commit: str = "a" * 40, cost_usd: float = 0.0,
+             prereg_sha256: str | None = None) -> dict:
+    """`build_receipt` with a matching binding (see :func:`_binding`).
+
+    The pre-registration hash goes to BOTH halves — the receipt's
+    `resolved_config` records the published protocol's hash and the binding
+    records the one re-hashed at the commit — because
+    :func:`m._validate_commit_binding` cross-checks them unconditionally: a
+    fixture that carried only one of them would be exactly the inconsistency
+    that check exists to catch.
+    """
+    prereg_sha256 = prereg_sha256 or "sha256:" + "0" * 64
+    return m.build_receipt(
+        scored=scored, commit=commit, cost_usd=cost_usd,
+        prereg_sha256=prereg_sha256,
+        commit_binding=_binding(commit, scored["corpus_hash"], prereg_sha256))
 
 
 def _mock_prereg(root: Path | None = None,
@@ -193,6 +248,146 @@ def _mock_prereg(root: Path | None = None,
         "n_cases": len(ask_corpus.case_ids(root)),
     })
     return record
+
+
+def _git_env() -> dict[str, str]:
+    """Host-independent env for the fixture's own git calls.
+
+    The throwaway repositories are built with the INHERITED environment, so
+    nothing in them is hermetic by default: a global ``commit.gpgsign = true``
+    makes ``git commit`` fail (the ``assert`` below then reads as an ERROR, not
+    a finding), a global ``core.hooksPath`` (this fleet's harness sets one) runs
+    the HOST's hooks inside the fixture, and ``init.defaultBranch`` /
+    ``init.templateDir`` are ambient too. Both config files are pointed at
+    ``os.devnull`` and every inherited ``GIT_*`` variable is dropped — the same
+    shape as ``tests/test_who_is_on.py::_git_env`` and
+    ``tests/test_lane_stash.py::_env``.
+    """
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_SYSTEM"] = os.devnull
+    return env
+
+
+def _git_hermetic(repo: Path, *args: str, date: str | None = None
+                  ) -> subprocess.CompletedProcess:
+    """``git -C repo <args>`` under :func:`_git_env`.
+
+    ``date`` pins BOTH the author and committer date to one explicit ISO
+    timestamp carrying an explicit UTC offset — the ordering tests need two
+    commits whose offsets differ, which is exactly what a real lane history
+    looks like here.
+    """
+    env = _git_env()
+    if date is not None:
+        env["GIT_COMMITTER_DATE"] = date
+        env["GIT_AUTHOR_DATE"] = date
+    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True,
+                          text=True, check=False, env=env)
+
+
+def _git_commit(repo: Path, message: str, *, date: str | None = None) -> str:
+    """Commit the worktree in a throwaway repo; return the full sha.
+
+    ``-c commit.gpgsign=false`` AND the ``os.devnull`` config env (see
+    :func:`_git_env`): signing is refused by name, and every ambient config
+    knob — hooks, init defaults — never reaches the fixture at all.
+    """
+    assert _git_hermetic(repo, "add", "-A").returncode == 0
+    proc = _git_hermetic(
+        repo, "-c", "user.name=pi-test",
+        "-c", "user.email=pi-test@example.invalid",
+        "-c", "commit.gpgsign=false",
+        "commit", "-q", "-m", message, date=date)
+    assert proc.returncode == 0, proc.stderr
+    sha = m._git_out(repo, "rev-parse", "HEAD")
+    assert sha
+    return sha
+
+
+def _git_init(repo: Path) -> None:
+    """Create a throwaway repo with BOTH ambient init knobs neutralised.
+
+    ``-b main`` pins ``init.defaultBranch``; ``--template=`` pins the template
+    SOURCE, so no template — a host ``init.templateDir``, ``$GIT_TEMPLATE_DIR``,
+    or git's own default directory — can drop files into the fixture's
+    ``.git``. That matters for hooks: ``git init`` copies every non-dot file of
+    the template into ``$GIT_DIR`` (git-init[1], TEMPLATE DIRECTORY), so a
+    template shipping an executable ``hooks/pre-commit`` lands in
+    ``.git/hooks``, and a hermetic commit cannot switch it off by config —
+    nulling ``core.hooksPath`` makes git fall back to ``.git/hooks``. Every
+    throwaway repo in this file is built HERE, so a fixture cannot be hermetic
+    in one helper and ambient in the next.
+    """
+    assert _git_hermetic(repo, "init", "-q", "-b", "main",
+                         "--template=").returncode == 0
+
+
+def _make_dated_repo(base: Path, *, prereg_date: str, run_date: str) -> dict:
+    """A two-commit repo whose commits carry EXPLICIT committer dates.
+
+    The two ``%cI`` strings are decided by the dates, not by commit order, so a
+    caller can build a parent/child pair whose TEXT order and EPOCH order
+    disagree — the shape mixed UTC offsets produce in this repository.
+    """
+    repo = base / "dated-repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    _git_init(repo)
+    corpus_dir = repo / "tests" / "eval" / "ask"
+    generate_corpus.write_corpus(corpus_dir, _small_cases())
+    prereg_path = corpus_dir / "preregistration.json"
+    prereg_path.write_text(json.dumps(_mock_prereg(corpus_dir)),
+                           encoding="utf-8")
+    prereg_commit = _git_commit(repo, "protocol: the pre-registration",
+                               date=prereg_date)
+    (repo / "run.marker").write_text("the run happened here\n", encoding="utf-8")
+    run_commit = _git_commit(repo, "run: the sealed corpus executed",
+                             date=run_date)
+    return {"repo": repo, "corpus_dir": corpus_dir, "prereg_path": prereg_path,
+            "prereg_commit": prereg_commit, "run_commit": run_commit}
+
+
+def _make_bound_repo(base: Path) -> dict:
+    """A throwaway repository in which the ordering claim is TRUE.
+
+    Three commits, each carrying something a different assertion needs:
+
+    * ``c1`` the corpus + the pre-registration — the protocol commit;
+    * ``c2`` a run marker — the commit a publish may legitimately record;
+    * ``c3`` the SAME corpus with one sealed gold answer RE-KEYED — a real sha
+      that cannot reproduce the scored corpus, i.e. the shape of a report that
+      cites a tree its numbers did not come from.
+    """
+    repo = base / "repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    _git_init(repo)
+    corpus_dir = repo / "tests" / "eval" / "ask"
+    generate_corpus.write_corpus(corpus_dir, _small_cases())
+    prereg_path = corpus_dir / "preregistration.json"
+    prereg_path.write_text(json.dumps(_mock_prereg(corpus_dir)),
+                           encoding="utf-8")
+    prereg_commit = _git_commit(repo, "protocol: the pre-registration")
+    (repo / "run.marker").write_text("the run happened here\n", encoding="utf-8")
+    run_commit = _git_commit(repo, "run: the sealed corpus executed")
+    gold = sorted((corpus_dir / "gold").glob("*.gold.json"))[0]
+    original_gold = gold.read_text(encoding="utf-8")
+    rekeyed = json.loads(original_gold)
+    rekeyed["answer"] = "a different answer entirely"
+    gold.write_text(json.dumps(rekeyed, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8")
+    rekeyed_commit = _git_commit(repo, "gold: re-keyed after the run")
+    # The WORKTREE goes back to the scored corpus, so HEAD (c3) is dirty on
+    # purpose: the mismatch lives ONLY in the commit, which is what makes the
+    # refusal below a test of the sha and not of the disk.
+    gold.write_text(original_gold, encoding="utf-8")
+    return {"repo": repo, "corpus_dir": corpus_dir, "prereg_path": prereg_path,
+            "prereg_commit": prereg_commit, "run_commit": run_commit,
+            "rekeyed_commit": rekeyed_commit}
+
+
+@pytest.fixture(scope="module")
+def bound_repo(tmp_path_factory):
+    return _make_bound_repo(tmp_path_factory.mktemp("bound-repo"))
 
 
 @pytest.fixture(scope="module")
@@ -503,8 +698,8 @@ def test_a_manifest_mismatch_is_inconclusive(shared_run):
 
 def test_the_receipt_carries_sha_model_and_hash_and_validates(shared_run):
     scored = shared_run["scored"]
-    receipt = m.build_receipt(scored=scored, commit="a" * 40, cost_usd=0.01,
-                              prereg_sha256="sha256:" + "b" * 64)
+    receipt = _receipt(scored, cost_usd=0.01,
+                       prereg_sha256="sha256:" + "b" * 64)
     assert receipt["commit"] == "a" * 40
     assert receipt["corpus_hash"] == scored["corpus_hash"]
     assert receipt["corpus_hash"].startswith("sha256:")
@@ -523,13 +718,13 @@ def test_a_receipt_may_not_overstate_its_own_evidence(shared_run):
     """The auditor's check re-derives the verdict: a receipt that says PASS
     while its own metrics show a live superseded claim is invalid."""
     scored = shared_run["scored"]
-    receipt = m.build_receipt(scored=scored, commit="a" * 40, cost_usd=0.01)
+    receipt = _receipt(scored, cost_usd=0.01)
     assert m.validate_ask_receipt(receipt) == []
     receipt["metrics"]["superseded_live@distilled"]["rendered_live"] = 1
     issues = m.validate_ask_receipt(receipt)
     assert issues and "contradicts" in issues[0], issues
 
-    receipt = m.build_receipt(scored=scored, commit="a" * 40, cost_usd=0.01)
+    receipt = _receipt(scored, cost_usd=0.01)
     receipt["metrics"]["verbatim_no_regression"]["regressions"] = ["ask04_badge"]
     assert m.validate_ask_receipt(receipt), (
         "a PASS receipt with a verbatim regression in its own metrics must be "
@@ -540,7 +735,7 @@ def test_w7_validate_receipt_is_longmemeval_gated_so_the_ask_bar_is_its_own(shar
     """The recorded reuse boundary (decision 4): build_receipt and
     VERDICT_VALUES are benchmark-generic; validate_receipt is not."""
     scored = shared_run["scored"]
-    receipt = m.build_receipt(scored=scored, commit="a" * 40, cost_usd=0.01)
+    receipt = _receipt(scored, cost_usd=0.01)
     w7_issues = w7_publish.validate_receipt(receipt)
     assert any("official_recall_all@" in issue for issue in w7_issues), (
         "w7_publish.validate_receipt must reject an ask receipt (it demands "
@@ -550,7 +745,7 @@ def test_w7_validate_receipt_is_longmemeval_gated_so_the_ask_bar_is_its_own(shar
 
 def test_the_report_claims_no_unpre_registered_threshold(shared_run):
     scored = shared_run["scored"]
-    receipt = m.build_receipt(scored=scored, commit="a" * 40, cost_usd=0.01)
+    receipt = _receipt(scored, cost_usd=0.01)
     prereg = m.load_preregistration()
     text = m.render_report(receipt=receipt, scored=scored, prereg=prereg,
                            prereg_sha256="sha256:" + "b" * 64)
@@ -567,15 +762,22 @@ def test_the_report_claims_no_unpre_registered_threshold(shared_run):
 def test_cli_preregister_run_score_publish(tmp_path, monkeypatch):
     """End to end through the CLI, with the mock judge (wiring, not a number).
 
-    The published report must be REFUSED if re-evaluated against a
-    pre-registration that no longer describes the corpus.
+    A MOCK-graded run is wiring, never a measurement: publish refuses it even
+    though its bar verdict is PASS. The run is recorded at a real commit in a
+    real repository (see :func:`_make_bound_repo`), so the ONLY thing left for
+    publish to refuse is the mock pin — which is what this test is about.
     """
     monkeypatch.chdir(tmp_path)
-    root = _small_corpus(tmp_path)
-    prereg_path = tmp_path / "prereg.json"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_init(repo)
+    corpus_dir = repo / "tests" / "eval" / "ask"
+    generate_corpus.write_corpus(corpus_dir, _small_cases())
+    prereg_path = corpus_dir / "preregistration.json"
     assert m._main(["preregister", "--out", str(prereg_path),
-                    "--judge", "mock", "--corpus-root", str(root)]) == 0
+                    "--judge", "mock", "--corpus-root", str(corpus_dir)]) == 0
     assert prereg_path.exists()
+    _git_commit(repo, "protocol: the pre-registration")
 
     # A stub reader is installed through the lane's own seam so the CLI run
     # needs no provider key.
@@ -585,27 +787,33 @@ def test_cli_preregister_run_score_publish(tmp_path, monkeypatch):
                         lambda: _RecordingReader(_answer_map(), []))
     obs_path = tmp_path / "obs.json"
     assert m._main(["run", "--out", str(obs_path),
-                    "--corpus-root", str(root)]) == 0
+                    "--corpus-root", str(corpus_dir)]) == 0
     scored_path = tmp_path / "scored.json"
     assert m._main(["score", "--run", str(obs_path), "--out", str(scored_path),
                     "--mock", "--prereg", str(prereg_path),
-                    "--corpus-root", str(root)]) == 0
+                    "--corpus-root", str(corpus_dir)]) == 0
     scored = json.loads(scored_path.read_text(encoding="utf-8"))
     assert scored["bar"]["verdict"] == "pass", scored["bar"]
+    (repo / "run.marker").write_text("the run happened here\n", encoding="utf-8")
+    run_commit = _git_commit(repo, "run: the sealed corpus executed")
+    # The commit binding is VERIFIED here, so the refusal asserted below can
+    # only be the mock pin — not a binding failure standing in for it.
+    binding, reasons = m.verify_commit_binding(
+        commit=run_commit, repo_root=repo, corpus_root=corpus_dir,
+        prereg=prereg_path)
+    assert binding is not None and reasons == [], reasons
 
     report = tmp_path / "run-report.md"
     receipt = tmp_path / "receipt.json"
-    # A MOCK-graded run is wiring, never a measurement: publish refuses it even
-    # though its bar verdict is PASS.
-    assert m._main(["publish", "--scored", str(scored_path),
-                    "--commit", "c" * 40, "--cost-usd", "0.02",
-                    "--out", str(report), "--receipt", str(receipt),
-                    "--prereg", str(prereg_path),
-                    "--corpus-root", str(root)]) == 2
+    pub = ["publish", "--scored", str(scored_path), "--commit", run_commit,
+           "--cost-usd", "0.02", "--out", str(report),
+           "--receipt", str(receipt), "--prereg", str(prereg_path),
+           "--corpus-root", str(corpus_dir), "--repo", str(repo)]
+    assert m._main(pub) == 2
     assert not report.exists() and not receipt.exists()
-    return
 
-def test_cli_publishes_a_run_under_an_honest_judge_identity(tmp_path):
+
+def test_cli_publishes_a_run_under_an_honest_judge_identity(published):
     """The publish path end to end, with the judge identity the receipt states.
 
     The mock pin cannot carry a PASS (``test_cli_preregister_run_score_publish``
@@ -614,29 +822,9 @@ def test_cli_publishes_a_run_under_an_honest_judge_identity(tmp_path):
     takes — so the receipt validates, the report renders, and the numbers in it
     are the numbers the bar read.
     """
-    root = _small_corpus(tmp_path)
-    run = m.run_sealed(corpus_root=root,
-                       reader_factory=_factory(_RecordingReader(_answer_map(), [])))
-    scored = m.score(run_report=run, corpus_root=root, judge=_StubJudge(),
-                     judge_spec=_StubJudge.model_id)
-    prereg = _mock_prereg(root)
-    prereg_path = tmp_path / "prereg.json"
-    prereg_path.write_text(json.dumps(prereg), encoding="utf-8")
-    scored["bar"] = m.evaluate_exit_bar(
-        scored=scored, manifest=ask_corpus.verify_manifest(root), prereg=prereg)
-    assert scored["bar"]["verdict"] == "pass", scored["bar"]
-    scored_path = tmp_path / "scored.json"
-    scored_path.write_text(json.dumps(scored), encoding="utf-8")
-
-    report = tmp_path / "run-report.md"
-    receipt_path = tmp_path / "receipt.json"
-    assert m._main(["publish", "--scored", str(scored_path),
-                    "--commit", "c" * 40, "--cost-usd", "0.02",
-                    "--out", str(report), "--receipt", str(receipt_path),
-                    "--prereg", str(prereg_path),
-                    "--corpus-root", str(root)]) == 0
-    assert report.read_text(encoding="utf-8").startswith("---\ntitle:")
-    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert published["rc"] == 0
+    assert published["report"].read_text(encoding="utf-8").startswith("---\ntitle:")
+    receipt = published["receipt"]
     assert receipt["verdict"] == "pass"
     assert receipt["judge_model"] == _StubJudge.model_id
     assert m.validate_ask_receipt(receipt) == []
@@ -694,8 +882,8 @@ def test_a_mock_graded_receipt_cannot_claim_the_official_pin(tmp_path):
         scored=scored, prereg=_mock_prereg(root,
                                            judge_spec=m.MOCK_JUDGE_SPEC))
     assert scored["bar"]["verdict"] == "pass", scored["bar"]
-    receipt = m.build_receipt(scored=scored, commit="e" * 40, cost_usd=0.0,
-                              prereg_sha256="0" * 64)
+    receipt = _receipt(scored, commit="e" * 40, cost_usd=0.0,
+                       prereg_sha256="0" * 64)
     mock_issues = m.validate_ask_receipt(receipt)
     assert any("MOCK-graded run cannot publish" in i for i in mock_issues), mock_issues
     # forging the pin onto the same receipt is caught by the derived-pin rule
@@ -923,8 +1111,8 @@ def test_score_refuses_a_report_it_cannot_grade(tmp_path):
 def test_a_receipt_rejects_a_zero_denominator(shared_run):
     """A vacuous PASS must be refused at the publication boundary too — the
     receipt's own comment promised this and the code only rejected `n < 0`."""
-    receipt = m.build_receipt(scored=shared_run["scored"], commit="f" * 40,
-                              cost_usd=0.0, prereg_sha256="0" * 64)
+    receipt = _receipt(shared_run["scored"], commit="f" * 40,
+                       cost_usd=0.0, prereg_sha256="0" * 64)
     assert m.validate_ask_receipt(receipt) == []
     receipt["metrics"]["superseded_live@distilled"] = {
         "seen": 0, "rendered_live": 0, "n": 0, "n_cases": 0}
@@ -941,9 +1129,479 @@ def test_the_report_renders_an_unobserved_claim_as_unmeasured(shared_run):
     row["superseded"][0].update({"seen": False, "rendered_live": False,
                                  "flagged": False})
     report = m.render_report(
-        receipt=m.build_receipt(scored=shared_run["scored"], commit="a" * 40,
-                                cost_usd=0.0, prereg_sha256="0" * 64),
+        receipt=_receipt(shared_run["scored"], cost_usd=0.0,
+                         prereg_sha256="0" * 64),
         scored=scored, prereg=_mock_prereg(shared_run["root"]),
         prereg_sha256="0" * 64)
     assert "unseen / —" in report
     assert "unseen / live-unflagged" not in report
+
+
+# ── 7. the published artifact is BOUND to the commit it records ───────────
+#
+# Targets 1 and 2 of #9097 are claims about history — "pre-registration
+# committed BEFORE the run (verifiable, not asserted)" and "reproducible from
+# the recorded sha alone". Both used to be satisfied by prose: `--commit` was a
+# free-text field, so a report could name a sha that does not resolve, a sha
+# whose tree carries a DIFFERENT corpus or protocol, or a sha at which the
+# pre-registration entered history in that same commit (i.e. possibly authored
+# after the numbers). The report rendered anyway, and its §6 told a reader to
+# `git checkout <sha>`.
+
+def _publish_argv(*, scored_path: Path, commit: str, report: Path,
+                  receipt: Path, corpus_root: Path, prereg: Path,
+                  repo: Path | None = None) -> list[str]:
+    argv = ["publish", "--scored", str(scored_path), "--commit", commit,
+            "--cost-usd", "0.02", "--out", str(report),
+            "--receipt", str(receipt), "--prereg", str(prereg),
+            "--corpus-root", str(corpus_root)]
+    if repo is not None:
+        argv += ["--repo", str(repo)]
+    return argv
+
+
+@pytest.fixture(scope="module")
+def published(tmp_path_factory, shared_run, bound_repo):
+    """ONE successful publish of the shared run, from a repository whose
+    ordering claim is true. Read by the two assertions that need the artifact."""
+    out = tmp_path_factory.mktemp("published")
+    scored_path = out / "scored.json"
+    scored_path.write_text(json.dumps(shared_run["scored"]), encoding="utf-8")
+    report = out / "run-report.md"
+    receipt_path = out / "receipt.json"
+    rc = m._main(_publish_argv(
+        scored_path=scored_path, commit=bound_repo["run_commit"], report=report,
+        receipt=receipt_path, corpus_root=bound_repo["corpus_dir"],
+        prereg=bound_repo["prereg_path"], repo=bound_repo["repo"]))
+    receipt = (json.loads(receipt_path.read_text(encoding="utf-8"))
+               if receipt_path.exists() else {})
+    return {"rc": rc, "report": report, "receipt": receipt}
+
+
+def test_the_verified_binding_proves_the_recorded_sha_vouches_for_the_run(
+        bound_repo, shared_run):
+    """The repository answers the three questions, not the report.
+
+    (a) the sha resolves; (b) the corpus AT that sha re-hashes to the scored
+    corpus and the pre-registration blob there is byte-identical to the
+    published one; (c) the pre-registration's own commit is a PROPER ancestor
+    of the run commit.
+    """
+    binding, reasons = m.verify_commit_binding(
+        commit=bound_repo["run_commit"], repo_root=bound_repo["repo"],
+        corpus_root=bound_repo["corpus_dir"], prereg=bound_repo["prereg_path"])
+    assert reasons == []
+    assert binding is not None
+    assert binding["schema"] == m.COMMIT_BINDING_SCHEMA
+    assert binding["run_commit"] == bound_repo["run_commit"]
+    assert binding["prereg_commit"] == bound_repo["prereg_commit"]
+    assert binding["ordering"] == "proven"
+    # (b) is the part that makes "reproducible from the sha alone" true: the
+    # corpus re-hashed out of the commit is the corpus that was scored.
+    assert binding["corpus_hash"] == ask_corpus.compute_corpus_hash(
+        bound_repo["corpus_dir"])
+    assert binding["corpus_hash"] == shared_run["scored"]["corpus_hash"]
+    assert binding["prereg_sha256"] == ask_corpus.sha256_file(
+        bound_repo["prereg_path"])
+    # the commit times are recorded, so a reviewer can re-check without git
+    assert binding["prereg_commit_time"] and binding["run_commit_time"]
+
+
+def test_publish_refuses_a_commit_that_does_not_resolve(tmp_path, shared_run,
+                                                        capsys):
+    """FAIL-BEFORE: this publish returned 0 and wrote the report.
+
+    A `--commit` that resolves to nothing is the purest form of the defect the
+    issue names — the report's whole reproducibility sentence points at a sha
+    that does not exist, and nothing noticed.
+    """
+    prereg_path = tmp_path / "prereg.json"
+    prereg_path.write_text(json.dumps(_mock_prereg(shared_run["root"])),
+                           encoding="utf-8")
+    scored_path = tmp_path / "scored.json"
+    scored_path.write_text(json.dumps(shared_run["scored"]), encoding="utf-8")
+    report = tmp_path / "run-report.md"
+    receipt = tmp_path / "receipt.json"
+    rc = m._main(_publish_argv(
+        scored_path=scored_path, commit="c" * 40, report=report,
+        receipt=receipt, corpus_root=shared_run["root"], prereg=prereg_path))
+    err = capsys.readouterr().err
+    assert rc == 2, "a sha that resolves to nothing must never be published"
+    assert "is not a commit" in err, err
+    assert not report.exists() and not receipt.exists()
+
+
+def test_publish_refuses_a_commit_whose_corpus_is_not_the_scored_one(
+        tmp_path, shared_run, bound_repo, capsys):
+    """A REAL commit that carries a DIFFERENT corpus cannot vouch for the run.
+
+    `c3` of the fixture re-keys one sealed gold answer after the run. The sha
+    resolves, the protocol at it is identical, the ordering holds — and the
+    corpus does not hash to the scored one, so `git checkout <sha>` reproduces
+    a corpus these numbers did not come from.
+    """
+    scored_path = tmp_path / "scored.json"
+    scored_path.write_text(json.dumps(shared_run["scored"]), encoding="utf-8")
+    report = tmp_path / "run-report.md"
+    receipt = tmp_path / "receipt.json"
+    rc = m._main(_publish_argv(
+        scored_path=scored_path, commit=bound_repo["rekeyed_commit"],
+        report=report, receipt=receipt, corpus_root=bound_repo["corpus_dir"],
+        prereg=bound_repo["prereg_path"], repo=bound_repo["repo"]))
+    err = capsys.readouterr().err
+    assert rc == 2, err
+    assert "DIFFERENT corpus" in err, err
+    assert not report.exists() and not receipt.exists()
+
+
+def test_the_ordering_claim_is_not_satisfied_when_the_protocol_shares_the_run_commit(
+        bound_repo):
+    """`written_before_any_arm_run: true` is a declaration; this is the check.
+
+    Recording the run at the commit that INTRODUCES the pre-registration proves
+    nothing — the protocol could have been written after the numbers were seen.
+    The bar needs the pre-registration's commit to be a proper ANCESTOR.
+    """
+    binding, reasons = m.verify_commit_binding(
+        commit=bound_repo["prereg_commit"], repo_root=bound_repo["repo"],
+        corpus_root=bound_repo["corpus_dir"], prereg=bound_repo["prereg_path"])
+    assert binding is None
+    assert any("ordering NOT proven" in reason for reason in reasons), reasons
+
+
+def test_a_shallow_boundary_at_the_prereg_commit_is_unprovable(tmp_path):
+    """A grafted boundary is an ordering that CANNOT be shown, so publish refuses.
+
+    `.git/shallow` is what `git clone --depth=N` leaves behind, and git reports
+    a grafted commit's parents as none — every path then looks added by that
+    commit, so `rev-list -1 -- <prereg>` returns it and the ancestry test is
+    trivially true. Writing the boundary file by hand is the same shape git
+    consumes (measured: `rev-list -1 <commit> -- <path>` still answers normally
+    with the file in place), so this pins the refusal without cloning. Each
+    shallow test builds its OWN repository: the boundary file must not leak into
+    the module-scoped fixture the other ordering tests share.
+    """
+    fixture = _make_bound_repo(tmp_path)
+    repo = Path(fixture["repo"])
+    shallow = repo / ".git" / "shallow"
+    shallow.write_text(fixture["prereg_commit"] + "\n", encoding="utf-8")
+    # Non-vacuity: the boundary really is what the reader sees, and history is
+    # still walkable — so the refusal below comes from the guard, not from git
+    # having died on the file.
+    assert m._shallow_boundary(repo) == {fixture["prereg_commit"]}
+    assert m._git_out(repo, "rev-list", "-1", fixture["run_commit"], "--",
+                      "tests/eval/ask/preregistration.json") is not None
+
+    binding, reasons = m.verify_commit_binding(
+        commit=fixture["run_commit"], repo_root=repo,
+        corpus_root=fixture["corpus_dir"], prereg=fixture["prereg_path"])
+    assert binding is None, "UNPROVABLE must never be recorded as a proof"
+    assert any("UNPROVABLE" in reason and "SHALLOW boundary" in reason
+               for reason in reasons), reasons
+
+
+@pytest.mark.skipif(os.geteuid() == 0,
+                    reason="root can read a 0o000 file, so the read would not fail")
+def test_an_unreadable_shallow_file_is_unprovable_not_absent(tmp_path):
+    """FAIL-BEFORE: an unreadable boundary read as `not shallow` — a false PASS.
+
+    `_shallow_boundary` folded every `OSError` into `set()`, so a shallow file
+    that exists but cannot be read disengaged the only guard implementing
+    "UNPROVABLE, refuse": on a clone whose boundary IS the pre-registration
+    commit every downstream ordering check then passes trivially and the
+    binding is recorded `proven`. An unreadable boundary is UNKNOWN, never
+    absent. Measured: git tolerates an unreadable `.git/shallow` (rev-list still
+    answers), so the read failure is reached rather than shadowed by a git error.
+    """
+    fixture = _make_bound_repo(tmp_path)
+    repo = Path(fixture["repo"])
+    shallow = repo / ".git" / "shallow"
+    shallow.write_text(fixture["prereg_commit"] + "\n", encoding="utf-8")
+    shallow.chmod(0o000)
+    try:
+        assert m._shallow_boundary(repo) is None, (
+            "an unreadable boundary must not read as 'this clone is complete'")
+        binding, reasons = m.verify_commit_binding(
+            commit=fixture["run_commit"], repo_root=repo,
+            corpus_root=fixture["corpus_dir"], prereg=fixture["prereg_path"])
+    finally:
+        shallow.chmod(0o644)
+    assert binding is None
+    assert any("cannot READ" in reason and "UNPROVABLE" in reason
+               for reason in reasons), reasons
+
+
+def test_the_ordering_cross_check_compares_instants_not_wall_clock_text(
+        tmp_path):
+    """FAIL-BEFORE: the clock cross-check refused a correctly ordered pair.
+
+    `%cI` renders each commit in its OWN UTC offset, so comparing two `%cI`
+    strings compares wall clocks: `"…T12:00+02:00" > "…T10:30-05:00"` is True
+    even though the first instant (10:00Z) is 5h30m EARLIER than the second
+    (15:30Z). The ancestry check at the same site passes; only the text
+    comparison refused — with a false accusation of rewritten history. Mixed
+    offsets are the norm here (lane commits `-05:00`, others `+00:00`).
+    """
+    repo = _make_dated_repo(
+        tmp_path, prereg_date="2026-01-01T12:00:00+02:00",
+        run_date="2026-01-01T10:30:00-05:00")
+    binding, reasons = m.verify_commit_binding(
+        commit=repo["run_commit"], repo_root=repo["repo"],
+        corpus_root=repo["corpus_dir"], prereg=repo["prereg_path"])
+    assert reasons == []
+    assert binding is not None
+    assert binding["ordering"] == "proven"
+    # Non-vacuity: the ISO TEXT really does sort the wrong way (that is what
+    # the pre-fix `>` compared), while the EPOCHS — the instants — do not.
+    assert binding["prereg_commit_time"] > binding["run_commit_time"]
+    assert binding["prereg_commit_epoch"] < binding["run_commit_epoch"]
+
+
+def test_the_ordering_cross_check_catches_a_rewritten_clock_across_offsets(
+        tmp_path):
+    """FAIL-BEFORE (the worse direction): it FAILED OPEN.
+
+    The text comparison is symmetric, so when the pre-registration's committer
+    date is genuinely LATER than the run's — rewritten history, the one thing
+    this cross-check exists to catch — an offset difference can order the
+    strings the other way and the check stayed silent while the binding was
+    recorded `proven` and rendered into §6 as evidence.
+    """
+    repo = _make_dated_repo(
+        tmp_path, prereg_date="2026-01-01T09:00:00-05:00",
+        run_date="2026-01-01T12:00:00+02:00")
+    binding, reasons = m.verify_commit_binding(
+        commit=repo["run_commit"], repo_root=repo["repo"],
+        corpus_root=repo["corpus_dir"], prereg=repo["prereg_path"])
+    assert binding is None
+    assert any("ordering NOT proven" in reason for reason in reasons), reasons
+    assert any("LATER than the run commit" in reason for reason in reasons)
+    # Non-vacuity: the ISO text sorts the way a text comparison reads as fine.
+    prereg_text = m._git_out(repo["repo"], "show", "-s", "--format=%cI",
+                             repo["prereg_commit"])
+    run_text = m._git_out(repo["repo"], "show", "-s", "--format=%cI",
+                          repo["run_commit"])
+    assert prereg_text < run_text, (prereg_text, run_text)
+    assert m._commit_epoch(repo["repo"], repo["prereg_commit"]) > \
+        m._commit_epoch(repo["repo"], repo["run_commit"])
+
+
+def test_the_commit_times_are_recorded_as_epochs_beside_the_iso_strings(
+        bound_repo):
+    """A receipt-only auditor re-checks the polarity without running git.
+
+    The ISO strings cannot decide it (they carry their own offsets), so the
+    comparable datum has to travel IN the binding: both epochs, ordered the
+    same way the ancestry proof orders the commits.
+    """
+    binding, reasons = m.verify_commit_binding(
+        commit=bound_repo["run_commit"], repo_root=bound_repo["repo"],
+        corpus_root=bound_repo["corpus_dir"], prereg=bound_repo["prereg_path"])
+    assert reasons == []
+    assert isinstance(binding["prereg_commit_epoch"], int)
+    assert isinstance(binding["run_commit_epoch"], int)
+    assert binding["prereg_commit_epoch"] <= binding["run_commit_epoch"]
+    # Each epoch IS the epoch of the commit whose ISO string travels beside it.
+    assert m._commit_epoch(bound_repo["repo"], binding["prereg_commit"]) == \
+        binding["prereg_commit_epoch"]
+    assert m._commit_epoch(bound_repo["repo"], binding["run_commit"]) == \
+        binding["run_commit_epoch"]
+    assert binding["prereg_commit_time"] and binding["run_commit_time"]
+
+
+def test_the_fixture_commits_are_hermetic_against_ambient_git_config(
+        tmp_path, monkeypatch):
+    """A HOSTILE global git config must not turn the fixtures into errors.
+
+    `_git_commit` used to be a bare `git commit` inheriting the environment, so
+    `commit.gpgsign = true` made the `assert` fire (an ERROR, not a finding) and
+    a global `core.hooksPath` ran the host's hooks inside the fixture this fleet
+    builds. The two probes prove the config really is live — so the fixture's
+    success below is not luck — and a bare `git init` under `init.defaultBranch
+    = trunk` proves the branch pin is load-bearing.
+    """
+    hooks = tmp_path / "hostile-hooks"
+    hooks.mkdir()
+    (hooks / "pre-commit").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    (hooks / "pre-commit").chmod(0o755)
+    hostile = tmp_path / "hostile-gitconfig"
+    hostile.write_text(
+        f"[commit]\n\tgpgsign = true\n[init]\n\tdefaultBranch = trunk\n"
+        f"[core]\n\thooksPath = {hooks}\n", encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(hostile))
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.txt").write_text("x\n", encoding="utf-8")
+    # A BARE init leaves the ambient default branch in place — the hostile one.
+    assert m._git(repo, "init", "-q").returncode == 0
+    # `symbolic-ref` reads the unborn branch; `rev-parse --abbrev-ref HEAD`
+    # needs a commit and errors on a fresh repo.
+    assert m._git_out(repo, "symbolic-ref", "--short", "HEAD") == "trunk"
+    assert m._git(repo, "add", "-A").returncode == 0
+    # Probe 1: signing is live, so a bare commit fails.
+    bare = m._git(repo, "-c", "user.name=pi-test",
+                  "-c", "user.email=pi-test@example.invalid",
+                  "commit", "-q", "-m", "bare")
+    assert bare.returncode != 0, (
+        "the hostile config is not live — this test would pass for the wrong "
+        f"reason (stdout={bare.stdout!r})")
+    # Probe 2: the hook is live too, so even an unsigned bare commit fails.
+    hooked = m._git(repo, "-c", "commit.gpgsign=false",
+                    "-c", "user.name=pi-test",
+                    "-c", "user.email=pi-test@example.invalid",
+                    "commit", "-q", "-m", "hooked")
+    assert hooked.returncode != 0, (
+        "the hooksPath is not live — this test would pass for the wrong "
+        f"reason (stdout={hooked.stdout!r})")
+
+    # ... and the fixture's own path ignores every one of those knobs.
+    sha = _git_commit(repo, "hermetic")
+    assert len(sha) == 40
+
+
+def test_the_fixture_init_ignores_an_ambient_template_dir(tmp_path, monkeypatch):
+    """The fixture's OWN init must not inherit a host template or branch default.
+
+    `git init` copies every non-dot file of the template directory into
+    `$GIT_DIR` (git-init[1], TEMPLATE DIRECTORY), so a host template shipping
+    an executable `hooks/pre-commit` lands in the fixture's `.git/hooks` — and
+    the hermetic commit cannot switch it off by config, because nulling
+    `core.hooksPath` makes git fall back to `.git/hooks`. A bare `git init`
+    under the hostile config (the shape `test_cli_preregister_run_score_publish`
+    used before `_git_init`) demonstrates all three exposures at once — trunk
+    branch, copied hook, failing commit — so the assertions below are not
+    satisfied by luck.
+    """
+    template = tmp_path / "hostile-template"
+    (template / "hooks").mkdir(parents=True)
+    (template / "hooks" / "pre-commit").write_text("#!/bin/sh\nexit 1\n",
+                                                   encoding="utf-8")
+    (template / "hooks" / "pre-commit").chmod(0o755)
+    hooks = tmp_path / "hostile-hooks"
+    hooks.mkdir()
+    (hooks / "pre-commit").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    (hooks / "pre-commit").chmod(0o755)
+    hostile = tmp_path / "hostile-gitconfig"
+    hostile.write_text(
+        f"[init]\n\tdefaultBranch = trunk\n\ttemplateDir = {template}\n"
+        f"[core]\n\thooksPath = {hooks}\n", encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(hostile))
+
+    # Probe: a BARE init inherits both of them — the branch AND the hook.
+    ambient = tmp_path / "ambient"
+    ambient.mkdir()
+    assert m._git(ambient, "init", "-q").returncode == 0
+    assert m._git_out(ambient, "symbolic-ref", "--short", "HEAD") == "trunk"
+    assert (ambient / ".git" / "hooks" / "pre-commit").exists(), (
+        "the hostile init.templateDir is not live — this test would pass for "
+        "the wrong reason")
+
+    # ... and the fixture's own init inherits NEITHER, so the commit below
+    # cannot be run through a hook that arrived from outside the repository.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_init(repo)
+    assert m._git_out(repo, "symbolic-ref", "--short", "HEAD") == "main"
+    assert not (repo / ".git" / "hooks" / "pre-commit").exists()
+    (repo / "a.txt").write_text("x\n", encoding="utf-8")
+    assert len(_git_commit(repo, "hermetic")) == 40
+
+
+def test_a_published_report_carries_the_verified_binding(published, bound_repo):
+    """The artifact a reviewer reads must carry the proof, not the assertion.
+
+    §1 and §6 are rendered from the binding the publisher verified, so the
+    report can be audited (`git merge-base --is-ancestor <prereg> <run>`) from
+    the text alone.
+    """
+    assert published["rc"] == 0
+    receipt = published["receipt"]
+    binding = receipt["commit_binding"]
+    assert binding["run_commit"] == bound_repo["run_commit"]
+    assert binding["prereg_commit"] == bound_repo["prereg_commit"]
+    assert binding["ordering"] == "proven"
+    assert receipt["commit"] == bound_repo["run_commit"]
+    assert m.validate_ask_receipt(receipt) == []
+    text = published["report"].read_text(encoding="utf-8")
+    assert bound_repo["run_commit"] in text
+    assert bound_repo["prereg_commit"] in text
+    assert "**PROVEN**" in text
+    assert (f"git merge-base --is-ancestor {bound_repo['prereg_commit']} "
+            f"{bound_repo['run_commit']}") in text
+
+
+def test_a_receipt_may_not_publish_an_unproven_ordering(shared_run):
+    """The auditor's half: a receipt that states a sha without the binding, or
+    carries a binding whose ordering was not proven, is invalid."""
+    scored = shared_run["scored"]
+    good = _receipt(scored)
+    assert m.validate_ask_receipt(good) == []
+
+    missing = {key: value for key, value in good.items()
+               if key != "commit_binding"}
+    assert any("commit_binding: missing" in issue
+               for issue in m.validate_ask_receipt(missing))
+
+    unproven = _receipt(scored)
+    unproven["commit_binding"]["ordering"] = "unproven"
+    assert any("PROVEN ordering" in issue
+               for issue in m.validate_ask_receipt(unproven))
+
+    placeholder = _receipt(scored)
+    placeholder["commit_binding"]["run_commit"] = "HEAD"
+    assert any("not a full 40-hex sha" in issue
+               for issue in m.validate_ask_receipt(placeholder))
+
+    same_commit = _receipt(scored)
+    same_commit["commit_binding"]["prereg_commit"] = same_commit["commit"]
+    assert any("share a commit" in issue
+               for issue in m.validate_ask_receipt(same_commit))
+
+    other_corpus = _receipt(scored)
+    other_corpus["commit_binding"]["corpus_hash"] = "sha256:" + "9" * 64
+    assert any("does not vouch for the corpus" in issue
+               for issue in m.validate_ask_receipt(other_corpus))
+
+    # The ordering is a claim about INSTANTS: an ISO pair alone cannot decide
+    # it, so a receipt that drops the epochs is not re-checkable.
+    no_epochs = _receipt(scored)
+    del no_epochs["commit_binding"]["prereg_commit_epoch"]
+    del no_epochs["commit_binding"]["run_commit_epoch"]
+    assert any("expected epoch seconds" in issue
+               for issue in m.validate_ask_receipt(no_epochs))
+
+    # ... and the polarity is checked, not just the presence.
+    inverted = _receipt(scored)
+    inverted["commit_binding"]["prereg_commit_epoch"] = 1767312000
+    inverted["commit_binding"]["run_commit_epoch"] = 1767225600
+    assert any("is LATER than the run commit's" in issue
+               for issue in m.validate_ask_receipt(inverted))
+
+    # DELETING the datum a cross-check compares against must fail, not skip: the
+    # pre-registration hash the binding carries has nothing to corroborate it
+    # without `resolved_config.preregistration_sha256`, and the old `if
+    # prereg_sha and ...` guard let a forger drop the field and validate clean.
+    dropped_prereg_sha = _receipt(scored)
+    del dropped_prereg_sha["resolved_config"]["preregistration_sha256"]
+    assert any("preregistration_sha256: missing" in issue
+               for issue in m.validate_ask_receipt(dropped_prereg_sha)), (
+        "removing the field the check compares against must invalidate the "
+        "receipt, not disable the check")
+
+    # The pre-registration's commit is the value §6 hands a re-verifier, so it
+    # needs the same full-sha rule as the run commit — a placeholder there makes
+    # the published `git merge-base --is-ancestor` unrunnable while the receipt
+    # still reads `ordering: proven`.
+    placeholder_prereg = _receipt(scored)
+    placeholder_prereg["commit_binding"]["prereg_commit"] = "b" * 12
+    assert any("commit_binding.prereg_commit" in issue and "40-hex" in issue
+               for issue in m.validate_ask_receipt(placeholder_prereg))
+
+    # `ordering: proven` is a claim that rests on a proof, so the proof is part
+    # of what must be present — otherwise the receipt asserts precedence while
+    # carrying none.
+    no_proof = _receipt(scored)
+    del no_proof["commit_binding"]["ordering_proof"]
+    assert any("commit_binding.ordering_proof" in issue
+               for issue in m.validate_ask_receipt(no_proof))
