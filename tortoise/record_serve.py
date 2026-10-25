@@ -306,18 +306,28 @@ ANCHORED_READS: dict[str, AnchoredRead] = {
         # ⚠️ NOT a query — this field states the read this unit REFUSES, and nothing
         # executes an `AnchoredRead.cypher` at all: the registry's only two readers
         # (`served_reads` / `not_served_reads`) enumerate its names and statuses.
-        # It is written in WORDS rather than as a Cypher sketch on purpose. An
-        # earlier cut spelled it `MATCH (a {id:$id})-[r]-(op) ... RETURN …`, and
-        # `#7948`'s census derives an all-relationship-type walk from any governed
-        # `MATCH … -[r]- …` string — so a DOCUMENTATION string would have had to be
-        # carried as an exclusion in `tests/_about_call_time_census.py`'s
-        # `EMPTY_PATTERN` register, whose entries excuse real read sites on schema
-        # grounds. A non-executed description is not a read site, and teaching the
-        # register to say so would widen a gate to accommodate prose. §13 enumerates
-        # real readers; this entry is not one of them.
-        cypher="not a query — the cache's neighbour answer walks EVERY incident edge "
-               "of the anchor (no relationship type is bound) and hops through "
-               "operator nodes, so no record row reproduces it (see `reason`)",
+        # It is written in WORDS because the Cypher sketch it carried was wrong
+        # twice over. `MATCH (a {id:$id})-[r]-(op) ... RETURN …` reads as an
+        # ALL-TYPE walk, while the cache read it meant
+        # (`search_engine.get_relationships`, reached by `sdk.expand_relationships`)
+        # BINDS its types — `:IMPL|NAND|hasPart` off the anchor to an operator node,
+        # `:IMPL|NAND|hasPart` on to the related claim, plus a direct `:IMPL|NAND`
+        # leg — so the sketch OVERSTATED the read it described. And a pseudo-query
+        # sitting in a prose field is a false positive for `#7948`'s census, which
+        # derives an all-type walk from any governed `MATCH … -[r]- …` string and
+        # would have had to carry this documentation string as an `EMPTY_PATTERN`
+        # EXCLUSION — a register whose three legal grounds all excuse a REAL read
+        # site by a fact about the pattern's schema (type-restricted, endpoints
+        # outside every `aboutObject` triple, structural degree/existence test),
+        # stated in `tests/_about_call_time_census.py` and in §13 of
+        # `docs/architecture/STORAGE-ARCHITECTURE.md`. A fourth, prose-based ground
+        # ("this string is never executed") would widen a gate to accommodate a
+        # comment; §13 enumerates real readers and this entry is not one of them.
+        cypher="not a query — the cache's neighbour answer is a two-leg operator "
+               "hop over `IMPL|NAND|hasPart` edges plus a direct `IMPL|NAND` leg, "
+               "labelled from the operator node's `op_type`/`label` and an `idx` "
+               "convention a record row cannot reproduce without re-deciding it "
+               "(see `reason`)",
         reason="the record shape exists (public.relation) but the cache's "
                "answer includes operator nodes and an idx convention a record "
                "row cannot reproduce without re-deciding it. Pinning parity to "
