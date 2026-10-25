@@ -206,8 +206,14 @@ stands unchanged.
    call site (`battery/recall/prepass.py:231`, invoked from `battery/runner/run.py:1080`) and the
    INCONCLUSIVE outcome is a real exit code (`battery/enums.py:37`), so the control variable *can* be
    enforced. (The 2026-09-10 verdict doc's "no production call site" line was superseded by #3327 /
-   PR #3439 on 2026-09-13; #1413 is CLOSED/implemented.) What remains is **real comparator-arm data** for
-   the A1/A2/A2b/A3 arms, which is #2525's scope in the #2515 umbrella. This corrects a claim in the
+   PR #3439 on 2026-09-13; #1413 is CLOSED/implemented.) What remains is **not data-only**, and the
+   MECE list says so: **#3327 is OPEN** (its own title: four open decision points, *blocks #2525
+   indicator 2*), and **#3437 is OPEN** — `a1` is in the pre-pass trigger population but its
+   pre-battery factual recall is **0.0 by construction** (`battery/arms/a1_longctx.py` resets
+   `_history`, which `record()` only fills during episodes, i.e. after the pre-pass), so for `a1` the
+   matched control may be unreachable and would re-create the constant-True trigger #3327 removed.
+   Comparator-arm data for A1/A2/A2b/A3 is #2525's scope in the #2515 umbrella **and inherits those
+   two blockers**. This corrects a claim in the
    verdict doc — the delta is to fix that claim, not to build a missing producer.
 4. **Capstone** — #1419 walks scope E2E-1…7 on the real run and gates epic completion.
 5. **Test-design map closure** — #1404 (open) is cited as the verification basis by #1416/#1419.
@@ -355,7 +361,7 @@ edges/labels. Listed for the owner gate.
 | # | Work unit | O/I/T (one line) | State |
 |---|---|---|---|
 | 1 | **#1416** battery execution + verdict re-file | O: run tier-1 `a4,a0` on the real lane (one invocation per arm, all five probe scorers — R2 included) and re-file the claim doc / I: `cells[primary] == "measured"` for R1/R4 (R2/R3/R5 present as `insufficient_n` until §7 row 9's judge, never absent) on each arm's own profile, and `report_status` an honest `incomplete_*` naming its cause (E2E-D1 — `complete` is unreachable and is not the criterion) / T: E2E-D1, D2 | OPEN — **the delta's critical path**. Its own DoD is the full battery (Tier-1, Tier-2, Tier-3, parity) and is **unchanged** by this brief |
-| 2 | **#2525** comparator-arm real-run readiness | O: run A1/A2/A2b/A3 on the real lane with matched-recall data / I: every comparator arm has real numbers + A2b go/no-go / T: E2E-D3 | OPEN (in #2515 umbrella) |
+| 2 | **#2525** comparator-arm real-run readiness | O: run A1/A2/A2b/A3 on the real lane with matched-recall data / I: every comparator arm has real numbers + A2b go/no-go / T: E2E-D3 | OPEN (in #2515 umbrella) — **not data-only**: blocked on **#3327** (four open decision points; its title says it blocks #2525 indicator 2) and **#3437** (`a1`'s pre-pass factual recall is 0.0 by construction, so the matched control may be unreachable for `a1` — §4 item 3) |
 | 3 | **#1419** capstone clickthrough | O: walk scope E2E-1…7 on the real run / I: all pass or gated-with-name, artifacts reproducible / T: E2E-D4 | OPEN |
 | 4 | **#1404** test-design integration-surface map | O: close the S1–S8 verification map the children cite / I: every surface has an assigned layer / T: cited by #1416/#1419 checklists | OPEN |
 | 5 | **#2702** `cal`/`bct` envelope contract | O: fix the empty-position envelope class / I: long-prompt deadline class no longer aborts calibration / T: calibration leg clean | CLOSED 2026-09-12 — no action |
