@@ -574,11 +574,14 @@ class TestWriterValidation(unittest.TestCase):
         #   * delete the truncated presence guard -> "no boolean `truncated`"
         #   * delete the truncated raise          -> "run truncated"
         # NOT a mutation: re-coercing the receipt (`ep['truncated']` ->
-        # `bool(ep.get('truncated'))`) reds NOTHING on its own, because the
-        # presence guard rejects the absent-key case first. The receipt
-        # coercion is only observable once the guard is gone, so it is not
-        # claimed as independently pinned here (measured — claiming it was
-        # false in an earlier revision of this comment).
+        # `bool(ep.get('truncated'))`) reds NOTHING — not alone, and not even
+        # with the presence guard deleted: the coercion is masked BOTH by that
+        # guard AND by the later `if ep['truncated']` index, so with the guard
+        # gone the absent-key case still dies on `KeyError: 'truncated'` (the
+        # same single failure as deleting the guard alone). This test therefore
+        # does NOT pin the receipt coercion at all, and claiming otherwise was
+        # false in two earlier revisions of this comment (measured both times).
+        tiers = []
         def _sdk(*, domain="d", reliability=None, ep=None):
             class _S:
                 def __init__(self, **kw):
@@ -588,7 +591,7 @@ class TestWriterValidation(unittest.TestCase):
                 def create_point(self, kind, content, **kw):
                     return {"id": "p1", "status": "live"}
                 def set_source_tier(self, url, tier):
-                    pass
+                    tiers.append(tier)
                 def get_source_reliability(self, url):
                     return reliability
                 def compute_confidence(self, anchors=None, **kw):
@@ -640,6 +643,17 @@ class TestWriterValidation(unittest.TestCase):
                     self._exec([{"kind": "fact", "content": "tripwire probe"}],
                                sdk_cls=_sdk(**kwargs))
                 self.assertIn(message, str(cm.exception))
+
+        # The tier the writer requests is a PUBLISHED value (README:
+        # `set_source_tier(source, "T2")`, "EP-compatibility is required, not
+        # optional"; T2 is the 0.75 credibility prior in
+        # tortoise/source_credibility.py). Nothing pinned it: the fakes
+        # discarded the argument and the read-back only requires
+        # `reliability is not None`, so ANY tier satisfies it — changing 'T2'
+        # to 'T4' left the whole lane suite green while every extracted source
+        # was written at a different credibility than the README claims.
+        self.assertTrue(tiers, "no case reached set_source_tier")
+        self.assertEqual(set(tiers), {"T2"})
 
 
 class TestWriterContract(unittest.TestCase):
