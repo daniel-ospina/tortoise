@@ -184,8 +184,10 @@ Run 2026-10-24 against `tests/test_record_serve.py` (51 tests) and the live file
   reaches the caller through `servedFrom`/`fallbackReason` on the wire — a caller CAN see a fallback —
   but an operator cannot alert on a rate. A metric emit belongs with the deployment that arms the mode,
   and it is named here rather than left to be assumed present.
-* **Not built here, named so the absence is visible:** a CLI verb (the two record verbs that exist,
-  `record-reconcile` and `record-restore`, are the precedent); connection pooling for the endpoint's
+* **Not built here, named so the absence is visible:** a CLI verb (the FOUR record verbs that exist — `record-reconcile`, `record-backup`,
+  `record-restore` and `record-text` — are the precedent; `record-backup`'s
+  "artifact already durable" convention and `record-text`'s exit-3-vs-2 split are
+  the relevant precedents for a record-READ verb); connection pooling for the endpoint's
   per-request record connection; `anchored-neighbours`; parity for any label other than `Point`
   (**#9721** — `:Event` loses the fold's `ON CREATE` defaults); a **cross-store CI lane** — the live
   parity and S9 legs need Postgres *and* FalkorDB, and no job provides both, so **both legs skip in

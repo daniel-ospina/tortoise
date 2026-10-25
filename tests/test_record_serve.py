@@ -1108,17 +1108,40 @@ def test_the_documented_coordinates_match_the_schema_reader():
 
     # Both house styles occur — `` `Point → id` `` and `` `Point` → `id` `` — so
     # the pairs are scraped, not matched per label.
-    for text, where in ((doc, "module docstring"), (epic, "epic doc")):
+    # The FUNCTION docstring too: the query-issuing read's is where the CHECK's
+    # token list lived, and a module-level-only scrape cannot see it.
+    # `require`: only the two artifacts that STATE the coordinate list must name
+    # every label. The query docstring names none by design — it is checked for
+    # whatever it does name (the `node_key = …` arm below), not for coverage.
+    sources = ((doc, "module docstring", True),
+               (rs._read_row.__doc__ or "", "_read_row docstring", False),
+               (epic, "epic doc", True))
+    for text, where, require in sources:
         # The pair is written as ONE clause (`Subject`/`Object` → …) — the shape
         # a stale key survives in, because neither label appears alone.
-        shared = set(re.findall(r"`Subject`\s*/\s*`?Object`?\s*→\s*`?(\w+)`?", text))
-        assert shared == {kp["Subject"], kp["Object"]}, (
-            f"{where} says Subject/Object → {sorted(shared)}")
+        # Only for the artifacts that MAKE the claim (the query docstring names
+        # no coordinates at all, so there is nothing there to keep in step).
+        if re.search(r"`Subject`\s*/\s*`?Object`?\s*→", text):
+            shared = set(re.findall(
+                r"`Subject`\s*/\s*`?Object`?\s*→\s*`?(\w+)`?", text))
+            assert shared == {kp["Subject"], kp["Object"]}, (
+                f"{where} says Subject/Object → {sorted(shared)}")
+
+        # The OTHER phrasing a stale key hides in: `node_key = <token>`. Every
+        # token an artifact names must be a key the schema reader recognises —
+        # #9881's `name` pins survived in exactly this form, invisible to the
+        # arrow scrape above.
+        for token in re.findall(r"node_key`?\s*=\s*`?(\w+)", text):
+            assert token in set(kp.values()), (
+                f"{where} pins node_key = {token}, which no label keys on "
+                f"(the reader's keys are {sorted(set(kp.values()))})")
 
         pairs = dict(re.findall(r"`?(\w+)`?\s*→\s*`?(\w+)`?", text))
         for label, key in kp.items():
             if label in ("Subject", "Object"):
                 continue  # covered by the shared clause above
+            if not require and label not in text:
+                continue
             assert label in pairs, f"{where} does not state the coordinate for {label}"
             assert pairs[label] == key, (
                 f"{where} says {label} → {pairs[label]}, the schema reader "
