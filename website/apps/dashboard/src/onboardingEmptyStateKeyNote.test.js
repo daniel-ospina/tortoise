@@ -60,7 +60,10 @@ const render = (variant, buildFork = false) =>
     .replace(/&#x27;/g, "'")
 const VARIANTS = ['reentry', 'graph-missing']
 const SELF_REQUIREMENT = 'If your setup needs an API key, ask an owner or admin to share one'
-const KEYLESS = 'Claude Desktop and Claude Web connect without a key.'
+// #9660 owner ruling: ChatGPT joined the chooser, so the key-less sentence
+// is derived over THREE connector leaves now. The literal is the sentence the
+// user reads, kept here as the pin (the code derives it from HARNESS_OAUTH).
+const KEYLESS = 'Claude Desktop, Claude Web and ChatGPT connect without a key.'
 const BUILD_SENTENCE =
   "You'll need an API key to call the Tortoise SDK: ask an owner or admin to share one."
 
@@ -116,14 +119,14 @@ test('#3729: the chooser leaf set and the key-less filter are derived from the v
   // the dashboard chooser's selectable leaves, as a LITERAL — a family with no
   // surfaces IS its own leaf (Cursor, Pi), so reading only `families[].surfaces`
   // would silently drop them
+  // #9660 owner ruling: `chatgpt` IS a chooser leaf now (the #2698 exclusion was
+  // reversed), so it appears in BOTH derived lists.
   assert.deepEqual(chooserLeafIds(),
-    ['claude', 'claude-desktop', 'claude-web', 'codex', 'codexDesktop', 'cursor', 'pi'])
-  assert.deepEqual(keylessChooserConnectorNames(), ['Claude Desktop', 'Claude Web'])
-  // `chatgpt` is key-less in the vocabulary but not a `HARNESS_FAMILIES` leaf,
-  // so it is excluded by construction (#2698)
+    ['claude', 'claude-desktop', 'claude-web', 'codex', 'codexDesktop', 'cursor', 'pi', 'chatgpt'])
+  assert.deepEqual(keylessChooserConnectorNames(), ['Claude Desktop', 'Claude Web', 'ChatGPT'])
   assert.equal(HARNESS_NAMES.chatgpt, 'ChatGPT')
   assert.ok(HARNESS_OAUTH.includes('chatgpt'), 'chatgpt is key-less in the vocabulary')
-  assert.ok(!chooserLeafIds().includes('chatgpt'), 'chatgpt is not a chooser leaf')
+  assert.ok(chooserLeafIds().includes('chatgpt'), 'chatgpt is a chooser leaf (#9660 ruling)')
 })
 
 test('#3729: the derivation logic is correct on INJECTED input (not just the live vocabulary)', () => {

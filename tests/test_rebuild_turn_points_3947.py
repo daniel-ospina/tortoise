@@ -469,7 +469,7 @@ def _contains_pairs(proj, sid: str, pid: str) -> int:
 
 
 def test_the_fold_refuses_a_whitespace_only_session_id(tmp_path):
-    """A BLANK `contains_session` is not an identity — both folds refuse it.
+    """A BLANK session id is not an identity — BOTH folds refuse it.
 
     Measured, and the reason the refusal lives in `projection._writable_container_id`
     rather than only in the record projection (#9553 review P2): on an indexed
@@ -480,9 +480,17 @@ def test_the_fold_refuses_a_whitespace_only_session_id(tmp_path):
     the Postgres record would have landed the row. Refusing at the shared gate
     is what keeps the two routes equal instead of engine-dependent.
 
+    ⛔ BOTH carriers are gated, and this leg pins the consequence of the second
+    one (#9599): the container is NOT written at all. When only `_link_session`
+    was gated, `_fold_session_recorded` still minted the blank `:Session` — the
+    invisible container this whole rule exists to keep out of the graph — so the
+    count here was ONE and the graph carried the node it could never address
+    again. `_writable_container_id` is the gate on the `SessionRecorded` carrier
+    too, so the expected count is ZERO.
+
     Falsifier: drop the blank clause from `_writable_container_id` and this leg
-    reports the duplicate `:Session` (and, on an unindexed engine, the edge)
-    the record refuses — the divergence the review named.
+    reports the blank `:Session` again (and, on an unindexed engine, the edge)
+    the record projection refuses — the divergence the review named.
     """
     sid, pid = "   ", "p-whitespace-turn"
     journal = _craft_container_journal(tmp_path, sid, pid)
@@ -492,14 +500,13 @@ def test_the_fold_refuses_a_whitespace_only_session_id(tmp_path):
         proj.g.query("MATCH (n) DETACH DELETE n")
         proj.rebuild(EventLog(journal), confirm_destructive=True)
         assert _contains_pairs(proj, sid, pid) == 0
-        # ONE `:Session` — the one `SessionRecorded` minted. Without the blank
-        # clause `_link_session` MERGEs a SECOND node with the same id (the
-        # indexed equality filter above misses the first), which is the
-        # duplicate-container half of the bug.
+        # ZERO `:Session`. A LOG SCAN, not an equality seek: the seek cannot see
+        # a blank key even when the node is there, which is the engine defect
+        # #9599 is about — an equality assertion would pass vacuously.
         assert proj.g.query(
-            "MATCH (s:Session) RETURN count(*)").result_set == [[1]], (
-            "`_link_session` minted a duplicate `:Session` for a blank "
-            "`contains_session` — `_writable_container_id` is not applied")
+            "MATCH (s:Session) RETURN s.id").result_set == [], (
+            "a blank `SessionRecorded` / `contains_session` minted a `:Session` "
+            "— `_writable_container_id` is not applied to BOTH carriers")
     finally:
         sdk.close()
 

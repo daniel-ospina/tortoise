@@ -17,6 +17,8 @@ related:
     note: "Self-hosted off-box copy — the rule below is not yet met without it."
   - issue: 9208
     note: "A REFUSED change-feed write is disclosed as a named degraded state, not a silent `[]`."
+  - issue: 9557
+    note: "R9 — the RECORD's backup (Postgres, the system of record) and the drill that proves it restores. The deployment rows below cover the graph; the first row now covers the record."
 ---
 
 # Durability Posture — the one authority
@@ -524,10 +526,65 @@ exemptions from R1; they are orthogonal to R2 and are not widened here.
 
 | Deployment | Mechanism (where the data lives) | Honest loss window | Strongest verification actually performed |
 |---|---|---|---|
+| **Hosted — the Postgres RECORD (the system of record)** (`tortoise/record_backup.py`, verb `python -m tortoise record-backup`) | An **independent logical dump of the record's own ten tables** (`tortoise-record-logical-dump-v1`: `pg_dump --data-only --format=custom` over `record_projection.THE_RECORD_TABLES`, `--no-owner --no-privileges`), AES-256-GCM encrypted with the SAME key as the graph archives, uploaded with a manifest carrying the ciphertext's sha256, the **column set** of every table and the row counts read **immediately before the dump** (the drill's `cut` read — the artifact's snapshot instant falls inside the dump, so this is deliberately NOT called a snapshot count; see #9795), to **Cloudflare R2 (off-box)** under `record-backups/`; retained to the newest 14 artifacts. **The schema is NOT in the artifact** — its one home is `supabase/migrations`, so a target must carry it (see below). **The connecting ROLE is not the record's app role** (#9801): R6 arms the record as `tortoise_record_app` (`NOBYPASSRLS`), under which every per-table count reads ZERO (the `*_app_tenant` policies read `app.current_org_id`, which this leg never sets) and `pg_dump`'s `row_security = off` default errors outright — so the verb resolves `TORTOISE_RECORD_BACKUP_DSN` (a role that BYPASSES RLS, which R6 names as one of three legitimate purposes) and refuses a connection whose role cannot bypass, naming the role rather than reporting an empty record. | **UNBOUNDED today, and stated as such: no cron invokes the verb yet.** The window is the operator's manual cadence until the job in `docs/infra-runbook.md` §3.5 is deployed; after that it is that job's cadence. Retention on the vendor side is **not** counted on (see the posture note below). | **Restore DRILL EXECUTED 2026-10-22 — against a real `postgres:17`, real `pg_dump`/`pg_restore`, the real migrations, and the real encrypt→upload→download→decrypt path, against in-memory storage: `R2Storage` itself is NOT yet exercised end-to-end (every arm of `tests/test_record_backup.py` substitutes storage), so the transport is the one leg of this claim that is unproven. 56 rows restored across the 9 tables the record had on that date (`session_narrative`, the tenth, landed the same day under #9555 and was therefore not in that artifact) with per-table equality.** Falsifiers observed **red** in the same session: a table forced short → the drill named it; a flipped byte → refused before `pg_restore`; a populated target → refused; an empty record → refused as vacuous; a schema-carrying dump into a migrated target → `relation "node_identity" already exists` (why the artifact is data-only). ⚠️ **NOT yet drilled against the HOSTED Supabase record** (needs a scratch project + the direct DSN) — so the claim here is *"the artifact restores, verified per table"*, not *"the hosted record has been restored"*. The comparison is a **window**, not an exact count, because the record is live: rows committed between the manifest's count and the dump's snapshot are in the artifact and not in the count, so an exact comparison would red a healthy backup on any record with continuous writes (see `docs/infra-runbook.md` §3.5). A scheduled drill that restores into one scratch project also needs `--reset-scratch` (a successful drill leaves the scratch target populated, and every restore refuses a populated target). |
 | **Hosted — graph archives** (`tortoise/hosted_backup.py`, `tortoise/backup_sweep.py`) | Per-graph **logical dump** (`tortoise-logical-dump-v1`), AES-256-GCM encrypted, uploaded with a sha256 manifest to **Cloudflare R2 (off-box)**, swept hourly (`registry-backup-cron.yml`, `17 * * * *`). **Gated:** `BACKUP_SWEEP_ENABLED` is fail-closed (default off, `tortoise/backup_config.py:172-180`, `:249`); `deploy-hosted.yml:358-380` sets it true only when every required secret is present. | **≤ 1 h typical / ≤ 2 h worst-case** for *entitled* graphs (`tier ≠ free` AND `backup_enabled`; `tortoise/backup_sweep.py:248-272`) *when the sweep is enabled* (`docs/ops/registry-backup-dr.md` §RPO; achieved age is measured per team/graph via `/v1/internal/backups/status`). An **unentitled** graph has **no periodic archive** — its window is unbounded. With the sweep **off** the same holds; the Pro on-demand backup endpoint (`POST /backups`, `tortoise/hosted_api.py`) and the vendor snapshot below remain. | **Checksum + on-path restore verification; the drill is NOT yet clean.** The live restore path verifies sha256 against the manifest and node/edge counts against the authenticated payload before swapping (`tortoise/hosted_backup.py:3-40`) — that gate is what caught the incomplete dump. A **restore drill was attempted once and FAILED** (2026-09-17, `workflow_dispatch`): `Edge restore incomplete: 9687/10000 linked — dump references missing nodes` (#3894; export defect fixed by #3921, `_DUMP_REVISION = 2` — #3895 stays open tracking a successful re-drill of a real artifact). The scheduled monthly drill (`registry-drill-cron.yml`, #2317) has **not yet run**. Until a real archive restores end-to-end this row is **not drilled to success**; the sweep producing archives is covered by the freshness watcher (#2790 / #2922). |
 | **Hosted — vendor platform persistence** (FalkorDB Cloud) | Vendor-managed. Off-box **snapshots every 12 h, 7-day retention** (Startup & Pro); snapshots deleted after 14 days. **Restore creates a NEW instance.** | **≤ 12 h** off-box. In-box persistence (AOF) is **contested** — see below; until settled, treat in-box persistence as unverified. | **Existence only — not drilled.** The cadence and retention are vendor-documented; no restore of a vendor snapshot has been performed by us. |
 | **Self-hosted (Docker Compose sidecar)** | FalkorDB sidecar with AOF + named volume (`README.md` self-host path, `docker-compose.yml`) — **on-box only**. Since **#8543** the off-box target is an explicit SETUP-PATH decision (`docker-compose.yml`, `docs/quickstart-selfhosted.md` §Option A2, `website/self-hosted.html`): declare the COMPLETE target (`R2_*` **and** `TORTOISE_BACKUP_KEY`), or set `TORTOISE_OFFBOX_BACKUP_DECLINED=1`; an UNDECIDED (or PARTIAL) target is reported loudly at daemon startup (`tortoise/selfhost.py`). Since **#8544** a complete target also **arms the driver** (`tortoise/selfhost_backup.py`): the daemon sweeps `org_selfhost` to that target on the `TORTOISE_OFFBOX_BACKUP_INTERVAL_SECONDS` cadence (default 1 h, floor 60 s) with the read-back-verified logical dump (`hosted_backup.create_backup` — the same per-graph primitive the hosted sweep calls), and prunes under the shared retention triple (24 h + 7 d + 4 w). A failed run is logged on **every** attempt. `scripts/daily-backup.sh` is a host-specific RDB copy (issue #101) that is not wired into the compose path or its docs. | AOF `everysec` = **≤ 1 s** on a clean host; **total loss** if the host or volume is lost. With a complete declared target the archive window is **≤ 1 h** once the first run lands (the **first run is one interval after boot**, so a deployment that restarts inside that interval has none). A declined/undecided deployment's window is **unbounded** — it produces no archive. | **Not drilled.** AOF is a live on-box artifact, not a backup. The archive *writer* is the production-verified one (sha256 manifest + per-object ledger + read-back coverage proof), but no restore of a **self-hosted** archive has been performed end-to-end. |
 | **Embedded (redisLite — eval only)** | RDB file; **AOF off by default** (`TORTOISE_EMBEDDED_AOF=1` opts in — `tortoise/projection/__init__.py:36-45` (`_embedded_aof_enabled`), `:1157-1181`, `:1831`, `:1865`). Single-writer; concurrent writers lose data. | AOF on: **≤ 1 s**. AOF off: **up to the next RDB save or a clean close** — RDB snapshots may never fire for a small graph (#915, #2879). | **Not drilled** (and not a production path). AOF's on-disk artifact is measured when opted in (`tests/test_embedded_durability_claim.py`) — presence, not a restore. |
+
+## The record's posture — the decision, and the half NOT taken (#9557)
+
+Promoting Postgres to the record moved the durability obligation onto Postgres (§3, §14.1 **O1**:
+*durability = the store's backup; rebuildability = the journal*). That ruling did **not** say **whose**
+backup, and there were two answers. The recorded decision is:
+
+- **ADOPTED — an independent off-box logical dump we hold** (`tortoise/record_backup.py`, above). It is
+the only option that yields an **artifact**, and an artifact is the only thing a drill can restore.
+It is consistent with the ruling, not a departure from it: the artifact is a **backup of the store**,
+never the journal replayed.
+- **NOT ADOPTED — the vendor's managed backups / PITR alone.** Not as a matter of taste. A PITR
+restore is **in place**: *"we download the latest available physical backup **to the project** and
+partially restore the database"*, and *"The project is inaccessible during this process"* — so it
+produces no artifact to restore into a scratch record. And *"When you delete a project, we
+permanently remove all associated data, including any backups stored in S3"*: the copy meant to
+protect the record would live inside the thing it protects, under the same account.
+- **NOT DECIDED HERE — buying PITR as an RPO upgrade.** It is a **cost-bearing owner decision**, so it
+is left as a recorded, priced option rather than silently enabled: **$100/mo per seven-day recovery band**
+(fourteen days ≈ $200, twenty-eight ≈ $400), on Pro and Team alike, **not covered by the Spend Cap**, and it **requires
+at least a Small compute add-on** (≈$15). Two vendor facts that bear on buying it: PITR **replaces**
+daily backups rather than adding to them (*"If you enable PITR, we will no longer take Daily
+Backups"*), and the newest restore point *"could be significantly behind the current time"* when the
+database has had no recent activity — which weakens "RPO = seconds" for a low-write record.
+
+The two are **not substitutes**: the dump buys an artifact we own and can prove; PITR buys a finer
+recovery point. A deployment may hold both, and holding the dump is what makes turning PITR on safe.
+
+### What the record artifact does NOT cover (recorded here so it cannot be assumed away)
+
+- **The control plane.** The artifact is the record's own ten tables. The record's foreign keys
+  reference `public.organizations(id)` and `public.graphs(org_id, id)`, and **no module in this tree
+  backs those up** — a restore target must already carry them (`docs/infra-runbook.md` §3.5
+  precondition 5). So the artifact restores the record **into a surviving tenant**, not into a fresh
+  project: after loss of the hosting project the tenancy rows (and their ids) are gone with it. That
+  gap predates this row and is tracked as its own decision (#9745) — it is stated here rather than
+  solved by this mechanism.
+- **Bucket-lock immutability.** The adopted object-lock rule is prefix-scoped to `backups/`
+  (`docs/ops/registry-backup-dr.md`), which is the **graph** archive prefix. Record artifacts live
+  under `record-backups/` and are therefore **not** covered by it: they are protected by credential
+  scope and the app-level retention prune only. Whether to add a second lock rule (and make the prune
+  lock-tolerant) is a decision tracked in #9746, not silently adopted here.
+- **Key rotation.** The artifact is encrypted with the same key as the graph archives and restores
+  through the same candidate chain (active + retained previous, #2318) — so a rotation does not strand
+  retained artifacts while the previous key is still configured. Once the previous key is dropped, a
+  retained artifact written under it is unreadable by design.
+
+**Sources read 2026-10-22** (vendor documentation; the full brief with quotes, per-tier tables and its
+`NOT VERIFIED` list is recorded on #9557): Supabase *Database Backups*,
+*Manage Point-in-Time Recovery usage*, *Pricing & Fees*, *Connect to your database*. One citation is
+deliberately kept narrow: "not available for direct download" sits in a subsection about **disabling
+PITR**, and the daily-backup docs imply downloadable daily backups exist for legacy logical-backup
+projects — so this decision rests on the two facts that are unambiguous (in-place restore; backups die
+with the project), not on a general "nothing is downloadable" claim.
 
 > These rows describe **data-plane durability**. Deletion and retention windows
 > are a separate promise and live in `docs/retention-and-deletion.md`; encryption
@@ -558,11 +615,22 @@ Three statements disagreed about whether the store or the journal was the
 durability authority, so the text inherited whatever the nearest comment
 believed. The fix is **deletion, not reconciliation**: the three contradicting
 journal-authority statements are removed, and no other file in the gate's
-contract surfaces carries the claim. Every remaining live restatement is
-enumerated under *Open items*, not silently tolerated. The durability-scoped
+contract surfaces carries the claim **in a wording the gate can see**; the
+restatements in wordings it is blind to are enumerated under *Open items* — or
+named there as unclassified candidates, where a per-site read is still owed
+(#9867) — not silently tolerated. The durability-scoped
 gate in `tests/test_durability_posture.py` fails the build if a
 `log`/`journal`/`jsonl`/`event stream` is bound to `source of truth` — or to
-`is [the] truth` — outside this file.
+`is [the] truth` — or to `is [the|a|an|our|its|their|your]? durab(le|ility)` —
+outside this file. Every bracket here marks an OPTIONAL slot, and the `?` on the
+determiner group states it outright: the bare `the log is durable` **is** a hit
+(pinned at `test_claim_regex_matches_the_original_defect_forms`), so reading that
+bracket as "exactly one determiner" would build a gate that fails open on that
+same bare form — the one narrowing the optional group closes. And the `source of truth` family is the
+one whose durability side needs NO log subject: `source of truth … durable`
+within the window fires on its own, which is how a *source of truth for
+durability* claim is caught; the two `is`-predicate families always require the
+log subject.
 
 **The gate's roots are the contract surfaces plus `graph-scripts/` (#4308).**
 The owner's §6 root list (`tortoise/`, the five docs, README) left the two
@@ -582,7 +650,11 @@ source of truth for a test session's created-graph ownership).
 
 **The gate matches a CLAIM SHAPE, not durability claims in general.** It fires on
 a `log`/`journal`/`jsonl`/`event stream` bound to `source of truth` / `is [the]
-truth`; a *mechanism promise* — e.g. a managed store "provides AOF durability" —
+truth` / `is [the|a|an|our|its|their|your]? durab(le|ility)` (the three families
+spelled out where the gate's roots are described, above; the determiner group is
+optional, so a bare `is durable` fires too, and on the `source of truth` side
+the `durab` arm needs no log subject at all); a *mechanism promise* —
+e.g. a managed store "provides AOF durability" —
 does not match it, and is corrected by hand (`docs/infra-runbook.md` §1 did this
 under **#2968**). That seam is not this gate's to close: the general binding from
 a written claim to the system it describes is **#5063**.
@@ -728,3 +800,89 @@ a written claim to the system it describes is **#5063**.
   The #2881 design round (§7) recommends reversing it to store-authoritative.
   This document states the store-authoritative rule the shipped code already
   implements; the row is the owner's to answer.
+- **#9867 — five sites (six wordings) the gate is BLIND to, plus the negation
+  shape it must never touch. This list is NOT claimed complete.** What the gate
+  fires on is a `log`/`journal`/`jsonl`/`event stream` within 40 chars of `source
+  of truth` (either order), or of `is [the] truth`, or of
+  `is [the|a|an|our|its|their|your]? durab(le|ility)` — the determiner group is
+  optional, so the bare `is durable` is a hit. **The `source of truth` family is
+  also the one whose durability side needs no log subject**: `source of truth …
+  durable` inside the window fires on its own — that is how *the source of truth
+  for durability claims* is caught, and a widened pattern that binds `durab` to
+  the log subject everywhere would drop it. The two `is`-predicate families do
+  require the log subject. Every site below fails that
+  SHAPE — and **not** because "store" is a different noun: `is the truth store`
+  bound to a `journal` subject *would* match the middle alternation, as measured.
+  The blindness comes in three measured forms: *truth* sits with no `is`
+  copula (`rebuild retains the truth`, bare `TRUTH`) — and for `appended to the
+  truth store` and the `f"(rebuild retains the truth)"` literal at
+  `commit_ops.py:1464` there is no log SUBJECT inside the window either (its
+  `:1469` sibling does carry `journaled`, which the `journal` alternation matches
+  because it has no trailing boundary), so a widening bound to the subject keeps
+  missing them; an adverb interrupts the predicate (`is still the
+  truth`); or the copula predicates a NOUN and durability survives only inside an
+  em-dash gloss (`Is this log a JOURNAL — a durable, replayable truth set`),
+  where the determiner slot takes `a` and the pattern needs `durab` next.
+  **De-fronting that last one does not fix it — measured: the same sentence with
+  `is` in front of `log` is still a miss, and only re-phrasing so that durability
+  is the direct predicate matches** — so a widened pattern must handle the gloss
+  form, not the word order. (The quotes below are the blind restatements
+  themselves, not positive examples quoted as live claims — and the reason is
+  **not** that this file cannot match the patterns: it does match them, and it
+  must (`test_canonical_doc_is_itself_a_claim_hit` requires this doc to carry the
+  authority statement). The reason is that this file is the one path BOTH
+  offender legs SKIP by name —
+  `test_no_durability_source_of_truth_claim_outside_the_canonical_doc`
+  and `test_no_wrapped_durability_claim_anywhere_in_the_scanned_roots` each
+  `continue` on `CANONICAL_DOC_REL` before scanning — so a hit written here is
+  unscanned and cannot move the repo-wide `0`, which is measured over the
+  NON-exempt roots. Two measured caveats keep that honest: the `record_writer.py`
+  sentence quoted below is reproduced with a different wrap than the source's,
+  so in this file it reads as a line-at-a-time hit; and this very paragraph
+  renders the bare form `the log is durable`, which matches too (line-at-a-time,
+  and again in the joined scan). Quoting a claim here is safe only because the
+  path is unscanned — never because the patterns are silent on it.)
+  Measured 2026-10-24 on `92b364e8b` and re-checked on
+  the merged base `9296a4e85`, all still live:
+  `projection/entities.py` (*Restore verbatim — the journal is still the truth*:
+  `still` defeats the predicate); `log.py`'s `EventLog` rubric (*Is this log a
+  JOURNAL — a durable, replayable truth set*: the copula predicates `a JOURNAL`
+  and durability is an adjective in the gloss, never the predicate);
+  `projection/edges.py` (*a recovery write that appended to the truth store*: no
+  `is` copula **and** no log subject inside the window — the nearest,
+  `journal-owning`, is on the previous line — i.e. form 1 plus a subject-free
+  nominal); `commit_ops.py` (*rebuild retains the truth*: contiguous on one source
+  line, `f"(rebuild retains the truth)"` at `:1464`, and a miss for form 1 —
+  `retains` is not a copula, and this occurrence has no log subject either; the
+  adjacent f-string literals split the surrounding SENTENCE, never the phrase,
+  which is why the f-string is not the cause);
+  `sdk.py` (*the journal — the TRUTH — never* recorded; *the journal (TRUTH)*).
+  **The OPPOSITE claim is also present and must stay green** — the gate's
+  silence there is correct, not a hole: the `no`/`needs no` truth-store negation
+  (`projection/__init__.py`, `mcp_auth.py`, `mcp_server.py`), `__main__.py`'s *A
+  SCRATCH journal, not a truth set*, and `projection/__init__.py`'s *a message
+  that promised a journal would tell an operator a truth store is bound when
+  none is*. **And the `truth store` phrase is mostly NOT this claim**: §17.1's
+  *every write goes to the truth store first*, the residency repair's *fetch from
+  the truth store (Postgres)*, and `onboarding/state.py`'s *the record is the
+  truth store* all name the **record**, whose authority is #9557's — the
+  distinction this document draws, not a restatement of the claim it deletes. A
+  sweep that reworded those would damage it. **A green gate run therefore does
+  not mean no restatement: it means none in the gate's wording.** **Not fixed
+  here, deliberately** — the sweep is #9867's, not this entry's — and not a blind
+  sweep either: `tortoise/`
+  also uses *truth* for the legitimate replay-ORDER axis (*the derived store must
+  never lead the truth*, §17.1), which the rule above does not forbid, so the
+  widened pattern and the per-site reword have to land as ONE change or the
+  pattern reds a correct sentence. #9867 carries the candidates that need a
+  per-site read before they can be called restatements: `record_writer.py`'s *a
+  per-record source of truth already exists — the append-only journal*, which
+  the gate WOULD match once the paragraph is joined (`source of truth` →
+  `journal` is 34 characters) and misses only because the wrapped scan
+  deliberately excludes that family and the line break puts `exists — the
+  append-only journal` on the next line — so this is the join-SCOPE hole, not a
+  pattern hole, and it is the ONLY site here whose answer a widened JOIN
+  changes. The one other candidate that looks like a wrap is `sdk.py`'s *the
+  journaled payload is the whole truth of this write*: it misses for the
+  PREDICATE (`is the whole truth`, not `is [the] truth`), and joining it would
+  not change that — the same reading applies to it with the break removed.

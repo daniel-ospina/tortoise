@@ -59,6 +59,17 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # namespace PROD code resolves, the same `prod-coupled` class as the
     # test_agent_signup / test_dr_endpoints / test_billing entries below.
     "test_github_connect.py": {"registry": "prod-coupled"},
+    # #9664 capstone connector (the ChatGPT onboarding journey): the test builds
+    # the REAL HTTP app against `TortoiseSDK(namespace="registry")` so the
+    # tenancy resolver and the record seam read the SAME control-plane namespace
+    # production resolves — the literal IS the namespace PROD code resolves, the
+    # `prod-coupled` class exactly like test_github_connect above. A `test_*`
+    # rename would seed a different graph than the code under test reads. The
+    # module landed without this declaration, which reds this gate on `main`
+    # (measured 2026-10-24, the `test-slow (c)` shard).
+    # ONE entry, not two: the dedupe that removed the duplicate key must keep a
+    # declaration, because the literal is still in the module (#9895 review).
+    "test_9664_capstone_connector_to_record.py": {"registry": "prod-coupled"},
     # 2026-08-28 merge-reconciliation: #1785/#1816 files use the 'registry'
     # literal (session/extraction tests) — routed so the markers gate passes
     # repo-wide.
@@ -884,6 +895,31 @@ def test_no_redirect_stems_registry_exact():
         # on the addition is the pin working as designed, so the stem is
         # DECLARED here rather than exempted.
         "test_document_source_ingested_at_5140",
+        # #9639: DECLARED, and the honest reason is that the exemption is INERT here — this file
+        # constructs no projection at all (it drives tools/install-ci-runner-x64.sh as a
+        # subprocess in a hermetic env), so no redirect can flip anything. It is in the set only
+        # because `carve_out:` and this tuple are ONE set in two homes
+        # (test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems), and the file is a
+        # carve-out member because the URI-unset leg is its natural home. Do not read this entry as
+        # an embedded-construction claim: there is none to make.
+        "test_ci_runner_x64_install",
+        # #9018: the RUNNER TOOL CONTRACT probe — same shape as the line above, so the same
+        # honest reason. It drives `.github/scripts/runner-tools.sh` as a subprocess against a
+        # stub binary and a locally built tarball, and constructs no projection, so the
+        # exemption is INERT here. The entry exists because `carve_out:` and this tuple are ONE
+        # set in two homes, and the file is a carve-out member because the URI-unset leg is its
+        # natural home (it needs no graph). Not an embedded-construction claim — there is none.
+        "test_runner_tool_contract",
+        # CLI-extraction lane (#9915): the suite's `TestWriterContract` builds
+        # per-test embedded SDKs from `TORTOISE_DB_PATH` in namespace
+        # `cliex-contract` — not guard-passing — so the load-bearing reason is
+        # the REDIRECT: a URI-set lane would flip those constructions onto the
+        # shared `tortoise_test_matrix` instance (#5084 class) and certify a
+        # lane the suite does not target. Registered in all three homes —
+        # config/ci-surfaces.yml `carve_out:`, the `core` surface row,
+        # TEST_NO_REDIRECT_STEMS and this declaration — so the pin reding on
+        # the addition is the pin working as designed.
+        "test_cli_extraction",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "

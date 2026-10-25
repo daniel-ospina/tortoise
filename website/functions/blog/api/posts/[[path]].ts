@@ -457,14 +457,14 @@ export const onRequestPatch: PagesFunction<Env> = async ({ request, env, params,
   let getRes: Response;
   try {
     getRes = await fetch(
-      `${env.SUPABASE_URL}/rest/v1/blog_posts?select=id,status,created_by,body&slug=eq.${encodeURIComponent(slug)}&limit=1`,
+      `${env.SUPABASE_URL}/rest/v1/blog_posts?select=id,status,created_by,body,hold_for_review&slug=eq.${encodeURIComponent(slug)}&limit=1`,
       { headers: serviceHeaders(env) },
     );
   } catch {
     return err(503, "upstream", "supabase unreachable");
   }
   if (!getRes.ok) return err(503, "upstream", `supabase ${getRes.status}`);
-  const rows = (await getRes.json()) as Array<{ id: string; status: string; created_by: string | null; body: string }>;
+  const rows = (await getRes.json()) as Array<{ id: string; status: string; created_by: string | null; body: string; hold_for_review: boolean | null }>;
   const post = rows[0];
   if (!post) return err(404, "not_found", "post not found");
   if (post.status === "archived") return err(409, "archived", "archived is terminal");
@@ -530,17 +530,24 @@ export const onRequestPatch: PagesFunction<Env> = async ({ request, env, params,
   }
   if (updated.length === 0) return err(409, "archived", "post was archived concurrently");
 
-  // #9680: IndexNow — submit the canonical URL when, and only when, THIS patch is
-  // the draft→published transition. The transition predicate IS the trigger: an
-  // edit that leaves the post published (both sides published), a draft write and
-  // an unpublish all fail it and submit nothing. The once-per-24h window that
-  // covers publish → unpublish → re-publish the same day lives in
-  // notifyPublished, backed by blog_posts.indexnow_submitted_at.
+  // #9680 + #9803: IndexNow — submit the canonical URL when THIS patch makes the
+  // row publicly readable, and only then. Two arms, one predicate (`becameLive`):
+  // a `status` transition to `published`, and a hold clear on a row that is
+  // already `published` (the status is unchanged but the URL stops answering 404 —
+  // reachable through the console's drafts-queue Publish, which publishes an
+  // agent's held draft without clearing the hold). Everything else submits
+  // nothing: a draft write, an unpublish, an edit that leaves a live row live.
+  // The once-per-24h window that covers publish → unpublish → re-publish the same
+  // day lives in notifyPublished, backed by blog_posts.indexnow_submitted_at.
   //
   // waitUntil, so the response does not wait on the vendor: the post is live
   // either way, a submission failure must not fail the publish, and there is no
   // retry in this path — the failure is logged with its status instead.
-  if (resultStatus === "published" && post.status !== "published") {
+  const becameLive =
+    resultStatus === "published" &&
+    (post.status !== "published" ||
+      (post.hold_for_review !== false && patch.hold_for_review === false));
+  if (becameLive) {
     waitUntil(
       notifyPublished({
         env,

@@ -62,10 +62,19 @@ Interface A states four properties, and the failure each one prevents:
    with no entry raises `UnknownJournalRecordType` **before any statement runs**
    (`replay_plan` materializes the whole journal first), so a replay either
    materializes the journal or leaves the record untouched.
-2. **A declared refusal is not a skip.** `PointsMerged` and
-   `EntityMutated op=rename` are *known* and *refused* with a written reason
-   (`RefusedJournalOperation`) — an approximation would silently re-point edges
-   the journal does not describe.
+2. **A declared refusal is not a skip — but a refusal is only correct when the
+   record genuinely cannot represent the operation.** `EntityMutated op=rename`
+   is *known* and *refused* with a written reason (`RefusedJournalOperation`).
+   `PointsMerged` used to sit beside it and was **wrong to**: the graph fold's
+   whole mutation for a merge is one `DETACH DELETE` per `merge_ids` entry
+   (`projection/entities.py::_EntityHandlers._delete`; `keep_id` is read nowhere
+   in `tortoise/` outside the record module), so the record *can* represent it —
+   and since `#9892` it does, emitting the same identity+node delete pair
+   `EntityMutated op=delete` emits, whose `ON DELETE CASCADE` removes the
+   loser's incident relations exactly as `DETACH` does. The refusal had also
+   never fired for the only producer (`api.py::merge_points` emits no `op`), so
+   the gap was misclassified as a generic fold failure while both merged Points
+   stayed in `public.point`.
 3. **`NoRecordEffect` is a decision with a reason**, never a hole: `IngestStarted`
    and `CalibrationRecorded` are audit-only, and `ConfidenceChanged` is the EP
    carve-out in executable form — the record's correct mutation for a recomputed
@@ -83,7 +92,7 @@ Interface A states four properties, and the failure each one prevents:
 7. **Edge endpoints are RESOLVED, never minted.** An `EntityLinked` endpoint is
    addressed by the journal `id` (the fold's own `MATCH (t:{label} {id:$tid})`),
    but `relation.src_key`/`tgt_key` are composite FKs into `node_identity`, whose
-   key is the label's canonical key (`Object`/`Subject`→`name`, `Source`→`url`,
+   key is the label's canonical key (`Object`/`Subject`→`id` since #9881, `Source`→`url`,
    `Point`/`Session`→`id`, `Event`→`event_id`). The projection joins the node row
    by `id` and takes its `node_key`; an endpoint with no row lands **no relation
    at all** — the fold's own `"absent"` verdict, not a phantom identity the hard
@@ -138,7 +147,7 @@ Interface A states four properties, and the failure each one prevents:
 | epistemic | `EntityMutated` | `OpDispatch` on `op` — patch / delete / **declared refusal** (`rename`) |
 | epistemic | `ConfidenceChanged` | **no effect** — the EP carve-out |
 | edges | `EntityLinked`, `DirectEdgeCreated`, `DirectEdgeRepoint` | `relation` upsert with `(label, key)` composite FKs |
-| epistemic | `PointsMerged` | **declared refusal** |
+| epistemic | `PointsMerged` | `NodesDelete` on `point` — one hard delete per `merge_ids` entry (the graph fold's `DETACH DELETE`; edges go with it, `keep_id` is not written because no unit reads it) |
 | bookkeeping | `IngestStarted`, `CalibrationRecorded` | **no effect**, with a reason |
 
 ## 2. Field placement — the schema is the contract
@@ -197,10 +206,176 @@ closed at both layers:
   graph cannot match a whitespace-only key (FalkorDB equality filter, **#9599**),
   so the fold would mint a duplicate `:Session` and land no edge while Postgres
   would have held the row.
-  The three remaining R5 classes are still **not** materialized and are named
-  where the producer lives: point-property edges (`extractedFrom`, `about*`,
-  `mitigated_by`, `TAGGED`), operator `IMPL`/`NAND`/`INPUT`, and the structural
-  predicates whose `DirectEdgeCreated` fold works but has **no producer**.
+  **Updated by #9553 (R5 class 1, `extractedFrom`):** the first family of the
+  point-PROPERTY set now lands too — one `relation` row per ref
+  (`record_projection._POINT_PROPERTY_RELATIONS`), because that is the fan-out
+  the fold's `_link_source` performs (many-to-many, `#3263`). Three details make
+  it parity rather than a plausible copy: the target resolves to the SAME Source
+  the fold picks — `resolve_source_key`'s canonical identity, matched on `url`
+  **or** `canonical_url`, PREFERRING the canonical match and ordered by
+  `node_key` within it, which is that resolver's own order (it queries
+  `canonicalUrl` first and returns there; the raw spelling is the adopt-on-touch
+  fallback) and its own tiebreak (`ORDER BY s.url LIMIT 1`), and never via the
+  `id` fallback `_ENTITY_MATCH_COLUMNS` supplies for `EntityLinked` — which also
+  required the projection to DERIVE `source.canonical_url`, since no payload may
+  carry it (`projection/entities.py::_EntityHandlers._SOURCE_HANDLED` lists
+  `canonicalUrl` as writer-derived); the ref container and the per-member gate
+  mirror `_link_source`'s (a dict fans out to nothing, `#8171`); and the `#5256`
+  read-version anchor rides `relation.source_version` — a PRIMARY column the
+  cache projection maps back to `r.sourceVersion` — from the Point's own
+  `sourceVersionTransit` carrier, all-or-nothing and raw-ref keyed, exactly as
+  `_point_source_transit` decides. That anchor is written ON CREATE, as
+  `_anchor_on_create` does: the INSERT carries it and the conflict path does not
+  touch the column at all, so a replayed edge neither advances nor fills a
+  recorded `source_version` on either route (every other relation attribute
+  stays latest-record-wins — edge state, not a recorded read version).
+  **Three residuals, none an unmatched-URL case.** (a) The Source's record must
+  precede the Point's (the live order: the capture materialises the session
+  Source first, `sdk.py::_materialize_session_source`), else the insert finds no
+  `source` row and lands nothing — the `absent` verdict every relation gives.
+  (b) A ref naming a Source the record never saw — `_link_source` MINTS an
+  **unjournaled** stub for one (`_mint_source_stub`, **#5024**) — has no
+  `(Source, key)` identity for `relation.tgt_key`'s composite FK at all, so the
+  record lands nothing by design: minting a node from an edge directive would
+  materialise a Source no record created. Same absent verdict, same reason, as
+  the CONTAINS envelope family (**#9594**).
+  (c) **Which RECORDS carry the family, where the fold's own routes disagree.**
+  `apply()` materialises a Point from four arms and three reach
+  `_upsert_point_edges` — `PointAdded`/`OperatorAdded`, `PointPromoted`,
+  `OperatorPromoted` (neither promote payload wrapper drops `extractedFrom`) —
+  while `rebuild_all`'s pass 2 re-derives the family for the two creation types
+  only. `_POINT_PROPERTY_RELATIONS` declares all four and the record follows
+  `apply()`, the chronological engine `rebuild`/`recover_from_log` run: declining
+  the promote rows would make the record POORER than the graph for exactly the
+  #2256 population whose promote IS the operator's only record. A full rebuild
+  that re-derives no promote edge is the divergence that follows, and it sits on
+  the pass-2 side.
+  The other class-1 families are still **not**
+  materialized, each for its own reason: `about*` needs `_create_about_edges`'
+  live name→label cascade (and `EntityLinked` already carries it whenever the
+  capture resolved it); `TAGGED` has no record `tag` node for
+  `relation.tgt_key` to key on.
+  **Updated by #9553 (R5 class 3, operator topology):** `mitigated_by` — and the
+  `IMPL`/`NAND`/`hasPart` edge and reverse `INPUT` it is emitted WITH — now land
+  as `relation` rows (`record_projection._operator_relation_statements`, declared
+  by `_OPERATOR_RELATION_RECORDS` for the same four `apply()` arms). The carrier
+  is the Point's own `{op_type, inputs}` descriptor, which is what
+  `edges.py::_create_edges` reads; the record mirrors it VALUE FOR VALUE — the
+  `op_type`→predicate map (four composition spellings → `hasPart`), the reverse
+  `INPUT`, and the two mitigation gates (`is_non_operator_payload` AND
+  `has_usable_mitigation_strength`, restated because the module loads STANDALONE
+  and pinned value-for-value). Three parity details: the endpoints are resolved
+  across the **four** epistemic labels (#7902 — an operator input may be a
+  `Subject`/`Object`/`Event`, so `relation.src_label` comes from the record's own
+  node rows rather than being assumed `Point`, which is why these rows are built
+  by a statement whose LABELS are subselect columns); each label resolves to its
+  CANONICAL key (`Point`/`Event` → `node_key`, `Subject`/`Object` → `id` since #9881),
+  because `relation.src_key` is a `node_identity` FK and the raw journal id for a
+  Subject would address a phantom identity; and the conflict path is
+  `DO NOTHING`, not `DO UPDATE` — the fold writes `{idx}` on the typed/reverse
+  edges and nothing at all on `mitigated_by`, so there is no attribute to
+  correct. ⛔ The input gate is `_writable_id`'s (`_writable_epistemic_id`), NOT
+  the blank-refusing `_writable_endpoint_id` the CONTAINS/extractedFrom families
+  use, and the difference is deliberate: those two address an endpoint with an
+  INLINE indexed property match, where FalkorDB's equality filter misses a
+  whitespace-only key (**#9599**), while `_create_edges` probes an operator input
+  with a label-disjunctive `WHERE` — a SCAN — and lands the edges for a blank key
+  (measured through the fold). Reusing the stricter rule here would make the
+  record poorer than the graph on the very edge this change carries. Residuals, stated: an input the fold STUBS (a short id that does not
+  resolve) lands no row, because a stub has no record row to resolve from — the
+  same `absent` verdict as every other relation — and a snapshot whose `operator`
+  key is ABSENT on a promote arm lands none, exactly as
+  `_promotion_point_with_operator` synthesizes only for `OperatorPromoted`; a
+  snapshot whose key is PRESENT but holds `None` (or any non-`dict`) lands none
+  too, because the fold's synthesis gate is `"operator" in p` and `_create_edges`
+  refuses a non-`dict` — the record follows both, so it can never be richer than
+  the graph on a corrupt record. One stated BOUND, and the record is the POORER
+  side of it: the fold matches `s` to EVERY node holding an input id and MERGEs
+  an edge pair per node, while the record files one row under the first label in
+  `EPISTEMIC_LABELS`. Ids are per-node ULIDs, so a duplicated id needs a
+  hand-written graph; the row is absent-but-one rather than wrong.
+  The remaining R5 classes are still **not** materialized and are named
+  where the producer lives: the rest of the point-property set (`about*`,
+  `TAGGED`) and the structural predicates whose `DirectEdgeCreated` fold works
+  but has **no producer**.
+  > **Updated #9553 (R5 class 4).** The structural predicates now HAVE their
+  > producer: the edge lane's two mints (`projection/edges.py::create_edge` and
+  > `create_about_edge`, plus `create_edge`'s three typed wrappers) journal §4.4's
+  > flat `DirectEdgeCreated` — `{src, tgt, edge_type, source_label,
+  > target_label}` — through `TortoiseSDK._record_structural_edge`, which the
+  > projection reaches via `_bind_structural_edge_recorder` (`_get_proj`, beside
+  > `_bind_journal`, and only when a journal exists). Nothing new is invented: the
+  > record type, the pass-2b fold and the `RelationUpsert` all predate it; the
+  > labels are additive for the RECORD (`relation.src_label`/`tgt_label` are bound
+  > values and each label resolves through its own key column) and ignored by the
+  > fold. TWO gates sit in front of the emission, both load-bearing: a REPLAY never
+  > journals (`projection.replay_window_open()` — `apply()`/`rebuild_all` re-wire
+  > about links through this very mint on the SDK's BOUND projection, so without it
+  > a recovery write would append to the append-only journal and write back the
+  > endpoints it resolved at replay time), and an endpoint the fold cannot address
+  > (`Source`; a non-`id`-valued node) is declined rather than half-journaled.
+  >
+  > **Measured.** PGlite (`supabase/tests/pglite/validate.mjs`) is the record
+  > route's CI gate: `PointAdded` + `SubjectAdded` + the descriptor ⇒ exactly one
+  > `relation` row `Point/p1 -> Subject/team-x` (the Subject filed by NAME), and
+  > idempotent on re-replay. On a local throwaway Postgres + FalkorDB the whole
+  > family set was measured 1:1:1 across live / journal-rebuild / record-rebuild
+  > (`ownedBy`, `dependsOn`, `hasPart`, `wasDerivedFrom`, `references`, bare
+  > `aboutObject`); `relation` goes from 0 rows for each to one. A
+  > `capture_session` leaves `aboutObject`/`extractedFrom` short by the captured
+  > turns — R4's pinned `point.search_keys` refusal, not an edge defect (the Point
+  > never reaches the record, so its edges have no endpoint).
+  >
+  > **What is and is not carried.** `RECORD_CARRIED_STRUCTURAL_RELS` is the
+  > lane's WHOLE write set (23 predicates, asserted at import), because the
+  > producer journals each one when its endpoints are addressable — including
+  > `aboutDocument`/`aboutSource`, which ARE journaled between epistemic endpoints
+  > (measured; `create_edge` type-checks only `aboutDocument`, `create_about_edge`
+  > type-checks neither). The per-WRITE decline is the `:Source` endpoint: the fold
+  > sweeps `EPISTEMIC_LABELS` on `p.id` and a `:Source` is url-keyed, so
+  > `SOURCE_ENDPOINT_CANONICAL_RELS` (`aboutDocument`, `aboutSource`) and a
+  > `:Source`-anchored `references` (`link_source_to_entity`) are declined and
+  > REPORTED through the package's one skip reporter (`projection._log_identity_skip`,
+  > `absent_is_ordinary=False, drops_record=True` — so the skip is COUNTED, not just
+  > logged); making a `:Source` addressable is a FOLD change — **#9834**. A
+  > self-edge is skipped (the fold's `E2E-11.6`) and warned once per relation at the
+  > recorder. The one
+  > family with no RECORD carrier is `TAGGED` (no record `tag` table to key
+  > `relation.tgt_key` on — a schema decision); a JOURNAL rebuild DOES restore it
+  > from the Point's `tags` property (`_sync_tags`, measured), and it is silent:
+  > `_sync_tags` reaches neither the lane nor this producer.
+  >
+  > ⚠️ **Supersede.** The `DirectEdgeCreated` fold's superseded-endpoint skip is gated on what the supersede DID
+  > to that edge (`_supersede_took_this_edge`), because each of its three shapes was a live ≠ rebuild divergence
+  > until the gate learned it: (1) DIRECTION — leg 2a (`IMPL`/`NAND`) moves both ways and always journals a
+  > repoint, while leg 2b moves only the OUTGOING side, so an incoming edge must be replayed; (2) ORDER — an edge
+  > minted at an already-superseded id was never moved by the supersede, so the gate compares the creation's
+  > journal seq with the supersede's and replays it; (3) THE DELETE-LEG'S BLIND SPOT — a replayed post-supersede
+  > creation is exempted from the 2b repoint delete-leg (which cleans pass-2's resurrection and cannot tell the
+  > two apart) by `(src, edge_type, RESOLVED target node)`, while the successor-side transfer still runs. Residuals:
+  > (a) `wasDerivedFrom`/`aboutAction` are moved live but not derivable, so 2b journals no repoint for them and the
+  > journal route loses them after a supersede; (b) the RECORD keeps EVERY moved structural rel at the
+  > pre-supersede point (a 2b descriptor carries `src=old_id` and the record's `DirectEdgeRepoint` is a plain
+  > upsert) — pre-dating this producer for `extractedFrom`/`EntityLinked`, newly visible for the rest — **#9836**.
+  >
+  > ⚠️ One uncarried writer is OUTSIDE this lane and stays open:
+  > `sdk.backfill_about_entities` mints about edges through `_create_about_edges` →
+  > `wire_about_link` (a bare MERGE) with no record and no `aboutEntities` snapshot
+  > prop, so neither carrier restores them — **#9833**.
+  >
+  > ⚠️ **One RECORD-side residual the producer cannot reach — `idx` (#9844), measured.** A
+  > `DirectEdgeCreated` descriptor carries no `idx`, so the record defaults it to `0`, while
+  > `relation`'s conflict key includes `idx` and an operator's own `hasPart`/`IMPL`/`NAND` rows
+  > carry `idx = enumerate(inputs)`. Mint the edge an operator's record already carries at
+  > `idx >= 1` (`create_operator("composedOf", a, [b])`, then
+  > `create_edge("hasPart", op, b)`) and the LIVE graph is unchanged — the `MERGE` is
+  > property-agnostic, so it dedups onto the `idx=1` edge and mints no new edge — while the
+  > record route computes `(op, b, hasPart, 0)` beside the existing `(op, b, hasPart, 1)`: two
+  > rows for one edge, the record RICHER than the graph. The producer cannot fix it (the mint
+  > takes no property parameter, §9.6, and cannot read the `idx` the existing edge carries), so
+  > the fix is a record-layer rule with its own test — insert only when the
+  > `(org, graph, rel_type, src, tgt)` triple is absent, for this family only — filed as
+  > **#9844**.
 * **It does not approve `#7879`'s scope.** Scope and Plan carry human gates.
 * **It adds no migration-safety surface** (owner scope ruling, 2026-10-10).
 * **It changes no public surface.** No MCP tool and no public SDK method is added,

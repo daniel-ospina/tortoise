@@ -95,7 +95,18 @@ class TestBridgePush:
 
 class TestNoEngineImports:
     def test_integrations_have_zero_sdk_imports(self):
-        """AST gate (AC4): integrations connect via MCP — no engine imports."""
+        """AST gate (AC4): integrations connect via MCP — no engine imports.
+
+        Scope limit (#9929 review advisory, disclosed): this gate sees IMPORT
+        NODES only. An integration that runs IN the Tortoise container and
+        reaches the engine through a module-level string (the writer script in
+        ``integrations/cli-extraction/extract_turns.py``) is invisible to
+        ``ast.parse``, and the running query lives in a test file this gate
+        does not scan — so a green run here is NOT proof that no integration
+        names the engine. The in-container access is deliberate and documented
+        in ``integrations/cli-extraction/README.md`` ("Its writes go through
+        public SDK doors").
+        """
         import ast
         from pathlib import Path
 

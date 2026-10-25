@@ -119,6 +119,11 @@ from tortoise.incident_kinds import (  # #4780: the one kind declaration site
     KIND_RESTORE_DRILL_FAILED,
     KIND_SIZE_GUARD_ABORT,
 )
+
+# #9572 review P2: the "nothing was named" predicate (absent OR blank) — ONE
+# home, shared with the SDK doors, EventAPI and the seed surfaces, so the two
+# spellings cannot be drawn differently at the next door.
+from tortoise.kind_fallbacks import named_kind
 from tortoise.live import epistemic_disjunction  # #7902: the shared label set
 from tortoise.mcp_server import create_http_app
 from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
@@ -156,6 +161,14 @@ from tortoise.projection import (
     journal_mint_write_ahead,  # #3390: journal the intended name BEFORE the CREATE
 )
 from tortoise.quota import with_limit_contact  # #5425 refusal seam
+
+# #9555 / R7: the ONE spelling of §9.1's narrative carrier type. Its record home
+# is `public.session_narrative` and it materialises no node (§9.1: "not in the
+# graph, not a `Document` node, not a `Point`"), so the type lives with the
+# registry that projects it — a producer and a registry that spell a type
+# differently is the `create_document(type="SourceCreated")` class, which
+# journalled NOTHING.
+from tortoise.record_projection import NARRATIVE_RECORD_TYPE
 from tortoise.retention import RESTORE_WINDOW_HOURS as _RESTORE_WINDOW_HOURS  # #4179
 from tortoise.retrieval_metering import (  # #4489: pure-ASGI retrieval-work flusher
     RetrievalMeteringMiddleware as _RetrievalMeteringMiddleware,
@@ -9215,7 +9228,13 @@ async def _require_approved_kind(sdk: TortoiseSDK, kind: str, *, door: str) -> N
 
 class CreateObjectRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
-    objectKind: str = Field(default="other")
+    # #9572: ``None`` means "the caller named no kind" and is FORWARDED AS "not
+    # supplied". A fabricated ``"other"`` default here re-opened the exact
+    # clobber the SDK doors had: the fold writes the discriminator ON MATCH as
+    # ``coalesce($ok, o.objectKind)``, so a defaulted request silently reset a
+    # stored ``capability`` to ``other`` on a re-create. The ``'other'`` default
+    # is the fold's ON CREATE arm.
+    objectKind: str | None = Field(default=None)
     # lifecycle status rides props (create_entity splats **props over the
     # 'live' default) — the onboarding STATE seed passes in_progress.
     status: str | None = None
@@ -9236,18 +9255,27 @@ async def create_object(body: CreateObjectRequest, request: Request,
     await _graph_offload(lambda: _check_org_limit(org, "points"),
                          op="check_org_limit.points")
     sdk = await _data_sdk_offloaded(org)
-    # #5475: the kind must not widen the graph's own approval set.
-    await _require_approved_kind(sdk, body.objectKind, door="create_object")
+    # #5475: the kind must not widen the graph's own approval set. #9572: only a
+    # NAMED kind is checked — an absent one is not a kind, and the fold supplies
+    # the ``'other'`` default ON CREATE. #9572 review P2: BLANK is not a kind
+    # either — ``""`` is not ``None``, so it passed this gate (a bare value names
+    # no pack, by design) and reached the fold's ``coalesce($k, stored)``, which
+    # returns the first NON-NULL argument: a blank re-create reset a stored kind
+    # to ``""``. ``kind_fallbacks.named_kind`` is the ONE predicate for that.
+    _okind = named_kind(body.objectKind)
+    if _okind is not None:
+        await _require_approved_kind(sdk, _okind, door="create_object")
     try:
         props = {}
         if body.status:
             props["status"] = body.status
+        if _okind is not None:
+            props["objectKind"] = _okind
         # #3718: sdk.create_object is SYNC FalkorDB socket I/O — run it in a
         # worker thread so THIS pinned call cannot freeze the single event loop
         # while it runs. Same asyncio.to_thread pattern as /v1/search;
         # response and error semantics are unchanged.
-        node = await asyncio.to_thread(
-            sdk.create_object, body.name, objectKind=body.objectKind, **props)
+        node = await asyncio.to_thread(sdk.create_object, body.name, **props)
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("create_object failed")
@@ -9270,7 +9298,8 @@ async def create_object(body: CreateObjectRequest, request: Request,
 
 class CreateSubjectRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
-    subjectKind: str = Field(default="other")
+    # #9572: ``None`` = not supplied — see CreateObjectRequest above.
+    subjectKind: str | None = Field(default=None)
 
 
 @app.post("/v1/subjects")
@@ -9288,13 +9317,20 @@ async def create_subject(body: CreateSubjectRequest, request: Request,
     await _graph_offload(lambda: _check_org_limit(org, "points"),
                          op="check_org_limit.points")
     sdk = await _data_sdk_offloaded(org)
-    # #5475: the same input constraint as /v1/objects, on the subject door.
-    await _require_approved_kind(sdk, body.subjectKind, door="create_subject")
+    # #5475: the same input constraint as /v1/objects, on the subject door
+    # (#9572: only a NAMED kind — see CreateObjectRequest; BLANK is not a kind,
+    # per ``kind_fallbacks.named_kind``).
+    _skind = named_kind(body.subjectKind)
+    if _skind is not None:
+        await _require_approved_kind(sdk, _skind, door="create_subject")
     try:
         # #3718: sync FalkorDB I/O — off-loaded off the event loop (see
-        # create_object above for the pattern and rationale).
+        # create_object above for the pattern and rationale). #9572: forward the
+        # kind ONLY when the caller named one, so a bare re-create cannot reset
+        # a stored kind to the default.
+        _kind = ({"subjectKind": _skind} if _skind is not None else {})
         node = await asyncio.to_thread(
-            sdk.create_subject, body.name, subjectKind=body.subjectKind)
+            sdk.create_subject, body.name, **_kind)
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("create_subject failed")
@@ -13327,8 +13363,17 @@ _SESSION_CAPTURE_LANE_VALUES = frozenset({"hook", "store_sync"})
 # stored as a value no reader can interpret. 'unknown' is a LEGAL member: the
 # backfill/import lane admits a record with no client timestamp and records
 # this honestly, and the floor treats it as NOT passed.
+#
+# 'entry_timestamp' (#3515 piece 12, ADDED by the store-sync backstop): the
+# store-sync lane's clock is the JSONL entry's OWN ``timestamp`` field — a
+# genuinely different clock from both an mtime and an observation instant, and
+# the table's PRIMARY source for that lane. It needs its own member because
+# recording it as 'file_mtime' would state a provenance the value does not
+# have, and the floor's whole falsifiability property is that a source tells a
+# reader WHICH clock produced the number. Additive: every pre-existing value is
+# still accepted, and the plugin/CLI/backfill lanes are unchanged.
 _SESSION_CAPTURED_AT_SOURCE_VALUES = frozenset(
-    {"cli_observed", "file_mtime", "unknown"})
+    {"cli_observed", "entry_timestamp", "file_mtime", "unknown"})
 
 
 class SessionRequest(BaseModel):
@@ -13385,6 +13430,37 @@ class SessionRequest(BaseModel):
     # Length-capped to prevent unbounded amplification onto every Session row.
     machine_id: str | None = Field(None, max_length=256)
     model: str | None = Field(None, max_length=128)
+
+    # #9599 — a PRESENT-but-blank session id is refused at the boundary, so it
+    # never reaches ``session_id = body.session_id or mint()`` (it is truthy,
+    # so that default never fired and the blank went straight to the write —
+    # where the engine cannot serve a blank key back to an equality seek: the
+    # next capture on the same id minted a DUPLICATE ``:Session`` and the turn
+    # container's CONTAINS edge landed nothing, measured). The rule is
+    # Layer-1's already (``commit_schema.CommitPayload._non_blank_session_id``,
+    # #4005 — the validator lives on ``CommitPayload``; there is no
+    # ``CommitRecord`` class, and citing one sent a review to re-derive a third
+    # spelling); this is the same sentence at the boundary — ONE predicate for
+    # all three DOORS (the two SDK doors and this one), so they cannot drift
+    # apart. ⛔ The blank rule has a SECOND, deliberate home one layer down: the
+    # REPLAY half is ``projection._writable_container_id`` (``_writable_id``
+    # PLUS this same blank clause), which gates both journal carriers and the
+    # sidecar restores and landed on main with #9594 from the #9553 review P2 —
+    # so #9553 is the correct citation for the BLANK rule, and only the PADDED
+    # position below is not its. ``None``/absent still mints (the caller named
+    # no session), and a PADDED-but-real id stays legitimate (#9599's own body;
+    # #9553 records no position on padded ids at all).
+    # Refusing or trimming it is #9599's open owner question (comment
+    # 6342343424): this PR lands only the blank half.
+    @field_validator("session_id")
+    @classmethod
+    def _non_blank_session_id(cls, v):
+        from tortoise.ids import session_id_refusal
+
+        refusal = session_id_refusal(v)
+        if refusal is not None:
+            raise ValueError(refusal)
+        return v
 
     # Invalid harness ⇒ 422 at the model boundary (FastAPI validation), never
     # a silent drop or a 200 — a typo'd harness must be visible (Task 11).
@@ -13774,7 +13850,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
 
     VERIFIED gate order (#2093 S2 amendment — the impl docstring's old gate
     list was stale, pre-#1927):
-      1. boundary 422 — invalid harness / conversation shape (Pydantic
+      1. boundary 422 — invalid harness / conversation shape / BLANK session_id
+         (#9599: `SessionRequest._non_blank_session_id`; a blank id names no
+         session, and writing it minted a duplicate `:Session` whose CONTAINS
+         edge landed nothing) (Pydantic
          SessionRequest validation fires BEFORE the handler on REST; the MCP
          tool's SessionRequest construction maps the same failure to its
          422-equivalent error dict) — recording-off never masks a malformed
@@ -13794,7 +13873,6 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     ``request`` is optional (the MCP tool has no HTTP Request) — audit and
     abuse recording degrade to a best-effort stub.
     """
-    import uuid
     from datetime import datetime
 
     from tortoise.quota import (
@@ -13937,7 +14015,13 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # first MATCH. `_capture_session_probe_off_loop` owns the hand-off (the same
     # off-loop seam the onboarding projection read uses); `session_id`/`now` are
     # pure computations, hoisted above it.
-    session_id = body.session_id or f"session_{uuid.uuid4().hex[:12]}"
+    # #9599: the mint is ONE spelling (`tortoise.ids.mint_session_id`) — this
+    # site and `extractor_v2`'s were the two hand-copies the ids.py helper
+    # subsumes. A blank `body.session_id` never reaches here: `SessionRequest`
+    # refuses it at the boundary (`_non_blank_session_id`).
+    from tortoise.ids import mint_session_id
+
+    session_id = body.session_id or mint_session_id()
     now = datetime.now(UTC).isoformat()
     sdk, proj, session_row = await _capture_session_probe_off_loop(
         org, session_id)
@@ -15813,10 +15897,22 @@ def _commit_response(
     """§6.1 200 response body — commit_id = client_commit_id (stable per
     logical commit); duplicate:true ⇒ zero writes, zero write-ops billed
     (PL4); held non-empty ⇒ overflow (PL3), client-side, re-commit checks
-    the 50-ceiling only. warnings[] (#405): additive, warn-first domain
-    integrity violations — the commit WRITES anyway; present (possibly
-    empty) on every 200, deterministic per payload (idempotent re-commits
-    return the same warnings)."""
+    the 50-ceiling only.
+
+    ``warnings[]`` (#405): additive, warn-first — the commit WRITES anyway;
+    present (possibly empty) on every 200. TWO kinds ride the one key, and the
+    difference is why the field is not uniform per payload:
+
+    * the payload's DOMAIN integrity warnings, derived from the payload alone
+      — deterministic per payload, so an idempotent re-commit returns the
+      same ones;
+    * WRITE-TIME advisories (``temporal_not_applied``, #7819) — observed while
+      the writes ran (a dedup fold dropped on an already-terminal claim wrote
+      NOTHING). These are present only on the response to the call that
+      PERFORMED the write; a ``duplicate:true`` replay writes nothing, so
+      nothing can be dropped, and its ``warnings[]`` is exactly the payload's
+      domain warnings (see the inline note in ``commit_session``'s write
+      phase)."""
     return {
         "session_id": payload.session_id,
         "commit_id": payload.client_commit_id,
@@ -15982,6 +16078,18 @@ def _prevalidate_supersede_window(sdk, pr, *, now: str) -> None:
     - a freshly-minted successor's payload ``when`` (``create_point`` writes
       ``validFrom`` only for a truthy ``when``).
 
+    ⚠️ The first bullet holds for a NON-TERMINAL dedup target only. When the
+    target is a terminal claim, ``create_point`` DROPS the fold whole (#7819):
+    a payload carrying any ``_TEMPORAL_RESTAMP_PROPS`` member writes nothing, so
+    the re-keyed node's stored start is NOT overwritten. ``payload_when`` is
+    still this mirror's input in that case, which makes the check CONSERVATIVE —
+    it can compare an end against a start the writer will never write. Because
+    ``_succ_state``'s terminal pre-check then skips ``supersede_point`` anyway,
+    no inverted window can result (nothing is written, so nothing is refused
+    late); the residual is an over-refusal — a ``supersede_window_inverted`` 422
+    for an inversion that exists only in the mirror's model — and it is
+    deterministic, so it must be repaired in the payload, not retried.
+
     When the resolution would instead fall through to a clock this check cannot
     read before the write (a fresh node's future ``createdAt``, or
     ``supersede_point``'s own ``now``), NOTHING is refused here and the ``[5]``
@@ -16007,9 +16115,13 @@ def _prevalidate_supersede_window(sdk, pr, *, now: str) -> None:
     # sibling loops + the MCP preview's identical read).
     old_vfs = [r[0] for r in old_rows]
     # Mirror `create_point(dedup=True)`'s successor resolution AT THIS POINT in
-    # the write sequence. A match re-keys the write onto that node (and, with a
-    # truthy payload `when`, `update_point` overwrites its stored start); no
-    # match mints the content-addressed `supersede_id` with the payload `when`.
+    # the write sequence. A match re-keys the write onto that node and — for a
+    # NON-TERMINAL target — a truthy payload `when` overwrites its stored start
+    # through the dedup fold's `update_point` (#7819 DROPS that fold whole when
+    # the target is a terminal claim, so `payload_when` is then the mirror's
+    # model of a write that will not happen: conservative, never fail-open —
+    # `_succ_state` skips the supersede itself). No match mints the
+    # content-addressed `supersede_id` with the payload `when`.
     existing_id = sdk._find_point_by_content(
         pr.point.content, pointKind=pr.point.pointKind)
     payload_when = pr.point.when or None
@@ -16048,6 +16160,38 @@ def _prevalidate_supersede_window(sdk, pr, *, now: str) -> None:
     )
 
 
+def _narrative_carrier(story_arc, summary, *, session_id: str,
+                       event_id: str, captured_at) -> dict | None:
+    """The journal record that makes §9.1's narrative reach the RECORD, or None.
+
+    Returns the `**kwargs` for `sdk._emit_event(NARRATIVE_RECORD_TYPE, …)`, or
+    ``None`` when there is no narrative to carry. The gate is on the TEXT, not
+    on the commit: `story_arc` is ``""`` for a capture whose distillation
+    produced no narrative, and emitting then would put a journal line on the
+    record whose whole payload the narrative home refuses (a blank narrative is
+    not §9.1 prose) — one no-op record per such commit, forever.
+
+    Extracted from the commit path so the gate is TESTABLE without a graph: the
+    measured #9555 gap was a producer that did not exist, and a producer's
+    "nothing to carry" case is exactly the one a call-site-only pin cannot
+    reach (calling `_execute_commit_writes` needs a live projection).
+
+    ``id`` is the commit's content-addressed ``eventId`` — the same anchor the
+    `:Event` write uses — so a RE-RUN of the commit phase (the retry contract:
+    "retry with the same client_commit_id") re-states the same identity and the
+    replay's idempotent upsert lands the same row rather than a duplicate.
+    """
+    if not isinstance(story_arc, str) or not story_arc.strip():
+        return None
+    return {
+        "id": event_id,
+        "sessionId": session_id,
+        "story_arc": story_arc,
+        "summary": summary,
+        "capturedAt": captured_at,
+    }
+
+
 def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # noqa: F821
     """W-3 [5] — the graph write phase for an adjudicated (budget=ok) commit.
 
@@ -16069,6 +16213,14 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     now = datetime.now(UTC).isoformat()
     session_id = payload.session_id
     reconcile = plan.reconcile
+    # #7819: TRANSIENT write-time advisories this phase has to REPORT but that
+    # are not payload domain warnings — today the only one is
+    # `temporal_not_applied`, raised when `create_point`'s dedup branch DROPS a
+    # fold carrying a validity window because the content address resolves to a
+    # terminal claim. A dropped fold writes nothing, so without this the client
+    # gets a 200 whose `when` was silently not applied. The handler folds these
+    # into the response's `warnings[]` (#405's additive channel).
+    _write_advisories: list[dict] = []
     # #5363 (B): each supersede window is validated inside the points loop
     # below, PER ACTION and immediately BEFORE that action's successor is
     # minted — see `_prevalidate_supersede_window` for why the position in the
@@ -16209,6 +16361,48 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 "sid": session_id, "eid": event_id,
                 "srcpath": document_basename, "now": now},
     )
+
+    # ── 2b. THE NARRATIVE'S JOURNAL CARRIER (#9555 / R7, §9.1). ──────────────
+    # The MERGE above writes `s.story_arc` — §9.1's S1 narrative ("the connected
+    # prose form of a captured session") — by RAW CYPHER, and raw Cypher is not
+    # a journal record (§17.1's unjournalled-writer ledger). Measured for #9555:
+    # that left the record's narrative home, `public.session_narrative`, with its
+    # two COUNT columns filled and its two TEXT columns NULL on every live
+    # capture, because the shape-keyed projection that owns that home
+    # (`record_projection._narrative_statements`) reads `story_arc` off a RECORD
+    # and no producer ever journalled one. The record could therefore reproduce
+    # the rows but not the narrative — exactly the D7 gap (#9567).
+    #
+    # WHY THIS IS THE WHOLE FIX, AND WHY IT IS NOT A SECOND WRITER. The record
+    # write path is singular and unchanged: `sdk._emit_event` is the ONE journal
+    # seam, and its live door (`record_writer.write_live_record`) is the ONE
+    # boundary into Postgres, driving the ONE fold (`record_projection.replay`).
+    # This adds a RECORD, which is what a producer does; it adds no writer. What
+    # it states is the write that already landed one statement above, which is
+    # §17.1's APPLY-FIRST lane — the record describes the write's own stored
+    # result (`payload.story_arc` is what the MERGE wrote verbatim; nothing in
+    # the payload is read back from the node, and the write's failure is
+    # fail-closed above, so a record can never outlive a write that did not
+    # land).
+    #
+    # WHY A DEDICATED TYPE RATHER THAN `SourceCreated`/`EventRecorded`. §9.1
+    # places the narrative *outside* the graph — "not in the graph, not a
+    # `Document` node, not a `Point`" — so the carrier must materialise no node:
+    # a `SourceCreated` for the transcript `:Source` would ALSO write the
+    # `public.source` row, and `record_projection`'s `props` tail would land the
+    # prose on a record row that the graph node does not carry, i.e. a
+    # second, drifting data-shaped copy — the very defect R7 exists to remove.
+    # `SessionNarrated` declares `NoRecordEffect` and its record effect is the
+    # SHAPE-KEYED secondary projection, so the text has exactly ONE home.
+    #
+    # EMPTY IS AN ABSENCE, NOT A RECORD — see `_narrative_carrier`'s own
+    # docstring for why the gate is on the TEXT and not on the commit.
+    _carrier = _narrative_carrier(
+        payload.story_arc, payload.summary,
+        session_id=session_id, event_id=event_id,
+        captured_at=payload.captured_at)
+    if _carrier is not None:
+        sdk._emit_event(NARRATIVE_RECORD_TYPE, **_carrier)
 
     # ── 3. Event AgentSession (content-addressed eventId — MERGE anchor,
     # amendment §4.3 #3) — produces the Document. Written via raw Cypher:
@@ -16438,6 +16632,9 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 # a new point property.
                 session_id=session_id, **point_props,
             )
+            # #7819: a fold dropped because the target is terminal writes
+            # NOTHING — carry the advisory out so the receipt reports it.
+            _write_advisories.extend(_written.get("advisories") or [])
             # #1370: record the id the write RESOLVED to (the map the binder
             # reads). #4970: the SUCCESSOR may itself re-key (its content
             # already exists under another id) — supersede the prior with the
@@ -16580,6 +16777,8 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 # the same source-session attribution surface.
                 session_id=session_id, **point_props,
             )
+            # #7819: same drop, the plain-create leg.
+            _write_advisories.extend(_written.get("advisories") or [])
             # #1370: the id the write RESOLVED to. #4970: the graph id §5
             # CONTAINS and the supersede below must use — the pre-existing
             # node on a dedup re-key, the payload id otherwise.
@@ -16629,17 +16828,32 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # edges are the canonical predicate (aboutEntity does NOT exist, §4.2); the
     # gated binder is the only aboutSubject producer. ──
     for er in reconcile.entities:
-        if is_subject_kind(er.entity.kind):
+        # #9572: the payload's `kind` is a CLASSIFICATION and `extractor_v2`
+        # repairs an unclassifiable entity to `core:other`. Writing that repair
+        # as the discriminator reached the fold's
+        # `ON MATCH … =coalesce($k, stored)` as a real kind, so this door — the
+        # PRODUCTION capture entry point (`TortoiseSDK.commit_session` POSTs
+        # here) — reset a stored `capability` on a bare re-mention. ONE
+        # predicate, shared with `sdk._payload_entity_kind`
+        # (`tortoise.kind_fallbacks`): a repair is not a discriminator, so it is
+        # omitted and the fold's `ON CREATE` arm supplies `other`.
+        from tortoise.kind_fallbacks import writable_kind
+        _ekind = writable_kind(er.entity.kind)
+        _kind_kw = {}
+        if _ekind is not None:
+            _kind_kw = ({"subjectKind": _ekind} if is_subject_kind(_ekind)
+                        else {"objectKind": _ekind})
+        if is_subject_kind(_ekind or ""):
             sdk.create_entity(
                 "subject", er.entity.name,
-                subjectKind=er.entity.kind,
+                **_kind_kw,
                 passes_frequency_gate=er.entity.passes_frequency_gate,
                 is_episodic=False,
             )
         else:
             sdk.create_entity(
                 "object", er.entity.name,
-                objectKind=er.entity.kind,
+                **_kind_kw,
                 passes_frequency_gate=er.entity.passes_frequency_gate,
                 is_episodic=False,
             )
@@ -16801,6 +17015,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         point_content_by_id=lambda pid: _point_content_by_id(
             payload, _commit_reverse_id_map.get(pid, pid)),
     )
+    return _write_advisories
 
 
 @app.post("/v1/sessions/commit")
@@ -16811,8 +17026,9 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
     422 field reasons incl. commit_id_mismatch + calibration_mismatch;
     retry-once semantics documented) → [2] L1 replay via :CommitRecord
     (fully_written → 200 duplicate:true, zero writes, zero write-ops) →
-    [3] L2 reconciliation IN MEMORY → [4] sessions presence contract +
-    budget adjudication on the reconciled net-new delta (soft 15 → WARN
+    [3] L2 reconciliation IN MEMORY → [4] sessions presence contract,
+    org points ceiling, per-org ingest budget (#4051: 429 + Retry-After)
+    and budget adjudication on the reconciled net-new delta (soft 15 → WARN
     telemetry; >25 first-adjudication → held[], NOT written; >50 → 402) →
     [5] the four-node chain + entities + operators + supersede_point +
     Session counters → [6] metering (write_ops +1 non-duplicate;
@@ -16824,8 +17040,12 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
     401 bad/missing key (get_current_org) · 402 budget ceiling · 422 Layer-1
     (retry once; code calibration_mismatch / commit_id_mismatch) OR an
     inverted supersede window (code supersede_window_inverted — #5363, a
-    deterministic payload refusal, NOT retryable) · 429
-    dedicated 300/min/key bucket (R-13) · 500 fail-closed, redacted.
+    deterministic payload refusal, NOT retryable) · 429 in TWO shapes, told
+    apart by `detail.code`: the dedicated 300/min/key bucket (R-13), and the
+    per-org ingest budget (#4051) with `detail.code = "ingest_rate_limited"`,
+    `detail.scope`, and a `Retry-After` the client MUST honour and then retry —
+    that one is a throttle, not a refusal of the data · 500 fail-closed,
+    redacted.
     """
     # #1927: commit_session is a session-content write surface that needs NO
     # consent gate — session_recording is default-ON (ToS-covered) with an
@@ -16930,7 +17150,9 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
     # write proceeds). Phase B (wired-but-inactive in prod — no production
     # chain is 'block'): a block-severity warning rejects the commit.
     from tortoise.commit_schema import domain_block_warnings
-    warnings = result.warnings or []
+    # COPY: `_execute_commit_writes` appends the #7819 write-time advisories
+    # below, and the plan's own warning list must not be mutated by a write.
+    warnings = list(result.warnings or [])
     blocking = domain_block_warnings(warnings)
     if blocking:
         raise HTTPException(
@@ -17055,6 +17277,116 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
         # never gated.
         _check_org_limit(org, "points")
 
+        # [4c] #4051 §3.1 — the per-ORG ingest budget. The gates above bound the
+        # REQUEST (payload shape, #9425) and the org's ALREADY-COUNTED nodes
+        # (#5637). Neither bounds the growth this lane leaves behind: a
+        # `points: []` commit mints :Session + transcript :Source +
+        # AgentSession :Event, and `_count_resource("points")` matches none of
+        # those labels, so that count never moves and its gate can never trip.
+        # #4010 made sessions unlimited for every tier, which removed this
+        # lane's only TOTAL bound; the total bound itself is #4051 §4 and needs
+        # an owner ruling (#4495/#5331 decided the UNIT is MB/GB, not nodes) —
+        # this is the slice of #4051 that needs no ruling: a per-org, 60s
+        # BYTE allowance on what a tenant may ingest, refused with 429 +
+        # Retry-After. It is a throttle (rate), not a cap (total): a legitimate
+        # commit at any rate below the allowance is unaffected, and a plan that
+        # wants more speaks to us (#5425's posture — rate limit, not refusal of
+        # the customer's data).
+        #
+        # WHY HERE — the SAME site as the sessions/points gates above, i.e. after
+        # every replay return and BEFORE the budget adjudication. Before the
+        # adjudication is load-bearing, not cosmetic: the `held` outcome WRITES
+        # (it MERGEs the :Session node with its `value_nodes_held` counter, and
+        # for a fresh `session_id` that MERGE CREATES it) and the `fail`
+        # outcome still leaves the :CommitRecord merged above — so every request
+        # that gets past the replay returns writes at least one node, and a gate
+        # below the adjudication (i.e. below the `held` return, not below the
+        # replay returns) would leave the held band's :Session mint
+        # (one uncounted node per request, the very class this issue is about)
+        # completely uncharged. ⛔ Moving the gate ABOVE the replay returns is the
+        # opposite error and is forbidden: a replay writes no nodes and must
+        # never 402 (#1727, pinned by
+        # `test_replay_does_not_consume_the_budget`).
+        #
+        # SCOPE, stated precisely because overstating a gate is worse than the
+        # gap it leaves: the refusal is not COMPLETELY write-free, but it no
+        # longer changes anything the client can observe. `store.acquire(...)`
+        # above merges this attempt's `:CommitRecord` BEFORE any gate in this
+        # handler, and a leftover `status='partial'` record is not neutral —
+        # `plan_commit`/`is_first_adjudication` read ANY existing record as a
+        # previous attempt, so it would make the documented
+        # backoff-and-retry a RE-adjudication without the first-adjudication
+        # hard-25 band (measured: a 26-net-new payload holds 26 on a clean
+        # graph but WRITES all 26 after a 429 left the record). The refusal
+        # therefore discards the record it just created
+        # (`store.discard_attempt`, only while its status is `partial`,
+        # `write_ops_billed` is 0 and no value nodes were declared), so a 429
+        # leaves the graph exactly as it was and the retry is a genuine first
+        # attempt. What remains is bounded and uncharged either way: the
+        # refused charge is not appended to the window, and the per-key rate
+        # limit bounds the request itself.
+        #
+        # CHARGE = max(payload bytes, nodes it will mint × 1024). The payload
+        # term stops a `summary`/`story_arc` (uncapped by Layer-1) from adding
+        # megabytes for a few hundred bytes of node charge; the node floor
+        # stops the `points: []` loop from being cheap. Both are stated in
+        # `commit_schema.commit_ingest_charge_bytes`; the reason it is NOT
+        # `plan.reconcile.net_new` (the PL4 metered figure) is there too — that
+        # counts points+entities+operators only, so an events-only payload
+        # would meter 0 while minting a node per entry.
+        from tortoise.commit_schema import commit_ingest_charge_bytes
+        from tortoise.quota import commit_ingest_admit
+
+        admission = commit_ingest_admit(org.get("org_id"),
+                                       commit_ingest_charge_bytes(payload))
+        if not admission.allowed:
+            retry_after = max(1, math.ceil(admission.retry_after))
+            # #4051 — the refusal must not change the RETRY's adjudication.
+            # `store.acquire` above merged this attempt's `:CommitRecord`, and
+            # `plan_commit`/`is_first_adjudication` read ANY existing record as
+            # a previous attempt — so leaving it would make the client's
+            # documented backoff-and-retry a RE-adjudication, dropping the
+            # first-adjudication hard-25 band: measured, a 26-net-new payload
+            # holds 26 on a clean graph but WRITES all 26 after a 429 left the
+            # record. Delete only what THIS attempt created (`created`) and
+            # only while it is still write-free, so the retry is a genuine
+            # first attempt and a real mid-write `partial` is untouched.
+            if created:
+                store.discard_attempt(payload.client_commit_id)
+            # #5425's seam, not a hand-appended sentence: it terminates the
+            # prose and appends the ONE contact path. A throttle is not a
+            # ceiling to buy out of — it names its own next step ("retry
+            # shortly") and the header says how long. The SENTENCE follows
+            # `scope`: in the shared-overflow regime the caller's own `used`
+            # can be 0 (the instance's shared capacity is what is spent), so
+            # saying "by this team" would blame a tenant that wrote nothing.
+            message = (
+                "The shared ingest allowance for this instance is saturated "
+                "— retry shortly"
+                if admission.scope == "process" else
+                "Too much data is being written by this team right now — "
+                "retry shortly")
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "code": "ingest_rate_limited",
+                    "message": with_limit_contact(message),
+                    # "org" = the caller's own allowance; "process" = the ONE
+                    # shared overflow bucket an instance falls back to when its
+                    # owned store is full of active orgs (bounded flood
+                    # regime). `used` is the caller's own spend in either case,
+                    # so `used: 0` with `scope: "process"` is a refusal about
+                    # the instance, never about the caller's traffic.
+                    "scope": admission.scope,
+                    "resource": "commit_ingest_bytes",
+                    "used": admission.used,
+                    "limit": admission.limit,
+                    "unit": "bytes/60s",
+                    "retry_after": retry_after,
+                },
+                headers={"Retry-After": str(retry_after)},
+            )
+
         # [4b] Budget — the authoritative §6.1 semantics live in adjudicate_budget.
         if plan.budget.outcome == "fail":
             # Ceiling exceeded (>50): nothing written; the record stays partial
@@ -17086,7 +17418,13 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
         # client retries with the same client_commit_id — safe by L1; the record
         # stays partial).
         try:
-            _execute_commit_writes(sdk, payload, plan)
+            # #7819: the phase returns its write-time advisories (a dedup fold
+            # dropped on a terminal claim wrote nothing) — they ride the same
+            # additive `warnings[]` channel as the payload's domain warnings, so
+            # a client sees that its `when` was not applied instead of a silent
+            # 200. They are NOT on the duplicate:true replay path (nothing is
+            # written there, so nothing is dropped).
+            warnings.extend(_execute_commit_writes(sdk, payload, plan) or [])
         except HTTPException:
             raise
         except InvertedSupersedeWindow as exc:
@@ -18955,7 +19293,7 @@ async def _membership_org(user_id: str, org_id: str) -> dict | None:
 def _graph_list_for(org_id: str) -> list[dict]:
     """One org's graph listing (#3718: blocking registry/PostgREST read).
 
-    The MODE BRANCH is here, not left to ``graph_list``'s own short-circuit:
+    The MODE BRANCH is here, not left to ``list_memory_graphs``'s own short-circuit:
     in Supabase mode ``_registry_anchor()`` would build (and eagerly attach)
     a FalkorDB handle BEFORE the callee ever consulted the mode, so the
     switcher — the first read every client makes — would need a live graph
@@ -18977,7 +19315,7 @@ def _graph_list_for(org_id: str) -> list[dict]:
     )
     if is_supabase_enabled():
         return graph_metadata(get_control_plane(), org_id)
-    return _registry_anchor().graph_list(org_id)
+    return _registry_anchor().list_memory_graphs(org_id)
 
 
 #: Orgs per off-loop submission when the switcher lists graphs, PER LANE
@@ -19088,13 +19426,13 @@ async def list_my_orgs(user: dict = Depends(get_current_user)):  # noqa: B008
     When EVERY membership is suspended there is nothing healthy to list →
     403 SUSPENDED with the appeal detail (#1853 lockdown preserved).
 
-    #765 (plan Task 8 reader inventory): graph_list resolves via the
+    #765 (plan Task 8 reader inventory): list_memory_graphs resolves via the
     mode-aware SDK (Supabase → teams.graph_name derivation via the seam;
     registry → Graph nodes). The mode branch that keeps this endpoint off the
     registry in Supabase mode is NOT the callee's short-circuit — it is the
     call-site branch in ``_graph_list_for`` (#3718), together with the
     lane-and-chunk choice made on the loop below, because ``_registry_anchor()``
-    binds eagerly and would be built before ``graph_list`` could consult the
+    binds eagerly and would be built before ``list_memory_graphs`` could consult the
     mode."""
     memberships = await _user_memberships(user["user_id"])
     resolved = []
@@ -19105,7 +19443,7 @@ async def list_my_orgs(user: dict = Depends(get_current_user)):  # noqa: B008
         resolved.append((m, org))
 
     # Suspended rows are excluded from graph resolution — they cannot be
-    # selected anyway, and graph_list must not observe the suspension stamp.
+    # selected anyway, and list_memory_graphs must not observe the suspension stamp.
     # #3718: the listing is a blocking registry/PostgREST read, and it used to
     # run per membership ON the loop. It now costs one OFF-LOOP submission per
     # chunk — ceil(N / the lane's chunk) submissions for N healthy orgs. (The
@@ -19160,6 +19498,12 @@ async def list_my_orgs(user: dict = Depends(get_current_user)):  # noqa: B008
         graphs_by_org.update(await offload(
             lambda chunk=chunk: {
                 org_id: _graph_list_for(org_id) for org_id in chunk},
+            # `op` is an OBSERVABILITY label naming the operation, not the SDK
+            # method it calls (its siblings are `data_sdk`, `org_sdk`, `query`):
+            # `tests/test_read_routes_loop_responsiveness.py` counts this exact
+            # label to prove the org-switcher fan-out stays chunked (#3718), so
+            # renaming it with the method it happens to call silently reds a pin
+            # that is about submission COUNT — and breaks metric continuity.
             op="graph_list"))
 
     out = []
@@ -19873,7 +20217,10 @@ def _provision_graph(org: dict, name: str,
     created_by_key_id — P2-6, NEVER a key id in created_by).
 
     ``packs`` (#9667): the optional desired pack set from the create body.
-    ``None`` = no pack decision (the graph stays UNCONFIGURED, catalog union).
+    ``None`` = no pack decision, so the graph is born UNCONFIGURED with no
+    ``:PackInstall`` records — the catalog-union arm until records exist (the
+    first packs read self-heals the starter set, which narrows it; #2714
+    indicator 3, #9691).
     A list — including ``[]`` — configures the graph at birth, in the SAME
     call and against the new graph's own physical namespace; the resolved set
     rides back in the envelope under ``packs``. A refusal rolls the graph back
@@ -20172,7 +20519,7 @@ async def create_org_graph(org_id: str, body: dict,
     async with _provision_lock(org_id):
         # Duplicate-active check INSIDE the lock (registry has no unique
         # index — P2 from review: the app check is the registry guard).
-        existing = _make_sdk(namespace="registry").graph_list(org_id)
+        existing = _make_sdk(namespace="registry").list_memory_graphs(org_id)
         if any(g["name"] == name and g.get("status") != "deleted"
                for g in existing):
             raise HTTPException(status_code=409, detail="Graph name already exists")
@@ -20208,8 +20555,9 @@ async def create_graph(body: dict, request: Request,
 
     #9667 — ``packs``: create and configure in ONE call, so an unconfigured
     graph is a CHOICE rather than the only possibility. Absent ⇒ the graph
-    is born unconfigured and keeps the catalog-union default (the owner's
-    decided behaviour — #2714 indicator 3); ``[]`` ⇒ born configured with an
+    is born unconfigured with no ``:PackInstall`` records, i.e. the
+    catalog-union arm until records exist (the first packs read self-heals the
+    starter set, which narrows it — #9691); ``[]`` ⇒ born configured with an
     EMPTY set; a list ⇒ exactly that set, and the 201 envelope carries the
     resolved ``packs`` so the caller never has to re-read. An invalid or
     unauthorised namespace fails the CREATION (rolled back, 422) rather than
@@ -20241,7 +20589,7 @@ async def create_graph(body: dict, request: Request,
         raise HTTPException(status_code=404, detail="Unknown organization")
     await _provision_preflight(org)
     async with _provision_lock(org_id):
-        existing = _make_sdk(namespace="registry").graph_list(org_id)
+        existing = _make_sdk(namespace="registry").list_memory_graphs(org_id)
         if any(g["name"] == name and g.get("status") != "deleted"
                for g in existing):
             raise HTTPException(status_code=409, detail="Graph name already exists")
@@ -20439,7 +20787,7 @@ async def _apply_graph_recording_override(
             found = any(r[0] == graph_id and r[2] != "deleted" for r in rows)
         if not found:
             raise HTTPException(status_code=404, detail="Unknown graph")
-        written = sdk.graph_set_recording(org_id, graph_id, body.recording)
+        written = sdk.update_memory_graph(org_id, graph_id, recording=body.recording)
     if not written:
         raise HTTPException(status_code=404, detail="Unknown graph")
     return {"graph_id": graph_id, "recording": body.recording}
@@ -20536,9 +20884,11 @@ def _pack_entries_from_body(raw: object) -> list[dict] | None:
     """#9667 — parse the optional ``packs`` field of a graph-CREATE body.
 
     ``None`` (field absent) means NO pack decision: the graph is created
-    UNCONFIGURED and keeps the catalog-union default (#2714 indicator 3), which
-    is the owner's decided behaviour — creation is not the place to narrow it
-    by accident. ``[]`` is the opposite and deliberate: the graph is born
+    UNCONFIGURED with no ``:PackInstall`` records — the catalog-union arm until
+    records exist (the first packs read self-heals the starter set, which
+    narrows the set; #2714 indicator 3, #9691) — which is the owner's decided
+    behaviour: creation is not the place to narrow it by accident. ``[]`` is the
+    opposite and deliberate: the graph is born
     CONFIGURED with an empty set, so nothing outside core is writable on it.
     That is the whole point of the atomic form — an unconfigured graph becomes
     a choice instead of the only possibility.
@@ -20577,17 +20927,17 @@ def _pack_entries_from_body(raw: object) -> list[dict] | None:
 
 
 def _registry_graph_list(org_id: str) -> list[dict]:
-    """Registry-lane ``graph_list`` in ONE worker hop — SDK construction
+    """Registry-lane ``list_memory_graphs`` in ONE worker hop — SDK construction
     included (#8648 review P1).
 
     ``_make_sdk`` is NOT free: in embedded mode it runs the keepalive anchor's
     probe query and, on a miss, an eager connect that holds the socket
     (#4660). Building the SDK on the loop and off-loading only the callee
-    (``to_thread(sdk.graph_list, …)``) left that blocking I/O on the event
+    (``to_thread(sdk.list_memory_graphs, …)``) left that blocking I/O on the event
     loop — the exact defect ``tests/test_read_routes_loop_responsiveness.py``
     pins.
     """
-    return _make_sdk(namespace="registry").graph_list(org_id)
+    return _make_sdk(namespace="registry").list_memory_graphs(org_id)
 
 
 async def _resolve_graph_data_namespace(org_id: str, graph_id: str) -> str | None:
@@ -20596,7 +20946,7 @@ async def _resolve_graph_data_namespace(org_id: str, graph_id: str) -> str | Non
     ``None`` = unknown / deleted / another team's graph (fail closed). The
     literal ``"default"`` resolves by KIND, not by id: in registry mode the
     default node carries a real gid as its id, while in Supabase mode the
-    derived default row's id IS the literal — reading the ``graph_list`` seam
+    derived default row's id IS the literal — reading the ``list_memory_graphs`` seam
     makes both lanes agree without a second resolution path.
     """
     try:
@@ -21071,7 +21421,7 @@ async def _apply_graph_rename(
     # name_active as the cross-worker DB backstop, whose violation is mapped
     # to the same 409 below (create-key parity: "HTTP 409" → 409, never 500).
     async with _provision_lock(org_id):
-        for row in sdk.graph_list(org_id):
+        for row in sdk.list_memory_graphs(org_id):
             if row.get("status") == "deleted":
                 continue
             if row.get("name") == name and row.get("graph_id") != target:
@@ -21084,7 +21434,7 @@ async def _apply_graph_rename(
                                         graph_id, name),
                     op="set_graph_name")
             else:
-                written = sdk.graph_set_name(org_id, graph_id, name)
+                written = sdk.update_memory_graph(org_id, graph_id, name=name)
         except Exception as _exc:
             if is_supabase_enabled() and "HTTP 409" in str(_exc):
                 raise HTTPException(
@@ -21534,7 +21884,7 @@ async def _restore_trash_graph_locked(request: Request, user: dict,
             restored = await asyncio.to_thread(
                 sb_restore, get_control_plane(), org_id, graph_id)
         else:
-            restored = await asyncio.to_thread(sdk.graph_restore, org_id,
+            restored = await asyncio.to_thread(sdk.restore_memory_graph, org_id,
                                                graph_id)
     except RuntimeError as e:
         # #2468: a concurrent create landing the freed name between the
@@ -21709,7 +22059,7 @@ async def list_graphs(org_id: str, user: dict = Depends(get_current_user)):  # n
         raise HTTPException(status_code=404, detail="Unknown organization")
     _ensure_not_suspended(org)
     sdk = _make_sdk(namespace="registry")
-    graphs = sdk.graph_list(org_id)
+    graphs = sdk.list_memory_graphs(org_id)
     from tortoise.supabase_control import (
         count_graph_keys,
         get_control_plane,
@@ -31032,8 +31382,14 @@ class _OrgSeedSurface:
     def query(self, cypher, **params):
         return self._sdk._get_proj().query(cypher, **params)
 
-    def create_subject(self, name, subjectKind="other", **props):
-        return self._sdk.create_subject(name, subjectKind=subjectKind, **props)
+    def create_subject(self, name, subjectKind=None, **props):
+        # #9572: ``None`` = not supplied, forwarded as absent — a fabricated
+        # ``"other"`` default here would re-open the clobber the SDK doors had.
+        # A BLANK kind is "not supplied" too (review P2): ``named_kind``.
+        subjectKind = named_kind(subjectKind)
+        if subjectKind is not None:
+            props["subjectKind"] = subjectKind
+        return self._sdk.create_subject(name, **props)
 
     def create_edge(self, relation, from_id, to_id):
         return self._sdk.create_edge(relation, from_id, to_id)

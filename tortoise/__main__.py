@@ -787,6 +787,672 @@ def _cmd_record_reconcile(args):
     return exit_code_for(result)
 
 
+def _cmd_record_backup(args):
+    """#9557 (R9) — the record's backup, and the drill that proves it restores.
+
+    The record (Postgres) is the system of record, so the durability obligation
+    is Postgres's own backup — and until this verb, **no module of ours held
+    it**: every archiving module in the tree copies the GRAPH. The mechanism is
+    ``tortoise/record_backup.py``; this verb is what gives it a caller that is
+    neither a test nor an evidence probe, and what a scheduler can run.
+
+    Two modes, one code path:
+
+    * **backup** (``--scratch-dsn`` absent) — dump → encrypt → upload to the
+      existing R2 bucket, then prune to ``--keep``.
+    * **drill** (``--scratch-dsn`` given) — the same backup, then download →
+      decrypt → restore into the SCRATCH record → compare per-table row counts
+      against the live source. This is the executed restore the posture
+      requires; a restore that has never been run is not a restore.
+
+    Exit codes, because a scheduler's only signal is the code:
+      ``0`` backup published (and, in drill mode, the restore VERIFIED)
+      ``1`` the run could not be completed (pg_dump/pg_restore non-zero, a
+          transport failure). What that means is decided by the FAILURE CLASS,
+          not by the mode — deciding it by mode made a drill-mode dump failure
+          (nothing published) print the sentence reserved for a post-publish
+          restore failure: a durability outage read as "backed up":
+          * a failure AFTER the artifact was published raises
+            ``RecordRestoreFailed`` and names the artifact id — the record IS
+            backed up and only the restore is NOT proven: retry, and if it
+            repeats check preconditions 4-5 (the scratch target's schema and
+            the tenancy rows its foreign keys reference): a missing parent row
+            never clears on a retry;
+          * any other ``RecordBackupError`` means NOTHING was published (the
+            dump, encrypt or upload leg failed, in either mode) — the record is
+            NOT backed up: retry
+      ``2`` could not run: no/malformed DSN, R2 not configured, psycopg2 absent,
+          a pooler DSN (the **source's** or the drill's **scratch** one — the
+          scratch side is checked before anything is dumped), `TORTOISE_BACKUP_KEY`
+          absent or malformed, a populated
+          scratch target, an empty record to drill, an artifact whose integrity,
+          shape pin or decryption does not verify (no verdict was produced — and
+          NOT a green one), or a ``--keep`` that would delete every artifact.
+          A **source role that cannot bypass RLS** is here too (#9801): the
+          record's own DSN is an app role (`NOBYPASSRLS`, R6), under which every
+          per-table count reads zero and `pg_dump` cannot read the tables at all.
+          It is a configuration fault — arm `TORTOISE_RECORD_BACKUP_DSN` — and
+          the refusal names the role and the variable, never "the record is
+          EMPTY".
+          A permanent fault discovered AFTER the upload names the published
+          artifact instead of claiming nothing was backed up: in drill mode the
+          artifact is durable and only the drill did not run.
+      ``3`` the drill RAN and the restored record DISAGREES with its source
+
+    ``2`` is also the code for every PERMANENT configuration fault, deliberately:
+    the record's own preconditions (a direct DSN, `psycopg2`, the backup key) are
+    fixed by editing config, so a scheduler that read them as ``1`` would retry
+    them forever and mint a fresh artifact on each attempt. A transport failure
+    and a broken dump stay ``1`` — the one class where "try again" is the answer.
+
+    ``2`` also covers a USAGE error, exactly as ``record-reconcile`` documents:
+    argparse's own ``error()`` exits ``2``. The two are not separated on purpose
+    — a scheduler must read ``2`` as *no verdict*, never as a green one.
+    """
+    import json as _json
+    import os
+
+    from tortoise.record_backup import (
+        RECORD_BACKUP_DSN_ENV,
+        RECORD_BACKUP_KEEP,
+        RecordBackupError,
+        RecordBackupUnavailable,
+        RecordRestoreFailed,
+        RecordRestoreRefused,
+        RecordRestoreVerifyError,
+        create_record_backup,
+        prune_record_backups,
+        run_restore_drill,
+    )
+    from tortoise.record_writer import RecordWriteError, record_dsn
+
+    # The DSN is resolved by the module that DECLARES the arming surface —
+    # never re-spelled here, so this verb cannot drift from the writer's notion
+    # of "armed" and a non-Postgres value is reported as the MISCONFIGURATION it
+    # is rather than as an unreadable record (an outage).
+    #
+    # ⛔ THE BACKUP HAS ITS OWN SURFACE (#9801). R6 arms the record as
+    # `tortoise_record_app` — `NOBYPASSRLS` — and a dump/restore must see EVERY
+    # tenant; R6 names the database-level backup as one of the three purposes a
+    # bypassing role may serve. So the precedence is: the explicit flag, then
+    # `TORTOISE_RECORD_BACKUP_DSN`, then the record's own DSN (unchanged
+    # behaviour for a deployment that has not split them — `require_bypassing_role`
+    # turns the resulting mismatch into a refusal that names the role, instead of
+    # a drill reporting a populated record as EMPTY).
+    env_backup = os.environ.get(RECORD_BACKUP_DSN_ENV)
+    #: Which surface the DSN is about to come from, handed to `record_dsn` so a
+    #: malformed value is attributed to the RIGHT arm in the sentence itself.
+    #: `record_dsn`'s default message names `TORTOISE_RECORD_DSN`, and pointing an
+    #: operator at the app-role variable for a value they set on the backup surface
+    #: is the same "say which one" failure the role refusal exists to end (#9801).
+    dsn_surface = "--record-dsn" if args.record_dsn is not None else ""
+    if args.record_dsn is None and env_backup is not None and not env_backup.strip():
+        # Set-but-blank is the shape a cron line takes when its environment is
+        # gone. Falling through to TORTOISE_RECORD_DSN here would silently run
+        # the backup as the APP role — the defect this surface exists to close.
+        print(f"Error: {RECORD_BACKUP_DSN_ENV} is set but names nothing — a "
+              "backup DSN that is empty cannot be used, and falling back to the "
+              "record's own (app-role) DSN would publish nothing. Nothing was "
+              "backed up, and no verdict was produced.", file=sys.stderr)
+        return 2
+    if args.record_dsn is None and env_backup:
+        args.record_dsn = env_backup.strip()
+        dsn_surface = RECORD_BACKUP_DSN_ENV
+    try:
+        # ⛔ THE SURFACE IS NAMED IN THE SENTENCE, NOT APPENDED TO IT (#9801).
+        # `record_dsn`'s message hardcodes `TORTOISE_RECORD_DSN`; a value the
+        # operator set on the BACKUP surface would therefore be reported against
+        # the app-role variable and then followed by an appended attribution —
+        # two surfaces named in one sentence, the wrong one first, and the
+        # appended clause running on from a message with no closing period.
+        dsn = record_dsn(args.record_dsn, surface=dsn_surface or None)
+    except RecordWriteError as e:
+        print(f"Error: {e} — the record was NOT backed up.", file=sys.stderr)
+        return 2
+    # ⛔ argv is PUBLIC — every user on the box can read a process's arguments
+    # (`ps`), and an argument also lands in shell history and the scheduler's own
+    # command file. So the scratch DSN has an environment surface, mirroring
+    # `TORTOISE_RECORD_DSN` (#9601 review, P2): a documented cron line that passes
+    # the password as `--scratch-dsn "$VAR"` puts the system-of-record credential
+    # in argv, which is the one thing this verb's module docstring promises it
+    # never does. An explicit flag still wins (an injected value keeps the DB-free
+    # pin possible).
+    if args.scratch_dsn is None:
+        env_scratch = os.environ.get("TORTOISE_RECORD_SCRATCH_DSN")
+        if env_scratch is not None and not env_scratch.strip():
+            # ⛔ THE ENV SURFACE REFUSES A BLANK DRILL DSN TOO (#9601 review cycle 6,
+            # P3). The flag branch below already treats a supplied-but-empty value as
+            # an error; the env var is the surface the runbook PREFERS, and it still
+            # collapsed "unset" and "set to blank" into backup-only mode — exit 0,
+            # `published`, no drill. A blank value here used to reach the drill and be
+            # refused as a malformed DSN (exit 2), so this is also the return of a
+            # refusal the fix had accidentally widened away.
+            print("Error: TORTOISE_RECORD_SCRATCH_DSN is set but names nothing — a "
+                  "drill DSN that is empty cannot be run, and backup-only mode is "
+                  "not what this run said it would do. Nothing was backed up, and "
+                  "no verdict was produced.", file=sys.stderr)
+            return 2
+        args.scratch_dsn = env_scratch.strip() if env_scratch else None
+    elif not args.scratch_dsn.strip():
+        # ⛔ A BLANK `--scratch-dsn` IS NOT "backup only" (#9601 review cycle 5, P2).
+        # `--scratch-dsn "$SCRATCH"` with the variable unset is the exact shape a cron
+        # line takes when its environment is gone, and it used to fall into backup mode:
+        # exit 0, `published`, and NO drill — on a schedule whose exit table defines 0 in
+        # drill mode as "the restore verified". A run that said it would drill and then
+        # silently did not is worse than a red. An ABSENT flag still means backup-only.
+        print("Error: --scratch-dsn was passed but names nothing — a drill DSN that "
+              "is empty cannot be run, and backup-only mode is not what this run "
+              "said it would do. Nothing was backed up, and no verdict was "
+              "produced.", file=sys.stderr)
+        return 2
+    if not dsn:
+        print("Error: no record DSN — pass --record-dsn, or set "
+              f"{RECORD_BACKUP_DSN_ENV} (the backup role) or "
+              "TORTOISE_RECORD_DSN. Nothing was backed up, and no restore was "
+              "proven.", file=sys.stderr)
+        return 2
+
+    # The bucket is the SAME one the graph archives use: a deployment that can
+    # sweep graphs needs no new credential for the record.
+    from tortoise.hosted_backup import R2Storage
+
+    try:
+        storage = R2Storage()
+        storage.head_bucket()
+    except Exception as e:
+        print(f"Error: the backup bucket is unreachable or unconfigured ({e}) — "
+              f"the record was NOT backed up.", file=sys.stderr)
+        return 2
+
+    keep = args.keep if args.keep is not None else RECORD_BACKUP_KEEP
+    if args.reset_scratch and not args.scratch_dsn:
+        # A silent no-op is how an operator believes the scratch target was
+        # emptied and finds out from the next run's refusal instead.
+        print("Error: --reset-scratch only applies to drill mode — it empties "
+              "the --scratch-dsn target. Nothing was backed up.", file=sys.stderr)
+        return 2
+    if keep < 1:
+        # Validated BEFORE the run: the flag's own help says `--keep 0` is
+        # refused, and a refusal that reached the operator as a traceback after a
+        # successful upload would read as "the backup failed".
+        print(f"Error: --keep must be >= 1, got {keep} — a prune that keeps "
+              f"nothing is data loss. Nothing was backed up.", file=sys.stderr)
+        return 2
+    try:
+        if args.scratch_dsn:
+            report = run_restore_drill(dsn, storage, args.scratch_dsn,
+                                       workdir=args.workdir,
+                                       reset_scratch=args.reset_scratch)
+        else:
+            report = create_record_backup(dsn, storage, workdir=args.workdir)
+    except RecordRestoreVerifyError as e:
+        print(f"✗ RESTORE DRILL RED: {e}", file=sys.stderr)
+        if args.json:
+            print(_json.dumps({"verdict": "MISMATCH",
+                               "mismatches": e.mismatches}, indent=2))
+        return 3
+    except RecordRestoreRefused as e:
+        # Not a verdict: the drill did not run. `2` says so, and a scheduler
+        # must not read it as "the record is backed up".
+        print(f"Error: {e} — no verdict was produced.", file=sys.stderr)
+        return 2
+    except RecordBackupUnavailable as e:
+        # A PERMANENT configuration fault (pooler DSN, psycopg2 absent, missing
+        # key): `2` = unconfigured. `1` would tell a scheduler to retry a fault
+        # only a config edit can clear.
+        #
+        # ⛔ THE PUBLISH STATE DECIDES THE SENTENCE, NOT THE CLASS (#9601 review
+        # cycle 10, P2). A drill publishes before it resets and restores, so this
+        # class is ALSO what a stale scratch credential raises — after a complete,
+        # checksummed artifact is already durable in `record-backups/`. The flat
+        # sentence claimed "nothing was backed up" about that run: the false
+        # durability outage this verb spent three cycles removing, re-emitted for a
+        # likelier class. `backup_id` is set only when the fault landed after the
+        # upload, so it is what the wording branches on. Exit stays `2`: this is
+        # still a config fault, and re-running the dump mints another artifact for
+        # one that is already published.
+        if e.backup_id:
+            print(f"Error: the artifact {e.backup_id} WAS published before the "
+                  f"drill could run, so the record IS backed up but this restore "
+                  f"was NOT attempted and no verdict was produced ({e}). Fix the "
+                  f"configuration that message names — do not mint another "
+                  f"artifact for it.", file=sys.stderr)
+        else:
+            print(f"Error: {e} — nothing was backed up, and no verdict was produced.",
+                  file=sys.stderr)
+        return 2
+    except RecordRestoreFailed as e:
+        # #9601 review cycle 3 (P2): the DRILL publishes before it restores, so
+        # this failure class means the artifact is DURABLE and only the restore
+        # is unproven. Exit `1` says "the run did not complete" — which is true —
+        # but the old flat message turned it into "the record is NOT backed up"
+        # (a durability outage that does not exist, alerted on by any scheduler
+        # reading that sentence) plus an unconditional "retry" for the one
+        # scratch-target fault retrying can never clear. The sibling prune path
+        # above already refuses to make that claim; this is the same shape.
+        print(f"Error: {e} — the artifact {e.backup_id} WAS published before the "
+              f"restore was attempted, so the record IS backed up but this "
+              f"restore was NOT proven. Retry; if it keeps failing, check the "
+              f"scratch target's schema and the tenancy rows its foreign keys "
+              f"reference (runbook preconditions 4-5) — a missing parent row "
+              f"never clears on a retry.", file=sys.stderr)
+        return 1
+    except RecordBackupError as e:
+        print(f"Error: {e} — the record was NOT backed up.", file=sys.stderr)
+        return 1
+
+    # Retention is BEST-EFFORT and runs AFTER the artifact is durable. A prune
+    # failure (a listing error, a transient delete error) must never turn a
+    # published, verified backup into "the record is NOT backed up" — exit 1 is
+    # that claim, and it is false here.
+    deleted: list[str] = []
+    try:
+        deleted = prune_record_backups(storage, keep=keep)
+    except Exception as e:
+        print(f"Warning: the backup was published, but the retention prune "
+              f"failed ({e}) — nothing was deleted, and `record-backups/` will "
+              f"grow past --keep until the next successful run.", file=sys.stderr)
+    if args.json:
+        print(_json.dumps({**report, "pruned": deleted}, indent=2, sort_keys=True))
+        return 0
+    if args.scratch_dsn:
+        print(f"✓ RESTORED — record backup {report['backup_id']} restored into "
+              f"scratch and matched its source "
+              f"({report['row_total']} rows across {len(report['tables'])} table(s))")
+        for table, counts in report["tables"].items():
+            moved = ("" if counts.get("source_after", counts["source"]) == counts["source"]
+                     else f" (source moved to {counts['source_after']} by the end of the dump)")
+            print(f"  {table}: source={counts['source']} restored={counts['restored']}{moved}")
+    else:
+        total = sum(report.get("row_counts", {}).values())
+        print(f"✓ record backup {report['backup_id']} published "
+              f"({total} rows, {report['bytes']} bytes, "
+              f"{len(report['tables'])} table(s))")
+        print("  ⚠ NOT PROVEN RESTORABLE — a backup without a drill is a claim. "
+              "Run with --scratch-dsn to restore it and compare row counts.")
+    if deleted:
+        print(f"  pruned {len(deleted)} object(s), keeping {keep} artifact(s)")
+    return 0
+def _cmd_record_restore(args):
+    """#9556 / R8 — the record-sourced RESTORE: rebuild a lost cache from the record.
+
+    ``rebuild_from_record`` is the seam (record → cache) and it had **no CLI
+    verb and no production caller** (measured for #9556: 0 non-test call
+    sites), so *"the graph is gone, restore it"* had no operator answer. This
+    verb is that answer; the composition and its four refusals live in
+    :mod:`tortoise.record_restore`, and the runbook section is
+    ``docs/infra-runbook.md`` §9.
+
+    Exit codes, because an operator's next step keys on them:
+      ``0`` restored · ``3`` REFUSED before any write, nothing written (empty
+      source, the cache's L2 destructive-op guard) · ``2`` no verdict — a
+      DSN/usage problem, an unreadable record or cache, **or a failure once the
+      rebuild has started** (a wipe that put nothing back lands here: the cache
+      is LOST, not untouched). ``2``'s caveat is ``record-reconcile``'s,
+      inherited verbatim: argparse's own ``error()`` also exits ``2``, so ``2``
+      means only *no verdict was produced*.
+
+    ⛔ ``--cache-graph`` is REQUIRED, with no derived default, for the reason
+    ``record-reconcile`` requires it — and the consequence here is worse than a
+    wrong verdict: a wrong guess opens an EMPTY graph, so the run would report
+    a restore into a graph nobody reads while the operator's real graph stayed
+    destroyed. That is why the pre-wipe node count is reported too, and why the
+    counts the verb prints are read back off the cache after the rebuild
+    (``record_restore``): a number the code did not measure is a claim, not a
+    restore.
+
+    ⛔ Both reads are BOUNDED (connect timeout + session ``statement_timeout``
+    on the record, ``CACHE_READ_TIMEOUT_MS`` on the pre-wipe count — the same
+    constant ``record-reconcile`` bounds the same full-graph read with): an
+    operator's restore must not hang with no output.
+
+    ⛔ No storage allowance is consulted (G5 on #9556): #9559's byte gate must
+    exempt this lane, because the billing path must never be able to defeat the
+    durability path mid-rebuild.
+    """
+    import json as _json
+
+    from tortoise.cache_projection import read_record_view
+    from tortoise.record_reconcile import (
+        RECORD_CONNECT_TIMEOUT_S,
+        RECORD_STATEMENT_TIMEOUT_MS,
+    )
+    from tortoise.record_restore import (
+        EXIT_REFUSED,
+        EXIT_RESTORED,
+        EXIT_UNAVAILABLE,
+        RestoreRefused,
+        RestoreUnavailable,
+        log_result,
+        refuse_unrestorable_source,
+        restore_from_record_view,
+    )
+
+    # The DSN is resolved by the module that DECLARES the arming surface, so a
+    # rename cannot silently disarm this verb while `RecordWriter` stays armed,
+    # and a non-Postgres value is the MISCONFIGURATION it is rather than an
+    # unreadable record (an outage).
+    from tortoise.record_writer import RecordWriteError, record_dsn
+
+    try:
+        dsn = record_dsn(args.record_dsn)
+    except RecordWriteError as e:
+        print(f"Error: {e} — nothing was restored, and the cache's state is "
+              f"UNCHANGED.", file=sys.stderr)
+        return EXIT_UNAVAILABLE
+    if not dsn:
+        print("Error: no record DSN — pass --record-dsn or set "
+              "TORTOISE_RECORD_DSN. Nothing was restored: this verb cannot "
+              "tell an empty record from an unarmed one, so it reports "
+              "neither. The cache's state is UNCHANGED.", file=sys.stderr)
+        return EXIT_UNAVAILABLE
+    # Usage-shaped refusals come BEFORE the optional-dependency check: an
+    # operator who forgot `--cache-graph` must not be told to install an extra
+    # first (measured — that ordering answered a missing flag with "psycopg2 is
+    # not installed" on a lane without the `postgres` extra).
+    if not args.cache_graph:
+        print(
+            "Error: --cache-graph is required — the cache graph's name is not "
+            "the record's --graph scope. This tree names it org_<org_id> (the "
+            "org SDK's isolated graph) or org_<org_id>_<graph_id> (the "
+            "registry/ACL namespace); guessing wrong opens an EMPTY graph, so "
+            "this run would report a restore into a graph nobody reads while "
+            "the real graph stayed destroyed. Nothing was restored.",
+            file=sys.stderr)
+        return EXIT_UNAVAILABLE
+    if args.limit is not None and args.limit < 1:
+        print(f"Error: --limit must be >= 1, got {args.limit} — 0 wipes the "
+              f"cache and writes nothing, so it is refused before any write. "
+              f"Nothing was restored.",
+              file=sys.stderr)
+        return EXIT_UNAVAILABLE
+
+    try:
+        import psycopg2
+    except ImportError:
+        print("Error: psycopg2 is not installed — the record cannot be read, "
+              "so nothing was restored and the cache's state is UNCHANGED. "
+              "Install the `postgres` extra.", file=sys.stderr)
+        return EXIT_UNAVAILABLE
+
+    from tortoise.projection import FalkorProjection
+
+    conn = None
+    proj = None
+    try:
+        try:
+            conn = psycopg2.connect(
+                dsn,
+                connect_timeout=RECORD_CONNECT_TIMEOUT_S,
+                options=f"-c statement_timeout={RECORD_STATEMENT_TIMEOUT_MS}",
+            )
+            view = read_record_view(conn, org_id=args.org, graph_id=args.graph)
+        except Exception as e:
+            raise RestoreUnavailable(
+                f"the record is unreadable ({type(e).__name__}) — nothing was "
+                f"restored and the cache's state is UNCHANGED") from e
+
+        # The SOURCE-side refusals run BEFORE the target graph is opened: a
+        # projection's construction MERGEs its own `:Meta {key:'point_fts_v2'}`
+        # bookkeeping marker, which CREATES a mistyped graph — and a mistyped
+        # scope is the commonest empty source, i.e. exactly the case where
+        # touching the named graph is worst (`refuse_unrestorable_source`).
+        refuse_unrestorable_source(
+            view, org_id=args.org, graph_id=args.graph,
+            cache_graph=args.cache_graph, allow_empty=bool(args.allow_empty),
+            limit=args.limit)
+
+        try:
+            proj = FalkorProjection.from_uri(args.db,
+                                             graph_name=args.cache_graph)
+        except Exception as e:
+            raise RestoreUnavailable(
+                f"cache {args.cache_graph!r} could not be opened "
+                f"({type(e).__name__}) — nothing was restored") from e
+
+        outcome = restore_from_record_view(
+            view,
+            org_id=args.org,
+            graph_id=args.graph,
+            cache_graph=args.cache_graph,
+            project=proj,
+            allow_empty=bool(args.allow_empty),
+            limit=args.limit,
+        )
+    except RestoreRefused as e:
+        print(f"Restore REFUSED: {e}", file=sys.stderr)
+        # ⚠️ "REFUSED" is about the RESTORE, not about the database. The
+        # source-side refusals are now raised before the target graph is
+        # opened, but the L2 refusal is asked OF a projection (the one owner of
+        # the name rule), and opening one MERGEs its `:Meta` marker. Saying
+        # "nothing was written" unqualified would be false in exactly the case
+        # an operator is reading this line (recorded on #9556's review).
+        print("  No row of the record's state was written to the cache. The "
+              "target graph may have been CREATED by opening it, with its own "
+              "`:Meta` bookkeeping marker — that is the projection, not a "
+              "restore.", file=sys.stderr)
+        return EXIT_REFUSED
+    except RestoreUnavailable as e:
+        print(f"Restore UNAVAILABLE: {e}", file=sys.stderr)
+        return EXIT_UNAVAILABLE
+    finally:
+        # The verb OWNS both handles (the `record-reconcile` rule): an operator
+        # command that leaks a connection per run is a slow outage.
+        if proj is not None:
+            proj.close()
+        if conn is not None:
+            conn.close()
+
+    line = log_result(outcome)
+    if args.json:
+        print(_json.dumps(outcome.as_dict(), indent=2, sort_keys=True))
+    else:
+        print(f"\u2713 {line}")
+    return EXIT_RESTORED
+
+
+def _cmd_record_text(args):
+    """#9555 / R7 — serve §9.4's VERBATIM text from the record alone.
+
+    ``record_read`` (the record-only reader, #9638) had **no production caller**
+    (measured: its own test was the only importer), so §9.4's *"send the
+    source's VERBATIM text, not the extracted claim"* had a reader and no path.
+    This verb is the path; the composition and its one refusal live in
+    :mod:`tortoise.record_text`, and the runbook section is
+    ``docs/infra-runbook.md`` §9b.
+
+    Exit codes are the operator's next step, and the 3-versus-2 split is the
+    reason the verb exists at all:
+
+    * ``0`` — the record served the text (§9.1's narrative and/or the raw
+      turns). The numbers are a MEASUREMENT: the turn count is what was read,
+      not what ``--limit`` allowed to be printed.
+    * ``3`` — the TENANT was scoped and read, and the record holds nothing for
+      the key. An honest absence: a session captured before the narrative carrier
+      landed, one whose distillation produced no narrative — or a mistyped
+      ``--org``/``--graph``, which is a tenant that holds nothing. ⚠️ Do NOT read
+      ``3`` as "the record lost the data".
+    * ``2`` — no verdict. No DSN, a malformed DSN, no ``psycopg2``, an
+      unreadable record — or **a connection that cannot be SCOPED** (a role that
+      bypasses RLS, or a tenant GUC that did not stick) and therefore could not
+      prove the tenant at all. That last one is not pedantry: a tenancy-filtered
+      read returns 0 rows SILENTLY, so answering from an unscopable connection
+      would state a falsehood about a customer's evidence (§9555 G1, #9600's app
+      role). ⚠️ A *scope that does not exist* is NOT this case — it is a tenant
+      with no text, i.e. ``3``.
+    """
+    import json as _json
+
+    from tortoise.record_text import (
+        EXIT_UNAVAILABLE,
+        exit_code_for,
+        log_result,
+        scoped,
+        serve_from_record,
+    )
+
+    # Resolved by the module that DECLARES the arming surface, so a rename
+    # cannot silently disarm this verb while `RecordWriter` stays armed.
+    from tortoise.record_writer import RecordWriteError, record_dsn
+
+    try:
+        dsn = record_dsn(args.record_dsn)
+    except RecordWriteError as e:
+        print(f"Error: {e} — no text was served and no verdict was produced.",
+              file=sys.stderr)
+        return EXIT_UNAVAILABLE
+    if not dsn:
+        print("Error: no record DSN — pass --record-dsn or set "
+              "TORTOISE_RECORD_DSN. This verb reads the record only; with no "
+              "record there is nothing it can honestly answer.", file=sys.stderr)
+        return EXIT_UNAVAILABLE
+
+    # Usage-shaped refusals BEFORE the optional-dependency check: an operator
+    # who passed both keys (or neither) must not be told to install an extra
+    # first (the `record-restore` ordering, measured there).
+    if bool(getattr(args, "session", None)) == bool(getattr(args, "source_url", None)):
+        print("Error: pass exactly one of --session / --source-url. "
+              "--session reads §9.1's narrative + turns by the session's own "
+              "identity; --source-url is §9.4's shape (the text behind a "
+              "claim), resolved through public.source.session_id. Two keys "
+              "make the answer's meaning ambiguous; neither makes it "
+              "unanswerable.", file=sys.stderr)
+        return EXIT_UNAVAILABLE
+    if args.limit is not None and args.limit < 0:
+        print(f"Error: --limit must be >= 0, got {args.limit}.", file=sys.stderr)
+        return EXIT_UNAVAILABLE
+
+    try:
+        import psycopg2
+    except ImportError:
+        print("Error: psycopg2 is not installed — the record cannot be read, "
+              "so no text was served. Install the `postgres` extra.",
+              file=sys.stderr)
+        return EXIT_UNAVAILABLE
+
+    from tortoise.record_read import RecordReadError
+    from tortoise.record_reconcile import (
+        RECORD_CONNECT_TIMEOUT_S,
+        RECORD_STATEMENT_TIMEOUT_MS,
+    )
+
+    conn = None
+    try:
+        try:
+            conn = psycopg2.connect(dsn, connect_timeout=RECORD_CONNECT_TIMEOUT_S)
+            # ⛔ THE BOUND IS SET AS A SESSION SETTING, NOT AS A CONNECT KWARG.
+            # Passing `options=…` to `connect()` REPLACES the DSN's own
+            # `options` parameter — and libpq's `options=-c role=<name>` is the
+            # connect-time spelling of `SET ROLE`, which is how a deployment
+            # (and this verb's live tests) connects as `tortoise_record_app`
+            # without a separate credential. Overriding it left the session on
+            # the provisioning superuser, which the tenant prologue then
+            # correctly refused — measured: the verb exited 2 on a DSN that
+            # worked everywhere else (PR #9862 review, P1). `set_config` also
+            # accepts a bind parameter, which `SET` does not.
+            # (autocommit for this one statement: `set_config` would otherwise
+            # open a transaction, and `conn.autocommit = False` below cannot be
+            # assigned inside one — measured, "set_session cannot be used inside
+            # a transaction".)
+            conn.autocommit = True
+            conn.cursor().execute(
+                "SELECT set_config('statement_timeout', %s, false)",
+                (str(int(RECORD_STATEMENT_TIMEOUT_MS)),),
+            )
+        except Exception as e:
+            print(f"Error: the record is unreadable ({type(e).__name__}) — no "
+                  f"text was served and no verdict was produced.",
+                  file=sys.stderr)
+            return EXIT_UNAVAILABLE
+
+        # ⛔ THE TENANT SCOPE IS INSTALLED — AND PROVEN — BEFORE ANY READ, and
+        # this is the whole 3-versus-2 split. The record's policies treat a
+        # missing GUC as "no rows", never as an error, so an unscoped read
+        # answers "this session has no narrative" about a session that has one.
+        # `scoped` is the record's OWN prologue (`record_projection.
+        # scope_connection`), shared with its two doors: it sets
+        # `app.current_org_id` transaction-locally, READS IT BACK, and refuses a
+        # connection whose role can bypass RLS. Once it returns, a zero-row
+        # answer is a true statement about this tenant — which is what makes
+        # EXIT_ABSENT an answer and not a guess.
+        #
+        # ⚠️ The GUC is transaction-local, so the connection is NOT autocommit
+        # and every read below runs in this one transaction.
+        conn.autocommit = False
+        try:
+            scoped(conn, org_id=args.org)
+        except Exception as e:
+            from tortoise.record_projection import RecordProjectionError
+            if isinstance(e, RecordProjectionError):
+                print(f"Error: the record's connection could not be scoped to "
+                      f"org={args.org!r} — {e} No verdict was produced: a "
+                      f"tenant-filtered read would otherwise report a session "
+                      f"that HAS text as an absent one.", file=sys.stderr)
+            else:
+                print(f"Error: the record is unreadable ({type(e).__name__}) — "
+                      f"no text was served and no verdict was produced.",
+                      file=sys.stderr)
+            return EXIT_UNAVAILABLE
+
+        try:
+            outcome = serve_from_record(
+                conn,
+                org_id=args.org,
+                graph_id=args.graph,
+                session_id=getattr(args, "session", None),
+                source_url=getattr(args, "source_url", None),
+                limit=args.limit,
+            )
+        except RecordReadError as e:
+            print(f"Error: the record is MALFORMED for this key — {e}",
+                  file=sys.stderr)
+            return EXIT_UNAVAILABLE
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return EXIT_UNAVAILABLE
+        except Exception as e:
+            # ⛔ THE READ LEG IS WRAPPED LIKE `record-reconcile`'S, and the arm
+            # is `2`, not a traceback (PR #9862 review, P2). `record_read`
+            # executes plain cursor SQL and raises the DRIVER's own exceptions
+            # (it has no try/except of its own), so without this every read-time
+            # failure escapes `main()` — which has no dispatch-level handler —
+            # and the process dies with a traceback and exit `1`: an exit code
+            # the contract does not define, so a scheduler keyed on `0/2/3`
+            # cannot classify the failure it just got.
+            #
+            # Three reachable causes, none exotic:
+            #   * `UndefinedTable` — the record DB has not had
+            #     `20261023000001_record_session_narrative.sql` applied. The most
+            #     likely FIRST-run failure for the operator this verb is for.
+            #   * `QueryCanceled` — this verb installs
+            #     `RECORD_STATEMENT_TIMEOUT_MS` for the session, so a large
+            #     tenant's turn read is cancelled and RAISES.
+            #   * `OperationalError` — a connection dropped between the scope
+            #     prologue and the read.
+            #
+            # `RecordReadError` / `ValueError` stay ABOVE this arm so their
+            # specific diagnostics still win; this is the catch-all that keeps
+            # "unreadable" inside the documented vocabulary.
+            print(f"Error: the record is unreadable ({type(e).__name__}) — no "
+                  f"text was served and no verdict was produced. This is exit "
+                  f"2, NOT an absence (exit 3): nothing was proven about what "
+                  f"the record holds.", file=sys.stderr)
+            return EXIT_UNAVAILABLE
+    finally:
+        if conn is not None:
+            conn.close()
+
+    log_result(outcome)
+    if args.json:
+        print(_json.dumps(outcome.as_dict(), indent=2, sort_keys=True))
+    else:
+        print(outcome.render())
+    # The mapping is the COMPOSITION's, not a second copy here: `exit_code_for`
+    # is what the exit-code pin exercises, so the shipped path and the pin
+    # cannot disagree (PR #9862 review round 3).
+    return exit_code_for(outcome)
+
+
 def _cmd_init(args):
     """Auto-detect FalkorDB and create default graph — onboarding."""
     import json as _json  # noqa: I001
@@ -5034,6 +5700,10 @@ def _spool_transcript(args) -> dict:
         spool_dir,
         write_spool_entry,
     )
+    # One spelling for "does this value name a session": the spool's wire
+    # normaliser delegates to the same helper, so the local entry key and the
+    # wire cannot disagree (#9599).
+    from tortoise.ids import session_id_or_absent
     from tortoise.session_attribution import derive_machine_id, sanitize_attribution_field
 
     transcript_path = Path(args.file)
@@ -5117,7 +5787,15 @@ def _spool_transcript(args) -> dict:
     # colliding (the server upserts on `session_id`). Capped: 240 + "-" + 12 = 253
     # ≤ the server's `max_length` (256); a longer id is a 422 → a permanent
     # discard of the whole capture.
-    session_id = getattr(args, "session_id", None) or _local_session_id(transcript_path)
+    # ⛔ #9599: a blank `--session-id "   "` is TRUTHY, so `or` never replaced it
+    # and the entry was stored under an id that names nothing. The WIRE is safe
+    # (the spool normalises a blank to None and the server mints), but the LOCAL
+    # entry would be keyed on nothing — so two blank-id captures collide on one
+    # spool key while the server files them as separate sessions. A blank is
+    # therefore ABSENT, exactly as an absent one is, and takes the path-anchored
+    # id: the entry keeps ONE stable key across snapshots.
+    session_id = (session_id_or_absent(getattr(args, "session_id", None))
+                  or _local_session_id(transcript_path))
 
     # #2681: derive machine_id + forward model when provided. Derive-only
     # sha256 of hostname\0username — never-throw, memoized per process.
@@ -6670,6 +7348,7 @@ def _process_saved_backlog(state: dict, *, decided_at: str) -> int:
     import time
 
     from tortoise import capture_backlog
+    from tortoise.ids import session_id_or_absent
 
     # Nothing to do is decided FIRST — before any provider messaging. An empty
     # (or transcript-less) backlog has no re-capture to spend on, so naming a
@@ -6775,7 +7454,12 @@ def _process_saved_backlog(state: dict, *, decided_at: str) -> int:
             # raises `no parser for harness 'claude'` — which is the exact
             # harness path that produces the backlog.
             harness=_backlog_parser_harness(record.get("harness")),
-            session_id=session_id or None,
+            # #9599: the ledger may carry a blank id (written before the
+            # writers refused to store one). `or None` kept it — it is truthy —
+            # so the import POSTed a blank, 422'd at the boundary, and the
+            # record was never retired. Absent takes the import's own digest
+            # fallback instead.
+            session_id=session_id_or_absent(session_id),
             # Inside a run, the per-entry progress line IS the report: letting
             # the import's own offer print too would repeat the whole backlog
             # summary once per entry, which reads as noise and buries the
@@ -6847,6 +7531,7 @@ def _cmd_sessions_import(args) -> int:
     from urllib.error import URLError, HTTPError
     from http.client import HTTPException as _HTTPException
 
+    from tortoise.ids import session_id_or_absent
     from tortoise.session_import import (
         MAX_TURNS, hermes_selected_session_id, parse_transcript,
         window_turns)
@@ -6941,7 +7626,15 @@ def _cmd_sessions_import(args) -> int:
                                       sort_keys=True)).encode("utf-8")
     else:
         key_material = read_path.read_bytes()
-    session_id = args.session_id or (
+    # #9599: a PRESENT-but-BLANK `--session-id` names no session, and this leg
+    # must agree with its three siblings (the SDK doors, the spool's wire
+    # normaliser, the TS hook): those all treat a blank as "named no session"
+    # and let one be minted. Here `args.session_id or …` kept a blank (it is
+    # truthy), which the server now answers with 422 — and this leg classifies a
+    # 422 as PERMANENT, so the import was neither spooled nor filed: a capture
+    # silently lost, plus a raw FastAPI body shown instead of the refusal text.
+    # Absent takes the stable content-addressed fallback below.
+    session_id = session_id_or_absent(args.session_id) or (
         "imp_" + hashlib.sha256(key_material).hexdigest()[:12])
 
     # Local receipt — 2xx-only (a failed POST must never look imported).
@@ -8551,8 +9244,21 @@ def _cmd_pack_validate(args) -> int:
     """tortoise pack validate <dir> — schema + cross-pack validation.
 
     Reuses PackRegistry._validate + _validate_cross_pack_refs (thin glue —
-    the validator is the single source of truth). Exit 0 clean, 1 errors.
+    the validator is the single source of truth). Exit 0 clean, 1 otherwise.
     Accepts the pack dir (packs/<ns>) or its parent (a packs/ dir).
+
+    The verdict reads BOTH registry buckets, because they answer the same
+    question from two sides and only one of them used to reach the exit code:
+    `reg.errors` (a typo → the pack is ISOLATED) and `reg.unresolved_refs` (a
+    missing PEER → the pack stays loaded and its references into the absent
+    pack do not resolve, #2781). Reading only `errors` printed `✓ Clean` and
+    exited 0 for a catalog whose declared `depends_on` was not installed
+    (#9663) — the same false green, one bucket over. A pack whose declared
+    dependency is absent is not clean: it is *loaded but unresolved*, and the
+    references it declares into that pack do not resolve. This also matches the
+    hosted install gate (`pack_manifest_store.validate_manifest` refuses exactly
+    these refs), so the local and hosted gates cannot disagree in the fail-open
+    direction.
 
     #2766: also prints the per-relation write-path verdict
     (writable | declaration-only | predicate-not-in-allowlist) from the one
@@ -8572,10 +9278,52 @@ def _cmd_pack_validate(args) -> int:
         return 1
     reg = PackRegistry(packs_dir)
     reg.load_all()
-    errors: dict[str, list[str]] = {}
-    for ns, errs in reg.errors.items():
-        if (packs_dir / ns / "manifest.yaml").exists() or ns == target.name:
-            errors[ns] = errs
+    # The registry keys `errors` by the MANIFEST's namespace, which is NOT the
+    # pack's directory name: `packs/project-management` declares `pm`,
+    # `packs/investment-portfolio-manager` declares `portfolio`. Keying this
+    # filter on the directory name silently dropped every error for such a pack
+    # — it printed "✓ Clean" and exited 0 while the registry had ISOLATED the
+    # pack (#9663: measured on `packs/investment-portfolio-manager` with a
+    # `nearMisses` typo — one isolation, zero printed errors, exit 0). Match
+    # BOTH the declared namespace and the directory name, so a manifest too
+    # broken to yield a namespace (keyed by directory name) is still reported.
+    target_manifest = target / "manifest.yaml"
+
+    def _scope(found: dict[str, list[str]],
+               keys: set[str]) -> dict[str, list[str]]:
+        """The registry's per-namespace bucket, scoped to the requested pack.
+
+        Both spellings are checked because the registry keys a diagnostic by
+        whatever it KNOWS: a pack it loaded by its MANIFEST namespace, a
+        manifest too broken to yield one by its DIRECTORY name. Nothing else
+        is the caller's business — a SIBLING's gap must not become this pack's
+        verdict (`errors` always had that false red; `unresolved_refs` only
+        inherited it once it reached the exit code, #9663).
+        """
+        return {ns: msgs for ns, msgs in found.items() if ns in keys}
+
+    if not target_manifest.exists():
+        # No manifest at the target means a `packs/` DIRECTORY was passed: the
+        # "validate every pack" mode, where there is no single pack to scope
+        # to. The old filter ran here too and hid every namespace whose
+        # directory name differs (`pm`, `portfolio`) — the same false green one
+        # level up (#9663 review), so this leg reports the registry verbatim.
+        errors: dict[str, list[str]] = dict(reg.errors)
+        unresolved: dict[str, list[str]] = dict(reg.unresolved_refs)
+    else:
+        target_keys = {target.name}
+        import yaml
+        try:
+            declared = yaml.safe_load(target_manifest.read_text()) or {}
+        except Exception:  # noqa: BLE001, RUF100 — unparseable ⇒ keyed by dir
+            declared = {}
+        declared_ns = declared.get("namespace") if isinstance(declared, dict) else None
+        if isinstance(declared_ns, str) and declared_ns.strip():
+            target_keys.add(declared_ns.strip())
+        errors = _scope(reg.errors, target_keys)
+        # Same scoping for the missing-peer bucket: it is keyed by the LOADED
+        # pack's namespace, and `target_keys` already carries the declared one.
+        unresolved = _scope(reg.unresolved_refs, target_keys)
     # #2766: the per-relation write-path verdict, from the ONE resolver pack
     # load warns with — so `validate` cannot report a relation as bound to a
     # path its own declaration does not bind. Enumerated from the registry
@@ -8598,13 +9346,19 @@ def _cmd_pack_validate(args) -> int:
     for rel in relations:
         verdict_counts[rel["write_verdict"]] = (
             verdict_counts.get(rel["write_verdict"], 0) + 1)
-    ok = not errors
+    n_errors = sum(len(v) for v in errors.values())
+    n_unresolved = sum(len(v) for v in unresolved.values())
+    # An unresolved reference is NOT clean: the pack loaded, but what it
+    # declares does not resolve, so `✓ Clean` over it is a claim the registry's
+    # own data contradicts (#9663).
+    ok = not errors and not n_unresolved
     if getattr(args, "json", False):
         print(_json.dumps({
             "ok": ok,
             "packs_dir": str(packs_dir),
             "loaded": sorted(reg.packs),
             "errors": errors,
+            "unresolved_refs": unresolved,
             "relation_verdicts": {
                 "counts": verdict_counts,
                 "relations": relations,
@@ -8618,6 +9372,16 @@ def _cmd_pack_validate(args) -> int:
             print(f"  ✗ {ns}:")
             for e in errs:
                 print(f"      {e}")
+        if unresolved:
+            # Distinct from the isolated-pack section above: these packs are
+            # LOADED, and the diagnostic names the pack that is missing. Kept
+            # separate so "installed but incomplete" is never read as "typo".
+            print("  ⚠ unresolved references — the pack is loaded, the peer it "
+                  "names is not:")
+            for ns, msgs in sorted(unresolved.items()):
+                print(f"    {ns}:")
+                for m in msgs:
+                    print(f"      {m}")
         if relations:
             print("  relation write verdicts:")
             for rel in sorted(relations, key=lambda r: (r["pack"], r["predicate"])):
@@ -8628,7 +9392,11 @@ def _cmd_pack_validate(args) -> int:
         if ok:
             print("✓ Clean — pack(s) validate")
         else:
-            print(f"✗ {sum(len(v) for v in errors.values())} error(s)")
+            if n_errors:
+                print(f"✗ {n_errors} error(s)")
+            if n_unresolved:
+                print(f"✗ {n_unresolved} unresolved reference(s) — a declared "
+                      f"or referenced pack is not installed")
     return 0 if ok else 1
 
 
@@ -10469,10 +11237,47 @@ def _cmd_decide(args) -> int:
             """Operator kwargs carrying the chosen direction (empty when unset)."""
             return {"direction": chosen_direction} if chosen_direction is not None else {}
 
+        # ── Idempotent operator wiring (#6671 / #9631) ──
+        # The lookup is `tortoise.decide_wiring`, the SAME writer
+        # `graph-scripts/decide.py` calls. This command carried its own
+        # per-run-only `created_ops` cache after #6671 fixed the script, so a
+        # re-run minted a fresh operator per edge and split the mitigations
+        # across copies — the ranking depended on how many times it was run
+        # (#9631, measured on the 2-edge fixture below: 3 → 6 operators,
+        # 1 → 2 mitigations, opt:a 0.6592 → 0.6756).
+        from tortoise.decide_wiring import (
+            damped_factor_ids,
+            may_mint_damped_bridge,
+            resolve_or_create_operator,
+            select_damp_targets,
+        )
+
+        proj = sdk._proj
+        # Keyed on the RESOLVED ids, so a key and a raw id that denote the same
+        # point converge on one operator (the script's cache has always done
+        # this; the name-keyed cache missed it).
+        created_ops: dict[tuple[str, str, str, str], str] = {}
+
+        def _elect(src_key: str, op_type: str, tgt_key: str,
+                   label: str | None) -> tuple[str | None, bool, str | None]:
+            """Resolve-or-create the bridge. Returns (op id, reused, note)."""
+            try:
+                op_id, reused, note = resolve_or_create_operator(
+                    sdk, proj, op_type, _resolve(src_key), _resolve(tgt_key),
+                    label, created_ops, create_kwargs=_direction_kw())
+            except Exception as e:
+                return None, False, str(e)
+            # A factor list must not carry the same operator twice — EP would
+            # count one bridge as two (the script's rule; this loop used to
+            # append blindly).
+            if op_id not in all_operator_ids:
+                all_operator_ids.append(op_id)
+            return op_id, reused, note
+
+        def _suffix(op_id: str, reused: bool) -> str:
+            return f" (reused {op_id})" if reused else ""
+
         # ── Create regular edges (IMPL/NAND) ──
-        # Track created operators so relevance_edges can reuse them instead of
-        # creating duplicates (same src/op_type/tgt in both sections).
-        created_ops: dict[tuple[str, str, str], str] = {}
         for edge in edges:
             if isinstance(edge, list):
                 # Tuple format: [source, op_type, target]
@@ -10487,27 +11292,27 @@ def _cmd_decide(args) -> int:
                 print(f"  ⚠ Unknown edge format: {edge}")
                 continue
 
-            try:
-                op = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)],
-                                         label=label, **_direction_kw())
-                created_ops[(src, op_type, tgt)] = op["id"]
-                all_operator_ids.append(op["id"])
-                print(f"  ✓ {src} --{op_type}--> {tgt}")
-            except Exception as e:
-                print(f"  ⚠ {src} --{op_type}--> {tgt}: {e}")
+            op_id, reused, note = _elect(src, op_type, tgt, label)
+            if op_id is None:
+                print(f"  ⚠ {src} --{op_type}--> {tgt}: {note}")
+                continue
+            print(f"  ✓ {src} --{op_type}--> {tgt}{_suffix(op_id, reused)}")
+            if note:
+                print(f"  ⚠ {src} --{op_type}--> {tgt}: {note}")
 
         # ── Truth edges: NAND the target finding point (it's FALSE) ──
         for te in truth_edges:
             src = te["source"]
             op_type = te.get("op_type", "NAND")
             tgt = te["target"]
-            try:
-                top = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)],
-                                          **_direction_kw())
-                all_operator_ids.append(top["id"])
-                print(f"  ⚡ truth: {src} --{op_type}--> {tgt}")
-            except Exception as e:
-                print(f"  ⚠ truth {src} --{op_type}--> {tgt}: {e}")
+            op_id, reused, note = _elect(src, op_type, tgt, te.get("label"))
+            if op_id is None:
+                print(f"  ⚠ truth {src} --{op_type}--> {tgt}: {note}")
+                continue
+            print(f"  ⚡ truth: {src} --{op_type}--> {tgt}"
+                  f"{_suffix(op_id, reused)}")
+            if note:
+                print(f"  ⚠ truth {src} --{op_type}--> {tgt}: {note}")
 
         # ── Relevance edges: mitigate the OPERATOR (TRUE but matters LESS) ──
         for re in relevance_edges:
@@ -10518,17 +11323,55 @@ def _cmd_decide(args) -> int:
             strength = re.get("strength", 0.30)
             # Clamp to valid mitigation range
             strength = max(0.10, min(0.50, strength))
+            label = re.get("label")
             try:
-                # Reuse the operator if already created in `edges` (prevents
-                # duplicate operators feeding EP twice).
-                op_id = created_ops.get((src, op_type, tgt))
-                if op_id is None:
-                    op = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)],
-                                             **_direction_kw())
-                    op_id = op["id"]
-                    all_operator_ids.append(op_id)
-                sdk.mitigate_operator(op_id, reason, strength)
-                print(f"  ⚖ relevance: {src} --{op_type}--> {tgt} (mitigated {strength:.2f}: {reason})")
+                # The selection rule is the script's (`select_damp_targets`):
+                # damp EVERY single-pair bridge on the triple, and refuse the
+                # ones that also claim other pairs.
+                pick = select_damp_targets(proj, op_type, _resolve(src),
+                                           _resolve(tgt), label)
+                targets = pick["targets"]
+                if not targets:
+                    for note in pick["notes"]:
+                        print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: "
+                              f"{note}")
+                    # This command's documented semantics are to wire the
+                    # operator it damps; WHICH cases licence that is stated once
+                    # in `may_mint_damped_bridge` (the script never mints).
+                    if not may_mint_damped_bridge(pick):
+                        continue
+                    op_id, reused, note = _elect(src, op_type, tgt, label)
+                    if op_id is None:
+                        print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: "
+                              f"{note}")
+                        continue
+                    if note:
+                        print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: "
+                              f"{note}")
+                    # Name the consequence: the notes above describe the
+                    # bridges that were ALREADY there, and this command's answer
+                    # to "nothing to damp" is to wire the bridge it damps.
+                    print(f"  ✓ relevance: {src} --{op_type}--> {tgt} "
+                          f"(wired single-pair bridge {op_id} to damp)")
+                    targets = [op_id]
+                elif pick["notes"]:
+                    for note in pick["notes"]:
+                        print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: "
+                              f"{note}")
+                # Every damped copy belongs in the factor list — a damped bridge
+                # that is missing from it drops out of the ranking, which is the
+                # "ranking depends on the run count" defect in its other
+                # direction (#9631 review). The rule lives in
+                # `damped_factor_ids` so both entry points agree.
+                for target_id in damped_factor_ids(targets):
+                    if target_id not in all_operator_ids:
+                        all_operator_ids.append(target_id)
+                for target_id in targets:
+                    sdk.mitigate_operator(target_id, reason, strength)
+                extra = ("" if len(targets) == 1
+                         else f" on {len(targets)} operators")
+                print(f"  ⚖ relevance: {src} --{op_type}--> {tgt} "
+                      f"(mitigated {strength:.2f}{extra}: {reason})")
             except Exception as e:
                 print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: {e}")
 
@@ -11022,6 +11865,37 @@ def _flush_pending_capture_notice() -> None:
     mark_capture_notice_shown()
 
 
+def _cmd_store_sync(args) -> int:
+    """``tortoise store-sync`` — the #3515 recovery sweep (spool + Pi log).
+
+    Credential resolution is BEST-EFFORT and happens here only so both halves
+    use ONE credential chain: the resolved key/url are handed to the spool leg
+    and to the worker (in the worker's own environment, never its argv).
+
+    The resolver is wrapped in a BLANKET ``except Exception``, not
+    ``_ConfigError``: ``_resolve_config_path`` calls ``Path.is_file()``, which
+    raises ``PermissionError`` when ``~/.tortoise`` is unreadable — and the
+    sweep is spawned DETACHED with ``stdio: "ignore"``, so a traceback here
+    both aborts the recovery sweep and hides why. That is the #3963 lesson
+    ``_cmd_session_drain_best_effort`` already records, and the log half needs
+    no config at all to READ files and re-anchor cursors: it reports "no
+    credential" honestly instead of dying before it runs.
+    """
+    import contextlib
+
+    from tortoise.store_sync import main as _store_sync_main
+
+    api_key = None
+    api_url = None
+    with contextlib.suppress(Exception):
+        # A corrupt OR UNREADABLE config must not make the sweep a no-op: the
+        # spool leg then reports `no_credential` and the log leg still runs.
+        _cfg_path, _config, api_key, api_url = _resolve_transmit_config()
+    args.api_key = api_key
+    args.api_url = api_url
+    return _store_sync_main(args)
+
+
 def main(argv: list[str] | None = None) -> int:
     import os as _os  # noqa: I001
     from tortoise.config import SUPPORTED_URI_SCHEMES
@@ -11130,6 +12004,166 @@ def main(argv: list[str] | None = None) -> int:
                          "be positive). A read that hits it refuses (exit 2) "
                          "— it never returns a partial answer")
     rr.add_argument("--json", action="store_true",
+                    help="Machine-readable JSON output")
+    # #9557 (R9): the RECORD's backup. Deliberately not `backup` (that verb
+    # copies a local embedded graph + its events.jsonl) and deliberately not on
+    # the capture turn: a scheduled, off-box artifact plus an executed restore.
+    rb = sp.add_parser(
+        "record-backup",
+        help="Dump the Postgres record, encrypt and upload it off-box; with "
+             "--scratch-dsn, restore it into a scratch record and prove the row "
+             "counts match. Exit 0 backed up+verified / 3 drill RED / 2 could "
+             "not run / 1 backup failed")
+    rb.add_argument("--record-dsn", default=None,
+                    help="Postgres DSN for the dump/restore (default: "
+                         "$TORTOISE_RECORD_BACKUP_DSN, falling back to "
+                         "$TORTOISE_RECORD_DSN when that is unset). It must be a "
+                         "role that BYPASSES RLS — a backup must see every tenant, "
+                         "and the record's own app role (NOBYPASSRLS) is refused "
+                         "with exit 2 (#9801). It must also be the DIRECT "
+                         "connection, not the pooler: a dump/restore session "
+                         "through a transaction pooler can be silently short, so "
+                         "a pooler DSN is refused (exit 2)")
+    rb.add_argument("--scratch-dsn", default=None,
+                    help="Drill mode: an EMPTY scratch Postgres DSN to restore "
+                         "the artifact into and compare row counts against the "
+                         "live record (default: $TORTOISE_RECORD_SCRATCH_DSN — "
+                         "prefer the env var: an argument is readable in `ps` "
+                         "and shell history). It must not be the record itself "
+                         "— a restore into a populated record is refused. "
+                         "Without this flag the verb backs up only, and says "
+                         "the artifact is NOT proven restorable")
+    rb.add_argument("--reset-scratch", action="store_true",
+                    help="Drill mode: TRUNCATE the record's tables on the "
+                         "--scratch-dsn target before restoring. A successful "
+                         "drill leaves the scratch target populated, and every "
+                         "restore refuses a populated target — so a scheduled "
+                         "drill needs this to be repeatable. It only ever "
+                         "touches the SCRATCH DSN (refused if equal to the "
+                         "record), and only the record's own tables")
+    rb.add_argument("--keep", type=int, default=None,
+                    help="Artifacts to retain after a successful run "
+                         "(default: 14). `--keep 0` is refused: a prune that "
+                         "keeps nothing is data loss")
+    rb.add_argument("--workdir", default=None,
+                    help="Directory for the plaintext dump while it is being "
+                         "encrypted/restored (default: the system temp dir). "
+                         "Each file is created inside a 0700 mkdtemp directory "
+                         "and removed on every path; the restored payload is "
+                         "written 0600, the backup dump inherits the process "
+                         "umask within that 0700 directory")
+    rb.add_argument("--json", action="store_true",
+                    help="Machine-readable JSON output")
+    # #3515 piece 5: the recovery SWEEP, as one command. It drains BOTH
+    # substrates — the capture spool (through the same `flush_spool` every other
+    # drain uses) and Pi's own session log (through the store-sync worker's
+    # per-file cursor) — because a sweep that drains one and not the other
+    # leaves half the death modes unhandled. Named at the TOP level, not under
+    # `session`, because it is pinned that way in the epic (§4 #3515 / §5) and
+    # the pin is what the tests drive.
+    ss = sp.add_parser(
+        "store-sync",
+        help="Recovery sweep: drain the capture spool AND any unsynced Pi "
+             "session .jsonl files (per-file cursor) — #3515")
+    ss.add_argument("--session-dir", default=None,
+                    help="Pi session directory (default: ~/.pi/agent/sessions)")
+    ss.add_argument("--cursor-dir", default=None,
+                    help="Cursor store directory (default: <spool-parent>/store-sync, "
+                         "the same directory both health-line readers open)")
+    ss.add_argument("--file", action="append", default=None,
+                    help="Sync only this session file (repeatable). A single "
+                         "--file also narrows the SPOOL half to that session "
+                         "(the filename carries the session id)")
+    ss.add_argument("--max-files", type=int, default=None,
+                    help="Bound this run to N session files (the rest drains next run)")
+    ss.add_argument("--max-requests", type=int, default=None,
+                    help="Bound this run to N POST attempts")
+    ss.add_argument("--exclude-session-id", default=None,
+                    help="Skip this session id (the one LIVE right now — filing it "
+                         "would make the server skip extraction for later turns)")
+    ss.add_argument("--no-spool", action="store_true",
+                    help="Skip the spool half (log half only). The spool half "
+                         "POSTs turns, so it needs capture consent "
+                         "(TORTOISE_CAPTURE=1); the log half does not")
+    ss.add_argument("--dry-run", action="store_true",
+                    help="Plan only — POST nothing, drain no spool entry, "
+                         "move no cursor")
+    ss.add_argument("--json", action="store_true", help="Machine-readable receipt")
+    # #9556 / R8: the record → cache RESTORE. A sibling of `record-reconcile`
+    # and deliberately NOT a `--from-record` flag on `rebuild`: `rebuild`'s
+    # `--dir` is the journal the replay reads, so a flag that silently makes it
+    # meaningless would make the two SOURCES indistinguishable on the one
+    # command that destroys a graph. The exit codes are the operator's next
+    # step (0 restored / 3 refused, nothing written / 2 no verdict) and the
+    # composition is `tortoise/record_restore.py`.
+    rr2 = sp.add_parser(
+        "record-restore",
+        help="Restore a lost cache graph from the Postgres record (R8) — the "
+             "record-sourced sibling of `rebuild`. Exit 0 restored / 3 "
+             "refused (nothing written) / 2 no verdict")
+    rr2.add_argument("--db", required=True,
+                     help="Cache target: FalkorDB docker:// URI")
+    rr2.add_argument("--record-dsn", default=None,
+                     help="Postgres record DSN (default: $TORTOISE_RECORD_DSN)")
+    rr2.add_argument("--org", required=True, help="Record org_id (the scope)")
+    rr2.add_argument("--graph", required=True,
+                     help="Record graph_id (the scope)")
+    rr2.add_argument("--cache-graph", default=None,
+                     help="Cache graph to RESTORE — REQUIRED in practice (the "
+                          "verb refuses without it, exit 2). NOT the record's "
+                          "--graph scope: this tree names it org_<org_id> or "
+                          "org_<org_id>_<graph_id>. No default is derived — a "
+                          "wrong guess opens an EMPTY graph and the run would "
+                          "report a restore into a graph nobody reads")
+    rr2.add_argument("--limit", type=int, default=None,
+                     help="Write at most N nodes (N >= 1). A bounded run is "
+                          "`bounded`, NOT necessarily partial: a bound at or "
+                          "above the record's node count covers every key the "
+                          "plan could write and declares coverage=complete "
+                          "(a record row the cache cannot address makes it "
+                          "partial at any bound). Read `unwritten_keys` / "
+                          "`relations_not_written` (reported as "
+                          "`declared_partial`), not the flag or the bound")
+    rr2.add_argument("--allow-empty", action="store_true",
+                     help="DANGER: proceed when the record holds NO rows for "
+                          "this scope. Without it an empty source is REFUSED "
+                          "(exit 3) because such a run wipes the cache and "
+                          "puts nothing back")
+    rr2.add_argument("--json", action="store_true",
+                     help="Machine-readable JSON output")
+    # #9555 / R7: §9.4's VERBATIM-EVIDENCE FETCH, served from the record. The
+    # reader (`tortoise/record_read.py`) landed with #9638 and had no production
+    # caller; this verb is the path, and the composition is
+    # `tortoise/record_text.py`. Exit 0 served / 3 readable-and-absent / 2 no
+    # verdict — the 3-vs-2 split is the whole point (a tenancy-filtered read
+    # returns 0 rows silently, so an unreadable SCOPE must never be reported as
+    # an absent SESSION).
+    rt = sp.add_parser(
+        "record-text",
+        help="Serve §9.4's verbatim source text (the S1 narrative + the raw "
+             "turns) from the Postgres record alone (R7). Exit 0 served / 3 "
+             "readable-and-absent / 2 no verdict")
+    rt.add_argument("--record-dsn", default=None,
+                    help="Postgres record DSN (default: $TORTOISE_RECORD_DSN)")
+    rt.add_argument("--org", required=True, help="Record org_id (the scope)")
+    rt.add_argument("--graph", required=True,
+                    help="Record graph_id (the scope)")
+    # The key is EITHER a session or a source url, and the verb refuses both /
+    # neither: `--session` reads §9.1's own identity, `--source-url` is §9.4's
+    # shape ("show me the verbatim text behind this claim"), which resolves
+    # through `public.source.session_id` — a COLUMN, so the link survives the
+    # graph being destroyed.
+    rt.add_argument("--session", default=None,
+                    help="Session id whose narrative + turns to serve")
+    rt.add_argument("--source-url", default=None,
+                    help="A :Source's url; serves the text behind the claim "
+                         "that links to it (§9.4)")
+    rt.add_argument("--limit", type=int, default=None,
+                    help="Render at most N turns. The Served/reported turn "
+                         "COUNT is never capped by this — only the rendering "
+                         "— so a bound cannot make a served answer understate "
+                         "the transcript it holds")
+    rt.add_argument("--json", action="store_true",
                     help="Machine-readable JSON output")
     bk = sp.add_parser("backup", help="Backup events.jsonl + FalkorDB to timestamped dir")
     bk.add_argument("--db", required=True, help="Path to database file")
@@ -11720,6 +12754,14 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_reconcile(args)
     elif args.cmd == "record-reconcile":
         return _cmd_record_reconcile(args)
+    elif args.cmd == "record-backup":
+        return _cmd_record_backup(args)
+    elif args.cmd == "record-restore":
+        return _cmd_record_restore(args)
+    elif args.cmd == "record-text":
+        return _cmd_record_text(args)
+    elif args.cmd == "store-sync":
+        return _cmd_store_sync(args)
     elif args.cmd == "backfill":
         _cmd_backfill(args)
         return 0

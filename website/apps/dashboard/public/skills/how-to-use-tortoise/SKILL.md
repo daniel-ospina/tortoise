@@ -46,6 +46,10 @@ The write operations appear once in this skill (by operation name). Invoke them 
 | Compute confidence | `tortoise_compute_confidence` | `sdk.compute_confidence(anchors=…)` |
 | Check structure | `tortoise_check_structure` | `sdk.check_structure()` |
 
+### When the client blocks the call
+
+Some clients refuse a write before it reaches Tortoise. ChatGPT currently blocks deletions: the user allows the call in its consent dialog and the client's own safety check still refuses it. Do not retry it and do not look for a way around it — name the point you could not delete and hand that step back to the user, who can run it from a harness with Tortoise credentials (Claude Code, Cursor, Pi, or Codex) or, for a whole graph, from the dashboard at `app.premiselabs.co`. No other operation in the map above is known to be blocked.
+
 ## Hard Gate
 
 **Any graph write** (create_point, create_operator, mitigate_operator, supersede_point, delete_point, annotate_point, invalidate_point) **MUST** go through this skill. Bypassing it risks:
@@ -386,8 +390,8 @@ Non-Point entities skip EP annotation (no confidence breakdown in results).
 
 Kind values are expanded through pack registries before queries execute. When you search for a kind like `WorkItem`, the system automatically includes:
 
-- **subclassOf**: Subclasses registered in packs (e.g., `dev:issue`, `pm:task`)
-- **equivalentTo**: Bidirectional equivalents (e.g., `dev:issue` ↔ `pm:task`)
+- **subclassOf**: Subclasses registered in packs (e.g., `dev:issue`, `pm:issue`)
+- **equivalentTo**: Bidirectional equivalents (e.g., `dev:issue` ↔ `pm:issue`)
 
 This means `tortoise_search(query="auth bug", kind="WorkItem")` matches both dev and PM work items automatically. No manual kind expansion needed.
 
@@ -476,7 +480,7 @@ Packs declare what KINDS and RELATIONS can exist:
 sdk.list_relations()  # returns fromKind/toKind/mechanism triplets
 
 # What kinds does a pack declare (including subclass/equivalence expansion)?
-sdk.expand_kind("WorkItem")  # returns ["dev:issue", "pm:task", ...]
+sdk.expand_kind("WorkItem")  # returns ["WorkItem", "dev:issue", "pm:issue", ...]
 ```
 
 ## Discovery Checklist

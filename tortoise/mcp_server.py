@@ -158,9 +158,14 @@ def _validation_error_kind(exc: PydanticValidationError) -> str:
 def _classify_mcp_call_error(exc: BaseException) -> tuple[str, str | None]:
     """Map a dispatch exception to (status, error_kind).
 
-    validation_error → pydantic argument-validation failures (raised raw or
-        wrapped by fastmcp's ValidationError, whose __cause__ carries the
-        pydantic errors); error_kind = '<error_type>:<field>'.
+    validation_error → an ARGUMENT refusal: pydantic argument-validation
+        failures (raised raw or wrapped by fastmcp's ValidationError, whose
+        __cause__ carries the pydantic errors) with error_kind =
+        '<error_type>:<field>'; a `graph` argument that names no reachable
+        graph (`mcp_auth.GraphTargetError`, raised as a `ToolError` carrying its
+        own machine-readable `code`) with error_kind = that code, e.g.
+        `invalid_graph` — the caller's input, not a server fault, so it must
+        not be bucketed with `exec_error`.
     auth_error → AuthorizationError.
     exec_error → everything else; error_kind = the exception class name,
         unwrapping fastmcp's ToolError/FastMCPError wrapper to the underlying
@@ -183,6 +188,14 @@ def _classify_mcp_call_error(exc: BaseException) -> tuple[str, str | None]:
             kind_exc = kind_exc.__cause__
         else:
             break
+    if isinstance(kind_exc, _mcp_auth.GraphTargetError):
+        # #9340: the `graph` argument named no graph this caller may reach.
+        # That is a CALLER-side argument refusal, not a server fault: bucketing
+        # it as `exec_error / ToolError` made the class unmeasurable (and left
+        # `GraphTargetError.code` written by nobody), so "how often do
+        # connectors send an invalid graph" — the question this new surface most
+        # needs to answer — was unanswerable from the mcp_tool_call series.
+        return "validation_error", getattr(kind_exc, "code", None) or "invalid_graph"
     return "exec_error", type(kind_exc).__name__
 
 
@@ -290,11 +303,31 @@ def _emit_mcp_tool_call_telemetry(org_id: str, tool_name: str, status: str,
       by the HTTP tenant-context refusal and by `_safe`'s unset-transport
       refusal, which record ``auth_error`` with ``error_kind = None`` rather
       than claim a gate they never touched. ``exec_error`` has ONE more
-      producer family, with ``error_kind = "safe_error"``: a dispatch whose
-      failure `_safe` ANSWERED with a dict instead of raising — the general
-      `_SafeError` payload (#8135) and the wrap envelope the tool's own schema
-      forbids (#8482), which is the same producer class and deliberately shares
-      the kind.
+      producer family, with ``error_kind = "safe_error"``: a dispatch that
+      answered with an `_SafeError` dict instead of raising. TWO producers
+      write that kind, both deliberately, and it is the same class in both
+      cases — "the tool answered with a failure payload, nothing raised":
+
+      * a failure `_safe` CAUGHT — the general `_SafeError` payload (#8135) and
+        the wrap envelope the tool's own schema forbids (#8482);
+      * a TOOL-BODY refusal the SDK was never called for — an argument
+        validation branch (`page must be >= 1`, an unrecognised recall mode, a
+        tag/option cap), a caller-side gate (`GitHub not connected`), or a
+        transport exclusion (`_http_excluded_error`). Before #9084 those were
+        plain dicts and read ``ok``.
+
+      Do NOT read ``error_kind == "safe_error"`` as "the SDK/backend failed":
+      it covers both families, and NOTHING IN THIS ROW separates them — the
+      emitted props are ``tool_name`` / ``status`` / ``latency_ms`` /
+      ``error_kind`` / ``result_count``, so the row carries no payload at all.
+      The payload's ``code`` does not separate them either, in EITHER
+      direction: `_safe`'s generic branch carries no ``code`` and neither do
+      most tool-body argument refusals, and where a code IS present it collides
+      (``ERR_QUOTA`` is emitted by `_safe`'s quota branch AND by a tool body's
+      own tag/option cap). Separating the families needs the call site and its
+      payload, or a new prop carrying the producer. ``status ==
+      "exec_error"`` is the failure column; ``safe_error`` names HOW it was
+      reported.
     - ``timeout`` — the transport wait bound fired at this seam
       (``error_kind = "wait_bound"``).
     - ``cancelled`` — the caller cancelled the dispatch
@@ -576,15 +609,93 @@ def _wait_bound_refused() -> bool:
     the pre-SSE-stall path, where pre-SSE cost >= bound and this seam's own
     deadline has already collapsed to 0. The seam must then NOT emit a second
     ``transport_wait_bound_exceeded`` and must NOT record the redundant refusal
-    as an ``mcp_tool_call`` ``timeout``. It still returns the refusal, so the
-    abandoned dispatch still terminates cleanly.
+    as an ``mcp_tool_call`` ``timeout``. It still returns the refusal — and, since
+    #9762, schedules NOTHING, so this path has no abandoned dispatch to drain.
     """
     state = _wait_bound_state()
     return bool(state.get(_WAIT_BOUND_REFUSED_KEY)) if state is not None else False
 
 
+def _wait_bound_refusal_result() -> ToolResult:
+    """The ONE refusal result both wait-bound paths return.
+
+    The message and the advertised delay come from the single module both
+    surfaces read (``mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE`` /
+    ``mcp_auth._TRANSPORT_WAIT_RETRY_AFTER_S``). Built in one place because two
+    paths now deliver it (the seam's own breach, and the already-refused
+    short-circuit #9762 added) and a second construction is how the two drift
+    apart.
+    """
+    return ToolResult(
+        content=_mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE,
+        # The REST JSON-RPC error payload, carried on the channel this surface
+        # has: same code, same message, same `data.retry_after`.
+        structured_content={"error": {
+            "code": ERR_TIMEOUT,
+            "message": _mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE,
+            "data": {"retry_after": _mcp_auth._TRANSPORT_WAIT_RETRY_AFTER_S},
+        }},
+        meta={_WAIT_BOUND_META_KEY: True},
+        is_error=True,
+    )
+
+
+async def _scoped_dispatch(name: str, arguments, graph_ref: str | None, *,
+                           version, task_meta):
+    """Resolve the `graph` argument AND dispatch, inside ONE task (#9762).
+
+    The resolution used to run in ``_wrapped_call_tool`` BEFORE the dispatch
+    task existed, and that ordering was wrong in two independent ways:
+
+    * the scope it applies is a set of ContextVars with no reset token
+      (``mcp_auth.use_graph_target``), so a scope applied to the CALLER's
+      context OUTLIVED the dispatch: the next call in that context that named no
+      graph (the documented "untouched default path") inherited the previous
+      call's graph, which is the silent-wrong-graph class #9340 closes;
+    * it spends the SAME remaining transport deadline the dispatch does
+      (#3834 F1), so a request the transport had already refused
+      (``_wait_bound_refused()`` ⇒ ``remaining == 0``) raised a graph
+      ``ToolError`` from the wrapper instead of returning the transport's own
+      refusal — recorded ``exec_error``/``ToolError`` in the very
+      ``mcp_tool_call`` series #3834 F-1/F-2 keep truthful, with a
+      control-plane ``list_memory_graphs`` read issued for an answered request.
+
+    Resolving INSIDE the task fixes both by construction: the scope moves with
+    the task, so it cannot outlive it and the task's own result is scoped by
+    construction.
+
+    On the naive guard the review of #9762 considered (`if not refused:
+    resolve`, left in the wrapper): it is wrong for the two reasons above — the
+    caller-context leak, and scheduling a side-effecting dispatch whose result
+    nothing will read. It would ALSO reopen the unscoped-result hazard in
+    principle: ``mcp_auth.await_under_wait_bound`` returns ``task.result()`` when
+    the task finished as the deadline expired, and a zero timeout does NOT make
+    that impossible — ``wait_for(shield(task), 0)`` still lets an
+    already-scheduled task run during its cancel wait (measured: a
+    non-suspending body completes and its result is returned). That hazard
+    belongs to the naive-guard VARIANT (resolve in the wrapper, plain dispatch).
+    On THIS code it is unreachable because a refused request never creates a task
+    at all — the entry short-circuit in ``_await_under_mcp_wait_bound`` — and
+    what removing that short-circuit costs is different: a control-plane read
+    issued for an answered request, and a side-effecting dispatch that keeps
+    running after the caller was told the request was refused.
+
+    The ``ExitStack`` is owned HERE, not by the caller: `use_record_tenant`
+    carries a ContextVar token, and a token created in this task's context can
+    only be reset in it (``ContextVar.reset`` from another context raises).
+    Owning it here is also what closes the record scope when an ABANDONED
+    (timed-out) dispatch finally finishes, rather than when the caller stopped
+    waiting.
+    """
+    with contextlib.ExitStack() as stack:
+        await _resolve_graph_argument(graph_ref, stack)
+        return await _original_call_tool(
+            name, arguments, version=version, run_middleware=True,
+            task_meta=task_meta)
+
+
 async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
-                                     task_meta):
+                                     task_meta, graph_ref: str | None = None):
     """Await the real tool dispatch under the transport wait bound (#3834).
 
     On breach the caller gets a legible refusal that REUSES the shipped
@@ -612,6 +723,12 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
     On the CANCELLATION path the opposite holds — the cancellation is propagated
     INTO the dispatch, as the direct await this wrapper replaced did, so the
     tool's own cancellation cleanup runs.
+
+    ``graph_ref`` is the `graph` argument the CALLER named, already popped off
+    ``arguments`` (#9340). It is resolved INSIDE the dispatch task — see
+    ``_scoped_dispatch`` (#9762): resolving it before the task is created makes
+    an already-refused request raise a graph error under a spent deadline, and
+    applies the scope to the caller's context.
     """
     t0 = _time.perf_counter()
     # #3834 F1: spend the TRANSPORT's REMAINING deadline, not a fresh one. The
@@ -630,6 +747,29 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
     # this seam's entry. Same clock as ``_wait_bound_arrival`` and
     # ``EmbeddingModel``'s own stamp.
     setup_ref = arrival if arrival is not None else _time.monotonic()
+    # #3834 F-2: the transport already refused AND answered this request (a
+    # pre-SSE stall, where pre-SSE cost >= bound and this seam's remaining
+    # deadline was 0). Read here to decide whether to schedule ANYTHING: the
+    # writer is ``hosted_api.WaitBoundMiddleware``, whose own ``task.done()`` /
+    # ``response_started`` guards have already run, so a flag set at this point
+    # means the caller holds a refusal and the dispatch's result is unreachable.
+    # ⚠️ The flag CAN still flip LATER on a transport that does not start its
+    # response before dispatching (fastmcp's ``json_response`` mode), which is
+    # why the emit site re-reads it — neither read subsumes the other.
+    transport_refused = _wait_bound_refused()
+    if transport_refused:
+        # #9762: do not even schedule the dispatch. Its result is unreachable
+        # (the middleware dropped the SSE response and answered the caller), so
+        # starting it would issue the control-plane read the `graph` resolution
+        # performs — and, for a WRITE tool, mutate state on behalf of a caller
+        # that was told the request had been refused. The refusal returned here
+        # is the one the caller's transport already sent; nothing is emitted,
+        # because the middleware's event is the truthful record.
+        _log.debug(
+            "MCP tools/call %s already refused at the transport; this seam's "
+            "refusal is redundant and no dispatch is started",
+            _mcp_auth._sanitize_for_log(name))
+        return _wait_bound_refusal_result()
     # #4055 (P2): bind an opaque owner token for this dispatch, then create the
     # dispatch task INSIDE the binding so it copies the token. A one-time
     # embedder load this dispatch triggers stamps that token as the load's
@@ -638,9 +778,15 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
     from tortoise.embeddings import request_load_owner
     owner = object()
     with request_load_owner(owner):
-        task = asyncio.ensure_future(
-            _original_call_tool(name, arguments, version=version,
-                                run_middleware=True, task_meta=task_meta))
+        # #9762: a graph-bearing dispatch is created from `_scoped_dispatch`,
+        # so the resolution rides the task that owns the scope. A call that
+        # named no graph dispatches directly — the fast path pays nothing.
+        dispatch = (_original_call_tool(
+            name, arguments, version=version, run_middleware=True,
+            task_meta=task_meta) if graph_ref is None else
+            _scoped_dispatch(name, arguments, graph_ref, version=version,
+                             task_meta=task_meta))
+        task = asyncio.ensure_future(dispatch)
     try:
         # ``wait_for`` + ``shield`` rather than ``asyncio.wait`` — the same
         # primitive choice as ``hosted_api.WaitBoundMiddleware.__call__``. The
@@ -679,12 +825,6 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
         pass
 
     _hold_mcp_dispatch_after_request(task)
-    # #3834 F-2: the transport already refused AND answered this request (a
-    # pre-SSE stall, where pre-SSE cost >= bound and this seam's remaining
-    # deadline was 0). The middleware's event is then the truthful record;
-    # emitting here would be a second, mutually-inconsistent
-    # ``transport_wait_bound_exceeded`` for the same request.
-    transport_refused = _wait_bound_refused()
     # #3834 F-1: report the interval the bound actually governs — the
     # CALLER-VISIBLE wait, the SAME interval the REST arm's breach event reports
     # (``hosted_api`` uses ``time.monotonic() - transport arrival``). ``t0`` here
@@ -705,13 +845,19 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
     # its route path for. Escape it for the log line (the analytics sink
     # sanitizes its own copy).
     safe_name = _mcp_auth._sanitize_for_log(name)
-    if transport_refused:
+    # #3834 F-2 / #9762: RE-READ the flag here, not only at entry. The entry
+    # short-circuit only sees a refusal that already happened; a transport that
+    # does not start its response before dispatching (fastmcp's
+    # ``json_response`` mode) can still reach the middleware's refusal branch
+    # WHILE this seam waits, and then the middleware's event is again the
+    # truthful one — emitting here would be the duplicate F-2 exists to prevent.
+    if _wait_bound_refused():
         # The transport's warning already covers this request; a second
-        # "refusing legibly" warning would describe a refusal this seam never
-        # delivers (the middleware dropped the SSE response).
+        # "refusing legibly" warning would describe a refusal the middleware
+        # delivered, not this seam.
         _log.debug(
-            "MCP tools/call %s already refused at the transport; this seam's "
-            "refusal is redundant", safe_name)
+            "MCP tools/call %s refused at the transport while this seam "
+            "waited; this seam's refusal is redundant", safe_name)
     else:
         # The SAME breach writer the REST arm uses — one emit site, one prop
         # vocabulary — scheduled OFF the loop (see
@@ -723,19 +869,7 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
         _log.warning(
             "transport wait bound (%.0fs) exceeded: MCP tools/call %s — "
             "refusing legibly", _mcp_auth._TRANSPORT_WAIT_BOUND_S, safe_name)
-    retry_after = _mcp_auth._TRANSPORT_WAIT_RETRY_AFTER_S
-    return ToolResult(
-        content=_mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE,
-        # The REST JSON-RPC error payload, carried on the channel this surface
-        # has: same code, same message, same `data.retry_after`.
-        structured_content={"error": {
-            "code": ERR_TIMEOUT,
-            "message": _mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE,
-            "data": {"retry_after": retry_after},
-        }},
-        meta={_WAIT_BOUND_META_KEY: True},
-        is_error=True,
-    )
+    return _wait_bound_refusal_result()
 
 
 def _enforce_mcp_tool_scope(name: str) -> None:
@@ -1282,6 +1416,199 @@ def _schema_error_result(result, name: str, schema: dict) -> ToolResult:
     )
 
 
+def _take_graph_argument(name: str,
+                         arguments: dict[str, Any] | None) -> str | None:
+    """Strip a tool call's optional `graph` argument, or refuse it (#9340).
+
+    The graph is a TOOL ARGUMENT, not a token claim (the owner's 2026-10-22
+    decision on #9340): a graph is working context inside one workspace, so a
+    connector selects it per call and the token stays `(user, workspace,
+    scope)`. Resolution + authorisation live in `mcp_auth` and are re-read on
+    EVERY call — this function only decides whether the argument applies to
+    THIS tool and turns a refusal into a tool error.
+
+    Applied at the single dispatch point rather than inside each tool for two
+    reasons: the dispatch point is where every tenant call already crosses
+    (`_enforce_mcp_tool_scope` sits a few lines above), and a per-tool edit
+    would leave the 70-odd tools that never got one silently pinned to the
+    default graph — the exact defect #9340 names.
+
+    The key is POPPED IN PLACE, so the dict the middleware chain carries
+    downstream no longer holds it: without that, `call_tool` re-entry
+    (`run_middleware=False`) would see the argument again, and the tool body
+    would receive a keyword its signature does not declare.
+
+    The excluded tools REFUSE rather than ignore: a call that names a graph on
+    a tool that does not target graphs is under-specified in the other
+    direction, and quietly dropping the argument is how a caller concludes
+    "that is the graph I asked for" about a workspace-wide operation.
+    """
+    if not isinstance(arguments, dict) or "graph" not in arguments:
+        return None
+    ref = arguments.pop("graph")
+    if name in _mcp_auth.GRAPH_ARGUMENT_EXCLUDED:
+        raise ToolError(
+            f"`{name}` does not take a `graph` argument — it targets the "
+            "workspace or names its graph explicitly. Remove the argument.")
+    return ref
+
+
+#: #9762: the slice of the transport's residual budget the graph lookup must
+#: leave on the clock, so its own refusal wins the race against the seam's
+#: generic one deterministically (both deadlines are otherwise the same absolute
+#: instant, and the seam's timer is armed first). Proportional to the residual,
+#: capped so a long budget does not hand the lookup a materially shorter one.
+#: THE TRADE: a lookup that would have finished inside this last slice is
+#: refused instead of served, which is why ``_resolve_graph_argument`` gives that
+#: refusal its OWN self-contained message — reusing the shared budget-breach
+#: prefix there would claim an exceeded budget and "the work may still complete
+#: on the server" for a call that never ran.
+_GRAPH_LOOKUP_MARGIN_FRACTION = 0.05
+_GRAPH_LOOKUP_MARGIN_CAP_S = 0.015
+
+
+async def _resolve_graph_argument(ref: str | None,
+                                  stack: contextlib.ExitStack) -> None:
+    """Resolve a stripped `graph` OFF the event loop, then scope the dispatch.
+
+    `plan_graph_target` reads the reachable graph set (a control-plane query —
+    up to three synchronous PostgREST round trips), so it rides
+    `asyncio.to_thread`; a ContextVar set inside that thread would die with the
+    thread's context copy, so the plan is applied back here with
+    `use_graph_target`.
+
+    A selected CUSTOM graph also installs the RECORD tenant for the rest of the
+    DISPATCH (`record_tenant_for_graph`), entered on the caller's `stack` so it
+    exits with the dispatch. Without it an armed record write under an org-wide
+    (OAuth) credential — the connection this feature exists for — would be
+    refused `no_tenant`, or, under a declared single-tenant env pair, filed
+    under a DIFFERENT graph than the data went to.
+
+    #9762: the stack is the DISPATCH TASK's (see `_scoped_dispatch`), so both
+    the ContextVars this applies and the record tenant it installs are confined
+    to the task that is being scoped — and are closed when that task finishes,
+    even if the caller has already stopped waiting.
+    """
+    if ref is None:
+        return
+    # The read is BOUNDED by the same transport budget the dispatch itself
+    # spends (#3834): a degraded control plane must produce a legible, retryable
+    # refusal instead of silently consuming the caller's whole budget and then
+    # having the dispatch abandoned mid-write (a retry would duplicate it). On
+    # stdio there is no transport arrival, so the full bound applies — the same
+    # rule `_await_under_mcp_wait_bound` uses.
+    arrival = _wait_bound_arrival()
+    remaining = (float(_mcp_auth._TRANSPORT_WAIT_BOUND_S) if arrival is None else max(
+        0.0, _mcp_auth._TRANSPORT_WAIT_BOUND_S - (_time.monotonic() - arrival)))
+    # #9762: the lookup's deadline is strictly EARLIER than the dispatch's, by a
+    # small share of what is left. Both are armed from the same absolute
+    # deadline (``arrival + bound``) while the seam's timer is created first —
+    # before this task's first step — so with EQUAL deadlines the seam takes the
+    # race, abandons this lookup and returns the GENERIC wait-bound refusal.
+    # Measured on the equal-deadline code with a degraded control plane (lookup
+    # length ≈ the whole residual): 3 of 4 runs recorded ``timeout/wait_bound``
+    # and 1 the graph refusal — one failure class, two different rows in the
+    # series this issue is about, and the actionable message usually lost. The
+    # race is not reliably decided either way at equal deadlines (another
+    # measurement saw 5/5 seam-wins), so a margin is what makes it deterministic
+    # rather than lucky.
+    #
+    # THE TRADE, stated because it is real: a lookup that WOULD have finished
+    # inside this last slice is refused instead of served. The slice is bounded
+    # (≤15 ms, 5% of the residual) and the refusal it produces says only that the
+    # lookup did not finish in the time left — never that the request's budget was
+    # exceeded, which in that band would be false.
+    margin = min(_GRAPH_LOOKUP_MARGIN_CAP_S, remaining * _GRAPH_LOOKUP_MARGIN_FRACTION)
+    lookup_budget = max(0.0, remaining - margin)
+    # `asyncio.timeout`, NOT `wait_for`: `wait_for` raises `TimeoutError` for
+    # BOTH its own deadline and any builtin `TimeoutError` (`socket.timeout` IS
+    # `TimeoutError` on 3.12) escaping the lookup — a control-plane read that
+    # times out would be reported as a breach of OUR budget, discarding the
+    # real cause. `cm.expired()` is the only thing that distinguishes them (the
+    # same conflation `_await_under_mcp_wait_bound` guards for handler bodies).
+    budget = None
+    try:
+        # `to_thread` is this layer's existing idiom for a short blocking read
+        # (`mcp_auth` runs the geo check the same way); bounded above, so a slow
+        # control plane cannot hold a worker indefinitely.
+        async with asyncio.timeout(lookup_budget) as budget:
+            plan = await asyncio.to_thread(
+                _mcp_auth.plan_graph_target, ref)
+    except TimeoutError:
+        if budget is None or not budget.expired():
+            # Raised INSIDE the lookup, not by this deadline: re-raise so the
+            # caller sees the real failure instead of a bogus "retry after Ns".
+            raise
+        if margin > 0:
+            # The margin cut this lookup while the request still had time on the
+            # clock, so the shared budget-breach wording below ("…was exceeded…
+            # the work may still complete on the server") is FALSE here on both
+            # counts: the budget was not exceeded, and nothing was executed —
+            # the dispatch is never created. Hence a self-contained message
+            # rather than that prefix with a different parenthetical.
+            raise ToolError(
+                "The graph lookup for this request did not finish inside the "
+                "time it had left, so the call was not executed. "
+                f"Retry after {_mcp_auth._TRANSPORT_WAIT_RETRY_AFTER_S}s."
+            ) from None
+        # No time left at all (the transport had already spent the bound): keep
+        # #9340's shipped wording — that IS the vocabulary callers and tests
+        # already read for this refusal. Its "the work may still complete on the
+        # server" clause is not true of THIS arm (the lookup raises before the
+        # tool is ever called), but the arm does not reach a caller through the
+        # wrapper: at `remaining == 0` the seam's own deadline wins the race, so
+        # this message is read by direct `_resolve_graph_argument` callers (and
+        # the pin below). A future ordering change that surfaces it would need
+        # the same self-contained treatment the margin arm got.
+        raise ToolError(
+            f"{_mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE} (The graph lookup "
+            f"exceeded the wait budget.) Retry after "
+            f"{_mcp_auth._TRANSPORT_WAIT_RETRY_AFTER_S}s.") from None
+    except _mcp_auth.GraphTargetError as exc:
+        # ToolError → an is_error tool result carrying the actionable message
+        # (naming the graphs the caller CAN reach), the same shape the budget
+        # refusal above uses. The CAUSE is kept deliberately (`from exc`, not
+        # `from None`): `_classify_mcp_call_error` unwraps it to
+        # `GraphTargetError` and records the refusal as an ARGUMENT error
+        # (`validation_error / invalid_graph`) instead of an un-coded
+        # `exec_error / ToolError` no series can count.
+        raise ToolError(str(exc)) from exc
+    _mcp_auth.use_graph_target(plan)
+    tenant = _mcp_auth.record_tenant_for_graph(plan)
+    if tenant is not None:
+        from tortoise.record_writer import use_record_tenant
+
+        stack.enter_context(use_record_tenant(*tenant))
+
+
+def _dispatch_graph_name() -> str:
+    """The graph NAME a handler must address for THIS dispatch (#9340).
+
+    Some handlers name their graph themselves and hand the name to
+    `tortoise.navigation`, whose `db.select_graph(graph_name)` is what actually
+    picks the graph — `_get_org_sdk()`'s scoping alone cannot reach it. They
+    must take the name from HERE, or `graph=` is advertised on them and then
+    silently ignored: the call is scoped to the selected graph, the read lands
+    on the workspace default, and the caller gets HTTP 200 from the wrong
+    graph. That is the silent-wrong-graph class #9340 exists to close, so the
+    rule lives in one function rather than in each handler.
+
+    HTTP/self-host only — callers keep their stdio branch (it honours the
+    handler's own `graph_name` argument for operator use). The namespace can
+    only be non-None when `plan_graph_target` matched a `public.graphs` row
+    whose own `org_id` is THIS workspace (and refused a graph-bound credential
+    a re-target), so the value is the resolver's verified row, never caller
+    input — the #236 cross-tenant guard is intact.
+    """
+    # Read through `_mcp_auth` rather than a module-level import of the
+    # ContextVar: adding that global binding re-compiles
+    # `tortoise_session_capture`'s code object (its own local import of the
+    # same name compiles differently), which re-stamps an owner-reviewed
+    # `served_from` row for a handler this change does not touch.
+    return (_mcp_auth._current_graph_namespace.get()
+            or f"org_{_current_org_id.get()}")
+
+
 async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None, *,
                              version=None, run_middleware: bool = True,
                              task_meta=None):
@@ -1318,8 +1645,38 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
     _safe_failure_token = _dispatch_safe_failures.set([])
     t0 = _time.perf_counter()
     try:
-        result = await _await_under_mcp_wait_bound(
-            name, arguments, version=version, task_meta=task_meta)
+        # #9340: scope this dispatch to the graph the CALL named (no-op when it
+        # named none). Inside the try so a refusal is classified and counted
+        # like every other tool-level failure rather than bypassing the
+        # telemetry seam.
+        #
+        # #9762: the argument is POPPED and VALIDATED here (`_take_graph_argument`
+        # refuses a `graph` on a tool that does not target graphs — the handler
+        # must also never receive a keyword its signature does not declare) and
+        # RESOLVED inside the dispatch task (`_await_under_mcp_wait_bound` →
+        # `_scoped_dispatch`). Resolving it here ran before the seam spent the
+        # transport's remaining deadline, so on a request the transport had
+        # already refused the lookup's `asyncio.timeout(0)` expired and turned
+        # the transport's own refusal into a graph `ToolError` (a false
+        # `exec_error` row in the `mcp_tool_call` series), and it left the scope
+        # set in the CALLER's context after the dispatch.
+        try:
+            graph_ref = _take_graph_argument(name, arguments)
+        except ToolError:
+            if not _wait_bound_refused():
+                raise
+            # #9762: the transport already answered this request, so the caller
+            # can never receive this tool-level argument refusal — recording it
+            # would be the same false `exec_error`/`ToolError` row, just from the
+            # validation half instead of the resolution half. Assign the refusal
+            # and FALL THROUGH, so the classification below still labels the row
+            # (`refused`/`transport_wait_bound`) and the refusal is repaired by
+            # the same envelope path as every other one.
+            result = _wait_bound_refusal_result()
+        else:
+            result = await _await_under_mcp_wait_bound(
+                name, arguments, version=version, task_meta=task_meta,
+                graph_ref=graph_ref)
         # #3675: the items this call RETURNED. Counted here, before the status
         # classification below, so the row carries the result of the dispatch
         # whether that dispatch succeeded or failed: a transport-wait-bound
@@ -1371,8 +1728,10 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
         # (`tortoise_recall`'s `{"mode": mode, **results}`) — so a tool that
         # recovered from a secondary `_safe` failure stays `ok`.
         #
-        # `exec_error` and NOT a new status member: the SDK DID raise and `_safe`
-        # only caught it, so this is the same class the ladder's own
+        # `exec_error` and NOT a new status member: the dispatch ANSWERED with a
+        # failure payload instead of raising — either `_safe` caught the SDK's
+        # exception (#8135) or the tool body refused before the SDK was ever
+        # called (#9084) — so this is the same class the ladder's own
         # `exec_error` names. The kind is `safe_error` — the member #8482
         # already established for a `_safe`-answered failure (the envelope
         # repair below is the same producer class, so folding in a second name
@@ -2117,8 +2476,16 @@ def _reject_server_managed_props(props: dict | None) -> str | None:
 
 
 def _http_excluded_error() -> dict:
-    """#236: JSON-RPC error for tools excluded from the tenant HTTP surface (D4)."""
-    return {
+    """#236: JSON-RPC error for tools excluded from the tenant HTTP surface (D4).
+
+    #9084: an `_SafeError`, not a plain dict — this is ONE funnel feeding eight
+    tool bodies (six live, two retired-but-served), each of which returns it
+    verbatim, so the dispatch used to be recorded ``status="ok"``. The wire
+    payload is unchanged (`_SafeError` is a ``dict`` subclass); the seam matches
+    it by value. Its ``error`` is a MAPPING, so the seam's text arm cannot see
+    it — the exact-dict arm is what classifies it.
+    """
+    return _SafeError({
         "jsonrpc": "2.0",
         "error": {
             "code": ERR_EXCLUDED,
@@ -2127,7 +2494,7 @@ def _http_excluded_error() -> dict:
                 "Use the hosted REST API or stdio MCP."),
         },
         "id": None,
-    }
+    })
 
 
 def _parse(v: Any) -> Any:
@@ -2177,7 +2544,7 @@ def tortoise_create_point(kind: str, content: str,
     props = _parse(props)
     _reject = _reject_server_managed_props(props)
     if _reject:
-        return {"error": _reject, "code": ERR_INVALID}
+        return _SafeError({"error": _reject, "code": ERR_INVALID})
     merged = dict(props or {})
     if authoredBy:
         merged["authoredBy"] = authoredBy
@@ -2188,10 +2555,12 @@ def tortoise_create_point(kind: str, content: str,
     tags = merged.get("tags") or []
     if isinstance(tags, list):
         if len(tags) > MAX_TAGS_PER_POINT:
-            return {"error": f"tags exceed the cap ({MAX_TAGS_PER_POINT})", "code": ERR_QUOTA}
+            return _SafeError({"error": f"tags exceed the cap ({MAX_TAGS_PER_POINT})",
+                               "code": ERR_QUOTA})
         for t in tags:
             if not isinstance(t, str) or not t.strip() or len(t) > 200:
-                return {"error": f"invalid tag value: {t!r} (must be a non-empty string ≤ 200 chars)"}
+                return _SafeError({"error": f"invalid tag value: {t!r} (must be a "
+                                            f"non-empty string ≤ 200 chars)"})
     merged["dedup"] = dedup
     result = _safe(_quota_gated(_get_org_sdk().create_point, "points", abuse_weight=1), kind, content, **merged)
     # #3926: gate on the typed failure result, never on key presence — a user
@@ -2280,11 +2649,11 @@ def tortoise_query(kind: str | None = None,
     """
     filters = _parse(filters)
     if page is not None and page < 1:
-        return {"error": "page must be >= 1 (1-based), got " + str(page)}
+        return _SafeError({"error": "page must be >= 1 (1-based), got " + str(page)})
     if offset is not None and offset < 0:
-        return {"error": "offset must be >= 0, got " + str(offset)}
+        return _SafeError({"error": "offset must be >= 0, got " + str(offset)})
     if limit is not None and limit < 1:
-        return {"error": "limit must be >= 1, got " + str(limit)}
+        return _SafeError({"error": "limit must be >= 1, got " + str(limit)})
     # Resolve include_retracted (#888): explicit param wins; else the filters-dict
     # value (don't silently drop a caller's True intent — review P2-2); else False.
     # Guard non-dict filters: a malformed-JSON string from _parse passes the substring
@@ -2323,7 +2692,8 @@ def tortoise_query(kind: str | None = None,
                 "hasMore": eff_offset + eff_limit < total}
     if text:
         if paginated:
-            return {"error": "offset/page not supported with text — use limit only, or tortoise_search"}
+            return _SafeError({"error": "offset/page not supported with text — "
+                                        "use limit only, or tortoise_search"})
         return _safe(_get_org_sdk().tortoise_fts_query, text, kind=kind,
                      entity_type=entity_type, limit=eff_limit,
                      min_confidence=min_confidence or 0.0,
@@ -2448,8 +2818,8 @@ def tortoise_packs_list() -> list[dict]:
     # introspection — pack state is per-tenant. (stdio/selfhost keeps the
     # base SDK: single-tenant, the base graph IS the tenant.)
     if _current_org_id.get() is None and _transport_mode.get() == "http":
-        return {"error": "Authentication required. No team context.",
-                "code": ERR_UNAUTHORIZED}
+        return _SafeError({"error": "Authentication required. No team context.",
+                           "code": ERR_UNAUTHORIZED})
     from tortoise.pack_state import get_tenant_packs
     return _safe(lambda: get_tenant_packs(_get_org_sdk()))
 
@@ -2476,19 +2846,25 @@ def tortoise_pack_install(manifest_yaml: str) -> dict:
 
     from tortoise.pack_manifest_store import upsert_tenant_manifest
     if _sys.modules.get("tortoise.hosted_api") is None:
-        return {
-            "installed": False,
-            "error": "tortoise_pack_install is HOSTED-only — on self-host add "
-                      "custom packs via the filesystem packs dir "
-                      "(TORTOISE_PACKS_DIR) + the 'tortoise pack' CLI.",
-        }
+        return _SafeError({
+                       "installed": False,
+                       "error": "tortoise_pack_install is HOSTED-only — on self-host add "
+                                 "custom packs via the filesystem packs dir "
+                                 "(TORTOISE_PACKS_DIR) + the 'tortoise pack' CLI.",
+                   })
     if _transport_mode.get() != "http":
-        return {"installed": False,
-                "error": "pack install requires the HTTP transport."}
+        return _SafeError({"installed": False,
+                           "error": "pack install requires the HTTP transport."})
     try:
         record = upsert_tenant_manifest(_get_org_sdk(), manifest_yaml)
     except ValueError as e:
-        return {"installed": False, "validation_errors": [str(e)]}
+        # A REJECTED manifest is a refusal, even though it carries no `error`
+        # key (`validation_errors` names the reason). Left as a plain dict the
+        # seam recorded the dispatch `ok` (#9609 review): the exact-payload arm
+        # of `_returned_safe_failure` classifies it once it IS an `_SafeError`,
+        # and the wire shape does not move (dict subclass).
+        return _SafeError({"installed": False,
+                           "validation_errors": [str(e)]})
     return {"installed": True, **record}
 
 
@@ -2683,11 +3059,11 @@ def tortoise_recall(query: str | None = None,
     "edges": [...], "stats": {...}}.
     """
     if mode not in _RECALL_MODES:
-        return {
-            "mode": mode,
-            "error": f"recall mode {mode!r} not recognized — use "
-                     f"state|gaps|subgraph|custom.",
-        }
+        return _SafeError({
+                       "mode": mode,
+                       "error": f"recall mode {mode!r} not recognized — use "
+                                f"state|gaps|subgraph|custom.",
+                   })
 
     if mode == "gaps":
         results = _safe(
@@ -2846,9 +3222,9 @@ def tortoise_dream(full: bool = False, dirty_only: bool = True,
     # exceptions into plain error dicts) — unknown mode → ERR_INVALID
     # (E2E-8.3 convention — named valid values in the message).
     if mode is not None and mode not in ("local", "stale-first", "full"):
-        return {"error": (
-            f"unknown dream mode {mode!r} — expected one of "
-            "'local', 'stale-first', 'full'"), "code": ERR_INVALID}
+        return _SafeError({"error": (
+                       f"unknown dream mode {mode!r} — expected one of "
+                       "'local', 'stale-first', 'full'"), "code": ERR_INVALID})
     return _safe(_get_org_sdk().dream, dirty_only=dirty_only, full=full,
                  max_hops=max_hops,
                  require_calibration=require_calibration,
@@ -2870,7 +3246,7 @@ def tortoise_update_point(id: str, props: Any) -> dict:
     props = _parse(props)
     _reject = _reject_server_managed_props(props)
     if _reject:
-        return {"error": _reject, "code": ERR_INVALID}
+        return _SafeError({"error": _reject, "code": ERR_INVALID})
     return _safe(_quota_gated(_get_org_sdk().update_point, "points"), id, **(props or {}))
 
 def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any,
@@ -2902,8 +3278,9 @@ def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any,
     # #329 batch cap on operator target fan-out
     from tortoise.quota import MAX_OPERATOR_TARGETS
     if isinstance(target_ids, list) and len(target_ids) > MAX_OPERATOR_TARGETS:
-        return {"error": f"create_operator target_ids exceed the cap ({MAX_OPERATOR_TARGETS})",
-                "code": ERR_QUOTA}
+        return _SafeError({"error": f"create_operator target_ids exceed the cap "
+                                    f"({MAX_OPERATOR_TARGETS})",
+                           "code": ERR_QUOTA})
     return _safe(_quota_gated(_get_org_sdk().create_operator, "points", abuse_weight=1), op_type, source_id, target_ids,
                  direction=direction, semantics=semantics)
 
@@ -2981,11 +3358,13 @@ def tortoise_file_decision(options: Any, evidence: Any,
     # #329 batch caps
     from tortoise.quota import MAX_FILE_DECISION_EVIDENCE, MAX_FILE_DECISION_OPTIONS
     if isinstance(options, list) and len(options) > MAX_FILE_DECISION_OPTIONS:
-        return {"error": f"file_decision options exceed the cap ({MAX_FILE_DECISION_OPTIONS})",
-                "code": ERR_QUOTA}
+        return _SafeError({"error": f"file_decision options exceed the cap "
+                                    f"({MAX_FILE_DECISION_OPTIONS})",
+                           "code": ERR_QUOTA})
     if isinstance(evidence, list) and len(evidence) > MAX_FILE_DECISION_EVIDENCE:
-        return {"error": f"file_decision evidence exceeds the cap ({MAX_FILE_DECISION_EVIDENCE})",
-                "code": ERR_QUOTA}
+        return _SafeError({"error": f"file_decision evidence exceeds the cap "
+                                    f"({MAX_FILE_DECISION_EVIDENCE})",
+                           "code": ERR_QUOTA})
     result = _safe(_quota_gated(_get_org_sdk().file_decision, "points",
                           abuse_weight=lambda r, a, k: 1 + len(a[0] or []) + len(a[1] or [])), options, evidence, choice)
     # #3926: gate on the typed failure result, never on key presence.
@@ -3124,10 +3503,12 @@ def tortoise_entity_profile(entity_id: str, hops: int = 2,
     """
     from tortoise.navigation import entityProfile
     proj = _get_org_sdk()._get_proj()
-    # #236: HTTP mode ignores user-supplied graph_name — org graph authoritative
-    # (cross-tenant injection guard). Stdio mode honors it (operator use).
+    # #236: HTTP mode ignores the USER-SUPPLIED graph_name — org graph
+    # authoritative (cross-tenant injection guard). Stdio honors it (operator
+    # use). #9340: the graph the call SELECTED still wins over the workspace
+    # default, or this tool advertises an argument it then ignores.
     if _transport_mode.get() == "http":
-        graph_name = f"org_{_current_org_id.get()}"
+        graph_name = _dispatch_graph_name()
     return _safe(entityProfile, proj.db, graph_name, entity_id,
                   hops=hops, pointKind=pointKind, confidenceMin=confidenceMin)
 
@@ -3140,9 +3521,10 @@ def tortoise_traverse(entity_id: str, max_hops: int = 2,
     """
     from tortoise.navigation import tortoise_traverse as _traverse
     proj = _get_org_sdk()._get_proj()
-    # #236: HTTP mode ignores user-supplied graph_name (cross-tenant guard)
+    # #236: HTTP mode ignores the user-supplied graph_name (cross-tenant
+    # guard); #9340: the SELECTED graph is still honoured over the default.
     if _transport_mode.get() == "http":
-        graph_name = f"org_{_current_org_id.get()}"
+        graph_name = _dispatch_graph_name()
     return _safe(_traverse, proj.db, graph_name, entity_id, max_hops)
 
 
@@ -3241,8 +3623,9 @@ def tortoise_checkpoint(items: Any,
     # #329 batch cap: a single checkpoint call must not create unbounded nodes
     from tortoise.quota import MAX_CHECKPOINT_ITEMS
     if isinstance(items, list) and len(items) > MAX_CHECKPOINT_ITEMS:
-        return {"error": f"checkpoint items exceed the batch cap ({MAX_CHECKPOINT_ITEMS})",
-                "code": ERR_QUOTA}
+        return _SafeError({"error": f"checkpoint items exceed the batch cap "
+                                    f"({MAX_CHECKPOINT_ITEMS})",
+                           "code": ERR_QUOTA})
     return _safe(_quota_gated(_get_org_sdk().checkpoint, "points",
                           abuse_weight=lambda r, a, k: int((r or {}).get("filed") or 0)), items,
                  agent_name=agent_name, threshold=threshold)
@@ -3265,14 +3648,24 @@ def tortoise_diary_read(agent_name: str, last_n: int = 10,
 
 def tortoise_list_graphs() -> list[str]:
     """List graph names. HTTP: only the calling org's own graphs (exact
-    `org_{org_id}` / legacy `team_{org_id}` equality — no cross-tenant
-    enumeration). Stdio: full list (operator context).
-    Alias → overview(section='graphs') (epic #888 W3)."""
+    `org_{org_id}` / legacy `team_{org_id}` equality, plus each of the org's
+    OTHER graphs' namespaces — no cross-tenant enumeration). Stdio: full list
+    (operator context).
+    Alias → overview(section='graphs') (epic #888 W3).
+
+    #9340: this is the DISCOVERY surface for the `graph` tool argument, so a
+    workspace that holds more than one graph must be able to see them here. It
+    used to return ONLY the tenant namespace, so a connector could not even
+    learn that a second graph existed — one half of the defect the argument
+    fixes. The extra names are taken from the org's OWN `list_memory_graphs` rows, not
+    from a namespace-prefix test: `org_<id>_` is also the prefix of a DIFFERENT
+    org whose id begins with `<id>_`, and a prefix test would leak that
+    tenant's graph name."""
     graphs = _safe(_get_org_sdk().list_graphs)
     if not isinstance(graphs, list):
         return graphs
     if _transport_mode.get() == "http":
-        from tortoise.mcp_auth import _current_org_id
+        from tortoise.mcp_auth import _current_org_id, reachable_graph_rows
         org_id = _current_org_id.get()
         # #3543: the tenant graph is `org_{org_id}` post-rename and
         # `team_{org_id}` before it; no data migration rewrites the stored
@@ -3280,6 +3673,13 @@ def tortoise_list_graphs() -> list[str]:
         # Same dual probe as hosted_api._graph_has_org_namespace — the sites
         # must agree or a legacy org's graphs become invisible here alone.
         own = {f"org_{org_id}", f"team_{org_id}"} if org_id else set()
+        if org_id:
+            # #9340: a control-plane failure here must not widen the answer.
+            # The tenant filter above already holds on its own, so a degraded
+            # read returns exactly the pre-#9340 list rather than everything.
+            with contextlib.suppress(Exception):
+                own |= {r["namespace"] for r in reachable_graph_rows(org_id)
+                        if r.get("namespace")}
         return [g for g in graphs if g in own]
     return graphs
 
@@ -3466,7 +3866,10 @@ def tortoise_analyze(question: str,
             # #236: HTTP mode must use the org graph, NOT the hardcoded
             # "tortoise" graph — that hardcode bypasses org isolation via
             # db.select_graph() (cross-tenant read). Stdio keeps "tortoise".
-            gname = f"org_{_current_org_id.get()}" if _transport_mode.get() == "http" else "tortoise"
+            # #9340: the SELECTED graph wins over the workspace default, or
+            # the anchors come from a different graph than the analysis runs on.
+            gname = (_dispatch_graph_name()
+                     if _transport_mode.get() == "http" else "tortoise")
             profile = entityProfile(proj.db, gname, entityId, hops=2)
             ids = {entityId}
             for category in profile.get("connected", {}).values():
@@ -3619,7 +4022,7 @@ def tortoise_create_entity(type: str, name: str, props: Any = None) -> dict:
     props = _parse(props)
     _reject = _reject_server_managed_props(props)
     if _reject:
-        return {"error": _reject, "code": ERR_INVALID}
+        return _SafeError({"error": _reject, "code": ERR_INVALID})
     return _safe(_quota_gated(_get_org_sdk().create_entity, "points"),
                  type, name, **(props or {}))
 
@@ -3632,7 +4035,7 @@ def tortoise_update(id: str, props: Any = None) -> dict:
     props = _parse(props)
     _reject = _reject_server_managed_props(props)
     if _reject:
-        return {"error": _reject, "code": ERR_INVALID}
+        return _SafeError({"error": _reject, "code": ERR_INVALID})
     return _safe(_quota_gated(_get_org_sdk().update, "points"),
                  id, **(props or {}))
 
@@ -3666,18 +4069,18 @@ def tortoise_operator_action(action: str, id: str, reason: str | None = None,
     """
     if action == "mitigate":
         if not reason:
-            return {"error": "operator_action(action='mitigate') requires 'reason'"}
+            return _SafeError({"error": "operator_action(action='mitigate') requires 'reason'"})
         return _safe(_quota_gated(_get_org_sdk().mitigate_operator, "points", abuse_weight=1),
                      id, reason, strength)
     if action == "annotate":
         dims = (bias, precision, consistency, directness)
         if any(d is None for d in dims):
-            return {"error": "operator_action(action='annotate') requires "
-                              "bias, precision, consistency, directness"}
+            return _SafeError({"error": "operator_action(action='annotate') requires "
+                                         "bias, precision, consistency, directness"})
         return _safe(_quota_gated(_get_org_sdk().annotate_operator, "points"),
                      id, *dims)
-    return {"error": f"operator_action: unknown action {action!r} — "
-                      f"must be 'mitigate' or 'annotate'"}
+    return _SafeError({"error": f"operator_action: unknown action {action!r} — "
+                                 f"must be 'mitigate' or 'annotate'"})
 
 
 def tortoise_create_subject(name: str, subjectKind: str, props: Any = None) -> dict:
@@ -3685,7 +4088,7 @@ def tortoise_create_subject(name: str, subjectKind: str, props: Any = None) -> d
     props = _parse(props)
     _reject = _reject_server_managed_props(props)
     if _reject:
-        return {"error": _reject, "code": ERR_INVALID}
+        return _SafeError({"error": _reject, "code": ERR_INVALID})
     return _safe(_quota_gated(_get_org_sdk().create_subject, "points"), name, subjectKind, **(props or {}))
 
 def tortoise_create_object(name: str, objectKind: str, props: Any = None) -> dict:
@@ -3693,7 +4096,7 @@ def tortoise_create_object(name: str, objectKind: str, props: Any = None) -> dic
     props = _parse(props)
     _reject = _reject_server_managed_props(props)
     if _reject:
-        return {"error": _reject, "code": ERR_INVALID}
+        return _SafeError({"error": _reject, "code": ERR_INVALID})
     return _safe(_quota_gated(_get_org_sdk().create_object, "points"), name, objectKind, **(props or {}))
 
 def tortoise_create_event(name: str, eventKind: str, props: Any = None) -> dict:
@@ -3701,7 +4104,7 @@ def tortoise_create_event(name: str, eventKind: str, props: Any = None) -> dict:
     props = _parse(props)
     _reject = _reject_server_managed_props(props)
     if _reject:
-        return {"error": _reject, "code": ERR_INVALID}
+        return _SafeError({"error": _reject, "code": ERR_INVALID})
     return _safe(_quota_gated(_get_org_sdk().create_event, "points"), name, eventKind, **(props or {}))
 
 
@@ -3724,7 +4127,7 @@ def tortoise_index_sessions(directory: str, extract_metadata: bool = True, llm_m
     if _transport_mode.get() == "http":
         return _http_excluded_error()
     if not os.path.isdir(directory):
-        return {"error": f"Directory not found: {directory!r}. Provide a valid path to a directory containing .md session files."}
+        return _SafeError({"error": f"Directory not found: {directory!r}. Provide a valid path to a directory containing .md session files."})
     return _safe(_get_org_sdk().index_sessions, directory, extract_metadata=extract_metadata, llm_model=llm_model)
 
 def tortoise_index_files(directory: str, corpus_name: str | None = None,
@@ -3743,8 +4146,8 @@ def tortoise_index_files(directory: str, corpus_name: str | None = None,
     if _transport_mode.get() == "http":
         return _http_excluded_error()
     if not os.path.isdir(directory):
-        return {"error": f"Directory not found: {directory!r}. Provide a valid "
-                         f"path to a directory containing .md files."}
+        return _SafeError({"error": f"Directory not found: {directory!r}. Provide a valid "
+                                    f"path to a directory containing .md files."})
     return _safe(_quota_gated(_get_org_sdk().index_directory, "points"),
                  directory, corpus_name=corpus_name,
                  extract_metadata=extract_metadata)
@@ -3776,7 +4179,7 @@ def tortoise_create_document(title: str, documentKind: str, props: Any = None) -
     props = _parse(props)
     _reject = _reject_server_managed_props(props)
     if _reject:
-        return {"error": _reject, "code": ERR_INVALID}
+        return _SafeError({"error": _reject, "code": ERR_INVALID})
     return _safe(_quota_gated(_get_org_sdk().create_document, "points"), title, documentKind, **(props or {}))
 
 def tortoise_create_source(url: str, sourceKind: str, tier: str | None = None,
@@ -3791,7 +4194,7 @@ def tortoise_create_source(url: str, sourceKind: str, tier: str | None = None,
     props = _parse(props) or {}
     _reject = _reject_server_managed_props(props)
     if _reject:
-        return {"error": _reject, "code": ERR_INVALID}
+        return _SafeError({"error": _reject, "code": ERR_INVALID})
     # tier/sourceDate are first-class kwargs (#398) — pop from props if a legacy
     # caller passed them there (kwarg wins; avoids TypeError on splat).
     props.pop("tier", None)
@@ -3862,7 +4265,7 @@ def tortoise_update_entity(id: str, props: Any = None) -> dict:
     props = _parse(props)
     _reject = _reject_server_managed_props(props)
     if _reject:
-        return {"error": _reject, "code": ERR_INVALID}
+        return _SafeError({"error": _reject, "code": ERR_INVALID})
     return _safe(_quota_gated(_get_org_sdk().update_entity, "points"), id, **(props or {}))
 
 def tortoise_delete_entity(id: str, dry_run: bool = False) -> dict | bool:
@@ -3926,14 +4329,14 @@ def tortoise_ingest(bundle: Any = None, granularity: str = "bulk",
     if bundle is None:
         bundle = {}
     if not isinstance(bundle, dict):
-        return {"error": "bundle must be a dict with points/entities/sources/"
-                          "connections sections", "code": ERR_INVALID}
+        return _SafeError({"error": "bundle must be a dict with points/entities/sources/"
+                                     "connections sections", "code": ERR_INVALID})
     if granularity not in INGEST_GRANULARITIES:
-        return {"error": f"granularity must be 'bulk' or 'granular', got "
-                          f"{granularity!r}", "code": ERR_INVALID}
+        return _SafeError({"error": f"granularity must be 'bulk' or 'granular', got "
+                                     f"{granularity!r}", "code": ERR_INVALID})
     if promotion_policy not in INGEST_PROMOTION_POLICIES:
-        return {"error": f"promotion_policy must be 'gated' or 'auto', got "
-                          f"{promotion_policy!r}", "code": ERR_INVALID}
+        return _SafeError({"error": f"promotion_policy must be 'gated' or 'auto', got "
+                                     f"{promotion_policy!r}", "code": ERR_INVALID})
     # Row-9 guard — the same reader and per-door depth as the SDK's
     # `_check_gated_status` (#7925): under gated, points must stay draft — ANY
     # effective status other than the exact canonical "draft" (top-level or
@@ -3942,13 +4345,13 @@ def tortoise_ingest(bundle: Any = None, granularity: str = "bulk",
         bad = _first_non_draft_status(bundle.get("points"))
         if bad is not None:
             i, st = bad
-            return {"error": f"points[{i}] status:{st!r} is not allowed "
-                              f"under promotion_policy 'gated' — under "
-                              f"gated points stay draft; pass "
-                              f"promotion_policy='auto' for explicit live, "
-                              f"or keep draft and promote via "
-                              f"update_point(status='live')",
-                    "code": ERR_INVALID}
+            return _SafeError({"error": f"points[{i}] status:{st!r} is not allowed "
+                                         f"under promotion_policy 'gated' — under "
+                                         f"gated points stay draft; pass "
+                                         f"promotion_policy='auto' for explicit live, "
+                                         f"or keep draft and promote via "
+                                         f"update_point(status='live')",
+                               "code": ERR_INVALID})
     return _safe(_quota_gated(_get_org_sdk().ingest, "points",
                           abuse_weight=lambda r, a, k: int(((r or {}).get("created") or {}).get("points") or 0)),
                  bundle, granularity=granularity, promotion_policy=promotion_policy)
@@ -4115,7 +4518,8 @@ def _overview_section(section: str, entity_id: str | None,
         return tortoise_list_graphs()
     if section == "topics":
         if not entity_id:
-            return {"error": "overview(section='topics') requires entity_id"}
+            return _SafeError(
+                {"error": "overview(section='topics') requires entity_id"})
         return tortoise_list_topics(entity_id)
     if section == "health":
         return tortoise_health()
@@ -4123,8 +4527,9 @@ def _overview_section(section: str, entity_id: str | None,
         return tortoise_status()
     if section == "stale":
         return tortoise_stale(days=days, limit=limit)
-    return {"error": f"overview: unknown section {section!r}. "
-                      f"Valid sections: {', '.join(_OVERVIEW_SECTIONS)}"}
+    return _SafeError(
+        {"error": f"overview: unknown section {section!r}. "
+                  f"Valid sections: {', '.join(_OVERVIEW_SECTIONS)}"})
 
 
 def tortoise_overview(section: str | None = None,
@@ -4182,7 +4587,8 @@ def tortoise_overview(section: str | None = None,
             combined[sec] = result
         return combined
     if not isinstance(section, str):
-        return {"error": f"overview: section must be a string, got {type(section).__name__}"}
+        return _SafeError({"error": f"overview: section must be a string, got "
+                                    f"{type(section).__name__}"})
     return _overview_section(section.strip().lower(), entity_id, days, limit)
 
 
@@ -4228,14 +4634,15 @@ def tortoise_get(id: str, type: str | None = None,
     """
     if not isinstance(type, str) or not type.strip():
         if not isinstance(id, str) or not id.strip():
-            return {"error": "get: 'id' is required when type is omitted"}
+            return _SafeError(
+                {"error": "get: 'id' is required when type is omitted"})
         return _get_auto_detect(id.strip())
     t = type.strip().lower()
     if t == "events":
         # get_events is a list surface — id is an optional eventKind filter
         return tortoise_get_events(eventKind=id or None, limit=limit)
     if not isinstance(id, str) or not id.strip():
-        return {"error": f"get: 'id' is required for type={t!r}"}
+        return _SafeError({"error": f"get: 'id' is required for type={t!r}"})
     id = id.strip()
     if t == "point":
         return tortoise_get_point(id)
@@ -4249,8 +4656,8 @@ def tortoise_get(id: str, type: str | None = None,
         return _safe(_get_org_sdk().get_session, id)
     if t == "governance":
         return tortoise_get_governance(id)
-    return {"error": f"get: unknown type {type!r}. "
-                      f"Valid types: {', '.join(_GET_TYPES)}"}
+    return _SafeError({"error": f"get: unknown type {type!r}. "
+                                f"Valid types: {', '.join(_GET_TYPES)}"})
 
 
 def tortoise_backfill_v25(dry_run: bool = True) -> dict:
@@ -4292,8 +4699,8 @@ def tortoise_mine_conversations(transcript: str | None = None,
         return _safe(sdk.mine_corpus, corpus_dir,
                      extract_entities=extract_entities)
     if not transcript or not source_id:
-        return {"error": "transcript= and source_id= are required "
-                         "(or corpus_dir= for a batch)"}
+        return _SafeError({"error": "transcript= and source_id= are required "
+                                    "(or corpus_dir= for a batch)"})
     try:
         from tortoise.api import EventAPI  # noqa: I001
         from tortoise.log import EventLog
@@ -4312,7 +4719,7 @@ def tortoise_mine_conversations(transcript: str | None = None,
         api = EventAPI(log, initiated_by="extractor", agent_id="mcp",
                        projection=sdk._get_proj())
     except Exception as exc:
-        return {"error": f"mine setup failed: {exc}"}
+        return _SafeError({"error": f"mine setup failed: {exc}"})
     return _safe(mine_conversation, transcript, source_id, api,
                  extract_entities=extract_entities,
                  content_dedup=content_dedup,
@@ -4527,7 +4934,10 @@ def _onboarding_state() -> dict:
     from tortoise.mcp_auth import SELFHOST_ORG_ID
     org_id = _current_org_id.get()
     if org_id is None:
-        return {"error": "No team context (HTTP mode required)"}
+        # #9084: `_SafeError`, so `tortoise_onboarding_state`,
+        # `tortoise_manage_sources` and `_sources_view` — which all return this
+        # payload verbatim — record the dispatch as a refusal instead of `ok`.
+        return _SafeError({"error": "No team context (HTTP mode required)"})
     if org_id == SELFHOST_ORG_ID:
         from tortoise.mcp_auth import _get_org_sdk
         from tortoise.onboarding import selfhost as _sh
@@ -4544,7 +4954,7 @@ def tortoise_onboarding_demo_create() -> dict:
     from tortoise.hosted_api import _seed_demo_graph
     org_id = _current_org_id.get()
     if org_id is None:
-        return {"error": "No team context (HTTP mode required)"}
+        return _SafeError({"error": "No team context (HTTP mode required)"})
     # C5 #2114 (re-review 3): the demo seeds the org's DEFAULT graph —
     # graph-bound keys rejected (REST twin public_demo parity).
     _reject_graph_bound_mcp_org_surface("demo seed")
@@ -4590,7 +5000,7 @@ def tortoise_onboarding_seed(org_name: str | None = None,
     _reject_graph_bound_mcp_org_surface("onboarding seed")
     org_id = _current_org_id.get()
     if org_id is None:
-        return {"error": "No team context (HTTP mode required)"}
+        return _SafeError({"error": "No team context (HTTP mode required)"})
     from tortoise.hosted_api import (
         HTTPException as _HTTPException,
     )
@@ -4605,10 +5015,10 @@ def tortoise_onboarding_seed(org_name: str | None = None,
     except _HTTPException as exc:
         # 503 graph-down (fail-loud FLOW write) etc. — surfaced honestly,
         # never a silent skip (agent retries when the graph is back).
-        return {"error": str(exc.detail),
-                "status": getattr(exc, "status_code", 500)}
+        return _SafeError({"error": str(exc.detail),
+                           "status": getattr(exc, "status_code", 500)})
     except Exception as exc:  # pragma: no cover - defensive
-        return {"error": f"seed failed: {exc}"}
+        return _SafeError({"error": f"seed failed: {exc}"})
 
 
 def tortoise_onboarding_session_recording(enabled: bool) -> dict:
@@ -4625,7 +5035,7 @@ def tortoise_onboarding_session_recording(enabled: bool) -> dict:
     _reject_graph_bound_mcp_org_surface("session recording toggle")
     org_id = _current_org_id.get()
     if org_id is None:
-        return {"error": "No team context (HTTP mode required)"}
+        return _SafeError({"error": "No team context (HTTP mode required)"})
     from tortoise.hosted_api import _update_onboarding_state
     state = _update_onboarding_state(org_id, session_recording=enabled,
                                      capture_revised=True)
@@ -4919,7 +5329,7 @@ def _set_source_state(source: str, enable: bool) -> dict:
     """
     org_id = _current_org_id.get()
     if org_id is None:
-        return {"error": "No team context (HTTP mode required)"}
+        return _SafeError({"error": "No team context (HTTP mode required)"})
     from tortoise.hosted_api import (
         _INDEX_JOB_OWNERS,
         _INDEX_JOBS,
@@ -4949,9 +5359,9 @@ def _set_source_state(source: str, enable: bool) -> dict:
             _log_source_change(org_id, source,
                                "enable" if enable else "disable",
                                "refused_state_unavailable")
-            return {"error": (
+            return _SafeError({"error": (
                 "The team's onboarding state could not be read (graph "
-                "unavailable), so nothing was changed.")}
+                "unavailable), so nothing was changed.")})
         if not enable:
             if not current_on:
                 _log_source_change(org_id, source, "disable", "already_off")
@@ -4971,9 +5381,9 @@ def _set_source_state(source: str, enable: bool) -> dict:
                              exc_info=True)
                 _log_source_change(org_id, source, "disable",
                                    "error_flag_write")
-                return {"error": (
+                return _SafeError({"error": (
                     "The source's enable flag could not be written; nothing "
-                    "changed. Retry.")}
+                    "changed. Retry.")})
             _log_source_change(org_id, source, "disable", "ok")
             return {
                 "source": source,
@@ -5002,23 +5412,23 @@ def _set_source_state(source: str, enable: bool) -> dict:
                          exc_info=True)
             _log_source_change(org_id, source, "enable",
                                "error_credentials")
-            return {
+            return _SafeError({
                 "error": (
                     "Could not read the stored GitHub credential (control "
                     "plane unavailable). NOTHING was changed — retry, or "
                     "re-authorise with tortoise_onboarding_github_connect."
                 )
-            }
+            })
         if not encrypted:
             _log_source_change(org_id, source, "enable",
                                "refused_not_connected")
-            return {
+            return _SafeError({
                 "error": (
                     "GitHub not connected. Authorise it first with "
                     "tortoise_onboarding_github_connect — this tool never "
                     "accepts credentials."
                 )
-            }
+            })
         # #1845: HEAL before walking, exactly as both REST twins do. The two
         # shapes this repairs — `github_org` missing, and the pre-#1845 connect
         # flow having stored the internal org_id UUID in it — index fine after
@@ -5044,14 +5454,14 @@ def _set_source_state(source: str, enable: bool) -> dict:
             # over a value that is not a login.
             _log_source_change(org_id, source, "enable",
                                "refused_no_github_org")
-            return {
+            return _SafeError({
                 "error": (
                     "GitHub org unknown for this team's stored credential and "
                     "it could not be derived from the stored token. Nothing "
                     "was started. Re-connect with "
                     "tortoise_onboarding_github_connect."
                 )
-            }
+            })
         kind = "docs" if source == "github_documents" else "github"
         runner = _run_docs_indexing if kind == "docs" else _run_indexing
         job_id, is_new = _start_index_job(org_id, kind=kind)
@@ -5062,8 +5472,8 @@ def _set_source_state(source: str, enable: bool) -> dict:
             _INDEX_JOBS.pop(job_id, None)
             _INDEX_JOB_OWNERS.pop(job_id, None)
             _log_source_change(org_id, source, "enable", "error_spawn")
-            return {"error": ("The index job could not be started; nothing "
-                              "was left claimed. Retry.")}
+            return _SafeError({"error": ("The index job could not be started; nothing "
+                                         "was left claimed. Retry.")})
         if not current_on:
             try:
                 _update_onboarding_state(org_id, _echo=False, **{flag: True})
@@ -5074,7 +5484,7 @@ def _set_source_state(source: str, enable: bool) -> dict:
                              exc_info=True)
                 _log_source_change(org_id, source, "enable",
                                    "error_flag_write")
-                return {
+                return _SafeError({
                     "error": (
                         "The index job started but the source's enable flag "
                         "could not be written, so it will still read as "
@@ -5082,7 +5492,7 @@ def _set_source_state(source: str, enable: bool) -> dict:
                     ),
                     "job_id": job_id,
                     "state": "started" if is_new else "reused",
-                }
+                })
         _log_source_change(org_id, source, "enable", "ok")
         return {
             "source": source,
@@ -5101,9 +5511,9 @@ def _set_source_state(source: str, enable: bool) -> dict:
         _log_source_change(org_id, source,
                            "enable" if enable else "disable",
                            "refused_state_unavailable")
-        return {"error": (
+        return _SafeError({"error": (
             "The team's onboarding state could not be read (graph "
-            "unavailable), so nothing was changed.")}
+            "unavailable), so nothing was changed.")})
     # `session_recording` defaults ON (#1927), so `current_on` alone does not say
     # whether a session-recording WRITE has ever landed — `capture_revised` is
     # that marker (both directions write it; there is no separate consent record
@@ -5140,9 +5550,9 @@ def _set_source_state(source: str, enable: bool) -> dict:
         _log_source_change(org_id, source,
                            "enable" if enable else "disable",
                            "error_flag_write")
-        return {"error": (
+        return _SafeError({"error": (
             "The source's recording flag could not be written; nothing "
-            "changed. Retry.")}
+            "changed. Retry.")})
     _log_source_change(org_id, source,
                        "enable" if enable else "disable", "ok")
     return {"source": source, "scope": "source",
@@ -5182,7 +5592,7 @@ def tortoise_manage_sources(action: str,
     _reject_graph_bound_mcp_org_surface("manage sources")
     org_id = _current_org_id.get()
     if org_id is None:
-        return {"error": "No team context (HTTP mode required)"}
+        return _SafeError({"error": "No team context (HTTP mode required)"})
 
     act = (action or "").strip().lower()
     if act == "list":
@@ -5191,16 +5601,16 @@ def tortoise_manage_sources(action: str,
         # A refusal is an ATTEMPT too (attributability): it is logged, not just
         # returned, so a caller probing for a write path leaves a record.
         _log_source_change(org_id, source or "?", str(action), "refused_action")
-        return {
-            "error": f"action must be one of list|enable|disable; got {action!r}"
-        }
+        return _SafeError({
+                       "error": f"action must be one of list|enable|disable; got {action!r}"
+                   })
     if source not in _SOURCE_ROSTER:
         _log_source_change(org_id, str(source), act, "refused_source")
-        return {
-            "error": (
-                f"source must be one of {sorted(_SOURCE_ROSTER)}; got {source!r}"
-            )
-        }
+        return _SafeError({
+                       "error": (
+                           f"source must be one of {sorted(_SOURCE_ROSTER)}; got {source!r}"
+                       )
+                   })
     return _set_source_state(source, act == "enable")
 
 
@@ -5213,7 +5623,7 @@ def tortoise_onboarding_github_connect(org: str | None = None) -> dict:
     _reject_graph_bound_mcp_org_surface("github connect")
     org_id = _current_org_id.get()
     if org_id is None:
-        return {"error": "No team context (HTTP mode required)"}
+        return _SafeError({"error": "No team context (HTTP mode required)"})
     import secrets  # noqa: I001
     from urllib.parse import urlencode
     import os as _os
@@ -5223,7 +5633,7 @@ def tortoise_onboarding_github_connect(org: str | None = None) -> dict:
         # In self-host HTTP the env never exists — match the prompt's documented
         # recovery anchor instead of the misleading "OAuth not configured".
         # (hosted_api.py REST endpoints keep the 503 ops signal.)
-        return {"error": "No team context (HTTP mode required)"}
+        return _SafeError({"error": "No team context (HTTP mode required)"})
     state = secrets.token_urlsafe(24)
     # Store CSRF state so the callback can validate it (P2 review fix) —
     # must be visible to the REST callback handler in the same process.
@@ -5247,7 +5657,7 @@ def tortoise_onboarding_github_status() -> dict:
     _reject_graph_bound_mcp_org_surface("github status")
     org_id = _current_org_id.get()
     if org_id is None:
-        return {"error": "No team context (HTTP mode required)"}
+        return _SafeError({"error": "No team context (HTTP mode required)"})
     # Follows the hosted seam (plan Task 6): Supabase orgs row via the
     # service-role control plane in Supabase mode, registry for selfhost.
     from tortoise.hosted_api import _github_credentials
@@ -5260,7 +5670,7 @@ def tortoise_onboarding_github_status() -> dict:
         # selfhost operators aren't misled (code-review P2, PR #861).
         from tortoise.supabase_control import is_supabase_enabled
         plane = "Supabase control plane" if is_supabase_enabled() else "registry"
-        return {"error": f"{plane} unavailable"}
+        return _SafeError({"error": f"{plane} unavailable"})
     except Exception:
         return {"connected": False, "org": None, "repos_count": None}
     if not enc:
@@ -5458,10 +5868,10 @@ def tortoise_session_capture(conversation: list[dict],
         # stdio / self-host HTTP: no hosted state plane, no receipts — the
         # honest error (matching the onboarding-tool precedent), never a
         # local fallback that bypasses the server-enforced capture gates.
-        return {"error": "session capture requires hosted mode — the "
-                          "tortoise_session_capture tool files to Tortoise "
-                          "Cloud (server-enforced recording + receipts); "
-                          "self-hosted stdio capture is not available."}
+        return _SafeError({"error": "session capture requires hosted mode — the "
+                                     "tortoise_session_capture tool files to Tortoise "
+                                     "Cloud (server-enforced recording + receipts); "
+                                     "self-hosted stdio capture is not available."})
     from tortoise.session_attribution import (
         derive_machine_id,
         sanitize_attribution_field,
@@ -5523,7 +5933,7 @@ def tortoise_session_capture(conversation: list[dict],
                               machine_id=machine_id, model=model)
     except Exception as e:
         # Pydantic 422-equivalent (invalid harness / conversation shape).
-        return {"error": f"invalid capture payload: {e}", "status": 422}
+        return _SafeError({"error": f"invalid capture payload: {e}", "status": 422})
     try:
         import asyncio
         # #3060: the SAME admission reservation as the REST endpoint. This
@@ -5599,7 +6009,7 @@ def tortoise_session_capture(conversation: list[dict],
         # ERR_QUOTA code rather than making the caller interpret a bare status.
         # One mapping site covers every 402 this impl can raise, so REST and
         # MCP cannot drift on the class of a refusal.
-        out = {"error": str(detail), "status": status}
+        out = _SafeError({"error": str(detail), "status": status})
         if status == 402:
             out["code"] = ERR_QUOTA
         return out
@@ -5641,17 +6051,17 @@ def tortoise_graph_set_recording(recording: bool | None,
         # stdio / self-host HTTP: the per-graph override is control-plane
         # state with no local registry row to write — honest error, never a
         # silent local no-op (capture-tool parity).
-        return {"error": "graph recording is a hosted control-plane "
-                           "setting — requires hosted mode"}
+        return _SafeError({"error": "graph recording is a hosted control-plane "
+                                      "setting — requires hosted mode"})
     gid = graph_id or (_current_graph_id.get() or "default")
     # Permission gate mirrors the REST PATCH key branch: team:manage (or
     # the legacy full-access class). Graph data scopes alone 403.
     scopes = _current_scopes.get()
     legacy = bool(_current_legacy_full_access.get())
     if not (legacy or scopes is None or "team:manage" in (scopes or [])):
-        return {"error": "Missing team:manage scope — per-graph recording "
-                           "is a team-management setting (mirror of "
-                           "PATCH /v1/graphs/{graph_id})", "status": 403}
+        return _SafeError({"error": "Missing team:manage scope — per-graph recording "
+                                      "is a team-management setting (mirror of "
+                                      "PATCH /v1/graphs/{graph_id})", "status": 403})
     from tortoise.hosted_api import (
         GraphRecordingPatch,
         _apply_graph_recording_override,
@@ -5667,8 +6077,8 @@ def tortoise_graph_set_recording(recording: bool | None,
         # Strict bool/null (no truthy-string coercion) — REST body parity.
         body = GraphRecordingPatch(recording=recording)
     except Exception as e:
-        return {"error": f"recording must be true, false or null ({e})",
-                "status": 422}
+        return _SafeError({"error": f"recording must be true, false or null ({e})",
+                           "status": 422})
     try:
         import asyncio
         return asyncio.run(
@@ -5676,7 +6086,7 @@ def tortoise_graph_set_recording(recording: bool | None,
     except Exception as e:
         status = getattr(e, "status_code", 500)
         detail = getattr(e, "detail", str(e))
-        return {"error": str(detail), "status": status}
+        return _SafeError({"error": str(detail), "status": status})
 
 
 def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
@@ -5690,7 +6100,7 @@ def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
     _reject_graph_bound_mcp_org_surface("github index")
     org_id = _current_org_id.get()
     if org_id is None:
-        return {"error": "No team context (HTTP mode required)"}
+        return _SafeError({"error": "No team context (HTTP mode required)"})
 
     from tortoise.hosted_api import (
         _github_token_enc,
@@ -5705,9 +6115,9 @@ def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
         # aren't misled (code-review P2, PR #861).
         from tortoise.supabase_control import is_supabase_enabled
         plane = "Supabase control plane" if is_supabase_enabled() else "registry"
-        return {"error": f"{plane} unavailable"}
+        return _SafeError({"error": f"{plane} unavailable"})
     if not encrypted:
-        return {"error": "GitHub not connected. Run tortoise_onboarding_github_connect first."}
+        return _SafeError({"error": "GitHub not connected. Run tortoise_onboarding_github_connect first."})
     # #1725 + P1-1 (PR #1792): single-flight — an in-flight started job for
     # the org is reused AND the run is spawned ONLY when the job was
     # freshly minted (never two concurrent walks on one job).
@@ -5724,8 +6134,8 @@ def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
         from tortoise.hosted_api import _INDEX_JOB_OWNERS, _INDEX_JOBS
         _INDEX_JOBS.pop(job_id, None)
         _INDEX_JOB_OWNERS.pop(job_id, None)
-        return {"error": ("The index job could not be started; nothing was "
-                          "left claimed. Retry.")}
+        return _SafeError({"error": ("The index job could not be started; nothing was "
+                                     "left claimed. Retry.")})
     return {"job_id": job_id, "status": "started",
             "state": "started" if is_new else "reused"}
 

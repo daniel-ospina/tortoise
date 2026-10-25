@@ -46,7 +46,35 @@ CORRECTED_CLAIM = 'means only that the dispatch neither raised nor returned a fa
 # The #9084 boundary, asserted as the CLAUSE rather than as a bare "#9084"
 # substring: a `#9084` mention anywhere in the file would satisfy a substring
 # check while the plain-dict clause it stands for was deleted (review P3).
-PLAIN_DICT_CLAUSE = 'a tool-level refusal returned as a **plain dict**'
+#
+# ⚠️ REVERSED when #9084 landed. While #9084 was open this clause was asserted
+# PRESENT ("one failure class does still read `ok`"); the issue closed that
+# class on the producers, so the same sentence is now STALE and is asserted
+# ABSENT — an operator who read it would filter on `status` to find "the rows
+# that still read ok" and believe the filter was complete.
+STALE_PLAIN_DICT_CLAIM = 'a tool-level refusal returned as a **plain dict**'
+
+# The post-#9084 statement, asserted PRESENT.
+CLOSED_REFUSAL_CLAIM = ('since #9084 a tool-level refusal is answered as an '
+                       '`_SafeError` and recorded')
+
+# ⚠️ "CLOSED" alone is an over-read, and the first version of this pin froze it
+# as REQUIRED text while three producer shapes were still open. The two shapes
+# that survive BY DESIGN are named, and pinned PRESENT, so the closure claim
+# cannot be restated without them: an `error` key is not by itself a refusal
+# (a domain answer carries one on purpose), and the seam only reads two levels
+# deep (a payload nested under a section is not classified).
+RESIDUAL_DOMAIN_ANSWER = 'a domain answer that carries an `error` key on purpose'
+RESIDUAL_NESTED_REFUSAL = 'a refusal buried deeper than the seam reads'
+#: What the gate actually scans — pinned so the doc cannot claim a narrower
+#: denominator than the one that holds the class shut.
+GATE_SCOPE_CLAIM = 'a gate on the producers (not a `status` filter) keeps it closed'
+#: The gate's MATCHED SHAPE, pinned PRESENT: "CLOSED" is true of a refusal
+#: carrying an `error` key (or returned as an `_SafeError`). A refusal answered
+#: with a KEYLESS plain dict is invisible to the gate AND to a `status` filter,
+#: so the operator text has to name that boundary — otherwise the next keyless
+#: producer re-opens #9084 under a green pin (#9609 review, 07be54534).
+GATE_MATCHED_SHAPE = 'refusal answered with a KEYLESS plain dict'
 
 
 def _flat_runbook() -> str:
@@ -77,14 +105,40 @@ def test_the_runbook_states_the_meaning_of_ok_the_emitter_has() -> None:
         "the runbook must state that `ok` means the dispatch NEITHER raised NOR "
         "returned a failure `_safe` swallowed (#8135)"
     )
-    assert PLAIN_DICT_CLAUSE in flat, (
-        "the runbook must name the class that still reads `ok` — a tool-level "
-        "refusal returned as a plain dict (#9084) — or an operator will read a "
-        "`status` filter as complete"
+    assert STALE_PLAIN_DICT_CLAIM not in flat, (
+        "the runbook still says a tool-level refusal returned as a plain dict "
+        "reads `ok`. That class is closed (#9084): the tool bodies answer a "
+        "refusal with an `_SafeError`, so the row is `exec_error`/`safe_error` "
+        "like every other refusal"
     )
-    assert "#9084" in flat, (
-        "the plain-dict clause must carry the #9084 pointer that tracks it"
+    assert CLOSED_REFUSAL_CLAIM in flat, (
+        "the runbook must state that a tool-level refusal is recorded as a "
+        "failure since #9084 — otherwise an operator reads `status == ok` as "
+        "excluding only the `_safe` class"
     )
+    assert GATE_SCOPE_CLAIM in flat, (
+        "the runbook must say WHAT holds the class shut — a gate on the "
+        "producers, not a `status` filter (#9084)"
+    )
+    assert GATE_MATCHED_SHAPE in flat, (
+        "the runbook must scope the CLOSED claim to the shape the gate MATCHES "
+        "(a dict carrying an `error` key, or an `_SafeError`): a refusal "
+        "answered with a keyless plain dict is invisible to the gate and to a "
+        "`status` filter alike (#9609 review)"
+    )
+    for residual, why in (
+        (RESIDUAL_DOMAIN_ANSWER,
+         "a payload may carry `error` because it is the ANSWER "
+         "(`tortoise_get_operator` reports `is_operator: false`), and "
+         "recording that as a failure would invent one (#4576)"),
+        (RESIDUAL_NESTED_REFUSAL,
+         "the seam reads the payload and its `result` wrap key only, so a "
+         "payload nested under a section is not classified"),
+    ):
+        assert residual in flat, (
+            "the runbook's CLOSED claim must NAME this residual, or an "
+            f"operator reads `status == ok` as excluding it: {why}"
+        )
 
 
 def test_the_pin_reads_the_runbook_the_scorecard_names() -> None:

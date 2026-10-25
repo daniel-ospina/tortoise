@@ -32,31 +32,77 @@ ROOT = Path(__file__).resolve().parent.parent
 BETA_DOC = ROOT / "docs" / "product" / "beta-sdk-surface.md"
 SDK_SRC = ROOT / "tortoise" / "sdk.py"
 
-# The ONE section that states a rename, per the beta doc's own heading. Scoped so a
-# backticked pair elsewhere in the doc (a target row, a discarded row) cannot be read as
-# an approved rename.
-_RENAME_HEADING = "### Renamed, relocated, or re-homed — or deleted as a duplicate alias"
-# `| \`old\` | → row 11 \`new\`. |` — a single-name row whose disposition names the
-# destination. Rows naming a group/wildcard are deliberately NOT read: the map is a
-# single name → single name lookup and a group row would need a choice this test must
-# not make.
-_RENAME_ROW = re.compile(
-    r"^\| `([a-z_][a-z0-9_]*)` \| → rows? \d+(?:[–-]\d+)? .*?`([a-z_][a-z0-9_]*)`"
-)
+#: The owner-approved target table — `| 30 | `update_memory_graph` | … |`. Row
+#: number → target name. Read from the doc, never typed: a rename's replacement must be
+#: one of the rows the approving region points at.
+_TARGET_ROW = re.compile(r"^\| (\d{1,2}) \| `([A-Za-z_][A-Za-z0-9_]*)")
+
+#: `row 30` / `rows 30–33` — the range of target rows an approving region points at.
+#: Accepts the en dash the doc uses and the ASCII hyphen, so a re-typeset row does not
+#: read as "no approval".
+_ROW_RANGE = re.compile(r"rows? (\d{1,2})(?:\s*[–-]\s*(\d{1,2}))?")
 
 
-def _approved_renames() -> dict[str, str]:
-    """The owner-approved `old -> new` pairs, read from the beta doc."""
-    text = BETA_DOC.read_text(encoding="utf-8")
-    start = text.index(_RENAME_HEADING)
-    out: dict[str, str] = {}
-    for line in text[start:].splitlines()[1:]:
-        if line.startswith("## "):
-            break
-        m = _RENAME_ROW.match(line)
+def _target_rows() -> dict[int, str]:
+    """The numbered owner-approved target rows of `beta-sdk-surface.md`."""
+    out: dict[int, str] = {}
+    for line in BETA_DOC.read_text(encoding="utf-8").splitlines():
+        m = _TARGET_ROW.match(line)
         if m:
-            out[m.group(1)] = m.group(2)
+            out[int(m.group(1))] = m.group(2)
+    assert len(out) == 40, (
+        f"the beta doc's target table no longer parses as 40 numbered rows (got {len(out)}); "
+        "every retirement's approval check is derived from it, so it cannot be guessed"
+    )
     return out
+
+
+def _norm(text: str) -> str:
+    """Whitespace-normalised text, so a re-wrap cannot fake (or hide) a citation."""
+    return " ".join(text.split())
+
+
+def _approved_replacements(name: str) -> set[str]:
+    """The target names the owner's ledger authorises `name` to become.
+
+    Three shapes of approval appear in the beta doc, and all three are read here — each
+    entry of `RETIRED_SDK_APPROVALS` quotes the region that authorises it:
+
+      1. a single-name rename row — ``| `events_poll` | → row 11 `poll_events`. |``
+      2. a GROUP rename row — ``| `graph_delete`, `graph_restore`, `graph_list`,
+         `graph_set_name` | → rows 30–33 `*_memory_graph*`. |``
+      3. a discarded-row entry that names its destination inline —
+         ``~~`graph_set_recording`~~ … folds into **`update_memory_graph`** (row 30)``
+
+    A parser that accepted only shape 1 could never authorise shapes 2 and 3 — which is
+    112 of the 114 renames the ledger records — so it would block phase 2 permanently.
+    The quote is what keeps this checkable: it must be present VERBATIM in the doc, it
+    must name the retired name, and the replacement must be one of the numbered target
+    rows it points at. WHICH row of a range a name collapses into is the author's
+    decision, settled by review — see `tortoise/sdk_retired.py`'s residual note.
+    """
+    from tortoise.sdk_retired import RETIRED_SDK_APPROVALS
+
+    quote = _norm(RETIRED_SDK_APPROVALS[name])
+    assert quote in _norm(BETA_DOC.read_text(encoding="utf-8")), (
+        f"{name}: the recorded approval is NOT in {BETA_DOC.name} — an approval cannot "
+        f"be invented. Recorded: {quote!r}"
+    )
+    assert name in quote, (
+        f"{name}: the recorded approval does not name the retired name. Recorded: {quote!r}"
+    )
+    m = _ROW_RANGE.search(quote)
+    assert m, (
+        f"{name}: the recorded approval points at no target row, so it authorises no "
+        f"replacement. Recorded: {quote!r}"
+    )
+    lo = int(m.group(1))
+    hi = int(m.group(2) or lo)
+    rows = _target_rows()
+    assert hi >= lo, f"{name}: inverted row range rows {lo}–{hi}"
+    missing = [n for n in range(lo, hi + 1) if n not in rows]
+    assert not missing, f"{name}: the approval names target rows that do not exist: {missing}"
+    return {rows[n] for n in range(lo, hi + 1)}
 
 
 def _public_methods() -> set[str]:
@@ -84,18 +130,69 @@ def test_the_map_is_not_empty() -> None:
 
 
 def test_every_retired_name_is_an_approved_rename() -> None:
-    """Each entry's exact `old -> new` pair is in the owner-approved beta rename table."""
+    """Each entry's replacement is a target row the owner's approving region names."""
     from tortoise.sdk_retired import RETIRED_SDK_METHODS
 
-    approved = _approved_renames()
-    wrong = {
-        old: (new, approved.get(old))
-        for old, new in RETIRED_SDK_METHODS.items()
-        if approved.get(old) != new
-    }
+    wrong = {}
+    for old, new in RETIRED_SDK_METHODS.items():
+        approved = _approved_replacements(old)
+        if new not in approved:
+            wrong[old] = (new, sorted(approved))
     assert not wrong, (
-        "a retired name's replacement is not the owner-approved one (the #4282 mandate: "
-        f"an unapproved rename needs Daniel first): {wrong}"
+        "a retired name's replacement is not one the owner-approved region names (the "
+        f"#4282 mandate: an unapproved rename needs Daniel first): {wrong}"
+    )
+
+
+def test_every_retired_name_carries_its_own_approval() -> None:
+    """The two maps are the same key set — an entry cannot skip its citation."""
+    from tortoise.sdk_retired import RETIRED_SDK_APPROVALS, RETIRED_SDK_METHODS
+
+    assert set(RETIRED_SDK_APPROVALS) == set(RETIRED_SDK_METHODS), (
+        "a retirement with no recorded approval region, or an approval with no "
+        "retirement: "
+        f"{sorted(set(RETIRED_SDK_APPROVALS) ^ set(RETIRED_SDK_METHODS))}"
+    )
+
+
+def test_each_retirement_records_the_row_it_chose() -> None:
+    """A RANGE approval does not pin WHICH row — the recorded ordinal does.
+
+    The group row approves rows 30–33, so `"graph_list": "delete_memory_graph"` would
+    satisfy every other assertion in this file and its hint would send every caller to
+    the eraser. This test is the pin that makes the author's choice an artifact instead
+    of a runtime re-decision: the recorded ordinal must resolve to the DECLARED
+    replacement, in a row the approving region actually names.
+    """
+    from tortoise.sdk_retired import (
+        RETIRED_SDK_APPROVAL_ROWS,
+        RETIRED_SDK_METHODS,
+    )
+
+    assert set(RETIRED_SDK_APPROVAL_ROWS) == set(RETIRED_SDK_METHODS), (
+        "every retirement needs its chosen target row, and only retirements may have "
+        f"one: {sorted(set(RETIRED_SDK_APPROVAL_ROWS) ^ set(RETIRED_SDK_METHODS))}"
+    )
+    rows = _target_rows()
+    wrong: dict[str, tuple] = {}
+    for old, new in RETIRED_SDK_METHODS.items():
+        row = RETIRED_SDK_APPROVAL_ROWS[old]
+        if rows.get(row) != new:
+            wrong[old] = (row, rows.get(row), new)
+    assert not wrong, (
+        "the recorded target row does not name the declared replacement "
+        "(row, the name on that row, the declared replacement): "
+        f"{wrong}"
+    )
+    outside = {
+        old: (RETIRED_SDK_APPROVAL_ROWS[old], sorted(_approved_replacements(old)))
+        for old in RETIRED_SDK_METHODS
+        if rows[RETIRED_SDK_APPROVAL_ROWS[old]] not in _approved_replacements(old)
+    }
+    assert not outside, (
+        "the recorded target row lies OUTSIDE the region the owner approved — the "
+        "ordinal cannot be used to smuggle in a row the approval never named: "
+        f"{outside}"
     )
 
 

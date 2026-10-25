@@ -42,6 +42,28 @@ MIGRATIONS = [
     # SHIPPED projection, so a schema still declaring `jsonb` keeps refusing the
     # producer's integer count with `DatatypeMismatch` here too.
     "20261022000001_record_session_capture_redactions_integer.sql",
+    # FORWARD `CREATE TABLE public.session_narrative` (§9.1 / R7, #9555). The
+    # shipped projection's `SessionRecorded` replay now emits an INSERT into it,
+    # so a list without this migration stands up a database that raises
+    # `UndefinedTable` the moment the probe runs the shipped code.
+    "20261023000001_record_session_narrative.sql",
+    # #9555/R7's carrier migration (`COMMENT ON` only). Applied so this list stays
+    # EQUAL to `record_projection.RECORD_MIGRATIONS` (#9550) — the probe stands up
+    # the SHIPPED schema, comments included.
+    "20261024000001_record_session_narrative_carrier.sql",
+    # The TENANCY POSTURE (#9554, epic #7879): the app role, its grants (and
+    # `relation_id_seq`'s USAGE), and the `*_app_tenant` policies — one per record
+    # table, ten since #9555's `session_narrative`. It adds
+    # no column and is applied anyway — the list is pinned to
+    # `RECORD_MIGRATIONS` in EQUALITY, and a probe whose Postgres lacks the
+    # policies is not the Postgres the shipped read runs against.
+    "20261025000001_record_tenancy_role_and_guc.sql",
+    # #9881's key move. It RE-DECLARES `node_identity.key_property` (Object/
+    # Subject → `id`) and rewrites the two `node_key` CHECKs, and the read
+    # projects a node by the contract key it parses from these FILES — so a
+    # probe Postgres without it keys Object/Subject by `name` while the shipped
+    # read binds `id`. Applied here for the same reason as the tenancy file.
+    "20261027000001_record_semantic_id_key.sql",
 ]
 DSN = "postgresql://postgres:cap@127.0.0.1:15499/capstone"
 

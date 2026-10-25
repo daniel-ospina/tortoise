@@ -5,9 +5,10 @@
  * ---------------
  * #4054 moved the session (`__Host-session`, host-only by construction) to
  * app.premiselabs.co, and #4171 moved the blog admin console there with it so
- * its `/api/session` check is same-origin. But the console's three remaining
- * `/blog/api/*` calls (`purge`, `generate-seo`, `generate-cover`) resolve
- * against the origin that serves the console — the app origin — while the blog
+ * its `/api/session` check is same-origin. But the console's `/blog/api/*`
+ * calls (`purge`, `generate-seo`, `generate-cover`, and `notify-publish`
+ * #9803) resolve against the origin that serves the console — the app origin —
+ * while the blog
  * Functions stayed on the marketing project (tortoise.premiselabs.co). Without
  * a passthrough those calls hit the app SPA shell (a 200 HTML page), so the
  * console silently fails to purge or generate.

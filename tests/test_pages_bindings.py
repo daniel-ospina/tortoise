@@ -804,8 +804,12 @@ def _run_probe(tmp_path: Path, mode: str) -> tuple[int, str]:
         "STUB_DIR": str(tmp_path),
         "PROBE_TMP": str(tmp_path),
     }
-    # `bash -e` mirrors GitHub Actions' default Linux shell — the exact condition
-    # under which the original bug reproduced.
+    # `bash -e` is the SHELL FLOOR these probes are written to survive, not the
+    # shell CI runs them in: GitHub Actions adds `-o pipefail`. Kept at `-e` here
+    # deliberately (#9680), because switching this shared helper would also submit
+    # every inherited step it drives to a pipefail audit nobody has done — the
+    # IndexNow steps, which this PR introduces, run under `-eo pipefail` in their
+    # own runners.
     r = subprocess.run(
         ["bash", "-e", str(_probe_script(tmp_path))],
         capture_output=True,
@@ -860,7 +864,7 @@ def test_the_probe_reports_the_503_error_code_verbatim(tmp_path) -> None:
 
 
 def test_the_probe_retries_a_transient_transport_failure(tmp_path) -> None:
-    """Proves the retry loop is REACHABLE under `bash -e`.
+    """Proves the retry loop is REACHABLE under `bash -e` (the floor, not CI's shell).
 
     Before the `|| curl_rc=$?` guard, the first failed substitution aborted the
     step: `rc7once` (two failures then a healthy 302) exited non-zero and the
@@ -1605,9 +1609,10 @@ def _run_deploy(
 ) -> tuple[int, str, Path, Path]:
     """Execute the shipped Deploy step with the shell exactly as CI runs it.
 
-    `bash -e` mirrors GitHub Actions' default Linux shell. The run block is the
-    comment-stripped shipped text — comments are inert, so executing without them
-    proves the CODE carries the behaviour, not the prose.
+    `bash -e` — the floor, not CI's shell: Actions adds `-o pipefail`, which is why
+    the #9680 steps have their own `-eo pipefail` runners. See `_run_probe`. The run
+    block is the comment-stripped shipped text — comments are inert, so executing
+    without them proves the CODE carries the behaviour, not the prose.
     """
     bin_dir = _stub_bin(tmp_path, "npx", STUB_NPX)
     site = _write_website_fixture(tmp_path, omit)
@@ -2248,7 +2253,7 @@ def _purge_script(tmp_path: Path) -> Path:
     """The shipped purge step, executed as written (comments stripped).
 
     No rewrites: the step has no retry bound, and its `exit 1` branches are the
-    behaviour under test. `bash -e` mirrors the Actions default shell.
+    behaviour under test. `bash -e` — the floor; CI adds `-o pipefail`.
     """
     p = tmp_path / "purge.sh"
     p.write_text(_step_code(PURGE), encoding="utf-8")
@@ -3091,3 +3096,778 @@ def test_the_d1_sessions_api_scan_is_not_vacuous() -> None:
         "reads are no longer visible to this scan, so it could not have detected "
         "a Sessions-API read"
     )
+
+
+# ── #9680: the IndexNow post-deploy gates ─────────────────────────────────
+# Each asserts the DEPLOYED half of a capability whose repo half is pinned by
+# `tests/test_blog_indexnow.py`. They belong in this file because the failure mode
+# is a deploy that stops serving the artifact — and because a gate whose REMOVAL
+# is invisible is the #7751 defect one level up (the tracker recorded IndexNow as
+# shipped while `/<key>.txt` answered 404 for weeks and nothing failed). So each
+# run block is EXECUTED here against a stub `curl`, not string-matched.
+INDEXNOW_PROBE = "Post-deploy — the IndexNow key file and notify route are live (#9680)"
+#: #9680: the hop the publish console actually crosses. `app.premiselabs.co` is
+#: the `tortoise-dashboard` Pages project, so this step belongs to
+#: `deploy-dashboard` — `test_the_indexnow_proxy_gate_is_the_dashboard_jobs`
+#: pins that, and it is the same rule as
+#: `test_the_onboarding_parity_check_guards_the_dashboard_job_only` (#2691): a
+#: step guarding one surface must not sit in the other surface's job.
+INDEXNOW_PROXY_PROBE = (
+    "Post-deploy — the app-origin IndexNow proxy answers its session gate (#9680)"
+)
+
+#: The artifacts that quote the steps by name to send a reader to them. A rename
+#: must red here rather than leave one of them pointing at a step that no longer
+#: exists — the provenance defect `tests/test_blog_indexnow.py`'s docstring was
+#: amended for in this same change.
+_INDEXNOW_PROBE_QUOTERS = (
+    REPO / "docs" / "blog-authoring.md",
+    REPO / "tests" / "test_blog_indexnow.py",
+)
+
+_INDEXNOW_MODULE_REL = "website/functions/blog/_shared/indexnow.ts"
+_INDEXNOW_KEY = "0123456789abcdef0123456789abcdef"
+
+#: The module fixture the step resolves the key from. The script runs with `cwd`
+#: set to this temp tree, so the step's own relative path reads THIS file — which
+#: is what lets the extractor cases be driven without touching the repo.
+_INDEXNOW_MODULE_OK = (
+    "// header\n"
+    f'export const INDEXNOW_KEY = "{_INDEXNOW_KEY}";\n'
+    'export const INDEXNOW_ENDPOINT = "https://api.indexnow.org/indexnow";\n'
+)
+
+
+def _dashboard_step_code(name: str) -> str:
+    step = next(s for s in _dashboard_steps() if s.get("name") == name)
+    return _strip_bash_comments(step["run"])
+
+
+def _indexnow_fixture(
+    tmp_path: Path, code: str, module_text: str, write_module: bool = True
+) -> Path:
+    """Write `code` (with only the benign retry rewrites) and the module fixture.
+
+    Rewrites, both benign: 10/5 attempts -> 2 and `sleep 10` -> `sleep 0`, so the
+    retry cases run fast. The control flow under test — the `|| curl_rc=$?` /
+    `|| proxy=000` guards, the per-attempt predicate, every `exit 1` arm and the
+    error text — is untouched; the REAL bounds are pinned separately on the
+    shipped text by the two `*_is_blocking` / `*_is_the_dashboard_jobs` tests.
+    """
+    rewritten = (
+        code.replace("seq 1 10", "seq 1 2")
+        .replace("seq 1 5", "seq 1 2")
+        .replace("sleep 10", "sleep 0")
+    )
+    assert "seq 1 2" in rewritten, "the retry bounds were not rewritten"
+    assert "sleep 10" not in rewritten, "a sleep was left in the executed copy"
+    if write_module:
+        module = tmp_path / _INDEXNOW_MODULE_REL
+        module.parent.mkdir(parents=True, exist_ok=True)
+        module.write_text(module_text, encoding="utf-8")
+    script = tmp_path / "indexnow.sh"
+    script.write_text(rewritten, encoding="utf-8")
+    return script
+
+
+#: A key-file GET on two legs (origin with a per-run `?cb=` nonce, then the
+#: canonical URL the endpoint is handed), one POST per hop (the marketing origin's
+#: Function, the app origin's BFF proxy), and the edge's own answer for an
+#: unmatched path. Every answer is an env var so a test can break exactly one of
+#: them — including ONE leg of the key file, which is what makes the two-leg
+#: probe falsifiable.
+STUB_INDEXNOW_CURL = r"""#!/bin/bash
+out= hdr= fmt= url=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out=$2; shift 2;;
+    -D) hdr=$2; shift 2;;
+    -w) fmt=$2; shift 2;;
+    -m) shift 2;;
+    -X) shift 2;;
+    -H) shift 2;;
+    -d) shift 2;;
+    -s|-S|-sS|-f|--fail) shift;;
+    *) url=$1; shift;;
+  esac
+done
+printf '%s\n' "$url" >> "$STUB_DIR/calls"
+n=$(wc -l < "$STUB_DIR/calls" | tr -d ' ')
+if [ "${STUB_FAIL_FIRST:-0}" != "0" ] && [ "$n" -le "${STUB_FAIL_FIRST}" ]; then
+  echo 'curl: (7) Failed to connect to host' >&2
+  printf '000'
+  exit 7
+fi
+# exit 0 having written `000` (a mid-stream reset): a status of 000 is not only a
+# non-zero curl exit, and the step's arm covers both.
+if [ "${STUB_ZERO:-0}" != "0" ]; then
+  printf '000'
+  exit 0
+fi
+code=200
+ctype="${STUB_CTYPE}"
+cache="${STUB_CACHE:-DYNAMIC}"
+body=""
+path="${url%%\?*}"          # the origin leg carries ?cb=<nonce>
+query=""
+[ "$path" != "$url" ] && query="nonce"
+key="${path##*/}"; key="${key%.txt}"
+case "$path" in
+  *app.premiselabs.co*notify-publish)
+    code="${STUB_PROXY_CODE}"; body="${STUB_PROXY_BODY}";;
+  *tortoise.premiselabs.co*notify-publish)
+    if [ "${STUB_GATE_FAIL:-0}" != "0" ]; then
+      echo 'curl: (7) Failed to connect to host' >&2
+      printf '000'
+      exit 7
+    fi
+    code="${STUB_GATE_CODE}"; body="${STUB_GATE_BODY}";;
+  *.txt)
+    if [ "$query" = "nonce" ]; then
+      code="${STUB_GET_CODE}"
+      case "${STUB_BODY_MODE}" in
+        key) body="$key";;
+        newline) body="$key
+";;
+        # SAME LENGTH, WRONG KEY: a rotated key is also 32 lowercase hex, so this
+        # is the shape that a length-only comparison certifies.
+        other32) body="deadbeefdeadbeefdeadbeefdeadbeef";;
+        other) body="not-the-key";;
+      esac
+      # A transient bad 200 on the FIRST attempt only: an HTML error document at
+      # 200. The shipped loop must retry it, not accept it (and not break on it).
+      if [ "${STUB_BAD_FIRST}" = "1" ] && [ "$n" = "1" ]; then
+        ctype="text/html; charset=utf-8"; body='<!doctype html><title>oops</title>'
+      fi
+    else
+      # A knob for the edge leg ALONE: `STUB_FAIL_FIRST` is call-count based, so
+      # the origin leg always fails first and the edge transport arm was
+      # unreachable from here (and therefore unverified).
+      if [ "${STUB_EDGE_FAIL:-0}" != "0" ]; then
+        echo 'curl: (7) Failed to connect to host' >&2
+        printf '000'
+        exit 7
+      fi
+      code="${STUB_EDGE_CODE:-${STUB_GET_CODE}}"
+      case "${STUB_EDGE_BODY_MODE:-${STUB_BODY_MODE}}" in
+        key) body="$key";;
+        newline) body="$key
+";;
+        other32) body="deadbeefdeadbeefdeadbeefdeadbeef";;
+        other) body="not-the-key";;
+      esac
+    fi;;
+  *) code=405;;
+esac
+[ -n "$out" ] && printf '%s' "$body" > "$out"
+if [ -n "$hdr" ]; then
+  printf 'HTTP/2 %s\r\ncontent-type: %s\r\ncf-cache-status: %s\r\n\r\n' "$code" "$ctype" "$cache" > "$hdr"
+fi
+case "$fmt" in *http_code*) printf '%s' "$code";; esac
+exit 0
+"""
+
+
+def _run_indexnow_gate(
+    tmp_path: Path,
+    get_code: str = "200",
+    ctype: str = "text/plain; charset=utf-8",
+    body_mode: str = "key",
+    gate_code: str = "401",
+    gate_body: str = '{"error":"unauthorized","message":"Session expired or not an admin"}',
+    fail_first: int | bool = False,  # a COUNT: 99 fails every attempt
+    module_text: str = _INDEXNOW_MODULE_OK,
+    cache: str = "DYNAMIC",
+    edge_code: str = "",
+    edge_body_mode: str = "",
+    edge_fail: bool = False,
+    gate_fail: bool = False,
+    zero: bool = False,
+    bad_first: bool = False,
+    cwd: Path | None = None,
+) -> tuple[int, str, list[str]]:
+    """Run the shipped marketing-origin gate; return (rc, output, urls requested).
+
+    `cwd=REPO` runs it against the SHIPPED module instead of the fixture — the one
+    mode in which the real `sed` extractor and the real constant are exercised
+    together (`test_the_shipped_extractor_reads_the_shipped_constant`).
+    """
+    bin_dir = _stub_bin(tmp_path, "curl", STUB_INDEXNOW_CURL)
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "STUB_DIR": str(tmp_path),
+        "STUB_GET_CODE": get_code,
+        "STUB_CTYPE": ctype,
+        "STUB_BODY_MODE": body_mode,
+        "STUB_GATE_CODE": gate_code,
+        "STUB_GATE_BODY": gate_body,
+        "STUB_PROXY_CODE": "401",
+        "STUB_PROXY_BODY": '{"error":"not_signed_in"}',
+        # a COUNT, not a flag: `99` fails EVERY attempt, which is the only arm
+        # that leaves the `-D` header file empty and so the only one that can see
+        # a header read that dies under `pipefail` (see the dead-origin test).
+        "STUB_FAIL_FIRST": "0" if fail_first is False else str(int(fail_first)),
+        "STUB_CACHE": cache,
+        "STUB_EDGE_CODE": edge_code,
+        "STUB_EDGE_BODY_MODE": edge_body_mode,
+        "STUB_EDGE_FAIL": "1" if edge_fail else "0",
+        "STUB_GATE_FAIL": "1" if gate_fail else "0",
+        "STUB_ZERO": "1" if zero else "0",
+        "STUB_BAD_FIRST": "1" if bad_first else "0",
+    }
+    script = _indexnow_fixture(
+        tmp_path, _step_code(INDEXNOW_PROBE), module_text, write_module=cwd is None
+    )
+    r = subprocess.run(
+        # `-eo pipefail`, NOT `-e`: GitHub Actions runs a `run:` body under
+        # `bash --noprofile --norc -eo pipefail`, and the difference is load-bearing
+        # here — a `grep|tail|tr` inside the step exits 1 on "no matching header",
+        # which under `-e` alone is harmless and under `pipefail` aborts the step
+        # before its retry can run (the review that found this ran both shells:
+        # `-e` → retried and passed, `-eo pipefail` → rc=1 after ONE request, no
+        # `::error::`). A harness that models the weaker shell cannot see that.
+        ["bash", "-eo", "pipefail", str(script)],
+        cwd=cwd or tmp_path,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    calls_file = tmp_path / "calls"
+    calls = calls_file.read_text(encoding="utf-8").split() if calls_file.exists() else []
+    return r.returncode, r.stdout + r.stderr, calls
+
+
+def _run_indexnow_proxy(
+    tmp_path: Path,
+    proxy_code: str = "401",
+    proxy_body: str = '{"error":"not_signed_in"}',
+    # a COUNT (`99` fails EVERY attempt) — a bool could only ever express "one
+    # blip", which the retry absorbs, so the step's transport-failure arm was
+    # unreachable from here.
+    fail_first: int | bool = False,
+) -> tuple[int, str, list[str]]:
+    """Run the shipped app-origin proxy gate; return (rc, output, urls requested)."""
+    bin_dir = _stub_bin(tmp_path, "curl", STUB_INDEXNOW_CURL)
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "STUB_DIR": str(tmp_path),
+        "STUB_GET_CODE": "200",
+        "STUB_CTYPE": "text/plain",
+        "STUB_BODY_MODE": "key",
+        "STUB_GATE_CODE": "401",
+        "STUB_GATE_BODY": '{"error":"unauthorized"}',
+        "STUB_PROXY_CODE": proxy_code,
+        "STUB_PROXY_BODY": proxy_body,
+        # a COUNT, not a flag: `99` fails EVERY attempt, which is the only arm
+        # that leaves the `-D` header file empty and so the only one that can see
+        # a header read that dies under `pipefail` (see the dead-origin test).
+        "STUB_FAIL_FIRST": "0" if fail_first is False else str(int(fail_first)),
+    }
+    script = _indexnow_fixture(
+        tmp_path, _dashboard_step_code(INDEXNOW_PROXY_PROBE), _INDEXNOW_MODULE_OK
+    )
+    r = subprocess.run(
+        ["bash", "-eo", "pipefail", str(script)],  # the shell Actions actually uses
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    calls_file = tmp_path / "calls"
+    calls = calls_file.read_text(encoding="utf-8").split() if calls_file.exists() else []
+    return r.returncode, r.stdout + r.stderr, calls
+
+
+def test_each_indexnow_step_cleans_up_its_scratch_dir() -> None:
+    """A per-run scratch dir that is never removed is a slow leak on a self-hosted
+    runner — and `$D` exists precisely to stop concurrent lanes sharing `/tmp`, so
+    leaving it behind undoes half of what it was added for."""
+    for code, name in (
+        (_step_code(INDEXNOW_PROBE), "deploy"),
+        (_dashboard_step_code(INDEXNOW_PROXY_PROBE), "deploy-dashboard"),
+    ):
+        assert 'D="${RUNNER_TEMP:-/tmp}/' in code, f"{name}: no per-run scratch dir"
+        assert 'trap \'rm -rf "$D"\' EXIT' in code, f"{name}: the scratch dir is never removed"
+
+
+def test_the_indexnow_gate_polls_and_is_blocking() -> None:
+    """A gate that cannot fail anything is the #7751 defect one level up.
+
+    `deploy` is the job whose failure fails the workflow, and this step carries no
+    `continue-on-error` — the property the advisory `verify-blog` job lacks. The
+    polling bounds are asserted here, on the SHIPPED text, because the executed
+    copies rewrite them to keep the tests fast.
+    """
+    steps = _deploy_steps()
+    names = [s.get("name", "") for s in steps]
+    assert INDEXNOW_PROBE in names, "the IndexNow post-deploy gate is gone"
+    assert names.index(INDEXNOW_PROBE) > names.index(DEPLOY), (
+        "the gate must run AFTER the upload — before it, it would be testing the "
+        "previous deployment"
+    )
+    step = steps[names.index(INDEXNOW_PROBE)]
+    assert not step.get("continue-on-error"), (
+        "the gate must not be advisory: `continue-on-error` would make a red here a "
+        "red job on a green run, which is what #7751's months of silent 404s look like"
+    )
+    assert step.get("if") == "always()", (
+        "`if: always()` is what keeps a failing earlier probe from MASKING this one"
+    )
+    code = _step_code(INDEXNOW_PROBE)
+    assert "seq 1 10" in code, "the key-file retry bound is gone (a single-shot probe reds on propagation)"
+    assert "seq 1 5" in code, "the notify-route retry bound is gone"
+    assert "sleep 10" in code, "the retry sleeps are gone — the bound would burn through instantly"
+
+
+def test_the_indexnow_proxy_gate_is_the_dashboard_jobs() -> None:
+    """#2691: the app-origin hop guards the DASHBOARD's surface, so it must fail
+    the dashboard job — not the marketing deploy.
+
+    The failure it prevents, named: `app.premiselabs.co` is the
+    `tortoise-dashboard` Pages project and the two jobs carry no `needs:` between
+    them on purpose, so a proxy break asserted from `deploy` would block the
+    unrelated marketing deploy while the dashboard's own job stayed green — the
+    coupling `test_the_onboarding_parity_check_guards_the_dashboard_job_only`
+    was written for.
+    """
+    assert INDEXNOW_PROXY_PROBE not in [s.get("name", "") for s in _deploy_steps()], (
+        "the app-origin probe is back in the marketing `deploy` job — a dashboard "
+        "break would block the landing deploy (#2691)"
+    )
+    steps = _dashboard_steps()
+    names = [s.get("name", "") for s in steps]
+    assert INDEXNOW_PROXY_PROBE in names, "the app-origin IndexNow probe is gone"
+    assert names.index(INDEXNOW_PROXY_PROBE) > names.index(DASHBOARD_DEPLOY), (
+        "the probe must run AFTER the dashboard upload — before it, it would test "
+        "the previous deployment"
+    )
+    step = steps[names.index(INDEXNOW_PROXY_PROBE)]
+    assert not step.get("continue-on-error"), "the app-origin probe must not be advisory"
+    assert step.get("if") == "always()", (
+        "`if: always()` is what keeps a failing earlier dashboard step from MASKING "
+        "this probe"
+    )
+    code = _dashboard_step_code(INDEXNOW_PROXY_PROBE)
+    assert "seq 1 5" in code, "the app-origin retry bound is gone"
+    assert "sleep 10" in code, "the retry sleeps are gone — the bound would burn through instantly"
+    assert '"not_signed_in"' in code, (
+        "the body assertion is gone — a bare 401 cannot tell the proxy's own gate "
+        "from a catch-all/edge refusal, which is the whole point of the probe"
+    )
+
+
+def test_the_indexnow_gates_are_named_by_every_artifact_that_quotes_them() -> None:
+    """The doc and the unit suite both send a reader to these steps BY NAME.
+
+    Whitespace is normalised on both sides: a Markdown/docstring line WRAP inside
+    a step name is a legitimate reflow, and a pin that red on it would be pushed
+    back rather than obeyed. A renamed step still reds.
+    """
+    for path in _INDEXNOW_PROBE_QUOTERS:
+        text = " ".join(path.read_text(encoding="utf-8").split())
+        for step in (INDEXNOW_PROBE, INDEXNOW_PROXY_PROBE):
+            assert " ".join(step.split()) in text, (
+                f"{path.relative_to(REPO)} points a reader at an IndexNow deploy step "
+                f"that does not exist ({step!r}) — either it was renamed or the "
+                "pointer is stale"
+            )
+
+
+def test_the_indexnow_gate_passes_when_the_surface_is_correct(tmp_path) -> None:
+    rc, out, calls = _run_indexnow_gate(tmp_path)
+    assert rc == 0, out
+    # Non-vacuity: it must have read BOTH key-file legs and the marketing hop.
+    origin = [c for c in calls if c.startswith(f"https://tortoise.premiselabs.co/{_INDEXNOW_KEY}.txt?cb=")]
+    assert origin, f"the cache-bypassing ORIGIN leg was never requested: {calls}"
+    assert f"https://tortoise.premiselabs.co/{_INDEXNOW_KEY}.txt" in calls, (
+        f"the canonical URL the IndexNow endpoint is handed was never requested: {calls}"
+    )
+    assert any("tortoise.premiselabs.co" in c and c.endswith("notify-publish") for c in calls), calls
+    # #2691, executably: the marketing gate must not touch the dashboard's origin
+    # at all — that surface is asserted by `deploy-dashboard`.
+    assert not [c for c in calls if "app.premiselabs.co" in c], calls
+    assert "::error::" not in out, out
+
+
+@pytest.mark.parametrize(
+    "argv,needle",
+    [
+        ({"get_code": "404"}, "is not served by the deployment"),
+        # A 5xx on the static key file is an outage, not a missing file (#3485).
+        # The needle must be a phrase of THIS arm: "NOT evidence the key file is
+        # gone" is also in the transport arm's message, so it could not see the
+        # outage arm being widened to swallow `5xx`.
+        ({"get_code": "520"}, "an origin/edge outage or rate limit"),
+        ({"get_code": "429"}, "or rate limit"),
+        ({"body_mode": "newline"}, "must contain the key and NOTHING else"),
+        ({"body_mode": "other"}, "must contain the key and NOTHING else"),
+        # The BODY TEXT is pinned separately from the byte COUNT, on both legs: a
+        # rotated key is also 32 lowercase hex, so 'same length, wrong key' is the
+        # desync a length-only comparison would certify.
+        ({"body_mode": "other32"}, "must contain the key and NOTHING else"),
+        ({"ctype": "text/html"}, "is not text/plain"),
+        # #4050/#9680: an edge-cached answer certifies the PREVIOUS deployment, so
+        # the origin leg must be able to notice it answered from cache.
+        ({"cache": "HIT"}, "was answered from CACHE"),
+        # Leg 2 is what the endpoint actually fetches: origin-correct is not enough,
+        # and BOTH of its halves are pinned (count and text).
+        ({"edge_code": "404"}, "not serving the key file"),
+        ({"edge_code": "522"}, "an edge outage or rate limit"),
+        # `000` on the edge leg alone: STUB_ZERO zeroes both legs, so the origin arm
+        # exits first and this alternative was unreachable — deleting `|000` from
+        # the edge arm left the suite green.
+        ({"edge_code": "000"}, "an edge transport failure"),
+        # A rate limit is a provider condition, not a delivery fault.
+        ({"edge_code": "429"}, "an edge outage or rate limit"),
+        ({"edge_body_mode": "other"}, "at the EDGE"),
+        ({"edge_body_mode": "other32"}, "at the EDGE"),
+        ({"edge_body_mode": "newline"}, "at the EDGE"),
+        ({"gate_code": "405"}, "did not refuse an anonymous caller"),
+        ({"gate_body": '{"error":"not_signed_in"}'}, "did not refuse an anonymous caller"),
+        # A provider blip is NOT "the route is gone" (#3485) — the message must
+        # say so, or the operator hunts a Function that was never deleted.
+        (
+            # a phrase unique to THIS arm: the `503*` catch-all below would satisfy
+            # a bare "could not verify" even if this arm were deleted.
+            {"gate_code": "503", "gate_body": '{"error":"unavailable","message":"try later"}'},
+            "admin lookup outage",
+        ),
+        (
+            {"gate_code": "503", "gate_body": '{"error":"not_configured"}'},
+            "required Pages binding is missing",
+        ),
+        # An UNRECOGNISED 503 — an edge/platform 503, an empty body, an HTML error
+        # page — is the same #3485 class as the two named ones and must not be
+        # reported as "did not refuse an anonymous caller": that sends an operator
+        # hunting a deleted Function during a provider outage. The status-only
+        # fallback used to say exactly that.
+        ({"gate_code": "503", "gate_body": ""}, "could not verify"),
+        (
+            {"gate_code": "503", "gate_body": "<html><body>503</body></html>"},
+            "an outage, not a missing route",  # unique to the 503* catch-all
+        ),
+        # A transport failure never reached the route: it must not be reported as
+        # "did not refuse an anonymous caller" (the blip-as-broken-route mistake).
+        ({"gate_code": "000"}, "could not verify"),
+        # And neither did a 5xx that the two NAMED bodies do not cover — the app
+        # origin's step handled the whole class and this one did not.
+        ({"gate_code": "502", "gate_body": ""}, "could not verify"),
+        ({"gate_code": "504", "gate_body": "<html>gateway timeout</html>"}, "could not verify"),
+        ({"gate_code": "521"}, "could not verify"),
+        # a Cloudflare rate limit is a provider condition, not a broken route
+        ({"gate_code": "429"}, "or rate limit, not a missing route"),
+    ],
+)
+def test_the_indexnow_gate_fails_for_each_broken_surface(tmp_path, argv: dict, needle: str) -> None:
+    """Every arm independently reds the deploy, and says which one broke."""
+    rc, out, _calls = _run_indexnow_gate(tmp_path, **argv)
+    assert rc == 1, f"{argv} should have red the gate, got rc={rc}:\n{out}"
+    assert "::error::" in out, out
+    assert needle in out, out
+    # Non-vacuity made structural rather than incidental: "could not verify" must
+    # never arrive with the sentence that blames the surface (a case arm can grow a
+    # second echo, and a presence-only assertion would not notice).
+    if "could not verify" in needle or needle in {
+        "NOT evidence the key file is gone",
+        "an edge outage or rate limit",
+        "an edge transport failure",
+        "an outage, not a missing route",
+        "admin lookup outage",
+    }:
+        # The outage arms must never arrive with the sentence that blames the
+        # surface — for the key-file rows too, which cannot reach the POST probe.
+        assert "did not refuse an anonymous caller" not in out, out
+        assert "is not served by the deployment" not in out, out
+        assert "not serving the key file" not in out, out
+
+
+@pytest.mark.parametrize(
+    "argv,needle",
+    [
+        # With the route deleted the POST is answered 405 with an EMPTY body
+        # (measured; a GET on this host is an honest 404, #3523) — so a status-only
+        # check would red there. These two are what the body assertion adds: a 401
+        # for the WRONG reason, and (hardening) a widened fallback answering 200
+        # with the SPA shell.
+        ({"proxy_code": "405", "proxy_body": ""}, "did not answer the proxy's session gate"),
+        ({"proxy_code": "200", "proxy_body": "<!doctype html>"}, "did not answer the proxy's session gate"),
+        # a 401 for the WRONG reason — the handler's own body, not the proxy's
+        (
+            {"proxy_body": '{"error":"unauthorized","message":"Session expired"}'},
+            "did not answer the proxy's session gate",
+        ),
+        # the proxy's own session-store path (#3485): could not verify, not "gone"
+        (
+            {"proxy_code": "503", "proxy_body": '{"error":"session_store_unavailable"}'},
+            "the proxy's session store",  # unique: the 5xx arm also says "could not verify"
+        ),
+        # A deterministic 500 is the one 5xx where "re-run" is not the answer.
+        ({"proxy_code": "500", "proxy_body": "boom"}, "next suspect"),
+        # ANY 5xx is the same class. An exact `503)` arm let 502/504 (origin down)
+        # and Cloudflare's 520-522/524 fall through to the arm that blames the route.
+        ({"proxy_code": "502", "proxy_body": "<html>bad gateway</html>"}, "could not verify"),
+        ({"proxy_code": "504", "proxy_body": ""}, "could not verify"),
+        ({"proxy_code": "521", "proxy_body": "<html>origin down</html>"}, "could not verify"),
+        ({"proxy_code": "429", "proxy_body": "rate limited"}, "could not verify"),
+    ],
+)
+def test_the_indexnow_proxy_gate_fails_for_each_broken_surface(
+    tmp_path, argv: dict, needle: str
+) -> None:
+    rc, out, calls = _run_indexnow_proxy(tmp_path, **argv)
+    assert rc == 1, f"{argv} should have red the proxy gate, got rc={rc}:\n{out}"
+    assert "::error::" in out, out
+    assert needle in out, out
+    if "could not verify" in needle or needle in {
+        "the proxy's session store",
+        "next suspect",
+        "or rate limit",
+    }:
+        assert "did not answer the proxy's session gate" not in out, out
+    assert any("app.premiselabs.co" in c and c.endswith("notify-publish") for c in calls), calls
+
+
+def test_the_indexnow_proxy_gate_passes_when_the_route_answers(tmp_path) -> None:
+    rc, out, calls = _run_indexnow_proxy(tmp_path)
+    assert rc == 0, out
+    assert [c for c in calls if "app.premiselabs.co" in c and c.endswith("notify-publish")], calls
+    # Non-vacuity: it must NOT claim more than it proves. The admin gate is the
+    # marketing hop's; this one proves the route is there.
+    assert "session gate" in out, out
+    assert "::error::" not in out, out
+
+
+def test_the_indexnow_gate_retries_a_transport_blip_instead_of_failing(tmp_path) -> None:
+    """Under `bash -e` a bare `$(curl …)` aborts the step on the first blip.
+
+    The `|| curl_rc=$?` guard is what keeps the retry reachable, and the call
+    count is what proves it: a guard that dropped the error would still exit 0
+    here with ONE request, i.e. a probe that never retried.
+    """
+    rc, out, calls = _run_indexnow_gate(tmp_path, fail_first=True)
+    assert rc == 0, out
+    origin = [
+        c for c in calls if f"/{_INDEXNOW_KEY}.txt?cb=" in c
+    ]
+    assert len(origin) == 2, f"the transport blip did not retry: {calls}"
+
+
+def test_the_indexnow_gate_retries_a_bad_200_instead_of_accepting_it(tmp_path) -> None:
+    """The per-attempt predicate is what makes a transient bad 200 retryable.
+
+    Pins the ONE property the whole-predicate break has that a `code = 200` break
+    lacks — and it is the opposite direction from the obvious guess: a stopped
+    deploy is defeated by the nonce, not by this predicate (the previous
+    deployment answers 200 with a CORRECT body too). What this buys is that a
+    200 whose type/body is wrong — an error document served at 200, a cache rule
+    pinning an HTML copy — is not accepted on the first attempt. With
+    `if [ "$code" = "200" ]; then break; fi` the loop stops on that attempt and
+    the ctype arm then reds the deploy for a propagation blip.
+    """
+    rc, out, calls = _run_indexnow_gate(tmp_path, bad_first=True)
+    assert rc == 0, out
+    origin = [c for c in calls if f"/{_INDEXNOW_KEY}.txt?cb=" in c]
+    assert len(origin) == 2, f"a bad 200 was accepted on the first attempt: {calls}"
+
+
+def test_the_indexnow_proxy_gate_diagnoses_a_dead_route_instead_of_blaming_it(tmp_path) -> None:
+    """Every proxy attempt blips: an outage, not a missing route.
+
+    `deploy-dashboard` is a blocking job and its `000)` arm is the ONLY thing that
+    distinguishes "the origin never answered" from "the route is gone" — two
+    failures with opposite fixes. It was unreachable from this harness while
+    `fail_first` was a bool, so a mutation deleting the arm would have left the
+    suite green.
+    """
+    rc, out, calls = _run_indexnow_proxy(tmp_path, fail_first=99)
+    assert rc == 1, out
+    assert "::error::" in out, out
+    assert "could not verify" in out, f"a transport failure blamed the route: {out!r}"
+    assert "did not answer the proxy's session gate" not in out, out
+    assert calls, "nothing was requested"
+
+
+def test_the_shipped_extractor_reads_the_shipped_constant(tmp_path) -> None:
+    """The real `sed` must read the real constant — not just a fixture.
+
+    Every other executed case writes `_shared/indexnow.ts` into a temp tree, so
+    the extractor is only ever exercised against a shape this suite controls. An
+    edit to the SHIPPED file that the regex cannot read (a type annotation, a
+    `as const`, a reflow) would then keep the whole local suite green and red
+    main's next deploy post-merge with `EXTRACTOR fault`. The independent oracle
+    is the key file the deploy uploads (`website/<key>.txt`), which is what the
+    served bytes must equal — so a wrong extraction cannot agree with it.
+    """
+    served = sorted(p for p in (REPO / "website").glob("*.txt") if p.stem != "robots")
+    assert len(served) == 1, f"expected exactly one served IndexNow key file, got {served}"
+    served_key = served[0].stem
+    rc, out, calls = _run_indexnow_gate(tmp_path, cwd=REPO)
+    assert rc == 0, out
+    assert f"https://tortoise.premiselabs.co/{served_key}.txt" in calls, (
+        "the shipped extractor did not resolve the constant the deploy serves — "
+        f"expected {served_key}.txt, requested {[c for c in calls if c.endswith('.txt')]}"
+    )
+
+
+def test_the_indexnow_proxy_gate_retries_a_transport_blip_instead_of_failing(tmp_path) -> None:
+    """Same guard, same trap, on the dashboard hop (`|| proxy=000`)."""
+    rc, out, calls = _run_indexnow_proxy(tmp_path, fail_first=True)
+    assert rc == 0, out
+    assert len(calls) == 2, f"the transport blip did not retry: {calls}"
+
+
+def test_the_indexnow_gate_reads_the_constant_not_an_example_above_it(tmp_path) -> None:
+    """An example of the constant quoted ABOVE it must not be what is read.
+
+    The fixture is a COMMENTED-OUT previous declaration — the shape a rotation
+    actually leaves behind, and the one that discriminates the `^export const`
+    anchor: an unanchored pattern still matches `// export const INDEXNOW_KEY =
+    "…"`, and a 32-hex example passes the length/hex validation, so the gate would
+    then verify `deadbeef….txt` and report the failure as a DEPLOY fault — exactly
+    what the `EXTRACTOR fault` arms exist to prevent.
+
+    (A block comment with the declaration at column 0 would defeat the anchor as
+    well, because `sed` has no comment awareness; that shape is not claimed, so it
+    is not asserted here.)
+    """
+    module = (
+        '// export const INDEXNOW_KEY = "deadbeefdeadbeefdeadbeefdeadbeef";\n'
+        f'export const INDEXNOW_KEY = "{_INDEXNOW_KEY}";\n'
+    )
+    rc, out, calls = _run_indexnow_gate(tmp_path, module_text=module)
+    assert rc == 0, out
+    requested = [c for c in calls if c.endswith(".txt")]
+    assert requested == [f"https://tortoise.premiselabs.co/{_INDEXNOW_KEY}.txt"], requested
+
+
+def test_the_indexnow_gate_diagnoses_a_dead_origin_instead_of_aborting_silently(tmp_path) -> None:
+    """Every attempt blips: the step must SAY so, not die in a pipeline.
+
+    GitHub Actions runs `run:` under `bash -eo pipefail`. A `grep | head | tr` after
+    the loop exits 1 when the `-D` header file is empty — which is exactly what a
+    transport blip leaves behind — so under `pipefail` the step aborted on the first
+    line after the loop: no echo, no `::error::`, an empty log, and the operator
+    left with a red deploy and nothing to act on (measured by the review that found
+    it: `bash -e` → retried and passed, `bash -eo pipefail` → rc=1 after ONE request).
+    The header reads are single-process `awk` for this reason: awk exits 0 on no
+    match, so "no header" reaches the `exit 1` arms that name it.
+    """
+    rc, out, calls = _run_indexnow_gate(tmp_path, fail_first=99)
+    assert rc == 1, out
+    assert "::error::" in out, f"the step died without a diagnosis: {out!r}"
+    assert "could not verify" in out, out
+    assert "is not served by the deployment" not in out, (
+        f"a transport failure was reported as a deploy fault: {out!r}"
+    )
+    assert "curl-failed" in out, out
+    assert calls, "nothing was requested"
+
+
+def test_the_indexnow_gate_reports_an_extractor_fault_when_the_checkout_is_empty(tmp_path) -> None:
+    """No `website/` tree (a failed checkout under `if: always()`) is OUR fault.
+
+    This is the arm that makes the extractor's `|| true` load-bearing rather than
+    decorative: without it, `sed` on an absent file exits 2, `pipefail` propagates
+    that through `| head -1`, and `set -e` kills the step before the `EXTRACTOR
+    fault` message — the one message written for this case — can print.
+    """
+    empty = tmp_path / "empty-checkout"
+    empty.mkdir()
+    rc, out, calls = _run_indexnow_gate(tmp_path, cwd=empty)
+    assert rc == 1, out
+    assert "EXTRACTOR fault" in out, f"no diagnosis for an absent source file: {out!r}"
+    assert calls == [], f"an unreadable constant still made requests: {calls}"
+
+
+def test_the_indexnow_gate_reports_an_extractor_fault_without_touching_the_site(tmp_path) -> None:
+    """A reflowed constant is OUR fault, and must not be reported as a deploy fault.
+
+    The failure message is the operator's only diagnosis, so it names the fault
+    and states that nothing about the deployed site was checked — and no request
+    is made at all, because the key is what forms the URL.
+    """
+    module = f'export const INDEXNOW_KEY =\n  "{_INDEXNOW_KEY}";\n'
+    rc, out, calls = _run_indexnow_gate(tmp_path, module_text=module)
+    assert rc == 1, out
+    assert "EXTRACTOR fault" in out, out
+    assert "is not served" not in out, f"an extractor fault blamed the deploy: {out}"
+    assert calls == [], f"an unreadable constant still made requests: {calls}"
+
+
+def test_the_indexnow_gate_diagnoses_an_unreachable_edge_instead_of_blaming_delivery(
+    tmp_path,
+) -> None:
+    """Origin 200, edge unreachable: a re-run, not a cache-rule hunt.
+
+    The edge leg is the URL the endpoint actually fetches, so a wrong status there
+    IS a delivery fault — but a transport failure is not, and the two need
+    different operators. `STUB_EDGE_FAIL` fails the second leg only; before that
+    knob existed this arm could not be executed by any test.
+    """
+    rc, out, calls = _run_indexnow_gate(tmp_path, edge_fail=True)
+    assert rc == 1, out
+    assert "could not verify" in out, out
+    assert "at the EDGE" in out, out
+    assert "not serving the key file" not in out, f"an outage blamed delivery: {out!r}"
+    assert len(calls) > 1, f"the edge leg was never attempted: {calls}"
+
+
+def test_the_notify_hop_transport_failure_surfaces_curl_itself(tmp_path) -> None:
+    """The key-file arm prints `curl said: …`; the POST hops must not be quieter.
+
+    curl's stderr is the only datum that says WHY nothing completed (DNS, TLS, a
+    reset), and both POST legs were sending it to /dev/null.
+    """
+    rc, out, calls = _run_indexnow_gate(tmp_path, gate_fail=True)
+    assert rc == 1, out
+    assert "could not verify" in out, out
+    assert "curl: (7)" in out, f"curl's own diagnosis was discarded: {out!r}"
+    assert "did not refuse an anonymous caller" not in out, out
+    assert calls, "nothing was requested"
+
+
+def test_the_indexnow_gate_diagnoses_a_zero_status_as_an_outage(tmp_path) -> None:
+    """`000` with curl exiting 0 must not read as "the file is not served".
+
+    A mid-stream reset can finish with status 000 and exit code 0, so keying the
+    outage arm on `curl-failed*` alone leaves that shape blaming the deployment.
+    """
+    rc, out, calls = _run_indexnow_gate(tmp_path, zero=True)
+    assert rc == 1, out
+    assert "could not verify" in out, out
+    assert "is not served by the deployment" not in out, f"an outage blamed the deploy: {out!r}"
+    assert calls, "nothing was requested"
+
+
+@pytest.mark.parametrize(
+    "module,needle",
+    [
+        # The two constant-VALIDATION arms. Both are load-bearing in the same way:
+        # a value that is not 32 lowercase hex is not a key an engine will accept,
+        # and — the reason they exist — a request made with it fails at the endpoint
+        # and gets reported as a DEPLOY fault, sending the operator to debug a site
+        # that is fine.
+        (
+            'export const INDEXNOW_KEY = "A7C41F0E9B2D63584E1C0AF7D3B925E6";\n',
+            "not lowercase hex",
+        ),
+        (
+            'export const INDEXNOW_KEY = "a7c41f0e9b2d63584e1c0af7d3b925e6dead";\n',
+            "36 characters",
+        ),
+        # Uppercase hex would ALSO pass a [0-9a-z] anchor check, so the case is a
+        # real shape rather than a hypothetical one.
+    ],
+)
+def test_the_indexnow_gate_validates_the_constant_before_it_requests_anything(
+    tmp_path, module: str, needle: str
+) -> None:
+    """A syntactically readable but INVALID constant is an EXTRACTOR fault too."""
+    rc, out, calls = _run_indexnow_gate(tmp_path, module_text=module)
+    assert rc == 1, out
+    assert "EXTRACTOR fault" in out, out
+    assert needle in out, out
+    assert "is not served" not in out, f"an extractor fault blamed the deploy: {out}"
+    assert calls == [], f"an invalid constant still made requests: {calls}"

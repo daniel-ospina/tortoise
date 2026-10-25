@@ -754,6 +754,39 @@ SOURCE_PATTERNS = {
                    # #3261/#3616/#8334 silent-drop class.
                    "tools/ts/",
                    "config/pages-upload-classification.txt",
+                   # #6870 review (P1): the mono-stack guard
+                   # (`tests/test_website_static.py::
+                   # TestMonospaceStackRendersAsAMonoFace`) widened its scan to
+                   # `apps/` and to the Python modules that emit HTML, but this
+                   # surface is the guard's ONLY registration and neither root
+                   # reached it. Measured before these entries:
+                   # `select(["apps/graph-viz/src/index.css"])` -> `surfaces=[]`
+                   # (a graph-viz-only diff filters to `changed == []` and takes
+                   # the docs-only tier-1 early return, because `apps/` is in
+                   # NON_PYTHON_PREFIXES and matched no SOURCE_PATTERNS row), and
+                   # `select(["tortoise/oauth.py"])` -> `['api', 'core']` with the
+                   # guard absent. So a re-copy of the old Courier-rendering stack
+                   # into one of the 8 graph-viz canvas/JSX declarations or into
+                   # the served MCP consent page merged GREEN — the
+                   # #1349/#3332/#3616 silent-drop class, on the exact surfaces
+                   # the guard was widened to protect. `tortoise/oauth.py` is in
+                   # CORE_ALSO, so `core` stays selected alongside. Concrete
+                   # paths, not globs: `select()` matches with `startswith`.
+                   # Pinned by tests/test_website_static.py::
+                   # TestMonospaceStackRendersAsAMonoFace::
+                   # test_every_file_it_scans_selects_this_guard (derived from the
+                   # files the scan reads) and by tests/test_ci_selection.py::
+                   # test_the_monospace_guard_is_selected_on_every_root_it_scans.
+                   "apps/graph-viz/src/",
+                   "tortoise/oauth.py",
+                   # The guard's other declared emitter (`MODULES`). It carries no
+                   # mono declaration today, so nothing forces its wiring — which
+                   # is exactly why it is named here: the guard's subject list
+                   # must not be able to grow a member whose diff never runs it.
+                   # Paired with `CORE_ALSO` below because a SOURCE_PATTERNS match
+                   # REPLACES the `core` fallback, and `test_render.py` (the
+                   # renderer's own guard) is registered `core`.
+                   "tortoise/render.py",
                    # PR #9652 review (P2): `tests/test_website_static.py`'s new
                    # `TestProductRootMarkerContract` has THREE subjects, and only
                    # two of them selected this surface — `website/product.html`
@@ -777,7 +810,45 @@ SOURCE_PATTERNS = {
                    # silent drop for another. Pinned by
                    # tests/test_ci_selection.py::
                    # test_product_root_marker_guard_runs_on_a_legal_pages_only_diff.
-                   "tests/e2e/test_legal_pages.py"),
+                   "tests/e2e/test_legal_pages.py",
+                   # #9607: `tortoise/quadrature.py` is an input this guard
+                   # DERIVES from — `test_docs_states_the_formulas_quadrature_
+                   # actually_computes` reads both factors out of the module and
+                   # asserts /docs states them, and its own docstring claims
+                   # *"editing `quadrature.py` itself reds the page that describes
+                   # it"*. That was FALSE in CI: `quadrature.py` matched no
+                   # `SOURCE_PATTERNS` entry and is not in `SHARED_MODULES`, so a
+                   # quadrature-only diff took the generic `core` fallback
+                   # (`surfaces=['core']`, `full=False`) and landed in a pool this
+                   # file is not registered in — so a QUADRATURE-ONLY diff could not
+                   # run the formula pin (a PR that also touched a `docs`/website
+                   # page still did, via `onboarding`). Measured on `02e18e752`
+                   # before listing: `select(["tortoise/quadrature.py"])` returned
+                   # `full=False`, `surfaces=['core']`, this file ABSENT from
+                   # `test_files`. Same #1349/#3332/#3616 silent-drop class as the
+                   # derivation inputs directly above (`website/_redirects`,
+                   # `tests/_html_links.py`), and the reverse ratchet in
+                   # `tests/test_website_docs_consistency.py::
+                   # test_every_guard_input_is_selectable_by_ci` pins it so the
+                   # entry cannot be dropped again.
+                   "tortoise/quadrature.py",
+                   # #9607 review P2 (round 5): the SIBLING instance of the entry
+                   # above, one file over. `test_website_docs_consistency.py`
+                   # imports `Point` / `point_content_id` from this module and its
+                   # `test_commit_schema_requires_a_source_on_every_extracted_claim`
+                   # is the evidence under the FAQ's PUBLISHED traceability
+                   # sentence — so relaxing `Point.source_ref` is the one change
+                   # that can falsify what `website/faq.html` ships. Measured
+                   # before this entry: `select(["tortoise/commit_schema.py"])`
+                   # returned `full=False`, `surfaces=['core']`, this file ABSENT
+                   # from `test_files` — the same `core` fallback as quadrature,
+                   # so the change that reds the contract tests could edit them and
+                   # still never run the pin on the page. Paired with a `CORE_ALSO`
+                   # entry below (a named-surface match REPLACES the `core`
+                   # fallback, #2938) and pinned by
+                   # tests/test_ci_selection.py::
+                   # test_commit_schema_change_keeps_the_core_pool_and_runs_the_docs_guard.
+                   "tortoise/commit_schema.py"),
     # NOTE: .github/workflows/deploy-pages.yml is deliberately NOT listed above.
     # A review pointed out that adding it would be a coverage DOWNGRADE: an
     # unlisted path falls into the unknown-path branch -> FULL matrix (fail
@@ -1074,6 +1145,33 @@ SOURCE_PATTERNS = {
 # tuple is redundant for any path already listed here.
 CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.py",
              "tortoise/projection/edges.py",
+             # #9607: `tortoise/quadrature.py` is registered in `onboarding` (its
+             # /docs formula guard lives there), and a SOURCE_PATTERNS match
+             # REPLACES the `core` fallback (#2938) — so without this entry the
+             # very PR that edits a formula would STOP running the whole core pool
+             # it selects today (`select(["tortoise/quadrature.py"], ...)` collapses
+             # to the `onboarding` set alone), i.e. the fix for one silent drop would
+             # create another. The pool's size is a DATED ANCHOR, not a live count
+             # (633 at `1ff23919c`; read today's with
+             # `len(select(["tortoise/foo.py"], "pull_request", load_manifest())["test_files"])`)
+             # — it grows with the suite, and a bare count rots.
+             #   ⚠️ Deliberately NOT the whole fix: `tests/test_ep_quadrature.py`
+             # is registered under `ep`, so a quadrature-only diff still drops it —
+             # and so do the three other `ep`-registered suites that import the
+             # module (`test_ep_calibration.py`, `test_ep_projections.py`,
+             # `test_gmm_proofs.py`). That half is pre-existing and is tracked
+             # separately (#9621) rather than folded in here.
+             "tortoise/quadrature.py",
+             # #9607 review P2 (round 5): `tortoise/commit_schema.py` is the other
+             # `core`-fallback input now registered in `onboarding` — same #2938
+             # trade, same remedy. Without this entry the very PR that relaxes
+             # `Point.source_ref` stops running the core pool it selects today
+             # (measured: `select(["tortoise/commit_schema.py"])` collapses to the
+             # `onboarding` set alone), i.e. the fix for one silent drop would
+             # create another. Pinned by
+             # tests/test_ci_selection.py::
+             # test_commit_schema_change_keeps_the_core_pool_and_runs_the_docs_guard.
+             "tortoise/commit_schema.py",
              # #7947 review P1: `tests/eval/write_path/` is a SOURCE_PATTERNS
              # entry of `eval` (the measurement sources), and a named-surface
              # match REPLACES the `tests/` -> core fallback — but `core`
@@ -1123,6 +1221,25 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # Pinned by
              # tests/test_ci_selection.py::test_record_wiring_check_tool_change_selects_core_not_tier1.
              "tools/record_wiring_check.py",
+             # #9790 review P1: tools/batch_review.py owns
+             # tests/test_batch_review.py (registered `core`), but `tools/` is a
+             # flat NON_PYTHON_PREFIXES entry and NO SOURCE_PATTERNS row matches
+             # the tool — so a tool-only change filtered to `changed == []`,
+             # took the docs-only early return and selected tier-1 smoke, where
+             # the guard is NOT registered. Measured before this entry:
+             # `select(["tools/batch_review.py"])` -> surfaces=[], full=False,
+             # test_batch_review.py absent. That is the #1349/#3332/#3616
+             # silent-drop class on the one diff that can break the guard: a
+             # follow-up that deletes `plan_records`'s manifest-head equality
+             # (`tools/batch_review.py::plan_records`) — the single line stopping a
+             # drifted outcome from minting a record — would have merged with
+             # the guard cases that pin it never running. The `core` row that
+             # registers the file is CLASSIFICATION only (#4348); it does not
+             # make a `tools/` path select `core`. CORE_ALSO (not
+             # TOOL_CARVEOUTS) because the suite is hermetic and the FastAPI-free
+             # core pool is the lowest-cost leg it can run in. Pinned by
+             # tests/test_ci_selection.py::test_batch_review_tool_change_selects_core_not_tier1.
+             "tools/batch_review.py",
              # #4174 review P1: the drift gate's suite (test_drift_guard.py) is
              # `core`-registered, but `tools/` is swallowed by
              # NON_PYTHON_PREFIXES and no SOURCE_PATTERNS entry matches
@@ -1153,6 +1270,20 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # silent-drop class as tools/queue_resweep.py above. Pinned by
              # tests/test_ci_selection.py::test_docs_lint_baseline_tool_change_selects_core_not_tier1.
              "tools/docs_lint_baseline.py",
+             # #9695 review P1: tools/ax_write_eval.py owns
+             # tests/test_ax_write_eval.py (registered `core`), but `tools/` is
+             # swallowed by NON_PYTHON_PREFIXES and no SOURCE_PATTERNS entry
+             # matches it — so a tool-only edit selected NO surface, took the
+             # docs-only early return and fell back to tier-1 smoke, where the
+             # file pinning the instrument's P0/P1 rules is NOT registered. The
+             # eval's whole acceptance is "the delta, per input" read off this
+             # instrument, so weakening a rule had to be the one diff that ran
+             # its pins. Same #1349/#3332/#3616 silent-drop class as the entries
+             # above; MEASURED before this entry: `--changed-files
+             # tools/ax_write_eval.py` -> surfaces=[], full=False,
+             # test_ax_write_eval.py ABSENT. Pinned by
+             # tests/test_ci_selection.py::test_ax_write_eval_tool_change_selects_core_not_tier1.
+             "tools/ax_write_eval.py",
              # #7814 review P2: the queue-reconcile schedule installer owns
              # tests/test_install_queue_reconcile_schedule.py, registered
              # `core`, but `tools/` is swallowed by NON_PYTHON_PREFIXES and no
@@ -1166,6 +1297,17 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # as tools/queue_resweep.py above. Pinned by
              # tests/test_ci_selection.py::test_install_queue_reconcile_schedule_tool_change_selects_core_not_tier1.
              "tools/install-queue-reconcile-schedule.sh",
+             # #9639: the x86_64 runner installer owns
+             # tests/test_ci_runner_x64_install.py, which is registered `core` (and `carve_out`),
+             # but `tools/` is swallowed by NON_PYTHON_PREFIXES and no SOURCE_PATTERNS entry
+             # matches an installer path — so an INSTALLER-ONLY change selected NO surface, took
+             # the docs-only early return and fell back to tier-1 smoke, where that test is not
+             # registered. The label invariant (this arch's marker only, no `ubuntu-<version>`
+             # pin, `auto` reads the gate's state instead of assuming it) and the headroom
+             # guards would then never run on the PR that edits them. Same #1349/#3332/#3616
+             # silent-drop class as the queue-reconcile installer above. Pinned by
+             # tests/test_ci_selection.py::test_install_ci_runner_x64_tool_change_selects_core_not_tier1.
+             "tools/install-ci-runner-x64.sh",
              # PR #8427 review Finding 4: tools/graph_write_repair.py and its
              # launchd installer own tests/test_graph_write_repair.py (registered
              # `core`) -- the probe classification that authorises a repair, the
@@ -1297,6 +1439,15 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # (test_control_plane_offload_3498.py), so the SOURCE_PATTERNS
              # `api` match must not drop the core half.
              "tortoise/oauth.py",
+             # #6870 review (P1/P3): the mono-stack guard declares
+             # `tortoise/render.py` in its `MODULES` and scans it, so its diff
+             # must select that guard (`SOURCE_PATTERNS["onboarding"]`). A
+             # named-surface match REPLACES the `core` fallback, and
+             # `tests/test_render.py` — the renderer's own guard — is registered
+             # `core`. Without this entry a renderer-only change would select
+             # `onboarding` and silently stop running the test that guards the
+             # renderer.
+             "tortoise/render.py",
              # #5581: the source-currency derivation helper owns
              # tests/test_source_currency_5581.py, registered `core` — but
              # `tools/` is swallowed by NON_PYTHON_PREFIXES and no
@@ -1353,7 +1504,103 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # can drift them. Pinned by
              # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
              "supabase/migrations/20261022000001_record_session_capture_redactions_integer.sql",
+             # #9555/R7: the FORWARD record migration that CREATES
+             # `public.session_narrative`. Same gap as the #8263/#2782 entries
+             # above and it sorts outside the `2026101200000` prefix: a
+             # forward-migration-only diff selects NO surface, so the legs that
+             # read this migration's TEXT (`test_record_projection.py`,
+             # `test_record_schema_placement.py`, `test_9555_session_narrative.py`,
+             # `test_7950_capstone_probe.py`) would not run on the very change
+             # that can drift them — the same #1349/#3332/#3616 silent-drop
+             # class. Pinned by
+             # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
+             "supabase/migrations/20261023000001_record_session_narrative.sql",
+             # #9555 / PR #9862 review round 4: R7's CARRIER migration
+             # (`20261024000001`, `COMMENT ON` only). Measured: a diff touching
+             # ONLY this file selected `surfaces: []`, so
+             # `test_9555_session_narrative.py` — which reads this file's text and
+             # pins the schema's narrative claim by name — did not run on the one
+             # change that can make its pin false. No `2026101*` prefix applies
+             # (same reason as the tenancy row below: `supabase/` is a
+             # NON_PYTHON_PREFIX), so without this entry the arm is a silent drop
+             # of the #1349/#3332/#3616 class.
+             "supabase/migrations/20261024000001_record_session_narrative_carrier.sql",
+             # #9554 / PR #9600 review cycle 1 (P2): the TENANCY POSTURE migration —
+             # the app role, its grants (including `relation_id_seq`'s USAGE) and
+             # the `*_app_tenant` policies, one per record table (ten, since
+             # #9555's `session_narrative`). It sorts outside the
+             # `2026101200000` prefix and `supabase/` is a NON_PYTHON_PREFIX, so a
+             # migration-only edit (dropping a `WITH CHECK`, flipping `is_local`,
+             # re-adding `BYPASSRLS`, removing the sequence grant) selected NO
+             # surface: `tests/test_record_tenancy_guc.py` — the suite that reads
+             # this migration's TEXT and pins it — did not run on the change that
+             # DEFINES the boundary. (The PGlite posture suite is NOT the gap: it
+             # is selected by the workflow's own `supabase/migrations/` prefix
+             # output and runs on every migration edit. The PYTHON pin is what
+             # had no entry.) Pinned by
+             # tests/test_ci_selection.py::test_the_tenancy_migration_selects_the_posture_pins.
+             "supabase/migrations/20261025000001_record_tenancy_role_and_guc.sql",
+             # #9881 / PR #9948 review P2: the FORWARD migration that
+             # RE-DECLARES the Object/Subject key contract — the
+             # `node_identity.key_property` CASE and both
+             # `chk_*_node_key_is_contract_key` pins. It is the one file that can
+             # re-declare what `record_projection.key_properties()` now reads
+             # (LAST declaration wins), and it sorts outside the
+             # `2026101200000` prefix while `supabase/` is a NON_PYTHON_PREFIX,
+             # so a diff touching only this file selected NO surface. Measured on
+             # the pre-fix head: `_sel([<this path>])` -> `surfaces: []`,
+             # `full: false`, and every reader of the contract —
+             # `test_record_projection.py`,
+             # `test_record_schema_placement.py`, `test_cache_projection.py`,
+             # `test_read_ledger.py` — absent from `test_files`. The
+             # #1349/#3332/#3616 silent-drop class, and the reason a `core`
+             # registration alone cannot fix it (a surface's test_files only run
+             # when that surface is ALREADY selected). Pinned by
+             # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change
+             # and ……::test_the_semantic_id_key_migration_selects_every_reader_of_the_contract.
+             "supabase/migrations/20261027000001_record_semantic_id_key.sql",
+             # Re-stated at the migration pair, NOT replaced by it (#9638 review
+             # P1): the DOC side is an independent member of this set. The
+             # #9555/R7 entry above was inserted over this path, so a
+             # placement-doc-ONLY change — the edit that silently desynchronised
+             # the pin from the table in the first place — fell back to the
+             # docs-only early return and ran neither reader. Both halves must
+             # be present; the pair's #7968 comment above names both paths and is
+             # false without this entry.
              "docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md",
+             # #9555 / #9638 review P3: the SECOND document the same pin now
+             # reads. `test_record_schema_placement.py::
+             # test_the_prerequisites_a1_census_matches_the_record_migrations`
+             # pins `08-hosted-prerequisites.md` §A1 — the epic's own "what
+             # EXISTS" ledger — against the migrations on disk. That path is
+             # under `docs/` (a NON_PYTHON_PREFIXES entry) and matches no
+             # SOURCE_PATTERNS row, so without this entry a §A1-only edit took
+             # the docs-only early return and selected NO surface: the census
+             # could be left claiming nine tables on the PR that creates the
+             # tenth, with the pin that exists to catch it never running — the
+             # #1349/#3332/#3616 silent-drop class, and the exact shape of the
+             # defect it pins. Pinned by
+             # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
+             "docs/epics/2026-10-10-7879-postgres-record/08-hosted-prerequisites.md",
+             # #9638 review P1: the THIRD document a record pin now reads, and
+             # the one whose absence made the PR's own newest commit
+             # (`e92a78099`, "the routing index's census, and the pin that keeps
+             # it true") unpinnable. `test_record_schema_placement.py::
+             # test_the_routing_index_census_matches_the_record_migrations`
+             # reads `docs/00_index.md`'s #7879 row for its census
+             # ("N record tables + M procedural views")
+             # AND for its negative ("no narrative/raw-text table"). That path
+             # is under `docs/` (a NON_PYTHON_PREFIXES entry) and matches no
+             # SOURCE_PATTERNS row, so an index-only edit filtered to
+             # `changed == []` and took the docs-only early return: the census
+             # could go stale again — exactly the drift the commit exists to
+             # catch — with the pin that guards it never selected. The
+             # `core` registration cannot fix this on its own: a surface's
+             # test_files only run when that surface is ALREADY selected.
+             # Same #1349/#3332/#3616 silent-drop class as the two entries
+             # above. Pinned by
+             # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
+             "docs/00_index.md",
              # RETIRED 2026-10-19: the orchestrator harness (and therefore
              # tests/test_orchestrator_harness.py) moved to
              # agent-infra/scripts/orchestrator-harness/. This repo keeps only a pointer
@@ -1478,11 +1725,47 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # entry) it is a cost/home fix rather than a hole fix, which is
              # stated so the polarity is not misread later.
              "docs/evidence/7949-capstone/",
+             # #9695: the Step-1 eval's EVIDENCE DOC
+             # (`docs/ax/how-to-use-tortoise-step1-eval.md`) publishes every
+             # measured number of that eval — the aggregate headline, all ten
+             # per-input P0/P1 rows, the class census and every `kind` ×N
+             # multiplier — and the only thing that re-derives them from the
+             # committed `runs/*/score.json` records is
+             # `tests/test_ax_write_eval.py`, registered on `core` only.
+             #
+             # MEASURED before this entry (`select()` in-process):
+             # `select(["docs/ax/how-to-use-tortoise-step1-eval.md"])` →
+             # `surfaces=[]`, `full=False`, pin ABSENT. `docs/` is a
+             # flat NON_PYTHON_PREFIXES entry and `_is_non_code_doc` recognises
+             # four exact paths, so the changed list comes back empty and
+             # select() takes the docs-only early return — tier-1 smoke, which
+             # does not carry the pin. A one-file PR could therefore re-cut the
+             # headline to any number and merge with the guard that re-measures
+             # it NEVER RUN: the #1349/#3332/#3616 class, reached through the
+             # early return rather than `_selection_relevant`, and the same
+             # shape recorded for `docs/evidence/7950-capstone/` above.
+             # Pinned by tests/test_ci_selection.py::
+             # test_the_step1_eval_evidence_doc_selects_core_not_tier1.
+             "docs/ax/how-to-use-tortoise-step1-eval.md",
              # `tools/` is a flat NON_PYTHON_PREFIXES entry too, so the checker was
              # swallowed by the same early return; its pins are `core`-registered
              # and hermetic, so `core` is the right lane (the shape
              # `tools/lane_stash.py` above takes).
              "tools/e1_e2_census_check.py",
+             # #9080 (#9089 review): the capstone gate itself
+             # (`tools/capstone_verdict_check.py`) — the closing rule for epic
+             # #7949 — owns `tests/test_7949_capstone_verdict_check.py`, which is
+             # registered `core`. Without this row a GATE-ONLY diff came back
+             # `surfaces=[], full=False`: the pin ran only because it also sits in
+             # the `tier1` curated list, so `core` — the surface the comment in
+             # `config/ci-surfaces.yml` names as its home — was nominal, and one
+             # `tier1` edit would have dropped the pin silently (measured before
+             # this entry: `select(['tools/capstone_verdict_check.py'])` →
+             # surfaces=[], pin present only via tier1). Same shape and remedy as
+             # `tools/e1_e2_census_check.py` above, and the same polarity note:
+             # this is a cost/home fix, not a hole fix. Pinned by
+             # tests/test_ci_selection.py::test_the_capstone_gate_change_selects_core_not_tier1.
+             "tools/capstone_verdict_check.py",
              # #4030: `supabase/config.toml` is the committed LOCAL-stack config,
              # and every env var it resolves by `env(NAME)` substitution must be
              # declared in `.env.example` — the guard for that pair
@@ -1548,6 +1831,20 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_ci_selection.py::test_journal_growth_guard_runs_on_a_tool_or_probe_change.
              "tools/journal_growth.py",
              "docs/evidence/5612-journal-growth/probes/",
+             # ⛔ NO `docs/evidence/7949-capstone/probes/` ROW. #9080 did add
+             # one, and it was DEAD: `"docs/evidence/7949-capstone/"` above is
+             # the whole bundle prefix and matching is `path.startswith()`, so
+             # a narrower prefix inside it can never admit a path the broader
+             # one does not. Measured (2026-10-20, `select()` in-process): with
+             # the narrow row deleted, a probe-only diff still returns
+             # `surfaces=['core']` and carries
+             # tests/test_7949_capstone_verdict_check.py — the broad row is what
+             # makes the probe select `core`, and it landed with #9076. A dead
+             # row is not harmless: it reads as the reason a path is covered, so
+             # the next lane re-adds it and the real reason (the broad row) goes
+             # unexamined. Pinned by
+             # tests/test_ci_selection.py::test_no_core_also_entry_is_shadowed_by_a_parent_prefix
+             # and ::test_7949_capstone_probe_change_selects_core_not_tier1.
              # #5612: `tests/test_journal_growth.py` hard-codes the CORPUS's
              # shape (`records == 39`, 29 distinct types), so an edit to the
              # fixture alone must select `core` too — it sits under
@@ -1558,6 +1855,23 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # never ran on the bytes they hard-code. Pinned by
              # tests/test_ci_selection.py::test_journal_growth_guard_runs_on_a_tool_or_probe_change.
              "supabase/tests/fixtures/record_projection_journal.jsonl",
+             # agent-infra#2344 (owner ruling): `tools/runner_autoscale.py` is this
+             # box's runner-capacity guard and `tests/test_runner_autoscale.py`
+             # owns its pins (ceiling arithmetic + 25 mutation gates). `tools/` is a
+             # flat NON_PYTHON_PREFIXES entry, so a tool-only change came back with
+             # `changed == []` and the guard's own tests never ran on the file they
+             # guard — the #1349/#3332/#3616 silent-drop class, the same shape as
+             # `tools/lane_stash.py` above. `CORE_ALSO` (not a SOURCE_PATTERNS row)
+             # is deliberate: this is a lane/fleet-hygiene contract about a TOOL, and
+             # `core` already carries the other `tools/` pins.
+             "tools/runner_autoscale.py",
+             # PR #9685 review round 9, P1-2: the INSTALLER arms the guard, and it was
+             # missing while its `.py` was listed — so an installer-only diff selected
+             # NO surface. That is the same silent-drop class one file over: the 825
+             # lines that decide whether the timer is armed at all were verified by
+             # nothing. Pinned by
+             # tests/test_ci_selection.py::test_runner_autoscale_installer_change_selects_core_not_tier1.
+             "tools/install-runner-autoscale-schedule.sh",
              # PR #8852 review P2: `website/apps/dashboard/deploy.sh` is the
              # documented manual deploy, and the #8816 guard
              # (tests/test_e2e_wrangler_prewarm.py, registered `core`) both reads
@@ -1775,7 +2089,17 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # `tests/eval/write_path/`). Both halves are asserted by
              # tests/test_ci_selection.py::
              # test_product_root_marker_guard_runs_on_a_legal_pages_only_diff.
-             "tests/e2e/test_legal_pages.py")
+             "tests/e2e/test_legal_pages.py",
+             # CLI-extraction lane (#9915): the flat `integrations/` prefix in
+             # NON_PYTHON_PREFIXES swallows the extractor, so an
+             # extractor-only diff comes back `changed=[]`, select() takes the
+             # early return and bypasses the `matched.add("core")` fallback —
+             # not one of the lane's guards (`tests/test_cli_extraction.py`,
+             # registered under `surfaces: core:` and `carve_out:`) would run
+             # on the very change that can break them (#6138-review-P1 class).
+             # Kept here so `_selection_relevant` claims it in `_keep_changed`
+             # and the core fallback stays alive.
+             "integrations/cli-extraction/extract_turns.py")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",

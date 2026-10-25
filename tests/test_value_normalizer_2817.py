@@ -49,6 +49,13 @@ from tortoise.money import (
     money_props,
     read_money_value,
 )
+
+# #2817 review F2: the capture write seam's report policy is taken FROM the
+# production constant rather than re-declared, so a re-declared copy cannot let
+# the two drift silently in either direction (a widened production set would
+# drown the receipt while these tests stayed green; a narrowed one could mute
+# the design's named abstention — §6/T3 — with no red anywhere).
+from tortoise.sdk import _CAPTURE_MONEY_WARN_ON as _CAPTURE_WARN_ON
 from tortoise.value_normalizer import (
     DROP_REASONS,
     PROSE_FIELDS,
@@ -995,6 +1002,113 @@ def test_a_number_word_anchor_is_never_typed(anchor_sentence):
     assert normalize_money_props(anchor_sentence) is None
 
 
+# ── the S5 call pattern's warning channel (route 2, #2817) ─────────────────
+#: ``_CAPTURE_WARN_ON`` above is the PRODUCTION narrowing the capture write
+#: seam passes: what a per-point writer must not report (it fires on ordinary
+#: business prose) vs what it must keep reporting (a number was present and was
+#: NOT safely typed — the design's named abstention, §6/T3).
+
+
+def test_the_seams_report_policy_is_the_one_the_ruling_records():
+    """#2817 review F2: pin the PRODUCTION partition itself.
+
+    The ruling (comment `6359826543`) silences exactly two reasons —
+    ``no_candidate`` (no number at all) and ``not_an_iso4217_code`` (ordinary
+    prose such as ``"ISO 9001"``) — and keeps every other reason reportable,
+    including ``no_currency_anchor`` (the design's named abstention, §6/T3)
+    and ``refused_by_layer1`` (an amount the store cannot hold). Equality, not
+    a subset, so BOTH directions of drift red here.
+    """
+    expected = DROP_REASONS - {"no_candidate", "not_an_iso4217_code"}
+    assert expected == _CAPTURE_WARN_ON, sorted(_CAPTURE_WARN_ON)
+    assert "no_currency_anchor" in _CAPTURE_WARN_ON
+    assert "refused_by_layer1" in _CAPTURE_WARN_ON
+
+
+def test_warn_on_narrows_the_channel_without_changing_the_derivation():
+    """``warn_on`` is a CHANNEL filter, not a parse switch: the same drops
+    occur on both paths, and only the reporting differs."""
+    noisy = []
+    quiet = []
+    assert normalize_money_props("no numbers here", warnings=noisy) is None
+    assert normalize_money_props(
+        "no numbers here", warnings=quiet, warn_on=_CAPTURE_WARN_ON) is None
+    assert len(noisy) == 1 and quiet == [], (noisy, quiet)
+    assert "no_candidate" in noisy[0], noisy
+
+
+def test_warn_on_keeps_the_designs_named_abstention_reportable():
+    """§6/T3: ``1.234,56 last quarter`` types nothing and IS worth reporting —
+    it is the case a reader must see (a number that could not be read), not
+    the noise the narrowing exists to suppress."""
+    warnings: list[str] = []
+    assert normalize_money_props(
+        "1.234,56 last quarter", warnings=warnings,
+        warn_on=_CAPTURE_WARN_ON) is None
+    assert len(warnings) == 1, warnings
+    assert "no_currency_anchor" in warnings[0], warnings
+
+
+def test_an_amount_the_store_cannot_hold_is_an_abstention():
+    """#2817 (review P1): a value the store cannot represent is a DROP, never a
+    write — and never the record's loss. Pre-fix this typed ``amountMinor``
+    above INT64, which the write path refuses, so at the capture seam the whole
+    POINT was lost and the capture reported `ok=False`."""
+    result = dropped(
+        "The facility size was EUR 123456789012345678 for the year.",
+        "refused_by_layer1")
+    assert result.typed is False
+    # The boundary is inclusive: INT64 max / 100 still types at exponent 2.
+    assert typed("EUR 92233720368547758")[AMOUNT_MINOR] == 9_223_372_036_854_775_800
+
+
+def test_warn_on_refuses_a_reason_outside_the_closed_set():
+    """A typo in a closed vocabulary must fail loudly — silently muting the
+    warning it was meant to configure is the failure mode."""
+    with pytest.raises(ValueError, match="unknown drop reason"):
+        normalize_money_props("EUR 800", warn_on={"no_currency_anchro"})
+    # ...and it raises even when the text would have TYPED, so the typo cannot
+    # hide behind a value the caller was happy with.
+    assert normalize_money_props("EUR 800") is not None
+
+
+def test_the_drops_sink_counts_by_reason_and_only_what_warn_on_reports():
+    """#2817 review F1: the AGGREGATING sink.
+
+    A per-run caller counts instead of appending, so its receipt is one bounded
+    summary entry however many values it wrote. The sink honours ``warn_on``
+    (an unreported reason is not counted, the same way it is not printed), and
+    it is independent of ``warnings`` — nothing is appended when only ``drops``
+    is passed, so the seam cannot accidentally keep the per-point channel.
+    """
+    drops: dict[str, int] = {}
+    warnings: list[str] = []
+    # Three unanchored bare numbers → three counted abstentions, and NOTHING
+    # appended when only the aggregating sink is passed.
+    for text in ("the tranche released 800 last week",
+                 "800 people were hired",
+                 "the policy covers all 800 accounts"):
+        assert normalize_money_props(
+            text, warn_on=_CAPTURE_WARN_ON, drops=drops) is None
+    assert drops == {"no_currency_anchor": 3}, drops
+    assert warnings == [], warnings
+    # A numberless sentence is NOT counted under the narrowed set ...
+    assert normalize_money_props(
+        "no numbers here", warn_on=_CAPTURE_WARN_ON, drops=drops) is None
+    assert drops == {"no_currency_anchor": 3}, drops
+    # ...a TYPED value contributes nothing to the count ...
+    assert normalize_money_props(
+        "EUR 800", warn_on=_CAPTURE_WARN_ON, drops=drops) is not None
+    assert drops == {"no_currency_anchor": 3}, drops
+    # ...and the two sinks are independent: passing BOTH appends the line AND
+    # counts it, so neither caller shape loses its signal.
+    assert normalize_money_props(
+        "the tranche released 800 last week", warn_on=_CAPTURE_WARN_ON,
+        drops=drops, warnings=warnings) is None
+    assert drops == {"no_currency_anchor": 4}, drops
+    assert len(warnings) == 1 and "no_currency_anchor" in warnings[0], warnings
+
+
 def test_a_long_input_is_not_quadratic():
     """Cycle-2 P2: ``_as_of`` was recomputed per candidate (24 KB took ~10 s).
     A generous bound: a structural regression shows up in orders of magnitude."""
@@ -1027,6 +1141,9 @@ def test_the_module_imports_no_clock_network_or_locale():
             imported.update(a.name.split(".")[0] for a in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
             imported.add(node.module.split(".")[0])
+    # `collections` is `collections.abc` for the ``warn_on`` annotation — pure
+    # stdlib with no clock, no network and no locale, so it does not weaken the
+    # property this test asserts.
     assert imported <= {"__future__", "re", "dataclasses", "typing",
-                        "tortoise"}, imported
+                        "collections", "tortoise"}, imported
     assert "locale" not in imported

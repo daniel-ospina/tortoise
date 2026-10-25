@@ -1010,7 +1010,7 @@ test('#2361 vocab anchor: LIVE surfaces (main.jsx) do not drift back to "point"'
   const promptsSrc = readFileSync(join(__dirname, 'wizardPrompts.js'), 'utf8')
   assert.deepEqual(promptsSrc.match(/\bpoints?\b/gi) ?? [], [],
     'new "point" vocabulary in wizardPrompts.js — the live wizard copy')
-  const rendered = ['pi', 'cursor', 'claude', 'codex', 'claude-desktop', 'claude-web']
+  const rendered = ['pi', 'cursor', 'claude', 'codex', 'claude-desktop', 'claude-web', 'chatgpt']
     .flatMap((h) => [1, 2].map((s) => wizardPromptText(h, s, 'tk_test', 'included')))
   assert.ok(rendered.some((p) => p.includes('tortoise_create_point')),
     'precondition: a rendered prompt carries the create_point instruction')

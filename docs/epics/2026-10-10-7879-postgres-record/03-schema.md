@@ -113,7 +113,7 @@ All three are `security_invoker = true`, so the caller's RLS applies at the seam
 
 ## 2. The `(label, key)` foreign key
 
-W1 fixes the key **by label** — `:Point → id`, `:Event → eventId`, `:Subject`/`:Object → name`, `:Source → url` — and states the rule that follows: **a foreign key is `(label, key)`, never a bare id**, because the same string used as a `:Subject` and as a `:Source` is two different nodes.
+W1 fixes the key **by label** — `:Point → id`, `:Event → eventId`, `:Subject`/`:Object → id` (since #9881 — `name` is a mutable natural key), `:Source → url` — and states the rule that follows: **a foreign key is `(label, key)`, never a bare id**, because the same string used as a `:Subject` and as a `:Source` is two different nodes.
 
 Three enforcements, and each closes a different hole:
 
@@ -190,7 +190,9 @@ The dotted BP edge props (`IMPL.msg_*` / `IMPL.back_msg_*`) are DERIVED too, so 
 
 ### 6.2 `supabase/tests/20261012000001_record_schema.sql` — the SQL half
 
-Runs on PGlite. Asserts the nine tables exist and the procedural layer is **not** one of them; the RLS boundary (a cross-tenant read returns **nothing**, and `authenticated` cannot write); the composite FKs (a relation to a non-existent node is refused); the `node_key` contract CHECKs; that each carve-out CHECK **fires**; and that the journal refuses UPDATE and DELETE.
+Runs on PGlite. Asserts the nine layer tables exist (§1 — and, since #9555, that the tenth,
+`session_narrative`, is there with its RLS boundary, in §6b) and the procedural layer is **not** one of
+them; the RLS boundary (a cross-tenant read returns **nothing**, and `authenticated` cannot write); the composite FKs (a relation to a non-existent node is refused); the `node_key` contract CHECKs; that each carve-out CHECK **fires**; and that the journal refuses UPDATE and DELETE.
 
 **Postgres availability: the SQL half IS verified.** `npm --prefix supabase/tests/pglite run validate` applies every migration on a fresh database and runs every suite — including this one — and passes. PGlite is WASM Postgres and is the repo's established no-Docker harness (`supabase/tests/pglite/validate.mjs`). What it does **not** verify: row-level behaviour against a live FalkorDB, and the projection (there is none yet — `#7969`).
 

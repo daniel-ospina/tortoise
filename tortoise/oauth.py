@@ -2134,7 +2134,7 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
     --bg: #060b14; --surface: #0d1a2d; --text: #cbd5e1; --text-dim: #94a3b8;
     --accent: #06b6d4; --accent-hover: #0891b2; --green: #4ade80;
     --red: #ef4444; --gold: #f59e0b; --border: #1e293b;
-    --mono: 'SF Mono','Cascadia Code','Fira Code','JetBrains Mono',monospace;
+    --mono: ui-monospace,'SFMono-Regular','SF Mono',Menlo,'Cascadia Code','Fira Code','JetBrains Mono',monospace;
     --serif: 'Georgia','Times New Roman',serif;
   }
   body { background: var(--bg); color: var(--text); font-family: var(--mono);

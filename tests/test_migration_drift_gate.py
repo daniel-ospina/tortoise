@@ -250,9 +250,18 @@ def test_duplicate_free_but_pending_blocks_normally():
 # applies the whole repo-pending set in filename order). The BLOCKING list also
 # silently omitted warn-class (index-only) repo-ahead migrations, which are
 # still pushed. Against the pre-#4278 script (`origin/main` @ 877fa52d1, which
-# predates this change) the behaviour tests below fail. Re-run it by writing
-# that revision to the script path and running this file — do NOT use `HEAD`,
-# which already contains the fix. `test_clean_run_has_no_remediation_markers`
+# predates this change) the behaviour tests below fail. Re-run it against that
+# revision in a THROWAWAY worktree — never by overwriting the tracked script,
+# which mutates the tree under review and races a concurrent reviewer (see the
+# ⛔ repo-ahead block below for the recipe and the measured incident):
+#     git worktree add /tmp/pre4278 877fa52d1
+#     cp tests/test_migration_drift_gate.py /tmp/pre4278/tests/   # REQUIRED: at
+#         # 877fa52d1 this file holds 14 tests and NONE of the named ones, so the
+#         # -k selects nothing (pytest exit 5 = "nothing ran", not a red)
+#     cd /tmp/pre4278 && TORTOISE_TEST_CARVE_OUT=1 uv run pytest \
+#         tests/test_migration_drift_gate.py
+# Do not use `HEAD`, which already contains the fix.
+# `test_clean_run_has_no_remediation_markers`
 # and `test_duplicate_branch_never_executes_supabase` are guards rather than
 # fail-on-current tests; `test_report_never_executes_supabase` fails there too,
 # but on its stdout assertion — see the docstrings.
@@ -310,9 +319,18 @@ def test_out_of_order_block_does_not_instruct_apply():
     assert "OUT OF ORDER" in r.stdout, r.stdout
     assert "20260918000001" in r.stdout, "the newest applied version must be named"
     assert "supabase migration repair --linked --status applied" in r.stdout
-    # The refused action is withheld, not merely labelled.
+    # The repair is printed on this branch too, and the ALERT WRAPPER KEEPS ONLY
+    # THE REPORT'S LAST 6000 BYTES (`deploy-api-alert.sh`), so the shared note's
+    # OWNER-ONLY preamble can be cut while this line survives: the inline
+    # qualifier is what must travel with the command itself (round-3 finding).
+    assert "#2240" in r.stdout, r.stdout
+    assert "(OWNER ACTION — a lane must not run prod DDL or repair, #2240)" in r.stdout, r.stdout
+    # The refused action is withheld, not merely labelled — INCLUDING the
+    # "dispatch is the sanctioned lane path" line, which is a forward reference
+    # that must not print when no dispatch line follows it (round-7 finding).
     assert "apply migrations first" not in r.stdout, r.stdout
     assert "gh workflow run supabase-deploy.yml" not in r.stdout, r.stdout
+    assert "supabase-deploy" not in r.stdout, r.stdout
 
 
 def test_in_order_block_still_instructs_apply():
@@ -327,6 +345,318 @@ def test_in_order_block_still_instructs_apply():
     assert "OUT OF ORDER" not in r.stdout, r.stdout
     assert "COMPLETE" in r.stdout, r.stdout
     assert "FILTERED" not in r.stdout, r.stdout
+
+
+# ── #9613: the block named a cause it cannot know, and withheld the remedy ──
+# Repo-ahead is a set-diff of version STRINGS against `schema_migrations`. It
+# proves prod has no ROW; it cannot prove prod lacks the OBJECTS. The in-order
+# report said "NOT applied to prod" and prescribed only `db push` — while the
+# out-of-order branch of the SAME script already documents the other case
+# ("already in prod with no schema_migrations row: record it WITHOUT running
+# DDL — migration repair --status applied"). Measured live on #9613: prod served
+# `blog_posts.author_image_url` — a column `20261021000001` adds — from
+# /blog/state-of-agentic-memory-2026 (rendered per request by the Pages
+# Function, reading project ybetwichurajbfswfeqa, which the page itself names in
+# its JSON-LD storage URL), while this gate reported that same version as "NOT
+# applied to prod". So the red could not be cleared by the action it named and
+# was not cleared by any other: the DDL-free remedy was printed only as a
+# trailing `# rename-repair case:` comment. All three tests below fail against
+# the pre-#9613 script; `test_in_order_block_still_instructs_apply` above is the
+# guard that keeps the apply path from being REPLACED rather than joined.
+#
+# ⛔ To measure the "before" side, use a THROWAWAY COPY — never overwrite the
+# script in a working tree:
+#     git worktree add /tmp/pre9613 origin/main
+#     cp tests/test_migration_drift_gate.py /tmp/pre9613/tests/   # REQUIRED: the
+#         # new tests do not exist at origin/main, so a -k filter selects nothing
+#         # and pytest exits 5 — which reads as "nothing to see", not as a red
+#     cd /tmp/pre9613 && TORTOISE_TEST_CARVE_OUT=1 uv run pytest \
+#         tests/test_migration_drift_gate.py
+# Writing `origin/main`'s script over the tracked file in place mutates the PR
+# under review and RACES a concurrent reviewer: measured on this PR, a peer's
+# suite read the reverted script mid-run and reported 3 failed where the branch
+# is green (round-2 review finding).
+
+
+def test_in_order_block_does_not_claim_prod_lacks_the_objects():
+    """The heading may state only what was measured: prod has no version row.
+
+    Asserts on the heading LINE, not on a substring some sibling note supplies —
+    otherwise rewording the note would silently un-pin the heading (#9613 review
+    finding, so the assertion below is a single heading line).
+    """
+    r = _run_fixture(
+        {"20260813000004_claim.sql": "CREATE TABLE IF NOT EXISTS public.c (id text);\n"},
+        ["0001"],
+    )
+    assert r.returncode == 1, r.stdout
+    assert "NOT applied to prod" not in r.stdout, r.stdout
+    heading = next(
+        ln for ln in r.stdout.splitlines() if ln.startswith("  BLOCKING repo-ahead")
+    )
+    # The TABLE, not the schema: `supabase_migrations` is the schema and an
+    # operator who queries it lands on a schema-vs-table error.
+    assert "supabase_migrations.schema_migrations" in heading, heading
+    assert "has NO row" in heading, heading
+
+
+def test_in_order_block_offers_the_ddl_free_remedy_for_bookkeeping_drift():
+    """Both outcomes are printed as peers, and the repair is gated on prod.
+
+    Naming only `db push` in this branch is what left #9613 red: for a version
+    whose objects are already in prod it re-runs DDL, and the remedy that fits
+    (repair) was not offered. Naming only `repair` would be the #1001 defect —
+    a blanket repair hides real drift — so the report must also carry the
+    read-only verification that tells the two cases apart.
+
+    The repair assertion is STRUCTURAL on purpose: the pre-#9613 script already
+    contained the string `supabase migration repair --linked --status applied`
+    in a trailing `# rename-repair case:` comment, so a substring check passes
+    against the very report this change replaces (#9613 review finding). The
+    `(b)` outcome marker does not exist in that form.
+    """
+    r = _run_fixture(
+        {"20260813000004_claim.sql": "CREATE TABLE IF NOT EXISTS public.c (id text);\n"},
+        ["0001"],
+    )
+    assert r.returncode == 1, r.stdout
+    out = r.stdout
+    # (a) the apply path survives, verbatim, and comes first.
+    assert "apply migrations first" in out, out
+    assert "gh workflow run supabase-deploy.yml --ref main" in out, out
+    # (b) the DDL-free path is a first-class outcome, not a trailing comment.
+    marker = "(b) the objects are PRESENT and only the version is unrecorded"
+    assert marker in out, out
+    assert out.index(marker) < out.index("repair --linked"), out
+    assert out.index("apply migrations first") < out.index(marker), out
+    # ... and it is not a blanket instruction: the report names the read-only
+    # checks that distinguish "absent" from "unrecorded", and the #1001 limit.
+    assert "db diff --linked" in out, out
+    assert "migration list --linked" in out, out
+    assert "#1001" in out, out
+    # The DIAGNOSIS is presence-pinned HERE, on the ordinary BLOCKING report: a
+    # mutant deleting the `$BLOCKING` disjunct of its guard left the whole suite
+    # green before this assertion existed, and the report it dropped the note from
+    # is the one #9613 exists for (round-5 review finding).
+    assert "note: 'repo-ahead' means prod has no" in out, out
+    assert "produces exactly this report" in out, out
+    # The inline owner qualifier is pinned LITERALLY: the alert wrapper embeds only
+    # the report's last 6000 bytes, so a back-reference to the note above can be cut
+    # while the pointer survives (round-5 review finding).
+    assert "(OWNER ACTION — a lane must not run prod DDL or repair, #2240)" in out, out
+    # ... and it is owner-only: #2240 forbids a LANE running prod DDL or repair,
+    # and rules out auto-dispatch on this path (docs/infra-runbook.md §8.6 states
+    # the same bound for the audience that reads this gate's output).
+    assert "#2240" in out, out
+    assert "OWNER-ONLY" in out, out
+
+
+def test_repo_ahead_note_accompanies_the_duplicate_prefix_branch():
+    """The duplicate-prefix exit prescribes a rename + apply, so it must carry
+    the same 'repo-ahead proves no ROW, not missing objects' note — that is the
+    exit where a DDL-free repair is most tempting (#9613 review finding)."""
+    r = _run_fixture(
+        {
+            "20260813000005_a.sql": "CREATE TABLE IF NOT EXISTS public.a (id text);\n",
+            "20260813000005_b.sql": "CREATE TABLE IF NOT EXISTS public.b (id text);\n",
+        },
+        ["0001"],
+    )
+    assert r.returncode == 1, r.stdout
+    assert "duplicate" in r.stdout.lower(), r.stdout
+    assert "schema_migrations ROW" in r.stdout, r.stdout
+    # A duplicate report is NOT the repo-ahead report, even when its files are
+    # block-class (BLOCKING non-empty): the sentence that names the report must
+    # not appear (round-6 review finding).
+    assert "produces exactly this report" not in r.stdout, r.stdout
+    # The #2240 owner bound rides the OWNER BOUND statement (a separate one from
+    # the repo-ahead diagnosis since round 4), so every red exit carries it; all
+    # THREE repair SITES also carry an inline qualifier, because the alert wrapper
+    # keeps only the report's last 6000 bytes.
+    assert "#2240" in r.stdout, r.stdout
+
+
+def test_diagnosis_reaches_the_duplicate_branch_without_a_blocking_member():
+    """The `$DUP_LOCAL_VERSIONS` disjunct of the DIAGNOSIS gate is load-bearing too.
+
+    Index-only duplicate pair whose version is NOT recorded: BLOCKING is empty
+    (index-only is warn class), DUP and repo-ahead are set. The two-line caveat
+    must still print — that branch is where a DDL-free repair is most tempting.
+    The "produces exactly this report" sentence must NOT: this report is a
+    duplicate-prefix report, which bookkeeping drift cannot produce (round-5
+    review findings — measured: deleting the disjunct left the suite green).
+    """
+    r = _run_fixture(
+        {
+            "20260813000005_first.sql": "CREATE INDEX IF NOT EXISTS i1 ON public.t (a);\n",
+            "20260813000005_second.sql": "CREATE INDEX IF NOT EXISTS i2 ON public.t (b);\n",
+        },
+        ["0001"],
+    )
+    assert r.returncode == 1, r.stdout
+    assert "duplicate" in r.stdout.lower(), r.stdout
+    assert "note: 'repo-ahead' means prod has no" in r.stdout, r.stdout
+    assert "produces exactly this report" not in r.stdout, r.stdout
+    # The rename operand is the ACTUAL second file (the fixture's names are
+    # descriptive on purpose — the repo's duplicates all are, e.g.
+    # 20261022000001_blog_indexnow / _record_session_capture_redactions_integer),
+    # carries the migrations path so it runs from the repo root, and the
+    # destination is the one the command uses.
+    assert (
+        "git mv supabase/migrations/20260813000005_second.sql"
+        " supabase/migrations/NEXTFREE1_second.sql"
+    ) in r.stdout, r.stdout
+    # Nothing shape-specific to a `_a`/`_b` fixture pair, and never the old
+    # rename-onto-the-other-duplicate form ("fatal: destination exists").
+    assert "_b.sql" not in r.stdout, r.stdout
+    assert "git mv 20260813000005_a.sql" not in r.stdout, r.stdout
+    # The ordering bound applies here too: `--include-all` applies the whole
+    # pending set in filename order, so a rename to a prefix BELOW prod's newest
+    # applied version is the #4278 hazard this gate refuses elsewhere.
+    assert "sorts AFTER 0001" in r.stdout, r.stdout
+
+    # Every colliding prefix gets its own operand: naming one of two leaves the
+    # next run red.
+    r2 = _run_fixture(
+        {
+            "20260813000005_first.sql": "CREATE INDEX IF NOT EXISTS i1 ON public.t (a);\n",
+            "20260813000005_second.sql": "CREATE INDEX IF NOT EXISTS i2 ON public.t (b);\n",
+            "20260813000006_first.sql": "CREATE INDEX IF NOT EXISTS i3 ON public.t (c);\n",
+            "20260813000006_second.sql": "CREATE INDEX IF NOT EXISTS i4 ON public.t (d);\n",
+        },
+        ["0001"],
+    )
+    assert r2.returncode == 1, r2.stdout
+    assert "git mv supabase/migrations/20260813000005_second.sql" in r2.stdout, r2.stdout
+    assert "git mv supabase/migrations/20260813000006_second.sql" in r2.stdout, r2.stdout
+    # One operand index per operand ACROSS prefixes, so the tokens differ.
+    assert "NEXTFREE1_" in r2.stdout and "NEXTFREE2_" in r2.stdout, r2.stdout
+
+
+def test_the_printed_rename_command_actually_runs(tmp_path):
+    """The report's only purpose is that someone runs the line it prints.
+
+    Round 8 measured the line aborting two ways — unquoted space name
+    (`fatal: destination 'gamma.sql' is not a directory`) and, worse, a name
+    containing `$(…)` executing on paste. This test EXECUTES what the report
+    printed, with only the NEXTFREE<n> token substituted, in a throwaway git repo
+    — the only pin that survives future rewording of the text around it.
+    """
+    mig = tmp_path / "migrations"
+    mig.mkdir()
+    nasty = "20260813000005_beta $(touch PWNED) gamma.sql"
+    (mig / nasty).write_text(
+        "CREATE INDEX IF NOT EXISTS i1 ON public.t (a);\n", encoding="utf-8"
+    )
+    (mig / "20260813000005_alpha.sql").write_text(
+        "CREATE INDEX IF NOT EXISTS i2 ON public.t (b);\n", encoding="utf-8"
+    )
+    env = _seam_env(mig, _stub_curl(["0001"]))
+    r = subprocess.run(
+        ["bash", str(SCRIPT)], capture_output=True, text=True, env=env, cwd=REPO_ROOT
+    )
+    assert r.returncode == 1, r.stdout
+    # Two files at the prefix, so the report prints BOTH choices as (a)/(b); this
+    # test runs (a) — keep the first listed file, move the other.
+    lines = [
+        ln.strip() for ln in r.stdout.splitlines() if ln.strip().startswith("(a) git mv ")
+    ]
+    assert len(lines) == 1, r.stdout
+    assert any(ln.strip().startswith("(b) git mv ") for ln in r.stdout.splitlines()), r.stdout
+    # Two files: `(b)` IS the alternative to `(a)`, and the guidance must say so
+    # (it is printed only for this arity, so a prefix with three files gets no (b)).
+    assert "run (b) INSTEAD of (a)" in r.stdout, r.stdout
+    cmd = lines[0][len("(a) ") :].replace("NEXTFREE1", "20261024000001")
+
+    work = tmp_path / "repo"
+    (work / "supabase" / "migrations").mkdir(parents=True)
+    for f in mig.iterdir():
+        (work / "supabase" / "migrations" / f.name).write_bytes(f.read_bytes())
+    subprocess.run(["git", "init", "-q", "."], cwd=work, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=work, check=True)
+    run = subprocess.run(
+        ["bash", "-c", cmd], cwd=work, capture_output=True, text=True
+    )
+    assert run.returncode == 0, f"{cmd!r} -> {run.stderr}"
+    names = sorted(p.name for p in (work / "supabase" / "migrations").iterdir())
+    # Exactly one file left at the old prefix; the other moved with its name
+    # INTACT — pinned to the exact expected name, because a quoting bug that ate
+    # the slug still satisfies a bare `startswith` (round-9 finding).
+    assert names.count("20260813000005_alpha.sql") == 1, names
+    expected = "20261024000001_" + nasty[len("20260813000005_") :]
+    assert expected in names, (expected, names)
+    assert nasty not in names, names
+    # ... and pasting it did NOT run the command substitution in the filename.
+    assert not (work / "PWNED").exists(), "the printed command executed a filename"
+
+    # N files at one prefix need N-1 renames, so N-1 operands; and a filename with
+    # a space must survive whole (no `basename`/`xargs` word-splitting) — both
+    # round-7 findings, both of which made the printed command unrunnable.
+    r3 = _run_fixture(
+        {
+            "20260813000005_alpha.sql": "CREATE INDEX IF NOT EXISTS i1 ON public.t (a);\n",
+            "20260813000005_beta gamma.sql": "CREATE INDEX IF NOT EXISTS i2 ON public.t (b);\n",
+            "20260813000005_delta.sql": "CREATE INDEX IF NOT EXISTS i3 ON public.t (c);\n",
+        },
+        ["0001"],
+    )
+    assert r3.returncode == 1, r3.stdout
+    # SHELL-QUOTED (round-8 finding): unquoted, a name with a space prints a
+    # command that aborts with "destination 'gamma.sql' is not a directory", and
+    # a name containing `$(…)` EXECUTES it on copy-paste. `%q` is the pin.
+    assert "git mv supabase/migrations/20260813000005_beta\\ gamma.sql" in r3.stdout, r3.stdout
+    assert "git mv supabase/migrations/20260813000005_delta.sql" in r3.stdout, r3.stdout
+    assert "git mv supabase/migrations/20260813000005_alpha.sql" not in r3.stdout, r3.stdout
+    assert "Repeat until ONE file remains" in r3.stdout, r3.stdout
+    # ⛔ THE GUIDANCE MUST MATCH THE OPERAND LIST. Three files at one prefix need
+    # TWO renames, so a "run exactly ONE line per prefix" instruction leaves a
+    # live duplicate — the next `db push` aborts on it and the gate is red again
+    # (#1235). Pin the arity statement to the operands actually printed, and pin
+    # that the two-file-only `(b)` choice is NOT offered here.
+    a_lines = [
+        ln for ln in r3.stdout.splitlines() if ln.strip().startswith("(a) git mv ")
+    ]
+    assert len(a_lines) == 2, r3.stdout
+    assert "run EVERY (a) line" in r3.stdout, r3.stdout
+    assert "run exactly ONE line per prefix" not in r3.stdout, r3.stdout
+    assert "(b) git mv " not in r3.stdout, r3.stdout
+    # ... and the sibling "which file to KEEP" warning uses the same arity rule.
+    assert "every (a) line, or (b) instead" in r3.stdout, r3.stdout
+    # The placeholder is a bare token (no shell metacharacters) and carries a
+    # GLOBAL index, so two operands can never be given the same prefix by
+    # substituting "the" token: each needs its own free numeric prefix.
+    assert "NEXTFREE1_" in r3.stdout, r3.stdout
+    # The gate cannot see which file's DDL prod already has; keeping the wrong one
+    # re-runs the applied DDL and silently never applies the other (#1001, round-8).
+    assert "Which file to KEEP is a prod question" in r3.stdout, r3.stdout
+
+
+def test_note_covers_the_duplicate_branch_when_nothing_is_repo_ahead():
+    """The `$DUP_LOCAL_VERSIONS` disjunct of the note's guard is load-bearing.
+
+    Two index-only files at ONE prefix whose version IS recorded in prod: no
+    BLOCKING member (index-only is warn class), no repo-ahead — only the
+    duplicate term can fire, and that is a red rename exit. A mutant with the
+    # term deleted stays green, because every other duplicate fixture uses
+    # CREATE TABLE and so sets BLOCKING too.
+    """
+    r = _run_fixture(
+        {
+            "20260813000005_a.sql": "CREATE INDEX IF NOT EXISTS i1 ON public.t (a);\n",
+            "20260813000005_b.sql": "CREATE INDEX IF NOT EXISTS i2 ON public.t (b);\n",
+        },
+        ["0001", "20260813000005"],
+    )
+    assert r.returncode == 1, r.stdout
+    assert "duplicate" in r.stdout.lower(), r.stdout
+    # The repo-ahead DIAGNOSIS is deliberately absent here: the version IS
+    # recorded and there is no repo-ahead to explain, so "bookkeeping drift
+    # produces exactly this report" would be false (round-4 review finding).
+    assert "note: 'repo-ahead' means prod has no" not in r.stdout, r.stdout
+    # What must survive is the OWNER bound — and it is the ONLY thing pinning the
+    # `$DUP_LOCAL_VERSIONS` disjunct of that guard, since BLOCKING is empty here.
+    assert "OWNER-ONLY" in r.stdout, r.stdout
+    assert "#2240" in r.stdout, r.stdout
 
 
 def test_mixed_out_of_order_and_safe_are_partitioned():
@@ -398,6 +728,47 @@ def _run_with_supabase_stub(
     return r, marker
 
 
+def test_in_order_report_never_executes_supabase():
+    """The ordinary pending branch prints TWO command-shaped remediations
+    (`supabase db push --linked --include-all` and `supabase migration repair
+    --linked --status applied <version>`); an unescaped backtick on either line
+    would run prod DDL while merely printing it (#4278's defect class).
+    `test_report_never_executes_supabase` only covers the OUT OF ORDER branch,
+    which is the reason this fixture is added rather than widened (#9613 review
+    finding).
+
+    What the marker proves, exactly, measured on mutants (#9613 review, round 4):
+
+    * The marker is only reachable for command text carrying no bash
+      metacharacters. The OUT OF ORDER branch's `supabase db push --include-all`
+      is that shape: backticked, the stub runs and the marker appears — which is
+      why `test_report_never_executes_supabase` is mutation-provable.
+    * The `db push --linked --include-all` line in THIS branch is that shape too
+      (measured: backticked, the stub runs and the marker IS written — a trailing
+      parenthetical after the closing backtick does not make the substitution
+      inert). So the marker is a real guard for this line as well.
+    * The REPAIR line is the one the marker cannot prove: `<version>` is parsed as
+      a redirect with a missing target, so a backticked mutant makes bash report a
+      syntax error inside the command substitution, the `echo` still runs and
+      prints a line with a hole, and the exit status is unchanged — nothing
+      executes, no marker appears. That line is pinned instead by the LITERAL
+      suffix assertion below (with ` <version>`); with the looser `... applied`
+      pin the mutant stayed green.
+    """
+    r, marker = _run_with_supabase_stub(
+        {"20260813000004_claim.sql": "CREATE TABLE IF NOT EXISTS public.c (id text);\n"},
+        ["0001"],
+    )
+    assert r.returncode == 1, r.stdout
+    assert not marker.exists(), "the report EXECUTED supabase instead of printing it"
+    # Both command lines really are present in this branch, or the guard is vacuous.
+    assert "supabase db push --linked --include-all" in r.stdout, r.stdout
+    # Literal suffix on purpose: `... applied` alone is still a substring of a
+    # backticked mutant (the `<version>` is what vanishes), so a looser pin
+    # leaves that regression uncovered.
+    assert "migration repair --linked --status applied <version>" in r.stdout, r.stdout
+
+
 def test_report_never_executes_supabase():
     """Guard: an unescaped backtick in the remediation text ran
     `supabase db push --include-all` while merely printing it (it also injected
@@ -436,6 +807,10 @@ def test_duplicate_branch_flags_out_of_order_after_rename():
     assert ooo, r.stdout
     assert "20260917000001" in ooo[0], ooo[0]
     assert "apply via supabase-deploy dispatch" in r.stdout, r.stdout
+    # The repair instruction on THIS branch carries its own inline owner bound
+    # (the alert wrapper keeps only the report's last 6000 bytes), pinned
+    # literally — `#2240` alone is also supplied by the statement above it.
+    assert "— OWNER ACTION, a lane must not run prod DDL" in r.stdout, r.stdout
 
 
 def test_fresh_project_with_no_applied_migrations_is_not_out_of_order():
@@ -498,12 +873,43 @@ def test_duplicate_branch_never_executes_supabase():
 
 
 def test_clean_run_has_no_remediation_markers():
-    """Negative control: a clean run must not print any block remediation."""
+    """Negative control: a clean run must not print any block remediation.
+
+    The repo-ahead note is in the marker list because it is a RED diagnosis, so
+    it belongs only on a run that prescribes an action. What the marker pins,
+    precisely: the NO-GUARD state (a note printed unconditionally) — a clean run
+    has no repo-ahead, so the `$REPO_AHEAD`-only mutant from round 1 is caught by
+    `test_warn_only_run_is_green_and_carries_no_red_diagnosis_note` instead
+    (round-3 review measured both mutants; neither test covers the other).
+    """
     r = _run({}, ["0001_base.sql", "20260813000004_claim.sql"], ["0001", "20260813000004"])
     assert r.returncode == 0, r.stderr
     assert "OK" in r.stdout
-    for marker in ("OUT OF ORDER", "BLOCKING", "PENDING AFTER", "include-all"):
+    for marker in (
+        "OUT OF ORDER",
+        "BLOCKING",
+        "PENDING AFTER",
+        "include-all",
+        "note: 'repo-ahead' means prod has no",
+        "OWNER-ONLY",
+    ):
         assert marker not in r.stdout, f"{marker!r} leaked into a clean run: {r.stdout}"
+
+
+def test_warn_only_run_is_green_and_carries_no_red_diagnosis_note():
+    """A warn-only (index-only) repo-ahead run EXITS 0 — so it must not carry the
+    "repo-ahead proves no ROW, not missing objects" note, which diagnoses a
+    blocked report. Measured leak before the round-2 fix: the note printed
+    immediately above "OK (no blocking drift)"."""
+    r = _run_fixture(
+        {"20260901000001_idx.sql": "CREATE INDEX IF NOT EXISTS idx_x ON public.t (a);\n"},
+        ["0001"],
+    )
+    assert r.returncode == 0, r.stdout
+    assert "OK (no blocking drift)" in r.stdout, r.stdout
+    assert "warn-only" in r.stdout.lower(), r.stdout
+    assert "note: 'repo-ahead' means prod has no" not in r.stdout, r.stdout
+    assert "OWNER-ONLY" not in r.stdout, r.stdout
 
 
 # ── #6136 regression: early-exit pipeline consumers under `set -euo pipefail` ──
@@ -649,11 +1055,9 @@ def test_many_matching_migrations_still_report_the_verdict():
     buffer — the defect CLASS, not the reported incident.
 
     The fixture directory is nested deep so each `ls` line is long and ~150
-    files suffice; the duplicate-repair path resolves `basename` once PER FILE,
-    so file count — not listing size — is what this test costs. Like its
-    siblings this relies on the host's default pipe capacity: a capacity raised
-    above the fixture's ~115 KiB listing would stop it failing pre-fix (it would
-    still pass post-fix).
+    files suffice. Like its siblings this relies on the host's default pipe
+    capacity: a capacity raised above the fixture's ~115 KiB listing would stop
+    it failing pre-fix (it would still pass post-fix).
     """
     mig = FIXTURES / "migrations"
     for _ in range(6):

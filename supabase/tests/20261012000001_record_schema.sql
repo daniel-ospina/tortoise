@@ -135,6 +135,71 @@ SELECT tests.assert(
      AND pg_get_constraintdef(con.oid) LIKE '%node_key = id%') = 1,
   '7968: point.node_key is pinned to id (W1: :Point -> id)');
 
+-- ── 3b. #9881: the SEMANTIC layer's key is the stable id, not the name ─────
+-- Under #3590 a `name` is a mutable natural key two live entities may share, so
+-- it cannot be a key — and while it WAS the key a rename was unrepresentable
+-- (the projection refused `EntityMutated op=rename`). These pins are what make
+-- a rename an ordinary column patch: the key never moves.
+SELECT tests.assert(
+  (SELECT count(*) FROM pg_constraint con
+   JOIN pg_class rel ON rel.oid = con.conrelid
+   WHERE con.contype = 'c' AND rel.relname = 'object'
+     AND pg_get_constraintdef(con.oid) LIKE '%node_key = id%') = 1,
+  '9881: object.node_key is pinned to id (a rename is a patch, not a key move)');
+
+SELECT tests.assert(
+  (SELECT count(*) FROM pg_constraint con
+   JOIN pg_class rel ON rel.oid = con.conrelid
+   WHERE con.contype = 'c' AND rel.relname = 'subject'
+     AND pg_get_constraintdef(con.oid) LIKE '%node_key = id%') = 1,
+  '9881: subject.node_key is pinned to id');
+
+-- `node_identity`'s generated CASE is the contract every composite FK endpoint
+-- is filed by, and it is declared TWICE on disk (the CREATE TABLE, then the
+-- forward re-declaration 20261027000001). The LIVE one must say `id`.
+INSERT INTO public.node_identity (org_id, graph_id, node_label, node_key)
+VALUES ('org_7968','g_7968','Object','obj-9881-a'),
+       ('org_7968','g_7968','Object','obj-9881-b'),
+       ('org_7968','g_7968','Subject','subj-9881')
+ON CONFLICT DO NOTHING;
+
+SELECT tests.assert(
+  (SELECT count(*) FROM public.node_identity
+    WHERE org_id = 'org_7968' AND graph_id = 'g_7968'
+      AND node_label = 'Object' AND key_property = 'id') = 2,
+  '9881: node_identity declares Object''s contract key as id');
+
+SELECT tests.assert(
+  (SELECT count(*) FROM public.node_identity
+    WHERE org_id = 'org_7968' AND graph_id = 'g_7968'
+      AND node_label = 'Subject' AND key_property = 'id') = 1,
+  '9881: node_identity declares Subject''s contract key as id');
+
+-- TWO incarnations, ONE name — the whole reason the key is the id. Under the
+-- name-keyed schema the second row could not exist at all, and under a key-MOVE
+-- rename it would collide with the first on the primary key.
+INSERT INTO public.object (org_id, graph_id, node_key, id, name)
+VALUES ('org_7968','g_7968','obj-9881-a','obj-9881-a','twin'),
+       ('org_7968','g_7968','obj-9881-b','obj-9881-b','twin')
+ON CONFLICT DO NOTHING;
+
+SELECT tests.assert(
+  (SELECT count(*) FROM public.object
+    WHERE org_id = 'org_7968' AND graph_id = 'g_7968' AND name = 'twin') = 2,
+  '9881: two same-name Objects both persist (a name is not an identity)');
+
+-- ...and the `name` column is MUTABLE under a fixed key: this is the statement
+-- the record projection emits for `EntityMutated op=rename`, and it must be
+-- accepted by the schema without touching `node_key`.
+UPDATE public.object SET name = 'twin-renamed'
+ WHERE org_id = 'org_7968' AND graph_id = 'g_7968' AND id = 'obj-9881-a';
+
+SELECT tests.assert(
+  (SELECT count(*) FROM public.object
+    WHERE org_id = 'org_7968' AND graph_id = 'g_7968'
+      AND node_key = 'obj-9881-a' AND name = 'twin-renamed') = 1,
+  '9881: a rename moves the name column and keeps the node_key');
+
 -- ── 4. The carve-out CHECKS actually refuse a derived value ────────────────
 INSERT INTO public.node_identity (org_id, graph_id, node_label, node_key)
 VALUES ('org_7968','g_7968','Point','01HX0000000000000000000001'),
@@ -165,9 +230,9 @@ END $$;
 DO $$
 BEGIN
   BEGIN
-    INSERT INTO public.subject (org_id, graph_id, node_key, name, props)
+    INSERT INTO public.subject (org_id, graph_id, node_key, id, name, props)
     VALUES ('org_7968','g_7968','rec-schema-subject','rec-schema-subject',
-            '{"status":"superseded"}'::jsonb);
+            'rec-schema-subject','{"status":"superseded"}'::jsonb);
     RAISE EXCEPTION '8263: chk_subject_props_no_derived accepted `status`' USING ERRCODE = 'P0002';
   EXCEPTION WHEN check_violation THEN NULL;
   END;
@@ -180,9 +245,9 @@ END $$;
 DO $$
 BEGIN
   BEGIN
-    INSERT INTO public.subject (org_id, graph_id, node_key, name, props)
+    INSERT INTO public.subject (org_id, graph_id, node_key, id, name, props)
     VALUES ('org_7968','g_7968','rec-schema-subject','rec-schema-subject',
-            '{"embedding":[0.1]}'::jsonb);
+            'rec-schema-subject','{"embedding":[0.1]}'::jsonb);
     RAISE EXCEPTION '8263: the forward ALTER re-opened `embedding` on subject.props' USING ERRCODE = 'P0002';
   EXCEPTION WHEN check_violation THEN NULL;
   END;
@@ -191,9 +256,9 @@ END $$;
 DO $$
 BEGIN
   BEGIN
-    INSERT INTO public.object (org_id, graph_id, node_key, name, props)
+    INSERT INTO public.object (org_id, graph_id, node_key, id, name, props)
     VALUES ('org_7968','g_7968','rec-schema-object','rec-schema-object',
-            '{"status":"live"}'::jsonb);
+            'rec-schema-object','{"status":"live"}'::jsonb);
     RAISE EXCEPTION '8263: chk_object_props_no_derived accepted `status`' USING ERRCODE = 'P0002';
   EXCEPTION WHEN check_violation THEN NULL;
   END;
@@ -282,12 +347,19 @@ SELECT tests.assert(
       AND column_name = 'capture_redactions') = 'integer',
   '9264: session.capture_redactions is integer, not jsonb');
 
+-- #9881: the pin MOVED. `Object`/`Subject` are keyed by the stable `id`, and
+-- `name` is an ordinary mutable column — so the fail-open shape to refuse is now
+-- a NULL `id` (a bare `node_key = id` is SQL NULL, not FALSE, and would be
+-- silently satisfied: the same hole #8179 P1 closed for `name`).
 DO $$
 BEGIN
   BEGIN
-    INSERT INTO public.object (org_id, graph_id, node_key, name)
-    VALUES ('org_7968','g_7968','obj-null-name', NULL);
-    RAISE EXCEPTION '7968: object accepted a NULL name (fail-open key pin)' USING ERRCODE = 'P0002';
+    INSERT INTO public.node_identity (org_id, graph_id, node_label, node_key)
+    VALUES ('org_7968','g_7968','Object','obj-null-id')
+    ON CONFLICT DO NOTHING;
+    INSERT INTO public.object (org_id, graph_id, node_key, id, name)
+    VALUES ('org_7968','g_7968','obj-null-id', NULL, 'a name cannot save it');
+    RAISE EXCEPTION '9881: object accepted a NULL id (fail-open key pin)' USING ERRCODE = 'P0002';
   EXCEPTION WHEN check_violation THEN NULL;
   END;
 END $$;
@@ -295,9 +367,59 @@ END $$;
 DO $$
 BEGIN
   BEGIN
-    INSERT INTO public.subject (org_id, graph_id, node_key, name)
-    VALUES ('org_7968','g_7968','subj-null-name', NULL);
-    RAISE EXCEPTION '7968: subject accepted a NULL name (fail-open key pin)' USING ERRCODE = 'P0002';
+    INSERT INTO public.node_identity (org_id, graph_id, node_label, node_key)
+    VALUES ('org_7968','g_7968','Subject','subj-null-id')
+    ON CONFLICT DO NOTHING;
+    INSERT INTO public.subject (org_id, graph_id, node_key, id, name)
+    VALUES ('org_7968','g_7968','subj-null-id', NULL, 'a name cannot save it');
+    RAISE EXCEPTION '9881: subject accepted a NULL id (fail-open key pin)' USING ERRCODE = 'P0002';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+END $$;
+
+-- #9881 KEPT this pin from #8179 P1: the key moved, the name did not become
+-- optional. `name IS NOT NULL` still holds in the new CHECK, and a schema that
+-- dropped it would let a rename blank the only human-readable handle a record
+-- has — an Object you can no longer name.
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO public.node_identity (org_id, graph_id, node_label, node_key)
+    VALUES ('org_7968','g_7968','Object','obj-null-name')
+    ON CONFLICT DO NOTHING;
+    INSERT INTO public.object (org_id, graph_id, node_key, id, name)
+    VALUES ('org_7968','g_7968','obj-null-name','obj-null-name', NULL);
+    RAISE EXCEPTION '9881: object accepted a NULL name (a record with no handle)' USING ERRCODE = 'P0002';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+END $$;
+
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO public.node_identity (org_id, graph_id, node_label, node_key)
+    VALUES ('org_7968','g_7968','Subject','subj-null-name')
+    ON CONFLICT DO NOTHING;
+    INSERT INTO public.subject (org_id, graph_id, node_key, id, name)
+    VALUES ('org_7968','g_7968','subj-null-name','subj-null-name', NULL);
+    RAISE EXCEPTION '9881: subject accepted a NULL name (a record with no handle)' USING ERRCODE = 'P0002';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+END $$;
+
+-- ...and a NAME-KEYED row is refused outright: `node_key = name` is the shape
+-- this migration removes, and a schema that still accepted it would let a rename
+-- move the key behind the projection's back.
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO public.node_identity (org_id, graph_id, node_label, node_key)
+    VALUES ('org_7968','g_7968','Object','a-name-not-an-id')
+    ON CONFLICT DO NOTHING;
+    INSERT INTO public.object (org_id, graph_id, node_key, id, name)
+    VALUES ('org_7968','g_7968','a-name-not-an-id','obj-real-id','a-name-not-an-id');
+    RAISE EXCEPTION '9881: object accepted node_key = name while its id was something else'
+      USING ERRCODE = 'P0002';
   EXCEPTION WHEN check_violation THEN NULL;
   END;
 END $$;
@@ -321,8 +443,9 @@ ON CONFLICT DO NOTHING;
 INSERT INTO public.source (org_id, graph_id, node_key, url)
 VALUES ('org_7968','g_7968','https://example.test/7968','https://example.test/7968')
 ON CONFLICT DO NOTHING;
-INSERT INTO public.object (org_id, graph_id, node_key, name, object_kind)
-VALUES ('org_7968','g_7968','rec-schema-object','rec-schema-object','other')
+INSERT INTO public.object (org_id, graph_id, node_key, id, name, object_kind)
+VALUES ('org_7968','g_7968','rec-schema-object','rec-schema-object',
+        'rec-schema-object','other')
 ON CONFLICT DO NOTHING;
 INSERT INTO public.event (org_id, graph_id, node_key, event_id, event_kind, content)
 VALUES ('org_7968','g_7968','evt_7968','evt_7968','decision','an occurrence')
@@ -398,8 +521,8 @@ SELECT tests.assert(
   (SELECT count(*) FROM pg_policies
    WHERE schemaname='public'
      AND tablename IN ('node_identity','journal_event','source','event','session',
-                       'object','subject','point','relation')) = 18,
-  '7968: every new table carries the org-read policy and the service_role policy');
+                       'object','subject','point','relation')) = 27,
+  '7968: every new table carries the org-read policy, the service_role policy and (R6) the app role''s tenant policy');
 
 -- auth.rsuperuser-only: SET ROLE then read with a DIFFERENT org GUC -> nothing.
 SET ROLE service_role;
@@ -429,6 +552,118 @@ BEGIN
 END $$;
 RESET ROLE;
 
+-- ── 6b. The §9.1 narrative home (#9555, R7) ───────────────────────────────
+-- The narrative is TEXT in Postgres, not a node (§9.1). This block pins that
+-- the home exists, is a tenancy surface like the other nine, and that the two
+-- things a narrative must not be able to do — dangle off no TENANT GRAPH, or be
+-- read across a tenant boundary — are refused by the DATABASE rather than by a
+-- convention in Python. (It deliberately does NOT require a `public.session` row:
+-- the FK anchors on the graph, and §9.4's own delete path removes the session
+-- row before the narrative, so a session-scoped FK would abort the batch — the
+-- assertion further down pins the survival.)
+SELECT tests.assert(
+  (SELECT count(*) FROM pg_class
+   WHERE relname = 'session_narrative' AND relkind = 'r' AND relrowsecurity) = 1,
+  '9555: the narrative home exists with RLS ENABLED');
+
+SELECT tests.assert(
+  (SELECT count(*) FROM pg_policies
+   WHERE schemaname = 'public' AND tablename = 'session_narrative'
+     AND policyname IN ('session_narrative_read_org',
+                        'session_narrative_service_role_all')) = 2,
+  '9555: the narrative home carries the org-read and service_role policies');
+
+-- R6 (#9554) creates `tortoise_record_app`, and that migration IS in this tree:
+-- the harness applies ALL migrations in order, so the role exists and both sides
+-- of this equality are 1. It stays an equality rather than a hardcoded 1 on
+-- purpose — it reds if the policy appears without the role, or the role without
+-- the policy, which a literal would not.
+SELECT tests.assert(
+  (SELECT count(*) FROM pg_policies
+   WHERE schemaname = 'public' AND tablename = 'session_narrative'
+     AND policyname = 'session_narrative_app_tenant')
+  = (SELECT count(*) FROM pg_roles WHERE rolname = 'tortoise_record_app'),
+  '9555: the app-role policy exists iff the role R6 creates exists');
+
+SET ROLE service_role;
+INSERT INTO public.node_identity (org_id, graph_id, node_label, node_key)
+VALUES ('org_7968','g_7968','Session','s_9555') ON CONFLICT DO NOTHING;
+INSERT INTO public.session (org_id, graph_id, node_key, id)
+VALUES ('org_7968','g_7968','s_9555','s_9555') ON CONFLICT DO NOTHING;
+INSERT INTO public.session_narrative
+  (org_id, graph_id, session_id, narrative, summary, capture_redactions, turn_count)
+VALUES ('org_7968','g_7968','s_9555','the arc','a capture', 3, 2);
+RESET ROLE;
+
+-- ⛔ The narrative row does NOT depend on the session row: the `public.session`
+-- row is deleted and the narrative survives. This is the regression pin — a
+-- foreign key into `public.session` made the WHOLE record batch abort on a
+-- capture whose transcript Source names a session row that is not written yet,
+-- so the FK anchors on the GRAPH instead.
+SET ROLE service_role;
+DELETE FROM public.session WHERE org_id = 'org_7968' AND graph_id = 'g_7968'
+   AND node_key = 's_9555';
+SELECT tests.assert(
+  (SELECT count(*) FROM public.session_narrative WHERE session_id = 's_9555') = 1,
+  '9555: the narrative survives its session row going away (the FK anchors on the graph)');
+RESET ROLE;
+
+-- A narrative for a GRAPH the record does not hold is refused (the FK, not a
+-- convention): the tenancy anchor is real, so a row cannot exist outside a
+-- tenant graph.
+SET ROLE service_role;
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO public.session_narrative (org_id, graph_id, session_id, narrative)
+    VALUES ('org_7968','g_missing','s_x','orphan');
+    RAISE EXCEPTION '9555: a narrative was accepted for a graph the record does not hold';
+  EXCEPTION WHEN foreign_key_violation THEN NULL;
+  END;
+END $$;
+RESET ROLE;
+
+-- The redaction count is a COUNT: the schema refuses a negative one.
+SET ROLE service_role;
+DO $$
+BEGIN
+  BEGIN
+    UPDATE public.session_narrative SET capture_redactions = -1
+     WHERE org_id = 'org_7968' AND graph_id = 'g_7968' AND session_id = 's_9555';
+    RAISE EXCEPTION '9555: a negative redaction count was accepted';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+END $$;
+RESET ROLE;
+
+-- Tenancy: the narrative is readable by its own tenant and invisible across the
+-- boundary — the same pair #7968 asserts for `point`.
+SET ROLE authenticated;
+SET app.current_org_id = 'org_7968';
+SELECT tests.assert(
+  (SELECT count(*) FROM public.session_narrative WHERE session_id = 's_9555') = 1,
+  '9555: the owning tenant reads its own narrative');
+SET app.current_org_id = 'org_7968_other';
+SELECT tests.assert(
+  (SELECT count(*) FROM public.session_narrative) = 0,
+  '9555: a cross-tenant read of the narrative returns nothing');
+RESET ROLE;
+
+-- `authenticated` is SELECT-only, like every other record table: the write path
+-- is #7951. A direct write must be refused by privilege, not by convention.
+SET ROLE authenticated;
+SET app.current_org_id = 'org_7968';
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO public.session_narrative (org_id, graph_id, session_id, narrative)
+    VALUES ('org_7968','g_7968','s_sneaky','sneaky');
+    RAISE EXCEPTION '9555: authenticated was able to write the narrative directly';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+END $$;
+RESET ROLE;
+
 -- ── 7. Clean up (the harness spot-checks for leftovers afterwards) ─────────
 -- The journal is append-only; the ONE production path that erases a tenant
 -- is the SECURITY DEFINER RPC `purge_org_record` (migration 20261012000005)
@@ -445,6 +680,9 @@ SELECT tests.assert(
 SELECT tests.assert(
   (SELECT count(*) FROM public.journal_event WHERE org_id = 'org_7968') = 0,
   '7968: purge_org_record cascaded the append-only journal');
+SELECT tests.assert(
+  (SELECT count(*) FROM public.session_narrative WHERE org_id = 'org_7968') = 0,
+  '9555: purge_org_record cascaded the tenant out of session_narrative');
 
 -- The RPC is the ONLY caller allowed to set the purge flag: an
 -- authenticated session must not be able to execute it (nor, therefore, to

@@ -99,7 +99,7 @@ both.
     RESTORE from ``prior`` (``vet_gate.py`` Rule 4), which re-emits an entity an
     EARLIER pass discarded, needs a surviving candidate to reference the name,
     and so cannot fire from a coverage gap. (``OUTCOMES`` =
-    KEEP/NOOP/DISCARD/MERGE, with MERGE recorded-not-applied, #5006.)
+    KEEP/NOOP/DISCARD/MERGE, with MERGE routed to S3's fusion, #5006.)
   * S2.3 CLASSIFY only LABELS: ``classify_items`` returns ``assignments`` (a
     kind per EXISTING id) and ``_apply_classify_kinds`` writes that kind onto an
     item already in the list. It adds none.
@@ -157,6 +157,19 @@ from . import value_gate as _value_gate  # #4899: the S2.2b identifier-only pred
 from . import vet_gate as _vet_gate  # #5005: S2.2 VET (stdlib-only module)
 from ._gate_memo import GateMemo
 from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
+
+# #5006: D12/O4's FUSION half — the union of both sides' attachments, executed
+# at S3 after the S2.2b verdict. Stdlib-only, so importing it costs nothing on
+# the capture path.
+from .near_dup_merge import MERGE as _MERGE_DECISION
+from .near_dup_merge import near_dup_merge as _near_dup_merge
+
+#: The ONE VET section whose candidates are Points, and therefore the only
+#: section a point fusion may be authorised for (#5006 review F2). `MERGE` is a
+#: legal outcome for every section in `vet_gate.OUTCOMES`, so the section is
+#: part of the verdict's key; `test_the_point_section_is_vets_own_token` pins
+#: this literal against `vet_gate.SECTIONS` so it cannot drift silently.
+_POINT_SECTION = "points"
 
 # ── The v2 master list (design doc §3) ─────────────────────────────────────
 
@@ -451,6 +464,14 @@ OPERATOR_SEMANTICS_RULE = (
     "  and the older claim is dst — NAND points AT what it refutes. An explicit\n"
     "  negation in a later turn ('the flag did not cause the duplicates') marks\n"
     "  THAT later claim as the attacker. Never put the claim under attack first.\n"
+    "- A THEORY THE CONVERSATION DISPLACES IS THE CLAIM UNDER ATTACK (#8503):\n"
+    "  in a retrospective or incident review, the finding that explains what\n"
+    "  really happened (the root cause, the evidence that settled it) REFUTES\n"
+    "  the theory an earlier turn recorded — 'the initial investigation blamed\n"
+    "  the search index' is dst, the root-cause claim is src. A finding does\n"
+    "  not IMPL the theory it displaced: never wire IMPL (support) between a\n"
+    "  root cause and the theory it refuted — that is a truth attack\n"
+    "  (ONTOLOGY §3.1 'A contradicts B'), so its kind is NAND.\n"
     "- RISK/RELEVANCE CLAIMS ARE DURABLE POINTS: a risk or concern claim\n"
     "  ('clock skew between regions can make lease expiry unsafe') is its OWN\n"
     "  point — never fuse it into the point/event for the action that later\n"
@@ -464,13 +485,37 @@ OPERATOR_SEMANTICS_RULE = (
     "  (w_eff = w * (1 - strength) — a graded dampener, NEVER a refutation.\n"
     "  A direct point-to-point refutation is NAND territory (a separate\n"
     "  operator), not a stronger MITIGATES).\n"
+    "- ONE MITIGATES PER PAIR (#8503): the graph holds each claim as its OWN\n"
+    "  point, so when two points express the same action (a decision and the\n"
+    "  implementation detail that carries it out) or two express the same risk\n"
+    "  (an incident report and the named risk it exposes), emit a MITIGATES\n"
+    "  for EACH pair the action actually bears on — a dampener wired to one\n"
+    "  pair leaves the other edge at full relevance. The operators array\n"
+    "  takes several entries; do not pick one pair and drop the rest.\n"
+    "  The SRC of a MITIGATES is ANY point carrying the action's warrant —\n"
+    "  the decision that chose it, the forecast of what it absorbs ('a\n"
+    "  ten-minute TTL cache will absorb nearly all of the repeat traffic'),\n"
+    "  or the safeguard that keeps it correct ('invalidate the cache entry on\n"
+    "  a write'). Each such claim is a separate point, so each gets its own\n"
+    "  dampener against the claim it bears on; wiring only the decision\n"
+    "  leaves the forecast and the safeguard unexpressed.\n"
     "- POINT-LEVEL SUPERSEDE (cross-session reversal — F2): when a new point\n"
     "  REPLACES a claim or decision from an EARLIER session, set its\n"
     "  \"supersedes\" to the existing point's id or EXACT content copied from\n"
     "  the graph search results — the write path folds a point-level CORRECTS\n"
     "  supersession (the old point is marked outdated). Same-session\n"
     "  reversals are state/validity semantics — never a point supersede.\n"
-    "  Never invent an id or content: resolve against the search results only."
+    "  Never invent an id or content: resolve against the search results only.\n"
+    "  An ENTITY-level supersede is NOT this channel: it produces NO\n"
+    "  reversal edge. An entity's own \"supersedes\" (with any lifecycle\n"
+    "  other than \"superseded\") IS accepted — but on a SEPARATE channel,\n"
+    "  an ObjectSuperseded record that folds the superseded object, not a\n"
+    "  CORRECTS operator edge; the \"lifecycle\": \"superseded\" spelling is\n"
+    "  REFUSED either way (with a ref: direction ambiguous; with none:\n"
+    "  nothing to express). The edge exists only\n"
+    "  when a statement POINT states the replacement and that point's\n"
+    "  \"supersedes\" names the earlier decision. So when the reversal must\n"
+    "  appear as this edge, say it as a point."
 )
 
 
@@ -489,7 +534,7 @@ def _s2s4_rules(master: dict | None = None, *,
     it is the slot that states the value policy — a pack's keep/drop hints and
     instruction snippets are policy, not vocabulary, so they must sit where
     the policy does and not in the master render. ``None``
-    (or a master whose packs declare nothing — every shipped pack today)
+    (or a master whose packs declare no hints — every shipped pack today)
     renders the pre-#4894 block byte-for-byte.
 
     #2818: ``master`` also carries ``pack_values`` — the per-kind value-field
@@ -528,8 +573,8 @@ def _pack_values_text(master: dict | None) -> str:
     ``_select_pack_kinds`` dropped from this story's PACK KINDS section,
     contradicting "EVERY kind you emit MUST come from this list". Policy,
     never vocabulary. ``""`` when nothing is declared, so the S2/S4 rule slot
-    is byte-identical for every pack that declares none (every shipped pack
-    today).
+    is byte-identical for every pack that declares none (the other six shipped
+    packs — since #9663 `portfolio:allocationTarget` does declare one).
     """
     values = (master or {}).get("pack_values") or {}
     if not isinstance(values, dict) or not values:
@@ -660,8 +705,8 @@ def _build_master_from_brief(brief: dict,
     # rather than folded into ``pack_kinds``' string values — every existing
     # consumer of ``pack_kinds`` (``master_kind_forms``, the write gates, the
     # compact selector) treats a value as the kind's description string, and a
-    # props-less kind must render byte-identically. Empty for every shipped
-    # pack today, so the render is unchanged unless a pack declares one.
+    # props-less kind must render byte-identically. The other six shipped packs
+    # declare nothing; since #9663 `portfolio:allocationTarget` does.
     pack_values: dict[str, list] = {}
     # #4894: the brief's RESERVED, non-kind sections are skipped by the SAME
     # set ``value_extractor`` uses to keep them out of the objectKind
@@ -688,8 +733,11 @@ def _build_master_from_brief(brief: dict,
         "pack_kinds": pack_kinds,
         # #2818: per-kind value-field declarations (only kinds that declare
         # one appear). A SEPARATE section so ``pack_kinds``' description
-        # strings keep their meaning for every existing reader; empty for
-        # every shipped pack today (so no render changes).
+        # strings keep their meaning for every existing reader. Since #9663 the
+        # catalogue is no longer wholly props-less — ONE kind declares a field
+        # (``portfolio:allocationTarget``), so the pack-kinds list gains that
+        # kind's ``[values: …]`` segment and this section is non-empty for any
+        # master that includes the portfolio pack.
         "pack_values": pack_values,
         "chains": {name: {"path": list(c["path"]), "note": c["note"]}
                    for name, c in CHAINS.items()},
@@ -697,7 +745,7 @@ def _build_master_from_brief(brief: dict,
         # #4894 / #1026: the packs' DECLARED value-brief hints (valueGate /
         # promptFragments). Carried verbatim on the master so the S1/S2/S4
         # render sites read one compiled source; empty for every pack that
-        # declares neither, which is every shipped pack today.
+        # declares neither, which is still every shipped pack today.
         "pack_hints": {ns: dict(h) for ns, h in
                        (brief.get("pack_hints") or {}).items()},
         # E2 (#1534): user-personal-state vocabulary — the Tier-A classification
@@ -814,6 +862,75 @@ _PACK_TRIGGERS = {
     "venture:": ("venture", "fund", "portfolio", "grant", "tranche",
                   "disbursement", "term of award", "programme", "asset",
                   "patent", "condition"),
+    # #9663: the portfolio overlay (`packs/investment-portfolio-manager`) is
+    # also a shipped pack with a trigger entry — without one it is injected
+    # WHOLE into every compact-mode prompt, which is the fail-open fallback,
+    # not a design.
+    # ⚠ These are matched with `t in story`, i.e. as SUBSTRINGS, so every entry
+    # must be one that cannot ride inside an unrelated word. `valuation` was the
+    # first draft and matched "evaluation" — which made an unrelated story
+    # select `portfolio:*` AND (because one match suppresses the all-packs
+    # fallback) drop every other pack's kinds from the compact prompt. Bare
+    # `mandate`, `allocation` and `impairment` reproduce that on "the team's
+    # mandate…", "resource allocation…", "a visual impairment…".
+    #
+    # A space or a hyphen is NOT enough. Measured on this row's earlier drafts,
+    # each of these selected `portfolio:*` on an ordinary non-portfolio story
+    # and so suppressed the all-packs fallback, dropping the OTHER packs' kinds
+    # — the overlay the story actually needed. Two of them are exceptions to the
+    # SCOPE of that measurement rather than counter-examples to it:
+    # `policy statement` and `policy weight` also match `agent-ops:`'s bare
+    # "policy", so instead of every sibling they dropped dev/marketing/pm/
+    # venture and left agent-ops standing — and since every story carrying
+    # "policy statement" necessarily carries "policy", no sentence exists on
+    # which those two could have matched alone:
+    #   * `valuation mark` — a SUBSTRING of "evaluation mark" and "revaluation
+    #     mark", the same trap as bare `valuation` one word longer;
+    #   * `write-up` / `write-down` — "the write-up of the release", "a
+    #     write-down of the inventory";
+    #   * `reference weight` / `policy weight` / `benchmark weight` — engineering
+    #     prose, "the reference weight of the assembly is 4.2 kg";
+    #   * `allocation target` / `target allocation` — budgeting prose, "the
+    #     council approved its target allocation of the road budget";
+    #   * `policy statement` — compliance prose, "our privacy policy statement";
+    #   * `mandate limits` — "the mandate limits how much we can spend";
+    #   * `fair value mark` / `target weight` — accounting and engineering terms
+    #     that apply to any asset, not to a portfolio position.
+    # All of them are recorded, with the measurement, in
+    # `tests/test_investment_portfolio_manager_pack.py::NON_TRIGGER_SYNONYMS`,
+    # so this is a recorded choice, not an omission.
+    #
+    # THE INVARIANT, made mechanical by that test: an entry is this namespace's
+    # own name, or an `investment `-prefixed phrase (space form only). Nothing
+    # else reaches this row — a per-phrase judgement call is exactly how a
+    # substring collision survives review (the first draft of this fix removed
+    # five and kept five of the same class). A HYPHEN form is deliberately NOT
+    # admitted: measured, `investment-grade` in the row selects `portfolio:*`
+    # alone on "sub-investment-grade bonds widened the spread" and on
+    # "non-investment-grade credits were sold" — the same strip this row exists
+    # to prevent. If the manifest ever declares an `investment-*` compound, it
+    # belongs in `NON_TRIGGER_SYNONYMS` with that measurement.
+    #
+    # THE COST, stated accurately rather than waved away. `_select_pack_kinds`
+    # falls back to ALL packs only when NOTHING matched in ANY namespace — and
+    # the sibling rows carry ordinary English (`dev:` "deploy"/"sprint"/"test",
+    # `venture:` "fund"/"asset"), so that fallback is not much of a net. A
+    # genuinely portfolio-shaped story whose only portfolio vocabulary is a
+    # synonym excluded above DOES lose the overlay once a sibling matches
+    # ("the allocation target for the fund was missed; deploy the fix" selects
+    # dev+venture, no portfolio). That loss is ACCEPTED — the alternative costs
+    # another pack's entire vocabulary — and it is pinned as a recorded decision
+    # in `tests/test_investment_portfolio_manager_pack.py::
+    # test_the_accepted_loss_is_a_recorded_decision`, so a later lane can tell it
+    # from a bug.
+    #
+    # A row missing a synonym the pack DOES declare is a real loss when a
+    # sibling matches: a bare "policy statement" used to lose the overlay to
+    # `agent-ops:`'s "policy". That is the cost of the invariant (`investment
+    # policy` — which a portfolio policy statement is actually called — still
+    # matches).
+    "portfolio:": ("portfolio", "investment mandate", "investment policy",
+                   "investment guidelines"),
     "agent-ops:": ("standard operating", "protocol", "token acknowledgement",
                     "destructive action", "policy", "standing rule"),
     # NOTE (#2031): the legacy "epistemic-team:" entry was removed — it
@@ -852,7 +969,7 @@ def _select_pack_kinds(story: str | None, pack_kinds: dict) -> dict:
         # A namespace with NO trigger entry cannot be story-selected —
         # always include it (per-tenant custom packs AND, since #5165, any
         # catalog pack shipped without a trigger entry; dropping them would
-        # silently strip their kinds from the compact prompt). All six
+        # silently strip their kinds from the compact prompt). All seven
         # shipped catalog namespaces HAVE entries, so the default
         # render's selection is unchanged for them — but the byte-identity
         # argument is about those entries, not about a starter-set
@@ -1036,9 +1153,10 @@ def _values_suffixes(master: dict | None) -> dict[str, str]:
     """kind → `` [values: name(valueKind[, required][, many]), …]`` (#2818).
 
     Only kinds that DECLARE value fields appear, so every ``- kind — desc``
-    line for a props-less kind is byte-identical to pre-#2818 (``{}`` for the
-    whole shipped catalog today). Shared by the verbose and compact renders so
-    the two prompt modes spell a declaration the same way.
+    line for a props-less kind is byte-identical to pre-#2818 (the other six
+    shipped packs declare nothing; since #9663 ``portfolio:allocationTarget``
+    does, so ``{}`` is no longer the whole catalogue). Shared by the verbose and
+    compact renders so the two prompt modes spell a declaration the same way.
     """
     from tortoise.pack_values import value_field_annotations
     master = master or {}
@@ -1647,6 +1765,13 @@ But STRIP, DON'T DROP the durable claim they carry:
 - An operational/environment lesson is a durable BELIEF — keep the
   cause-effect ("the bash tool kills child processes when it returns",
   "backgrounded processes do not survive tool-call return"), drop the episode.
+- An operational OUTCOME that EVIDENCES a claim is a durable claim too (#8503):
+  a rollback that restored traffic, a chaos run that showed no duplicates, a
+  deploy that held. Keep the outcome AND its measured effect ("traffic
+  normalized within thirteen minutes", "every batch was claimed exactly once
+  after the expiry"); strip the mechanics around it (the command run, the
+  clock time, the batch/shard id). The outcome is what makes the claim behind
+  it believable, so dropping it drops the evidence, not the noise.
 - Process chatter with NO durable claim is dropped ("I'll fix both now",
   "let me verify X").
 What survives is what changes the world model — including how we work.
@@ -1689,8 +1814,28 @@ SEARCH KEYS (E3): emit 2-4 `search_keys` — paraphrases/synonyms a
 questioner might use, plus the verbatim value tokens ("27:12",
 "five-K time"). The fact is findable when asked with different words.
 
-USER VS ASSISTANT (E3): an assistant suggestion/proposal is NOT a user
-fact — do not emit it as a statement point unless the user confirmed it.
+USER VS ASSISTANT (E3) — the SPEAKER is not a filter on CLAIMS: a Point
+carries no speaker at all (it is derived from the source turn at read time),
+so a claim the ASSISTANT asserts is recorded exactly like one the user
+asserts — a diagnosis, a hypothesis ("the sidebar feature is the prime
+suspect"), a derived conclusion, an estimate ("a ten-minute TTL cache will
+absorb nearly all of the repeat traffic"), or a proposed direction is a
+statement Point of its own. A hypothesis the graph can later NAND is a
+BELIEF, and only a Point carries one: dropping an assistant-asserted claim
+because the assistant spoke it deletes beliefs, not chatter. What IS excluded
+is the assistant's PROCESS CHATTER and BARE OFFERS ("I'll fix that now",
+"let me verify X", "want me to also …") — those assert nothing. A
+USER-PERSONAL-STATE fact (personal best, schedule, preference) belongs to the
+USER: never emit one attributed to, or invented by, the assistant.
+A QUESTION THAT ASSERTS A CLAIM CARRIES THAT CLAIM: "what about services
+with no owner row, they will fall through any ownership-based router?"
+asserts the fall-through; "maintenance windows are the other classic noise
+source, do you want ember to auto-suppress?" asserts the noise source. Emit
+the asserted claim as its own Point — the interrogative frame is not a
+disqualifier. Likewise a HYPOTHESIS UNDER INVESTIGATION (a prime suspect, a
+leading theory, "the spike correlates with the Oct 5 release") is a belief
+that changes what gets tested next: emit it as a Point and let the graph
+carry its confidence — speculation is not a NOOP when it steers a decision.
 
 OUTPUT CONTRACT — ONE JSON object and NOTHING else:
 {date_anchor}{output_contract}
@@ -2659,8 +2804,16 @@ Rules:
 - SEARCH KEYS (E3): emit 2-4 `search_keys` — paraphrases/synonyms a
   questioner might use, plus the verbatim value tokens ("27:12",
   "five-K time"). The fact is findable when asked with different words.
-- USER VS ASSISTANT (E3): an assistant suggestion/proposal is NOT a user
-  fact — do not emit it as a statement point unless the user confirmed it.
+- USER VS ASSISTANT (E3) — the SPEAKER is not a filter on CLAIMS: emit a
+  claim the ASSISTANT asserts (diagnosis, hypothesis, derived conclusion,
+  estimate, proposed direction) as a statement Point exactly like a user
+  claim — a Point carries no speaker, and a hypothesis is a belief. Exclude
+  only PROCESS CHATTER and BARE OFFERS ("I'll fix that now", "want me to …"),
+  which assert nothing. Never attribute a USER-PERSONAL-STATE fact to the
+  assistant. A QUESTION THAT ASSERTS A CLAIM carries it ("they will fall
+  through any ownership-based router?"), and a HYPOTHESIS UNDER
+  INVESTIGATION ("the sidebar feature is the prime suspect") is a belief
+  that steers the next test — emit both as Points.
 - OPERATOR REFERENCING: operator src/dst MUST be the EXACT content of a point
   or event emitted in THIS output (copy verbatim, no paraphrasing). If an
   endpoint has no point yet, CREATE the point first. NEVER use an entity name
@@ -3791,25 +3944,39 @@ NOOP_MIN_OVERLAP = 0.45        # Q2: paraphrase-NOOP band floor
 
 
 class DecisionRecord:
-    """One 4-way consolidation decision (D1).
+    """One consolidation decision (D1, plus D12/O4's MERGE).
 
-    decision ∈ {"ADD", "UPDATE", "NOOP", "DELETE"}; prior_id = the matched
-    existing point ("" for ADD); overlap = the length-guarded token overlap
-    vs the chosen prior; reason ∈ {"", "identical", "paraphrase",
-    "value_change"}; evidence = human-readable why (rides the result-level
-    records + link_before_create notes).
+    decision ∈ {"ADD", "UPDATE", "NOOP", "DELETE", "MERGE"}; prior_id = the
+    matched existing point ("" for ADD); overlap = the length-guarded token
+    overlap vs the chosen prior; reason ∈ {"", "identical", "paraphrase",
+    "value_change", "near_dup_merge"}; evidence = human-readable why (rides
+    the result-level records + link_before_create notes).
+
+    ``MERGE`` (#5006, D12/O4) is the fifth outcome the design has always had
+    and the code did not: the FUSION the design places at S3, after the S2.2b
+    verdict. It is distinct from ``NOOP`` in exactly one way — it writes.
+    ``NOOP`` folds a candidate into a prior and emits nothing, so it may only
+    be taken when the prior already carries every entity the candidate names
+    (the #9424 guard); ``MERGE`` is the authorised path for the pair that
+    guard refuses, because it UNIONS the two attachment sets onto the
+    survivor instead of dropping one side's. ``union_entities`` is that union
+    — the whole set the survivor must carry after the fusion, empty on every
+    other decision.
     """
 
-    __slots__ = ("decision", "evidence", "overlap", "prior_id", "reason")
+    __slots__ = ("decision", "evidence", "overlap", "prior_id", "reason",
+                 "union_entities")
 
     def __init__(self, decision: str, prior_id: str = "",
                  overlap: float = 0.0, reason: str = "",
-                 evidence: str = "") -> None:
+                 evidence: str = "",
+                 union_entities: tuple[str, ...] = ()) -> None:
         self.decision = decision
         self.prior_id = prior_id
         self.overlap = overlap
         self.reason = reason
         self.evidence = evidence
+        self.union_entities = tuple(union_entities)
 
 
 _NUMBER_WORDS = {
@@ -5720,10 +5887,13 @@ def supersede_allowed(a: str, b: str) -> bool:
 # paraphrase band below AND the exact-content arm (step 1), which returns
 # before the per-prior loop.
 #
-# ⚠️ This is the evidence-preservation half of #5006, NOT the union-merge. The
-# Jev-arbitrated fusion that keeps ONE point and writes the union onto it is
-# still unimplemented (`config/v4-mechanisms.yml` keeps `near_dup_merge` at
-# `not-implemented`), and this guard deliberately does not pretend otherwise.
+# ⚠️ That was the REFUSAL half of #5006 (#9424). The other half — the
+# authorised FUSION that keeps ONE point and writes the union of both sides'
+# attachments onto it — is `tortoise/near_dup_merge.py`, and it is what makes
+# this refusal the SAFE branch rather than a dead end: a pair this guard
+# refuses is `ADD` by default, and `MERGE` when S2.2b VET recorded the verdict
+# (D12/O4). The two halves are complementary by construction — the guard's
+# refusal is precisely the case the fusion exists to make lossless.
 
 
 def _attachment_ids(value: object) -> frozenset[str] | None:
@@ -5763,18 +5933,22 @@ def _attachments_preserved(prior: dict, candidate: dict) -> bool:
 
 def classify_consolidation(point: dict, priors: list[dict], *,
                            entity_mentions: list[str] | None = None,
-                           current_date: str | None = None) -> DecisionRecord:
-    """D1: the pure 4-way consolidation classifier (no LLM, no graph I/O).
+                           current_date: str | None = None,
+                           merge_flagged: bool = False) -> DecisionRecord:
+    """D1: the consolidation classifier (no LLM, no graph I/O).
 
     Maps (candidate point + S3-retrieved priors + entity/attribute context)
-    to one of ADD / UPDATE / NOOP / DELETE in priority order:
+    to one of ADD / UPDATE / NOOP / DELETE in priority order, plus the MERGE
+    (D12/O4) the `merge_flagged` operand admits:
 
       1. NOOP (identical)   — normalized content equals a prior (the
                               existing exact/content-hash dedup).  A fold is
                               admissible only when it loses nothing here too:
                               the prior must already carry every entity the
                               candidate names (#5006), else that prior is
-                              skipped and the claim falls through to ADD;
+                              skipped and the claim falls through to ADD —
+                              or to MERGE when the pair is flagged and near-
+                              identical (see `merge_flagged` below);
       2. UPDATE             — same entity + same attribute, VALUE differs
                               (value-signature inequality when both sides
                               carry a signature, else the E5 frame-token
@@ -5792,8 +5966,26 @@ def classify_consolidation(point: dict, priors: list[dict], *,
                               already carry every entity the candidate names
                               (#5006 — a fold stamps no link, so an entity
                               only the candidate names would be dropped);
-                              otherwise the claim falls through to ADD.
-      4. ADD                — no prior match.
+                              otherwise the claim falls through to ADD;
+      4. MERGE (D12/O4)     — ⚠️ NOT a sixth way to fold: it is the authorised
+                              alternative for the pair step 1/step 3 must
+                              REFUSE. When such a pair is `merge_flagged`
+                              and near-identical, `tortoise.near_dup_merge`
+                              unions the two attachment sets onto the
+                              survivor instead of dropping one side's, which
+                              is exactly what makes the fold lossless. A
+                              `MERGE` carries `union_entities` — the whole
+                              set the survivor must carry afterwards;
+      5. ADD                — no prior match.
+
+    ``merge_flagged`` is the S2.2b VET verdict for THIS candidate (D12: the
+    arbiter answers *"are these the same claim?"*, the mechanical guard only
+    answers *"is anything distinguishing lost?"*). Default False — no
+    verdict, no fusion — so the classifier's pre-#5006 behaviour is byte-
+    identical for every caller that does not thread a verdict through. A
+    flagged pair still has to clear the mechanical ladder (never-across
+    guard, value differences, the 0.95 bar, a readable union): the flag is
+    necessary, never sufficient.
 
     DELETE is NEVER produced from content alone (D5 — only explicit
     retractions). Ambiguous entity/attribute → NOOP only on high text
@@ -5822,6 +6014,20 @@ def classify_consolidation(point: dict, priors: list[dict], *,
         # carry every entity the candidate names may not absorb it — skip that
         # prior (not the candidate) and let the pair fall through to ADD.
         if not _attachments_preserved(p, point):
+            # D12/O4 (#5006): unless S2.2b recorded the MERGE verdict, in which
+            # case this is exactly the pair the FUSION exists for — identical
+            # content, a wider attachment set, nothing distinguishing lost.
+            if merge_flagged and str(p.get("id") or ""):
+                _diff, _ident = _boundary(str(p.get("content") or ""), content)
+                plan = _near_dup_merge(point, p, overlap=1.0,
+                                       difference=_diff, identity=_ident,
+                                       flagged=True)
+                if plan.merge:
+                    return DecisionRecord(
+                        "MERGE", prior_id=str(p.get("id") or ""),
+                        overlap=1.0, reason="near_dup_merge",
+                        evidence=plan.evidence,
+                        union_entities=plan.union_entities)
             continue
         return DecisionRecord("NOOP", prior_id=str(p.get("id") or ""),
                               overlap=1.0, reason="identical",
@@ -5829,6 +6035,7 @@ def classify_consolidation(point: dict, priors: list[dict], *,
 
     best_update: tuple[float, dict] | None = None
     best_noop: tuple[float, dict, str] | None = None   # (overlap, prior, mode)
+    best_merge: tuple[float, dict, Any] | None = None  # (overlap, prior, plan)
     for p in priors:
         if not str(p.get("id") or ""):
             continue
@@ -5865,8 +6072,18 @@ def classify_consolidation(point: dict, priors: list[dict], *,
             continue
         # #5006: the attachments half of the same ruling.  A fold emits no
         # payload point, so it would drop any entity only the candidate names;
-        # refuse it and let the claim fall through to ADD instead.
+        # refuse it — UNLESS S2.2b recorded the MERGE verdict (D12/O4), in which
+        # case the fold becomes lossless by UNIONING the two attachment sets
+        # onto the survivor instead. The mechanical ladder is re-checked inside
+        # `near_dup_merge` (never-across, the 0.95 bar, a readable union): the
+        # verdict is necessary and never sufficient.
         if not _attachments_preserved(p, point):
+            if merge_flagged:
+                plan = _near_dup_merge(point, p, overlap=ov,
+                                       difference=difference, identity=identity,
+                                       flagged=True)
+                if plan.merge and (best_merge is None or ov > best_merge[0]):
+                    best_merge = (ov, p, plan)
             continue
         if sig_equal and (tier_a or bool(mentions)) and gate:
             # value identity — short-circuits both bands
@@ -5886,12 +6103,22 @@ def classify_consolidation(point: dict, priors: list[dict], *,
             reason="value_change",
             evidence="same entity+attribute, value differs, length-guarded "
                      "overlap or fact-value contradiction, later date")
-    if best_noop is not None:
+    if best_noop is not None and (best_merge is None
+                                  or best_noop[0] > best_merge[0]):
         ov, p, mode = best_noop
         return DecisionRecord(
             "NOOP", prior_id=str(p.get("id") or ""), overlap=round(ov, 3),
             reason="paraphrase",
             evidence=f"{mode} (overlap {ov:.2f})")
+    if best_merge is not None:
+        # Ties go to MERGE: it preserves the union where NOOP preserves only
+        # the prior's set, and both are lossless, so the union is the strictly
+        # safer winner on an otherwise equal pair.
+        ov, p, plan = best_merge
+        return DecisionRecord(
+            "MERGE", prior_id=str(p.get("id") or ""), overlap=round(ov, 3),
+            reason="near_dup_merge", evidence=plan.evidence,
+            union_entities=plan.union_entities)
     return DecisionRecord("ADD", evidence="no prior match")
 
 
@@ -6271,7 +6498,58 @@ def _resolve_point_supersede(ref: str, search: dict,
     search — which ran BEFORE this capture's writes — makes the point
     supersede CROSS-SESSION by construction (the #2552 F2 decision:
     same-session reversals are state/validity semantics, never a CORRECTS
-    record)."""
+    record).
+
+    #8503 RECALL LEG (the drift the exact leg refuses): the ref is the model
+    COPYING a prior point out of the search results, and a long copy drifts
+    by a lead-in word — measured on the #2514 corpus, wp07's ref reads "We
+    ship the lease fix all-at-once behind a single global kill flag" for the
+    wp06 prior "Ship the lease fix all-at-once behind a single global kill
+    flag rather than a week of per-shard canary". Exact equality refused it,
+    so the CORRECTS edge — the ONLY licensed carrier of a cross-session
+    decision reversal — was dropped on a quoting slip, which is what the
+    receipt's `point supersedes=… matches no S3 prior` warning names.
+
+    ⛔ A COVERAGE RATIO IS THE WRONG SHAPE FOR THIS LEG, and the first cut of
+    this change proved it: dividing by the ref alone made ONE differing
+    content token free (6/7 = 0.857), so "report the latency regression to the
+    payments team" folded onto "…to the search team", a 30-second timeout
+    onto a 60-second one, and a `cause`/`effect` swap onto its inversion —
+    each of which `_boundary` (`distinguishing_difference`, above) refuses to
+    even FOLD, let alone supersede. A false CORRECTS terminalizes a live
+    belief and there is no un-supersede API to repair it.
+
+    So the leg is **frame-EDGE-trimmed token EQUALITY** (see
+    ``_span_contains`` for why every tolerant shape was rejected): after
+    dropping the non-load-bearing frame words at each end of both sequences the
+    two must be EQUAL and name the same subject. There is no negation gate and
+    no condition gate — a negator and a condition marker are LOAD-BEARING
+    (``_EDGE_TRIMMABLE`` never removes them), so they sit inside the compared
+    core and the equality test decides them (see the round-5 paragraph below).
+    An addition ANYWHERE the trim does not reach — including a
+    tail clause, which is the measured drift's shape — refuses and fails open.
+    ``SUPERSEDE_REF_MIN_TOKENS`` keeps a generic short ref from matching half
+    the graph, and a unique match is required: 0 candidates and any 2+
+    candidates still fail open with a named warning.
+
+    ⛔ CONTAINMENT ALONE IS NOT ENOUGH, and code review round 2 proved it with
+    three axes this tokenizer cannot see, because `_FRAME_STOPWORDS` includes
+    the connectives and the pronouns:
+      * a FRAME-WORD substitution ("tuesday AND wednesday" vs "tuesday OR
+        wednesday") is invisible to containment;
+      * a SUBJECT substitution ("WE ship" vs "THEY ship") is invisible too —
+        and pronouns carry an entity in this module's own model
+        (`_CONTENT_STOPWORDS = _FRAME_STOPWORDS - _ENTITY_PRONOUNS`);
+      * a DELETION of a qualifier only the prior carries (the ref truncated
+        before "once the canary passes in staging") CONTAINS in order, so an
+        unconditional claim would supersede a gated decision.
+    Round 5 then removed the separate gates entirely: with the load-bearing
+    words excluded from the trim, negation, conditions, connectives and dates
+    all sit INSIDE the compared core, so equality decides them and a second
+    predicate would be dead code. What remains is the trim, a pronoun-set check
+    that refuses a SUBSTITUTION but not an ADDITION, the length floor and the
+    uniqueness rule.
+    """
     ref = (ref or "").strip()
     if not ref or ref in ("null", "None"):
         return None
@@ -6284,6 +6562,21 @@ def _resolve_point_supersede(ref: str, search: dict,
     matches = [p for p in points
                if _norm(str(p.get("content") or "")) == norm]
     if not matches:
+        drifted = _supersede_band_candidates(ref, points)
+        if len(drifted) == 1:
+            prior = drifted[0]
+            warnings.append(
+                f"point-supersede recall band (#8503): ref {ref[:60]!r} is "
+                f"the same claim as {prior.get('id')!r} once frame words at "
+                f"its edges are disregarded "
+                f"('{str(prior.get('content'))[:60]}') — resolved to that "
+                "prior instead of failing open")
+            return prior
+        if len(drifted) > 1:
+            warnings.append(f"point supersedes={ref[:60]!r} is ambiguous "
+                            f"({len(drifted)} priors tie once edge frame "
+                            "words are disregarded) — skipped (never guess)")
+            return None
         warnings.append(f"point supersedes={ref[:60]!r} matches no S3 prior "
                         "— skipped (fail-open)")
         return None
@@ -6292,6 +6585,172 @@ def _resolve_point_supersede(ref: str, search: dict,
                         f"({len(matches)} priors) — skipped (never guess)")
         return None
     return matches[0]
+
+
+# #8503: the supersede-ref recall leg's one bound. The leg itself is an
+# EQUALITY test (frame-edge-trimmed token equality) — a boolean, so there is no
+# ratio and no threshold to tune; this floor keeps a short generic ref
+# ("the lease decision") from matching half the graph and keeps the
+# never-guess property testable.
+SUPERSEDE_REF_MIN_TOKENS = 5
+
+
+def _supersede_ref_tokens(text: str) -> list[str]:
+    """ORDERED content tokens of a supersede ref / prior content.
+
+    Order matters because the comparison is SEQUENCE EQUALITY (frame-edge
+    trimmed, see ``_span_contains``), not a bag of tokens: a role inversion, a
+    swapped pair or a recombination across two clauses all change the sequence
+    and therefore refuse without a separate gate. This tokenizer is NOT the
+    span test's input — it only feeds the LENGTH FLOOR, so frame words are
+    dropped here; the span test uses ``_supersede_span_tokens``, which keeps
+    them. Sentence punctuation is stripped per token — a copied ref routinely
+    differs from its prior by a trailing '.' or a quote mark.
+    """
+    out: list[str] = []
+    for raw in _norm(text).split():
+        tok = raw.strip(".,;:!?\"'()[]{}")
+        if tok and tok not in _FRAME_STOPWORDS:
+            out.append(tok)
+    return out
+
+
+def _supersede_span_tokens(text: str) -> list[str]:
+    """Punctuation-normalised tokens IN ORDER, frame words KEPT.
+
+    Different from ``_supersede_ref_tokens`` (which drops frame words for the
+    length floor): the span test needs the frame words, because a frame word's
+    ROLE can be load-bearing ("by 30 seconds" is not "to 30 seconds", "and" is
+    not "or") and dropping them made every frame-word substitution invisible
+    (code-review round 3). Sentence punctuation is stripped per token — a
+    copied ref routinely differs from its prior by a quote mark.
+    """
+    out: list[str] = []
+    for raw in _norm(text).split():
+        tok = raw.strip(".,;:!?\"'()[]{}")
+        if tok:
+            out.append(tok)
+    return out
+
+
+# #8503: the frame words that may be trimmed from an EDGE, which is a strictly
+# smaller set than `_FRAME_STOPWORDS`: a negator, a condition, a load-bearing
+# connective, a date and a clock unit all change what a claim asserts, and a
+# leading `If` (a frame word AND a condition marker) would otherwise be trimmed
+# away on both sides — an ungated claim then superseding a gated one
+# (review round 5). Pronouns stay trimmable because the measured drift prefixes
+# "We" to a subject-less prior, and `_supersede_pronouns` refuses the
+# substitution direction separately.
+# Temporal-scope adverbs are a load-bearing edge too and are in neither
+# `_DATE_WORDS` nor `_CLOCK_UNITS`, so they are named here: "…kill flag" must
+# not supersede "…kill flag now" (review round 5).
+_TEMPORAL_SCOPE = frozenset({
+    "now", "still", "already", "later", "soon", "currently", "previously",
+    "formerly", "anymore", "anon", "immediately", "eventually",
+})
+_EDGE_TRIMMABLE = (_FRAME_STOPWORDS
+                   - _NEGATION_MARKERS
+                   - _CONDITION_MARKERS
+                   - _CONNECTIVE_MEMBERS
+                   - _DATE_WORDS
+                   - _CLOCK_UNITS
+                   - _TEMPORAL_SCOPE)
+
+
+def _span_contains(ref_tokens: list[str], prior_tokens: list[str]) -> bool:
+    """True when the two token sequences agree except for FRAME words at the EDGES.
+
+    ⛔ This is deliberately NOT a containment test, and the reason is the whole
+    history of this leg. Three review rounds each found a hole in a tolerant
+    matcher, and every hole was a difference the tolerance could not see:
+
+      * a COVERAGE ratio folded every substituted content token (round 1);
+      * an ordered/contiguous span over frame-STRIPPED tokens folded an
+          exchanged connective, a substituted subject and a deleted qualifier,
+          and then a substituted preposition once frame words were kept inside
+          the span (rounds 2 and 3);
+      * allowing an ADDITIVE TAIL — which the measured drift needs, because the
+          model truncated "…rather than a week of per-shard canary" — folds any
+          trailing QUALIFIER the ref dropped ("…kill flag" over "…kill flag
+          after the staging canary passes", "…to 30 seconds" over "…to 30
+          seconds for the payments queue"). A trailing truncation is exactly
+          what this model does, so a tail-tolerant matcher is unsafe BY DESIGN,
+          and no closed-class vocabulary can enumerate every qualifier spelling.
+
+    So the leg is the narrowest rule that cannot corrupt a belief: drop the
+    NON-LOAD-BEARING frame words at each END of both sequences
+    (`_EDGE_TRIMMABLE` — articles, pronouns, prepositions) and require the
+    remainders to be EQUAL. A negator, a condition, a connective, a date or a
+    clock unit is NEVER trimmed, because each of those changes what the claim
+    asserts. Everything else (an added clause, a dropped
+    qualifier, a swapped connective or preposition, a changed number, entity or
+    scope) refuses, and the caller fails open with a named warning.
+
+    ⚠️ CONSEQUENCE, stated rather than buried: the measured wp07 drift is a
+    CONTENT-tail truncation, so this leg does NOT repair that row — it refuses
+    it. Repairing a truncated copy needs a semantic resolver (the Jev-shaped
+    seam the extractor-v4 architecture names as unbuilt) or a prompt that gets
+    the ref copied exactly; it is not something a string predicate should be
+    trusted with, because the failure mode is a live belief marked outdated
+    with no un-supersede API.
+    """
+    def _core(tokens: list[str]) -> list[str]:
+        i, j = 0, len(tokens)
+        while i < j and tokens[i] in _EDGE_TRIMMABLE:
+            i += 1
+        while j > i and tokens[j - 1] in _EDGE_TRIMMABLE:
+            j -= 1
+        return tokens[i:j]
+
+    core_ref, core_prior = _core(ref_tokens), _core(prior_tokens)
+    return bool(core_ref) and core_ref == core_prior
+
+
+def _supersede_pronouns(text: str) -> frozenset[str]:
+    """The entity-carrying pronouns a claim names (empty when it names none).
+
+    `_FRAME_STOPWORDS` strips pronouns from the compared CORE (`_EDGE_TRIMMABLE`
+    keeps them trimmable at an edge, so a pronoun at an edge never reaches the
+    core), so equality alone is blind to "we ship" becoming "they ship" — a
+    different subject. Presence is not the test: the measured drift PREFIXES
+    "We" to a prior that states no subject, and refusing that would undo the
+    fix. Only a substitution — pronouns on BOTH sides, and different — is
+    refused.
+    """
+    return frozenset(tok for tok in _supersede_span_tokens(text)
+                     if tok in _ENTITY_PRONOUNS)
+
+
+def _supersede_band_candidates(ref: str, points: list[dict]) -> list[dict]:
+    """Priors the ref is a faithful (drifted, never substituted) copy of.
+
+    Returns every candidate that passes; the CALLER resolves only when exactly
+    one does. Acceptance is deliberately boolean rather than a similarity
+    score: a ref whose frame-edge-trimmed token sequence must EQUAL the
+    prior's, naming the same subject, is either a copy of this prior or it is
+    not one. (Negation, conditions, connectives and dates need no separate
+    gate: they are LOAD-BEARING, `_EDGE_TRIMMABLE` never removes them, so they
+    are inside the compared core and equality decides them.) A score is what
+    let a substitution through in the first cut; a span tolerant of an additive
+    tail is what let a dropped qualifier through in the third.
+    """
+    ref_tokens = _supersede_ref_tokens(ref)
+    if len(ref_tokens) < SUPERSEDE_REF_MIN_TOKENS:
+        return []
+    ref_pron = _supersede_pronouns(ref)
+    out: list[dict] = []
+    for p in points:
+        content = str(p.get("content") or "")
+        # a SUBJECT substitution is a frame-word substitution too (see
+        # `_supersede_pronouns`: a one-sided pronoun is an addition and is
+        # allowed, two different ones are not).
+        cand_pron = _supersede_pronouns(content)
+        if ref_pron and cand_pron and ref_pron != cand_pron:
+            continue
+        if _span_contains(_supersede_span_tokens(ref),
+                          _supersede_span_tokens(content)):
+            out.append(p)
+    return out
 
 
 def _supersession_records(entity_refs: list[dict], search: dict,
@@ -6610,7 +7069,8 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                   extractor_version: str = "value@0.5.0+v2",
                   master: dict | None = None,
                   session_date: str | None = None,
-                  edus: list[dict] | None = None) -> dict:
+                  edus: list[dict] | None = None,
+                  merge_flagged: frozenset[str] | set[str] = frozenset()) -> dict:
     """S5: deterministic embed EXECUTION (not a flash prompt).
 
     Maps the complete embed list to the Layer-1 commit payload in dependency
@@ -6853,6 +7313,12 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     point_ids: dict[str, str] = {}   # norm content → point id
     tier_a_points = 0                # E2 (#1534): Tier-A state-value count
     noops: list[dict] = []           # E7 (D4): folded duplicates — result-level
+    # #5006 (D12/O4): the FUSIONS — near-duplicate pairs merged onto ONE
+    # survivor with the union of both sides' attachments. Result-level like
+    # ``noops`` (never inside the payload: the payload describes NEW nodes, and
+    # a merge creates none). This list is the merge's whole evidence trail: the
+    # survivor, the union it must carry, and the losing candidate's provenance.
+    merges: list[dict] = []
     # #2552 (op_04, F2): point-level supersede refs collected from the
     # embed points (a NEW point whose ``supersedes`` names an EARLIER-session
     # claim surfaced by the S3 search) — resolved after the loop against the
@@ -6864,7 +7330,14 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         if not isinstance(p, dict):
             warnings.append(f"non-dict point entry {p!r} skipped")
             continue
-        content = str(p.get("content", "")).strip()[:_MAX_CONTENT]
+        # ⚠️ `str(...)` NOT `str(... or "")`: #5060 made a falsy content
+        # WRITABLE as its coerced text (a `None` content is the claim "None"),
+        # and `tests/test_extractor_embed_coerce_5060.py` pins it. Collapsing a
+        # falsy value to "" here makes the `if not content: continue` guard
+        # below DROP the item silently — which reverses that contract and reds
+        # the #5060 battery. `_raw_content` exists for the verdict key only.
+        _raw_content = str(p.get("content", "")).strip()
+        content = _raw_content[:_MAX_CONTENT]
         if not content:
             continue
         pkind = str(p.get("pointKind", "")).strip() or "statement"
@@ -6900,15 +7373,30 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         quote = str(p.get("quote") or "").strip()[:200]
         search_keys = _clean_search_keys(p.get("search_keys"), warnings,
                                          f"point '{content[:60]}'")
-        # E7 (D1): the 4-way decision vs the S3-retrieved priors — pure and
-        # deterministic. NOOP folds into the existing point (a `duplicates`
+        # E7 (D1): the consolidation decision vs the S3-retrieved priors — pure
+        # and deterministic. NOOP folds into the existing point (a `duplicates`
         # stamp at the write path, D4 — physically ONE point, no new edge),
         # never a new payload point.
+        #
+        # #5006 (D12/O4): a MERGE verdict recorded by S2.2b VET for THIS
+        # candidate is what admits the FUSION at S3 — `merge_flagged` reaches
+        # the classifier as the verdict, never as the decision. Matching is by
+        # normalised content (`_norm`), not by list index: VET's item ids are
+        # index-shaped and `apply_vet` removes DISCARDed items from the list,
+        # so an index-based read would silently flag the WRONG candidate.
         decision = classify_consolidation(
             {"content": content, "about_entities": about_list,
              "search_keys": search_keys, "when": when_valid,
              "tier": str(p.get("tier") or "")},
             idx["points"], entity_mentions=about_list,
+            # Probe with the SAME key `_merge_flagged_contents` emits
+            # (`_merge_verdict_keys`): the un-clipped content, and the item
+            # text VET actually keyed on (`name or content`). A single clipped
+            # `n` here silently drops the verdict for any candidate over
+            # `_MAX_CONTENT`, and for any point item that also carries a
+            # `name`.
+            merge_flagged=bool(_merge_verdict_keys(
+                str(p.get("name") or _raw_content).strip()) & merge_flagged),
             current_date=when_valid or session_date)
         pid = _content_id("pt", content)
         if decision.decision == "NOOP":
@@ -6928,6 +7416,33 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 "searched_for": f"point '{content[:60]}'", "found": True,
                 "note": f"duplicate of existing {pid} ({decision.reason}) — "
                         "folded (duplicates stamp, no new point)"})
+            continue
+        if decision.decision == "MERGE":
+            # #5006 (D12/O4) — the FUSION, executed at S3 after the gate.
+            # ONE node survives (the prior); no payload point is emitted, and
+            # the prior's CLAIM is never rewritten ("union the attachments,
+            # never fuse the claim"). The surviving point's attachment set
+            # becomes `union_entities`, which the write path applies; the
+            # losing document's provenance rides this record as the session
+            # membership + quote it contributed, so it is not silently dropped.
+            pid = decision.prior_id or pid
+            merges.append({
+                "point_id": pid, "session_ref": session_id,
+                "overlap": decision.overlap,
+                "evidence": decision.evidence,
+                # the SURVIVING claim, unchanged — read from the prior row
+                "content": _prior_row_content(idx["points"], pid, content),
+                # the whole union the survivor must carry after the fusion
+                "about_entities": list(decision.union_entities),
+                # where the LOSING side's evidence goes
+                "merged_content": content,
+                "merged_quote": quote,
+                "reason": "near_dup_merge"})
+            point_ids[n] = pid
+            link_before_create.append({
+                "searched_for": f"point '{content[:60]}'", "found": True,
+                "note": f"near-duplicate merge into existing {pid} "
+                        "(attachments unioned, no new point)"})
             continue
         if decision.decision == "UPDATE":
             reason = "REVISES"  # supersession: new content corrects the old
@@ -7467,6 +7982,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     return {
         "payload": payload,
         "noops": noops,                # E7 (D4): result-level, NOT in the payload
+        "merges": merges,              # #5006: result-level, NOT in the payload
         "deletions": deletions,        # E7 (D5): result-level, NOT in the payload
         "supersessions": supersessions,
         "chain_notes": llm_chain_notes + chain_notes,
@@ -7479,6 +7995,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             "operator_endpoints_minted": len(minted_endpoints),
             "tier_a_points": tier_a_points,
             "noops": len(noops),
+            "merges": len(merges),
             "deletions": len(deletions),
             "search_queries": (search or {}).get("queries_run", 0),
             "search_degraded": bool((search or {}).get("degraded")),
@@ -7688,6 +8205,104 @@ def _edus_from_conversation(conversation: list[dict]) -> list[dict]:
             for i, t in enumerate(conversation) if t.get("content")]
 
 
+def _merge_verdict_keys(text: object) -> frozenset[str]:
+    """The normalised spellings a S2.2b VET ``MERGE`` verdict may be keyed under.
+
+    **One definition of the key, used by BOTH ends of the routing** (#5006):
+    :func:`_merge_flagged_contents` emits these and ``execute_embed`` probes
+    with them. Two spellings, for two real asymmetries between VET and the
+    write path:
+
+    1. **The cap.** ``execute_embed`` keys on ``content[:_MAX_CONTENT]``
+       (``_MAX_CONTENT = 1000``) while VET's ``_item_text`` never truncates, so
+       a candidate over 1000 characters keys two DIFFERENT strings and the
+       verdict is silently dropped — ``merge_flagged`` is then ``False``, the
+       ``#9424`` guard refuses the fold, and the pair falls through to ``ADD``:
+       a second Point minted for a pair the arbiter marked ``MERGE``, with no
+       warning and ``stats["merges"]`` still 0. Both spellings are accepted,
+       exactly as ``vet_gate._resolution_variants`` (the same clip, on the
+       #2552 mint surface) already keeps ``_norm(raw)`` and
+       ``_norm(raw[:_MAX_CONTENT])``.
+    2. **The field.** VET keys on ``_item_text`` = ``name or content``
+       (``vet_gate`` documents that it follows the extractor's own rule), while
+       the point write path keys on ``content``. A point item carrying both
+       keys is therefore keyed on its NAME by VET, so the caller passes the
+       same ``name or content`` expression this helper normalises — one rule,
+       not two.
+
+    A blank text yields the empty set (no verdict ⇒ no merge — the fail-closed
+    direction for a write).
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return frozenset()
+    return frozenset({_norm(raw), _norm(raw[:_MAX_CONTENT])})
+
+
+def _merge_flagged_contents(*surfaces: dict | None) -> frozenset[str]:
+    """The normalised candidate contents S2.2b VET recorded a ``MERGE`` verdict
+    for (#5006 — the verdict's consumer).
+
+    D12/O4 splits the near-duplicate concern across three sites (§4.2): VET
+    records the VERDICT, S3 executes the FUSION. This is the routing between
+    them — until #5006 the verdict had **no consumer at all**, which is what
+    made the absence of the action invisible.
+
+    Content, not the item id: VET's ids are index-shaped and ``apply_vet``
+    removes DISCARDed items from the list between the two passes, so an
+    index-keyed hand-off would flag the wrong candidate after any removal.
+
+    ⚠️ **And the SECTION is part of the key.** ``vet_candidates`` decides over
+    three sections (``points`` / ``events`` / ``entities``) with one shared
+    ``OUTCOMES`` set — ``MERGE`` is one of them for all three — and
+    ``_item_text`` is ``name or content`` for every section. A content-only key
+    therefore lets an EVENT whose text equals a point's, or an ENTITY whose
+    NAME does, authorise a fusion of a Point the arbiter never marked: the
+    verdict is per-CANDIDATE, and dropping the section widens it silently to a
+    different candidate object. Rows are kept only for the point section; a
+    row with no readable ``section`` is not a point verdict and contributes
+    nothing (fail-closed — no verdict ⇒ no merge).
+
+    A missing/malformed surface contributes nothing (no verdict ⇒ no merge),
+    which is the fail-closed direction for a write.
+
+    ⚠️ **ACCEPTED RESIDUAL — the key is TEXT, not the item id, so a verdict can
+    flag a SIBLING.** Two same-text candidates in one pass are distinguished by
+    ``vet_gate``'s index-bearing ``_item_id``, and this hand-off drops the index
+    (deliberately: ``apply_vet`` removes items between the passes, so an
+    index-keyed read would flag the WRONG candidate). The cost is the converse
+    — a verdict recorded for one candidate also flags a *different* candidate
+    whose text collides with it, and the consumer then probes with
+    ``name or content``, so a NAME can collide too. The mechanical ladder still
+    has to admit the pair (the ~0.95 bar against a prior, no distinguishing
+    difference, a readable union), so a misfire needs a text collision AND a
+    near-identical prior. **Pre-existing and unchanged by this routing**
+    (measured identical at ``3e669aa6``); tracked on tortoise#9869. ⚠️ Do not
+    read the SECTION key above as closing it: that KEY stops a verdict on a
+    different KIND of candidate from being widened, not a verdict on a
+    different candidate of the same kind.
+    """
+    flagged: set[str] = set()
+    for surface in surfaces:
+        decisions = (surface or {}).get("decisions")
+        if not isinstance(decisions, dict):
+            continue
+        for d in decisions.values():
+            if not isinstance(d, dict):
+                continue
+            if str(d.get("section") or "").strip().lower() != _POINT_SECTION:
+                continue
+            outcome = str(d.get("outcome") or "").strip().upper()
+            if outcome != _MERGE_DECISION:
+                continue
+            # Both spellings, and the item-text rule — see
+            # :func:`_merge_verdict_keys`: a text-only, un-clipped key drops
+            # every verdict on a candidate over ``_MAX_CONTENT``, which is the
+            # silent duplicate this whole mechanism exists to prevent.
+            flagged |= _merge_verdict_keys(d.get("text"))
+    return frozenset(flagged)
+
+
 def _run_vet_pass(embed_list: dict, narrative: str, *, arbiter=None,
                   prior: dict | None = None
                   ) -> tuple[dict, dict, list[str], dict]:
@@ -7782,8 +8397,11 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     active backend is embedded, S3 degrades gracefully and the pipeline
     proceeds treating everything as new).
     """
-    import uuid
-    session_id = session_id or f"session_{uuid.uuid4().hex[:12]}"
+    # #9599: the mint is ONE spelling (`tortoise.ids.mint_session_id`); the
+    # hand-copied literal here was one of the four this helper subsumes.
+    from tortoise.ids import mint_session_id
+
+    session_id = session_id or mint_session_id()
     errors: list[str] = []
     # M3 (#1524, D3): per-session LLM roll-up + granular error census (class →
     # count across S1/S2/S4 failures). ``errors`` (strings) stays unchanged —
@@ -8176,7 +8794,9 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     try:
         result = execute_embed(complete_list, search, session_id=session_id,
                                story_arc=story_arc, master=master,
-                               session_date=session_date, edus=edus)
+                               session_date=session_date, edus=edus,
+                               merge_flagged=_merge_flagged_contents(
+                                   vet_s2_stats, vet_union_stats))
     except Exception as e:  # S5 must NEVER block the pipeline (design §7.4)
         errors.append(f"S5 failed: {type(e).__name__}: {e}")
         # D1 (#1746): deterministic class for the previously-uncensused S5
@@ -8184,6 +8804,7 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
         _bump_census_class(error_census, "s5_failed")
         result = {"payload": None, "chain_notes": [], "link_before_create": [],
                   "supersessions": [], "noops": [], "deletions": [],
+                  "merges": [],
                   "warnings": [f"S5 embed execution failed: {e}"],
                   "minted_kinds": [], "stats": {}}
     result["chain_enforcer"] = {      # #1695 Task 1 evidence surface

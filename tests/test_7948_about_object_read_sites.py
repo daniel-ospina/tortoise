@@ -139,8 +139,12 @@ WHAT THIS PINS
    fail-open:** substituting a different REGISTERED tool on rows 4 and 21 left
    every arm green, and the blast-radius door count is derived from those very
    cells. The residual is named there — the closure is name-based (permissive:
-   it can miss a bad door, never invent reach), the budget is a BOUND (3, with two
-   measured exceptions), and its acceptance RATE is pinned by (22) so it cannot
+   it can miss a bad door, and it can invent a hop through a repeated attribute or
+   builtin name; a repeated function-local VARIABLE target no longer resolves
+   (`#9817` — the NAME of a nested `def`/`class` still does, and that residue is
+   declared in the note at `_DOOR_REACH_HOPS`), the
+   budget is a BOUND (3, with two
+   measured exceptions), and its acceptance COUNT is pinned by (22) so it cannot
    loosen again silently. **The REST door is keyed on `(verb, path)`, not path
    alone** — a cell naming the sibling `GET` of a `POST` route is a different
    door, and was green before the verb was checked.
@@ -230,7 +234,7 @@ WHAT THIS PINS
    ARM rather than as a comment, the same correction (16) records for the
    fragment census that existed for three cycles and was never CALLED.
 22. `test_the_attribution_predicate_does_not_swallow_the_whole_table` — (8)'s
-   relation is a BOUND, so the RATE it accepts is pinned as its own number: at
+   relation is a BOUND, so the COUNT it accepts is pinned as its own number: at
    most `_ACCEPTED_PAIRS_AT_THIS_HEAD` of the (row, table-door) pairs and at
    most `_WORST_ROW_AT_THIS_HEAD` for any one row, with a floor at the cell
    occurrences §13 states, so a predicate that breaks the other way also reds.
@@ -242,9 +246,15 @@ WHAT THIS PINS
 23. `test_the_gate_walk_comment_pins_no_wall_clock_figure` +
    `test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced` +
    `test_the_gate_walk_capture_reads_every_position_a_duration_is_written` +
-   `test_the_gate_walk_anchors_name_the_commit_that_carries_the_figure` — the four
-   `#9506`/`#9522` arms, and the only ones here about this instrument's OWN prose rather
-   than §13's. The third is the `#9522` capture arm: it replays the removed figure
+   `test_the_gate_walk_anchors_name_the_commit_that_carries_the_figure` +
+   `test_the_gate_walk_comment_asserts_no_unmeasured_magnitude` +
+   `test_the_gate_walk_magnitude_ratios_recompute_from_the_rows_they_name` +
+   `test_the_narrow_gate_walk_rebuild_buys_nothing` — the listed
+   `#9506`/`#9522`/`#9501` arms, and the only ones here about this instrument's OWN
+   prose rather than §13's. (No count: a bare number is the same claim in a third
+   alphabet, which is the defect this file removes from the census comment — an
+   enumerated list of names is checkable, a total is not.) The third is the `#9522` capture arm: it replays the
+   removed figure
    through each of the three SYNTHETIC positions (docstring, trailing comment, `#` block
    above the `def`), then holds the LIVE function by containment (its docstring's first
    line is in the capture) and by width (strictly more lines than the `#`-line
@@ -318,6 +328,100 @@ WHAT THIS PINS
    commit `fa84a473d:990-992`, and — where this checkout can reach the objects,
    skipped rather than shallow-ified otherwise — that blob must carry the figure while
    `origin/main`'s does not.
+   ⚠️ **The FIFTH arm is the same rule in the OTHER ALPHABET (`#9501`).** `#9516`
+   removed the FIGURES and left the MAGNITUDE in words — *"No magnitude is pinned: the
+   rebuild is a small fraction of this arm's cost, and a wall-clock number in a comment
+   is the claim that rots"* — which `_unframed_durations` cannot see, because it matches
+   a NUMBER and a UNIT and a proportion spelled in words carries neither. So the
+   sentence survived the guard written to delete exactly that
+   claim, and it did not reproduce: measured at `81f5594dc` — the merge base when the
+   figures were taken; `main` has advanced since, so a `base` label would describe a
+   tree the measurement never saw (fresh process, `_literal_files()` warm, two runs) —
+   the rebuild is 2.5–3.0 s of
+   `_narrow_gate_walk_sites`'s own 3.9–4.4 s, and the percentages recomputed from that
+   row are the claim — not the word form the sentence used. (`_unsettleable_magnitudes`'
+   docstring carries both rows and the percentages recomputed from them, and an arm
+   there holds the two prose sites to the same rows. The first measurement belongs to a
+   DIFFERENT tree, `69390341f`, and `#9549` changed the census universe between them, so
+   neither set is a re-measurement of the other. The `69390341f` row is not restated
+   here: a figure copied into this paragraph is a figure no arm recomputes, and the
+   `81f5594dc` pair above is recomputed only because `_BASE_MEASUREMENT_PROSE` holds it
+   to that row — `#9528` re-review, which caught this sentence claiming both were
+   unchecked when one of them is the most tightly held prose in the file.)
+   `_unsettleable_magnitudes()` states that rule once for the word form
+   (a magnitude — digit or word — is allowed only with the framing that produced it),
+   and `test_the_gate_walk_comment_asserts_no_unmeasured_magnitude` applies it to the
+   live comment, with its non-vacuity — and the legs that pin its per-line framing
+   window — in `test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced` (below).
+   ⚠️ The phrase may WRAP (the sentence it exists to red on is broken as `…a small
+   fraction of this` / `# arm's cost…`), so the search window is the phrase's line plus
+   the NEXT one (`_flatten_comment`), and FRAMING is decided over that same pair by
+   `_framed` (`#9501` review, cycles 2–3: a whole-text framing test cleared every
+   magnitude in the function, a line-by-line search was green on the file's real
+   comment, and the two-line window is pinned by its own leg so the accepted cost stays
+   one line wide and visible).
+   `_unframed_durations` is deliberately NOT flattened: its framing window is the
+   number's own LINE by design, and the wrap residual there is filed as `#9531`.
+   ⚠️ **The SIXTH arm is the third alphabet, and the one no predicate can see.** The
+   comment had also come to pin a bare count two lines below a sentence saying no
+   magnitude was pinned ("the same 29 `_File`s" next to "No magnitude is pinned: the
+   rebuild is a small fraction of this arm's cost"): true, deterministic, and measured
+   by NOTHING, since bare digits carry no UNIT for `_unframed_durations` to match and
+   are not words for `_unsettleable_magnitudes`. The count is gone rather than
+   restated, and the claim it stood for is EXECUTED by
+   `test_the_narrow_gate_walk_rebuild_buys_nothing`: it substitutes a rebuild of the
+   same `_File`s for `_literal_files()` and runs the REAL `_narrow_gate_walk_sites`
+   body, so "same values, same order, same derivations" is measured through the walk
+   the comment sits in rather than written down beside it.
+
+24. `test_a_stated_fact_cannot_be_satisfied_by_prose` — the fact check reads
+   source with comments and docstrings BLANKED (`_code_lines`), because a fact
+   in a comment is not a fact about executed code. Measured: weaken
+   `sdk.provenance`'s query to `MATCH (s)-[r]->(n)` and leave the old
+   `MATCH (s:Subject {id:$sid})-[r]->(n)` in a comment above it, and on raw
+   source the arm stays GREEN while the walk observes `aboutObject` with no
+   `:Subject` bound. The stripper is column-exact on comments (a trailing
+   comment must not take its code line with it) and blanks a whole bare-string
+   statement.
+25. `test_a_stated_fact_is_bound_to_one_site_not_to_its_symbol` — the register
+   key is `(file, symbol)` and the derivation is per-SITE, so a symbol-wide
+   fact span lets one walk's ground vouch for its neighbour AND for anything
+   appended later. Measured: one unconstrained all-edge walk added inside
+   `sdk.provenance` (`MATCH (x)-[rr]->(y) RETURN count(rr)`) kept every arm
+   green, while `origin/main`'s per-walk guard reded on it. `mining.verify_no_
+   auto_wire`'s two walks are the live fixture: each site must carry a fact,
+   and the two must not resolve to the SAME fact set.
+26. `test_a_walk_inside_an_already_registered_statement_is_unbounded` — the
+   per-statement bound is still one level too coarse: the derivation keys a site
+   on `(symbol, line)`, so a walk appended INSIDE an already-registered query
+   string (`… properties(n) UNION MATCH (x)-[rr]->(y) …`) is the SAME site, the
+   count does not move, and the first walk's fact vouched for it. Measured on
+   that cut, the copy shipped green; the per-WINDOW net now reds naming the
+   window, and the fixture pins both halves (one derived site, two walk
+   occurrences, the second unbounded).
+27. `test_a_stated_fact_no_site_carries_reds_the_entry` — the reverse direction
+   an any-fact-per-site loop cannot express. It is REQUIRED for the two-site
+   entries (each site carries only its own fact) and it silently dropped 4 of
+   the 12 recorded grounds: retyping `_DEGREE`'s anchor from
+   `(old:Source {url:$u})` to `(old)` left the arm green while the walk started
+   observing `aboutObject`, where `origin/main`'s all-facts rule reded. Every
+   recorded fact must now be carried by SOME site of its entry.
+28. `test_the_walk_window_ends_at_a_union_and_at_a_comma` — the per-CLAUSE cut
+   of item 26 was still open in TWO directions, both measured GREEN: a second
+   pattern of the SAME `MATCH` (`… (a)-[r]->(b), (x)-[rr]->(y) …`) produces no
+   new clause segment, and a `UNION` arm that REUSES a variable name from the
+   first arm (`… RETURN type(r), labels(n)[0] … UNION MATCH (n)-[rr]->(m) …`)
+   satisfied the old earlier-clause escape's variable overlap. The window ends at
+   both boundaries now: two windows per query, the registered walk's window
+   carries the fact and the copy's does not. Pinned through the real derivation
+   too (the copy is still ONE site, so the count cannot see either shape).
+29. `test_the_live_fact_corpus_is_the_stripped_source` — item 24 exercises
+   `_code_lines` DIRECTLY, so nothing pinned its only production consumer.
+   Measured: reverting `_site_fact_text` to raw source left every other arm green,
+   because no live fact is comment-satisfiable today — the hole reverts one line
+   away and silently. The arm asserts the LIVE corpus is comment-free and that at
+   least one live site's statement carries a `#` comment in the raw source, so
+   the discriminator is live rather than hypothetical.
 
 ⚠️ **What this deliberately does NOT claim.** The LITERAL census is a LOWER
 BOUND: it sees a relationship pattern naming the edge, so a reader that
@@ -329,9 +433,7 @@ from going unnoticed (its pin would dangle). There is NO carrier fallback in
 (2): a row is a literal read, a pinned computed-name read, or red — the old
 fallback ("any `MATCH` in the span plus a bare mention of a carrier-shaped
 constant") decided no current row and would have greened a future one that read
-nothing. The UNTYPED walks (rows 3, 22, 24–33) are NOT a lower bound any more:
-(16) derives them from the tree, which is what stopped the class moving on
-every pass. Line NUMBERS are not asserted — the symbol is authoritative and a
+nothing. The UNTYPED walks — every row whose query carries a relationship with NO type written, in any of the three spellings §13 derives (the bracketed `-[r]->`, the bracket-less `(n)--()`, and a pattern comprehension), whether that is its whole read or a walk beneath a constant-carried one — are NOT a lower bound any more, and are deliberately not enumerated here: (16) derives them from the tree, which is what stopped the class moving on every pass. Line NUMBERS are not asserted — the symbol is authoritative and a
 symbol that merely moved passes. And the enumeration is of READERS of the edge
 as data; writers that MERGE it are not rows here.
 
@@ -343,8 +445,10 @@ from __future__ import annotations
 import ast
 import functools
 import inspect
+import io
 import re
 import subprocess
+import tokenize
 from collections.abc import Callable
 from pathlib import Path
 
@@ -410,6 +514,69 @@ _CLAUSE = re.compile(
     r"\b(OPTIONAL\s+MATCH|MATCH|MERGE|CREATE|SET|DELETE|DETACH)\b", re.I
 )
 _READ_CLAUSES = {"MATCH", "OPTIONAL MATCH"}
+
+#: The two boundaries a walk's bindings cannot cross (`_top_level_offsets` finds
+#: them outside brackets and strings): a `UNION` arm binds its OWN variables, and
+#: a comma-separated pattern is a second, independently matched walk.
+#:
+#: ⚠️ **The comma boundary is decided by CLAUSE, not by every top-level comma.**
+#: `_top_level_offsets(text, _COMMA)` finds the commas of a `WITH` projection list
+#: too, and there a comma separates ITEMS of one projection — evaluated in ONE
+#: scope — not two patterns. Splitting there cut `WITH r, n`'s window in two, so
+#: the registered fact fell outside the walk's window and `_scope_survives` (which
+#: correctly reports the projection as CARRYING `r`) was never consulted: `WITH r,
+#: n` / `WITH n, r` were reported ungrounded, the exact carrying projection
+#: `_walk_binding` and `_scope_survives` document as staying green (#9544 review
+#: P2). `_pattern_comma_offsets` decides each comma by the clause it sits in.
+_UNION_CLAUSE = re.compile(r"\bUNION\b", re.I)
+_COMMA = re.compile(r",")
+#: Clauses whose top-level commas separate INDEPENDENT patterns — the only commas a
+#: walk's fact cannot cross. In every other clause (`WITH`, `RETURN`, `SET`, …) a
+#: comma separates ITEMS of one projection, which are evaluated in one scope, so it
+#: ends no window. `CREATE`/`MERGE` are included because their `(a), (b)` patterns
+#: are independent matches in exactly the way a second `MATCH` pattern is.
+_PATTERN_CLAUSES = frozenset({"MATCH", "OPTIONAL MATCH", "MERGE", "CREATE"})
+
+#: A SCOPE boundary — the third way a NAME stops meaning the same relationship. A
+#: `WITH` re-projects the variables in scope: a name it does not carry is GONE, so a
+#: later `MATCH` re-binding that name binds a FRESH relationship and walks a fresh
+#: set of types. ⚠️ `WITH` is the ONLY scope boundary in Cypher's subquery story: a
+#: `CALL { … }` block IMPORTS the outer bindings (that is how state is passed in),
+#: so the block itself ends nothing — what ends the identity is a `WITH` INSIDE it,
+#: which is what `_scope_boundary_offsets` descends to find. An earlier revision
+#: made the block a blanket barrier on the inverted premise ("imports nothing it
+#: is not given"); see `_scope_boundary_offsets` for why no valid query can exhibit
+#: that shape and what the barrier cost instead.
+_SCOPE_BOUNDARY = re.compile(r"\bWITH\b", re.I)
+#: A `CALL { … }` subquery OPENER. Its body is descended into by
+#: `_scope_boundary_offsets`, never refused wholesale: `_top_level_offsets` cannot
+#: see a `WITH` at brace depth 1.
+_CALL_SUBQUERY = re.compile(r"\bCALL\s*\{", re.I)
+#: Where a `WITH`'s projection list ends — the next clause keyword of its OWN block.
+#: `CALL` is a clause too, so `WITH n CALL { … }` ends its projection at the `CALL`;
+#: without it the projection ran on into the subquery body and every such query read
+#: as a barrier (#9544 review P2).
+_PROJECTION_END = re.compile(
+    r"\b(OPTIONAL\s+MATCH|MATCH|MERGE|CREATE|SET|DELETE|DETACH|WHERE|WITH|UNWIND|"
+    r"RETURN|ORDER\s+BY|SKIP|LIMIT|UNION|CALL)\b",
+    re.I,
+)
+#: `WITH *` carries EVERY name into the next scope, so it is not a barrier. It is
+#: matched as a STANDALONE projection ITEM (`_projection_items`), never as "any `*`
+#: in the projection": `WITH count(*) AS c` and `WITH a * 2 AS c` drop every grouping
+#: variable, and an unanchored `*` search read both as `WITH *` (#9493 review P2-2).
+_PROJECTS_EVERYTHING = "*"
+
+#: A walk's relationship SLOT, read at the offset `_walk_occurrences` reported:
+#: the bracket (`-[r]->`, `<-[r {c:$c}]-`, `-[]->`). The bracket-less spelling is
+#: read from the census's own `_BARE_TRAVERSAL` match spans rather than by a second
+#: pattern here: a CONSUMING `(node)--(node)` pattern cannot see the second hop of a
+#: chained `(a)--(b)--(c)` (it eats `(b)` and resumes after it), which is how
+#: `_walk_binding` came to raise "the walk net and the derivation have drifted
+#: apart" over a shape with no drift in it (#9544 review P3).
+_WALK_SLOT = re.compile(r"[-<]\s*\[([^\]]*)\]")
+#: The Cypher name a relationship pattern binds (`r` in `[r]`, `[r {c:$c}]`).
+_REL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 #: A table row: `| 3 | `module.py::Symbol.attr` | reads for | **reach** |`.
 _ROW = re.compile(
@@ -715,49 +882,154 @@ def _span(tree: ast.Module, dotted: str) -> tuple[int, int] | None:
     return None
 
 
-def _owning_span(tree: ast.Module, symbol: str) -> tuple[int, int] | None:
-    """`_span`, plus one CLASS level down for a bare method name.
+def _class_body_targets(rel: str, function: str, cls: str) -> frozenset[str]:
+    """What a class body DECLARES, read from the SOURCE: the `Assign`/`AnnAssign`
+    target names of `cls` (a class defined directly inside `function`, in
+    `tortoise/<rel>`) that carry a VALUE and whose targets are bare `Name`s —
+    `_symbol_index`'s own condition, applied to a class that is itself
+    function-local.
 
-    The census attributes a read to the innermost `def`, so a register entry may
-    name `_materialize_connector_source` without its class — `_span` only
-    resolves that spelling when the entry writes `Class.attr`. The register does
-    not, and a fact check that silently found NO span would be checking nothing.
+    ⚠️ These are exactly the names the index must NOT contain for this class: a
+    class local to a function has a local BODY, so `index()` walks it with
+    `in_function=True` and mints none of them (that absence is what the paired
+    assertion pins). This helper reports the SOURCE side of the pair, so a red on it
+    means the SOURCE moved — a rename, or a declaration re-shaped into a form the
+    index skips — and the pin needs re-pointing. It does NOT mean `in_function`
+    stopped propagating.
+
+    ⚠️ The condition must be the index's own, not a looser one, or the presence
+    check defeats itself: an annotation-only `x: list` (no value) would satisfy
+    PRESENT while the index cannot mint the id the next assertion forbids —
+    `assert <id> not in set()`, green and testing nothing. Nested `def`/`class`
+    names are excluded for a DIFFERENT reason: the index mints a nested definition
+    node regardless of `in_function`, so including them would red the ABSENCE pin
+    with the wrong diagnosis ("`in_function` is not propagating") when what changed
+    was a name collision.
     """
-    found = _span(tree, symbol)
-    if found is not None:
-        return found
+    tree = _parsed(str(PKG / rel))
     for node in tree.body:
-        if not isinstance(node, ast.ClassDef):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name != function:
             continue
         for inner in node.body:
-            if _bound_name(inner) == symbol:
-                return (inner.lineno, inner.end_lineno or inner.lineno)
-    return None
+            if isinstance(inner, ast.ClassDef) and inner.name == cls:
+                names: set[str] = set()
+                for statement in inner.body:
+                    if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                        continue
+                    if statement.value is None:
+                        continue
+                    targets = (
+                        statement.targets
+                        if isinstance(statement, ast.Assign)
+                        else [statement.target]
+                    )
+                    names.update(t.id for t in targets if isinstance(t, ast.Name))
+                return frozenset(names)
+    return frozenset()
 
 
-def _symbol_fact_text(rel: str, symbol: str) -> str:
-    """The source a stated exclusion FACT must appear in, or raise.
+@functools.cache
+def _code_lines(path: Path) -> tuple[str, ...]:
+    """The module's source with COMMENTS and PROSE STRINGS blanked out.
 
-    The symbol's own span, plus — ONE level, no recursion — the body of every
+    ⚠️ **A fact check over raw source is satisfiable by text that never runs, and
+    that is measured, not hypothetical.** Leaving the old query in a comment
+    above a weakened one — `# MATCH (s:Subject {id:$sid})-[r]->(n)` over
+    `MATCH (s)-[r]->(n)` — keeps every substring assertion green while the walk
+    observes `aboutObject`, which is the exact fail-open this arm exists to
+    close, one edit away. A docstring is the same hole: it is prose (item 18 of
+    this file's map pins that rule for the literal census, and the fact check
+    must not be the one place that forgot it).
+
+    Comments are cut by `tokenize`, which is the only thing that knows where a
+    `#` is inside a string and where it is not, and the cut is COLUMN-EXACT so
+    code sharing a line with a trailing comment survives. A bare string
+    statement is any `ast.Expr` wrapping a `Constant` str — docstrings are only
+    its first-statement special case — and its lines are blanked whole. Line
+    count and line numbers are preserved, so every span below is still a span
+    into the file the AST came from.
+    """
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    for token in tokenize.generate_tokens(io.StringIO(text).readline):
+        if token.type != tokenize.COMMENT:
+            continue
+        row, start, end = token.start[0], token.start[1], token.end[1]
+        line = lines[row - 1]
+        lines[row - 1] = line[:start] + " " * (end - start) + line[end:]
+    for node in ast.walk(_module_tree(path)):
+        if not (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            continue
+        for row in range(node.lineno, (node.end_lineno or node.lineno) + 1):
+            lines[row - 1] = ""
+    return tuple(lines)
+
+
+def _statement_span(tree: ast.Module, line: int) -> tuple[int, int] | None:
+    """The span of the STATEMENT the given line belongs to — innermost, exact.
+
+    `ast.stmt` nodes nest (`For` → `Expr` → the call), so the innermost one
+    containing the line is the statement the walk is written in. Equal spans are
+    indistinguishable (the same lines are the same text), so the tie-break only
+    has to be deterministic.
+    """
+    best: tuple[int, int] | None = None
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.stmt):
+            continue
+        low, high = node.lineno, node.end_lineno or node.lineno
+        if not low <= line <= high:
+            continue
+        if best is None or high - low < best[1] - best[0] or low > best[0]:
+            best = (low, high)
+    return best
+
+
+def _site_fact_text(rel: str, line: int) -> str:
+    """The source ONE stated exclusion FACT must appear in, or raise.
+
+    ⚠️ **The span is the SITE's statement, never the whole registered symbol, and
+    that is the difference between a register and a voucher.** The register key
+    is `(file, symbol)` while the derivation is per-SITE, so a symbol-keyed fact
+    check silently owns every FUTURE walk added beside a registered one: measured
+    on the pre-fix arm, adding one fully unconstrained all-edge walk to
+    `sdk.provenance` (`MATCH (x)-[rr]->(y) RETURN count(rr)`) kept the whole file
+    green, while `origin/main`'s per-walk guard reded on it. `#9493` replaced
+    that guard's per-walk bound with a per-symbol one, which is strictly weaker.
+
+    The statement span, plus — ONE level, no recursion — the body of every
     module-level constant that span NAMES. The second half is load-bearing and
-    was measured, not assumed: three of the nine entries have no Cypher in their
-    own span at all, because the walk lives in a query CONSTANT their body
-    executes (`session_source_migration._DEGREE` behind `_degree`,
-    `_OUT_TYPES`/`_IN_TYPES` behind `_rel_types`). Without it the arm would have
-    had to weaken those facts to the constant's NAME — a check that the entry
-    still mentions a symbol, which is the unread claim it exists to replace.
+    was measured, not assumed: three of the nine entries keep their Cypher in a
+    query CONSTANT their statement executes (`session_source_migration._DEGREE`
+    behind `_degree`, `_OUT_TYPES`/`_IN_TYPES` behind `_rel_types`), and the
+    derived SITE for those is the constant's own line. Without it the arm would
+    have had to weaken those facts to the constant's NAME — a check that the
+    entry still mentions a symbol, which is the unread claim it replaces.
 
     `rel` is spelled from the REPO root (`tortoise/projection/entities.py`,
     as the register writes it), while a §13 row spells it from the package
     (`projection/entities.py`); both forms resolve here.
+
+    This is the SOURCE-spelling corpus — the net that says a recorded ground is
+    still in the code. The walk net deliberately reads a different corpus,
+    `_site_query_texts`, which is the RESOLVED query: comments and prose cannot
+    reach it at all, and a walk the resolver assembles out of parts is visible
+    there where no source-level scan of the bracket is.
     """
     path = PKG / rel.removeprefix("tortoise/")
-    lines = path.read_text(encoding="utf-8").splitlines()
+    lines = _code_lines(path)
     tree = _module_tree(path)
-    span = _owning_span(tree, symbol)
+    span = _statement_span(tree, line)
     assert span is not None, (
-        f"`{rel}::{symbol}` — the register names a symbol this module does not "
-        "bind, so its stated exclusion cannot be checked against any code"
+        f"`{rel}:{line}` — the derivation attributed a site to a line this module "
+        "has no statement at, so its stated exclusion cannot be checked against "
+        "any code"
     )
     text = "\n".join(lines[span[0] - 1 : span[1]])
     for node in tree.body:
@@ -766,8 +1038,562 @@ def _symbol_fact_text(rel: str, symbol: str) -> str:
         name = _bound_name(node)
         if name is None or not re.search(rf"\b{re.escape(name)}\b", text):
             continue
+        if (node.lineno, node.end_lineno) == span:
+            continue  # the statement IS the constant; its body is already in `text`
         text += "\n" + "\n".join(lines[node.lineno - 1 : node.end_lineno or node.lineno])
     return text
+
+
+@functools.cache
+def _file_by_rel() -> dict:
+    """The census's own parsed modules, keyed the way the register spells a file.
+
+    The same `_File` objects the derivation walked, so a fact check cannot parse a
+    DIFFERENT tree than the site came from (a second parse could drift on a
+    generated file, and would silently measure the wrong source).
+    """
+    return {file.rel: file for file in _call_time_census()._files()}
+
+
+def _site_query_texts(file, symbol: str, line: int) -> tuple[str, ...]:
+    """The RESOLVED Cypher of the walk(s) derived at this site — the executed text.
+
+    ⚠️ **The corpus for the walk net is the resolved query, not the source, and
+    that is what makes it the same object the derivation saw.** `_resolve` folds
+    adjacent literals, `+` concatenation, f-string parts and module constants, so
+    a walk the derivation attributes to `(symbol, line)` appears here exactly as
+    it will run — including the part-assembled spellings (`"MATCH (n)-" +
+    "[r]->(m)"`) that no source-level scan of the bracket can see.
+
+    Docstrings are excluded for the reason the derivation excludes them: prose
+    quoting a pattern is not an executed read.
+    """
+    census = _call_time_census()
+    docstrings = census._docstrings(file)
+    texts: list[str] = []
+    for node in census._roots(file):
+        if id(node) in docstrings or getattr(node, "lineno", 0) != line:
+            continue
+        if symbol not in census._site_symbol(node, file):
+            continue
+        texts.extend(census._resolve(node, census._scope(file, node), file))
+    return tuple(dict.fromkeys(texts))
+
+
+def _top_level_offsets(text: str, needle: re.Pattern[str]) -> list[int]:
+    """Offsets where `needle` matches OUTSIDE brackets and quoted strings.
+
+    Brackets are counted (`()`, `[]`, `{}` all nest in Cypher), so the commas of a
+    property map, a label list or a comprehension are not boundaries, and a quoted
+    string cannot introduce one. Shared by both boundaries below, so `UNION` and
+    the comma are measured the same way a query is read.
+    """
+    hits: list[int] = []
+    depth = 0
+    quote = ""
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if quote:
+            if char == "\\":
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char in "'\"":
+            quote = char
+        elif char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth = max(0, depth - 1)
+        elif depth == 0 and (match := needle.match(text, index)) is not None:
+            hits.append(index)
+            index = match.end()
+            continue
+        index += 1
+    return hits
+
+
+def _pattern_comma_offsets(text: str) -> list[int]:
+    """Top-level commas that separate PATTERNS — never a projection's ITEM commas.
+
+    ⚠️ **`_top_level_offsets(text, _COMMA)` is not the pattern boundary, and
+    treating it as one cut a carrying projection in half.** Measured on the
+    pre-fix `_walk_spans`: `MATCH (s:Subject {id:$sid})-[r]->(n) WITH n, r MATCH
+    (x)-[r]->(y) RETURN type(r)` produced the windows `('… WITH n', 'r')` and
+    `(', r MATCH …', 'r')`, so the registered fact sat in the FIRST window, the
+    walk in the second, and `_scope_survives` — which correctly reports that
+    `WITH n, r` CARRIES `r` — was never consulted (#9544 review P2). `WITH r, n`
+    behaved identically.
+
+    A comma separates patterns only inside a clause that MATCHES them
+    (`_PATTERN_CLAUSES`); in a `WITH`/`RETURN` projection it separates items of
+    ONE projection, which are evaluated in one scope and cross no binding. The
+    clause is the nearest preceding TOP-LEVEL clause keyword, read by the same
+    `_PROJECTION_END` scanner that bounds a projection, so the two cannot agree
+    about the clause a comma belongs to and disagree about the boundary.
+
+    A comma with no clause keyword in front of it is treated as a boundary: no
+    valid Cypher query has one, and the conservative direction there is the
+    fail-open closure rather than a false red.
+    """
+    marks: list[tuple[int, str]] = []
+    for at in _top_level_offsets(text, _PROJECTION_END):
+        match = _PROJECTION_END.match(text, at)
+        assert match is not None, f"`_PROJECTION_END` matched nothing at {at}"
+        marks.append((at, " ".join(match.group(1).upper().split())))
+    marks.extend((at, "") for at in _top_level_offsets(text, _COMMA))
+    offsets: list[int] = []
+    clause = ""
+    for at, keyword in sorted(marks):
+        if keyword:
+            clause = keyword
+        elif not clause or clause in _PATTERN_CLAUSES:
+            offsets.append(at)
+    return offsets
+
+
+def _walk_binding(query: str, start: int) -> str:
+    r"""What IDENTIFIES the walk at `start` — its relationship VARIABLE, or its own text.
+
+    ⚠️ **A fact that merely SITS in a walk's window is not a fact ABOUT that walk,
+    and that gap shipped a live fail-open.** With the window alone as the bound, a
+    second all-edge walk appended with no `UNION` and no top-level comma between
+    it and the registered one — `… -[r]->(n) MATCH (x)-[rr]->(y) …`, a CHAINED hop
+    `… -[r]->(n)-[rr]->(y) …`, or a comprehension in a `WHERE`
+    (`WHERE size([(x)-[rr]-(y) | rr]) > 0`) — landed in the registered walk's
+    window and inherited its fact. Measured with the pre-fix `_unbounded_walks`:
+    all three returned `[]`, i.e. green, while the register went on claiming the
+    class is closed.
+
+    The token is read straight off the text at the offset `_walk_occurrences`
+    reported, so this net can never disagree with the derivation about what a walk
+    is or where it starts:
+
+    * a bracketed walk that binds a name (`-[r]->`, `-[r {c:$c}]->`) → the name —
+      `r`. A fact bounds it by NAMING `r`, which is exactly what every recorded
+      ground does (`WHERE type(r) IN [...]`, `-[r]->(n:Point)`, ...). Reusing a
+      name inside one arm is Cypher's own way of saying *the same relationship*,
+      so it is not a second walk; a `UNION` arm re-binding the name IS one, and
+      the window boundary is what separates those two cases. ⚠️ **A name only
+      means the same relationship for as long as some scope CARRIES it**, which
+      is the third case and is `_scope_survives`'s job rather than a window
+      boundary's: `MATCH (s)-[r]->(n) WITH n MATCH (x)-[r]->(y)` sits in ONE
+      window (no `UNION`, no top-level comma) and reuses the name `r`, yet the
+      `WITH n` dropped `r`, so the second `MATCH` binds a FRESH relationship and
+      walks a fresh set of types — a fact about the first cannot bound it. `WITH *`
+      or a projection that carries the name (`WITH r, n`) keeps the identity, and
+      those stay green;
+    * a bracketed walk that binds NOTHING (`-[]->`) → its own relationship slot
+      text, since there is no name a fact could carry;
+    * a bracket-less walk (`(n)--()`, and each hop of a chained
+      `(a)--(b)--(c)`) → its own `(node)…(node)` pattern text, for the same
+      reason. The extent comes from the census's `_BARE_TRAVERSAL` match at the
+      reported offset — the SAME match the derivation reported, so the two cannot
+      disagree about where the hop ends — and never from a consuming re-scan of
+      the query (a `\(node\)--\(node\)` pattern eats the middle node of a chain,
+      so its next `finditer` step starts past the second hop and finds nothing).
+    """
+    slot = _WALK_SLOT.match(query, start)
+    if slot is not None:
+        name = _REL_NAME.match(slot.group(1).strip())
+        return name.group(0) if name is not None else slot.group(0)
+    dashes = _call_time_census()._BARE_TRAVERSAL.match(query, start)
+    if dashes is not None and start > 0 and query[start - 1] == ")":
+        # A node in this class carries no brackets of its own (`[^()]*`), so the
+        # nearest `(` before the hop and the nearest `)` after it are its ends.
+        left = query.rfind("(", 0, start)
+        right = query.find(")", dashes.end())
+        if left != -1 and right != -1:
+            return query[left : right + 1]
+    raise AssertionError(
+        f"`_walk_occurrences` reported a walk at offset {start} of {query!r}, and "
+        "neither spelling matches there — the walk net and the derivation have "
+        "drifted apart, so every fact assertion about this query is measuring "
+        "text no walk was derived from"
+    )
+
+
+def _names_binding(fact: str, binding: str) -> bool:
+    """Does `fact` bound the walk identified by `binding` — not merely sit near it?
+
+    A NAME is matched as a whole identifier: `\br\b` by hand would read the `r` of
+    `[rr]` as a mention of `r`, which is precisely the mutation this net must
+    catch (`MATCH (x)-[rr]->(y)` beside the registered `-[r]->` walk). A walk that
+    binds no name is matched LITERALLY, because its pattern text is the only thing
+    that can identify it.
+    """
+    if not _REL_NAME.fullmatch(binding):
+        return binding in fact
+    return (
+        re.search(
+            rf"(?<![A-Za-z0-9_]){re.escape(binding)}(?![A-Za-z0-9_])", fact
+        )
+        is not None
+    )
+
+
+def _walk_windows(query: str) -> tuple[tuple[str, str], ...]:
+    """One entry per WALK OCCURRENCE in one resolved query — its WINDOW and its BINDING.
+
+    ⚠️ **The unit is the window, not the query, not the clause, and not the
+    statement, and each coarser unit was MEASURED to leak.** The derivation keys a
+    site on `(symbol, line)`, so a walk appended inside an already-registered
+    query string produces no new site at all; what the fact check has to do is
+    decide how much text around the walk a fact may vouch for. Three answers were
+    tried and the first two shipped a live fail-open:
+
+    * a STATEMENT (the P1 cut) — `… properties(n) " "UNION MATCH (x)-[rr]->(y)
+      …` appended to `sdk.provenance` shipped green: the fact about the first walk
+      excused the second;
+    * a CLAUSE, plus an "an earlier clause counts when it binds a variable this
+      walk uses" escape — two escapes stayed green: `, (x)-[rr]->(y)` as a second
+      pattern of the same `MATCH` (no new clause, so no new segment), and a
+      `UNION` arm that REUSED a variable name from the first arm (the escape's
+      overlap came from the second arm's own `RETURN type(r)`);
+    * a WINDOW — the boundaries below. Two hard boundaries, both of them things a
+      walk's bindings cannot cross: a `UNION` (each arm binds its OWN variables, so
+      a constraint in one says nothing about the other) and a top-level COMMA in a
+      clause that MATCHES patterns (a second pattern in one `MATCH` matches
+      independently, exactly as the escape's own justification said). A comma in a
+      projection list is NOT a boundary: it separates the ITEMS of one projection,
+      which are evaluated in one scope — `_pattern_comma_offsets` decides by clause,
+      because splitting there discarded the registered fact of `WITH n, r` before
+      the scope rule was ever asked (#9544 review P2).
+
+    ⚠️ **A window is necessary and NOT sufficient,** which is the second half of
+    this rule: a fact inside the window can still be a fact about a DIFFERENT walk
+    in it. Three boundary-free appends (`MATCH (x)-[rr]->(y)` after the
+    registered `MATCH`, a chained hop `-[r]->(n)-[rr]->(y)`, a comprehension in a
+    `WHERE`) all stayed inside the registered walk's window and shipped green on
+    that rule alone. So each occurrence also carries its BINDING
+    (`_walk_binding`), and `_unbounded_walks` demands a fact that NAMES it.
+
+    The walk itself is `_walk_occurrences`, the census's positional form of
+    `_is_empty_pattern_read` — the same definition the derivation uses, so the net
+    can never check a shape the derivation does not call a walk (a bracket-less
+    `(n)--()`, or a comprehension after a `SET`).
+
+    ⚠️ **A window is a SPAN, not a scope.** The third way a fact stops being about
+    a walk is a scope boundary INSIDE one window: `MATCH (s)-[r]->(n) WITH n
+    MATCH (x)-[r]->(y)` has no `UNION` and no top-level comma, so both walks share
+    one window, but the `WITH n` dropped `r` — the second `MATCH` binds a FRESH
+    relationship and the fact about the first one says nothing about it. That
+    check needs the walk's OFFSET, not only its window text, which is why
+    `_walk_spans` is the primitive and this function is the text view of it.
+    """
+    return tuple(
+        (query[low:high], binding)
+        for low, high, _start, binding in _walk_spans(query)
+    )
+
+
+def _walk_spans(query: str) -> tuple[tuple[int, int, int, str], ...]:
+    """`(window_low, window_high, walk_offset, binding)` — one row per WALK OCCURRENCE.
+
+    The offset is what a scope check needs: whether a `WITH` between a fact and
+    the walk CARRIED the walk's binding cannot be answered from the window text
+    alone when the same name appears more than once in it.
+    """
+    census = _call_time_census()
+    arm_bounds = sorted({0, *_top_level_offsets(query, _UNION_CLAUSE), len(query)})
+    windows = [
+        (arm_bounds[i], arm_bounds[i + 1]) for i in range(len(arm_bounds) - 1)
+    ]
+    spans: list[tuple[int, int]] = []
+    for low, high in windows:
+        local = [
+            low + offset for offset in _pattern_comma_offsets(query[low:high])
+        ]
+        bounds = sorted({low, *local, high})
+        spans.extend((bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1))
+    return tuple(
+        (low, high, start, _walk_binding(query, start))
+        for start in census._walk_occurrences(query)
+        for low, high in spans
+        if low <= start < high
+    )
+
+
+def _scope_survives(query: str, fact_at: int, walk_at: int, binding: str) -> bool:
+    """Does `binding` still name the SAME relationship across the gap fact → walk?
+
+    ⚠️ **Reusing a relationship name is only "the same relationship" for as long
+    as some scope CARRIES the name.** `MATCH (s:Subject {id:$sid})-[r]->(n) WITH n
+    MATCH (x)-[r]->(y) RETURN type(r)` sits in ONE window — no `UNION`, no
+    top-level comma — and reuses `r`, so the window-and-binding rule read the
+    registered fact as a ground for a walk over a relationship the fact never
+    mentioned. It is a genuinely unconstrained all-edge walk (`x`/`y` unbound, so
+    `aboutObject` is walked and its targets returned), i.e. the exact class this
+    net exists to refuse, shipped green.
+
+    The barrier is decided on the text a `WITH` projects (`_PROJECTION_END` bounds
+    it), by `_projection_carries`: `WITH n` drops `r` → the name is gone → a later
+    `MATCH (x)-[r]->(y)` is a FRESH relationship; `WITH r, n` and a standalone
+    `WITH *` carry it → not a barrier, so that shape stays green. A rename or a
+    derivation (`WITH r AS rel`, `WITH type(r) AS t`, `WITH r.id AS rid`) and an
+    aggregate that drops the grouping variables (`WITH count(*) AS c`) are all
+    barriers: the relationship itself does not survive them.
+
+    ⚠️ **A `CALL { … }` block is NOT a barrier — a `WITH` inside it is, FOR THAT
+    BODY'S SCOPE ONLY.** An earlier revision refused every walk inside a subquery
+    on the premise that a subquery "imports nothing it is not given"; Cypher says
+    the opposite (the block imports every binding in scope, which is how state is
+    passed in, and the one thing it refuses is a RE-declaration). That inverts the
+    rule: the shape the blanket barrier claimed to catch cannot be written as a
+    valid query at all, while a `WITH` inside the body — which really does end the
+    identity — was out of reach, because it sits at brace depth 1 where
+    `_top_level_offsets` does not look. `_scope_boundary_offsets` descends into
+    the body instead, so the same projection reader decides the subquery case and
+    the top-level one.
+
+    ⚠️ **And the descent is BLOCK-SCOPED, not query-wide.** The first cut of it
+    handed every body-internal `WITH` to every walk in the query, so a walk AFTER
+    the block was refused by a projection that never had it in scope: measured,
+    `MATCH …-[r]->(n) CALL { WITH n RETURN n AS nn } MATCH (x)-[r]->(y)` reported
+    the post-`CALL` walk as ungrounded, though the subquery's `WITH` projects only
+    inside the subquery and the outer `r` is still in scope after the block
+    (#9544 review P3). `_scope_boundary_spans` pairs each boundary with the block
+    it belongs to, and a walk outside that block is untouched by it.
+    """
+    low, high = sorted((fact_at, walk_at))
+    for at, block_low, block_high in _scope_boundary_spans(query):
+        if not block_low <= walk_at < block_high:
+            # A `WITH` INSIDE a `CALL { … }` body ends that BODY's scope only; the
+            # enclosing scope's binding survives the block (a subquery imports the
+            # outer bindings, it does not consume them).
+            continue
+        if not low < at < high:
+            continue
+        word = _SCOPE_BOUNDARY.match(query, at)
+        assert word is not None, f"`_SCOPE_BOUNDARY` matched nothing at {at}"
+        projection = query[word.end() : _projection_end(query, at, high)]
+        if _projection_carries(projection, binding):
+            continue
+        return False
+    return True
+
+
+def _block_span(query: str, at: int) -> tuple[int, int]:
+    """The span of the innermost `CALL { … }` BODY containing `at`, else the whole query.
+
+    A `WITH`'s projection list ends where the next clause OF ITS OWN BLOCK begins.
+    Clause keywords inside a subquery body sit at brace depth 1, so
+    `_top_level_offsets` cannot see them — a projection read on block bounds would
+    run past the body and out into the outer query. `{}` is the only brace Cypher
+    has here (a property map cannot contain a clause keyword), so the innermost
+    enclosing pair is the block.
+    """
+    opens: list[int] = []
+    quote = ""
+    index = 0
+    while index < len(query):
+        char = query[index]
+        if quote:
+            if char == "\\":
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char in "'\"":
+            quote = char
+        elif char == "{":
+            opens.append(index)
+        elif char == "}" and opens:
+            opened = opens.pop()
+            if opened < at < index:
+                return opened + 1, index
+        index += 1
+    return 0, len(query)
+
+
+def _scope_boundary_offsets(query: str) -> list[int]:
+    """Every `WITH` that can END a relationship's identity — subquery bodies included.
+
+    Two readers, one rule: `_top_level_offsets` finds the block-level `WITH`s, and
+    each `CALL { … }` body is descended into with the body's OWN text so a `WITH`
+    inside it is found by the same reader (recursively, so a nested subquery is
+    covered by the same descent rather than by a second rule).
+
+    ⚠️ **The descent is what makes the subquery case pinnable, and the blanket
+    barrier it replaces was not.** A `WITH` inside the body is a real, valid query
+    (`CALL { WITH s MATCH (x)-[r]->(y) RETURN y }` drops `r` by projecting only
+    `s`, so the inner `[r]` is a FRESH relationship) and the walk inside it binds
+    the SAME name the fact names — so `_scope_survives` is genuinely consulted and
+    the arm in `test_a_walk_rebinding_a_name_a_with_dropped_is_a_FRESH_walk` can
+    tell this rule from its absence. A subquery WITHOUT a `WITH` re-binding a name
+    is a redeclaration, which Cypher rejects, so there is no valid query to pin
+    the opposite direction with — which is exactly why the barrier could never be
+    pinned and had to go (#9544 review P2).
+
+    ⚠️ **The offset alone is not enough: a boundary belongs to a BLOCK.** A `WITH`
+    inside a body ends that body's scope and nothing else, so the caller needs to
+    know which block each offset came from — that pairing is
+    `_scope_boundary_spans`, and this function stays the flat offset view of it.
+    """
+    offsets = _top_level_offsets(query, _SCOPE_BOUNDARY)
+    for match in _CALL_SUBQUERY.finditer(query):
+        low, high = _block_span(query, match.end())
+        if not low <= match.end() < high:
+            continue
+        offsets.extend(
+            low + offset for offset in _scope_boundary_offsets(query[low:high])
+        )
+    return sorted(offsets)
+
+
+def _scope_boundary_spans(query: str) -> list[tuple[int, int, int]]:
+    """`(offset, block_low, block_high)` per `WITH` — the BLOCK whose scope it ends.
+
+    ⚠️ **A `WITH` inside a `CALL { … }` body ends that BODY's scope, not the
+    enclosing one — and applying it query-wide is a false red.**
+    `_scope_boundary_offsets` descends into bodies because a `WITH` at brace depth
+    1 is invisible to `_top_level_offsets`; the first cut of that descent then
+    handed every body-internal `WITH` to every walk in the query. Measured:
+    `MATCH (s:Subject {id:$sid})-[r]->(n) CALL { WITH n RETURN n AS nn } MATCH
+    (x)-[r]->(y) RETURN type(r)` reported the post-`CALL` walk as ungrounded,
+    though the subquery's `WITH` projects only inside the subquery and the outer
+    `r` is still in scope after the block (#9544 review P3).
+
+    `_block_span` supplies the pairing: for a `WITH` at brace depth 0 it answers
+    the whole query, so a top-level boundary reaches every walk exactly as before,
+    and for a body-internal one it answers that body's span, so the boundary
+    reaches only the walks the projection actually had in scope.
+    """
+    return [(at, *_block_span(query, at)) for at in _scope_boundary_offsets(query)]
+
+
+def _projection_items(projection: str) -> tuple[str, ...]:
+    """The `WITH` projection split into ITEMS at its top-level commas.
+
+    A comma inside `count(*)` or `r {c: $c}` is not an item separator, so the
+    split tracks bracket depth. `DISTINCT` is a keyword of the projection, not of
+    its first item, so it is stripped before the items are read.
+    """
+    text = projection.strip()
+    if text.upper().startswith("DISTINCT"):
+        text = text[len("DISTINCT") :].strip()
+    items: list[str] = []
+    depth = 0
+    current: list[str] = []
+    for char in text:
+        if char in "([":
+            depth += 1
+        elif char in ")]":
+            depth -= 1
+        if char == "," and depth == 0:
+            items.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    items.append("".join(current))
+    return tuple(item.strip() for item in items if item.strip())
+
+
+def _projection_carries(projection: str, binding: str) -> bool:
+    """Does this `WITH` carry the RELATIONSHIP a fact bound under `binding`?
+
+    ⚠️ **Decided from the projection's TARGETS, never from a bare-token search of
+    its text** (#9493 review P2-1). A token search said `WITH r AS rel` carries
+    `r` because the substring `r` is in it — but `AS rel` RENAMES the name, so a
+    later `MATCH (x)-[r]->(y)` binds a FRESH relationship and the fact about the
+    first one grounds nothing. `WITH type(r) AS t` (`r` inside a function call)
+    and `WITH r.id AS rid` (`r` followed by a property access) were read the same
+    way, and all three are unconstrained all-edge walks.
+
+    So: a standalone `*` item carries everything; a bare `name` item carries
+    `name`; and an `expr AS alias` item carries the RELATIONSHIP only when no
+    alias is introduced at all — a renamed or derived value is not the same edge,
+    even when the alias happens to be spelled `alias`. The conservative
+    direction is a false red on a query that re-projects a relationship without
+    renaming it, which is the shape a reader can see and fix; the other direction
+    is a fail-open on the class this net exists to refuse.
+    """
+    return any(
+        item in (_PROJECTS_EVERYTHING, binding)
+        for item in _projection_items(projection)
+    )
+
+
+def _projection_end(query: str, at: int, limit: int) -> int:
+    """Where the `WITH` projection starting at `at` ends — the next clause of its BLOCK.
+
+    Bounded on BOTH sides. Below by the enclosing block's span (`_block_span`),
+    because a clause inside a `CALL { … }` body sits at brace depth 1 and
+    `_top_level_offsets` would run the projection past the body and out into the
+    outer query. Above by `limit` (the walk's own window end) so a projection is
+    never read into a clause that belongs to another window: the question is only
+    what THIS `WITH` carried forward.
+    """
+    low, high = _block_span(query, at)
+    ends = [
+        low + offset
+        for offset in _top_level_offsets(query[low:high], _PROJECTION_END)
+        if low + offset > at
+    ]
+    return min([*[off for off in ends if off <= limit], limit])
+
+
+def _unbounded_walks(query: str, facts: tuple[str, ...]) -> list[tuple[str, str]]:
+    """The walk WINDOWS of `query` that NO stated fact bounds — walk by walk.
+
+    Each item is `(window, binding)` — the window the walk sits in and the token
+    that identifies the walk itself, so a failure can say WHICH walk was left
+    unstated instead of only which stretch of text it sits in.
+
+    A fact bounds a walk only when BOTH hold: the fact is inside that walk's own
+    window, and the fact NAMES that walk's own binding (`_names_binding`). The
+    first half is what stops a fact crossing a `UNION` or a comma; the second is
+    what stops a fact about one walk vouching for its NEIGHBOUR inside one window,
+    which is the shape that survived the window rule alone (`MATCH (x)-[rr]->(y)`
+    appended with no boundary in front of it). There is deliberately NO
+    cross-window escape: the two forms of one (statement-wide, and
+    earlier-clause-on-variable-overlap) were each measured open, and a walk whose
+    bound is written in a DIFFERENT arm or pattern of the same query is a walk
+    nobody has stated a ground for.
+
+    ⚠️ **And a name only carries that identity while a scope CARRIES it** — a
+    `WITH` that drops the binding ends it, so a later `MATCH` re-binding the same
+    name is a fresh relationship and the fact about the old one does not bound it
+    (`_scope_survives`). The third half of the test, for the same reason as the
+    second: the name alone is not the walk.
+
+    This is the per-walk half of the fact check, and it exists because the
+    site-oriented half cannot see a second walk written into an already-registered
+    query string: the derivation keys a site on `(symbol, line)`, so such a copy
+    produces no new site, and a fact found ANYWHERE in the statement excused it.
+    """
+    unbounded: list[tuple[str, str]] = []
+    for low, high, start, binding in _walk_spans(query):
+        window = query[low:high]
+        bounded = False
+        for fact in facts:
+            fact_at = query.find(fact, low, high)
+            if fact_at == -1 or fact_at + len(fact) > high:
+                continue
+            if _names_binding(fact, binding) and _scope_survives(
+                query, fact_at, start, binding
+            ):
+                bounded = True
+                break
+        if not bounded:
+            unbounded.append((window, binding))
+    return list(dict.fromkeys(unbounded))
+
+
+def _uncarried_facts(facts: tuple[str, ...], text: str) -> list[str]:
+    """The stated facts that appear NOWHERE in the text they are recorded about.
+
+    The direction an any-fact-per-site loop cannot express: it is required for the
+    two-site entries (each site carries only its own fact, so "all facts in every
+    site" is unsatisfiable), but on its own it lets an entry keep STATING a fact
+    whose ground the code lost, as long as one other fact still matches.
+    """
+    return [fact for fact in facts if fact not in text]
 
 
 def _reads_literally(value: str) -> bool:
@@ -1711,11 +2537,23 @@ def _route_table() -> dict[tuple[str, str], frozenset[str]]:
 #
 # ⚠️ **Declared residuals — each MEASURED here, not assumed:**
 #
-#   * **The relation is PERMISSIVE, so it can miss a bad door; it cannot invent
-#     reach.** Resolution is by name, so a call through a computed attribute
-#     (`getattr(obj, name)`) is invisible. That direction is chosen: a
-#     permissive relation false-REDS nothing, and this arm's job is to stop a
-#     *substituted* door, not to prove a call graph.
+#   * **The relation is PERMISSIVE, so it can miss a bad door; and it can INVENT
+#     one hop through a repeated identifier.** Resolution is by name, so a hop
+#     resolves a bare name to EVERY symbol of that name: a call through a computed
+#     attribute (`getattr(obj, name)`) is invisible (permissive, the harmless
+#     direction), and a common name — an attribute (`list`, `.delete`) or a
+#     builtin — makes two unrelated sites adjacent (measured: `MCP tortoise_search`
+#     reaches `hosted_backup.py::BackupStorage.list` in 2 hops, the last of which is
+#     nothing but the repeated name `list`). Function-local ASSIGNMENT targets no longer do:
+#     since the `#9817` fix they are not symbol definitions at all (see
+#     `_symbol_index`), and that class was the one that produced a WRONG attribution
+#     rather than an extra hop. ⚠️ The NAME of a nested `def`/`class` is still a
+#     symbol — what the local-class rule drops is its BODY's assignments, and the
+#     class node itself stays (both directions are pinned in
+#     `test_a_local_class_body_is_not_a_source_of_symbols`) — so this residual
+#     is about local VARIABLES, not about every local definition.
+#     The budget and the pinned count are what keep the residue small; the arm
+#     still does not prove a call graph.
 #   * **A door that ENTERS the shared search path is attributed to the readers
 #     that path touches — measured, not merely possible.**
 #     `tortoise_suggest_entry_points` reaches row 2's reader in three hops
@@ -1729,20 +2567,29 @@ def _route_table() -> dict[tuple[str, str], frozenset[str]]:
 #   * **`_DOOR_REACH_HOPS` is a BOUND, and the number is a MEASUREMENT, not a
 #     guess — the first one was WRONG and a review caught it.** A uniform budget
 #     of 5 attributed every row of the table as it stood then, so it looked safe;
-#     measured against substitutions that keep a REAL tool in the cell it accepted
-#     it swallowed the largest share of the (row, table-door) pairs, and three such
-#     substitutions stayed GREEN (rows 22/24's reach cells swapped, rows 28-31's
-#     backup doors swapped, and row 28's verb changed to the sibling `GET` that
-#     dumps nothing). At a uniform 3 hops the same sweep accepts far less and all
-#     three red; the SHIPPED predicate — the exceptions in `_DISTANCE_EXCEPTIONS`
-#     included — accepts the rate the arm below pins (`_ACCEPTED_PAIRS_AT_THIS_HEAD`
-#     over the derived population), because a rate restated in prose is a count
-#     that rots: this sentence still read 63/340 = 18.5 % after the table grew.
-#     Depth still trades both
-#     ways — at 2 hops nine legitimate rows false-red — and the only two true
-#     attributions beyond 3 are named in `_DISTANCE_EXCEPTIONS` with the code fact
+#     measured against substitutions that keep a REAL tool in the cell, it accepted
+#     the largest share of the (row, table-door) pairs, and three such substitutions
+#     are refused at a uniform 3 (rows 22/24's reach cells swapped, rows 28-31's
+#     backup doors swapped, and row 28's verb changed to the sibling `GET` that dumps
+#     nothing) — but at `3f2f48932` only TWO of them discriminate 5 from 3: the
+#     backup swap is already refused at 5, because row 31's swapped cell is 7 hops
+#     (and under the shipped predicate row 29's is 5 against that reader's 4-hop
+#     exception) — the per-door figures are in the `_DOOR_REACH_HOPS` note below.
+#     ⚠️ **The 5-versus-3 comparison above is made at THAT commit, against its own
+#     pre-`#9817` index**: under the current index all three are refused even at a
+#     uniform 5 (the four substituted backup cells are 11, 12, `None`, `None`), so a
+#     lane that re-measures at HEAD and finds no discrimination there has not
+#     refuted it.
+#     The SHIPPED predicate — the exceptions in `_DISTANCE_EXCEPTIONS`
+#     included — accepts the COUNT the arm below pins (`_ACCEPTED_PAIRS_AT_THIS_HEAD`
+#     over the derived population), because a figure restated in prose rots: this
+#     sentence still read 63/340 = 18.5 % after the table grew.
+#     Depth still trades both ways — at a UNIFORM 2 hops nine legitimate rows
+#     false-red (seven if the `_DISTANCE_EXCEPTIONS` budgets are honoured, i.e.
+#     only the global budget is lowered) — and the only two true attributions
+#     beyond 3 are named in `_DISTANCE_EXCEPTIONS` with the code fact
 #     that earns each. ⚠️ This is why the bound is pinned on BOTH sides: the
-#     acceptance rate is itself an arm
+#     acceptance count is itself an arm
 #     (`test_the_attribution_predicate_does_not_swallow_the_whole_table`), so the
 #     predicate cannot quietly go permissive again.
 #   * **Falsifiability is a SEPARATE arm**
@@ -1753,14 +2600,52 @@ def _route_table() -> dict[tuple[str, str], frozenset[str]]:
 #: How many reference hops a door→reader attribution may take. See the residual
 #: note above: this is a BOUND, not a proof.
 #:
-#: ⚠️ **Three, and the tighter number is what makes the arm discriminate.** A
-#: uniform budget of 5 was measured to accept **16.5 % of the 418
-#: (row, table-door) pairs** — three substitutions that keep a REAL tool in a
-#: cell were green under it (rows 22/24's reach cells swapped, rows 28/30's REST
-#: doors swapped, and row 28's verb changed). A uniform 3 accepts **15.6 %**, and
-#: all three of those red; the shipped predicate, with the two exceptions below,
-#: accepts 69/418 = **16.5 %**. Every one of the 31 true attributions is within 3
-#: hops except the two named in `_DISTANCE_EXCEPTIONS`.
+#: ⚠️ **Three, and this is a BOUND, not a proof.** Re-measured 2026-10-24 at
+#: `d07c9e99e`, with function-local ASSIGNMENT targets excluded from the symbol
+#: index (see `_symbol_index`; the NAME of a nested `def`/`class` is still indexed)
+#: and the per-reader exceptions DISABLED, so these are the PURE
+#: relation's figures over the 418 pairs: a uniform 2 accepts 24, a uniform 3 34,
+#: a uniform 4 43, a uniform 5 52. The SHIPPED predicate — the two exceptions in
+#: `_DISTANCE_EXCEPTIONS` added — accepts 36, i.e. the exceptions are worth exactly
+#: the 34 -> 36 above, stated separately so neither figure hides the other. Every
+#: one of the 31 true attributions is within 3 hops except the two named in
+#: `_DISTANCE_EXCEPTIONS`. (Counts, not percentages, on purpose: this file's own
+#: rule is that a rate restated against a fixed denominator rots on the next table
+#: growth — a sentence two screens up still read `63/340 = 18.5 %` after the table
+#: grew. The denominator is 19 rows x 22 doors at this head.)
+#: ⚠️ **The figures an earlier wording here carried were re-measured, not merely
+#: re-labelled.** It reported `16.5 %` for a uniform 5 and `15.6 %` for a uniform 3,
+#: and justified the tighter number with three substitutions it said stayed green
+#: at 5 and red at 3 (rows 22/24's reach cells swapped, rows 28-31's backup doors
+#: swapped, row 28's verb changed). At `3f2f48932` — the commit that wrote that
+#: sentence — the figures reproduce **against that commit's own, still-defective index** (it
+#: had no `in_function` flag at all, so function locals were symbols): uniform
+#: 2/3/4/5 = 26/59/90/170 of 418 and the shipped predicate 69, which is why
+#: `16.5 %` (69/418) reproduces there and `15.6 %` reproduces on NO index (a
+#: uniform 3 was 59/418 = 14.1 %, and the uniform-5 rate was 170/418, which is
+#: the "170 of the 418 (row, table-door) pairs" the arm BELOW states). ⚠️ The
+#: index matters: the CURRENT sweep above, locals excluded, applied to that same
+#: tree measures 24/34/42/52 and a shipped 36 — the difference is the defect,
+#: not the tree.
+#: The DISCRIMINATION the old wording claimed was only PARTLY true there, and the
+#: per-DOOR distances are what show it, not a per-cell minimum. Measured there, per
+#: door and per CELL — a swapped DOOR changes every cell that carries it, so the
+#: backup swap is FOUR cells (rows 28/29 carry `POST /v1/backups`, rows 30/31 its
+#: `restore` sibling), not the two the old wording named: row 24's reader via row
+#: 22's two doors 5, 5; row 22's reader via row 24's three doors 3, 4, 4; rows 28/29
+#: via `POST /v1/backups/restore` 5, 5; rows 30/31 via `POST /v1/backups` 5, 7; row
+#: 28's verb `GET` 5. **Every one of those cells is refused at a uniform 3** —
+#: row 22's because two of its three substituted doors sit at 4, since the arm
+#: refuses a CELL when ANY of its doors exceeds the budget (so the leading `3` is
+#: one green door inside a refused cell, never a green cell). ⚠️ **So only two of
+#: the three substitutions discriminate 5 from 3**: at a uniform 5 the backup swap
+#: is ALREADY refused, on row 31's 7-hop cell (and, with the exceptions on, on row
+#: 29's 5-hop cell against that reader's 4-hop budget) — its green cells are rows
+#: 28/29/30 only. What changed is that the local-symbol fix removes the collisions
+#: those substitutions were exploiting: under the current index all three are
+#: REFUSED even at a uniform 5.
+#: The budget stays at 3 — it is a bound, and nothing here depends on the old
+#: rates.
 _DOOR_REACH_HOPS = 3
 
 #: Readers whose door chain is legitimately LONGER than `_DOOR_REACH_HOPS`,
@@ -1784,10 +2669,16 @@ _DISTANCE_EXCEPTIONS: dict[str, tuple[int, str]] = {
     ),
 }
 
-#: How far the search itself may walk. Deliberately above every budget in play, so
-#: a `None` means UNREACHABLE rather than "further than we looked" — the message
-#: distinguishes the two, and a short search cap would report a long chain as no
-#: chain at all.
+#: How far the search itself may walk. Above every BUDGET in play (3, plus the
+#: two exceptions whose budgets are 4 and 5) — which is NOT the same as above
+#: every CHAIN, and the difference is measured, not assumed: at this head
+#: `MCP tortoise_search` reaches `hosted_backup.py::_independent_counts` and
+#: `_DUMP_EDGE_PAGE_QUERY` in 13 hops and `_COUNT_ALL_EDGES_QUERY` in 14, so
+#: `_door_distance` returns `None` for them at this cap. **`None` therefore means
+#: "not found within `_DISTANCE_SEARCH_CAP` hops", never "unreachable"**, and
+#: every message that consumes the value says which of the two it is — a short
+#: cap reports a long chain as no chain at all, so a caller must not read `None`
+#: as proof of absence.
 _DISTANCE_SEARCH_CAP = 12
 
 
@@ -1801,6 +2692,36 @@ def _symbol_index() -> tuple[dict[str, frozenset[str]], dict[str, frozenset[str]
     `_COUNT_ALL_EDGES_QUERY`, which are strings rather than functions, and a
     function-only index would have reported those two rows as unreachable — a
     false red produced by the instrument, not by the table.
+
+    ⚠️ **A LOCAL variable is NOT a symbol, and indexing one INVENTS reach.** The
+    indexer used to register every `x = …` it walked past, function bodies
+    included, so a local `ids`/`edges`/`result` in one module was a definition
+    node that a same-named local ANYWHERE else resolved to — a hop through
+    nothing but a repeated identifier. Measured on this tree before the rule was
+    added: `MCP tortoise_search` acquired an attribution to
+    `hosted_backup.py::_COUNT_ALL_EDGES_QUERY` over the chain
+    `tortoise_fts_query` → `_review_prune.ids` →
+    `hosted_backup._independent_counts.edges` → the constant, where the two
+    middle hops are the locals `ids` and `edges` in functions that have nothing
+    to do with each other (`#9720` added the `ids` local, which shortened the
+    same collision from 5 hops to 4 and took the accepted count from 69 pairs
+    to 70). The relation's own note now states what the code enforces: a
+    repeated ATTRIBUTE or builtin name can still buy a hop (`list`, `.delete`),
+    while a repeated function-local VARIABLE target no longer resolves (the NAME
+    of a nested `def`/`class` still does — the residual note above declares that
+    remaining permissive direction). The `#9817`
+    local-VARIABLE defect was the class that produced a WRONG attribution rather
+    than an extra hop, so those definition nodes are excluded here and the
+    negative probe for that exact pair lives in
+    `test_the_door_attribution_refuses_a_door_that_reaches_another_reader`.
+    A local CLASS body is a weaker case, measured separately: it supplies extra
+    hop CANDIDATES and moves no accepted pair at all — which is why it needed a
+    pin of its own (`test_a_local_class_body_is_not_a_source_of_symbols`)
+    rather than resting on the two ceilings. A class whose body is walked from a
+    function carries `in_function` through unchanged.
+    Values of a local assignment are still REACHED from the enclosing function
+    (`mentions` walks every `Assign` value), so dropping the target nodes loses
+    no real reference.
     """
     defs: dict[str, set[str]] = {}
     refs: dict[str, frozenset[str]] = {}
@@ -1843,18 +2764,31 @@ def _symbol_index() -> tuple[dict[str, frozenset[str]], dict[str, frozenset[str]
                 reference(inner.value)
         return frozenset(names)
 
-    def index(body, rel: str, prefix: str) -> None:
+    def index(body, rel: str, prefix: str, *, in_function: bool = False) -> None:
         for node in body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 qual = f"{prefix}{node.name}"
                 node_id = f"{rel}::{qual}"
                 defs.setdefault(node.name, set()).add(node_id)
                 refs[node_id] = mentions(node)
-                index(node.body, rel, f"{qual}.")
+                index(node.body, rel, f"{qual}.", in_function=True)
             elif isinstance(node, ast.ClassDef):
                 defs.setdefault(node.name, set()).add(f"{rel}::{prefix}{node.name}")
-                index(node.body, rel, f"{prefix}{node.name}.")
-            elif isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+                # A class BODY still declares symbols (`Class.ATTR` constants) —
+                # the class ITSELF is always a symbol (a nested `def`/`class` is
+                # indexed whether or not it is inside a function), but a class
+                # local to a function has a local BODY, so only its `Assign`
+                # targets are dropped and the flag carries through unchanged (see
+                # `test_a_local_class_body_is_not_a_source_of_symbols`).
+                index(node.body, rel, f"{prefix}{node.name}.", in_function=in_function)
+            elif (
+                isinstance(node, (ast.Assign, ast.AnnAssign))
+                and node.value is not None
+                and not in_function
+            ):
+                # Module- and class-level only: a function-local target is not a
+                # symbol (see the docstring). Nested `def`s above are still
+                # indexed either way.
                 targets = node.targets if isinstance(node, ast.Assign) else [node.target]
                 for target in targets:
                     if isinstance(target, ast.Name):
@@ -1898,7 +2832,13 @@ def _door_entry_ids(door: str) -> frozenset[str]:
 
 @functools.cache
 def _door_distance(door: str, reader: str) -> int | None:
-    """Shortest reference distance from `door` to `reader`; `None` = unreachable.
+    """Shortest reference distance from `door` to `reader`; `None` = NOT FOUND
+    within `_DISTANCE_SEARCH_CAP` hops.
+
+    ⚠️ `None` is a TRUNCATION, not a proof of absence — a chain longer than the
+    cap reports `None` exactly like one that does not exist (measured at this
+    head: `_COUNT_ALL_EDGES_QUERY` is 14 hops against a cap of 12), which is why
+    the two are never conflated in a message.
 
     Returns the DISTANCE rather than a boolean so the failure can say how far the
     chain actually is — "needs 4 references, budget is 3" is actionable, "not
@@ -1965,16 +2905,194 @@ def test_the_door_attribution_refuses_a_door_that_reaches_another_reader():
 
     # …and a door that exists but is on another surface path must not be
     # attributed to a reader it does not reach.
+    # ⚠️ This door needs the SAME non-vacuity guard as `MCP tortoise_search`
+    # below: `_door_entry_ids` yields `frozenset()` for a handler that no longer
+    # resolves, `_door_distance` then returns `None`, and every `not
+    # _door_reaches(...)` in the loop would pass while testing nothing.
+    assert _door_entry_ids("MCP tortoise_suggest_entry_points"), (
+        "this probe's door does not resolve, so the `not _door_reaches(...)` loop "
+        "below would be vacuous — a door that is not in the index never reaches "
+        "anything (measured: a renamed tool yields frozenset() and refuses every "
+        "reader)"
+    )
     for wrong in (
         "mcp_server.py::_preview_supersede",
         "sdk.py::TortoiseSDK.belief_timeline",
     ):
+        # The READER needs the guard too, not just the door: a reader id that no
+        # longer resolves is absent from the index, `_door_distance` returns
+        # `None`, and the assertion below passes while testing NOTHING — the same
+        # vacuity the door guard above closes, one operand over.
+        assert wrong in _symbol_index()[1], (
+            f"the probe reader `{wrong}` is not a node in the symbol index, so the "
+            "`not _door_reaches(...)` assertion below would pass on a reader that "
+            "cannot be reached because it does not exist"
+        )
         assert not _door_reaches("MCP tortoise_suggest_entry_points", wrong), (
             f"MCP `tortoise_suggest_entry_points` is attributed to `{wrong}`, which it "
             "does not reach — the door→reader predicate answers True too freely, so "
             "`test_every_customer_callable_row_reaches_a_declared_door` would pass a "
             "substituted door."
         )
+
+    # ⚠️ A chain built out of a repeated FUNCTION-LOCAL name is not reach, and
+    # this pair is the measured case: `MCP tortoise_search` was attributed to row
+    # 29's backup count constant over `tortoise_fts_query` → `_review_prune.ids` →
+    # `_independent_counts.edges` → the constant — hops two and three being the
+    # locals `ids` and `edges` in unrelated functions, because the indexer used to
+    # register function-local assignments as symbols. None of the dumps' own symbols
+    # is inside this door's budget and that stays so — measured, `dump_graph` 12 hops
+    # and `create_backup` 11 are far past that budget and still INSIDE the cap (so
+    # `_door_distance` returns their distance and the pair is refused on the budget
+    # alone), `_independent_counts` and
+    # `_DUMP_EDGE_PAGE_QUERY` are 13 and `_COUNT_ALL_EDGES_QUERY` 14 (those three are
+    # beyond the 12-hop `_DISTANCE_SEARCH_CAP`, so `_door_distance` reports `None` for
+    # them — "further than we looked", not "unreachable"), and `restore_graph` /
+    # `_restore_copy_settled` are unreachable AT CAP 24 (the cap was raised for
+    # that measurement) — "unreachable" is not claimed for caps beyond it. (Other
+    # `hosted_backup.py`
+    # symbols ARE reachable at 2-3 hops through ATTRIBUTE names — `list`, `delete` —
+    # which is the relation's declared permissive direction: a repeated identifier
+    # can buy a hop, so only the pair the door is FOR is pinned here. If it reds,
+    # either a local is a symbol again or the search path grew a real edge into the
+    # backup's whole-graph count — name which before tightening anything.)
+    assert _door_entry_ids("MCP tortoise_search"), (
+        "this probe's door does not resolve, so `not _door_reaches(...)` below would be "
+        "vacuous — a door that is not in the index never reaches anything (measured: a "
+        "renamed tool yields frozenset() and refuses every reader)"
+    )
+    # The READER needs the same guard as the door: a reader id that no longer
+    # resolves is absent from the index, `_door_distance` answers `None`, and the
+    # `not _door_reaches(...)` assertion below passes while testing nothing.
+    assert "hosted_backup.py::_COUNT_ALL_EDGES_QUERY" in _symbol_index()[1], (
+        "the probe reader `hosted_backup.py::_COUNT_ALL_EDGES_QUERY` is not a node in "
+        "the symbol index, so the assertion below would pass on a reader that cannot "
+        "be reached because it no longer exists — re-point the pin at the renamed "
+        "constant rather than letting it go silent"
+    )
+    assert not _door_reaches("MCP tortoise_search", "hosted_backup.py::_COUNT_ALL_EDGES_QUERY"), (
+        "the search door is attributed to `hosted_backup.py::_COUNT_ALL_EDGES_QUERY` "
+        "INSIDE this reader's 4-hop budget. At the pinned head that pair is 14 hops "
+        "— past the 12-hop search cap, so `_door_distance` answers `None`, and far "
+        "past the budget — so this arm reds only once the pair has come INSIDE the "
+        "budget: the attribution then walked a bare NAME (`ids`/`edges`) through a "
+        "function-LOCAL assignment, so any file that reuses a common variable name "
+        "becomes reachable from any door. Locals must not be symbol definitions "
+        "(`_symbol_index`)."
+    )
+
+
+def test_a_local_class_body_is_not_a_source_of_symbols():
+    """The `in_function` flag reaches a class BODY, and only the local one is dropped.
+
+    ⚠️ The class NAME is NOT what this arm forbids: a class defined inside a
+    function remains a symbol (pinned below), which is why the arm is named for the
+    BODY — what must not be indexed is that body's assignments.
+
+    `_symbol_index`'s `ClassDef` branch used to hard-code `in_function=False`, so a
+    class defined INSIDE a function had its own body indexed as if it were
+    module-level: `index_walk.py::_getmntinfo_table._StatFS._fields_` and
+    `projection/__init__.py::journal_epistemic_existence._Node.__slots__` were
+    registered under the BARE names `_fields_` / `__slots__`, so a same-named
+    assignment anywhere resolved to them — the same defect class as #9817's local
+    variables, one nesting level down. The flag now propagates.
+
+    ⚠️ **Why this needs its own arm.** Nothing else in the file can catch that
+    branch: the two ceilings (`_ACCEPTED_PAIRS_AT_THIS_HEAD`,
+    `_WORST_ROW_AT_THIS_HEAD`) are `<=` and this change moves NO pair (measured —
+    the accepted total is unchanged), so reverting `in_function=in_function` to
+    `in_function=False` leaves every other arm green. Both directions are pinned
+    here: the local class body is gone, AND a module-level `Class.ATTR` constant
+    is still indexed, so the arm cannot be satisfied by deleting the whole
+    `ClassDef` branch either.
+    """
+    defs, _ = _symbol_index()
+
+    # A module-level `Enum`'s member is an `Assign` with a value at
+    # `in_function=False` — it must SURVIVE (dropping class bodies wholesale would
+    # also make §13's constant rows unattributable).
+    assert "alert_store.py::ResolveOutcome.RESOLVED" in defs.get("RESOLVED", set()), (
+        "the module-level `Class.ATTR` constant `ResolveOutcome.RESOLVED` is no "
+        "longer a symbol — the `ClassDef` branch must still index a class body "
+        "whose class is NOT local. Present in `_symbol_index`'s output: "
+        f"{sorted(defs.get('RESOLVED', ()))}. If `ResolveOutcome` moved, re-point "
+        "this pin rather than deleting it — it is the positive half of the pair."
+    )
+
+    # …and the body of a class local to a FUNCTION must not be. ⚠️ Node-id precise,
+    # like the `__slots__` arm below and for the same reason: the NAME may also be
+    # defined at module level (as `__slots__` routinely is), and a whole-tree
+    # `not defs.get(name)` would then red on a legitimate module-level definition
+    # while blaming `in_function` propagation.
+    # ⚠️ The SUBJECT's own locality is pinned first: hoisting `_StatFS` to module
+    # scope is behaviour-preserving and would move the offending id to
+    # `index_walk.py::_StatFS._fields_`, leaving the arm below GREEN while it no
+    # longer exercises the local-class rule at all. Pinned here so a hoist reds as
+    # "re-point this pin", not as silence or as a false `in_function` diagnosis.
+    assert "index_walk.py::_getmntinfo_table._StatFS" in defs.get("_StatFS", set()), (
+        "this pin's SUBJECT has moved: `_StatFS` is no longer a class defined inside "
+        "`index_walk._getmntinfo_table` (present nodes: "
+        f"{sorted(defs.get('_StatFS', ()))}). If it was hoisted to module scope, a "
+        "module-level `Class.ATTR` is legitimate and the `_fields_` arm below no "
+        "longer tests the local-class rule — re-point both at another class that is "
+        "still defined inside a function (or delete the pair, and the coverage with "
+        "it), rather than loosening them."
+    )
+    # ⚠️ The ATTRIBUTE is pinned PRESENT from source before it is pinned ABSENT
+    # from the index. Without this half, renaming `_fields_` in `index_walk.py`
+    # makes the next assertion read `assert <id> not in set()` — green, and testing
+    # nothing — which is the same silence the SUBJECT pin above refuses for a
+    # hoist. A rename must red as "re-point this pin".
+    local_targets = _class_body_targets("index_walk.py", "_getmntinfo_table", "_StatFS")
+    assert "_fields_" in local_targets, (
+        "this pin's ATTRIBUTE has moved: the body of `_StatFS` in "
+        "`tortoise/index_walk.py` declares no `_fields_` target (targets present: "
+        f"{sorted(local_targets)}), so the absence check below is `not in set()` and "
+        "tests nothing. Re-point BOTH halves at the attribute the local class now "
+        "declares, rather than deleting the pair and the coverage with it."
+    )
+    assert "index_walk.py::_getmntinfo_table._StatFS._fields_" not in defs.get("_fields_", set()), (
+        "a function-local class body is indexed as a symbol again — "
+        "`index_walk.py::_getmntinfo_table._StatFS._fields_` is a definition node, and "
+        "`_StatFS` is a class defined INSIDE `_getmntinfo_table`, so `in_function` is "
+        "not propagating into the `ClassDef` branch and a local class's attributes "
+        "become reachable bare names (`_symbol_index`). `_fields_` now resolves to "
+        f"{sorted(defs.get('_fields_', ()))}. (If the id reads `index_walk.py::_StatFS."
+        "_fields_` instead, the class was HOISTED — re-point the pin above rather "
+        "than treating it as a propagation defect.)"
+    )
+    # The `__slots__` half gets the same PRESENT-from-source guard as `_fields_`:
+    # a rename would leave the absence check below asserting `not in set()`.
+    node_targets = _class_body_targets(
+        "projection/__init__.py", "journal_epistemic_existence", "_Node"
+    )
+    assert "__slots__" in node_targets, (
+        "this pin's ATTRIBUTE has moved: the body of `_Node` in "
+        "`tortoise/projection/__init__.py` declares no `__slots__` target (targets "
+        f"present: {sorted(node_targets)}), so the absence check below is "
+        "`not in set()` and tests nothing. Re-point BOTH halves at the attribute "
+        "the local class now declares, rather than deleting the pair."
+    )
+    assert "projection/__init__.py::journal_epistemic_existence._Node.__slots__" not in defs.get(
+        "__slots__", set()
+    ), (
+        "the function-local `_Node` class body is indexed again — "
+        "`journal_epistemic_existence._Node.__slots__` is a definition node, so a "
+        "bare `__slots__` anywhere resolves to it (`in_function` must carry into "
+        "the `ClassDef` branch with its value UNCHANGED). If the id reads "
+        "`projection/__init__.py::_Node.__slots__` instead, `_Node` was HOISTED out "
+        "of `journal_epistemic_existence` — re-point this pin at a class that is "
+        "still function-local rather than treating a legitimate module-level "
+        "`__slots__` as a propagation defect."
+    )
+    # The class ITSELF is still a symbol — only its body's assignments are dropped.
+    # Stated so the arm above cannot be greened by dropping local nested defs too.
+    assert "projection/__init__.py::journal_epistemic_existence._Node" in defs.get("_Node", set()), (
+        "the local `_Node` CLASS is no longer a symbol — a nested `def`/`class` "
+        "is still indexed whether or not it is inside a function; only its body's "
+        "`Assign` targets are local. Present: "
+        f"{sorted(defs.get('_Node', ()))}"
+    )
 
 
 #: Measured at this head: how many of the table's own TWENTY-TWO doors the attribution
@@ -1987,22 +3105,49 @@ def test_the_door_attribution_refuses_a_door_that_reaches_another_reader():
 #: `TortoiseSDK.ingest`), not a looser relation — no existing row's accepted set
 #: grew, and no existing row gained a door, which is what distinguishes this from
 #: the tripwire's failure mode.
-_ACCEPTED_PAIRS_AT_THIS_HEAD = 69
+#: ⛔ RE-DERIVED 2026-10-24: 69 -> 36, and the FALL is the whole point — the 70th
+#: pair was REFUSED, not pinned. `_symbol_index` was registering a function-LOCAL
+#: assignment as a symbol definition, so a hop could resolve the bare name to a
+#: local in an unrelated function. The 70th pair was exactly that:
+#: `MCP tortoise_search` -> row 29's `hosted_backup.py::_COUNT_ALL_EDGES_QUERY`
+#: over `tortoise_fts_query` ->(ids)-> `_review_prune.ids` ->(edges)->
+#: `_independent_counts.edges` -> the constant, where hops two and three are the
+#: locals `ids` and `edges` in functions that share no reference at all (`#9720`
+#: added the `ids` local, which shortened that same collision from 5 hops to 4 and
+#: took the count 69 -> 70; the pair was never reach). Locals are not symbols any
+#: more, and re-measuring the corpus shows how much of the 70 was the defect:
+#: **34 of the 70 pairs the predicate accepted at that head were collision chains**
+#: (33 of the pinned 69, plus the 70th itself), so the honest figure is 36. Every
+#: row's OWN declared door still attributes, the three measured substitutions
+#: still red, and the 31-cell floor still holds — which is what makes this a
+#: tightening, not a relaxation. The refused pair is pinned as a negative probe in
+#: `test_the_door_attribution_refuses_a_door_that_reaches_another_reader`.
+_ACCEPTED_PAIRS_AT_THIS_HEAD = 36
 #: 15 -> 17 on 2026-10-21: the TABLE's door set grew by the two SDK doors the new
 #: call-time rows name, and `_hop_query` (an all-edge walk) legitimately reaches
 #: more of a larger set. It is the same relation over a larger population, not a
 #: looser predicate — no door was added to any row's own reach cell.
-_WORST_ROW_AT_THIS_HEAD = 17
+#: ⛔ 17 -> 4 on 2026-10-24, with the pair count above and for the same reason: a
+#: row's accepted set was measured over collision hops as well as references, so
+#: the old 17 counted the defect too. Rows 2 and 17 now lead at 4 accepted doors.
+_WORST_ROW_AT_THIS_HEAD = 4
 
 
 def test_the_attribution_predicate_does_not_swallow_the_whole_table():
     """The bound above is only a check if the predicate still DISCRIMINATES.
 
-    The REJECTED `_DOOR_REACH_HOPS = 5` accepted roughly two fifths of the
-    (row, table-door) pairs *as the table stood then* — and three substitutions
-    that keep a REAL tool in a cell stayed green under it. (The figure is stated as
-    a proportion on purpose: the population has grown since, and a percentage
-    restated against a fixed denominator is the rot this file retires.) A bound is not a proof, so the acceptance RATE is
+    The REJECTED `_DOOR_REACH_HOPS = 5` accepted 170 of the 418 (row, table-door)
+    pairs — and the population is 418 pairs at BOTH commits, so the difference
+    from today's 52 is the INDEX, not the table — measured against the
+    PRE-`#9817` index that stood when it was rejected (`3f2f48932`, the commit
+    that wrote the old wording). At THAT index two of the three substitutions
+    that keep a REAL tool in a cell stayed green under it: the backup-doors swap
+    was ALREADY refused at 5, on row 31's 7-hop cell (under the CURRENT index
+    all three are refused even at 5; the per-door figures are in the
+    `_DOOR_REACH_HOPS` note). The figure is a COUNT over that population, not a
+    rate, for the reason the `_DOOR_REACH_HOPS` note gives: a rate restated
+    against a fixed denominator rots on the next table growth (the `63/340`
+    precedent). A bound is not a proof, so the acceptance COUNT is
     pinned as its own number: the predicate may accept, over the table's own
     doors, at most `_ACCEPTED_PAIRS_AT_THIS_HEAD` pairs and at most
     `_WORST_ROW_AT_THIS_HEAD` for any single row. A predicate that starts
@@ -2013,6 +3158,16 @@ def test_the_attribution_predicate_does_not_swallow_the_whole_table():
     ⚠️ **Both figures are MEASURED, and neither is to be nudged.** A RISE means
     the relation loosened (fix the relation, not the ceiling); a FALL means it
     tightened, and the new figure should be re-derived and the reason recorded.
+    ⛔ **The 2026-10-24 red is the precedent, and it was a RISE that was REFUSED.**
+    The pin read 69 and measured 70; the 70th pair was traced (the arm's own
+    enumeration, diffed against the previous head) to `MCP tortoise_search` ->
+    `hosted_backup.py::_COUNT_ALL_EDGES_QUERY`, a chain of two bare-name hops
+    through function LOCALS in unrelated functions — not reach. The relation was
+    tightened, the pair became a negative probe, and the re-derivation that
+    followed found 34 of the 70 accepted pairs were the same defect (33 of the
+    pinned 69, plus the 70th), so the pin FELL to 36. A
+    ceiling raised past a pair nobody can name is the failure this arm exists for;
+    a ceiling LOWERED with the diff recorded is the arm working.
     """
     rows = [row for row in _rows() if _reach(row) == "customer-callable"]
     table_doors = sorted({door for row in rows for door in _doors(str(row["reach"]))})
@@ -2119,15 +3274,26 @@ def test_every_customer_callable_row_reaches_a_declared_door():
             hops = _distance_budget(reader)
             distance = _door_distance(door, reader)
             if distance is None or distance > hops:
-                reached = "does not reach it at all" if distance is None else f"needs {distance} references"
-                broken.append(
-                    f"{label} — {door} exists but {reached} to reach `{reader}`, and this "
-                    f"row's budget is {hops} — the door is not a door to THIS reader, so "
-                    "the blast-radius count would be counted from the wrong tool "
-                    "(if the chain is legitimately longer now, give the reader an entry in "
-                    "`_DISTANCE_EXCEPTIONS` with the reason, rather than loosening the budget "
-                    "for every row)"
-                )
+                if distance is None:
+                    shortfall = (
+                        f"is not found within the {_DISTANCE_SEARCH_CAP}-hop search cap. "
+                        "This arm cannot tell 'no chain' from 'a chain longer than it "
+                        "looked', so the fix is to raise `_DISTANCE_SEARCH_CAP` (and "
+                        "re-derive the pinned figures) or to shorten the chain. ⛔ A "
+                        "`_DISTANCE_EXCEPTIONS` entry cannot help: it raises the "
+                        "reader's BUDGET, and the search stops at the cap before any "
+                        "budget is consulted. So this door is UNVERIFIED here, not "
+                        "wrong: it may be the right door on a chain longer than the cap."
+                    )
+                else:
+                    shortfall = (
+                        f"needs {distance} references and this row's budget is {hops}, so "
+                        "it is not a door to THIS reader (if the chain is legitimately "
+                        "longer now, give the reader an entry in `_DISTANCE_EXCEPTIONS` "
+                        "with the reason, rather than loosening the budget for every row). "
+                        "The blast-radius count would be counted from the wrong tool."
+                    )
+                broken.append(f"{label} — {door} exists but {shortfall}")
 
     # A predicate that silently stops resolving its entries turns this arm green
     # on an assertion it never made — so the floor is asserted, not assumed.
@@ -2798,7 +3964,8 @@ def _derived(keys: dict[tuple[str, str], tuple[int, ...]]) -> dict[str, tuple[in
 
 def _register_keys(entries) -> set[str]:
     # `EMPTY_PATTERN` entries carry a fourth element (the code facts their reason
-    # rests on), `CALL_TIME_REL` entries do not — both key the same way.
+    # rests on) and a fifth (the site count), `CALL_TIME_REL` entries carry
+    # neither — both key the same way.
     return {_site_key(rel, symbol) for rel, symbol, *_rest in entries}
 
 
@@ -2965,42 +4132,137 @@ def test_no_empty_pattern_entry_is_also_a_row():
 
 
 def test_every_empty_pattern_entry_states_a_true_fact():
-    """Each entry's REASON is checked against the code it claims to describe.
+    """Each entry's REASON is checked against EVERY site it claims to describe.
 
     ⚠️ **This arm restores the half the `#9493` fold deleted, and its absence was
     a fail-open in the direction this class exists to close.** An entry is
-    `(file, symbol, why, facts)`; the other three arms read only `(file, symbol)`,
-    so the prose — the register's ONLY record of *why* a walk is out — was never
-    checked against anything. Measured on the pre-arm tree: retyping
+    `(file, symbol, why, facts, sites)`; the other three arms read only
+    `(file, symbol)`, so the prose — the register's ONLY record of *why* a walk is
+    out — was never checked against anything. Measured on the pre-arm tree: retyping
     `session_source_migration._OUT_TYPES` from `(old:Source {url:$u})` to
     `(old)`, or dropping `:Subject` from `sdk.provenance`, makes the walk start
     observing an `aboutObject` edge while EVERY arm stays green — the entry goes
     on excusing it, and §13's two legal grounds no longer hold for that site.
 
-    The facts are asserted as plain substrings of the symbol's own span plus the
-    module-level constants that span names (`_symbol_fact_text`), so a fact
-    cannot be satisfied by an unrelated reader elsewhere in the file — which is
-    what the old guard's cross-clause formatter existed for, and what a
-    package-wide `grep` would have broken.
+    ⚠️ **The check is per SITE, and the first cut of this arm was per SYMBOL — which
+    is a voucher, not a register.** The register key is `(file, symbol)` while the
+    derivation is per-site, so a symbol-keyed fact check owns anything added
+    inside that symbol later. Measured on that cut: adding one fully unconstrained
+    all-edge walk to `sdk.provenance` (`MATCH (x)-[rr]->(y) RETURN count(rr)`) left
+    all 43 arms green, while `origin/main`'s per-walk guard reded on it — a new
+    un-excluded reader of `aboutObject` shipped with the register vouching for it,
+    falsifying `_about_call_time_census.py`'s *"a NEW member of the class cannot
+    appear silently"*. So each derived `(rel, symbol, line)` of a registered key
+    must be covered by the entry's facts.
+
+    ⚠️ **THREE nets, because each covers a blind spot the others cannot.** Bound
+    per statement alone, and per SITE alone, both still failed:
+
+    * the SITE COUNT (`sites` fifth element) catches a walk added on its own line —
+      a copy at the same `(symbol, line)` produces no new site, so the number cannot
+      move, and that gap shipped a second walk on the first walk's fact;
+    * the WALK net (`_unbounded_walks`) checks every walk OCCURRENCE of the site's
+      RESOLVED query against a fact that sits in the walk's OWN window
+      (`_walk_windows`: a `UNION` arm or a top-level comma ends a window) AND that
+      NAMES the walk's own relationship binding (`_walk_binding`), so a walk
+      appended INSIDE an already-registered query string has to carry a fact of
+      its own — the `UNION MATCH (x)-[rr]->(y)` copy of `sdk.provenance` reds
+      here, where the number stayed quiet, and so do the two escapes the earlier
+      per-CLAUSE form left open (a comma-separated pattern beside the registered
+      walk, and a `UNION` arm that reuses a variable name from the first arm).
+      ⚠️ Requiring only the WINDOW was itself measured open — `MATCH (x)-[rr]->(y)`
+      appended with no boundary in front of it, a chained hop
+      `-[r]->(n)-[rr]->(y)`, and a comprehension in the walk's `WHERE` all stayed
+      inside the registered walk's window and shipped green — which is why the
+      fact must NAME the walk and not merely sit beside it. ⚠️ And a NAME is only
+      an identity while a scope CARRIES it: `MATCH …-[r]->(n) WITH n MATCH
+      (x)-[r]->(y)` re-binds `r` after a `WITH` dropped it, so it is a FRESH walk
+      and the fact about the first one reds as a ground for it
+      (`_scope_survives`; `WITH *` and a projecting `WITH r` stay green);
+    * the UNION net (`_uncarried_facts`) requires every recorded FACT to appear in
+      some site, which is the direction an any-fact-per-site loop cannot express
+      and which is what a retyped `_DEGREE` anchor (`(old:Source …)` → `(old)`)
+      needs in order not to hide behind the fact that still matches.
+
+    The facts are asserted as plain substrings of the site's statement plus the
+    module-level constants it names, over source with COMMENTS and PROSE STRINGS
+    blanked (`_site_fact_text`): a fact satisfied by a comment is not a fact about
+    executed code. The clause net reads the resolved query instead
+    (`_site_query_texts`), because that is the text the walk actually runs, and it
+    bounds each walk OCCURRENCE by a fact inside its own window AND naming its own
+    binding — both coarser units (statement, clause) and the window-alone form
+    were measured to let a second walk ride on the first walk's fact.
     """
     census = _call_time_census()
     assert census.EMPTY_PATTERN, (
         "the `EMPTY_PATTERN` register is empty — this arm would then assert "
         "nothing, which is how an unread prose reason ships green"
     )
-    checked = 0
+    derived = census._empty_pattern_sites()
+    files = _file_by_rel()
+    declared_sites = sum(entry[4] for entry in census.EMPTY_PATTERN)
+    derived_sites = sum(
+        len(derived.get((rel, symbol), ()))
+        for rel, symbol, *_rest in census.EMPTY_PATTERN
+    )
+    assert derived_sites == declared_sites, (
+        f"the register declares {declared_sites} site(s) and the derivation finds "
+        f"{derived_sites} under those keys — a site was added beside the "
+        "registered ones (or went missing), and the entry cannot vouch for a walk "
+        "it was not written about. This number is asserted BEFORE anything is "
+        "appended to the failure list, because a count checked after the fact is "
+        "a count that can never fire"
+    )
+    walks_checked = 0
     failures: list[str] = []
-    for rel, symbol, _why, facts in census.EMPTY_PATTERN:
+    for rel, symbol, _why, facts, sites in census.EMPTY_PATTERN:
+        key = _site_key(rel, symbol)
         assert facts, (
-            f"`{_site_key(rel, symbol)}` carries no code fact — its reason is "
-            "prose nothing can falsify, so weakening the walk would leave it "
-            "excusing a site that now reads the edge"
+            f"`{key}` carries no code fact — its reason is prose nothing can "
+            "falsify, so weakening the walk would leave it excusing a site that "
+            "now reads the edge"
         )
-        text = _symbol_fact_text(rel, symbol)
-        for fact in facts:
-            checked += 1
-            if fact not in text:
-                failures.append(f"  - {_site_key(rel, symbol)} no longer states `{fact}`")
+        lines = derived.get((rel, symbol), ())
+        if len(lines) != sites:
+            failures.append(
+                f"  - {key} declares {sites} site(s) and the derivation finds "
+                f"{len(lines)} at lines {list(lines)} — a site was added beside "
+                "the registered ones, and the entry cannot vouch for a walk it "
+                "was not written about"
+            )
+        file = files[rel]
+        source_texts: list[str] = []
+        entry_walks = 0
+        for line in lines:
+            source_texts.append(_site_fact_text(rel, line))
+            for query in _site_query_texts(file, symbol, line):
+                windows = _walk_windows(query)
+                entry_walks += len(windows)
+                walks_checked += len(windows)
+                for window, binding in _unbounded_walks(query, facts):
+                    failures.append(
+                        f"  - {key}:{line} walks `{binding}` in the window "
+                        f"`{window[:90]}` and NO stated fact bounds THAT walk — "
+                        "a second walk written into an already-registered query "
+                        "string (another `UNION` arm, a comma-separated pattern, "
+                        "a chained hop, a comprehension in its `WHERE`, or a "
+                        "re-binding after a `WITH` that dropped the name) is a "
+                        "new reader of the edge, and the fact that bounds the "
+                        "walk beside it does not NAME this one"
+                    )
+        if not entry_walks:
+            failures.append(
+                f"  - {key} derives site(s) at {list(lines)} and the clause net "
+                "finds no walk in any of their queries — the reason is then "
+                "checked against text that carries no walk at all, which is how a "
+                "bound can be asserted about nothing"
+            )
+        for fact in _uncarried_facts(facts, "\n".join(source_texts)):
+            failures.append(
+                f"  - {key} states `{fact}` and NO site of the entry carries it — "
+                "the ground it records is gone from the code, and an any-fact "
+                "check hides that behind whichever fact still matches"
+            )
     assert not failures, (
         "these `EMPTY_PATTERN` entries excuse a walk on a fact their code no "
         "longer carries, so the walk may now be observing an `aboutObject` edge "
@@ -3011,10 +4273,780 @@ def test_every_empty_pattern_entry_states_a_true_fact():
         "`aboutObject` triple, or a degree/existence count that returns no "
         "edge), or move the site to a §13 row."
     )
-    assert checked >= len(census.EMPTY_PATTERN), (
-        f"{len(census.EMPTY_PATTERN)} entries produced only {checked} fact "
-        "assertions — every entry must carry at least one, or the register's "
-        "reasons are unverified again"
+    assert walks_checked >= len(census.EMPTY_PATTERN), (
+        f"the walk net examined {walks_checked} walk occurrence(s) over "
+        f"{len(census.EMPTY_PATTERN)} entries — an entry whose walk the net "
+        "cannot see is an entry whose reason nothing checks, so this floor is "
+        "what keeps the per-clause half from going silent"
+    )
+
+def test_a_stated_fact_cannot_be_satisfied_by_prose(tmp_path):
+    """A comment or a docstring is not code, so a fact there is not a fact.
+
+    ⚠️ **Measured on the first cut, which read RAW source.** Weakening
+    `sdk.provenance`'s query to `MATCH (s)-[r]->(n)` and leaving
+    `MATCH (s:Subject {id:$sid})-[r]->(n)` in a comment above it kept the arm
+    GREEN: the walk observes `aboutObject`, the ground is false, and a plain
+    substring test cannot tell prose from code. No live fact depended on it (all
+    sixteen resolve to real code), so it was defeatable-by-future-edit rather
+    than false — which is exactly the shape a fixture has to close, because the
+    edit that exploits it is the same edit that weakens a walk.
+
+    A synthetic file, because the property is about the READER and not about any
+    one entry: the same query in the body must survive, and the same query as a
+    docstring or a comment must not.
+    """
+    path = tmp_path / "prose.py"
+    path.write_text(
+        "def _walk(query):\n"
+        '    """The docstring copy: MATCH (s:Subject {id:$sid})-[r]->(n)."""\n'
+        "    # the comment copy: MATCH (s:Subject {id:$sid})-[r]->(n)\n"
+        '    unused = 1  # a trailing copy: MATCH (s:Subject {id:$sid})-[r]->(n)\n'
+        '    return query("MATCH (s)-[r]->(n)")\n',
+        encoding="utf-8",
+    )
+    text = "\n".join(_code_lines(path))
+    assert 'return query("MATCH (s)-[r]->(n)")' in text, (
+        "the stripper removed EXECUTED code — every fact assertion would then be "
+        "measured against a file it did not read, which is a green with no subject"
+    )
+    assert "unused = 1" in text, (
+        "a code line sharing a line with a trailing comment went with the "
+        "comment — the cut must be column-exact, not whole-line"
+    )
+    assert "Subject" not in text, (
+        "the fact survives in a COMMENT or a DOCSTRING, so a weakened walk can be "
+        "excused by prose that never runs — the exact mutation that kept this "
+        "check green before the stripper existed"
+    )
+
+
+def test_a_stated_fact_is_bound_to_one_site_not_to_its_symbol():
+    """A registered symbol may own TWO walks, and each is bound to its OWN statement.
+
+    ⚠️ **This is the shape P1 reported, asserted where it lives.** The register key
+    is `(file, symbol)`; the derivation is per-SITE. A fact check over the whole
+    symbol therefore lets ONE walk's ground vouch for its neighbour — and by
+    extension for anything appended later, which is how an unconstrained all-edge
+    walk added to `sdk.provenance` shipped green.
+
+    `mining.verify_no_auto_wire` is the live two-site fixture, and no line number
+    is written down: its walks are taken from the derivation, and the two site
+    texts must each carry a fact and must NOT carry the same one — a symbol-wide
+    span collapses them into the same set and reds here.
+    """
+    census = _call_time_census()
+    entry = next(e for e in census.EMPTY_PATTERN if e[1] == "verify_no_auto_wire")
+    rel, symbol, _why, facts, sites = entry
+    lines = census._empty_pattern_sites()[(rel, symbol)]
+    assert len(lines) == sites == 2, (
+        f"`{_site_key(rel, symbol)}` derives {len(lines)} site(s) against {sites} "
+        "declared — the two-site fixture this arm rests on has moved, so the "
+        "assertion below would compare nothing"
+    )
+    carried = [
+        [fact for fact in facts if fact in _site_fact_text(rel, line)]
+        for line in lines
+    ]
+    assert all(carried), (
+        "a site of `verify_no_auto_wire` carries NONE of the entry's facts: "
+        f"{carried} — the walk is no longer bounded by the ground the register "
+        "records for it"
+    )
+    assert carried[0] != carried[1], (
+        f"both sites resolve to the same fact set ({carried[0]}) — the fact text "
+        "spans the whole SYMBOL again, so one walk's ground vouches for the "
+        "other and for any walk added beside them"
+    )
+
+
+def test_a_walk_inside_an_already_registered_statement_is_unbounded():
+    """A second walk in the SAME query string is a second WALK, not the same site.
+
+    ⚠️ **Measured on this head before the clause net existed.** The derivation keys
+    a site on `(symbol, line)`, so a walk appended INSIDE an already-registered
+    query string — `sdk.provenance`'s
+    `"… properties(n) " "UNION MATCH (x)-[rr]->(y) RETURN type(rr), …"`, which
+    `_resolve` folds into ONE candidate at ONE line — produces no new site. The
+    site's count therefore does not move, and a fact found ANYWHERE in the
+    statement excused it: a genuine new reader of `aboutObject` (untyped, so it
+    walks `aboutObject` and `RETURN type(rr)` reports it) shipped green, where
+    `origin/main`'s clause-scoped guard reded.
+
+    Two halves, because the hole is the gap between them: the derivation must
+    report ONE site (that is why the count net cannot see the copy), and the
+    clause net must report TWO walk-bearing clauses with the second one unbounded.
+    """
+    census = _call_time_census()
+    facts = ("MATCH (s:Subject {id:$sid})-[r]->(n)",)
+    query = (
+        "MATCH (s:Subject {id:$sid})-[r]->(n) RETURN type(r), labels(n)[0], "
+        "properties(n) UNION MATCH (x)-[rr]->(y) RETURN type(rr), labels(y)[0], "
+        "properties(y)"
+    )
+    walks = _walk_windows(query)
+    assert len(walks) == 2, (
+        f"the walk net found {len(walks)} walk occurrence(s) in a query that "
+        "carries two — a walk added beside a registered one inside ONE query "
+        "string would then be invisible, which is the fail-open this net closes"
+    )
+    assert any(fact in walks[0][0] for fact in facts), (
+        f"the FIRST walk is not the one the fact bounds: {walks[0]!r}"
+    )
+    unbounded = _unbounded_walks(query, facts)
+    assert unbounded == [walks[1]], (
+        f"the appended walk is not reported as unbounded ({unbounded!r}) — the "
+        "fact written about the first walk is vouching for it again"
+    )
+    # The other half: the SITE COUNT cannot see this copy, so the clause net is
+    # the only thing that can. Asserted through the real derivation on a synthetic
+    # module, not by reading the site key.
+    source = (
+        "def provenance(query):\n"
+        "    box = (\n"
+        '        "MATCH (s:Subject {id:$sid})-[r]->(n) RETURN type(r) "\n'
+        '        "UNION MATCH (x)-[rr]->(y) RETURN type(rr)"\n'
+        "    )\n"
+        "    return query(box)\n"
+    )
+    file = census._File(Path("synthetic_same_statement.py"), "synthetic.py", source)
+    sites = census._empty_pattern_sites_in(file)
+    assert sites == {("provenance", 3)}, (
+        f"the same-statement copy produced {sorted(sites)} — if it produced TWO "
+        "sites the COUNT would catch it and the clause net's premise would be "
+        "wrong; if it produced none this fixture is measuring nothing"
+    )
+    derived_queries = _site_query_texts(file, "provenance", 3)
+    assert derived_queries, (
+        "`_site_query_texts` resolved no query for a site the derivation reports — "
+        "the clause net would then check no walk at all"
+    )
+    assert all(_unbounded_walks(q, facts) for q in derived_queries), (
+        f"the appended walk is not unbounded through the site's RESOLVED query "
+        f"({derived_queries!r}) — the net is reading source text, or the wrong line"
+    )
+
+
+def test_the_walk_window_ends_at_a_union_and_at_a_comma():
+    """The two escapes the per-CLAUSE form left open, each a live mutation shape.
+
+    ⚠️ **Measured on the per-CLAUSE cut, and BOTH shipped green there.** The clause
+    net segmented only at the census's `_CLAUSE` keyword, and let a fact in an
+    EARLIER clause count when that clause bound a variable the walk's text used.
+    The two shapes below are what that rule could not see:
+
+    * (a) a second pattern in the SAME `MATCH` — `, (x)-[rr]->(y)` introduces no
+      clause keyword, so no new segment was produced, and the whole segment carried
+      the registered walk's fact;
+    * (b) a `UNION` arm that REUSES a variable name from the first arm — the
+      first arm's `… RETURN type(r), labels(n)[0] …` re-mentions `n` and `r`, so the
+      overlap the escape tested was non-empty even though the second arm binds its
+      own `n` and matches its walk independently.
+
+    Each is asserted as a WINDOW (two windows, the second unbounded) AND through the
+    real derivation on a synthetic module — the site count cannot see either copy,
+    because both land at the same `(symbol, line)` as the registered walk.
+    """
+    census = _call_time_census()
+    facts = ("MATCH (s:Subject {id:$sid})-[r]->(n)",)
+
+    comma = (
+        "MATCH (s:Subject {id:$sid})-[r]->(n), (x)-[rr]->(y) "
+        "RETURN type(r), labels(n)[0], type(rr)"
+    )
+    windows = _walk_windows(comma)
+    assert len(windows) == 2, (
+        f"the second pattern of one `MATCH` produced {len(windows)} window(s) — "
+        "it is a separate walk and the fact about its neighbour does not bound it"
+    )
+    assert any(fact in windows[0][0] for fact in facts), (
+        f"the registered walk is not the first window: {windows[0]!r}"
+    )
+    assert not any(fact in windows[1][0] for fact in facts), (
+        f"the comma-separated walk's window carries the neighbour's fact: "
+        f"{windows[1]!r} — the window boundary is not a top-level comma"
+    )
+    assert _unbounded_walks(comma, facts) == [windows[1]], (
+        f"the comma-separated walk is not reported unbounded "
+        f"({_unbounded_walks(comma, facts)!r}) — a second pattern beside a "
+        "registered one ships green again"
+    )
+
+    union = (
+        "MATCH (s:Subject {id:$sid})-[r]->(n) RETURN type(r), labels(n)[0], "
+        "properties(n) UNION MATCH (n)-[rr]->(m) RETURN type(rr), labels(m)[0], "
+        "properties(m)"
+    )
+    union_windows = _walk_windows(union)
+    assert len(union_windows) == 2, (
+        f"the second `UNION` arm produced {len(union_windows)} window(s) — an arm "
+        "binds its OWN variables, so the first arm's fact cannot bound it"
+    )
+    unbounded = _unbounded_walks(union, facts)
+    assert unbounded == [union_windows[1]], (
+        f"the reused-variable `UNION` arm is not reported unbounded "
+        f"({unbounded!r}) — a variable name shared with the first arm's `RETURN` "
+        "is being read as a bound"
+    )
+
+    comprehension = (
+        "MATCH (s:Subject {id:$sid})-[r]->(n) RETURN type(r), "
+        "[(x)-[rr]->(y) | type(rr)] AS pairs"
+    )
+    comp_windows = _walk_windows(comprehension)
+    assert len(comp_windows) == 2, (
+        f"a comprehension appended to the `RETURN` produced {len(comp_windows)} "
+        "window(s) — the census derives comprehensions as walks whatever clause "
+        "introduces them, so the net must demand a fact for this one too"
+    )
+    assert _unbounded_walks(comprehension, facts) == [comp_windows[1]], (
+        "the appended comprehension is vouched for by the registered walk's fact: "
+        f"{_unbounded_walks(comprehension, facts)!r}"
+    )
+
+    # The derivation half: no site-count can see any of these, because the copy
+    # lands on the already-registered line. Asserted on a synthetic module through
+    # the real derivation and the real resolver.
+    source = (
+        "def provenance(query):\n"
+        "    box = (\n"
+        '        "MATCH (s:Subject {id:$sid})-[r]->(n), (x)-[rr]->(y) "\n'
+        '        "RETURN type(r), type(rr)"\n'
+        "    )\n"
+        "    return query(box)\n"
+    )
+    file = census._File(Path("synthetic_comma.py"), "synthetic.py", source)
+    sites = census._empty_pattern_sites_in(file)
+    assert sites == {("provenance", 3)}, (
+        f"the comma-separated copy produced {sorted(sites)} — if it produced TWO "
+        "sites the COUNT would catch it and this fixture's premise would be wrong; "
+        "if it produced none the fixture is measuring nothing"
+    )
+    derived_queries = _site_query_texts(file, "provenance", 3)
+    assert derived_queries, (
+        "`_site_query_texts` resolved no query for a site the derivation reports — "
+        "the walk net would then check no walk at all"
+    )
+    assert all(_unbounded_walks(q, facts) for q in derived_queries), (
+        f"the comma-separated walk is not unbounded through the site's RESOLVED "
+        f"query ({derived_queries!r}) — the net is reading source text, or the "
+        "wrong line"
+    )
+
+
+def test_a_walk_is_bounded_only_by_a_fact_that_NAMES_IT():
+    """A fact bounds the walk it was WRITTEN ABOUT — not its neighbours in a window.
+
+    ⚠️ **Measured on the per-WINDOW cut this arm was added for, and all three
+    shipped green there.** A window ends only at a `UNION` or a top-level comma, so
+    a second all-edge walk appended with neither boundary in front of it stayed
+    inside the registered walk's window and inherited its fact. Applied to
+    `tortoise/sdk.py::provenance`'s registered query, each of the three is a
+    genuine new reader of `aboutObject` (untyped, so every relationship type —
+    `aboutObject` included — is walked):
+
+    * (a) a second `MATCH` CLAUSE — `… -[r]->(n) MATCH (x)-[rr]->(y) RETURN …`;
+    * (b) a CHAINED hop on the registered pattern — `… -[r]->(n)-[rr]->(y) …`;
+    * (c) a pattern COMPREHENSION in the walk's own `WHERE` —
+      `WHERE size([(x)-[rr]-(y) | rr]) > 0`.
+
+    All three shipped green, and every other net stayed quiet too: the site count
+    cannot move (the copy is on the registered line, so it is the same
+    `(symbol, line)` site), and the census's `24 keys / 36 rows` derivation is
+    unchanged. So the fact has to NAME the walk — its own relationship variable —
+    and not merely sit beside it.
+
+    ⚠️ **The converse is deliberate, not an oversight:** REUSING a variable name is
+    not a second walk. Inside one arm, `MATCH (s)-[r]->(n) MATCH (x)-[r]->(y)` binds
+    the SAME relationship `r` again, so it traverses no new type — there is no
+    unbound reader to state a ground for. Across a `UNION` the arm binds its OWN
+    variables, so a name reused by the second arm is a NEW walk, and the window
+    boundary is what reds it (pinned below, and in
+    `test_the_walk_window_ends_at_a_union_and_at_a_comma`). Keeping both halves
+    asserted is what stops the next reader "fixing" the reuse case into a
+    false red on every real query.
+    """
+    facts = ("MATCH (s:Subject {id:$sid})-[r]->(n)",)
+    registered = "MATCH (s:Subject {id:$sid})-[r]->(n)"
+    shapes = {
+        "a": f"{registered} MATCH (x)-[rr]->(y) RETURN type(r), labels(n)[0], type(rr)",
+        "b": "MATCH (s:Subject {id:$sid})-[r]->(n)-[rr]->(y) "
+        "RETURN type(r), type(rr)",
+        "c": f"{registered} WHERE size([(x)-[rr]-(y) | rr]) > 0 RETURN type(r)",
+    }
+    for label, query in shapes.items():
+        unbounded = _unbounded_walks(query, facts)
+        assert len(unbounded) == 1, (
+            f"shape ({label}) reports {len(unbounded)} unbounded walk(s) "
+            f"({unbounded!r}) — the registered `-[r]->` walk is bounded and the "
+            "appended `-[rr]->` walk has to be the one reported. `[]` here is "
+            "the fail-open: the appended walk inherits the registered walk's "
+            "fact because both sit in ONE window"
+        )
+        window, binding = unbounded[0]
+        assert binding == "rr", (
+            f"shape ({label}) reports `{binding}` as the unstated walk — the "
+            "binding is not being read off the walk the derivation found, so the "
+            "net is comparing facts against the wrong token"
+        )
+        assert "[rr]" in window, (
+            f"shape ({label}) reports a window that does not contain the "
+            f"appended walk: {window!r} — the net is vouching for text it never "
+            "looked at"
+        )
+    # The token comparison is an IDENTIFIER comparison, not a substring one: the
+    # registered fact mentions `r`, and `r` is a substring of `rr`.
+    assert not _names_binding(f"{registered}", "rr"), (
+        "a fact stating `-[r]->` is being read as naming `rr` — the binding "
+        "match is a substring test, so `MATCH (x)-[rr]->(y)` rides on it again"
+    )
+    assert not _names_binding("MATCH (x)-[rr]->(y) RETURN type(rr)", "r"), (
+        "a fact that states the `-[rr]->` walk is being read as naming `r` — "
+        "the match is a SUBSTRING test, so a fact about a neighbour's `rr` walk "
+        "would bound every `-[r]->` walk in the same window"
+    )
+    assert _names_binding(registered, "r"), (
+        "a fact stating the registered walk does not name its own variable `r` — "
+        "then every live entry is a false red and the check is unusable"
+    )
+    assert _names_binding("WHERE type(r) IN ['IMPL','NAND']", "r"), (
+        "a TYPE-RESTRICTION ground does not name the walk it bounds — the live "
+        "`hosted_api._load_commit_graph_state` entry rests on exactly this shape, "
+        "so this red would be a false one"
+    )
+    # The bracket-less spelling binds no name, so its own pattern text is the
+    # token: that is what the live `validate_chain_integrity` ground states.
+    assert _names_binding("AND NOT (n)--()", "(n)--()"), (
+        "a fact that STATES the bracket-less walk does not bound it — the live "
+        "`orphaned_draft` entry would be a false red"
+    )
+    # Derivation half: none of the three shapes produces a new site, which is why
+    # the count net cannot see them and the walk net is the only thing that can.
+    census = _call_time_census()
+    source = (
+        "def provenance(query):\n"
+        "    box = ("
+        '"MATCH (s:Subject {id:$sid})-[r]->(n) MATCH (x)-[rr]->(y) "'
+        '"RETURN type(r), type(rr)"'
+        ")\n"
+        "    return query(box)\n"
+    )
+    file = census._File(Path("synthetic_boundary_free.py"), "synthetic.py", source)
+    sites = census._empty_pattern_sites_in(file)
+    assert len(sites) == 1 and next(iter(sites))[0] == "provenance", (
+        f"the boundary-free second `MATCH` produced {sorted(sites)} — if the "
+        "derivation DOES see it the count would catch it and this fixture's "
+        "premise (one `(symbol, line)` site for BOTH walks) is wrong"
+    )
+    site_line = next(iter(sites))[1]
+    derived_queries = _site_query_texts(file, "provenance", site_line)
+    assert derived_queries, (
+        "`_site_query_texts` resolved no query for the boundary-free site — the "
+        "walk net would then check no walk at all"
+    )
+    assert all(len(_unbounded_walks(q, facts)) == 1 for q in derived_queries), (
+        f"the boundary-free walk is vouched for through the site's RESOLVED query "
+        f"({derived_queries!r}) — the net is reading source text, or the wrong line"
+    )
+
+
+def test_a_walk_rebinding_a_name_a_with_dropped_is_a_FRESH_walk():
+    """A name is an identity only while a SCOPE carries it — `WITH` can end it.
+
+    ⚠️ **Measured on the window-and-binding rule this arm's neighbour installed,
+    and it shipped green there.** Both walks sit in ONE window (no `UNION`, no
+    top-level comma) and both are spelled `[r]`, so `_walk_binding` returns `r`
+    for both and the registered fact — which NAMES `r` — read as a ground for
+    the second walk. But `WITH n` did not carry `r`: the name is GONE, the later
+    `MATCH (x)-[r]->(y)` binds a FRESH relationship, and `x`/`y` unbound makes it
+    a genuinely unconstrained all-edge walk (so `aboutObject` is walked and its
+    targets returned). That is the class the register claims is closed, and no
+    other net sees it: the copy is on the registered line, so the site count
+    cannot move.
+
+    The barrier is scoped, not blanket — the converse shapes below stay green,
+    because a standalone `WITH *` and a bare `WITH r` really do keep the same
+    relationship, and reddening them would be a false red on every real query.
+    What is NOT carrying is a projection that renames, derives or aggregates:
+    `WITH r AS rel` renames the name (so the later `[r]` is a NEW relationship),
+    `WITH type(r) AS t` projects a string, `WITH r.id AS rid` projects a value,
+    and `WITH count(*) AS c` drops every grouping variable — each a fresh
+    all-edge walk, each asserted below (#9493 review P2-1/P2-2). A `CALL { … }`
+    subquery IMPORTS the outer bindings (the block itself is not a barrier), so the
+    arm below asserts the opposite direction: a `WITH` INSIDE the body is what ends
+    the identity, for that body's scope.
+    """
+    census = _call_time_census()
+    facts = ("MATCH (s:Subject {id:$sid})-[r]->(n)",)
+
+    def pre_fix(query: str, given: tuple[str, ...]) -> list[tuple[str, str]]:
+        """The window-and-binding rule WITHOUT the scope check — what shipped green."""
+        return [
+            (window, binding)
+            for window, binding in dict.fromkeys(_walk_windows(query))
+            if not any(
+                fact in window and _names_binding(fact, binding) for fact in given
+            )
+        ]
+
+    dropped = (
+        "MATCH (s:Subject {id:$sid})-[r]->(n) WITH n MATCH (x)-[r]->(y) "
+        "RETURN type(r)"
+    )
+    assert pre_fix(dropped, facts) == [], (
+        "the pre-fix predicate already reports the post-`WITH` walk — then this "
+        "fixture is not measuring the scope escape and the arm proves nothing"
+    )
+    unbounded = _unbounded_walks(dropped, facts)
+    assert len(unbounded) == 1, (
+        f"the walk re-binding `r` after `WITH n` reports {len(unbounded)} "
+        f"unbounded walk(s) ({unbounded!r}) — `[]` here is the fail-open: the "
+        "`WITH` dropped `r`, so the second `MATCH` walks a DIFFERENT "
+        "relationship and the fact about the first one says nothing about it"
+    )
+    window, binding = unbounded[0]
+    assert binding == "r" and "[r]" in window, (
+        f"the reported walk is not the post-`WITH` one ({window!r}, "
+        f"binding {binding!r}) — the net is vouching for, or blaming, text it "
+        "never looked at"
+    )
+
+    # The barrier is a DROPPED name, not a `WITH`: carrying the name forward keeps
+    # the relationship, so these are the same walk and must stay bounded.
+    for label, carrying in {
+        "*": "WITH * MATCH (x)-[r]->(y) RETURN type(r)",
+        "r": "WITH r MATCH (x)-[r]->(y) RETURN type(r)",
+        "DISTINCT r": "WITH DISTINCT r MATCH (x)-[r]->(y) RETURN type(r)",
+    }.items():
+        query = f"MATCH (s:Subject {{id:$sid}})-[r]->(n) {carrying}"
+        assert _unbounded_walks(query, facts) == [], (
+            f"`{label}` carries the binding forward, so the second `MATCH` is "
+            f"the SAME relationship and the registered fact bounds it — "
+            f"{_unbounded_walks(query, facts)!r} is a false red on a real query"
+        )
+
+    # …and the shapes that RENAME, DERIVE or AGGREGATE do NOT carry it: the name is
+    # either a different entity or gone, so the later `[r]` is a fresh walk. Each of
+    # these was GREEN before the projection-target rule (#9493 review P2-1/P2-2).
+    for label, renaming in {
+        "r AS rel": "WITH r AS rel MATCH (x)-[r]->(y) RETURN type(r)",
+        "type(r) AS t": "WITH type(r) AS t MATCH (x)-[r]->(y) RETURN type(r)",
+        "r.id AS rid": "WITH r.id AS rid MATCH (x)-[r]->(y) RETURN type(r)",
+        "count(*) AS c": "WITH count(*) AS c MATCH (x)-[r]->(y) RETURN type(r)",
+        "a * 2 AS c": "WITH 2 * 1 AS c MATCH (x)-[r]->(y) RETURN type(r)",
+    }.items():
+        query = f"MATCH (s:Subject {{id:$sid}})-[r]->(n) {renaming}"
+        reported = _unbounded_walks(query, facts)
+        assert len(reported) == 1 and reported[0][1] == "r", (
+            f"`{label}` does not carry the RELATIONSHIP forward — the later "
+            f"`MATCH (x)-[r]->(y)` binds a fresh all-edge walk and the fact about "
+            f"the first one grounds nothing, so it must be reported "
+            f"({reported!r}); an empty list here is the fail-open"
+        )
+
+    # ⚠️ A `CALL { … }` block IMPORTS the outer bindings, so the block is NOT a
+    # barrier — a `WITH` INSIDE it is, and that `WITH` sits at brace depth 1 where
+    # `_top_level_offsets` cannot look. The arm is therefore written with `[r]`,
+    # the SAME name the fact names: a `[rr]` fixture would never consult the scope
+    # check at all (`_names_binding(fact, "rr")` is False, so the binding rule
+    # alone refuses it) — that is how the previous revision of this arm passed
+    # while pinning nothing (#9544 review P2).
+    subquery = (
+        "MATCH (s:Subject {id:$sid})-[r]->(n) "
+        "CALL { WITH s MATCH (x)-[r]->(y) RETURN y } RETURN type(r)"
+    )
+    assert _names_binding(facts[0], "r"), (
+        "the subquery fixture's inner walk must bind the name the fact NAMES, or "
+        "the binding rule decides it and the scope rule is never consulted"
+    )
+    assert pre_fix(subquery, facts) == [], (
+        "the window-and-binding rule already reports the subquery walk — then "
+        "this fixture is not measuring the subquery scope escape"
+    )
+    reported_subquery = _unbounded_walks(subquery, facts)
+    assert len(reported_subquery) == 1 and reported_subquery[0][1] == "r", (
+        "the `WITH s` INSIDE a `CALL { … }` body drops `r`, so the inner "
+        "`MATCH (x)-[r]->(y)` binds a FRESH all-edge walk and must be reported "
+        f"({reported_subquery!r}) — an empty list here is the fail-open, and it "
+        "is what the previous blanket-`CALL`-barrier arm could not tell apart"
+    )
+
+    # ⚠️ …and the descent is BLOCK-SCOPED: a `WITH` inside a body ends THAT body's
+    # scope, not the enclosing one. The first cut of the descent handed every
+    # inner `WITH` to every walk in the query, so a walk AFTER the block was
+    # refused by a projection that never had it in scope — a false red on a
+    # legitimate query (the block imports `r`; it does not consume it).
+    after_block = (
+        "MATCH (s:Subject {id:$sid})-[r]->(n) "
+        "CALL { WITH n RETURN n AS nn } MATCH (x)-[r]->(y) RETURN type(r)"
+    )
+
+    def pre_fix_boundary_spans(query: str) -> list[tuple[int, int, int]]:
+        """`_scope_boundary_spans` as it first shipped: every `WITH` spans the query."""
+        return [
+            (at, 0, len(query)) for at in _scope_boundary_offsets(query)
+        ]
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setitem(globals(), "_scope_boundary_spans", pre_fix_boundary_spans)
+        assert _unbounded_walks(after_block, facts), (
+            "the query-wide boundary rule does not report the post-`CALL` walk — "
+            "then this fixture is not measuring the block-scoping escape and the "
+            "arm below proves nothing"
+        )
+    assert _unbounded_walks(after_block, facts) == [], (
+        "the `WITH n` sits INSIDE the `CALL { … }` body, so it ends that body's "
+        "scope only: the outer `r` is still in scope after the block, the "
+        f"post-`CALL` `[r]` is the SAME relationship — "
+        f"{_unbounded_walks(after_block, facts)!r} is a false red on a real query"
+    )
+    # …while a `WITH` at the TOP level after the block still ends the identity.
+    after_block_dropped = (
+        "MATCH (s:Subject {id:$sid})-[r]->(n) "
+        "CALL { WITH n RETURN n AS nn } WITH nn MATCH (x)-[r]->(y) RETURN type(r)"
+    )
+    dropped_after = _unbounded_walks(after_block_dropped, facts)
+    assert len(dropped_after) == 1 and dropped_after[0][1] == "r", (
+        "a TOP-LEVEL `WITH nn` after the block does drop `r`, so the later "
+        f"`MATCH (x)-[r]->(y)` is a fresh all-edge walk ({dropped_after!r}) — the "
+        "block scoping must not reach a boundary that belongs to the outer scope"
+    )
+
+    # The derivation half: the copy is on the registered line, so the SITE COUNT
+    # still cannot see it — the walk net is the only net that can.
+    source = (
+        "def provenance(query):\n"
+        "    box = (\n"
+        '        "MATCH (s:Subject {id:$sid})-[r]->(n) "\n'
+        '        "WITH n MATCH (x)-[r]->(y) RETURN type(r)"\n'
+        "    )\n"
+        "    return query(box)\n"
+    )
+    file = census._File(Path("synthetic_with_scope.py"), "synthetic.py", source)
+    sites = census._empty_pattern_sites_in(file)
+    assert len(sites) == 1 and next(iter(sites))[0] == "provenance", (
+        f"the post-`WITH` re-binding produced {sorted(sites)} — if the derivation "
+        "DOES see it the count would catch it and this fixture's premise (one "
+        "`(symbol, line)` site for BOTH walks) is wrong"
+    )
+    site_line = next(iter(sites))[1]
+    derived_queries = _site_query_texts(file, "provenance", site_line)
+    assert derived_queries, (
+        "`_site_query_texts` resolved no query for the `WITH`-scoped site — the "
+        "walk net would then check no walk at all"
+    )
+    assert all(_unbounded_walks(q, facts) for q in derived_queries), (
+        f"the post-`WITH` walk is vouched for through the site's RESOLVED query "
+        f"({derived_queries!r}) — the net is reading source text, or the wrong line"
+    )
+
+
+def test_a_with_projection_that_carries_beside_another_item_stays_green():
+    """A PROJECTION comma is not a pattern boundary — `WITH r, n` keeps the binding.
+
+    ⚠️ **Measured on the post-round-2 head, where the two nets disagreed.**
+    `_walk_spans` cut a `UNION` arm at every top-level comma, projection lists
+    included, so `WITH n, r` / `WITH r, n` produced the windows `('… WITH n', 'r')`
+    and `(', r MATCH …', 'r')`. The registered fact sat in the FIRST window, the
+    walk in the SECOND, and `_scope_survives` — which correctly reports that
+    `WITH n, r` CARRIES `r`, exactly as `_walk_binding` and `_scope_survives`
+    document — was never consulted. Both orders were reported ungrounded, so the
+    shipped contract in those two docstrings was false and nothing reded when it
+    broke (#9544 review P2).
+
+    In Cypher a projection comma separates ITEMS of one projection, evaluated in
+    ONE scope; a comma separates PATTERNS only inside a clause that matches them
+    (`MATCH`, `OPTIONAL MATCH`, `MERGE`, `CREATE`), which is what
+    `_pattern_comma_offsets` decides. This arm pins the whole CARRYING direction —
+    `*`, `r`, `DISTINCT r`, `r, n`, `n, r` — and the DROPPED/RENAMED direction
+    beside another item, so the closure the comma boundary existed for is not lost
+    along with the false red.
+    """
+    census = _call_time_census()
+    facts = ("MATCH (s:Subject {id:$sid})-[r]->(n)",)
+
+    def pre_fix_spans(query: str) -> tuple[tuple[int, int, int, str], ...]:
+        """`_walk_spans` as it shipped: EVERY top-level comma ends a window."""
+        arm_bounds = sorted(
+            {0, *_top_level_offsets(query, _UNION_CLAUSE), len(query)}
+        )
+        spans: list[tuple[int, int]] = []
+        for index in range(len(arm_bounds) - 1):
+            low, high = arm_bounds[index], arm_bounds[index + 1]
+            bounds = sorted(
+                {
+                    low,
+                    *[
+                        low + at
+                        for at in _top_level_offsets(query[low:high], _COMMA)
+                    ],
+                    high,
+                }
+            )
+            spans.extend((bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1))
+        return tuple(
+            (low, high, start, _walk_binding(query, start))
+            for start in census._walk_occurrences(query)
+            for low, high in spans
+            if low <= start < high
+        )
+
+    carrying = {
+        "*": "WITH * MATCH (x)-[r]->(y) RETURN type(r)",
+        "r": "WITH r MATCH (x)-[r]->(y) RETURN type(r)",
+        "DISTINCT r": "WITH DISTINCT r MATCH (x)-[r]->(y) RETURN type(r)",
+        "r, n": "WITH r, n MATCH (x)-[r]->(y) RETURN type(r)",
+        "n, r": "WITH n, r MATCH (x)-[r]->(y) RETURN type(r)",
+    }
+    queries = {
+        label: f"MATCH (s:Subject {{id:$sid}})-[r]->(n) {carrying_forward}"
+        for label, carrying_forward in carrying.items()
+    }
+
+    # The NON-VACUITY half: the pre-fix window split still reports the two
+    # projection-comma shapes, so the green below is this rule's work and not a
+    # fixture that measures nothing.
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setitem(globals(), "_walk_spans", pre_fix_spans)
+        for label in ("r, n", "n, r"):
+            reported = _unbounded_walks(queries[label], facts)
+            assert len(reported) == 1 and reported[0][1] == "r", (
+                f"the pre-fix window split does not report `WITH {label}` — then "
+                "this fixture is not measuring the projection-comma escape and "
+                f"the arm below proves nothing ({reported!r})"
+            )
+
+    for label, query in queries.items():
+        assert _unbounded_walks(query, facts) == [], (
+            f"`WITH {label}` CARRIES `r` forward, so the later `MATCH (x)-[r]->(y)` "
+            "is the SAME relationship and the registered fact bounds it — "
+            f"{_unbounded_walks(query, facts)!r} is the false red this fix removes"
+        )
+
+    # The CLOSURE half: a projection that drops or renames the binding still ends
+    # it, INCLUDING when it sits beside another item — the comma fix must not turn
+    # a multi-item projection into a blanket pass.
+    barrier = {
+        "n, m": "WITH n, m MATCH (x)-[r]->(y) RETURN type(r)",
+        "n, r AS rel": "WITH n, r AS rel MATCH (x)-[r]->(y) RETURN type(r)",
+        "n, type(r) AS t": "WITH n, type(r) AS t MATCH (x)-[r]->(y) RETURN type(r)",
+    }
+    for label, carrying_forward in barrier.items():
+        query = f"MATCH (s:Subject {{id:$sid}})-[r]->(n) {carrying_forward}"
+        reported = _unbounded_walks(query, facts)
+        assert len(reported) == 1 and reported[0][1] == "r", (
+            f"`WITH {label}` does NOT carry `r` forward — the later "
+            "`MATCH (x)-[r]->(y)` binds a fresh all-edge walk and must be reported "
+            f"({reported!r}); an empty list here is a fail-open the comma fix "
+            "would have introduced"
+        )
+
+    # And the comma boundary a second PATTERN needs is untouched: `MATCH …, (x)`
+    # matches independently, so a fact in the first pattern reaches no further.
+    second_pattern = (
+        "MATCH (s:Subject {id:$sid})-[r]->(n), (x)-[rr]->(y) "
+        "RETURN type(r), type(rr)"
+    )
+    assert len(_walk_windows(second_pattern)) == 2, (
+        "the second pattern of one `MATCH` no longer gets its own window — the "
+        "clause-aware comma rule must keep pattern separators and drop only "
+        f"projection commas ({_walk_windows(second_pattern)!r})"
+    )
+    assert _pattern_comma_offsets(second_pattern) == [second_pattern.index(",")], (
+        "`_pattern_comma_offsets` did not keep the comma that separates the two "
+        f"`MATCH` patterns ({_pattern_comma_offsets(second_pattern)!r})"
+    )
+    assert _pattern_comma_offsets(
+        "MATCH (a)-[r]->(b) WITH r, a RETURN type(r), labels(a)"
+    ) == [], (
+        "a `WITH`/`RETURN` projection comma is not a pattern boundary — "
+        "`_pattern_comma_offsets` must find none here "
+        f"({_pattern_comma_offsets('MATCH (a)-[r]->(b) WITH r, a RETURN type(r), labels(a)')!r})"
+    )
+
+
+def test_the_live_fact_corpus_is_the_stripped_source():
+    """The fact corpus is `_code_lines` — WIRED, not only unit-tested.
+
+    ⚠️ **`test_a_stated_fact_cannot_be_satisfied_by_prose` calls the stripper
+    directly, so nothing pinned its only production consumer.** Measured: reverting
+    `_site_fact_text`'s `lines = _code_lines(path)` to
+    `lines = tuple(path.read_text(encoding="utf-8").splitlines())` left every arm
+    green, because no live fact is comment-satisfiable TODAY — so the hole the
+    stripper closes would reopen silently on the next refactor of that function,
+    and this file's map item 24 would become false prose.
+
+    Asserted on the LIVE corpus: every live site's fact text is comment-free, and at
+    least ONE live site's statement carries a `#` comment in the raw source — so the
+    discriminator is live, and the arm reds if it ever stops being.
+    """
+    census = _call_time_census()
+    raw_carriers: list[str] = []
+    for rel, symbol, *_rest in census.EMPTY_PATTERN:
+        for line in census._empty_pattern_sites()[(rel, symbol)]:
+            path = PKG / rel.removeprefix("tortoise/")
+            span = _statement_span(_module_tree(path), line)
+            assert span is not None, (
+                f"`{_site_key(rel, symbol)}:{line}` has no statement span — the "
+                "raw-vs-stripped comparison below would measure nothing"
+            )
+            raw = path.read_text(encoding="utf-8").splitlines()
+            if "#" in "\n".join(raw[span[0] - 1 : span[1]]):
+                raw_carriers.append(f"{_site_key(rel, symbol)}:{line}")
+            text = _site_fact_text(rel, line)
+            assert "#" not in text, (
+                f"`{_site_key(rel, symbol)}:{line}` fact text carries a COMMENT "
+                "— the fact corpus is raw source again, so a fact can be "
+                "satisfied by prose that never runs. `_site_fact_text` must build "
+                "its text from `_code_lines`."
+            )
+    assert raw_carriers, (
+        "no live site's STATEMENT carries a comment, so the assertion above cannot "
+        "discriminate raw source from stripped source — the live discriminator "
+        "has moved, and this arm needs a new one before it can be trusted"
+    )
+
+
+def test_a_stated_fact_no_site_carries_reds_the_entry():
+    """Every recorded FACT must be carried, not just ONE of them (the reverse net).
+
+    ⚠️ **Measured on the pre-fix arm, and this is the narrowing the PR introduced.**
+    The per-site model needs an ANY-fact rule (the two-site entries carry one fact
+    each, so "all facts in every site" is unsatisfiable), but the loop that
+    implements it (`for fact in facts: if fact in text: break`) has no reverse
+    direction: on the entries that carry MORE facts than sites, retyping one anchor
+    hides behind whichever fact still matches. Measured: retype
+    `session_source_migration._DEGREE` from `(old:Source {url:$u})` to `(old)` and
+    the walk starts observing an `aboutObject` edge while the arm stays green —
+    where `origin/main`, which required every fact, reded.
+
+    Asserted on the live register, because the register is what has to stay true:
+    the entry's facts are all carried today, and the mutated fact set — which the
+    any-fact loop would have accepted — is reported missing.
+    """
+    census = _call_time_census()
+    entry = next(e for e in census.EMPTY_PATTERN if e[1] == "_degree")
+    rel, symbol, _why, facts, _sites = entry
+    lines = census._empty_pattern_sites()[(rel, symbol)]
+    text = "\n".join(_site_fact_text(rel, line) for line in lines)
+    assert not _uncarried_facts(facts, text), (
+        f"`{_site_key(rel, symbol)}` no longer carries its own recorded fact "
+        f"({_uncarried_facts(facts, text)!r}) — the reason is false about its code"
+    )
+    retyped = (facts[0].replace(":Source ", " ", 1), *facts[1:])
+    assert retyped != facts, (
+        f"the fixture's mutation did not change the fact set ({facts!r}) — it "
+        "would then assert the unmutated entry reds, which is a false red"
+    )
+    assert _uncarried_facts(retyped, text) == [retyped[0]], (
+        "the retyped anchor is not reported as uncarried: "
+        f"{_uncarried_facts(retyped, text)!r} — the arm is back to accepting ONE "
+        "of an entry's facts, which is how a lost ground ships green"
+    )
+    assert any(fact in text for fact in retyped), (
+        "the mutated entry carries NONE of its facts, so the any-fact loop would "
+        "have red too — the mutation is only discriminating while at least one "
+        "fact still matches"
     )
 
 
@@ -3058,31 +5090,133 @@ def test_a_part_assembled_walk_is_derived():
     )
 
 
+#: The RETIRED anchored form of the split-traversal filter, kept ONLY as the
+#: control for the arm below: it is the predicate the widening replaced, so
+#: "nothing admitted before is dropped" is measured against the real thing rather
+#: than against a paraphrase of it.
+_RETIRED_SPLIT_TRAVERSAL = re.compile(
+    r"\[[A-Za-z_][^\]\n,\"']*\]\s*-|\[[A-Za-z_][^\]\n,\"']*\]\s*[\"']\s*\+\s*[\"']\s*-"
+)
+
+
+def test_the_module_filter_is_a_strict_superset_of_the_anchored_form():
+    """The widening drops nothing, admits something, and stays inside the walk.
+
+    ⚠️ **This arm replaces numerals that had already rotted.** The census comment
+    used to state the module counts behind the widening ("242 modules … 76 …
+    211 …"), and a sibling merge added a module inside this PR's lifetime, so the
+    numbers were wrong while the prose still called them measured. A count in a
+    comment has no falsifier; the RELATION does, so it is what is asserted here
+    and the comment states no number.
+
+    Three assertions, and ONE of them measures the thing the arm is named for —
+    the other two are CONTROLS that cannot fail by construction, stated as such so
+    the next reader does not cite them as measurements:
+
+    * **no drops** (control, structurally true) — every module the retired
+      anchored form admitted is still admitted. It cannot fail: each alternative of
+      the retired form embeds the `[` + name + `]` run the unanchored pattern
+      matches, so this holds for ANY corpus. It is here as the guard against the
+      predicate being re-anchored later, not as evidence of anything measured;
+    * **not vacuous** (MEASURED) — the widening admits modules the anchored form
+      refused, which is the assertion with teeth: it fails if the predicate drifts
+      back onto the anchored shape, and it is what makes the control above
+      non-trivially satisfiable;
+    * **inside the walk** (control, structurally true) — `_may_traverse_every_type`
+      is one of the clauses that ADMITS a module, so `widened <= walked` holds by
+      construction. It is the tripwire for that wiring changing, not a measurement
+      of the corpus.
+
+    The derivation pin in `test_the_module_filter_admits_a_split_traversal`
+    (`24` keys / `36` rows) is the second measuring assertion: it is what proves
+    the widening added no site.
+    """
+    census = _call_time_census()
+    universe = census._universe()
+    anchored = {
+        path for path, source in universe.items() if _RETIRED_SPLIT_TRAVERSAL.search(source)
+    }
+    widened = {
+        path for path, source in universe.items() if census._SPLIT_TRAVERSAL.search(source)
+    }
+    assert anchored and widened, (
+        f"the comparison is measuring an empty set ({len(anchored)} anchored / "
+        f"{len(widened)} widened over {len(universe)} modules) — a subset claim "
+        "about nothing is what this arm exists to refuse"
+    )
+    assert not anchored - widened, (
+        "the widened filter REFUSES modules the anchored form admitted: "
+        f"{sorted(str(p) for p in anchored - widened)} — a filter narrower than "
+        "the one it replaced drops a module before the derivation can see the "
+        "walk inside it, which is the one direction this predicate cannot fail in"
+    )
+    assert widened - anchored, (
+        "the widened filter admits nothing the anchored form refused, so the "
+        "subset assertion above is trivially true and the widening is "
+        "unmeasured — either the third spelling is no longer what the predicate "
+        "is for, or this control has drifted off the retired form"
+    )
+    walked = {file.path for file in census._files()}
+    assert widened <= walked, (
+        "the module filter admits modules the gate then refuses to WALK: "
+        f"{sorted(str(p) for p in widened - walked)} — admitting a module and "
+        "never parsing it makes `_files()` the narrower instrument again. "
+        "(Structurally true — `_SPLIT_TRAVERSAL` is one of `_files()`'s own "
+        "admission clauses — so this is a tripwire on that wiring, not a "
+        "measured property of the corpus; the docstring says so.)"
+    )
+
+
 def test_the_module_filter_admits_a_split_traversal():
-    """The file gate must admit a walk whose dash is outside the bracket literal.
+    """The file gate must admit every walk the RESOLVER can reassemble.
 
     ⚠️ Measured on the pre-fix filter: both assembled spellings returned `False`
     while the one-literal spelling returned `True`, so a module holding only the
     assembled form was dropped before the derivation — which can see it — ran.
     `test_the_file_filter_un_sees_nothing` cannot catch this: the corpus holds no
     such file today, so the difference it compares stays empty either way. The
-    assertion is therefore synthetic, on the two shapes a `+` concatenation
+    assertion is therefore synthetic, on the shapes a `+` concatenation
     produces.
+
+    ⚠️ **The first cut of this arm measured the two spellings the CHANGELOG names
+    and still missed the third:** with the bracket in one constant and the dash in
+    another (`_A = "-[r]"`, `_B = "->"`, `"MATCH (n)" + _A + _B + "(m)"`) the
+    resolver reassembles the walk and derives it, while a regex demanding the `-`
+    right after the `]` refused the module — the gate narrower than the thing it
+    gates, which is the one direction a filter cannot fail in. So the filter no
+    longer requires dash adjacency, and the derivation count below pins that the
+    widening changed nothing it derives.
     """
     census = _call_time_census()
     cases = {
         'q("MATCH (n)-" + "[r]->(m)")': "the bracket is its own literal",
         'q("MATCH (n)-[r]" + "->(m)")': "the dash is its own literal",
+        '_A = "-[r]"\n_B = "->"\nq("MATCH (n)" + _A + _B + "(m)")': (
+            "the bracket and the dash are in DIFFERENT constants"
+        ),
     }
     for source, shape in cases.items():
         assert census._may_traverse_every_type(source), (
             f"the module filter refuses the assembled spelling ({shape}): "
-            f"{source} — the file is never walked, so the walk inside it is "
+            f"{source!r} — the file is never walked, so the walk inside it is "
             "invisible however good the resolver is"
         )
     assert not census._may_traverse_every_type("no cypher here at all"), (
         "the filter admits a module with no traversal in it — as a filter that "
         "is free, but it also means the assertions above measure nothing"
+    )
+    # The widening is only safe if it is DERIVATION-NEUTRAL: the unanchored form
+    # admits more modules (Python subscripts match too), and the count below is
+    # what proves none of them contributed a site — a module admitted and then
+    # deriving nothing costs a parse, not a false claim.
+    sites = census._empty_pattern_sites()
+    assert (len(sites), sum(len(lines) for lines in sites.values())) == (26, 39), (
+        "the empty-pattern derivation moved off 26 symbol keys / 39 site rows "
+        f"({len(sites)} keys, "
+        f"{sum(len(lines) for lines in sites.values())} rows). The register's "
+        "`sites` counts and BOTH completeness directions are stated against "
+        "those numbers, so a move is a corpus change to re-derive — never a "
+        "number to retype"
     )
 
 
@@ -3248,6 +5382,38 @@ def test_the_bracket_less_spelling_is_inside_the_walk():
     assert not census._BARE_TRAVERSAL.search("MATCH (n)-[r]->(m)"), (
         "the bracket-less detector also matches the bracketed spelling, so it is "
         "not measuring the shape it claims"
+    )
+
+
+def test_a_chained_bracket_less_walk_binds_its_OWN_hop():
+    """A chain `(a)--(b)--(c)` is TWO walks, and each binds its own hop.
+
+    ⚠️ **The second hop used to crash the net instead of answering it** (#9544
+    review P3). `_walk_occurrences` reports both `--` offsets, but `_walk_binding`
+    re-matched the query with a CONSUMING `(node)--(node)` pattern: it ate
+    `(a)--(b)` and resumed after `(b)`, so it could never see the second dash pair
+    and raised "the walk net and the derivation have drifted apart" — a diagnosis
+    of drift, over a shape with no drift in it, greeting the first person to
+    register a chained bracket-less site. The extent is now read from the same
+    `_BARE_TRAVERSAL` match the derivation reported, so a chain answers.
+    """
+    census = _call_time_census()
+    chain = "MATCH (a)--(b)--(c) RETURN a"
+    assert census._walk_occurrences(chain) == (9, 14), (
+        f"the derivation reports {census._walk_occurrences(chain)!r} for a chain, "
+        "not the two dash pairs this arm is written about"
+    )
+    bound = [_walk_binding(chain, start) for start in census._walk_occurrences(chain)]
+    assert bound == ["(a)--(b)", "(b)--(c)"], (
+        f"a chained bracket-less walk binds {bound!r} — each hop must carry its "
+        "OWN `(node)…(node)` text, or a fact about one hop vouches for the other"
+    )
+    # The point of the token: a fact naming ONE hop does not bound the other.
+    assert _unbounded_walks(chain, ("MATCH (a)--(b)",)) == [
+        ("MATCH (a)--(b)--(c) RETURN a", "(b)--(c)")
+    ], (
+        "a chained walk inherits its neighbour's fact — the binding token is not "
+        "per-hop, so the second hop is silently covered by a ground about the first"
     )
 
 def test_the_derived_aliases_are_grounded():
@@ -3833,6 +5999,935 @@ def _unframed_durations(comment: str) -> list[str]:
     return found
 
 
+def _flatten_comment(comment: str) -> str:
+    """`comment` as ONE line, so a line break cannot hide a phrase (`#9501`).
+
+    ⚠️ **The defect this exists for: a guard blind to where the prose WRAPS.** A
+    comment is judged as the text a reader reads, and that text is wrapped to the
+    repo's line length, so a break landing INSIDE a phrase splits it into two lines
+    that no single alternation matches and no backtracking recovers.
+
+    Measured, and it was the whole hole: the sentence this file exists to red on —
+    *"the rebuild is a small fraction of this arm's cost"* — is wrapped at this repo's
+    width as `…a small fraction of this` / `# arm's cost…`. The first version of
+    `_unsettleable_magnitudes` was therefore **GREEN on the comment `origin/main`
+    actually carries**, and RED only on the re-wrapped copy the arm fed it: one moved
+    line break was the entire difference between RED and GREEN, so the arm was vacuous
+    with respect to the defect it was written for (`#9501` review).
+
+    ⚠️ The word-form predicate flattens; `_unframed_durations` deliberately does NOT.
+    Its framing window is the number's own LINE by design (`_framed`), and flattening
+    there would let a marker on ANY line frame every figure in the comment — the
+    whole-text hole `#9522` closed. So a duration broken before its unit stays silent,
+    and that residual is filed with the line-vs-number coarseness as `#9531` rather
+    than bought back by widening the framing window.
+    """
+    return " ".join(line.strip().lstrip("#").strip() for line in comment.splitlines())
+
+
+#: A size QUALIFIER in front of the subject noun — `the ENTIRE arm's cost`, `the whole
+#: walk`. Measured by the `#9501` review: the determiners were enumerated and the
+#: qualifier slot did not exist, so `# a small fraction of the entire arm's cost` — the
+#: sentence this chain produced with ONE word inserted — was GREEN. Deliberately a
+#: CLOSED list rather than a `\w+` slot, because a generic word slot buys back this
+#: false negative by turning every noun phrase into a candidate (`# most of these
+#: modules are run in the suite` red on `run`); a qualifier outside this list is a
+#: stated GREEN residual in `#9531`, the same disposition as an unknown quantity noun.
+_MAGNITUDE_QUALIFIER = r"(?:entire|whole|full|overall|complete|remaining|aforementioned)"
+
+#: ⚠️ The subject's DETERMINER slot is two layers, not one (`#9528` re-review round 3).
+#: It was `the|this|that|these|those`, so `that`/`those` were added first and then the
+#: QUANTIFIERS (`all|every|each|both|some|any|no`) — and each round closed one spelling
+#: while its neighbour stayed GREEN, because a quantifier can sit IN FRONT OF an article
+#: or a possessive (`# the rebuild is half of all its cost`, `# half of every run pays
+#: the parse`). One layer could not express both, so the slot is now
+#: quantifier-then-article, and the two vocabularies are this file's single lists rather
+#: than a shape (`\w+\s+` would swallow `no such` and every innocent noun phrase).
+_MAGNITUDE_QUANTIFIER = r"(?:all|every|each|both|some|any|no)"
+_MAGNITUDE_ARTICLE = r"(?:the|this|that|these|those|its|their|our|his|her|your|my|a|an)"
+
+#: The quantities a proportion claim is ABOUT — the arm, its cost, its work, in the
+#: plural too ("most of the walks pay the parse"), or an ANAPHOR standing in for one
+#: ("a small fraction of it", "… of its cost"). Every alternative below BINDS to one of
+#: these, because the claim class is "a share of the work", not "any phrase containing
+#: `most of`": `# most of these modules are literal carriers` asserts no magnitude at
+#: all, and a merge-gating arm that reds on it reports "state the framing that produced
+#: it" for a sentence holding no figure — a false positive, not a policy (`#9501` review).
+#: ⚠️ The DETERMINER slot is `the|this|that|these|those` plus the QUANTIFIERS
+#: (`all|every|each|both|some|any|no`): `# the rebuild is half of all its cost` and
+#: `# half of every run pays the parse` were GREEN while the `these` spelling red, so one
+#: determiner still retired the guard (`#9528` re-review). The slot is a closed list and
+#: every spelling added to it is a GREEN leg's neighbour, which is why it is one list for
+#: the whole predicate rather than a shape (`\w+\s+` would swallow `no such` and every
+#: innocent noun phrase in this repo's comments).
+#: ⚠️ The ANAPHOR is the cycle-3 P0: without it `# the rebuild is a small fraction of it`
+#: was GREEN, one pronoun away from the sentence `#9516` left behind. `it`/`its`/`them`/
+#: `their`/`itself`/`this one` bind as subjects, and so does a DEMONSTRATIVE with a
+#: measured noun after it (`# most of that arm`, `# most of those arms`): `that`/`those`
+#: were missing from the determiner slot, so swapping one determiner turned the same
+#: sentence GREEN (`#9528` re-review). A demonstrative naming anything else stays the
+#: innocent shape this binding exists to keep green (`# most of these modules`,
+#: `# most of this file is parsed once`), and a BARE demonstrative with no noun at all
+#: (`# most of that`) is a stated residual in `#9531`, not an oversight.
+#: ⚠️ Two more shapes are deliberately ABSENT: a bare `bulk` with no subject (measured: it
+#: red `# reads them in bulk from the disk`), and the bare noun `time` (measured: it red
+#: `# most of the time this is fine`, an idiom, not a figure). The cost of the second is
+#: a time-share claim in words going GREEN, which is the direction a merge gate should
+#: err in; both are listed with the other residuals in `#9531`.
+#:
+#: Possessive PRONOUNS on a measured quantity (`#9528` re-review). Defined here because
+#: BOTH predicates read one vocabulary: the share veto below and the subject slot here.
+#: A determiner strip that consumed `its`/`their`/`our` as if they were `the` put the
+#: measurement noun at position 0 of a tail, where the dropped-apostrophe check is
+#: suppressed — so `# the second half of its cost is the parse` read GREEN while
+#: `… of the arm's cost` red, one pronoun away from the sentence the veto exists for.
+#: And on the SUBJECT side the old anaphor list was `it|its|itself|them|their`, so
+#: `# most of our total` matched nothing at all — the vocabulary is one set now, so a
+#: pronoun cannot bind in one predicate and be missing from the other.
+_MAGNITUDE_POSSESSIVE_PRONOUNS = frozenset(
+    {"its", "itself", "their", "theirs", "our", "ours", "his", "her", "hers", "your", "yours", "my"}
+)
+
+#: The ANAPHORS that stand in for a measured quantity — the object pronouns plus the
+#: whole possessive vocabulary above. `them` is not a possessive and stays: `# most of
+#: them` is a share of the things the walk reads.
+_MAGNITUDE_ANAPHOR = "|".join(
+    sorted(
+        {"it", "them", "this\\s+one", "that\\s+one"} | _MAGNITUDE_POSSESSIVE_PRONOUNS,
+        key=len,
+        reverse=True,
+    )
+)
+
+_MAGNITUDE_SUBJECT = (
+    rf"(?:(?:{_MAGNITUDE_QUANTIFIER}\s+)?(?:{_MAGNITUDE_ARTICLE}\s+)?(?:{_MAGNITUDE_QUALIFIER}\s+)?"
+    r"(?:\w+(?:[- ]\w+)*['’]s\s+|\w+(?:[- ]\w+)*s'\s+)?"
+    r"(?:arms?|costs?|wall[- ]?clocks?|runs?|suites?|totals?|works?|budgets?|walks?)\b"
+    rf"|(?:{_MAGNITUDE_ANAPHOR})\b)"
+)
+
+#: A magnitude asserted in WORDS — the form `_unframed_durations` cannot see, because
+#: it matches digits. Each alternative names a proportion without naming a number: the
+#: same unsettleable claim in a different alphabet.
+#: ⚠️ The ADJECTIVE is OPTIONAL on purpose. The sentence this chain produced read *"the
+#: redundant rebuild is a fraction of this arm"*, and the first version of this pattern
+#: required `small|large|…` before the noun — so it was GREEN on the exact spelling the
+#: defect took (`#9501` review). What makes the phrase a claim is the quantity it binds
+#: to, never the adverb in front of it.
+#: ⚠️ The ORDINALS are matched as their PRODUCTIVE MORPHOLOGY, never as the bare `\w+th`
+#: suffix: that shape is not a closed class in English (measured by the `#9501` review:
+#: it read `length`, `path` and `depth` as proportions, so `# the length of the walk
+#: grows` red the gate). The closed shapes are `\w+teenths?` (thirteenth … nineteenth),
+#: `\w+tieths?` (twentieth … ninetieth) and the magnitude-scale `hundredth` …
+#: `trillionth`, each with its plural — no ordinary English noun ends in `-teenth` or
+#: `-tieth` — plus the enumerated `third` … `twelfth`. An ENUMERATION that stopped at
+#: `thousandths?` was itself GREEN on `a twentieth of the arm` and `a millionth of the
+#: arm` (`#9501` review, the same "the list is complete" claim that was false twice):
+#: the list is closed only where the SPELLING is, which is these shapes.
+#: ⚠️ The MULTIPLICATIVE forms are a separate alternative (cycle-2 review): `twice as long
+#: as the walk`, `doubles this arm's cost`, `2× the walk`, `an order of magnitude`,
+#: `a factor of two`, `three in four of the walks` are each a magnitude bound to a
+#: measured quantity — a one-keystroke rewording of the sentence `#9516` left behind —
+#: and every one of them was GREEN. Each is BOUND (to a subject, to `as … as`, to
+#: `of <subject>`, or to a `than <subject>` comparison) so `# doubles entries in the
+#: list`, `# reads 2x per site`, `# the rebuild is 2x faster` and `# 0x1f` stay GREEN.
+#: ⚠️ …and the NUMERAL is a SHAPE, not a hand-list (cycle-3 review): `4 times`,
+#: `10 times`, `quadruples`, `threefold`, `3 in 4`, `9 out of 10` and `3/4` were all
+#: GREEN while their neighbours red, which is the "closed" claim being false by one
+#: keystroke. `Nx`/`N×` must be TIGHT (`2×`) because `3 x 4` is a grid, and `factor of`
+#: takes a NUMERAL because `a factor of safety` is not a magnitude — both measured.
+#: ⚠️ `Nx`/`N×` also BINDS, like every other alternative (`#9501` review measured it
+#: reding `# reads 2x per site` and `# the rebuild is 2x faster` with the remediation
+#: "state the framing that produced it" for a sentence holding no figure): it takes a
+#: subject (`2× the walk`) or a `than <subject>` comparison (`2x faster than the walk`,
+#: `2x longer than the run`) — prose naming neither stays GREEN.
+#: A number written as a WORD, for the percentage slot below. ⚠️ The slot was
+#: DIGIT-ONLY, so `# forty per cent of the arm is the re-parse` was GREEN while its
+#: digit twin REDded — the `#9528` review's round-2 P2, and the same one-word-swap
+#: retirement the whole guard exists to refuse. It is a closed vocabulary (tens,
+#: their hyphenated compounds, teens, units, and the `hundred` forms) rather than
+#: `[a-z]+`, because a generic word slot turns every `<word> per cent` into a hit.
+_WORD_NUMERAL = (
+    r"(?:(?:a\s+|one\s+|two\s+)?hundred"
+    r"|(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)"
+    r"(?:[- ](?:one|two|three|four|five|six|seven|eight|nine))?"
+    r"|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen"
+    r"|ten|one|two|three|four|five|six|seven|eight|nine)"
+)
+
+#: A multiplier / ratio / multiple slot — a DIGIT or a number WORD, and the WORD is
+#: `_WORD_NUMERAL` rather than its own list, so a numeral cannot be closed in the
+#: percentage slot and open in the multiplicative one — which is exactly what happened:
+#: this slot stopped at `ten`, so `eleven times the walk`, `a factor of eleven`,
+#: `twentyfold the walk` and `three in eleven of the walks` were GREEN while their
+#: `ten` twins red (`#9528` re-review round 4). Declared here, AFTER `_WORD_NUMERAL`,
+#: because it now reads that vocabulary.
+_MAGNITUDE_NUMERAL = rf"(?:\d+(?:\.\d+)?|{_WORD_NUMERAL})"
+
+#: A percentage figure — a DIGIT or a number WORD — in every spelling the file
+#: closes. One constant serves both the word-form guard and the ratio arm's bare
+#: sweep, so a spelling cannot be closed in one and open in the other — including the
+#: numeral's CASE and its UNIT'S PUNCTUATION.
+#: ⚠️ CASE is part of the closure: the guard compiles with `re.IGNORECASE`, so the sweep
+#: must pass the same flag (it did not, and every sentence-initial `Forty percent`
+#: escaped it — `#9528` review round 3, P2).
+#: ⚠️ PUNCTUATION too: `per-cent` and `per  cent` are the same claim as `per cent`, and a
+#: unit alternation spelled `per\s?cent` left both open in both predicates while
+#: `40-percent` was closed in the guard and open in the sweep — the "one constant serves
+#: both" claim, false by one hyphen (`#9528` review round 4).
+#: STATED MISSES: `_WORD_NUMERAL` is the units, the teens, the tens (hyphen or
+#: space) and the `hundred` forms. It does NOT carry `zero` or the thousand scale
+#: (`one thousand`, `a million`); with `%` / `per cent` / `pct` those spellings are open
+#: in both predicates, and with the `percent` noun they are caught only by the bare noun
+#: at the top of `_MAGNITUDE_WORDS`. Deliberately not chased: a numeral vocabulary wide
+#: enough to reach them starts matching ordinary prose, and the cost of the miss is one
+#: spelling a reader can already see.
+#: The per/cent separator is capped at TWO characters (`?` twice rather than a counted
+#: quantifier, because this is an f-string and `{0,2}` would be eaten as a format
+#: field), so `per   cent` with three spaces stays open in both predicates — the same
+#: disposition as above.
+_PERCENTAGE_FIGURE = rf"(?:\d+(?:\.\d+)?|{_WORD_NUMERAL})[-\s]*(?:%|per[-\s]?[-\s]?cent|pct)"
+
+_MAGNITUDE_WORDS = re.compile(
+    rf"\b(?P<proportion>"
+    rf"(?:(?:small|large|tiny|negligible|modest|minor|major|significant|"
+    rf"substantial|smallish)\s+)?"
+    rf"(?:third|thirds|half|halves|quarter|quarters|fourths?|fifths?|sixths?|"
+    rf"sevenths?|eighths?|ninths?|tenths?|elevenths?|twelfths?|\d+(?:st|nd|rd|th)s?|"
+    rf"\w+teenths?|"
+    rf"\w+tieths?|(?:hundred|thousand|million|billion|trillion)ths?|"
+    rf"fraction|share|portion|part|proportion|percentage|percent|"
+    rf"ratio|majority|minority|sliver|chunk))\s+(?:of|in)\s+{_MAGNITUDE_SUBJECT}"
+    rf"|\b(?P<percent>{_PERCENTAGE_FIGURE})"
+    rf"\s+(?:of|in)\s+{_MAGNITUDE_SUBJECT}"
+    rf"|\b(?P<bulk>(?:the\s+)?(?:bulk|lion's\s+share))\s+of\s+{_MAGNITUDE_SUBJECT}"
+    rf"|\b(?P<share>(?:most|half)\s+(?:of\s+)?{_MAGNITUDE_SUBJECT})"
+    rf"|\b(?P<multiple>"
+    rf"an?\s+order\s+of\s+magnitude"
+    rf"|an?\s+factor\s+of\s+{_MAGNITUDE_NUMERAL}"
+    rf"|(?:twice|{_MAGNITUDE_NUMERAL}\s+times)\s+(?:as\s+\w+\s+as\b|"
+    rf"{_MAGNITUDE_SUBJECT})"
+    rf"|(?:doubles?|triples?|quadruples?|quintuples?|halves?)\s+(?:the\s+)?"
+    rf"{_MAGNITUDE_SUBJECT}"
+    rf"|{_MAGNITUDE_NUMERAL}[- ]?fold\b"
+    rf"|\d+(?:\.\d+)?\s?[x×](?![\w.])\s+(?:of\s+)?{_MAGNITUDE_SUBJECT}"
+    rf"|\d+(?:\.\d+)?\s?[x×](?![\w.])\s+"
+    rf"(?:faster|slower|longer|bigger|larger|smaller|higher|lower)\s+than\s+"
+    rf"{_MAGNITUDE_SUBJECT}"
+    rf"|{_MAGNITUDE_NUMERAL}\s+(?:in|out\s+of)\s+{_MAGNITUDE_NUMERAL}\s+"
+    rf"(?:of\s+)?{_MAGNITUDE_SUBJECT}"
+    rf"|\d+(?:\.\d+)?\s*/\s*\d+(?:\.\d+)?\s+of\s+{_MAGNITUDE_SUBJECT}"
+    rf")",
+    re.IGNORECASE,
+)
+
+#: A POSITIONAL qualifier in front of a share noun (`# the second half of the walk`,
+#: `# the left half of the suite`, `# the second part of the walk`) — which phase of
+#: something runs, not what share of a measured quantity it is. Measured by the
+#: `#9501` review: both red without this, on the walk's own vocabulary (`part` names one
+#: of the three passes).
+#:
+#: ⛔ The set is PHASES only (`#9528` review round 5, P1). `upper`, `lower` and `other`
+#: were in it and they are SHARE adjectives: with them here, one word retired the guard
+#: and `# the other half of the arm's cost` / `# the upper half of the arm` both read
+#: GREEN. Stated cost, not discovered later: `# the upper half of the walk` now REDs,
+#: and the remediation is one edit.
+_MAGNITUDE_POSITIONAL = re.compile(
+    r"\b(?:first|second|third|left|right|top|bottom|last|final)\s+$",
+    re.IGNORECASE,
+)
+
+#: The TAIL that turns a positional `half` back into a SHARE (`#9528` review round 5,
+#: P1). The phase reading needs the divided thing named WITHOUT a possessive, so
+#: `# the second half of the walk` is a phase while `# the second half of the walk's
+#: cost` is a share of a measured quantity. Read off the TAIL and not from the subject
+#: slot, because that slot only swallows an ASCII `'s`: a typographic apostrophe
+#: (`walk’s cost`, what macOS and Word produce), a plural possessive (`walks' cost`) and
+#: a dropped apostrophe (`walk cost`) each leave the subject unmatched, and without this
+#: veto each of them kept the exemption.
+#: The nouns that make a dropped apostrophe a MEASUREMENT (`walk cost`): a bare
+#: measurement noun right after the divided thing is the only way to spell the share
+#: without punctuation.
+_MAGNITUDE_MEASUREMENT_NOUNS = frozenset(
+    {"cost", "costs", "work", "time", "runtime", "wall-clock", "wallclock"}
+)
+
+#: How many words of the tail are scanned for a possessive. The divided thing is a
+#: noun PHRASE (`the gate walk's cost`), not a sentence: three words covers a determiner
+#: or qualifier plus the head noun plus one modifier, and a possessive past that is not
+#: one about THIS share. ⚠️ It was six, which reached into the sentence's NEXT clause:
+#: `# the second half of the walk re-reads the arm's output` and `# the second half of the
+#: suite validates the work of the extractor` both RED — two spellings of an innocent
+#: phase sentence, differing from their GREEN twins only by a later clause's noun
+#: (`#9528` re-review). The price is stated: a possessive three words into the divided
+#: thing (`the entire first gate walk's cost`) is now GREEN, and the dropped-apostrophe
+#: RED legs the file pins sit at position 1 — the multi-word spelling at position 2 is the
+#: STATED GREEN residual (`# the second half of the gate walk cost`), not an oversight.
+_MAGNITUDE_TAIL_WORDS = 3
+
+
+def _MAGNITUDE_PHASE_SHARE_TAIL(tail: str) -> bool:
+    """Does the text AFTER a positional share noun name a MEASUREMENT (`#9528` P1)?
+
+    `# the second half of the walk` is a PHASE; `# the second half of the walk's cost`
+    is a SHARE of a measurement wearing a phase's clothes. The possessive is read HERE,
+    off the tail, and in CODE rather than one regex, for two measured reasons:
+
+    * the subject slot (`_MAGNITUDE_SUBJECT`) only swallows a single-word ASCII `'s`,
+      so a typographic apostrophe (`walk’s cost`, what macOS and Word produce), a plural
+      possessive (`walks' cost`) and a dropped apostrophe (`walk cost`) leave it
+      unmatched;
+    * it also accepts a MULTI-WORD possessive (`the gate walk's cost`), so a one-token
+      tail check was GREEN on `# the second half of the whole arm's cost` and on every
+      `the gate walk's cost` spelling — the same one-word-retires-the-guard shape, moved
+      from the adjective slot to the divided-thing slot.
+
+    The DEMONSTRATIVE determiner is consumed as a determiner, not as the divided thing:
+    without that, `# the second half of the work re-reads the sources` read RED because
+    `the` stood in for the share's subject and `work` looked like a dropped-apostrophe
+    measurement — the documented-GREEN parallel of `the second half of the walk re-reads
+    the sources`.
+
+    ⚠️ A POSSESSIVE PRONOUN is NOT consumed (`#9528` re-review). It names an owner, not
+    a thing: `the second half of its cost` is a share of a measurement exactly as
+    `of the arm's cost` is, and stripping the pronoun as a determiner landed the
+    measurement noun at position 0 — where the dropped-apostrophe check is suppressed —
+    so the whole tail read GREEN. The pronoun now reds on its own, which is the fourth
+    constraint this veto states, applied to the pronoun spelling of it.
+
+    Stated residual, pinned by the GREEN legs beside this arm: a DEMONSTRATIVE is
+    stripped exactly as `the` is, so a phase of a thing named that way
+    (`# the second half of this cost`, `# the second half of these costs`) keeps the
+    exemption the same as `# the second half of the costs` — the boundary this veto
+    draws is POSSESSIVES, and a demonstrative names the thing rather than owning it.
+    `# the second half of these costs` used to read RED only because `these` was not in
+    the strip, while `# the second half of the costs` read GREEN: an inconsistency
+    between two spellings of the same sentence, not a stricter guard (`#9528`
+    re-review). An anaphor with no possessive (`# the second half of it`) is the same
+    shape.
+    """
+    head = re.match(r"\s*of\s+", tail, re.IGNORECASE)
+    if not head:
+        return False
+    rest = tail[head.end() :]
+    # A QUANTIFIER can sit in front of the divided thing's determiner (`of all its cost`,
+    # `of both their runs`), and one strip layer could not consume both: the pronoun
+    # landed at position 1 and the whole share read GREEN (`#9528` re-review round 4).
+    quantifier = re.match(rf"(?:{_MAGNITUDE_QUANTIFIER})\s+", rest, re.IGNORECASE)
+    if quantifier:
+        rest = rest[quantifier.end() :]
+    determiner = re.match(
+        r"(?:the|this|that|these|those|a|an)\s+",
+        rest,
+        re.IGNORECASE,
+    )
+    if determiner:
+        rest = rest[determiner.end() :]
+    words = re.findall(r"[\w’'-]+", rest)[: _MAGNITUDE_TAIL_WORDS]
+    for position, word in enumerate(words):
+        lowered = word.lower()
+        # The pronoun owns the DIVIDED THING only as its determiner — the first word of
+        # the tail. Scanning the whole window red `# the second half of the walk
+        # re-reads its sources`, where `its` owns something in a LATER clause and the
+        # divided thing carries no possessive at all: a false RED with a remediation
+        # ("state the framing that produced it") describing a figure the sentence does
+        # not contain (`#9528` re-review).
+        if position == 0 and lowered in _MAGNITUDE_POSSESSIVE_PRONOUNS:
+            return True
+        if lowered.endswith(("'s", "’s")) or lowered.endswith("s'"):
+            return True
+        # a dropped apostrophe: the measurement noun RIGHT AFTER the divided thing —
+        # position 1, not "somewhere in the window", which is what the code did and red
+        # `# the second half of the suite validates the work of the extractor` on a
+        # `work` three words out (`#9528` re-review).
+        if position == 1 and lowered in _MAGNITUDE_MEASUREMENT_NOUNS:
+            return True
+    return False
+
+
+def _unsettleable_magnitudes(comment: str) -> list[str]:
+    """Magnitude claims in `comment` that no number makes settleable (`#9501`).
+
+    ⚠️ **This is the digit guard's rule in the other alphabet, and it is the hole
+    `#9516` left.** That change removed the *figures* from the gate-walk comment but
+    kept the magnitude in WORDS: *"No magnitude is pinned: the rebuild is a small
+    fraction of this arm's cost, and a wall-clock number in a comment is the claim that
+    rots."* A predicate that matches a NUMBER and a UNIT (`10.36 s`, `30 seconds`,
+    `2.6 min`) cannot see it: a proportion spelled in words carries no number for it to
+    match, so the sentence survived the guard written to delete exactly that claim — and
+    it is **false at the
+    natural reading.** Measured with `_literal_files()` replaced by a rebuild over
+    `_sources().items()`, fresh process, `_literal_files()` warm, two runs per tree
+    (`arm` = `_narrow_gate_walk_sites`'s own cost, `ungated` = the pass it gates):
+
+    - `69390341f` (the `#9516` merge): rebuild 1.70 s / 1.81 s, arm 3.35 s / 3.14 s,
+      ungated 10.81 s / 9.90 s.
+    - `81f5594dc` (`#9549`; the merge base when the figures were taken): rebuild 2.50 s / 3.00 s, arm 3.90 s / 4.40 s. `#9549` changed the census universe, so these absolute times are NOT the
+      ones above; the direction is the same on both trees, and the percentages
+      recomputed from these rows below are the claim.
+
+    Read against the ARM the comment sits in, the rebuild is **over half** of it, not a
+    small fraction. Each percentage below is RECOMPUTED from the row above it by
+    `test_the_gate_walk_magnitude_ratios_recompute_from_the_rows_they_name`, so a claim
+    and the figures it is made from cannot drift apart again (`#9501` review: the
+    percentages here were hand-computed once, and one of them was attributed to a
+    reading — and a tree — it did not belong to):
+
+    - `69390341f` arm 51 % / 58 %, ungated 16 % / 18 %, folded 12 % / 14 %.
+    - `81f5594dc` arm 64 % / 68 %.
+
+    The ungated and FOLDED readings are the only ones that make it look small, and
+    neither is the arm the comment sits in: a ratio whose truth depends on an unstated
+    reading of "this arm" is the same unsettleable claim as `10.36 s of 10.85 s`,
+    written so the duration guard misses it.
+
+    One rule, stated once and applied to both forms: a magnitude — digit or word — is a
+    fact asserted about a measurement, and it is allowed only when the comment also
+    states the framing that produced it. A framed figure therefore admits the word form
+    too; an unframed one admits neither.
+
+    ⚠️ **The framing window is the phrase's own line and the ONE AFTER IT, and reuses
+    `_framed`; the first version used the WHOLE TEXT and that was a merge-gating false
+    negative** (measured by the `#9501` review, cycle 2). It short-circuited on
+    `any(marker in comment …)`, so ONE framing mention anywhere in the function — an
+    unrelated `whole arm`, three lines away — cleared every word-form magnitude in it.
+    That is the whole-text hole `#9522` closed for durations, reopened in the other
+    alphabet. Reusing `_framed` also buys its DENIAL veto, so
+    `# whole arm was never measured: a small fraction of the arm` REDs instead of
+    framing itself.
+
+    ⚠️ **The search window is that same pair of lines**, because the phrase this
+    predicate exists to red on is wrapped INSIDE itself: `origin/main` breaks it as
+    `…a small fraction of this` / `# arm's cost…`, so a line-by-line match was GREEN on
+    the comment the file actually carries and RED only on a re-wrapped copy of it
+    (`_flatten_comment`). Cost, stated and PINNED by an arm rather than implied: a
+    marker on the NEXT line frames a complete same-line phrase, so the hole is one line
+    wide (two lines of text) where the first version's was the whole function. Narrowing
+    it to one line would red a legitimate framed-but-wrapped claim; both cells are filed
+    with the duration predicate's own line-vs-number coarseness as `#9531`.
+
+    ⚠️ Coarse in BOTH directions, and both are documented rather than discovered:
+
+    * GREEN where the phrase is an OPEN-CLASS quantity noun no alternative knows
+      ("the rebuild eats a hair of the arm", "a good deal of the arm's cost"), a share
+      of something that is not a measured quantity ("most of these modules are literal
+      carriers", "the bulk of these modules"), a bare `bulk` with no subject, a bare
+      `this`/`that` demonstrative (`# most of this file is parsed once` — the shapes the
+      subject binding exists to keep green), a POSITIONAL share ("the second half of
+      the walk", "the left half of the suite", "the second part of the walk" — a phase,
+      not a share, and GREEN only while the divided thing is named WITHOUT a possessive
+      and the qualifier is a PHASE word: `upper`, `lower` and `other` are share
+      adjectives, so `the upper half of the walk` and `the other half of the arm's cost`
+      are RED), or a PERCENTAGE WITH NO SUBJECT AT ALL (a bare figure whose value
+      is written and whose object is not — written without a concrete number here, so
+      this description is not itself a bare figure).
+      ⚠️ The phase exemption's NOUN set is closed to the PHASE-NEUTRAL nouns
+      (`half|halves|most|part|parts|portion|portions|share|shares|fraction|fractions`),
+      so a positional qualifier in front of a SHARE noun is refused:
+      `# the first third of the walk`, `# the last quarter of the run` and
+      `# the final quarter of the run` are refused
+      even though they name a phase, because a position plus a share noun is exactly the
+      shape of a share of a measurement (compare `# the first third of the arm's cost`,
+      which is RED for both reasons) and the guard cannot tell a phase of three from a
+      proportion — so it errs closed. Stated cost, pinned by RED legs, and the remedy is
+      one edit (`the first part of the walk`). ⚠️ The exemption was NOT protecting
+      `# a third of the arm`: that sentence has no positional qualifier, so it is
+      refused by the proportion rule itself — the earlier rationale here claimed
+      otherwise and was measured false (`#9528` re-review round 4).
+      That last cell is the stated PRICE OF THE BINDING rather than an oversight: the
+      `percent` alternative requires `of|in <subject>`, because a bare percentage is
+      overwhelmingly an unpacked figure (a coverage or a share of something unnamed)
+      and reding it would reword honest comments with no measurement behind the demand.
+      The illustration above is deliberately figure-free: a concrete number here would
+      be a bare percentage in this very docstring, which the ratio arm reds on. What IS closed is the productive
+      morphology — the ordinal SHAPES (`-teenth`, `-tieth`, `hundredth` … `trillionth`,
+      each with its plural) together with the enumerated `third` … `twelfth`, each
+      percentage SPELLING (the `N %` / `N%` / `N per cent` / `N pct` forms — written
+      without a concrete number here, so this description is not itself a bare figure),
+      the pronoun ANAPHORS, and
+      the multiplicative forms in every numeral SPELLING (`4 times`, `quadruples`,
+      `threefold`, `3 in 4`, `9 out of 10`, `3/4`, `2× the walk`) — because those are
+      the spellings a rewording reaches for first, and this guard has already been
+      retired by a rewording three times. That is why the live comment carries no
+      proportion at all rather than a phrasing a list must chase.
+    * RED on a real magnitude REGARDLESS of the adjective in front of it ("a fraction of
+      this arm" as much as "a small fraction of this arm"), on a size-qualified subject
+      ("the entire arm's cost") as much as a bare one, and on `half the arm` as
+      much as `half of the arm` — the spellings an adjective-gated, `of`-gated list
+      was green on, one of which is the exact sentence this chain produced.
+    * RED on a positional share whose divided thing is named with a POSSESSIVE: `the
+      second half of the walk's cost` is a share of a measurement, `the second half of
+      the walk` is a phase, and the possessive is read off the TAIL rather than inferred
+      from the subject slot — that slot only swallowed an ASCII `'s` on a single word.
+      The tail read (rather than a one-token pattern) is what closes the MULTI-WORD
+      case, which a one-token veto was GREEN on: `the second half of the control arm's
+      cost`, `the second half of the gate walk's cost`. (A `whole arm` spelling is
+      exempt for a different reason — `_framed` treats `whole arm` as a framing
+      marker, so that sentence states its own frame and the exemption is the framing
+      rule's, not this one's.) `_MAGNITUDE_SUBJECT` accepts the
+      typographic (`walk’s cost`) and plural (`walks' cost`) possessives too, so those
+      red for the same reason. The qualifier set is phase words only
+      (`first`/`second`/`third`/`left`/`right`/`top`/`bottom`/`last`/`final`);
+      `upper`/`lower`/`other` are share adjectives. Stated costs of the tightening, both measured rather than
+      discovered later: `the upper half of the walk` reds (a phase sentence with a share
+      adjective), and so does any possessive on the divided thing, measurement or not
+      (`the second half of the run's output`).
+    * GREEN residual, named so it is a stated limit and not a false PASS: a dropped
+      apostrophe on a MULTI-WORD divided thing (`the second half of the gate walk cost`)
+      matches nothing at all — `_MAGNITUDE_SUBJECT` needs either a possessive or a bare
+      measurement noun immediately after the determiner — so it stays GREEN, and the
+      phrase carries a figure only if a number is also written. Pinned as a GREEN leg
+      with that note, so a later widening reds here and has to update this bullet.
+    """
+    lines = comment.splitlines()
+    found: list[str] = []
+    for index in range(len(lines)):
+        pair = lines[index : index + 2]
+        # Framing is `_framed`'s per-line decision, taken over the same PAIR the phrase
+        # is searched in: a phrase that wraps can state its framing on either half.
+        if any(_framed(part) for part in pair):
+            continue
+        window = _flatten_comment("\n".join(pair))
+        for match in _MAGNITUDE_WORDS.finditer(window):
+            # A POSITIONAL `half` is a phase, not a share (`# the second half of the
+            # walk re-reads the sources`) — the qualifier sits outside the match, so
+            # this is a post-filter rather than a lookbehind of shifting width.
+            # The share NOUN's own extent, not the whole match: `_MAGNITUDE_WORDS` may
+            # swallow the subject too (`half of the walk's cost`), so the tail has to be
+            # taken after the noun or the veto reads the words that follow the share.
+            head = re.match(
+                r"(?:half|halves|most|part|parts|portion|portions|share|shares|"
+                r"fraction|fractions)\b",
+                match.group(),
+                re.IGNORECASE,
+            )
+            if (
+                head
+                and _MAGNITUDE_POSITIONAL.search(window[: match.start()])
+                # …and the divided thing must be named WITHOUT a possessive, or this is
+                # a share of a measurement wearing a phase's clothes.
+                and not _MAGNITUDE_PHASE_SHARE_TAIL(window[match.start() + head.end() :])
+            ):
+                continue
+            found.append(match.group(match.lastgroup))
+    return list(dict.fromkeys(found))
+
+
+#: One MEASURED row in `_unsettleable_magnitudes`'s paragraph: a COMMIT, and the three
+#: wall-clock pairs it produced. The ratio arm below RECOMPUTES every percentage claim
+#: from these, so a claim and its figures cannot drift apart (`#9501` review).
+_MAGNITUDE_MEASURED_ROW = re.compile(
+    r"^[ \t]*-[ \t]*`(?P<sha>[0-9a-f]{7,40})`[^\n]*?:[ \t]*rebuild "
+    r"(?P<rebuild>[0-9.]+ s\s*/\s*[0-9.]+ s),\s*arm "
+    r"(?P<arm>[0-9.]+ s\s*/\s*[0-9.]+ s)"
+    r"(?:,\s*ungated (?P<ungated>[0-9.]+ s\s*/\s*[0-9.]+ s))?\.",
+    re.MULTILINE,
+)
+
+#: One CLAIM row: the same commit, and the rebuild as a percentage of each reading.
+#: `ungated`/`folded` are omitted where the measured row carries no figures for them.
+_MAGNITUDE_CLAIM_ROW = re.compile(
+    r"^[ \t]*-[ \t]*`(?P<sha>[0-9a-f]{7,40})` arm "
+    r"(?P<arm>[0-9]+ % / [0-9]+ %)"
+    r"(?:, ungated (?P<ungated>[0-9]+ % / [0-9]+ %))?"
+    r"(?:, folded (?P<folded>[0-9]+ % / [0-9]+ %))?\.",
+    re.MULTILINE,
+)
+
+#: A stated percentage is rounded to a whole point, so recomputation agrees within HALF
+#: a point; the full point of slack is for a row whose figures are themselves rounded.
+#: ⚠️ It was 1.5 while the comment claimed "within one", and that admitted a materially
+#: wrong figure: `51 %` (true value 50.7) written as `52 %` passed (`#9528` re-review,
+#: measured) — a tolerance wider than the rounding it excuses is a hole, not slack.
+_MAGNITUDE_RATIO_TOLERANCE_PP = 1.0
+
+#: The module docstring's base-anchored figures, which must be the SAME set the
+#: `81f5594dc` measurement row carries — the two prose sites state one measurement.
+_BASE_MEASUREMENT_PROSE = re.compile(
+    r"measured at `(?P<sha>[0-9a-f]{7,40})`.*?the rebuild is "
+    r"(?P<rlo>[0-9.]+)–(?P<rhi>[0-9.]+) s of\s+`_narrow_gate_walk_sites`'s own "
+    r"(?P<alo>[0-9.]+)–(?P<ahi>[0-9.]+) s",
+    re.DOTALL,
+)
+
+
+def _seconds(text: str) -> list[float]:
+    """The numbers out of a `1.70 s / 1.81 s` (or `51 % / 58 %`) pair."""
+    return [float(number) for number in re.findall(r"\d+(?:\.\d+)?", text)]
+
+
+def _magnitude_ratios(figures: dict[str, list[float]], framing: str) -> list[float]:
+    """The two runs' percentages of the rebuild under ONE reading, row order kept."""
+    rebuild = figures["rebuild"]
+    if framing == "arm":
+        total = figures["arm"]
+    elif framing == "ungated":
+        total = figures["ungated"]
+    elif figures["ungated"]:
+        total = [
+            own + ungated
+            for own, ungated in zip(figures["arm"], figures["ungated"], strict=True)
+        ]
+    else:
+        total = []
+    if len(total) != len(rebuild):
+        return []
+    return [
+        100.0 * rebuild_run / total_run
+        for rebuild_run, total_run in zip(rebuild, total, strict=True)
+    ]
+
+
+#: The percentage SPELLINGS a bare claim can hide in — a DIGIT or a number WORD, in
+#: every spelling the word-form guard closes (`_PERCENTAGE_FIGURE`), so a spelling
+#: cannot be closed in one predicate and open in the other. It used to match only the
+#: `N %` (space) form, so `17%` / `17 per cent` / `17 pct` outside a claim row were
+#: silent (`#9528` review P2), and it used to require a DIGIT, so `sixty-four percent`
+#: in the guarded paragraph was unrecomputed (round-2 P3) — one word swapped either way.
+_BARE_PERCENTAGE = _PERCENTAGE_FIGURE
+
+
+def _magnitude_ratio_findings(prose: str) -> list[str]:
+    """What is wrong with the ratio claims in `prose`, recomputed from its own rows.
+
+    Three ways to be wrong, all MEASURED rather than argued: a percentage with no
+    commit-anchored figures behind it, a percentage that disagrees with the figures of
+    the commit it names, and a percentage written OUTSIDE a claim row — which no arm
+    recomputes, so it is free to rot. That last shape is the defect this replaces: the
+    paragraph it quotes attached a folded-in figure to a reading whose own rows do not
+    give it (the folded percentage is the smaller of the three readings, and the
+    small-looking one belongs to the ungated pass alone — both recomputed from the rows
+    below by the arm that calls this function, never restated here).
+    """
+    findings: list[str] = []
+    measured: dict[str, dict[str, list[float]]] = {}
+    for row in _MAGNITUDE_MEASURED_ROW.finditer(prose):
+        measured[row.group("sha")] = {
+            "rebuild": _seconds(row.group("rebuild")),
+            "arm": _seconds(row.group("arm")),
+            "ungated": _seconds(row.group("ungated") or ""),
+        }
+    if not measured:
+        findings.append(
+            "the prose states no commit-anchored measurement row, so every "
+            "percentage in it is unrecomputable"
+        )
+    claims = list(_MAGNITUDE_CLAIM_ROW.finditer(prose))
+    if not claims:
+        findings.append(
+            "the prose states no recomputed percentage row, so its ratio claims name "
+            "neither the commit nor the reading they are a percentage OF"
+        )
+    for row in claims:
+        sha = row.group("sha")
+        figures = measured.get(sha)
+        if figures is None:
+            findings.append(
+                f"`{sha}` is named in a percentage row but no measurement row carries "
+                "it, so those percentages have no figures behind them"
+            )
+            continue
+        for framing in ("arm", "ungated", "folded"):
+            stated = row.group(framing)
+            computed = _magnitude_ratios(figures, framing)
+            if stated is None:
+                if computed:
+                    findings.append(
+                        f"`{sha}` carries the figures for the {framing} reading and "
+                        "the percentage row omits it"
+                    )
+                continue
+            stated_runs = _seconds(stated)
+            if not computed:
+                findings.append(
+                    f"the percentage row states a {framing} reading for `{sha}`, "
+                    "whose measurement row carries no figures for it"
+                )
+                continue
+            if len(stated_runs) != len(computed):
+                findings.append(
+                    f"`{sha}` {framing}: {len(stated_runs)} stated figure(s) for "
+                    f"{len(computed)} measurement(s)"
+                )
+                continue
+            for state, recomputed in zip(stated_runs, computed, strict=True):
+                if abs(state - recomputed) > _MAGNITUDE_RATIO_TOLERANCE_PP:
+                    findings.append(
+                        f"`{sha}` {framing}: the prose states {state:g} %, its own "
+                        f"figures give {recomputed:.1f} %"
+                    )
+    # ⚠️ `re.IGNORECASE`: `_MAGNITUDE_WORDS` is case-insensitive, so a DIGIT-ONLY flag
+    # here left every SENTENCE-INITIAL `Forty percent` unrecomputed — the sweep and the
+    # guard disagreeing about the numeral's case, i.e. one predicate closing a spelling
+    # the other leaves open (`#9528` review round 3, P2; 65 of 75 capitalised cells
+    # GREEN).
+    for bare in re.finditer(_BARE_PERCENTAGE, prose, re.IGNORECASE):
+        if not any(row.start() <= bare.start() < row.end() for row in claims):
+            findings.append(
+                f"{bare.group()!r} is stated in prose that no arm recomputes, so it "
+                "is free to rot: state it in a percentage row"
+            )
+    return findings
+
+
+#: The measurement paragraph of `_unsettleable_magnitudes`' docstring VERBATIM as it
+#: shipped before this correction — figures anchored to "this PR's base" with
+#: `69390341f`'s numbers in the parentheses, and `~17 %` attributed to the FOLDED
+#: reading, which that arithmetic gives 12 % / 14 % for. Quoted rather than re-created,
+#: so the non-vacuity leg below is a statement about the shipped text.
+_PREFIX_MAGNITUDE_PARAGRAPH = """\
+Measured at this PR's base (fresh process, `_literal_files()`
+warm, two runs) with `_literal_files()` replaced by a rebuild over
+`_sources().items()`:
+the rebuild costs 2.5–3.0 s of `_narrow_gate_walk_sites`'s own 3.9–4.4 s — **over
+half** the arm, not a small fraction of it. (The first measurement, at
+`69390341f`, read 1.70 s / 1.81 s of 3.35 s / 3.14 s — the same over-half
+direction on a box ~15 % faster, so a slightly lower ratio.) It reaches ~17 % only
+if "this arm" is read as the whole gate walk, with the ungated pass folded in —
+which is not the arm the comment sits in. A ratio whose truth depends on an unstated
+reading of "this arm" is the same unsettleable claim as `10.36 s of 10.85 s`,
+written so the duration guard misses it.
+"""
+
+
+def test_the_gate_walk_magnitude_ratios_recompute_from_the_rows_they_name():
+    """The word form's percentages are computed from the figures beside them (`#9501`).
+
+    ⚠️ **A hand-computed percentage is a claim, and this paragraph shipped one that was
+    wrong.** The `#9501` review found it attaching a folded-in figure to the reading
+    "with the ungated pass folded in" — a reading that arithmetic does not give: the
+    folded percentage is the smaller one, and the small-looking figure belongs to the
+    ungated pass ALONE. (Both readings are recomputed by this arm from the rows below
+    and never restated here — not even the shipped figure, which the quoted paragraph in
+    `_PREFIX_MAGNITUDE_PARAGRAPH` carries verbatim.) (An earlier revision of this paragraph is
+    where the `1.70 s / 1.81 s of 3.35 s / 3.14 s` pair and the base-labelled
+    `2.5–3.0 s of 3.9–4.4 s` pair sat in two different trees; in the text quoted by
+    `_PREFIX_MAGNITUDE_PARAGRAPH` below, the first pair is already parenthesised to
+    `69390341f`, so no base mislabelling survives there to find.) A figure whose
+    provenance does not survive recomputation is the defect class this file exists to
+    close, one alphabet over from the comment it guards.
+
+    So the paragraph carries its measurements as commit-anchored ROWS and its claims as
+    rows this arm recomputes: each percentage must equal the rebuild over the reading it
+    names, for the commit it names, from figures stated in the same paragraph — and no
+    percentage may stand outside such a row.
+
+    Non-vacuity, three legs: (1) the paragraph as it shipped before this correction,
+    quoted verbatim in `_PREFIX_MAGNITUDE_PARAGRAPH`, produces findings — it states a
+    percentage nothing recomputes; (2) that shipped percentage re-written as a `folded`
+    row reds on the ARITHMETIC (the row's own figures give a folded reading well below
+    the figure it claimed), so the comparison is live rather than the row-shape check
+    alone; (3) the
+    module docstring's base-anchored figures must be the same set the `81f5594dc` row
+    carries, so the two prose sites cannot name different trees for one measurement
+    again.
+    """
+    prose = inspect.getdoc(_unsettleable_magnitudes) or ""
+    findings = _magnitude_ratio_findings(prose)
+    assert findings == [], (
+        "the magnitude paragraph's ratio claims do not recompute against the figures "
+        f"it states: {findings}"
+    )
+
+    stale = _magnitude_ratio_findings(_PREFIX_MAGNITUDE_PARAGRAPH)
+    assert stale, (
+        "the paragraph as it shipped before this correction passes the recomputation "
+        "check, so this arm pins nothing"
+    )
+    assert any("no recomputed percentage row" in finding for finding in stale), (
+        f"the shipped text reds for the wrong reason: {stale}"
+    )
+
+    folded_claim = (
+        "- `69390341f` (the `#9516` merge): rebuild 1.70 s / 1.81 s, "
+        "arm 3.35 s / 3.14 s, ungated 10.81 s / 9.90 s.\n"
+        "- `69390341f` arm 51 % / 58 %, ungated 16 % / 18 %, folded 17 % / 17 %."
+    )
+    mismatched = _magnitude_ratio_findings(folded_claim)
+    assert any("folded" in finding and "figures give" in finding for finding in mismatched), (
+        "a folded percentage that disagrees with its own row's figures passes, so the "
+        f"recomputation is not comparing them: {mismatched}"
+    )
+
+    # ⛔ …and a percentage that is WRONG BY MORE THAN ROUNDING must red, which is what
+    # the tolerance is FOR: at 1.5 points `51 %` (true value 50.7) could be written
+    # `52 %` and the arm stayed green, while the comment beside the constant claimed the
+    # recomputation "agrees within one" (`#9528` re-review, measured). The tolerance is
+    # now the rounding it excuses, and this leg pins the direction.
+    drifted = prose.replace("arm 51 % / 58 %", "arm 52 % / 59 %")
+    assert drifted != prose, (
+        "the magnitude paragraph no longer carries `arm 51 % / 58 %`, so this leg pins "
+        "nothing — retarget it at the row it does carry"
+    )
+    drift = _magnitude_ratio_findings(drifted)
+    assert any("arm:" in finding and "figures give" in finding for finding in drift), (
+        "a stated percentage 1.3 points off its own row passes, so the tolerance admits "
+        f"a materially wrong figure rather than the rounding it exists for: {drift}"
+    )
+
+    # ⛔ …and every shape `_magnitude_ratio_findings` can report must hold on EVERY prose
+    # site in this file, not only on the paragraph this arm points it at (`#9528`
+    # re-review rounds 5-6). The sweep ran on `_unsettleable_magnitudes.__doc__` alone,
+    # so the defect class this branch exists to close could be re-inserted into the module
+    # docstring and into this arm's OWN docstring: measured, a bare percentage reds now,
+    # but so did a CLAIM ROW whose percentage disagrees with its own figures (T4) and a
+    # percentage row naming a commit no measurement row carries — both stayed GREEN while
+    # this leg selected only the `free to rot` shape. The two row-ABSENCE findings are the
+    # only ones dropped here, because these prose sites legitimately carry no claim row;
+    # every other shape is kept.
+    ROW_ABSENCE = (
+        "the prose states no commit-anchored measurement row",
+        "the prose states no recomputed percentage row",
+    )
+    for site, text in (
+        ("the module docstring", __doc__ or ""),
+        (
+            "this arm's own docstring",
+            inspect.getdoc(test_the_gate_walk_magnitude_ratios_recompute_from_the_rows_they_name)
+            or "",
+        ),
+        (
+            "the `_unsettleable_magnitudes` docstring",
+            inspect.getdoc(_unsettleable_magnitudes) or "",
+        ),
+    ):
+        findings_here = [
+            finding
+            for finding in _magnitude_ratio_findings(text)
+            if not finding.startswith(ROW_ABSENCE)
+        ]
+        assert not findings_here, (
+            f"{site} states a percentage that no recomputed claim row holds up: "
+            f"{findings_here} — a prose site no arm reads is where this branch's own "
+            "defect class lives"
+        )
+
+    # The bare-percentage sweep must close every spelling, not one of them: a rotated
+    # figure re-spelt `43%` / `43 per cent` / `43 pct` sat outside every row and was
+    # silent, which is the rot this third shape exists to catch (`#9528` review P2).
+    # The figure is one the paragraph does not carry, and the assertion names it, so the
+    # leg reds on the APPENDED text rather than on any pre-existing bare figure.
+    for spelling in ("~43 %", "~43%", "~43 per cent", "~43 pct"):
+        rotated = f"{prose}\nIt reaches {spelling} only if read as the whole walk.\n"
+        rotated_findings = _magnitude_ratio_findings(rotated)
+        assert any("43" in finding and "free to rot" in finding for finding in rotated_findings), (
+            f"a percentage written `{spelling}` outside every claim row passes the "
+            f"sweep, so the closure misses that spelling: {rotated_findings}"
+        )
+
+    # …and the same closure in the WORD alphabet: the sweep needed a DIGIT, so a
+    # percentage spelled out could be appended to this very paragraph and stay green
+    # while its digit twin red (`#9528` review round 2, P3) — and it needed the numeral's
+    # CASE too, because `_MAGNITUDE_WORDS` is case-insensitive while `finditer` was not,
+    # so every SENTENCE-INITIAL spelling escaped (round 3, P2).
+    for spelled_out in (
+        "It is sixty-four percent of the arm.",
+        "- Forty percent of the arm is the re-parse.",
+        "- Sixty-four percent of the arm is the re-parse.",
+        "- One hundred per cent of the arm is the re-parse.",
+        # the UNIT's punctuation is the same claim: a hyphen or a doubled space must not
+        # retire the sweep while the guard reads it (`#9528` review round 4)
+        "- The rebuild is 40 per-cent of the arm.",
+        "- The rebuild is forty per  cent of the arm.",
+        "- The rebuild is 40-percent of the arm.",
+    ):
+        findings = _magnitude_ratio_findings(f"{prose}\n{spelled_out}\n")
+        assert any("free to rot" in finding for finding in findings), (
+            f"{spelled_out!r} writes a percentage with a number WORD outside every claim "
+            f"row and passes the sweep, so the rot closure is not the same in both "
+            f"predicates (or not case-insensitive): {findings}"
+        )
+
+    base = _BASE_MEASUREMENT_PROSE.search(__doc__ or "")
+    assert base is not None, (
+        "the module docstring no longer states the base measurement in the form "
+        "`measured at `<sha>` (…, the merge base when the figures were taken) the "
+        "rebuild is A–B s of "
+        "`_narrow_gate_walk_sites`'s own C–D s`, so the two prose sites cannot be held "
+        "to the same rows"
+    )
+    rows = {row.group("sha"): row for row in _MAGNITUDE_MEASURED_ROW.finditer(prose)}
+    assert base.group("sha") in rows, (
+        f"the module docstring anchors its figures to `{base.group('sha')}`, and no "
+        "measurement row in `_unsettleable_magnitudes`' docstring carries that commit"
+    )
+    row = rows[base.group("sha")]
+    for stated, measured in (
+        ((base.group("rlo"), base.group("rhi")), row.group("rebuild")),
+        ((base.group("alo"), base.group("ahi")), row.group("arm")),
+    ):
+        assert sorted(round(float(value), 1) for value in stated) == sorted(
+            round(value, 1) for value in _seconds(measured)
+        ), (
+            f"`{base.group('sha')}`: the module docstring states {stated} and the "
+            f"measurement row carries {measured!r} — the two prose sites describe "
+            "different measurements of the same tree"
+        )
+
+    # ⚠️ The paragraph also makes the claim in WORDS — "the rebuild is over half of it" —
+    # and a claim in words is not recomputed by a percentage check. Derive it from the
+    # same rows: a re-measurement that puts the rebuild at or below half now reds instead
+    # of leaving the sentence standing while every percentage arm stays green
+    # (`#9528` re-review round 3, which measured exactly that: a consistent re-measurement
+    # at 25 % left both ratio arms and the base-prose arm green).
+    for sha, measured_row in rows.items():
+        rebuild = _seconds(measured_row.group("rebuild"))
+        arm_seconds = _seconds(measured_row.group("arm"))
+        assert rebuild and arm_seconds and len(rebuild) == len(arm_seconds), (
+            f"`{sha}`: the row carries {measured_row.group('rebuild')!r} of "
+            f"{measured_row.group('arm')!r}, so the over-half claim cannot be derived"
+        )
+        assert all(
+            100.0 * value / total > 50.0
+            for value, total in zip(rebuild, arm_seconds, strict=True)
+        ), (
+            f"`{sha}`: the paragraph calls the rebuild 'over half' the arm and these rows "
+            f"put it at or below half ({measured_row.group('rebuild')} of "
+            f"{measured_row.group('arm')}) — the words and the figures disagree"
+        )
+
+
+def test_the_gate_walk_comment_asserts_no_unmeasured_magnitude():
+    """A magnitude in WORDS is still a claim, and this one did not reproduce (`#9501`).
+
+    ⚠️ **The gap `#9516` left, executed rather than argued.** Its guard holds the
+    comment to its DURATIONS; the comment it produced pins a *proportion* in words
+    instead — "the rebuild is a small fraction of this arm's cost" — which does not
+    reproduce against the row that names its figures' tree, `81f5594dc`
+    (`_unsettleable_magnitudes`' docstring carries the rows and the percentages
+    recomputed from them; no figure is copied here, because a copy is what nothing
+    recomputes — `#9528` re-review: this docstring said "at this head", which is a tree
+    the measurement never saw). So the guard moved
+    the figure out of the sentence and the sentence kept the claim, which is the defect
+    class this issue chain exists to end: a magnitude stated in prose with nothing
+    measuring it. The rule is the same one the duration arm states, applied to the other
+    alphabet.
+
+    Non-vacuity is its own leg in
+    `test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced` (below): the sentence
+    `#9516` left behind REDs, a magnitude word carrying its framing stays GREEN, a
+    framing marker ELSEWHERE in the comment does not clear it, and the live comment is
+    GREEN under the same predicate.
+    """
+    census = _call_time_census()
+    comment = _gate_walk_comment()
+    # ⚠️ The floor reads the `#`-line projection, not `comment`: `comment` is the whole
+    # SOURCE (`_prose_of`), so `assert comment` could never fail and this arm would
+    # advertise an anti-vacuity floor it does not have — the defect main documents at
+    # `_gate_walk_comment_lines` and reached again here (cycle-2 review).
+    assert _gate_walk_comment_lines(census._narrow_gate_walk_sites), (
+        "`_narrow_gate_walk_sites` carries no `#` comment any more, so this arm "
+        "asserts nothing — the mechanism it states was the whole point of the change"
+    )
+    assert not _unsettleable_magnitudes(comment), (
+        "the gate-walk comment pins a magnitude in WORDS, which no number makes "
+        f"settleable ({_unsettleable_magnitudes(comment)}) — state the figure with "
+        "the framing that produced it (whole arm / control step / `--durations=0` / "
+        "in-suite), or state only the mechanism. A proportion without a number is "
+        "not a weaker claim than a duration without framing, it is the same claim."
+    )
+
+
 def test_the_gate_walk_comment_pins_no_wall_clock_figure():
     """A pinned duration must carry the framing that produced it (`#9506`).
 
@@ -3877,8 +6972,8 @@ def test_the_gate_walk_comment_pins_no_wall_clock_figure():
 
 
 def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
-    """Non-vacuity for `_unframed_durations`, on the PRE-`#9516` MAIN — not an
-    intermediate commit of this branch (`#9506`).
+    """Non-vacuity for `_unframed_durations` AND `_unsettleable_magnitudes`, on the
+    PRE-`#9516` MAIN — not an intermediate commit of this branch (`#9506`, `#9501`).
 
     ⚠️ **The round-5 review found the first guard green on `origin/main`.** It red
     only on `says_none AND duration`, and the base text says no denial, so the arm
@@ -3894,6 +6989,13 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
     wording pointed a re-verifier at a tree that no longer says what this arm claims.
     The string below is `fa84a473d:tests/_about_call_time_census.py:990-992`, the last
     main commit to carry it.
+
+    ⚠️ **The word-form legs at the end of this arm are the same non-vacuity for the
+    other ALPHABET (`#9501`), and they carry their own premise.** Each feeding string is
+    first shown to be INVISIBLE to `_unframed_durations` (no digit, no unit), because a
+    word-form leg whose input the digit guard already reds would prove nothing about the
+    word form. The live comment is checked under that predicate too, so the two live arms
+    cannot diverge from their non-vacuity arm unnoticed.
     """
     pre_9516_main = (
         "# `_literal_files()` is already parsed and cached; re-reading `_sources()` "
@@ -4137,6 +7239,498 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
         "the live comment must be green under the same predicate the two arms above "
         "use — this is the arm the guard asserts, restated so a divergence between "
         "the predicate and its non-vacuity arm cannot go unnoticed"
+    )
+
+    # ── the SECOND predicate's non-vacuity (`#9501`): the same rule in the OTHER
+    # ALPHABET. `_unframed_durations` matches digits, so every string below is invisible
+    # to it — and that premise is ASSERTED, not assumed, before each word-form leg leans
+    # on it, because a word-form leg whose input the digit guard already reds proves
+    # nothing about the word form.
+    #
+    # This is the sentence `#9516` left behind, VERBATIM as `origin/main` wraps it
+    # (`git show origin/main:tests/_about_call_time_census.py`), WRAP INCLUDED: it breaks
+    # between `this` and `arm's`, so a predicate that matches per line is GREEN on the
+    # real defect while RED only on a re-wrapped copy of it.
+    survived = (
+        "# `_literal_files()` is already parsed and cached; re-reading `_sources()` and\n"
+        "# rebuilding the same 29 `_File`s is redundant work for byte-identical output —\n"
+        "# the same `_File` values over the same `_sources().items()` order, so only object\n"
+        "# identity changes. No magnitude is pinned: the rebuild is a small fraction of this\n"
+        "# arm's cost, and a wall-clock number in a comment is the claim that rots."
+    )
+    assert not _unframed_durations(survived), (
+        "the premise of this leg: the digit guard is BLIND to the sentence `#9516` left "
+        "behind — if it were not, the word-form arm would be redundant"
+    )
+    assert _unsettleable_magnitudes(survived) == ["small fraction"], (
+        "the word-form predicate must red on the sentence `#9516` left behind, as it is "
+        "WRAPPED on `origin/main` (`the rebuild is a small fraction of this` / `# arm's "
+        "cost`) — a predicate that only matches this phrase on one long line passes on "
+        "the comment the file actually carries, which is the fail-open shape `#9501` is"
+    )
+    # ⚠️ This leg carries the lesson from the first version of the arm: its fixture bound
+    # the proportion to `it`, which is NOT in `_MAGNITUDE_SUBJECT`, so the predicate
+    # matched nothing and the assertion passed with the framing exemption deleted
+    # outright — green for a reason other than the one its message claims. The phrase is
+    # bound to THE ARM here, so the framing marker is the only thing clearing it, and the
+    # unframed twin below is executed to prove exactly that.
+    framed_magnitude = (
+        "# the arm measured 14.4 s whole arm, --durations=0: a small fraction of the arm"
+    )
+    assert not _unsettleable_magnitudes(framed_magnitude), (
+        "a magnitude word that carries the framing of its figure must stay allowed — "
+        "otherwise this is a style rule against adverbs rather than a rule about "
+        "settleable claims"
+    )
+    assert _unsettleable_magnitudes(
+        "# the arm measured 14.4 s: a small fraction of the arm"
+    ) == ["small fraction"], (
+        "the leg above must be green BECAUSE OF THE FRAMING, not because the phrase is "
+        "outside the predicate's reach — this is the identical sentence with the two "
+        "framing markers (`whole arm`, `--durations=0`) removed, and it must red"
+    )
+
+    # ⚠️ Two spellings the FIRST version of the predicate was GREEN on, and the first of
+    # them is the sentence this chain produced verbatim. The adjective was mandatory
+    # (`small fraction`) and alternative 3 required the literal `of`, so dropping one
+    # word — or stating the refuted magnitude in the author's own measured phrasing
+    # (`over half the arm`) — retired the guard. Executed here rather than argued,
+    # because "the list covers its class" is the claim that was false.
+    for spelling in (
+        "# the redundant rebuild is a fraction of this arm, and a wall-clock number is "
+        "the claim that rots.",
+        "# the rebuild is over half the arm, so reusing the parsed files is the fix.",
+    ):
+        assert not _unframed_durations(spelling), (
+            "the premise of this leg: neither spelling carries a duration, so the digit "
+            "guard is blind to it and only the word-form predicate can red"
+        )
+        assert _unsettleable_magnitudes(spelling), (
+            f"the word-form predicate must red on {spelling!r} — `a fraction of this "
+            "arm` is the exact sentence this chain produced and `half the arm` is the "
+            "measured truth it was refuted with; a pattern that needs an adjective, or "
+            "needs the literal `of`, is green on the defect one word away"
+        )
+
+    # ⚠️ The percentage slot was DIGIT-ONLY, so a proportion re-spelt with a number WORD
+    # retired the guard while its digit twin red — the same one-word swap, one alphabet
+    # over (`#9528` review round 2, P2: `# forty per cent of the arm` was GREEN, and it
+    # could be pasted into the live comment with 48 tests still passing).
+    for spelled, expected in (
+        ("# 40 per cent of the arm is the re-parse.", ["40 per cent"]),
+        ("# forty per cent of the arm is the re-parse.", ["forty per cent"]),
+        ("# 40 pct of the arm is the re-parse.", ["40 pct"]),
+        ("# forty pct of the arm is the re-parse.", ["forty pct"]),
+        ("# 40% of the arm is the re-parse.", ["40%"]),
+        ("# sixty-four percent of the arm is the re-parse.", ["sixty-four percent"]),
+        ("# one hundred per cent of the arm is the re-parse.", ["one hundred per cent"]),
+    ):
+        assert not _unframed_durations(spelled), (
+            "the premise of this leg: a percentage carries no digit-and-unit duration, "
+            "so only the word-form predicate can red it"
+        )
+        assert _unsettleable_magnitudes(spelled) == expected, (
+            f"the word-form predicate must red on {spelled!r} as {expected!r} "
+            f"({_unsettleable_magnitudes(spelled)}) — a percentage whose NUMERAL is a "
+            "word is the identical claim to its digit twin, and a slot that needs a "
+            "digit is retired by one word"
+        )
+
+    # …and the other direction, so this is a rule about CLAIMS rather than about
+    # adverbs: prose about WHICH modules are walked asserts no magnitude, and reding on
+    # it would fail a merge gate over a sentence holding no figure (with "state the
+    # framing that produced it" as the remediation).
+    for prose in (
+        "# most of these modules are literal carriers, so the index reads them first.",
+        "# most of the 29 files take the second branch; the rest fall through.",
+        "# the bulk of these modules are literal carriers, so the index reads them.",
+        "# reads them in bulk from the disk",
+        "# the length of the walk grows with the module set",
+        "# the path of the walk goes through the constant",
+        "# the depth of the walk is bounded by the package",
+        "# most of the time this is the second branch",
+        "# most of this file is parsed once",
+        "# the run is cached",
+        "# half of these modules are synthetic",
+        "# doubles entries in the list before it walks them",
+        # the NUMERAL-adjacent shapes a shape-only pattern gets wrong (cycle-3 review):
+        "# the grid is 3 x 4 sites",
+        "# the viewport is 1024 x 768",
+        "# the matrix is 2 × 2",
+        "# a factor of safety on the walk",
+        "# 0x1f is the mask",
+        "# a 2x2 matrix",
+        # a POSITIONAL share is a phase, not a share (cycle-3 review):
+        "# the second half of the walk re-reads the sources",
+        "# the left half of the suite is unused",
+        "# the second part of the walk is the ungated pass",
+        "# the first half of the work is the ungated pass",
+        # ...and the STATED RESIDUAL (#9528 review round 6): a dropped apostrophe on a
+        # MULTI-WORD divided thing matches nothing — no possessive to bound the subject
+        # and no bare measurement noun right after the determiner — so it stays GREEN.
+        # Widening `_MAGNITUDE_SUBJECT` to see it must red this leg and update the
+        # docstring's residual bullet in the same change.
+        "# the second half of the gate walk cost is the parse",
+        # ...and the STATED RESIDUAL the `#9528` re-review added beside it: a
+        # DEMONSTRATIVE names the divided thing rather than owning it, so a phase of it
+        # keeps the exemption — the same boundary as `the second half of the walk`. The
+        # possessive PRONOUN spelling of the same sentence is RED below, and the two
+        # legs are what keep the difference from being quietly widened one way or the
+        # other.
+        "# the second half of this cost is the parse",
+        "# the second half of that work is the parse",
+        "# the second half of these costs is the parse",
+        "# the second half of the costs is the parse",
+        "# the second half of a run re-reads the sources",
+        "# the second half of all the work re-reads the sources",
+        # ...and a positional `last`/`final` is a PHASE word, not a share adjective
+        # (`# the last half of the walk` was refused one word from its pinned twin; `#9528`
+        # re-review round 4).
+        "# the last half of the walk is the ungated pass",
+        "# the final half of the walk is the ungated pass",
+        "# the second half of it is the parse",
+        # ...and a possessive pronoun that owns something in a LATER clause is not a
+        # possessive on the divided thing: scanning the whole tail window red this
+        # sentence, one word from the GREEN leg above (`#9528` re-review). The pronoun
+        # check is scoped to the divided thing's own determiner position.
+        "# the second half of the walk re-reads its sources",
+        # ...and the SAME false positive in the two branches the re-review found still
+        # position-blind: an apostrophe or a measurement noun in a LATER clause. Each is
+        # now GREEN, and each differed from a RED leg only by one word's position
+        # (`#9528` re-review round 3).
+        "# the second half of the walk re-reads the arm's output",
+        "# the second half of the suite validates the work of the extractor",
+        # a proportion bound to something that is not a measured quantity:
+        "# e.g. 3 in 4 cases",
+        "# most of these modules are run in the suite",
+        # the NUMERAL-adjacent shapes a shape-only pattern gets wrong — `N x` BINDS to a
+        # subject or to a `than <subject>` comparison, so prose naming neither stays
+        # GREEN (`#9501` review measured all three reding with the remediation "state
+        # the framing that produced it" for a sentence holding no figure):
+        "# reads 2x per site",
+        "# 2x the modules are walked",
+        "# the rebuild is 2x faster",
+    ):
+        assert not _unsettleable_magnitudes(prose), (
+            f"{prose!r} asserts no magnitude, so the predicate must stay GREEN on it — "
+            "an unscoped `bulk`, an `\\w+th` ordinal shape, a bare `most of the time`, "
+            "a bare `N x M`, a `factor of safety` or a positional `half` reds here and "
+            "the diagnosis it prints describes a figure the sentence does not carry"
+        )
+
+    # ⛔ …and the SAME positional shape is a SHARE the moment the divided thing is named
+    # with a possessive, or the qualifier is a share adjective (`#9528` review round 5,
+    # P1 — every one of these measured GREEN before the tail veto, i.e. one word in front
+    # of the noun retired the guard). Both directions are pinned, because the fix for one
+    # is what reds the other: `# the upper half of the walk` is now RED on purpose.
+    for share in (
+        "# the other half of the arm's cost is the parse",
+        "# the upper half of the walk",
+        "# the second half of the walk's cost is the parse",
+        "# the second half of the walk’s cost is the parse",  # typographic apostrophe
+        "# the second half of the walks' cost is the parse",  # plural possessive
+        "# the second half of the walk cost is the parse",  # dropped apostrophe
+        # ...and the MULTI-WORD divided thing, which a one-token tail veto was GREEN on:
+        # the possessive sits one word further out, which is the whole reason the tail
+        # is read in code rather than matched against a single token.
+        "# the second half of the control arm's cost is the parse",
+        "# the second half of the gate walk's cost is the parse",
+        "# the second half of the gate walk’s cost is the parse",
+        "# the second half of the gate walks' cost is the parse",
+        # ...and a possessive on a NON-measurement: the stated cost of the rule, not a
+        # shape it is trying to catch, and it is a share of a thing either way.
+        "# the second half of the run's output is the parse",
+        # ...and a POSSESSIVE PRONOUN on the divided thing (`#9528` re-review): the
+        # determiner strip consumed `its`/`their`/`our` as if they were `the`, which put
+        # the measurement noun at position 0 — where the dropped-apostrophe check is
+        # suppressed — and read the whole share GREEN. `of its output` carries no
+        # measurement noun at all, so the pronoun has to red on its own.
+        "# the second half of its cost is the parse",
+        "# the second half of their work is the parse",
+        "# the second half of our total is the parse",
+        "# the second half of its output is the parse",
+        # ...and a QUANTIFIER in front of that pronoun (`of all its cost`, `of both their
+        # runs`) defeated the strip one layer down — the same shape as the subject slot's
+        # quantifier layer, fixed the same way (`#9528` re-review round 4).
+        "# the second half of all its cost is the parse",
+        "# the second half of both their runs is the parse",
+        "# the second half of all our cost is the parse",
+    ):
+        assert _unsettleable_magnitudes(share), (
+            f"{share!r} is a SHARE of a measured quantity wearing a phase's clothes — a "
+            "possessive on the divided thing (ASCII, typographic, plural or dropped) or a "
+            "share adjective is what separates it from `the second half of the walk`, and "
+            "without both constraints one word in front of the noun retires this guard"
+        )
+
+    # ⚠️ STATED COST of the CLOSED phase-noun set, pinned rather than implied: a
+    # positional qualifier in front of a SHARE noun names a phase and is refused anyway,
+    # because admitting `third`/`quarter` to the phase set would retire the guard for
+    # `# a third of the arm` — the share class this chain enumerates. `the walk` has
+    # three passes, so `the first third of the walk` is the natural spelling and the
+    # remedy is one edit (`the first part of the walk`) (`#9528` re-review round 3).
+    for refused_in_theory_only in (
+        "# the first third of the walk is the ungated pass",
+        "# the last quarter of the run is the cache",
+        "# the final quarter of the run is the cache",
+    ):
+        assert _unsettleable_magnitudes(refused_in_theory_only), (
+            f"{refused_in_theory_only!r} names a PHASE and is refused anyway — that is "
+            "the stated cost of the closed phase-noun set, so if it ever goes GREEN the "
+            "docstring's residual bullet is stale and the share class it protects "
+            "(`# a third of the arm`) has been admitted to the exemption"
+        )
+
+    # ⚠️ The PRODUCTIVE proportion spellings are closed, not only the adjectives in front
+    # of them. Making the adjective optional fixed `a fraction of this arm`; the
+    # vocabulary was still a hand-list, so `two thirds of the arm` escaped — the same
+    # one-synonym-away fail-open, one vocabulary over. The ORDINAL SET and the percentage
+    # spellings are enumerated because they are closed classes (the `\\w+th` SUFFIX is
+    # not — cycle-2 review measured it reading `length`, `path` and `depth` as
+    # proportions, hence the GREEN legs above). ⚠️ This does NOT make the list closed — an
+    # open-class quantity noun ("a hair of the arm", "a good deal of the arm's cost")
+    # still passes, and it is documented rather than claimed otherwise: what is closed is
+    # the morphology, not the vocabulary.
+    for spelling in (
+        "# two thirds of the arm is the re-parse.",
+        "# the majority of the arm's cost is the AST parse.",
+        "# the rebuild is a sliver of this walk's work.",
+        "# two fifths of the arm is the re-parse.",
+        "# nine tenths of this arm's cost is the ungated walk.",
+        "# 80% of the walk's work is the AST parse.",
+        "# 40 per cent of the arm is the re-parse.",
+        "# 40 pct of the walk's work is the AST parse.",
+        "# the bulk of the walk is the re-parse",
+        "# the lion's share of the arm's cost is the parse",
+        # ⚠️ The ORDINAL MORPHOLOGY, not an enumeration (`#9501` review): an enumerated
+        # list that stopped at `thousandths?` was GREEN on `a twentieth of the arm` and
+        # `a millionth of the arm` — the same "the list is complete" claim that was
+        # already false twice. `-teenth` / `-tieth` / the magnitude scale end no ordinary
+        # English noun, so those SHAPES close the class `length`/`depth`/`path` cannot.
+        "# a twentieth of the arm is the re-parse.",
+        "# a thirtieth of this arm's cost is the AST parse.",
+        "# a fortieth of the walk is the re-parse.",
+        "# a nineteenth of this walk's work is the parse.",
+        "# a millionth of the arm",
+        # ⚠️ The SUBJECT's qualifier slot (`#9501` review): one word inserted into the
+        # defect sentence — `the ENTIRE arm's cost` — was GREEN, and a multi-word
+        # possessive (`the gate walk's cost`) was too.
+        "# the rebuild is a small fraction of the entire arm's cost",
+        "# a small fraction of the full arm's cost",
+        "# the rebuild is a small fraction of the gate walk's cost",
+        # …and the RATIO family in every numeral SPELLING (`#9501` review: the
+        # `one|two|three|four in two|…|five` window was GREEN on `one in ten`).
+        "# two in ten of the walks pay the parse.",
+        "# five in six of the walks pay the parse.",
+        # ⚠️ The DETERMINER slot is a closed list, and closing one spelling at a time is
+        # how this guard was retired before: `all|every|each|both|some|any|no` were
+        # missing, so `# half of all runs pay the parse` shipped GREEN while the `these`
+        # spelling red (`#9528` re-review round 3).
+        "# half of all runs pay the parse.",
+        "# half of every run pays the parse.",
+        "# the rebuild is half of all its cost.",
+        # ⚠️ The indefinite article is a determiner too: `# half of a run is the parse`
+        # shipped GREEN while `# half of runs pay the parse` red (`#9528` re-review
+        # round 4).
+        "# half of a run is the parse",
+        "# most of a walk is the parse",
+        # …and the DIGIT ordinal is the same claim in the other alphabet: the alphabetic
+        # morphology is closed (`-teenth`/`-tieth`/`hundredth`…), so `# a 10th of the arm`
+        # was GREEN beside `# a tenth of the arm` (`#9528` re-review round 4).
+        "# a 10th of the arm is the re-parse.",
+        "# a 3rd of the arm is the re-parse",
+        # …and the MULTIPLICATIVE slot stopped its numeral vocabulary at `ten` while the
+        # percentage slot knew the teens and tens — one numeral open in one predicate and
+        # closed in the other, the failure this file's "one constant serves both" rule
+        # exists to prevent. `_MAGNITUDE_NUMERAL` now reads `_WORD_NUMERAL`.
+        "# re-parsing is eleven times the walk",
+        "# the rebuild is a factor of eleven over the walk's work.",
+        "# the re-parse is twentyfold the walk",
+        "# three in eleven of the walks pay the parse.",
+        # ⚠️ The DEMONSTRATIVE determiner (`#9528` re-review): `that`/`those` were
+        # missing from the subject slot's determiner list, so ONE determiner swapped a
+        # RED for a GREEN on the same sentence — the one-synonym-away fail-open, one
+        # vocabulary over.
+        "# the rebuild is a small fraction of that arm",
+        "# most of those arms is the parse",
+        "# the rebuild is most of that run",
+    ):
+        assert _unsettleable_magnitudes(spelling), (
+            f"{spelling!r} states a proportion of a measured quantity and must red — a "
+            "list that knows only `fraction|share|portion|part` is one synonym away "
+            "from the fail-open that retired the previous version of this guard"
+        )
+
+    # ⚠️ The ANAPHOR is the cycle-3 P0: the proportion bound to a PRONOUN — one word from
+    # the sentence `#9516` left behind — was GREEN, and the earlier fix had *re-bound the
+    # fixture* to `the arm` rather than closing the slot, which made the arm green for a
+    # reason other than the one its message claims. Both directions here.
+    for anaphoric in (
+        "# the rebuild is a small fraction of it",
+        "# the rebuild is a small fraction of its cost",
+        "# the rebuild is most of them",
+    ):
+        assert _unsettleable_magnitudes(anaphoric), (
+            f"{anaphoric!r} binds the proportion to a PRONOUN standing in for the arm, "
+            "which is the sentence `#9516` left behind with one word changed — a "
+            "subject list that knows only the nouns is green on it"
+        )
+
+    # ⚠️ The MULTIPLICATIVE forms: each binds to a measured quantity, each is a closed
+    # class, and each was GREEN (`cycle-2 review`). `twice as long as the walk` is one
+    # keystroke from the sentence `#9516` left behind, so a guard that knows only
+    # `a fraction of` is retired by the next re-wording. ⚠️ The NUMERAL is a shape, not a
+    # hand-list (`cycle-3 review`): `4 times`, `10 times`, `quadruples`, `threefold`,
+    # `3 in 4`, `9 out of 10` and `3/4` were all GREEN while their neighbours red.
+    for spelling in (
+        "# the rebuild takes twice as long as the walk.",
+        "# the rebuild doubles this arm's cost.",
+        "# the rebuild is 2× the walk.",
+        "# re-parsing is 4 times the work of the walk",
+        "# re-parsing is four times the work of the walk",
+        "# re-parsing is 10 times the walk",
+        "# re-parsing quadruples the work",
+        "# re-parsing quintuples the arm's cost",
+        "# the re-parse is threefold the walk",
+        "# the re-parse is 3-fold",
+        "# this is an order of magnitude more than the walk.",
+        "# the rebuild is a factor of two over the walk's work.",
+        "# three in four of the walks pay the parse.",
+        "# 3 in 4 of the walks pay the parse",
+        "# 9 out of 10 runs pay the parse",
+        "# 3/4 of the arm is the re-parse",
+        "# 2x faster than the walk",
+        "# the walk is twice as fast as the gate",
+    ):
+        assert _unsettleable_magnitudes(spelling), (
+            f"{spelling!r} states a magnitude bound to a measured quantity and must red "
+            "— a multiplicative comparison is the same unsettleable claim as a share, "
+            "and every spelling of its numeral is the same claim in another alphabet"
+        )
+
+    # ⚠️ **The framing window is PER LINE, and this leg is the cycle-2 P0.** The first
+    # version short-circuited on `any(marker in comment …)`, so ONE framing mention
+    # anywhere in the function cleared every word-form magnitude in it — the whole-text
+    # hole `#9522` closed for durations, reopened in the other alphabet. Measured then:
+    # the refuted sentence with `(measured once whole arm)` three lines below came back
+    # GREEN.
+    assert _unsettleable_magnitudes(
+        "# the rebuild is a small fraction of this\n"
+        "# arm's cost, so reuse the parsed files.\n"
+        "#\n"
+        "# (measured once whole arm)"
+    ) == ["small fraction"], (
+        "a framing marker on ANOTHER line must not clear this line's magnitude — "
+        "otherwise one `whole arm` anywhere in a comment frames every proportion in it, "
+        "which is the whole-text window the duration predicate's per-line `_framed` "
+        "exists to refuse"
+    )
+    # …and the DENIAL veto is inherited rather than reimplemented: a marker whose own
+    # sentence denies it is not framing, so this REDs instead of framing itself.
+    assert _unsettleable_magnitudes(
+        "# whole arm was never measured: a small fraction of the arm"
+    ), (
+        "a DENIED framing marker must not frame a magnitude — `_framed` is what decides "
+        "framing here, precisely so the `_denied` veto and its three windows come with "
+        "it instead of being re-derived"
+    )
+    # ⚠️ **The ACCEPTED COST of the wrap window, pinned so it cannot silently widen.**
+    # The search window is the phrase's line plus the one after it, because the refuted
+    # sentence wraps INSIDE the phrase — so a marker on the NEXT line frames a complete
+    # same-line magnitude. That is one line wide where the first version's hole was the
+    # whole function (`cycle-3 review` measured this cell and asked for it to be pinned
+    # rather than left implicit, which is what this leg does). If a later edit widens the
+    # window to ±2 lines, this leg stays GREEN and the three-line leg above reds — which
+    # is the pair that makes the boundary executable in both directions.
+    assert not _unsettleable_magnitudes(
+        "# the rebuild is a small fraction of the arm\n"
+        "# whole arm timing lives in the issue"
+    ), (
+        "the wrap window is the phrase's line plus the NEXT one, so a framing marker "
+        "there clears it — this is the ACCEPTED cost (`#9531`). If this leg reds, the "
+        "window was narrowed to one line and a framed-but-wrapped claim now reds; if "
+        "the three-line leg above reds instead, the window widened"
+    )
+    assert not _unsettleable_magnitudes(_gate_walk_comment()), (
+        "the live comment must be green under the WORD-form predicate too — the same "
+        "divergence guard the duration leg above applies, for the predicate the other "
+        "live arm asserts"
+    )
+
+
+def test_the_narrow_gate_walk_rebuild_buys_nothing():
+    """The gate-walk comment's MECHANISM, executed — no figure left to rot (`#9501`).
+
+    ⚠️ **The comment pinned a bare count while denying it pinned anything.** On
+    `origin/main` it read "`_literal_files()` is already parsed and cached; re-reading
+    `_sources()` and rebuilding the same 29 `_File`s is redundant work for
+    byte-identical output … No magnitude is pinned: the rebuild is a small fraction of
+    this arm's cost" — so a number with NO UNIT sat two lines from a sentence claiming
+    no magnitude was pinned, and no arm measured it: the first module added to or
+    removed from the module set made the count false with every arm still green. (The
+    same sentence also carried the refuted *word-form* proportion the arm above reds
+    on, which is the same defect in the second alphabet.)
+
+    The counts are DETERMINISTIC, so the fix is to execute the claim they stood for
+    rather than to restate them: walking `_sources().items()` and rebuilding the same
+    `_File`s yields the same values in the same order, so only object identity differs.
+    That is measured here by substituting the rebuild for `_literal_files()` and running
+    the REAL `_narrow_gate_walk_sites` body — the derivation is not copied into this arm,
+    so it cannot drift from the walk the comment describes (the blindness channel
+    `test_the_ungated_walk_reuses_the_gated_derivations` exists to catch).
+
+    Falsifiable in one half: the substitute must actually have run, or this compares a
+    walk to itself. The identity half is a HARNESS PREMISE, not a measurement — the
+    `_File`s are built in this body, so identity with the cached ones is impossible by
+    construction and that assertion cannot fail while the harness is what it says it is.
+    It is kept, and labelled as the premise the `rebuilt == reused` reading depends on,
+    rather than presented as a second falsifiable direction (`#9501` review).
+    """
+    census = _call_time_census()
+    reused = census._narrow_gate_walk_sites()
+    original = census._literal_files
+    made: list[tuple] = []
+
+    def _rebuild_from_sources():
+        # The alternative the comment rules out, spelled the way `_literal_files()`
+        # spells the reuse: same `EDGE` filter, same `_sources().items()` order.
+        files = tuple(
+            census._File(path, str(path.relative_to(census.ROOT)), source)
+            for path, source in census._sources().items()
+            if census.EDGE in source
+        )
+        made.append(files)
+        return files
+
+    try:
+        census._literal_files = _rebuild_from_sources
+        rebuilt = census._narrow_gate_walk_sites()
+    finally:
+        census._literal_files = original
+
+    assert made, (
+        "`_narrow_gate_walk_sites` no longer reads `_literal_files()`, so the rebuild "
+        "substituted above never ran and the comparison below is a walk against itself"
+    )
+    reuse_objects = original()
+    assert [file.rel for file in made[-1]] == [file.rel for file in reuse_objects], (
+        "the rebuild visits a different module set or order than `_literal_files()` "
+        f"({len(made[-1])} vs {len(reuse_objects)} modules) — the comment's claim is "
+        "that it is the SAME values over the SAME order, so this premise no longer holds"
+    )
+    # HARNESS PREMISE, not a measurement: these `_File`s are built in this body, so they
+    # cannot be the cached objects. Kept as the premise that makes `rebuilt == reused`
+    # mean "same values, different objects" — if an edit ever made the substitute hand
+    # back the cached files, this arm would silently measure a walk against itself.
+    assert not any(a is b for a in made[-1] for b in reuse_objects), (
+        "the substitute handed back the REUSED `_File` objects, so the premise this arm "
+        "is read under no longer holds — `rebuilt == reused` would then mean nothing"
+    )
+    assert rebuilt == reused, (
+        "walking `_sources().items()` and rebuilding the same `_File`s does NOT yield "
+        f"the same derivations ({[len(part) for part in rebuilt]} vs "
+        f"{[len(part) for part in reused]}) — the gate-walk comment's mechanism claim "
+        "is false at this head and the comment must be restated"
     )
 
 

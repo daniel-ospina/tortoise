@@ -16,7 +16,7 @@ aboutObjects: [tortoise-mcp, tortoise-sdk]
 ## The vision, in one paragraph
 
 **A developer should be able to read our entire surface in a sitting and know what to call.**
-Today they cannot: the MCP server exposes **99 tools** and the SDK **150 methods**, with five
+Today they cannot: the MCP server exposes **99 tools** and the SDK **149 methods**, with five
 overlapping ways to search, four ways to revise, seven ways to create a node, and a
 lifecycle nobody owns. The target is a surface small enough to hold in your head, where every
 name says what it does, every operation says what it will do to your data, and
@@ -42,8 +42,8 @@ account — the builder pays; an end-customer never has an organisation account 
 | Document | What it is |
 |---|---|
 | **`docs/product/canonical-mcp-tools.md`** | **The approved MCP list — 23 tools**, 9 READ / 14 WRITE. Merged as `8375c7921`. This is the **naming authority** for the SDK. |
-| **`docs/product/beta-sdk-surface.md`** | **The recommended SDK surface — 40 methods** over 150, from the builder's and the agent's actual work. Includes the discarded-name ledger and the rationale for each. |
-| `docs/product/canonical-sdk-methods.md` | The full inventory of all 150 with descriptions, grouped into 32 groups. **It is an inventory and an earlier target sketch, not the target.** Where it disagrees with `beta-sdk-surface.md`, `beta-sdk-surface.md` governs. |
+| **`docs/product/beta-sdk-surface.md`** | **The recommended SDK surface — 40 methods** over 149, from the builder's and the agent's actual work. Includes the discarded-name ledger and the rationale for each. |
+| `docs/product/canonical-sdk-methods.md` | The full inventory of all 149 with descriptions, grouped into 32 groups. **It is an inventory and an earlier target sketch, not the target.** Where it disagrees with `beta-sdk-surface.md`, `beta-sdk-surface.md` governs. |
 
 **These documents are the vision.** This file is the bridge from them to implementation.
 
@@ -111,7 +111,7 @@ loses both reads.
 absorbed into the 27 targets. Many current tools map onto one target, so the two numbers are
 not complements.
 
-## The reconciliation — SDK 150 → 40
+## The reconciliation — SDK 149 → 40
 
 The ledger of the departing names — grouped, with the rationale for each group — is the
 **"Discarded — and why"** section of `docs/product/beta-sdk-surface.md`.
@@ -188,7 +188,7 @@ handler twice.
 | **0.2** | **Name the target.** A short note in both canonical docs stating that **every name is a target, not a description of today.** | The review found the MCP column reads as present tense. A developer following it today calls tools that do not exist. |
 | **0.3** | **The MCP rename table.** old name → new name, per tool. | **Only 5 of the 27 is live at all** — every registered MCP tool carries a `tortoise_` prefix, so no target name matches a served name verbatim; exactly 5 (create_entity, get_entity, approve_merge, graph_set_recording, manage_sources) have a `tortoise_`-prefixed equivalent, and the other 22 have neither. Without this, implementation silently renames the whole MCP surface with no migration note. |
 | **0.3b** | **The SDK rename table.** old name → new name, per method — the SDK pair to 0.3. This exists because 0.3 is the *MCP* table; the SDK half would otherwise have had no owner. `beta-sdk-surface.md` and the SDK reconciliation above both delegate their per-name check here. | 0.1 |
-| **0.4** | **`__all__` in `tortoise/__init__.py`.** | The root cause of 150. The public surface is declared by *convention*; every design test presupposes a declaration. Without this the surface drifts back. |
+| **0.4** | **`__all__` in `tortoise/__init__.py`.** | The root cause of the 149-method surface. The public surface is declared by *convention*; every design test presupposes a declaration. Without this the surface drifts back. |
 
 ### Phase 1 — the declaration and the gate
 

@@ -51,7 +51,10 @@ from tortoise.cypher_guard import (  # #3595 `=~` guard — the ONE seam
     tolerates_altered_numbers,  # #7174/#5011: the replay/apply exemption
 )
 from tortoise.env_truthy import FALSY, env_flag  # #4097: the declared truthy contract
-from tortoise.retry import MEMORY_CEILING_OWNERSHIP_CONSTRAINT  # #9532: ONE ownership authority
+from tortoise.retry import (  # #9532: ONE ownership authority; #7357: ONE "reached" rule
+    MEMORY_CEILING_OWNERSHIP_CONSTRAINT,
+    ceiling_reading_drift,
+)
 from tortoise.index_catalogue import (  # #3154/#522/#3441: the ONE presence check
     index_catalogue_has_field,
     index_row_has_field,
@@ -4070,6 +4073,30 @@ def _raw_query_lane_permit() -> str | None:
     return reason
 
 
+def replay_window_open() -> bool:
+    """True while a REPLAY window is open — i.e. this write came FROM the journal.
+
+    The ONE reader a producer-side door consults when it must not append a record
+    to the journal it is replaying (#9553 class 4). Read it from the SCOPE STACK,
+    not from the innermost lane: every replay engine opens
+    `_replay_write_scope()`, and an inner lane (`_prewipe_restore_write_scope`,
+    `_prewipe_synthetic_write_scope`, `_graph_metadata_write_scope`, or the edge
+    lane's own `_structural_edge_write_scope`) SHADOWS the reason while the
+    replay is still running. `_RAW_QUERY_CLOSED_DEPTH` is the depth #9391 built
+    for exactly that property — it is set by `_handle_only_write_scope`, which is
+    what `_replay_write_scope()` returns (and the only other caller is
+    `event_store`'s replay leg) — so `> 0` means "inside a handle-only replay
+    window", inherited by every nested scope.
+
+    ⛔ WHY A WRITE DOOR ASKS THIS AT ALL. The journal is APPEND-ONLY: a rebuild
+    that appended to it makes the log a function of itself — one new
+    `DirectEdgeCreated` per journaled link per rebuild, unbounded — and writes
+    back endpoints resolved AT REPLAY TIME, so drift becomes new durable truth.
+    Recovery must read it, never extend it (`docs/durability-posture.md`).
+    """
+    return _RAW_QUERY_CLOSED_DEPTH.get() > 0
+
+
 @contextlib.contextmanager
 def _handle_only_write_scope(reason: str):
     """A permit for the write HANDLE only — held for the WHOLE nested window.
@@ -4633,6 +4660,92 @@ def _prewipe_synthetic_write_scope(reason: str):
 #: and a rebuild iterates every record in the journal — one allocation per
 #: record is real work for a state that carries no claim.
 _NO_FOLD_LANE = contextlib.nullcontext()
+
+
+#: The DIRECT edge types a supersede moves live — leg 2a, which covers BOTH
+#: directions (its two branches query the edge in each orientation) and ALWAYS
+#: journals a `DirectEdgeRepoint` for the new endpoint.
+SUPERSEDE_DIRECT_RELS = frozenset({"IMPL", "NAND"})
+
+
+def _supersede_moved_rels() -> frozenset[str]:
+    """Every edge type a supersede MOVES live — the ones the guard inspects.
+
+    Read by the `DirectEdgeCreated` fold's superseded-endpoint guard (`#9553`).
+    Two families, with DIFFERENT shapes, and the differences are what the caller
+    has to encode (`_supersede_took_this_edge`):
+
+      * `SUPERSEDE_DIRECT_RELS` (`IMPL`/`NAND`) — leg 2a, BOTH directions, and it
+        always journals a repoint ⇒ a superseded endpoint on either side means the
+        edge was moved;
+      * `SUPERSEDE_TRANSFERRED_RELS` — leg 2b, which queries only the OUTGOING
+        side of the superseded point ⇒ it moves an outgoing edge and NOTHING
+        ELSE. An INCOMING edge (`(other)-[aboutPoint]-> old`) is never moved, live
+        keeps it at the old point, and skipping its creation would drop it
+        (measured: `p2 -[aboutPoint]-> p1`, supersede p1 → live keeps it,
+        rebuild lost it).
+
+    ⚠️ RESIDUAL, stated here (`wasDerivedFrom`/`aboutAction`): those two are moved
+    by 2b but are not derivable, so 2b journals no repoint for them. A
+    pre-supersede creation is still skipped (keeping the `E2E-11.6` no-dead-point
+    invariant rather than minting a phantom at the old point) at the price of
+    losing the edge on the journal route; the record keeps its pre-supersede row.
+    Closing that needs a repoint descriptor for non-derivable structural rels AND
+    a delete-old leg on the record side — **#9836**.
+
+    Late import: `tortoise.projection.edges` imports THIS module (the same reason
+    `_structural_edge_write_scope` imports late).
+    """
+    from .edges import SUPERSEDE_TRANSFERRED_RELS
+
+    return SUPERSEDE_DIRECT_RELS | SUPERSEDE_TRANSFERRED_RELS
+
+
+def _supersede_took_this_edge(etype, ev_seq, src, tgt, succ, supersede_last) -> bool:
+    """Did a supersede MOVE this recorded edge away from the endpoints it names?
+
+    Three facts decide it, and a rel-type-only gate gets the last two wrong (both
+    were found by measurement, not reasoning):
+
+      * `SUPERSEDE_DIRECT_RELS` (`IMPL`/`NAND`) — leg 2a moves them in BOTH
+        directions and always journals a repoint, so a superseded endpoint on
+        either side means "moved";
+      * `SUPERSEDE_TRANSFERRED_RELS` — leg 2b queries only the OUTGOING side
+        (`MATCH (old:Point {id:$old_id})-[r:rel]->(target)`), so it moves an
+        outgoing edge and NOTHING ELSE. `(other)-[aboutPoint]-> old` is never
+        moved, live keeps it at the old point, and skipping its creation would
+        drop it (measured: live `p2->p1 = ['aboutPoint']`, rebuild `[]`);
+      * ORDER — leg 2b moves what EXISTS at supersede time. An edge MINTED at an
+        already-superseded id (`create_edge`/`create_about_edge` have no
+        terminal-endpoint guard, unlike `create_direct_edge`'s `#2422` refusal) is
+        journaled as a plain creation, gets no repoint, and is kept live at the
+        old point — so it must be replayed, and the guard compares the creation's
+        journal seq with the supersede's to tell the two apart.
+
+    ⛔ THE ORDERING ARM NEEDS A SECOND HALF, and this is where it lives: a
+    replayed creation whose edge ALSO has a 2b repoint descriptor would be deleted
+    again by that descriptor's delete-leg (which cleans pass-2's resurrection and
+    cannot tell it from a fresh replay). The caller therefore RECORDS every
+    `(src, edge_type, tgt)` it replayed at a superseded source, and the delete-leg
+    skips those keys — so both shapes end where live is: the re-asserted edge at
+    the old point (this fold) and the transferred one at the successor (the
+    repoint leg).
+
+    ⚠️ Residual, stated: `wasDerivedFrom`/`aboutAction` are moved by 2b but are
+    not derivable, so 2b journals no repoint for them; a PRE-supersede creation is
+    skipped, keeping the `E2E-11.6` no-dead-point invariant at the price of losing
+    the edge on the journal route (`#9836`).
+    """
+    if etype in SUPERSEDE_DIRECT_RELS:
+        return src in succ or tgt in succ
+    if etype not in _supersede_moved_rels():
+        return False
+    if src not in succ:
+        return False
+    superseded_at = supersede_last.get(src)
+    if superseded_at is None:            # not a surviving supersede of THIS pass
+        return True
+    return ev_seq < superseded_at[0]
 
 
 def _fold_lane_for_event(seq: int, event_source):
@@ -7138,12 +7251,50 @@ def _writable_id(val) -> bool:
     record whose ``name`` was absent (it defaults to ``""``). Refusing it here
     keeps the rule in ONE home rather than repeating ``... and val`` at every
     call site.
+
+    ⛔ A WHITESPACE-ONLY value is deliberately STILL writable here (#9599).
+    Widening this predicate to ``bool(val.strip())`` looks like the same rule,
+    but this function is shared with the fold's LIVE path
+    (``_upsert_subject``/``_upsert_object``). MEASURED with the widening in
+    place: ``create_subject("   ")``/``create_object("   ")`` returned ``{}`` —
+    success, no node written, with a metered write op billed — and
+    ``POST /v1/sessions/commit`` with ``entities:[{"name":"   "}]`` returned
+    **200** with ``nodes_created`` counting a node that never landed and the
+    entity silently dropped. (An earlier draft of this note said "a
+    deterministic 500"; a fresh verifier re-measured it and it is the 200 +
+    silent drop above. The conclusion is unchanged: a 200 that drops the write
+    and reports success is worse than an audible refusal.) The blank SESSION key
+    is therefore refused at EVERY place that writes it, with ONE predicate per
+    layer: the two journal folds and the two snapshot/restore paths
+    (``entities._fold_session_recorded``, ``entities._link_session``,
+    ``rebuild_all``'s ``session_snapshot`` loop, and the record-sourced rebuild
+    — ``rebuild_from_record``, whose node filter lives in
+    ``_project_record_view``) all use ``_writable_container_id`` — this
+    predicate PLUS the blank clause, i.e. the same owner, so a journal replay
+    and a sidecar restore cannot disagree — while the caller-facing doors (the
+    SDK's ``capture_session`` / ``commit_session`` and the hosted
+    ``SessionRequest`` boundary) use ``tortoise.ids.session_id_refusal``, where
+    a caller can be told WHY. ⚠️ That list is the whole replay surface: a new
+    carrier outside it is ungated by construction, so add it here AND in
+    ``tests/test_9599_blank_session_id.py``'s docstring. The blank-NAME class
+    needs the Layer-1 / ingest shape gates, not this predicate.
     """
     return isinstance(val, str) and bool(val) and _annotator_value_ok(val)
 
 
 def _writable_container_id(val) -> bool:
-    """`_writable_id` PLUS the blank refusal — the `contains_session` gate.
+    """`_writable_id` PLUS the blank refusal — the SESSION-ID gate.
+
+    It gates BOTH journal carriers that merge a `:Session` key, so the rule has
+    one owner and not one per fold: `_link_session` (the `contains_session`
+    envelope field on a `PointAdded`) and `_fold_session_recorded` (the `id` of
+    a `SessionRecorded`). The two differ only in the CONSEQUENCE, which each
+    reports through `_log_identity_skip`'s `drops_record` flag: a refused
+    `contains_session` loses one derived EDGE after the Point is written, while
+    a refused `SessionRecorded` loses the container RECORD itself. The DOOR
+    half of the same rule — a caller-supplied `session_id` — is
+    `tortoise.ids.session_id_refusal`, which is a boundary refusal (it has a
+    caller to answer) and never reaches a merge key.
 
     The extra clause is MEASURED, not cosmetic, and it belongs here rather
     than only in the record projection (#9553 review P2), because a rule that
@@ -7159,7 +7310,10 @@ def _writable_container_id(val) -> bool:
     `MATCH … (s:Session {id:$sid})`, landing NO `contains_session` edge — while
     the record projection (Postgres, no such quirk) WOULD have landed the row.
     The embedded engine is worse still: it duplicates the node with no index at
-    all.
+    all. `_fold_session_recorded` had the same hole one carrier up: a
+    `SessionRecorded` for a whitespace-only id resurrected the invisible
+    container on EVERY journal replay, so even a journal written before the
+    capture doors refused one rebuilt the broken session.
 
     ⛔ SCOPE, so this is not over-read as a general sanitizer: the refusals are
     `_writable_id`'s plus BLANK only. A padded-but-real id (`'  s1  '`) is a
@@ -7173,7 +7327,7 @@ def _writable_container_id(val) -> bool:
     and the record fold agree (`record_projection._writable_endpoint_id`
     mirrors this predicate value-for-value, pinned by
     `tests/test_record_projection.py::test_the_envelope_endpoint_gate_is_the_folds_own_rule`).
-    `_link_session` becomes a plain `_writable_id` caller again once #9599 is
+    Both session folds become plain `_writable_id` callers again once #9599 is
     fixed — this gate (`_writable_container_id`) is the stopgap, the index
     defect is the cause.
     """
@@ -7347,6 +7501,16 @@ _NO_PROJECTION_FOLD = frozenset({
     # intentionally-not-folded; without this entry every replay would log an
     # "unrecognized event type" warning per refusal.
     "EntityBindingRefused",
+    # #9555/R7: §9.1's narrative carrier. It has NO graph effect by design —
+    # §9.1 places the narrative "not in the graph, not a `Document` node, not a
+    # `Point`" — so it folds NOWHERE and its record home is Postgres's
+    # `public.session_narrative` (the record projection's shape-keyed secondary
+    # projection). Listing it here is what keeps a replay of a journal holding
+    # one from logging an "unrecognized event type" warning per capture; leaving
+    # it out would also make the graph fold's own vocabulary check
+    # (tests/test_record_projection.py) the only thing standing between a new
+    # producer and a warning storm.
+    "SessionNarrated",
 })
 
 # #3305: the Point-lifecycle terminalizers whose replay fold is a per-event
@@ -10176,6 +10340,34 @@ class FalkorProjection(
     # refusal off on a projection whose journal really was bound.
     _journal_backed: bool = False
 
+    #: #9553 class 4: the RECORDER the journal-owning door binds so this
+    #: projection's structural-edge mints can JOURNAL what they wrote. A class
+    #: attribute (not set in ``__init__``) for the same reason
+    #: ``_journal_backed`` is: the ``object.__new__`` guard stubs that skip
+    #: ``__init__`` must read a default instead of raising ``AttributeError``.
+    #:
+    #: ⛔ WHY A CALLBACK AND NOT A DIRECT APPEND. The journal handle lives on the
+    #: SDK (``_emit_event`` owns the ordinal, the dirty set and the record's live
+    #: door, ``record_writer.write_live_record``); a projection built on its own —
+    #: a test fold, `rebuild_all`, `FalkorProjection.from_uri` — has no journal at
+    #: all. A bound callback keeps ONE producer for the whole write surface (every
+    #: SDK door, `hosted_api`, `mining`, and `create_edge`'s three typed wrappers
+    #: all funnel through the two mints) and leaves an unbound projection writing
+    #: exactly what it wrote before this change: nothing.
+    _structural_edge_recorder: Any = None
+
+    def _bind_structural_edge_recorder(self, recorder: Any) -> None:
+        """Bind (or, with ``None``, clear) the structural-edge record producer.
+
+        Called by :meth:`TortoiseSDK._get_proj` next to ``_bind_journal`` — the
+        same "this projection is somebody's live cache" moment. The value is a
+        callable taking ONE flat descriptor
+        (``{edge_type, src, src_label, tgt, tgt_label}``); it must never raise on
+        the write path (the journal append is best-effort by contract), and this
+        module does not interpret its result.
+        """
+        self._structural_edge_recorder = recorder
+
     def _bind_journal(self, journal_path: str | None) -> None:
         """Mark this projection as the derived cache of a journal (`#7951`).
 
@@ -10885,15 +11077,18 @@ class FalkorProjection(
             # tolerance — a 1-byte or 4 KiB shortfall is the reading, not a
             # different cause — and only a shortfall WIDER than it is treated as
             # evidence that the ceiling is not the explanation.
-            # #7392 cycle 6 — the tolerance's measured half is the ABSOLUTE
-            # floor; the 1% arm is a heuristic that must not scale unbounded,
-            # because at 1 TiB it would swallow 10 GiB of genuine headroom and
-            # print the ceiling sentence for a reading that is far from it —
-            # the over-claim direction, which is the unsafe one (its remedy is
-            # `--maxmemory`). Capped at 1 MiB: the false-negative direction is
-            # safe, because the below branch withholds nothing and asks for a
-            # re-read.
-            drift = max(64 << 10, min(cap // 100, 1 << 20))
+            #
+            # ⚠️ THE TOLERANCE IS NOT THIS MODULE'S (#7357 review P2). The SDK's
+            # hedge note TELLS an operator how to decide the same question from
+            # an `INFO memory` read of their own, so the rule has two readers and
+            # lived in two places — and they had already drifted: the note said
+            # "used_memory has reached", with no tolerance, which withdraws the
+            # remedy at a genuine ceiling reading 40 KiB under the cap. THIS
+            # message calls `retry.ceiling_reading_drift`; the note DESCRIBES the
+            # same rule (it holds an exception, not a reading), so a correction to
+            # these numbers must move the note's prose too — nothing makes that
+            # happen by itself, and the bound/unbound list below says so.
+            drift = ceiling_reading_drift(cap)
             if cap <= 2 * drift:
                 # #7392 cycle 7 — a tolerance larger than the ceiling's own
                 # scale makes the below branch UNREACHABLE and prints "has
@@ -10960,17 +11155,44 @@ class FalkorProjection(
         # the pair is bound by `MEMORY_CEILING_OWNERSHIP_CONSTRAINT` below and
         # must not disagree about the remedy either.
         #
-        # #7392 review P1 — what that binding does NOT yet cover: the pair is
-        # bound on the PROHIBITION and on the ceiling remedy, but NOT on whether
-        # a ceiling exists. `tortoise/retry.py::explain_memory_ceiling` still
-        # asserts "it has reached its configured dataset limit (`maxmemory`)"
-        # for any `redis.exceptions.OutOfMemoryError` (its classifier admits the
-        # CLASS, not just the wording), so on a ceiling-less instance the note
-        # and the `cap <= 0` branch above state opposite facts. Measured and
-        # recorded on #7357 (issuecomment-6341756094) — the note is that
-        # issue's deliverable, so it is fixed there, not here; this comment is
-        # the pointer so the next reader does not read the sentence above as
-        # proof that the two already agree.
+        # #7392 review P1 — the gap that binding did NOT cover, now closed on
+        # #7357: the pair was bound on the PROHIBITION and on the remedy, but
+        # NOT on whether a ceiling exists. `tortoise/retry.py::
+        # explain_memory_ceiling` used to assert "it has reached its configured
+        # dataset limit (`maxmemory`)" for any `redis.exceptions.OutOfMemoryError`
+        # (its classifier admits the CLASS, not just the wording), so on a
+        # ceiling-less instance the note and the `cap <= 0` branch above stated
+        # opposite facts (measured and recorded on #7357,
+        # issuecomment-6341756094). The note now branches on
+        # `_chain_names_the_ceiling`: the ceiling sentence needs the engine's own
+        # sentence in the exception, and a class-only refusal is told what the
+        # message does establish plus how to READ whether a ceiling exists.
+        #
+        # ⚠️ WHAT THIS PAIR ACTUALLY SHARES, enumerated, so this cannot be read
+        # as more than it is (#7357, cycle 4 — an earlier draft of this comment
+        # said more than the code held):
+        #   BOUND: the #2981 PROHIBITION, composed from the one constant in
+        #     `tortoise/retry.py`.
+        #   BOUND: the "ceiling was REACHED" rule, via `ceiling_reading_drift`
+        #     — this message CALLS it, the SDK note DESCRIBES it (it holds an
+        #     exception, not a reading). The note's WORDING is pinned by the
+        #     hedge-arm test, not by the drift-value test.
+        #   NOT BOUND: the knob's HOMES. `_CEILING_REMEDY_HOMES` is composed by
+        #     the note ONLY; this message carries its own wording of the same
+        #     two homes in four places. A third home must be added to all of
+        #     them, and nothing reddens if it is not.
+        #   NOT BOUND: the `cap <= 2 * drift` SCALE GUARD below, which only a
+        #     reader HOLDING a reading can apply. At a cap small enough for it
+        #     to fire (under ~128 KiB) this message says "does not show the
+        #     ceiling being reached" where the note's advice would still say to
+        #     raise it. Unreachable with any instance this repo runs — the
+        #     smallest is the 1 MiB lane container — and left stated rather than
+        #     papered over.
+        #   NOT BOUND: the CLASSIFICATION. `_WRITE_REFUSAL_MARKERS` does not
+        #     match a class-only `OOM …` reply, so such a refusal can still fall
+        #     through to the rebuild advice in `_backend_failure_message` — the
+        #     #2981 direction. A separate seam with its own measurement,
+        #     deliberately not widened here.
         return (
             "DB refused writes on open: the graph is INTACT but "
             f"{lead}. This is NOT "
@@ -14679,7 +14901,12 @@ class FalkorProjection(
                 # #8499 / A10 #1048: the plain direct-edge BASE creation —
                 # deferred to the pass-2b sweep (see its declaration and the
                 # fold there for why it must precede the repoint leg).
-                direct_edge_created_events.append(ev)
+                # #9553: the journal SEQ rides along, because the supersede guard
+                # inside that fold is an ORDERING property as well as a direction
+                # one (a creation AFTER its own supersede was never moved by it) —
+                # the seq is READ by `_supersede_took_this_edge`, not carried for
+                # shape.
+                direct_edge_created_events.append((seq, ev))
             elif t == "DirectEdgeRepoint":
                 # #2423: supersede's 2a-DIRECT transfer emits a flat
                 # DirectEdgeRepoint descriptor {src, tgt, edge_type, attrs}
@@ -15267,6 +15494,19 @@ class FalkorProjection(
             if not _writable_id(sid):
                 _log_identity_skip("Session snapshot", sid, "id (MERGE key)")
                 continue
+            # #9599: the SIDEcar is the OTHER way a pre-fix blank container
+            # comes back. `_writable_id` admits a blank on purpose (it is
+            # shared with entity NAMES), so this leg applies
+            # `_writable_container_id` — the SAME predicate the two journal
+            # folds use, not a second spelling of the rule. Without it the
+            # standard recovery command (`rebuild_all`) restored the very
+            # `:Session {id:'   '}` the journal fold refuses — and journal-only
+            # `rebuild()` over the SAME journal ended with none. Two entry
+            # points disagreeing about one journal is worse than either rule:
+            # the operator's log says "dropped" while the node is present.
+            if not _writable_container_id(sid):
+                _log_identity_skip("Session snapshot", sid, "id (MERGE key)")
+                continue
             clean = {k: v for k, v in props.items() if k != "id"}
             self._restore_write(
                 "MERGE (s:Session {id:$id}) SET s += $props",
@@ -15274,6 +15514,12 @@ class FalkorProjection(
                 reason=":Session containers (#3947)",
             )
         for sid, pid in session_point_links:
+            # #9599: same rule for the CONTAINS link restore — a link is only
+            # meaningful against a container that was restored, and the gate is
+            # the same `_writable_container_id`.
+            if not _writable_container_id(sid):
+                _log_identity_skip("Session snapshot", sid, "id (MERGE key)")
+                continue
             self._restore_write(
                 "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
                 "MERGE (s)-[:CONTAINS]->(p)",
@@ -15997,7 +16243,15 @@ class FalkorProjection(
             # hardcoded :Point match would silently drop every Object↔Object
             # direct edge — the SAME defect the repoint leg's direct branch
             # carried until #8622 widened it with this identical sweep.
-            for ev in direct_edge_created_events:
+            # Keys this fold REPLAYED at a superseded source (#9553). The 2b
+            # repoint delete-leg runs after this loop and cleans pass-2's
+            # resurrection at the old point; it cannot tell that resurrection from
+            # a fresh replay, so these keys are exempted from the delete.
+            # ⚠️ The journal SEQ rides on each event because the supersede guard is
+            # a DIRECTION test AND an ORDER one (a creation AFTER its own supersede
+            # was never moved by it) — see `_supersede_took_this_edge`.
+            replayed_at_terminal: set[tuple[str, str, int]] = set()
+            for ev_seq, ev in direct_edge_created_events:
                 etype = ev.get("edge_type")
                 src, tgt = ev.get("src"), ev.get("tgt")
                 if (not isinstance(src, str) or not isinstance(tgt, str)
@@ -16011,19 +16265,39 @@ class FalkorProjection(
                     # Phantom self-edge: never re-create (E2E-11.6 no-self
                     # contract — the same guard the repoint leg applies).
                     continue
-                if src in succ or tgt in succ:
-                    # A SUPERSEDED endpoint. Supersede already transferred (or
-                    # collapsed) this edge LIVE, and journaled its own
-                    # ``DirectEdgeRepoint`` descriptor for the NEW endpoint
-                    # (that descriptor's ``src`` is new_id — it records where
-                    # the edge NOW is, not where it was). Re-creating the edge
-                    # here would leave a phantom at the DEAD source that no
-                    # later leg cleans: the repoint leg's delete-leg is
-                    # STRUCTURAL-only, and its direct branch MERGEs at the
-                    # successor. So the repoint descriptor owns the edge's
-                    # post-transfer form — and in the collapse-to-self-edge
-                    # lane (which deliberately emits NO descriptor) this skip
-                    # is what makes the edge disappear, matching live.
+                if _supersede_took_this_edge(etype, ev_seq, src, tgt, succ,
+                                             supersede_last):
+                    # A SUPERSEDED endpoint OF A RELATION SUPERSEDE ACTUALLY MOVED.
+                    #
+                    # ⛔ THE GATE IS THE PREMISE (#9553). This guard's argument is
+                    # "supersede already transferred (or collapsed) this edge LIVE,
+                    # and journaled its own `DirectEdgeRepoint` descriptor for the
+                    # NEW endpoint", so re-creating it here would leave a phantom at
+                    # the DEAD source. That premise is TRUE for exactly two
+                    # families: the direct IMPL/NAND edges (`sdk.supersede_point`
+                    # 2a transfers them and ALWAYS emits a repoint) and the
+                    # `DERIVABLE_STRUCTURAL_RELS` (2b's `structural_rels` loop emits
+                    # a repoint only `if derivable`).
+                    #
+                    # It is FALSE for every other rel a `DirectEdgeCreated` can now
+                    # carry (the structural-edge lane's `ownedBy`/`hasPart`/
+                    # `dependsOn`/… — #9553 class 4): 2b never touches them, so a
+                    # supersede leaves the edge AT THE OLD POINT live, and skipping
+                    # the creation here was what made a rebuild DROP an edge live
+                    # still holds (measured: `dependsOn`/`ownedBy` live at old,
+                    # `rebuild_all` → gone). Before the producer existed those
+                    # records did not exist, so this gate could not be wrong; it can
+                    # now, and this is where it is narrowed.
+                    #
+                    # ⚠️ RESIDUAL, named (not fixed here — a different behaviour):
+                    # `wasDerivedFrom`/`aboutAction` are in `SUPERSEDE_STRUCTURAL_RELS`
+                    # (supersede MOVES them live) but are NOT derivable, so 2b emits
+                    # NO repoint descriptor for them. They therefore fall in neither
+                    # half: live has the edge at the successor, this fold still
+                    # skips it, and the record route keeps the pre-supersede row at
+                    # the old point. Closing it needs a repoint descriptor for
+                    # non-derivable structural rels AND a delete-old leg on the
+                    # record side — filed as its own issue (see #9553's PR).
                     continue
                 labels: dict[str, str] = {}
                 for _label in EPISTEMIC_LABELS:
@@ -16048,6 +16322,18 @@ class FalkorProjection(
                     f"MERGE (a)-[:{etype}]->(b)",
                     params={"a": src, "b": tgt},
                 )
+                if src in succ:
+                    # A creation REPLAYED at a superseded source (the ORDERING arm
+                    # above) — exempt the edge from the repoint delete-leg below.
+                    # The key is the RESOLVED NODE, not the logical endpoint: this
+                    # descriptor carries the journal id (`tgt`), while a 2b repoint
+                    # descriptor carries the replay key (a Subject's NAME) — same
+                    # node, two spellings, so only the node identity can match them.
+                    tid_rows = self.g.query(
+                        f"MATCH (t:{labels[tgt]}) WHERE t.id = $v "
+                        f"RETURN ID(t) LIMIT 1", params={"v": tgt}).result_set
+                    if tid_rows:
+                        replayed_at_terminal.add((src, etype, tid_rows[0][0]))
                 # Last-writer-wins attr SET — the final attrs post-rebuild
                 # (REVIEW-FIX P1 cycle-26 on the emission site).
                 attrs = {k: ev[k] for k in
@@ -16266,6 +16552,16 @@ class FalkorProjection(
                             # constrained to (old:Point{id:src}) — never a
                             # graph-wide pattern delete, never a descriptor-
                             # carried rid (internal ids die at rebuild).
+                            # ⛔ THE SAME BLIND SPOT AS THE NORMAL STRUCTURAL
+                            # DELETE-LEG (#9553): this descriptor exists when the
+                            # structural target IS the successor, and its delete
+                            # cannot tell pass-2's resurrection from an edge the
+                            # creation fold replayed at the old point. Live holds
+                            # that re-assertion, so the key is exempted the same
+                            # way (a peer review found this branch unguarded one
+                            # cycle after the sibling was fixed).
+                            if (src, etype, rows[0][0]) in replayed_at_terminal:
+                                continue
                             self.g.query(
                                 f"MATCH (old:Point {{id:$old}})-[r:{etype}]->(t) "
                                 f"WHERE ID(t) = $tid DELETE r",
@@ -16307,10 +16603,18 @@ class FalkorProjection(
                         # src (id-reuse) owns its edges legitimately.
                         if not _src_is_terminal(src):
                             continue
-                        self.g.query(
-                            f"MATCH (old:Point {{id:$old}})-[r:{etype}]->(t) "
-                            f"WHERE ID(t) = $tid DELETE r",
-                            params={"old": src, "tid": resolved["internal"]})
+                        # ⛔ THE EXEMPTION GUARDS ONLY THE DELETE, never the
+                        # transfer below it: a creation the fold REPLAYED at the
+                        # old point (a post-supersede re-assertion) must survive
+                        # the resurrection cleanup, AND the moved edge must still
+                        # be re-created at the successor — live holds BOTH
+                        # (#9553). Skipping the whole branch kept the old side and
+                        # lost the successor side (measured).
+                        if (src, etype, resolved["internal"]) not in replayed_at_terminal:
+                            self.g.query(
+                                f"MATCH (old:Point {{id:$old}})-[r:{etype}]->(t) "
+                                f"WHERE ID(t) = $tid DELETE r",
+                                params={"old": src, "tid": resolved["internal"]})
                         # #2489 step 6b (2nd-model P1): structural descriptors
                         # must obey #2488's survivor-filtered succ map — once
                         # #2488 lands (pre-recreation supersede folds dropped),
@@ -16914,16 +17218,32 @@ class FalkorProjection(
           ``tortoise/cache_projection.py``).
         * **The declaration follows the writes.** ``coverage`` is `complete`
           **iff** every record key was materialised; ``limit`` bounds how many
-          nodes are written, and a bounded run therefore declares `partial`,
-          enumerating what it wrote. That is the seam through which the
+          nodes are written, and a bounded run does not declare `partial` merely for
+          being bounded — a bound at or above the record's node count covers every key
+          the plan could write and therefore declares `complete`, so `bounded` is a
+          FLAG, not a state (#9604 review). `coverage` follows the WRITES, so a record
+          row the projection REFUSES (a blank-keyed `:Session`, #9599) makes the
+          declaration `partial` at any bound. That is the seam
+          through which the
           completeness marker (#7952) can FIRE — it is not an eviction policy
           (§2.0 holds the FalkorDB limit high; the trigger for partiality is
-          still §17.3's).
+          still §17.3's). ``limit`` must be >= 1: a 0 bound is empty-slice after
+          an UNCONDITIONAL wipe, i.e. "clear it and put nothing back", so it is
+          refused (#9556 review).
 
         ``limit`` is a bound and nothing more: nodes are taken in a
         deterministic key order, and a relation whose endpoint falls outside
         the bound is a no-op (the same verdict the record projection's own
         endpoint resolution gives an absent endpoint).
+
+        ⚠️ ``declare=False`` leaves the residency marker to the CALLER, and an
+        ABSENT marker reads ``complete`` (``residency.read_declaration``'s
+        documented fail-safe). The wipe above deletes the marker either way, so
+        a caller that passes ``declare=False`` and does not write its own
+        declaration leaves the graph claiming the whole record is hot — which a
+        ``--limit``-bounded run has no right to claim. The FAILURE arm always
+        writes a nothing-proven declaration regardless of this flag (#9604
+        review); only the success arm's marker is the caller's to write.
 
         #9124: declare the REBUILD lane, then project the record. Every write
         this engine issues — ``_wipe_all_nodes``'s ``MATCH (n) DETACH DELETE n``,
@@ -16972,16 +17292,40 @@ class FalkorProjection(
         lane is opened by its only caller.
         """
         from tortoise.cache_projection import (
-            declaration_for,
+            NODE_TABLES,
             project_records,
             record_plan,
-            write_declaration,
         )
 
         nodes = tuple(view.nodes)
+        # #9599: `rebuild_from_record` is a GRAPH write, so it obeys the GRAPH's
+        # rule even though the RECORD layer deliberately keeps the row (see
+        # `record_projection`'s `SessionRecorded` note — the record is the
+        # faithful carrier, a Postgres key is addressable, the engine's key is
+        # not). MEASURED before this gate: the blank `:Session` landed, its
+        # CONTAINS edge silently did not (the engine cannot serve a blank
+        # indexed key back to an equality seek), and the receipt still said
+        # `coverage: complete` with `relations_written: 1` — a false PASS on
+        # the one path a lost cache depends on.
+        refused = {(n.label, n.key) for n in nodes
+                   if n.label == "Session"
+                   and not _writable_container_id(n.key)}
+        if refused:
+            for _label, _key in sorted(refused):
+                _log_identity_skip("Session", _key, "id (MERGE key)")
+            nodes = tuple(
+                n for n in nodes if (n.label, n.key) not in refused)
         if limit is not None:
-            if limit < 0:
-                raise ValueError(f"limit must be >= 0, got {limit}")
+            if limit < 1:
+                # ⚠️ 0 is the destructive no-op: `nodes[:0]` is empty, but the
+                # WIPE below is unconditional, so a 0 bound clears the cache and
+                # writes nothing — a caller asking for "nothing" gets "gone".
+                # Refused at the SEAM, not only at `record-restore`'s own door
+                # (#9556 review P2), so the next caller cannot reach it by
+                # forgetting a check.
+                raise ValueError(
+                    f"limit must be >= 1, got {limit} — a 0 bound would wipe "
+                    f"the graph and project nothing")
             nodes = tuple(sorted(nodes, key=lambda n: (n.label, n.key))[:limit])
             kept = {(n.label, n.key) for n in nodes}
             relations = tuple(
@@ -16990,6 +17334,14 @@ class FalkorProjection(
                 and (r.tgt_label, r.tgt_key) in kept)
         else:
             relations = tuple(view.relations)
+        if refused:
+            # An edge whose endpoint was excluded has nothing to bind — dropping
+            # it here (rather than writing a statement that matches no row) is
+            # what makes `relations_written` mean what it says.
+            relations = tuple(
+                r for r in relations
+                if (r.src_label, r.src_key) not in refused
+                and (r.tgt_label, r.tgt_key) not in refused)
 
         plan = record_plan(nodes, relations)  # raises BEFORE any wipe
 
@@ -16999,22 +17351,93 @@ class FalkorProjection(
             "REFUSING to run bulk DETACH DELETE on non-test graph")
         self._wipe_all_nodes(confirm_destructive=confirm_destructive,
                              operation="rebuild_from_record")
-        self._ensure_indexes()
-        statements = project_records(self.g, plan)
+        # ⛔ Everything from here to the declaration write is POST-WIPE, and a
+        # raise in this window used to leave the graph with NO residency marker
+        # at all (#9604 review). ``residency.read_declaration`` answers
+        # ``complete`` for an ABSENT marker (the documented fail-safe: a missing
+        # declaration is the normal state), so "wiped and then died" read as
+        # "the whole record is hot" — the same §17.3 inversion the
+        # plan-built-marker fix closed, reached through absence instead of
+        # through a stale plan. The marker is therefore made TRUE before the
+        # exception leaves this method: nothing was proven written, so nothing
+        # is claimed hot.
+        try:
+            self._ensure_indexes()
+            statements = project_records(self.g, plan)
+
+            # ⛔ MEASURED AFTER THE WRITE, never the plan's length (#9556 review).
+            # ``len(nodes)`` is the size of the INPUT, computed above — before the
+            # wipe and before ``project_records`` ran — so returning it as
+            # "written" made EVERY caller's count check a tautology: a rebuild that
+            # wiped and materialised nothing still reported
+            # ``nodes_written == len(nodes)``, i.e. a destroyed cache behind an
+            # exit-0-shaped success. That is the false-PASS class, so the counts are
+            # read back off the graph the same way the sibling replay lane does
+            # (``_rebuild_all_replay`` → ``node_count``/``edge_count`` after the
+            # fold). The wipe is unconditional and whole-graph, so everything the
+            # graph holds now was written by THIS run.
+            #
+            # ⚠️ ``relations_written`` can legitimately be lower than the number of
+            # record relations SELECTED: a relation statement MATCHes its endpoints,
+            # so one whose endpoint the projection does not resolve is a no-op (see
+            # this method's module-facing notes). ``relations_selected`` reports the
+            # plan's own size beside it, so the two are told apart rather than
+            # conflated.
+            nodes_written = self._count_projected(
+                "MATCH (n) WHERE any(l IN labels(n) WHERE l IN $labels) "
+                "RETURN count(n)",
+                {"labels": sorted(NODE_TABLES)})
+            relations_written = self._count_projected(
+                "MATCH ()-[r]->() RETURN count(r)", None)
+        except BaseException:
+            # ⛔ UNCONDITIONAL, not `if declare` (#9604 review). The wipe above
+            # already deleted the `:Meta` marker, and `residency.read_declaration`
+            # answers `complete` for an ABSENT marker — so bailing out here with
+            # no marker would leave the graph reporting "the whole record is hot"
+            # for a run that just emptied it. `declare=False` is therefore NOT
+            # allowed to mean "leave the marker missing": the caller may own the
+            # marker, but `missing` is a claim, not a blank. Nothing is proven
+            # written on this path, so nothing is claimed hot.
+            self._declare_materialized(view, (), scope=scope)
+            raise
 
         declaration = None
         if declare:
             materialized = plan.node_keys()
-            declaration = declaration_for(
-                view.record_keys,
-                [(label, key) for label, key in materialized],
-                scope=scope,
-            )
-            write_declaration(self.g, declaration)
+            # ⛔ The declaration claims only what the MEASURED counts proved
+            # (#9556 review). It used to be built from ``plan.node_keys()`` —
+            # the PLAN — so a rebuild whose writes did not land still wrote a
+            # ``complete`` (or plan-sized ``partial``) residency marker into a
+            # cache that held nothing, and its caller then refused the run as
+            # LOST. The graph was left carrying a claim the code had just
+            # disproved: §17.3 says a key the cache does not hold must read
+            # ``not-hot``/``degraded``, and a ``complete`` marker makes it read
+            # ``empty`` (absence) instead — the polarity this marker exists to
+            # prevent.
+            #
+            # The writing lane knows HOW MANY nodes landed (``nodes_written``)
+            # but not WHICH, so the only provable set is the two ends: all of
+            # the plan when the count matches it, and NOTHING otherwise. The
+            # short direction is the safe one — an understated hot set costs a
+            # residency miss, an overstated one reports a missing node as
+            # genuinely absent.
+            proven = (materialized
+                      if nodes_written == len(set(materialized)) else ())
+            declaration = self._declare_materialized(view, proven, scope=scope)
 
         return {
-            "nodes_written": len(nodes),
-            "relations_written": len(relations),
+            "nodes_written": nodes_written,
+            "relations_written": relations_written,
+            # The plan's own size, stated as such: it is what the projection
+            # SELECTED from the record, and it is NOT a write count.
+            "nodes_selected": len(nodes),
+            "relations_selected": len(relations),
+            # #9604 review P2: the rows this projection DECLINED to project, so
+            # the `nodes_selected` denominator is auditable instead of merely
+            # asserted. This is the set behind the "a refused row is not a
+            # restore shortfall" decision — without it an operator comparing
+            # `nodes_written` with `nodes_selected` cannot see WHY they differ.
+            "refused_keys": sorted(refused),
             "statements": statements,
             "record_nodes": len(view.nodes),
             "record_relations": len(view.relations),
@@ -17022,6 +17445,54 @@ class FalkorProjection(
             "declared_keys": len(declaration.hot_keys or ()) if declaration else 0,
             "source": "record",
         }
+
+    def _declare_materialized(self, view, proven, *, scope: str = ""):
+        """Write the residency marker for what this run PROVED it materialised.
+
+        One writer for both arms of :meth:`_project_record_view` — the landed
+        one (:meth:`_count_projected` matched the plan) and the failed one
+        (nothing is provable, so nothing is claimed hot). ``residency
+        .read_declaration`` treats an ABSENT marker as ``complete``, so a
+        post-wipe failure that wrote no marker would report a destroyed cache as
+        fully hot; this is how the failure arm makes the graph's own truth match
+        the run's.
+        """
+        from tortoise.cache_projection import declaration_for, write_declaration
+
+        declaration = declaration_for(view.record_keys, proven, scope=scope)
+        write_declaration(self.g, declaration)
+        return declaration
+
+    def _count_projected(self, cypher: str,
+                         params: dict | None = None) -> int:
+        """Run one post-rebuild COUNT and return it as an ``int``.
+
+        The measurement half of :meth:`_project_record_view`'s report. A read is
+        permitted on every lane (``_raw_query_lane_permit``/§17.1 gate the
+        MUTATING statements only), so this runs inside the rebuild's declared
+        window unchanged.
+
+        ⚠️ BOUNDED, because this read happens AFTER the wipe: a full-graph count
+        that blocks forever would leave an operator with a destroyed cache and
+        no output at all (the ``record-restore`` verb's contract is bounded
+        reads — ``_target_nodes_before`` bounds the same shape with the same
+        constant, imported from the sibling verb so the two cannot drift).
+
+        A count that cannot be READ (a timeout, a driver error, an empty result
+        set) RAISES rather than returning a plausible number: the caller's whole
+        purpose at this point is to say what the cache now holds, and "unknown"
+        reported as ``0`` would be read as the LOST-wipe finding — a number the
+        code did not measure is exactly the false PASS that made ``len(nodes)``
+        wrong in the first place. The caller classifies this as UNKNOWN.
+        """
+        from tortoise.record_reconcile import CACHE_READ_TIMEOUT_MS
+
+        rows = self.g.query(cypher, params=params,
+                            timeout=CACHE_READ_TIMEOUT_MS).result_set
+        if not rows or not rows[0]:
+            raise RuntimeError(
+                f"the post-rebuild count returned no row: {cypher[:80]}")
+        return int(rows[0][0])
 
     def query(self, cypher: str, **params):
         # #7951 §17.1 — the public raw-query lane is closed for a

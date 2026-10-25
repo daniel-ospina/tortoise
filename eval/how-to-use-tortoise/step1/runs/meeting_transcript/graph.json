@@ -1,0 +1,583 @@
+{
+  "nodes": [
+    {
+      "layer": "Source",
+      "labels": [
+        "Source"
+      ],
+      "text": "Pricing / self-serve decision meeting \u2014 2026-09-14 (Dana CEO, Ravi PM, Priya Eng)",
+      "kind": "meetingTranscript",
+      "is_operator": false,
+      "op_type": "",
+      "status": "",
+      "url": "transcript://meetings/2026-09-14-pricing",
+      "id": "transcript://meetings/2026-09-14-pricing"
+    },
+    {
+      "layer": "Event",
+      "labels": [
+        "Event"
+      ],
+      "text": "Pricing & self-serve decision meeting",
+      "kind": "meeting",
+      "is_operator": false,
+      "op_type": "",
+      "status": "",
+      "url": "",
+      "id": "1a16610cf43-76c7c529430f"
+    },
+    {
+      "layer": "Subject",
+      "labels": [
+        "Subject"
+      ],
+      "text": "Dana",
+      "kind": "person",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "sub-e3a2de22e986f9dd912462ec35"
+    },
+    {
+      "layer": "Subject",
+      "labels": [
+        "Subject"
+      ],
+      "text": "Ravi",
+      "kind": "person",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "sub-fb66249fd31cc68e126dd388e7"
+    },
+    {
+      "layer": "Subject",
+      "labels": [
+        "Subject"
+      ],
+      "text": "Priya",
+      "kind": "person",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "sub-3333fa5da8b764e934a786f0a6"
+    },
+    {
+      "layer": "Object",
+      "labels": [
+        "Object"
+      ],
+      "text": "self-serve tier",
+      "kind": "offering",
+      "is_operator": false,
+      "op_type": "",
+      "status": "being discontinued",
+      "url": "",
+      "id": "obj-4285d05b2c0f45c6db7d8e8544"
+    },
+    {
+      "layer": "Object",
+      "labels": [
+        "Object"
+      ],
+      "text": "self-serve migration communications",
+      "kind": "deliverable",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "obj-9f7ca9b3fb21cb62a5d54ab0b2"
+    },
+    {
+      "layer": "Object",
+      "labels": [
+        "Object"
+      ],
+      "text": "pricing page",
+      "kind": "productSurface",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "obj-bf6cad5b7ecd5658e83b2fe3a6"
+    },
+    {
+      "layer": "Object",
+      "labels": [
+        "Object"
+      ],
+      "text": "EU data residency",
+      "kind": "openQuestion",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "obj-8b8aa9ed478405d600152a341d"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "The self-serve tier is being killed. Decision made 2026-09-14 by Dana (CEO), effective Q4 2026.",
+      "kind": "decision",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "1a16610d11b-6237808cba75"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "Ravi owns migration communications for the self-serve shutdown; first draft due 2026-09-25.",
+      "kind": "plan",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "1a16610d30e-65dc03da9375"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "The pricing page rewrite must land before the migration comms first draft; Priya needs it first.",
+      "kind": "plan",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "1a16610d35c-ed6243111844"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "Priya estimates an 80% probability that the pricing page rewrite slips by one week.",
+      "kind": "estimate",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "1a16610d38a-76d2f7ca2843"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "Open question: EU data residency requirements. Raised by Dana 2026-09-14, explicitly deferred ('at some point') \u2014 no owner, no target date, no decision.",
+      "kind": "issue",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "1a16610d3bd-2e90dc45d979"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "",
+      "kind": "",
+      "is_operator": true,
+      "op_type": "IMPL",
+      "status": "live",
+      "url": "",
+      "id": "1a16610d57e-26d6b887a660"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "",
+      "kind": "",
+      "is_operator": true,
+      "op_type": "NAND",
+      "status": "live",
+      "url": "",
+      "id": "1a16610d5c3-eddabcd65a67"
+    }
+  ],
+  "edges": [
+    {
+      "relation": "participatesIn",
+      "from": "Dana",
+      "to": "Pricing & self-serve decision meeting",
+      "from_layer": "Subject",
+      "to_layer": "Event",
+      "from_id": "sub-e3a2de22e986f9dd912462ec35",
+      "to_id": "1a16610cf43-76c7c529430f"
+    },
+    {
+      "relation": "participatesIn",
+      "from": "Ravi",
+      "to": "Pricing & self-serve decision meeting",
+      "from_layer": "Subject",
+      "to_layer": "Event",
+      "from_id": "sub-fb66249fd31cc68e126dd388e7",
+      "to_id": "1a16610cf43-76c7c529430f"
+    },
+    {
+      "relation": "participatesIn",
+      "from": "Priya",
+      "to": "Pricing & self-serve decision meeting",
+      "from_layer": "Subject",
+      "to_layer": "Event",
+      "from_id": "sub-3333fa5da8b764e934a786f0a6",
+      "to_id": "1a16610cf43-76c7c529430f"
+    },
+    {
+      "relation": "extractedFrom",
+      "from": "The self-serve tier is being killed. Decision made 2026-09-14 by Dana (CEO), effective Q4 2026.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a16610d11b-6237808cba75",
+      "to_id": "transcript://meetings/2026-09-14-pricing"
+    },
+    {
+      "relation": "aboutEvent",
+      "from": "The self-serve tier is being killed. Decision made 2026-09-14 by Dana (CEO), effective Q4 2026.",
+      "to": "Pricing & self-serve decision meeting",
+      "from_layer": "Point",
+      "to_layer": "Event",
+      "from_id": "1a16610d11b-6237808cba75",
+      "to_id": "1a16610cf43-76c7c529430f"
+    },
+    {
+      "relation": "aboutSubject",
+      "from": "The self-serve tier is being killed. Decision made 2026-09-14 by Dana (CEO), effective Q4 2026.",
+      "to": "Dana",
+      "from_layer": "Point",
+      "to_layer": "Subject",
+      "from_id": "1a16610d11b-6237808cba75",
+      "to_id": "sub-e3a2de22e986f9dd912462ec35"
+    },
+    {
+      "relation": "aboutObject",
+      "from": "The self-serve tier is being killed. Decision made 2026-09-14 by Dana (CEO), effective Q4 2026.",
+      "to": "self-serve tier",
+      "from_layer": "Point",
+      "to_layer": "Object",
+      "from_id": "1a16610d11b-6237808cba75",
+      "to_id": "obj-4285d05b2c0f45c6db7d8e8544"
+    },
+    {
+      "relation": "INPUT",
+      "from": "The self-serve tier is being killed. Decision made 2026-09-14 by Dana (CEO), effective Q4 2026.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a16610d11b-6237808cba75",
+      "to_id": "1a16610d57e-26d6b887a660"
+    },
+    {
+      "relation": "extractedFrom",
+      "from": "Ravi owns migration communications for the self-serve shutdown; first draft due 2026-09-25.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a16610d30e-65dc03da9375",
+      "to_id": "transcript://meetings/2026-09-14-pricing"
+    },
+    {
+      "relation": "aboutEvent",
+      "from": "Ravi owns migration communications for the self-serve shutdown; first draft due 2026-09-25.",
+      "to": "Pricing & self-serve decision meeting",
+      "from_layer": "Point",
+      "to_layer": "Event",
+      "from_id": "1a16610d30e-65dc03da9375",
+      "to_id": "1a16610cf43-76c7c529430f"
+    },
+    {
+      "relation": "ownedBy",
+      "from": "Ravi owns migration communications for the self-serve shutdown; first draft due 2026-09-25.",
+      "to": "Ravi",
+      "from_layer": "Point",
+      "to_layer": "Subject",
+      "from_id": "1a16610d30e-65dc03da9375",
+      "to_id": "sub-fb66249fd31cc68e126dd388e7"
+    },
+    {
+      "relation": "aboutSubject",
+      "from": "Ravi owns migration communications for the self-serve shutdown; first draft due 2026-09-25.",
+      "to": "Ravi",
+      "from_layer": "Point",
+      "to_layer": "Subject",
+      "from_id": "1a16610d30e-65dc03da9375",
+      "to_id": "sub-fb66249fd31cc68e126dd388e7"
+    },
+    {
+      "relation": "aboutObject",
+      "from": "Ravi owns migration communications for the self-serve shutdown; first draft due 2026-09-25.",
+      "to": "self-serve migration communications",
+      "from_layer": "Point",
+      "to_layer": "Object",
+      "from_id": "1a16610d30e-65dc03da9375",
+      "to_id": "obj-9f7ca9b3fb21cb62a5d54ab0b2"
+    },
+    {
+      "relation": "dependsOn",
+      "from": "Ravi owns migration communications for the self-serve shutdown; first draft due 2026-09-25.",
+      "to": "The pricing page rewrite must land before the migration comms first draft; Priya needs it first.",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a16610d30e-65dc03da9375",
+      "to_id": "1a16610d35c-ed6243111844"
+    },
+    {
+      "relation": "INPUT",
+      "from": "Ravi owns migration communications for the self-serve shutdown; first draft due 2026-09-25.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a16610d30e-65dc03da9375",
+      "to_id": "1a16610d57e-26d6b887a660"
+    },
+    {
+      "relation": "INPUT",
+      "from": "Ravi owns migration communications for the self-serve shutdown; first draft due 2026-09-25.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a16610d30e-65dc03da9375",
+      "to_id": "1a16610d5c3-eddabcd65a67"
+    },
+    {
+      "relation": "extractedFrom",
+      "from": "The pricing page rewrite must land before the migration comms first draft; Priya needs it first.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a16610d35c-ed6243111844",
+      "to_id": "transcript://meetings/2026-09-14-pricing"
+    },
+    {
+      "relation": "aboutEvent",
+      "from": "The pricing page rewrite must land before the migration comms first draft; Priya needs it first.",
+      "to": "Pricing & self-serve decision meeting",
+      "from_layer": "Point",
+      "to_layer": "Event",
+      "from_id": "1a16610d35c-ed6243111844",
+      "to_id": "1a16610cf43-76c7c529430f"
+    },
+    {
+      "relation": "aboutObject",
+      "from": "The pricing page rewrite must land before the migration comms first draft; Priya needs it first.",
+      "to": "pricing page",
+      "from_layer": "Point",
+      "to_layer": "Object",
+      "from_id": "1a16610d35c-ed6243111844",
+      "to_id": "obj-bf6cad5b7ecd5658e83b2fe3a6"
+    },
+    {
+      "relation": "INPUT",
+      "from": "The pricing page rewrite must land before the migration comms first draft; Priya needs it first.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a16610d35c-ed6243111844",
+      "to_id": "1a16610d57e-26d6b887a660"
+    },
+    {
+      "relation": "extractedFrom",
+      "from": "Priya estimates an 80% probability that the pricing page rewrite slips by one week.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a16610d38a-76d2f7ca2843",
+      "to_id": "transcript://meetings/2026-09-14-pricing"
+    },
+    {
+      "relation": "aboutEvent",
+      "from": "Priya estimates an 80% probability that the pricing page rewrite slips by one week.",
+      "to": "Pricing & self-serve decision meeting",
+      "from_layer": "Point",
+      "to_layer": "Event",
+      "from_id": "1a16610d38a-76d2f7ca2843",
+      "to_id": "1a16610cf43-76c7c529430f"
+    },
+    {
+      "relation": "aboutSubject",
+      "from": "Priya estimates an 80% probability that the pricing page rewrite slips by one week.",
+      "to": "Priya",
+      "from_layer": "Point",
+      "to_layer": "Subject",
+      "from_id": "1a16610d38a-76d2f7ca2843",
+      "to_id": "sub-3333fa5da8b764e934a786f0a6"
+    },
+    {
+      "relation": "aboutObject",
+      "from": "Priya estimates an 80% probability that the pricing page rewrite slips by one week.",
+      "to": "pricing page",
+      "from_layer": "Point",
+      "to_layer": "Object",
+      "from_id": "1a16610d38a-76d2f7ca2843",
+      "to_id": "obj-bf6cad5b7ecd5658e83b2fe3a6"
+    },
+    {
+      "relation": "INPUT",
+      "from": "Priya estimates an 80% probability that the pricing page rewrite slips by one week.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a16610d38a-76d2f7ca2843",
+      "to_id": "1a16610d5c3-eddabcd65a67"
+    },
+    {
+      "relation": "extractedFrom",
+      "from": "Open question: EU data residency requirements. Raised by Dana 2026-09-14, explicitly deferred ('at some point') \u2014 no owner, no target date, no decision.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a16610d3bd-2e90dc45d979",
+      "to_id": "transcript://meetings/2026-09-14-pricing"
+    },
+    {
+      "relation": "aboutEvent",
+      "from": "Open question: EU data residency requirements. Raised by Dana 2026-09-14, explicitly deferred ('at some point') \u2014 no owner, no target date, no decision.",
+      "to": "Pricing & self-serve decision meeting",
+      "from_layer": "Point",
+      "to_layer": "Event",
+      "from_id": "1a16610d3bd-2e90dc45d979",
+      "to_id": "1a16610cf43-76c7c529430f"
+    },
+    {
+      "relation": "aboutSubject",
+      "from": "Open question: EU data residency requirements. Raised by Dana 2026-09-14, explicitly deferred ('at some point') \u2014 no owner, no target date, no decision.",
+      "to": "Dana",
+      "from_layer": "Point",
+      "to_layer": "Subject",
+      "from_id": "1a16610d3bd-2e90dc45d979",
+      "to_id": "sub-e3a2de22e986f9dd912462ec35"
+    },
+    {
+      "relation": "aboutObject",
+      "from": "Open question: EU data residency requirements. Raised by Dana 2026-09-14, explicitly deferred ('at some point') \u2014 no owner, no target date, no decision.",
+      "to": "EU data residency",
+      "from_layer": "Point",
+      "to_layer": "Object",
+      "from_id": "1a16610d3bd-2e90dc45d979",
+      "to_id": "obj-8b8aa9ed478405d600152a341d"
+    },
+    {
+      "relation": "IMPL",
+      "from": "",
+      "to": "The self-serve tier is being killed. Decision made 2026-09-14 by Dana (CEO), effective Q4 2026.",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a16610d57e-26d6b887a660",
+      "to_id": "1a16610d11b-6237808cba75"
+    },
+    {
+      "relation": "IMPL",
+      "from": "",
+      "to": "Ravi owns migration communications for the self-serve shutdown; first draft due 2026-09-25.",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a16610d57e-26d6b887a660",
+      "to_id": "1a16610d30e-65dc03da9375"
+    },
+    {
+      "relation": "IMPL",
+      "from": "",
+      "to": "The pricing page rewrite must land before the migration comms first draft; Priya needs it first.",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a16610d57e-26d6b887a660",
+      "to_id": "1a16610d35c-ed6243111844"
+    },
+    {
+      "relation": "NAND",
+      "from": "",
+      "to": "Ravi owns migration communications for the self-serve shutdown; first draft due 2026-09-25.",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a16610d5c3-eddabcd65a67",
+      "to_id": "1a16610d30e-65dc03da9375"
+    },
+    {
+      "relation": "NAND",
+      "from": "",
+      "to": "Priya estimates an 80% probability that the pricing page rewrite slips by one week.",
+      "from_layer": "Point",
+      "to_layer": "Point",
+      "from_id": "1a16610d5c3-eddabcd65a67",
+      "to_id": "1a16610d38a-76d2f7ca2843"
+    }
+  ],
+  "counts": {
+    "Point": 7,
+    "Subject": 3,
+    "Object": 4,
+    "Event": 1,
+    "Source": 1
+  },
+  "operators": [
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "",
+      "kind": "",
+      "is_operator": true,
+      "op_type": "IMPL",
+      "status": "live",
+      "url": "",
+      "id": "1a16610d57e-26d6b887a660"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "",
+      "kind": "",
+      "is_operator": true,
+      "op_type": "NAND",
+      "status": "live",
+      "url": "",
+      "id": "1a16610d5c3-eddabcd65a67"
+    }
+  ],
+  "sources": [
+    {
+      "layer": "Source",
+      "labels": [
+        "Source"
+      ],
+      "text": "Pricing / self-serve decision meeting \u2014 2026-09-14 (Dana CEO, Ravi PM, Priya Eng)",
+      "kind": "meetingTranscript",
+      "is_operator": false,
+      "op_type": "",
+      "status": "",
+      "url": "transcript://meetings/2026-09-14-pricing",
+      "id": "transcript://meetings/2026-09-14-pricing"
+    }
+  ],
+  "relations": [
+    "IMPL",
+    "INPUT",
+    "NAND",
+    "aboutEvent",
+    "aboutObject",
+    "aboutSubject",
+    "dependsOn",
+    "extractedFrom",
+    "ownedBy",
+    "participatesIn"
+  ],
+  "mitigations": []
+}

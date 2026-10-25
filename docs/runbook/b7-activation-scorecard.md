@@ -115,9 +115,27 @@ instant. If you change one leg's bounds, the other must move with it.
 "ok"` means only that the dispatch neither raised nor returned a failure `_safe`
 swallowed — since #8135 such a call is recorded `status: 'exec_error'` /
 `error_kind: 'safe_error'` — and a search that returned zero points is still
-`ok`. One failure class does still read `ok`: a tool-level refusal returned as a
-**plain dict** rather than through `_safe` (the unrecognised recall mode is one),
-which is tracked in #9084. Do not filter on `status` to find those rows.
+`ok`. The one class that still read `ok` while #9084 was open — a tool-level
+refusal the tool body answered with a plain dict, whatever built it (a helper
+the body returns from, a name it assigned the payload to, or a retired-but-
+still-served name whose original body the shim runs) — is CLOSED: since #9084 a
+tool-level refusal is answered as an `_SafeError` and recorded `exec_error` /
+`safe_error` like every other refusal, and a gate on the producers (not a
+`status` filter) keeps it closed. Two named residuals still read `ok` and are
+NOT refusals a `status` filter should find: a domain answer that carries an
+`error` key on purpose (`tortoise_get_operator` on a point that is not an
+operator — a successful fetch reporting that fact, #4576), and a refusal
+buried deeper than the seam reads (`tortoise_overview()` with no `section`
+nests each section's payload one level down, so a failing section is not
+classified). The gate's own match is a dict **literal** carrying a constant
+`error` key (or a body that returns one by name), so a refusal answered with a
+KEYLESS plain dict — or with an `error` key built any other way (`dict(error=…)`,
+a key assigned after construction, an unpack, a conditional) — would be invisible
+to it and to a `status` filter alike; no served tool
+answers that way at this writing — the last one (`tortoise_pack_install`'s
+rejected manifest, `{"installed": false, "validation_errors": [...]}`) is
+answered as an `_SafeError` too. Otherwise: do not read a `status` filter as
+"the retrieval answered".
 
 **`recall_returned` is a RETURN, not an answer.** Since #3675 the
 `mcp_tool_call` props carry `result_count` — the number of items the call

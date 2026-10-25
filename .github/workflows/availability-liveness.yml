@@ -61,6 +61,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      # ── THE RUNNER TOOL CONTRACT (#9018) ──────────────────────────────
+      # The checker reads the heartbeat with `gh api search/issues`. Until #9018
+      # that call was wrapped as `if ! out="$(gh … 2>/dev/null)"`, so a missing
+      # binary — measured 2026-10-24 on `pi-runner-vm-3` — had its `command not
+      # found` swallowed and surfaced as the checker's own FAIL-CLOSED verdict,
+      # "heartbeat search failed". The verdict was right; the attribution was
+      # fiction. The wrapper now keeps gh's words, and this step provides the
+      # tool or fails NAMING it, before the checker's own logic runs.
+      - name: Runner tool contract — provide gh (#9018)
+        run: bash .github/scripts/runner-tools.sh ensure gh
       - name: Check the pager's heartbeat (#4573)
         env:
           # Actions does NOT export GITHUB_TOKEN itself, so GH_TOKEN must be

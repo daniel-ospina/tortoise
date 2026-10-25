@@ -92,14 +92,14 @@ class TestE2E6EmptyState:
 
     def test_no_demo_seed_leaves_empty_graph(self, provision_test_user):
         u = provision_test_user(demo_seed=False)
-        graphs = u["sdk"].graph_list(u["org_id"])
+        graphs = u["sdk"].list_memory_graphs(u["org_id"])
         # Default graph exists (guaranteed), no custom demo graph
         assert len(graphs) == 1
         assert graphs[0]["kind"] == "default"
 
     def test_demo_seed_adds_custom_graph(self, provision_test_user):
         u = provision_test_user(demo_seed=True)
-        graphs = u["sdk"].graph_list(u["org_id"])
+        graphs = u["sdk"].list_memory_graphs(u["org_id"])
         assert len(graphs) >= 2  # default + demo
 
 

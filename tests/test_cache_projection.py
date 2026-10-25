@@ -16,7 +16,9 @@ Four claims, and each is a test here rather than a sentence in a design doc:
    is what makes the clause non-vacuous: the schema *refuses* those names, and a
    projection that dropped the distinction would carry them.
 3. **REBUILDABLE FROM THE RECORD ALONE.** A rebuild's node key set and per-node
-   field set are a function of the record and of nothing else, and projecting
+   field set are a function of the record — plus the fold's DECLARED `ON CREATE`
+   constants, `cache_projection.FOLD_ON_CREATE_DEFAULTS` (#9634), which fill a
+   field the record row is SILENT about — and of nothing else, and projecting
    the same view twice yields the same statement multiset (idempotent).
 4. **A COLD REGION READS `not-hot`, NEVER `empty`.** The declaration is written
    **after** the writes and is a function of what was materialised, so a record
@@ -74,6 +76,28 @@ REFUSED = rp.refused_props_names(MIGRATIONS)
 SECTION_TABLE_ALL = {**SECTION_TABLE, "Edges": "relation"}
 
 
+def _fold_source() -> str:
+    """`projection/entities.py` with whole-line `#` comments REMOVED.
+
+    The fold's clauses are separated by long comment blocks that QUOTE the
+    clause shapes (e.g. "this arm used to read ``s.subjectKind=$sk``"), so a
+    source-parsed assertion that keeps comments matches PROSE as often as code —
+    and a naive `ON MATCH` truncation lands inside such a comment. That is how
+    the Subject pin went vacuous when #9572 put a comment between `s.name=$name`
+    and the clause it explains: the slice ended 90 characters in, so the guard
+    inspected a comment instead of a clause.
+
+    Only whole-line comments are dropped (no pinned clause sits on a commented
+    line); the file is still read from disk, so the pins remain source-parsed and
+    need no engine.
+    """
+    path = REPO_ROOT / "tortoise" / "projection" / "entities.py"
+    return "\n".join(
+        line for line in path.read_text().splitlines()
+        if not line.lstrip().startswith("#")
+    )
+
+
 def _rows(cls: str):
     """Placement rows of one class, edge predicates EXPANDED to properties."""
     for section, prop, c in PLACEMENT_ROWS:
@@ -87,7 +111,7 @@ def _view():
     nodes = [
         _node("Point", {"id": "p-1", "content": "c", "is_operator": False,
                         "point_kind": "claim", "props": {"openSetProp": 1}}),
-        _node("Object", {"name": "acme", "props": {}}),
+        _node("Object", {"id": "acme", "name": "acme", "props": {}}),
     ]
     rels = [cp.RecordRelation(
         rel_type="aboutObject", src_label="Point", src_key="p-1",
@@ -172,7 +196,8 @@ def test_a_derived_name_in_the_props_tail_is_refused():
     with pytest.raises(cp.CacheProjectionError):
         _node("Point", {"id": "p-1", "props": {"confidence": 0.9}})
     with pytest.raises(cp.CacheProjectionError):
-        _node("Object", {"name": "acme", "props": {"embedding": [0.1]}})
+        _node("Object", {"id": "acme", "name": "acme",
+                          "props": {"embedding": [0.1]}})
 
 
 def test_a_derived_column_on_a_record_row_projects_nothing():
@@ -295,22 +320,39 @@ def test_the_placement_tables_ambiguities_are_exactly_the_five_declared():
 
 
 def test_key_properties_are_the_interface_e_contract_read_from_the_ddl():
-    """Read from `node_identity`'s generated CASE, never restated here."""
+    """Read from `node_identity`'s generated CASE, never restated here.
+
+    ⚠️ The CASE is declared TWICE on disk: the CREATE TABLE in
+    `20261012000001` and the forward re-declaration in `20261027000001` (#9881
+    moved `Object`/`Subject` from `name` to `id`). The reader walks every record
+    migration and takes the LAST declaration, so the map below is the POST-move
+    contract — the one the database enforces. A reader pinned to the original
+    file reported `name` while the live schema required `id`.
+    """
     expected = {
         "Point": "id",
         "Event": "eventId",
-        "Subject": "name",
-        "Object": "name",
+        "Subject": "id",
+        "Object": "id",
         "Source": "url",
         "Session": "id",
     }
     assert expected == cp.KEY_PROPERTY
-    sql = (MIGRATIONS / "20261012000001_record_event_stream.sql").read_text()
-    assert "key_property" in sql, "the DDL moved — re-read the parser"
+    for name in ("20261012000001_record_event_stream.sql",
+                 "20261027000001_record_semantic_id_key.sql"):
+        sql = (MIGRATIONS / name).read_text()
+        assert "key_property" in sql, "the DDL moved — re-read the parser"
+    # The pre-move declaration is still ON DISK (append-only history) and the
+    # reader must NOT be reading it: this is the half that would silently revert
+    # the key if the parser went back to one file.
+    original = (MIGRATIONS / "20261012000001_record_event_stream.sql").read_text()
+    assert "WHEN 'Object'  THEN 'name'" in original
 
 
 def test_a_node_key_is_the_labels_contract_key():
-    assert _node("Subject", {"name": "acme"}).key == "acme"
+    # #9881: `Object`/`Subject` key on the stable `id`; the name is a mutable
+    # natural key, so it can no longer BE the key.
+    assert _node("Subject", {"id": "acme", "name": "acme"}).key == "acme"
     assert _node("Point", {"id": "1a-1"}).key == "1a-1"
     assert _node("Source", {"url": "https://x"}).key == "https://x"
     assert _node("Event", {"event_id": "ev-1"}).key == "ev-1"
@@ -320,7 +362,7 @@ def test_a_node_key_is_the_labels_contract_key():
 
 def test_the_key_property_is_projected_as_a_property_too():
     """`id`/`name`/`url` are PRIMARY properties, not only MERGE coordinates."""
-    assert _node("Subject", {"name": "acme"}).props["name"] == "acme"
+    assert _node("Subject", {"id": "acme", "name": "acme"}).props["name"] == "acme"
     assert _node("Source", {"url": "https://x"}).props["url"] == "https://x"
 
 
@@ -330,6 +372,253 @@ def test_the_props_tail_keeps_its_verbatim_property_names():
                           "props": {"someOpenSetKey": 7, "another_one": "x"}})
     assert got.props["someOpenSetKey"] == 7
     assert got.props["another_one"] == "x"
+
+
+# ── 2b. the fold's ON CREATE defaults (#9634) ──────────────────────────────
+#
+# `public.subject.subject_kind` and `public.object.object_kind`/`title` are
+# NULLABLE, and a record row can be silent about the discriminator: #9572 (open
+# branch `fix/9572-discriminator-clobber`, unmerged) removes the fabricated
+# default from every write door — correctly, because the record must not state a
+# kind nobody named. The FOLD supplies one under `ON CREATE` regardless, and
+# `_props_from_row` drops a NULL column, so without the defaults below a
+# record-sourced rebuild materialised a `:Subject` with no `subjectKind` — a
+# property ONTOLOGY §4.2 (Subject) / §4.3 (Object) lists as REQUIRED — while
+# `rebuild_all` (journal replay, which runs the fold) wrote `'other'`. Live ≠
+# record, for that property. ⚠️ On this tree the discriminator is still
+# FABRICATED at every write door, so the table is the record→cache half that
+# must land WITH or before #9572, not a fix for a live-reachable defect.
+#
+# ⚠️ `Source.sourceKind` is the SAME construction and is deliberately NOT here:
+# the fold has two defaults for it (`"document"` from `_upsert_source`,
+# `"agentSession"` for a `session:` ref from `_mint_source_stub`), so a NULL
+# row cannot be resolved without the prefix rule — defaulting to `"document"`
+# would fabricate the wrong kind on every session Source. #9710.
+
+
+def test_a_record_row_silent_about_the_kind_gets_the_folds_own_default():
+    """A NULL discriminator materializes the constant the FOLD would write.
+
+    This is the measured residual of #9572: the record is silent (NULL column,
+    no tail key), so the cache must fall back to the fold's own `ON CREATE`
+    constant rather than materializing the node with the property MISSING.
+    """
+    subject = _node("Subject", {"id": "Probe", "name": "Probe",
+                                "subject_kind": None})
+    assert subject.props["subjectKind"] == "other", (
+        "a record-sourced :Subject lost the discriminator the live fold writes"
+    )
+    obj = _node("Object", {"id": "acme", "name": "acme",
+                           "object_kind": None, "title": None})
+    assert obj.props["objectKind"] == "other"
+    assert obj.props["title"] == ""
+
+
+def test_the_source_discriminator_is_declared_excluded_not_guessed():
+    """The label whose default is AMBIGUOUS stays out of the table — pinned.
+
+    `_upsert_source` defaults `sourceKind` to `"document"`;
+    `_mint_source_stub` defaults a `session:` ref to `"agentSession"` (its own
+    docstring: minting those as `document` was the wart #5012 removed). A loader
+    default of `"document"` would therefore FABRICATE the wrong kind on every
+    session Source — so a NULL `source_kind` row must stay silent until the
+    prefix rule (or a record column) exists (#9710). This test fails if a future
+    editor "completes" the table by adding it.
+    """
+    assert "Source" not in cp.FOLD_ON_CREATE_DEFAULTS, (
+        "Source.sourceKind has two fold defaults ('document' / 'agentSession' "
+        "for session: refs) — a single constant here fabricates a kind; see "
+        "#9710"
+    )
+    source = _node("Source", {"url": "session:abc", "source_kind": None})
+    assert "sourceKind" not in source.props, (
+        "a session Source whose record row is silent about sourceKind was given "
+        "a kind the fold never wrote"
+    )
+
+
+def test_the_subject_null_case_is_fold_parity_and_the_param_carries_no_default():
+    """Subject's null half is the FOLD's rule, exactly like Object's (#9572).
+
+    The rationale for `FOLD_ON_CREATE_DEFAULTS` must not claim parity it does
+    not have — nor a DECISION it no longer makes. Object's clauses coalesce, so
+    null-as-silence is what the fold does there; since #9572 Subject's
+    `ON CREATE` does the same (`s.subjectKind=coalesce($sk, 'other')`) with the
+    parameter built as `ev.get("subject_kind")` — a NULL default. An ABSENT key
+    and a PRESENT-and-null key therefore behave identically (both `'other'`), so
+    the loader's `'other'` fill reproduces the fold instead of overriding it.
+
+    The fabricated default is what this pin keeps out, and it is not cosmetic:
+    with `ev.get("subject_kind", "other")` restored, "the caller named none"
+    and "the caller named other" are the SAME value at the `ON MATCH` arm
+    (`coalesce($sk, s.subjectKind)`), so a bare re-create clobbers a stored
+    `team` — the #9572 defect itself.
+
+    Source-parsed like the sibling pin, so the claim reds here if the fold
+    changes shape or the declaration drifts back to the discharged residual.
+    """
+    fold = _fold_source()
+    # Object: null-as-silence IS the fold's rule (both clauses coalesce).
+    assert re.search(r"o\.objectKind=coalesce\(\$ok, 'other'\)", fold)
+    assert re.search(r"o\.title=coalesce\(\$title, ''\)", fold)
+    # Subject: the same rule ON CREATE (#9572).
+    # ⚠️ Truncate on `ON MATCH SET`, NOT `ON MATCH`: the #9572 comment block sits
+    # between `s.name=$name` and the clause it explains and contains the words
+    # "ON MATCH as", which cut this slice 90 characters in and made the guards
+    # below inspect a comment. `_fold_source()` removes that class of trap too.
+    create = fold[fold.index("ON CREATE SET s.id=$id, s.name=$name"):]
+    create = create[:create.index("ON MATCH SET")]
+    assert re.search(r"s\.subjectKind=coalesce\(\$sk, 'other'\)", create), (
+        "the Subject `ON CREATE` clause no longer supplies the fold's own "
+        "'other' fallback — re-derive FOLD_ON_CREATE_DEFAULTS from the fold"
+    )
+    assert not re.search(r"s\.subjectKind=\$sk", create), (
+        "the Subject `ON CREATE` clause went back to writing `$sk` bare, which "
+        "REMOVES the property on a present-null key (#7936) and re-opens the "
+        "absent-vs-present-null split this pin discharged"
+    )
+    # The parameter must stay NULL-defaulted. A fabricated default here is what
+    # makes a caller value and an absent one the same value (#9572).
+    assert re.search(r'"sk":\s*ev\.get\("subject_kind"\)', fold), (
+        "the Subject parameter is not NULL-defaulted any more — a bare "
+        "re-create must send NULL, never a kind the caller did not name"
+    )
+    assert not re.search(r'"sk":\s*ev\.get\("subject_kind",', fold), (
+        "the Subject parameter regained a fabricated default — at "
+        "`coalesce($sk, s.subjectKind)` it is indistinguishable from a caller "
+        "naming that kind, so a bare re-create clobbers a stored kind (#9572)"
+    )
+    # ON MATCH must PRESERVE what is stored: the invariant the fix protects.
+    assert re.search(
+        r"s\.subjectKind=coalesce\(\$sk, s\.subjectKind\)", fold), (
+        "the Subject `ON MATCH` arm no longer preserves a stored kind"
+    )
+    # And the declaration says PARITY where an editor of the table reads it,
+    # with the discharged residual recorded rather than left standing.
+    src = (REPO_ROOT / "tortoise" / "cache_projection.py").read_text()
+    assert re.search(r"THE SUBJECT HALF IS PARITY TOO \(#9572\)", src), (
+        "FOLD_ON_CREATE_DEFAULTS lost the note declaring that Subject's null "
+        "half is fold parity (#9572) — the table would read as a loader "
+        "decision it no longer is"
+    )
+    assert not re.search(r"RESIDUAL — the Subject clause does NOT coalesce", src), (
+        "FOLD_ON_CREATE_DEFAULTS still claims the pre-#9572 residual: the fold "
+        "COALESCES on Subject now, so that note is stale in the direction that "
+        "reads as a decision the loader makes"
+    )
+
+
+def test_a_named_kind_and_a_tail_kind_are_never_overwritten_by_the_default():
+    """The default is a FALLBACK, not a write — a named kind wins, wherever it rode."""
+    named = _node("Subject", {"id": "Probe", "name": "Probe",
+                             "subject_kind": "team"})
+    assert named.props["subjectKind"] == "team"
+    # A tail value outranks the fallback. ⚠️ The FOLD does not read a tail
+    # `subjectKind` (it is in `_SUBJECT_HANDLED`, so `_persist_extra_props` skips
+    # it), so this ordering is the LOADER's contract, not a parity claim: the
+    # loader must never replace something the record said with a fallback.
+    from_tail = _node("Subject", {"id": "Probe", "name": "Probe",
+                                  "subject_kind": None,
+                                  "props": {"subjectKind": "role"}})
+    assert from_tail.props["subjectKind"] == "role"
+    # A tail NULL takes the fallback too — and since #9572 that IS fold parity:
+    # `s.subjectKind=coalesce($sk, 'other')` with `$sk` NULL-defaulted makes a
+    # present-null key and an absent column behave identically, so the record's
+    # silence means the same thing on both sides of the cache. Declared at
+    # `cache_projection.FOLD_ON_CREATE_DEFAULTS`, and pinned by
+    # `test_the_subject_null_case_is_fold_parity_and_the_param_carries_no_default`.
+    null_tail = _node("Subject", {"id": "Probe", "name": "Probe",
+                                  "subject_kind": None,
+                                  "props": {"subjectKind": None}})
+    assert null_tail.props["subjectKind"] == "other"
+    named_obj = _node("Object", {"id": "acme", "name": "acme",
+                                 "object_kind": "org", "title": "Acme"})
+    assert (named_obj.props["objectKind"], named_obj.props["title"]) == (
+        "org", "Acme")
+
+
+def test_the_declared_fold_defaults_are_the_folds_own_constants():
+    """PIN the declaration against the fold's clauses, so drift reds HERE.
+
+    A second declaration is only safe when something fails if it goes stale.
+    `FOLD_ON_CREATE_DEFAULTS` restates three constants the fold owns
+    (`_upsert_subject`'s `coalesce($sk, 'other')` fallback and the
+    `subjectKind` parameter that feeds it, plus `_upsert_object`'s two
+    `coalesce` fallbacks); if the fold changes one, this test reds with the
+    constant named, rather than silently re-opening the live ≠ record gap.
+
+    Source-parsed on purpose: the alternative is a live graph, and a pin that
+    only runs where an engine is reachable cannot guard the ordinary lane. It
+    reads `_fold_source()` (comments stripped) because the fold's comment blocks
+    quote the clause shapes, so a comment would otherwise satisfy a pattern. The
+    live half of the same claim is
+    `tests/test_cache_projection_live.py::test_a_record_sourced_node_carries_the_discriminator_the_fold_supplies`.
+
+    ⚠️ SCOPE, stated so the pin is not read as more than it is: it checks the
+    clauses it NAMES — it is not a discovery sweep, so a fold constant nobody
+    listed here is invisible to it (the exclusion list in
+    `FOLD_ON_CREATE_DEFAULTS` is hand-maintained; #9710 carries the known
+    members). Each pattern targets the `ON CREATE SET` node property, not a
+    bare params entry, because a params default that the clause stops APPLYING
+    would leave this table fabricating a default.
+    """
+    fold = _fold_source()
+    antecedents = {
+        # both halves: the `ON CREATE SET` write AND the parameter that feeds it
+        # (#9572 — the write COALESCEs and the parameter is NULL-defaulted, so a
+        # bare re-create sends no kind and `ON MATCH` preserves the stored one)
+        ("Subject", "subjectKind"): (
+            r"s\.subjectKind=coalesce\(\$sk, 'other'\)",
+            r'"sk":\s*ev\.get\("subject_kind"\)',
+        ),
+        ("Object", "objectKind"): (
+            r"o\.objectKind=coalesce\(\$ok, 'other'\)",
+        ),
+        ("Object", "title"): (
+            r"o\.title=coalesce\(\$title, ''\)",
+        ),
+    }
+    declared = {
+        (label, prop): value
+        for label, props in cp.FOLD_ON_CREATE_DEFAULTS.items()
+        for prop, value in props.items()
+    }
+    assert set(declared) == set(antecedents), (
+        "the declared fold defaults and the pinned fold clauses disagree — a "
+        f"default was added or removed: declared-only "
+        f"{sorted(set(declared) - set(antecedents))}, pinned-only "
+        f"{sorted(set(antecedents) - set(declared))}"
+    )
+    for key, patterns in antecedents.items():
+        for pattern in patterns:
+            assert re.search(pattern, fold), (
+                f"the fold clause that supplies {key[0]}.{key[1]}'s default is "
+                f"gone or changed (/{pattern}/ not found in "
+                "projection/entities.py) — re-derive FOLD_ON_CREATE_DEFAULTS "
+                "from the fold, do not guess. A NEW constant the fold owns is "
+                "the same finding: this table is the record→cache side of it."
+            )
+    # A constant with a SECOND home drifts silently: `_mint_subject_stub`
+    # (`projection/edges.py`) writes the same `subjectKind='other'` literal for a
+    # stub-minted Subject, so a change there would red nothing above.
+    edges = (REPO_ROOT / "tortoise" / "projection" / "edges.py").read_text()
+    assert re.search(r"s\.subjectKind='other'", edges), (
+        "`_mint_subject_stub` in projection/edges.py no longer writes the same "
+        "`subjectKind='other'` literal this table transcribes for Subject — the "
+        "stub-minted half of the constant drifted. Re-derive, do not guess."
+    )
+    # The Object twin: `_event_plain_merge` writes `o.objectKind='other'` for the
+    # stub Object an event's mechanism link mints.
+    assert re.search(r"o\.objectKind='other'", fold), (
+        "the Object stub path (`_event_plain_merge` in projection/entities.py) "
+        "no longer writes the same `objectKind='other'` literal this table "
+        "transcribes — the stub-minted half of the constant drifted."
+    )
+    # The values the patterns above force, asserted so the table cannot drift
+    # while the patterns still match (they pin the CONSTRUCTION, not the literal).
+    assert declared[("Subject", "subjectKind")] == "other"
+    assert declared[("Object", "objectKind")] == "other"
+    assert declared[("Object", "title")] == ""
 
 
 # ── 3. one-way by construction ──────────────────────────────────────────────
@@ -354,14 +643,17 @@ def test_the_materializer_issues_no_cache_read():
 def test_relation_endpoints_resolve_by_label_and_key_not_by_a_bare_id():
     """Interface E's rule, at the edge: a rebuilt edge binds by `(label, key)`.
 
-    A resolver that matched `{id: $key}` would bind a `:Subject` by an opaque
-    graph id and resolve to nothing on a rebuild (`#2489`/`#5086`).
+    Since #9881 a `:Subject`'s contract key IS its `id` (the name became a
+    mutable natural key), so the rebound edge binds `Subject{id: …}` — and the
+    `relation` row's `tgt_key` holds that id, not the name. The rule this pins
+    is unchanged: the binding is the label's DECLARED key column, never a bare
+    `{id: $key}` guess (`#2489`/`#5086`); what moved is which column that is.
     """
     rel = cp.RecordRelation(
         rel_type="aboutSubject", src_label="Point", src_key="p-1",
         tgt_label="Subject", tgt_key="acme", idx=0, props={})
     compact = cp.relation_statement(rel).cypher.replace(" ", "")
-    assert "tgt:Subject{name:$tgt_key}" in compact, compact
+    assert "tgt:Subject{id:$tgt_key}" in compact, compact
     assert "src:Point{id:$src_key}" in compact, compact
 
 
@@ -381,6 +673,14 @@ def test_relation_props_ride_the_edge_and_the_predicate_is_the_rel_type():
 
 def test_rebuild_equals_record_no_extra_node_and_no_extra_field():
     """The rebuild's field set is EXACTLY the record's — never a superset.
+
+    ⚠️ ONE DECLARED EXCEPTION (#9634): the properties in
+    `cp.FOLD_ON_CREATE_DEFAULTS` are the FOLD's `ON CREATE` constants, applied
+    where the record row is silent, so the view carries them before this test
+    runs. That is why the comparison below cannot see this class — the bound on
+    the exception is
+    `test_the_declared_fold_defaults_are_the_folds_own_constants`, not this
+    assertion. Everything NOT in that table is still pinned exactly here.
 
     This is S3's contract clause at the STATEMENT level: a superset would be the
     cache carrying state the record does not hold, i.e. the cache becoming a
@@ -633,16 +933,31 @@ def test_an_empty_record_declares_partial_not_complete():
 
 
 class _FakeCursor:
-    def __init__(self, rows_by_table):
+    def __init__(self, rows_by_table, seen: list[str] | None = None):
         self._rows = rows_by_table
         self._current: list[dict] = []
+        self._seen = seen if seen is not None else []
+        self._last = ""
+        self._tenant = None
 
     def execute(self, sql, params=None):
+        self._seen.append(sql)
+        self._last = sql
+        if sql == cp._rp.TENANT_GUC_SQL:
+            self._tenant = params[0] if params else None
         m = re.search(r"FROM public\.(\w+)", sql)
         self._current = self._rows.get(m.group(1), []) if m else []
 
     def fetchall(self):
         return list(self._current)
+
+    def fetchone(self):
+        # R6 (#9600 review cycle 2): the reader installs the tenant scope, whose
+        # single verify statement returns (tenant, bypassing). This fake models
+        # a correctly scoped, NON-bypassing connection.
+        if self._last == cp._rp.TENANT_SCOPE_SQL:
+            return (self._tenant, False)
+        return (self._tenant,)
 
     def __enter__(self):
         return self
@@ -652,18 +967,19 @@ class _FakeCursor:
 
 
 class _FakeConn:
-    def __init__(self, rows_by_table):
+    def __init__(self, rows_by_table, seen: list[str] | None = None):
         self._rows = rows_by_table
+        self._seen: list[str] = seen if seen is not None else []
 
     def cursor(self):
-        return _FakeCursor(self._rows)
+        return _FakeCursor(self._rows, self._seen)
 
 
 def test_read_record_view_keys_by_the_contract_key():
     conn = _FakeConn({
         "point": [{"id": "p-1", "content": "c", "props": {}},
                   {"id": "p-2", "content": "d", "props": {}}],
-        "object": [{"name": "acme", "props": {}}],
+        "object": [{"id": "acme", "name": "acme", "props": {}}],
         "relation": [{"rel_type": "aboutObject", "src_label": "Point",
                       "src_key": "p-1", "tgt_label": "Object",
                       "tgt_key": "acme", "idx": 0, "props": {}}],
@@ -676,7 +992,13 @@ def test_read_record_view_keys_by_the_contract_key():
 
 
 def test_read_record_view_asks_for_the_scope_it_was_given():
-    """A reader that forgot the tenancy predicate would project every tenant."""
+    """A reader that forgot the tenancy predicate would project every tenant.
+
+    #9600 review cycle 2 (P1): the reader also has to install the SCOPE those
+    predicates are evaluated against — under the app-role DSN a missing GUC is
+    zero rows, not an error. So the first two statements are the tenant prologue
+    and its verification, and every DATA statement carries both predicates.
+    """
     seen: list[str] = []
 
     class _Cursor(_FakeCursor):
@@ -690,5 +1012,11 @@ def test_read_record_view_asks_for_the_scope_it_was_given():
 
     cp.read_record_view(_Conn(), org_id="o", graph_id="g")
     assert seen, "the reader issued no query at all"
-    for sql in seen:
+    assert seen[0] == cp._rp.TENANT_GUC_SQL, (
+        "the reader selected before scoping the connection — every row it got "
+        "back came from a connection with no tenant GUC")
+    assert seen[1] == cp._rp.TENANT_SCOPE_SQL, (
+        "the reader did not verify the tenant it set (nor the role it set it "
+        "for)")
+    for sql in seen[2:]:
         assert "org_id = %s" in sql and "graph_id = %s" in sql

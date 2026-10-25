@@ -11,6 +11,30 @@ governingAgreement: "#133"
 
 # Plan — #133 Proportional Extraction v1 (explicit-signal upgrade)
 
+> ⚠️ **PARTIALLY RETIRED — D10 (ONTOLOGY v3.15 §4.4, #5026).** The `doc_status`
+> state machine this plan builds (§Solution 1, §Design, the Integration Surface
+> Map rows for `doc_status`, and the backfill task below) was retired when
+> `:Document` folded into `:Source`, and
+> **`graph-scripts/backfill_doc_status.py` was DELETED** — the backfill
+> instruction in §Solution 6 / §Task 4 is a historical record and **must not be
+> executed or re-created**. The upgrade path (`_do_upgrade` /
+> `_do_upgrade_all`) is live.
+>
+> ⛔ **The stored signal is NOT `needs_extraction` alone, and this note must not
+> say it is.** `doc_status` is retired on the WRITE side only: both extraction
+> readers still honour a value they find, and `captured`/`extracted` **outrank**
+> `needs_extraction` (§4.4, implemented as the first two arms of
+> `ingest.py::_document_is_pending`). Since #9874 an ABSENT
+> `needs_extraction` no longer reads as "already extracted" — but only where the
+> caller asked for that: the explicitly named `--upgrade` document, and
+> `--upgrade-all --include-unstamped`. The default `--upgrade-all` sweep does NOT
+> select an unmarked document, and a rebuilt graph replays the old record's
+> boilerplate `needs_extraction=false`, which reads as done. **So the pre-D10
+> population the deleted backfill stamped is still not discoverable** — that
+> needs the `:Document` → `:Source` relabel, which is #5140 finding 8 and has
+> not shipped. Read the residual on #5140 (the 2026-10-24T09:03 comment) before
+> treating a document as upgraded.
+
 ## Context
 
 - **Issue:** #133 — proportional extraction follow-up to #125 (metadata-only capture)
@@ -33,7 +57,7 @@ Sessions captured via #125 are metadata-only (Document with topics/summary/sourc
 3. **`tortoise ingest --upgrade-all`**: query `MATCH (d:Document) WHERE d.doc_status = 'captured' OR d.needs_extraction = true RETURN d.id` (via `proj.g.query()` inline in ingest.py — the SDK has no document-status query), upgrade each. **Loop-safety:** each attempt gated by `begin_ingest` key (content-hash + extractor version) — identical content skips re-extraction; changed content re-extracts (correct, not a loop).
 4. **`needs_extraction: true` frontmatter flag**: the explicit "this session matters" signal — read by `_parse_frontmatter` into the DocumentCreated event, stored as `d.needs_extraction` property, consumed by `--upgrade-all` discovery.
 5. **Lazy EP re-propagation**: after upgrade lands new Points, run `compute_confidence` on the affected subgraph on-demand (not a global recompute).
-6. **Backfill migration**: `graph-scripts/backfill_doc_status.py` stamps existing Documents (no `doc_status` property) to `captured`.
+6. **Backfill migration**: `graph-scripts/backfill_doc_status.py` stamps existing Documents (no `doc_status` property) to `captured`. **⛔ RETIRED (D10, §4.4): the script is DELETED — do not run or re-create this step. `doc_status` is retired on the WRITE side only (a stored value is still READ, and `captured`/`extracted` outrank `needs_extraction`), and an ABSENT `needs_extraction` is pending only for `--upgrade` on a named document and for `--upgrade-all --include-unstamped` — the default sweep does not select it. So #9874's fix does NOT reach the pre-D10 population on a rebuilt graph (see the header note and #5140).**
 
 ### Capture-default (Q2)
 
@@ -84,6 +108,12 @@ Sessions captured via #125 are metadata-only (Document with topics/summary/sourc
 - Test: `tests/test_ingest.py` (EP runs after upgrade)
 
 ### Task 4: Backfill migration
+
+> ⛔ **RETIRED (D10, #5026 / §4.4) — do NOT implement, run, or re-create.**
+> `graph-scripts/backfill_doc_status.py` was deleted with `doc_status` itself.
+> Kept only as the record of the original plan: the population it stamped is
+> still not discoverable (the `:Document` → `:Source` relabel is #5140
+> finding 8, unshipped), so the replacement is deliberately NOT claimed here.
 
 **Intent:** Existing Documents get `doc_status: captured` so the state machine is consistent (PO Q6).
 **Acceptance:** One-time script stamps all Documents without doc_status as `captured`; idempotent; safe on live graph (test_guard, test-prefixed graphs). **Run BEFORE `--upgrade-all` in production** (Task 2 dependency).

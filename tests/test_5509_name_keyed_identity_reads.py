@@ -307,11 +307,16 @@ class TestCanonicalIdIsNotReReadByName:
             def __init__(self, projection):
                 self.projection = projection
 
-            def add_object(self, name, kind, *, id=None, **props):
+            def add_object(self, name, object_kind=None, *, id=None, **props):
+                # #9572: the real door's signature is `(name, object_kind=None)`
+                # — the kind is forwarded by keyword only when the caller named
+                # one. This stub took `kind` as a REQUIRED positional-or-keyword
+                # argument, so keyword forwarding broke the pin on a correct
+                # change; the stub now matches the real default.
                 projection = self.projection
                 projection.apply({
                     "type": "ObjectRegistered", "id": id, "name": name,
-                    "objectKind": kind, "createdAt": now_iso(),
+                    "objectKind": object_kind, "createdAt": now_iso(),
                     "canonical_name": props.get("canonical_name"),
                     "title": props.get("title")})
                 return id

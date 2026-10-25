@@ -36,9 +36,10 @@
 //     a per-isolate Map would be correct only until the next isolate — green in a
 //     test, a flood in production, which is the shape this repo keeps re-learning.
 //     The state is `blog_posts.indexnow_submitted_at` (migration
-//     20261022000001_blog_indexnow.sql). Every read or write of it is fail-soft
-//     and LOGGED: the stamp is a rate limit, never a correctness dependency of
-//     the publish.
+//     20261026000001_blog_indexnow.sql — renumbered forward from 20261022000001,
+//     which a first-merged migration had already claimed). Every read or write of
+//     it is fail-soft and LOGGED: the stamp is a rate limit, never a correctness
+//     dependency of the publish.
 //
 // ZERO-DEPENDENCY (plain TS + Web APIs, like its siblings in this directory).
 
@@ -280,11 +281,31 @@ async function stampSubmittedAt(env: Env, id: string, nowMs: number, url: string
 }
 
 /**
+ * What came of a notification attempt (#9803). `submit-failed` is deliberately
+ * NOT folded into `submitted`: the vendor can reject (403 bad key, 422 malformed)
+ * or time out, and a caller reading "submitted" must not be told a delivery
+ * happened when the only fact is that we tried. Every arm is a normal result —
+ * the function has no failure mode other than throwing, which it does not do.
+ */
+export type NotifyOutcome =
+  | "submitted"
+  | "submit-failed"
+  | "skipped-unreadable"
+  | "skipped-window";
+
+/**
  * Submit one published article's canonical URL to IndexNow, at most once per
  * `INDEXNOW_WINDOW_MS` PER ROW — non-atomically, and not keyed by URL; the
  * constant documents the two escapes (overlapping transitions of one row, and a
  * deleted-and-recreated slug). Called from the agent API's publish transition
- * inside `waitUntil`, so the publish response never waits on the vendor.
+ * inside `waitUntil` — so THAT publish response never waits on the vendor — and
+ * called SYNCHRONOUSLY from `api/notify-publish.ts`, which does await it. Two
+ * callers, one rule: the wait behaviour belongs to the caller, not to this.
+ *
+ * #9803: the console's four call sites are `save.ts` (editor publish save, both
+ * create and re-publish) plus `blog-api.ts`'s `publishPost` (the drafts-queue
+ * Publish) and `clearHoldPost`; all three user actions reach this through the
+ * one endpoint, and the endpoint re-checks "live" before calling here.
  *
  * ⛔ This is the ONLY submission path in the codebase, and it takes ONE url. A
  * bulk/backfill loop does not belong in a publish handler (#9680 item 5): the
@@ -293,13 +314,20 @@ async function stampSubmittedAt(env: Env, id: string, nowMs: number, url: string
  *
  * NEVER THROWS — the caller has already answered 200 and the post is live.
  * A failure here is a log line about a notification, never a failed publish.
+ *
+ * RETURNS the decision (#9803) so a caller can report it instead of guessing —
+ * see `NotifyOutcome` above (four arms; `submit-failed` is the vendor's answer,
+ * not ours). The agent API ignores
+ * the value; the admin-editor endpoint (`api/notify-publish.ts`) answers with
+ * it. It is an OUTCOME, not a status — every arm is a normal result, and the
+ * only way to fail is to throw, which this function does not do.
  */
 export async function notifyPublished(input: {
   env: Env;
   id: string;
   url: string;
   nowMs: number;
-}): Promise<void> {
+}): Promise<NotifyOutcome> {
   const { env, id, url, nowMs } = input;
   try {
     const lastSubmittedAt = await readSubmittedAt(env, id, url);
@@ -307,20 +335,23 @@ export async function notifyPublished(input: {
       // Not an error: an edit that never reached this path, a state we cannot
       // read, or a real submission inside the window. Logged so "why did
       // nothing go out?" has an answer in the Cloudflare log.
+      const outcome: NotifyOutcome = lastSubmittedAt === undefined ? "skipped-unreadable" : "skipped-window";
       if (lastSubmittedAt !== undefined) {
         console.log(`[indexnow] skipped (submitted ${lastSubmittedAt}): ${url}`);
       }
-      return;
+      return outcome;
     }
-    await submitUrl(url);
+    const submission = await submitUrl(url);
     // Stamped on the ATTEMPT, whatever its outcome: a vendor outage must not
     // turn every subsequent re-publish into another attempt, and there is no
     // retry in this path by design.
     await stampSubmittedAt(env, id, nowMs, url);
+    return submission.ok ? "submitted" : "submit-failed";
   } catch {
     // Belt and braces. Everything above is already fail-soft; this guarantees a
     // future edit cannot turn a notification into an unhandled rejection in a
     // background task.
     console.warn(`[indexnow] unexpected failure: ${url}`);
+    return "skipped-unreadable";
   }
 }

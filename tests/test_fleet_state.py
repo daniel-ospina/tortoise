@@ -17,6 +17,7 @@ exists, and each is chosen so it can FAIL on a regression:
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 import stat
@@ -2280,6 +2281,11 @@ def test_a_placeholder_cwd_is_unresolved_not_a_lane(monkeypatch) -> None:
         cwds, err = fs.process_cwds([8])
     assert cwds == {} and err == "", (
         "lsof's placeholder is not a path — it must read as UNRESOLVED")
+    # ⛔ AND THE RAW DATUM TRAVELS OUT OF THE `lsof` BRANCH TOO (review of #2401). The
+    # macOS reader is the one the Mac fleet runs, and deleting its `refused[cur] = raw`
+    # left this suite green while that fleet reverted to "no cwd could be read".
+    assert cwds.refused == {8: placeholder}, (
+        "the lsof reader must carry the rejected string, not only drop it")
 
     # The same rule on the `/proc` reader: a removed directory.
     monkeypatch.setattr(fs, "_proc_cwd_is_readable", lambda: True)
@@ -2301,6 +2307,94 @@ def test_a_placeholder_cwd_is_unresolved_not_a_lane(monkeypatch) -> None:
         monkeypatch.setattr(fs, "pid_alive", lambda pid: False)
         live = fs.live_sessions()
     assert live.measured is True and dict(live) == {}, "an exited pid is not a gap"
+
+
+def test_a_rejected_cwd_carries_its_raw_datum_out_of_the_reader(
+        monkeypatch) -> None:
+    """A REJECTED CWD IS A DATUM, NOT AN ABSENCE (measured 2026-10-24, cell-4).
+
+    Two live lanes had their worktrees reaped under them, so the kernel answered
+    ``/proc/<pid>/cwd`` → ``/tmp/cell-wt-adv-runnerprov-land (deleted)``. The
+    reader rejects that string — correct, it attributes to no worktree — and then
+    reported the refusal as "no cwd could be read", which is FALSE and threw away
+    the only thing that identifies the orphan: the path. A reader that holds the
+    datum and reports an absence is the class this pins.
+    """
+    monkeypatch.setattr(fs, "_proc_cwd_is_readable", lambda: True)
+    raw = "/tmp/cell-wt-adv-runnerprov-land (deleted)"
+    monkeypatch.setattr(fs.os, "readlink", lambda _p: raw)
+    cwds, err = fs.process_cwds([2510056])
+    assert dict(cwds) == {} and err == "", "still unresolved — fail-closed"
+    assert cwds.refused == {2510056: raw}, (
+        "the raw string travels with the answer instead of being dropped")
+
+    # … and an EXITED pid leaves no refusal behind: nothing was measured, so
+    # there is nothing to name (the per-pid judgement decides, as before).
+    def _gone(_p):
+        raise FileNotFoundError("no such process")
+
+    monkeypatch.setattr(fs.os, "readlink", _gone)
+    cwds, _err = fs.process_cwds([2510056])
+    assert cwds.refused == {}
+
+
+def test_a_reaped_worktree_is_named_in_the_gap_not_hidden(monkeypatch) -> None:
+    """THE CELL-WIDE ZERO, in one assertion.
+
+    A live pid whose cwd names a REAPED worktree still leaves the store UNMEASURED
+    (the wording never becomes "measured" — #8999's fail-closed polarity is
+    untouched). What changes is that the gap now says WHICH pid ran WHERE, so the
+    refusal is one line an operator can act on instead of "no cwd could be read"
+    — which named neither the pid nor the datum, and zeroed a cell's whole queue
+    for 12+ hours.
+    """
+    raw = "/tmp/cell-wt-adv-reaping (deleted)"
+
+    class _Cwds(dict):
+        pass
+
+    cwds = _Cwds()
+    # AN INSTANCE ATTRIBUTE, NOT A CLASS ONE: `refused` is a per-test DATUM (one pid → the path
+    # that pid refused), not a constant every instance of `_Cwds` shares, and an instance
+    # attribute says so at the point the fixture is built. This is intent, not a gate: the
+    # `main` version was `ClassVar[dict[int, str]]`, which is lint-clean too — `ClassVar` is
+    # exactly what RUF012 asks for — so nothing here reds `ruff check .` either way.
+    cwds.refused = {2559943: raw}
+
+    monkeypatch.setattr(fs, "cmux_session_records", lambda: ([], "", "no cmux"))
+    monkeypatch.setattr(fs, "pi_processes", lambda: ([{"pid": 2559943, "ppid": 1}], ""))
+    monkeypatch.setattr(fs, "process_cwds", lambda pids: (cwds, ""))
+    monkeypatch.setattr(fs, "pid_alive", lambda pid: True)
+    live = fs.live_sessions()
+    assert live.measured is False, "a live pid with no attributable cwd is still a gap"
+    assert dict(live) == {}, "and no lane is minted from a deleted path"
+    assert "2559943" in live.error
+    assert raw in live.error, (
+        "the deleted path is the datum — without it the gap is undiagnosable")
+    assert "no cwd could be read" not in live.error, (
+        "a cwd WAS read; saying otherwise is the falsehood that hid the cause")
+    assert "orphan" in live.error, "and the remedy names the orphan process, not the gate"
+
+
+def test_the_arm_that_decided_the_refusal_leads_the_cause(monkeypatch) -> None:
+    """ONLY the process arm poisons ``measured`` — an unreadable cmux store is
+    covered by the process table, which sees every live lane this user runs — so the
+    process arm must LEAD the sentence.
+
+    ⛔ DOWNSTREAM READERS BOUND THIS STRING. The harness records the first cause cut
+    to 320 characters and the dispatch line cuts it again at 400 (measured
+    2026-10-24: `[dispatch] BLOCKED … first cause: … (tried: `cmux sessi`), so
+    listing the inert cmux failure first truncated the deciding datum mid-word.
+    """
+    monkeypatch.setattr(fs, "cmux_session_records", lambda: (
+        [], "", "`cmux sessions list --json --all` exited 2"))
+    monkeypatch.setattr(fs, "pi_processes", lambda: ([{"pid": 5, "ppid": 1}], ""))
+    monkeypatch.setattr(fs, "process_cwds", lambda pids: ({}, ""))
+    monkeypatch.setattr(fs, "pid_alive", lambda pid: True)
+    live = fs.live_sessions()
+    assert live.error.index("live-process table") < live.error.index(
+        "cmux session store"), "the deciding arm leads"
+    assert live.measured is False
 
 
 def test_a_path_with_a_parenthesised_suffix_is_a_cwd_not_a_placeholder(
@@ -2343,12 +2437,343 @@ def test_a_guest_cli_error_object_is_not_a_session_store(monkeypatch) -> None:
 
     Reading that as "no sessions" is a measured "nothing is running" while the box
     runs lanes. The payload's SHAPE is what separates an answer from a refusal.
+
+    ⛔ AND IT IS WRITTEN TO STDERR WITH A NON-ZERO EXIT (measured on cell-4,
+    2026-10-24: `cmux sessions list --json --all` → rc 2, payload on STDERR, STDOUT
+    empty). This test used to stub ``_run`` — which degrades a non-zero exit to
+    "" — so it fed the classifier a payload the production path could NEVER hand
+    it: the suite was green while the box reported "produced nothing" for a
+    command that had named its own problem. The seam is ``subprocess.run`` now, so
+    the rc/stream path under test is the one the reader actually runs.
     """
-    monkeypatch.setattr(fs, "_run", lambda cmd, timeout=60: json.dumps(
-        {"code": "usage.invalid", "message": "--all needs a value"}))
+    payload = json.dumps({"code": "usage.invalid", "message": "--all needs a value"})
+    seen: list[list[str]] = []
+
+    class _Refusal:
+        returncode = 2
+        stdout = ""
+        stderr = payload
+
+    def fake_run(cmd, **kwargs):
+        seen.append(list(cmd))
+        return _Refusal()
+
+    monkeypatch.setattr(fs.subprocess, "run", fake_run)
     recs, source, err = fs.cmux_session_records()
     assert recs == [] and source == ""
-    assert "usage.invalid" in err and "--all needs a value" in err
+    assert "usage.invalid" in err and "--all needs a value" in err, (
+        "the grammar's OWN answer is the cause, and it arrived on stderr")
+    assert "exited 2" in err, "the rc is part of the datum"
+    assert "produced nothing" not in err, (
+        "the command produced a payload that named the problem — saying it "
+        "produced nothing is the falsehood this pins")
+    assert seen[0][1] == "sessions", "the Mac grammar is still tried first"
+
+    # ⛔ THE BOUND IS ON THE RENDERED STRING, NOT ON ITS INPUT (review of #2401):
+    # `repr` expands each non-printable character four-fold, so slicing the input to
+    # 200 and THEN calling repr produced up to 802 characters — 2.5x the 320-char
+    # window the harness reads a cause through. A control-laden refusal is the case
+    # that catches it.
+    assert len(fs._cmux_said("\x01" * 200)) <= fs._CMUX_SAID_BOUND
+    assert len(fs._cmux_said("\\" * 200)) <= fs._CMUX_SAID_BOUND
+    # ⛔ AND THE CUT NEVER SPLITS AN ESCAPE (review of #9887, fourth round). A head slice
+    # of the RENDERED form ended `…\x01\x0` — a sequence that never existed, written into
+    # the persisted cause by the very function whose job is to make that cause readable.
+    # `literal_eval` is the assertion: a rendered form that cannot be parsed back is a
+    # truncated one. Red on `repr(first)[:_CMUX_SAID_BOUND]` for n >= 50.
+    for n in (50, 59, 200):
+        said = fs._cmux_said("\x01" * n)
+        # raises ValueError if the cut landed inside `\xNN` — which is the whole point
+        rendered = ast.literal_eval(said)
+        assert rendered and set(rendered) == {"\x01"}, (
+            f"a {n}-byte control payload must render as a WHOLE literal: {said[-12:]!r}")
+        assert len(said) <= fs._CMUX_SAID_BOUND
+    assert fs._cmux_said("usage.invalid: --all needs a value") == (
+        "'usage.invalid: --all needs a value'"), "a plain cause is untouched"
+
+
+def test_a_session_store_from_a_FAILED_command_is_named_and_refused(
+        monkeypatch) -> None:
+    """THE POLARITY THE CAPTURE FIX MUST NOT MOVE (review of #2401).
+
+    Reading a failing command's stdout is what lets the REFUSAL be named. It must
+    not become a way to ACCEPT an answer: a non-zero exit can mean a PARTIAL list,
+    and a lane missing from a partial store is the fail-open direction — the gate
+    answering "nobody holds it" about a running lane. So the payload names the
+    refusal and is then NOT the answer.
+    """
+
+    class _Partial:
+        returncode = 1
+        stdout = json.dumps({"sessions": [
+            {"agent": "pi", "workspace_id": "ws-1", "pid": 1}]})
+        stderr = ""
+
+    monkeypatch.setattr(fs.subprocess, "run", lambda cmd, **k: _Partial())
+    recs, source, err = fs.cmux_session_records()
+    assert recs == [] and source == "", (
+        "a store that arrived with a failed command is not the answer")
+    assert "exited 1" in err and "is not read as a session store" in err
+
+
+def test_a_store_on_STDERR_is_a_cause_never_an_answer(monkeypatch) -> None:
+    """THE STREAMS ARE NOT INTERCHANGEABLE (review of #2401).
+
+    Reading the failure's words is what lets the refusal be named — but stderr must
+    never become an EVIDENCE source the pre-#2401 reader did not consult: a
+    `{"sessions": []}` written there (a warning, a debug echo) would otherwise be a
+    MEASURED "nothing is running" from a channel that carries diagnostics.
+    """
+
+    class _StderrStore:
+        returncode = 0
+        stdout = ""
+        stderr = json.dumps({"sessions": [
+            {"agent": "pi", "workspace_id": "ws-1", "pid": 1}]})
+
+    monkeypatch.setattr(fs.subprocess, "run", lambda cmd, **k: _StderrStore())
+    recs, source, err = fs.cmux_session_records()
+    assert recs == [] and source == "", (
+        "a store on stderr is not an answer, however well-formed")
+    assert "printed nothing on stdout" in err
+    assert "ws-1" in err, (
+        "the datum belongs to the CAUSE: the store WAS read, and it was named — on the "
+        "stream that cannot answer, so the refusal carries it and the answer does not")
+
+
+def test_whitespace_stdout_does_not_shadow_a_stderr_cause(monkeypatch) -> None:
+    """A CAUSE COMES FROM THE FIRST STREAM THAT SAID SOMETHING (final review round).
+
+    `raw`-truthiness let a WHITESPACE-only stdout win over a non-empty stderr, so the
+    refusal rendered `(stderr: no output)` about a stream that had named the problem —
+    the same "produced nothing about a command that said something" falsehood this
+    change exists to remove, narrowed to a whitespace case.
+    """
+
+    class _WhitespaceStdout:
+        returncode = 0
+        stdout = "\n"
+        stderr = "warning: session socket unavailable, falling back"
+
+    monkeypatch.setattr(fs.subprocess, "run", lambda cmd, **k: _WhitespaceStdout())
+    recs, source, err = fs.cmux_session_records()
+    assert recs == [] and source == ""
+    assert "session socket unavailable" in err, (
+        "the stderr cause must not be shadowed by a whitespace-only stdout")
+    assert "no output" not in err, "and the label must not claim stderr was empty"
+
+
+def _collision_preflight():
+    """`tools/collision_preflight.py`, loaded by path — the CLAIM GATE's own composition.
+
+    The harness records the gate's sentence, not this module's, so the budget the gap
+    message has to fit is decided in THAT file. Calling the producers keeps the arithmetic
+    here honest when their wording changes — a literal copy of the prose cannot (review of
+    #9887, fourth round).
+    """
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[1] / "tools" / "collision_preflight.py"
+    name = "_collision_preflight_for_gap_budget"
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec and spec.loader, f"cannot load {path}"
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_gap_fits_the_bound_its_readers_apply(monkeypatch) -> None:
+    """THE MESSAGE IS READ THROUGH A BOUND (review of #2401).
+
+    `refresh-candidates.sh` cuts the first cause it records at 320 characters and
+    `orch-loop.sh` prints `why=` at 400. A per-pid clause made five refused pids a
+    977-character sentence — so the pids and the remedy fell outside the window, and
+    a message built for an unbounded reader is a message that is invisible where it
+    matters. The pids, one raw datum and the remedy must all survive 320.
+    """
+    refused = {
+        2510056 + i: f"/tmp/cell-wt-adv-runnerprov-land{i} (deleted)" for i in range(5)
+    }
+
+    class _Cwds(dict):
+        pass
+
+    cwds = _Cwds()
+    cwds.refused = refused
+    monkeypatch.setattr(fs, "cmux_session_records", lambda: ([], "", "no cmux"))
+    monkeypatch.setattr(fs, "pi_processes", lambda: (
+        [{"pid": p, "ppid": 1} for p in refused], ""))
+    monkeypatch.setattr(fs, "process_cwds", lambda pids: (cwds, ""))
+    monkeypatch.setattr(fs, "pid_alive", lambda pid: True)
+    live = fs.live_sessions()
+    assert live.measured is False
+    head = live.error[:320]
+    for pid in refused:
+        assert str(pid) in head, f"pid {pid} fell outside the 320-char window"
+    assert "/tmp/cell-wt-adv-runnerprov-land0 (deleted)" in head, (
+        "the datum fell outside the window")
+    assert "orphan" in head, "and so did the remedy"
+    # ⛔ THE BOUND IS ON THE DECIDING ARM, NOT ON THE WHOLE SENTENCE (review of #2401, third round).
+    # `live.error` joins the process arm AND the cmux arm, and a real box's cmux arm is long: with
+    # both grammars refusing (the measured cell-4 state) the whole sentence is 622 characters. The
+    # old `len(live.error) < 400` went RED for that legitimate state and was green here only because
+    # this fixture stubs the cmux arm to `"no cmux"`. What the readers bound is the FIRST CAUSE —
+    # `unusable_cause` cuts at 320 — so that is what has to fit, and it is the arm that decides
+    # `measured` that must lead it.
+    proc_arm = live.error.split("; cmux session store: ")[0]
+    assert len(proc_arm) <= 320, (
+        f"the deciding arm must fit the first-cause cut: {len(proc_arm)} chars")
+
+    # ⛔ AND A REAL FLEET PATH IS LONG (review of #2401). The case above uses a
+    # 40-character path, which cannot see the failure that matters: Mac worktrees are
+    # `/Users/…/tortoise/.worktrees/cell-wt-…`, routinely 90+ characters, and an
+    # unbounded sample put the remedy straight back outside the window this message
+    # exists to fit (`orphan` fell out of `[:320]` at pathlen 90 — measured).
+    long_path = (
+        "/Users/danielospina/Documents/GitHub/tortoise/.worktrees/"
+        "cell-wt-adv-runnerprov-land-0123456789 (deleted)"
+    )
+    long_refused = {2510100 + i: long_path for i in range(5)}
+    cwds.refused = long_refused
+    monkeypatch.setattr(fs, "pi_processes", lambda: (
+        [{"pid": p, "ppid": 1} for p in long_refused], ""))
+    live = fs.live_sessions()
+    head = live.error[:320]
+    for pid in long_refused:
+        assert str(pid) in head, f"pid {pid} fell outside the window on a long path"
+    assert "reap the orphan" in head, "the remedy must survive a long pathlen too"
+    assert "runnerprov-land-0123456789 (deleted)" in head, (
+        "and the datum must keep the part that IDENTIFIES the directory — its tail")
+
+    # ⛔ AND WITH A REAL cmux ARM (review of #2401, third round). The ordering change exists so the
+    # process arm — the only one that can poison `measured` — LEADS the cause, and nothing tested it
+    # against a realistic second arm: cell-4's two grammar refusals are ~350 characters on their own,
+    # so the deciding datum is only visible because it comes first.
+    cmux_arm = (
+        "`cmux sessions list --json --all` exited 2: 'usage.invalid: --all needs a "
+        "value' (a failed command's output is not read as a session store); "
+        "`cmux session list --json` exited 3: 'cannot connect to session socket "
+        "/tmp/cmux-tui-1000/cloud.sock: Connection refused (os error 111)' "
+        "(a failed command's output is not read as a session store)"
+    )
+    monkeypatch.setattr(fs, "cmux_session_records", lambda: ([], "", cmux_arm))
+    live = fs.live_sessions()
+    head = live.error[:320]
+    assert live.error.startswith("live-process table: "), (
+        "the deciding arm must lead the sentence")
+    assert "orphan" in head, (
+        "the remedy must still be inside the first-cause cut when a real cmux arm follows it")
+    for pid in long_refused:
+        assert str(pid) in head, f"pid {pid} was pushed out by the cmux arm"
+
+    # ⛔ AND A CONTROL-LADEN PATH (review of #2401, fourth round). The cap is on the RENDERED form
+    # because `repr` expands each non-printable byte four-fold; the plain-path case above cannot see
+    # that, so BOTH regressions (dropping the `[:64]`, or re-capping the raw string) shipped green.
+    # This case is the only one that can fail on them.
+    ctl = {2510200 + i: "/tmp/wt-" + "\x01" * 40 + " (deleted)" for i in range(5)}
+    cwds.refused = ctl
+    monkeypatch.setattr(fs, "pi_processes", lambda: (
+        [{"pid": p, "ppid": 1} for p in ctl], ""))
+    live = fs.live_sessions()
+    ctl_arm = live.error.split("; cmux session store: ")[0]
+    assert len(ctl_arm) <= 320, (
+        f"a control-laden sample must not overrun the bound: {len(ctl_arm)} chars")
+    assert "reap the orphan" in ctl_arm[:320], (
+        "and the remedy must still be inside the window")
+    # ⛔ AND THE CAP KEEPS THE TAIL IT PROMISES (review of #2401, fifth round). The cap used to be
+    # `repr("…" + sample[-40:])[:64]` — a HEAD cut of the RENDERED form — so this fixture kept 61
+    # escape characters and dropped ` (deleted)`, the suffix that says the directory is gone and
+    # the reason this message exists. Only the length was graded, so the loss shipped green.
+    assert " (deleted)" in ctl_arm, (
+        "the rendered sample must keep its TAIL — the suffix is what identifies the "
+        f"directory: {ctl_arm!r}")
+    rendered_sample = ctl_arm.split(" — e.g. ", 1)[1].split(" (a removed directory", 1)[0]
+    assert len(rendered_sample) <= 64, (
+        "and it is still bounded to the rendered 64-char cap, not left unbounded: "
+        f"{len(rendered_sample)} chars")
+
+    # ⛔ AND THE COUNTING CASE: more than five unresolved pids adds `(+N more)`, which has to be
+    # budgeted too (measured 324-326 chars for 8-digit pids before the remedy clause was shortened).
+    many = {2520000 + i: f"/tmp/cell-wt-many{i} (deleted)" for i in range(12)}
+    cwds.refused = many
+    monkeypatch.setattr(fs, "pi_processes", lambda: (
+        [{"pid": p, "ppid": 1} for p in many], ""))
+    live = fs.live_sessions()
+    many_arm = live.error.split("; cmux session store: ")[0]
+    # ⛔ AND THE SAMPLE MUST COME FROM THE NAMED SLICE (review of #2401, fourth round). With the
+    # refusal held only by pids OUTSIDE the five named, an all-pids scan printed `e.g. <path>` for a
+    # pid the message never names — an operator reaping the five would change nothing.
+    sparse = {2530000: "", 2530001: "", 2530002: "", 2530003: "", 2530004: ""}
+    sparse.update({2530005: "/tmp/cell-wt-the-one-that-matters (deleted)",
+                   2530006: "/tmp/cell-wt-also-matters (deleted)"})
+    cwds.refused = {k: v for k, v in sparse.items() if v}
+    monkeypatch.setattr(fs, "pi_processes", lambda: (
+        [{"pid": p, "ppid": 1} for p in sparse], ""))
+    live = fs.live_sessions()
+    sparse_arm = live.error.split("; cmux session store: ")[0]
+    assert "(+2 more)" in sparse_arm, "the omitted count is stated"
+    assert "the-one-that-matters" not in sparse_arm, (
+        "the datum must never belong to a pid the message does not name")
+
+    assert "(+7 more)" in many_arm, "the omitted count is still stated"
+    assert len(many_arm) <= 320, (
+        f"the counting case must fit the bound too: {len(many_arm)} chars")
+    assert "reap the orphan" in many_arm[:320]
+
+    # ⛔ AND THE BOUND THAT ACTUALLY BITES IS THE COMPOSED ONE (review of #9887, third round).
+    # Everything above grades `live.error` against 320, but the harness never records this arm on
+    # its own: `refresh-candidates.sh:2342` writes the CLAIM GATE's reason through `cut -c1-320`,
+    # and that reason wraps this arm in the gate's own prose — so the cause's budget is what is in
+    # front of it, not 320. Asserting `len(live.error) <= 320` therefore proved nothing about the
+    # reader the message was written for.
+    # ⛔ AND IT IS COMPOSED FROM THE PRODUCERS, NOT FROM A COPY OF THEIR PROSE (review of #9887,
+    # fourth round). A literal copy stays green when the gate's wording changes — which is the
+    # one event this arithmetic has to survive — so the note is built by the gate itself:
+    # `_board_can_answer` (a `liveness-unmeasured` orphan carrying this cause) into
+    # `_holder_gate_note`. Both live in `tools/collision_preflight.py` and are called here, not
+    # quoted.
+    claim_gate = _collision_preflight()
+    note = claim_gate._holder_gate_note(claim_gate.HolderRead(
+        measured=False,
+        source="unreadable board",
+        unanswerable=claim_gate._board_can_answer({
+            "reconciliation": {
+                "registry_measured": True,
+                "github_measured": True,
+                "open_issues_truncated": False,
+                "liveness_error": many_arm,
+            },
+            "index": {"issues": {}},
+            "lanes": [],
+            "orphans": [{"kind": "liveness-unmeasured"}],
+        }),
+    ))
+    # Only what is IN FRONT of the cause costs it anything: the gate's trailing
+    # ` (comment prose is not read, #8175)` sits after the 320-char cut and costs zero.
+    offset = note.index(many_arm)
+    recorded = note[:320]
+    assert 320 - offset == 139, (
+        f"the gate puts {offset} chars in front of this cause, so the harness's 320-char "
+        f"cut leaves it {320 - offset} — re-measure the numbers in `live_sessions`' comment "
+        f"(and #9900) against THIS, not against a tally of the gate's whole wrapper")
+    # What IS guaranteed, in the reader that matters: every pid an operator has to reap is
+    # inside the recorded 320 (the last of the five 8-digit pids ends at 259).
+    for pid in sorted(many)[:5]:
+        assert str(pid) in recorded, (
+            f"pid {pid} fell out of the COMPOSED first cause the harness records")
+    # What is NOT — tracked as #9900, and pinned so it cannot pass silently for a guarantee: the
+    # ` (deleted)` suffix (the part that says the directory is GONE) and the remedy are outside
+    # the cut. When #9900 shrinks the gate's prose, THESE flip and must become positive
+    # assertions rather than be deleted.
+    assert " (deleted)" not in recorded, (
+        "the datum's identifying suffix is outside the composed cut today (#9900) — if this "
+        "starts failing, the gate's prose shrank and this assertion should be inverted")
+    assert "orphan" not in recorded, (
+        "the remedy is outside the composed cut today (#9900) — invert, do not delete, once "
+        "the composed budget grows")
 
 
 def test_the_plural_grammar_is_preferred_and_a_later_one_can_answer(monkeypatch) -> None:
@@ -2356,14 +2781,24 @@ def test_the_plural_grammar_is_preferred_and_a_later_one_can_answer(monkeypatch)
     future cmux only has the singular one the reader still reads a SESSION STORE."""
     calls: list[list[str]] = []
 
-    def fake_run(cmd, timeout=60):
-        calls.append(list(cmd))
-        if cmd[1] == "sessions":
-            return ""  # this cmux has no plural resource
-        return json.dumps({"sessions": [
+    class _Answer:
+        returncode = 0
+        stdout = json.dumps({"sessions": [
             {"agent": "pi", "workspace_id": "ws-1", "pid": 1}]})
+        stderr = ""
 
-    monkeypatch.setattr(fs, "_run", fake_run)
+    class _NoGrammar:
+        # The box's REAL shape: the plural resource is refused on stderr, rc 2.
+        returncode = 2
+        stdout = ""
+        stderr = json.dumps(
+            {"code": "usage.invalid", "message": "--all needs a value"})
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        return _NoGrammar() if cmd[1] == "sessions" else _Answer()
+
+    monkeypatch.setattr(fs.subprocess, "run", fake_run)
     recs, source, err = fs.cmux_session_records()
     assert err == "" and source == fs.LIVE_STORE_CMUX_SINGULAR
     assert recs and recs[0]["workspace_id"] == "ws-1"
@@ -2810,3 +3245,79 @@ def test_the_board_reports_which_store_answered(monkeypatch) -> None:
     assert rec["liveness_source"] == fs.LIVE_STORE_PROCESS
     assert rec["liveness_error"] == "no cmux on this box"
     assert rec["liveness_measured"] is True
+
+
+# ── the process census must be able to SEE a lane whose argv[0] is a path ────────
+def test_pi_processes_reads_the_untruncated_command_column(monkeypatch) -> None:
+    """⛔ `ps` TRUNCATES `command=` TO THE OUTPUT WIDTH, AND THE MATCHER READS ITS BASENAME.
+
+    Measured 2026-10-24 while building the EMPTY-CLAIM leg: a fixture lane launched as
+    `/tmp/…/fakebin-empty/pi 120` arrived as `/tmp/…/fakebin-empt` (80 columns), so
+    `_pi_pids_from_ps` matched no basename `pi` and the census answered "no pi process"
+    about a process that was running. That is the fail-open direction for everything built
+    on the answer — `StaleHolder._owner` reads exactly it to decide whether a worktree has a
+    live owner. Without `-ww` this test fails; the assertion is on the ARGV the reader
+    sends, so it cannot pass by accident on a box whose `ps` happens not to truncate.
+    """
+    seen: list[list[str]] = []
+
+    def _fake_run(cmd, timeout=60):
+        seen.append(list(cmd))
+        # A row shaped exactly as the truncated `ps` produces it: the basename gone.
+        return f"  4242   1   {os.getuid()} /tmp/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/fakebin-empt\n"
+
+    monkeypatch.setattr(fs, "_run", _fake_run)
+    procs, err = fs.pi_processes()
+    assert err == ""
+    assert procs == [], "a truncated command is not a pi row — it must not be guessed at"
+    argv = seen[0]
+    assert "-ww" in argv, f"the census must not let `ps` truncate the command column: {argv}"
+    assert argv[:2] == ["ps", "-ww"]
+
+
+def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
+    """End-to-end MATCHER coverage: a real process named `pi` under a long path is found.
+
+    ⛔ AND IT PINS THE TRUNCATION FIX, which the first version of this test did not (review,
+    2026-10-24). The truncation is driven by the OUTPUT WIDTH — `COLUMNS` when the
+    environment carries one, the terminal width otherwise — so a box with a wide terminal
+    shows nothing and a green here proved nothing about `-ww`. This test SETS
+    `COLUMNS=80` (measured: every `ps` row cut to exactly 80 characters, 1966 uncapped),
+    which reproduces the hazard deterministically: the fixture lane's argv[0] is ~59
+    characters, so without `-ww` the `command=` column is cut before its basename and the
+    census cannot see a live lane. Verified red with the flag removed.
+
+    A copy of a real binary (never a `#!` script — the kernel rewrites argv[0] to the
+    interpreter, which `_pi_pids_from_ps` documents). SKIPS where `sleep` is unavailable
+    or the process table cannot be read at all (reported as an error by the reader), so a
+    box without those does not red a census that is fine.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    sleep_bin = shutil.which("sleep") or "/bin/sleep"
+    if not os.path.exists(sleep_bin):
+        pytest.skip(f"no `sleep` binary at {sleep_bin} for the fixture lane")
+    long_dir = Path(tempfile.mkdtemp(prefix="pi-census-" + "x" * 40))
+    # ⛔ The narrow width is the FIXTURE, not the environment: without this the test
+    # measures whatever terminal the suite happens to run under.
+    monkeypatch.setenv("COLUMNS", "80")
+    try:
+        pi = long_dir / "pi"
+        shutil.copy(sleep_bin, pi)
+        proc = subprocess.Popen([str(pi), "60"],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            procs, err = fs.pi_processes()
+            if err:
+                pytest.skip(f"the process table is unreadable here: {err}")
+            pids = [p["pid"] for p in procs]
+            assert proc.pid in pids, (
+                f"a lane whose argv[0] is {str(pi)!r} was invisible to the census "
+                f"(pids seen: {pids})")
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+    finally:
+        shutil.rmtree(long_dir, ignore_errors=True)

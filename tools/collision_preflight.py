@@ -112,9 +112,19 @@ Surfaces (8 rows, ALL hit-capable)
   · ADVISORY ·              /repos/<owner>/<repo>/pulls   body closing
                                                          reference)
                                                          (#5251)
-  local branches            git for-each-ref refs/heads
+  local branches            git for-each-ref refs/heads   (a 0-ahead branch
+                                                           with no live owner,
+                                                           no uncommitted work and
+                                                           no live claim ref is
+                                                           ADVISORY — EMPTY CLAIM,
+                                                           #6108; an unreadable
+                                                           reading BLOCKS)
   remote branches           git for-each-ref refs/remotes   (all remotes)
-  local worktrees           git worktree list --porcelain   (UNTRUNCATED)
+  local worktrees           git worktree list --porcelain   (UNTRUNCATED; the
+                                                           same EMPTY-CLAIM leg
+                                                           applies to a record
+                                                           whose branch is 0
+                                                           ahead, #6108)
   issue assignee/holder     gh issue view N (assignee) +  (a lane MECHANICALLY
                             the FLEET BOARD's lane->issue  attributed to #N whose
                             attribution + holder liveness  holder has NOT stopped;
@@ -1153,6 +1163,14 @@ def _strip_control_sequences(text: str | None) -> str:
     """Remove whole ANSI escape sequences (payload included) plus any
     remaining control character, for MATCHING. Display uses `_sanitize`."""
     return _CONTROL_RE.sub("", _ESCAPE_RE.sub("", text or ""))
+
+
+def _is_within(path: str, root: str) -> bool:
+    """Is `path` the same as `root`, or inside it? (both already realpath'd.)"""
+    if not path or not root:
+        return False
+    root = root.rstrip(os.sep)
+    return path == root or path.startswith(root + os.sep)
 
 
 def _one_line(text: str, limit: int = 200) -> str:
@@ -2467,6 +2485,803 @@ def _tip_is_ancestor_of(
     return str(payload.get("status") or "").strip().lower() in ("ahead", "identical")
 
 
+# ── STALE HOLDERS: a branch that was never asked whether it is still held ────
+#
+# THE MEASURED DEFECT (tortoise#9806, measured 2026-10-24). On the owner's Mac, with a
+# reloaded controller running `SCOPE=auto`, TWENTY-FOUR candidates in a row answered
+# `collision — a peer owns it, retried next pass` and the backlog stayed at 0. The holders
+# `who_is_on` named were not claims at all: they were BRANCHES whose names carry the issue
+# number, one commit ahead of a main that had moved on by 3732, whose last commit was 54.8
+# days old, with no live process, no uncommitted work and no claim ref behind them. A
+# branch whose number matches was read as a live claim the moment it was created, and
+# NOTHING ever asked again — the gate revalidated a past state forever.
+#
+# WHAT THIS IS NOT. It is NOT the demotion #6108 proposed and refused. #6108 wanted
+# `ahead == 0` to stop blocking; that was refused because a fresh branch between
+# `git worktree add` and its first commit is EXACTLY 0 ahead. This rule never looks at
+# `ahead`: it asks whether the HOLDER EVIDENCE ITSELF has gone stale, in four independent
+# dimensions at once. A brand-new empty branch fails the `behind` test by construction (it
+# sits at main's tip), so the window #6108 protects is untouched by THIS rule.
+#
+# ⚠️ AND #6108 HAS SINCE BEEN REOPENED AND GRANTED, NARROWLY (2026-10-24). `judge_empty`
+# below demotes a LOCAL branch that is 0 commits ahead **and** has no live worktree owner,
+# no uncommitted work and no live claim ref — the measured block was a P0 (#9567) and an
+# open P1 (#9097) frozen forever by an empty ref. The `worktree add` window the refusal
+# was about stays BLOCKING under that leg **while the lane's process is alive**: a live
+# `pi` standing in the checkout IS an owner. ⚠️ And for PREPARE-THEN-DISPATCH — a
+# controller that creates the checkout before the lane's process starts — the protection
+# is the CLAIM REF (`refs/claims/issue-<N>`), never the checkout's existence: a clean,
+# registered, unclaimed checkout with no process in it is indistinguishable from an
+# abandoned one by every signal this gate can read, and the `OVERRIDES:` decision below
+# demotes it. `judge_empty`'s STATED RESIDUALS say so; read them before relying on a
+# worktree to hold an issue.
+#
+#     OVERRIDES: #6108's recorded trade-off — "the count is REPORTED, not acted on …
+#     every 0-ahead branch must keep blocking" — a 0-ahead branch that is BOTH far behind
+#     main AND silent for a week AND unowned AND unclaimed is now ADVISORY. #6108's
+#     reasoning ("the over-block is the accepted price of never reading a lane that has
+#     CLAIMED an issue as free") is preserved in the dimension it is actually about: the
+#     CLAIM. A lane that has claimed the work still blocks, through all four tests.
+#
+# THE FOUR TESTS, all required (any one failing leaves the ref BLOCKING — fail-closed):
+#
+#   1. DIVERGENCE — the tip is at least `STALE_BEHIND_MIN` commits behind
+#      `origin/main`. MEASURED, not guessed (this repo, 2026-10-24: 1767 local+remote
+#      refs, 1507 of them naming a number): behind p10 = 141, p25 = 386, median = 2113.
+#      The four blocked issues sit at 457, 777, 777, 783, 3732.
+#   2. SILENCE — no commit on the tip newer than `STALE_TIP_DAYS` days. MEASURED against
+#      the population that is demonstrably LIVE: every branch checked out in a worktree on
+#      this box (94 worktrees) has a tip at most 5.7 days old and is at most 356 behind.
+#      The four blocked issues: 8.6, 12.2, 12.4 and 54.8 days. `STALE_TIP_DAYS = 7.0` is
+#      the only integer day that sits above the live population's maximum and below the
+#      smallest blocked case; it is deliberately NOT higher, because #2446's tip is 8.6
+#      days old and a threshold of 10 would leave it blocking.
+#   3. NO LIVE WORKTREE OWNER — no live `pi` process whose cwd is inside a worktree
+#      checked out on this ref, AND no uncommitted work in any such worktree.
+#      ⛔ THE PROCESS-CWD CHECK IS THE DISCRIMINATOR, NOT AGE: a worktree is not stale
+#      because it is old (a long test run is a live owner and its `pi` parent holds the
+#      cwd). Age enters NEITHER this test nor the worktree surface — it appears only in
+#      test 2, on the BRANCH, which is what the abandoned branch actually leaves behind.
+#   4. NO LIVE CLAIM REF — `refs/claims/issue-<N>` on the target's origin: absent, or
+#      present with an EXPIRED lease. This is the one test that costs network I/O, so it
+#      runs LAST and only for a ref that already passed 1-3. Its polarity is
+#      `claims.sh:_lease_is_live`'s, copied deliberately: an absent / unparseable lease
+#      is LIVE, an unreadable registry is LIVE, and an ORPHANED claim is LIVE here (the
+#      reaper owns orphan release; treating it as free would be a second, unreviewed
+#      copy of that policy). Every one of those choices can only keep a ref BLOCKING.
+#
+# A ref that passes all four is ADVISORY — reported in full, with the basis, at `weak`
+# strength, which cannot contribute to the verdict. It is NEVER silently dropped: a
+# reader must be able to see the stale holder, because the cleanup (deleting the branch)
+# is a separate, evidence-based action and this gate does not perform it.
+#
+# ⛔ NOT `tools/branch_reaper.py`'S QUESTION. That tool asks "may this branch be DELETED?"
+# from GitHub PR state and answers with a delete; this asks "is this ref still EVIDENCE of
+# in-flight work?" from owner evidence and answers with an advisory row. Merging the two
+# would let a dispatch gate delete a branch — never.
+STALE_BEHIND_MIN = 300
+STALE_TIP_DAYS = 7.0
+# The claim namespace `claims.sh` writes issue claims into (`claim_issue_ref`). Mirrored,
+# not imported: agent-infra is a separate checkout this tool may not have.
+CLAIM_NS = "refs/claims"
+CLAIM_TMP_NS = "refs/claims-tmp"
+
+
+def _ref_tip_age_days(git_bin: str, repo: str, ref: str, timeout: float,
+                      now: float | None = None) -> float | None:
+    """Age in days of `ref`'s tip COMMIT, or None when it cannot be read.
+
+    The COMMITTER date, from the commit object itself — never a file mtime and never the
+    ref's own reflog: an mtime is when this checkout last touched the ref, which on a
+    fetch cache is "just now" for a commit that is a month old.
+
+    None means NOT MEASURED, and a caller must keep the ref BLOCKING on it. `--format=%ct`
+    always prints, so an empty or unparseable answer is a read failure, not an age of 0.
+    """
+    rc, out, _err, _timed_out = _run(
+        [git_bin, "log", "-1", "--format=%ct", ref], repo, timeout,
+    )
+    if rc != 0:
+        return None
+    try:
+        committed = int(out.strip())
+    except ValueError:
+        return None
+    age = ((time.time() if now is None else now) - committed) / 86400.0
+    return max(0.0, age)
+
+
+def _local_worktrees_for(ref: str, sha: str | None,
+                        blocks: list[dict] | None) -> list[dict]:
+    """The worktree records a `ref` could be held through.
+
+    TWO keys, because a worktree records one and the branch may be spelled another:
+
+      * `branch` — the same bare name (`refs/heads/x` for a local ref, and the LOCAL twin
+        `refs/heads/x` for `refs/remotes/<remote>/x`). A lane checks out the local branch;
+        `who_is_on` reports whichever ref carries the number, so matching on the bare name
+        is what keeps one abandoned claim from being judged twice with two answers;
+      * `head` — the tip SHA. A DETACHED worktree records `(detached)` and no branch, and
+        a lane testing a pushed head is exactly that shape.
+
+    ⛔ `(detached)` IS NEVER MATCHED BY NAME. Treating it as a name would make every
+    detached worktree "the same holder" as every ref under judgement, so uncommitted work
+    in one unrelated checkout would keep an abandoned branch blocking forever — the
+    over-block this rule exists to remove, reintroduced through the back door.
+
+    `None` for `blocks` means the listing could not be read, and the caller must treat that
+    as "cannot prove", never as "no worktrees".
+    """
+    if blocks is None:
+        return []
+    bare = _short_branch(ref) if ref and ref != "(detached)" else ""
+    out = []
+    for block in blocks:
+        branch = block.get("branch") or ""
+        if bare and branch and branch != "(detached)" and _short_branch(branch) == bare:
+            out.append(block)
+            continue
+        if sha and block.get("head") == sha:
+            out.append(block)
+    return out
+
+
+class StaleHolder:
+    """Is a number-named ref still EVIDENCE of in-flight work? (see the block above)
+
+    One instance per pre-flight run: the process census, the worktree-dirt reads and the
+    claim read are all cached here, so the four tests are paid at most once each no matter
+    how many refs name the issue.
+
+    ⛔ EVERY FAILURE TO MEASURE LEAVES THE REF BLOCKING. There is no arm of `judge` that
+    turns "I could not read it" into an advisory row: the unmeasured cases are the ones
+    that used to be false CLEANs in this module's history, and this gate's whole polarity
+    is that an unread surface is not a free one.
+    """
+
+    def __init__(self, git_bin: str, repo: str, issue: int, timeout: float,
+                 worktrees: list[dict] | None, now: float | None = None) -> None:
+        self.git_bin = git_bin
+        self.repo = repo
+        self.issue = issue
+        self.timeout = timeout
+        self.worktrees = worktrees
+        self.now = time.time() if now is None else now
+        self._census: tuple[list[str], str] | None = None
+        #: Live `pi` pids whose cwd the census could NOT resolve. `fleet_state.process_cwds`
+        #: deliberately SKIPS a pid whose cwd is unreadable (hidepid, a removed directory, an
+        #: `lsof` placeholder) and reports no error, because an exited pid is not a gap. For
+        #: the STALE leg that is harmless (it asks "is a lane standing HERE" and a per-pid
+        #: judgement follows); for the EMPTY leg it is the fail-open direction, so a LIVE
+        #: unresolved pid makes the empty test UNREADABLE instead of "nobody there".
+        self._census_gaps: list[int] = []
+        self._claim: tuple[bool, str, bool] | None = None
+        self.demoted = 0
+        self.judged = 0
+        #: The EMPTY-claim leg's own counters (`judge_empty`), kept SEPARATE from the
+        #: stale leg's so a surface note can report which rule did the work.
+        self.empty_demoted = 0
+        self.empty_judged = 0
+        self.empty_kept: list[str] = []
+        self.empty_unmeasured: list[str] = []
+        #: Why a CANDIDATE (a ref that already passed the divergence and silence tests)
+        #: was still kept blocking. Those are the interesting refusals — an owner or a
+        #: claim — and the surface note prints them, so a reader who expected a demotion
+        #: can see which of the two remaining tests caught it (#6108's auditability).
+        self.kept: list[str] = []
+        #: Why a candidate could not be MEASURED at all (`counts`/tip date unreadable).
+        #: Separated from `kept` because the two say different things: one is the rule
+        #: holding, the other is the gate refusing to decide — and a reader must be able to
+        #: tell "a live owner is there" from "we could not look".
+        self.unmeasured: list[str] = []
+        #: (live, basis, UNREADABLE). ⛔ THE THIRD ELEMENT IS NOT DERIVED FROM THE BASIS
+        #: TEXT: a refusal that says "I could not look" must read differently from one
+        #: that says "I looked and a lane is there", and matching on prose to tell them
+        #: apart is how that distinction silently stops working (the owner reader below
+        #: PREFIXES the basis with the checkout's path, so an equality test on the bare
+        #: text never matched — measured in review, 2026-10-24). It is returned by the
+        #: read that knows.
+        self._owners: dict[str, tuple[bool, str, bool]] = {}
+
+    # ── test 3a: a live process standing in a worktree ───────────────────────
+
+    def _process_cwds(self) -> tuple[list[str], str]:
+        """(every cwd this user's live `pi` processes stand in, error).
+
+        `pi` is the fleet's sanctioned lane process (`nohup pi …`, a cmux pane's
+        `exec pi`, a `task` child), and its cwd is what attributes it to a worktree — so
+        this is the same instrument `fleet_state.live_sessions` uses for the claim gate,
+        reused rather than re-derived. Both readers are `fleet_state`'s: `/proc` where the
+        kernel exposes it (the cells) and one batched `lsof` on macOS, which is the box
+        this rule exists for.
+
+        ⛔ A CENSUS THAT CANNOT ANSWER IS AN ERROR, NOT AN EMPTY LIST. `ps` printing
+        nothing, or a store that answered while a cwd could not be resolved, makes the
+        worktree UNMEASURED — and an unmeasured worktree is never demoted.
+
+        STATED RESIDUAL: a lane's process is a `pi`; a NON-`pi` process standing in a
+        worktree with no `pi` parent (an orphaned test run whose lane has exited) is not
+        seen here. Its work is still protected by test 3b (an uncommitted tree is not
+        demoted), and the demoted row prints its basis so a reader can see what was
+        measured.
+        """
+        if self._census is not None:
+            return self._census
+        procs, perr = fleet_state.pi_processes()
+        if perr:
+            self._census = ([], perr)
+            return self._census
+        pids = [int(p["pid"]) for p in procs if p.get("pid")]
+        cwds, cerr = fleet_state.process_cwds(pids)
+        if cerr:
+            self._census = ([], cerr)
+            return self._census
+        # ⛔ AN UNRESOLVED CWD IS NOT "NO LANE THERE". `process_cwds` skips a pid whose cwd
+        # cannot be resolved WITHOUT reporting an error (its docstring: "an unread
+        # /proc/<pid>/cwd is skipped"; the per-pid judgement is `live_sessions`' job).
+        # Taken as a complete census that reads "no live pi process" about a live lane the
+        # reader simply could not see — verified in review with `/proc/<pid>/cwd` at
+        # PermissionError. So the gap is named here, and `_census_complete` refuses to
+        # answer from it. Only LIVE gaps count: a pid that exited between the two reads is
+        # not a lane (the same distinction `_usable_cwd` documents).
+        self._census_gaps = [
+            pid for pid in pids if pid not in cwds and fleet_state.pid_alive(pid)
+        ]
+        self._census = (sorted(set(cwds.values())), "")
+        return self._census
+
+    def _census_complete(self) -> str:
+        """`""` when the census can answer "is a lane standing in X" for EVERY live pi.
+
+        A gap is a live process whose cwd this user cannot read: its lane cannot be
+        attributed to a checkout, so "nobody holds this" is not a measurement it can
+        support. Returned as a reason rather than a bool so the refusal prints WHAT was
+        unreadable (#1185's rule: an unreadable verdict must never read as free).
+        """
+        _cwds, err = self._process_cwds()
+        if err:
+            return f"the process census could not be read ({err})"
+        if self._census_gaps:
+            return (f"the process census could not resolve the cwd of {len(self._census_gaps)} "
+                    f"live `pi` process(es) (pid {', '.join(str(p) for p in self._census_gaps[:4])})"
+                    + (" …" if len(self._census_gaps) > 4 else ""))
+        return ""
+
+    def _owner(self, path: str) -> tuple[bool, str, bool]:
+        """(does a live owner hold this worktree?, basis, was the read UNREADABLE?)."""
+        if path in self._owners:
+            return self._owners[path]
+        cwds, err = self._process_cwds()
+        if err:
+            basis = (f"the process census could not be read ({err}) — a live owner "
+                     "cannot be ruled out (NOT demoted)")
+            self._owners[path] = (True, basis, True)
+            return self._owners[path]
+        real = os.path.realpath(path)
+        prefix = real.rstrip(os.sep) + os.sep
+        for cwd in cwds:
+            if cwd == real or cwd.startswith(prefix):
+                self._owners[path] = (True, f"live pi process standing in it ({cwd})", False)
+                return self._owners[path]
+        # ⛔ A DIRECTORY THAT IS NOT THERE CANNOT BE `git status`-ED, and `_run` reports
+        # that spawn failure as "<git>: command not found" — a reason that blames the
+        # wrong thing. `os.path.isdir` is False for EACCES/ESTALE as well as for a missing
+        # path, and every one of those FAILS CLOSED here: an unreadable tree cannot be
+        # read as clean, and a MOVED worktree is LIVE (its `.git` holds an absolute
+        # `gitdir:`), so absence is never evidence of death. Stated, not assumed.
+        if not path or not os.path.isdir(path):
+            basis = ("its registered worktree directory is not on disk or not readable, so "
+                     "uncommitted work cannot be ruled out — NOT demoted (a MOVED worktree "
+                     "keeps working from its new path)")
+            self._owners[path] = (True, basis, True)
+            return self._owners[path]
+        rc, out, errout, timed_out = _run(
+            [self.git_bin, "status", "--porcelain"], path, self.timeout,
+        )
+        if rc != 0:
+            why = "timeout" if timed_out else f"exit {rc}"
+            basis = (f"`git status` in the worktree failed ({why}: "
+                     f"{_one_line(errout)}) — uncommitted work cannot be ruled out "
+                     "(NOT demoted)")
+            self._owners[path] = (True, basis, True)
+            return self._owners[path]
+        if out.strip():
+            self._owners[path] = (True, "the worktree has uncommitted work", False)
+            return self._owners[path]
+        self._owners[path] = (False, "no live pi process in the worktree and no "
+                                     "uncommitted work in it", False)
+        return self._owners[path]
+
+    def _live_worktree_owner(
+        self, ref: str, sha: str | None,
+    ) -> tuple[bool, str, bool]:
+        """(held by a live worktree?, basis, UNREADABLE?) — ONE answer for all its records."""
+        if self.worktrees is None:
+            basis = ("the worktree list could not be read, so a live owner cannot "
+                     "be ruled out (NOT demoted)")
+            return True, basis, True
+        records = _local_worktrees_for(ref, sha, self.worktrees)
+        for block in records:
+            live, basis, unreadable = self._owner(block.get("path") or "")
+            if live:
+                return True, f"{block.get('path')}: {basis}", unreadable
+        if not records:
+            return False, "no worktree is checked out on it", False
+        return False, "; ".join(
+            f"{block.get('path')}: no live pi process and no uncommitted work"
+            for block in records
+        ), False
+
+    def _name_matched_owner(self, ref: str) -> tuple[bool, str, bool]:
+        """(is `ref` held by a worktree CHECKED OUT ON IT?, basis) — NAME MATCH ONLY.
+
+        ⛔ DELIBERATELY NOT `_live_worktree_owner`, and the difference is PRECISION, not
+        style. That reader also matches a record by its HEAD SHA, because a lane testing a
+        pushed head is a detached checkout of the same commit. For a 0-ahead branch the tip
+        SHA is a commit main already has, so the SHA key would hand this judgement to
+        whatever OTHER checkout happens to sit on that commit — on a hub checkout, `main`'s
+        own worktree. Uncommitted work there is not work on this branch, and blocking an
+        empty claim on it would be the same "irrelevant dirt holds an arbitrary issue
+        forever" defect `_local_worktrees_for` refuses for `(detached)`.
+        """
+        if self.worktrees is None:
+            basis = ("the worktree list could not be read, so a live owner cannot "
+                     "be ruled out (NOT demoted)")
+            return True, basis, True
+        bare = _short_branch(ref)
+        records = [
+            block for block in self.worktrees
+            if (block.get("branch") or "")
+            and block["branch"] != "(detached)"
+            and bare
+            and _short_branch(block["branch"]) == bare
+        ]
+        for block in records:
+            live, basis, unreadable = self._owner(block.get("path") or "")
+            if live:
+                return True, f"{block.get('path')}: {basis}", unreadable
+        if not records:
+            return False, "no worktree is checked out on it", False
+        return False, "; ".join(
+            f"{block.get('path')}: no live pi process and no uncommitted work"
+            for block in records
+        ), False
+
+    def _unregistered_checkout_owner(
+        self, ref: str, base: str,
+    ) -> tuple[bool, str, bool]:
+        """(does a live `pi` stand in a checkout of `ref` git does NOT register?, basis, UNREADABLE?).
+
+        ⛔ THE HOLE THIS CLOSES (reproduced in review, 2026-10-24). `_name_matched_owner`
+        asks the worktree LIST, and the list is not the world: a lane whose checkout was
+        MOVED and whose stale registration was then PRUNED (`git worktree prune`, which is
+        this module's own advice for a dead record) has NO record at all. The list then
+        answers "no worktree is checked out on it" while a live `pi` stands in the moved
+        tree writing this very branch — and the ref is demoted. Measured: `mv <wt>
+        moved-away` + prune + a live `pi` in the moved tree -> `VERDICT: CLEAN (exit 0)`.
+
+        So the census is asked the COMPLEMENT question: for every live `pi` cwd that is
+        inside NO registered checkout, does that cwd BELONG TO THIS REPOSITORY?
+
+          * its `--git-common-dir` IS ours -> an unregistered checkout of ours (a worktree
+            whose registration was removed). Ask git which branch it holds: `ref`
+            (a claim — BLOCKS), another branch (not this ref), or a HEAD it cannot name
+            (BLOCKS — it cannot be ruled out);
+          * the common dir cannot be read AND its `.git` pointer names a path under OUR git
+            dir -> OURS and BROKEN, which is exactly what `worktree prune` leaves behind
+            when the tree was moved: BLOCKS, reported `UNREADABLE`;
+          * anything else (a `pi` run from `$HOME`, another repository's checkout, a clone)
+            -> not a claim on this repository's refs at all. ⛔ A SEPARATE CLONE HAS ITS OWN
+            BRANCHES: treating a foreign checkout on a same-named branch as a holder would
+            block every issue in every repo on a box where some other repo happens to carry
+            the same branch name — the over-block that gets a gate switched off.
+
+        `base` is `_name_matched_owner`'s answer, carried into the basis so the printed row
+        still says what the list said.
+        """
+        why = self._census_complete()
+        if why:
+            basis = (f"{base}; and {why}, so a live owner of an UNREGISTERED checkout "
+                     "cannot be ruled out — NOT demoted")
+            return True, basis, True
+        cwds, _err = self._process_cwds()
+        registered = [
+            os.path.realpath(block["path"]) for block in (self.worktrees or [])
+            if block.get("path")
+        ]
+        ours = self._git_common_dir(self.repo)
+        if ours is None:
+            basis = (f"{base}; and this checkout's own git directory could not be "
+                     "identified, so an UNREGISTERED checkout cannot be ruled out "
+                     "— NOT demoted")
+            return True, basis, True
+        bare = _short_branch(ref)
+        for cwd in cwds:
+            real = os.path.realpath(cwd)
+            if any(
+                real == root or real.startswith(root.rstrip(os.sep) + os.sep)
+                for root in registered
+            ):
+                continue
+            theirs = self._git_common_dir(cwd)
+            if theirs is None:
+                # ⛔ NOT AN ERROR BY ITSELF: the cwd may simply not be a checkout this
+                # process can attribute. Only a `.git` POINTER INTO OUR OWN GIT DIR makes
+                # it ours — that is the fingerprint of a linked worktree whose admin dir
+                # was pruned after the tree moved.
+                pointer = self._worktree_gitdir_of(cwd)
+                if pointer and _is_within(pointer, ours):
+                    basis = (f"{base}; and a live pi process stands in {cwd}, whose `.git` "
+                             f"names {pointer} — an UNREGISTERED checkout of THIS repository "
+                             "(moved, or pruned) whose HEAD cannot be named — NOT demoted")
+                    return True, basis, True
+                continue
+            if os.path.realpath(theirs) != os.path.realpath(ours):
+                # Another repository. Its branches are not this repository's refs.
+                continue
+            rc2, name, _err2, _to2 = _run(
+                [self.git_bin, "-C", cwd, "symbolic-ref", "--quiet", "--short", "HEAD"],
+                self.repo, self.timeout,
+            )
+            if rc2 != 0:
+                basis = (f"{base}; and a live pi process stands in the unregistered checkout "
+                         f"{cwd} of this repository, whose HEAD cannot be named (detached or "
+                         "unreadable) — NOT demoted")
+                return True, basis, True
+            if _short_branch(name.strip()) == bare:
+                return True, (
+                    f"a live pi process stands in the UNREGISTERED checkout {cwd}, "
+                    f"which is on {ref} (its worktree record is gone — moved, or pruned)"
+                ), False
+        return False, (
+            f"{base}; no live pi process stands in an unregistered checkout of it"
+        ), False
+
+    def _git_common_dir(self, where: str) -> str | None:
+        """The ABSOLUTE git-common-dir of the checkout at `where`, or None.
+
+        `rev-parse --git-common-dir` prints a path RELATIVE to the cwd for a main checkout
+        (".git") and an absolute one for a linked worktree, so it is resolved here rather
+        than trusted. `None` means "could not be read" — the caller decides what that
+        means, because for the EMPTY leg it is evidence only when the `.git` pointer names
+        our own git dir (`_unregistered_checkout_owner`).
+        """
+        rc, out, _err, _to = _run(
+            [self.git_bin, "-C", where, "rev-parse", "--git-common-dir"],
+            self.repo, self.timeout,
+        )
+        if rc != 0 or not out.strip():
+            return None
+        got = out.strip()
+        if not os.path.isabs(got):
+            got = os.path.join(where, got)
+        return os.path.realpath(got)
+
+    @staticmethod
+    def _worktree_gitdir_of(cwd: str) -> str:
+        """What `<cwd>/.git` POINTS AT when it is a linked worktree's pointer file, else `""`.
+
+        A linked worktree's `.git` is a FILE holding `gitdir: <path>`; a main checkout's is
+        a DIRECTORY. Only the pointer is read, and only to answer "is this checkout ours?".
+        """
+        marker = os.path.join(cwd, ".git")
+        try:
+            if not os.path.isfile(marker):
+                return ""
+            with open(marker, encoding="utf-8", errors="replace") as handle:
+                first = handle.readline().strip()
+        except OSError:
+            return ""
+        if not first.startswith("gitdir:"):
+            return ""
+        target = first.split(":", 1)[1].strip()
+        if not target:
+            return ""
+        if not os.path.isabs(target):
+            target = os.path.join(cwd, target)
+        return os.path.realpath(target)
+
+    # ── test 4: the issue claim ──────────────────────────────────────────────
+
+    def _claim_live(self) -> tuple[bool, str, bool]:
+        """(is a LIVE `refs/claims/issue-<N>` held?, basis).
+
+        The read is `claims.sh:claim_issue_preflight`'s, in the same order, for the same
+        reason: `git ls-remote <ref>` exits 0 with EMPTY output when the ref does not
+        exist and NON-ZERO only when the remote could not be consulted, so collapsing the
+        two would read an outage as "nobody holds it". The lease is DATA (the claim
+        commit's own message) and a claim is `--force-with-lease`-fenced on the ref's
+        SHA, so a temp ref is fetched to read the message and deleted immediately.
+
+        ⛔ THE POLARITY IS COPIED FROM THE ONE FUNCTION THAT OWNS IT (`_lease_is_live`,
+        claims.sh): absent, `0`, non-numeric and oversized leases are all LIVE. An
+        unreadable registry, an unreadable fetch and an unreadable local clock are LIVE
+        too. Every one of those only ever REFUSES a demotion.
+
+        ⛔ ONLY `issue-<N>` IS AN ISSUE CLAIM. `refs/claims/<PR>-<sha12>` and
+        `refs/claims/pr-<N>` are the PR keys and the issue/PR number spaces are disjoint;
+        reading one as an issue claim would block issue N on a review lane for PR N.
+        """
+        if self._claim is not None:
+            return self._claim
+        ref = f"{CLAIM_NS}/issue-{self.issue}"
+        rc, out, err, timed_out = _run(
+            [self.git_bin, "ls-remote", "origin", ref], self.repo, self.timeout,
+        )
+        if rc != 0:
+            why = "timeout" if timed_out else f"exit {rc}"
+            basis = (f"the claim registry could not be read ({ref}: "
+                     f"`git ls-remote` {why}: {_one_line(err)}) — NOT demoted")
+            self._claim = (True, basis, True)
+            return self._claim
+        sha = out.split()[0] if out.split() else ""
+        if not sha:
+            self._claim = (False, f"no `{ref}` on origin", False)
+            return self._claim
+        tmp = f"{CLAIM_TMP_NS}/preflight-{os.getpid()}-{int(self.now)}"
+        try:
+            frc, _fout, ferr, _fto = _run(
+                [self.git_bin, "fetch", "-q", "origin", f"+{ref}:{tmp}"],
+                self.repo, self.timeout,
+            )
+            if frc != 0:
+                basis = (f"`{ref}` exists but its lease could not be read "
+                         f"({_one_line(ferr)}) — treated as LIVE, NOT demoted")
+                self._claim = (True, basis, True)
+                return self._claim
+            return self._lease_from_ref(ref, tmp, sha)
+        finally:
+            _run([self.git_bin, "update-ref", "-d", tmp], self.repo, self.timeout)
+
+    def _lease_from_ref(self, ref: str, tmp: str, sha: str) -> tuple[bool, str, bool]:
+        rc, out, _err, _to = _run(
+            [self.git_bin, "cat-file", "commit", tmp], self.repo, self.timeout,
+        )
+        if rc != 0:
+            self._claim = (True, (f"`{ref}` exists but its commit could not be read — "
+                                 "treated as LIVE, NOT demoted"), True)
+            return self._claim
+        lease = ""
+        for line in out.splitlines():
+            for token in line.split():
+                if token.startswith("lease_until="):
+                    lease = token.split("=", 1)[1]
+        # claims.sh:_lease_unparseable — an absent value, the `0` sentinel, any
+        # non-digit (a negative collapses to `0`) and a 19+-digit value (the `[`
+        # 18-digit bound exists so a full-width lease cannot wrap) are all "a claim
+        # EXISTS whose lease this reader cannot parse" — i.e. LIVE, never free.
+        if not lease or not lease.isdigit() or len(lease) > 18 or lease == "0":
+            self._claim = (True, (f"`{ref}` is held with a lease this reader cannot "
+                                 f"parse (lease_until={lease or 'absent'}) — treated as "
+                                 "LIVE, NOT demoted"), True)
+            return self._claim
+        until = int(lease)
+        if until > int(self.now):
+            self._claim = (True, (f"`{ref}` is a LIVE claim (lease {until - int(self.now)}s "
+                                 "left) — NOT demoted"), False)
+            return self._claim
+        self._claim = (False, (f"the only `{ref}` (sha {sha[:9]}) EXPIRED at {until}, "
+                              f"{(int(self.now) - until) // 3600}h ago"), False)
+        return self._claim
+
+    # ── the four tests ───────────────────────────────────────────────────────
+
+    def note_since(self, judged0: int, demoted0: int, kept0: int,
+                   unmeasured0: int = 0) -> str:
+        """The surface note for ONE surface's share of the judgement.
+
+        Scoped by the caller's counters so a row reports only what IT measured: the
+        worktree row must not claim the branch row's refusals (a note that attributes one
+        surface's measurement to another is the defect `truncation_widenable` and
+        `registry_error` exist to prevent on their own surfaces).
+        """
+        judged = self.judged - judged0
+        if not judged:
+            return ""
+        note = (
+            f"; {judged} stale-holder candidate(s) judged, "
+            f"{self.demoted - demoted0} demoted to ADVISORY (behind >= "
+            f"{STALE_BEHIND_MIN}, tip silent >= {STALE_TIP_DAYS:g}d, no live worktree "
+            "owner, no live claim ref — reported, non-blocking)"
+        )
+        unmeasured = self.unmeasured[unmeasured0:]
+        if unmeasured:
+            note += ("; NOT demoted on an unreadable measurement: "
+                     + " | ".join(dict.fromkeys(unmeasured)))
+        kept = self.kept[kept0:]
+        if kept:
+            # ⛔ A REFUSAL IS NAMED, NOT COUNTED. The four tests ARE the rule, so a reader
+            # who expected a demotion must be able to see WHICH one held — the same
+            # argument #6108 makes for printing the ahead-count.
+            note += ("; kept blocking by a live owner or claim: "
+                     + " | ".join(dict.fromkeys(kept)))
+        return note
+
+    def judge(self, ref: str, sha: str | None,
+              counts: tuple[int, int] | None,
+              tip_age_days: float | None) -> tuple[bool, str]:
+        """(provably abandoned?, basis naming what was measured).
+
+        A "no" carries the FIRST failing dimension, so the report can say why a ref the
+        operator expected to be stale is still blocking — the auditable half of #6108.
+        """
+        self.judged += 1
+        if counts is None:
+            basis = "its distance from origin/main could not be measured"
+            self.unmeasured.append(basis)
+            return False, basis
+        ahead, behind = counts
+        if behind < STALE_BEHIND_MIN:
+            return False, (f"only {behind} behind origin/main (< {STALE_BEHIND_MIN}) "
+                           "— a recent base is a live claim")
+        if tip_age_days is None:
+            basis = "its tip commit's date could not be read"
+            self.unmeasured.append(basis)
+            return False, basis
+        if tip_age_days < STALE_TIP_DAYS:
+            return False, (f"its tip is {tip_age_days:.1f} days old (< {STALE_TIP_DAYS:g}) "
+                           "— a recent commit is a live claim")
+        live, owner_basis, _owner_unreadable = self._live_worktree_owner(ref, sha)
+        if live:
+            self.kept.append(owner_basis)
+            return False, owner_basis
+        claimed, claim_basis, _claim_unreadable = self._claim_live()
+        if claimed:
+            self.kept.append(claim_basis)
+            return False, claim_basis
+        self.demoted += 1
+        return True, (
+            f"no commit in {tip_age_days:.1f} days, {behind} behind origin/main, "
+            f"{ahead} ahead; {owner_basis}; {claim_basis}"
+        )
+
+    # ── the EMPTY leg: nothing in the ref that main does not already have ───
+
+    def judge_empty(self, ref: str,
+                    counts: tuple[int, int] | None) -> tuple[bool, str, bool]:
+        """(provably an EMPTY claim?, basis, the basis is an UNREADABLE reading).
+
+        THE MEASURED DEFECT (measured 2026-10-24T03:20Z, `collision_preflight.py 9567`):
+        `refs/heads/feat/9567-tm` was **0 commits ahead / 121 behind origin/main** — a
+        branch a lane created and then never used — and it refused dispatch on #9567 (a
+        P0-blocker) permanently, for every agent, with no way to clear it short of
+        deleting the branch. #9097 was the second instance in the same window. The
+        StaleHolder rule above cannot reach this shape: that rule needs the ref to be
+        far behind (>= 300), and this one is only 121 behind — so the divergence arm is
+        NOT satisfied, and a same-day tip fails SILENCE too. The stale rule is built to
+        infer abandonment from age; an empty branch needs no inference at all — main
+        already contains every commit the ref has, so there is nothing to collide with.
+
+        ⛔ THIS IS THE DEMOTION #6108 ASKED FOR AND `.judge` DELIBERATELY REFUSED, and
+        the refusal was a RECORDED DECISION, so it is reopened rather than quietly
+        reversed. The owner reopened it on 2026-10-24 with the measured cost above. The
+        old objection was real and is answered by the CONDITIONS, not by argument: a
+        branch between `git worktree add` and its first commit is ALSO 0 ahead, and
+        demoting it would let two lanes write to one branch (#4256) — so a 0-ahead ref
+        is demoted ONLY when every mechanical piece of holder evidence is absent.
+
+            OVERRIDES: #6108's recorded trade-off — "THE COUNT IS REPORTED, NOT ACTED
+            ON … every 0-ahead branch must keep blocking" — a local branch that is 0
+            commits ahead of origin/main AND has NO live worktree owner (no live `pi`
+            process standing in a checkout of it, no uncommitted work in any such
+            checkout) AND NO live `refs/claims/issue-<N>` is now ADVISORY. The claim
+            #6108's trade-off protects is still protected: a lane that has CLAIMED the
+            work still blocks, through the worktree-owner and claim-ref tests, which is
+            where "has a lane taken this" is answered mechanically since #8175 (the
+            branch's NAME is not the claim; the holder is).
+
+        ALL of the following are required (any failure leaves the ref BLOCKING):
+
+          1. it is a LOCAL branch (`refs/heads/`). ⛔ NOT a remote-tracking ref. The
+             STALE leg above does demote `origin/...` refs (a 300-behind, silent, unowned
+             one), but for THIS leg a remote-tracking ref is a FETCH CACHE: its sha is
+             whatever the last fetch wrote, so "0 ahead of origin/main" would describe a
+             stale cache, not the branch that exists on the remote — the class #7693 is
+             about. It is refused by name, and a 0-ahead `refs/remotes/origin/...` keeps
+             blocking (#7693, #6108).
+          2. `ahead == 0`, measured AT THE GATE (one `rev-list --count --left-right`,
+             never a cached count). An unreadable count is NOT zero — it is
+             `UNREADABLE`, and the ref keeps blocking.
+          3. no live worktree OWNER (`_name_matched_owner`, NAME match only): no live `pi`
+             process whose cwd is inside a worktree CHECKED OUT ON IT, and no uncommitted
+             work in one. A failed `git status` / an unreadable process census is
+             UNREADABLE, and an unreadable census can never be `no owner`.
+          4. no LIVE claim ref (`_claim_live`, the same polarity `claims.sh` owns).
+
+        STATED RESIDUALS. The first two cannot produce a false CLEAN; the third is a
+        real, DECIDED window — stated here rather than argued away, because a reader who
+        relies on a worktree to hold an issue needs to know what actually holds it:
+
+          * a worktree record whose DIRECTORY is gone (a `mv`, or a registration not yet
+            pruned) keeps blocking: `_worktree_liveness` documents why absence is not
+            evidence of death, and `_owner` then cannot run `git status` in it — so the
+            ref is UNREADABLE, not empty. A human clears it with `git worktree prune` or
+            by deleting the branch; this gate REPORTS, it never reaps;
+          * a lane whose work is entirely uncommitted in a checkout the process census
+            cannot associate with the ref (a non-`pi` process) is covered by condition 3's
+            dirt test only — the same residual `.judge` states. A MOVED checkout is NOT
+            in that class: while its registration survives, `_owner` reads it through the
+            path it has (a missing directory is UNREADABLE, not clean); once the
+            registration is PRUNED, `_unregistered_checkout_owner` finds the lane by
+            asking git what branch each unregistered `pi` cwd holds;
+          * ⛔ PREPARE-THEN-DISPATCH. A clean, registered checkout of the ref with NO live
+            `pi` process in it and no claim ref is demoted: every mechanical signal this
+            gate can read says the same thing about it as about an abandoned checkout, and
+            the decision above distinguishes by DIRT (a dirty checkout blocks, a clean one
+            does not). A flow that creates the checkout BEFORE the lane's process starts —
+            a controller running `git worktree add`, writing a brief, then dispatching — is
+            therefore protected by `refs/claims/issue-<N>` (`claims.sh`), which BLOCKS, and
+            NOT by the checkout's existence. Take the claim first, or expect a peer's
+            pre-flight to answer CLEAN for the issue in that window.
+        """
+        if not ref.startswith("refs/heads/"):
+            # NOT counted: this is not a candidate, it is out of scope by construction.
+            return False, (
+                "not a local branch — the EMPTY-CLAIM test is scoped to refs/heads/ "
+                "(a remote-tracking ref is a fetch cache, #7693)"
+            ), False
+        if counts is None:
+            # COUNTED: it IS a candidate — it named the issue, it is local, and only the
+            # measurement failed. Leaving the counter to the `ahead == 0` arm dropped
+            # exactly the case this leg exists for out of the surface note (measured in
+            # review: the note printed nothing at all for an unreadable distance).
+            self.empty_judged += 1
+            basis = "its distance from origin/main could not be measured"
+            self.empty_unmeasured.append(basis)
+            return False, basis, True
+        ahead, behind = counts
+        if ahead != 0:
+            # NOT counted: a ref with its own commits is not an empty claim, and the
+            # stale leg is what judges those.
+            return False, f"{ahead} commit(s) ahead of origin/main — it carries work", False
+        self.empty_judged += 1
+        live, owner_basis, owner_unreadable = self._name_matched_owner(ref)
+        if not live:
+            # ⛔ THE LIST IS NOT THE WORLD — see `_unregistered_checkout_owner`, which is
+            # where a MOVED+PRUNED checkout's live lane used to disappear into a CLEAN.
+            live, owner_basis, owner_unreadable = self._unregistered_checkout_owner(
+                ref, owner_basis,
+            )
+        if live:
+            # ⛔ "I COULD NOT LOOK" IS NOT "A LANE IS THERE". Both block, but filing an
+            # unreadable reading under the owner/claim heading told the reader the opposite
+            # of what happened (measured in review), so the two are separated here exactly
+            # as the stale leg separates `kept` from `unmeasured`.
+            (self.empty_unmeasured if owner_unreadable else self.empty_kept).append(owner_basis)
+            return False, owner_basis, owner_unreadable
+        claimed, claim_basis, claim_unreadable = self._claim_live()
+        if claimed:
+            (self.empty_unmeasured if claim_unreadable else self.empty_kept).append(claim_basis)
+            return False, claim_basis, claim_unreadable
+        self.empty_demoted += 1
+        return True, (
+            f"EMPTY-CLAIM — 0 commits ahead of origin/main ({behind} behind), so the "
+            f"ref holds nothing main does not already have; {owner_basis}; {claim_basis}"
+        ), False
+
+    def empty_note_since(self, judged0: int, demoted0: int, kept0: int,
+                         unmeasured0: int = 0) -> str:
+        """The surface note for ONE surface's share of the EMPTY-leg judgement."""
+        judged = self.empty_judged - judged0
+        if not judged:
+            return ""
+        note = (
+            f"; {judged} 0-ahead local branch(es) judged as EMPTY CLAIMS, "
+            f"{self.empty_demoted - demoted0} demoted to ADVISORY (0 commits ahead of "
+            "origin/main, no live worktree owner, no uncommitted work, no live claim "
+            "ref — reported, non-blocking)"
+        )
+        unmeasured = self.empty_unmeasured[unmeasured0:]
+        if unmeasured:
+            note += ("; NOT demoted on an unreadable measurement: "
+                     + " | ".join(dict.fromkeys(unmeasured)))
+        kept = self.empty_kept[kept0:]
+        if kept:
+            note += ("; kept blocking by a live owner or claim: "
+                     + " | ".join(dict.fromkeys(kept)))
+        return note
+
+
 def scan_branch_surface(
     surface: Surface, refs: list[tuple[str, str]], issue: int,
     identity: Identity, merged_head_shas: set[str],
@@ -2475,6 +3290,8 @@ def scan_branch_surface(
     remote_namespaces: set[str] | None = None,
     targeted_terminal: dict[str, str] | None = None,
     counts: object = None,
+    stale: StaleHolder | None = None,
+    tip_age: object = None,
 ) -> None:
     """NUMBER matching only — the lexical arm is gone (#3504).
 
@@ -2489,10 +3306,18 @@ def scan_branch_surface(
           sample (#5485); supplied by the caller, which has the gh binary and
           the resolved slug. Demoted on EITHER an exact tip match OR
           containment — see `_branch_terminal_state_from_prs`
-      3. otherwise **blocking** — a live lane that names this issue
+      3. **stale, unowned, unclaimed** — the ref's own holder evidence is past its
+         expiry, measured in FOUR dimensions at once (divergence, silence, no live
+         worktree owner, no live claim ref — `StaleHolder`): reported at `weak`
+         strength as ADVISORY and never dropped (#9806). `ahead` plays no part
+      3b. **EMPTY CLAIM** — a LOCAL branch 0 commits ahead of `origin/main` with no
+         live worktree owner, no uncommitted work and no live claim ref
+         (`StaleHolder.judge_empty`): ADVISORY, reported and never dropped (#6108,
+         reopened 2026-10-24). An UNREADABLE measurement is `UNREADABLE` and BLOCKS
+      4. otherwise **blocking** — a live lane that names this issue
 
-    A self or terminal ref is reported (never silent) at `weak` strength, which
-    cannot contribute to the verdict. Refs that do not name the issue are not
+    A self, terminal, stale or empty ref is reported (never silent) at `weak` strength,
+    which cannot contribute to the verdict. Refs that do not name the issue are not
     reported at all: with the lexical arm gone there is nothing to say about
     them, and emitting ~170 "already merged" rows would bury the real signal.
     """
@@ -2568,27 +3393,36 @@ def scan_branch_surface(
         # skipping the call there means no git subprocess is paid for a hit whose
         # strength is already settled.
         #
-        # ⛔ THE COUNT IS REPORTED, NOT ACTED ON, AND THAT IS DELIBERATE. The
-        # obvious next step — demote `ahead == 0` to non-blocking — is REFUSED
-        # here after measurement, not for lack of a mechanism. Every 0-ahead
-        # branch must keep blocking, and the test suite PINS it in terms that
-        # leave no room to refine within the frame: not only
-        # `test_branch_created_at_main_tip_with_no_commits_still_blocks` (the
-        # window `_branch_terminal_state` names — a lane between
-        # `git worktree add` and its first commit), but also
-        # `test_fresh_branch_behind_main_at_a_merged_head_blocks_without_first_parent`
-        # (a fresh branch main has since moved past) and
-        # `test_unresolvable_main_tip_never_downgrades` /
-        # `test_unresolvable_first_parent_never_downgrades` (no witness at all).
-        # A first attempt at exactly this demotion reddened those 8 tests.
+        # ⛔ THE COUNT IS REPORTED **AND** (for a provably empty claim) DECIDED. Both
+        # halves are deliberate, and the history matters because the second half was a
+        # recorded REFUSAL until 2026-10-24.
         #
-        # So this is a RECORDED DECISION with a stated trade-off, not a bug in
-        # the tool: the over-block is the accepted price of never reading a lane
-        # that has CLAIMED an issue — by creating the branch — as free. Changing
-        # it is a reopen to argue with the owner (#6108), never a quiet edit.
-        # Reporting the count is what makes that argument cheap: it is the one
-        # datum that lets a reader resolve the ambiguity by hand, which is
-        # precisely what #6108 asks for and what the verdict alone could not say.
+        # REPORTED: a gate whose two cases — "a lane has committed work here" and "an
+        # empty branch whose name contains this number exists" — print identically cannot
+        # be audited by its reader, and an un-auditable gate gets overridden until it
+        # stops being a gate (#6108's own argument).
+        #
+        # DECIDED: #6108 asked for `ahead == 0` to stop blocking, and the first attempt
+        # was refused because a lane between `git worktree add` and its first commit is
+        # EXACTLY 0 ahead — demoting that would let two lanes write to one branch
+        # (#4256, which must never reopen). The measured cost of the refusal then landed
+        # (2026-10-24T03:20Z): `refs/heads/feat/9567-tm` at 0 ahead / 121 behind froze a
+        # P0-blocker and `fix/9097-protocol-precedence` (0/75) an open P1, permanently,
+        # for every agent — the block's cause was an empty ref nobody could delete from
+        # inside a gate that never reaps. The owner reopened #6108 for the NARROW form:
+        # `StaleHolder.judge_empty` demotes a 0-ahead LOCAL branch only when every
+        # mechanical piece of holder evidence is also absent (no live worktree owner, no
+        # uncommitted work, no live claim ref). The `worktree add` window stays BLOCKING
+        # while the lane's process is alive (a live `pi` in the checkout is an owner); the
+        # PREPARE-THEN-DISPATCH shape — checkout created before the process starts — is
+        # held by the CLAIM REF instead, which is a stated residual in `judge_empty`.
+        #
+        # ⛔ SO `ahead` IS STILL NOT DECISIVE BY ITSELF, and nothing here reads it as
+        # "free": an UNREADABLE count is `UNREADABLE` (blocking), a ref with ≥1 commit
+        # ahead blocks exactly as before, and the stale leg (`judge`) is unchanged and
+        # still runs after this one. See `judge_empty`'s `OVERRIDES:` line and its
+        # STATED RESIDUALS — a worktree record whose directory is gone keeps blocking,
+        # because absence is not evidence of death and the gate reports, never reaps.
         ahead = behind = None
         if counts is not None:
             measured = counts(ref)  # type: ignore[operator]
@@ -2598,6 +3432,32 @@ def scan_branch_surface(
         detail = f"matched issue-number ({issue})"
         if ahead is not None:
             detail += f" — {ahead} commit(s) ahead / {behind} behind origin/main"
+        if stale is not None:
+            measured = (ahead, behind) if ahead is not None else None
+            empty, empty_basis, unreadable = stale.judge_empty(ref, measured)
+            if empty:
+                surface.add(
+                    ref,
+                    f"{detail} — ADVISORY, not in-flight work: {empty_basis} — reported "
+                    "so it can be cleaned up, NEVER dropped",
+                    "weak",
+                )
+                continue
+            if unreadable:
+                # The ref stays BLOCKING, and the reason is named as a FAILED READ so a
+                # reader can tell "the gate declined to decide" from "a lane is there".
+                detail += (f" — UNREADABLE {empty_basis} — NOT treated as an empty "
+                           "claim (fail-closed)")
+            age = tip_age(ref) if tip_age is not None else None  # type: ignore[operator]
+            abandoned, basis = stale.judge(ref, sha, measured, age)
+            if abandoned:
+                surface.add(
+                    ref,
+                    f"{detail} — ADVISORY, not in-flight work: {basis} — reported "
+                    "so it can be cleaned up, NEVER dropped",
+                    "weak",
+                )
+                continue
         surface.add(ref, detail, "strong")
 
 
@@ -2727,14 +3587,33 @@ def scan_worktree_surface(
     surface: Surface, blocks: list[dict], issue: int, identity: Identity,
     merged_head_shas: set[str], ancestor_merged: set[str] | None,
     main_tip: str | None, first_parent: set[str] | None,
+    counts: object = None,
+    stale: StaleHolder | None = None,
+    tip_age: object = None,
 ) -> None:
     """Untruncated worktree scan — NUMBER match on the full path and branch.
 
-    Same three-step decision as the branch surface (self, then terminal, then
-    blocking), because a worktree hit is the same claim seen from a different
-    angle: #3504 class 4's reproduction had the caller's OWN worktree among its
-    blocking hits. The path is matched in full — a worktree is named after its
+    Same decision as the branch surface (self, then terminal, then EMPTY CLAIM, then
+    STALE, then blocking), because a worktree hit is the same claim seen from a
+    different angle: #3504 class 4's reproduction had the caller's OWN worktree among its
+    blocking hits.
+
+    ⛔ THE SAME EMPTY-CLAIM TEST APPLIES HERE, AND IT MUST (#6108, reopened 2026-10-24).
+    The measured block named BOTH rows for the same claim — `refs/heads/feat/9567-tm`
+    (0 commits ahead) AND its worktree record — so demoting the branch alone would have
+    left #9567 un-dispatchable through this one. `judge_empty` is scoped to
+    `refs/heads/`, so a DETACHED record is not demoted by it: no branch means no claim to
+    prove empty. The path is matched in full — a worktree is named after its
     issue by convention, and the full path is the honest field to read.
+
+    ⛔ THE SAME STALE-HOLDER TEST APPLIES HERE, AND IT MUST (#9806). A record and a ref
+    naming the issue are two ways of seeing ONE claim, and the measured incident
+    (`.worktrees/tm-2446`, 8.7 days old, on `feat/2446-tm`) names the WORKTREE — demoting
+    the branch alone would have left the issue un-dispatchable through this row. Its
+    condition 3 is narrower here: the record IS the worktree whose owner and dirt are
+    checked, so "no live owner" is a statement about this record, not about the branch.
+    ⛔ AGE IS NOT THE DISCRIMINATOR THERE: a long test run is a live owner, and it is the
+    process-cwd read (plus uncommitted work) that decides, never how old the checkout is.
 
     ⛔ THE PATH IS THE WEAKER OF THE TWO FIELDS, AND #9540 IS WHY. A path is also
     a leftover: `/tmp/wt-3718` held a lane whose branch claimed #9397, and the
@@ -2821,6 +3700,58 @@ def scan_worktree_surface(
                 "weak",
             )
             continue
+        if stale is not None:
+            # The ref this record is held through: the branch when it has a usable name,
+            # else the HEAD sha (a detached checkout — `_local_worktrees_for` matches it
+            # by sha, and `rev-list origin/main...<sha>` is well defined).
+            rev = branch if (branch and branch != "(detached)") else (block.get("head") or "")
+            measured = counts(rev) if (counts is not None and rev) else None  # type: ignore[operator]
+            # #6108 (reopened 2026-10-24): the SAME EMPTY-CLAIM leg as the branch surface,
+            # because a worktree record and a ref naming the issue are ONE claim seen from
+            # two angles — demoting the branch alone would leave the issue undispatchable
+            # through this row. `judge_empty` is scoped to `refs/heads/`, so a DETACHED
+            # record (its `rev` is a sha) is never demoted here: no branch, no claim to
+            # prove empty.
+            #
+            # ⛔ AND IT RUNS ONLY ON A BRANCH THAT NAMES THIS ISSUE (`branch_hit`), which is
+            # what keeps #3611 intact. A record reached by its PATH alone — a generated
+            # `mergify/…`/CI branch, or a branch that names something else — is not a claim
+            # this rule may judge: the BRANCH surface never sees a generated ref at all
+            # (`_is_generated_branch` skips it before matching, and the module promises a
+            # bot-minted name is not evidence about the PATH either), so demoting one here
+            # would make the two surfaces disagree about the same ref in the fail-OPEN
+            # direction. A path-only hit keeps BLOCKING exactly as it did before.
+            unreadable = False
+            if branch_hit:
+                empty, empty_basis, unreadable = stale.judge_empty(rev or label, measured)
+                if empty:
+                    surface.add(
+                        label,
+                        f"matched issue-number ({issue}) ({basis}) — ADVISORY, not "
+                        f"in-flight work: {empty_basis} — reported so it can be cleaned "
+                        "up, NEVER dropped",
+                        "weak",
+                    )
+                    continue
+                if unreadable:
+                    surface.add(
+                        label,
+                        f"matched issue-number ({issue}) ({basis}) — UNREADABLE "
+                        f"{empty_basis} — NOT treated as an empty claim (fail-closed)",
+                        "strong",
+                    )
+                    continue
+            age = tip_age(rev) if (tip_age is not None and rev) else None  # type: ignore[operator]
+            abandoned, why = stale.judge(rev or label, block.get("head"), measured, age)
+            if abandoned:
+                surface.add(
+                    label,
+                    f"matched issue-number ({issue}) ({basis}) — ADVISORY, not "
+                    f"in-flight work: {why} — reported so it can be cleaned up, "
+                    "NEVER dropped",
+                    "weak",
+                )
+                continue
         surface.add(label, f"matched issue-number ({issue}) ({basis})", "strong")
 
 
@@ -3969,7 +4900,9 @@ WEAK_HIT_KINDS = (
     "a HOLDER the board reports as stopped (the writer has stopped), your own "
     "work, a terminal branch/PR, the shared fleet account, a fetch-cache ref "
     "under a namespace no configured remote fetches into, a worktree RECORD "
-    "that cannot be live work (#6622)"
+    "that cannot be live work (#6622), an EMPTY CLAIM — a local branch 0 commits "
+    "ahead of origin/main with no live owner, no uncommitted work and no live "
+    "claim ref (#6108)"
 )
 WEAK_KIND_PROSE_ONLY = "a prose-only cross-reference"
 
@@ -5935,6 +6868,40 @@ def run_preflight(
     # None (unreadable) leaves all refs blocking, which is the pre-existing
     # behaviour.
     remote_namespaces = _remote_tracking_namespaces(git_bin, cwd, timeout)
+    # ── #9806: the STALE-HOLDER test's two input callables, defined once ─────
+    # Both pay one git call per REF THAT MATCHES the issue number, so a normal run pays
+    # nothing extra: the branch arm below and the worktree arm in step 4 share them.
+    def _branch_counts(_ref: str) -> tuple[int, int] | None:
+        return _ahead_behind(git_bin, cwd, _ref, timeout)
+
+    def _ref_tip_age(_ref: str) -> float | None:
+        return _ref_tip_age_days(git_bin, cwd, _ref, timeout)
+
+    # ⛔ THE WORKTREE LISTING IS READ HERE, BEFORE THE BRANCH SURFACES, because the
+    # stale-holder test asks a question about the WORKTREES (`is a live process standing
+    # in one of them?`) while scanning a BRANCH. It is the same ONE `git worktree list
+    # --porcelain`, read once and handed to both steps; step 4 consumes this result rather
+    # than re-issuing it, so the surface still reports ONE failure for ONE read. A read
+    # that fails leaves `worktree_blocks` None, which the test treats as "cannot prove"
+    # (no demotion) and step 4 reports as INCOMPLETE exactly as before.
+    worktree_blocks: list[dict] | None = None
+    worktree_error: SurfaceError | None = None
+    if target.path is not None:
+        try:
+            rc, out, err, timed_out = _run(
+                [git_bin, "worktree", "list", "--porcelain"], cwd, timeout
+            )
+            if rc != 0:
+                why = "timeout" if timed_out else f"exit {rc}"
+                raise SurfaceError(f"git worktree list failed ({why}): {_one_line(err)}")
+            worktree_blocks = _worktree_blocks(out)
+        except SurfaceError as exc:
+            worktree_error = exc
+    # The one object both surfaces ask. Constructed even when the listing failed — its
+    # own `worktrees is None` arm refuses every demotion in that case.
+    stale = StaleHolder(
+        git_bin, cwd, issue, timeout, worktree_blocks,
+    ) if target.path is not None else None
     # The LOCAL pass used to record `sha -> (ref, why)` here so the REMOTE pass could
     # demote a twin caching the same tip. That demotion is gone and the map with it —
     # see the removal block below, on the `else`-less namespace loop. Dead state and
@@ -6051,17 +7018,31 @@ def run_preflight(
             # PR #7718; a doc line would not have stopped the collision.
             # #6108: the ahead-count reaches the surface through a callable so
             # the scan decides WHEN to pay for it — only for refs that already
-            # matched the issue number. See the note in `scan_branch_surface`
-            # for why the count is REPORTED and not acted on.
-            def _branch_counts(_ref: str) -> tuple[int, int] | None:
-                return _ahead_behind(git_bin, cwd, _ref, timeout)
-
+            # matched the issue number. See the note in `scan_branch_surface`:
+            # the count is REPORTED on every hit, and since #6108 was reopened it
+            # also DECIDES one narrow case (`judge_empty` — 0 ahead with no owner,
+            # no uncommitted work and no live claim), never by itself.
+            # #9806: `tip_age` and `stale` ride along for the SAME reason — one git
+            # call and one claim read, only for a ref that matched AND is far enough
+            # behind AND silent long enough to be a stale-holder candidate.
+            judged0, demoted0, kept0, unmeasured0 = (
+                (stale.judged, stale.demoted, len(stale.kept), len(stale.unmeasured))
+                if stale else (0, 0, 0, 0)
+            )
+            # The EMPTY-CLAIM leg's own counters, snapshotted beside the stale leg's so
+            # each surface reports only its own measurements (#6108).
+            empty_judged0 = stale.empty_judged if stale else 0
+            empty_demoted0 = stale.empty_demoted if stale else 0
+            empty_kept0 = len(stale.empty_kept) if stale else 0
+            empty_unmeasured0 = len(stale.empty_unmeasured) if stale else 0
             scan_branch_surface(
                 surface, refs, issue, identity, merged_head_shas,
                 ancestor_merged, main_tip, first_parent,
                 remote_namespaces=remote_namespaces,
                 targeted_terminal=targeted_terminal,
                 counts=_branch_counts,
+                stale=stale,
+                tip_age=_ref_tip_age,
             )
             surface.note = f"{len(refs)} ref(s) enumerated"
             if namespace != "refs/heads":
@@ -6101,15 +7082,23 @@ def run_preflight(
                     f"{targeted_failures} ref(s) — those refs keep blocking "
                     "(fail-closed)"
                 )
+            # #9806: the stale-holder test is reported as a MEASUREMENT (how many refs
+            # it judged and how many it demoted), never as a silent narrowing. A reader
+            # must be able to see that a hit became advisory and why.
+            if stale is not None:
+                surface.note += stale.note_since(
+                    judged0, demoted0, kept0, unmeasured0)
+                surface.note += stale.empty_note_since(
+                    empty_judged0, empty_demoted0, empty_kept0, empty_unmeasured0)
         except SurfaceError as exc:
             surface.incomplete(f"git-unavailable: {exc}")
 
     # 4. Worktree surface — UNTRUNCATED by construction; the count is proof.
-    #    `blocks` is the `git worktree list --porcelain` parse for THIS surface
-    #    (see `_worktree_blocks`), hoisted only so the note can count it. #8175
-    #    deleted the claim-artifact verifier that once read it — nothing else
-    #    consumes this listing.
-    blocks: list[dict] | None = None
+    #    `worktree_blocks` was READ IN STEP 3 above (the stale-holder test needs the
+    #    worktree side of a branch hit), so this step CONSUMES that one read rather than
+    #    re-issuing it: one `git worktree list --porcelain` per run, one failure reported.
+    #    #8175 deleted the claim-artifact verifier that once read it.
+    blocks: list[dict] | None = worktree_blocks
     surface = surfaces[SURFACE_WORKTREES]
     if target.path is None:
         surface.incomplete(
@@ -6117,32 +7106,41 @@ def run_preflight(
             "found — the worktree surface cannot describe the TARGET repo and is "
             "left INCOMPLETE rather than scanning a different one (NOT clean)"
         )
+    elif worktree_error is not None:
+        surface.incomplete(f"git-unavailable: {worktree_error}")
     else:
         try:
-            rc, out, err, timed_out = _run(
-                [git_bin, "worktree", "list", "--porcelain"], cwd, timeout
-            )
-            if rc != 0:
-                why = "timeout" if timed_out else f"exit {rc}"
-                raise SurfaceError(f"git worktree list failed ({why}): {_one_line(err)}")
             # `_worktree_blocks` REFUSES an unreadable record, an unrecognised
             # continuation line, and a record missing its path or HEAD, so a
             # parse loss is a NAMED INCOMPLETE rather than a silently smaller
             # answer. The count guard that used to sit here could never fire: it
             # compared `len(blocks)` with the number of `worktree ` lines, and
             # the parser built one block per such line.
-            blocks = _worktree_blocks(out)
             # Reuse the LOCAL-BRANCH walk instead of repeating the identical
             # `for-each-ref --merged=origin/main refs/heads` query, and carry
             # its availability through: when the walk could not run, the
             # branch surfaces say so, and this surface claiming a plain
             # "untruncated" enumeration implied the terminal test had run.
             _wt_ancestor = ancestor_merged_local
-            scan_worktree_surface(
-                surface, blocks, issue, identity, merged_head_shas,
-                _wt_ancestor, main_tip, first_parent,
+            judged0, demoted0, kept0, unmeasured0 = (
+                (stale.judged, stale.demoted, len(stale.kept), len(stale.unmeasured))
+                if stale else (0, 0, 0, 0)
             )
-            surface.note = f"{len(blocks)} worktree(s) enumerated (untruncated)"
+            empty_judged0 = stale.empty_judged if stale else 0
+            empty_demoted0 = stale.empty_demoted if stale else 0
+            empty_kept0 = len(stale.empty_kept) if stale else 0
+            empty_unmeasured0 = len(stale.empty_unmeasured) if stale else 0
+            scan_worktree_surface(
+                surface, blocks or [], issue, identity, merged_head_shas,
+                _wt_ancestor, main_tip, first_parent,
+                counts=_branch_counts, stale=stale, tip_age=_ref_tip_age,
+            )
+            surface.note = f"{len(blocks or [])} worktree(s) enumerated (untruncated)"
+            if stale is not None:
+                surface.note += stale.note_since(
+                    judged0, demoted0, kept0, unmeasured0)
+                surface.note += stale.empty_note_since(
+                    empty_judged0, empty_demoted0, empty_kept0, empty_unmeasured0)
             if _wt_ancestor is None:
                 surface.note += (
                     "; ⚠ 'merged into main' detection UNAVAILABLE (for-each-ref "

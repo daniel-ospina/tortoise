@@ -1380,8 +1380,8 @@ class _EntityHandlers:
         # one of these lands on the document `:Source`). They are the same
         # undeclared-drop class as the line above and were found by reading what
         # that writer actually emits rather than what this declaration assumed:
-        # `needs_extraction` is read back by `ingest` (`coalesce(s.needs_extraction,
-        # false)`) as the extraction signal, and `authored_by`/`owned_by`/
+        # `needs_extraction` is read back by `ingest` RAW — absent is not
+        # `false`, #5140 — as the extraction signal, and `authored_by`/`owned_by`/
         # `managed_by`/`governing_agreement`/`document_knowledge_domain`/`createdAt`
         # are the document's own provenance metadata. Both spellings are listed
         # for the session/source pair because the document writer emits the
@@ -1728,6 +1728,14 @@ class _EntityHandlers:
         # contract. ``validToPrecision='unknown'`` is the 3-state end's
         # closed-unknown marker and must survive rebuild verbatim.
         "validFromPrecision", "validToPrecision",
+        # #2351 (epic #2349 E-derived): the asserted-vs-derived CLAIM CLASS
+        # (`sdk.create_point(claim_class=…)`, ``tortoise/claim_class.py``).
+        # Written on the node ONLY for ``derived`` (absence IS ``asserted``, so
+        # the marker is migration-free), carried on the PointAdded snapshot and
+        # restored through this same open-set passthrough. Declared so the
+        # shared live+replay writer does not log a FALSE `"Point prop %r is not
+        # declared"` drift warning for every derived claim on every rebuild.
+        "claimClass",
         # #6151 defect 2: the #2199 system-default provision, recorded on a
         # decide part BORN live (no explicit status). `_apply_source_
         # inheritance` re-injects the default ONLY where this marker says one
@@ -2681,12 +2689,39 @@ class _EntityHandlers:
         journal-only rebuild must not restore the Session as though nothing
         was ever redacted. Overwrite semantics, like ``turn_count``.
         """
-        from tortoise.projection import _annotator_value_ok, _writable_id
+        from tortoise.projection import (
+            _annotator_value_ok,
+            _log_identity_skip,
+            _writable_container_id,
+        )
 
         if not isinstance(ev, dict):
             return 0
         sid = ev.get("id")
-        if not _writable_id(sid) or not sid:
+        # #9599: a BLANK id is not an identity, and this is the REPLAY half of
+        # the refusal the capture doors make. The rule is `_writable_container_id`
+        # — the SAME gate `_link_session` applies to `contains_session`, one
+        # owner for both journal carriers. `_writable_id` deliberately still
+        # admits a blank (#9599) because it is shared with entity NAMES, whose
+        # fold must not be widened. Without the extra clause a journal written
+        # before the doors refused resurrects a `:Session {id:'   '}` on
+        # rebuild — an indexed key the engine cannot serve back to an equality
+        # seek, so the container is invisible and every later capture mints a
+        # duplicate on it. An ABSENT id is ordinary here: `_log_identity_skip`
+        # stays silent for it (no identity was named at all).
+        # ⛔ `drops_record=True` (#8840/#8702): this `return` IS the record's
+        # death — the container is not written at all — so the replay accounting
+        # must count it as a DROPPED record, not as an identity refused INSIDE a
+        # record that still replayed (that clause states the record IS in the
+        # graph, which is false here, and it hides a missing `:Session` from the
+        # operator). Same convention as the Point creation anchors
+        # (`FalkorProjection.apply`). The sibling `_link_session` arm
+        # deliberately does NOT pass it: an edge is lost there, not a record.
+        if not _writable_container_id(sid):
+            _log_identity_skip("Session", sid, "id (MERGE key)",
+                               event_id=ev.get("event_id"),
+                               where="FalkorProjection._fold_session_recorded",
+                               drops_record=True)
             return 0
         sets: list[str] = []
         params: dict = {"sid": sid}
@@ -2827,7 +2862,14 @@ class _EntityHandlers:
         # mint a DUPLICATE `:Session` and land no edge (see that predicate's
         # docstring). The record projection refuses the same ids, and the two
         # gates are pinned equal, so a whitespace-only `contains_session` is
-        # dropped by BOTH routes instead of by one.
+        # dropped by BOTH routes instead of by one. ⛔ ONE owner, both carriers
+        # (#9599 review): this is the `contains_session` arm, and
+        # `_fold_session_recorded` above applies the SAME predicate to its
+        # `SessionRecorded` id — a pre-fix journal can name the blank session
+        # through either one. An earlier revision of this branch stacked a
+        # THIRD predicate (`tortoise.ids.session_id_refusal`) here in front of
+        # this gate; it is removed, because two predicates for one identity
+        # rule is how the pins and the code drift apart.
         from tortoise.projection import _log_identity_skip, _writable_container_id
         if not _writable_container_id(session_id):
             _log_identity_skip("Session", session_id, "id (MERGE key)")
@@ -3894,7 +3936,18 @@ class _EntityHandlers:
         _set_emb = set_embedding_clause("s")
         self.g.query(
             f"MERGE (s:Subject {{{merge_key}:$key}}) "
-            "ON CREATE SET s.id=$id, s.name=$name, s.subjectKind=$sk, s.createdAt=coalesce($ca, $now), "
+            "ON CREATE SET s.id=$id, s.name=$name, "
+            # #9572: the discriminator is written ON MATCH as
+            # ``coalesce($sk, s.subjectKind)`` — which preserves a stored kind
+            # ONLY if "the caller named none" arrives as NULL. So the DEFAULT
+            # is applied here, on CREATE, and never at the door: this arm used
+            # to read ``s.subjectKind=$sk`` with ``ev.get("subject_kind",
+            # "other")``, so a fabricated door default and a caller value were
+            # indistinguishable and a bare re-create reset a stored `team` to
+            # `other` (the Object arm already coalesced here — the Subject twin
+            # was the gap).
+            "s.subjectKind=coalesce($sk, 'other'), "
+            "s.createdAt=coalesce($ca, $now), "
             # #1423: status ON CREATE only — the Subject twin of the #1350
             # Object clause. Before this, `status` rode the extra-props lane
             # (`_SUBJECT_HANDLED` lacked it, #2295), which applies on MATCH as
@@ -3927,7 +3980,9 @@ class _EntityHandlers:
             "            s.createdAt=coalesce(s.createdAt, $ca), "
             "            " + _set_emb,
             params={"key": merge_value, "id": sid, "name": name,
-                    "sk": ev.get("subject_kind", "other"),
+                    # #9572: NULL default — see the ON CREATE clause above. A
+                    # fabricated default here is the defect, not the fix.
+                    "sk": ev.get("subject_kind"),
                     "ca": ev.get("createdAt"), "now": _now_iso(),
                     "st": ev.get("status"),  # #1423: status ON CREATE only
                     "embedding": embedding},
@@ -4215,7 +4270,22 @@ class _EntityHandlers:
         source_url``), which keeps its ``references`` edge — the
         index-completeness gate's ``edge`` clause depends on it, so collapsing
         the two into one node would make the edge a dropped self-loop and every
-        doc unit permanently incomplete. `content`, `doc_status` and
+        doc unit permanently incomplete. **That is the index path's guarantee,
+        and it is scoped to it**: the index path's document id is
+        ``doc_<rel-path>`` and its ``source_url`` is ``corpus://…``, so the two
+        are never one identity. A caller that supplies a NETWORK URL as the
+        document id and the SAME url's variant as ``source_url`` IS one
+        identity — the resolver below (S0a, #5012/#5053) folds it onto one node,
+        which is the correct outcome for a document that is its own corpus
+        source, not a topology regression. The self-loop is then suppressed by
+        ``link_source_to_entity``'s own #5151 guard, NOT by this method's
+        ``#205`` test: ``ref != did`` compares the RAW ref to the RESOLVED id,
+        so BETWEEN TWO SPELLINGS OF ONE IDENTITY it is TRUE for the variant and
+        false only for the identically-spelled one (it is also TRUE for every
+        genuinely distinct source, which is what wires the legitimate
+        ``references`` edge) — the variant case is the caller-side guard
+        ``projection/edges.py`` records as defeated by resolution, and the
+        reason #5151 keeps the guard inside the callee. `content`, `doc_status` and
         `objectKind` are RETIRED and are never written (nor re-admissible via
         the open passthrough).
 
@@ -4239,6 +4309,54 @@ class _EntityHandlers:
         from tortoise.projection import _log_identity_skip, _writable_id
         if not _writable_id(did):
             _log_identity_skip("Document", did, "id (MERGE key)")
+            return
+        # #5140 finding 12: the document MERGE key adopts the SAME S0a/S0b
+        # canonical-identity resolver (`resolve_source_key`, #5012/#5053) as
+        # every other `:Source` write path (`_upsert_source`,
+        # `_mint_source_stub`, `link_source_to_entity`). Before this the RAW
+        # event id was the MERGE key, so a caller-supplied URL variant minted a
+        # SECOND `:Source` for one identity (measured: `create_source(
+        # 'https://example.com/a/b')` then `DocumentCreated` on
+        # `'https://Example.COM/a/b/?utm_source=x#frag'` → two nodes) — the
+        # S0a/S0b invariant D10 made load-bearing when it folded the document
+        # node into `:Source`. Non-network document ids (`doc_<rel-path>` from
+        # `derive_document_id`, and the BARE FILENAME the CLI passes as
+        # `args.transcript.name` — `corpus://…` is the index path's SOURCE URL,
+        # not a document id) are returned
+        # UNCHANGED by the resolver (identity there), so the index and CLI
+        # paths are unaffected; the fold stamps `canonicalUrl`/`urlAliases`
+        # exactly as `_upsert_source` does. The resolved key is re-checked
+        # because it is a DIFFERENT value from the one checked above.
+        # ⚠️ WHAT IT DOES CHANGE, stated because it is a consequence of the
+        # identity rule rather than an accident: a NETWORK document id is
+        # canonicalised by S0a, so two ids differing only in
+        # fragment/query/trailing-slash are ONE document `:Source` (S0a's own
+        # rule — a fragment never selects a different document). Two "documents"
+        # a caller named that way therefore become one node, and the `documents`
+        # meter counts one. ⚠️ And like every other resolving writer, the MERGE
+        # key here is a RESOLUTION: if the stored `url` moves between the live
+        # write and its replay (an unjournaled writer touching the node in
+        # between), live and replay can land on different keys — the exposure
+        # `edges.py::resolve_source_versions` names, already present on
+        # `_upsert_source`/`_mint_source_stub`, not introduced here.
+        # ⚠️ AND THE COLLISION IT MAKES REACHABLE, which is NOT limited to
+        # another document: a document id whose canonical form equals an
+        # EXISTING `:Source` — including a non-document provenance source —
+        # folds onto that source and overwrites its `title`/`documentKind`. The
+        # node then leaves `list_sources()` (`documentKind IS NULL`) and enters
+        # the `documents` meter. Measured: `create_source(url,'web')` + a
+        # `DocumentCreated` for a VARIANT of that url → ONE node
+        # (`sourceKind='web'`, `documentKind='report'`, promoted title),
+        # `list_sources()` 1 → 0. It is not a new RULE — the identically
+        # spelled form already behaves this way on `main` (measured there) —
+        # but a variant now reaches it, and `EventAPI.add_document(doc_id=…)`
+        # takes a caller-supplied id. Whether promotion should also move
+        # `sourceKind` to `'document'` is #9536's contract, not this fold's;
+        # pinned by `test_document_id_that_canonicalises_onto_a_web_source.
+        raw_did = did
+        did = resolve_source_key(self.g, did)
+        if not _writable_id(did):
+            _log_identity_skip("Document", did, "url (resolved MERGE key)")
             return
         # Compute embedding from title+content for semantic search (#7845).
         # Epic #900 T3 cycle-19: the NEW index path carries a suppress flag in
@@ -4323,6 +4441,17 @@ class _EntityHandlers:
         self.g.query(
             "MERGE (s:Source {url:$id}) " + clear_then_set_prefix("s") +
             "SET s.id=coalesce(s.id, $id), "
+            # S0a/S0b (#5012/#5053) identity, parity with `_upsert_source`'s
+            # clauses (#5140 finding 12): without them this node is INVISIBLE
+            # to the shared resolver, so the SAME identity in the other ORDER
+            # still minted a second `:Source` — a `DocumentCreated` on a URL
+            # variant, then `create_source` on the plain url, produced two
+            # nodes because `resolve_source_key` had no `canonicalUrl` to match
+            # on (measured). `coalesce` = never overwrite a stored identity.
+            "    s.canonicalUrl=coalesce(s.canonicalUrl, $cu), "
+            "    s.urlAliases=CASE WHEN $raw_url IN coalesce(s.urlAliases, []) "
+            "        THEN coalesce(s.urlAliases, []) "
+            "        ELSE coalesce(s.urlAliases, []) + [$raw_url] END, "
             # ⛔ `_searchText` is written BEFORE `s.title` (#8870): its
             # last-resort fallback READS `s.title`, and on the server engine a
             # same-clause read observes the value an earlier item just wrote.
@@ -4472,6 +4601,11 @@ class _EntityHandlers:
             "REMOVE " + ", ".join(
                 f"s.{k}" for k in sorted(self._DOC_RETIRED_KEYS)),
             params={"id": did, "title": ev.get("title", did),
+                    # S0a/S0b: the identity form and the RAW spelling this
+                    # record named (the alias set `_upsert_source` keeps), from
+                    # the event's own id — deterministic on replay.
+                    "cu": normalize_source_url(raw_did),
+                    "raw_url": raw_did,
                     # NO "" default here: a present null and an omitted key
                     # both stay Cypher null and fall to the third coalesce
                     # term ("") only on CREATE, so a partial re-write cannot
@@ -4488,8 +4622,19 @@ class _EntityHandlers:
         # so that extra props land on the Source node regardless of edge
         # success). D10 retired keys (content/doc_status/objectKind) are denied
         # here — the fixed clause above already covers every other doc key.
+        # ⚠️ The skip-set reached by this call is the FULL
+        # `_SOURCE_HANDLED | _DOC_PASSTHROUGH_HANDLED | _DOC_RETIRED_KEYS`
+        # reserve, not only the retired keys: server-managed keys such as
+        # `version` and `ingestedAt` are owned by the fixed clause (version is
+        # the §4.6 ordinal — 1 at creation, +1 on a content-hash change — and
+        # advances off `content_hash`, never off the caller), so a caller-
+        # supplied `version=` / `ingestedAt=` on a `DocumentCreated` is DROPPED
+        # rather than persisted verbatim. `documentKind` is skipped for the
+        # same reason (#5140 finding 7): the fixed clause above owns it. That is
+        # deliberate, and it is why this call needs no `allow_keys` closed set
+        # (#228).
         #
-        # This call passes NO `allow_keys` DELIBERATELY: `test_create_document_
+        # ⛔ This call passes NO `allow_keys` DELIBERATELY: `test_create_document_
         # persists_arbitrary_props` (#228) pins the document route as a caller
         # passthrough. It is therefore NOT the same contract as `_upsert_source`
         # (which passes `_SOURCE_EXTRA_PROPS`), and the disagreement between the
@@ -5025,13 +5170,17 @@ class _EntityHandlers:
                 uses = [uses]  # bare dict → normalize to list
             for use_item in uses:
                 if isinstance(use_item, dict):
-                    # #125 structured uses: {name, kind} → objectKind from kind
+                    # #125 structured uses: {name, kind} → objectKind from kind.
+                    # #9572: an ABSENT kind stays absent — a fabricated
+                    # `"other"` here becomes a real kind on a node that may
+                    # already exist, and the ON MATCH arm would then overwrite
+                    # a stored `capability`.
                     use_name = use_item.get("name", "")
-                    use_kind = use_item.get("kind", "other")
+                    use_kind = use_item.get("kind") or None
                 else:
-                    # legacy string uses → default objectKind='other'
+                    # legacy string uses name no kind at all (#9572)
                     use_name = str(use_item)
-                    use_kind = "other"
+                    use_kind = None
                 # #7369: `use_name` is the Object MERGE key.
                 if not _writable_id(use_name):
                     _log_identity_skip(
@@ -5046,8 +5195,12 @@ class _EntityHandlers:
                     # must still journal that registration.
                     self.g.query(
                         "MERGE (o:Object {name:$name}) "
-                        "ON CREATE SET o.id=$id, o.objectKind=$kind, o._stub=true "
-                        "ON MATCH SET o.objectKind=$kind",
+                        "ON CREATE SET o.id=$id, "
+                        "o.objectKind=coalesce($kind, 'other'), o._stub=true "
+                        # #9572: coalesce, not a hard SET — a `uses[]` entry that
+                        # names no kind must not reset a stored discriminator
+                        # (the Subject arm's ON MATCH already works this way).
+                        "ON MATCH SET o.objectKind=coalesce($kind, o.objectKind)",
                         params={"name": use_name, "kind": use_kind, "id": stub_id},
                     )
                     self.g.query(

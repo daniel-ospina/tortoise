@@ -34,10 +34,14 @@ def _make_claim(sdk: TortoiseSDK, content: str):
 
 class TestEvidence:
     def test_set_returns_data(self, sdk):
-        result = sdk.set_point_baseline("claim-1", 5.0, 2.0)
+        # #9262: the returned dict describes a prior the GRAPH now holds, so the
+        # point must exist first — an id naming no node is refused (a real
+        # caller always has the point whose prior it is setting).
+        p = _make_claim(sdk, "claim-1")
+        result = sdk.set_point_baseline(p["id"], 5.0, 2.0)
         # #398/#2199: return includes baseline provenance (source defaults to
         # the #2199 token family's author-set value, renamed from 'explicit').
-        assert result == {"claim_id": "claim-1", "alpha": 5.0, "beta": 2.0,
+        assert result == {"claim_id": p["id"], "alpha": 5.0, "beta": 2.0,
                           "source": "set-by-author"}
 
     def test_get_confidence_default(self, sdk):

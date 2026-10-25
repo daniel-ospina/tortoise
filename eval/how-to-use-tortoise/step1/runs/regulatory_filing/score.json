@@ -1,0 +1,113 @@
+{
+  "input": "regulatory_filing",
+  "cell": "source document with provenance",
+  "confuses": [
+    "Source-vs-Object",
+    "Point-vs-Source"
+  ],
+  "counts": {
+    "Point": 5,
+    "Subject": 2,
+    "Object": 1,
+    "Event": 1,
+    "Source": 1
+  },
+  "item_rows": [
+    {
+      "item": "SEC Form D",
+      "expected": "source:document",
+      "written": "Source:document",
+      "node": "SEC Form D - Solstice Robotics Inc. - filed 2026-06-11",
+      "fuzzy": true,
+      "verdict": "OK"
+    },
+    {
+      "item": "$12,500,000",
+      "expected": "point:statement",
+      "written": "Point:observation",
+      "node": "Total amount sold in the SEC Form D filed by Solstice Robotics Inc. on 2026-06-1",
+      "fuzzy": true,
+      "verdict": "KIND"
+    },
+    {
+      "item": "14 investors",
+      "expected": "point:statement",
+      "written": "Point:observation",
+      "node": "The SEC Form D filed by Solstice Robotics Inc. on 2026-06-11 reports 14 investor",
+      "fuzzy": true,
+      "verdict": "KIND"
+    },
+    {
+      "item": "Solstice Robotics",
+      "expected": "subject:organization",
+      "written": "Subject:core:organization",
+      "node": "Solstice Robotics Inc.",
+      "fuzzy": false,
+      "verdict": "OK"
+    }
+  ],
+  "findings": [
+    {
+      "severity": "P1",
+      "item": "$12,500,000",
+      "finding": "kind outside the frozen set: expected one of ['statement'], written 'observation' ('Total amount sold in the SEC Form D filed by Solstice Roboti') \u2014 declared, but not the kind this item is",
+      "fix": "pick a kind the active vocabulary declares for this layer (\u00a75)"
+    },
+    {
+      "severity": "P1",
+      "item": "14 investors",
+      "finding": "kind outside the frozen set: expected one of ['statement'], written 'observation' ('The SEC Form D filed by Solstice Robotics Inc. on 2026-06-11') \u2014 declared, but not the kind this item is",
+      "fix": "pick a kind the active vocabulary declares for this layer (\u00a75)"
+    }
+  ],
+  "relations": [
+    "aboutObject",
+    "aboutSource",
+    "aboutSubject",
+    "extractedFrom",
+    "memberOf",
+    "participatesIn",
+    "wasDerivedFrom"
+  ],
+  "operators": [],
+  "sources": [
+    "https://www.sec.gov/Archives/edgar/data/0001234567/000123456726000001/xslFormDX01/primary_doc.xml"
+  ],
+  "mitigations": [],
+  "kind_census": {},
+  "wrong_axis_kinds": [],
+  "cross_axis_kinds": [],
+  "kind_sources": {
+    "Point": {
+      "observation": "CORE",
+      "statement": "CORE"
+    },
+    "Subject": {
+      "core:organization": "CORE",
+      "core:role": "CORE"
+    },
+    "Object": {
+      "other": "CORE"
+    },
+    "Event": {
+      "occurrence": "CORE"
+    },
+    "Source": {
+      "document": "CORE"
+    }
+  },
+  "packs": [
+    "agent-ops",
+    "dev",
+    "marketing",
+    "pm",
+    "portfolio",
+    "product-strategy",
+    "venture"
+  ],
+  "severity_counts": {
+    "P0": 0,
+    "P1": 2,
+    "P2": 0
+  }
+}

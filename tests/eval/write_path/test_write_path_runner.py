@@ -992,3 +992,319 @@ def test_run_carries_operator_edge_audit_dimension(tmp_path, monkeypatch):
             < receipt["operator_audit"]["planted"])
     assert (receipt["operator_audit"]["operators_provenanced"]
             == receipt["operator_audit"]["operators_total"] > 0)
+
+
+# ── #8503: attributing an `edge_missing` verdict ───────────────────────────
+#
+# An `edge_missing` verdict (both endpoints present, no qualifying edge) has
+# TWO mechanisms that need different fixes: the model never FORMED the edge
+# (operator selection) or the seam DROPPED one it did emit (a write-path bug).
+# The receipts carried no extraction warnings at all, so a reader could not
+# tell them apart. The block below is the discriminator; these tests pin both
+# directions, because a filter that matched everything would answer "some
+# warnings" rather than "no drop".
+
+
+def test_operator_drop_warnings_names_a_seam_drop():
+    results = [{
+        "session_id": "wp01_quarry_debug",
+        "extraction_warnings": [
+            "operator dropped: src/dst did not resolve to an emitted "
+            "point/event ('X' → 'Y')",
+            "value-normalizer: 5 point(s) carried an amount that was not typed",
+        ],
+    }]
+    drops = runner.operator_drop_warnings(results)
+    assert drops["total"] == 1
+    assert drops["operator_drops"] == 1
+    assert drops["supersede_refusals"] == 0
+    assert list(drops["by_session"]) == ["wp01_quarry_debug"]
+    assert "operator dropped" in drops["by_session"]["wp01_quarry_debug"][0]
+
+
+def test_operator_drop_warnings_separates_the_replace_channel():
+    """#8503: a supersede refusal is NOT an operator drop.
+
+    The first cut of this classifier matched "is not expressible in the
+    Layer-1 payload" and counted wp02's three ENTITY-lifecycle notices plus
+    wp07's two supersede refusals as five operator drops — attributing
+    selection misses to the operator pass, which had dropped nothing. The two
+    classes answer different questions and are counted separately.
+    """
+    results = [{
+        "session_id": "wp07_bluepeak_followup",
+        "extraction_warnings": [
+            "entity 'all-at-once rollout' lifecycle=superseded with no "
+            "supersedes ref is not expressible in the Layer-1 payload",
+            "entity 'per-service flags' supersedes='all-at-once rollout' does "
+            "not resolve to an S3 search result — recorded without a graph id",
+            "point supersedes='We ship the lease fix' matches no S3 prior — "
+            "skipped (fail-open)",
+        ],
+    }]
+    drops = runner.operator_drop_warnings(results)
+    assert drops["operator_drops"] == 0
+    assert drops["supersede_refusals"] == 3
+    assert drops["total"] == 3
+
+
+def test_recall_leg_success_is_not_counted_as_a_refusal():
+    """#8503 code-review finding: the refusal markers key on TAILS, not the
+    `point supersedes=` prefix.
+
+    The recall leg's SUCCESS warning shares that prefix, so the first cut of
+    `_SUPERSEDE_REFUSAL_MARKERS` counted the one resolution that worked as a
+    replace-channel DROP — the exact false-attribution class the two-class
+    split exists to prevent.
+    """
+    results = [{
+        "session_id": "wp07_bluepeak_followup",
+        "extraction_warnings": [
+            "point-supersede recall band (#8503): ref 'We ship the lease fix' "
+            "is the same claim as 'pt_wp06_decision' once frame words at its edges are disregarded — resolved "
+            "to that prior instead of failing open",
+            "point supersedes='We ship the lease fix' matches no S3 prior — "
+            "skipped (fail-open)",
+        ],
+    }]
+    drops = runner.operator_drop_warnings(results)
+    assert drops["supersede_refusals"] == 1, drops
+    assert drops["operator_drops"] == 0
+
+
+def test_operator_drop_warnings_ignores_benign_extraction_warnings():
+    """Zero is a MEASUREMENT (#8503): "the extractor logged no drop".
+
+    The real receipt's sessions log value-span, slot-binding and search_keys
+    warnings — none of them a drop. A marker set that counted those would
+    attribute every ``edge_missing`` to the write path.
+    """
+    results = [{
+        "session_id": "wp01_quarry_debug",
+        "extraction_warnings": [
+            "value-bearing point 'X' resolved verbatim in turn 8, but the "
+            "quoted text carries no value",
+            "point 'Maya owns the pre-deploy check': search_keys capped at 4",
+            "MITIGATES target edge materialized (#2552 mint-before-wire)",
+            "operator endpoint minted (#2552 mint-before-wire): IMPL dst",
+            "NAND direction canonicalized (#909 — new-claim-attacks-existing)",
+        ],
+    }]
+    assert runner.operator_drop_warnings(results) == {
+        "total": 0, "operator_drops": 0, "supersede_refusals": 0,
+        "by_session": {}}
+
+
+def test_entity_name_collision_is_not_a_supersede_refusal():
+    """#8503 round 6: the refusal set must not swallow a notice that refuses nothing.
+
+    `entity '<x>' kind '<y>' is ambiguous across namespaces … created with the
+    explicit kind` CREATES the entity, so counting it as a replace-channel
+    refusal made a receipt assert a drop cause that did not exist. The markers
+    key on the resolver's own ambiguous forms only; this pin is what keeps a
+    future "broaden the marker" edit from restoring the false cause.
+    """
+    collision = (
+        "entity 'lumen auth' kind 'core:service' is ambiguous across "
+        "namespaces in the existing graph — created with the explicit kind "
+        "(link-before-create cannot disambiguate)")
+    collision_only = runner.operator_drop_warnings(
+        [{"session_id": "s", "extraction_warnings": [collision]}])
+    assert collision_only == {"total": 0, "operator_drops": 0,
+                             "supersede_refusals": 0, "by_session": {}}
+    # EVERY resolver ambiguity form counts — the point-supersede branch
+    # ("N priors contain it") as well as the lifecycle branch ("direction
+    # unclear"), or a receipt claims no refusal on a run that refused one.
+    for form in (
+        "entity 'x' lifecycle=superseded with supersedes='y' is ambiguous "
+        "(direction unclear) — supersession record skipped (never-guess)",
+        "point supersedes='r' is ambiguous (2 priors contain it) — skipped "
+        "(never guess)",
+        "point supersedes='r' is ambiguous (2 priors) — skipped (never guess)",
+    ):
+        refused = runner.operator_drop_warnings(
+            [{"session_id": "s", "extraction_warnings": [form]}])
+        assert refused["supersede_refusals"] == 1, form
+
+
+def test_run_note_never_claims_zero_drops_when_drops_exist():
+    """#8503 round 5: the note's operator sentence tracks the operator count.
+
+    The `elif supersede_refusals` branch was reachable with `operator_drops > 0`
+    and still said "logged no operator drop" — a false statement in a shipped
+    receipt. Four combinations, all pinned, and every assertion is on a note
+    that must EXIST (an empty string once satisfied the drops-only check, which
+    is how the missing note survived a gate).
+    """
+    def notes_for(operator_drops: int, refusals: int,
+                  posture: str = "llm") -> str:
+        audit = {
+            "planted": 15, "edge_correct": 5, "content_ok": 11,
+            "operators_total": 10, "operators_provenanced": 10,
+            "drop_warnings": {"total": operator_drops + refusals,
+                              "operator_drops": operator_drops,
+                              "supersede_refusals": refusals,
+                              "by_session": {}},
+        }
+        return "\n".join(
+            runner.operator_drop_notes(audit["drop_warnings"], posture))
+
+    both_zero = notes_for(0, 0)
+    assert "logged no operator drop and no supersede refusal" in both_zero
+    # the blind-spot enumeration is part of the claim: three seams, named
+    assert "three seams" in both_zero
+    assert "commit layer" in both_zero and "snapshot failed to read" in both_zero
+    assert "NOOP" in both_zero
+    # drops only: THE note must exist and name the drops (an empty string would
+    # satisfy a bare "not in" assertion — the vacuous pin review round 6 caught)
+    drops_only = notes_for(2, 0)
+    assert drops_only.strip(), "a run with drops must carry a drop note"
+    assert "logged no operator drop" not in drops_only
+    assert "2 drop warning(s)" in drops_only
+    # refusals only: the operator sentence is truthful
+    assert "the operator pass logged no drop" in notes_for(0, 3)
+    # BOTH non-zero: must name the drops, never claim zero
+    both = notes_for(2, 3)
+    assert "logged no operator drop" not in both
+    assert "2 drop warning(s)" in both
+    assert "3 refusal(s)" in both
+
+
+# ── #8503 code-review round 7: the note must know WHICH LANE it is on ───────
+
+def test_the_zero_drop_note_does_not_claim_a_clean_bill_on_the_m2_lane():
+    """The `drop_warnings` count is zero BY CONSTRUCTION on the m2 lane.
+
+    Every marker `operator_drop_warnings` classifies is emitted by
+    `tortoise/extractor_v2.py`, and the `m2` posture routes capture to the M2
+    extractor, which never runs the product operator pass. So the zero note's
+    conclusion — "an edge_missing verdict in this receipt is not an
+    EXTRACTOR-side drop" — was an inference that lane's measurement cannot
+    make, printed beside `operator_audit_notes`' own m2 caveat saying the lane
+    has no product relation extraction at all. Two notes, one receipt,
+    disagreeing about what the zero means.
+    """
+    def notes_for(operator_drops: int, refusals: int, posture: str) -> str:
+        drops = {"total": operator_drops + refusals,
+                 "operator_drops": operator_drops,
+                 "supersede_refusals": refusals, "by_session": {}}
+        return "\n".join(runner.operator_drop_notes(drops, posture))
+
+    m2_zero = notes_for(0, 0, "m2")
+    assert "NOT MEASURED" in m2_zero, m2_zero
+    assert "product operator pass" in m2_zero
+    assert "not an EXTRACTOR-side drop" not in m2_zero, (
+        "the m2 lane cannot support the inference: its operator pass never runs")
+    assert "three seams" not in m2_zero, (
+        "the llm-lane blind spots do not bound a lane that never ran the pass")
+    # two-sided: the llm lane still makes the claim it can make, and the four
+    # count combinations are unchanged there.
+    llm_zero = notes_for(0, 0, "llm")
+    assert "not an EXTRACTOR-side drop" in llm_zero
+    assert "NOT MEASURED" not in llm_zero
+    assert "three seams" in llm_zero
+
+
+def test_recall_leg_success_warning_is_not_a_refusal():
+    """#8503 code-review finding: the classifier and the warning TEXT agree.
+
+    The refusal markers key on refusal tails, and the recall leg's success
+    line must therefore name no refusal. This pin runs the leg and classifies
+    the warning it actually emits — a regression that re-uses the
+    `point supersedes=… matches no S3 prior` shape for a SUCCESS fails here,
+    not in a prose assertion.
+    """
+    import tortoise.extractor_v2 as v2
+
+    embed = {"entities": [], "events": [],
+             "points": [{"content": "roll out per-service flags for the next "
+                                    "rollout instead of one global kill flag",
+                          "pointKind": "statement",
+                          "supersedes": "lease fix ships behind the canary "
+                                        "flag at"}],
+             "operators": []}
+    search = {"entities": [], "events": [],
+              "points": [{"id": "pt_wp06", "kind": "statement",
+                          "content": "The lease fix ships behind the canary "
+                                     "flag"}]}
+    r = v2.execute_embed(embed, search, session_id="s1")
+    assert any(s["superseded"] == "pt_wp06" for s in r["supersessions"])
+    success = [w for w in r["warnings"] if "recall band" in w]
+    assert success, r["warnings"]
+    drops = runner.operator_drop_warnings(
+        [{"session_id": "s1", "extraction_warnings": success}])
+    assert drops["total"] == 0, drops
+
+
+def test_non_dict_operator_drop_is_a_marker():
+    """#8503 round 4: a malformed operator entry IS a drop and is classified.
+
+    It never reaches the operator pass, so the pass's own drop line cannot
+    cover it; without this marker the receipt reports `operator_drops == 0` on
+    a run where an operator was skipped.
+    """
+    drops = runner.operator_drop_warnings([{
+        "session_id": "wp01_quarry_debug",
+        "extraction_warnings": [
+            'non-dict operator entry "IMPL: a -> b" skipped'],
+    }])
+    assert drops["operator_drops"] == 1, drops
+    assert drops["supersede_refusals"] == 0
+
+
+def test_retraction_refusals_are_counted():
+    """#8503 round 7: a refused RETRACTION is an extractor-side drop too.
+
+    Two of the four retraction refusal forms matched no marker, so a run whose
+    retractions were all refused classified as `{total: 0}` and shipped the
+    "no supersede refusal in any session" note — the false-zero class again.
+    """
+    for form in (
+        "non-dict retraction ref 'pt_abc123' skipped",
+        "empty retraction ref (no id, no content) — skipped",
+    ):
+        drops = runner.operator_drop_warnings(
+            [{"session_id": "s", "extraction_warnings": [form]}])
+        assert drops["supersede_refusals"] == 1, form
+        assert drops["operator_drops"] == 0, form
+
+
+def test_receipt_omits_drop_warnings_when_the_audit_carries_none():
+    """A receipt must not assert "0 drops" for a run that measured none."""
+    report = _completed_report()
+    report["operator_audit"] = {
+        "planted": 15, "edge_correct": 2, "content_ok": 7,
+        "operators_total": 27, "operators_provenanced": 27, "results": {},
+    }
+    receipt = runner.build_receipt(report)
+    assert "drop_warnings" not in receipt["operator_audit"]
+
+
+def test_receipt_carries_extraction_warnings_and_drop_attribution():
+    report = _completed_report()
+    report["session_results"] = [{
+        "session_id": "wp01_quarry_debug",
+        "emitted": True,
+        "macro": {"survived": 1, "total": 2},
+        "strict": {"survived": 1, "total": 2},
+        "leaked": {"leaked": 0, "total": 0},
+        "quotes": {"grounded": 0, "total": 0},
+        "provenance": {"accurate": 1, "total": 1},
+        "memory_point_count": 3,
+        "operator_counts": {"IMPL": 2},
+        "extraction_warnings": ["operator dropped: src/dst did not resolve"],
+        "unit_detail": {},
+    }]
+    report["operator_audit"] = {
+        "planted": 15, "edge_correct": 2, "content_ok": 7,
+        "operators_total": 27, "operators_provenanced": 27,
+        "drop_warnings": runner.operator_drop_warnings(
+            report["session_results"]),
+        "results": {},
+    }
+    receipt = runner.build_receipt(report)
+    assert receipt["session_results"][0]["extraction_warnings"] == [
+        "operator dropped: src/dst did not resolve"]
+    assert receipt["operator_audit"]["drop_warnings"]["total"] == 1
+    # a receipt that carries them still validates
+    assert runner.validate_receipt(receipt) == []

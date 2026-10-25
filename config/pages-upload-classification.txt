@@ -73,6 +73,13 @@ public a7c41f0e9b2d63584e1c0af7d3b925e6.txt
 # They are staged by the dashboard's vite build, not by this upload.
 excluded 2479-re-auth-implementation-plan.md
 excluded README.md
+# The installable skill archives (#9660): `.skill` zips the ChatGPT card hands to
+# the dashboard (`app.premiselabs.co`) from this origin, and the docs page links
+# same-origin. `public` because the deploy MUST stage them — the card's three
+# links 404 otherwise. The directories hold ONLY the archives: `*.md` at any
+# depth is still excluded by the deploy step, and the archive source is the
+# served copy at the app origin, so no skill document is published from here.
+public skills
 excluded apps
 excluded migrations
 excluded website_architecture.md

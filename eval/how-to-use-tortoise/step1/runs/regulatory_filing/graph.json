@@ -1,0 +1,358 @@
+{
+  "nodes": [
+    {
+      "layer": "Source",
+      "labels": [
+        "Source"
+      ],
+      "text": "SEC Form D - Solstice Robotics Inc. - filed 2026-06-11",
+      "kind": "document",
+      "is_operator": false,
+      "op_type": "",
+      "status": "",
+      "url": "https://www.sec.gov/Archives/edgar/data/0001234567/000123456726000001/xslFormDX01/primary_doc.xml",
+      "id": "https://www.sec.gov/Archives/edgar/data/0001234567/000123456726000001/xslFormDX01/primary_doc.xml"
+    },
+    {
+      "layer": "Subject",
+      "labels": [
+        "Subject"
+      ],
+      "text": "Solstice Robotics Inc.",
+      "kind": "core:organization",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "sub-89c517d8ab2778d1b44d0826ae"
+    },
+    {
+      "layer": "Subject",
+      "labels": [
+        "Subject"
+      ],
+      "text": "CFO of Solstice Robotics Inc.",
+      "kind": "core:role",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "sub-f48d1b90ead16c8c26ad498087"
+    },
+    {
+      "layer": "Event",
+      "labels": [
+        "Event"
+      ],
+      "text": "SEC Form D filed by Solstice Robotics Inc. on 2026-06-11",
+      "kind": "occurrence",
+      "is_operator": false,
+      "op_type": "",
+      "status": "",
+      "url": "",
+      "id": "1a166162f2f-be2f26634172"
+    },
+    {
+      "layer": "Object",
+      "labels": [
+        "Object"
+      ],
+      "text": "Solstice Robotics Inc. SEC Form D offering (2026-06-11)",
+      "kind": "other",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "obj-b674faf334fad59c8f0148e962"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "Total offering amount of the SEC Form D filed by Solstice Robotics Inc. on 2026-06-11 was $40,000,000.",
+      "kind": "observation",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "1a16616305b-04f96ca94e59"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "Total amount sold in the SEC Form D filed by Solstice Robotics Inc. on 2026-06-11 was $12,500,000.",
+      "kind": "observation",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "1a16616307d-3ddd475fc10b"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "The SEC Form D filed by Solstice Robotics Inc. on 2026-06-11 reports 14 investors.",
+      "kind": "observation",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "1a16616309b-dea467837153"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "The SEC Form D filing by Solstice Robotics Inc. is signed by the CFO.",
+      "kind": "statement",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "1a1661630c1-5649ff40448d"
+    },
+    {
+      "layer": "Point",
+      "labels": [
+        "Point"
+      ],
+      "text": "The SEC Form D filing was retrieved from EDGAR on 2026-10-05.",
+      "kind": "observation",
+      "is_operator": false,
+      "op_type": "",
+      "status": "live",
+      "url": "",
+      "id": "1a1661630d4-489b49dfd217"
+    }
+  ],
+  "edges": [
+    {
+      "relation": "participatesIn",
+      "from": "Solstice Robotics Inc.",
+      "to": "SEC Form D filed by Solstice Robotics Inc. on 2026-06-11",
+      "from_layer": "Subject",
+      "to_layer": "Event",
+      "from_id": "sub-89c517d8ab2778d1b44d0826ae",
+      "to_id": "1a166162f2f-be2f26634172"
+    },
+    {
+      "relation": "memberOf",
+      "from": "CFO of Solstice Robotics Inc.",
+      "to": "Solstice Robotics Inc.",
+      "from_layer": "Subject",
+      "to_layer": "Subject",
+      "from_id": "sub-f48d1b90ead16c8c26ad498087",
+      "to_id": "sub-89c517d8ab2778d1b44d0826ae"
+    },
+    {
+      "relation": "aboutSource",
+      "from": "SEC Form D filed by Solstice Robotics Inc. on 2026-06-11",
+      "to": "",
+      "from_layer": "Event",
+      "to_layer": "Source",
+      "from_id": "1a166162f2f-be2f26634172",
+      "to_id": "https://www.sec.gov/Archives/edgar/data/0001234567/000123456726000001/xslFormDX01/primary_doc.xml"
+    },
+    {
+      "relation": "aboutSubject",
+      "from": "SEC Form D filed by Solstice Robotics Inc. on 2026-06-11",
+      "to": "Solstice Robotics Inc.",
+      "from_layer": "Event",
+      "to_layer": "Subject",
+      "from_id": "1a166162f2f-be2f26634172",
+      "to_id": "sub-89c517d8ab2778d1b44d0826ae"
+    },
+    {
+      "relation": "aboutObject",
+      "from": "SEC Form D filed by Solstice Robotics Inc. on 2026-06-11",
+      "to": "Solstice Robotics Inc. SEC Form D offering (2026-06-11)",
+      "from_layer": "Event",
+      "to_layer": "Object",
+      "from_id": "1a166162f2f-be2f26634172",
+      "to_id": "obj-b674faf334fad59c8f0148e962"
+    },
+    {
+      "relation": "wasDerivedFrom",
+      "from": "Solstice Robotics Inc. SEC Form D offering (2026-06-11)",
+      "to": "",
+      "from_layer": "Object",
+      "to_layer": "Source",
+      "from_id": "obj-b674faf334fad59c8f0148e962",
+      "to_id": "https://www.sec.gov/Archives/edgar/data/0001234567/000123456726000001/xslFormDX01/primary_doc.xml"
+    },
+    {
+      "relation": "aboutSubject",
+      "from": "Solstice Robotics Inc. SEC Form D offering (2026-06-11)",
+      "to": "Solstice Robotics Inc.",
+      "from_layer": "Object",
+      "to_layer": "Subject",
+      "from_id": "obj-b674faf334fad59c8f0148e962",
+      "to_id": "sub-89c517d8ab2778d1b44d0826ae"
+    },
+    {
+      "relation": "extractedFrom",
+      "from": "Total offering amount of the SEC Form D filed by Solstice Robotics Inc. on 2026-06-11 was $40,000,000.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a16616305b-04f96ca94e59",
+      "to_id": "https://www.sec.gov/Archives/edgar/data/0001234567/000123456726000001/xslFormDX01/primary_doc.xml"
+    },
+    {
+      "relation": "aboutSubject",
+      "from": "Total offering amount of the SEC Form D filed by Solstice Robotics Inc. on 2026-06-11 was $40,000,000.",
+      "to": "Solstice Robotics Inc.",
+      "from_layer": "Point",
+      "to_layer": "Subject",
+      "from_id": "1a16616305b-04f96ca94e59",
+      "to_id": "sub-89c517d8ab2778d1b44d0826ae"
+    },
+    {
+      "relation": "aboutObject",
+      "from": "Total offering amount of the SEC Form D filed by Solstice Robotics Inc. on 2026-06-11 was $40,000,000.",
+      "to": "Solstice Robotics Inc. SEC Form D offering (2026-06-11)",
+      "from_layer": "Point",
+      "to_layer": "Object",
+      "from_id": "1a16616305b-04f96ca94e59",
+      "to_id": "obj-b674faf334fad59c8f0148e962"
+    },
+    {
+      "relation": "extractedFrom",
+      "from": "Total amount sold in the SEC Form D filed by Solstice Robotics Inc. on 2026-06-11 was $12,500,000.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a16616307d-3ddd475fc10b",
+      "to_id": "https://www.sec.gov/Archives/edgar/data/0001234567/000123456726000001/xslFormDX01/primary_doc.xml"
+    },
+    {
+      "relation": "aboutSubject",
+      "from": "Total amount sold in the SEC Form D filed by Solstice Robotics Inc. on 2026-06-11 was $12,500,000.",
+      "to": "Solstice Robotics Inc.",
+      "from_layer": "Point",
+      "to_layer": "Subject",
+      "from_id": "1a16616307d-3ddd475fc10b",
+      "to_id": "sub-89c517d8ab2778d1b44d0826ae"
+    },
+    {
+      "relation": "aboutObject",
+      "from": "Total amount sold in the SEC Form D filed by Solstice Robotics Inc. on 2026-06-11 was $12,500,000.",
+      "to": "Solstice Robotics Inc. SEC Form D offering (2026-06-11)",
+      "from_layer": "Point",
+      "to_layer": "Object",
+      "from_id": "1a16616307d-3ddd475fc10b",
+      "to_id": "obj-b674faf334fad59c8f0148e962"
+    },
+    {
+      "relation": "extractedFrom",
+      "from": "The SEC Form D filed by Solstice Robotics Inc. on 2026-06-11 reports 14 investors.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a16616309b-dea467837153",
+      "to_id": "https://www.sec.gov/Archives/edgar/data/0001234567/000123456726000001/xslFormDX01/primary_doc.xml"
+    },
+    {
+      "relation": "aboutSubject",
+      "from": "The SEC Form D filed by Solstice Robotics Inc. on 2026-06-11 reports 14 investors.",
+      "to": "Solstice Robotics Inc.",
+      "from_layer": "Point",
+      "to_layer": "Subject",
+      "from_id": "1a16616309b-dea467837153",
+      "to_id": "sub-89c517d8ab2778d1b44d0826ae"
+    },
+    {
+      "relation": "aboutObject",
+      "from": "The SEC Form D filed by Solstice Robotics Inc. on 2026-06-11 reports 14 investors.",
+      "to": "Solstice Robotics Inc. SEC Form D offering (2026-06-11)",
+      "from_layer": "Point",
+      "to_layer": "Object",
+      "from_id": "1a16616309b-dea467837153",
+      "to_id": "obj-b674faf334fad59c8f0148e962"
+    },
+    {
+      "relation": "extractedFrom",
+      "from": "The SEC Form D filing by Solstice Robotics Inc. is signed by the CFO.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a1661630c1-5649ff40448d",
+      "to_id": "https://www.sec.gov/Archives/edgar/data/0001234567/000123456726000001/xslFormDX01/primary_doc.xml"
+    },
+    {
+      "relation": "aboutSubject",
+      "from": "The SEC Form D filing by Solstice Robotics Inc. is signed by the CFO.",
+      "to": "Solstice Robotics Inc.",
+      "from_layer": "Point",
+      "to_layer": "Subject",
+      "from_id": "1a1661630c1-5649ff40448d",
+      "to_id": "sub-89c517d8ab2778d1b44d0826ae"
+    },
+    {
+      "relation": "aboutSubject",
+      "from": "The SEC Form D filing by Solstice Robotics Inc. is signed by the CFO.",
+      "to": "CFO of Solstice Robotics Inc.",
+      "from_layer": "Point",
+      "to_layer": "Subject",
+      "from_id": "1a1661630c1-5649ff40448d",
+      "to_id": "sub-f48d1b90ead16c8c26ad498087"
+    },
+    {
+      "relation": "aboutSource",
+      "from": "The SEC Form D filing was retrieved from EDGAR on 2026-10-05.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a1661630d4-489b49dfd217",
+      "to_id": "https://www.sec.gov/Archives/edgar/data/0001234567/000123456726000001/xslFormDX01/primary_doc.xml"
+    },
+    {
+      "relation": "extractedFrom",
+      "from": "The SEC Form D filing was retrieved from EDGAR on 2026-10-05.",
+      "to": "",
+      "from_layer": "Point",
+      "to_layer": "Source",
+      "from_id": "1a1661630d4-489b49dfd217",
+      "to_id": "https://www.sec.gov/Archives/edgar/data/0001234567/000123456726000001/xslFormDX01/primary_doc.xml"
+    }
+  ],
+  "counts": {
+    "Point": 5,
+    "Subject": 2,
+    "Object": 1,
+    "Event": 1,
+    "Source": 1
+  },
+  "operators": [],
+  "sources": [
+    {
+      "layer": "Source",
+      "labels": [
+        "Source"
+      ],
+      "text": "SEC Form D - Solstice Robotics Inc. - filed 2026-06-11",
+      "kind": "document",
+      "is_operator": false,
+      "op_type": "",
+      "status": "",
+      "url": "https://www.sec.gov/Archives/edgar/data/0001234567/000123456726000001/xslFormDX01/primary_doc.xml",
+      "id": "https://www.sec.gov/Archives/edgar/data/0001234567/000123456726000001/xslFormDX01/primary_doc.xml"
+    }
+  ],
+  "relations": [
+    "aboutObject",
+    "aboutSource",
+    "aboutSubject",
+    "extractedFrom",
+    "memberOf",
+    "participatesIn",
+    "wasDerivedFrom"
+  ],
+  "mitigations": []
+}

@@ -89,8 +89,9 @@
 #   RECORD_REPO                     override owner/name (default GITHUB_REPOSITORY)
 #   RECORD_WORKFLOW                 workflow file (default availability-watchdog.yml)
 #
-# Harness: .github/scripts/availability-record.test.sh (stubs `gh`, no network,
-# CI job `availability-record`). Run: bash .github/scripts/availability-record.test.sh
+# Harness: .github/scripts/availability-record.test.sh (stubs `gh`, no network, the
+# `Availability record-only baseline (#3810)` step of ci.yml's `ops-harnesses` job).
+# Run: bash .github/scripts/availability-record.test.sh
 # ============================================================================
 set -uo pipefail
 

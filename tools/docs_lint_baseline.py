@@ -35,8 +35,10 @@ WHAT THIS PROGRAM DOES
     (``ResponseStats::is_success``, lychee 0.24.2) is
     ``error_map.is_empty() && timeout_map.is_empty()`` — the ``--accept-timeouts``
     opt-out exists precisely because a timeout IS a failure by default. Because
-    this step runs the whole-repo lychee action with ``fail: false`` (so the
-    differ decides), a map the differ does not read is a class it cannot fail on:
+    the CI side is a producer that captures the report and does NOT decide
+    (``.github/scripts/docs-link-check.sh`` publishes it and the differ below
+    adjudicates, #7435), a map the differ does not read is a class it cannot fail
+    on:
     keying on ``error_map`` alone left a new dead link that TIMED OUT instead of
     erroring passing the required check, and unable ever to become "known" (the
     snapshot's producer uses the same parse). Reading both maps makes the differ
@@ -1139,11 +1141,33 @@ def load_markdownlint(output: Path, expected_files: int) -> list[tuple[str, str,
 
 
 def load_lychee(output: Path, repo_root: Path) -> list[tuple[str, str, str]]:
+    """Read the LINK CHECK step's report, refusing every absence of a measurement.
+
+    The three refusals are deliberately worded apart, because the 2026-10-25
+    failure (#9708) was a *producer* defect reported as a *report-format*
+    problem: the composite action could not find its own binary, wrote a
+    ZERO-BYTE file, and exited 0 — so this function said "unparseable" and the
+    red landed on the PR's markdown. An EMPTY report is now named for what it
+    is: no measurement, and therefore not a verdict about the diff.
+    """
     if not output.is_file():
-        raise FailClosed(f"lychee JSON report {output} is missing — the link check did not run")
+        raise FailClosed(
+            f"lychee JSON report {output} is missing — the LINK CHECK step produced no "
+            "report, so nothing here is a verdict about the changed markdown (#9708)"
+        )
     try:
-        document = json.loads(output.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        text = output.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise FailClosed(f"lychee JSON report {output} is unreadable: {exc}") from exc
+    if not text.strip():
+        raise FailClosed(
+            f"lychee JSON report {output} is EMPTY (zero bytes) — the LINK CHECK step "
+            "produced no report, so this is a failed MEASUREMENT and not a finding "
+            "about the changed markdown (#9708)"
+        )
+    try:
+        document = json.loads(text)
+    except json.JSONDecodeError as exc:
         raise FailClosed(f"lychee JSON report {output} is unparseable: {exc}") from exc
     document = _require_lychee_shape(document, f"report {output}")
     return parse_lychee(document, repo_root)

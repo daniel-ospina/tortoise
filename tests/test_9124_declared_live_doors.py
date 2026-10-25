@@ -352,6 +352,13 @@ _UNRESOLVED = {
     "_assert_lifecycle_guard",
     "_graph_presence",
     "_hop",
+    # #7819: the statement is the shared `live.LIFECYCLE_FANOUT_QUERY` constant,
+    # which this resolver reads only as a module-level string of the scanned
+    # file — so it reports '<unresolved>' here (the same call inside
+    # `_assert_lifecycle_guard` is reported the same way). By hand:
+    # `MATCH (n:Point {id:$id}) RETURN n.is_operator, n.status,
+    # coalesce(n.outdated, false)` — a read.
+    "_lifecycle_terminal_marker",
     "_window_closure",
     "expand_relationships",
     # f-string interpolates a computed fragment (`{_label}`, `{relationship_type}`,
@@ -417,6 +424,15 @@ _UNRESOLVED = {
     "_find_point_by_content",
     "_find_points_by_key",
     "_find_terminal_dedup_hit",
+    # #8400 review P3: ONE query now backs both key legs. It was hoisted out of
+    # the per-leg copies — those callers no longer reach the graph handle
+    # themselves and are not scan entry points any more — so the two legs stop
+    # carrying byte-identical copies of the terminal probe (the fork class the
+    # `_dedup_match_clauses` extraction exists to kill). Hand check, same as
+    # before: a literal `MATCH (n:Point) WHERE n.id IN $ids AND <terminal
+    # predicate> RETURN n.id LIMIT 1` is a pure read that appends no record and
+    # writes nothing; it only decides whether a fold WOULD be refused.
+    "_terminal_holder_among",
     # #9350: `_capture_stamp_targets` runs the CALLER's statement prefix (it is
     # handed the shared `MATCH … WHERE` half so the read and the guarded write
     # cannot drift), so the resolver cannot unfold it. Checked by hand: the

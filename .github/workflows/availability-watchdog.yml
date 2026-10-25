@@ -38,8 +38,9 @@
 # rather than going quiet.
 #
 # Operator runbook: docs/infra-runbook.md → "Out-of-band availability watchdog".
-# Harness: .github/scripts/availability-watchdog.test.sh (CI job
-# availability-watchdog; stubs curl/gh/flyctl, no network).
+# Harness: .github/scripts/availability-watchdog.test.sh (step
+# `Availability watchdog state machine (#2850)` of the `ops-harnesses` CI job;
+# stubs curl/gh/flyctl, no network).
 #
 # TWO PRODUCTION TARGETS (#3628): the Fly API probe above, plus a SECOND,
 # DEDICATED step for the Cloudflare Pages auth surface (`GET /auth/start`).
@@ -149,6 +150,17 @@ jobs:
         continue-on-error: true
         timeout-minutes: 3
         uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
+      # ── THE RUNNER TOOL CONTRACT (#9018) ──────────────────────────────
+      # The watchdog shells out to `gh` (availability-watchdog.sh) to read and
+      # file its incident issue. `runs-on: ubuntu-latest` normally means a
+      # GitHub-hosted image, but the fallback pool carries that label on a bare
+      # runner whose service PATH is a minimal non-login one with no `gh`.
+      # Measured 2026-10-24 on `pi-runner-vm-5/6`: `line 1008: gh: command not
+      # found`, re-reported as "issue search failed on the recovery path — the
+      # monitor cannot confirm incident state". That is the runner's fault
+      # wearing the instrument's name. Provide the tool or fail NAMING it.
+      - name: Runner tool contract — provide gh (#9018)
+        run: bash .github/scripts/runner-tools.sh ensure gh
       - name: Probe the public endpoint (self-heal + deduplicated alert)
         env:
           # STEP-level (round 3, P3-11): BOTH tokens are exported ONLY to the

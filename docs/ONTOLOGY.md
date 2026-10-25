@@ -486,7 +486,9 @@ node TOPOLOGY (two addresses for one document), not merely the edge.
 
 **`documentKind` is not `sourceKind`.** `sourceKind` answers *what kind of source this is* (`document`, `conversation`, `github_issue`, `agentSession` — the full vocabulary is in §5); `documentKind` answers *what genre of document it is*. Different questions — **neither absorbs the other**.
 
-**Liveness is a read, not a field.** *"Is this source still good?"* is answered from the entities extracted from it — high confidence, not superseded, not under a `NAND`. **The source inherits its health from its contents**, so nothing is stored to keep in sync and nothing can drift from the graph it describes. There is no `doc_status`.
+**Liveness is a read, not a field.** *"Is this source still good?"* is answered from the entities extracted from it — high confidence, not superseded, not under a `NAND`. **The source inherits its health from its contents**, so nothing is stored to keep in sync and nothing can drift from the graph it describes.
+
+**`doc_status` is RETIRED, not absent — a surviving one is READ, and `captured`/`extracted` outrank `needs_extraction`.** D10 removed the field from the write path: the post-D10 fold never sets it, and completion **REMOVEs** it (`SET s.needs_extraction = false REMOVE s.doc_status`), so a node this product writes today carries none. Retiring a field does not delete the data already on disk, so **both extraction readers honour a `doc_status` they find**, in this order: `captured` ⇒ pending (even beside the pre-D10 writer's boilerplate `needs_extraction: false`); `extracted` ⇒ done (even beside a stale `needs_extraction: true`); an explicit `needs_extraction: true` ⇒ pending (read *before* the generic retired-value arm, so a `draft` node carrying it is still discovered); any other retired value (`draft`) ⇒ pending for `--upgrade` **only** — `--upgrade-all` does not select it and `--include-unstamped` does not change that, since that flag widens only the *no-property* arm. With no `doc_status` and no `needs_extraction`, an **ABSENT** value is "no claim", never "done". So read absence of `doc_status` as *nothing retired to honour*, never as *the strongest possible signal* — that inversion is exactly the defect #5140 fixed.
 
 **Currency is also a read, and it needs an anchor.** Whether the extracted Points are *about the current content* is decided by the **version recorded on the extraction link** against the source's current version (§4.6) — not by any stored flag.
 
@@ -574,7 +576,7 @@ suppresses operator promotion exactly as a draft Point does.
 | `eventId` | string | — | — | The Event that ingested this source — the 1-hop audit hop to the mechanism snapshot (§3.5) |
 | `story_arc` | string | — | — | Arc continuation, for a source captured as part of a longer session narrative |
 | `sourcePath` | string | — | — | Filesystem path, for locally-ingested sources |
-| `needs_extraction` | bool | — | — | Explicit signal that this source is awaiting extraction (`--upgrade-all` discovery) |
+| `needs_extraction` | bool | — | — | Explicit signal that this source is awaiting extraction (`--upgrade-all` discovery) — read **after** `doc_status`'s `captured`/`extracted` arms but **before** the generic retired-value arm, so an explicit `true` is discovered even on a `draft` node, while `captured`/`extracted` outrank it (§4.4). `true` ⇒ pending, `false` ⇒ done, and an **absent** value means "no claim", not "done" (a document Source minted with no signal is selected only by `--upgrade` or by an explicit `--include-unstamped`) |
 | `_searchText` | string | — | — | Derived full-text index field (coalesce-on-create, overwrite-on-hash-change) |
 | `reliability` | float 0..1 | — | — | DERIVED query-time projection (mean of the modulated Beta prior) — documented cache, never authoritative (v3.2, #398) |
 | `reliabilityComponents` | JSON | — | — | Cache metadata: tier, decay, factor, assessment_count, derivation time (#398) |
@@ -724,7 +726,15 @@ window-consuming read path emits the same `valid_from_precision` /
 `valid_to_precision` / `end_state` block through `validity.window_read_fields`,
 and a covering candidate whose end is `unknown` also sets `end_state_unknown` on
 the reply — so an un-datable end is never read as still-true. `unknown` is
-END-only: a window with no datable start is not a window.
+END-only: a window with no datable start is not a window. **A declaration
+annotates a bound; it cannot summon one** (#9244) — so both the declared token
+and the legacy `day` default sit behind the same orderability gate on a PRESENT
+bound, and `supersede_point` inherits the successor's declared START precision
+onto the predecessor's END **only when that end came from the successor's own
+`validFrom`** (or a `valid_from` kwarg naming the same instant — the write guard
+forces equality with the stored start): when the resolution ladder falls through
+to `createdAt`/`now` (the start names no instant), the end is stamped with
+**no** precision property (#9729).
 
 > **Point's `when` is not a second valid-time slot.** `when` (§4.1) is the
 > **occurrence-date input** — the payload-level anchor the hosted commit path
@@ -1113,6 +1123,8 @@ degraded_reason    timeout | assembly_error | breaker_open      # degradations o
 > ```
 >
 > **Tombstone contract:** Retracted points stay in the graph (`get_point` returns them with `status='retracted'`). Default query surfaces (`query`, `paginated_query`) exclude them; pass `include_retracted=True` or an explicit `status='retracted'` filter to surface them. Deletion via `delete_point` hard-deletes (no tombstone).
+>
+> **A dead claim's temporal record is refused on the lifecycle doors (#2498, #7819).** `supersede_point`, `invalidate_point` and `retract_point` consult `TortoiseSDK._assert_lifecycle_guard`, whose predicate is `live.is_terminal_status` (the terminal statuses above plus `deprecated`, or the legacy `outdated=true` flag). Since #7819 `update_point` consults it too, for all four caller-temporal properties — `validFrom`, `validTo`, their precision markers, `expiredAt` and `when` (`_TEMPORAL_RESTAMP_PROPS`) — so a dead claim's validity window **and its occurrence anchor** can no longer be rewritten through that door. The scope is deliberate: a content or metadata revision of a terminal claim stays legal, because a `PointRevised` later than a terminalization is the newer same-id writer and the replay fold is built for it (`skip_updated_at` via `max_inline_seq`, #3305; `test_pointinvalidated_rebuild.py`, `test_pointsuperseded_rebuild.py`). #7819 does not close `update_entity`'s Point arms, which write caller props and `status` with a vocabulary check and no lifecycle guard (so they can also flip a `retracted` Point to `live`) — tracked as #9649. The promote residual is unchanged: the draft→live arm does not read the `outdated` flag, so a flag-dead point with a NULL status can still be given `status='live'` while the flag keeps it terminal for readers. **Consequence recorded so no one "tidies" it away:** a legacy INVERTED window (`validTo` before `validFrom`) already stored on a terminal claim is now frozen — `audit`'s `inverted_validity_window` check keeps reporting it HIGH (dead predecessors are the population #4021 damaged, and `get_historical_knowledge` walks them), but its published `fix` is lifecycle-aware and names the door that refuses — `tortoise_update_point`, which refuses a dead claim by construction (#7819) — instead of prescribing the call (`tests/test_5361_inverted_window_audit.py` pins both branches). It must **not** generalise that to the SDK: the unguarded `update_entity` Point arms above remain a live route to the same window (#9649), so "not repairable through the SDK" would be false.
 >
 > **Parity decision (#690, amended #1088):** SDK + EventAPI + CLI share a single status vocabulary (`POINT_STATUS_VALUES` in `sdk.py`). A no-status `create_point` is `live` and an explicit `draft` is honoured and never auto-promoted; EventAPI births `draft` as its own journal-composer posture — deliberately NOT SDK parity since #1088; CLI backfill promotes NULL-status legacy points to `live` (migration-only, not a drift). The `:GraphEvent` label is RESERVED for the #432 change-log stream (`{seq, ts, type, payload, event_id}`, zero relationships — graph islands) — distinct from the `:Event` ontology entity with `eventId` (§3.4). See docs/event-catalog.md.
 
