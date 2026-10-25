@@ -1500,10 +1500,14 @@ def test_a_resume_read_that_hits_its_budget_says_so(sweep: Any, monkeypatch: Any
     re-posted and a warning would name a duplicate that cannot exist.
     """
     client = sweep.GhClient(f"{OWNER}/tortoise", per_page=2, comment_page_budget=2)
-    # The intake POST goes through `urlopen`, so it is stubbed on the instance:
-    # every other step in `sweep()` then completes and `report.relayed` is
-    # meaningful. No test in this file may reach the real endpoint — see the
-    # autouse `_scrubbed_intake_env` fixture above.
+    # The intake POST goes through `urlopen`, so it is stubbed on the instance —
+    # no test in this file may reach the real endpoint (see the autouse
+    # `_scrubbed_intake_env` fixture above). The steps AFTER it are NOT stubbed:
+    # `_stub_gh_json` answers read paths only, so the item's first `-X POST`/
+    # `PATCH` raises inside `sweep()`'s per-item `try` and the item is recorded
+    # in `report.failed`, never in `report.relayed` — case (a) below pins that,
+    # because what this test is about is the NOTE and the FLAG, both of which are
+    # produced before any mutation.
     monkeypatch.setattr(client, "post_intake", lambda payload: None)
 
     def chatter(count: int, start: int = 0) -> list[dict[str, Any]]:
@@ -1536,6 +1540,13 @@ def test_a_resume_read_that_hits_its_budget_says_so(sweep: Any, monkeypatch: Any
     report = run(sweep, client)
     assert any("page budget" in note for note in report.notes), report.notes
     assert any("duplicate comment" in note for note in report.notes), report.notes
+    # The stub answers READS only, so the item aborts at its first mutation. That
+    # is why this test reads the note and the flag and never claims a relay: if a
+    # later change ever stubs the mutations here, this assertion is what says so.
+    assert report.relayed == [] and report.failed == [("issue", 7)], (
+        report.relayed,
+        report.failed,
+    )
 
     # (b) budget exhausted but the marker IS on the pages read ⇒ no note, and no
     # comment is posted: the warning would name a duplicate that cannot happen.
