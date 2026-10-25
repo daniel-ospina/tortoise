@@ -38,14 +38,20 @@
 #
 # SAFETY
 # ------
-# * No PR code is ever checked out: `actions/checkout` takes the DEFAULT BRANCH
-#   (this is a schedule/dispatch run, so there is no PR context at all), and the
-#   relayed metadata is read over REST.
+# * No PR code is ever checked out: `actions/checkout` pins
+#   `ref: github.event.repository.default_branch`, so a `workflow_dispatch` from
+#   an unmerged branch cannot execute that branch's tool or read its policy
+#   config against the live repo. A dispatch also defaults to `dry_run=true`;
+#   the cron is what acts.
 # * `relay-then-close`: a failed intake POST leaves the item OPEN, unlabelled and
 #   uncommented for the next run, and reds this workflow — a dead intake is an
 #   alarm, never a silent "handled".
-# * An incomplete listing takes NO action (`exit 2`), `--max` bounds a run, and
-#   `--since-hours` bounds the window so a first run cannot reach into history.
+# * A page that FAILS to read takes NO action (`exit 2`) — unreadable data is not
+#   an empty page. A window that OUTGREW the page budget is a different condition
+#   and is acted on as a PREFIX (every item in it was read successfully), because
+#   aborting there would let anyone willing to open >1,000 items in a day switch
+#   the control off. `--max` bounds a run, and `--since-hours` bounds the window
+#   so a first run cannot reach into history.
 # * It closes and relays. It never merges, and it holds no merge permission.
 
 name: "Inbound relay sweep — the converging half"
@@ -67,9 +73,12 @@ on:
         required: false
         default: "20"
       dry_run:
+        # A dispatch defaults to INERT: the cron does the acting. A manual run is
+        # what a human reaches for while testing or rotating the secret, and it
+        # must not close contributors' items because a default was wrong.
         description: "Print the plan and perform nothing (true/false)"
         required: false
-        default: "false"
+        default: "true"
 
 permissions:
   contents: read
@@ -88,9 +97,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Check out the default branch (never a PR head)
+      # ⛔ `ref:` IS PINNED. On `workflow_dispatch` the default is the DISPATCHED
+      # ref, so without this a run started from an unmerged branch would execute
+      # that branch's tool AND read that branch's `.mergify.yml` against the live
+      # repo, holding two write scopes and the intake secret.
+      - name: Check out the default branch (never a PR head, never a dispatched ref)
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
 
       - name: Set up Python
@@ -102,9 +116,12 @@ jobs:
       # to act without it (an unreadable config must never be read as "no
       # prefix matches", which would close a queue batch — #5185).
       - name: Install the one dependency (the queue config reader)
-        run: python -m pip install --disable-pip-version-check pyyaml
+        # PINNED, like the sibling workflows (`ci-timing.yml`, `deploy-pages.yml`):
+        # this job holds `issues: write` + `pull-requests: write` and the intake
+        # secret, so an unpinned install is a supply-chain hole on a 15-min timer.
+        run: python -m pip install --disable-pip-version-check 'pyyaml==6.0.2'
 
-      - name: "Sweep — relay, label, comment, close"
+      - name: "Sweep — relay, comment, close, label"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}

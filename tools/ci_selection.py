@@ -1284,6 +1284,22 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # test_ax_write_eval.py ABSENT. Pinned by
              # tests/test_ci_selection.py::test_ax_write_eval_tool_change_selects_core_not_tier1.
              "tools/ax_write_eval.py",
+             # #9946 review round 2 (P1): tools/inbound_relay_sweep.py owns
+             # tests/test_inbound_relay_sweep.py (registered `core`), and the
+             # same trap bit: `tools/` is swallowed by NON_PYTHON_PREFIXES and no
+             # SOURCE_PATTERNS entry matches the tool, so a TOOL-ONLY change
+             # selected NO surface, took the docs-only early return and landed on
+             # tier-1 smoke, where that file is not registered. The tool is the
+             # control that closes contributors' items on a 15-minute timer; the
+             # rails the suite pins (relay-before-close, label LAST, no action on
+             # an unreadable page) are exactly what a weakening PR would edit, so
+             # weakening the rail had to be the one diff that ran its pins. Same
+             # #1349/#3332/#3616 silent-drop class as the entries above; MEASURED
+             # before this entry: `--changed-files tools/inbound_relay_sweep.py`
+             # -> surfaces=[], full=False, test_inbound_relay_sweep.py ABSENT.
+             # Pinned by tests/test_ci_selection.py::
+             # test_inbound_relay_sweep_tool_change_selects_core_not_tier1.
+             "tools/inbound_relay_sweep.py",
              # #7814 review P2: the queue-reconcile schedule installer owns
              # tests/test_install_queue_reconcile_schedule.py, registered
              # `core`, but `tools/` is swallowed by NON_PYTHON_PREFIXES and no

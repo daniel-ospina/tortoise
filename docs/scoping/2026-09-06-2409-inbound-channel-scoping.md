@@ -136,11 +136,16 @@ contribution) sat unrelayed while its content had to be re-landed base-side as
 Two changes close the gap, and neither changes the policy above:
 
 - **`tools/inbound_relay_sweep.py`** + `.github/workflows/inbound-relay-sweep.yml`
-  — a 15-minute schedule that applies the SAME policy (label, comment, close,
-  relay) to items the event path missed. A scheduled run is started by the
+  — a 15-minute schedule that applies the SAME policy (relay, comment, close,
+  label) to items the event path missed, with ONE deliberate divergence: it spares
+  a bot-authored PR from a fork that the event path would close (an external bot's
+  PR left open costs a step; our own monitor's record closed does not come back).
+  The divergence is pinned by a test with its reason. A scheduled run is started by the
   repository's own credential, so it is not subject to the approval policy and
   does not depend on any event surviving. It is idempotent on the label,
-  window-bounded, capped, fails closed on an incomplete listing, and relays
+  window-bounded, capped, takes no action on an unreadable page (a listing that
+  merely outgrew the page budget is acted on as a prefix, so a flood cannot
+  switch it off), and relays
   BEFORE it closes (a failed intake POST leaves the item open for the next run
   and reds the workflow).
 - **belt 3 in the event path's guard (#9613)** — a bot-authored ISSUE is never

@@ -78,9 +78,20 @@ def _load() -> Any:
     return module
 
 
+_LOADED: Any = None
+
+
 @pytest.fixture(scope="module")
 def sweep() -> Any:
-    return _load()
+    global _LOADED
+    _LOADED = _load()
+    return _LOADED
+
+
+def sweep_truncated(prefix: list[dict[str, Any]], whole: list[dict[str, Any]]) -> Exception:
+    """The module's own TruncatedListing — the SAME class object the run catches."""
+    assert _LOADED is not None, "the `sweep` fixture must have loaded the module"
+    return _LOADED.TruncatedListing(f"truncated at {len(prefix)} of {len(whole)}", prefix)
 
 
 # ── a fake GitHub, recording every mutation in order ─────────────────────────
@@ -97,12 +108,18 @@ class FakeClient:
         fail_relay: bool = False,
         fail_listing: bool = False,
         fail_detail: bool = False,
+        fail_close: bool = False,
+        fail_label: bool = False,
+        truncated_after: int | None = None,
     ) -> None:
         self._issues = issues or []
         self._pulls = pulls or []
         self.fail_relay = fail_relay
         self.fail_listing = fail_listing
         self.fail_detail = fail_detail
+        self.fail_close = fail_close
+        self.fail_label = fail_label
+        self.truncated_after = truncated_after
         self.calls: list[tuple[str, Any]] = []
         self.seen_stop_before: Any = None
 
@@ -116,6 +133,8 @@ class FakeClient:
             marked = {k: v for k, v in pr.items() if k not in ("head", "base")}
             marked["pull_request"] = {"url": "…"}
             out.append(marked)
+        if self.truncated_after is not None:
+            raise sweep_truncated(out[: self.truncated_after], out)
         return out
 
     def pull_detail(self, number: int) -> dict[str, Any]:
@@ -135,12 +154,16 @@ class FakeClient:
 
     def add_label(self, number: int, label: str) -> None:
         self.calls.append(("label", number))
+        if self.fail_label:
+            raise RuntimeError("422 Label does not exist")
 
     def comment(self, number: int, body: str) -> None:
         self.calls.append(("comment", number))
 
     def close(self, kind: str, number: int) -> None:
         self.calls.append(("close", number))
+        if self.fail_close:
+            raise RuntimeError("502 Bad Gateway")
 
     def mutations(self) -> list[tuple[str, Any]]:
         """Mutations only — a PR detail fetch is a read."""
@@ -228,10 +251,14 @@ def test_unrelayed_external_pr_is_relayed_then_closed(sweep: Any) -> None:
     assert report.relayed == [("pr", 9883)]
     assert client.mutations() == [
         ("intake", "pr-9883"),
-        ("label", 9883),
         ("comment", 9883),
         ("close", 9883),
-    ], "relay must land BEFORE the close — the record is why the close is safe"
+        ("label", 9883),
+    ], (
+        "the record lands first (that is why the close is safe) and the label lands "
+        "LAST: it is the 'fully handled' marker, so a failure anywhere before it "
+        "leaves the item unlabelled and the next run picks it up again"
+    )
     assert report.failed == []
 
 
@@ -242,9 +269,9 @@ def test_external_issue_is_relayed_then_closed(sweep: Any) -> None:
     assert report.relayed == [("issue", 9913)]
     assert client.mutations() == [
         ("intake", "issue-9913"),
-        ("label", 9913),
         ("comment", 9913),
         ("close", 9913),
+        ("label", 9913),
     ]
 
 
@@ -393,6 +420,7 @@ def test_failed_intake_post_leaves_the_item_open_and_unlabelled(sweep: Any) -> N
     assert client.mutations() == [("intake", "pr-9883")]
     assert report.relayed == []
     assert report.failed and report.failed[0][1] == 9883
+    assert report.failed[0][2] == "relay", "the intake POST is what failed"
     assert report.exit_code == 1
 
 
@@ -452,7 +480,10 @@ def test_policy_agrees_with_the_event_guard(sweep: Any) -> None:
     prefix, a second spared class) and the other does not, this fails — which
     is the only durable defence against two implementations of one policy.
     """
-    guard = pytest.importorskip("test_inbound_relay_guard")
+    # ⛔ A HARD import, never `importorskip`: this is the one gate that keeps the
+    # two implementations of the policy from drifting, and a skip asserts nothing
+    # while CI stays green (#review B).
+    guard = importlib.import_module("test_inbound_relay_guard")
 
     cases: list[tuple[str, dict[str, Any], dict[str, Any]]] = [
         (
@@ -619,14 +650,31 @@ def test_client_raises_on_a_failed_page(sweep: Any, monkeypatch: Any) -> None:
         client.list_open(stop_before=NOW - timedelta(hours=24))
 
 
-def test_client_raises_instead_of_truncating_a_huge_window(sweep: Any, monkeypatch: Any) -> None:
-    """If the window itself holds more than the page budget, refuse — never truncate."""
+def test_page_budget_exhaustion_raises_a_truncation_carrying_the_prefix(
+    sweep: Any, monkeypatch: Any
+) -> None:
+    """Running out of page budget is a TRUNCATION, not an unreadable page.
+
+    It used to be an abort, which made the control switch-off-able on demand by
+    anyone willing to open >1,000 items in a day (#review B). The two conditions
+    are now distinct types on purpose: `TruncatedListing` carries the items that
+    WERE read, so `sweep()` can act on the prefix, while a page that fails to
+    read still raises a plain `ListingError` and aborts (pinned by
+    `test_incomplete_listing_takes_no_action`). Reverting this to the abort
+    fails here, by name.
+    """
     page = [issue(1000 - n, created=timedelta(minutes=n + 1)) for n in range(100)]
     _stub_gh(sweep, monkeypatch, {n: page for n in range(1, 30)})
 
     client = sweep.GhClient(f"{OWNER}/tortoise", max_pages=3)
-    with pytest.raises(sweep.ListingError):
+    with pytest.raises(sweep.TruncatedListing) as caught:
         client.list_open(stop_before=NOW - timedelta(hours=24))
+
+    assert caught.value.items, "the prefix it read must travel with the error"
+    assert len(caught.value.items) == 300, "3 pages x 100 — every read item"
+    # It is still a ListingError, so a caller that has not been taught the
+    # distinction keeps the OLD behaviour (abort) rather than silently acting.
+    assert isinstance(caught.value, sweep.ListingError)
 
 
 def test_queue_prefixes_are_read_from_the_live_config(sweep: Any) -> None:
@@ -649,3 +697,113 @@ def test_unreadable_queue_config_refuses_to_act(sweep: Any, tmp_path: Path) -> N
     custom = tmp_path / "mergify.yml"
     custom.write_text("queue_rules:\n  - name: main\n    queue_branch_prefix: mergify-\n")
     assert sweep.queue_prefixes(custom) == ("mergify-",)
+
+
+# ── (vii) the review round: the belts must be DISCRIMINATING, and a bookkeeping
+#          failure must not become a wedge or a permanent skip ─────────────────
+
+
+def test_user_authored_same_repo_queue_branch_is_spared(sweep: Any) -> None:
+    """The queue-branch belt on its OWN, with no bot to shadow it.
+
+    Measured gap (#review B): every other queue-batch test also satisfies the
+    bot exclusion, so deleting the branch arm left the whole suite green. A
+    queue rule with `draft_bot_account` opens batches under a USER account, which
+    is the shape this arm exists for — the event path pins it at
+    `test_batch_pr_opened_under_a_bot_account_is_not_closed`.
+    """
+    client = FakeClient(
+        pulls=[
+            pull(
+                6650,
+                author="queue-drafter",
+                author_type="User",
+                head_ref="mergify/merge-queue/0123456789",
+                head_repo=f"{OWNER}/tortoise",
+            )
+        ]
+    )
+    report = run(sweep, client)
+
+    assert report.relayed == []
+    assert client.mutations() == []
+
+
+def test_a_bookkeeping_failure_does_not_kill_the_run_or_mark_the_item(
+    sweep: Any,
+) -> None:
+    """A failed close must leave the item UNLABELLED, and the sweep must go on.
+
+    Two defects this pins, both from the review round:
+      * an exception from `close`/`label`/`comment` used to escape `sweep()`
+        (traceback, no report, every remaining item dropped);
+      * the label used to be applied BEFORE the close, so a failed close left an
+        item that is OPEN and MARKED — excluded from every later sweep while
+        still running the full CI matrix, with nothing able to retry it.
+    """
+    client = FakeClient(
+        pulls=[pull(9883, author="Maiiiry")],
+        issues=[issue(9913, author="fr3iheit")],
+        fail_close=True,
+    )
+    report = run(sweep, client)
+
+    # Oldest first: the issue (1 h) precedes the PR (also 1 h) by selection order,
+    # so assert the SET — which item was attempted matters, the order does not.
+    assert {(kind, n) for kind, n, _ in report.failed} == {("pr", 9883), ("issue", 9913)}
+    assert report.exit_code == 1
+    assert ("label", 9883) not in client.mutations(), (
+        "the item was never closed, so it must NOT carry the 'fully handled' label"
+    )
+    # Both items were attempted: one failing item cannot wedge the sweep.
+    assert {n for _, n, _ in report.failed} == {9883, 9913}
+
+
+def test_a_failed_label_still_closed_the_item_and_does_not_wedge(sweep: Any) -> None:
+    """The label is the last step; failing it leaves a closed item, not a wedge."""
+    client = FakeClient(pulls=[pull(9883, author="Maiiiry")], fail_label=True)
+    report = run(sweep, client)
+
+    assert ("close", 9883) in client.mutations()
+    # The label is last, so a label failure means everything BEFORE it landed:
+    # the step is what decides whether the item is retryable, so assert it too.
+    assert report.failed == [("pr", 9883, "label")]
+    assert report.exit_code == 1
+
+
+def test_a_dense_window_is_a_prefix_not_an_abort(sweep: Any) -> None:
+    """>page-budget items in the window must not switch the control off.
+
+    Anyone can open items on a public repo, so treating a dense window as
+    "unreadable" would let a flood disable the relay on demand (#review B). The
+    prefix was read successfully, so it is acted on and the remainder is
+    reported.
+    """
+    client = FakeClient(
+        issues=[issue(1, created=timedelta(minutes=2))],
+        pulls=[pull(2, created=timedelta(minutes=1))],
+        truncated_after=1,
+    )
+    report = run(sweep, client)
+
+    assert report.exit_code == 0
+    assert [n for _, n in report.relayed] == [1]
+    assert any("truncated" in note for note in report.notes)
+
+
+def test_dry_run_works_without_intake_credentials(sweep: Any) -> None:
+    """A preview must not require the secret it never uses."""
+    client = FakeClient(pulls=[pull(9883, author="Maiiiry")])
+    cfg = sweep.Config(
+        repo=f"{OWNER}/tortoise",
+        owner=OWNER,
+        label=LABEL,
+        queue_prefixes=("mergify/merge-queue/",),
+        intake_url="",
+        intake_secret="",
+    )
+    report = sweep.sweep(client, cfg, now=NOW, since_hours=24, max_actions=20, dry_run=True)
+
+    assert report.exit_code == 0
+    assert report.relayed == [("pr", 9883)]
+    assert client.mutations() == []

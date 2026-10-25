@@ -92,8 +92,12 @@ merges (#8375's property for `ci_check_repair.py`, kept here).
 
 EXIT CODES
   0  complete: every selected item was relayed (or the run was a dry run)
-  1  at least one item's intake POST failed — that item was left untouched
-  2  could not act: intake not configured, or the listing was incomplete
+  1  at least one item failed at some step — the FAILED line names the step and
+     the state the item was left in, which is what decides whether the next run
+     retries it (see `_FAILED_STATE`)
+  2  could not act: intake not configured (a non-dry run), or a page could not
+     be read. A window that OUTGREW the page budget is not this: it is acted on
+     as a prefix, and the remainder is reported as deferred (`TruncatedListing`)
 """
 
 from __future__ import annotations
@@ -150,6 +154,22 @@ class ConfigError(RuntimeError):
     """A safety-relevant config could not be read — act on nothing."""
 
 
+class TruncatedListing(ListingError):
+    """The window held more items than the page budget.
+
+    NOT the same condition as an unreadable page, and it must not be treated as
+    one: every item here was read successfully, newest-first, so acting on the
+    prefix can only MISS an item (the safe direction — the next run's window
+    slides forward), while aborting would switch the control off on demand for
+    anyone willing to open >1,000 items in a day (#review B). A page that FAILS
+    to read still aborts the whole run: that is unreadable data, not a prefix.
+    """
+
+    def __init__(self, message: str, items: list[dict[str, Any]]) -> None:
+        super().__init__(message)
+        self.items = items
+
+
 @dataclass(frozen=True)
 class Config:
     repo: str
@@ -164,7 +184,11 @@ class Config:
 class Report:
     selected: list[tuple[str, int]] = field(default_factory=list)
     relayed: list[tuple[str, int]] = field(default_factory=list)
-    failed: list[tuple[str, int]] = field(default_factory=list)
+    # (kind, number, step): the step that failed. The step is not decoration —
+    # it is the only thing that says whether the item is still retryable, so the
+    # operator-facing line can state the real state instead of guessing (#review
+    # round 2, P2).
+    failed: list[tuple[str, int, str]] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     deferred: int = 0
     errors: list[str] = field(default_factory=list)
@@ -177,6 +201,23 @@ class Report:
         if self.failed:
             return 1
         return 0
+
+
+# What each step's failure leaves behind, in the SAME order the per-item sequence
+# runs them (relay -> comment -> close -> label). The distinction that matters:
+# every step up to and including `close` leaves the item OPEN, so the next sweep
+# re-lists it and retries; a `label` failure leaves it CLOSED and unlabelled,
+# which nothing will ever reconcile — and nothing needs to, because the record,
+# the comment and the close all landed.
+_FAILED_STATE = {
+    "relay": "left OPEN and unlabelled — the next run retries it",
+    "comment": "relayed, left OPEN and unlabelled — the next run retries it",
+    "close": "relayed and commented, left OPEN and unlabelled — the next run retries it",
+    "label": (
+        "relayed, commented and CLOSED, but unlabelled — terminal: the sweep "
+        "lists open items only, and there is nothing left to do to it"
+    ),
+}
 
 
 # ── the decision (pure, unit-tested, cross-checked against the workflow) ─────
@@ -316,7 +357,10 @@ def sweep(
 ) -> Report:
     report = Report(dry_run=dry_run)
 
-    if not cfg.intake_url or not cfg.intake_secret:
+    # A dry run performs no POST, so a missing credential is not a reason to
+    # refuse it — and `--dry-run` must stay usable for previewing the listing
+    # rails precisely when the secret is missing or being rotated.
+    if not dry_run and (not cfg.intake_url or not cfg.intake_secret):
         report.errors.append(
             "intake is not configured (INBOUND_URL / INBOUND_SECRET_GITHUB): "
             "nothing is closed without a record"
@@ -324,20 +368,37 @@ def sweep(
         return report
 
     cutoff = now - timedelta(hours=since_hours)
+    truncated: str | None = None
     try:
         listing = list(client.list_open(stop_before=cutoff))
-        candidates = [
-            item for item in listing if _created_at(item) >= cutoff and _prefilter(item, cfg)
-        ]
+    except TruncatedListing as exc:
+        # A dense window is a PREFIX, not an unreadable read: every item here was
+        # read successfully, newest-first, so acting on it can only miss an item
+        # (the next run's window slides forward). Aborting instead would let
+        # anyone switch the control off by opening >1,000 items in a day.
+        listing = list(exc.items)
+        truncated = str(exc)
+    except Exception as exc:  # a READ failure is not a prefix: act on nothing
+        report.errors.append(f"listing incomplete, no action taken: {exc}")
+        return report
+
+    if truncated:
+        report.notes.append(
+            f"{truncated} — acted on the {len(listing)} newest items read; the rest "
+            "of the window is deferred to a later run"
+        )
+
+    candidates = [item for item in listing if _created_at(item) >= cutoff and _prefilter(item, cfg)]
+    try:
         # `/issues` carries a PR without its head/base; the detail is what tells a
         # queue batch from an external PR. Fetched per candidate (a handful per
         # run) rather than paging the whole `/pulls` backlog, which is both slow
-        # (a 60 s timeout is a real measurement, not a hypothetical) and heavy.
+        # (a 60 s page timeout is a measurement, not a hypothetical) and heavy.
         items = [
             client.pull_detail(int(item["number"])) if "pull_request" in item else item
             for item in candidates
         ]
-    except Exception as exc:  # any read failure is "incomplete"
+    except Exception as exc:  # a detail read that fails is unreadable data too
         report.errors.append(f"listing incomplete, no action taken: {exc}")
         return report
 
@@ -354,15 +415,33 @@ def sweep(
         if dry_run:
             report.relayed.append((kind, number))
             continue
+        # THE WHOLE PER-ITEM SEQUENCE IS GUARDED, NOT JUST THE POST. A bookkeeping
+        # failure that escaped here would kill the run with a traceback and drop
+        # every remaining item (#review B/D).
+        step = "relay"
         try:
             client.post_intake(intake_payload(item))
+            step = "comment"
+            client.comment(number, "\n".join(_COMMENT_PULL if kind == "pr" else _COMMENT_ISSUE))
+            step = "close"
+            client.close(kind, number)
+            # ⛔ THE LABEL IS APPLIED LAST, AND THAT ORDER IS THE RAIL. It is the
+            # "fully handled" marker both this tool and the event path read, so
+            # applying it before the close would leave an item that is OPEN and
+            # MARKED — excluded from every later sweep while still running the CI
+            # matrix, with nothing able to retry it (the event path listens for
+            # `opened` only). Applied after the close, a failure anywhere above
+            # leaves the item unlabelled, which is exactly what makes the next run
+            # pick it up again.
+            step = "label"
+            client.add_label(number, cfg.label)
         except Exception as exc:
-            report.failed.append((kind, number))
-            report.notes.append(f"{kind} #{number}: intake POST failed: {exc}")
+            report.failed.append((kind, number, step))
+            report.notes.append(
+                f"{kind} #{number}: the {step} step failed — "
+                f"{type(exc).__name__}: {exc}"
+            )
             continue
-        client.add_label(number, cfg.label)
-        client.comment(number, "\n".join(_COMMENT_PULL if kind == "pr" else _COMMENT_ISSUE))
-        client.close(kind, number)
         report.relayed.append((kind, number))
 
     return report
@@ -423,9 +502,9 @@ class GhClient:
             if stop_before is not None and chunk and _created_at(chunk[-1]) < stop_before:
                 # Newest-first: this page already reaches past the window.
                 return items
-        raise ListingError(
-            f"{path}: more than {self.max_pages * self.per_page} items newer than "
-            "the window — the listing is incomplete, so nothing may be closed"
+        raise TruncatedListing(
+            f"{path}: more than {self.max_pages * self.per_page} items newer than the window",
+            items,
         )
 
     def list_open(self, *, stop_before: datetime | None = None) -> list[dict[str, Any]]:
@@ -586,8 +665,8 @@ def main(argv: list[str] | None = None) -> int:
     verb = "WOULD relay" if args.dry_run else "relayed"
     for kind, number in report.relayed:
         print(f"{verb} {kind} #{number}")
-    for kind, number in report.failed:
-        print(f"FAILED   {kind} #{number} (left open and unlabelled)")
+    for kind, number, step in report.failed:
+        print(f"FAILED   {kind} #{number} at the {step} step — {_FAILED_STATE[step]}")
     for note in report.notes:
         print(f"note: {note}", file=sys.stderr)
     if report.deferred:
