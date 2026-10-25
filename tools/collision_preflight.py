@@ -1691,11 +1691,27 @@ def _closing_numbers_in_text(text: str | None) -> list[int]:
 # issue's own case — was invisible; where that mis-resolution read CLEAN the run
 # exited 0 while `collision_preflight 7970` exited 1.
 #
-# The cost of the union is NOISE, and noise here is the fail-CLOSED direction:
-# `(#2048)` in a title or `perf/1200-rps-cache` in a branch can be a SIZE or a
-# METRIC, and resolving one drags an unrelated issue into the run (where an
-# issue-absent surface makes the whole dispatch INCOMPLETE). Over-blocking is
-# retried by the next pass; under-blocking duplicates a lane's work. So
+# The cost of the union is NOISE: `(#2048)` in a title or `perf/1200-rps-cache`
+# in a branch can be a SIZE or a METRIC, and resolving one drags an unrelated
+# issue into the run (where an issue-absent surface makes the whole dispatch
+# INCOMPLETE). For COLLISION and INCOMPLETE that noise IS the fail-CLOSED
+# direction — the next pass retries an over-blocked candidate, while
+# under-blocking duplicates a lane's work.
+#
+# ⛔ ONE DIRECTION IS NOT FAIL-CLOSED, AND IT IS THE ONE THAT STOPS RETRYING.
+# If the metric-shaped number happens to name a real CLOSED issue, the run
+# reports `VERDICT: LANDED (exit 4)` — and LANDED is the answer the caller
+# treats as authoritative and therefore does NOT re-ask
+# (`agent-infra/scripts/orchestrator-harness/refresh-candidates.sh`, whose LANDED
+# arm is the one that ends the retry). So a noise arm can STARVE real work, not
+# merely delay it. That is traded deliberately for RECALL — the opposite error is
+# the duplicate dispatch this whole section exists to prevent — and it is stated
+# here rather than left for a reader to infer from "noise is harmless". The
+# remedy lives with the caller: a candidate that stops on LANDED must be
+# checkable by its ISSUE number, which is where the real answer lives.
+# `test_a_METRIC_shaped_branch_resolving_to_a_CLOSED_issue_is_LANDED` pins this
+# direction, so narrowing an arm forces this note to be revisited with it.
+#
 # SOURCE-first order survives as the LABEL — `arm` names the highest-precedence
 # contributing arm and the header names EVERY contributing arm — and never as a
 # choice of which numbers are gated.
@@ -1808,6 +1824,14 @@ def resolve_pull_request_work_items(
     never asserts a fact the read did not establish. Its numbers on that path
     are the body's closing keyword alone, so the header names that provenance
     instead of claiming the computed field spoke.
+
+    ⛔ COST: EVERY resolved work item runs the FULL pre-flight. A PR closing N
+    issues costs N pre-flights — N surface enumerations on the fleet-shared
+    GraphQL budget (#100-121's first-class concern) — and the union above is
+    precisely what makes N larger than one. Deliberate: the cheap alternative is
+    gating fewer items, which is the dropped-arm fail-OPEN this resolver exists
+    to remove. There is no cap, so the cost is bounded only by the number of
+    issues a PR names; a batch PR dispatched by number pays it in full.
 
     No I/O, no verdict: this answers "which work items?" and nothing else, so
     it is directly testable and cannot itself decide a dispatch.
