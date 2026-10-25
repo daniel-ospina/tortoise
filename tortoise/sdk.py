@@ -17236,8 +17236,16 @@ class TortoiseSDK:
 
         Raises ValueError if id not found, not an operator, strength out of
         [0, 1], or credibility outside the ladder.
-        Idempotent: second call updates existing mitigation (reason + strength),
-        does not create a duplicate.
+        Idempotent: a second call updates the existing CURRENT mitigation
+        (reason + strength), does not create a duplicate. A mitigation the graph
+        records as terminal (retracted/superseded/outdated/archived) is never
+        revived in place — a re-assertion creates a NEW mitigation Point, since
+        retraction is terminal (#432/#2422).
+
+        The created mitigation Point is a CURRENT point (`status='live'`,
+        #5089/#9962) — the `weights.py` dampener read prices `m.status`, so a
+        terminal mitigation stops dampening and a retracted one restores the
+        operator's undamped weight without deleting it.
         """
         # #4647: guard before the range check — ``0 <= Decimal('NaN') <= 1``
         # raises ``decimal.InvalidOperation``, so the check would raise an
@@ -17274,10 +17282,24 @@ class TortoiseSDK:
             _mit_default = credibility_prior(DECIDE_DEFAULT_CREDIBILITY)
             author_prior = (_mit_default[0] + AUTHOR_ASSERTION_WEAK_PC,
                             _mit_default[1])
-        # Idempotency: check for existing mitigation
+        # Idempotency: check for an existing CURRENT mitigation.
+        # #9962: a TERMINAL mitigation (retracted / superseded / outdated /
+        # archived, or the legacy `outdated` flag) is EXCLUDED from this
+        # lookup. The dampener read prices `m.status`, so updating a terminal
+        # node in place would leave it dead: the call would report success and
+        # dampen nothing — the same silent no-op this door's missing status
+        # created in the first place (measured: mitigate → retract →
+        # mitigate(strength=0.3) left the weight at 1.0000 with the node still
+        # `retracted`). Retraction is TERMINAL (#432/#2422), so the node is NOT
+        # revived in place: a re-assertion mints a NEW mitigation Point and the
+        # retracted one keeps its state and its history. The read composes
+        # several mitigations by max strength (#2315), so after the
+        # re-assertion exactly the live one prices the operator.
         proj = self._get_proj()
         existing = proj.g.query(
-            "MATCH (op:Point {id:$id})-[r:mitigated_by]->(m:Point) RETURN m.id",
+            "MATCH (op:Point {id:$id})-[r:mitigated_by]->(m:Point) "
+            f"WHERE {_terminal_excluded('m.status')} "
+            "RETURN m.id",
             params={"id": id},
         ).result_set
         if existing:
@@ -17363,10 +17385,21 @@ class TortoiseSDK:
         # parameter, and the abort means the statement did not land — so a
         # re-issue cannot mint a second mitigation Point. Bare CREATE ⇒
         # `retryable_aborted_write` only.
+        # #9962 / #5089: the mitigation is born `status:'live'` — a CURRENT
+        # point, which is what the dampener read prices (`weights.py` honours
+        # `m.status`, so a status-less node would lean on the legacy NULL-is-
+        # live rule forever) and what every other write path already emits
+        # (`create_point` defaults to draft|live). Measured before the fix:
+        # `get_point(mid)['status'] is None`, so the node was neither staged
+        # nor current for any reader of `status` — the #6107 root, on this
+        # door. It is `live`, not `draft`: the mitigation is created by an
+        # explicit operator-mitigating call, exactly like the IMPL/NAND
+        # operator it damps (this is NOT an extraction staging path).
         self._graph_write_with_retry(
             lambda: proj.g.query(
                 "CREATE (m:Point {id:$id, content:$c, pointKind:'statement', "
-                "mitigation_strength:$s, is_operator:false, createdAt:$now, updatedAt:$now})",
+                "mitigation_strength:$s, is_operator:false, status:'live', "
+                "createdAt:$now, updatedAt:$now})",
                 params={"id": mid, "c": f"[MITIGATION] {reason}", "s": strength, "now": now},
             ),
             what="mitigate_operator CREATE(:Point)",

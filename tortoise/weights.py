@@ -21,6 +21,14 @@ decision 2026-09-07: mitigation is a GRADED DAMPENER, not a refutation):
   0.50 keeps 50%. Because the band caps at 0.50 the operator always keeps
   at least half its effective weight — mitigation dampens but NEVER
   refutes (a NAND stays a contradiction; it is only a weaker one).
+* A mitigation prices the operator from its **live** state only: a
+  mitigation Point that is terminal (`retracted` / `superseded` /
+  `outdated` / `archived`, or carrying the legacy `outdated` flag) — or
+  `draft` — contributes NOTHING, so retracting a mitigation restores the
+  operator's undamped weight. Deleting the mitigation is never required to
+  stop the dampening (#9962: `retract_point` and `delete_point` differ in
+  what they REMOVE, never in whether the EP contribution stops). A legacy /
+  imported mitigation with no stored `status` reads as live.
 * A mitigation's strength is NOT how true the reason is and is NOT fused
   into the mitigation point's own Beta prior (#2199 knock-on decision 3:
   the number modulates the OPERATOR's weight, not the reason's belief).
@@ -35,6 +43,8 @@ commit_ops, audit) references THIS docstring for the band + formula.
 """
 
 import math
+
+from .live import _live_only
 
 # ── Mitigation strength band (#2315) ──────────────────────────────────
 MITIGATION_STRENGTH_MIN = 0.10  # 0.10: minor caveat — weakest dampening
@@ -307,8 +317,37 @@ def compute_operator_weight(proj, op_id: str, use_dynamic: bool = False) -> floa
     # mitigation's sole belief effect. Multiple mitigation points on one
     # operator (an import artifact — mitigate_operator is idempotent): the
     # strongest (max strength) governs; dampening never stacks past 0.50.
+    #
+    # ⛔ #9962 — THE READ IS PRICED FROM THE MITIGATION'S *LIVE* STATE. Until
+    # this predicate existed, the query below matched any `mitigated_by`
+    # neighbour regardless of status, so `retract_point(<mit>)` wrote
+    # `status='retracted'` and the dampener kept firing: the graph reported
+    # `w_eff = w * (1 - strength)` for a mitigation it had itself recorded as
+    # withdrawn, and the only working remedy was `delete_point` — the very
+    # tool the terminal-state contract (#2422, §17.1) says not to use.
+    # `retract_point` and `delete_point` must differ ONLY in what they remove,
+    # never in whether the EP contribution stops.
+    #
+    # The predicate is the canonical one from `tortoise/live.py`, NOT a
+    # hand-rolled `status <> 'retracted'` (that omission — one terminal status
+    # hand-picked, the rest forgotten — is the defect class `live.py` exists to
+    # stop, #2901/#4058). It gives all three arms the dampener needs:
+    #   * terminal statuses (`retracted`/`superseded`/`outdated`/`archived`)
+    #     and the legacy `outdated=true` flag → excluded (#2422's terminal
+    #     rule for factor inputs, which this dampener must obey — it prices an
+    #     EP factor);
+    #   * `draft` → excluded (#780: a draft never contributes to live belief,
+    #     and a mitigation is a contribution);
+    #   * ABSENT status → LIVE, the same rule every other status reader uses
+    #     (legacy/imported mitigation Points written before `mitigate_operator`
+    #     stamped one keep dampening, and remain retractable).
+    # This is the ONLY read of an operator's dampening: `ep.py` consumes this
+    # function, and nothing else derives a weight, so every EP consumer honours
+    # a retraction through this one predicate.
     mit_rows = g.query(
-        "MATCH (o:Point {id:$id})-[:mitigated_by]->(m:Point) RETURN m.mitigation_strength",
+        "MATCH (o:Point {id:$id})-[:mitigated_by]->(m:Point) "
+        f"WHERE {_live_only('m.status')} "
+        "RETURN m.mitigation_strength",
         params={"id": op_id},
     ).result_set
     if mit_rows:

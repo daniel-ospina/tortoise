@@ -481,3 +481,181 @@ class TestSingleWriterReadOnlyInstrument:
             f"legacy mitigation without strength must use the documented "
             f"default: expected {expected}, observed {observed}"
         )
+
+
+class TestRetractionStopsTheDampener:
+    """#9962 — a mitigation prices the operator from its LIVE state.
+
+    The dampener is read from ``(op)-[:mitigated_by]->(m)``. Until #9962 that
+    read had **no status predicate**, so ``retract_point(m)`` changed the node
+    and nothing else: the operator kept ``w_eff = w * (1 - strength)`` and only
+    ``delete_point`` — the tool the terminal-state contract says NOT to use —
+    restored the weight. A retracted mitigation that keeps dampening is worse
+    than a missing one: the graph reports a confidence nobody can justify and
+    nothing discloses it (#9675 step 5, the write pipeline's premise).
+
+    The readers these tests cover, and why they are the RIGHT ones:
+
+    * the WEIGHT — ``compute_operator_weight`` is the only place an operator
+      weight is priced (``ep.py`` consumes it through ``_affected_factors``;
+      there is no second derivation), so a predicate there covers every EP
+      consumer by construction;
+    * the POSTERIOR — the retracted state must reach a re-run, not just the
+      read, which is why the round-trip asserts the propagated confidence;
+    * the WRITE — a mitigation must be born a CURRENT point (#5089), or the
+      status predicate has nothing to read on the very nodes it prices.
+
+    MUTATIONS THAT MUST RED:
+    * drop the status predicate from the ``mitigated_by`` read → the
+      retracted/draft arms keep the damped weight (1.0 != 0.5);
+    * replace the canonical predicate with ``m.status <> 'retracted'`` → the
+      draft arm still dampens (a hand-rolled subset is the defect class
+      ``tortoise/live.py`` exists to stop);
+    * drop ``status:'live'`` from ``mitigate_operator``'s CREATE → the born
+      status is absent, not current (#5089).
+    """
+
+    def test_retracting_a_mitigation_restores_the_weight(self):
+        """The named #9962 test: mitigate → retract → the weight is undamped.
+
+        Failing state (measured on origin/main@4c797596d, 2026-10-25):
+        ``w_eff`` stays 0.5000 after ``retract_point`` because the
+        ``mitigated_by`` read has no status predicate.
+        Reachable: a real ``mitigate_operator`` write on a real IMPL operator,
+        then the real ``retract_point`` door, read back by the real
+        factor-extraction path.
+        """
+        sdk = fresh_sdk()
+        _src, claim, op_id = make_impl_chain(sdk)
+
+        base = resolved_weight(sdk, op_id, claim["id"])
+        assert base == pytest.approx(IMPL_BASE_WEIGHT)
+
+        mid = sdk.mitigate_operator(
+            op_id, "the lift was from a leaked test set", strength=0.5)["id"]
+        assert resolved_weight(sdk, op_id, claim["id"]) == pytest.approx(
+            base * mitigation_dampening_factor(0.5))
+
+        sdk.retract_point(mid)
+        assert sdk.get_point(mid)["status"] == "retracted"
+
+        after = resolved_weight(sdk, op_id, claim["id"])
+        assert after == pytest.approx(base), (
+            f"a RETRACTED mitigation still dampens: base={base}, "
+            f"after retraction={after}"
+        )
+
+    def test_retraction_restores_the_downstream_posterior(self):
+        """O/I/T 2: the round-trip returns the claim to its pre-mitigation belief.
+
+        Failing state: the post-retraction run settles the mitigated
+        confidence, because the retracted mitigation still dampens.
+        Reachable: three ``run_ep`` passes over the same chain — unmitigated,
+        mitigated, post-retraction. ``retract_point`` marks the operator's
+        inputs dirty through ``_reverse_bfs_neighbors``' back-link branch, so
+        the third pass is a real recompute, not a cached number.
+        """
+        sdk = fresh_sdk()
+        _src, claim, op_id = make_impl_chain(sdk)
+
+        conf_before = get_conf(run_ep(sdk), claim["id"])
+        mid = sdk.mitigate_operator(op_id, "major counter-evidence", strength=0.50)["id"]
+        conf_mitigated = get_conf(run_ep(sdk), claim["id"])
+        assert conf_mitigated < conf_before, (
+            f"mitigation must lower the posterior: {conf_before:.4f} -> {conf_mitigated:.4f}"
+        )
+
+        sdk.retract_point(mid)
+        conf_after = get_conf(run_ep(sdk), claim["id"])
+        assert conf_after == pytest.approx(conf_before, abs=1e-3), (
+            f"retracting the mitigation must restore the pre-mitigation "
+            f"posterior: before={conf_before:.6f}, mitigated={conf_mitigated:.6f}, "
+            f"after retraction={conf_after:.6f}"
+        )
+
+    def test_a_draft_mitigation_does_not_dampen(self):
+        """The SAME predicate's other half: a draft never prices a live posterior.
+
+        Failing state: a draft mitigation dampens, because the read has no
+        status predicate at all. This is the arm that distinguishes the
+        canonical ``_live_only`` predicate from a hand-rolled
+        ``status <> 'retracted'`` — #780's rule is that drafts never
+        contribute to live belief, and a mitigation is a contribution.
+        Reachable: ``mitigate_operator`` writes a real mitigation; the graph
+        then records it as ``draft`` exactly as a staged extraction would.
+        """
+        sdk = fresh_sdk()
+        _src, claim, op_id = make_impl_chain(sdk)
+        base = resolved_weight(sdk, op_id, claim["id"])
+        mid = sdk.mitigate_operator(op_id, "staged, not yet reviewed", strength=0.50)["id"]
+
+        proj = sdk._get_proj()
+        proj.g.query(
+            "MATCH (m:Point {id:$mid}) SET m.status = 'draft'", params={"mid": mid})
+        observed = resolved_weight(sdk, op_id, claim["id"])
+        assert observed == pytest.approx(base), (
+            f"a DRAFT mitigation dampens a live operator: base={base}, "
+            f"observed={observed}"
+        )
+
+
+class TestMitigationIsBornCurrent:
+    """#9962 target 2 / #5089 — the mitigation write must produce a live Point.
+
+    Measured before the fix: ``mitigate_operator``'s reply has no ``status``
+    key and ``get_point(mid)['status'] is None`` — neither ``draft`` nor
+    ``live``, so the point is unclassified for every surface that reads
+    ``status`` (#6107's root, on the mitigation door this time).
+    """
+
+    def test_mitigate_operator_reports_a_current_status(self):
+        """Failing state: ``status`` is absent (``None``) on the created node.
+
+        Reachable: the real ``mitigate_operator`` create path; the assertion
+        reads the WRITER's reply and the NODE, so a reply-only patch cannot
+        fake it.
+        """
+        sdk = fresh_sdk()
+        _src, _claim, op_id = make_impl_chain(sdk)
+
+        reply = sdk.mitigate_operator(op_id, "significant limitation", 0.30)
+        assert reply.get("status") in ("draft", "live"), (
+            f"mitigate_operator's reply must carry a current status, got "
+            f"{reply.get('status')!r}"
+        )
+        assert sdk.get_point(reply["id"])["status"] == reply["status"]
+
+    def test_re_mitigating_a_retracted_mitigation_dampens_again(self):
+        """The WRITER's idempotency lookup honours the same terminal state.
+
+        This is the second reader of ``mitigated_by`` and the one the retraction
+        tests above leave uncovered: ``mitigate_operator`` re-uses an existing
+        mitigation instead of minting a duplicate. Once the read prices
+        ``m.status``, updating a RETRACTED node in place would report success
+        and dampen nothing (measured before this guard: weight stayed 1.0000
+        with the node still ``retracted``) — the same silent no-op the missing
+        status caused. Retraction is terminal, so the node is not revived: the
+        re-assertion is a NEW mitigation Point and the retracted one keeps its
+        history, which the max-strength read then ignores.
+        """
+        sdk = fresh_sdk()
+        _src, claim, op_id = make_impl_chain(sdk)
+        base = resolved_weight(sdk, op_id, claim["id"])
+
+        first = sdk.mitigate_operator(op_id, "the lift was from a leaked test set", 0.50)
+        sdk.retract_point(first["id"])
+        assert resolved_weight(sdk, op_id, claim["id"]) == pytest.approx(base)
+
+        again = sdk.mitigate_operator(op_id, "a clean re-run reproduced the lift", 0.30)
+        assert again["id"] != first["id"], (
+            "a re-assertion must mint a new mitigation — reviving a retracted "
+            "one in place would reverse the terminal-state contract"
+        )
+        assert sdk.get_point(first["id"])["status"] == "retracted"
+        assert again["status"] in ("draft", "live")
+        observed = resolved_weight(sdk, op_id, claim["id"])
+        assert observed == pytest.approx(
+            base * mitigation_dampening_factor(0.30)), (
+            f"re-mitigating after a retraction dampened nothing: base={base}, "
+            f"observed={observed}"
+        )
