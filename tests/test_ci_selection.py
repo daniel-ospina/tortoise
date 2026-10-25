@@ -2192,6 +2192,29 @@ def test_docs_lint_baseline_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_inbound_relay_sweep_tool_change_selects_core_not_tier1():
+    """A change to the relay sweep must run the rails it pins (#9943).
+
+    `tests/test_inbound_relay_sweep.py` is registered on the `core` surface and
+    owns the sweep's invariants — relay-before-close, the label applied LAST so a
+    failure leaves the item retryable, an unreadable page taking no action, and
+    the queue-batch exclusion — which are exactly what a PR would edit to weaken
+    the control. That registration is INERT for a tool-only diff: `tools/` is a
+    flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches the tool, so
+    `select()` returned NO surface, took the docs-only early return and fell back
+    to the tier-1 smoke set, which does not contain the file. The 15-minute cron
+    then runs the weakened tool with its rails unpinned.
+
+    Mutation check: removing the CORE_ALSO entry fails the FIRST assert
+    (`"core" in r["surfaces"]`); the docs-only early return then yields
+    `full: False` with no pin, so the later asserts pass unexercised.
+    """
+    r = _sel(["tools/inbound_relay_sweep.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_inbound_relay_sweep.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
 def test_ax_write_eval_tool_change_selects_core_not_tier1():
     """A change to the eval instrument must run the rules it pins (#9695 review).
 

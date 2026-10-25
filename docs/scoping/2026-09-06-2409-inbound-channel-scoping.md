@@ -140,9 +140,13 @@ Two changes close the gap, and neither changes the policy above:
   relay) to items the event path missed. A scheduled run is started by the
   repository's own credential, so it is not subject to the approval policy and
   does not depend on any event surviving. It is idempotent on the label,
-  window-bounded, capped, fails closed on an incomplete listing, and relays
-  BEFORE it closes (a failed intake POST leaves the item open for the next run
-  and reds the workflow).
+  window-bounded and capped, and relays BEFORE it closes (a failed intake POST
+  leaves the item open for the next run and reds the workflow). The label is
+  applied LAST, so a failure anywhere in the sequence leaves the item unlabelled
+  and therefore retryable rather than open-and-marked. A page that FAILS to read
+  takes no action at all; a window that merely outgrew the page budget is acted
+  on as the prefix that was read — otherwise anyone willing to open more than
+  `max_pages x 100` items in a day could switch the control off.
 - **belt 3 in the event path's guard (#9613)** — a bot-authored ISSUE is never
   relayed. The issue branch previously spared only the owner's login, so the
   relay would have closed this repo's own monitor alarm threads
