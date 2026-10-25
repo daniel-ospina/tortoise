@@ -23,6 +23,11 @@ rows and a coverage overclaim:
    onboarding document mentions — nor its advertised replacement
    ``tortoise_overview(section="health")``. That omission is why the PR's own
    correction could name a RETIRED tool and the instrument stayed silent.
+4. Step **2** had no row at all (``row("2"`` → 0 hits), so the bundle recorded
+   its premise as ``STATIC`` while the other nine were measured — and #9691 then
+   falsified it *by hand*, finding that ``configured: false`` is **not** the
+   catalog union on a hosted default graph. A premise the instrument does not
+   read is a premise the instrument cannot falsify.
 
 WHAT THIS PINS
 --------------
@@ -34,15 +39,22 @@ WHAT THIS PINS
 3. A mapping entry that is not a completion gate does not flip the verdict.
 4. The ``team-named`` row reads both clauses: the org-create init fragment and
    ``_NON_AGENT_STEPS``; either one failing makes it FALSIFIED.
+5. Step 2's THREE resolution arms each have a row, driven through the real
+   ``pack_state.resolved_pack_set`` — and each row FALSIFIES on the defect it
+   exists to catch: records resolving to the union (#9691), a starter set equal
+   to the catalog, a first packs read that does not narrow a record-less graph.
+6. A query the packs rows do not model leaves that section UNMEASURED (exit 3),
+   never a satisfied row.
 
 Non-vacuity: on the pre-fix probe, (1) has no ``tortoise_health`` /
 ``tortoise_overview`` / ``tortoise_onboarding_state`` row, (2) has no
-"is in a completion gate" row and reads 2 of the 3 gates, and (4) prints
-``CONFIRMED`` while the org-create fragment writes no ``team-named`` edge.
+"is in a completion gate" row and reads 2 of the 3 gates, (4) prints
+``CONFIRMED`` while the org-create fragment writes no ``team-named`` edge, and
+(5) has no step-2 row at all — ``row("2"`` matched nothing, so the whole step-2
+group of guards reds against it.
 
 Static: imports the probe and the onboarding modules; no DB, no network.
 """
-
 from __future__ import annotations
 
 import importlib.util
@@ -238,7 +250,6 @@ def test_the_team_named_row_also_measures_the_non_agent_half(probe, monkeypatch)
 
 # ── onboarding: an interpretation is printed only for the value it explains ──
 
-
 def test_the_restart_pending_gloss_follows_the_value(probe, monkeypatch) -> None:
     """`False` must not print the `True` interpretation.
 
@@ -260,3 +271,119 @@ def test_the_restart_pending_gloss_follows_the_value(probe, monkeypatch) -> None
     assert "harness NOT yet verified" not in measured, (
         f"a False derivation must not carry the True gloss: {measured!r}"
     )
+
+
+# ── packs: step 2's premise is MEASURED, and each arm can falsify ──────────
+
+
+#: One needle per resolution arm the packs section must measure. The pre-fix
+#: census matched NONE of them (it had no step-2 row at all), which is how
+#: #9691 falsified step 2's parenthetical by hand instead of by this probe.
+STEP2_ARMS = (
+    "the platform STARTER set is narrower",
+    "no `:PackInstall` records AND no `:PackSelection` marker",
+    "`configured=False` is NOT the catalog union",
+    "the `:PackSelection` MARKER, not the records",
+    "the FIRST packs read on a record-less unconfigured graph",
+)
+
+
+def test_step_2_has_a_measured_row_for_every_resolution_arm(probe) -> None:
+    """Non-vacuity: the census had ZERO step-2 rows before this guard.
+
+    Step 2 was the only step in the ten-step table whose premise the census
+    never read (`row("2"` had 0 hits; the bundle called it "premise STATIC"),
+    so the instrument could not falsify it — #9691 had to be caught by hand.
+    """
+    probe.census_packs()
+    still_two = [(premise, measured) for step, premise, measured in probe.rows
+                 if step == "2"]
+    assert still_two, "the census still gives step 2 no measured row"
+    premises = [premise for premise, _m in still_two]
+    for needle in STEP2_ARMS:
+        assert any(needle in p for p in premises), (
+            f"the step-2 rows do not measure {needle!r}: {premises}")
+    for premise, measured in still_two:
+        assert measured.startswith(("CONFIRMED", "FALSIFIED")), (
+            f"a premise row must carry a verdict, got {measured!r} for {premise!r}")
+
+
+def test_the_record_arm_row_falsifies_if_records_resolve_to_the_union(
+    probe, monkeypatch
+) -> None:
+    """#9691 re-introduced: a resolution that answers the union for a graph that
+    HOLDS records. That is the exact defect the Settings copy shipped, so the
+    row must read FALSIFIED rather than stay CONFIRMED on the flag alone."""
+    from tortoise import pack_state
+
+    monkeypatch.setattr(
+        pack_state, "resolved_pack_set_for_graph",
+        lambda _g: pack_state.ResolvedPackSet(namespaces=None, revision=0,
+                                              configured=False))
+    probe.census_packs()
+    verdict = _measured(probe, "`configured=False` is NOT the catalog union")
+    assert verdict.startswith("FALSIFIED"), (
+        f"records resolving to `namespaces=None` IS the #9691 defect: {verdict!r}")
+    assert "namespaces=None" in verdict, (
+        f"the row must print the set it resolved, got {verdict!r}")
+
+
+def test_the_starter_row_falsifies_when_the_starter_set_is_the_catalog(
+    probe, monkeypatch
+) -> None:
+    """A starter set equal to the catalog would make step 2's parenthetical TRUE."""
+    from tortoise import pack_state
+
+    monkeypatch.setattr(pack_state, "_resolve_catalog",
+                        lambda: {"a": {"version": "1"}, "b": {"version": "1"}})
+    monkeypatch.setattr(pack_state, "_starter_namespaces",
+                        lambda *_a, **_k: ["a", "b"])
+    probe.census_packs()
+    verdict = _measured(probe, "the platform STARTER set is narrower")
+    assert verdict.startswith("FALSIFIED"), (
+        f"a starter set spanning the catalog does not narrow anything: {verdict!r}")
+    assert "catalog−starter=NONE" in verdict, (
+        f"the row must print the difference it measured, got {verdict!r}")
+
+
+def test_the_self_heal_row_falsifies_when_the_read_does_not_seed(
+    probe, monkeypatch
+) -> None:
+    """The union arm is transitory: the first packs READ seeds the starter set.
+
+    If `get_tenant_packs` stops self-healing, a record-less graph STAYS on the
+    catalog union and step 2's parenthetical becomes true again for it.
+    """
+    from tortoise import pack_state
+
+    monkeypatch.setattr(pack_state, "ensure_tenant_packs",
+                        lambda *_a, **_k: [])
+    probe.census_packs()
+    verdict = _measured(probe, "the FIRST packs read on a record-less unconfigured graph")
+    assert verdict.startswith("FALSIFIED"), (
+        f"a read that seeds nothing leaves the union arm in place: {verdict!r}")
+    assert "still the union" in verdict, (
+        f"the row must say the graph is still un-narrowed, got {verdict!r}")
+
+
+def test_an_unmodelled_pack_query_leaves_the_packs_section_unmeasured(
+    probe, monkeypatch, capsys
+) -> None:
+    """Fail-closed polarity, end to end: exit 3, never a satisfied row.
+
+    The packs rows answer three query shapes and RAISE on any other, so a change
+    in `pack_state`'s readers surfaces as an UNMEASURED section instead of a row
+    that never read what it prints.
+    """
+    from tortoise import pack_state
+
+    def _unmodelled(graph):
+        graph.query("MATCH (z:BrandNewLabel) RETURN z")
+        raise AssertionError("unreachable: the fake graph must refuse that query")
+
+    monkeypatch.setattr(pack_state, "resolved_pack_set_for_graph", _unmodelled)
+    rc = probe.main()
+    out = capsys.readouterr().out
+    assert rc == 3, f"an unmeasurable premise must exit 3, got {rc}"
+    assert "UNMEASURED SECTIONS" in out, out
+    assert "census_packs" in out, out
