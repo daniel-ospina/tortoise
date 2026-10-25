@@ -104,24 +104,34 @@ def test_document_created_then_source_still_one_node(sdk_factory):
 
 def test_document_created_non_url_id_keeps_its_identity(sdk_factory):
     """Non-over-reach: the resolver is IDENTITY for the two non-URL document-id
-    shapes the live producers actually emit — `doc_<rel-path>` from
+    shapes the INDEX and CLI paths emit — `doc_<rel-path>` from
     `derive_document_id` (the underscore form: `doc_notes/5140.md`, not
     `doc/notes/…`) and a BARE FILENAME, which is what the CLI passes
     (`ingest.py` uses `args.transcript.name`; `corpus://…` is the index path's
-    SOURCE URL, not a document id). Their node keys must not move."""
+    SOURCE URL, not a document id). Their node keys must not move.
+
+    ⚠️ It asserts the identity PROPERTY as well as the key, and one literal is
+    MIXED CASE, because the key alone cannot see the defect this guards: on a
+    first-time miss `resolve_source_key` returns the raw id (its step 4), so a
+    resolver that canonicalised these shapes would leave `url` untouched while
+    moving only `canonicalUrl` — and a lower-casing resolver is invisible to
+    all-lower-case literals. Measured: with `normalize_source_url` mapping
+    `doc_Notes/…` to `doc/Notes/…`, or lower-casing it, a key-only version of
+    this test passed 7/7 and this version fails.
+
+    Scoped to those two PRODUCER paths on purpose: they are not the only
+    non-URL document ids (`create_document` mints a ULID key), but the claim
+    being pinned is that the resolver leaves these two alone."""
     sdk = sdk_factory()
     proj = sdk._get_proj()
-    dids = ("doc_notes/5140.md", "5140.md")
+    dids = ("doc_Notes/5140.md", "README.md")
     for did in dids:
         proj.apply({"type": "DocumentCreated", "id": did, "title": did, "document_kind": "brief"})
     rows = proj.g.query(
-        "MATCH (s:Source) WHERE s.url IN ['doc_notes/5140.md', '5140.md'] "
-        "RETURN s.url, s.documentKind"
+        "MATCH (s:Source) WHERE s.url IN ['doc_Notes/5140.md', 'README.md'] "
+        "RETURN s.url, s.canonicalUrl, s.documentKind"
     ).result_set
-    assert sorted(rows) == [
-        ["5140.md", "brief"],
-        ["doc_notes/5140.md", "brief"],
-    ], rows
+    assert sorted(rows) == [[d, d, "brief"] for d in sorted(dids)], rows
 
 
 def test_document_created_replays_to_the_same_node(sdk_factory):
