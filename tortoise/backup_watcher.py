@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import resource
 import threading
 import time  # noqa: F401
@@ -43,6 +44,7 @@ from .incident_kinds import (
     KIND_R2_DOWN,
     KIND_R2_UNLISTABLE,
     KIND_STALE,
+    resolve_streak_for,
 )
 
 logger = logging.getLogger(__name__)
@@ -250,9 +252,14 @@ def compute_status(
 ) -> dict[str, Any]:
     """Pure staleness computation. Returns the watcher's decision surface.
 
-    Per-org statuses: ``never`` (seam org with no R2 archive), ``stale``
-    (newest archive older than threshold — a non-expired simulate object
-    carries an OLD age and therefore forces the stale evaluation), ``ok``,
+    Per-org statuses: ``never`` (seam org with no R2 archive), ``stale`` — which
+    is THREE different readings, and only the first is an age (#5047/#9937):
+    (a) the newest archive is older than the threshold (a non-expired simulate
+    object carries an OLD age and forces this too); (b) the listing did not
+    answer this poll and the last CONFIRMED measurement is old (a degraded read,
+    #3658); (c) a CONFIRMED listing found no default-graph archive for an org
+    whose team state exists (an absence — the archive SET is missing, #9938).
+    Callers must not treat (c) as an age claim. ``ok``,
     ``stamp_missing`` (archives exist but no state object), ``not_eligible``
     (org the sweep will not back up — #3658). ``unknown`` when R2 is
     unreachable with no last-known-good (fresh boot — honest silence).
@@ -299,7 +306,43 @@ def compute_status(
             result["per_team"][org] = "never"
             continue
         if newest is None:
-            result["per_team"][org] = "stale"
+            # NO default archive timestamp was measured for an org whose R2
+            # prefix EXISTS. What that absence MEANS depends on what else we
+            # know, and the three cases must not share a label — the per-graph
+            # twin below already splits exactly these three (#2313, #2374).
+            #
+            # 1. UNCONFIRMED poll (R2 degraded): the prefix list is the
+            #    census/cache, so a cache miss is not a measurement. Keep the
+            #    long-standing ``stale`` label — asserting ``never`` off it
+            #    would fabricate NEVER_BACKED_UP (#3658, and its pinned test
+            #    ``test_watcher_degraded_poll_does_not_resolve_a_real_never_incident``).
+            #
+            # 2. CONFIRMED poll, NO team state: nothing was ever dumped, so
+            #    ``never`` is the measured truth. This is the class that churned.
+            #    ``create_backup`` uploads ``dump.enc`` FIRST and
+            #    ``manifest.json`` LAST (#5062 review F3), and
+            #    ``_default_graph_newest`` only reads manifests — so between a
+            #    dump starting and its manifest landing the prefix is non-empty
+            #    with no manifest. That window used to read ``stale`` (an AGE
+            #    claim about an archive nobody measured an age for) while the
+            #    next poll, after the sweep's rollback/delete emptied the
+            #    prefix, read ``never``. Each side of the flip resolves the
+            #    other kind and FILES A NEW ISSUE (resolving deletes the dedup
+            #    sentinel, so a recurrence is a new incident — alert_store's own
+            #    contract), which is how one org accumulated 11 issues over 27
+            #    days (#6014…#9911) for a condition that never changed.
+            #
+            # 3. CONFIRMED poll, team state PRESENT: a dump SUCCEEDED once
+            #    (state is written only after one), so ``never`` would be a
+            #    false claim — the archive SET is what is missing (#2374's
+            #    case). This table has no class for it (the org-level census for
+            #    it is the separate ``backup_set_missing`` list), so it keeps
+            #    its pre-existing label rather than gaining a new false one.
+            #    Teaching this table that class is #9938's, not this change's.
+            if not r2_ok or org in state_orgs:
+                result["per_team"][org] = "stale"
+            else:
+                result["per_team"][org] = "never"
             continue
         if simulate_age is not None and simulate_age < newest:
             newest = simulate_age  # simulate object wins newest-primary selection
@@ -821,6 +864,9 @@ class BackupWatcher:
                 r2_reachable=r2_reachable,
                 prev_per_team=prev_per_team,
                 census_confirmed=census_confirmed,
+                newest_ts_by_org=newest_by_org,
+                now=now,
+                simulate_age=simulate_age,
             )
 
         # Re-baseline the universe-shrink reference ONLY on a confirmed poll (the
@@ -906,7 +952,8 @@ class BackupWatcher:
                 "(retried next poll)"
             )
 
-    def _alert_leg(self, op: str, kind: str, subject: str = "") -> bool:
+    def _alert_leg(self, op: str, kind: str, subject: str = "",
+                   detail: dict[str, Any] | None = None) -> bool:
         """One alert-store leg, contained AND attributed (#3031 cycle-2 review P2).
 
         Contained per leg rather than per block, for two reasons:
@@ -956,7 +1003,19 @@ class BackupWatcher:
                 outcome = self._alerts.resolve_incident_state(kind, subject)
                 return outcome not in (
                     ResolveOutcome.SKIPPED_FRESH, ResolveOutcome.SKIPPED_WINDOW)
-            getattr(self._alerts, op)(kind, subject)
+            # The RESOLVE arm returned above, and `op` is validated on entry, so
+            # from here on this is always the OPEN. #5047: the filing carries the
+            # MEASUREMENT that justified it — `open_incident(kind, subject)` with
+            # no detail files a body whose payload is literally `Detail: {}`, an
+            # incident nobody reading the tracker can triage, and it is what the
+            # watcher-filed per-org `[DR] STALE` issues carry (the older ones were
+            # the DRIVER's per-tenant filings, which did carry a measured age and
+            # were pooled by #4994).
+            # ⚠️ ``detail`` is passed to EVERY open leg (a third positional
+            # argument), so any alert store in use must accept it on
+            # ``open_incident``; a 2-argument double raises into the ``except
+            # Exception`` below and silently drops the leg.
+            getattr(self._alerts, op)(kind, subject, detail)
             return True
         except CloseCooldown as cool:
             logger.info(
@@ -970,10 +1029,182 @@ class BackupWatcher:
             )
             return False
 
+    def _stale_evidence(self, org: str, newest: datetime | None,
+                        now: datetime | None,
+                        simulate_age: datetime | None = None,
+                        r2_confirmed: bool = False) -> dict[str, Any]:
+        """The diagnostic payload for a STALE filing (#5047).
+
+        STALE's close condition is an AGE claim, so the measured age and the
+        archive it came from are the data a triager needs. Before this the
+        watcher passed no detail at all, so every watcher-filed per-org STALE
+        issue carried ``Detail: {}`` — no age, no archive, no close condition —
+        which is why they could accumulate to 678 filings without a single one
+        being assessable (#5047 lists this as its diagnostic-payload symptom).
+
+        The payload states ONLY what was measured, because a payload is exactly
+        the wrong place to be approximate — a triager acts on it:
+
+        * ``newest`` is the newest DEFAULT-graph archive the poll had — measured
+          now, or (on a degraded poll) the last CONFIRMED measurement it kept.
+        * when ``newest`` is ``None`` the filing is an absence/unknown, never an
+          age, and the payload names WHICH absence. ``compute_status`` reaches
+          ``stale`` with ``newest is None`` on two different polls: an
+          UNCONFIRMED one (the listing did not answer — a cache miss off the
+          census) and a CONFIRMED one for an org that has team state but no
+          default archive (a dump succeeded once, so the archive SET is what is
+          missing — the class this table cannot name yet, #9938). They send a
+          triager to different places, so they must not share a string.
+        * an ``ops/simulate`` DRILL forces the class without changing the
+          archive, so the simulated timestamp is reported as ``simulated_age``
+          and NEVER as ``newest_default_archive`` — publishing a key that does
+          not exist is the same defect as publishing an age nobody measured.
+        """
+        try:
+            return self._stale_evidence_inner(
+                org, newest, now, simulate_age, r2_confirmed)
+        except Exception:  # a payload must never abort the alert drive
+            logger.exception("could not build STALE evidence for %r", org)
+            return {"subject": org, "stale_threshold_min": self._stale_min}
+
+    def _stale_closes_when(self, lead: str) -> str:
+        """``lead`` is the branch-specific recovery, then EVERY shipped arm.
+
+        Composed in ONE place on purpose: the previous shape let a branch assign
+        ``closes_when`` itself, and the confirmed-absence branch then silently
+        dropped ``not_eligible`` and the universe-shrink leg — a payload that
+        lists some closers reads as exhaustive, so a triager whose issue closed
+        for an unlisted reason concludes the watcher lies (#9940 review).
+
+        The arms below are the SHIPPED ones, not an aspiration:
+          * ``_drive_alerts`` ``never`` / ``stamp_missing`` -> class change, which
+            closes this one AND opens the matching kind (#3294 org exclusivity);
+          * ``_drive_alerts`` ``not_eligible`` -> closes, opens NOTHING (the org
+            left the DR surface);
+          * the ``departed`` universe-shrink leg -> the subject is gone;
+          * the ``ok`` arm -> a measured-fresh reading.
+        Every one goes through ``resolve_incident_state``, so each is held for
+        the same recovery window: a single poll never clears an incident.
+        """
+        window = resolve_streak_for(KIND_STALE)
+        return (
+            f"{lead} ALSO: the org's class changes to NEVER_BACKED_UP / "
+            "METADATA_LOST — that arm closes this one AND opens the matching "
+            "kind (#3294: exactly the incidents matching the current "
+            "classification are open); or the class changes to not_eligible "
+            "(the org left the DR surface: this closes and NOTHING is opened); "
+            "or the org leaves the census and its archive listing entirely "
+            "(universe-shrink: the subject is gone). Each is held for "
+            f"{window} consecutive confirming poll(s) before it is applied, so "
+            "a single poll never clears this.")
+
+    def _stale_evidence_inner(self, org: str, newest: datetime | None,
+                              now: datetime | None,
+                              simulate_age: datetime | None,
+                              r2_confirmed: bool) -> dict[str, Any]:
+        evidence: dict[str, Any] = {
+            "subject": org,
+            "stale_threshold_min": self._stale_min,
+        }
+        fresh_arm = (
+            "a default-graph archive is MEASURED no older than "
+            f"{self._stale_min}m under this org's R2 prefix (the `ok` arm — an "
+            "archive that merely REAPPEARS does not close it: the reading must "
+            "be fresh)")
+        if newest is not None:
+            evidence["newest_default_archive"] = newest.isoformat()
+            if now is not None:
+                # ``compute_status`` compares the FLOAT age (``age > thr``), so
+                # the reported number must not floor down to the threshold and
+                # make the body read as a false positive — an age of 90m30s is
+                # OVER a 90m threshold and must not print "90".
+                age_min = max(0, math.ceil((now - newest).total_seconds() / 60.0))
+                # ⚠️ The keys are ``age_min`` / ``age_human``, NOT ``age`` /
+                # ``age_minutes``, ON PURPOSE: ``alert_store._title`` renders
+                # either of those two into the title as ``— last backup <age>``,
+                # and the title SHAPE is the adoption contract
+                # (``github_issue.incident_title_matches`` — a subject segment
+                # must be exact before any `` — `` prose). The payload belongs in
+                # the body; the title stays byte-identical so the
+                # search-before-file adoption path cannot be changed by a
+                # diagnostic field.
+                # ``test_stale_payload_does_not_change_the_title_shape`` pins it.
+                evidence["age_min"] = age_min
+                evidence["age_human"] = (
+                    f"{age_min}m" if age_min < 120 else f"{age_min / 60:.1f}h")
+            if simulate_age is not None and (
+                    now is None or simulate_age < newest):
+                # Same newest-primary rule ``compute_status`` applies. Reported
+                # as its OWN field: the archive above is the real one.
+                evidence["simulated"] = True
+                evidence["simulated_age"] = simulate_age.isoformat()
+                if now is not None:
+                    evidence["simulated_age_min"] = max(
+                        0, math.ceil((now - simulate_age).total_seconds() / 60.0))
+                evidence["measurement"] = (
+                    "this staleness is FORCED BY AN ops/simulate DRILL object, "
+                    "not by the archive: `newest_default_archive` above is the "
+                    "real newest (age "
+                    + str(evidence.get("age_human", "n/a"))
+                    + "), and the simulated age is the incident's trigger. Do "
+                    "not hunt for a `backups/` key dated `simulated_age`.")
+                evidence["closes_when"] = self._stale_closes_when(
+                    "the drill ends (the `ops/simulate` object is deleted, "
+                    "refreshed or expires) AND the real archive above is itself "
+                    f"measured no older than {self._stale_min}m — if that "
+                    "archive is stale too, this stays open FOR THAT REASON:",)
+            elif not r2_confirmed:
+                # A degraded poll keeps the last CONFIRMED measurement, so this
+                # timestamp is real but is not necessarily the newest, and the
+                # age is only a LOWER bound: a newer archive may have landed
+                # while the listing was not answering. Saying so is the whole
+                # point — an exact-looking age off a blind poll is the same
+                # "presented as measured" defect this change removes.
+                evidence["age_is_lower_bound"] = True
+                evidence["measurement"] = (
+                    "the archive listing did NOT answer this poll: "
+                    "`newest_default_archive` is the last CONFIRMED listing's "
+                    "newest, so `age_min` is a LOWER BOUND — a newer archive may "
+                    "exist unobserved (#3658: a degraded read is not a fresh "
+                    "one).")
+                evidence["closes_when"] = self._stale_closes_when(
+                    f"{fresh_arm}:")
+            else:
+                evidence["closes_when"] = self._stale_closes_when(f"{fresh_arm}:")
+        elif r2_confirmed:
+            evidence["newest_default_archive"] = None
+            # The in-flight cause comes FIRST: it is both the most common and the
+            # benign one, and sending a triager to "bulk delete" on a routine
+            # in-progress backup is worse than saying nothing. ``create_backup``
+            # uploads ``dump.enc`` then ``manifest.json``, and this watcher reads
+            # the manifest key only — so a run between the two uploads is
+            # invisible here.
+            evidence["measurement"] = (
+                "a CONFIRMED listing found no default-graph archive (manifest "
+                "key) under this org's R2 prefix, while team state EXISTS. MOST "
+                "LIKELY a backup is IN FLIGHT: `create_backup` uploads "
+                "`dump.enc` before `manifest.json`, so the newest run is "
+                "manifest-less for the duration of a dump — re-check in a few "
+                "minutes before treating this as loss. If it persists: the "
+                "archive SET is missing (bulk delete / prune) or a key's "
+                "timestamp does not parse (#9938). R2 connectivity is NOT the "
+                "suspect.")
+            evidence["closes_when"] = self._stale_closes_when(f"{fresh_arm}:")
+        else:
+            # Unreachable from ``_drive_alerts`` — the open gate at the `stale`
+            # arm is exactly the complement of this predicate. Kept as keys only:
+            # a payload that TELLS a reader the filing was not made is a claim
+            # that can only mislead if it is ever published.
+            evidence["newest_default_archive"] = None
+        return evidence
+
     def _drive_alerts(self, status: dict[str, Any], r2_ok: bool | None,
                       *, r2_reachable: bool | None = None,
                       prev_per_team: set[str] | None = None,
-                      census_confirmed: bool = False) -> None:
+                      census_confirmed: bool = False,
+                      newest_ts_by_org: dict[str, datetime] | None = None,
+                      now: datetime | None = None,
+                      simulate_age: datetime | None = None) -> None:
         """#3031: drive the alert store — fail-soft, never at the heartbeat's expense.
 
         The heartbeat written right after this call is the watcher's OWN
@@ -1028,7 +1259,23 @@ class BackupWatcher:
                     if r2_confirmed:
                         self._alert_leg("resolve_incident", KIND_NEVER_BACKED_UP, org)
                         self._alert_leg("resolve_incident", KIND_METADATA_LOST, org)
-                    self._alert_leg("open_incident", KIND_STALE, org)
+                    # An UNMEASURED ``stale`` is not an age claim. On a DEGRADED
+                    # poll a no-archive org lands in this arm from the census
+                    # (``compute_status`` substitutes ``r2_orgs = orgs``), and
+                    # opening STALE off it files a NEW issue for every no-archive
+                    # org on every R2 blip — the same "one unchanged condition,
+                    # repeated issues" defect this change removes from the
+                    # healthy flip (the resolve side is already gated; the open
+                    # side was not). Nothing is silenced by skipping it: the
+                    # platform-scoped kinds R2_DOWN/R2_UNLISTABLE are the incidents for that
+                    # poll, and they are opened/kept by the legs below.
+                    if r2_confirmed or (newest_ts_by_org or {}).get(org) is not None:
+                        self._alert_leg(
+                            "open_incident", KIND_STALE, org,
+                            detail=self._stale_evidence(
+                                org, (newest_ts_by_org or {}).get(org), now,
+                                simulate_age, r2_confirmed),
+                        )
                 elif state == "stamp_missing":
                     if r2_confirmed:
                         self._alert_leg("resolve_incident", KIND_STALE, org)
