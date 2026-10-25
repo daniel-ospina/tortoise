@@ -122,7 +122,7 @@ because they are the cache's own fold state and a record-served answer must not 
 
 ## 3. Mutation arms — the guards, and the edits that turn them RED
 
-Run 2026-10-24 against `tests/test_record_serve.py` (39 tests) and the live file (2 tests):
+Run 2026-10-24 against `tests/test_record_serve.py` (42 tests) and the live file (2 tests):
 
 | edit | result |
 |---|---|
@@ -137,6 +137,9 @@ Run 2026-10-24 against `tests/test_record_serve.py` (39 tests) and the live file
 | a misconfigured DSN is reported as an outage | 1 RED (`test_a_misconfigured_dsn_is_structural_not_an_outage`) |
 | a projection refusal is downgraded to a fallback | 1 RED (`test_an_unprojectable_record_is_structural_not_a_fallback`) |
 | the `:Event` parity bound is dropped from the registry | 1 RED (`test_node_by_key_parity_is_declared_measured_for_point_only`) |
+| a tenancy misconfiguration is downgraded to a fallback | 1 RED (`test_a_misconfigured_tenancy_is_structural_not_a_fallback`) |
+| a permanent missing tenant is answered 503 | 1 RED (`test_a_credential_without_a_record_tenant_is_a_fault_not_an_outage`) |
+| `off` mode overwrites a stored `servedFrom` | 1 RED (`test_off_mode_leaks_no_attribution_and_keeps_a_stored_name`) |
 
 ## 4. What this does not decide, and where the decision could overturn it
 
@@ -149,7 +152,11 @@ Run 2026-10-24 against `tests/test_record_serve.py` (39 tests) and the live file
   the record is authoritative, so a miss there is a real absence — **but only where the record is
   complete**, which is a deployment fact, not a property of this code. `record` mode asserts it;
   `prefer` mode does not and pays for the doubt with a named, counted fallback. The endpoint answers
-  **503** (never 404) for an impaired record, pinned by test.
+  **503** (never 404) for an impaired record, pinned by test. The one arm that is
+  NOT an impairment is the tenant one: a credential that resolves no record tenant
+  never becomes resolvable by retrying, so it is **500** (a permanent fault), and
+  a role/GUC misconfiguration refuses **structurally** (500) instead of being
+  counted as `record-unavailable` — an ops reason for a value problem.
 * **Not built here, named so the absence is visible:** a CLI verb (the two record verbs that exist,
   `record-reconcile` and `record-restore`, are the precedent); connection pooling for the endpoint's
   per-request record connection; `anchored-neighbours`; parity for any label other than `Point`

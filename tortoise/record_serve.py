@@ -128,6 +128,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -135,14 +136,12 @@ from typing import Any
 __all__ = [
     "ANCHORED_READS",
     "MODES",
-    "MODE_OFF",
-    "MODE_PREFER",
+    "MODE_OFF",    "MODE_PREFER",
     "MODE_RECORD",
     "NODE_KEY_COLUMN",
     "NOT_SERVED",
     "READ_NODE_BY_KEY",
     "READ_POINT_BY_ID",
-    "RECORD_CONNECT_TIMEOUT_S",
     "RECORD_SERVE_ENV",
     "RECORD_STATEMENT_TIMEOUT_MS",
     "SERVED",
@@ -180,12 +179,17 @@ MODE_RECORD = "record"
 MODE_PREFER = "prefer"
 MODES: tuple[str, ...] = (MODE_OFF, MODE_RECORD, MODE_PREFER)
 
-#: The record read's own bounds. `record-reconcile` bounds the same two things
-#: for the same reason: an armed read must not be able to hang a request on a
-#: wedged database. A non-positive bound is not a bound (the driver reads 0 as
-#: "wait forever"), so the constants are positive and the CLI/verb layer that
-#: ever exposes them must refuse zero too.
-RECORD_CONNECT_TIMEOUT_S = 10
+#: The record read's SESSION bound. `record-reconcile` bounds the same thing for
+#: the same reason: an armed read must not be able to hang a request on a wedged
+#: database. A non-positive bound is not a bound (the driver reads 0 as "wait
+#: forever"), so the constant is positive and any caller that ever exposes it
+#: must refuse zero.
+#:
+#: ⚠️ The CONNECT bound is NOT declared here: `_default_connect` applies
+#: :data:`tortoise.record_writer.CONNECT_TIMEOUT_SECONDS`, the one arming module
+#: that owns opening a record connection. This module re-declared its own copy
+#: once and nothing read it — a second constant that LOOKS like it bounds the
+#: connect is worse than none, because the next reader trusts it.
 RECORD_STATEMENT_TIMEOUT_MS = 15_000
 
 #: The record's identity-contract column every node table carries, and the
@@ -415,6 +419,13 @@ FALLBACK_REASONS: tuple[str, ...] = (
     FALLBACK_RECORD_UNAVAILABLE, FALLBACK_RECORD_MISS)
 
 _FALLBACKS: dict[str, int] = {}
+#: The counter is incremented from BOTH the event loop (the endpoint's
+#: tenant-unresolved arm) and a worker thread (`serve_point` under
+#: `asyncio.to_thread`), so the read-modify-write needs a lock. Without it two
+#: concurrent fallbacks can both read N and write N+1 — silently under-reporting
+#: exactly the events this module's "the fallback is MEASURABLE" argument rests
+#: on.
+_FALLBACKS_LOCK = threading.Lock()
 
 
 def note_fallback(reason: str) -> None:
@@ -422,17 +433,20 @@ def note_fallback(reason: str) -> None:
     if reason not in FALLBACK_REASONS:
         raise ValueError(
             f"fallback reason must be one of {FALLBACK_REASONS}, got {reason!r}")
-    _FALLBACKS[reason] = _FALLBACKS.get(reason, 0) + 1
+    with _FALLBACKS_LOCK:
+        _FALLBACKS[reason] = _FALLBACKS.get(reason, 0) + 1
 
 
 def fallback_counts() -> dict[str, int]:
     """The process's named fallbacks, by reason (a copy)."""
-    return dict(_FALLBACKS)
+    with _FALLBACKS_LOCK:
+        return dict(_FALLBACKS)
 
 
 def reset_fallback_counts() -> None:
     """Zero the counters — for a test, and for a meter that reports deltas."""
-    _FALLBACKS.clear()
+    with _FALLBACKS_LOCK:
+        _FALLBACKS.clear()
 
 
 # ── the record door ─────────────────────────────────────────────────────────
@@ -444,9 +458,11 @@ def open_record(record_dsn: str | None = None) -> Any:
     The DSN is resolved by :func:`tortoise.record_writer.record_dsn` — the module
     that DECLARES the arming surface — so this door cannot drift from the
     writer's notion of "armed", and a non-Postgres value is the MISCONFIGURATION
-    it is rather than an unreadable record. The connection is opened with a
-    connect timeout and a session ``statement_timeout``: a served read must not
-    be able to hang a request on a wedged database.
+    it is rather than an unreadable record. The connection is opened with the
+    CONNECT bound the ARMING module owns
+    (:data:`tortoise.record_writer.CONNECT_TIMEOUT_SECONDS`, applied inside
+    ``_default_connect``) plus a session ``statement_timeout`` set here: a served
+    read must not be able to hang a request on a wedged database.
     """
     # ⚠️ The resolver is imported under a DISTINCT name: the parameter above is
     # also called `record_dsn`, and a same-named import rebinds the name so the
@@ -690,18 +706,26 @@ def serve_point(*, tenant: tuple[str, str], point_id: str,
                             fallback_reason=reason)
 
     from .cache_projection import CacheProjectionError
+    from .record_projection import RecordProjectionError
 
     try:
         props = _from_record()
-    except (AnchorDidNotBind, CacheProjectionError):
+    except (AnchorDidNotBind, CacheProjectionError, RecordProjectionError):
         # STRUCTURAL refusals, never availability events. `AnchorDidNotBind`
         # means the anchor did not restrict, so NEITHER store's answer is
         # trustworthy for this coordinate. `CacheProjectionError`
         # (`UnprojectableRecord` / `UnknownRecordColumn`) means the record row —
         # or a column the reader does not know — cannot be projected at all:
-        # the "the record is newer than the reader" class. Both are defects a
-        # fallback would hide behind a plausible answer, and both are reported
-        # to the endpoint as a fault (500) rather than as an impairment (503).
+        # the "the record is newer than the reader" class.
+        # `RecordProjectionError` is where `scope_connection` refuses a
+        # MISCONFIGURED tenancy: a role that BYPASSES RLS, a lost tenant GUC, an
+        # unreadable role posture. Its message names the fix ("arm
+        # TORTOISE_RECORD_DSN with tortoise_record_app"), and letting it fall to
+        # the availability arm below would both lose that instruction and count
+        # it as `record-unavailable` — an ops reason for a value problem, which
+        # is the same misclassification the misconfigured-DSN arm refuses.
+        # All three are defects a fallback would hide, and all three reach the
+        # endpoint as a fault (500) rather than an impairment (503).
         raise
     except RecordServeError as e:
         if not isinstance(e, RecordUnavailable):
