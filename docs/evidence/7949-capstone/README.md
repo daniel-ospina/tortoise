@@ -129,10 +129,14 @@ itself.
 `tortoise/sdk.py` (+86 lines) moved the symbols this bundle cites, so the `file:line` numbers in the
 probe's `E3_RULE` and in the S2.2/S2.3 cause strings were re-derived — and those strings RENDER into
 a log. The frozen `capstone-measured-e0fc940b.log` therefore still carries the cites **as-of its own
-stamp** (`sdk.py:12401`, `sdk.py:12682`, `edges.py:467`, `edges.py:2168-2192`, **`edges.py:494-503`** —
-the `_anchor_on_create` / `_DERIVATION_ANCHOR_SET` cite, re-derived by this bundle to `502`/`510`), which
-no longer resolve on `main`; every rendered cite this bundle re-derives is listed here, including the
-one the E3 rule itself renders — and it renders `tortoise/extractor_v2.py:8278-8285`, whose END was already one
+stamp**, and **every rendered cite this bundle re-derives is listed here** — including the ones the E3
+rule and the S2.2 cause string render: `sdk.py:12401` (the meta fold), `sdk.py:12682` (the
+references-edge writer), `sdk.py:2367` (`_TURN_WRITE_CYPHER`), `edges.py:467`
+(`_DERIVATION_REFERENCES_LABELS`), `edges.py:494-503` (`_anchor_on_create` / `_DERIVATION_ANCHOR_SET`,
+re-derived by this bundle to `502`/`510`), `edges.py:2168-2192` (`link_source_to_event`),
+`tortoise/extractor_v2.py:8278-8285` (the VET surface), and `tortoise/extractor_v2.py:8288-8292` (the
+same VET surface as the S2.2 cause string cites it). **They no longer resolve on `main`** at this head.
+The `8278-8285` END was already one
 line long at that stamp (`8284` closes the block; `8285` opens the next one) and is corrected to
 `8823-8829` here, not in the log. That is deliberate: a scored log is a measurement record and the bundle's rule is
 that a row moves only by RE-RUNNING the probe and removing the file it replaces, never by editing a

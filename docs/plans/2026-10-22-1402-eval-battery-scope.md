@@ -55,7 +55,7 @@ already exist and contradict an owner-approved basis.
    verdict), publish missing rows (#2522-#2525)"*. It is a consumer umbrella, not a duplicate.
 3. **Is the whole epic waste if the verdict is "not unique"?** No — align §"the differentiation PROFILE"
    makes a negative profile a deliverable, and the profile is what the comparison-systems table consumes.
-4. **Cost.** The one real run's **published** figure of `$1.07` at `deepseek-v4-flash` is retracted by the verdict doc this brief extends: that number came from a price basis matching no provider price, and re-pricing the run's OWN token counts puts the true cost at **≈$0.17–0.29** (`docs/claims/agent-reasoning-verdict.md:59–79`, #2874/#2906 — the published figure *"overstates the leg by 3.7-6.4x"*). Order-of-magnitude: tens of cents per arm-run, not thousands. That range is derived from the executed run's arm **`a0` alone**; the `a4` leg was deliberately not run (`docs/claims/agent-reasoning-verdict.md:93`), and `a4` also drives the product extraction path per episode, so its token count is unmeasured and strictly larger — §8 prices the two-arm delta as a floor, not a symmetric estimate.
+4. **Cost.** The one real run's **published** figure of `$1.07` at `deepseek-v4-flash` is retracted by the verdict doc this brief extends: that number came from a price basis matching no provider price, and re-pricing the run's OWN token counts puts the true cost at **≈$0.17–0.29** (`docs/claims/agent-reasoning-verdict.md:59–79`, #2874/#2906 — the published figure *"overstates the leg by 3.7-6.4x"*). Order-of-magnitude: tens of cents per arm-run, not thousands. That range is derived from the executed run's arm **`a0` alone**; the `a4` leg was deliberately not run (`docs/claims/agent-reasoning-verdict.md:93`), so `a4`'s token count is **unmeasured** and the two-arm delta in §8 is an extrapolation with an unmeasured second term — not a bound in either direction.
 
 ### Eisenhower / profit alignment
 
@@ -283,11 +283,15 @@ no expected family is missing (`:115`), and `compose_run_status` returns `None` 
 reason: the expected set is the fixed 14-family `METRIC_FAMILIES` (`battery/cli.py:551`) and this run
 measures five of them, so the base rule's missing set is non-empty by construction. A criterion demanding
 `complete` on such a run is unsatisfiable, so the only way to satisfy it would be to emit a false status —
-the exact failure this case exists to catch. A future full-battery run that genuinely measures all 14
-families SHOULD read `complete`, and that is not a defect. What IS required of the status: it is an `incomplete_*` whose cause is
+the exact failure this case exists to catch. A future full-battery run that measures all 14 families
+**and** excludes no episode and has no `insufficient_n` cell DOES read `complete`, and that is not a
+defect; a run with 14/14 families but one excluded episode still reads `incomplete_real_partial`
+(`:218–219`), and that is not a defect either — so a criterion for the battery must assert the status's
+CAUSE, not the token `complete`. What IS required of the status: it is an `incomplete_*` whose cause is
 recorded, and whenever it is `incomplete_real_partial` the excluded episodes / `insufficient_n` cells are
 itemised by family.
-**And** a `complete` claim, an itemised per-family residual presented AS the pass, or a family that is
+**And** a `complete` claim **on a run whose expected families were not all measured (this delta run's
+case — `complete` is unreachable there by construction)**, an itemised per-family residual presented AS the pass, or a family that is
 neither `measured` nor explicitly named in the deferred set (L1–L6, D2–D4) or the judge-gated set (R2/R3/R5
 — present as `insufficient_n`, never absent) is a **FAILED** result, and the failure must name the blocking
 issue per family — itemisation is the diagnostic, never the pass, because a criterion that accepts it
@@ -399,7 +403,7 @@ the split and the sealed fixtures, never the run — which is why it is not a te
 
 | Option | What happens | Cost |
 |---|---|---|
-| **A (recommended)** | Execute the delta as a SEQUENCE, not as a closure: #1416 re-run (one invocation per arm) → re-file verdict → #2525 → #1419. **#1402 does NOT close here** — it stays OPEN until `03-scope.md` deliverables 4/5/6 (Tier-2, the Tier-3 six-arm sweep, parity) are measured, per the 2026-08-14 owner override (all probes × all arms, no exclusions). The delta is how that ruling gets started, not a substitute for it. | **≈$0.34–0.58 is a FLOOR** — 2 × ≈$0.17–0.29, where the per-arm figure is `a0`-derived (the `a4` leg was deliberately not run — `docs/claims/agent-reasoning-verdict.md:93`) and `a4` drives the extraction path per episode, so its token count is unmeasured and strictly larger. Basis is the corrected **declared/estimated** price (`battery/config/prices.py`, 0.084/0.168), NOT `provider_reported`: the receipt carries no `usage.cost`, which is the gap #2906 closes (§1, adversarial test item 4; verdict doc `:59–79`). Plus §7 rows 8–9 (code, not spend) + a few sessions |
+| **A (recommended)** | Execute the delta as a SEQUENCE, not as a closure: #1416 re-run (one invocation per arm) → re-file verdict → #2525 → #1419. **#1402 does NOT close here** — it stays OPEN until `03-scope.md` deliverables 4/5/6 (Tier-2, the Tier-3 six-arm sweep, parity) are measured, per the 2026-08-14 owner override (all probes × all arms, no exclusions). The delta is how that ruling gets started, not a substitute for it. | **≈$0.34–0.58, EXTRAPOLATED from one measured arm** — 2 × ≈$0.17–0.29, where the per-arm figure is `a0`-derived (the `a4` leg was deliberately not run — `docs/claims/agent-reasoning-verdict.md:93`) and **`a4`'s token count is unmeasured**, so the second term is an assumption, not a bound. Basis is the corrected **declared/estimated** price (`battery/config/prices.py`, 0.084/0.168), NOT `provider_reported`: the receipt carries no `usage.cost`, which is the gap #2906 closes (§1, adversarial test item 4; verdict doc `:59–79`). Plus §7 rows 8–9 (code, not spend) + a few sessions |
 | **B** | Declare the reclassification trigger fired (positioning leads with reasoning-uniqueness) and promote #1416 to launch-relevant, which by 01-align's own wording moves the epic Do-now. | Same work, different priority/labelling |
 | **C** | Defer again: leave the verdict as the stale no-data doc. | Cheapest now; the claim stays unsaid while the doc reads as a negative finding |
 
