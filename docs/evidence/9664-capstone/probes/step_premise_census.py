@@ -18,6 +18,11 @@ Sections
                 MENTIONS and its advertised replacement), vs TOOL_REGISTRY
   onboarding  — the canonical step ids, the completion gates, and what the
                 server can OBSERVE (vs. what only a client can record)
+  packs       — step 2's "the default is catalog union + core": the THREE
+                resolution arms of `pack_state.resolved_pack_set` (driven
+                through the real function), the starter-set/catalog relation,
+                and the self-heal that narrows a record-less graph on its
+                first packs READ
   resource    — the RFC 8707 resource forms an MCP connector may declare, which
                 is what the "deliberate ugly cases" (from #9340) must fit into
 
@@ -34,6 +39,8 @@ Exit codes
 """
 from __future__ import annotations
 
+import contextlib
+import os
 import sys
 from pathlib import Path
 
@@ -155,6 +162,317 @@ def census_onboarding() -> None:
     # layer (`-k handler_env`), whose log sits beside this one.
 
 
+# ── packs: step 2's "the default is catalog union + core" (#9691) ──────────
+#
+# Step 2 is the only step whose basis the evidence bundle recorded as "premise
+# STATIC". It is NOT the only step without a census row — steps 3 and 10 have
+# no row either, and their premises are measured by OTHER logs (`01`, `05`) —
+# so `STATIC` was the one state in which NO artifact re-read the premise, and
+# that is how step 2 was falsified by hand instead of by this instrument: on a
+# hosted organization's default graph `configured: false` is NOT the catalog
+# union (#9691). The rows below measure the arms of the ONE authority
+# (`pack_state.resolved_pack_set`), so the next falsification shows up here.
+
+
+class _FakeResult:
+    def __init__(self, result_set) -> None:
+        self.result_set = result_set
+
+
+class _FakeGraph:
+    """A graph HANDLE for the packs rows — inputs only, never a decision.
+
+    `pack_state.resolved_pack_set_for_graph` is what these rows MEASURE, and
+    it reads a graph through exactly three query shapes. This stand-in answers
+    those shapes and nothing else. The RESOLUTION is never re-implemented here:
+    the install records and the marker are the INPUTS, and the real function
+    resolves them.
+
+    ⛔ AN UNMODELLED QUERY RAISING IS NOT ENOUGH, and believing it was is the
+    defect review round 1 found (P1). `graph_kind_namespaces` wraps its scan in
+    ``except Exception: continue`` BY DESIGN (it must narrow the union on a
+    graph error, `pack_state.py:803-812`), so an `AssertionError` raised from
+    the DATA-LEG branch is SWALLOWED: the union silently loses that leg and all
+    five rows still print CONFIRMED with "data leg: none in the probe graph".
+    `served` is what closes it — every branch records the shape it answered,
+    and `census_packs` REFUSES to report unless every shape it depends on was
+    actually served (an unserved one raises OUTSIDE the swallow, so `main()`
+    lands the section in UNMEASURED and exits 3).
+
+    The KIND scans (the data leg of the union) all answer empty: every probe
+    graph holds no data, which is what makes `namespaces == recorded` below a
+    readable assertion instead of a coincidence. A row that depends on it says
+    so in the row itself.
+
+    A refusal is also RECORDED (`refused`), not only raised — for EVERY branch,
+    not just the seed: a raise from inside `graph_kind_namespaces`
+    (`pack_state.py:803-812`) or from `ensure_tenant_packs`' per-namespace
+    best-effort guard (`pack_state.py:482`) never reaches the instrument, so
+    only the record can tell `_require_served` that a read was attempted and
+    refused. Without it an unmodelled query in either swallow site is
+    indistinguishable from a read that never happened, and the row prints
+    either a broken-product verdict or a leg it never measured.
+    """
+
+    def __init__(self, installs=(), marker=None) -> None:
+        self.installs = [tuple(r) for r in installs]
+        self.marker = marker
+        #: The query shapes this handle actually ANSWERED — see the class note.
+        self.served: set[str] = set()
+        #: The shapes this handle REFUSED. A refusal is a measurement failure
+        #: even when the caller swallows the raise — `ensure_tenant_packs`
+        #: wraps its seeding write in `except Exception: … best-effort`
+        #: (`pack_state.py:482`), so a changed seed write returns an EMPTY list
+        #: instead of raising into `main()`. `_require_served` reads this set.
+        self.refused: set[str] = set()
+
+    def query(self, cypher: str, params=None, **_kw):
+        p = params or {}
+        if "MERGE (p:PackInstall" in cypher:  # ensure_tenant_packs' seeding
+            # The seeding write's OWN shape is modelled, not bookkept (review
+            # round 1, P3): `get_tenant_packs` filters `status == 'removed'`
+            # out, so a stand-in that silently accepted any status would report
+            # "5 records after the read" over a regression that seeded them
+            # inactive. A changed seeding write must fail loud here.
+            if "p.status = 'active'" not in cypher:
+                # Recorded as well as raised: the raising is for a direct
+                # caller, but the real path catches it one layer up, so only
+                # the record can reach `_require_served`.
+                self.refused.add("seed")
+                raise AssertionError(
+                    "the seeding write no longer sets status='active' — the "
+                    f"self-heal row cannot be measured against this: {cypher[:120]!r}")
+            self.served.add("seed")
+            ns = p.get("ns")
+            if ns and not any(r[0] == ns for r in self.installs):
+                self.installs.append((ns, p.get("version"), "active",
+                                      "starter", p.get("now")))
+            return _FakeResult([])
+        if ":PackInstall" in cypher:
+            self.served.add("installs")
+            return _FakeResult(self.installs)
+        if ":PackSelection" in cypher:
+            self.served.add("selection")
+            return _FakeResult([self.marker] if self.marker else [])
+        if "RETURN DISTINCT n." in cypher:  # graph_kind_namespaces — no data
+            self.served.add("kind_scan")
+            return _FakeResult([])
+        # Recorded before raising, for the same reason as the seed branch: both
+        # swallow sites above turn a raise into silence, and silence is exactly
+        # what a row prints as "not consulted" / "none in the probe graph".
+        self.refused.add("unmodelled")
+        raise AssertionError(
+            "the packs rows do not model this query, so they cannot measure "
+            f"what depends on it: {cypher[:100]!r}")
+
+
+def _require_served(graph: _FakeGraph, expected: set[str], what: str) -> None:
+    """Fail closed unless every shape this row rests on was actually READ.
+
+    Raised from `census_packs` rather than from `query()` on purpose: the
+    data-leg scan swallows a raising query (see `_FakeGraph`), so the refusal
+    must happen where nothing catches it.
+
+    A RECORDED refusal is checked unconditionally, and before `expected`: a
+    refused query means the stand-in was handed a shape it does not model, so
+    whatever the row observed afterwards is not a measurement of the reader —
+    and the two readers that swallow (`graph_kind_namespaces`, and
+    `ensure_tenant_packs`' per-namespace seeding write) make an empty result
+    indistinguishable from a broken product (review round 2, P2).
+    """
+    if graph.refused:
+        raise RuntimeError(
+            f"{what} issued a query the stand-in REFUSED {sorted(graph.refused)} — "
+            "the reader's shape changed, and the refusal was swallowed one layer "
+            "up, so the row would report a product failure it never read")
+    missing = sorted(expected - graph.served)
+    if missing:
+        raise RuntimeError(
+            f"{what} did not read {missing} — the reader's query shape changed, "
+            "so the row would report a leg it never measured (a swallowed "
+            "data-leg refusal is exactly the direction this instrument exists "
+            "to prevent)")
+
+
+@contextlib.contextmanager
+def _sdks_absent(graph: _FakeGraph):
+    """Substitute ONLY the SDK→graph-handle seam, for the self-heal row.
+
+    `get_tenant_packs` / `ensure_tenant_packs` are the REAL functions under
+    measurement — this probe holds no SDK, so the two helpers that turn one
+    into a graph handle are pointed at the fake graph. Nothing about the
+    resolution is re-implemented, and the substitution is undone in a
+    ``finally`` so a raised row cannot leak it into the next section.
+    """
+    from tortoise import pack_state
+
+    saved = (pack_state._target_graph, pack_state._resolved_graph_name)
+    pack_state._target_graph = lambda *a, **k: graph
+    pack_state._resolved_graph_name = lambda *a, **k: "9664-probe"
+    try:
+        yield
+    finally:
+        pack_state._target_graph, pack_state._resolved_graph_name = saved
+
+
+def census_packs() -> None:
+    from tortoise import pack_state
+
+    catalog = pack_state._resolve_catalog()
+    # `_resolve_catalog` NEVER raises: it returns {} on an unavailable registry
+    # (`pack_state.py:234-251`, D6 masking). Unguarded, that empty catalog makes
+    # rows 2a/2e print FALSIFIED and row 2c print the INVERSE of this PR's
+    # finding ("catalog−resolved=NONE") — a section of confident verdicts under
+    # exit 0, where nothing was measurable (review round 2, P2). Fail closed.
+    if not catalog:
+        raise RuntimeError(
+            "the shared catalog could not be read — rows 2a-2e cannot be "
+            "measured, and an unreadable catalog would make them report the "
+            "opposite of what they exist to find")
+    # `_starter_namespaces` honours `TORTOISE_STARTER_PACKS` (`pack_state.py:254-268`),
+    # so an override makes rows 2a-2e measure a starter set the product does not
+    # ship — and the failure is SILENT in both directions (review round 4, P3):
+    # `TORTOISE_STARTER_PACKS=dev,typo-nonexistent` made 2e print FALSIFIED ("the
+    # self-heal no longer seeds") over a documented skip (`pack_state.py:462-468`,
+    # "unknown in shared catalog — skipped"), and `=dev` alone read the whole
+    # section green over a one-namespace set. Our own environment, reported as a
+    # product finding — the direction this section already refuses for its
+    # sibling switch (`PACK_STATE_DISABLE_SELF_HEAL`, below). Fail closed.
+    if os.environ.get("TORTOISE_STARTER_PACKS", "").strip():
+        raise RuntimeError(
+            "TORTOISE_STARTER_PACKS is set — rows 2a-2e would measure that "
+            "starter set, not the shipped DEFAULT_STARTER_PACKS "
+            "(`pack_state.py:110`); unset it and re-run")
+    starter = pack_state._starter_namespaces()
+    only_catalog = sorted(set(catalog) - set(starter))
+    row("2", "the platform STARTER set is narrower than the shared catalog "
+             "(a provisioned graph is not seeded with the union)",
+        f"{'CONFIRMED' if only_catalog else 'FALSIFIED'} "
+        f"(catalog {len(catalog)}={', '.join(sorted(catalog))}; "
+        f"starter {len(starter)}={', '.join(starter)}; "
+        f"catalog−starter={only_catalog or 'NONE'})")
+
+    # The three arms, in the order `resolved_pack_set` documents them. Every
+    # arm is driven through the real function; only the INPUTS differ.
+    union = _FakeGraph()
+    union_arm = pack_state.resolved_pack_set_for_graph(union)
+    # Only TWO shapes: the union arm RETURNS EARLY (`pack_state.py:974-975`,
+    # `if not rows and selection is None`) and never consults the data leg — so
+    # `kind_scan` is not in the REQUIRED set here; it is checked as an ABSENCE
+    # immediately below, which is the direction `_require_served` cannot see.
+    _require_served(union, {"installs", "selection"}, "the union arm")
+    # THE CLAUSE BELOW IS A CLAIM ABOUT CONTROL FLOW, so it is checked here and
+    # it fails closed. `_require_served` is a LOWER bound — it fails on a shape
+    # that was NOT read and says nothing about one that WAS — so a reader that
+    # consults the data leg on this arm would still print "data leg: not
+    # consulted — the arm returns early" with every expectation satisfied
+    # (measured: all rows CONFIRMED, `25 premises, 0 unmeasured sections`,
+    # exit 0, the whole test file green).
+    # Deriving the WORD instead (`'consulted' if 'kind_scan' in union.served`)
+    # would stop it lying and stay green over a changed contract, which is the
+    # fail-open direction here: without the early return, `namespaces=None` no
+    # longer means "the catalog union regardless of data" (#2714 indicator 3)
+    # — a record-less graph that HOLDS data would resolve to that data — and
+    # this probe graph holds none, so no row below could tell the difference.
+    # The early return is part of the premise. When it moves, re-derive.
+    if "kind_scan" in union.served:
+        raise RuntimeError(
+            "the union arm consulted the data leg — `resolved_pack_set_for_graph` "
+            "no longer returns early for a record-less graph "
+            "(`pack_state.py:974-975`), so the row's 'not consulted' clause is "
+            "false and this section's two-shape expectation is stale: re-derive "
+            "the section")
+    # The premise's SECOND half — what `namespaces=None` MEANS to a consumer
+    # ("the catalog union") — is a claim about the WRITE GATE, not about this
+    # resolution arm, so it is measured at the gate that owns it:
+    # `pack_state.unapproved_kind_pack`'s `if approved is None: return None`,
+    # whose docstring IS the #2714 indicator-3 statement. Printed as a literal,
+    # this clause survived a narrowed fallback AT THAT LINE with all five packs
+    # rows CONFIRMED and the census at exit 0 (measured in review round 4: M9 →
+    # `approved = frozenset({'dev'})` on the `return None` branch) — the census
+    # green-lit the fallback being dead, which is the class this PR removes.
+    # Both halves are measured against the real function: `None` admits, and an
+    # EXPLICIT set (even an empty one) constrains — the contrast the clause names.
+    gate_kind = f"{(only_catalog or sorted(catalog))[0]}:probe"
+    union_admits = pack_state.unapproved_kind_pack(gate_kind, None) is None
+    narrowed_refusal = pack_state.unapproved_kind_pack(gate_kind, frozenset())
+    narrowed_refuses = narrowed_refusal == gate_kind.partition(":")[0]
+    row("2", "no `:PackInstall` records AND no `:PackSelection` marker → "
+             "`namespaces=None`, the catalog union (#2714 indicator 3)",
+        f"{'CONFIRMED' if union_arm.namespaces is None and not union_arm.configured and union_admits and narrowed_refuses else 'FALSIFIED'}"
+        f" (namespaces={'None' if union_arm.namespaces is None else sorted(union_arm.namespaces)};"
+        f" configured={union_arm.configured}; data leg: not consulted — the arm returns early;"
+        f" write gate: `{gate_kind}` admitted with approved=None ({union_admits}) and"
+        f" refused by an explicit set (→{narrowed_refusal}))")
+
+    seeded = _FakeGraph(installs=((ns, "1.0.0", "active", "starter",
+                                   "2026-01-01T00:00:00Z") for ns in starter))
+    record_arm = pack_state.resolved_pack_set_for_graph(seeded)
+    _require_served(seeded, {"installs", "selection", "kind_scan"}, "the records arm")
+    resolved = sorted(record_arm.namespaces) if record_arm.namespaces is not None else None
+    missing = sorted(set(catalog) - set(resolved or ()))
+    # The "NOT the catalog union" half is part of the VERDICT, not only of the
+    # evidence line (review round 2, P2): with `catalog == starter` this row
+    # used to print CONFIRMED while its own evidence read
+    # `catalog−resolved=NONE` — asserting its own negation.
+    not_the_union = resolved is not None and set(resolved) != set(catalog)
+    row("2", "`configured=False` is NOT the catalog union: `:PackInstall` "
+             "records with no marker resolve to the RECORDED set (#9691)",
+        f"{'CONFIRMED' if resolved == sorted(starter) and not_the_union and not record_arm.configured else 'FALSIFIED'}"
+        f" (configured={record_arm.configured}; namespaces={resolved}; "
+        f"catalog−resolved={missing or 'NONE'}; data leg: scanned, no data in the probe graph)")
+
+    marker = (1, "2026-01-01T00:00:00Z", "9664-probe")
+    marked = _FakeGraph(installs=tuple(seeded.installs), marker=marker)
+    marked_arm = pack_state.resolved_pack_set_for_graph(marked)
+    _require_served(marked, {"installs", "selection", "kind_scan"}, "the marker arm")
+    row("2", "the `:PackSelection` MARKER, not the records, is what makes "
+             "`configured=True`",
+        f"{'CONFIRMED' if not record_arm.configured and marked_arm.configured else 'FALSIFIED'}"
+        f" (records alone → configured={record_arm.configured};"
+        f" records+marker → configured={marked_arm.configured}, revision={marked_arm.revision})")
+
+    # The union arm is REAL but transitory for a hosted graph: the first packs
+    # READ seeds the starter set (`get_tenant_packs` self-heal, #318/#9583), so
+    # the state a user reaches at step 2 is the narrowed one. Measured by
+    # running the real ensure-then-read path, not by reading its source.
+    if pack_state._self_heal_disabled():
+        raise RuntimeError(
+            "PACK_STATE_DISABLE_SELF_HEAL is set — the self-heal arm cannot be "
+            "measured in this environment (unset it and re-run)")
+    fresh = _FakeGraph()
+    with _sdks_absent(fresh):
+        listed = pack_state.get_tenant_packs(None)
+    after = pack_state.resolved_pack_set_for_graph(fresh)
+    # What must have been READ, given what was observed — two arms, so two
+    # expectations, and neither is a tautology:
+    #   * `seed` only when records APPEARED (a self-heal that seeds nothing is a
+    #     falsified PREMISE, which the row below reports — not an unmeasurable
+    #     one, since no read was skipped — UNLESS the stand-in recorded a
+    #     refusal, which `_require_served` raises on regardless of `listed`);
+    #   * `kind_scan` only when the resolution did NOT take the record-less
+    #     early return (`pack_state.py:974-975`); if it reports a resolved set,
+    #     the data leg is part of that answer and must have been scanned.
+    expected = {"installs", "selection"}
+    if after.namespaces is not None:
+        expected.add("kind_scan")
+    if listed:
+        expected.add("seed")
+    _require_served(fresh, expected, "the self-heal arm")
+    # "merges the STARTER SET" is the premise, so the resolved set must BE the
+    # starter set — "any narrowed set" is a different sentence (review round 2,
+    # P2): a seeding change recording one of five namespaces printed CONFIRMED.
+    seeded_all = (after.namespaces is not None
+                  and sorted(after.namespaces) == sorted(starter))
+    row("2", "the FIRST packs read on a record-less unconfigured graph merges "
+             "the starter set — so step 2's union arm does not survive the "
+             "surface the user opens",
+        f"{'CONFIRMED' if listed and seeded_all and not after.configured else 'FALSIFIED'}"
+        f" ({len(listed)} records after the read; "
+        f"resolved={sorted(after.namespaces) if after.namespaces is not None else 'None (still the union)'};"
+        f" configured={after.configured})")
+
+
 # ── resource: the connector targets the OAuth AS will accept (#9340) ───────
 def census_resource() -> None:
     from tortoise.oauth import OAuthError, parse_resource
@@ -177,7 +495,8 @@ def census_resource() -> None:
 
 
 def main() -> int:
-    for section in (census_tools, census_onboarding, census_resource):
+    for section in (census_tools, census_onboarding, census_packs,
+                    census_resource):
         try:
             section()
         except Exception as exc:  # fail closed, name the section

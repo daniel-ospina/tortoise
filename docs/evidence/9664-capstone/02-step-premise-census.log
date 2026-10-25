@@ -1,9 +1,10 @@
-# 02 — step-premise census (no browser, no ChatGPT, no tenant) — 2026-10-22T22:14:21Z
+# 02 — step-premise census (no browser, no ChatGPT, no tenant) — 2026-10-25T21:16:04Z
 # command: .venv/bin/python docs/evidence/9664-capstone/probes/step_premise_census.py
-# git HEAD: b39c70d8cf5e457d40ac2308d73d9853731a44e0
+# Measured at: fix/9664-step2-census-measured@a310c1d9c on 2026-10-25
+# git HEAD: a310c1d9c6e76a109f9602d9079d25cb5ad6afd2
 
 #9664 capstone — step-premise census
-repo=/Users/danielospina/Documents/GitHub/tortoise/.worktrees/tm-9664  base=https://api.premiselabs.co
+repo=/tmp/cell-t3/.worktrees/fix-9987  base=https://api.premiselabs.co
 
 step    premise                                                         measured
 ------  --------------------------------------------------------------  ----------------------------------------
@@ -23,11 +24,16 @@ step    premise                                                         measured
 5       the `compact` completion gate requires                          first-points-filed, harness-connected
 5       `restart_pending` for the set step 5 describes (['team-named','connection-written'])  True — i.e. 'config written, harness NOT yet verified'
 5       `restart_pending` once the harness has connected                False
+2       the platform STARTER set is narrower than the shared catalog (a provisioned graph is not seeded with the union)  CONFIRMED (catalog 7=agent-ops, dev, marketing, pm, portfolio, product-strategy, venture; starter 5=dev, marketing, product-strategy, pm, agent-ops; catalog−starter=['portfolio', 'venture'])
+2       no `:PackInstall` records AND no `:PackSelection` marker → `namespaces=None`, the catalog union (#2714 indicator 3)  CONFIRMED (namespaces=None; configured=False; data leg: not consulted — the arm returns early; write gate: `portfolio:probe` admitted with approved=None (True) and refused by an explicit set (→portfolio))
+2       `configured=False` is NOT the catalog union: `:PackInstall` records with no marker resolve to the RECORDED set (#9691)  CONFIRMED (configured=False; namespaces=['agent-ops', 'dev', 'marketing', 'pm', 'product-strategy']; catalog−resolved=['portfolio', 'venture']; data leg: scanned, no data in the probe graph)
+2       the `:PackSelection` MARKER, not the records, is what makes `configured=True`  CONFIRMED (records alone → configured=False; records+marker → configured=True, revision=1)
+2       the FIRST packs read on a record-less unconfigured graph merges the starter set — so step 2's union arm does not survive the surface the user opens  CONFIRMED (5 records after the read; resolved=['agent-ops', 'dev', 'marketing', 'pm', 'product-strategy']; configured=False)
 4+ugly  bare /mcp (what ChatGPT's UI gets today)                        ACCEPTED → org_id=None
 4+ugly  origin root (ChatGPT echoes resource=origin)                    ACCEPTED → org_id=None
 4+ugly  org-scoped (the #1701 R1 team selector)                         ACCEPTED → org_id=11111111-2222-3333-4444-555555555555
 4+ugly  GRAPH-scoped (the ugly cases need this)                         REFUSED(400 invalid_resource)
 
-MEASURED: 20 premises, 0 unmeasured sections.
+MEASURED: 25 premises, 0 unmeasured sections.
 
 exit=0
