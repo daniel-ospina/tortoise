@@ -65,14 +65,18 @@ name: main-lint
 #      pass. The `case` below is an allow-list on purpose: only `success` is
 #      green, so a new/unrecognised conclusion cannot fall through to a pass.
 #      PINNED: the step exists after the lint step, is the one step deriving
-#      `steps.ruff.outcome` through `env:`, carries `if: always()`, writes
-#      `$GITHUB_STEP_SUMMARY`, emits both `::notice` and `::error`, and its
-#      default arm exits non-zero while its `success` arm does not. Each half has
-#      a mutant in the pin's `_STARVED_SHAPES`.
+#      `steps.ruff.outcome` through `env:`, carries no active `continue-on-error`,
+#      carries `if: always()`, really READS the outcome variable (an override in
+#      its own `run:` is refused), writes `$GITHUB_STEP_SUMMARY`, emits both
+#      `::notice` and `::error`, and its default arm exits non-zero while its
+#      `success` arm does not. EVERY one of those halves has a mutant in the
+#      pin's `_STARVED_SHAPES`, and the honest spellings (`if: ${{ always() }}`,
+#      an `exit 2` fallback, an inert `continue-on-error: false`) stay green.
 #   2. the verdict IS the lint step's own outcome, so a finding still fails the
 #      job — including when the notification ALSO fails. The notification cannot
-#      change the verdict in either direction. PINNED: the notifier's `if:` is
-#      the one step keyed on that outcome and carries `failure()`, and its
+#      change the verdict in either direction. PINNED: exactly ONE step keys on
+#      that outcome in its `if:` (a second keyed step is how the notifier stops
+#      being the thing that notifies), it carries `failure()`, and its
 #      `continue-on-error: true` is required (a reporter that throws cannot red
 #      the job). NOT pinned: that each API call is individually try/catch'd —
 #      the pin reads the shape, not the call graph; the `wrapped` behaviour is

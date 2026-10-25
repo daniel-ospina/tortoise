@@ -1843,12 +1843,16 @@ def _verdict_step_problem(steps: list, ruff_index: int, ruff_id: str) -> str | N
             "the verdict-publishing step has no `run:` — it publishes nothing, and "
             "the verdict a reader needs is back to being inferred from an exit code"
         )
-    if "continue-on-error" in verdict:
+    if verdict.get("continue-on-error") not in (None, False, "false"):
+        # PRESENCE is not the property: `continue-on-error: false` is inert (the
+        # same spelling `_inert_step_key` accepts on the ruff step), and a pin that
+        # reds it gets deleted by the next tidy-up. Only an ACTIVE silencing value
+        # removes the one arm that must fail.
         return (
-            "the verdict-publishing step carries `continue-on-error`, which silences "
-            "the ONE arm that must fail (NO VERDICT — the lint step did not run). An "
-            "unmeasured tree can then end the run GREEN behind an annotation nobody "
-            "reads"
+            "the verdict-publishing step carries `continue-on-error: "
+            f"{verdict.get('continue-on-error')}`, which silences the ONE arm that "
+            "must fail (NO VERDICT — the lint step did not run). An unmeasured tree "
+            "can then end the run GREEN behind an annotation nobody reads"
         )
     condition = str(verdict.get("if", ""))
     status_terms = {f"{name}()" for name in _STATUS_SCAN.findall(condition)}
@@ -1886,12 +1890,24 @@ def _verdict_step_problem(steps: list, ruff_index: int, ruff_id: str) -> str | N
         for key, value in (verdict.get("env") or {}).items()
         if ruff_id in _OUTCOME_REF.findall(str(value)) or f"steps['{ruff_id}']" in str(value)
     ]
-    if not any(f"${{{key}" in run for key in outcome_vars):
+    # COMMENT-STRIPPED `code`, like every neighbouring check: a `${OUTCOME}` that
+    # appears only in a comment satisfies a raw-text test while the `case` is keyed
+    # on something else — the check would read prose, not behaviour.
+    if not any(f"${{{key}" in code for key in outcome_vars):
         return (
             f"the verdict-publishing step sets {outcome_vars} but never READS it in "
             "its `run:` — the `case` is not keyed on the ruff step's own outcome, "
             "so it publishes whatever the shell last saw"
         )
+    for key in outcome_vars:
+        # An ASSIGNMENT before the `case` decides the verdict without measuring:
+        # `OUTCOME=success` publishes PASS on every run, including a red lint step.
+        if re.search(rf"(^|[\s;])(export\s+)?{re.escape(key)}=", code, re.M):
+            return (
+                f"the verdict-publishing step ASSIGNS `{key}` in its own `run:` — the "
+                "published verdict is then a constant, not the lint step's outcome, "
+                "and a red tree can be reported as PASS"
+            )
     arms = _case_arms(run)
     if not arms:
         return (
@@ -1900,9 +1916,21 @@ def _verdict_step_problem(steps: list, ruff_index: int, ruff_id: str) -> str | N
             "`if` chain whose default is the pass"
         )
     tokens = {pattern: {tok.strip("'\"") for tok in pattern.split("|")} for pattern in arms}
-    success_arms = [pattern for pattern, toks in tokens.items() if "success" in toks]
+    pass_arms = [pattern for pattern, toks in tokens.items() if toks == {"success"}]
+    fail_arms = [pattern for pattern, toks in tokens.items() if toks == {"failure"}]
+    merged_success = [
+        pattern for pattern, toks in tokens.items() if "success" in toks and toks != {"success"}
+    ]
     default_arms = [pattern for pattern, toks in tokens.items() if "*" in toks]
-    if not success_arms:
+    if merged_success:
+        # `success|skipped)` makes a PASS and an unmeasured run share one arm; the
+        # verdict published for the second one is whatever the first needs.
+        return (
+            f"the verdict `case` merges the PASS conclusion into {merged_success} — "
+            "`success` must have an arm of its own, or a second conclusion is reported "
+            "with the PASS verdict"
+        )
+    if not pass_arms:
         return (
             f"the verdict `case` has no `success)` arm ({sorted(arms)}) — a PASS has "
             "no arm of its own, so `success` falls into whatever the default does "
@@ -1913,18 +1941,24 @@ def _verdict_step_problem(steps: list, ruff_index: int, ruff_id: str) -> str | N
             "conclusion GitHub has not documented yet, and a `skipped` lint step, "
             "then match nothing and the step exits 0 with no verdict published"
         )
-    for pattern in success_arms:
+    for pattern in pass_arms:
         if _exits_nonzero(arms[pattern]):
             return (
                 f"the verdict `case` `{pattern})` arm exits non-zero — a PASS must not "
                 "fail the step, or every green tree is red"
             )
-    for pattern, toks in tokens.items():
-        if pattern in success_arms or "failure" in toks:
+    for pattern in tokens:
+        if pattern in pass_arms:
             continue
-        # ALLOW-LIST polarity: every arm that is neither the PASS nor the FAIL arm
-        # (the default included) must fail the step. A `skipped)` arm that passes,
-        # or a default that passes, turns "nothing measured this tree" into green.
+        if pattern in fail_arms:
+            # ONLY the genuine `failure)` arm is exempt: the lint step already owns
+            # that red. An arm that MERGES `failure` with another conclusion —
+            # `*|failure)`, `failure|skipped)` — is not this arm: it routes the
+            # other conclusion to a pass, which is the #5120 fail-open.
+            continue
+        # ALLOW-LIST polarity: every arm that is neither the PASS nor the plain FAIL
+        # arm (the default included) must fail the step. A `skipped)` arm that
+        # passes, or a default that passes, turns "nothing measured this tree" green.
         if not _exits_nonzero(arms[pattern]):
             return (
                 f"the verdict `case` `{pattern})` arm does not exit non-zero — only "
@@ -2235,6 +2269,12 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
                 "that tells the merged PR its lint broke main is gone, so the guard "
                 "reports red into a run nobody is watching"
             )
+        if len(notifiers) > 1:
+            return (
+                f"{len(notifiers)} steps key on `steps.{step_id}.outcome` in their "
+                "`if:` — exactly ONE may, because a second keyed step is how the "
+                "notification stops being the thing that notifies"
+            )
         for index, _other in notifiers:
             if index < idx:
                 return (
@@ -2402,9 +2442,11 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
         # value this requirement rejects — the shipped-and-inert #5120 shape.
         missing.append(
             "pull-requests: write (it implies the read the attribution lookup needs; "
-            "measured, #5120: `issues: write` ALONE answers 'Resource not accessible "
-            "by integration' on a PR comment, so the attribution step runs and never "
-            "notifies)"
+            "MEASURED, #5120: the notification still answered 'Resource not accessible "
+            "by integration' on a token that held `issues: write`. WHICH call 403'd is "
+            "unrecorded — the step wrapped listComments and createComment in one catch "
+            "— so this requirement is what the measurement says was missing, not a "
+            "settled mechanism; do not drop `issues: write` on the strength of it)"
         )
     if missing:
         return (
@@ -3072,6 +3114,74 @@ def _remove_verdict_step(doc: dict) -> None:
     doc["jobs"]["lint"]["steps"].remove(_verdict_step(doc))
 
 
+def _set_verdict_without_error(doc: dict) -> None:
+    """The other half of "both directions are NAMED" — FAIL becomes a bare exit code."""
+    step = _verdict_step(doc)
+    step["run"] = "\n".join(
+        line for line in step["run"].splitlines() if "::error" not in line
+    )
+
+
+def _set_verdict_success_arm_fails(doc: dict) -> None:
+    """A PASS arm that `exit 1`s: every green tree would be reported red."""
+    step = _verdict_step(doc)
+    lines = step["run"].splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() == "success)":
+            lines.insert(index + 1, '    exit 1')
+            break
+    step["run"] = "\n".join(lines)
+
+
+def _set_verdict_default_merges_failure(doc: dict) -> None:
+    """`*|failure)` with no exit: the unmeasured default rides the FAIL arm's pass."""
+    step = _verdict_step(doc)
+    run = step["run"].replace("  *)\n", "  *|failure)\n", 1)
+    step["run"] = "\n".join(
+        line for line in run.splitlines() if not _NONZERO_EXIT.search(line)
+    )
+
+
+def _set_verdict_skipped_rides_failure(doc: dict) -> None:
+    """`skipped` merged into the passing FAIL arm — an unmeasured tree goes green."""
+    step = _verdict_step(doc)
+    step["run"] = step["run"].replace("  failure)\n", "  failure|skipped)\n", 1)
+
+
+def _set_verdict_outcome_only_in_a_comment(doc: dict) -> None:
+    """The `case` keyed on a constant; `${OUTCOME}` survives only in a comment/echo.
+
+    The default arm's message also interpolates `${OUTCOME}`, so a one-line edit to
+    the `case` selector alone would still READ the variable — the mutation has to
+    take the measuring out of the run, which is what a "make it always pass" edit
+    does. A raw-text check is satisfied by the echo; a comment-stripped one is not.
+    """
+    step = _verdict_step(doc)
+    step["run"] = (
+        step["run"]
+        .replace('case "${OUTCOME:-}" in', '# case "${OUTCOME:-}" in\n          case "success" in', 1)
+        .replace("${OUTCOME:-null}", "null")
+    )
+
+
+def _set_verdict_outcome_overridden(doc: dict) -> None:
+    """`OUTCOME=success` before the `case`: the verdict is a constant, not a measure."""
+    step = _verdict_step(doc)
+    step["run"] = step["run"].replace("set -u", "set -u\n          OUTCOME=success", 1)
+
+
+def _set_second_keyed_notifier(doc: dict) -> None:
+    """A second step keys on the outcome in its `if:` — the notifier stops being THE one."""
+    step_id = _ruff_step(doc)["id"]
+    steps = doc["jobs"]["lint"]["steps"]
+    notifier = next(
+        step
+        for step in steps
+        if isinstance(step, dict) and f"steps.{step_id}." in str(step.get("if", ""))
+    )
+    steps.insert(len(steps), dict(notifier, name="a second keyed notifier"))
+
+
 def _set_verdict_without_notice(doc: dict) -> None:
     """An annotation in only ONE direction: a failing tree is a bare exit code again."""
     step = _verdict_step(doc)
@@ -3223,6 +3333,7 @@ _STARVED_SHAPES = [
     ("a notifier `if:` with a false conjunct", _set_notifier_with_false_conjunct),
     ("a notifier step with no `uses:`/`run:`", _set_notifier_without_action),
     ("a notifier that can fail the job", _set_notifier_fatal),
+    ("a second step keyed on the outcome in its `if:`", _set_second_keyed_notifier),
     # ── the VERDICT is never published, or is published green (#5120) ──
     ("the verdict step deleted", _remove_verdict_step),
     ("a verdict `if:` gated on success", _set_verdict_if_success),
@@ -3230,6 +3341,12 @@ _STARVED_SHAPES = [
     ("a verdict step silenced by `continue-on-error`", _set_verdict_step_silenced),
     ("a verdict step that never writes the summary", _set_verdict_without_summary),
     ("a verdict step that emits no `::notice`", _set_verdict_without_notice),
+    ("a verdict step that emits no `::error`", _set_verdict_without_error),
+    ("a verdict `success)` arm that exits non-zero", _set_verdict_success_arm_fails),
+    ("a default arm merged with `failure`", _set_verdict_default_merges_failure),
+    ("`skipped` merged into the passing FAIL arm", _set_verdict_skipped_rides_failure),
+    ("the outcome read only in a comment", _set_verdict_outcome_only_in_a_comment),
+    ("the outcome variable overridden in `run:`", _set_verdict_outcome_overridden),
     ("a verdict step whose default arm is green", _set_verdict_default_green),
     ("a verdict `case` with no `success)` arm", _set_verdict_without_success_arm),
     ("a second reader of the ruff outcome", _set_second_outcome_reader),
@@ -3298,6 +3415,10 @@ def _set_verdict_if_spaced_always(doc: dict) -> None:
     _verdict_step(doc)["if"] = "${{ always() }}"
 
 
+def _set_verdict_inert_continue_on_error(doc: dict) -> None:
+    _verdict_step(doc)["continue-on-error"] = False
+
+
 def _set_verdict_exit_2(doc: dict) -> None:
     step = _verdict_step(doc)
     step["run"] = step["run"].replace("exit 1", "exit 2")
@@ -3308,8 +3429,9 @@ def _set_verdict_exit_2(doc: dict) -> None:
     [
         ("the spaced form `if: ${{ always() }}`", _set_verdict_if_spaced_always),
         ("an honest non-zero `exit 2` in the default arm", _set_verdict_exit_2),
+        ("the inert `continue-on-error: false`", _set_verdict_inert_continue_on_error),
     ],
-    ids=["spaced-always", "exit-2"],
+    ids=["spaced-always", "exit-2", "inert-continue-on-error"],
 )
 def test_the_verdict_pin_accepts_honest_spellings(label: str, mutate) -> None:
     """The verdict pin must not red spellings that are equally correct.
