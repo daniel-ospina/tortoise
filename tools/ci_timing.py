@@ -77,8 +77,27 @@ def gh_api(repo: str, url: str) -> dict:
     mapping raises `DurationsBridgeError`. Both are fetch failures — the
     callers decide whether one is fatal — so a caller tests "did the fetch
     fail", not which way (#6092 review round 7).
+
+    ⛔ AN ABSENT `gh` BINARY IS A FETCH FAILURE TOO, not a traceback.
+    `subprocess.run(["gh", …])` raises `FileNotFoundError` when the CLI is not
+    on PATH, and it is NOT an `OSError` anyone upstream was catching on the
+    artifact path: `main()`'s `except (CalledProcessError, DurationsBridgeError)`
+    let it escape, so the whole tool died with `FileNotFoundError: … 'gh'` on any
+    host without the CLI. MEASURED in CI: the self-hosted runners do not carry it,
+    so `test_a_resampled_run_publishes_one_failure_list` and
+    `test_the_markdown_takes_the_resolved_sample_time` red-ed `test (a)` on every
+    PR whose shard actually ran pytest (run 40164731582, job 121086780957).
+    This module's own contract is "a caller tests *did the fetch fail*", so the
+    missing executable belongs in the same class as a non-zero exit: the callers
+    already downgrade it to a warning (`main()` :3321, `pick_run` :163, the
+    provenance check :3192), and the artifact is still published.
     """
-    proc = subprocess.run(["gh", "api", url], capture_output=True, text=True, check=True)
+    try:
+        proc = subprocess.run(["gh", "api", url], capture_output=True, text=True, check=True)
+    except FileNotFoundError as exc:
+        raise DurationsBridgeError(
+            f"gh api {url} could not run: no `gh` CLI on PATH ({exc})"
+        ) from exc
     try:
         data = json.loads(proc.stdout)
     except (ValueError, RecursionError) as exc:

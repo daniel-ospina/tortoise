@@ -27,9 +27,137 @@ name: main-lint
 # so any pushed tree can redden main. It is the cheapest gate we have (~2 min,
 # one pip install, no package install), which is why it is never deduped — unlike
 # its former host, whose dedup arm only ever applied to the pytest suite.
+#
+# ── THE REPORT MUST NEVER BE THE VERDICT (#5120, measured 2026-10-25) ──────────
+# Run 40154972406 (`main @ 0cbeb1918`) was red for TWO independent reasons, and
+# its three annotations could not tell them apart:
+#
+#     warning: main-lint comment failed (error: Resource not accessible by integration)
+#     failure: Process completed with exit code 1.
+#
+# The `failure` was a REAL ruff finding (`RUF059`, `tests/test_docs_link_check.py`
+# — the #5203/#4298/#5130 family, NOT this workflow's defect). It was outside the
+# first revision of this change; it is cleared HERE, in its own commit, so the
+# branch's tree is genuinely `ruff check .`-clean instead of trading on an
+# unrelated red — #5203 remains the tracker for that class on `main`. The `warning`
+# was this workflow failing to post its own
+# notification, and THAT is what this change is about. What is MEASURED is only:
+# the runner printed `Issues: write`, the notification still answered "Resource not
+# accessible by integration" — and it did so on EVERY failing run, not just this
+# one. It was first observed on run 39827884237 (2026-10-22T18:02Z, ~3h after the
+# step shipped in c72c66be2) and still reproduced on 40080049465 (2026-10-24) and
+# 40154972406 (2026-10-25); 28 of the 34 failing `main-lint` runs in the most
+# recent 100 predate 2026-10-25. So the only channel that tells a merged PR its
+# tree broke main had NEVER posted, for three days of red mains — an earlier
+# revision of this comment said "no run reached it before 2026-10-25", which was
+# wrong and understated exactly the evidence that is hardest to dismiss as a
+# transient (corrected in review of #9960).
+#
+# ⚠️ THE MECHANISM IS A HYPOTHESIS, STATED AS ONE. The old step wrapped
+# `issues.listComments` AND `issues.createComment` in ONE catch, so the log does
+# not even record WHICH call 403'd — and GitHub's own contract for
+# `POST /repos/{owner}/{repo}/issues/{issue_number}/comments` lists "Issues
+# (write)" as sufficient ("at least one of: Issues write, Pull requests write",
+# docs.github.com/en/rest/issues/comments). So the doc reading and the measurement
+# disagree, and this file does not get to settle it by assertion: `pull-requests:
+# write` is granted BECAUSE the measured 403 happened without it, both scopes are
+# kept rather than guessing which one is redundant, and the reporter now names the
+# failing call and its HTTP status — so the next failure yields the datum this one
+# could not, and the success path is observable on the first real push to main.
+#
+# Three properties are now explicit, and the pin asserts them — the parts it does
+# NOT pin are named as such rather than implied (a claim a tidy-up can leave
+# silently false is how the contribution gets deleted with green CI):
+#   1. the VERDICT is published by its OWN step as an annotation + step summary,
+#      so a reader never infers it from an exit code. PASS, FAIL and NO VERDICT
+#      (the lint step did not run) are each NAMED — and NO VERDICT is never a
+#      pass. The `case` below is an allow-list on purpose: only `success` is
+#      green, so a new/unrecognised conclusion cannot fall through to a pass.
+#      PINNED: the step exists after the lint step, is the one step deriving
+#      `steps.ruff.outcome` through `env:`, carries no active `continue-on-error`,
+#      carries `if: always()` as its WHOLE condition (a conjunct could skip it),
+#      SELECTS on that outcome (a constant selector, or a `${OUTCOME:-success}`
+#      default, is refused) and cannot override it in its own `run:`, writes
+#      `$GITHUB_STEP_SUMMARY`, emits both `::notice` and `::error` — and the pin
+#      then EXECUTES the step once per conclusion under `bash -e` (the shell GitHub
+#      runs an unspecified `shell:` with, so a mid-arm failure really aborts it)
+#      and judges it on its exit code, its STEP SUMMARY (judged on its own, not as
+#      part of the log) and its annotation: `success`/`failure` pass with
+#      PASS/FAIL, `skipped`/an EMPTY outcome (a null conclusion — GitHub
+#      interpolates the variable to `""`, it is never unset)/an undocumented
+#      conclusion exit NON-ZERO with NO VERDICT. Polarity is decided by running it, not by reading it (`true #
+#      exit 1`, `${OUTCOME:-success}` and a PASS sentence hoisted above the `case`
+#      all defeat a text-shaped check). EVERY one of those halves has a mutant in
+#      `_STARVED_SHAPES`, and the honest spellings (`if: ${{ always() }}`, an
+#      `exit 2` fallback, an inert `continue-on-error: false`, a renamed outcome
+#      variable, `echo …; exit 1` on one line, compact `success) … ;;` arms) stay
+#      green. The step's OTHER keys are an allow-list for the same reason the ruff
+#      step's are: the harness above supplies its own shell and summary, so it is
+#      blind to `shell: echo`/`shell: python`, a real `working-directory:` and an
+#      `env: GITHUB_STEP_SUMMARY` — each of which stops the runner publishing the
+#      verdict while every executed case still passes. Those are REFUSED.
+#   2. the verdict IS the lint step's own outcome, so a finding still fails the
+#      job — including when the notification ALSO fails. The notification cannot
+#      change the verdict in either direction. PINNED: exactly ONE step keys on
+#      that outcome in its `if:` (a second keyed step is how the notifier stops
+#      being the thing that notifies), it carries a status function that removes
+#      the implicit `success()`, and its WRITE PATH is gated: the non-push
+#      `context.eventName` test precedes the `issues.createComment` call, is the
+#      NEGATIVE test (`!== 'push'` — an inverted one returns on every real push and
+#      notifies on a dispatch) and RETURNS inside its own body, so a dispatch on a
+#      branch cannot post "main is lint-red" onto an unmerged PR (idempotent by the
+#      commit marker, so no re-run corrects it). It also carries
+#      `continue-on-error: true` (a reporter that throws cannot red the job). The
+#      pin is the STATUS SLOT, not
+#      the spelling: `failure()` is what this file writes, and `always()` — which
+#      is the same pin, ANDed with the same outcome conjunct — is a pinned
+#      ACCEPTANCE case, so a tidy-up that writes it stays green instead of
+#      teaching the next lane that an honest spelling is a violation. Only
+#      `success()`/`cancelled()` (never fires on the failing path) and a
+#      status-free `if:` (implicit `success()`) are refused. NOT pinned: that
+#      each API call is individually try/catch'd —
+#      the pin reads the shape, not the call graph; the `wrapped` behaviour is
+#      measured on real runs (see the PR's Evidence table), not asserted here.
+#   3. the notification is `continue-on-error: true` and every API call is
+#      wrapped, so a reporter failure is a warning that NAMES the endpoint and
+#      the token error instead of a bare "Resource not accessible by
+#      integration" nobody can act on. PINNED: the reporter's `warn` interpolates
+#      `err.status` — the HTTP status is the one datum this defect could not
+#      recover, so a warning that drops it is the same failure again. NOT pinned:
+#      the wording around it.
+#
+# ONE job. The `permissions:` below is the job's scope: this workflow has exactly
+# one job, so a job-level block would be the same grant under a name that shadows
+# the workflow one wholesale (the pin reads whichever is effective) — and nothing
+# else can inherit it.
 on:
   push:
     branches: [main]
+  # Dispatch exists so the guard can be MEASURED on a branch — the shape any fix
+  # to this file has to be proven in (#5120) — without waiting for main to go
+  # red. It adds no REQUIRED check and no new check NAME — a dispatch run still
+  # reports the single `lint` name — but it is not invisible: the run creates a
+  # `lint` check-run ON THE DISPATCHED REF's sha, and a PR displays its head
+  # sha's check-runs. ⛔ So dispatch it only on a THROWAWAY ref that will be
+  # deleted, never on a branch hosting an open PR while that branch is lint-red:
+  # `simulate_comment_failure` is only reachable on a branch that is already
+  # failing, so the probe leaves a FAILING `lint` check-run there, and by this
+  # repo's own rule a re-run adds an attempt and never clears one — only a new
+  # sha can (#5120 measured itself on a throwaway that was then deleted).
+  # Measured 2026-10-25: `gh workflow run main-lint.yml --ref <branch>` works
+  # pre-merge BECAUSE this file already exists on the default branch; a NEW
+  # workflow file cannot be dispatched at all until it is merged (the API answers
+  # "not found on the default branch"), so anything that must be measured before
+  # its own merge needs a `push` trigger instead.
+  # ⛔ Dispatch it on a BRANCH ref, never on `main`: an extra `lint` attempt
+  # lands on main's sha and, under the newest-attempt rule, could mask the red
+  # this workflow exists to report. The first step warns when that happens.
+  workflow_dispatch:
+    inputs:
+      simulate_comment_failure:
+        description: 'Force the attribution comment to fail, to prove a reporter failure is a warning and never the verdict'
+        type: boolean
+        default: false
 
 concurrency:
   group: main-lint-${{ github.sha }}
@@ -37,11 +165,24 @@ concurrency:
 
 permissions:
   contents: read
-  pull-requests: read # commit → PR lookup for the attribution comment
+  # `write` (not `read`): the attribution lookup needs only read, but
+  # `issues.createComment` on the merged PR 403'd without `pull-requests: write`
+  # — on a token that DID hold `issues: write` (#5120). Hypothesis, not settled
+  # fact: the docs list `Issues(write)` as sufficient, and the suppressed log could
+  # not attribute the 403 to a call. Both scopes are declared until a real PR
+  # comment succeeds, and the reporter now names the call + status so the redundant
+  # one can be dropped on evidence.
+  pull-requests: write
   # `issues: write` is required by `issues.createComment` below — a permission not
   # listed is `none`, and a `push` event's default token is read-only. Dropping it
   # in the move here would make the notification a 403 (the pre-move job carried it
-  # at workflow level).
+  # at workflow level). Kept alongside `pull-requests: write` because the endpoint
+  # called is the ISSUES one. ⛔ This is a HARD requirement of
+  # tests/test_reporting_workflow_concurrency.py: dropping the scope here reds
+  # that pin, so a lane that believes it redundant must change the pin and the
+  # reasoning in the same commit — with a real post-merge run as the evidence that
+  # `issues.createComment` works without it. It is a superset of what the endpoint
+  # needs today, never a narrowing.
   issues: write
 
 jobs:
@@ -49,6 +190,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Refuse to be mistaken for the push verdict (dispatch on main)
+        # A dispatch on main adds a SECOND `lint` attempt to a sha that already
+        # has one. A re-run adds a check-run; it never clears one — so the tree's
+        # verdict stays the PUSH run, and this line says so where a reader of the
+        # dispatch run will see it (#5120).
+        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+        run: |
+          echo "::warning title=main-lint dispatched on main::this run is a DISPATCH attempt on ${GITHUB_SHA}, not the merged-tree verdict — read the push run for this sha; an extra attempt must never be read as a fresh green."
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }} # deterministic — mid-run main advance must not move the tree
@@ -64,8 +213,55 @@ jobs:
       - name: "Ruff check . (repo config — E/F/B/UP/I/SIM/RUF, #1503 baseline)"
         id: ruff
         run: ruff check .
+      - name: "Publish the verdict — PASS / FAIL / NO VERDICT (#5120)"
+        id: verdict
+        # `always()`: this step is the reader's answer in BOTH directions. It is
+        # deliberately NOT keyed on `steps.ruff.outcome` in its `if:` — it reads the
+        # outcome through `env: OUTCOME` instead, because the pin asserts the ONE
+        # step keying on that outcome in its `if:` is the github-script comment
+        # below (a second such step is how the notification stops being the thing
+        # that notifies), and the ONE step deriving it through `env:` is this one.
+        # The FAIL arm does not fail this step — the ruff step already owns that
+        # red; only the NO VERDICT arm exits 1, because an unmeasured tree must not
+        # finish green.
+        if: always()
+        env:
+          OUTCOME: ${{ steps.ruff.outcome }}
+        run: |
+          set -u
+          # ⛔ ALLOW-LIST polarity: only `success` is a PASS. `skipped`, `null`
+          # or any conclusion GitHub has not documented means the lint step did
+          # not measure this tree — that is NO VERDICT, never green.
+          case "${OUTCOME:-}" in
+            success)
+              echo "### main-lint verdict: **PASS** — no findings on \`${GITHUB_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
+              echo "::notice title=main-lint PASS::no findings on ${GITHUB_SHA}"
+              ;;
+            failure)
+              echo "### main-lint verdict: **FAIL** — findings on \`${GITHUB_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
+              echo "The lines above this step are the findings. This red IS the lint verdict; it is not a reporting failure." >> "$GITHUB_STEP_SUMMARY"
+              echo "::error title=main-lint FAIL — findings reported::the lint verdict is FAIL on ${GITHUB_SHA}; the findings are the step log above. Main is lint-red until they are fixed."
+              ;;
+            *)
+              echo "### main-lint verdict: **NO VERDICT** — the lint step did not run (outcome: \`${OUTCOME:-null}\`)" >> "$GITHUB_STEP_SUMMARY"
+              echo "::error title=main-lint NO VERDICT — not a pass::the lint step concluded '${OUTCOME:-null}', so nothing measured this tree. Absence of a verdict is not a pass."
+              # The ONLY arm that fails this step: in the FAIL arm the lint step
+              # already owns the red, but an unmeasured tree can otherwise leave
+              # the run GREEN with a verdict nobody reads. `::error` alone does
+              # not fail a step — the annotation is for the reader, the exit code
+              # is for the gate.
+              exit 1
+              ;;
+          esac
       - name: Comment on the merged PR (best-effort attribution)
-        # `failure()` must be NAMED: an `if:` with no status function gets an
+        # ⛔ Fatal to NOTHING: the verdict is the lint step's outcome, published by
+        # the step above. `continue-on-error` makes that structural rather than a
+        # promise — a reporter that throws before its own try/catch cannot red the
+        # job either (#5120).
+        continue-on-error: true
+        # A status function must be NAMED (this file writes `failure()`, which
+        # also keeps the distinction below; `always()` is the pin's other accepted
+        # spelling): an `if:` with no status function gets an
         # implicit `success()` prepended, and `success()` is false once the ruff
         # step has failed — so the bare `steps.ruff.outcome == 'failure'` form was
         # SKIPPED on exactly the path it exists for (measured on run 39734942845:
@@ -76,10 +272,37 @@ jobs:
         # commenting nonsense.
         if: failure() && steps.ruff.outcome == 'failure'
         uses: actions/github-script@v7
+        env:
+          # Dispatch-only probe (#5120 step 4): forces the call onto a
+          # nonexistent issue so the REPORTING-FAILURE path can be exercised on
+          # demand. It posts nothing anywhere.
+          SIMULATE_COMMENT_FAILURE: ${{ inputs.simulate_comment_failure }}
         with:
           script: |
+            const simulate = String(process.env.SIMULATE_COMMENT_FAILURE) === 'true';
             const { owner, repo } = context.repo;
             const marker = `commit ${context.sha}`;
+            // ⛔ A NON-PUSH RUN IS NOT THE MERGED TREE, and the body below claims a
+            // POST-MERGE failure of main. On a dispatch, `context.sha` is the branch
+            // head and `listPullRequestsAssociatedWithCommit` resolves a commit that
+            // is not on the default branch to its MERGED **AND OPEN** pull requests —
+            // so the unguarded path posts "main is now lint-red" onto an unmerged
+            // PR, permanently (the marker makes it idempotent, so no re-run corrects
+            // it). Only the push arm may notify; the probe is exempt because it
+            // never writes to a real issue.
+            if (context.eventName !== 'push' && !simulate) {
+              core.info(`main-lint: ${context.eventName} run on ${context.ref} is not the merged tree — not notifying`);
+              return;
+            }
+            // A reporter failure must never read as a verdict, and must never be
+            // anonymous: the endpoint and the HTTP status are the two things the
+            // 2026-10-25 lane could not recover from `Resource not accessible by
+            // integration` alone (#5120).
+            const warn = (what, err) => core.warning(
+              `main-lint NOTIFICATION FAILED — ${what}: ${err.message}`
+              + `${err.status ? ` (HTTP ${err.status})` : ''}. The VERDICT is unaffected `
+              + `(read the "Publish the verdict" step); this step cannot fail the job.`,
+            );
             let pr = null;
             try {
               // Attribution moved off `needs.dedup-check.outputs.pr_number` (that
@@ -91,30 +314,41 @@ jobs:
               });
               pr = data.length ? data[0].number : null;
             } catch (err) {
-              core.warning(`main-lint PR attribution failed (error: ${err.message})`);
+              warn('repos.listPullRequestsAssociatedWithCommit (attribution)', err);
             }
-            if (!pr) {
+            // The probe deliberately skips the `!pr` early return: a branch
+            // commit has no PR attribution, and the reporter-failure path is
+            // exactly what it is here to exercise.
+            const target = simulate ? 999999999 : pr;
+            if (!target) {
               core.warning('main lint failed but no PR attribution — see the merge commit check');
               return;
             }
             const body = `⚠️ This PR **failed post-merge ruff lint on main** (run ${context.runId}, ${marker}). Main is now lint-red, which reddens the merge ref of **every** open PR until it is fixed. Reproduce locally with \`pip install ruff==0.16.4 && ruff check .\` and open a fix PR.`;
+            let already = false;
             try {
               // IDEMPOTENT: the natural response to a red main is "re-run", and an
               // unconditional comment would append one more identical warning per
               // re-run to the merged PR.
               const existing = await github.rest.issues.listComments({
-                owner, repo, issue_number: pr, per_page: 100,
+                owner, repo, issue_number: target, per_page: 100,
               });
-              const already = existing.data.some(
+              already = existing.data.some(
                 (comment) => comment.body && comment.body.includes(marker),
               );
-              if (already) {
-                core.info(`main-lint ${marker} already recorded on #${pr} — not commenting again`);
-                return;
-              }
-              await github.rest.issues.createComment({ issue_number: pr, owner, repo, body });
             } catch (err) {
-              // Best-effort: a 403/422 here must not bury the ruff log behind a
-              // second failing step.
-              core.warning(`main-lint comment failed (error: ${err.message})`);
+              // A failed READ is not a reason to stay silent: the marker check is
+              // an optimisation, and one duplicate comment is recoverable while a
+              // missing one is the defect this step exists for.
+              warn(`issues.listComments on #${target} (the duplicate check)`, err);
+            }
+            if (already) {
+              core.info(`main-lint ${marker} already recorded on #${target} — not commenting again`);
+              return;
+            }
+            try {
+              await github.rest.issues.createComment({ issue_number: target, owner, repo, body });
+            } catch (err) {
+              // THE notification. Named as such, so the log says what was lost.
+              warn(`issues.createComment on #${target} (THE NOTIFICATION — the merged PR is not told)`, err);
             }
