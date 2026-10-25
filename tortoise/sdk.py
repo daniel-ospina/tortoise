@@ -3898,11 +3898,20 @@ def _kind_layer_advisory(note: dict | None, node_id: str | None,
             f"as a :{declared} (with the kind on {actual[0]}Kind) instead of "
             f"the {layer.capitalize()} the door requested. The kind decides the "
             f"layer (ONTOLOGY §1); "
+            # ⛔ The claim is about the GRAPH, never about THIS call. The routed
+            # id is DETERMINISTIC (`_entity_name_id(<label>, name)`), so a re-run
+            # of the very call that first split the entity MERGES onto the node
+            # it already minted — the peer probe below only asks whether the
+            # OTHER label holds the name, never whether the routed node is new,
+            # so "this write created a SECOND node" was FALSE on every retry
+            # (the common case: ingest and capture re-issue writes), while the
+            # graph fact it is trying to convey stayed true (#9964 review).
             + (f"⚠️ {_peer_article} :{layer.capitalize()} named {name!r} ALREADY "
                f"exists ({_peer}), and entity ids are LABEL-scoped "
-               f"(`sha256('<label>:<name>')`), so this write created a SECOND "
-               f"node ({node_id}) rather than replacing it — {name!r} now has a "
-               f"node under EACH entity label, nothing reconciles them for you "
+               f"(`sha256('<label>:<name>')`), so the graph now holds a SECOND "
+               f"node ({node_id}) beside it rather than replacing it — {name!r} "
+               f"has a node under EACH entity label, nothing reconciles them "
+               f"for you "
                f"(#2489: no repair path), and the older one keeps answering "
                f"the {layer.capitalize()}-keyed reads. Retire the stale node "
                f"explicitly, or read this entity across both labels."

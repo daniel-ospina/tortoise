@@ -580,6 +580,44 @@ def test_a_re_route_that_splits_an_existing_entity_names_both_ids(sdk):
     assert "``create_object``" not in clean_notes[0]["message"], clean_notes[0]
 
 
+def test_the_split_advisory_states_a_graph_fact_not_a_causal_one(sdk):
+    """"this write created a SECOND node" is FALSE on a retry that created nothing.
+
+    The routed id is DETERMINISTIC (``_entity_name_id("Subject", name)``), so
+    re-issuing the very call that first split the entity MERGES onto the node the
+    first call minted. The peer probe only asks whether the OTHER label holds the
+    name — never whether the routed node is new — so the retry re-reports the
+    split, and the pre-fix wording turned that into a causal claim: *"this write
+    created a SECOND node"*, false on every retry while the graph fact ("`'Acme'`
+    has a node under EACH entity label") stayed true. Retries are the common case
+    here (ingest and capture both re-issue writes) and the advisory is the
+    statement a caller reconciles from, so the claim is about the GRAPH.
+    """
+    legacy = sdk.create_object("Acme Retry")            # no kind → a plain :Object
+    first = sdk.create_object("Acme Retry", objectKind="core:organization")
+    assert _node(sdk, first["id"])[0] == ["Subject"], first
+
+    again = sdk.create_object("Acme Retry", objectKind="core:organization")
+    assert again["id"] == first["id"], (
+        "the routed id is deterministic — the retry must MERGE onto the node the "
+        f"first call minted, not mint a third: {first['id']} vs {again['id']}")
+    assert _graph(sdk).query(
+        "MATCH (n {name:'Acme Retry'}) RETURN count(n)").result_set[0][0] == 2, (
+        "the retry added a node: the graph must hold exactly the stale twin and "
+        "the routed one")
+
+    notes = _layer_notes(again)
+    assert [n["code"] for n in notes] == ["kind_layer_routed"], again.get("advisories")
+    message = notes[0]["message"]
+    # The graph fact still holds, and both ids are still named…
+    assert "SECOND" in message and "the graph now holds" in message, message
+    assert legacy["id"] in message and first["id"] in message, message
+    # …but the call did NOT create anything this time.
+    assert "this write created" not in message, (
+        "the advisory claims THIS write created a node on a retry that created "
+        f"nothing — it merged onto {first['id']}: {message}")
+
+
 def test_ingest_dedup_follows_the_label_the_write_lands_on(sdk):
     """`ingest`'s `existed` probe must ask for the label the WRITE uses (#9964).
 
