@@ -3334,7 +3334,10 @@ def tortoise_mitigate_operator(id: str, reason: str, strength: float = 0.5,
       numeric 0-4) — stamped 'set-by-author'. Omit for the #2199 system
       starting belief ('medium', provenance 'system-default') so the
       mitigation is a calibrated live evidence point (no CalibrationError).
-    Idempotent — second call updates existing mitigation.
+    Idempotent for a CURRENT mitigation — a second call updates it in place.
+    Once it has been withdrawn (retracted/superseded/outdated/archived) the
+    call mints a NEW mitigation Point and returns its id, because a retraction
+    is terminal (#432/#2422) and is never revived by a re-assertion.
     """
     return _safe(_quota_gated(_get_org_sdk().mitigate_operator, "points", abuse_weight=1), id, reason, strength, credibility)
 

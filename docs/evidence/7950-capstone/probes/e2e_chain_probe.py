@@ -70,6 +70,11 @@ RECORD_MIGRATIONS = [
     # table (ten, since #9555's `session_narrative`). No column
     # — kept in step with `e2e_postgres_bootstrap.py` for the same reason.
     "20261025000001_record_tenancy_role_and_guc.sql",
+    # #9967: `idx_source_canonical_scope`, the index behind the `:Source`
+    # resolver's `canonical_url` arm. No column — kept in step with
+    # `e2e_postgres_bootstrap.py` for the same reason (a dead copy that is
+    # allowed to drift becomes a live lie the moment it is re-lit, #8976 P3).
+    "20261025000002_record_source_canonical_index.sql",
     # #9881: the Object/Subject key move (node_key = id, `node_identity`'s
     # `key_property` re-declared). A probe Postgres without it keys the semantic
     # layer by `name` while the read parses `id` from these files.

@@ -5675,6 +5675,21 @@ surfaces:
   # (the fixture builds `TortoiseSDK(<tmpfile>)`), so it is ALSO registered in
   # `carve_out` below.
   - test_direction_storage_7852.py
+  # #9963: the MECHANISM leg at the SAME door — `create_operator` compares the
+  # written `op_type` to the mechanism the write's declared meaning (or the pack
+  # relation it names) DECLARES, and returns a `mechanism_mismatch` warning
+  # without refusing the write (#1934's warn-not-block ruling). `sdk` owns it
+  # because the door is `tortoise/sdk.py`, exactly as it owns the two #7852
+  # siblings above.
+  # ⛔ The surface arm is for CLASSIFICATION (manifest-integrity refuses a test
+  # file no surface claims — and a file registered ONLY in `carve_out`
+  # classifies as None), NOT for selection: the file is a carve-out member, and
+  # the carve-out leg is diff-GATED (`carve_out_run`) but never diff-SIZED
+  # (python-ci.yml), so it runs on every gated diff regardless of which surface
+  # the diff selects. Measured: `select()` for `tortoise/pack_registry.py` (which
+  # is `core`) is byte-identical with or without this arm. Embedded-only (the
+  # fixture builds `TortoiseSDK(<tmpfile>)`), so it is ALSO in `carve_out` below.
+  - test_mechanism_write_path_9963.py
   # #3849: the ask_lane-only selection leg. `tortoise/ask_lane.py` maps to
   # `sdk`, so these two must be dual-registered here or they stop running on
   # an ask_lane-only PR (a SOURCE_PATTERNS match REPLACES the core fallback).
@@ -6778,6 +6793,13 @@ carve_out:
 # live graph, so a URI-set lane would redirect it. Also in the `sdk` surface
 # above, which is where a diff selects it.
 - test_direction_storage_7852.py
+# #9963: the mechanism comparison is embedded-only in the same way as the two
+# files above — the fixture builds `TortoiseSDK(<tmpfile>)` and reads the stored
+# `op_type` back off the graph, so a URI-set lane would redirect the construction
+# to the server and the assertions would grade a graph this test never seeded.
+# Also in the `sdk` surface above (its door is `tortoise/sdk.py`), which is where
+# a diff selects it.
+- test_mechanism_write_path_9963.py
 # #6871: embedded-only — the fixture builds `TortoiseSDK(<tmpfile>)`, so a
 # URI-set lane would redirect it. Also in the `sdk` surface above, which is
 # where the diff selects it.
@@ -8702,6 +8724,13 @@ durations:
   test_8089_expired_invitation_sweep.py: 11.0  # unmeasured — local wall reading, added by #8089; refresh from the next sweep
   test_5142_ontology_record.py: 4.5  # ci-timing top-15 2026-10-20 (run 39467226356); was 3.7
   test_direction_storage_7852.py: 5.4
+  # #9963: unmeasured — a file ADDED BY A PR has no CI junit measurement (the
+  # refresher samples push-to-main runs only), so it carries the flat default
+  # exactly as an absent key would (the #3419/#2788 rule). Do NOT substitute a
+  # local timing: the weight is a SHARD-LAYOUT input. Refresh from the first
+  # post-merge sweep that collects it. The test count is deliberately NOT stated
+  # — a hand-written count here goes stale the moment a test is added.
+  test_mechanism_write_path_9963.py: 2.0
   test_incident_kinds.py: 5.1  # ci-timing top-15 2026-10-20 (run 39467226356); was 4.0
   # #9217 (#3400 trap): both files are ADDED BY THIS PR, so no CI junit measurement can exist for
   # them (the refresher samples push-to-main runs only) — 2.0 is the flat default, NOT a local

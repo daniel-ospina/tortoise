@@ -58,6 +58,14 @@ MIGRATIONS = [
     # `RECORD_MIGRATIONS` in EQUALITY, and a probe whose Postgres lacks the
     # policies is not the Postgres the shipped read runs against.
     "20261025000001_record_tenancy_role_and_guc.sql",
+    # #9967's `idx_source_canonical_scope` — the index behind the `canonical_url`
+    # arm of the ONE `:Source` resolver. This probe drives the SHIPPED projection,
+    # so without it the probe's Postgres answers every source write with the
+    # sequential scan the file exists to remove (#9956 review cycle 2). Applied
+    # anyway for the same reason as the tenancy file: the list is pinned to
+    # `RECORD_MIGRATIONS` in EQUALITY, and a probe measuring the resolver's cost
+    # on an unindexed tenant measures a schema the shipped read does not run on.
+    "20261025000002_record_source_canonical_index.sql",
     # #9881's key move. It RE-DECLARES `node_identity.key_property` (Object/
     # Subject → `id`) and rewrites the two `node_key` CHECKs, and the read
     # projects a node by the contract key it parses from these FILES — so a

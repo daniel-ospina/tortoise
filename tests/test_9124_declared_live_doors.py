@@ -350,6 +350,19 @@ _NO_JOURNAL = {
 #: `MATCH … RETURN` read with no write keyword in it.
 _UNRESOLVED = {
     "_assert_lifecycle_guard",
+    # #9962: the ONLY handle reach in this function is its redelivery read (the
+    # prior-mitigation census: id/content/strength plus
+    # `live._terminal_excluded('m.status')` as `is_current`). The unresolvable
+    # fragment is that helper's rendered predicate — the canonical terminal
+    # vocabulary, which this row must NOT hand-roll into a literal here (that
+    # is the #2901 defect class the predicate exists to stop), so the statement
+    # cannot be flattened for the resolver. Checked by hand: the statement is a
+    # `MATCH (op:Point {id:$oid})-[:mitigated_by]->(m:Point) RETURN …` read with
+    # no SET/CREATE/MERGE/DELETE/REMOVE and no write procedure, and it appends
+    # no record. What the function WRITES it does not write through the handle:
+    # it delegates to `mitigate_operator`, which is its own censused door — so
+    # this row declares a read and blesses no undeclared write.
+    "_apply_ingest_mitigation",
     "_graph_presence",
     "_hop",
     # #7819: the statement is the shared `live.LIFECYCLE_FANOUT_QUERY` constant,
@@ -447,6 +460,16 @@ _UNRESOLVED = {
     "_reverse_bfs_neighbors",
     "_semantic_dedup",
     "_source_reachable_by",
+    # #9962: the state view's mitigation read interpolates
+    # `live._live_only('m.status')` — the DAMPENER's own predicate
+    # (`weights.py`'s `compute_operator_weight`), which is the point of the row:
+    # the surfaced text and the computed weight must be one question, so the
+    # predicate is shared rather than re-spelled as a literal. The resolver
+    # cannot unfold a call, hence '<unresolved>'. Checked by hand: the statement
+    # is `MATCH (op:Point {is_operator:true})-[r:mitigated_by]->(m:Point) WHERE
+    # op.id IN $ids AND <live-only predicate> RETURN …` — a read, the only one
+    # this function issues, with no write clause and no write procedure.
+    "_state_mitigations",
     "_state_related_objects",
     "_state_related_points",
     "_unsweepable_dirty_roots",
