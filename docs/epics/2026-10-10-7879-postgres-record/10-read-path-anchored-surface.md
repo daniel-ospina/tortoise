@@ -159,11 +159,14 @@ Run 2026-10-24 against `tests/test_record_serve.py` (50 tests) and the live file
   the record is authoritative, so a miss there is a real absence — **but only where the record is
   complete**, which is a deployment fact, not a property of this code. `record` mode asserts it;
   `prefer` mode does not and pays for the doubt with a named, counted fallback. The endpoint answers
-  **503** (never 404) for an impaired record, pinned by test. The one arm that is
-  NOT an impairment is the tenant one: a credential that resolves no record tenant
-  never becomes resolvable by retrying, so it is **500** (a permanent fault), and
-  a role/GUC misconfiguration refuses **structurally** (500) instead of being
-  counted as `record-unavailable` — an ops reason for a value problem.
+  **503** (never 404) for an impaired record, pinned by test. Two arms are NOT
+  impairments: (a) a credential that resolves no record tenant — a permanent
+  PER-CREDENTIAL fact, not a fault: `record` mode answers **500** because it has no
+  cache branch, while `prefer` mode falls back and names it
+  (`record-tenant-unresolved`, the third of the three reasons); (b) a
+  role/GUC misconfiguration, which refuses **structurally** (500) in both armed
+  modes instead of being counted as `record-unavailable` — an ops reason for a
+  value problem.
 * **`prefer` never lets the cache's availability decide whether the record is
   asked.** Its handle is constructed through the #3498 seam, but a construction
   failure is CAPTURED and re-raised only when the cache is actually needed —

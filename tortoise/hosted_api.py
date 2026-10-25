@@ -9595,9 +9595,15 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
 
     ⚠️ **503 is only for a record that cannot be REACHED.** A record that is
     MISCONFIGURED answers **500** in either armed mode, with no fallback and no
-    count — an absent or malformed `TORTOISE_RECORD_DSN`, an unresolvable
-    tenant, an unprojectable row, a tenancy that bypasses RLS: retrying repairs
-    none of them, so `prefer` does not treat them as "still incomplete".
+    count — an absent or malformed `TORTOISE_RECORD_DSN`, a missing driver, an
+    unprojectable row, a tenancy that bypasses RLS: retrying repairs none of
+    them, so `prefer` does not treat them as "still incomplete".
+
+    ⚠️ **A credential with NO RECORD TENANT is a third case, and it is not a
+    misconfiguration.** Session and JWT credentials resolve no record tenant by
+    design, so in `record` mode that is a **500** (there is no cache branch to
+    fall back to) while in `prefer` mode it is a NAMED, COUNTED fallback —
+    `record-tenant-unresolved`, the third of the three reasons.
 
     ⚠️ A record-served answer carries the record's PRIMARY field set. Two
     differences from the cache answer, both deliberate: `content_hash` is

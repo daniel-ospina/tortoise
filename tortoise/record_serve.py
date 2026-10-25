@@ -54,9 +54,11 @@ in the same artifact is indistinguishable from an omission:
   accessor: write paths call it mid-write to build journal events, so serving it
   from the record would make a writer read a store that the same write has not
   finished projecting. The caller-facing reads are the hosted endpoint served
-  here and the MCP tool built on the same accessor (``tortoise_get_point``) —
-  those are not wired, because an MCP call carries no hosted org credential to
-  resolve a record tenant from. (#8877 names the same internal/caller-facing
+  here and the MCP route that reaches the same accessor —
+  ``tortoise_get_entity(id, type="point")`` (``tortoise_get_point`` is its
+  RETIRED alias, ``tool_registry.RETIRED_USE_INSTEAD``) — neither is wired,
+  because an MCP call carries no hosted org credential to resolve a record
+  tenant from. (#8877 names the same internal/caller-facing
   separation.) ``tortoise_get_entity`` is NOT built on this accessor — it
   reaches ``TortoiseSDK.get_entity``, a different read with its own coordinate,
   and it is excluded under ``entity-accessor`` below rather than folded in here.
@@ -181,12 +183,15 @@ RECORD_SERVE_ENV = "TORTOISE_RECORD_SERVE"
 #: ``off``     the cache answers; the record is never consulted (the default).
 #: ``record``  the record answers; there is no cache branch at all.
 #: ``prefer``  the record answers first, and a NAMED, COUNTED fallback covers a
-#:             record that ANSWERS and cannot serve (`record-miss`) or cannot be
-#:             reached (`record-unavailable`). It does NOT cover a record that
-#:             was never armed or is misconfigured: an absent/malformed DSN, an
-#:             unresolvable tenant, an unprojectable row and a bad tenancy are
-#:             structural and answer 500 — retrying never repairs them, and a
-#:             permanent increment of the outage counter would hide that.
+#:             record that ANSWERS and cannot serve (`record-miss`), cannot be
+#:             reached (`record-unavailable`), or cannot be scoped because this
+#:             CREDENTIAL resolves no record tenant (`record-tenant-unresolved`
+#:             — normal for session/JWT credentials, not a misconfiguration).
+#:             It does NOT cover a record that was never armed or is
+#:             misconfigured: an absent/malformed DSN, a missing driver, an
+#:             unprojectable row and a bad tenancy are structural and answer
+#:             500 — retrying never repairs them, and a permanent increment of
+#:             the outage counter would hide that.
 MODE_OFF = "off"
 MODE_RECORD = "record"
 MODE_PREFER = "prefer"
