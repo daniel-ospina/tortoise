@@ -9614,18 +9614,27 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
 
     # ⭐ #7970: the mode is read BEFORE any cache handle is CONSTRUCTED. In
     # 'record' mode this endpoint must reach the record with the graph engine
-    # stopped, so building the SDK here would reintroduce the dependency this
-    # unit removes: `_data_sdk` runs `_assert_graph_owned`, whose probe failure
-    # raises **403 GRAPH_NOT_FOUND** — an impairment reported as absence, the
-    # exact class the 503 arm below exists to forbid — and on an embedded
-    # deployment the SDK's construction itself probes (and may start) the store.
-    # With the handle built only when a cache answer is actually needed,
-    # 'record' mode makes ZERO cache calls, which is what the epic's S9 claim
-    # states.
+    # stopped, so NO handle is constructed on that path: `_data_sdk_offloaded`
+    # runs `_assert_graph_owned`, whose probe failure raises **403
+    # GRAPH_NOT_FOUND** — an impairment reported as absence, the exact class the
+    # 503 arm below exists to forbid — and on an embedded deployment the SDK's
+    # construction itself probes (and may start) the store.
+    #
+    # ⚠️ The other two modes construct it EXACTLY as before, through the
+    # bounded graph-lane seam (#3498) — which supplies the graph pool slot, the
+    # wait bound and the fail-closed 503. An earlier cut of this change built the
+    # handle from inside a worker thread with a bare sync `_data_sdk`, which made
+    # `record` lazy but silently dropped all three from the DEFAULT path; the
+    # laziness belongs to `record` alone.
     mode = record_serve.serve_mode()
+    sdk = None
+    if mode != record_serve.MODE_RECORD:
+        sdk = await _data_sdk_offloaded(org)
 
-    def _query_props(sdk) -> dict | None:
+    def _cache_props() -> dict | None:
         # #3718 residual 2: sync FalkorDB read off the loop (see list_points).
+        # Called from a worker thread (both call sites are off-loop), so the SDK
+        # built on the loop is queried off it — the pre-#7970 shape.
         rows = sdk._get_proj().g.query(
             "MATCH (p:Point {id: $id}) "
             "WHERE p.status IS NULL OR p.status <> 'retracted' "
@@ -9633,20 +9642,6 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
             params={"id": point_id},
         ).result_set
         return dict(rows[0][0]) if rows else None
-
-    async def _cache_answer() -> dict | None:
-        """The cache read, THROUGH the bounded graph-lane seam (#3498).
-
-        ⚠️ Both halves are the pre-#7970 shape and are load-bearing on the
-        DEFAULT path: `_data_sdk_offloaded` is the seam that supplies the graph
-        pool slot, the wait bound and the fail-closed 503 — a bare
-        `asyncio.to_thread(_data_sdk, ...)` would lose all three and let a
-        wedged graph open hang on the shared executor. So this callback is
-        lazy (it runs only when a cache answer is needed) without trading away
-        the seam.
-        """
-        sdk = await _data_sdk_offloaded(org)
-        return await asyncio.to_thread(_query_props, sdk)
 
     served = None
     if mode != record_serve.MODE_OFF:
@@ -9669,21 +9664,13 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
             served = record_serve.ServedAnswer(
                 read=record_serve.READ_POINT_BY_ID,
                 coordinate=f"Point:{point_id}", served_from="cache",
-                props=await _cache_answer(),
+                props=await asyncio.to_thread(_cache_props),
                 fallback_reason=record_serve.FALLBACK_RECORD_UNAVAILABLE)
         else:
-            # `serve_point` is sync and calls its cache callback from the worker
-            # thread, so the callback bridges back to the loop for the seam.
-            loop = asyncio.get_running_loop()
-
-            def _from_cache() -> dict | None:
-                return asyncio.run_coroutine_threadsafe(
-                    _cache_answer(), loop).result()
-
             try:
                 served = await asyncio.to_thread(
                     record_serve.serve_point, tenant=tenant, point_id=point_id,
-                    cache_answer=_from_cache, mode=mode)
+                    cache_answer=_cache_props, mode=mode)
             except record_serve.RecordUnavailable as e:
                 # 'record' mode has no cache branch. Answering 404 here would
                 # turn an IMPAIRED read into a finding of absence — the exact
@@ -9697,7 +9684,7 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
                 raise HTTPException(status_code=500, detail=str(e)) from e
 
     if served is None:
-        props = await _cache_answer()
+        props = await asyncio.to_thread(_cache_props)
     else:
         props = served.props
     if not props:
