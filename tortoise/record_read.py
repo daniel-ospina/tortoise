@@ -119,6 +119,11 @@ class Turn:
     index: int
     content: str
     speaker: str | None = None
+    #: The record's ``created_at`` for the turn, verbatim (a text column). It is
+    #: carried so a reader serving from the record can return the SAME payload the
+    #: graph read returned — without it, switching the source silently drops the
+    #: timestamp from every transcript (#10000).
+    created_at: str | None = None
 
     @property
     def body(self) -> str:
@@ -267,7 +272,7 @@ def _turns(conn: Any, org_id: str, graph_id: str,
     # including the case the range cannot: a session id that is a prefix of
     # another (`sec` vs `sec_t0`).
     cursor.execute(
-        f"SELECT node_key, content, speaker FROM public.{POINT_TABLE} "
+        f"SELECT node_key, content, speaker, created_at FROM public.{POINT_TABLE} "
         f"WHERE org_id = %s AND graph_id = %s AND is_episodic IS TRUE "
         f"AND node_key >= %s AND node_key < %s AND node_key ~ %s",
         (org_id, graph_id, session_id + "_t", session_id + "_u",
@@ -276,6 +281,7 @@ def _turns(conn: Any, org_id: str, graph_id: str,
     turns: list[Turn] = []
     for row in _rows(cursor):
         turn_id, content, speaker = row[0], row[1], row[2]
+        created_at = row[3] if len(row) > 3 else None
         if not isinstance(turn_id, str) or not isinstance(content, str):
             raise RecordReadError(
                 f"a turn row for session {session_id!r} has no usable "
@@ -288,6 +294,7 @@ def _turns(conn: Any, org_id: str, graph_id: str,
             index=_turn_index(turn_id, session_id),
             content=content,
             speaker=speaker if isinstance(speaker, str) and speaker else None,
+            created_at=created_at if isinstance(created_at, str) else None,
         ))
     # Ordered by the id's own index, in PYTHON: the order is a property of the
     # key contract, and re-deriving it in SQL (a regex substring cast) would be
