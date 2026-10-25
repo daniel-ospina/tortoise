@@ -38,13 +38,23 @@ name: main-lint
 # The `failure` was a REAL ruff finding (`RUF059`, `tests/test_docs_link_check.py`
 # — the #5203/#4298/#5130 family, NOT this workflow's defect and deliberately not
 # folded in here). The `warning` was this workflow failing to post its own
-# notification: the runner prints the granted scopes, and this job's token held
-# `Issues: write` — yet `issues.createComment` on the merged PULL REQUEST still
-# answered "Resource not accessible by integration", because a PR conversation is
-# governed by the `pull-requests` scope for an App installation token, which this
-# file did not grant at all. The only channel that tells a merged PR its tree
-# broke main has therefore NEVER worked: the step shipped with this workflow
+# notification, and THAT is what this change is about. What is MEASURED is only:
+# the runner printed `Issues: write`, the notification still answered "Resource not
+# accessible by integration", and the only channel that tells a merged PR its tree
+# broke main had therefore NEVER posted — the step shipped with this workflow
 # (c72c66be2, #9630) and no run reached it before main went red on 2026-10-25.
+#
+# ⚠️ THE MECHANISM IS A HYPOTHESIS, STATED AS ONE. The old step wrapped
+# `issues.listComments` AND `issues.createComment` in ONE catch, so the log does
+# not even record WHICH call 403'd — and GitHub's own contract for
+# `POST /repos/{owner}/{repo}/issues/{issue_number}/comments` lists "Issues
+# (write)" as sufficient ("at least one of: Issues write, Pull requests write",
+# docs.github.com/en/rest/issues/comments). So the doc reading and the measurement
+# disagree, and this file does not get to settle it by assertion: `pull-requests:
+# write` is granted BECAUSE the measured 403 happened without it, both scopes are
+# kept rather than guessing which one is redundant, and the reporter now names the
+# failing call and its HTTP status — so the next failure yields the datum this one
+# could not, and the success path is observable on the first real push to main.
 #
 # Three properties are now explicit, and the pin asserts them — the parts it does
 # NOT pin are named as such rather than implied (a claim a tidy-up can leave
@@ -56,8 +66,9 @@ name: main-lint
 #      green, so a new/unrecognised conclusion cannot fall through to a pass.
 #      PINNED: the step exists after the lint step, is the one step deriving
 #      `steps.ruff.outcome` through `env:`, carries `if: always()`, writes
-#      `$GITHUB_STEP_SUMMARY`, and its default arm `exit 1`s while its `success`
-#      arm does not. Each half has a mutant in the pin's `_STARVED_SHAPES`.
+#      `$GITHUB_STEP_SUMMARY`, emits both `::notice` and `::error`, and its
+#      default arm exits non-zero while its `success` arm does not. Each half has
+#      a mutant in the pin's `_STARVED_SHAPES`.
 #   2. the verdict IS the lint step's own outcome, so a finding still fails the
 #      job — including when the notification ALSO fails. The notification cannot
 #      change the verdict in either direction. PINNED: the notifier's `if:` is
@@ -71,10 +82,10 @@ name: main-lint
 #      the token error instead of a bare "Resource not accessible by
 #      integration" nobody can act on.
 #
-# ONE push, ONE PR, ONE job. The `permissions:` below is the job's scope: this
-# workflow has exactly one job, so a job-level block would be the same grant
-# under a name that shadows the workflow one wholesale (the pin reads whichever
-# is effective) — and nothing else can inherit it.
+# ONE job. The `permissions:` below is the job's scope: this workflow has exactly
+# one job, so a job-level block would be the same grant under a name that shadows
+# the workflow one wholesale (the pin reads whichever is effective) — and nothing
+# else can inherit it.
 on:
   push:
     branches: [main]
@@ -111,8 +122,12 @@ concurrency:
 permissions:
   contents: read
   # `write` (not `read`): the attribution lookup needs only read, but
-  # `issues.createComment` on the merged PR 403s without `pull-requests: write`
-  # — measured on the token that DID hold `issues: write` (#5120).
+  # `issues.createComment` on the merged PR 403'd without `pull-requests: write`
+  # — on a token that DID hold `issues: write` (#5120). Hypothesis, not settled
+  # fact: the docs list `Issues(write)` as sufficient, and the suppressed log could
+  # not attribute the 403 to a call. Both scopes are declared until a real PR
+  # comment succeeds, and the reporter now names the call + status so the redundant
+  # one can be dropped on evidence.
   pull-requests: write
   # `issues: write` is required by `issues.createComment` below — a permission not
   # listed is `none`, and a `push` event's default token is read-only. Dropping it
