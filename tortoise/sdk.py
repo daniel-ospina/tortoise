@@ -17243,7 +17243,13 @@ class TortoiseSDK:
         revived in place — a re-assertion creates a NEW mitigation Point, since
         retraction is terminal (#432/#2422). A REDELIVERY through ``ingest()``
         is not a re-assertion, so it writes nothing in that state (see
-        ``_apply_ingest_mitigation``).
+        ``_apply_ingest_mitigation``). A ``draft`` mitigation is neither
+        terminal nor current: it IS the node this lookup finds, so the call
+        updates it in place and does NOT promote it (#1088 — no retro-
+        promotion), which means a draft-only operator accepts the call and does
+        not dampen. The reply carries its ``status``, because ``current`` in
+        ``live.py`` includes draft and a caller would otherwise read the update
+        as "this now dampens".
 
         The created mitigation Point is a CURRENT point (`status='live'`,
         #5089/#9962) — the `weights.py` dampener read prices `m.status`, so a
