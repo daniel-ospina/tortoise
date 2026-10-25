@@ -1836,6 +1836,98 @@ def test_an_INDEX_FLAG_cannot_hide_a_modified_executed_module(tmp_path):
         assert m.code_identity(repo)["dirty_paths"] == [], flag
 
 
+def test_a_BYTE_CACHE_under_the_executed_surface_is_refused(tmp_path):
+    """FAIL-BEFORE: an UNTRACKED ``.pyc`` was excused by suffix, so the tree
+    read as clean and a forged byte-cache could publish as "clean at run time".
+
+    ``NOISE_SUFFIXES`` lists ``.pyc``/``.pyo`` only so the guard's
+    ``--allow-bytecode`` opt-out has something to name: ``_is_bytecode`` is what
+    REFUSES them by default (#3712). Excusing them here imported half a policy
+    while the comment promised the whole of it, and a byte-cache is executable
+    code this record does not verify — PEP 552's hash-based pyc with
+    ``check_source`` unset loads WITHOUT the source being read, and a forged
+    header matches its source by construction.
+
+    Both suffixes are exercised, and ``git status`` is asserted to print nothing
+    first: without that premise the test could pass because status happened to
+    see the cache, not because the surface scan refused it.
+    """
+    for suffix in (".pyc", ".pyo"):
+        repo = _make_surface_repo(tmp_path / suffix.lstrip("."))
+        # An ignore rule is what makes this a REAL lane shape: in a repository
+        # that gitignores byte-caches (this one does), `git status` never
+        # mentions them. Committing the rule first is also what makes the
+        # premise assertion below meaningful.
+        (repo / ".gitignore").write_text("__pycache__/\n*.pyc\n*.pyo\n",
+                                         encoding="utf-8")
+        assert _git_commit(repo, "ignore: byte-caches")
+        cache = repo / "tortoise" / "__pycache__" / f"ask_lane{suffix}"
+        cache.parent.mkdir()
+        cache.write_bytes(b"\x00forged byte-cache: not in any sha\n")
+        assert m._git(repo, "status", "--porcelain",
+                      "--untracked-files=normal").stdout.strip() == "", (
+            "the fixture did not reproduce git hiding an untracked byte-cache")
+        identity = m.code_identity(repo)
+        assert identity["dirty_paths"], (suffix, identity)
+        assert "byte-cache" in identity["dirty_paths"][0], identity
+        # The remedy is named, because the refusal IS reachable in a real
+        # checkout (pytest writes caches) and a lane must know what clears it.
+        assert "__pycache__" in identity["dirty_paths"][0], identity
+
+
+def test_a_TRACKED_byte_cache_is_refused_too(tmp_path):
+    """FAIL-BEFORE: a COMMITTED ``.pyc`` was invisible to both oracles.
+
+    The surface scan only refused a non-``H`` index tag, and a committed
+    byte-cache carries the ordinary ``H`` — while ``git status`` calls the tree
+    clean because nothing about it changed. The guard refuses byte-caches over
+    every set it checks (#3712: untracked, tracked, present at the rev), so a
+    committed cache is refused on the same ground: CPython prefers it over the
+    ``.py`` beside it.
+    """
+    repo = _make_surface_repo(tmp_path)
+    cache = repo / "tools" / "probe_step.pyc"
+    cache.write_bytes(b"\x00forged byte-cache: part of the sha\n")
+    assert _git_commit(repo, "a committed byte-cache")
+    assert m._git(repo, "status", "--porcelain",
+                  "--untracked-files=normal").stdout.strip() == "", (
+        "the fixture did not reproduce a clean status over a tracked cache")
+    identity = m.code_identity(repo)
+    assert identity["dirty_paths"], identity
+    assert "byte-cache" in identity["dirty_paths"][0], identity
+
+
+def test_an_ordinary_untracked_module_is_reported_ONCE_without_an_ignore_claim(
+        tmp_path):
+    """FAIL-BEFORE: ONE file was reported TWICE, as "2 uncommitted path(s)",
+    and the reason said an ignore rule hid it — sending the operator to look for
+    a `.gitignore` entry that does not exist.
+
+    ``git ls-files --others`` without ``--exclude-standard`` returns EVERY
+    untracked file, ignored or not, so the ordinary "write a new module under
+    `tools/`, run it, then commit" lane shape hit both scans. The collapsed
+    directory shape is pinned too: `--untracked-files=normal` prints
+    `?? tools/newdir/` and not its contents, so a file inside it must dedupe
+    against that row rather than exact-match a path status never printed.
+    """
+    repo = _make_surface_repo(tmp_path)
+    (repo / "tools" / "new_tool.py").write_text("VALUE = 2\n", encoding="utf-8")
+    nested = repo / "tools" / "newdir"
+    nested.mkdir()
+    (nested / "nested_module.py").write_text("VALUE = 3\n",
+                                              encoding="utf-8")
+    status = m._git(repo, "status", "--porcelain",
+                    "--untracked-files=normal").stdout
+    assert "tools/new_tool.py" in status and "tools/newdir/" in status, status
+    identity = m.code_identity(repo)
+    dirty = identity["dirty_paths"]
+    # One row per reported path: the two status rows and NOTHING re-reported.
+    assert len(dirty) == 2, dirty
+    assert dirty.count("tools/new_tool.py") == 1, dirty
+    assert not any("nested_module.py" in path for path in dirty), dirty
+    assert not any("ignore rule" in path for path in dirty), dirty
+
+
 def test_a_dirty_tree_is_DETECTED_and_refused_end_to_end(bound_repo, tmp_path,
                                                          capsys):
     """FAIL-BEFORE with `code_identity` forced clean: this published (rc 0).

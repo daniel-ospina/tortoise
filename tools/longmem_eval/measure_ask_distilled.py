@@ -158,8 +158,21 @@ from tools.ask_spotcheck import (  # noqa: E402
 
 # The noise-suffix policy is IMPORTED, not re-listed: the guard and this record
 # must excuse exactly the same set, and a second copy is a copy that drifts.
+#
+# ⛔ BOTH halves of the guard's split, not just the constant. The guard's
+# ``NOISE_SUFFIXES`` names the suffix-excused set, but ``.pyc``/``.pyo`` are
+# members of that tuple only so the ``--allow-bytecode`` opt-out has something
+# to name: ``_is_bytecode`` is what the guard uses to REFUSE them by default
+# (#3712), over every set (untracked, tracked, present at the rev). Importing
+# the tuple alone imported the excuse while the comment promised the policy —
+# and a byte-cache is executable code (PEP 552: a hash-based pyc whose
+# ``check_source`` flag is unset is loaded WITHOUT the source being hashed, and
+# a forged header matches its source by construction), so the excuse made a
+# forged byte-cache read as a clean tree in a record whose whole purpose is a
+# sound attestation.
 from tools.longmem_eval.guard_measured_revision import (  # noqa: E402
-    NOISE_SUFFIXES_FOLDED,
+    _is_bytecode,
+    _is_noise,
 )
 from tools.longmem_eval.judge import (  # noqa: E402
     DEFAULT_JUDGE_MODEL,
@@ -622,9 +635,46 @@ def _shallow_boundary(repo_root: Path) -> set[str] | None:
         return None
 
 
+def _status_covered(rel: str, status_paths: tuple[str, ...] | list[str]) -> bool:
+    """Whether ``git status`` ALREADY reported ``rel`` (so re-reporting it
+    would inflate the count and misname the reason).
+
+    ``git ls-files --others`` (no ``--exclude-standard``) returns EVERY
+    untracked file under the surface, ignored or not — so for an ordinary
+    untracked module the surface scan and the status scan both see it, and
+    reporting both made one file read as "2 uncommitted path(s)" whose reason
+    pointed the operator at an ignore rule that does not exist.
+
+    Four shapes have to match, or the dedupe would still double-report:
+
+    * the plain row (``?? tools/x.py``);
+    * a COLLAPSED untracked directory — ``--untracked-files=normal`` prints
+      ``?? tools/newdir/`` and not its contents, so a file inside it is
+      covered by that row;
+    * a rename/copy row (``R  old -> new``): the path that exists now is the
+      right-hand side;
+    * a C-quoted path (git quotes non-ASCII/control bytes unless
+      ``core.quotePath=false``).
+    """
+    for raw in status_paths:
+        path = raw.strip()
+        if not path:
+            continue
+        _, sep, destination = path.partition(" -> ")
+        if sep:
+            path = destination.strip()
+        if len(path) >= 2 and path.startswith('"') and path.endswith('"'):
+            path = path[1:-1]
+        if path == rel or (path.endswith("/") and rel.startswith(path)):
+            return True
+    return False
+
+
 def _paths_hidden_from_status(
         repo_root: Path,
-        surface: tuple[str, ...] = EXECUTED_SURFACE) -> list[str] | None:
+        surface: tuple[str, ...] = EXECUTED_SURFACE,
+        *,
+        status_paths: tuple[str, ...] | list[str] = ()) -> list[str] | None:
     """Paths a ``git status`` answer cannot see, enumerated from git's records.
 
     ``git status`` is an oracle that takes advice, and both of its advisers can
@@ -649,6 +699,19 @@ def _paths_hidden_from_status(
     the tests build — carries ignored trees (``.venv/``) that are not execution
     surface, so an unbounded no-ignore enumeration would refuse every real run.
 
+    ⛔ BYTE-CACHES ARE REFUSED, never excused — the guard's own default
+    (#3712, ``_is_bytecode``) over all the sets it checks: untracked here,
+    tracked here (a committed/staged ``.pyc`` is just as loadable), and by the
+    guard at the revision. ``_is_noise`` still carries ``.pyc``/``.pyo`` as
+    members, so the byte-cache test runs FIRST — otherwise the noise excuse
+    would swallow exactly the case the guard refuses. The refusal is one
+    aggregated row rather than one per file: a checkout easily carries a
+    hundred byte-caches, and a hundred rows would bury the reason.
+
+    ``status_paths`` are the paths ``git status`` already reported, used ONLY
+    to dedupe: a path status saw needs no second row, and the ignore-rule
+    wording is reserved for a path status did NOT list.
+
     Returns ``None`` when a git call FAILS: a failed ``ls-files`` has empty
     stdout, and empty stdout must never read as "nothing hidden".
     """
@@ -660,23 +723,49 @@ def _paths_hidden_from_status(
     if others.returncode != 0:
         return None
     hidden: list[str] = []
+    byte_caches: list[str] = []
     for entry in tagged.stdout.split("\0"):
         if not entry:
             continue
         tag, _, rel = entry.partition(" ")
-        if tag != "H":
+        if _is_bytecode(rel):
+            # Tracked (committed/staged) byte-cache: git calls it clean, and
+            # the index tag says "ordinary", so neither oracle below nor the
+            # status answer can see that CPython may load it over the source.
+            byte_caches.append(rel)
+        elif tag != "H":
             hidden.append(
                 f"{rel} (index flag {tag!r} tells git not to look at this "
                 f"file's content, so the dirty state is suppressed)")
     for rel in others.stdout.split("\0"):
-        # Excused by SUFFIX only (editor/VCS droppings, and byte-caches) — the
-        # same set ``guard_measured_revision`` excuses, reused rather than
-        # re-listed so the two cannot drift.
-        if not rel or rel.casefold().endswith(NOISE_SUFFIXES_FOLDED):
+        if not rel:
+            continue
+        if _is_bytecode(rel):
+            byte_caches.append(rel)
+            continue
+        # Excused by SUFFIX only (editor/VCS droppings) — the same suffix-only
+        # excusal ``guard_measured_revision`` applies, taken from its own
+        # predicate so the two cannot drift. Byte-caches are NOT in this set
+        # however ``NOISE_SUFFIXES`` lists them: they were taken above.
+        if _is_noise(rel):
+            continue
+        # Already reported by the status oracle: one file, one row.
+        if status_paths and _status_covered(rel, status_paths):
             continue
         hidden.append(
-            f"{rel} (untracked and hidden from `git status` by an ignore "
-            f"rule)")
+            f"{rel} (untracked under the executed surface and NOT listed by "
+            f"`git status` — an ignore rule hides it)")
+    if byte_caches:
+        listed = sorted(byte_caches)
+        examples = ", ".join(listed[:3]) + (" …" if len(listed) > 3 else "")
+        hidden.append(
+            f"{len(listed)} byte-cache file(s) under the executed surface "
+            f"(e.g. {examples}) — a ``.pyc``/``.pyo`` is executable code that "
+            f"this record does not verify, and a forged byte-cache's header "
+            f"matches its source by construction (PEP 552), so the recorded "
+            f"sha cannot vouch for what CPython loads. Re-run over a "
+            f"byte-code-free tree (remove them first: `find tortoise tools "
+            f"-name __pycache__ -type d -prune -exec rm -rf {{}} +`)")
     return hidden
 
 
@@ -707,14 +796,19 @@ def code_identity(repo_root: str | Path | None,
     ``skip-worktree`` modification and an ignored, importable file are visible
     (:func:`_paths_hidden_from_status`).
 
-    Residual, stated rather than implied: noise suffixes (``.pyc``/``.pyo``,
-    ``.orig``, ``.rej``, ``.swp``, ``.DS_Store``) are EXCUSED from the untracked
-    scan — the same suffix-only excusal ``guard_measured_revision`` applies —
-    because a byte-cache exists in any tree that has ever imported the package
-    and refusing one would make every real run unpublishable. The measured run
-    is launched byte-code-free (``run_protocol`` passes ``-B`` and
-    ``PYTHONDONTWRITEBYTECODE=1``); a pre-existing forged byte-cache is not
-    examined here.
+    Byte-caches are REFUSED, not excused, which is the same default the sibling
+    guard enforces (#3712) over the same surface: a ``.pyc``/``.pyo`` is
+    executable code, this record does not verify its contents, and a forged
+    one's header matches its source by construction — so a tree carrying one is
+    not a tree the recorded sha reproduces, even though ``git status`` calls it
+    clean. The remedy is the guard's: run byte-code-free (``run_protocol``
+    already passes ``-B`` and ``PYTHONDONTWRITEBYTECODE=1``, which stops caches
+    being WRITTEN) over a tree with no byte-caches left in it, which is why the
+    refusal names the command that removes them.
+
+    The remaining suffix exemptions are the editor/VCS droppings
+    (``.orig``/``.rej``/``.swp``/``.swo``/``.DS_Store``) — taken from
+    ``guard_measured_revision._is_noise`` so the two cannot drift.
     """
     if repo_root is None:
         return {
@@ -749,7 +843,8 @@ def code_identity(repo_root: str | Path | None,
     # nothing at all. Both are asked of git's records directly, and a git
     # failure here is recorded as not-provably-clean for the same reason a
     # failed status is — empty stdout is not a clean tree.
-    hidden = _paths_hidden_from_status(repo_root, surface)
+    hidden = _paths_hidden_from_status(repo_root, surface,
+                                       status_paths=dirty_paths)
     if hidden is None:
         dirty_paths.append(
             "<git ls-files failed: the tree is not provably clean>")

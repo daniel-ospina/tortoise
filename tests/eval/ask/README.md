@@ -158,11 +158,24 @@ with no filter in it, over the **executed surface** (`tortoise/` + `tools/`):
 the untracked set is enumerated **without** `--exclude-standard`, and every
 tracked file's index tag is read — `H` is ordinary, a lowercase tag is
 assume-unchanged, `S` is skip-worktree, and anything else is refused. Each such
-path is recorded as an uncommitted path, so publish refuses the run. Only noise
-suffixes (editor/VCS droppings and byte-caches — the set
-`guard_measured_revision` excuses, imported rather than re-listed) are excused
-from the untracked scan; a failed `git ls-files` is recorded as
-not-provably-clean, exactly as a failed `git status` is.
+path is recorded as an uncommitted path, so publish refuses the run. A path the
+surface scan finds that `git status` **already reported** is not recorded
+twice: one file is one uncommitted path, and the "an ignore rule hides it"
+wording is used only for a path status did not list. A failed `git ls-files` is
+recorded as not-provably-clean, exactly as a failed `git status` is.
+
+Only the editor/VCS suffixes (`.orig`, `.rej`, `.swp`, `.swo`, `.DS_Store`) are
+excused from the untracked scan, taken from the guard's own predicate
+(`guard_measured_revision._is_noise`) so the two cannot drift. **Byte-caches
+(`.pyc`/`.pyo`) are REFUSED**, which is the guard's default too (#3712): they
+are executable code this record does not verify, a forged one's header matches
+its source by construction, and CPython prefers a matching `.pyc` over the
+`.py` beside it — so a tree carrying one is not a tree the recorded sha
+reproduces, however clean `git status` looks. Tracked/committed byte-caches are
+refused on the same ground. The run is launched byte-code-free
+(`run_protocol` passes `-B` and `PYTHONDONTWRITEBYTECODE=1`), which stops caches
+being written but not one being read — so the refusal names the removal
+command, and a run is publishable once the surface carries no byte-caches.
 
 ## Why this is a separate tree from `tests/eval/write_path/`
 
