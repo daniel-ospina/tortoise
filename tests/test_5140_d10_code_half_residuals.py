@@ -291,6 +291,11 @@ def test_document_id_that_canonicalises_onto_a_web_source(sdk_factory):
     assert rows[0][0] == 1, f"one identity must be one node: {rows}"
     # current behaviour (see docstring): the source is PROMOTED to a document
     assert rows[0][2] == ["web"] and rows[0][3] == ["report"], rows
+    # …and its `title` is OVERWRITTEN by the document's — the half of the
+    # promotion the docstring names, asserted rather than described (#9952
+    # review ISSUE 3: it was collected and never read, so nothing pinned it).
+    assert rows[0][4] == ["Extracted doc"], (
+        f"the fold did not overwrite the provenance Source's title: {rows}")
     assert [r.get("url") for r in sdk.list_sources()] == [], (
         "a promoted node is metered as a document and leaves list_sources()"
     )
