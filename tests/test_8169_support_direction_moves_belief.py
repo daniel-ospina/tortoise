@@ -43,7 +43,7 @@ reverted — the counts are what the run printed, not what the design expects):
     module exists for: it is invisible to ``test_6151`` (which reads the same
     scalar) and to the weight test here, and only the belief assertions catch
     it. A module that could not fail on it would be re-testing `weights.py`.
-  * **the weight never leaves ``_collect_factors``** — replace
+  * **the weight never leaves ``_affected_factors``** — replace
     ``weight = compute_operator_weight(self.proj, op_id)`` with ``1.0``. Red:
     **6 failed, 0 passed.** (Both the weight test and the belief tests, because
     ``_affected_factors`` is the function that resolves the factor tuple the
@@ -177,7 +177,20 @@ def run_ep(sdk):
 
 
 def get_conf(result, point_id):
-    return result.get(point_id, 0.5)
+    """The settled posterior for ``point_id``, RAISED when EP wrote none.
+
+    ``run_ep`` returns only nodes whose ``confidence`` is non-null, so a `.get`
+    default here would hand a belief assertion a fabricated 0.5 in exactly the
+    case where the settle did not reach the claim — the "silently read 1.0"
+    defect `resolved_weight` above is written to refuse. Mirror it: raise.
+    """
+    if point_id not in result:
+        raise AssertionError(
+            f"EP settled no confidence for {point_id!r} — the propagation did not "
+            f"reach this claim, so the assertion has nothing to compare "
+            f"(settled ids: {sorted(result)[:8]}…, {len(result)} total)"
+        )
+    return result[point_id]
 
 
 def _impl_settled(rating):
@@ -260,7 +273,7 @@ class TestTheSupportDirectionMovesBelief:
 
         Failing state: the two runs settle the SAME confidence, because the
         resolved weight never reached ``tilted_moments``.
-        Mutation (RED): ``weight = 1.0`` in ``ep.py::_collect_factors`` — the
+        Mutation (RED): ``weight = 1.0`` in ``ep.py::_affected_factors`` — the
         weight reader (and ``test_6151``) stay green; this assertion does not.
         """
         _, support = _impl_settled(None)
@@ -291,7 +304,7 @@ class TestTheSupportDirectionMovesBelief:
 
         Measured here: the contested claim settles 0.1955 unrated and 0.5496
         with its IMPL rated at the best end. Mutation (RED): ``weight = 1.0``
-        in ``ep.py::_collect_factors`` — the two runs become identical.
+        in ``ep.py::_affected_factors`` — the two runs become identical.
         """
         contested = _contested_settled(False)
         reinforced = _contested_settled(True)
@@ -359,7 +372,7 @@ class TestTheBandIsAMagnitudeNotAPolarity:
         Reachable on this graph: the NAND's weight resolves 8.0 unrated,
         10.0 best-rated (the documented 1.25x, absorbed at the ceiling) and
         4.0 worst-rated.
-        Mutation (RED): ``weight = 1.0`` in ``ep.py::_collect_factors`` — all
+        Mutation (RED): ``weight = 1.0`` in ``ep.py::_affected_factors`` — all
         three readings collapse to the unrated posterior.
         """
         _, unrated = _nand_settled(None)

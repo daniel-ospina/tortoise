@@ -267,6 +267,14 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # teardown, so no lane leaks into a later docker-lane test.
     "test_6151_annotation_band.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
                                       r'monkeypatch\.setenv\s*\(\s*"TORTOISE_DB_URI"'],
+    # #8169: the SUPPORT direction's belief-level instrument — the same SHAPE as
+    # its two siblings above (a module-level live probe with a `finally` restore
+    # at import, plus a per-test fresh-URI fixture whose `monkeypatch.setenv`
+    # auto-restores at teardown), and the same reason the probe exists: the claim
+    # under test is the SETTLED posterior, which no pure-function test can
+    # observe. DELIBERATE_URI.
+    "test_8169_support_direction_moves_belief.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
+                                                   r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     # C3-1 #2567: docker-lane coverage-loop tests — module-level live probe
     # (set + restore) + per-test fresh-graph fixture (the test_entity_key_
     # expansion pattern; the monkeypatch.setenv is auto-restored).
