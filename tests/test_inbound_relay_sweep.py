@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -97,12 +98,20 @@ class FakeClient:
         fail_relay: bool = False,
         fail_listing: bool = False,
         fail_detail: bool = False,
+        fail_comment: bool = False,
+        fail_close: bool = False,
+        fail_label: bool = False,
     ) -> None:
         self._issues = issues or []
         self._pulls = pulls or []
         self.fail_relay = fail_relay
         self.fail_listing = fail_listing
         self.fail_detail = fail_detail
+        self.fail_comment = fail_comment
+        self.fail_close = fail_close
+        self.fail_label = fail_label
+        #: Set True to model a window denser than the page budget.
+        self.window_truncated = False
         self.calls: list[tuple[str, Any]] = []
         self.seen_stop_before: Any = None
 
@@ -135,12 +144,18 @@ class FakeClient:
 
     def add_label(self, number: int, label: str) -> None:
         self.calls.append(("label", number))
+        if self.fail_label:
+            raise RuntimeError("gh api labels failed (rc=1): rate limited")
 
     def comment(self, number: int, body: str) -> None:
         self.calls.append(("comment", number))
+        if self.fail_comment:
+            raise RuntimeError("gh api comments failed (rc=1): rate limited")
 
     def close(self, kind: str, number: int) -> None:
         self.calls.append(("close", number))
+        if self.fail_close:
+            raise RuntimeError("gh api PATCH failed (rc=1): 502")
 
     def mutations(self) -> list[tuple[str, Any]]:
         """Mutations only — a PR detail fetch is a read."""
@@ -228,10 +243,15 @@ def test_unrelayed_external_pr_is_relayed_then_closed(sweep: Any) -> None:
     assert report.relayed == [("pr", 9883)]
     assert client.mutations() == [
         ("intake", "pr-9883"),
-        ("label", 9883),
         ("comment", 9883),
         ("close", 9883),
-    ], "relay must land BEFORE the close — the record is why the close is safe"
+        ("label", 9883),
+    ], (
+        "relay must land BEFORE the close — the record is why the close is safe — "
+        "and the label must land LAST: it is the idempotence marker, so applying "
+        "it before the close makes a failed close invisible to every later run "
+        "(open + labelled = skipped forever, and nothing retries it)"
+    )
     assert report.failed == []
 
 
@@ -242,9 +262,9 @@ def test_external_issue_is_relayed_then_closed(sweep: Any) -> None:
     assert report.relayed == [("issue", 9913)]
     assert client.mutations() == [
         ("intake", "issue-9913"),
-        ("label", 9913),
         ("comment", 9913),
         ("close", 9913),
+        ("label", 9913),
     ]
 
 
@@ -289,6 +309,32 @@ def test_queue_batch_pull_request_is_never_touched(sweep: Any) -> None:
     )
     report = run(sweep, client)
 
+    assert report.relayed == []
+    assert client.mutations() == []
+
+
+def test_user_authored_same_repo_queue_branch_is_spared(sweep: Any) -> None:
+    """The queue-branch arm, which bot identity CANNOT cover.
+
+    Mergify's documented `draft_bot_account` opens the batch under a USER
+    account, so belt 2 (`user.type == 'Bot'`) does not fire and the head branch
+    is the only marker left. Every other same-repo `mergify/merge-queue/…` case
+    in this suite is bot-authored, and the bot arm returns FIRST — so all of
+    them stay green with this arm deleted. This is the case that goes red. The
+    event path spares the same shape (its belt 1 is author-agnostic), and the
+    parity test below pins that too.
+    """
+    batch = pull(
+        17,
+        author="some-user",
+        author_type="User",
+        head_ref="mergify/merge-queue/6e89cfe947",
+        head_repo=f"{OWNER}/tortoise",
+    )
+    client = FakeClient(pulls=[batch])
+    report = run(sweep, client)
+
+    assert sweep.should_relay(batch, config(sweep)) is False
     assert report.relayed == []
     assert client.mutations() == []
 
@@ -396,6 +442,75 @@ def test_failed_intake_post_leaves_the_item_open_and_unlabelled(sweep: Any) -> N
     assert report.exit_code == 1
 
 
+@pytest.mark.parametrize("failing_step", ["comment", "close"])
+def test_a_bookkeeping_failure_leaves_the_item_for_the_next_run(
+    sweep: Any, failing_step: str
+) -> None:
+    """A `gh` failure AFTER the intake POST must not escape `sweep()`.
+
+    The pre-fix code guarded only the intake POST: a `RuntimeError` from
+    `add_label` / `comment` / `close` propagated out of `sweep()`, `main()` had
+    no `try`, so the run died with a traceback before printing the report and
+    every remaining item was dropped. It also applied the LABEL before them,
+    which left the item OPEN + LABELLED — skipped by every later run and
+    retried by nothing (the event path only listens for `opened`).
+
+    This pins both halves at once: no exception escapes, the item is reported
+    as FAILED (so the run exits 1), and it was never labelled — so the next
+    15-minute run selects it again.
+    """
+    client = FakeClient(pulls=[pull(9883, author="Maiiiry")], **{f"fail_{failing_step}": True})
+    report = run(sweep, client)
+
+    assert report.relayed == []
+    assert [n for _, n in report.failed] == [9883]
+    assert report.exit_code == 1
+    assert ("label", 9883) not in client.mutations(), (
+        "the label is the idempotence marker: applying it before a successful "
+        "close leaves an open+labelled item that nothing retries"
+    )
+    assert any(failing_step in note for note in report.notes), report.notes
+    # …and the evidence that a later run would retry it: the decision still says
+    # "relay", and the label the sweep would have applied is absent.
+    assert sweep.should_relay(pull(9883, author="Maiiiry"), config(sweep)) is True
+
+
+def test_a_failed_label_is_reported_without_losing_the_rest_of_the_batch(
+    sweep: Any,
+) -> None:
+    """The last step failing must still report, and must not abort the batch."""
+    client = FakeClient(
+        issues=[issue(1), issue(2)], pulls=[pull(3, author="Maiiiry")], fail_label=True
+    )
+    report = run(sweep, client)
+
+    assert report.relayed == []
+    assert [n for _, n in report.failed] == [1, 2, 3]
+    assert report.exit_code == 1
+    # Every item still got its record, comment and close — the label failed for
+    # all three, and the run reported it instead of raising.
+    assert ("close", 3) in client.mutations()
+
+
+def test_a_dense_window_acts_on_the_prefix_and_defers_the_rest(sweep: Any) -> None:
+    """A flood must not be an off-switch for the control.
+
+    More items in the window than the page budget ⇒ the prefix is acted on and
+    the unread remainder is reported as deferred. Aborting the whole run (the
+    pre-fix behaviour: `ListingError` → `errors` → exit 2, no action) would let
+    any GitHub user disable the sweep by opening 1,000 issues in 24 h.
+    """
+    client = FakeClient(pulls=[pull(9883, author="Maiiiry")])
+    client.window_truncated = True
+    report = run(sweep, client)
+
+    assert report.relayed == [("pr", 9883)]
+    assert report.truncated is True
+    assert report.errors == []
+    assert report.exit_code == 0
+    assert any("deferred" in note for note in report.notes), report.notes
+
+
 def test_run_is_capped_and_reports_the_remainder(sweep: Any) -> None:
     client = FakeClient(issues=[issue(n) for n in range(1, 6)])
     report = run(sweep, client, max_actions=2)
@@ -424,6 +539,39 @@ def test_dry_run_performs_nothing(sweep: Any) -> None:
     assert report.exit_code == 0
 
 
+def test_dry_run_needs_no_intake_credential(sweep: Any) -> None:
+    """A dry run never POSTs, so it must not demand the secret it never uses.
+
+    Refusing here turns "show me the plan" into a red run on exactly the machine
+    where the credential is not configured.
+    """
+    client = FakeClient(pulls=[pull(9883, author="Maiiiry")])
+    cfg = sweep.Config(
+        repo=f"{OWNER}/tortoise",
+        owner=OWNER,
+        label=LABEL,
+        queue_prefixes=("mergify/merge-queue/",),
+        intake_url="",
+        intake_secret="",
+    )
+    report = sweep.sweep(client, cfg, now=NOW, since_hours=24, max_actions=20, dry_run=True)
+
+    assert report.relayed == [("pr", 9883)]
+    assert client.mutations() == []
+    assert report.errors == []
+    assert report.exit_code == 0
+
+
+def test_main_reports_a_crashing_sweep_instead_of_dying(sweep: Any, monkeypatch: Any) -> None:
+    """`main()` must render the failure — a traceback loses the whole report."""
+
+    def boom(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(sweep, "sweep", boom)
+    assert sweep.main(["--repo", f"{OWNER}/tortoise"]) == 2
+
+
 def test_missing_intake_configuration_takes_no_action(sweep: Any) -> None:
     """No URL or no secret is not a reason to close without a record."""
     client = FakeClient(pulls=[pull(9883)])
@@ -444,6 +592,26 @@ def test_missing_intake_configuration_takes_no_action(sweep: Any) -> None:
 # ── (iv) the two implementations of the policy cannot drift apart ────────────
 
 
+def _load_event_guard() -> Any:
+    """The event path's own suite, loaded BY PATH.
+
+    ⛔ Never `importorskip`. This cross-check is the ONLY thing keeping the sweep
+    and the event path from drifting apart, so a guard module that cannot be
+    loaded must FAIL the suite, never skip past the gate green (a rename, a
+    moved file or an `--import-mode=importlib` collection change would silently
+    delete the control). Loading by path also removes the dependency on pytest's
+    rootdir insertion.
+    """
+    path = REPO_ROOT / "tests" / "test_inbound_relay_guard.py"
+    spec = importlib.util.spec_from_file_location("test_inbound_relay_guard", path)
+    if spec is None or spec.loader is None:
+        pytest.fail(f"the sweep/event parity gate cannot load the guard from {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_policy_agrees_with_the_event_guard(sweep: Any) -> None:
     """The sweep's decision must equal the workflow's own job-level `if:`.
 
@@ -452,7 +620,7 @@ def test_policy_agrees_with_the_event_guard(sweep: Any) -> None:
     prefix, a second spared class) and the other does not, this fails — which
     is the only durable defence against two implementations of one policy.
     """
-    guard = pytest.importorskip("test_inbound_relay_guard")
+    guard = _load_event_guard()
 
     cases: list[tuple[str, dict[str, Any], dict[str, Any]]] = [
         (
@@ -472,6 +640,22 @@ def test_policy_agrees_with_the_event_guard(sweep: Any) -> None:
                 12,
                 author="mergify[bot]",
                 author_type="Bot",
+                head_ref="mergify/merge-queue/6e89cfe947",
+                head_repo=f"{OWNER}/tortoise",
+            ),
+        ),
+        (
+            # Mergify's `draft_bot_account`: the batch opened under a USER
+            # account, where only the queue-OWNED HEAD BRANCH is evidence.
+            "user-authored same-repo queue branch",
+            guard._event(
+                login="some-user",
+                head_ref="mergify/merge-queue/6e89cfe947",
+                head_repo=f"{OWNER}/tortoise",
+            ),
+            pull(
+                17,
+                author="some-user",
                 head_ref="mergify/merge-queue/6e89cfe947",
                 head_repo=f"{OWNER}/tortoise",
             ),
@@ -569,6 +753,67 @@ def test_sweep_workflow_is_scheduled_and_uses_the_same_label(sweep: Any) -> None
     assert sweep.OWNER == OWNER
 
 
+def test_the_workflow_never_checks_out_a_dispatched_ref(sweep: Any) -> None:
+    """A dispatch from an unmerged branch must not run that branch's tool.
+
+    `workflow_dispatch` honours the dispatched ref, so an unpinned
+    `actions/checkout` runs the branch's `tools/inbound_relay_sweep.py` AND
+    reads its `.mergify.yml` against the live repo — while holding
+    `issues: write`, `pull-requests: write` and the intake secret.
+    `persist-credentials: false` does not help: the step token is what makes the
+    mutations. A checkout step without `ref:` must fail here.
+    """
+    import yaml
+
+    doc = yaml.safe_load(SWEEP_WORKFLOW.read_text())
+    checkouts = [
+        step
+        for step in doc["jobs"]["sweep"]["steps"]
+        if str(step.get("uses") or "").startswith("actions/checkout")
+    ]
+    assert len(checkouts) == 1, checkouts
+    with_ = checkouts[0].get("with") or {}
+    assert with_.get("ref") == "${{ github.event.repository.default_branch }}", (
+        "the checkout must be PINNED to the default branch: an unpinned "
+        "checkout executes the DISPATCHED ref's tool against the live repo"
+    )
+    assert with_.get("persist-credentials") is False
+
+
+def test_a_manual_dispatch_defaults_to_inert(sweep: Any) -> None:
+    """A dispatch to INSPECT the live repo must not relay, comment and close."""
+    import yaml
+
+    doc = yaml.safe_load(SWEEP_WORKFLOW.read_text())
+    inputs = (doc[True]["workflow_dispatch"] or {}).get("inputs") or {}
+    assert inputs["dry_run"]["default"] == "true", (
+        "a silent live default turns 'show me the plan' into real closes"
+    )
+    # The schedule path passes no input, so `inputs.dry_run` is empty there —
+    # empty is not 'true', so the scheduled run still acts.
+    assert "inputs.dry_run == 'true'" in SWEEP_WORKFLOW.read_text()
+
+
+def test_the_workflow_pins_its_only_dependency_to_the_lockfile(sweep: Any) -> None:
+    """This job holds write tokens and the intake secret — no free-floating fetch."""
+    text = SWEEP_WORKFLOW.read_text()
+    installed = re.search(r"pip install[^\n]*?pyyaml([^\s\"']*)", text)
+    assert installed, "the workflow must install the queue-config reader"
+    spec = installed.group(1)
+    assert spec.startswith("=="), (
+        f"pyyaml is installed unpinned ({spec or 'no specifier'!r}) in the one job "
+        "that holds `issues: write` + `pull-requests: write` and the intake secret"
+    )
+    locked = re.search(
+        r'^name = "pyyaml"\nversion = "([^"]+)"', (REPO_ROOT / "uv.lock").read_text(), re.M
+    )
+    assert locked, "uv.lock no longer carries pyyaml"
+    assert spec == f"=={locked.group(1)}", (
+        f"the workflow pins pyyaml{spec} but the lockfile resolves "
+        f"{locked.group(1)} — bind the pin to the lockfile"
+    )
+
+
 # ── (vi) the real client's paging rails, on the live backlog's shape ─────────
 #
 # This repo has 1,202 open issues+pulls, so "walk every page or raise" would
@@ -619,14 +864,34 @@ def test_client_raises_on_a_failed_page(sweep: Any, monkeypatch: Any) -> None:
         client.list_open(stop_before=NOW - timedelta(hours=24))
 
 
-def test_client_raises_instead_of_truncating_a_huge_window(sweep: Any, monkeypatch: Any) -> None:
-    """If the window itself holds more than the page budget, refuse — never truncate."""
+def test_client_returns_the_prefix_instead_of_aborting_a_huge_window(
+    sweep: Any, monkeypatch: Any
+) -> None:
+    """A window denser than the page budget yields a PREFIX, not an abort.
+
+    The pre-fix client raised `ListingError` here, which `sweep()` turned into
+    `errors` → exit 2 with no action at all. Since any GitHub user can open
+    1,000 issues on a public repo, that made a flood an off-switch for the whole
+    control. A FAILED page still raises (the rail that is correct) — see
+    `test_client_raises_on_a_failed_page`.
+    """
     page = [issue(1000 - n, created=timedelta(minutes=n + 1)) for n in range(100)]
     _stub_gh(sweep, monkeypatch, {n: page for n in range(1, 30)})
 
     client = sweep.GhClient(f"{OWNER}/tortoise", max_pages=3)
-    with pytest.raises(sweep.ListingError):
-        client.list_open(stop_before=NOW - timedelta(hours=24))
+    got = client.list_open(stop_before=NOW - timedelta(hours=24))
+
+    assert len(got) == 300, "the pages already read must be returned, not discarded"
+    assert client.window_truncated is True
+    # The flag is per-listing, never sticky: a later run that fits the budget
+    # must not keep reporting a deferred remainder.
+    _stub_gh(
+        sweep,
+        monkeypatch,
+        {1: [issue(5, created=timedelta(minutes=5))]},
+    )
+    assert client.list_open(stop_before=NOW - timedelta(hours=24)) != []
+    assert client.window_truncated is False
 
 
 def test_queue_prefixes_are_read_from_the_live_config(sweep: Any) -> None:

@@ -38,15 +38,23 @@
 #
 # SAFETY
 # ------
-# * No PR code is ever checked out: `actions/checkout` takes the DEFAULT BRANCH
-#   (this is a schedule/dispatch run, so there is no PR context at all), and the
-#   relayed metadata is read over REST.
-# * `relay-then-close`: a failed intake POST leaves the item OPEN, unlabelled and
-#   uncommented for the next run, and reds this workflow — a dead intake is an
-#   alarm, never a silent "handled".
-# * An incomplete listing takes NO action (`exit 2`), `--max` bounds a run, and
-#   `--since-hours` bounds the window so a first run cannot reach into history.
-# * It closes and relays. It never merges, and it holds no merge permission.
+# * No PR code is ever checked out: `actions/checkout` is pinned to the
+#   DEFAULT BRANCH by an explicit `ref:`. It is not enough that `schedule` runs
+#   on the default branch — `workflow_dispatch` honours the dispatched ref
+#   (`gh workflow run --ref <branch>`, or the UI's "Use workflow from"), so an
+#   unpinned checkout would execute THAT branch's tool and read its
+#   `.mergify.yml` against the live repo while holding `issues: write`,
+#   `pull-requests: write` and the intake secret. Pinned by a test.
+# * `relay-then-close-then-label`: a failed intake POST (or a failed comment /
+#   close) leaves the item UNLABELLED, so the next run selects it again and
+#   reds this workflow — a dead intake is an alarm, never a silent "handled".
+#   The label is applied LAST because it is the idempotence marker.
+# * An INCOMPLETE listing (a failed page) takes NO action (`exit 2`), `--max`
+#   bounds a run, and `--since-hours` bounds the window so a first run cannot
+#   reach into history. A window holding more items than the page budget acts on
+#   the prefix and DEFERS the rest — a flood must not disable the control.
+# * A manual dispatch defaults to `dry_run=true` (inert): a maintainer running it
+#   to inspect the live repo must not relay, comment and close for real.
 
 name: "Inbound relay sweep — the converging half"
 
@@ -69,7 +77,10 @@ on:
       dry_run:
         description: "Print the plan and perform nothing (true/false)"
         required: false
-        default: "false"
+        # INERT BY DEFAULT: a maintainer dispatching this to INSPECT the live
+        # repo must not relay, comment and close for real. The schedule path
+        # passes nothing, so `inputs.dry_run` is empty there and the run is live.
+        default: "true"
 
 permissions:
   contents: read
@@ -88,9 +99,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Check out the default branch (never a PR head)
+      - name: Check out the default branch (never the dispatched ref)
         uses: actions/checkout@v4
         with:
+          # ⛔ PINNED. Without `ref:`, a `workflow_dispatch` from an unmerged
+          # branch checks THAT branch out and runs its `tools/inbound_relay_sweep.py`
+          # against the live repo, with `issues: write` + `pull-requests: write`
+          # and the intake secret in reach. `persist-credentials: false` does not
+          # help — the step token and the job's permissions are what the
+          # branch's code would use. Pinned by a test.
+          ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
 
       - name: Set up Python
@@ -101,10 +119,15 @@ jobs:
       # The queue-batch exclusion is read from `.mergify.yml`. The tool REFUSES
       # to act without it (an unreadable config must never be read as "no
       # prefix matches", which would close a queue batch — #5185).
+      #
+      # ⛔ PINNED, and pinned to the lockfile's resolved version: this job holds
+      # `issues: write` + `pull-requests: write` plus the intake secret, so a
+      # free-floating index fetch is a supply-chain surface. `tests/
+      # test_inbound_relay_sweep.py` binds this literal to `uv.lock`.
       - name: Install the one dependency (the queue config reader)
-        run: python -m pip install --disable-pip-version-check pyyaml
+        run: python -m pip install --disable-pip-version-check pyyaml==6.0.3
 
-      - name: "Sweep — relay, label, comment, close"
+      - name: "Sweep — relay, comment, close, label"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}

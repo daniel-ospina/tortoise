@@ -53,8 +53,8 @@ WHAT IT DOES — the same policy as the event path, not a second one
   queue-owned branch (`queue_branch_prefix`) → leave (#5185: closing a batch
                                                dequeues every merge in flight)
   bot-authored (any kind)                    → leave (below)
-  anything else                              → relay to intake, then label,
-                                               comment, close
+  anything else                              → relay to intake, then comment,
+                                               close, and LABEL LAST
 
 ⛔ BOT-AUTHORED ITEMS ARE SPARED, AND THAT IS DELIBERATELY SAFER THAN THE
 EVENT PATH'S PR BRANCH. Our own automation opens issues we must not destroy:
@@ -74,12 +74,22 @@ other fails the suite instead of silently closing the wrong class.
 
 SAFETY RAILS (each pinned by a test) — a sweeper is riskier than a per-event relay
 ---------------------------------------------------------------------------------
-  * RELAY-THEN-CLOSE. The intake POST happens first. If it fails, the item is
-    left OPEN, unlabelled and uncommented, so the next run retries it — and the
-    run exits 1, so a dead intake is an alarm rather than a silent "handled".
-  * COMPLETENESS. Every listing page must succeed. An unreadable page is not an
-    empty page: a partial read aborts the whole run BEFORE any mutation (exit 2).
-    This is the "never bulk-close on a rate-limited read" rule.
+  * RELAY-THEN-CLOSE-THEN-LABEL. The intake POST happens first and the LABEL is
+    applied LAST. The whole per-item sequence is guarded: if any step fails the
+    item is left UNLABELLED (so the next 15-minute run selects it again), the
+    failure is reported, the remaining items still run, and the run exits 1 — a
+    dead intake is an alarm rather than a silent "handled". Applying the label
+    before the close would invert this: the label is the idempotence marker, so
+    an open+labelled item is skipped by every later run and retried by nothing
+    (the event path only listens for `opened`).
+  * COMPLETENESS — a FAILED page aborts. An unreadable page is not an empty
+    page: a partial read (rate limit, transient 5xx, timeout) aborts the whole
+    run BEFORE any mutation (exit 2). This is the "never bulk-close on a
+    rate-limited read" rule.
+  * A DENSE WINDOW ⇒ A PREFIX, NOT AN ABORT. A window holding more items than
+    the page budget must not let a flood switch the control off (any GitHub user
+    can open 1,000 issues on a public repo): the pages already read are acted
+    on and the unread remainder is reported as DEFERRED to later runs.
   * NOT-CONFIGURED fails closed. No `INBOUND_URL` or no `INBOUND_SECRET_*` means
     the record cannot be written, so nothing is closed (exit 2).
   * A bounded WINDOW (`--since-hours`, default 24) and a bounded run
@@ -167,6 +177,9 @@ class Report:
     failed: list[tuple[str, int]] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     deferred: int = 0
+    #: The window held more items than the page budget: the prefix was acted on
+    #: and the unread remainder is deferred (never "nothing may be closed").
+    truncated: bool = False
     errors: list[str] = field(default_factory=list)
     dry_run: bool = False
 
@@ -316,7 +329,11 @@ def sweep(
 ) -> Report:
     report = Report(dry_run=dry_run)
 
-    if not cfg.intake_url or not cfg.intake_secret:
+    # A dry run never POSTs, so it must not demand the credential it does not
+    # use: demanding it turns "show me the plan" into a red run on exactly the
+    # machine where the secret is not configured (a maintainer inspecting the
+    # live repo).
+    if not dry_run and (not cfg.intake_url or not cfg.intake_secret):
         report.errors.append(
             "intake is not configured (INBOUND_URL / INBOUND_SECRET_GITHUB): "
             "nothing is closed without a record"
@@ -341,6 +358,16 @@ def sweep(
         report.errors.append(f"listing incomplete, no action taken: {exc}")
         return report
 
+    if getattr(client, "window_truncated", False):
+        # NOT an error: a dense window acts on the prefix it read. Aborting here
+        # would hand any flooder an off-switch for the whole control.
+        report.truncated = True
+        report.notes.append(
+            "the window holds more open items than the page budget: the pages "
+            "read were acted on below, and the UNREAD remainder is deferred to "
+            "later runs (a dense window must never disable the sweep)"
+        )
+
     selected = [item for item in items if should_relay(item, cfg)]
     # Oldest first: the longest-waiting item is the one whose absence hurts.
     selected.sort(key=_created_at)
@@ -354,15 +381,28 @@ def sweep(
         if dry_run:
             report.relayed.append((kind, number))
             continue
+        # ⛔ THE WHOLE SEQUENCE IS GUARDED, AND THE LABEL IS LAST. The label is
+        # the idempotence marker: applying it before the comment/close would
+        # mean a bookkeeping failure leaves the item OPEN AND LABELLED — skipped
+        # by every later run and retried by nothing (the event path only listens
+        # for `opened`). Applied last, any failure leaves the item unlabelled and
+        # therefore re-selectable, and `main()` still prints the report.
+        step = "intake POST"
         try:
             client.post_intake(intake_payload(item))
+            step = "comment"
+            client.comment(number, "\n".join(_COMMENT_PULL if kind == "pr" else _COMMENT_ISSUE))
+            step = "close"
+            client.close(kind, number)
+            step = "label"
+            client.add_label(number, cfg.label)
         except Exception as exc:
             report.failed.append((kind, number))
-            report.notes.append(f"{kind} #{number}: intake POST failed: {exc}")
+            report.notes.append(
+                f"{kind} #{number}: {step} failed (item left unlabelled so a "
+                f"later run retries it): {exc}"
+            )
             continue
-        client.add_label(number, cfg.label)
-        client.comment(number, "\n".join(_COMMENT_PULL if kind == "pr" else _COMMENT_ISSUE))
-        client.close(kind, number)
         report.relayed.append((kind, number))
 
     return report
@@ -392,15 +432,26 @@ class GhClient:
     repo has 1,202 open issues+pulls, so "walk every page or raise" would raise
     on every run and turn the sweep into a permanent no-op (the very defect it
     exists to repair).
+
+    A FAILED page raises (`ListingError`) — a transient `gh` failure is not an
+    empty page. A window holding more than the page budget does NOT raise: it
+    returns the prefix it read and sets `window_truncated`, so the caller acts
+    on what it saw and defers the rest. Raising there would let a flood of
+    >`max_pages * per_page` opened items in 24 h — which any GitHub user can
+    produce on a public repo — switch the control off permanently.
     """
 
     def __init__(self, repo: str, *, per_page: int = 100, max_pages: int = 10) -> None:
         self.repo = repo
         self.per_page = per_page
         self.max_pages = max_pages
+        #: True ⇔ the last listing stopped at the page budget with the window
+        #: possibly continuing past it (the unread remainder is deferred).
+        self.window_truncated = False
 
     def _paginate(self, path: str, *, stop_before: datetime | None = None) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
+        self.window_truncated = False
         # `path` may already carry a query (`?state=open`): a second `?` is a
         # 422 from the API, which the rail below correctly reads as "incomplete".
         separator = "&" if "?" in path else "?"
@@ -423,10 +474,11 @@ class GhClient:
             if stop_before is not None and chunk and _created_at(chunk[-1]) < stop_before:
                 # Newest-first: this page already reaches past the window.
                 return items
-        raise ListingError(
-            f"{path}: more than {self.max_pages * self.per_page} items newer than "
-            "the window — the listing is incomplete, so nothing may be closed"
-        )
+        # The page budget is exhausted with the window still possibly continuing.
+        # Return the PREFIX (never raise — see the class docstring) and let the
+        # caller report the remainder as deferred.
+        self.window_truncated = True
+        return items
 
     def list_open(self, *, stop_before: datetime | None = None) -> list[dict[str, Any]]:
         """Every open issue AND pull request, newest first, window-bounded.
@@ -574,24 +626,36 @@ def main(argv: list[str] | None = None) -> int:
         intake_url=os.environ.get("INBOUND_URL", ""),
         intake_secret=os.environ.get("INBOUND_SECRET_GITHUB", ""),
     )
-    report = sweep(
-        GhClient(args.repo),
-        cfg,
-        now=datetime.now(UTC),
-        since_hours=args.since_hours,
-        max_actions=args.max_actions,
-        dry_run=args.dry_run,
-    )
+    try:
+        report = sweep(
+            GhClient(args.repo),
+            cfg,
+            now=datetime.now(UTC),
+            since_hours=args.since_hours,
+            max_actions=args.max_actions,
+            dry_run=args.dry_run,
+        )
+    except Exception as exc:
+        # An escaping exception must still render as an error, not as a
+        # traceback with no report: the run is the alarm, and a traceback on a
+        # scheduled run tells a reader nothing about what was acted on.
+        print(f"error: the sweep could not complete: {exc}", file=sys.stderr)
+        return 2
 
     verb = "WOULD relay" if args.dry_run else "relayed"
     for kind, number in report.relayed:
         print(f"{verb} {kind} #{number}")
     for kind, number in report.failed:
-        print(f"FAILED   {kind} #{number} (left open and unlabelled)")
+        print(f"FAILED   {kind} #{number} (unlabelled — see note; a later run retries it)")
     for note in report.notes:
         print(f"note: {note}", file=sys.stderr)
     if report.deferred:
         print(f"deferred {report.deferred} item(s) past --max={args.max_actions}")
+    if report.truncated:
+        print(
+            "deferred: the unread remainder of the window (the page budget was "
+            "exhausted; later runs continue from the next window)"
+        )
     for error in report.errors:
         print(f"error: {error}", file=sys.stderr)
     print(
