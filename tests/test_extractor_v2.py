@@ -2236,6 +2236,34 @@ class TestS5:
             "a participant name was minted from a re-spelling of itself")
         assert any("NOT minted" in w and "ENTITY" in w for w in r["warnings"])
 
+    def test_point_quote_cap_matches_its_mirrors(self):
+        """#2684: `_MAX_QUOTE` is one cap enforced at three layers, and only the
+        extraction layer derives it from this constant.
+
+        `extractor_v2` truncates with it (the point's own `quote` at `:7383`,
+        the probe/anchor forms at `:7727`/`:7736`/`:7741`); `commit_schema`
+        DECLARES the same bound as `Point.quote`'s `max_length` (it must not
+        import this module — the dependency runs the other way); and `sdk.py`'s
+        ingest validator refuses a longer quote with the literal `200`
+        ("provenance quote cap, v3.6 #11").
+
+        The `commit_schema` side is pinned here because raising this constant
+        ALONE stamps quotes the commit boundary then REJECTS — the whole-session
+        payload-loss class #5060 exists to prevent — and `_stamp_inputs` in the
+        #2684 census imports the constant, so a raise moves the census's pinned
+        `(0, 200)` in the SAME direction as the cap (it would not catch this).
+        Same shape as the `_MAX_CONTENT`/`vet_gate` mirror pin beside this one.
+        """
+        from tortoise import commit_schema
+        quote_field = commit_schema.Point.model_fields["quote"]
+        limits = [m.max_length for m in quote_field.metadata
+                  if getattr(m, "max_length", None) is not None]
+        assert limits == [v2._MAX_QUOTE], (
+            f"commit_schema.Point.quote accepts {limits}, extractor_v2 stamps "
+            f"{v2._MAX_QUOTE} — a quote longer than the field's max_length is "
+            "REJECTED at the commit boundary, losing the whole session payload; "
+            "raise both or neither")
+
     def test_endpoint_content_cap_matches_vet_gate(self):
         """#5069: the mint's key, the emit-path content keys and
         ``vet_gate._MAX_CONTENT`` all truncate at the same boundary. The two

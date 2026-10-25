@@ -3354,13 +3354,13 @@ def _norm_kind(k: str) -> str:
 _MAX_CONTENT = 1000
 
 #: The point-QUOTE cap — distinct from ``_MAX_CONTENT`` (the identity cap) and
-#: from a summary's 2000. Every site that stores a point's ``quote`` truncates
-#: with it, so the cap is single-sourced rather than repeated as a bare ``200``
-#: literal at each site. That matters because a MEASUREMENT mirror may not hold
-#: its own copy: ``tests/eval/write_path/test_value_span_census_2684.py``
-#: (``_stamp_inputs``) reproduces production's clamped inputs, and while it
-#: carried its own ``[:200]`` a change to this cap would have left the census
-#: green and reporting addresses production never writes (#2684 review P1).
+#: from a summary's 2000. Every site in THIS module that stores a point's
+#: ``quote`` truncates with it; the #2684 census imports it rather than holding
+#: its own ``[:200]``. ⛔ NOT single-sourced throughout: ``commit_schema``
+#: declares the same bound as ``Point.quote``'s ``max_length`` and ``sdk.py``'s
+#: ingest door refuses ``len(quote) > 200`` — raise this alone and the commit
+#: boundary drops the WHOLE session payload (#5060); the pair is pinned by
+#: ``test_point_quote_cap_matches_its_mirrors``.
 _MAX_QUOTE = 200
 
 

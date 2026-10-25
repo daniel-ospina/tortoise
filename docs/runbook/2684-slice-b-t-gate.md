@@ -216,6 +216,23 @@ collapsed 2}`), so the four numbers above are re-derived rather than quoted: a
 lane that switches the grouping back to the receipt's field gets a red on the
 counts themselves, not merely on the divergence.
 
+⛔ **And both quotes are the COMMITTED ones, not the receipt's raw strings** —
+§2.1's rule one field over. The write path rewrites a point's `quote` to
+`[:_MAX_QUOTE]` at that point's own commit (`extractor_v2.py:7383`, carried into
+`pt_entry` at `:7493`) and `_same_fact` compares the committed hit
+(`retrieval.py:2407-2408`), so the census reads its quotes through
+`_stamp_inputs` — the same clamp the span half applies. The population differs on
+**3 of the 217 points** (exactly the three carrying a >200-char quote) and
+**every published count is clamp-invariant on it**: the table above
+(41/24/1/2 and 11/8/0/1) and the advisory reading (43/26/1/2) reproduce
+byte-identically with the clamped quotes, so the four/seven numbers are
+unaffected while the INPUTS are now the ones a package holds. That invariance is
+why the pin is synthetic rather than corpus-shaped:
+`test_the_dedupe_leg_reads_the_COMMITTED_quote_not_the_raw_receipt` drives one
+constructed pair whose raw and committed readings DIVERGE (a value token in the
+truncated tail), so a revert to the raw field reds instead of staying green on a
+corpus that cannot tell the two apart.
+
 **The one decisive pair is `wp07_bluepeak_followup`/narrative, turn 14**: a
 value-bearing point paired with a strict SUB-quote that carries no value, at quote
 overlap **1.00**. Delete `if _pkg_differ_value_critical(qa, qb): return False`
@@ -330,7 +347,7 @@ operators/NANDs, so it measures a raw-content baseline, not Tortoise.
 # suite's session gate requires a DB URI by default):
 TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest \
     tests/eval/write_path/test_value_span_census_2684.py -q -p no:cacheprovider
-# 8 passed
+# 12 passed
 
 # the mechanism's own unit pins:
 TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_extractor_v2.py \

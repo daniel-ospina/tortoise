@@ -23,14 +23,14 @@ The T's per-question leg is *"the value-bearing evidence is verbatim-present"*
   ``_value_verbatim_span``, called in the SHIPPED ORDER (resolve, then stamp
   against the resolved turn). **The two stamp-side inputs are the ones
   production hands it** — content clamped to ``_MAX_CONTENT`` and the quote to
-  200 chars (``extractor_v2.py:7340`` / ``:7373``), while the resolver gets the
-  raw point (``:7478``). See ``_stamp_inputs``.
+  200 chars (``extractor_v2.py:7350`` / ``:7383``), while the resolver gets the
+  raw point (``:7488``). See ``_stamp_inputs``.
 
 ⛔ **The resolver is not optional in this census.** The receipt's
 ``source_turn_id`` is the model's ADVISORY index; the write path resolves the
 turn from the quote first and never lets a wrong model index win
-(``_resolve_source_turn`` docstring; call site ``extractor_v2.py:7478`` →
-``:7494``). Passing the receipt field straight through measures a population
+(``_resolve_source_turn`` docstring; call site ``extractor_v2.py:7488`` →
+``:7504``). Passing the receipt field straight through measures a population
 production never produces *and* never fires the resolver's own E3 anchor
 warning — it under-counts ``no_turn`` and over-counts ``band`` (measured: 3
 points, all ``wp06_quarry_rollout``/``narrative``, which the resolver reports
@@ -199,7 +199,7 @@ def _edus(session: str) -> list[dict]:
     ``_resolve_source_turn`` — "position and value can diverge"). A hand-rolled
     copy keeps the empty turns, so its list is LONGER and the divergence lands
     on the resolver's in-range bound, ``0 <= model_idx < len(edus)``
-    (``extractor_v2.py:6878``): a model index that fell inside the hand-rolled
+    (``extractor_v2.py:6888``): a model index that fell inside the hand-rolled
     list can fall outside production's, so the resolved ``turn_idx`` differs for
     exactly those points. That flips them between ``no_turn`` (``turn_idx is
     None``) and ``band``/``valuefree_quote``, changes which warning variant an
@@ -245,6 +245,20 @@ def _stamp_inputs(point: dict) -> tuple[str, str]:
     content = str(point.get("content") or "").strip()[:v2._MAX_CONTENT]
     quote = str(point.get("quote") or "").strip()[:v2._MAX_QUOTE]
     return content, quote
+
+
+def _stamp_quote(point: dict) -> str:
+    """The ``quote`` production COMMITS for this point — ``_stamp_inputs``' quote half.
+
+    The dedupe half reads quotes too, and ``retrieval._same_fact`` compares the
+    COMMITTED hit (``retrieval.py:2403-2405``: ``qa = str(a.get("quote") or
+    "")``), i.e. after ``extractor_v2`` rewrote the field to
+    ``[:_MAX_QUOTE]`` at the point's own commit (``:7383``). Reading the raw
+    receipt string here would measure a population no package holds — the same
+    defect §2.1 and §2.3 each corrected once already (advisory turn index, raw
+    span inputs), one field over.
+    """
+    return _stamp_inputs(point)[1]
 
 
 def _absence_class(turn_idx: int | None, quote: str,
@@ -430,7 +444,7 @@ def test_the_census_resolves_the_turn_the_way_the_write_path_does():
     """The census must not measure a population production never produces.
 
     The write path resolves the source turn from the quote BEFORE stamping
-    (``extractor_v2.py:7478`` → ``:7494``), and the receipt's
+    (``extractor_v2.py:7488`` → ``:7504``), and the receipt's
     ``source_turn_id`` is only the model's ADVISORY index. Reading that field
     straight through puts three ``wp06_quarry_rollout``/``narrative`` points on
     turns the resolver refuses (quote-overlap < 0.6), which (a) hides the
@@ -684,6 +698,14 @@ NEAR_DUPE_VALUE_CONFLICTS_PER_ARM = 0
 #: ``_same_fact`` compares the committed field. Grouping by the advisory index
 #: measures a population no package holds.
 #:
+#: ⛔ And the QUOTES are the committed ones too (``_stamp_quote``) —
+#: ``_same_fact`` reads the hit's ``quote``, which the write path already
+#: truncated to ``_MAX_QUOTE`` at the point's own commit. The sealed corpus is
+#: clamp-INVARIANT here (3 of the 217 points carry a longer quote and none of
+#: them moves a counter), so this cannot be a corpus-shaped pin: the synthetic
+#: pair in ``test_the_dedupe_leg_reads_the_COMMITTED_quote_not_the_raw_receipt``
+#: is where the two readings diverge and a revert reds.
+#:
 #: ⛔ ``value_guard_decisive = 1`` — the corpus DOES carry evidence that the
 #: quote-value guard prevents a value loss: ``wp07_bluepeak_followup``/narrative
 #: turn 14 pairs a value-bearing point against a strict SUB-quote that carries no
@@ -727,7 +749,7 @@ def _resolved_turn_key(point: dict, edus: list[dict]) -> str:
 
     ⛔ Not the receipt's own ``source_turn_id``. That field is the S2 model's
     ADVISORY index; production overwrites it with ``_resolve_source_turn``'s
-    answer before the point is committed (``extractor_v2.py:7478`` → ``:7485``),
+    answer before the point is committed (``extractor_v2.py:7488`` → ``:7495``),
     and ``_same_fact`` groups on the committed field
     (``retrieval.py:2403-2405``). Same defect class as §2.1's, one leg over —
     grouping by the advisory index counts pairs production never forms."""
@@ -735,6 +757,40 @@ def _resolved_turn_key(point: dict, edus: list[dict]) -> str:
     return _pkg_turn_key({"source_turn_id":
                           v2._resolve_source_turn(point, edus,
                                                   warnings=warnings)})
+
+
+def _dedupe_acc() -> dict:
+    """The four-field counter §2.3 publishes for the same-source-turn route."""
+    return {"consulted": 0, "value_flagged": 0,
+            "value_guard_decisive": 0, "collapsed": 0}
+
+
+def _same_turn_route(acc: dict, a: dict, b: dict, edus: list[dict]) -> None:
+    """``retrieval._same_fact``'s SAME-SOURCE-TURN route, applied to one PAIR.
+
+    ⛔ Both quotes are the ones production COMMITS (``_stamp_quote``), not the
+    receipt's raw strings: ``_same_fact`` compares the committed hit
+    (``retrieval.py:2403-2405``), which the write path already rewrote to
+    ``[:_MAX_QUOTE]``. On the sealed corpus the published counts are
+    clamp-invariant (3 points carry a longer quote, none of them moves a
+    counter), so a corpus-shaped pin cannot tell the two readings apart — this
+    function is module-level precisely so
+    ``test_the_dedupe_leg_reads_the_COMMITTED_quote_not_the_raw_receipt`` can
+    drive it with a pair where they DIFFER.
+    """
+    at = _resolved_turn_key(a, edus)
+    qa = _stamp_quote(a)
+    qb = _stamp_quote(b)
+    if not (at and at == _resolved_turn_key(b, edus) and qa and qb):
+        return
+    acc["consulted"] += 1
+    passes_overlap = _pkg_overlap(qa, qb) >= DEFAULT_PACKAGE_SAME_TURN_OVERLAP
+    if _pkg_differ_value_critical(qa, qb):
+        acc["value_flagged"] += 1
+        if passes_overlap:          # the guard CHANGED this outcome
+            acc["value_guard_decisive"] += 1
+    elif passes_overlap:
+        acc["collapsed"] += 1
 
 
 def test_the_dedupe_leg_is_measured_on_BOTH_legs():
@@ -769,30 +825,14 @@ def test_the_dedupe_leg_is_measured_on_BOTH_legs():
     pairs = near_dupe = conflicts = 0
     all_pairs = all_near_dupe = 0
     pooled_pairs = pooled_near_dupe = 0
-    same_turn = {"consulted": 0, "value_flagged": 0,
-                 "value_guard_decisive": 0, "collapsed": 0}
-    same_turn_vb = dict(same_turn)
+    same_turn = _dedupe_acc()
+    same_turn_vb = _dedupe_acc()
     # The ADVISORY-key reading (``ADVISORY_KEY_DEDUPE``): the same measurement
     # grouped on the receipt's field, counted with all four fields so runbook
     # §2.3's published table is RE-DERIVED, and pinned by equality so a lane
     # that switches the grouping back to the receipt's field gets a red instead
     # of a quiet re-measure.
-    same_turn_advisory = dict(same_turn)
-
-    def _same_turn(acc: dict, a: dict, b: dict, edus: list[dict]) -> None:
-        at = _resolved_turn_key(a, edus)
-        qa = str(a.get("quote") or "")
-        qb = str(b.get("quote") or "")
-        if not (at and at == _resolved_turn_key(b, edus) and qa and qb):
-            return
-        acc["consulted"] += 1
-        passes_overlap = _pkg_overlap(qa, qb) >= DEFAULT_PACKAGE_SAME_TURN_OVERLAP
-        if _pkg_differ_value_critical(qa, qb):
-            acc["value_flagged"] += 1
-            if passes_overlap:          # the guard CHANGED this outcome
-                acc["value_guard_decisive"] += 1
-        elif passes_overlap:
-            acc["collapsed"] += 1
+    same_turn_advisory = _dedupe_acc()
 
     for session in SESSIONS:
         edus = _edus(session)
@@ -800,17 +840,17 @@ def test_the_dedupe_leg_is_measured_on_BOTH_legs():
             for a, b in itertools.combinations(_points(session, arm), 2):
                 # content-ratio zero over the population dedupe actually sees
                 all_pairs += 1
-                if _pkg_overlap(a.get("content") or "",
-                                b.get("content") or "") >= DEFAULT_PACKAGE_VERBATIM_OVERLAP:
+                if _pkg_overlap(_stamp_inputs(a)[0],
+                                _stamp_inputs(b)[0]) >= DEFAULT_PACKAGE_VERBATIM_OVERLAP:
                     all_near_dupe += 1
-                _same_turn(same_turn, a, b, edus)
+                _same_turn_route(same_turn, a, b, edus)
                 # advisory-key reading: same pairs, WRONG key — all FOUR
                 # fields, so the numbers §2.3 publishes are re-derived (a
                 # consulted-only counter cannot fail: every other field stays
                 # 0, and "advisory != resolved" then holds for any count).
                 at, bt = _pkg_turn_key(a), _pkg_turn_key(b)
-                qa = str(a.get("quote") or "")
-                qb = str(b.get("quote") or "")
+                qa = _stamp_quote(a)
+                qb = _stamp_quote(b)
                 if at and at == bt and qa and qb:
                     same_turn_advisory["consulted"] += 1
                     adv_passes = (_pkg_overlap(qa, qb)
@@ -824,12 +864,12 @@ def test_the_dedupe_leg_is_measured_on_BOTH_legs():
             points = _value_bearing_points(session, arm)
             for a, b in itertools.combinations(points, 2):
                 pairs += 1
-                _same_turn(same_turn_vb, a, b, edus)
-                if _pkg_overlap(a.get("content") or "",
-                                b.get("content") or "") >= DEFAULT_PACKAGE_VERBATIM_OVERLAP:
+                _same_turn_route(same_turn_vb, a, b, edus)
+                if _pkg_overlap(_stamp_inputs(a)[0],
+                                _stamp_inputs(b)[0]) >= DEFAULT_PACKAGE_VERBATIM_OVERLAP:
                     near_dupe += 1
-                    if _pkg_differ_value_critical(a.get("content") or "",
-                                                  b.get("content") or ""):
+                    if _pkg_differ_value_critical(_stamp_inputs(a)[0],
+                                                  _stamp_inputs(b)[0]):
                         conflicts += 1
         pooled = [p for arm in ARMS for p in _value_bearing_points(session, arm)]
         for a, b in itertools.combinations(pooled, 2):
@@ -885,6 +925,52 @@ def test_the_dedupe_leg_is_measured_on_BOTH_legs():
         f"pooling the two arms produced no "
         f"≥{DEFAULT_PACKAGE_VERBATIM_OVERLAP} pair — the universe note in "
         f"§2.3 (pooled pairs={pooled_pairs}) no longer holds")
+
+
+def test_the_dedupe_leg_reads_the_COMMITTED_quote_not_the_raw_receipt(monkeypatch):
+    """The dedupe half's two quotes are the COMMITTED ones, and this pair proves it.
+
+    ⛔ The sealed corpus cannot discriminate a clamped quote from a raw one:
+    the published counts are clamp-invariant on it (3 of the 217 points carry a
+    >``_MAX_QUOTE``-char quote and none of them moves a counter), so a
+    corpus-shaped pin stays GREEN on a revert to ``str(hit.get("quote"))`` — a
+    guard that cannot fail. This pair is constructed to differ: the same 200
+    characters on both sides, plus a value token that production's
+    ``[:_MAX_QUOTE]`` truncates away.
+
+    Committed reading (what the census must do): the two quotes are IDENTICAL,
+    the overlap clears the threshold, nothing fact-critical differs →
+    ``collapsed``. Raw reading (what the census used to do): the tail survives,
+    ``300`` is a fact-critical symmetric-difference token, the guard is
+    consulted and becomes DECISIVE — a different outcome on the same pair, which
+    is exactly what makes this pin non-vacuous.
+    """
+    base = ("quarry rollout proceeds as described while handlers discuss the "
+            "rollout openly " * 6)[:v2._MAX_QUOTE]
+    assert len(base) == v2._MAX_QUOTE, len(base)
+    edus = [{"index": 7, "text": base + " 300"}]
+    a = {"content": base, "quote": base + " 300", "source_turn_id": 7}
+    b = {"content": base, "quote": base, "source_turn_id": 7}
+
+    committed = _dedupe_acc()
+    _same_turn_route(committed, a, b, edus)
+    assert committed == {"consulted": 1, "value_flagged": 0,
+                         "value_guard_decisive": 0, "collapsed": 1}, (
+        f"the route did not read the COMMITTED quote: {committed} — production "
+        f"commits quote[:_MAX_QUOTE] (extractor_v2.py:7383), so the pair is a "
+        "collapse, not a value conflict")
+
+    # … and the SAME pair read the way this file used to read it, to show the
+    # substitution is what produces the difference (not the synthetic data).
+    monkeypatch.setitem(globals(), "_stamp_quote",
+                        lambda p: str(p.get("quote") or ""))
+    raw = _dedupe_acc()
+    _same_turn_route(raw, a, b, edus)
+    assert raw == {"consulted": 1, "value_flagged": 1,
+                   "value_guard_decisive": 1, "collapsed": 0}, (
+        f"the raw-receipt reading was expected to see a value conflict and did "
+        f"not: {raw} — the synthetic pair no longer discriminates, so this pin "
+        "proves nothing and must be rebuilt")
 
 
 # ── the relaxation a future lane will reach for — MEASURED ON BOTH READINGS ─
@@ -994,3 +1080,116 @@ def _longest_quote_run(turn: str, quote: str):
             if span is not None and v2._carries_value(turn[span[0]:span[1]]):
                 return (span, frag, turn[span[0]:span[1]])
     return None
+
+
+# ── the numbers THIS file publishes, resolved at the head it publishes them at ─
+#
+# ⛔ A `file:line` in a durable artifact is only safe if something re-derives it
+# on every insertion above it. This PR's own `_MAX_QUOTE` block moved every
+# `extractor_v2.py` cite below it by +10, and the numbers this file publishes
+# were the ones that did NOT move with it: the census's docstrings kept pointing
+# ten lines above the code they name, while `_stamp_inputs`' docstring (updated
+# by the same commit) pointed at the right ones — one file, two answers, and no
+# leg reading either. The 7949 bundle's sweep (`tests/test_7949_capstone_measure
+# .py::_bundle_sweep`) is row-scoped to the `#7949` index row and does not read
+# this file, so the pin lives here, beside the cites it holds.
+#
+# The pin is a MAPPING, not an assertion about the code: each published number
+# is paired with the line it must name, so the two move together. Every
+# FILE-QUALIFIED cite in this file must be in the mapping (an unlisted one is
+# unverified, so it reds like the 7949 sweep's `assert not unmatched`), and every
+# mapped line must still carry its symbol — a production insertion above these
+# lines reds until the numbers are re-derived, and a cite edited without
+# re-deriving reds too. That is the contract, not an inconvenience.
+_PUBLISHED_CITES = {
+    7350: ("content = _raw_content[:_MAX_CONTENT]", "the content clamp"),
+    7383: ('quote = str(p.get("quote") or "").strip()[:_MAX_QUOTE]',
+           "the quote clamp, at the point's own commit"),
+    6888: ("if type(model_idx) is int and 0 <= model_idx < len(edus):",
+           "the resolver's in-range bound"),
+    7488: ("turn_idx = _resolve_source_turn(p, edus, warnings=warnings)",
+           "the resolver call"),
+    7489: ("pt_entry = {", "the point entry the span is stamped into"),
+    7495: ('"source_turn_id": turn_idx,',
+           "the resolved turn the point COMMITS"),
+    7496: ("}", "the end of the point entry"),
+    7504: ("_span = _value_verbatim_span(content, quote, turn_idx, edus,",
+           "the stamp itself"),
+}
+
+#: The value-free gate `_value_verbatim_span` applies, published by the two
+#: artifacts this PR adds (they disagreed about it: the index row said
+#: `:3603-3604`, which is prose INSIDE the same docstring, while the runbook said
+#: `:3613-3614`). One site, three readers — so all three are pinned together.
+_VALUE_FREE_GATE = (3613, "if not _carries_value(content, quote):")
+
+
+def test_every_extractor_v2_cite_this_file_publishes_resolves_at_this_head():
+    """Each published ``extractor_v2.py`` number → the line it names, and back.
+
+    Non-vacuity: moving a number in this file's own prose (or inserting lines
+    above it in `extractor_v2.py`) reds — the mapping is the tripwire, and it is
+    the reason a future lane cannot re-stale these sites silently. An
+    UNLISTED file-qualified cite reds as unverified, so the pin cannot be
+    outgrown by adding a cite beside it.
+    """
+    text = Path(__file__).read_text(encoding="utf-8")
+    lines = (WRITE_PATH.resolve().parents[2] / "tortoise/extractor_v2.py") \
+        .read_text(encoding="utf-8").splitlines()
+
+    published = {int(n) for n in re.findall(r"extractor_v2\.py:(\d+)", text)}
+    # … and any bare continuation (``→ `:7495` ``, or a range end like
+    # ``:7489-7496``) counts as PUBLISHED, so a mapped number is not orphaned
+    # merely because its file is named once.
+    for start, end in re.findall(r":(\d{4,5})(?:-(\d{4,5}))?", text):
+        published.add(int(start))
+        if end:
+            published.add(int(end))
+    unswept = sorted({int(n) for n in
+                      re.findall(r"extractor_v2\.py:(\d+)", text)}
+                     - set(_PUBLISHED_CITES))
+    assert not unswept, (
+        "this file publishes a file-qualified extractor_v2.py cite that this pin "
+        "does not hold, so nothing verifies it — add it to _PUBLISHED_CITES "
+        f"with the line it must name: {unswept}")
+    orphaned = sorted(set(_PUBLISHED_CITES) - published)
+    assert not orphaned, (
+        "_PUBLISHED_CITES holds numbers this file no longer publishes — the pin "
+        f"would cover a cite nobody reads: {orphaned}")
+
+    stale = []
+    for number, (expected, label) in sorted(_PUBLISHED_CITES.items()):
+        got = lines[number - 1].strip()
+        if got != expected:
+            stale.append(f"extractor_v2.py:{number} ({label}) reads {got!r}, "
+                         f"not {expected!r}")
+    assert not stale, (
+        "the cites this census publishes point at lines that no longer carry "
+        "the code they name — re-derive the numbers (the symbol is "
+        "authoritative, the line is a convenience) and update the prose with "
+        "them:\n  " + "\n  ".join(stale))
+
+
+def test_the_value_free_gate_cite_agrees_across_the_index_row_and_the_runbook():
+    """The index row and the runbook must publish the SAME line for one gate.
+
+    They did not: `docs/00_index.md`'s `#2684` row said `:3603-3604` (prose in
+    the docstring) while §6 of the runbook said `:3613-3614` (the gate). A
+    summary that contradicts the document it summarises is the failure mode the
+    bundle's cite convention exists to prevent, and nothing read either.
+    """
+    number, expected = _VALUE_FREE_GATE
+    repo = WRITE_PATH.resolve().parents[2]
+    lines = (repo / "tortoise/extractor_v2.py").read_text(encoding="utf-8") \
+        .splitlines()
+    assert lines[number - 1].strip() == expected, (
+        f"extractor_v2.py:{number} reads {lines[number - 1].strip()!r}, not "
+        f"{expected!r} — re-derive the gate's line and update both artifacts")
+
+    cite = f"extractor_v2.py:{number}-{number + 1}"
+    for name in ("docs/00_index.md", "docs/runbook/2684-slice-b-t-gate.md"):
+        body = (repo / name).read_text(encoding="utf-8")
+        assert cite in body, (
+            f"{name} no longer publishes `{cite}` for the value-free gate — "
+            "the two artifacts must name the same site, and a stale number here "
+            "is a number nothing can self-detect")
