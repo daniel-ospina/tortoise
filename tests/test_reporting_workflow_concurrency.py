@@ -2144,14 +2144,18 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
     # `pull-requests: read` was the whole requirement until #5120, on the reading
     # that `issues: write` covers `issues.createComment`. MEASURED, 2026-10-25 (run
     # 40154972406, `main @ 0cbeb1918`): the job's token DID hold `Issues: write` —
-    # the runner prints the granted scopes — and `issues.createComment` on the
-    # merged PULL REQUEST still answered "Resource not accessible by integration".
-    # A PR conversation is governed by the `pull-requests` scope for an App
-    # installation token, so `read` runs the attribution lookup and then 403s at
-    # the comment. The notification had never posted once: the step shipped with
-    # this workflow (c72c66be2) and was first reached on 2026-10-25. `write`
-    # implies `read`, so either level satisfies the lookup and only `write` can
-    # satisfy the comment — the requirement is on the SUBSTANCE, not the spelling.
+    # the runner prints the granted scopes — and the notification still answered
+    # "Resource not accessible by integration". ⚠️ What is NOT established is the
+    # MECHANISM: the old step wrapped `issues.listComments` AND
+    # `issues.createComment` in ONE catch, so the log does not record which call
+    # 403'd, and GitHub's own contract for POST /issues/{n}/comments lists "Issues
+    # (write)" as sufficient ("at least one of: Issues write, Pull requests
+    # write", docs.github.com/en/rest/issues/comments). The measurement and the doc
+    # reading disagree, so this pin requires the scope the measurement says was
+    # missing and does NOT pretend to know which of the two is redundant: the
+    # reporter names the failing call and its status, and the first successful
+    # comment on a real PR is what settles it. `write` implies `read`, so either
+    # level satisfies the attribution lookup and only `write` can satisfy a comment.
     missing = [
         f"{scope}: {level}"
         for scope, level in (
@@ -2177,6 +2181,110 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
             "`issues.createComment` 403s without the scope the endpoint actually "
             "reads on a pull request, so a lint-red main is reported into a run "
             "nobody sees"
+        )
+    # The VERDICT must be PUBLISHED, not inferred (#5120). This runs LAST so the
+    # checks above name their own defects first, and it is keyed on the lint
+    # step's id — the same id the notifier pin uses.
+    if isinstance(job, dict):
+        lint_id = next(
+            (
+                step.get("id")
+                for step in (job.get("steps") or [])
+                if isinstance(step, dict)
+                and isinstance(step.get("run"), str)
+                and "ruff check" in step["run"]
+            ),
+            None,
+        )
+        if isinstance(lint_id, str) and lint_id:
+            verdict_problem = _verdict_step_problem(job, lint_id)
+            if verdict_problem is not None:
+                return verdict_problem
+    return None
+
+
+_OUTCOME_REF = re.compile(
+    r"\$\{\{\s*steps\.([A-Za-z0-9_.-]+)\.(?:outcome|conclusion)\s*\}\}"
+)
+_NONZERO_EXIT = re.compile(r"\bexit\s+[1-9]\d*\b")
+
+
+def _verdict_step_problem(job: dict, lint_id: str) -> str | None:
+    """Why the job does not PUBLISH a readable verdict, or ``None``.
+
+    #5120: `main`'s lint check was red with three annotations and no readable
+    verdict, so the only way to answer "did the lint pass?" was to reason about
+    `Process completed with exit code 1` — the same shape in which "the lint step
+    never ran at all" finishes GREEN behind an annotation nobody reads. The remedy
+    is a step that NAMES the verdict as an annotation AND a step summary.
+
+    That step is invisible to every other check in this module: it reads the lint
+    outcome through `env:` (an `if:` would make it the second step keyed on
+    `steps.<id>.outcome`, which the notification pin above rejects), so before this
+    pin DELETING it, disabling it with `if: false`, silencing it with
+    `continue-on-error: true`, blanking its summary, and making its default arm
+    green ALL left this module GREEN while restoring the defect it forbids. Each is
+    a mutant in `_STARVED_SHAPES`.
+    """
+    def reads_the_outcome(step: dict) -> bool:
+        env = step.get("env")
+        if not isinstance(env, dict):
+            return False
+        return any(
+            reference == lint_id
+            for value in env.values()
+            for reference in _OUTCOME_REF.findall(str(value))
+        )
+
+    steps = [step for step in (job.get("steps") or []) if isinstance(step, dict)]
+    verdicts = [step for step in steps if reads_the_outcome(step)]
+    if not verdicts:
+        return (
+            f"no step reads `steps.{lint_id}.outcome`, so nothing PUBLISHES a verdict "
+            "(#5120). What is left is a run whose red must be inferred from "
+            "`Process completed with exit code 1` — indistinguishable from a reporter "
+            "that failed, and GREEN when the lint step never ran at all"
+        )
+    if len(verdicts) > 1:
+        return (
+            f"{len(verdicts)} steps read `steps.{lint_id}.outcome`; the verdict must "
+            "have exactly ONE publisher or two of them can disagree about the same tree"
+        )
+    step = verdicts[0]
+    if not isinstance(step.get("run"), str):
+        return "the verdict step has no `run:` — it publishes nothing"
+    if "continue-on-error" in step:
+        return (
+            "the verdict step carries `continue-on-error`, which silences the ONE arm "
+            "that must fail (NO VERDICT — the lint step did not run). An unmeasured "
+            "tree can then end the run GREEN behind an annotation nobody reads"
+        )
+    if _STATUS_SCAN.findall(str(step.get("if", ""))) != ["always"]:
+        return (
+            f"the verdict step has `if: {step.get('if')}`, which does not fire on BOTH "
+            "paths. A bare/`success()` form skips it exactly on the failing path — the "
+            "verdict a reader most needs — and `failure()` publishes only one direction"
+        )
+    run = step["run"]
+    if "GITHUB_STEP_SUMMARY" not in run:
+        return (
+            "the verdict step never writes `$GITHUB_STEP_SUMMARY` — the step summary is "
+            "the readable record on the run page; an annotation alone is lost among the "
+            "run's other annotations, which is the #5120 shape"
+        )
+    for command in ("::notice", "::error"):
+        if command not in run:
+            return (
+                f"the verdict step never emits `{command}` — both directions must be "
+                "NAMED, or a passing tree is silent and a failing one is a bare exit code"
+            )
+    default_arm = run[run.rfind("*)") :] if "*)" in run else ""
+    if not default_arm or not _NONZERO_EXIT.search(default_arm):
+        return (
+            "the verdict step's DEFAULT arm does not exit non-zero, so NO VERDICT (the "
+            "lint step did not run) would be reported as a passing run. Allow-list "
+            "polarity: only `success` is green and the fallback must fail — absence of a "
+            "verdict is not a pass (#5120)"
         )
     return None
 
@@ -2807,23 +2915,64 @@ def _set_notifier_without_action(doc: dict) -> None:
 
 
 def _set_permissions_without_issues_write(doc: dict) -> None:
-    doc["permissions"] = {"contents": "read", "pull-requests": "read"}
+    # ONLY `issues: write` is missing: `pull-requests: write` stays, so this mutant
+    # keeps witnessing its own requirement after #5120 added the second scope. With
+    # `pull-requests: read` here it rejected for BOTH reasons, and dropping the
+    # `issues: write` requirement would have gone unnoticed (found in review of
+    # #9960).
+    doc["permissions"] = {"contents": "read", "pull-requests": "write"}
 
 
 def _set_permissions_without_pull_requests_write(doc: dict) -> None:
-    """The EXACT shape that shipped and never notifieD anyone (#5120).
+    """The EXACT shape that shipped and never notified anyone (#5120).
 
     `issues: write` + `pull-requests: read` is what this workflow carried from
     c72c66be2 until 2026-10-25. The token really did hold `Issues: write` (the
-    runner prints the granted scopes) and `issues.createComment` on the merged PR
-    still 403'd, so the notification was inert on every run — the shape has to be
-    a REJECTED mutant, not the live artifact.
+    runner prints the granted scopes) and the notification still 403'd, so it was
+    inert on every run — the shape has to be a REJECTED mutant, not the live
+    artifact.
     """
     doc["permissions"] = {
         "contents": "read",
         "issues": "write",
         "pull-requests": "read",
     }
+
+
+def _verdict_step(doc: dict) -> dict:
+    for step in doc["jobs"]["lint"]["steps"]:
+        if isinstance(step, dict) and step.get("id") == "verdict":
+            return step
+    raise AssertionError(
+        "the live artifact lost its verdict step — the mutant is unbuildable"
+    )
+
+
+def _set_no_verdict_step(doc: dict) -> None:
+    job = doc["jobs"]["lint"]
+    job["steps"] = [
+        step
+        for step in job["steps"]
+        if not (isinstance(step, dict) and step.get("id") == "verdict")
+    ]
+
+
+def _set_verdict_step_never_runs(doc: dict) -> None:
+    _verdict_step(doc)["if"] = "false"
+
+
+def _set_verdict_step_silenced(doc: dict) -> None:
+    _verdict_step(doc)["continue-on-error"] = True
+
+
+def _set_verdict_default_green(doc: dict) -> None:
+    step = _verdict_step(doc)
+    step["run"] = step["run"].replace("exit 1", "exit 0")
+
+
+def _set_verdict_no_summary(doc: dict) -> None:
+    step = _verdict_step(doc)
+    step["run"] = step["run"].replace("$GITHUB_STEP_SUMMARY", "/dev/null")
 
 
 _STARVED_SHAPES = [
@@ -2898,6 +3047,12 @@ _STARVED_SHAPES = [
         "permissions without `pull-requests: write` (#5120)",
         _set_permissions_without_pull_requests_write,
     ),
+    # ── the verdict must be PUBLISHED, not inferred (#5120) ──
+    ("no verdict step at all (#5120)", _set_no_verdict_step),
+    ("a verdict step that never runs", _set_verdict_step_never_runs),
+    ("a verdict step silenced by `continue-on-error`", _set_verdict_step_silenced),
+    ("a verdict step whose default arm is green", _set_verdict_default_green),
+    ("a verdict step that writes no summary", _set_verdict_no_summary),
     # ── the tree is never checked out, or is not the pushed tree ──
     ("no checkout step", _set_no_checkout),
     ("a skipped checkout", _set_checkout_skipped),
