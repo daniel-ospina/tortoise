@@ -7962,7 +7962,7 @@ class TortoiseSDK:
         `record_projection` needs — `relation.src_label`/`tgt_label` are bound as
         VALUES and `relation` carries composite FKs into `node_identity`, so the
         record must know WHICH table to resolve the endpoint in (a `Point` keys
-        `node_key = id`, a `Subject` keys `name`) — while the journal fold
+        `node_key = id`, a `Subject` keys `id` since #9881) — while the journal fold
         IGNORES them and resolves labels itself by an id-anchored sweep
         (`rebuild_all` pass-2b). Adding them therefore changes nothing for the
         journal route and is what makes the record route agree with it.
@@ -31798,9 +31798,14 @@ class TortoiseSDK:
         _ledger_record(
             "Point", [i for i in out if i.get("entity_type") == "point"]
         )
-        # NOT the Object leg: an Object's key is `name`, and these rows carry
-        # `id`, so recording them could only emit `unresolved` — reported as
-        # "rows with no key at all", which is false. Named as a hole instead.
+        # NOT the Object leg — and since #9881 that is a WIRING choice (#8877),
+        # not a shape limit. Before the move an Object's key was `name` and these
+        # rows carry `id`, so recording them could only emit `unresolved`
+        # ("rows with no key at all", which was false); the key IS the `id` now,
+        # so those rows ARE addressable and hooking this leg is #8877's
+        # follow-up. It is left unhooked here deliberately — this change is the
+        # key move, and turning on a new read leg is a measurement decision for
+        # that issue, not a silent side effect of it.
         if read_status_out is not None:
             # B6 (#3892): the composite is derived AFTER the pipeline, from the
             # rows the caller actually RECEIVES. The filters, the rerank and

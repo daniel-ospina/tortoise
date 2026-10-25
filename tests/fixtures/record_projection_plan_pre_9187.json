@@ -1,5 +1,5 @@
 {
- "_comment": "The (sql, params) set record_projection.replay_plan emitted at ecc7bc8ca, the commit BEFORE PR #9194 added start_seq. Regenerate only with a deliberate, reviewed plan change; this is the regression pin for #9187's additive-default claim.",
+ "_comment": "The (sql, params) set record_projection.replay_plan emitted with the start_seq default. Originally captured at ecc7bc8ca (the commit BEFORE PR #9194 added start_seq); REGENERATED for #9881, a deliberate reviewed plan change: Object/Subject `node_key` is now the stable `id` instead of the name (`a document` -> `o1`), which is the whole point of that fix. Every other statement is byte-identical. Regenerate only with a deliberate, reviewed plan change; this is the regression pin for #9187's additive-default claim.",
  "generated_from_commit": "ecc7bc8ca",
  "graph_id": "graph-1",
  "note": "start_seq did not exist at that commit; the plan below is therefore the default-position plan.",
@@ -44,7 +44,7 @@
     "org-1",
     "graph-1",
     "Object",
-    "a document"
+    "o1"
    ]
   ],
   [
@@ -53,7 +53,7 @@
     "org-1",
     "graph-1",
     "Object",
-    "a document",
+    "o1",
     "o1",
     "a document",
     "document",

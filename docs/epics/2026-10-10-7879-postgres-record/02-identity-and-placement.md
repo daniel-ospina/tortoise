@@ -76,6 +76,26 @@ The graph does not key every node by one property, and pretending otherwise is w
 | `:Object` | **`name`** | the caller | the MERGE key; `id` is `_entity_name_id(label, name)`, a pure function **of** the name |
 | `:Source` | **`url`** | `source_identity.normalize_source_url` (S0a) | the MERGE key — Sources MERGE by canonicalised url; `id` mirrors `url` |
 
+**⛔ CORRECTION (2026-10-24, #9881) — the `:Subject`/`:Object` row above is the PRE-#3590 key, and the RECORD no longer uses it.**
+#3590 mints an opaque `id` at creation and makes `name` a **mutable natural key** two live
+entities may share, so `name` cannot be an identity any more. #9881 moved the record with it: in
+`supabase/migrations/20261027000001_record_semantic_id_key.sql`, `public.object.node_key` and
+`public.subject.node_key` **are the `id`** (`CHECK (id IS NOT NULL AND node_key = id)`), the `name`
+stays a mutable column, and `node_identity.key_property` says `id` for both labels — the contract
+every composite FK endpoint is filed by. The stable-key rule this section states is unchanged;
+only *which* property is stable changed, for exactly those two labels.
+
+The consequence the refusal in `record_projection` named is now gone rather than worked around: a
+rename is `UPDATE … SET name = $new WHERE id = $id`. It was refused
+(*"a rename MOVES the canonical key, so it is a key migration, not a patch"*) while the key was the
+name, and that sentence was TRUE of the schema above. A **key move** (`node_key` follows the new
+name) was rejected as the alternative — it re-imposes the natural key it is trying to remove, and a
+rename onto a name another live incarnation already holds becomes a PRIMARY KEY collision. The
+`name` column is still how a NAME-keyed structural descriptor (§1.3) resolves to its row.
+
+`tortoise/cache_projection.KEY_PROPERTY` reads this contract from the DDL and takes the LAST
+declaration per label, so a forward re-declaration (this one) wins over the `CREATE TABLE`.
+
 **The rule that follows from the table, and it is the one the schema needs:** a **foreign key is `(label, key)`**, never a bare id. `aboutDocument` is the worked example — it targets a `:Source`, so it resolves by `url`; the same string used as a `:Subject` would be a *different* node. This is why `STRUCTURAL_REL_LABELS` exists (§1.3).
 
 **⚠️ Two key roles — the identity key above is NOT the structural replay key.** The table fixes the property a store mints / MERGEs a label by. §1.3 fixes a **second, narrower** map: the key a rebuilt structural edge resolves its sibling by. For `aboutPoint` / `aboutEvent` the replay key is the target's **`name`**, not `id` / `eventId` — `stub_key` returns `target.get('name')` for every derivable rel except `aboutDocument` / `extractedFrom` (which key on `url`), and `resolve_structural_target` matches a `:Point` / `:Event` by `MATCH (x:{label} {name:$key})` (`projection/edges.py`). So `name` is the **required key property** for a structural target of those two rels; an id-only `aboutPoint` / `aboutEvent` target emits **no descriptor** and the edge dies at rebuild. The two maps are deliberately different and must not be collapsed (the §1.5 pin fabricates `name` in the target dict, so it does **not** exercise this seam).

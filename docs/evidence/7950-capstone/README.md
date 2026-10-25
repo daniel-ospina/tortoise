@@ -394,6 +394,11 @@ $ npm --prefix supabase/tests/pglite run validate         → 20261012000001_rec
 
 The stable key is fixed **per label** — `:Point`→`id`, `:Event`→`eventId`,
 `:Subject`/`:Object`→`name`, `:Source`→`url` — so a foreign key is **`(label, key)`**, never a bare
+
+> ⚠️ **#9881 (2026-10-27) updated the contract this reading states:** `:Subject`/`:Object` now key
+> on `id`, not `name`. The measurement above stands as the reading of ITS commit; the two labels are
+> `id` today (`supabase/migrations/20261027000001_record_semantic_id_key.sql`).
+
 id; enforced in the schema by `public.node_identity.key_property` (generated) and composite FKs,
 and pinned in Python by `stub_key` + `STRUCTURAL_REL_LABELS` (`aboutDocument` keys on `url`, never
 the retired `coalesce(title, name)`). A new `:Point` id is minted by `tortoise/ids.py::ulid()`
