@@ -9,6 +9,7 @@
  */
 
 import { buildSaveRecord, createPost, updatePost, purgePostCache, notifyPublished, type SaveFormFields } from '@/lib/blog-api';
+import { becomesLive } from '@/lib/publish-transition';
 
 export type SaveMode = 'draft' | 'publish';
 
@@ -21,6 +22,18 @@ export interface SaveContext {
   id?: string;
   /** True when the post is currently published (draft-save = unpublish → purge). */
   wasPublished?: boolean;
+  /**
+   * True when the STORED row's `hold_for_review` is anything but `false` — so a
+   * NULL counts as held, exactly as `api/notify-publish.ts` reads it. Only the
+   * publish path consults it: clearing that hold is the one way a save on an
+   * already-published post still makes its URL live (#9830), and treating it as
+   * "not held" would silently drop that notification.
+   *
+   * Defaults to `false`, i.e. "not held", which makes a save that forgot to
+   * pass it skip the notification rather than submit on an ordinary edit — the
+   * safe direction: a skipped notification is recoverable, a flood is not.
+   */
+  wasHeld?: boolean;
 }
 
 export type GetSaveContext = () => SaveContext;
@@ -52,10 +65,27 @@ export function createSaveHandler(getState: GetSaveContext) {
     if ((mode === 'draft' && ctx.wasPublished || holdHidesPublished) && ctx.form.slug) {
       void purgePostCache(ctx.form.slug);
     }
-    // #9803: publish — including "publish again" on an already-live post. The
-    // endpoint re-checks that the row is published and owns the 24h window, so
-    // this is safe to fire on every publish save.
-    if (mode === 'publish' && ctx.form.slug) {
+    // #9680 item 3 / indicator (c): notify only when THIS save makes the URL
+    // live — the same predicate the agent API applies in its PATCH handler
+    // (`becameLive`, `functions/blog/api/posts/[[path]].ts`). One rule, one home
+    // (`lib/publish-transition.ts`).
+    //
+    // The form this replaces fired on `mode === 'publish'` alone, and on an
+    // already-published post that mode is the "Save & Republish" button: an
+    // EDIT THAT LEAVES THE ROW PUBLISHED, which the issue forbids. The 24h
+    // window could not cover for it — the window bounds repeats, so an edit
+    // saved a day after the publish passed it and submitted a URL that had not
+    // changed.
+    //
+    // The create path above needs none of this: a row that did not exist before
+    // cannot have been live, so a create always transitions. Do not "unify" the
+    // two into an unconditional call for symmetry.
+    const publishedAfter = record.status ?? 'draft';
+    const makesUrlLive = becomesLive(
+      { status: ctx.wasPublished ? 'published' : 'draft', hold_for_review: ctx.wasHeld === true },
+      { status: publishedAfter, hold_for_review: ctx.form.hold_for_review === true },
+    );
+    if (makesUrlLive && ctx.form.slug) {
       void notifyPublished(ctx.form.slug);
     }
     return ctx.id;

@@ -75,6 +75,9 @@ NOTIFY_FUNCTION = WEBSITE / "functions" / "blog" / "api" / "notify-publish.ts"
 INDEXNOW_MODULE = WEBSITE / "functions" / "blog" / "_shared" / "indexnow.ts"
 SAVE_UNIT = WEBSITE / "apps" / "blog-admin" / "src" / "lib" / "save.ts"
 BLOG_API = WEBSITE / "apps" / "blog-admin" / "src" / "lib" / "blog-api.ts"
+PUBLISH_TRANSITION = WEBSITE / "apps" / "blog-admin" / "src" / "lib" / "publish-transition.ts"
+POSTS_LIST = WEBSITE / "apps" / "blog-admin" / "src" / "pages" / "PostsList.tsx"
+POST_EDITOR = WEBSITE / "apps" / "blog-admin" / "src" / "pages" / "PostEditor.tsx"
 
 SITE = "https://tortoise.premiselabs.co"
 
@@ -390,14 +393,47 @@ def test_v5b_stamp_read_failure_is_a_200_skipped_unreadable():
 
 
 def test_v6_editor_fires_on_publish_only_for_both_paths():
+    """KEPT for its two MIRROR arms; its UPDATE-path arm was REVERSED in #9680.
+
+    It used to require exactly
+    `if (mode === 'publish' && ctx.form.slug) { void notifyPublished(...) }` and
+    described it as "covers 'publish again'". That form is the defect: on an
+    already-published post, `mode === 'publish'` is the editor's "Save &
+    Republish" button, so it notified on an EDIT THAT LEAVES THE ROW PUBLISHED —
+    the case #9680 forbids twice (item 3, indicator (c)). The 24h window could
+    not cover for it, because a window bounds REPEATS and cannot classify a
+    transition: an edit saved 25 hours later passed it and submitted a URL whose
+    content had not changed.
+
+    So the update-path arm now asserts the opposite direction — the call is
+    guarded by the shared transition rule — and the rule itself is driven case by
+    case by `test_the_transition_predicate_admits_only_a_write_that_makes_the_url_live`
+    below rather than pinned as source text here.
+    """
     src = SAVE_UNIT.read_text()
-    # create path
+    # create path: a row that did not exist before cannot have been live, so a
+    # create always transitions — no predicate needed, and none used.
     assert re.search(r"if \(mode === 'publish' && created\.slug\) void notifyPublished\(created\.slug\)", src), (
         "the create path must notify on publish"
     )
-    # update path
-    assert re.search(r"if \(mode === 'publish' && ctx\.form\.slug\) \{\s*\n\s*void notifyPublished\(ctx\.form\.slug\);", src), (
-        "the update path must notify on publish (covers 'publish again')"
+    # update path: guarded by the ONE transition rule, fed by BOTH facts.
+    assert re.search(r"const makesUrlLive = becomesLive\(", src), (
+        "the update path must decide through becomesLive (lib/publish-transition.ts), not on `mode` alone"
+    )
+    assert re.search(r"ctx\.wasPublished \? 'published' : 'draft'", src), (
+        "the rule needs the row's PRIOR status — without it every publish save looks like a transition"
+    )
+    assert re.search(r"hold_for_review: ctx\.wasHeld === true", src), (
+        "the rule needs the row's PRIOR hold state, or clearing a hold on a published post goes un-notified (#9830)"
+    )
+    assert re.search(r"if \(makesUrlLive && ctx\.form\.slug\) \{\s*\n\s*void notifyPublished\(ctx\.form\.slug\);", src), (
+        "the notify call must be guarded by the transition decision, not by `mode`"
+    )
+    # THE REGRESSION THIS PINS (#9680): the pre-fix condition. Its absence is the
+    # point — restore it and an edit that leaves the row published submits again.
+    assert not re.search(r"if \(mode === 'publish' && ctx\.form\.slug\) \{", src), (
+        "the update path must NOT notify on `mode === 'publish'` alone — that is the "
+        "'Save & Republish' button, i.e. an edit that leaves the row published"
     )
     # and nothing outside those two guarded sites (the import carries no paren)
     assert src.count("notifyPublished(") == 2, "expected exactly two call sites"
@@ -412,4 +448,173 @@ def test_v6_editor_fires_on_publish_only_for_both_paths():
     )
     assert api.count("void notifyPublished(") == 2, (
         "expected exactly two console call sites: publishPost and clearHoldPost"
+    )
+
+
+# ── #9680 item 3 / indicator (c): the console must not submit on an EDIT ──────
+#
+# WHY THE RULE IS DRIVEN HERE AND NOT ONLY PINNED AS SOURCE TEXT. The defect this
+# closes is a guard that was *present and green*: `save.ts` notified on
+# `mode === 'publish'`, every test asserting "one submission" used a fresh row,
+# and the 24h window in `_shared/indexnow.ts` made an edit-only save look
+# identical to a publish. A regex can pin the SHAPE of the fix and can never say
+# what it decides, so the predicate itself is executed, case by case, over the
+# whole visibility transition space.
+#
+# The rule has ONE home (`lib/publish-transition.ts`) and two readers: this test,
+# and `save.ts`. It mirrors the agent API's `becameLive`
+# (`website/functions/blog/api/posts/[[path]].ts`), whose own comment already
+# states it — "Everything else submits nothing: a draft write, an unpublish, an
+# edit that leaves a live row live." The console was the one path out of step.
+
+_TRANSITION_DRIVER = """
+const mod = await import(process.argv[2]);
+const cases = JSON.parse(process.argv[3]);
+console.log(JSON.stringify(cases.map((c) => mod.becomesLive(c.before, c.after))));
+"""
+
+# (before, after, expected, what the case IS)
+TRANSITION_CASES: list[tuple[dict, dict, bool, str]] = [
+    # ── the writes that MUST notify: the URL starts being served ─────────────
+    (
+        {"status": "draft", "hold_for_review": False},
+        {"status": "published", "hold_for_review": False},
+        True,
+        "publish a draft",
+    ),
+    (
+        {"status": "draft", "hold_for_review": True},
+        {"status": "published", "hold_for_review": False},
+        True,
+        "publish a held draft and clear the hold in the same save",
+    ),
+    (
+        {"status": "published", "hold_for_review": True},
+        {"status": "published", "hold_for_review": False},
+        True,
+        "clear the hold on an already-published post (#9830) — status unchanged, URL goes 404 → 200",
+    ),
+    (
+        {"status": "published", "hold_for_review": None},
+        {"status": "published", "hold_for_review": False},
+        True,
+        "clear a NULL hold — NULL counts as held, so this is the same transition",
+    ),
+    # ── the writes that must submit NOTHING — #9680 item 3 / indicator (c) ───
+    (
+        {"status": "published", "hold_for_review": False},
+        {"status": "published", "hold_for_review": False},
+        False,
+        "AN EDIT THAT LEAVES STATUS PUBLISHED — the editor's 'Save & Republish' on a live post. "
+        "This is the row the pre-fix form submitted once the 24h window had passed.",
+    ),
+    (
+        {"status": "published", "hold_for_review": True},
+        {"status": "published", "hold_for_review": True},
+        False,
+        "a save that leaves a held post held — its URL was 404 before and is 404 after",
+    ),
+    (
+        {"status": "published", "hold_for_review": False},
+        {"status": "published", "hold_for_review": True},
+        False,
+        "a save that HIDES a live article — nothing to notify, and IndexNow has no retraction",
+    ),
+    (
+        {"status": "published", "hold_for_review": False},
+        {"status": "draft", "hold_for_review": False},
+        False,
+        "unpublish",
+    ),
+    (
+        {"status": "draft", "hold_for_review": False},
+        {"status": "draft", "hold_for_review": False},
+        False,
+        "draft save",
+    ),
+    (
+        {"status": "published", "hold_for_review": False},
+        {"status": "archived", "hold_for_review": False},
+        False,
+        "archive — terminal, and not a publish",
+    ),
+]
+
+
+def _run_transition(cases: list[tuple[dict, dict, bool, str]]) -> list[bool]:
+    """Execute the SHIPPED predicate once for every case (one node, not ten)."""
+    driver = _driver_path().parent / "transition.mjs"
+    driver.write_text(_TRANSITION_DRIVER)
+    proc = subprocess.run(
+        [
+            "node",
+            "--experimental-strip-types",
+            str(driver),
+            str(PUBLISH_TRANSITION),
+            json.dumps([{"before": c[0], "after": c[1]} for c in cases]),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        cwd=str(REPO_ROOT),
+    )
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def test_the_transition_predicate_admits_only_a_write_that_makes_the_url_live():
+    """#9680 item 3 / indicator (c), decided — not described.
+
+    MUTATION THIS CATCHES: replacing the rule with `return after.status ===
+    'published'` (the pre-fix intent: "publish save ⇒ notify") reds the
+    `published → published` case, which is the one the 24h window could not
+    protect. Dropping the hold arm reds the three hold cases. Reading NULL as
+    clear reds the NULL-hold case.
+    """
+    actual = _run_transition(TRANSITION_CASES)
+    mismatches = [
+        f"{case[3]}\n    before={case[0]} after={case[1]}\n    expected {case[2]}, predicate said {got}"
+        for case, got in zip(TRANSITION_CASES, actual, strict=True)
+        if got != case[2]
+    ]
+    assert not mismatches, "the publish-transition rule is wrong for:\n  " + "\n  ".join(mismatches)
+
+
+def test_the_editor_supplies_the_hold_state_the_rule_needs():
+    """The rule is only as good as its inputs, and both come from the ROW.
+
+    MUTATION THIS CATCHES: dropping `wasHeld` from `PostEditor`'s save context
+    makes `ctx.wasHeld` undefined, the rule reads the row as never-held, and
+    clearing a hold on a published post stops being submitted — a real publish
+    transition going silently un-notified, which is the #7751 failure shape. And
+    `existingPost.hold_for_review` must come from the row select (`POST_SELECT`
+    carries it), or every publish save reads the row as held and the edit case
+    above submits again.
+    """
+    editor = POST_EDITOR.read_text()
+    assert re.search(
+        r"wasHeld: existingPost \? existingPost\.hold_for_review !== false : false", editor
+    ), "PostEditor must pass the stored hold state (`!== false`: NULL counts as held)"
+    assert re.search(r"\bhold_for_review\b", (BLOG_API.read_text().split("POST_SELECT")[1])[:900]), (
+        "POST_SELECT must select hold_for_review, or the editor's `existingPost` cannot carry it"
+    )
+
+
+def test_the_console_call_sites_that_keep_the_coarse_guard_are_transition_only_by_construction():
+    """Why `publishPost` / `clearHoldPost` may fire on every call while the editor
+    save may not: their BUTTONS are rendered only for the transitional state.
+
+    `test_v6_...` pins that those two functions notify. That is safe only because
+    the drafts-queue Publish renders for `status === 'draft'` and Clear-hold
+    renders for a truthy `hold_for_review`. MUTATION THIS CATCHES: rendering
+    Publish on a published row (or Clear-hold on a non-held one) turns those call
+    sites into non-transition submitters — the same defect this PR fixed in
+    `save.ts`, one button away.
+    """
+    src = POSTS_LIST.read_text()
+    assert re.search(r"\{post\.status === 'draft' && \(\s*\n\s*<Button[^>]*onClick=\{\(\) => doPublish\.mutate\(\)\}", src), (
+        "the drafts-queue Publish must be rendered only for a draft row"
+    )
+    assert re.search(r"\{post\.hold_for_review && post\.status !== 'archived' && \(", src), (
+        "Clear-hold must be rendered only for a held row"
     )

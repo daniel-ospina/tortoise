@@ -386,9 +386,20 @@ export async function purgePostCache(slug: string): Promise<void> {
 // cannot nominate a URL.
 //
 // Triggered by the THREE console write paths that can make a row publishable:
-// the editor form's publish save (`save.ts`, including "publish again"), the
-// drafts-queue one-click Publish (`publishPost`), and clearing a hold
-// (`clearHoldPost`). Fail-open: a notification never blocks or fails a save.
+// the editor form's publish save (`save.ts`), the drafts-queue one-click Publish
+// (`publishPost`), and clearing a hold (`clearHoldPost`). Fail-open: a
+// notification never blocks or fails a save.
+//
+// ⚠️ EACH CALLER DECIDES WHETHER ITS WRITE IS A TRANSITION; this function does
+// not, and neither does the endpoint (it answers "is this row live NOW?"). The
+// editor save is the only one of the three reachable on an ALREADY-PUBLISHED
+// post — its publish button reads "Save & Republish" — so it gates on
+// `lib/publish-transition.ts` (#9680 item 3: an edit that leaves status
+// published submits nothing). The other two are transition-only by construction:
+// the drafts-queue Publish renders only for `status === 'draft'` and
+// Clear-hold only for a truthy `hold_for_review`, both pinned in
+// `tests/test_blog_publish_notify_admin.py`. Those render guards are load-bearing;
+// widening either one makes its call site an untransitioned submitter.
 //
 // Repeat calls are SERIALISED, not dropped. The pair that makes dropping visible
 // is queue-Publish-then-clear-hold: the first submission is refused 409
