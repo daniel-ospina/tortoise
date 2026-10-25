@@ -2114,7 +2114,7 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
             return install_problem
     # The failure notification is the whole point of "main went red": without
     # `issues: write`, `createComment` 403s on a push event (the default token is
-    # read-only), and `pull-requests: read` is what the attribution lookup needs.
+    # read-only), and `pull-requests` is what the attribution lookup needs.
     # A job-level `permissions:` REPLACES the workflow level wholesale.
     # PRESENCE, not truthiness: a job-level `permissions: {}` is GitHub's idiom for
     # "grant nothing" and REPLACES the workflow grant — `or` read it as absent.
@@ -2141,21 +2141,42 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
             f"its `permissions:` block is {perms!r}, which is not a form GitHub accepts "
             "— the workflow is invalid, so no run exists at all and nothing reports red"
         )
+    # `pull-requests: read` was the whole requirement until #5120, on the reading
+    # that `issues: write` covers `issues.createComment`. MEASURED, 2026-10-25 (run
+    # 40154972406, `main @ 0cbeb1918`): the job's token DID hold `Issues: write` —
+    # the runner prints the granted scopes — and `issues.createComment` on the
+    # merged PULL REQUEST still answered "Resource not accessible by integration".
+    # A PR conversation is governed by the `pull-requests` scope for an App
+    # installation token, so `read` runs the attribution lookup and then 403s at
+    # the comment. The notification had never posted once: the step shipped with
+    # this workflow (c72c66be2) and was first reached on 2026-10-25. `write`
+    # implies `read`, so either level satisfies the lookup and only `write` can
+    # satisfy the comment — the requirement is on the SUBSTANCE, not the spelling.
     missing = [
         f"{scope}: {level}"
         for scope, level in (
             ("issues", "write"),
-            ("pull-requests", "read"),
             ("contents", "read"),
         )
         if perms.get(scope) != level
     ]
+    pull_requests = perms.get("pull-requests")
+    if pull_requests != "write":
+        # ONE message for both sub-cases (key absent, and key `read`): they have the
+        # same fix, and a first message naming `read` would hand the fixer the exact
+        # value this requirement rejects — the shipped-and-inert #5120 shape.
+        missing.append(
+            "pull-requests: write (it implies the read the attribution lookup needs; "
+            "measured, #5120: `issues: write` ALONE answers 'Resource not accessible "
+            "by integration' on a PR comment, so the attribution step runs and never "
+            "notifies)"
+        )
     if missing:
         return (
             f"its effective permissions are {perms} and omit {missing} — "
-            "`issues.createComment` 403s without `issues: write` on a push event "
-            "(the default token is read-only), so a lint-red main is reported into a "
-            "run nobody sees, and the attribution lookup needs `pull-requests: read`"
+            "`issues.createComment` 403s without the scope the endpoint actually "
+            "reads on a pull request, so a lint-red main is reported into a run "
+            "nobody sees"
         )
     return None
 
@@ -2789,6 +2810,22 @@ def _set_permissions_without_issues_write(doc: dict) -> None:
     doc["permissions"] = {"contents": "read", "pull-requests": "read"}
 
 
+def _set_permissions_without_pull_requests_write(doc: dict) -> None:
+    """The EXACT shape that shipped and never notifieD anyone (#5120).
+
+    `issues: write` + `pull-requests: read` is what this workflow carried from
+    c72c66be2 until 2026-10-25. The token really did hold `Issues: write` (the
+    runner prints the granted scopes) and `issues.createComment` on the merged PR
+    still 403'd, so the notification was inert on every run — the shape has to be
+    a REJECTED mutant, not the live artifact.
+    """
+    doc["permissions"] = {
+        "contents": "read",
+        "issues": "write",
+        "pull-requests": "read",
+    }
+
+
 _STARVED_SHAPES = [
     # ── does not RUN on every merged tree ──
     # The measured defect: the guard inside its former host's constant group.
@@ -2857,6 +2894,10 @@ _STARVED_SHAPES = [
     ("no `runs-on:`", _set_no_runs_on),
     ("an unresolvable self-hosted label", _set_self_hosted_runner),
     ("permissions without `issues: write`", _set_permissions_without_issues_write),
+    (
+        "permissions without `pull-requests: write` (#5120)",
+        _set_permissions_without_pull_requests_write,
+    ),
     # ── the tree is never checked out, or is not the pushed tree ──
     ("no checkout step", _set_no_checkout),
     ("a skipped checkout", _set_checkout_skipped),
