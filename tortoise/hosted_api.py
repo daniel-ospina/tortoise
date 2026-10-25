@@ -9599,6 +9599,14 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
     it as a stored column), and the EP dirty flags (`ep_dirty`,
     `ep_dirty_at`) are ABSENT, because they are the cache's own fold state and a
     record-served answer must not claim to know it (§17.5's carve-out).
+
+    ⚠️ `servedFrom` / `fallbackReason` are RESERVED response fields whenever a
+    mode is armed: the attribution always wins, because a caller that cannot
+    tell a fallback from a stored field would have exactly the invisible
+    fallback this unit forbids. A point whose own `props` happen to carry one of
+    those names therefore has it shadowed on an ARMED read; in `off` mode no
+    attribution is emitted at all, so the stored property passes through
+    unchanged (the pre-#7970 response, byte for byte).
     """
     _require_scope(org, "graphs:read", "get_point")
 
@@ -9611,16 +9619,12 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
     # raises **403 GRAPH_NOT_FOUND** — an impairment reported as absence, the
     # exact class the 503 arm below exists to forbid — and on an embedded
     # deployment the SDK's construction itself probes (and may start) the store.
-    # With the handle built lazily inside `_from_cache`, 'record' mode makes
-    # ZERO cache calls, which is what the epic's S9 claim states.
+    # With the handle built only when a cache answer is actually needed,
+    # 'record' mode makes ZERO cache calls, which is what the epic's S9 claim
+    # states.
     mode = record_serve.serve_mode()
 
-    def _from_cache() -> dict | None:
-        # Lazy on purpose (#7970): only the arms that MAY consult the cache pay
-        # for it. This runs inside a worker thread (every caller wraps it in
-        # `asyncio.to_thread`), so the sync `_data_sdk` is the #3718 off-loop
-        # construction — not a regression to on-loop graph work.
-        sdk = _data_sdk(org)
+    def _query_props(sdk) -> dict | None:
         # #3718 residual 2: sync FalkorDB read off the loop (see list_points).
         rows = sdk._get_proj().g.query(
             "MATCH (p:Point {id: $id}) "
@@ -9630,27 +9634,52 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
         ).result_set
         return dict(rows[0][0]) if rows else None
 
+    async def _cache_answer() -> dict | None:
+        """The cache read, THROUGH the bounded graph-lane seam (#3498).
+
+        ⚠️ Both halves are the pre-#7970 shape and are load-bearing on the
+        DEFAULT path: `_data_sdk_offloaded` is the seam that supplies the graph
+        pool slot, the wait bound and the fail-closed 503 — a bare
+        `asyncio.to_thread(_data_sdk, ...)` would lose all three and let a
+        wedged graph open hang on the shared executor. So this callback is
+        lazy (it runs only when a cache answer is needed) without trading away
+        the seam.
+        """
+        sdk = await _data_sdk_offloaded(org)
+        return await asyncio.to_thread(_query_props, sdk)
+
     served = None
     if mode != record_serve.MODE_OFF:
         tenant = _resolve_record_tenant(org)
         if tenant is None:
-            # No record tenant for this credential. In 'record' mode that is an
-            # IMPAIRED read (503, never 404); in 'prefer' mode it is a NAMED,
-            # COUNTED fallback. Falling through silently would be exactly the
-            # invisible fallback this unit exists to make impossible.
+            # No record tenant for this credential. In 'record' mode that is a
+            # STRUCTURAL condition — retrying never resolves it — so it is a
+            # 500, never a 503 (which is reserved for "the record could not be
+            # asked") and never a 404 (which would report absence). In 'prefer'
+            # mode it is a NAMED, COUNTED fallback; falling through silently
+            # would be the invisible fallback this unit exists to prevent.
             if mode == record_serve.MODE_RECORD:
                 raise HTTPException(
-                    status_code=503,
-                    detail=("the record's tenant could not be resolved for this "
-                            "credential, so absence is NOT established"))
+                    status_code=500,
+                    detail=("this credential resolves no record tenant, so the "
+                            "read cannot be served from the record — absence "
+                            "is NOT established"))
             record_serve.note_fallback(
                 record_serve.FALLBACK_RECORD_UNAVAILABLE)
             served = record_serve.ServedAnswer(
                 read=record_serve.READ_POINT_BY_ID,
                 coordinate=f"Point:{point_id}", served_from="cache",
-                props=await asyncio.to_thread(_from_cache),
+                props=await _cache_answer(),
                 fallback_reason=record_serve.FALLBACK_RECORD_UNAVAILABLE)
         else:
+            # `serve_point` is sync and calls its cache callback from the worker
+            # thread, so the callback bridges back to the loop for the seam.
+            loop = asyncio.get_running_loop()
+
+            def _from_cache() -> dict | None:
+                return asyncio.run_coroutine_threadsafe(
+                    _cache_answer(), loop).result()
+
             try:
                 served = await asyncio.to_thread(
                     record_serve.serve_point, tenant=tenant, point_id=point_id,
@@ -9668,7 +9697,7 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
                 raise HTTPException(status_code=500, detail=str(e)) from e
 
     if served is None:
-        props = await asyncio.to_thread(_from_cache)
+        props = await _cache_answer()
     else:
         props = served.props
     if not props:

@@ -26,8 +26,10 @@ one to provision instead of reporting a single opaque 'needs a database'.
 ⚠️ **BOTH LEGS SKIP IN EVERY CI LEG TODAY — this file has no CI coverage of
 anything, and that is a measured fact, not a gap someone forgot.** No job
 provides both stores: `test-record-postgres` (
-`.github/workflows/python-ci.yml`) runs ONLY
-`tests/test_9078_record_written_by_production_path.py` and exports no
+`.github/workflows/python-ci.yml`) runs only the POSTGRES-ONLY record legs
+(`tests/test_9078_record_written_by_production_path.py`,
+`tests/test_9555_narrative_carrier.py`,
+`tests/test_9664_capstone_connector_to_record.py`) and exports no
 `TORTOISE_DB_URI` by design (`.github/actions/postgres-provision`, #9551), and
 the FalkorDB jobs export no record DSN. So this file is registered in
 `config/ci-surfaces.yml` so that it is CLASSIFIED (an unclassified test file

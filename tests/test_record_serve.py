@@ -497,7 +497,14 @@ def _call_endpoint(monkeypatch, point_id="p-1", *, cache="unusable"):
             class _G:
                 def query(self, *_a, **_k):
                     class _R:
-                        result_set: ClassVar[list] = []
+                        # `props` serves a point that carries its OWN property
+                        # named like the attribution field, which is what the
+                        # reserved-name rule is about.
+                        result_set: ClassVar[list] = (
+                            [[{"id": "p-1", "content": "cache",
+                               "pointKind": "claim", "status": "live",
+                               "servedFrom": "user-owned"}]] if cache == "props"
+                            else [])
                     return _R()
             return type("P", (), {"g": _G()})()
 
@@ -505,12 +512,21 @@ def _call_endpoint(monkeypatch, point_id="p-1", *, cache="unusable"):
     # `_data_sdk`, so `record` mode never builds one. Patching the SDK FACTORY
     # (not the async offload wrapper it used before) is what lets this spy prove
     # that: a `record`-mode call that reached the cache at all would raise here.
-    def _sdk(_org):
+    async def _sdk(_org):
         built.append(_org)
         return _SpySDK()
 
+    def _no_direct_sdk(*_a, **_k):
+        raise AssertionError("the endpoint constructed an SDK directly")
+
     built: list = []
-    monkeypatch.setattr(api, "_data_sdk", _sdk)
+    # #7970: the route reaches the cache ONLY through the bounded graph-lane seam
+    # (`_data_sdk_offloaded`, #3498), which is also the seam the pre-PR code used,
+    # so this spy proves "record mode built no handle" on the real path.
+    # `_make_sdk` is the OTHER member of the repo's `_SDK_CONSTRUCTION_SEAMS`
+    # (tests/test_read_routes_loop_responsiveness.py), so it is trapped too.
+    monkeypatch.setattr(api, "_data_sdk_offloaded", _sdk)
+    monkeypatch.setattr(api, "_make_sdk", _no_direct_sdk)
     monkeypatch.setattr(api, "_resolve_record_tenant", lambda _org: TENANT)
     monkeypatch.setattr(api, "_require_scope", lambda *_a, **_k: None)
     org = {"id": "org_t", "graph_id": "g_t"}
@@ -626,12 +642,12 @@ def test_the_endpoint_prefers_the_cache_with_a_named_reason(monkeypatch):
                     return _R()
             return type("P", (), {"g": _G()})()
 
-    def _sdk(_org):
+    async def _sdk(_org):
         return _CacheSDK()
 
-    # #7970: the route reaches for the cache through its sync factory, lazily —
-    # only the `prefer` fallback arm constructs a handle at all.
-    monkeypatch.setattr(api, "_data_sdk", _sdk)
+    # #7970: the route reaches the cache through the bounded graph-lane seam,
+    # lazily — only the `prefer` fallback arm constructs a handle at all.
+    monkeypatch.setattr(api, "_data_sdk_offloaded", _sdk)
     monkeypatch.setattr(api, "_resolve_record_tenant", lambda _org: TENANT)
     monkeypatch.setattr(api, "_require_scope", lambda *_a, **_k: None)
     body = asyncio.run(api.get_point("p-1", org={"id": "org_t",
@@ -739,3 +755,73 @@ def test_node_by_key_parity_is_declared_measured_for_point_only():
     assert diff.clean is False, (
         "the declared #9721 gap did not redden — the disclosure is stale")
     assert "eventKind" in diff.unexplained_missing
+
+
+def test_a_misconfigured_tenancy_is_structural_not_a_fallback(monkeypatch):
+    """The DSN's ROLE is a value problem, so it must not be counted as an outage.
+
+    `record_projection.scope_connection` refuses a role that BYPASSES RLS (the
+    production-shape misconfiguration, since `TEST_RECORD_DB_URI` is a superuser)
+    with a `RecordProjectionError` whose message names the fix — *"arm
+    TORTOISE_RECORD_DSN with tortoise_record_app"*. It is not a
+    `RecordServeError`, so before this arm it fell to the availability branch:
+    `prefer` counted it `record-unavailable` (an ops reason for a value problem)
+    and `record` mode dropped the instruction, keeping only the class name.
+    """
+    from tortoise.record_projection import RecordProjectionError
+
+    def _boom(_conn, **_kw):
+        raise RecordProjectionError(
+            "the connecting role BYPASSES RLS — arm TORTOISE_RECORD_DSN with "
+            "tortoise_record_app")
+
+    monkeypatch.setattr(rs, "read_point", _boom)
+    cache = _cache({})
+    with pytest.raises(RecordProjectionError):
+        rs.serve_point(tenant=TENANT, point_id="p-1", cache_answer=cache,
+                       connect=_opener(_FakeConn(rows=[_row()])),
+                       mode=rs.MODE_PREFER)
+    assert cache.calls == [], "a tenancy misconfiguration fell back to the cache"
+
+
+def test_a_credential_without_a_record_tenant_is_a_fault_not_an_outage(monkeypatch):
+    """No resolvable tenant is PERMANENT, so it is 500 — never 503 and never 404.
+
+    503 is reserved for 'the record could not be asked' (retryable); a credential
+    that resolves no record tenant never becomes resolvable by retrying, so
+    answering 503 invites a retry loop that cannot succeed — and 404 would report
+    absence, the defect the whole unit forbids.
+    """
+    from fastapi import HTTPException
+
+    import tortoise.hosted_api as api
+
+    monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_RECORD)
+    monkeypatch.setattr(api, "_resolve_record_tenant", lambda _org: None)
+    monkeypatch.setattr(api, "_require_scope", lambda *_a, **_k: None)
+
+    async def _no_cache(_org):  # pragma: no cover - must not be reached
+        raise AssertionError("the cache was consulted without a record tenant")
+
+    monkeypatch.setattr(api, "_data_sdk_offloaded", _no_cache)
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(api.get_point("p-1", org={"id": "org_t",
+                                              "org_id": "org_t"}))
+    assert caught.value.status_code == 500
+    assert "tenant" in str(caught.value.detail)
+
+
+def test_off_mode_leaks_no_attribution_and_keeps_a_stored_name(monkeypatch):
+    """OFF emits NO attribution, so a point's own `servedFrom` passes through.
+
+    The reserved-name rule is one-way: an ARMED read lets the attribution win (a
+    caller must be able to tell a real fallback from a stored field), while OFF
+    must stay byte-identical to the pre-#7970 response — no wrapper, no keys, and
+    the point's own property untouched.
+    """
+    body, err, built = _call_endpoint(monkeypatch, cache="props")
+    assert err is None
+    assert body["servedFrom"] == "user-owned", (
+        "off mode overwrote a stored property with an attribution field")
+    assert "fallbackReason" not in body
+    assert built != [], "off mode did not consult the cache"
