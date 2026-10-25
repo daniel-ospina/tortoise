@@ -324,6 +324,12 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # here: `carve_out` and this tuple are one set in two homes, and a stem in only one is the
     # silent hole `test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems` catches.
     "test_ci_runner_x64_install",
+    # #9018: the RUNNER TOOL CONTRACT's probe is subprocess-only (a stub binary, a locally built
+    # tarball, no network, no graph, nothing imported from the package), so there is nothing to
+    # redirect — but the stem must still be here: `carve_out` and this tuple are one set in two
+    # homes, and a stem in only one is the silent hole
+    # `test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems` catches.
+    "test_runner_tool_contract",
     # #8488: the in-process Okapi BM25 lexical arm — module-level
     # ``pytest.mark.embedded_only`` (its subject is the embedded lane and the
     # shipped read's own fusion), so it is exempt from the docker redirect and

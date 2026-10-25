@@ -92,6 +92,13 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      # ── THE RUNNER TOOL CONTRACT (#9018) ──────────────────────────────
+      # tools/ci_queue_health.py measures the queue through `gh`. Without it the
+      # run reports `CI: UNKNOWN (the tool produced no state line)` and exits 2
+      # — measured 2026-10-24 on `pi-runner-vm-3`/`-6`. "I could not look" must
+      # never be the last word on a queue. Provide the tool or fail NAMING it.
+      - name: Runner tool contract — provide gh (#9018)
+        run: bash .github/scripts/runner-tools.sh ensure gh
       # tools/ci_queue_health.py is stdlib-only; this pin supplies the >=3.12
       # interpreter every tool in `tools/` requires (#5128).
       - uses: actions/setup-python@v5

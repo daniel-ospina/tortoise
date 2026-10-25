@@ -69,6 +69,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      # ── THE RUNNER TOOL CONTRACT (#9018) ──────────────────────────────
+      # `availability-record.sh` reads AND writes GitHub issues through `gh`.
+      # `runs-on: ubuntu-latest` normally means a hosted image WITH `gh`; the
+      # fallback pool carries that same label on a bare runner whose service PATH
+      # is a minimal non-login one, where the record dies `exit 127` and reads as
+      # a data fault rather than a runner fault.
+      - name: Runner tool contract — provide gh (#9018)
+        run: bash .github/scripts/runner-tools.sh ensure gh
       - name: Build the record-only availability baseline (#3810)
         env:
           # Actions does NOT export GITHUB_TOKEN itself, so GH_TOKEN must be

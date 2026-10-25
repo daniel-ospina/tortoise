@@ -54,6 +54,14 @@ jobs:
       issues: write
     steps:
       - uses: actions/checkout@v4
+      # ── THE RUNNER TOOL CONTRACT (#9018) ──────────────────────────────
+      # `availability-record.sh` reads AND writes GitHub issues through `gh`.
+      # `runs-on: ubuntu-latest` normally means a hosted image WITH `gh`; the
+      # fallback pool carries that same label on a bare runner whose service PATH
+      # is a minimal non-login one, where the record dies `exit 127` and reads as
+      # a data fault rather than a runner fault.
+      - name: Runner tool contract — provide gh (#9018)
+        run: bash .github/scripts/runner-tools.sh ensure gh
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'

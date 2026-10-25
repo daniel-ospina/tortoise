@@ -198,6 +198,20 @@ jobs:
         with:
           python-version: '3.12'
 
+      # ── THE RUNNER TOOL CONTRACT (#9018) ──────────────────────────────
+      # `runs-on: ubuntu-24.04` is documented as a HOSTED-ONLY pin, and the pool is
+      # not supposed to claim it — but it HAS, and there is job evidence: run
+      # 40141219586's `classify` was served by `runner_name: pi-runner-vm-3` with
+      # `labels: [ubuntu-24.04]`, and 38 of the 39 `classify` failures measured on
+      # 2026-10-24 held that same label on `pi-runner-vm-2/3/4/5/6`. (The drift arm
+      # that should have noticed reads `scripts/ci_runner_gate.sh`'s TEXT, not the
+      # live label set, so it could not fire — that is its own finding, not this
+      # step's.) Those failures were `gh: command not found` / `exit code 127`: a
+      # red that reads as a product failure and is not. This step provides the tool
+      # or fails NAMING it.
+      - name: Runner tool contract — provide gh (#9018)
+        run: bash .github/scripts/runner-tools.sh ensure gh
+
       - name: Resolve the issue body + labels
         id: issue
         env:
@@ -298,6 +312,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
+      # ── THE RUNNER TOOL CONTRACT (#9018) ──────────────────────────────
+      # Re-fetching the body below is two `gh` calls; `runs-on: ubuntu-24.04` is a
+      # HOSTED label that the pool has also carried (measured 2026-10-24: every
+      # failing `classify`/`provenance` job that ran on `pi-runner-vm-*` held it),
+      # and such a runner's service PATH is a minimal non-login one with no `gh`.
+      # Provide the tool or fail NAMING it instead of failing at 127.
+      - name: Runner tool contract — provide gh (#9018)
+        run: bash .github/scripts/runner-tools.sh ensure gh
 
       # The body is RE-FETCHED rather than handed over as an artifact: it is one
       # API call, and an artifact would put the untrusted text through a second
