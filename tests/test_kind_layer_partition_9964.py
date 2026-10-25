@@ -6,7 +6,7 @@ MEASURED on ``origin/main@4c797596d`` (2026-10-25), before this file:
         -> {'objectKind': 'core:organization', 'status': 'live', 'warnings': None}
         stored as: [['Object']]
         MATCH (s:Subject {subjectKind:'core:organization'}) -> 0 rows
-    create_subject("Widget", subjectKind="core:product")     # an OBJECT kind
+    create_subject("Widget", subjectKind="core:skill")       # an OBJECT kind
         stored as: [['Subject']]
     create_point("core:deployment", "the deploy happened")   # an EVENT kind
         stored as: [['Point'], 'core:deployment']
@@ -34,6 +34,12 @@ The contract these tests pin:
   subject door (or a Subject kind at the object door) writes the layer its kind
   names, with a ``kind_layer_routed`` advisory. ``#1934``'s warn-not-block is a
   recorded decision, so a REFUSAL here would be a reopen for the owner.
+  ⛔ The re-route's authority is the CLASSIFIER's partition plus the §5 Subject
+  vocabulary — NOT the write-gate vocabularies. ``objectKind``'s bucket accepts
+  the bare form of 56 legacy names, so routing from it re-labelled
+  ``create_subject('pi-agent', 'agent')`` (no classifier section; ``agent`` is a
+  §5 Object key) into an ``:Object`` and redded two shipped tests. A kind only
+  that vocabulary knows is REPORTED and left on the layer the caller asked for.
 * A kind that belongs to another AXIS (an Event kind at the Point door, an
   entity kind at the Event door) is NOT re-routed — a Point and an Event are
   different records, and §5 declares ``decision``/``humanApproval`` on BOTH
@@ -65,14 +71,17 @@ import pytest
 
 from tortoise.extractor_v2 import CORE_OBJECT_KEYS, EVENTS, POINTS, SUBJECTS
 from tortoise.kind_layers import (
+    ENTITY_LAYERS,
+    KIND_PROP,
     NIL_KINDS,
     SECTION_LAYERS,
     core_sections,
     declared_layers,
     entity_route,
+    section_of,
     undeclared_on,
 )
-from tortoise.sdk import TortoiseSDK
+from tortoise.sdk import TortoiseSDK, _kind_layer_note
 from tortoise.value_extractor import _clear_kind_spec_cache, compile_kind_index_spec
 
 TEST_GRAPH = "tortoise_test_9964_kind_layer"
@@ -140,12 +149,47 @@ def test_object_door_refuses_a_subject_kind(sdk):
 
 
 def test_subject_door_writes_an_object_kind_as_an_object(sdk):
-    """The mirror: `create_subject(subjectKind=<an Object kind>)` is an Object."""
-    r = sdk.create_subject("Widget", subjectKind="core:product")
+    """The mirror: `create_subject(subjectKind=<an Object kind>)` is an Object.
+
+    ``core:skill`` is in the classifier's ``objects`` section, so it is an
+    Object kind by the ROUTING authority (``kind_layers.routing_layers``).
+    """
+    r = sdk.create_subject("Widget", subjectKind="core:skill")
     labels, object_kind, _sk, _pk, _ek = _node(sdk, r["id"])
     assert labels == ["Object"], r
-    assert object_kind == "core:product"
+    assert object_kind == "core:skill"
     assert [n["code"] for n in _layer_notes(r)] == ["kind_layer_routed"]
+
+
+def test_a_vocabulary_only_kind_stays_on_the_door_the_caller_chose(sdk):
+    """A kind only the WRITE-GATE vocabulary knows is reported, never routed.
+
+    `agent` is an ONTOLOGY §5 Object key with **no classifier section** — it is
+    "declared object" only because ``objectKind``'s legacy bucket accepts the
+    bare name. Routing that declaration into a label re-labelled an explicitly
+    Subject-typed write (``create_subject('pi-agent', 'agent')`` — the door name
+    AND the property both say Subject, no classifier section says anything) into
+    an ``:Object``, which redded two shipped tests
+    (``test_entity_identity.py::…::test_provenance_resolves_id_typed_authored_by``
+    and ``test_p1_differentiators.py::…::test_provenance_with_matching_subject``)
+    and left `provenance` with no Subject to answer from — #9964 review P1.
+
+    The write LANDS where the caller asked (#1934 warn-not-block) and the
+    disagreement is REPORTED, which is the most a vocabulary-only declaration
+    can justify.
+    """
+    assert section_of("agent") is None
+    assert entity_route("agent") is None
+    r = sdk.create_subject("pi-agent", subjectKind="agent")
+    labels, object_kind, subject_kind, _pk, _ek = _node(sdk, r["id"])
+    assert labels == ["Subject"], r
+    assert subject_kind == "agent"
+    assert object_kind is None
+    assert [n["code"] for n in _layer_notes(r)] == ["kind_other_layer"], \
+        r.get("advisories")
+    # ...and the Subject-side read the door exists for still answers.
+    p = sdk.create_point("statement", "A claim", authoredBy=r["id"])
+    assert sdk.provenance(p["id"])["subject"] is not None
 
 
 def test_routing_never_turns_a_legal_write_into_a_refusal(sdk):
@@ -192,29 +236,103 @@ def test_no_object_carries_a_subject_kind_through_the_doors(sdk):
 # ── one partition: the classifier's sections are the door's authority ─────
 
 def test_the_classifiers_partition_is_the_one_the_doors_enforce():
-    """Every kind the classifier can assign is declared on its OWN section's layer.
+    """The classifier's section and the door's re-route can never disagree.
 
-    This is the invariant that makes the two layers unable to disagree: the
-    classifier restricts candidates per section (``TYPE_SECTIONS``) and returns
-    the winning kind; the door asks ``kind_layers`` which layer declares it. If
-    the section's layer were not among them, a classifier assignment could be
-    re-routed (or warned about) by the write — the exact silent disagreement
-    #9964 measured.
+    ⛔ The earlier version of this test asserted
+    ``layer in declared_layers(kind)`` — TRUE BY CONSTRUCTION, and therefore
+    inert: ``declared_layers`` derives that layer from the SAME ``section_of``
+    over the SAME spec the loop read, so the loop reduced to ``assert x in {x}``
+    and could not fail if the doors disagreed with the classifier (measured:
+    replace ``_kind_layer_note``'s body with ``return t, None`` — routing AND
+    reporting gone — and the old loop still passed; #9964 review).
+
+    What is asserted instead is the ROUTING CONSEQUENCE, over every kind the
+    classifier can assign, THROUGH THE DOOR FUNCTION:
+
+    * a kind from a POINT/EVENT section is never entity-routed;
+    * a kind from an ENTITY section is never re-routed to the OTHER entity
+      layer — the silent disagreement #9964 measured (``core:team`` is a
+      ``subjects`` kind an ``type='object'`` write stored as an ``:Object``);
+    * a kind whose entity layer is EXCLUSIVE (``entity_route`` is not ``None``)
+      IS routed there, and is reported as ``kind_layer_routed``;
+    * every other kind keeps the layer the caller asked for and is never
+      reported as routed.
     """
     spec = compile_kind_index_spec()
     assert spec["core:team"]["section"] == "subjects"  # the measured case
-    # ── #2818: the CORE key order is the classifier's partition AND the npz
-    # cache key. `compile_kind_index_spec` now builds these entries from
-    # `core_sections()` — whose INSERTION ORDER is deliberately objects →
-    # subjects → points → events — so a reorder (or a member moving group)
-    # rotates `kind_index.cache_key_for`'s hash and silently re-embeds the whole
-    # kind index. `test_pack_value_declarations_2818` compiles the spec twice
-    # and compares the two, which cannot see this: a reorder moves BOTH sides
-    # together. Pin the order itself, against the ONE authority.
+    routed = 0
+    for kind, md in spec.items():
+        if kind in NIL_KINDS:
+            # ``other`` asserts nothing about the layer: it routes nowhere and
+            # warns about nothing (its own silence test pins the door).
+            assert declared_layers(kind) == frozenset(), kind
+            assert entity_route(kind) is None, kind
+            continue
+        layer = SECTION_LAYERS[md["section"]]
+        route = entity_route(kind)
+        if layer not in ENTITY_LAYERS:
+            assert route is None, (
+                f"{kind!r} is classified from the {md['section']} section, so it "
+                f"must never be entity-routed; entity_route said {route!r}")
+            continue
+        # A §5 overlap kind (``core:goal`` is objects-section AND pointKind) is
+        # declared outside the entity partition too, so it is never routed
+        # (#7813) — the invariant is "never the OPPOSITE entity layer".
+        other = "object" if layer == "subject" else "subject"
+        assert route != other, (
+            f"the classifier assigns {kind!r} from the {md['section']} section, "
+            f"but the door would re-route it to {other} — the silent "
+            f"disagreement #9964 measured")
+        assert route in (None, layer), (kind, layer, route)
+        # ── the DOOR, not the map: a caller who typed the WRONG entity door is
+        # either re-labelled to this kind's own layer, or left where they asked.
+        asked = other
+        door_type, note = _kind_layer_note(asked, {KIND_PROP[asked]: kind})
+        assert door_type in (asked, layer), (
+            f"the {asked} door moved {kind!r} to {door_type!r}; the classifier "
+            f"assigns it from the {md['section']} section")
+        if route == layer:
+            assert door_type == layer, (
+                f"{kind!r} is declared only on the {layer} layer but the "
+                f"{asked} door did not route it (#9964)")
+            assert note and note["code"] == "kind_layer_routed", (kind, note)
+            assert note["actual"] == (layer,), note
+            routed += 1
+        else:
+            assert door_type == asked, (kind, door_type)
+            assert note is None or note["code"] == "kind_other_layer", (kind, note)
+    assert routed, ("no spec kind re-routes through the door — the assertions "
+                    "above cannot fire (non-vacuity guard)")
+
+
+def test_the_core_key_order_is_a_pinned_stability_convention():
+    """The spec's CORE key order is a STABILITY convention — pinned as one.
+
+    ``compile_kind_index_spec`` builds its core entries from ``core_sections()``,
+    so that map's insertion order (objects → subjects → points → events) fixes
+    the compiled spec's key order. It is worth pinning: a reorder is a gratuitous
+    diff in a generated artifact, and ``test_pack_value_declarations_2818``'s
+    byte-identity check compiles the spec TWICE and compares the two, so a
+    reorder moves BOTH sides together and cannot fire there.
+
+    ⚠️ It is NOT a cache-key dependency, which is what this file (and
+    ``core_sections()``'s docstring, and ``value_extractor``'s comment) used to
+    claim: ``kind_index.cache_key_for`` serializes with
+    ``json.dumps(spec, sort_keys=True, default=str)`` — key order cannot reach
+    the digest at all — and ``KindIndex.build`` sorts its kind names, so
+    candidate order is sorted too. Measured at this head:
+    ``cache_key_for(spec) == cache_key_for({k: spec[k] for k in reversed(spec)})``
+    is ``True``. The false mechanism was propagated from the PR body into three
+    code comments by a fix cycle instead of being removed; it is corrected here
+    (#9964 review).
+    """
+    from tortoise.kind_index import cache_key_for
+
+    spec = compile_kind_index_spec()
     core = list(core_sections())
     assert list(spec)[:len(core)] == core, (
-        "the kind-index spec's core key order changed — that is the npz cache "
-        "key (#2818): every graph silently re-embeds the index")
+        "the kind-index spec's core key order changed — the historic order is a "
+        "stability convention (see the docstring: this is NOT a cache key)")
     assert [spec[k]["section"] for k in core] == [core_sections()[k] for k in core]
     assert [core_sections()[k] for k in core] == (
         ["objects"] * len(CORE_OBJECT_KEYS)
@@ -222,20 +340,11 @@ def test_the_classifiers_partition_is_the_one_the_doors_enforce():
         + ["points"] * len(POINTS)
         + ["events"] * len(EVENTS)
     ), "the four sections must stay contiguous and in objects→subjects→points→events order"
-    disagreements = []
-    for kind, md in spec.items():
-        layer = SECTION_LAYERS[md["section"]]
-        if kind in NIL_KINDS:
-            # `other` asserts nothing about the layer: it routes nowhere and
-            # warns about nothing (covered by the silence test below), so it
-            # cannot disagree with a section.
-            assert declared_layers(kind) == frozenset(), kind
-            continue
-        if layer not in declared_layers(kind):
-            disagreements.append((kind, md["section"], sorted(declared_layers(kind))))
-    assert not disagreements, (
-        "the classifier can assign a kind its own section's layer does not "
-        f"declare: {disagreements[:5]}")
+    # ...and the ORDER is provably not the cache key (the claim this replaces).
+    reversed_spec = {k: spec[k] for k in reversed(list(spec))}
+    assert cache_key_for(spec) == cache_key_for(reversed_spec), (
+        "key order reached the cache key after all — the corrected rationale "
+        "in core_sections()'s docstring is wrong")
 
 
 def test_the_automatic_entity_case_lands_on_the_subject_layer(sdk):
@@ -425,3 +534,100 @@ def test_two_disagreeing_spellings_never_drop_the_caller_s_kind(sdk):
     assert labels2 == ["Subject"], ok
     assert subject_kind2 == "core:organization"
     assert [n["code"] for n in _layer_notes(ok)] == ["kind_layer_routed"]
+
+
+# ── the re-route's blast radius: label-scoped identity ───────────────────
+
+def test_a_re_route_that_splits_an_existing_entity_names_both_ids(sdk):
+    """Routing is lossless only when the other label holds nothing (#9964 review).
+
+    Entity ids are LABEL-scoped (`ids.entity_name_id` hashes
+    ``f"{label}:{name}"``), so on a graph that already holds the entity under the
+    label the write LEFT — the pre-fix shape this issue exists to describe, which
+    #2489 records as never repaired — the re-route mints a SECOND node beside the
+    stale one. The advisory asserted "no data was lost" in exactly that case; it
+    must name both ids instead, and keep the lossless wording only when the write
+    really did not split anything.
+    """
+    legacy = sdk.create_object("Acme Split")          # no kind → a plain :Object
+    assert _node(sdk, legacy["id"])[0] == ["Object"]
+
+    routed = sdk.create_object("Acme Split", objectKind="core:organization")
+    assert _node(sdk, routed["id"])[0] == ["Subject"]
+    assert routed["id"] != legacy["id"], "ids are label-scoped — the split IS real"
+    notes = _layer_notes(routed)
+    assert [n["code"] for n in notes] == ["kind_layer_routed"], routed.get("advisories")
+    message = notes[0]["message"]
+    assert legacy["id"] in message, f"the stale twin is not named: {message}"
+    assert routed["id"] in message, f"the new node is not named: {message}"
+    assert "no data was lost" not in message, (
+        f"the advisory claims losslessness over a graph it just split: {message}")
+    # ...and the split is in the GRAPH, not just in the prose.
+    assert _graph(sdk).query(
+        "MATCH (n {name:'Acme Split'}) RETURN count(n)").result_set[0][0] == 2
+
+    # The lossless case keeps the lossless wording (the branch is the split, not
+    # the route) — and names the door of the layer actually written, not the one
+    # the caller just used (#9964 review: it rendered `DOOR[requested]`, so
+    # `create_object(objectKind='core:organization')` was told "the door that
+    # writes a Object explicitly is ``create_object``").
+    clean = sdk.create_object("Fresh Holdings", objectKind="core:organization")
+    clean_notes = _layer_notes(clean)
+    assert [n["code"] for n in clean_notes] == ["kind_layer_routed"]
+    assert "no data was lost" in clean_notes[0]["message"], clean_notes[0]
+    assert "``create_subject``" in clean_notes[0]["message"], (
+        f"the remedy names the wrong door: {clean_notes[0]['message']}")
+    assert "``create_object``" not in clean_notes[0]["message"], clean_notes[0]
+
+
+def test_ingest_dedup_follows_the_label_the_write_lands_on(sdk):
+    """`ingest`'s `existed` probe must ask for the label the WRITE uses (#9964).
+
+    The probe ran on the ITEM's `type` label while the door re-labelled the write
+    by the kind, so re-ingesting ``{"type": "object", "objectKind": "core:team"}``
+    probed `:Object`, found nothing (the first run minted a `:Subject`) and
+    reported **created** while the write MERGED — on every run, forever.
+    """
+    bundle = {"entities": [{"type": "object", "name": "Ingest Team",
+                            "objectKind": "core:team"}]}
+    first = sdk.ingest(bundle)
+    assert first["created"]["entities"] == 1, first
+    assert _node(sdk, first["ids"]["entities"][0])[0] == ["Subject"]
+
+    second = sdk.ingest(bundle)
+    assert second["created"]["entities"] == 0, (
+        f"the probe missed the node the first run created: {second}")
+    assert second["deduped"]["entities"] == 1, second
+    assert second["ids"]["entities"] == first["ids"]["entities"]
+
+    # The mirror: an Object kind declared on a `type="subject"` item.
+    mirror = {"entities": [{"type": "subject", "name": "Ingest Widget",
+                            "subjectKind": "core:skill"}]}
+    m1 = sdk.ingest(mirror)
+    assert m1["created"]["entities"] == 1, m1
+    assert _node(sdk, m1["ids"]["entities"][0])[0] == ["Object"]
+    m2 = sdk.ingest(mirror)
+    assert m2["created"]["entities"] == 0, m2
+    assert m2["deduped"]["entities"] == 1, m2
+    assert _graph(sdk).query(
+        "MATCH (n {name:'Ingest Widget'}) RETURN count(n)").result_set[0][0] == 1
+
+
+def test_the_dedup_hit_keeps_the_layer_advisory(sdk):
+    """The DEDUP-hit branch must not drop the layer notice (#9964 review).
+
+    `create_point`'s dedup-hit return attached only `temporal_not_applied`, so
+    the SAME call reported `kind_other_layer` on its first run and lost it on the
+    re-run — the branch a retry actually takes. Both advisories ride ONE
+    `advisories` key, so the merge (not a second `**` splat) is what keeps them.
+    """
+    first = sdk.create_point("core:deployment", "deploy twice", status="superseded")
+    assert [n["code"] for n in _layer_notes(first)] == ["kind_other_layer"], \
+        first.get("advisories")
+    again = sdk.create_point("core:deployment", "deploy twice",
+                             status="superseded", dedup=True,
+                             validFrom="2020-01-01T00:00:00Z")
+    codes = [n["code"] for n in (again.get("advisories") or [])]
+    assert "temporal_not_applied" in codes, again.get("advisories")
+    assert "kind_other_layer" in codes, (
+        f"the layer notice was dropped by the dedup branch: {again.get('advisories')}")

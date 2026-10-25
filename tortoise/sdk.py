@@ -91,8 +91,8 @@ from .live import direction_flows  # #7852 (source→target, target→source) fl
 from .live import direction_spellings  # #7852 stored-token equivalence class
 from .live import is_default_direction  # #7852 "does not differentiate" default
 from .entity_identity import (  # #3633 route-then-refuse identity resolution
-    ADDRESSING_SOURCE, UnaddressableEntityName, resolve_document_target_id,
-    resolve_entity_id)
+    ADDRESSING_SOURCE, UnaddressableEntityName, all_name_holder_ids,
+    resolve_document_target_id, resolve_entity_id)
 from .live import _terminal_expression  # #3142 shared Cypher terminal predicate (POSITIVE direction)
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
 from .live import classify_lifecycle_fanout  # #7822 fan-out-wide lifecycle verdict
@@ -3733,6 +3733,40 @@ def _named_layer_kinds(props: dict) -> list[tuple[str, str, str]]:
     return named
 
 
+#: entity layer → the node label its door mints. Entity identity is
+#: LABEL-SCOPED (``ids.entity_name_id`` hashes ``f"{label}:{name}"``), so the
+#: same name under the two entity labels is TWO nodes, never one entity seen
+#: twice — which is why a re-route can SPLIT an entity (#9964 review).
+_ENTITY_LAYER_LABEL: dict[str, str] = {"subject": "Subject", "object": "Object"}
+
+
+def _existing_entity_ids(g, etype: str, props: dict, name: Any) -> list:
+    """The ids of the entity nodes this write will actually MERGE onto.
+
+    ``etype`` is what the ITEM declared; the entity door re-labels the write by
+    the KIND it names (#9964: ``create_object(objectKind='core:team')`` writes a
+    ``:Subject``), and identity is label-scoped (``ids.py``:
+    ``sha256(f"{label}:{name}")``) — so probing ``etype``'s label can measure a
+    DIFFERENT node than the write touches. Measured at the review head:
+    re-ingesting ``{"type": "object", "objectKind": "core:team"}`` reported
+    ``created`` while the write MERGED, forever, because the ``:Object`` probe
+    never matched the ``:Subject`` the door had minted.
+
+    Asks the door's OWN authority (``_kind_layer_note``) instead of re-deriving
+    type→label here, on a COPY (that function MUTATES ``props`` on the routed
+    case), and fails open to ``etype`` (#1934: a probe must never refuse a
+    write).
+    """
+    if not isinstance(name, str) or not name:
+        return []
+    try:
+        probe = _kind_layer_note(etype, dict(props))[0]
+    except Exception:  # noqa: BLE001, RUF100 — probe only, never refuses a write
+        probe = etype
+    label = _ENTITY_LAYER_LABEL.get(probe) or _ENTITY_LAYER_LABEL.get(etype)
+    return all_name_holder_ids(g, label, name) if label else []
+
+
 def _kind_layer_note(t: str, props: dict) -> tuple[str, dict | None]:
     """Route/annotate an ENTITY write by the kind it names (#9964).
 
@@ -3757,7 +3791,10 @@ def _kind_layer_note(t: str, props: dict) -> tuple[str, dict | None]:
         # Event door (the document door's kind is a Source genre, not a layer).
         return t, _first_layer_mismatch(named, t)
     # 1. Kinds that belong EXCLUSIVELY to one entity layer ROUTE the label — the
-    #    kind is the decision, the door's `type` was only a hint. Every named
+    #    kind is the decision, the door's `type` was only a hint. The authority is
+    #    `kind_layers.routing_layers` (the classifier's section + the §5 Subject
+    #    vocabulary), NOT the write-gate vocabularies — see that function for the
+    #    P1 that ruled the latter out. Every named
     #    kind must be THE SAME kind, so a write that names two different layers
     #    is never routed on a coin flip. Nor is a write that names ONE property
     #    under two spellings whose values disagree (`objectKind="core:organization",
@@ -3828,12 +3865,16 @@ def _first_layer_mismatch(named: list[tuple[str, str, str]],
     return None
 
 
-def _kind_layer_advisory(note: dict | None, node_id: str | None) -> dict:
+def _kind_layer_advisory(note: dict | None, node_id: str | None,
+                         name: str | None = None) -> dict:
     """The ADVISORY payload for ``_kind_layer_note``'s note (#8171 channel).
 
     ADVISORY ONLY: the write has already landed, nothing here raises or changes
     what was stored, and a caller that ignores it loses nothing but the notice
     (#1934 warn-not-block).
+
+    ``name`` is the entity name, needed only when the re-route SPLIT an existing
+    entity (``note['split_peer_id']``) — the message then names both ids.
     """
     if not note:
         return {}
@@ -3843,12 +3884,31 @@ def _kind_layer_advisory(note: dict | None, node_id: str | None) -> dict:
     declared = "/".join(a.capitalize() for a in actual)
     _article = "an" if declared[:1] in "AEIOU" else "a"
     if note["code"] == "kind_layer_routed":
+        # ⛔ "no data was lost" is only true when the OTHER entity label holds no
+        # node of this name. Identity is label-scoped, so on a graph that already
+        # holds the OLD label (#2489 records no repair path) the re-route mints a
+        # SECOND node and leaves the stale one answering every old-label read —
+        # the caller is the only one who can reconcile that, so the advisory
+        # names both ids instead of claiming losslessness (#9964 review).
+        _peer = note.get("split_peer_id")
+        _peer_article = "an" if layer[:1].lower() in "aeiou" else "a"
+        _door = DOOR[actual[0]]
         message = (
             f"{kind!r} is {_article} {declared}-layer kind, so this write landed "
             f"as a :{declared} (with the kind on {actual[0]}Kind) instead of "
             f"the {layer.capitalize()} the door requested. The kind decides the "
-            f"layer (ONTOLOGY §1); no data was lost, and the door that writes "
-            f"a {layer.capitalize()} explicitly is ``{DOOR[layer]}``."
+            f"layer (ONTOLOGY §1); "
+            + (f"⚠️ {_peer_article} :{layer.capitalize()} named {name!r} ALREADY "
+               f"exists ({_peer}), and entity ids are LABEL-scoped "
+               f"(`sha256('<label>:<name>')`), so this write created a SECOND "
+               f"node ({node_id}) rather than replacing it — {name!r} now has a "
+               f"node under EACH entity label, nothing reconciles them for you "
+               f"(#2489: no repair path), and the older one keeps answering "
+               f"the {layer.capitalize()}-keyed reads. Retire the stale node "
+               f"explicitly, or read this entity across both labels."
+               if _peer else
+               f"no data was lost, and the door that writes {_article} "
+               f"{declared} explicitly is ``{_door}``.")
         )
     else:
         doors = ", ".join(f"{DOOR[a]} (e.g. {DOOR[a]}(name, "
@@ -9489,8 +9549,18 @@ class TortoiseSDK:
                         # or to an SDK caller reading the return value. The
                         # advisory is transient (#8171) — it rides a COPY, so
                         # neither `get_point` nor the journal ever holds it.
-                        return {**self.get_point(pid),
-                                **self._temporal_not_applied_advisory(pid)}
+                        # ⚠️ BOTH advisories ride the one `advisories` key, so the
+                        # merge is `_merge_advisories` (a second `**` splat would
+                        # REPLACE the list and drop the kind↔layer note — the
+                        # defect measured at the #9964 review: the re-run of this
+                        # very call returned `temporal_not_applied` ONLY, while
+                        # its first run reported `kind_other_layer` too).
+                        return {
+                            **self.get_point(pid),
+                            **_merge_advisories(
+                                self._temporal_not_applied_advisory(pid),
+                                _kind_layer_advisory(_layer_note, pid)),
+                        }
                 if _has_key:
                     # One read serves BOTH #6110 audits below.
                     _existing = self.get_point(pid)
@@ -21142,17 +21212,14 @@ class TortoiseSDK:
                 if isinstance(item.get(key), str) and item[key] in refs:
                     item[key] = refs[item[key]]
             if etype == "subject":
-                existed = proj.g.query(
-                    "MATCH (n:Subject {name:$name}) RETURN n.id",
-                    params={"name": name},
-                ).result_set
+                # ── #9964 review: probe the label the WRITE lands on, not the one
+                # the item declared (the door re-labels by the kind). See
+                # `_existing_entity_ids`.
+                existed = _existing_entity_ids(proj.g, etype, item, name)
                 node = self.create_subject(name, **item)
                 canonical = node.get("id") or name
             elif etype == "object":
-                existed = proj.g.query(
-                    "MATCH (n:Object {name:$name}) RETURN n.id",
-                    params={"name": name},
-                ).result_set
+                existed = _existing_entity_ids(proj.g, etype, item, name)
                 node = self.create_object(name, **item)
                 canonical = node.get("id") or name
             elif etype == "event":
@@ -36057,6 +36124,32 @@ class TortoiseSDK:
                         _prov_id, _prov_ref, label=_prov_label),
                     what="create_entity extractedFrom edges",
                 )
+        # ── #9964 review: a re-route mints a LABEL-scoped id, so on a graph
+        # that already holds this entity under the OTHER entity label it mints a
+        # SECOND node beside the stale one (#2489 records no repair path). The
+        # advisory used to claim "no data was lost" in exactly that case; probe
+        # for the twin so it can name both ids instead. READ-ONLY and fail-open
+        # (#1934): a probe that failed must never refuse a write that landed.
+        if _layer_note and _layer_note.get("code") == "kind_layer_routed":
+            _written_id = node.get("id") or node.get("eventId")
+            # `all_name_holder_ids` takes a LABEL and refuses anything else, so
+            # map the note's LAYER through the one map instead of re-spelling.
+            _peer_label = _ENTITY_LAYER_LABEL.get(_layer_note["layer"])
+            try:
+                _split_peer = next(
+                    (i for i in all_name_holder_ids(
+                        self._get_proj().g, _peer_label, name)
+                     if i and i != _written_id), None) if _peer_label else None
+            except Exception as _split_exc:  # noqa: BLE001, RUF100 — advisory only
+                # ⚠️ `type` is this method's PARAMETER (the entity type), so
+                # `type(exc)` would be the string here — use `__class__`.
+                _logger.warning(
+                    "create_entity: the split probe failed (%s: %s) — the "
+                    "re-route advisory is reported without it.",
+                    _split_exc.__class__.__name__, _split_exc)
+                _split_peer = None
+            if _split_peer:
+                _layer_note = {**_layer_note, "split_peer_id": _split_peer}
         return {
             "node": node,
             "nudges": self._nudge_candidates(
@@ -36064,7 +36157,8 @@ class TortoiseSDK:
             **_merge_advisories(
                 self._provenance_advisory(node, props, entity_type=t),
                 _kind_layer_advisory(
-                    _layer_note, node.get("id") or node.get("eventId"))),
+                    _layer_note, node.get("id") or node.get("eventId"),
+                    name=name)),
         }
 
     # ── #8171: the write-time provenance advisory ────────────────────

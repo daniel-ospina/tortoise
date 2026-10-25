@@ -1099,7 +1099,12 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_create_subject",
         id="surface.create_subject",
-        description="Create a Subject node (team, role, organization, person).",
+        description=(
+            "Create a Subject node (team, role, organization, person), unless the "
+            "kind names the other entity layer: the KIND decides the LABEL "
+            "(#9964), so a kind the classifier partitions as an Object (e.g. "
+            "subjectKind='core:skill') writes an :Object and is reported as "
+            "advisories.kind_layer_routed."),
         risk="destructive",  # a repeat call re-applies caller props ON MATCH (#9572)
         http_policy=True,
         sdk_method="create_subject",
@@ -1107,7 +1112,11 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_create_object",
         id="surface.create_object",
-        description="Create an Object node (product, customer, skill, etc.).",
+        description=(
+            "Create an Object node (product, customer, skill, etc.), unless the "
+            "kind is a §5 Subject kind: the KIND decides the LABEL (#9964), so "
+            "objectKind='core:organization' writes a :Subject and is reported "
+            "as advisories.kind_layer_routed."),
         risk="destructive",  # a repeat call re-applies caller props ON MATCH (#9572)
         http_policy=True,
         sdk_method="create_object",

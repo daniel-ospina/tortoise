@@ -324,7 +324,17 @@ response_fields:
     type=document (the sole type this door materializes extractedFrom for); its message names `extractedFrom=''session:<id>''`.
     `extracted_from_inert` fires on ANY type when an extractedFrom WAS declared but the type is not one this door
     wires (subject/object/event). A type this door cannot source at all (subject/object/event with nothing declared)
-    is NOT advised — there is no in-door remedy to name, so a note would be noise (#8171, review P1)'
+    is NOT advised — there is no in-door remedy to name, so a note would be noise (#8171, review P1). Two codes from
+    the kind↔layer partition (#9964) ride the same key: `kind_layer_routed` when the kind the write names is declared
+    EXCLUSIVELY on the other entity layer — the KIND decides the LABEL, so the node is written as a `:Subject`/`:Object`
+    with the kind re-declared on that layer''s canonical prop (objectKind=''core:organization'' at type=''object'' lands
+    as a :Subject carrying subjectKind) — and `kind_other_layer` when the kind is declared only on another AXIS (an
+    Event kind at an entity door), where the write LANDS as asked and the message names the door that writes the declaring
+    layer. Neither code ever blocks or refuses (#1934 warn-not-block). The routing authority is the classifier''s section
+    plus the §5 Subject vocabulary — never the write-gate vocabularies, so a kind only those know (`agent`) is reported
+    and left on the layer the caller chose. ⚠️ A re-route mints a LABEL-scoped id, so when a same-name node already
+    exists on the label the write left, the graph holds BOTH afterwards and the message names both ids instead of
+    claiming nothing was lost (#2489: no repair path)'
   unchanged_when_off: n/a — not flag-gated; the key is ABSENT on a write the door can source, so a sourced response
     stays byte-identical
 - response: tortoise_create_document
@@ -336,21 +346,30 @@ response_fields:
     byte-identical
 - response: tortoise_create_subject
   field: advisories
-  emitted_when: the alias door now surfaces the same advisory as create_entity(type='subject') — `extracted_from_inert`
-    when the write declares an extractedFrom this door does not wire (subject writes have no `no_source`, see tortoise_create_entity).
-    Additive key; the node properties are unchanged (#8171, review P2)
+  emitted_when: 'the alias door now surfaces the same advisory as create_entity(type=''subject'') — `extracted_from_inert`
+    when the write declares an extractedFrom this door does not wire (subject writes have no `no_source`, see
+    tortoise_create_entity). Additive key; every pre-existing property keeps its value (#8171, review P2) — ⚠️ but the
+    node LABEL is not fixed: the kind decides the layer (#9964), so this alias writes an `:Object` when the subjectKind
+    is a kind the classifier partitions on the Object layer (e.g. subjectKind=''core:skill''; reported as `kind_layer_routed`),
+    and a kind declared only on another axis lands here reported as `kind_other_layer`'
   unchanged_when_off: n/a — not flag-gated; the key is ABSENT when there is no advisory, so the response stays byte-identical
 - response: tortoise_create_object
   field: advisories
-  emitted_when: the alias door now surfaces the same advisory as create_entity(type='object') — `extracted_from_inert`
-    when the write declares an extractedFrom this door does not wire (object writes have no `no_source`, see tortoise_create_entity).
-    Additive key; the node properties are unchanged (#8171, review P2)
+  emitted_when: 'the alias door now surfaces the same advisory as create_entity(type=''object'') — `extracted_from_inert`
+    when the write declares an extractedFrom this door does not wire (object writes have no `no_source`, see
+    tortoise_create_entity). Additive key; every pre-existing property keeps its value (#8171, review P2) — ⚠️ but the
+    node LABEL is not fixed: the kind decides the layer (#9964), so this alias writes a `:Subject` when objectKind is
+    a §5 Subject kind (e.g. objectKind=''core:organization''; reported as `kind_layer_routed`), and a kind declared only
+    on another axis lands here reported as `kind_other_layer`. The MCP tool requires objectKind, so this door also cannot
+    express "a Subject with no kind" — the kind is the only lever it has'
   unchanged_when_off: n/a — not flag-gated; the key is ABSENT when there is no advisory, so the response stays byte-identical
 - response: tortoise_create_event
   field: advisories
-  emitted_when: the alias door now surfaces the same advisory as create_entity(type='event') — `extracted_from_inert`
-    when the write declares an extractedFrom this door does not wire (event writes have no `no_source`, see tortoise_create_entity).
-    Additive key; the node properties are unchanged (#8171, review P2)
+  emitted_when: 'the alias door now surfaces the same advisory as create_entity(type=''event'') — `extracted_from_inert`
+    when the write declares an extractedFrom this door does not wire (event writes have no `no_source`, see
+    tortoise_create_entity). Additive key; every pre-existing property keeps its value (#8171, review P2) — the Event
+    door never RE-LABELS (an entity or point kind written here is reported as `kind_other_layer` and the :Event lands
+    as asked, #9964/#1934), so a `kind_layer_routed` code cannot fire here'
   unchanged_when_off: n/a — not flag-gated; the key is ABSENT when there is no advisory, so the response stays byte-identical
 - response: tortoise_create_point
   field: advisories
@@ -363,7 +382,11 @@ response_fields:
     annotation with no link behind it (#8171). A second code rides the same key: `temporal_not_applied`, when the
     write DEDUP-hits a point that is already a terminal claim and the payload carried a temporal prop — the whole
     fold is dropped (#7819 refuses re-stamping a dead claim''s window), so the response reports the HIT plus this
-    advisory instead of a silent no-op'
+    advisory instead of a silent no-op. A THIRD code rides it too (#9964): `kind_other_layer`, when the declared
+    pointKind is declared only on another layer (an Event kind — e.g. pointKind=''core:deployment'') written as a point —
+    the point LANDS with that kind (#1934 warn-not-block) and the message names `create_event`. This door never re-labels
+    (a Point is a different record, not a relabel of an entity), so `kind_layer_routed` cannot fire here. Both codes ride
+    the SAME key on the dedup-hit return, so a re-run reports them together rather than dropping one'
   unchanged_when_off: n/a — not flag-gated; the key is ABSENT on a sourced or word-bearing write, and on every write
     whose fold actually applied, so that response stays byte-identical
 - response: tortoise_check_structure
@@ -1440,7 +1463,8 @@ rows:
   keyword_rank: 2
   cluster: create
   canonical: false
-  job: Create an Object node (product, customer, skill, etc.).
+  job: 'Create an Object node (product, customer, skill, etc.), unless the kind is a §5 Subject kind: the KIND decides
+    the LABEL (#9964), so objectKind=''core:organization'' writes a :Subject and is reported as advisories.kind_layer_routed.'
   dependency: declares TortoiseSDK.create_object (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
@@ -1467,7 +1491,9 @@ rows:
   keyword_rank: 2
   cluster: create
   canonical: false
-  job: Create a Subject node (team, role, organization, person).
+  job: 'Create a Subject node (team, role, organization, person), unless the kind names the other entity layer: the
+    KIND decides the LABEL (#9964), so a kind the classifier partitions as an Object (e.g. subjectKind=''core:skill'')
+    writes an :Object and is reported as advisories.kind_layer_routed.'
   dependency: declares TortoiseSDK.create_subject (resolves)
   lifecycle: active
   used_by: never called, tooling, docs

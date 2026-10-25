@@ -50,6 +50,14 @@ This module answers it ONCE, and every consumer derives from it:
   hint and the KIND is the decision. The two entity layers are disjoint
   (measured: no Object kind is a §5 Subject kind, and no pack declares a
   subject kind), so the route has one answer.
+  ⛔ It reads the CLASSIFIER's partition and the §5 Subject vocabulary
+  (``routing_layers``), NOT the write-gate vocabularies: the object bucket
+  accepts the bare form of 56 legacy names, so routing from it re-labelled an
+  explicitly Subject-typed write (``create_subject('pi-agent', 'agent')`` — no
+  classifier section, and ``agent`` is a §5 OBJECT kind) into an ``:Object``
+  and redded two shipped tests. A kind only the write-gate vocabulary knows is
+  REPORTED by the door (``kind_other_layer``, warn-not-block #1934), never
+  used to overrule the door the caller chose (#9964 review).
 
 ``other`` / ``core:other`` declares NOTHING about the layer — §5's catch-all,
 and the fold's ON CREATE default for every entity label — so it is never
@@ -116,9 +124,17 @@ def core_sections() -> dict[str, str]:
 
     Insertion order IS the kind-index spec's key order (objects → subjects →
     points → events), because ``compile_kind_index_spec`` builds the spec from
-    this map and ``kind_index.cache_key_for`` hashes the spec JSON: reordering
-    would rotate the persisted index's cache key and silently re-embed the whole
-    kind index (the #2818 note). The four source declarations are imported, never
+    this map in this order. That is a STABILITY convention (it keeps a
+    generated artifact's key order from churning), pinned by
+    ``tests/test_kind_layer_partition_9964.py`` — ⛔ it is NOT a cache-key
+    dependency: ``kind_index.cache_key_for`` serializes with
+    ``sort_keys=True`` and ``KindIndex.build`` sorts its kind names, so key
+    order cannot reach the digest or the candidate order (measured at the
+    #9964 review: ``cache_key_for(spec) == cache_key_for(reversed(spec))``).
+    An earlier draft of this docstring claimed a reorder would "rotate the
+    persisted index's cache key and silently re-embed the whole kind index"
+    (#2818); that mechanism is false and is corrected here rather than
+    repeated. The four source declarations are imported, never
     re-spelled — ONTOLOGY §5 is canonical and ``extractor_v2`` mirrors it.
     """
     from tortoise.extractor_v2 import CORE_OBJECT_KEYS, EVENTS, POINTS, SUBJECTS
@@ -235,6 +251,12 @@ def declared_layers(kind: Any) -> frozenset[str]:
     A ``NIL_KINDS`` value returns EMPTY: ``other`` is writable on every entity
     layer (the fold's ON CREATE default) and asserts nothing, so it must not be
     read as evidence for one layer.
+
+    ⚠️ This is the ADVISORY authority. A door must not re-LABEL a write from it:
+    the write-gate vocabularies accept a wide legacy surface (56 bare object
+    names, namespaces stripped), which is right for "does this layer know the
+    kind" and wrong for "which layer does the kind belong to". Routing reads
+    ``routing_layers`` instead (#9964 review).
     """
     if not isinstance(kind, str) or not kind.strip():
         return frozenset()
@@ -269,19 +291,62 @@ def undeclared_on(kind: Any, layer: str) -> tuple[str, ...]:
     return tuple(sorted(layers))
 
 
-def entity_route(kind: Any) -> str | None:
-    """The ONE entity layer ``kind`` is declared on, or ``None``.
+def routing_layers(kind: Any) -> frozenset[str]:
+    """The layers that may DECIDE a door's label — and nothing else.
 
-    ``None`` when the kind is undeclared, declared on more than one entity layer
-    (impossible today — the two are disjoint — but not assumed), or declared
-    anywhere outside the entity partition (``goal`` is Point AND Object; an
-    event kind is an Event). Only a kind that belongs *exclusively* to one
-    entity layer can decide a door's label without losing something.
+    Two declarations, and only two:
+
+    * the classifier's section (``section_of``) — the partition the PR's own
+      authority is built on, and
+    * the §5 Subject vocabulary (``declares_subject``) — read from
+      ``extractor_v2.SUBJECTS``, so it survives an unreadable pack catalog
+      (``section_of`` degrades to "no section" there, and the subject kinds
+      must still route — ``test_a_malformed_pack_manifest_cannot_refuse_a_write``
+      pins exactly that).
+
+    ⛔ The write-gate vocabularies (``domain_loader.known_kinds``) are
+    DELIBERATELY absent, even though ``declared_layers`` uses them for the
+    ADVISORY. They are the wrong authority for deciding a label:
+    ``objectKind``'s bucket accepts the bare form of 56 legacy names, and
+    ``kind_is_known`` strips a namespace before matching, so an OBJECT kind
+    (``agent`` — a §5 Object key with no classifier section) was declared
+    "object only" and a Subject-typed write naming it was re-labelled into an
+    ``:Object``. Measured at the #9964 review head: that broke
+    ``create_subject('pi-agent', 'agent')`` — an explicitly Subject-typed write
+    whose door AND property say Subject, which ``provenance`` and
+    ``file_human_approval`` read Subject-side — and redded two shipped tests
+    (``test_entity_identity.py::…::test_provenance_resolves_id_typed_authored_by``
+    and ``test_p1_differentiators.py::…::test_provenance_with_matching_subject``).
+    A "this kind is known to that layer's vocabulary" fact is a WARNING
+    (``undeclared_on``), not a licence to overrule the door the caller chose
+    (#1934: warn, never block; here, never re-label either).
     """
-    layers = declared_layers(kind)
-    if not layers:
-        return None
-    if layers - set(ENTITY_LAYERS):
+    if not isinstance(kind, str) or not kind.strip() or kind in NIL_KINDS:
+        return frozenset()
+    layers: set[str] = set()
+    section = section_of(kind)
+    if section in SECTION_LAYERS:
+        layers.add(SECTION_LAYERS[section])
+    if declares_subject(kind):
+        layers.add("subject")
+    return frozenset(layers)
+
+
+def entity_route(kind: Any) -> str | None:
+    """The ONE entity layer ``kind`` is declared on by a ROUTING declaration.
+
+    ``None`` when the kind is undeclared there, declared on more than one entity
+    layer (impossible today — the two are disjoint — but not assumed), or
+    declared anywhere outside the entity partition (``goal`` is Point AND Object;
+    an event kind is an Event). Only a kind that belongs *exclusively* to one
+    entity layer can decide a door's label without losing something.
+
+    See ``routing_layers`` for why the write-gate vocabularies do not
+    participate: routing from them re-labelled main's ``create_subject('pi-agent',
+    'agent')`` into an ``:Object`` (#9964 review P1).
+    """
+    layers = routing_layers(kind)
+    if not layers or layers - set(ENTITY_LAYERS):
         return None
     found = sorted(layers)
     return found[0] if len(found) == 1 else None

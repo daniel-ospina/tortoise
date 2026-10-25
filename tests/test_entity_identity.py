@@ -1011,11 +1011,12 @@ _ALLOWED_KEYED = {
         # attaches to every carrier, id-less stub included; migration-gated.
         '_oid_rows = proj.g.query( "MATCH (o:Object {name:$n}) " "RETURN o.id", params={"n": _n}).result_set': 1,
         'proj.g.query( "MATCH (p:Point {id:$pid}), " "(o:Object {name:$n}) " "WHERE o.id IS NULL OR o.id = \'\' " "MERGE (p)-[:aboutObject]->(o)", params={"pid": pid, "n": _n})': 1,
-        # C: ingest EXISTENCE probes — "does a holder exist" feeds the
-        # created/deduped counter. The canonical id comes from the create
-        # call's return value, never from this read.
-        'existed = proj.g.query( "MATCH (n:Subject {name:$name}) RETURN n.id", params={"name": name}, ).result_set': 1,
-        'existed = proj.g.query( "MATCH (n:Object {name:$name}) RETURN n.id", params={"name": name}, ).result_set': 1,
+        # C: ingest's existence probe is NO LONGER here — it now asks the
+        # dispositioned resolver (`entity_identity.all_name_holder_ids`) for the
+        # label the WRITE lands on, via `sdk._existing_entity_ids` (#9964).
+        # Probing the ITEM's label here measured a different node than the
+        # write touched once the kind could re-label the write, so the entry
+        # that used to record the two raw reads is gone with them.
     },
 }
 

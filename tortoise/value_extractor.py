@@ -428,8 +428,11 @@ def compile_kind_index_spec(packs_dir: Path | str | None = None,
         "events": lambda k: str(EVENTS[k]),
     }
     # `core_sections()`'s insertion order IS this spec's historic key order
-    # (objects → subjects → points → events) — load-bearing, because
-    # `kind_index.cache_key_for` hashes the spec JSON (#2818).
+    # (objects → subjects → points → events) — a STABILITY convention pinned by
+    # `tests/test_kind_layer_partition_9964.py`, ⛔ not a cache-key dependency:
+    # `kind_index.cache_key_for` serializes with `sort_keys=True`, so key order
+    # cannot reach the digest (#9964 review — the old "#2818 hashes the spec
+    # JSON" rationale was measured false and is corrected, not repeated).
     for k, section in core_sections().items():
         desc = _declared_desc[section](k)
         spec[k] = {"text": _surface(k, desc, [], []), "section": section,
