@@ -1,0 +1,2129 @@
+"""The intake relay needs a path that does not depend on one event-time run.
+
+MEASURED DEFECT (2026-10-24, this repo)
+---------------------------------------
+`.github/workflows/inbound-relay.yml` is the source stop for external
+contributions (#2409 / #2441): label `queued-for-triage`, comment, close, relay
+to intake. Its only external trigger is `opened`, so it gets ONE chance per
+item — and that chance does not survive this repo's own settings:
+
+  * `GET /repos/…/actions/permissions/fork-pr-contributor-approval` →
+    `{"approval_policy": "all_external_contributors"}`: a workflow run started
+    by an external actor is held until a maintainer approves it.
+  * Of the 800 most recent runs of that workflow (2026-10-19T05:08Z →
+    2026-10-24T23:53Z): **792 `skipped`** (owner-authored traffic, correctly
+    excluded before a runner exists) and **8 `startup_failure`** — every one of
+    them an external actor's event — and **0 executions**. 8 of 8 external
+    triggers died before a single step ran.
+  * Nothing re-fires it. `tools/ci_check_repair.py` repairs REQUIRED checks
+    only; a close/reopen re-fires `reopened`, which this workflow does not
+    listen to.
+  * Measured cost on the item that named this lane: PR #9883 — a phantom whose
+    entire diff was one README comment line (`README.md +3 −0`) — stayed open
+    13 h 41 m, ran the full CI matrix (6 reds, all inherited from its base) and
+    consumed a lane cycle (`pr-doctor-brief-prd-9883.txt`).
+
+So the relief is not a smarter classifier of "is this diff a real fix" (we do
+not own the producer, and an external producer can defeat any client-side
+patch). It is the thing the design already promises and never delivered: the
+relay's EFFECT must converge even when its event-time run dies.
+
+WHAT THIS SUITE PINS
+--------------------
+`tools/inbound_relay_sweep.py` runs on a schedule under the repository's own
+credential — not an external actor's — so it is not subject to the approval
+policy and does not depend on any event run. It applies the SAME policy as the
+workflow, and these tests pin both halves:
+
+  * the decision, cross-checked against the workflow's own job-level `if:`
+    (imported from `test_inbound_relay_guard.py`), so the two paths cannot
+    drift apart into "the sweep closes what the relay would spare";
+  * the rails, because a sweeper that closes pull requests is dangerous in a
+    way a per-event relay is not: an incomplete listing must take NO action, a
+    failed intake POST must leave the item OPEN and UNLABELLED for the next
+    run, a run is capped, and the window is bounded.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import os
+import re
+import sys
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+MODULE_PATH = REPO_ROOT / "tools" / "inbound_relay_sweep.py"
+WORKFLOW = REPO_ROOT / ".github" / "workflows" / "inbound-relay.yml"
+SWEEP_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "inbound-relay-sweep.yml"
+
+OWNER = "daniel-ospina"
+LABEL = "queued-for-triage"
+NOW = datetime(2026, 10, 25, 0, 30, tzinfo=UTC)
+
+
+def _load() -> Any:
+    """The tool, loaded by path — `tools/` is not an installed package."""
+    assert MODULE_PATH.is_file(), f"missing tool: {MODULE_PATH}"
+    spec = importlib.util.spec_from_file_location("inbound_relay_sweep", MODULE_PATH)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    # Registered before execution: a dataclass resolves its own module from
+    # `sys.modules` while the class body runs.
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture(scope="module")
+def sweep() -> Any:
+    return _load()
+
+
+@pytest.fixture(autouse=True)
+def _scrubbed_intake_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No unit test in this file may POST a real intake record.
+
+    A `GhClient` built WITHOUT an explicit credential falls back to
+    `os.environ` (`INBOUND_URL` / `INBOUND_SECRET_GITHUB`) — `main()` passes
+    `Config`'s values instead, so production has one source, but every test in
+    this file constructs the client directly. A developer shell, or CI, that
+    happens to export the pair would therefore make a test driving the REAL
+    client (the resume-read cases, the stub-`gh` cases) POST to the live intake
+    endpoint before it ever failed on a stub: a write to a production system
+    produced by a unit test.
+
+    Autouse and module-wide, so a NEW test cannot reintroduce the hazard by
+    forgetting to opt in. A test that must exercise `post_intake` re-adds the
+    pair with `monkeypatch.setenv` (or passes a credential explicitly) and stubs
+    the transport.
+    """
+    monkeypatch.delenv("INBOUND_URL", raising=False)
+    monkeypatch.delenv("INBOUND_SECRET_GITHUB", raising=False)
+
+
+# ── a fake GitHub, recording every mutation in order ─────────────────────────
+
+
+class FakeClient:
+    """Records mutations; `fail_relay` makes the intake POST fail."""
+
+    def __init__(
+        self,
+        *,
+        issues: list[dict[str, Any]] | None = None,
+        pulls: list[dict[str, Any]] | None = None,
+        fail_relay: bool = False,
+        fail_listing: bool = False,
+        fail_detail: bool = False,
+        fail_comment: bool = False,
+        fail_close: bool = False,
+        fail_label: bool = False,
+        relayed: bool = False,
+        fail_resume: bool = False,
+    ) -> None:
+        self._issues = issues or []
+        self._pulls = pulls or []
+        self.fail_relay = fail_relay
+        self.fail_listing = fail_listing
+        self.fail_detail = fail_detail
+        self.fail_comment = fail_comment
+        self.fail_close = fail_close
+        self.fail_label = fail_label
+        #: Model an item whose relay already commented (a retry, not a new item).
+        self.relayed = relayed
+        self.fail_resume = fail_resume
+        self.labelled_reads: list[str] = []
+        #: Set True to model a window denser than the page budget.
+        self.window_truncated = False
+        self.calls: list[tuple[str, Any]] = []
+        self.seen_stop_before: Any = None
+
+    # reads — one bounded listing, which carries pull requests as issue objects
+    def list_open(self, *, stop_before: Any = None) -> list[dict[str, Any]]:
+        self.seen_stop_before = stop_before
+        if self.fail_listing:
+            raise RuntimeError("rate limit exceeded")
+        out = [dict(item) for item in self._issues]
+        for pr in self._pulls:
+            marked = {k: v for k, v in pr.items() if k not in ("head", "base")}
+            marked["pull_request"] = {"url": "…"}
+            out.append(marked)
+        return out
+
+    def pull_detail(self, number: int) -> dict[str, Any]:
+        self.calls.append(("detail", number))
+        if self.fail_detail:
+            raise RuntimeError(f"pulls/{number} failed")
+        for pr in self._pulls:
+            if int(pr["number"]) == number:
+                return dict(pr)
+        raise RuntimeError(f"no such PR {number}")
+
+    def list_labelled(self, label: str) -> list[dict[str, Any]]:
+        self.labelled_reads.append(label)
+        return [
+            dict(item)
+            for item in [*self._issues, *self._pulls]
+            if label.casefold()
+            in {
+                str(entry.get("name") if isinstance(entry, dict) else entry).casefold()
+                for entry in (item.get("labels") or [])
+            }
+        ]
+
+    def already_relayed(self, number: int) -> bool:
+        self.calls.append(("check", number))
+        if self.fail_resume:
+            raise RuntimeError("gh api comments failed (rc=1): 502")
+        return self.relayed
+
+    # writes
+    def post_intake(self, payload: dict[str, Any]) -> None:
+        self.calls.append(("intake", payload["source_item_id"]))
+        if self.fail_relay:
+            raise RuntimeError("intake refused")
+
+    def add_label(self, number: int, label: str) -> None:
+        self.calls.append(("label", number))
+        if self.fail_label:
+            raise RuntimeError("gh api labels failed (rc=1): rate limited")
+
+    def comment(self, number: int, body: str) -> None:
+        self.calls.append(("comment", number))
+        if self.fail_comment:
+            raise RuntimeError("gh api comments failed (rc=1): rate limited")
+
+    def close(self, kind: str, number: int) -> None:
+        self.calls.append(("close", number))
+        if self.fail_close:
+            raise RuntimeError("gh api PATCH failed (rc=1): 502")
+
+    def mutations(self) -> list[tuple[str, Any]]:
+        """Mutations only — a PR detail fetch or a marker check is a read."""
+        return [call for call in self.calls if call[0] not in ("detail", "check")]
+
+
+def issue(
+    number: int,
+    *,
+    author: str = "someone",
+    author_type: str = "User",
+    labels: list[str] | None = None,
+    created: timedelta = timedelta(hours=1),
+) -> dict[str, Any]:
+    return {
+        "number": number,
+        "title": f"t{number}",
+        "body": "b",
+        "html_url": f"https://github.com/{OWNER}/tortoise/issues/{number}",
+        "user": {"login": author, "type": author_type},
+        "labels": [{"name": name} for name in (labels or [])],
+        "created_at": (NOW - created).isoformat().replace("+00:00", "Z"),
+    }
+
+
+def pull(
+    number: int,
+    *,
+    author: str = "someone",
+    author_type: str = "User",
+    labels: list[str] | None = None,
+    head_ref: str = "feature/thing",
+    head_repo: str = "someone/tortoise",
+    base_ref: str = "main",
+    created: timedelta = timedelta(hours=1),
+) -> dict[str, Any]:
+    obj = issue(
+        number,
+        author=author,
+        author_type=author_type,
+        labels=labels,
+        created=created,
+    )
+    obj["html_url"] = f"https://github.com/{OWNER}/tortoise/pull/{number}"
+    obj.update(
+        {
+            "head": {"ref": head_ref, "repo": {"full_name": head_repo}},
+            "base": {"ref": base_ref},
+            "draft": False,
+        }
+    )
+    return obj
+
+
+def config(sweep: Any) -> Any:
+    return sweep.Config(
+        repo=f"{OWNER}/tortoise",
+        owner=OWNER,
+        label=LABEL,
+        queue_prefixes=("mergify/merge-queue/",),
+        intake_url="https://intake.example/functions/v1/inbound-ingest",
+        intake_secret="s3cret",
+    )
+
+
+def _stranded_note(report: Any) -> str:
+    """The note about open+labelled items — one note, so its wording is pinnable."""
+    return next(note for note in report.notes if "already carry" in note)
+
+
+def run(sweep: Any, client: Any, **kwargs: Any) -> Any:
+    params: dict[str, Any] = {"since_hours": 24, "max_actions": 20, "dry_run": False}
+    params.update(kwargs)
+    return sweep.sweep(client, config(sweep), now=NOW, **params)
+
+
+# ── (i) the phantom shape is relayed, in one order, exactly once ─────────────
+
+
+def test_unrelayed_external_pr_is_relayed_then_closed(sweep: Any) -> None:
+    """The #9883 shape: an external PR nobody has relayed yet.
+
+    The sweep does not classify the DIFF — an external PR is closed and queued
+    whatever its diff says, which is the whole point: a phantom and a real
+    contribution take the same route, so no diff heuristic can be fooled.
+    """
+    client = FakeClient(pulls=[pull(9883, author="Maiiiry")])
+    report = run(sweep, client)
+
+    assert report.relayed == [("pr", 9883)]
+    assert client.mutations() == [
+        ("intake", "pr-9883"),
+        ("comment", 9883),
+        ("close", 9883),
+        ("label", 9883),
+    ], (
+        "relay must land BEFORE the close — the record is why the close is safe — "
+        "and the label must land LAST: it is the idempotence marker, so applying "
+        "it before the close makes a failed close invisible to every later run "
+        "(open + labelled = skipped forever, and nothing retries it)"
+    )
+    assert report.failed == []
+
+
+def test_external_issue_is_relayed_then_closed(sweep: Any) -> None:
+    client = FakeClient(issues=[issue(9913, author="fr3iheit")])
+    report = run(sweep, client)
+
+    assert report.relayed == [("issue", 9913)]
+    assert client.mutations() == [
+        ("intake", "issue-9913"),
+        ("comment", 9913),
+        ("close", 9913),
+        ("label", 9913),
+    ]
+
+
+# ── (ii) the four classes the relay must never touch ─────────────────────────
+
+
+def test_owner_items_are_never_touched(sweep: Any) -> None:
+    client = FakeClient(
+        issues=[issue(1, author=OWNER)],
+        pulls=[pull(2, author=OWNER, head_repo=f"{OWNER}/tortoise")],
+    )
+    report = run(sweep, client)
+
+    assert report.relayed == []
+    assert client.mutations() == []
+
+
+def test_already_relayed_items_are_skipped(sweep: Any) -> None:
+    """The label is the idempotence marker: a second run is a no-op."""
+    client = FakeClient(
+        issues=[issue(1, labels=[LABEL])],
+        pulls=[pull(2, labels=[LABEL])],
+    )
+    report = run(sweep, client)
+
+    assert report.relayed == []
+    assert client.mutations() == []
+
+
+def test_queue_batch_pull_request_is_never_touched(sweep: Any) -> None:
+    """#5185/#3558: closing a batch PR dequeues every merge in the fleet."""
+    client = FakeClient(
+        pulls=[
+            pull(
+                6648,
+                author="mergify[bot]",
+                author_type="Bot",
+                head_ref="mergify/merge-queue/6e89cfe947",
+                head_repo=f"{OWNER}/tortoise",
+            )
+        ]
+    )
+    report = run(sweep, client)
+
+    assert report.relayed == []
+    assert client.mutations() == []
+
+
+def test_user_authored_same_repo_queue_branch_is_spared(sweep: Any) -> None:
+    """The queue-branch arm, which bot identity CANNOT cover.
+
+    Mergify's documented `draft_bot_account` opens the batch under a USER
+    account, so belt 2 (`user.type == 'Bot'`) does not fire and the head branch
+    is the only marker left. Every other same-repo `mergify/merge-queue/…` case
+    in this suite is bot-authored, and the bot arm returns FIRST — so all of
+    them stay green with this arm deleted. This is the case that goes red. The
+    event path spares the same shape (its belt 1 is author-agnostic), and the
+    parity test below pins that too.
+    """
+    batch = pull(
+        17,
+        author="some-user",
+        author_type="User",
+        head_ref="mergify/merge-queue/6e89cfe947",
+        head_repo=f"{OWNER}/tortoise",
+    )
+    client = FakeClient(pulls=[batch])
+    report = run(sweep, client)
+
+    assert sweep.should_relay(batch, config(sweep)) is False
+    assert report.relayed == []
+    assert client.mutations() == []
+
+
+def test_same_repo_bot_pr_to_the_default_branch_is_spared(sweep: Any) -> None:
+    """Belt 2 of the guard: an installed App cannot be impersonated."""
+    client = FakeClient(
+        pulls=[
+            pull(
+                7,
+                author="dependabot[bot]",
+                author_type="Bot",
+                head_ref="dependabot/npm/thing",
+                head_repo=f"{OWNER}/tortoise",
+                base_ref="main",
+            )
+        ]
+    )
+    assert run(sweep, client).relayed == []
+    assert client.mutations() == []
+
+
+def test_bot_authored_pr_is_spared_even_from_a_fork(sweep: Any) -> None:
+    """A DELIBERATE asymmetry with the event path, and the reason for it.
+
+    The event path closes a bot-authored PR from a fork (it is not the queue's
+    batch). The sweep spares every bot-authored item, because the class of thing
+    our automation opens includes live alarm threads — see
+    `test_bot_authored_issue_is_never_closed`. An external bot's PR left open
+    costs one step; our own monitor issue closed leaves a gap in the alarm
+    history. The asymmetry decides the same way it does for the queue's batch.
+    """
+    client = FakeClient(
+        pulls=[
+            pull(
+                8,
+                author="mergify[bot]",
+                author_type="Bot",
+                head_ref="mergify/merge-queue/deadbeef00",
+                head_repo="someone/tortoise",
+            )
+        ]
+    )
+    assert run(sweep, client).relayed == []
+    assert client.mutations() == []
+
+
+def test_bot_authored_issue_is_never_closed(sweep: Any) -> None:
+    """#9613's shape: a live alarm thread opened by our own monitor.
+
+    `deploy-hosted: deploy-api failed at 'drift'` — open, `bug`, authored by
+    `github-actions[bot]`. Closing it would silently destroy a record a human
+    reads, which is a worse error than a triage miss.
+    """
+    client = FakeClient(
+        issues=[issue(9613, author="github-actions[bot]", author_type="Bot", labels=["bug"])]
+    )
+    report = run(sweep, client)
+
+    assert report.relayed == []
+    assert client.mutations() == []
+
+
+def test_unreadable_author_type_fails_closed(sweep: Any) -> None:
+    """An empty / unknown `user.type` is not evidence of the queue's batch."""
+    client = FakeClient(
+        pulls=[
+            pull(
+                9,
+                author="mergify[bot]",
+                author_type="",
+                head_repo=f"{OWNER}/tortoise",
+            )
+        ]
+    )
+    assert run(sweep, client).relayed == [("pr", 9)]
+
+
+# ── (iii) the rails — a sweeper must not act on what it could not read ───────
+
+
+def test_incomplete_listing_takes_no_action(sweep: Any) -> None:
+    """An unreadable page is not an empty page. No closes on a partial read."""
+    client = FakeClient(pulls=[pull(1), pull(2)], fail_listing=True)
+    report = run(sweep, client)
+
+    assert report.relayed == []
+    assert client.mutations() == []
+    assert report.errors and report.exit_code == 2
+
+
+def test_failed_intake_post_leaves_the_item_open_and_unlabelled(sweep: Any) -> None:
+    """Relay-then-close: bookkeeping failure must not silently drop the record.
+
+    The item stays OPEN and UNLABELLED, so the next run retries it — and the
+    run exits non-zero, so a dead intake is an alarm rather than a silent
+    "handled".
+    """
+    client = FakeClient(pulls=[pull(9883, author="Maiiiry")], fail_relay=True)
+    report = run(sweep, client)
+
+    assert client.mutations() == [("intake", "pr-9883")]
+    assert report.relayed == []
+    assert report.failed and report.failed[0][1] == 9883
+    assert report.exit_code == 1
+
+
+@pytest.mark.parametrize("failing_step", ["comment", "close"])
+def test_a_bookkeeping_failure_leaves_the_item_for_the_next_run(
+    sweep: Any, failing_step: str
+) -> None:
+    """A `gh` failure AFTER the intake POST must not escape `sweep()`.
+
+    The pre-fix code guarded only the intake POST: a `RuntimeError` from
+    `add_label` / `comment` / `close` propagated out of `sweep()`, `main()` had
+    no `try`, so the run died with a traceback before printing the report and
+    every remaining item was dropped. It also applied the LABEL before them,
+    which left the item OPEN + LABELLED — skipped by every later run and
+    retried by nothing (the event path only listens for `opened`).
+
+    This pins both halves at once: no exception escapes, the item is reported
+    as FAILED (so the run exits 1), and it was never labelled — so the next
+    15-minute run selects it again.
+    """
+    client = FakeClient(pulls=[pull(9883, author="Maiiiry")], **{f"fail_{failing_step}": True})
+    report = run(sweep, client)
+
+    assert report.relayed == []
+    assert [n for _, n in report.failed] == [9883]
+    assert report.exit_code == 1
+    assert ("label", 9883) not in client.mutations(), (
+        "the label is the idempotence marker: applying it before a successful "
+        "close leaves an open+labelled item that nothing retries"
+    )
+    assert any(failing_step in note for note in report.notes), report.notes
+    # …and the evidence that a later run would retry it: the decision still says
+    # "relay", and the label the sweep would have applied is absent.
+    assert sweep.should_relay(pull(9883, author="Maiiiry"), config(sweep)) is True
+
+
+def test_a_failed_label_is_reported_without_losing_the_rest_of_the_batch(
+    sweep: Any,
+) -> None:
+    """The last step failing must still report, and must not abort the batch."""
+    client = FakeClient(
+        issues=[issue(1), issue(2)], pulls=[pull(3, author="Maiiiry")], fail_label=True
+    )
+    report = run(sweep, client)
+
+    assert report.relayed == []
+    assert [n for _, n in report.failed] == [1, 2, 3]
+    assert report.exit_code == 1
+    # Every item still got its record, comment and close — the label failed for
+    # all three, and the run reported it instead of raising.
+    assert ("close", 3) in client.mutations()
+    # …and the operator is told the truth: this state is NOT retried.
+    assert all("by hand" in note for note in report.notes if "failed" in note)
+
+
+def test_a_dense_window_acts_on_the_prefix_and_defers_the_rest(sweep: Any) -> None:
+    """A flood must not be an off-switch for the control.
+
+    More items in the window than the page budget ⇒ the prefix is acted on and
+    the unread remainder is reported as deferred. Aborting the whole run (the
+    pre-fix behaviour: `ListingError` → `errors` → exit 2, no action) would let
+    any GitHub user disable the sweep by opening 1,000 issues in 24 h.
+    """
+    client = FakeClient(pulls=[pull(9883, author="Maiiiry")])
+    client.window_truncated = True
+    report = run(sweep, client)
+
+    assert report.relayed == [("pr", 9883)]
+    assert report.truncated is True
+    assert report.errors == []
+    assert report.exit_code == 0
+    assert any("deferred" in note for note in report.notes), report.notes
+
+
+def test_the_detail_budget_bounds_the_reads_that_decide_the_actions(sweep: Any) -> None:
+    """`--max` bounds the mutations; the detail budget bounds the reads.
+
+    A detail fetch is one `gh api` call, and the page budget alone admits up to
+    1,000 candidates. Unbounded, a dense window spends the whole REST budget on
+    reads and then 403s on the mutations — and a mutation that fails after its
+    intake POST re-relays the item every 15 minutes without ever closing it.
+    """
+    client = FakeClient(pulls=[pull(n, author="someone") for n in range(1, 21)])
+    report = run(sweep, client, max_actions=20, detail_budget=3)
+
+    fetches = [call for call in client.calls if call[0] == "detail"]
+    assert len(fetches) == 3, fetches
+    assert report.unexamined == 17
+    assert report.deferred == 17
+    assert report.exit_code == 0
+
+
+def test_a_queue_config_of_the_wrong_shape_is_unreadable_too(sweep: Any, tmp_path: Path) -> None:
+    """Parsing is not reading: the wrong SHAPE must refuse like a missing file.
+
+    `queue_prefixes()` wraps the read in `except Exception -> ConfigError`, and
+    the comprehension that walks `queue_rules` used to sit OUTSIDE it, so a
+    config that yaml happily parses to a list, a string rule or an int escaped
+    as AttributeError/TypeError. `main()` catches only `ConfigError`, so the
+    documented "2 = could not act" became a traceback and exit 1 — not a
+    mutation (the direction is still fail-closed) but not the refusal the
+    module contract promises (#9946 review cycle 3).
+    """
+    shapes = {
+        "top-level list": "- queue_rules:\n",
+        "string rule": "queue_rules:\n  - just-a-string\n",
+        "scalar rules": "queue_rules: 7\n",
+    }
+    for name, text in shapes.items():
+        path = tmp_path / f"{name.replace(' ', '-')}.yml"
+        path.write_text(text)
+        with pytest.raises(sweep.ConfigError):
+            sweep.queue_prefixes(path)
+
+
+def test_the_default_detail_budget_is_the_rail_that_ships(sweep: Any) -> None:
+    """`main()` passes no `detail_budget`, so the CONSTANT is the shipped rail.
+
+    Every other case here passes a budget explicitly, so raising or deleting
+    `DEFAULT_DETAIL_BUDGET` left the suite green while the read budget — the
+    only thing between a dense window and a 403 on the mutations — went to
+    infinity in production (#9946 review P2). The candidates are queue batches
+    so `should_relay()` is false for all of them: the ACTION cap can never bind,
+    which isolates the detail budget as the one that stops the reads.
+    """
+    # ⛔ A FIXED candidate count, NOT `DEFAULT_DETAIL_BUDGET + 5`: a fixture that
+    # scales with the constant makes the test blind to the constant itself —
+    # raising it to 500 moved the fixture to 505 and the assertion still held,
+    # which is exactly the non-discrimination this case exists to remove.
+    candidates = 200
+    assert candidates > sweep.DEFAULT_DETAIL_BUDGET, (
+        "the fixture must exceed the shipped budget, or the budget is not what "
+        "bounds the reads"
+    )
+    client = FakeClient(pulls=[
+        # Mergify's `draft_bot_account` shape: a USER-authored PR whose queue
+        # ownership lives ONLY on the head branch, so it needs a detail fetch and
+        # `should_relay()` still says no — the action cap therefore never binds.
+        pull(
+            2000 + n,
+            author="some-user",
+            head_ref="mergify/merge-queue/6e89cfe947",
+            head_repo=f"{OWNER}/tortoise",
+        )
+        for n in range(candidates)
+    ])
+    report = run(sweep, client)  # NO detail_budget — `main()`'s own call shape
+
+    fetches = [call for call in client.calls if call[0] == "detail"]
+    assert len(fetches) == sweep.DEFAULT_DETAIL_BUDGET, len(fetches)
+    assert report.unexamined == candidates - sweep.DEFAULT_DETAIL_BUDGET
+    assert report.relayed == []
+
+
+def test_the_detail_fetch_stops_once_the_action_cap_is_met(sweep: Any) -> None:
+    """Once `--max` actable items are known, more reads buy nothing."""
+    client = FakeClient(pulls=[pull(n, author="someone") for n in range(1, 41)])
+    report = run(sweep, client, max_actions=2)
+
+    fetches = [call for call in client.calls if call[0] == "detail"]
+    assert len(fetches) == 2, fetches
+    assert report.unexamined == 38
+    assert [n for _, n in report.relayed] == [1, 2]
+
+
+def test_a_spared_queue_batch_does_not_exhaust_the_action_cap(sweep: Any) -> None:
+    """The cap counts ACTABLE items, not examined ones.
+
+    A pile of queue batches at the head of the window must not stop the sweep
+    from reaching the external items behind them.
+    """
+    batches = [
+        pull(
+            n,
+            author="mergify[bot]",
+            author_type="Bot",
+            head_ref="mergify/merge-queue/6e89cfe947",
+            head_repo=f"{OWNER}/tortoise",
+        )
+        for n in range(1, 6)
+    ]
+    client = FakeClient(pulls=[*batches, pull(900, author="outsider")])
+    report = run(sweep, client, max_actions=1)
+
+    assert [n for _, n in report.relayed] == [900]
+    # Bot-authored items cost NO detail fetch at all — `should_relay` decides
+    # them from the listing, so the reads are spent only where they can change
+    # the answer.
+    assert [n for name, n in client.calls if name == "detail"] == [900]
+
+
+def test_a_retry_resumes_instead_of_re_posting(sweep: Any) -> None:
+    """A failed CLOSE must not make the next run comment a second time.
+
+    The sequence is relay → comment → close → label, so an item whose close
+    failed is selected again 15 minutes later. Without a resume it would re-post
+    the same boilerplate comment on an external contributor's PR every 15
+    minutes for as long as the close keeps failing. The relay's own footer is
+    the marker that says "we already spoke".
+
+    ⛔ The RECORD is still posted on a resume. The marker proves we commented,
+    never that intake accepted the record — the event path posts intake LAST
+    (label → comment → close → POST), so its footer can exist with no record at
+    all — and `source_item_id` keys the POST, so repeating it is a no-op.
+    """
+    client = FakeClient(pulls=[pull(9883, author="Maiiiry")], relayed=True, fail_close=True)
+    report = run(sweep, client)
+
+    assert [n for _, n in report.failed] == [9883]
+    assert client.mutations() == [("intake", "pr-9883"), ("close", 9883)], (
+        "a retry must skip only the COMMENT — never the record"
+    )
+
+    # …and once the close stops failing, the retry completes with the marker
+    # applied and still only one comment on the item.
+    client = FakeClient(pulls=[pull(9883, author="Maiiiry")], relayed=True)
+    report = run(sweep, client)
+    assert report.relayed == [("pr", 9883)]
+    assert client.mutations() == [("intake", "pr-9883"), ("close", 9883), ("label", 9883)]
+
+
+def test_a_failed_resume_read_is_not_blamed_on_the_intake(sweep: Any) -> None:
+    """The note names the step that actually failed — an operator debugs that."""
+    client = FakeClient(pulls=[pull(9883, author="Maiiiry")], fail_resume=True)
+    report = run(sweep, client)
+
+    assert client.mutations() == []
+    note = next(n for n in report.notes if "9883" in n)
+    assert "resume check" in note and "intake POST" not in note, note
+
+
+def test_the_resume_marker_is_the_comment_the_relay_actually_posts(sweep: Any) -> None:
+    """A literal that drifts would silently turn every retry back into a re-post."""
+    assert sweep.RELAY_MARKER in "\n".join(sweep._COMMENT_PULL)
+    assert sweep.RELAY_MARKER in "\n".join(sweep._COMMENT_ISSUE)
+
+
+def _relay_comment_scripts() -> list[str]:
+    """The `actions/github-script` bodies of `inbound-relay.yml` that POST a comment.
+
+    Derived, never listed: a third comment-posting step must not be able to
+    appear without the checks below covering it.
+    """
+    import yaml
+
+    jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
+    return [
+        step["with"]["script"]
+        for job in jobs.values()
+        for step in job.get("steps", [])
+        if isinstance(step.get("with"), dict)
+        and "createComment" in str(step["with"].get("script", ""))
+    ]
+
+
+def test_the_resume_footer_is_bound_to_the_EVENT_path_copies_too(sweep: Any) -> None:
+    """The footer has THREE copies; only the sweep's two were bound.
+
+    `test_the_resume_marker_is_the_comment_the_relay_actually_posts` pins the
+    sweep's own templates. The event path posts the same footer from
+    `inbound-relay.yml` — its issue step AND its pull-request step — and that is
+    the copy a LATE-APPROVED external run compares against to recognise work the
+    sweep already did. Drifting it turns every such approval back into a second
+    identical comment on a contributor's item (#9946 review P2).
+
+    ⛔ The assertion reads the POSTED BODY, not just "the marker appears in this
+    script": a first version accepted any occurrence, so drifting the body while
+    the idempotence constant stayed put kept the test green — the exact failure
+    it is here to catch.
+    """
+    import re
+
+    scripts = _relay_comment_scripts()
+    assert len(scripts) == 2, f"expected the issue and PR comment steps: {len(scripts)}"
+    for script in scripts:
+        bodies = re.findall(r"body:\s*\[(.*?)\]\.join\('\\n'\)", script, re.DOTALL)
+        assert len(bodies) == 1, f"expected exactly one posted comment body: {len(bodies)}"
+        entries = re.findall(r"'((?:[^'\\]|\\.)*)'", bodies[0])
+        assert entries, bodies[0]
+        assert sweep.RELAY_MARKER in entries[-1], (
+            "the comment this step POSTS does not end with the sweep's "
+            f"RELAY_MARKER ({sweep.RELAY_MARKER!r}), so neither path can "
+            f"recognise the other's comment and both will post one — the body "
+            f"ends {entries[-1]!r}"
+        )
+
+
+def test_every_relay_comment_step_checks_for_an_existing_comment_first(sweep: Any) -> None:
+    """The idempotence read must be BEFORE the write, in the event path too.
+
+    The sweep applies this policy on a schedule, so by the time a HELD external
+    run is approved the item may already be labelled, commented and closed. A
+    read that happens after `createComment` is not a check.
+
+    ⛔ Present-and-ordered is NOT the property worth pinning on its own: measured
+    in cycle 3, replacing the predicate with `const alreadyCommented = false;`
+    left every test green, because the read and its position still existed and
+    the rail had silently become "never skip". So the DETECTION CONSTANT is bound
+    to the sweep's marker, and the predicate must actually consume it plus the
+    same author rule `already_relayed()` applies — a bot-typed comment or the
+    owner's login, never the bare string an author could paste.
+    """
+    import re
+
+    for script in _relay_comment_scripts():
+        assert "listComments" in script, (
+            "this step posts a relay comment without looking for one it already "
+            "posted: a late-approved run would double-comment"
+        )
+        assert script.index("listComments") < script.index("createComment"), (
+            "the duplicate-comment check runs AFTER the comment is posted"
+        )
+
+        consts = re.findall(r"const FOOTER = '([^']*)'", script)
+        assert consts == [sweep.RELAY_MARKER], (
+            f"the step compares against {consts!r} but the sweep recognises its "
+            f"own comment by {sweep.RELAY_MARKER!r}: the two paths would stop "
+            "recognising each other and both would post"
+        )
+
+        start = script.find("const alreadyCommented")
+        gate = script.find("if (!alreadyCommented)")
+        assert start != -1, "no `alreadyCommented` predicate to bind"
+        assert gate != -1, "the result of the check does not gate the comment"
+        assert start < gate, (
+            "the check must be decided BEFORE the gate that posts the comment"
+        )
+        # The slice, not a regex: the predicate is a multi-line arrow function
+        # whose body carries its own semicolons, so a `;`-terminated match stops
+        # at `const user = …;` and tests nothing.
+        body = script[start:gate]
+        assert "includes(FOOTER)" in body, (
+            "the predicate does not test for the footer, so it cannot tell a "
+            f"relayed item from a fresh one: {body}"
+        )
+        assert "user.type" in body and "user.login === owner" in body, (
+            "the predicate does not apply `already_relayed()`'s author rule "
+            f"(a bot comment, or the owner's own login): {body}"
+        )
+
+
+def test_every_relay_script_declares_the_payload_it_reads(sweep: Any) -> None:
+    """An undeclared payload root is a ReferenceError AFTER the mutations.
+
+    Measured 2026-10-25 (#9946): the issue step read `issue.title` / `issue.user`
+    with no `const issue = …` — the sibling PR step declares its own `pr` at the
+    same point — so a real issue relay threw at the `return`, i.e. AFTER the
+    label, the comment and the close had landed, and the intake POST (the next
+    step of the job) never ran. The item was then closed, labelled and
+    unrecorded: invisible to the sweep (it selects OPEN items) and retried by
+    nothing. Latent only because the relay never executed for an external actor.
+    """
+    import re
+
+    for script in _relay_comment_scripts():
+        for root in ("issue", "pr"):
+            # `issue.number` after a dot is `context.issue`, and `issueNumber`
+            # has no dot — neither is a payload read.
+            if re.search(rf"(?<![\w.$]){root}\.", script) is None:
+                continue
+            assert f"const {root} =" in script, (
+                f"this script reads `{root}.…` without declaring it: the "
+                "ReferenceError fires at the RETURN, after the label/comment/"
+                "close and before the intake POST, leaving the item closed but "
+                "never recorded"
+            )
+
+
+def test_an_open_labelled_item_is_reported_and_rules_nothing(sweep: Any) -> None:
+    """The one state nothing repairs must be NAMED, not silently skipped.
+
+    `_prefilter` drops an open+labelled item (the label is the idempotence
+    marker), so before this it appeared in no list, no count and no note — while
+    the event path applies the label FIRST and can leave exactly this state (a
+    502 on the comment/close). It is counted and reported; never auto-closed,
+    because a human may have labelled it deliberately to keep it open.
+    """
+    client = FakeClient(
+        issues=[issue(9913, author="fr3iheit", labels=[LABEL])],
+        pulls=[pull(9884, author="Maiiiry", labels=[LABEL])],
+    )
+    report = run(sweep, client)
+
+    assert report.stranded == 2
+    assert report.relayed == []
+    assert client.mutations() == [], "a stranded item is never auto-closed"
+    note = _stranded_note(report)
+    assert "half-applied" in note.casefold(), note
+    assert "REOPENED" in note, (
+        "the state is AMBIGUOUS: an approved item REOPENED for review keeps the "
+        f"label and is not a half-applied relay — the note must say so: {note}"
+    )
+    assert "close by hand" not in note.casefold(), (
+        f"closing an item under review is the opposite of correct: {note}"
+    )
+    assert report.exit_code == 0, "a note, not a red run every 15 minutes"
+
+
+def test_a_labelled_owner_item_is_not_called_stranded(sweep: Any) -> None:
+    """Owner traffic is outside the relay entirely — its labels are not ours."""
+    client = FakeClient(issues=[issue(1, author=OWNER, labels=[LABEL])])
+    report = run(sweep, client)
+
+    assert report.stranded == 0
+    assert not any("already carry" in note for note in report.notes)
+
+
+def test_a_failed_label_says_it_will_not_be_retried(sweep: Any) -> None:
+    """The label step is last: its failure is the one that is NOT self-healing.
+
+    The close already succeeded, so the item is no longer in the open listing and
+    no later run re-selects it. The note must say that instead of claiming a
+    retry that cannot happen — and it must also name the ORDER the recovery is
+    sensitive to: a maintainer who reopens the item unlabelled hands it straight
+    back to this sweep, which closes it again with no second comment (the footer
+    already proves the record landed, so the comment step is skipped by design).
+    """
+    client = FakeClient(pulls=[pull(9883, author="Maiiiry")], fail_label=True)
+    report = run(sweep, client)
+
+    assert [n for _, n in report.failed] == [9883]
+    note = next(n for n in report.notes if "9883" in n)
+    assert "by hand" in note and "no later run" in note, note
+    assert "retries it" not in note, note
+    assert "BEFORE reopening" in note, (
+        "the label failure leaves the item CLOSED and unlabelled, so a reopen "
+        "before the label puts it back in the sweep's selection — open, "
+        "external, no label — and it is closed again with no comment; the note "
+        f"must name the order: {note}"
+    )
+
+    # The re-close it warns about, measured rather than described: reopened with
+    # no label, the sweep selects it, skips the comment (the footer is there) and
+    # closes it again.
+    reopened = FakeClient(pulls=[pull(9883, author="Maiiiry")], relayed=True)
+    second = run(sweep, reopened)
+    assert [n for _, n in second.relayed] == [9883]
+    assert ("comment", 9883) not in reopened.calls, (
+        "a resumed item re-posts no comment (by design) — that is why the "
+        "silent re-close is the outcome the note has to warn about"
+    )
+    assert ("close", 9883) in reopened.calls
+
+
+def test_a_pre_close_failure_names_the_window_edge_it_will_not_survive(
+    sweep: Any,
+) -> None:
+    """A pre-close failure is retried ONLY while the item is inside the window.
+
+    The note used to promise "a later run retries it" unconditionally. That is
+    false at the window edge, and the edge is the one this sweep exists to stop
+    losing items at: `selected` is `_created_at(item) >= now - since_hours` and
+    `created_at` never moves, so an item that fails in the LAST CADENCE of the
+    window has aged out by the next run — open, unlabelled, no intake record, and
+    selected by nothing. Nothing else reports it either: `stranded` counts
+    open+LABELLED items only, and `deferred`/`unexamined` count what THIS window
+    saw.
+
+    So this pins both halves: the note names the exact age-out time (making the
+    claim true and the manual recovery actionable), and the hole it names is
+    measured — the very next run, 15 minutes later, selects nothing.
+    """
+    # 10 minutes short of the 24 h cutoff: inside run 1, outside run 2.
+    near_the_edge = pull(9883, author="Maiiiry",
+                         created=timedelta(hours=23, minutes=50))
+    client = FakeClient(pulls=[near_the_edge], fail_relay=True)
+    first = run(sweep, client)
+
+    assert [n for _, n in first.failed] == [9883]
+    note = next(n for n in first.notes if "9883" in n)
+    ages_out = (NOW - timedelta(hours=23, minutes=50)) + timedelta(hours=24)
+    assert ages_out.isoformat() in note, (
+        "the note must name WHEN the item ages out of the window, not promise a "
+        f"retry that stops existing: {note}"
+    )
+    assert "relayed by hand" in note, note
+
+    # 15 minutes later — a real cadence — the item is gone from the selection.
+    second = sweep.sweep(client, config(sweep), now=NOW + timedelta(minutes=15),
+                         since_hours=24, max_actions=20, dry_run=False)
+    assert second.selected == [], (
+        "if this ever selects the item, the window does not move and the note's "
+        "age-out clause is the thing to delete — not the clause to trust"
+    )
+    assert second.exit_code == 0 and not second.notes, (
+        "and nothing reports it: the run that abandoned it is the only record"
+    )
+
+
+def test_the_rails_promise_no_retry_that_the_label_step_cannot_get(
+    sweep: Any,
+) -> None:
+    """The RAILS docstring must not claim a recovery the LABEL step cannot get.
+
+    `test_a_failed_label_says_it_will_not_be_retried` pins the *code's* note.
+    This pins the *document* an operator is handed, because the two drifted: the
+    docstring claimed "any step" failure leaves the item unlabelled "so the next
+    15-minute run selects it again", while the label step runs AFTER a
+    successful close and the sweep lists `state=open` only — so a label failure
+    is relayed, closed, unmarked and re-selected by nothing. `EXIT CODES` and
+    the scoping doc were corrected first and this prose was left behind, which
+    is exactly why the two halves are pinned separately here.
+
+    A docstring is prose, so this asserts the two things that can be asserted
+    about it: the exact over-claim is gone, and the exception is named where the
+    rail is described. Pre-fix it reds on the first assertion.
+    """
+    rails = (sweep.__doc__ or "").split("SAFETY RAILS", 1)[1].split(
+        "EXIT CODES", 1)
+    assert len(rails) == 2, "the docstring lost its SAFETY RAILS/EXIT CODES frame"
+    # Whitespace-normalised: the claim is prose, and re-wrapping a paragraph
+    # must not be able to hide (or fake) it.
+    rail_text = " ".join(rails[0].split())
+    assert "if any step fails the item is left UNLABELLED" not in rail_text, (
+        "the rails text still promises a re-select for EVERY step — the label "
+        "step runs after the close, so no later run can select it again"
+    )
+    assert "BEFORE THE CLOSE" in rail_text, (
+        "the rails text must scope its re-select promise to the steps before "
+        "the close"
+    )
+    assert "by hand" in rail_text, (
+        "the rails text must name the recovery for the one state nothing "
+        "retries: applying the label by hand"
+    )
+    assert "BEFORE reopening" in rail_text, (
+        "the rails text must name the ORDER the label-by-hand recovery is "
+        "sensitive to — a reopened item with no label is re-selected and "
+        "closed again with no comment"
+    )
+    assert "STILL INSIDE" in rail_text and "ages out" in rail_text, (
+        "the rails text must scope the pre-close re-select to the "
+        "`--since-hours` window: an item that fails in the last cadence of the "
+        "window is not re-selected by anything, so an unqualified "
+        "\"a later run selects it again\" is the same over-claim one step "
+        "earlier in the sequence"
+    )
+
+    # `EXIT CODES` exit 2 is the operator's list of "could not act" causes, and
+    # this change added a fourth one (`--repo` not `owner/name`). A list that
+    # does not name it sends a reader triaging a red run through three causes
+    # that all fail to match.
+    codes = " ".join(rails[1].split())
+    assert "owner/name" in codes, (
+        f"EXIT CODES must name the malformed `--repo` cause it now has: {codes}"
+    )
+
+    # The same over-claim lived in the block comment at the sequence itself.
+    block = MODULE_PATH.read_text(encoding="utf-8").split(
+        "THE WHOLE SEQUENCE IS GUARDED", 1)[1].split('step = "resume check"', 1)[0]
+    block_text = " ".join(
+        line.lstrip(" #") for line in block.splitlines()
+    )
+    assert "any failure leaves the item unlabelled and" not in block_text, (
+        "the sequence comment still claims any failure leaves the item "
+        "re-selectable, including the label step that runs after the close"
+    )
+    assert "BEFORE THE CLOSE" in block_text, block_text
+
+
+def test_run_is_capped_and_reports_the_remainder(sweep: Any) -> None:
+    client = FakeClient(issues=[issue(n) for n in range(1, 6)])
+    report = run(sweep, client, max_actions=2)
+
+    assert [n for _, n in report.relayed] == [1, 2]
+    assert report.deferred == 3
+    assert ("close", 3) not in client.mutations()
+
+
+def test_window_excludes_older_items(sweep: Any) -> None:
+    client = FakeClient(
+        issues=[issue(1, created=timedelta(hours=1))],
+        pulls=[pull(2, created=timedelta(hours=72))],
+    )
+    report = run(sweep, client, since_hours=24)
+
+    assert report.relayed == [("issue", 1)]
+
+
+def test_dry_run_performs_nothing(sweep: Any) -> None:
+    client = FakeClient(pulls=[pull(9883, author="Maiiiry")])
+    report = run(sweep, client, dry_run=True)
+
+    assert report.relayed == [("pr", 9883)]
+    assert client.mutations() == []
+    assert report.exit_code == 0
+
+
+def test_dry_run_needs_no_intake_credential(sweep: Any) -> None:
+    """A dry run never POSTs, so it must not demand the secret it never uses.
+
+    Refusing here turns "show me the plan" into a red run on exactly the machine
+    where the credential is not configured.
+    """
+    client = FakeClient(pulls=[pull(9883, author="Maiiiry")])
+    cfg = sweep.Config(
+        repo=f"{OWNER}/tortoise",
+        owner=OWNER,
+        label=LABEL,
+        queue_prefixes=("mergify/merge-queue/",),
+        intake_url="",
+        intake_secret="",
+    )
+    report = sweep.sweep(client, cfg, now=NOW, since_hours=24, max_actions=20, dry_run=True)
+
+    assert report.relayed == [("pr", 9883)]
+    assert client.mutations() == []
+    assert report.errors == []
+    assert report.exit_code == 0
+
+
+def test_the_intake_scrubbing_fixture_is_installed_and_the_post_path_is_live(
+    sweep: Any, monkeypatch: Any
+) -> None:
+    """The autouse scrub is in place, and the path it closes really reaches the wire.
+
+    Named for what it PINS, not for the class of hazard: the absence asserts below
+    are a self-check of `_scrubbed_intake_env` (they can only fail when the fixture
+    is gone AND the shell exports the pair — a mutation of this file, not of the
+    product). What the product can be pinned on is the second half: with a
+    credential, `post_intake` builds a request and hands it to `urlopen`, so a test
+    that drives the real client would POST a live record before failing on a stub.
+    The transport is stubbed, so neither half leaves the machine.
+
+    The client's credential is ONE source (`GhClient(intake_url=…, intake_secret=…)`,
+    which is what `main()` passes from `Config`) — the env fallback is only for a
+    direct construction, asserted by the first client below.
+    """
+    # The guard is proved by ABSENCE, asserted first: with the fixture removed
+    # and the ambient shell exporting the pair, this fails before any request is
+    # built — the failure mode the fixture exists to prevent.
+    assert "INBOUND_URL" not in os.environ, "autouse intake scrubbing is gone"
+    assert "INBOUND_SECRET_GITHUB" not in os.environ, "autouse intake scrubbing is gone"
+
+    with pytest.raises(RuntimeError, match="unset"):
+        sweep.GhClient(f"{OWNER}/tortoise").post_intake({"source_item_id": "issue-1"})
+
+    posted: list[Any] = []
+
+    class _Response:
+        status = 200
+
+        def __enter__(self) -> _Response:
+            return self
+
+        def __exit__(self, *exc: Any) -> bool:
+            return False
+
+    monkeypatch.setattr(
+        sweep.urllib.request,
+        "urlopen",
+        lambda request, timeout=0: posted.append(request) or _Response(),
+    )
+
+    # (1) the ENV fallback a directly-constructed client uses …
+    monkeypatch.setenv("INBOUND_URL", "https://intake.example/live")
+    monkeypatch.setenv("INBOUND_SECRET_GITHUB", "live-secret")
+    sweep.GhClient(f"{OWNER}/tortoise").post_intake({"source_item_id": "issue-1"})
+
+    # (2) … and the CONFIG the caller passes, which wins over the environment —
+    # `sweep()`'s credential rail reads that same `Config`, so "the rail passed"
+    # and "the POST has a credential" cannot disagree.
+    sweep.GhClient(
+        f"{OWNER}/tortoise",
+        intake_url="https://intake.example/from-config",
+        intake_secret="config-secret",
+    ).post_intake({"source_item_id": "issue-2"})
+
+    assert len(posted) == 2, "post_intake reaches the transport once per call"
+    assert posted[0].full_url == "https://intake.example/live"
+    assert any(
+        name.casefold() == "x-inbound-secret" and value == "live-secret"
+        for name, value in posted[0].headers.items()
+    ), posted[0].headers
+    assert posted[1].full_url == "https://intake.example/from-config", (
+        "a Config-supplied credential must own the POST — reading os.environ here "
+        "is how the rail passes and the POST then fails with 'unset'"
+    )
+    assert any(
+        name.casefold() == "x-inbound-secret" and value == "config-secret"
+        for name, value in posted[1].headers.items()
+    ), posted[1].headers
+
+
+def test_the_short_read_note_is_a_truth_table(sweep: Any) -> None:
+    """The note depends on the VERDICT *and* the read — all four rows are pinned.
+
+    A short read is only news when the verdict it fed was "not relayed": with the
+    marker found nothing is re-posted, so warning about a duplicate would name one
+    that cannot exist. The gate is
+    `not resume and getattr(client, "comment_read_truncated", False)`, and until
+    now only row 2 was asserted — a mutant dropping the second half would emit
+    "a duplicate comment may be posted" on EVERY relayed item while every other
+    assert in this file still passed.
+    """
+    rows = [
+        (False, False, False),  # complete read, nothing to announce — the missed row
+        (False, True, True),  # short read + not-relayed verdict ⇒ the note
+        (True, False, False),  # relayed, complete read
+        (True, True, False),  # relayed (marker found) ⇒ nothing is re-posted
+    ]
+    for relayed, truncated, expect_note in rows:
+        client = FakeClient(issues=[issue(7)], relayed=relayed)
+        client.comment_read_truncated = truncated
+        report = run(sweep, client)
+        assert report.relayed == [("issue", 7)], (relayed, truncated, report.failed)
+        got = any("duplicate comment" in note for note in report.notes)
+        assert got is expect_note, (relayed, truncated, report.notes)
+
+
+def test_the_stranded_summary_matches_the_note_it_points_at(
+    sweep: Any, monkeypatch: Any, capsys: Any
+) -> None:
+    """The loud line must not re-assert the one cause the note just removed.
+
+    Open + labelled is EITHER a half-applied relay OR an item relayed and then
+    REOPENED for review. The note says so and refuses to pick a cause; the run's
+    summary line still printed `half-applied, nothing retries them` — one
+    verdict, wrong for every item under review, four times an hour, and it is the
+    line an operator reads first. The note was pinned; this was not.
+    """
+    report = sweep.Report(dry_run=False, stranded=2)
+    report.notes.append("2 open item(s) already carry 'queued-for-triage': EITHER …")
+    monkeypatch.setattr(sweep, "sweep", lambda *a, **k: report)
+
+    assert sweep.main(["--repo", f"{OWNER}/tortoise"]) == 0
+
+    summary = next(
+        line for line in capsys.readouterr().out.splitlines() if line.startswith("STRANDED")
+    )
+    assert "half-applied" in summary.casefold(), summary
+    assert "reopened" in summary.casefold(), (
+        f"the other cause must be named: an item reopened for review is not a "
+        f"half-applied relay, and closing it is the wrong action: {summary}"
+    )
+    assert "cannot tell them apart" in summary, summary
+
+
+def test_main_reports_a_crashing_sweep_instead_of_dying(sweep: Any, monkeypatch: Any) -> None:
+    """`main()` must render the failure — a traceback loses the whole report."""
+
+    def boom(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(sweep, "sweep", boom)
+    assert sweep.main(["--repo", f"{OWNER}/tortoise"]) == 2
+
+
+def test_main_refuses_when_the_queue_config_is_unreadable(sweep: Any, monkeypatch: Any,
+                                                        tmp_path: Path,
+                                                        capsys: Any) -> None:
+    """The refusal has to exist in `main()` too, not only in `queue_prefixes()`.
+
+    `test_unreadable_queue_config_refuses_to_act` drives the reader directly, so
+    replacing `main()`'s `except ConfigError: return 2` with a fallback to
+    `DOCUMENTED_DEFAULT_PREFIX` — the guess the reader's own docstring forbids —
+    left the suite green while a reconfigured queue's batch PR became
+    "external" and got closed, dequeuing every in-flight merge (#5185, #9946
+    review P2).
+
+    ⛔ The reader is STUBBED, and that is the point rather than a shortcut:
+    `queue_prefixes(path: Path = MERGIFY)` binds its default at def time, so
+    monkeypatching the module's `MERGIFY` cannot make the call `main()` makes
+    fail — the first version of this case patched `MERGIFY`, silently read the
+    REAL `.mergify.yml`, and passed for the wrong reason.
+    """
+
+    def unreadable(*args: Any, **kwargs: Any) -> Any:
+        raise sweep.ConfigError(
+            "cannot read the queue configuration at /absent.yml (missing)"
+        )
+
+    monkeypatch.setattr(sweep, "queue_prefixes", unreadable)
+    monkeypatch.setenv("INBOUND_URL", "https://intake.example/relay")
+    monkeypatch.setenv("INBOUND_SECRET_GITHUB", "s3cret")
+
+    # ⛔ RECORDED, not raising: `main()` wraps the sweep in its own
+    # `except Exception -> 2`, so a raising stub is swallowed and the assertion
+    # on the exit code alone cannot tell the refusal from the fallback. The
+    # question is whether ANY read reached GitHub.
+    reads: list[Any] = []
+    monkeypatch.setattr(sweep, "_gh", lambda *a, **k: reads.append(a) or "{}")
+
+    assert sweep.main(["--repo", f"{OWNER}/tortoise"]) == 2
+    assert reads == [], (
+        "no `gh` read may happen when the queue config is unreadable: the sweep "
+        "cannot tell a queue batch from an external PR"
+    )
+    assert "cannot read the queue configuration" in capsys.readouterr().err
+
+
+def test_a_malformed_repo_is_refused_before_anything_derives_the_owner(
+    sweep: Any, monkeypatch: Any, capsys: Any,
+) -> None:
+    """`--repo`'s owner half is the ONLY thing sparing this repo's own items.
+
+    `Config.owner` is `repo.split("/")[0]`, and `should_relay` spares
+    owner-authored items on it. A value with no slash (`--repo tortoise`, a
+    URL, a stray artefact) therefore derives an owner that matches NOTHING, so
+    every owner-authored open item in the window reads as "external" and gets
+    relayed, commented, CLOSED and labelled — irreversible, on a tool whose
+    whole job is irreversible closes. The scheduled path cannot reach it
+    (`GITHUB_REPOSITORY` is always `owner/name`), so this is a
+    manual-invocation guard, and it must refuse BEFORE the client is built.
+
+    ⛔ The exit code alone cannot settle it: pre-fix the run proceeded and then
+    failed for an unrelated reason (no `gh` here), which is also a 2. So the
+    sweep itself is stubbed and `AssertionError`s if it is ever entered.
+    """
+    entered: list[Any] = []
+
+    def must_not_run(*args: Any, **kwargs: Any) -> Any:
+        entered.append(args)
+        raise AssertionError("the sweep ran for a --repo it cannot parse")
+
+    monkeypatch.setattr(sweep, "sweep", must_not_run)
+    monkeypatch.setenv("INBOUND_URL", "https://intake.example/relay")
+    monkeypatch.setenv("INBOUND_SECRET_GITHUB", "s3cret")
+
+    for malformed in (
+        "tortoise",                             # no owner half at all
+        "github.com/daniel-ospina/tortoise",     # a URL, not `owner/name`
+        "https://github.com/daniel-ospina/tortoise",
+        f"{OWNER}/tortoise/",                    # a trailing artefact
+        "a/b/c",
+    ):
+        assert sweep.main(["--repo", malformed, "--dry-run"]) == 2, malformed
+
+    assert entered == [], (
+        "a malformed --repo reached sweep(): its owner half matches nothing, so "
+        "every owner-authored item would be treated as external and closed"
+    )
+    assert "owner/name" in capsys.readouterr().err
+
+
+def test_missing_intake_configuration_takes_no_action(sweep: Any) -> None:
+    """No URL or no secret is not a reason to close without a record."""
+    client = FakeClient(pulls=[pull(9883)])
+    cfg = sweep.Config(
+        repo=f"{OWNER}/tortoise",
+        owner=OWNER,
+        label=LABEL,
+        queue_prefixes=("mergify/merge-queue/",),
+        intake_url="",
+        intake_secret="",
+    )
+    report = sweep.sweep(client, cfg, now=NOW, since_hours=24, max_actions=20, dry_run=False)
+
+    assert client.mutations() == []
+    assert report.exit_code == 2
+
+
+# ── (iv) the two implementations of the policy cannot drift apart ────────────
+
+
+def _load_event_guard() -> Any:
+    """The event path's own suite, loaded BY PATH.
+
+    ⛔ Never `importorskip`. This cross-check is the ONLY thing keeping the sweep
+    and the event path from drifting apart, so a guard module that cannot be
+    loaded must FAIL the suite, never skip past the gate green (a rename, a
+    moved file or an `--import-mode=importlib` collection change would silently
+    delete the control). Loading by path also removes the dependency on pytest's
+    rootdir insertion.
+    """
+    path = REPO_ROOT / "tests" / "test_inbound_relay_guard.py"
+    spec = importlib.util.spec_from_file_location("test_inbound_relay_guard", path)
+    if spec is None or spec.loader is None:
+        pytest.fail(f"the sweep/event parity gate cannot load the guard from {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_policy_agrees_with_the_event_guard(sweep: Any) -> None:
+    """The sweep's decision must equal the workflow's own job-level `if:`.
+
+    `closes()` evaluates the REAL guard expression from
+    `inbound-relay.yml`. If one path learns a new exclusion (a renamed queue
+    prefix, a second spared class) and the other does not, this fails — which
+    is the only durable defence against two implementations of one policy.
+    """
+    guard = _load_event_guard()
+
+    cases: list[tuple[str, dict[str, Any], dict[str, Any]]] = [
+        (
+            # ⛔ A FORK on BOTH sides — that is the shape the label names, and it
+            # is the most common external one. `guard._event` defaults
+            # `head_repo=REPO`, so this case used to compare the sweep's fork
+            # item against a SAME-repo event: measured, teaching the guard to
+            # spare non-bot forks left this case green and the bot-fork pin
+            # green, i.e. the parity gate could not see the two paths diverge on
+            # the very shape it is labelled for (#9946 review P2).
+            "external fork PR",
+            guard._event(
+                actor="outsider",
+                login="outsider",
+                head_repo="someone/tortoise",
+                fork=True,
+            ),
+            pull(10, author="outsider"),
+        ),
+        (
+            "owner PR",
+            guard._event(actor=OWNER, login=OWNER, head_repo=f"{OWNER}/tortoise"),
+            pull(11, author=OWNER, head_repo=f"{OWNER}/tortoise"),
+        ),
+        (
+            "queue batch",
+            guard.batch_pr(),
+            pull(
+                12,
+                author="mergify[bot]",
+                author_type="Bot",
+                head_ref="mergify/merge-queue/6e89cfe947",
+                head_repo=f"{OWNER}/tortoise",
+            ),
+        ),
+        (
+            # Mergify's `draft_bot_account`: the batch opened under a USER
+            # account, where only the queue-OWNED HEAD BRANCH is evidence.
+            "user-authored same-repo queue branch",
+            guard._event(
+                login="some-user",
+                head_ref="mergify/merge-queue/6e89cfe947",
+                head_repo=f"{OWNER}/tortoise",
+            ),
+            pull(
+                17,
+                author="some-user",
+                head_ref="mergify/merge-queue/6e89cfe947",
+                head_repo=f"{OWNER}/tortoise",
+            ),
+        ),
+        (
+            "bot same-repo default base",
+            guard._event(
+                login="dependabot[bot]",
+                user_type="Bot",
+                head_ref="dependabot/npm/x",
+                head_repo=f"{OWNER}/tortoise",
+            ),
+            pull(
+                13,
+                author="dependabot[bot]",
+                author_type="Bot",
+                head_ref="dependabot/npm/x",
+                head_repo=f"{OWNER}/tortoise",
+            ),
+        ),
+        (
+            "bot-authored issue (#9613)",
+            guard._event(
+                event_name="issues",
+                actor="github-actions[bot]",
+                login="github-actions[bot]",
+                user_type="Bot",
+            ),
+            issue(16, author="github-actions[bot]", author_type="Bot"),
+        ),
+        (
+            "fork PR named like a queue branch",
+            guard._event(
+                head_ref="mergify/merge-queue/0123456789",
+                head_repo="someone-else/tortoise",
+            ),
+            pull(
+                15,
+                head_ref="mergify/merge-queue/0123456789",
+                head_repo="someone-else/tortoise",
+            ),
+        ),
+    ]
+
+    disagreements = [
+        (name, guard.closes(event), sweep.should_relay(item, config(sweep)))
+        for name, event, item in cases
+        if guard.closes(event) != sweep.should_relay(item, config(sweep))
+    ]
+    assert not disagreements, (
+        "the sweep and the workflow disagree about who is external: "
+        f"{disagreements} (guard_decision, sweep_decision)"
+    )
+
+    # The ONE deliberate divergence, pinned so it cannot widen by accident: a
+    # bot-authored PR from a fork is closed by the event path and spared by the
+    # sweep (see `test_bot_authored_pr_is_spared_even_from_a_fork`).
+    bot_fork = pull(
+        14,
+        author="mergify[bot]",
+        author_type="Bot",
+        head_ref="mergify/merge-queue/deadbeef00",
+        head_repo="someone-else/tortoise",
+    )
+    assert guard.closes(
+        guard._event(
+            login="mergify[bot]",
+            user_type="Bot",
+            head_ref="mergify/merge-queue/deadbeef00",
+            head_repo="someone-else/tortoise",
+        )
+    ), "the event path no longer closes a bot's fork PR — re-derive this exception"
+    assert sweep.should_relay(bot_fork, config(sweep)) is False
+
+
+# ── (v) the literals are bound to the event path, not copied by hand ─────────
+
+
+def test_sweep_workflow_is_scheduled_and_uses_the_same_label(sweep: Any) -> None:
+    import yaml
+
+    assert SWEEP_WORKFLOW.is_file(), "the sweep must actually be scheduled"
+    doc = yaml.safe_load(SWEEP_WORKFLOW.read_text())
+
+    # It must fire without an event, or it inherits the exact defect it repairs.
+    assert "schedule" in doc[True], "a cron trigger is the point of this workflow"
+    assert "workflow_dispatch" in doc[True]
+
+    # The label is the event path's idempotence marker; a second literal here
+    # that drifts would re-close everything on every run.
+    event_doc = yaml.safe_load(WORKFLOW.read_text())
+    event_text = json.dumps(event_doc["jobs"])
+    assert LABEL in event_text, "the event path no longer uses this label"
+    assert sweep.LABEL == LABEL, "the sweep must use the event path's label"
+    assert sweep.OWNER == OWNER
+
+
+def test_the_workflow_never_checks_out_a_dispatched_ref(sweep: Any) -> None:
+    """A dispatch from an unmerged branch must not run that branch's tool.
+
+    `workflow_dispatch` honours the dispatched ref, so an unpinned
+    `actions/checkout` runs the branch's `tools/inbound_relay_sweep.py` AND
+    reads its `.mergify.yml` against the live repo — while holding
+    `issues: write`, `pull-requests: write` and the intake secret.
+    `persist-credentials: false` does not help: the step token is what makes the
+    mutations. A checkout step without `ref:` must fail here.
+    """
+    import yaml
+
+    doc = yaml.safe_load(SWEEP_WORKFLOW.read_text())
+    checkouts = [
+        step
+        for step in doc["jobs"]["sweep"]["steps"]
+        if str(step.get("uses") or "").startswith("actions/checkout")
+    ]
+    assert len(checkouts) == 1, checkouts
+    with_ = checkouts[0].get("with") or {}
+    assert with_.get("ref") == "${{ github.event.repository.default_branch }}", (
+        "the checkout must be PINNED to the default branch: an unpinned "
+        "checkout executes the DISPATCHED ref's tool against the live repo"
+    )
+    assert with_.get("persist-credentials") is False
+
+
+def _sweep_step(doc: dict[str, Any]) -> dict[str, Any]:
+    return next(
+        step
+        for step in doc["jobs"]["sweep"]["steps"]
+        if "inbound_relay_sweep.py" in str(step.get("run") or "")
+    )
+
+
+def _dry_run_expression(step: dict[str, Any]) -> Any:
+    """The step's `DRY_RUN:` value compiled into a callable over contexts.
+
+    Evaluated with the EVENT GUARD's evaluator — the same strict Actions
+    expression subset the job-level `if:` is graded with, which RAISES on any
+    syntax it does not model instead of falling through as True. So the verdict
+    below is the one Actions reaches, not a spelling match.
+    """
+    guard = _load_event_guard()
+    raw = str((step.get("env") or {}).get("DRY_RUN") or "")
+    match = re.fullmatch(r"\s*\$\{\{(?P<expr>.*)\}\}\s*", raw, re.S)
+    assert match, f"DRY_RUN must be one `${{{{ expr }}}}` bound in `env:`: {raw!r}"
+    tokens = guard._tokenize(match.group("expr"))
+
+    def evaluate(*, github: dict[str, Any], inputs: dict[str, Any]) -> bool:
+        # The flag is passed iff the expression renders the string `true`: the
+        # script compares it with `=` against that literal.
+        value = guard._Parser(tokens).parse({"github": github, "inputs": inputs})
+        return str(value).lower() == "true"
+
+    return evaluate
+
+
+def test_a_manual_dispatch_defaults_to_inert(sweep: Any) -> None:
+    """A dispatch to INSPECT the live repo must not relay, comment and close.
+
+    EVALUATED, not spelled: the `DRY_RUN:` expression is run through the event
+    guard's strict evaluator for each context. The liveness half matters as much
+    as the inert half — an expression that resolves dry on the SCHEDULE path
+    leaves the converging half inert, which is the worst regression this
+    workflow can have (the control would exist and never act).
+    """
+    import yaml
+
+    doc = yaml.safe_load(SWEEP_WORKFLOW.read_text())
+    inputs = (doc[True]["workflow_dispatch"] or {}).get("inputs") or {}
+    assert inputs["dry_run"]["default"] == "true", (
+        "a silent live default turns 'show me the plan' into real closes"
+    )
+
+    step = _sweep_step(doc)
+    dry_run = _dry_run_expression(step)
+
+    assert dry_run(github={"event_name": "schedule"}, inputs={}) is False, (
+        "a SCHEDULED run must act: no dispatch input exists on that path, so the "
+        "expression has to resolve LIVE there"
+    )
+    assert dry_run(github={"event_name": "workflow_dispatch"}, inputs={}) is True, (
+        "a dispatch that somehow carries no value must still be inert"
+    )
+    assert dry_run(github={"event_name": "workflow_dispatch"}, inputs={"dry_run": "true"}) is True
+    assert (
+        dry_run(github={"event_name": "workflow_dispatch"}, inputs={"dry_run": "True"}) is True
+    ), "only the exact literal `false` may make a dispatch live"
+    assert (
+        dry_run(github={"event_name": "workflow_dispatch"}, inputs={"dry_run": "false"}) is False
+    ), "an explicit `false` is the one way to run a dispatch live"
+
+    script = step["run"]
+    assert script.count("--dry-run") == 1, script
+    assert re.search(r'\[\s*"\$DRY_RUN"\s*=\s*"true"\s*\]', script), (
+        "the flag must be guarded by an exact comparison against the bound "
+        f"DRY_RUN value, not a truthiness test: {script!r}"
+    )
+
+
+def test_dispatch_inputs_are_bound_in_env_never_substituted_into_the_script(
+    sweep: Any,
+) -> None:
+    """A `${{ inputs.* }}` expanded into `run:` is shell SOURCE, not data.
+
+    GitHub substitutes expressions into the step's shell TEXT before bash parses
+    it (#4334/#4361), so `--since-hours "${{ inputs.since_hours }}"` lets an
+    input containing `"` break out of its quoting and run commands in a job that
+    holds `issues: write` + `pull-requests: write` and `INBOUND_SECRET_GITHUB` —
+    dispatch permission (which cannot read repo secrets) escalating to a
+    secret-reading one. Every other cron/dispatch workflow in this repo binds
+    its inputs in `env:` and references them quoted.
+
+    The rule is flat, with no exemption for the decision-shaped inputs: they are
+    EVALUATED in `env:` (`DRY_RUN`) and passed to the script as `$VAR`, so no
+    input value is ever part of the script's text.
+    """
+    import yaml
+
+    doc = yaml.safe_load(SWEEP_WORKFLOW.read_text())
+    declared = set((doc[True]["workflow_dispatch"] or {}).get("inputs") or {})
+    assert declared == {"since_hours", "max_actions", "dry_run"}, declared
+
+    bound: dict[str, str] = {}
+    for step in doc["jobs"]["sweep"]["steps"]:
+        script = str(step.get("run") or "")
+        for name in sorted(declared):
+            assert not re.search(rf"\$\{{\{{[^}}]*\binputs\.{name}\b", script), (
+                f"`inputs.{name}` is substituted into a `run:` body — bind it in "
+                f"`env:` and reference `$VAR` quoted instead: {script!r}"
+            )
+        for key, value in (step.get("env") or {}).items():
+            for name in sorted(declared):
+                if re.search(rf"\binputs\.{name}\b", str(value)):
+                    bound.setdefault(name, str(key))
+
+    assert set(bound) == declared, (
+        f"these dispatch inputs are never bound in `env:`: {sorted(declared - set(bound))}"
+    )
+
+
+def test_the_workflow_pins_its_only_dependency_to_the_lockfile(sweep: Any) -> None:
+    """This job holds write tokens and the intake secret — no free-floating fetch."""
+    text = SWEEP_WORKFLOW.read_text()
+    installed = re.search(r"pip install[^\n]*?pyyaml([^\s\"']*)", text)
+    assert installed, "the workflow must install the queue-config reader"
+    spec = installed.group(1)
+    assert spec.startswith("=="), (
+        f"pyyaml is installed unpinned ({spec or 'no specifier'!r}) in the one job "
+        "that holds `issues: write` + `pull-requests: write` and the intake secret"
+    )
+    locked = re.search(
+        r'^name = "pyyaml"\nversion = "([^"]+)"', (REPO_ROOT / "uv.lock").read_text(), re.M
+    )
+    assert locked, "uv.lock no longer carries pyyaml"
+    assert spec == f"=={locked.group(1)}", (
+        f"the workflow pins pyyaml{spec} but the lockfile resolves "
+        f"{locked.group(1)} — bind the pin to the lockfile"
+    )
+
+
+# ── (vi) the real client's paging rails, on the live backlog's shape ─────────
+#
+# This repo has 1,202 open issues+pulls, so "walk every page or raise" would
+# raise on EVERY run — a permanent no-op wearing the costume of a safety rail.
+# Paging is therefore window-bounded: newest-first, stop once a page reaches
+# past the cutoff. These pin that with the real `GhClient` and a stubbed `gh`.
+
+
+def _stub_gh(sweep: Any, monkeypatch: Any, pages: dict[int, Any]) -> list[str]:
+    seen: list[str] = []
+
+    def fake(argv: list[str], *, timeout: int = 60) -> str:
+        seen.append(argv[1])
+        page = int(argv[1].rsplit("page=", 1)[1])
+        value = pages[page]
+        if isinstance(value, Exception):
+            raise value
+        return json.dumps(value)
+
+    monkeypatch.setattr(sweep, "_gh", fake)
+    return seen
+
+
+# The #5128 interpreter-guard invariant is deliberately NOT re-asserted here: it
+# has an owner that DERIVES its corpus — `tests/test_entry_point_python_guard.py`
+# is parametrized over the tracked `tools/**/*.py` corpus, which includes this
+# tool, and it executes the guard node rather than grepping for it. A second,
+# substring-only copy in this file could only rot against that one.
+
+
+def test_client_stops_paging_at_the_window(sweep: Any, monkeypatch: Any) -> None:
+    """One page is enough when the newest page already reaches past the window."""
+    page = [issue(1000 - n, created=timedelta(minutes=10 * n + 1)) for n in range(100)]
+    page[-1] = issue(1, created=timedelta(hours=48))  # oldest on page 1
+    seen = _stub_gh(sweep, monkeypatch, {1: page})
+
+    client = sweep.GhClient(f"{OWNER}/tortoise")
+    got = client.list_open(stop_before=NOW - timedelta(hours=24))
+
+    assert len(got) == 100
+    assert seen == [
+        "repos/daniel-ospina/tortoise/issues?state=open&sort=created&direction=desc"
+        "&per_page=100&page=1"
+    ], seen
+    assert seen[0].count("?") == 1, "a second '?' is a 422, read as an incomplete listing"
+
+
+def test_client_raises_on_a_failed_page(sweep: Any, monkeypatch: Any) -> None:
+    """A transient gh failure is not an empty page."""
+    page = [issue(n, created=timedelta(minutes=n + 1)) for n in range(100)]
+    _stub_gh(sweep, monkeypatch, {1: page, 2: RuntimeError("rate limit exceeded")})
+
+    client = sweep.GhClient(f"{OWNER}/tortoise")
+    with pytest.raises(sweep.ListingError):
+        client.list_open(stop_before=NOW - timedelta(hours=24))
+
+
+def test_client_returns_the_prefix_instead_of_aborting_a_huge_window(
+    sweep: Any, monkeypatch: Any
+) -> None:
+    """A window denser than the page budget yields a PREFIX, not an abort.
+
+    The pre-fix client raised `ListingError` here, which `sweep()` turned into
+    `errors` → exit 2 with no action at all. Since any GitHub user can open
+    1,000 issues on a public repo, that made a flood an off-switch for the whole
+    control. A FAILED page still raises (the rail that is correct) — see
+    `test_client_raises_on_a_failed_page`.
+    """
+    page = [issue(1000 - n, created=timedelta(minutes=n + 1)) for n in range(100)]
+    _stub_gh(sweep, monkeypatch, {n: page for n in range(1, 30)})
+
+    client = sweep.GhClient(f"{OWNER}/tortoise", max_pages=3)
+    got = client.list_open(stop_before=NOW - timedelta(hours=24))
+
+    assert len(got) == 300, "the pages already read must be returned, not discarded"
+    assert client.window_truncated is True
+    # The flag is per-listing, never sticky: a later run that fits the budget
+    # must not keep reporting a deferred remainder.
+    _stub_gh(
+        sweep,
+        monkeypatch,
+        {1: [issue(5, created=timedelta(minutes=5))]},
+    )
+    assert client.list_open(stop_before=NOW - timedelta(hours=24)) != []
+    assert client.window_truncated is False
+
+
+def test_queue_prefixes_are_read_from_the_live_config(sweep: Any) -> None:
+    """The exclusion is config-bound — the same source the event guard reads."""
+    import yaml
+
+    live = yaml.safe_load((REPO_ROOT / ".mergify.yml").read_text())
+    expected = {
+        str(rule.get("queue_branch_prefix") or "mergify/merge-queue/")
+        for rule in (live.get("queue_rules") or [])
+    }
+    assert set(sweep.queue_prefixes()) == expected
+
+
+def test_unreadable_queue_config_refuses_to_act(sweep: Any, tmp_path: Path) -> None:
+    """No config is not "no queue batch": closing one dequeues every merge."""
+    with pytest.raises(sweep.ConfigError):
+        sweep.queue_prefixes(tmp_path / "does-not-exist.yml")
+
+    custom = tmp_path / "mergify.yml"
+    custom.write_text("queue_rules:\n  - name: main\n    queue_branch_prefix: mergify-\n")
+    assert sweep.queue_prefixes(custom) == ("mergify-",)
+
+
+# ── (vii) the two reads that decide a RESUME and the STRANDED state ────────
+#
+# Both are real `GhClient` calls, pinned at the client level: the window-bounded
+# listing cannot answer either question, and a `FakeClient` that ignores
+# `stop_before` cannot tell that apart from a correct implementation.
+
+
+def _stub_gh_json(sweep: Any, monkeypatch: Any, answers: dict[str, Any]) -> list[str]:
+    """Stub `_gh` keyed on a substring of the requested path."""
+    seen: list[str] = []
+
+    def fake(argv: list[str], *, timeout: int = 60) -> str:
+        seen.append(argv[1])
+        for needle, value in answers.items():
+            if needle in argv[1]:
+                if isinstance(value, Exception):
+                    raise value
+                return json.dumps(value)
+        raise AssertionError(f"unexpected gh call: {argv[1]}")
+
+    monkeypatch.setattr(sweep, "_gh", fake)
+    return seen
+
+
+def test_the_stranded_read_is_filtered_and_window_independent(sweep: Any, monkeypatch: Any) -> None:
+    """An open+labelled item that aged out of the 24 h window must still be found.
+
+    The window read stops paging at the cutoff, so scanning it reported the
+    unrepairable state only while the item was recent — and then it vanished from
+    every report while staying open and retried by nothing.
+    """
+    client = sweep.GhClient(f"{OWNER}/tortoise")
+    seen = _stub_gh_json(
+        sweep,
+        monkeypatch,
+        {
+            # the window read: newest items only, none of them labelled
+            "sort=created&direction=desc": [
+                issue(n, created=timedelta(minutes=n + 1)) for n in range(1, 4)
+            ],
+            # the filtered read: the old stranded item, well past the window
+            "labels=queued-for-triage": [issue(500, author="old-timer", labels=[LABEL])],
+        },
+    )
+
+    labelled = client.list_labelled(LABEL)
+
+    assert [int(item["number"]) for item in labelled] == [500]
+    assert any("state=open" in call and "labels=queued-for-triage" in call for call in seen), seen
+    assert not any("sort=created&direction=desc" in call for call in seen), (
+        "the stranded read must not ride on the window listing"
+    )
+
+
+def test_sweep_reports_a_stranded_item_outside_the_window(sweep: Any) -> None:
+    client = FakeClient(
+        issues=[issue(1, created=timedelta(hours=1))],
+        pulls=[pull(500, author="old-timer", labels=[LABEL], created=timedelta(days=30))],
+    )
+    report = run(sweep, client)
+
+    assert client.labelled_reads == [LABEL], "one dedicated filtered read"
+    assert report.stranded == 1
+    assert "half-applied" in _stranded_note(report).casefold()
+    # …and the stale labelled item is NOT dragged into the action set.
+    assert report.relayed == [("issue", 1)]
+
+
+def test_a_dense_window_is_reported_through_the_real_client(sweep: Any, monkeypatch: Any) -> None:
+    """The truncation must survive the SECOND listing, or the report is a fake.
+
+    `window_truncated` is PER-LISTING: `GhClient._paginate` resets it on every
+    call, and `sweep()` makes the stranded (`state=open&labels=…`) read after the
+    window read — so reading the flag at the end saw the LABELLED read's `False`
+    and the dense-window note could never print in production. The run then read
+    as a clean pass over a window it had only partly read, which is exactly the
+    silence the rail exists to break. This drives the REAL client (the fake's
+    `list_labelled` never touches the attribute, so a FakeClient test is vacuous
+    here) and asserts the prefix is still acted on.
+    """
+    client = sweep.GhClient(f"{OWNER}/tortoise", per_page=2, max_pages=2)
+    _stub_gh_json(
+        sweep,
+        monkeypatch,
+        {
+            "labels=queued-for-triage&per_page=2&page=1": [],
+            "sort=created&direction=desc&per_page=2&page=1": [issue(1), issue(2)],
+            "sort=created&direction=desc&per_page=2&page=2": [issue(3), issue(4)],
+        },
+    )
+
+    report = run(sweep, client, dry_run=True)
+
+    assert report.truncated is True, (
+        "the open-window truncation was erased by the stranded read before it "
+        "was read — the operator is told the window was covered when it was not"
+    )
+    assert any("deferred" in note for note in report.notes), report.notes
+    # The ACTION half still holds: the prefix it read is acted on, not aborted.
+    assert report.selected == [("issue", 1), ("issue", 2), ("issue", 3), ("issue", 4)]
+    assert report.errors == []
+
+
+def test_a_failed_comment_page_raises_before_any_mutation(sweep: Any, monkeypatch: Any) -> None:
+    """An unreadable page is not an absent marker.
+
+    If the resume read swallowed a failed page, "no footer found" would be
+    indistinguishable from "I did not finish reading" — and the item would be
+    re-commented. The read must raise instead; `sweep()` turns that into
+    `resume check failed` with every mutation skipped.
+    """
+    client = sweep.GhClient(f"{OWNER}/tortoise", per_page=2, comment_page_budget=4)
+    chatter = {"body": "chatter", "user": {"login": "u", "type": "User"}}
+    _stub_gh_json(
+        sweep,
+        monkeypatch,
+        {
+            "7/comments?per_page=2&page=1": [chatter, chatter],
+            "7/comments?per_page=2&page=2": RuntimeError("gh api failed (rc=1): 502"),
+        },
+    )
+
+    with pytest.raises(sweep.ListingError):
+        client.already_relayed(7)
+
+
+def test_a_resume_read_that_hits_its_budget_says_so(sweep: Any, monkeypatch: Any) -> None:
+    """A SHORT read is not a confident verdict — but only when the verdict is used.
+
+    `comment_page_budget` bounds the resume read; a thread longer than the budget
+    finds no marker and the run re-comments. Raising would make a long thread
+    permanently un-relayable, but returning False in SILENCE is the worst option:
+    the read was short while the verdict was confident. The client sets
+    `comment_read_truncated` (probed against the page PAST the budget, so the
+    flag is a fact and not a guess) and the sweep turns it into a note — only
+    when the verdict is `not relayed`, since when the marker WAS found nothing is
+    re-posted and a warning would name a duplicate that cannot exist.
+    """
+    client = sweep.GhClient(f"{OWNER}/tortoise", per_page=2, comment_page_budget=2)
+    # The intake POST goes through `urlopen`, so it is stubbed on the instance —
+    # no test in this file may reach the real endpoint (see the autouse
+    # `_scrubbed_intake_env` fixture above). The steps AFTER it are NOT stubbed:
+    # `_stub_gh_json` answers read paths only, so the item's first `-X POST`/
+    # `PATCH` raises inside `sweep()`'s per-item `try` and the item is recorded
+    # in `report.failed`, never in `report.relayed` — case (a) below pins that,
+    # because what this test is about is the NOTE and the FLAG, both of which are
+    # produced before any mutation.
+    monkeypatch.setattr(client, "post_intake", lambda payload: None)
+
+    def chatter(count: int, start: int = 0) -> list[dict[str, Any]]:
+        return [
+            {"body": f"chatter {start + i}", "user": {"login": f"u{start + i}", "type": "User"}}
+            for i in range(count)
+        ]
+
+    marker = {
+        "body": f"👋 Thanks for the contribution!\n\n{sweep.RELAY_MARKER}",
+        "user": {"login": "github-actions[bot]", "type": "Bot"},
+    }
+    window = {
+        "labels=queued-for-triage&per_page=2&page=1": [],
+        "sort=created&direction=desc&per_page=2&page=1": [issue(7)],
+    }
+
+    # (a) budget exhausted, no marker in what was read ⇒ the verdict is announced.
+    _stub_gh_json(
+        sweep,
+        monkeypatch,
+        {
+            **window,
+            "7/comments?per_page=2&page=1": chatter(2, start=10),
+            "7/comments?per_page=2&page=2": chatter(2, start=20),
+            # The PROBE past the budget: a thread really continues here.
+            "7/comments?per_page=2&page=3": chatter(1, start=30),
+        },
+    )
+    report = run(sweep, client)
+    assert any("page budget" in note for note in report.notes), report.notes
+    assert any("duplicate comment" in note for note in report.notes), report.notes
+    # The stub answers READS only, so the item aborts at its first mutation. That
+    # is why this test reads the note and the flag and never claims a relay: if a
+    # later change ever stubs the mutations here, this assertion is what says so.
+    assert report.relayed == [] and report.failed == [("issue", 7)], (
+        report.relayed,
+        report.failed,
+    )
+
+    # (b) budget exhausted but the marker IS on the pages read ⇒ no note, and no
+    # comment is posted: the warning would name a duplicate that cannot happen.
+    _stub_gh_json(
+        sweep,
+        monkeypatch,
+        {
+            **window,
+            "7/comments?per_page=2&page=1": [marker, *chatter(1, start=40)],
+            "7/comments?per_page=2&page=2": chatter(2, start=50),
+            "7/comments?per_page=2&page=3": chatter(1, start=60),
+        },
+    )
+    resumed = run(sweep, client)
+    assert client.comment_read_truncated is True, "the read really was short"
+    assert not any("duplicate comment" in note for note in resumed.notes), resumed.notes
+
+    # (c) an EMPTY probe page means the thread ended exactly at the budget: the
+    # flag stays clear, so an exact multiple of `budget * per_page` is not
+    # reported as a shortfall. The REPORT half of this row (flag clear ⇒ no
+    # note) is pinned on its own in
+    # `test_the_short_read_note_is_a_truth_table`, which covers all four
+    # combinations — the real client is used here only for what it alone can
+    # produce, the flag.
+    _stub_gh_json(
+        sweep,
+        monkeypatch,
+        {
+            **window,
+            "7/comments?per_page=2&page=1": chatter(2, start=70),
+            "7/comments?per_page=2&page=2": chatter(2, start=80),
+            "7/comments?per_page=2&page=3": [],
+        },
+    )
+    client.already_relayed(7)
+    assert client.comment_read_truncated is False, (
+        "a full final page at the budget is the END of the thread, not a shortfall"
+    )
+
+    # (d) …and the flag is per-call, never sticky: a later short read of a
+    # different thread cannot inherit the earlier verdict.
+    _stub_gh_json(sweep, monkeypatch, {"7/comments?per_page=2&page=1": chatter(1, start=90)})
+    client.already_relayed(7)
+    assert client.comment_read_truncated is False
+
+
+def test_the_resume_marker_must_be_our_own_comment(sweep: Any, monkeypatch: Any) -> None:
+    """The footer is a fixed public string — anyone can paste it.
+
+    Only a BOT-typed comment (an installed App / GITHUB_TOKEN, not impersonable)
+    or the owner's own login counts, so a contributor cannot silence the relay's
+    comment (or, worse, get an item closed on the strength of a quoted footer).
+    """
+    footer = {"body": f"👋 Thanks for the contribution!\n\n{sweep.RELAY_MARKER}"}
+    client = sweep.GhClient(f"{OWNER}/tortoise")
+
+    _stub_gh_json(
+        sweep,
+        monkeypatch,
+        {"comments": [{**footer, "user": {"login": "Maiiiry", "type": "User"}}]},
+    )
+    assert client.already_relayed(9883) is False
+
+    _stub_gh_json(
+        sweep,
+        monkeypatch,
+        {"comments": [{**footer, "user": {"login": "github-actions[bot]", "type": "Bot"}}]},
+    )
+    assert client.already_relayed(9883) is True
+
+    _stub_gh_json(
+        sweep,
+        monkeypatch,
+        {"comments": [{**footer, "user": {"login": OWNER, "type": "User"}}]},
+    )
+    assert client.already_relayed(9883) is True, "a local run posts as the owner"
+
+    _stub_gh_json(
+        sweep,
+        monkeypatch,
+        {"comments": [{"body": "unrelated", "user": {"login": "x", "type": "Bot"}}]},
+    )
+    assert client.already_relayed(9883) is False
+
+
+def test_the_resume_read_walks_to_the_newest_comments(sweep: Any, monkeypatch: Any) -> None:
+    """The comments endpoint IGNORES `sort`/`direction` — page 1 is the OLDEST.
+
+    Measured on #9613: `?per_page=3&sort=created&direction=desc` returns an
+    ASCENDING triple, identical to the request without those parameters (the
+    endpoint accepts only `since`, `per_page` and `page`). A resume read that
+    asks for "newest first" and stops therefore reads the oldest page — so the
+    relay's own footer, posted at close time (i.e. LAST), is invisible on any
+    item with more than `per_page` comments. The retry then re-posts the
+    identical comment every 15 minutes for as long as the close keeps failing,
+    which is the exact failure this marker exists to prevent.
+
+    Three shapes, because the terminal page is not enough on its own: the marker
+    sits mid-thread once a contributor replies after it, and an EXACT multiple of
+    `per_page` comments ends on a full page followed by an EMPTY one.
+    """
+    client = sweep.GhClient(f"{OWNER}/tortoise")
+
+    def chatter(count: int, start: int = 0) -> list[dict[str, Any]]:
+        return [
+            {"body": f"chatter {start + i}", "user": {"login": f"u{start + i}", "type": "User"}}
+            for i in range(count)
+        ]
+
+    marker = {
+        "body": f"👋 Thanks for the contribution!\n\n{sweep.RELAY_MARKER}",
+        "user": {"login": "github-actions[bot]", "type": "Bot"},
+    }
+
+    # (a) the marker on page 2 of a short thread.
+    # `&page=N` (not `page=N`): `per_page=100` itself contains `page=1`.
+    seen = _stub_gh_json(
+        sweep, monkeypatch, {"&page=1": chatter(client.per_page), "&page=2": [marker]}
+    )
+    assert client.already_relayed(9883) is True, (
+        "the marker lives past page 1 — a read that stops there misses it and re-posts the comment"
+    )
+    assert any("&page=2" in call for call in seen), seen
+
+    # (b) an EXACT multiple of `per_page`: the last page is FULL and the page
+    # after it is EMPTY, so "the page past the end" is not the newest page.
+    _stub_gh_json(
+        sweep,
+        monkeypatch,
+        {"&page=1": [*chatter(client.per_page - 1), marker], "&page=2": []},
+    )
+    assert client.already_relayed(9883) is True, (
+        "a 100-comment thread ends on a full page followed by an empty one; "
+        "scanning only the empty page reports 'not relayed' and re-posts"
+    )
+
+    # (c) a contributor replied AFTER our comment, pushing it off the terminal
+    # page entirely.
+    _stub_gh_json(
+        sweep,
+        monkeypatch,
+        {
+            "&page=1": chatter(client.per_page),
+            "&page=2": [marker, *chatter(client.per_page - 1, start=200)],
+            "&page=3": chatter(1, start=400),
+        },
+    )
+    assert client.already_relayed(9883) is True, (
+        "a reply after ours leaves the marker on an EARLIER page — the scan must "
+        "not be limited to the terminal page"
+    )
