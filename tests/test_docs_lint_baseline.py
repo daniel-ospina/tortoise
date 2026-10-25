@@ -49,6 +49,8 @@ from tools import docs_lint_baseline as dlb  # noqa: E402
 
 CI = ROOT / ".github" / "workflows" / "ci.yml"
 BASELINE = ROOT / "config" / "docs-lint-baseline.json"
+# The `docs` job's link producer — a `run:` step we own since #9708.
+LINK_CHECK_SCRIPT = ROOT / ".github" / "scripts" / "docs-link-check.sh"
 
 MARKDOWNLINT_REPORT = """markdownlint-cli2 v0.23.3 (markdownlint v0.41.1)
 Finding: ./docs/x.md ./docs/y.md
@@ -678,6 +680,66 @@ def test_unparseable_lychee_report_fails_closed(tmp_path: Path, capsys):
     ])
     assert rc == 2
     assert "unparseable" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("payload", ["", "\n", "   \n\t"])
+def test_an_empty_lychee_report_is_named_as_an_absent_measurement(
+    tmp_path: Path, payload: str, capsys
+):
+    """#9708 — the measured failure, and why its wording matters.
+
+    On 2026-10-25T00:14Z (job 121024630636) `lycheeverse/lychee-action@v2` could
+    not find its own binary, copied a `mktemp` file (0 bytes) over this differ's
+    input, and exited 0. The differ then reported *"is unparseable: Expecting
+    value: line 1 column 1 (char 0)"* — a report-FORMAT complaint, on a PR whose
+    markdown had never been measured, which reads to the author as their bug.
+
+    The refusal is unchanged (still rc 2, still fail-closed: an absent report is
+    NEVER "nothing to lint"); only the attribution changes — an EMPTY report now
+    names the LINK CHECK step and says it is a failed measurement, distinct from
+    genuinely malformed JSON.
+    """
+    rc = dlb.main([
+        "check",
+        "--markdownlint-output", str(_write(tmp_path, "md.txt", MARKDOWNLINT_REPORT)),
+        "--markdownlint-expected-files", "2",
+        "--lychee-output", str(_write(tmp_path, "lychee.json", payload)),
+        "--baseline", str(_write(tmp_path, "b.json", json.dumps(_baseline(_md_keys(MARKDOWNLINT_REPORT), [])))),
+        "--repo-root", str(tmp_path),
+    ])
+    err = capsys.readouterr().err
+    assert rc == 2, "an empty report must never read as a clean lint"
+    assert "EMPTY" in err and "LINK CHECK step produced no report" in err
+    assert "failed MEASUREMENT" in err
+    # and it must not masquerade as a JSON-format problem
+    assert "unparseable" not in err
+
+
+def test_missing_lychee_report_fails_closed(tmp_path: Path, capsys):
+    """The CONSUMER half of #9708: a MISSING report is an absent measurement.
+
+    The markdownlint half has had this mirror test since #2386
+    (``test_missing_markdownlint_report_fails_closed``); the lychee half did not,
+    so the branch this change REWORDS was unpinned — deleting it (or narrowing it
+    to EMPTY-only) left the whole suite green, and the differ would then read a
+    missing report as zero findings. With the snapshot as a ceiling (46 known
+    lychee findings) that is a PASS, i.e. the exact "an absent measurement is a
+    clean verdict" fail-open this change exists to close.
+    """
+    rc = dlb.main([
+        "check",
+        "--markdownlint-output", str(_write(tmp_path, "md.txt", MARKDOWNLINT_REPORT)),
+        "--markdownlint-expected-files", "2",
+        "--lychee-output", str(tmp_path / "absent-lychee.json"),
+        "--baseline", str(_write(tmp_path, "b.json", json.dumps(_baseline(_md_keys(MARKDOWNLINT_REPORT), [])))),
+        "--repo-root", str(tmp_path),
+    ])
+    err = capsys.readouterr().err
+    assert rc == 2, "a missing link report must never read as a clean lint"
+    assert "is missing — the LINK CHECK step produced no report" in err
+    assert "so nothing here is a verdict about the changed markdown" in err
+    # and it must not be confused with the other two refusals
+    assert "unparseable" not in err and "EMPTY" not in err
 
 
 def test_baseline_whose_counts_disagree_with_its_lists_fails_closed(tmp_path: Path, capsys):
@@ -1514,30 +1576,41 @@ def test_linters_capture_output_instead_of_deciding_the_verdict():
             "Link check (changed files)",
             "Docs lint baseline (changed files)",
             "lychee-pr.json",
+            "pr-md.txt",
             "steps.changed.outputs.count",
         ),
         (
             "Link check (main health, changed files)",
             "Docs lint baseline (main health)",
             "lychee-mh.json",
+            "changed-md.txt",
             "steps.changed_mh.outputs.count",
         ),
     )
-    for action_name, differ_name, report, count_expr in pairing:
-        with_block = _by_name(action_name)["with"]
-        assert with_block.get("format") == "json", action_name
-        assert with_block.get("fail") is False, action_name
-        assert with_block.get("failIfEmpty") is False, action_name
-        assert str(with_block.get("output", "")).endswith(report), action_name
-        # The LINTER must be pinned, not the action's mutable default: the module
-        # asserts the snapshot was taken with a specific lychee, and the snapshot's
-        # keys encode that version's status text — while `lychee-action@v2`
-        # defaults to a version in its own action.yml (#7542 review round 10).
-        # markdownlint is pinned the same way (`markdownlint-cli2@0.23.3`).
-        assert with_block.get("lycheeVersion") == "v0.24.2", action_name
-        step = _by_name(differ_name)
-        assert f'--lychee-output "$RUNNER_TEMP/{report}"' in step["run"], differ_name
-        assert step["env"]["EXPECTED_MD_FILES"] == "${{ " + count_expr + " }}", differ_name
+    for action_name, differ_name, report, files_from, count_expr in pairing:
+        step = _by_name(action_name)
+        # #9708: the producer is a `run:` step we own, not a composite action. The
+        # composite's `fail: false` swallowed `lychee: command not found` (exit
+        # 127) and copied an empty file over this differ's input, so this pin now
+        # asserts on the producer's own argv: the same report path the differ
+        # reads (the copy-paste that would cross the two paths fails here), the
+        # pinned linter, and the population file.
+        assert _by_name(action_name).get("uses") is None, (
+            f"{action_name!r} must not delegate to a composite action (#9708)"
+        )
+        run = step["run"]
+        assert ".github/scripts/docs-link-check.sh" in run, action_name
+        assert f'--output "$RUNNER_TEMP/{report}"' in run, action_name
+        assert f'--files-from "$RUNNER_TEMP/{files_from}"' in run, action_name
+        differ = _by_name(differ_name)
+        assert f'--lychee-output "$RUNNER_TEMP/{report}"' in differ["run"], differ_name
+        assert differ["env"]["EXPECTED_MD_FILES"] == "${{ " + count_expr + " }}", differ_name
+        # The pin itself lives in the script (LYCHEE_VERSION), because that is
+        # where the linter is resolved and installed now; assert it there too, or
+        # "pinned" would be a claim about nothing.
+        assert f'LYCHEE_VERSION="{dlb.LYCHEE_PIN}"' in LINK_CHECK_SCRIPT.read_text(
+            encoding="utf-8"
+        ), "the producer must pin the linter the snapshot was taken with (#7435)"
 
 
 def test_normalize_path_strips_the_ci_list_prefix():
