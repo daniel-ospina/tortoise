@@ -85,6 +85,32 @@ def test_named_provider_routes_endpoint(monkeypatch):
     assert r2.pinned is False                # bare spec != pinned spec
 
 
+def test_reader_disables_thinking_on_a_reasoning_by_default_provider(monkeypatch):
+    """A reader on a reasoning-by-default provider MUST disable thinking.
+
+    Measured 2026-10-25 (api.deepseek.com, official reader call shape —
+    temperature 0, max_tokens 500, no response_format): an 11,352-prompt-token
+    multi-session question came back with ``completion_tokens=500`` and an
+    EMPTY answer. The harness recorded it ``valid: True`` with no error class
+    and scored it 0 — a starved answer indistinguishable from a wrong one. The
+    same request with ``thinking:{type:disabled}`` returned a real answer.
+    """
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "d")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "o")
+    r = build_reader("deepseek:deepseek-flash")
+    req = r._model.build_request("SYS", "USER")
+    assert req["thinking"] == {"type": "disabled"}
+    # …and the official reader shape is otherwise untouched.
+    assert req["max_tokens"] == 500
+    assert req["temperature"] == 0
+    assert "response_format" not in req
+    assert req["messages"] == [{"role": "system", "content": "SYS"},
+                                {"role": "user", "content": "USER"}]
+    # A provider that does NOT reason by default keeps the official shape.
+    r2 = build_reader("openrouter:deepseek/deepseek-v4-flash")
+    assert "thinking" not in r2._model.build_request("SYS", "USER")
+
+
 def test_named_provider_missing_key_still_raises(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "o")
     # deterministic regardless of the ambient env (this machine has multiple
