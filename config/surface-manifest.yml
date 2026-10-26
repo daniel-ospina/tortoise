@@ -21,7 +21,7 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-cut_at_commit: c648c794a
+cut_at_commit: d426db97cc2766b5f35a70f2cc81bfdac2e6bdb9
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -50,14 +50,14 @@ response_fields:
 - response: tortoise_search
   field: claim_class
   emitted_when: '#2351 (epic #2349 E-derived) — the claim''s asserted/derived class, emitted ONLY when the CALLER
-    opts in by passing claim_class to the SDK verb `tortoise_fts_query` (then every returned Point carries the key,
-    and the same seam FILTERS pre-truncation). Recorded because CONTRIBUTING''s carve-out is about what `tools/surface_manifest.py
-    check` FAILS on, not about what goes unrecorded — but stated precisely: the served handlers (`tortoise_search`
-    and the hosted GET /v1/search) do not declare or forward the parameter today, so NO served response carries
-    this key. Making it reachable from a served surface widens an advertised tool schema and is an MCP/SDK Surface
-    Approval decision, not a consequence of this row'
-  unchanged_when_off: yes — the caller has to pass the parameter, so every pre-#2351 call returns rows with no claim_class
-    key at all (byte-identical)
+    opts in by passing claim_class to the SDK verb `tortoise_fts_query` (then every returned Point carries the
+    key, and the same seam FILTERS pre-truncation). Recorded because CONTRIBUTING''s carve-out is about what
+    `tools/surface_manifest.py check` FAILS on, not about what goes unrecorded — but stated precisely: the served
+    handlers (`tortoise_search` and the hosted GET /v1/search) do not declare or forward the parameter today, so
+    NO served response carries this key. Making it reachable from a served surface widens an advertised tool
+    schema and is an MCP/SDK Surface Approval decision, not a consequence of this row'
+  unchanged_when_off: yes — the caller has to pass the parameter, so every pre-#2351 call returns rows with no
+    claim_class key at all (byte-identical)
 - response: tortoise_search
   field: outdated
   emitted_when: the legacy flag half of the terminal vocabulary is set on the Point (invalidate_point terminalises
@@ -72,31 +72,31 @@ response_fields:
   unchanged_when_off: yes — the whole `provenance` block is absent when the flag is off, so the row is byte-identical
 - response: tortoise_search
   field: provenance.captured_at
-  emitted_when: the same flag AND the Point carries `createdAt` — when the fact entered memory (#3837)
+  emitted_when: 'the same flag AND the Point carries `createdAt` — when the fact entered memory (#3837)'
   unchanged_when_off: yes — nested in the same flag-gated `provenance` block; absent when the flag is off
 - response: tortoise_search
   field: quote
   emitted_when: '#8658 — the Point''s own verbatim anchor (the quote an extractor lifted from its source turn).
     Present only when the Point CARRIES the property, whatever wrote it (the E3 extractor OR a plain `create_point(quote=…)`
-    write — the read path emits on presence, it does not ask who wrote); it is the key `retrieval._is_own_source`
-    and `_same_fact` collapse a distilled point''s own source chunk/turn onto'
+    write — the read path emits on presence, it does not ask who wrote); it is the key `retrieval._is_own_source` and
+    `_same_fact` collapse a distilled point''s own source chunk/turn onto'
   unchanged_when_off: n/a — not flag-gated; the key is absent on every unprovenanced hit, so those responses stay
     byte-identical
 - response: tortoise_search
   field: source_turn_id
   emitted_when: '#8658 — the source-turn index the quote anchors to, as the WRITER stored it (the extractor declares
-    it a 0-based int, `commit_schema` `Field(ge=0)`, but the read path does NOT type-check a passthrough prop, so
-    a row can carry a str — treat the type as declared, not enforced). Turn 0 is the FIRST turn and is a real value:
+    it a 0-based int, `commit_schema` `Field(ge=0)`, but the read path does NOT type-check a passthrough prop, so a
+    row can carry a str — treat the type as declared, not enforced). Turn 0 is the FIRST turn and is a real value:
     emitted on presence, never dropped as falsey. Absent when the Point records no source turn'
   unchanged_when_off: n/a — not flag-gated; absent (not empty, not null) on every hit whose Point records no source
     turn, so those responses stay byte-identical
 - response: tortoise_search
   field: span_start
   emitted_when: '#8658 / #5007 — the start character offset of the quote in its source text. A POINTER, not a payload.
-    The pair-or-neither invariant is a WRITE-DOOR rule, not a read guarantee: the SDK write doors refuse a half
-    span (`commit_schema.validate_span` via `create_point` / `update_point` / `update_entity`), but this read emits
-    each offset INDEPENDENTLY, so a node written outside those doors (raw Cypher tooling / repair) can return one
-    side. 0 is a real offset'
+    The pair-or-neither invariant is a WRITE-DOOR rule, not a read guarantee: the SDK write doors refuse a half span
+    (`commit_schema.validate_span` via `create_point` / `update_point` / `update_entity`), but this read emits each
+    offset INDEPENDENTLY, so a node written outside those doors (raw Cypher tooling / repair) can return one side.
+    0 is a real offset'
   unchanged_when_off: n/a — not flag-gated; absent on every spanless hit, so those responses stay byte-identical
 - response: tortoise_search
   field: span_end
@@ -108,10 +108,10 @@ response_fields:
   emitted_when: '#2350 — the hit is a Point carrying a validity window, and the START''s precision: year|month|day,
     or null where the stored start is PRESENT but names no instant (`""`, `TBD`, `not-a-date` — the #6140 ruling
     makes that "no start was recorded", so there is no granularity to claim; #9201). A legacy bare-ISO (orderable)
-    start reads as day; a caller-DECLARED token is reported only once that bound itself ORDERS — since #9244 a declaration
-    annotates a bound, it cannot summon one, so a token declared on an unorderable start still reads null. Emitted
-    with the same block as valid_to_precision and end_state, whenever valid_from / valid_to / valid_from_precision
-    / valid_to_precision is present'
+    start reads as day; a caller-DECLARED token is reported only once that bound itself ORDERS — since #9244 a
+    declaration annotates a bound, it cannot summon one, so a token declared on an unorderable start still reads
+    null. Emitted with the same block as valid_to_precision and end_state,
+    whenever valid_from / valid_to / valid_from_precision / valid_to_precision is present'
   unchanged_when_off: n/a — not flag-gated; an undated hit stays byte-identical (no window keys at all), never a
     defaulted value
 - response: tortoise_search
@@ -119,9 +119,10 @@ response_fields:
   emitted_when: '#2350 — the end precision of the hit''s validity window: year|month|day, the end-only `unknown`
     marker (the window ENDED but is un-datable), or null where the stored end is PRESENT but names no instant (`TBD`
     — no granularity to claim; #9201, and #9244 for a caller-DECLARED token: a declaration annotates a bound, it
-    cannot summon one — the same gate the start row records, applied to BOTH ends; null here does NOT change end_state,
-    which stays `known` for a dated-but-un-datable end, #9202). ABSENT (not null) when the window has no end at
-    all, so the open shape stays distinguishable. Emitted with the same block as valid_from_precision and end_state'
+    cannot summon one — the same gate the start row records, applied to BOTH ends; null here does NOT change
+    end_state, which stays `known` for a dated-but-un-datable end, #9202). ABSENT (not null) when the window has no
+    end at all, so the open shape stays distinguishable. Emitted with the same block as valid_from_precision and
+    end_state'
   unchanged_when_off: n/a — not flag-gated; absent when the point has no end, so an open-ended hit stays byte-identical
 - response: tortoise_search
   field: end_state
@@ -323,17 +324,17 @@ response_fields:
     type=document (the sole type this door materializes extractedFrom for); its message names `extractedFrom=''session:<id>''`.
     `extracted_from_inert` fires on ANY type when an extractedFrom WAS declared but the type is not one this door
     wires (subject/object/event). A type this door cannot source at all (subject/object/event with nothing declared)
-    is NOT advised — there is no in-door remedy to name, so a note would be noise (#8171, review P1). Two codes
-    from the kind↔layer partition (#9964) ride the same key: `kind_layer_routed` when the kind the write names is
-    declared EXCLUSIVELY on the other entity layer — the KIND decides the LABEL, so the node is written as a `:Subject`/`:Object`
-    with the kind re-declared on that layer''s canonical prop (objectKind=''core:organization'' at type=''object''
-    lands as a :Subject carrying subjectKind) — and `kind_other_layer` when the kind is declared only on another
-    AXIS (an Event kind at an entity door), where the write LANDS as asked and the message names the door that writes
-    the declaring layer. Neither code ever blocks or refuses (#1934 warn-not-block). The routing authority is the
-    classifier''s section plus the §5 Subject vocabulary — never the write-gate vocabularies, so a kind only those
-    know (`agent`) is reported and left on the layer the caller chose. ⚠️ A re-route mints a LABEL-scoped id, so
-    when a same-name node already exists on the label the write left, the graph holds BOTH afterwards and the message
-    names both ids instead of claiming nothing was lost (#2489: no repair path)'
+    is NOT advised — there is no in-door remedy to name, so a note would be noise (#8171, review P1). Two codes from
+    the kind↔layer partition (#9964) ride the same key: `kind_layer_routed` when the kind the write names is declared
+    EXCLUSIVELY on the other entity layer — the KIND decides the LABEL, so the node is written as a `:Subject`/`:Object`
+    with the kind re-declared on that layer''s canonical prop (objectKind=''core:organization'' at type=''object'' lands
+    as a :Subject carrying subjectKind) — and `kind_other_layer` when the kind is declared only on another AXIS (an
+    Event kind at an entity door), where the write LANDS as asked and the message names the door that writes the declaring
+    layer. Neither code ever blocks or refuses (#1934 warn-not-block). The routing authority is the classifier''s section
+    plus the §5 Subject vocabulary — never the write-gate vocabularies, so a kind only those know (`agent`) is reported
+    and left on the layer the caller chose. ⚠️ A re-route mints a LABEL-scoped id, so when a same-name node already
+    exists on the label the write left, the graph holds BOTH afterwards and the message names both ids instead of
+    claiming nothing was lost (#2489: no repair path)'
   unchanged_when_off: n/a — not flag-gated; the key is ABSENT on a write the door can source, so a sourced response
     stays byte-identical
 - response: tortoise_create_document
@@ -346,29 +347,29 @@ response_fields:
 - response: tortoise_create_subject
   field: advisories
   emitted_when: 'the alias door now surfaces the same advisory as create_entity(type=''subject'') — `extracted_from_inert`
-    when the write declares an extractedFrom this door does not wire (subject writes have no `no_source`, see tortoise_create_entity).
-    Additive key; every pre-existing property keeps its value (#8171, review P2) — ⚠️ but the node LABEL is not
-    fixed: the kind decides the layer (#9964), so this alias writes an `:Object` when the subjectKind is a kind
-    the classifier partitions on the Object layer (e.g. subjectKind=''core:skill''; reported as `kind_layer_routed`),
+    when the write declares an extractedFrom this door does not wire (subject writes have no `no_source`, see
+    tortoise_create_entity). Additive key; every pre-existing property keeps its value (#8171, review P2) — ⚠️ but the
+    node LABEL is not fixed: the kind decides the layer (#9964), so this alias writes an `:Object` when the subjectKind
+    is a kind the classifier partitions on the Object layer (e.g. subjectKind=''core:skill''; reported as `kind_layer_routed`),
     and a kind declared only on another axis lands here reported as `kind_other_layer`'
   unchanged_when_off: n/a — not flag-gated; the key is ABSENT when there is no advisory, so the response stays byte-identical
 - response: tortoise_create_object
   field: advisories
   emitted_when: 'the alias door now surfaces the same advisory as create_entity(type=''object'') — `extracted_from_inert`
-    when the write declares an extractedFrom this door does not wire (object writes have no `no_source`, see tortoise_create_entity).
-    Additive key; every pre-existing property keeps its value (#8171, review P2) — ⚠️ but the node LABEL is not
-    fixed: the kind decides the layer (#9964), so this alias writes a `:Subject` when objectKind is a §5 Subject
-    kind (e.g. objectKind=''core:organization''; reported as `kind_layer_routed`), and a kind declared only on another
-    axis lands here reported as `kind_other_layer`. The MCP tool requires objectKind, so this door also cannot express
-    "a Subject with no kind" — the kind is the only lever it has'
+    when the write declares an extractedFrom this door does not wire (object writes have no `no_source`, see
+    tortoise_create_entity). Additive key; every pre-existing property keeps its value (#8171, review P2) — ⚠️ but the
+    node LABEL is not fixed: the kind decides the layer (#9964), so this alias writes a `:Subject` when objectKind is
+    a §5 Subject kind (e.g. objectKind=''core:organization''; reported as `kind_layer_routed`), and a kind declared only
+    on another axis lands here reported as `kind_other_layer`. The MCP tool requires objectKind, so this door also cannot
+    express "a Subject with no kind" — the kind is the only lever it has'
   unchanged_when_off: n/a — not flag-gated; the key is ABSENT when there is no advisory, so the response stays byte-identical
 - response: tortoise_create_event
   field: advisories
   emitted_when: 'the alias door now surfaces the same advisory as create_entity(type=''event'') — `extracted_from_inert`
-    when the write declares an extractedFrom this door does not wire (event writes have no `no_source`, see tortoise_create_entity).
-    Additive key; every pre-existing property keeps its value (#8171, review P2) — the Event door never RE-LABELS
-    (an entity or point kind written here is reported as `kind_other_layer` and the :Event lands as asked, #9964/#1934),
-    so a `kind_layer_routed` code cannot fire here'
+    when the write declares an extractedFrom this door does not wire (event writes have no `no_source`, see
+    tortoise_create_entity). Additive key; every pre-existing property keeps its value (#8171, review P2) — the Event
+    door never RE-LABELS (an entity or point kind written here is reported as `kind_other_layer` and the :Event lands
+    as asked, #9964/#1934), so a `kind_layer_routed` code cannot fire here'
   unchanged_when_off: n/a — not flag-gated; the key is ABSENT when there is no advisory, so the response stays byte-identical
 - response: tortoise_create_point
   field: advisories
@@ -382,11 +383,10 @@ response_fields:
     write DEDUP-hits a point that is already a terminal claim and the payload carried a temporal prop — the whole
     fold is dropped (#7819 refuses re-stamping a dead claim''s window), so the response reports the HIT plus this
     advisory instead of a silent no-op. A THIRD code rides it too (#9964): `kind_other_layer`, when the declared
-    pointKind is declared only on another layer (an Event kind — e.g. pointKind=''core:deployment'') written as
-    a point — the point LANDS with that kind (#1934 warn-not-block) and the message names `create_event`. This door
-    never re-labels (a Point is a different record, not a relabel of an entity), so `kind_layer_routed` cannot fire
-    here. Both codes ride the SAME key on the dedup-hit return, so a re-run reports them together rather than dropping
-    one'
+    pointKind is declared only on another layer (an Event kind — e.g. pointKind=''core:deployment'') written as a point —
+    the point LANDS with that kind (#1934 warn-not-block) and the message names `create_event`. This door never re-labels
+    (a Point is a different record, not a relabel of an entity), so `kind_layer_routed` cannot fire here. Both codes ride
+    the SAME key on the dedup-hit return, so a re-run reports them together rather than dropping one'
   unchanged_when_off: n/a — not flag-gated; the key is ABSENT on a sourced or word-bearing write, and on every write
     whose fold actually applied, so that response stays byte-identical
 - response: tortoise_check_structure
@@ -676,10 +676,10 @@ rows:
     priors visible.
   dependency: declares TortoiseSDK.belief_timeline (resolves)
   lifecycle: active
-  used_by: agents, tooling, skill-docs, docs
+  used_by: never called, tooling, skill-docs, docs
   recommendation: keep
   basis: observed
-  reason: called by agents
+  reason: not called over MCP, but used by tooling, skill-docs — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -1000,10 +1000,10 @@ rows:
     get a plain property update.
   dependency: declares TortoiseSDK.update (resolves)
   lifecycle: active
-  used_by: agents, tooling, skill-docs, docs
+  used_by: never called, tooling, skill-docs, docs
   recommendation: keep
   basis: observed
-  reason: called by agents
+  reason: not called over MCP, but used by tooling, skill-docs — removing it would break that
   recommended_family: memory
   proposed: true
   exemption: false
@@ -1081,7 +1081,7 @@ rows:
     radius (the point and every edge that would be removed) and changes nothing.
   dependency: declares TortoiseSDK.delete_point_wrapped (resolves)
   lifecycle: active
-  used_by: agents, tooling, skill-docs, docs
+  used_by: never called, tooling, skill-docs, docs
   recommendation: merge
   basis: decided
   reason: '`tortoise_delete` in the same group already does this job (its own description names what it consolidates),
@@ -1163,10 +1163,10 @@ rows:
     edge only, no edge transfer. dry_run=True previews exactly which edges would transfer and changes nothing.'
   dependency: declares TortoiseSDK.supersede (resolves)
   lifecycle: active
-  used_by: agents, tooling, skill-docs, docs
+  used_by: never called, tooling, skill-docs, docs
   recommendation: keep
   basis: observed
-  reason: called by agents
+  reason: not called over MCP, but used by tooling, skill-docs — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -1413,10 +1413,10 @@ rows:
     advisory is returned.'
   dependency: declares TortoiseSDK.create_entity (resolves)
   lifecycle: active
-  used_by: agents, tooling, docs
+  used_by: never called, tooling, docs
   recommendation: keep
   basis: observed
-  reason: called by agents
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: graph
   proposed: true
   exemption: false
@@ -1439,7 +1439,7 @@ rows:
   job: Create an Event node (meeting, decision, deployment, etc.).
   dependency: declares TortoiseSDK.create_event (resolves)
   lifecycle: active
-  used_by: agents, tooling, docs
+  used_by: never called, tooling, docs
   recommendation: merge
   basis: decided
   reason: '`tortoise_create_entity` in the same group already does this job (its own description names what it consolidates),
@@ -1467,7 +1467,7 @@ rows:
     the LABEL (#9964), so objectKind=''core:organization'' writes a :Subject and is reported as advisories.kind_layer_routed.'
   dependency: declares TortoiseSDK.create_object (resolves)
   lifecycle: active
-  used_by: agents, tooling, docs
+  used_by: never called, tooling, docs
   recommendation: merge
   basis: decided
   reason: '`tortoise_create_entity` in the same group already does this job (its own description names what it consolidates),
@@ -1491,12 +1491,12 @@ rows:
   keyword_rank: 2
   cluster: create
   canonical: false
-  job: 'Create a Subject node (team, role, organization, person), unless the kind names the other entity layer:
-    the KIND decides the LABEL (#9964), so a kind the classifier partitions as an Object (e.g. subjectKind=''core:skill'')
+  job: 'Create a Subject node (team, role, organization, person), unless the kind names the other entity layer: the
+    KIND decides the LABEL (#9964), so a kind the classifier partitions as an Object (e.g. subjectKind=''core:skill'')
     writes an :Object and is reported as advisories.kind_layer_routed.'
   dependency: declares TortoiseSDK.create_subject (resolves)
   lifecycle: active
-  used_by: agents, tooling, docs
+  used_by: never called, tooling, docs
   recommendation: merge
   basis: decided
   reason: '`tortoise_create_entity` in the same group already does this job (its own description names what it consolidates),
@@ -1552,10 +1552,10 @@ rows:
     the direction.'
   dependency: declares TortoiseSDK.create_operator (resolves)
   lifecycle: active
-  used_by: agents, tooling, skill-docs, docs
+  used_by: never called, tooling, skill-docs, docs
   recommendation: keep
   basis: observed
-  reason: called by agents
+  reason: not called over MCP, but used by tooling, skill-docs — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -1615,7 +1615,7 @@ rows:
   job: Update any entity's properties.
   dependency: declares TortoiseSDK.update_entity (resolves)
   lifecycle: active
-  used_by: agents, tooling, docs
+  used_by: never called, tooling, docs
   recommendation: merge
   basis: decided
   reason: '`tortoise_update` in the same group already does this job (its own description names what it consolidates),
@@ -1696,7 +1696,7 @@ rows:
   job: Annotate an operator Point with structured epistemic dimensions (bias, precision, consistency, directness).
   dependency: declares TortoiseSDK.annotate_operator (resolves)
   lifecycle: active
-  used_by: agents, tooling, skill-docs, docs
+  used_by: never called, tooling, skill-docs, docs
   recommendation: merge
   basis: decided
   reason: '`tortoise_operator_action` in the same group already does this job (its own description names what it
@@ -1719,8 +1719,8 @@ rows:
   keyword_rank: 9
   cluster: operator-action
   canonical: false
-  job: Create a mitigation Point that modulates an operator's edge strength. Idempotent for a CURRENT mitigation
-    — a second call updates it in place; once it has been withdrawn (retracted/superseded/outdated/archived) a re-assertion
+  job: Create a mitigation Point that modulates an operator's edge strength. Idempotent for a CURRENT mitigation —
+    a second call updates it in place; once it has been withdrawn (retracted/superseded/outdated/archived) a re-assertion
     mints a NEW mitigation Point and returns its id.
   dependency: declares TortoiseSDK.mitigate_operator (resolves)
   lifecycle: active
@@ -1776,10 +1776,10 @@ rows:
   job: Provenance chain — 'Who decided this?' Follows authoredBy → Subject → delegation.
   dependency: declares TortoiseSDK.provenance (resolves)
   lifecycle: active
-  used_by: agents, tooling, docs
+  used_by: never called, tooling, docs
   recommendation: keep
   basis: observed
-  reason: called by agents
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -1802,10 +1802,10 @@ rows:
     relationship, depth}]}.'
   dependency: 'handler-served: no declared SDK link'
   lifecycle: active
-  used_by: agents, tooling, docs
+  used_by: never called, tooling, docs
   recommendation: keep
   basis: observed
-  reason: called by agents
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -1854,10 +1854,10 @@ rows:
     for multi-hop filtered BFS use tortoise_entity_profile.
   dependency: declares TortoiseSDK.list_topics (resolves)
   lifecycle: active
-  used_by: agents, tooling, docs
+  used_by: never called, tooling, docs
   recommendation: keep
   basis: observed
-  reason: called by agents
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -2718,10 +2718,10 @@ rows:
     permalink key. tier (T0-T4 / legacy alias) stores the credibility tier; sourceDate is the evidence-age clock.
   dependency: declares TortoiseSDK.create_source (resolves)
   lifecycle: active
-  used_by: agents, tooling, docs
+  used_by: never called, tooling, docs
   recommendation: keep
   basis: observed
-  reason: called by agents
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -2744,10 +2744,10 @@ rows:
     R16 operator promotion, deferred dedup/temporal wiring). WRITES status + wires edges.
   dependency: declares TortoiseSDK.promote_point (resolves)
   lifecycle: active
-  used_by: agents, tooling, docs
+  used_by: never called, tooling, docs
   recommendation: keep
   basis: observed
-  reason: called by agents
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -5488,7 +5488,7 @@ rows:
   job: Public SDK method TortoiseSDK.session_context.
   dependency: 'reached by 1 registered tool(s): tortoise_session_context'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
