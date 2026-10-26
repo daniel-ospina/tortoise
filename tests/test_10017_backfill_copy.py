@@ -90,7 +90,9 @@ def test_session_event_never_invents_a_timestamp() -> None:
     event = copy_mod.build_session_event("s1", {}, turn_count=0, max_index=-1,
                                          event_id="E1")
     assert "created_at" not in event
-    assert event["turn_count"] == 0 and event["turn_max_index"] == -1
+    # NO COUNT EITHER — `0` / `-1` are the values that WALK THE RECORD DOWN on a
+    # re-run (see test_a_count_the_graph_cannot_vouch_for_is_never_written).
+    assert "turn_count" not in event and "turn_max_index" not in event
     assert event["is_episodic"] is True
 
 
@@ -125,6 +127,36 @@ def test_turn_event_strips_content_hash_and_keeps_embedding_present() -> None:
     assert event["contains_session"] == "s1" and event["id"] == "s1_t3"
     assert "content_hash" not in event["point"]
     assert "embedding" in event["point"] and event["point"]["embedding"] is None
+
+
+def test_the_turn_payload_goes_through_the_embedding_seam() -> None:
+    """`properties(p)` is a GRAPH READ-BACK, not a JSON-shaped value.
+
+    `stamp_journal_embedding` is the single seam both journal producers use, and
+    it exists because a vector read back after a `vecf32` write can arrive as a
+    numpy array or a driver type (#5004 round-3, `tortoise/embeddings.py`). This
+    tool feeds that read-back straight into `_journal_row`'s `json.dumps`, which
+    raises on a numpy array — aborting the run AFTER the journal append, leaving
+    `PointAdded` records the record never received.
+    """
+    np = pytest.importorskip("numpy")
+    event = copy_mod.build_turn_event(
+        "s1", {"id": "s1_t0", "content": "hi",
+               "embedding": np.array([0.5, 0.25], dtype="float32")},
+        event_id="E")
+    assert isinstance(event["point"]["embedding"], list)
+    assert event["point"]["embedding"] == [0.5, 0.25]
+    json.dumps(event["point"])          # the payload the record serialises
+
+
+def test_an_unrepresentable_vector_is_dropped_but_the_field_stays_owned() -> None:
+    """A non-finite component is not a vector the record can hold, and dropping
+    the KEY would let replay re-encode the point under a different model — so the
+    seam keeps the field present and empty (presence is ownership, #5004)."""
+    event = copy_mod.build_turn_event(
+        "s1", {"id": "s1_t0", "embedding": [0.1, float("inf")]}, event_id="E")
+    assert "embedding" in event["point"]
+    assert event["point"]["embedding"] is None
 
 
 # ── the write: commit, or refuse ───────────────────────────────────────────
@@ -299,7 +331,10 @@ def test_copy_emits_the_empty_session_too_and_counts_what_landed() -> None:
         event_id=lambda: "E")
     assert sorted(sent) == ["s1", "s2"]           # the empty session is filed
     assert [e["type"] for e in sent["s2"]] == ["SessionRecorded"]
-    assert sent["s2"][0]["turn_count"] == 0
+    # No count is asserted for a session with neither turns nor a declaration:
+    # writing `0` here is what lets a re-run blank a real count.
+    assert "turn_count" not in sent["s2"][0]
+    assert "turn_max_index" not in sent["s2"][0]
     assert "created_at" not in sent["s2"][0]   # no key, not a present null
     assert stats["sessions"] == 2 and stats["turns"] == 1
     assert stats["empty_sessions"] == 1
@@ -308,6 +343,66 @@ def test_copy_emits_the_empty_session_too_and_counts_what_landed() -> None:
     # "not measured", which is how a silent gap reads as a clean result.
     assert stats["anomalies"]["orphan"] == 0
     assert set(stats["anomalies"]) >= {"off_shape", "orphan", "cross_wired"}
+
+
+def test_positioned_counts_only_a_proven_position() -> None:
+    """`stats["positioned"]` is the number an operator reads as "sessions that got
+    a journal position" (and `main` renames it to `positions_measured: null` on a
+    dry run), so `None` must never be counted as a measured position.
+
+    The sibling test above exercises the counting test with an emit that always
+    returns a position, which leaves the `None` branch unpinned — inverting it
+    (`if positioned is None` → count it, or dropping the guard) kept the whole
+    file green.
+    """
+    graph = _FakeGraph(
+        sessions=[(1, "s1", {}), (2, "s2", {})],
+        turns=[(1, "s1_t0", {"id": "s1_t0", "pointKind": "event"}, ["s1"]),
+               (2, "s2_t0", {"id": "s2_t0", "pointKind": "event"}, ["s2"])])
+
+    def emit(sid, events):
+        return 7 if sid == "s1" else None      # s2: no position was measured
+
+    stats = copy_mod.copy_phase(graph, emit, event_id=lambda: "E")
+    assert stats["sessions"] == 2 and stats["turns"] == 2
+    assert stats["positioned"] == 1
+
+
+def test_a_record_seam_failure_still_writes_the_artifact(monkeypatch, tmp_path) -> None:
+    """The artifact contract is one exception class wide, not two.
+
+    A record connection dying at session N of M is the most likely production
+    failure, and it used to escape as an uncaught traceback: exit `1` ("the tool
+    cannot start") with NO artifact, on a run that had already committed N-1
+    sessions — the exact "re-run to find out how far it got" remedy the partial
+    stats exist to remove.
+    """
+    from tortoise.record_writer import RecordWriteError
+
+    _main_harness(monkeypatch, _FakeGraph(
+        sessions=[(1, "s1", {}), (2, "s2", {})],
+        turns=[(1, "s1_t0", {"id": "s1_t0", "pointKind": "event"}, ["s1"]),
+               (2, "s2_t0", {"id": "s2_t0", "pointKind": "event"}, ["s2"])]))
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://u:p@db/record")
+    journal = tmp_path / "graph.jsonl"
+    journal.write_text("{}\n")
+
+    def _fake_journal_emit(journal_path, dsn, org_id, graph_id):
+        def emit(sid, events):
+            if sid == "s2":
+                raise RecordWriteError("connection terminated at s2")
+            return 5
+        return emit
+
+    monkeypatch.setattr(copy_mod, "_journal_emit", _fake_journal_emit)
+    out = tmp_path / "summary.json"
+    with pytest.raises(SystemExit) as excinfo:
+        copy_mod.main(["--graph", "g", "--org-id", "o", "--graph-id", "gid",
+                       "--journal", str(journal), "--out", str(out)])
+    assert excinfo.value.code == 2      # REFUSED, not "cannot start" (1)
+    report = json.loads(out.read_text())
+    assert report["sessions"] == 1 and report["turns"] == 1
+    assert report["refused"] == "connection terminated at s2"
 
 
 def test_a_failed_session_write_aborts_the_copy_instead_of_being_counted() -> None:
@@ -531,6 +626,57 @@ def test_the_counts_still_rise_to_an_attached_count_above_the_declaration() -> N
         "s1", {"turn_count": 6, "turn_max_index": 5}, turn_count=12,
         max_index=11, event_id="E")
     assert event["turn_count"] == 12 and event["turn_max_index"] == 11
+
+
+def test_a_count_the_graph_cannot_vouch_for_is_never_written() -> None:
+    """`max()` protects against the graph's DECLARATION — not against the RECORD.
+
+    The re-run after the delete phase is the case that destroys: the turn nodes
+    are gone (`attached=0`) and a legacy `:Session` node declares no
+    `turn_max_index`, so `0` would overwrite a real `turn_count=12` through
+    `DO UPDATE SET turn_count = EXCLUDED.turn_count` and `-1` would overwrite the
+    real high-water mark through `props || EXCLUDED.props`. `-1` is worse than
+    absence: `sdk` reads `coalesce(s.turn_max_index, s.turn_count, 0)`, so a
+    negative mark makes the stale-turn sweep walk nothing (#10000).
+    """
+    from tortoise.record_projection import Node, _upsert_statement
+
+    event = copy_mod.build_session_event(
+        "s1", {}, turn_count=0, max_index=-1, event_id="E")
+    assert "turn_count" not in event and "turn_max_index" not in event
+
+    # The mechanism, driven through the record's OWN statement emitter: a column
+    # the payload does not carry is absent from the INSERT's column list, so the
+    # `ON CONFLICT … DO UPDATE` branch never names it and whatever the record
+    # already holds survives. The control shows the branch that DOES name it.
+    node = Node("session", "Session", "id")
+    without = _upsert_statement("o", "g", node, "s1", {"id": "s1"}, {}).sql
+    with_count = _upsert_statement(
+        "o", "g", node, "s1", {"id": "s1", "turn_count": 0}, {}).sql
+    assert "turn_count = EXCLUDED.turn_count" not in without
+    assert "turn_count = EXCLUDED.turn_count" in with_count
+
+
+def test_a_graph_property_beats_the_default_it_collides_with() -> None:
+    """Defaults are written FIRST, so a graph property is never overridden.
+
+    `_split_properties` snake-cases every payload key into the same column and
+    lets the LAST one win, so a default written after the payload decides the
+    column. Measured through the record's real splitter: a `:Session` carrying
+    `isEpisodic: false` used to reach the record with `is_episodic = True`.
+    """
+    from tortoise.record_projection import _split_properties
+
+    event = copy_mod.build_session_event(
+        "s1", {"createdAt": "REAL", "isEpisodic": False}, turn_count=0,
+        max_index=-1, event_id="E")
+    assert event["isEpisodic"] is False and event["createdAt"] == "REAL"
+    col_values, _tail = _split_properties(
+        "session", event,
+        columns={"session": frozenset({"id", "is_episodic", "created_at"})},
+        refused={})
+    assert col_values["is_episodic"] is False   # the graph's fact, not the default
+    assert col_values["created_at"] == "REAL"
 
 
 # ── a turn key the record cannot represent refuses the copy ──────────────

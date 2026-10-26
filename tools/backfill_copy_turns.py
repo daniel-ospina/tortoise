@@ -40,22 +40,23 @@ left nodes the record can never hold:
 
 * ``0``  accepted nodes copied; every anomaly class is either zero or
   copied-and-reported.
-* ``1``  the tool cannot start: an environment variable it was pointed at is not
-  set, a flag received a pasted URI/DSN, or `--journal` is missing on a run that
-  would write.
-* ``2``  REFUSED. Either a BLOCKING anomaly class is nonzero (``off_shape``,
-  ``orphan``, ``session_mismatch``, ``duplicate_index`` — no key the record can
-  store), or the copy stopped on a write it could not prove: a truncated read, an
-  unproven journal position, a non-contiguous segment, a record that was not
-  A blocking class is reported IN the artifact (the copy ran, so the JSON says what did land), and so
-  is a refusal that lands part of the copy (a write whose position could not be proven at session N of
-  M — the artifact carries the sessions that completed). A refusal raised before the loop (a duplicate
-  turn key, a truncated read) writes no artifact, because nothing was copied.
 * ``1``  the tool cannot START: an environment variable it was pointed at is not
   set, a flag received a pasted URI/DSN, `--journal` is missing on a run that
   would write, or argparse rejected the invocation. This is why `main` uses
   ``_UsageParser``: argparse's default is ``2``, which would make a typo
   indistinguishable from a refusal.
+* ``2``  REFUSED. Either a BLOCKING anomaly class is nonzero (``off_shape``,
+  ``orphan``, ``session_mismatch``, ``duplicate_index`` — no key the record can
+  store), or the copy stopped on a write it could not prove: a truncated read, an
+  unproven journal position, a non-contiguous segment, a record that was not
+  armed, a record that executed statements nobody committed, or the record seam
+  itself raising (``RecordWriteError``/``RecordConnectError`` — unreachable,
+  refusing, or rolling back at session N of M).
+  A blocking class is reported IN the artifact (the copy ran, so the JSON says
+  what did land), and so is a refusal that lands part of the copy (a write whose
+  position could not be proven at session N of M — the artifact carries the
+  sessions that completed). A refusal raised before the loop (a duplicate turn
+  key, a truncated read) writes no artifact, because nothing was copied.
 
 Honest bounds, stated rather than implied:
 
@@ -81,11 +82,25 @@ MB at the largest production graph (6,432 turns), not a constant.
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter BEFORE the imports below — a module-level
+# 3.11+-only import would fail first, and an UNATTRIBUTED failure is the harm
+# #5128 was filed for. Same shape as the two siblings in this chain
+# (tools/backfill_graph_turns.py, tools/turn_parity_census.py); the guard must be
+# the first statement after the docstring and `import sys`, which
+# `tests/test_entry_point_python_guard.py` pins for every tools/ entry point.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/backfill_copy_turns.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/backfill_copy_turns.py`"
+    )
+
 import argparse
 import contextlib
 import json
 import os
-import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -234,14 +249,20 @@ def build_session_event(session_id: str, props: dict, *, turn_count: int,
     # `draft_count`, `value_nodes_*`, `updated_at` and the props tail, and
     # neither gate can see it (the census reads only the counts; the parity gate
     # compares turn nodes).
-    event = {k: v for k, v in props.items()
-             if k not in _SESSION_DERIVED and k not in _SESSION_ENVELOPE}
+    # ⛔ DEFAULTS FIRST, PAYLOAD SECOND, ENVELOPE THIRD. The default used to be
+    # written LAST (`event.update({… "is_episodic": props.get(…)})` after the
+    # payload), so it won every collision: a `:Session` carrying `isEpisodic:
+    # false` (camelCase) had its property forced to `True` by the snake_case
+    # default beside it — both keys reach `_split_properties`, which snake-cases
+    # them into the SAME column and lets the LAST one win. Defaults first means
+    # a graph property always overrides the default, never the other way round.
+    event = {"is_episodic": True}
+    event.update({k: v for k, v in props.items()
+                  if k not in _SESSION_DERIVED and k not in _SESSION_ENVELOPE})
     event.update({
         "event_id": event_id, "type": "SessionRecorded",
         "initiated_by": "backfill", "projection_version": 2,
         "id": session_id,
-        # A session fact, not a constant of this phase.
-        "is_episodic": props.get("is_episodic", True),
     })
     # A session with no `created_at` in the graph gets NO key — never a timestamp
     # (a backfilled `now` is indistinguishable from a real creation time), and
@@ -265,19 +286,62 @@ def build_session_event(session_id: str, props: dict, *, turn_count: int,
     # turns than they carry (declared=6, attached=12), which the raw attached
     # count fixes and the raw declared value would preserve — so take the larger
     # of the two. Neither number is ever rewritten downward.
+    #
+    # ⛔ AND A NUMBER THE GRAPH CANNOT VOUCH FOR IS OMITTED, never written. `max()`
+    # only protects against the graph's OWN declaration; it cannot protect against
+    # what the RECORD already holds. The re-run after the delete phase is the case
+    # that destroys: the graph's turn nodes are gone (`attached=0`) and a legacy
+    # `:Session` node declares no `turn_max_index`, so `0` would overwrite a real
+    # `turn_count=12` through `DO UPDATE SET turn_count = EXCLUDED.turn_count`, and
+    # `-1` would overwrite the real high-water mark through the props merge — which
+    # is WORSE than absence, because `sdk` reads
+    # `coalesce(s.turn_max_index, s.turn_count, 0)` and a negative mark makes the
+    # stale-turn sweep walk nothing at all (#10000 exists to keep it working).
+    # Omitting the key is what `created_at` above already does: the column is not
+    # in the INSERT's column list, so `DO UPDATE` never names it and an existing
+    # value survives; a first insert takes the column's own NULL, which is the
+    # honest "no count was ever stated".
     declared_count = census._int_or_none(props.get("turn_count")) or 0
     declared_max = census._int_or_none(props.get("turn_max_index"))
-    event["turn_count"] = max(declared_count, turn_count)
-    event["turn_max_index"] = max(
-        declared_max if declared_max is not None else -1, max_index)
+    if declared_count or turn_count:
+        event["turn_count"] = max(declared_count, turn_count)
+    if declared_max is not None or max_index >= 0:
+        event["turn_max_index"] = max(
+            declared_max if declared_max is not None else -1, max_index)
     return event
 
 
 def build_turn_event(session_id: str, props: dict, *, event_id: str) -> dict:
     """``PointAdded`` for one turn, carrying its ``CONTAINS`` session linkage."""
+    # Imported HERE, not at module scope: `tortoise.embeddings` pulls numpy, and
+    # `--dry-run`/`--help` should not pay for it (the same reason `_journal_emit`
+    # imports the record seam locally).
+    from tortoise.embeddings import stamp_journal_embedding
+
     snap = {k: v for k, v in props.items() if k != "content_hash"}
     # Presence is ownership (#5004): an absent key lets replay invent a vector.
     snap.setdefault("embedding", None)
+    # ⛔ THE SEAM, not a hand-rolled approximation of it.
+    # `stamp_journal_embedding` is *"THE single seam both journal producers use …
+    # so they cannot drift"* (`tortoise/embeddings.py`), and it exists because a
+    # graph read-back is not JSON-shaped: `properties(p)` can hand back a driver
+    # vector or a numpy array after a `vecf32` write (#5004 round-3). This tool
+    # feeds exactly that read-back into a `json.dumps` payload
+    # (`record_projection._journal_row`), where a non-list container raises and
+    # aborts the run AFTER the journal append. The seam also refuses a
+    # non-numeric / non-finite / implausibly long vector, dropping it to `None`
+    # while the field stays OWNED.
+    #
+    # `creating=False` because this is a RE-EMITTED SNAPSHOT: the vector was
+    # computed at capture time, possibly under a different model, and nothing in
+    # the graph records which. Attesting the model that happens to be configured
+    # on the machine running the copy would stamp a false origin — the exact
+    # failure the seam's own `embedding_preserved` branch exists to prevent.
+    # ⚠️ This departs from ONE line of #10017's recorded copy recipe
+    # (`creating=True`), which was read off the SDK's CREATING emission site
+    # where the vector IS computed in the same write; recorded here so the next
+    # lane can see the choice rather than rediscover it.
+    snap = stamp_journal_embedding(snap, creating=False)
     return {
         "event_id": event_id, "type": "PointAdded",
         "initiated_by": "backfill", "projection_version": 2,
@@ -354,12 +418,23 @@ def copy_phase(graph, emit, *, page_size: int | None = None, event_id) -> dict:
                    for i in indexes]
         try:
             positioned = emit(sid, events)
-        except CopyRefused as exc:
+        except Exception as exc:
             # The artifact must still say what LANDED. A refusal at session 500
             # of 600 leaves 499 copied, and "re-run to find out how far it got"
             # is the one remedy this tool must not require — a re-run re-appends
             # the journal (see the retry bound in the module docstring).
-            exc.stats = dict(stats)
+            #
+            # EVERY failure from the emit carries the partial stats, not just
+            # `CopyRefused`: the seam raises its own classes
+            # (`RecordWriteError`/`RecordConnectError` — an unreachable database,
+            # a refused write, a rollback), and a connection dying at session N
+            # of M used to escape as an uncaught traceback (exit 1, "the tool
+            # cannot start") with NO artifact, on the most likely production
+            # failure of all. Nothing is swallowed here: the exception is
+            # re-raised untouched, with the context attached.
+            if getattr(exc, "stats", None) is None:
+                with contextlib.suppress(AttributeError):
+                    exc.stats = dict(stats)
             raise
         if positioned is not None:
             stats["positioned"] += 1
@@ -539,9 +614,15 @@ def main(argv: list[str] | None = None) -> int:
     # needs before a 38k-row write was the one the dry run fabricated.
     emit = (lambda sid, events: None) if args.dry_run else _journal_emit(
         args.journal, dsn, args.org_id, args.graph_id)
+    # The record seam's OWN failure classes are part of the artifact contract:
+    # a connection that dies at session N of M is a REFUSAL (exit 2, artifact
+    # written reporting what landed), not "the tool cannot start" (exit 1).
+    # `RecordConnectError` subclasses `RecordWriteError`, so one name covers both.
+    from tortoise.record_writer import RecordWriteError
+
     try:
         stats = copy_phase(graph, emit, event_id=ulid)
-    except (census.CensusError, CopyRefused) as exc:
+    except (census.CensusError, CopyRefused, RecordWriteError) as exc:
         # A refusal is a VERDICT, not a crash: exit 2 with the reason, so the
         # operator (or a CI chain) reads what happened instead of a traceback —
         # the code the census uses for the same class (exit 2, no artifact).
