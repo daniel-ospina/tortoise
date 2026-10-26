@@ -769,6 +769,11 @@ surfaces:
   # `docs/product/sdk-surface-declaration.md`, and `tools/` + `docs/` are non-python
   # prefixes, so a generator-only edit would otherwise select NO surface.
   - test_sdk_surface.py
+  # #10044: the APPROVED-surface declaration gate (tortoise/__all__.py = the owner's 40,
+  # tools/sdk_surface_declaration.py, the generated docs/product/sdk-surface-baseline.md).
+  # Dual-registered with `core` for the same reason as test_sdk_surface.py above: `tools/`
+  # and `docs/` are non-python prefixes, so a gate- or doc-only edit would select no surface.
+  - test_sdk_surface_declaration.py
   # #5373: the `merge=union` registry validator's fail-closed proof. Dual-registered
   # with `core` for the same reason as test_bridge_table.py above — `tools/registry_integrity.py`
   # is named in SOURCE_PATTERNS["api"], so a VALIDATOR-only edit selects `api` and runs
@@ -4499,6 +4504,9 @@ surfaces:
   # `test_*_rename_table.py` / `test_sdk_surface.py` rows above.
   - test_surface_guard_pin_4606.py
   - test_surface_manifest.py
+  # #10044: the declaration gate — a PR that edits tortoise/__all__.py, the gate itself, or
+  # the generated baseline doc must run its proofs.
+  - test_sdk_surface_declaration.py
   - test_suspension_parity.py
   - test_taxonomy.py
   # #4069: temp-dir hygiene + the operator-invoked backlog sweep. Core-owned —
