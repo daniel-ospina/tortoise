@@ -405,6 +405,12 @@ surfaces:
   - test_abuse.py
   - test_abuse_integration.py
   - test_acl_graph_users.py   # C4 #2113: per-graph FalkorDB ACL layer (docker-lane; skipif no URI)
+  # #8617: the DECLARED ACL-layer posture + the recorded absence (unit lane:
+  # no server, no docker — the refusal shapes a healthy self-hosted
+  # server cannot produce). Registered under `api` because the change it
+  # guards lives in `tortoise/hosted_api.py` (the mint hook) and
+  # `tortoise/acl_graph_users.py`.
+  - test_acl_layer_posture_8617.py
   - test_analytics_write_path_resolution.py
   # #8151: `fetch_rows` now walks via `supabase_control.query_all` (#4038), the
   # same seam `test_5388_org_enumeration_completeness.py` guards on this
@@ -7603,6 +7609,12 @@ durations:
   test_dataplane_lane_loop_responsiveness.py: 17.1  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 13.4
   test_extractor_reliability.py: 5.1  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 4.9
   test_acl_graph_users.py: 9.6  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 10.6
+  # #3400/#9068 trap: a file ADDED BY A PR has no CI junit measurement, and an
+  # absent key drops `durations` coverage under the 90% floor. The row is
+  # REQUIRED, and it carries the flat 2.0 default — a local timing is a
+  # shard-layout input that must model CI, not this box. Refresh from the
+  # first post-merge run.
+  test_acl_layer_posture_8617.py: 2.0  # new in #8617; unmeasured on CI (flat default, see the entry above)
   test_battery_exposure_liveness.py: 12.6  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 6.2
   test_attribution_machine_model.py: 14.1  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 6.5
   test_battery_real_deadline.py: 5.0  # ci-timing top-15 2026-10-19 (run 39191149586); was 3.0
