@@ -64,7 +64,10 @@ The pin stays ARMED, and it reds on the WRONG follow-through first:
   pin. It is a WRITE-PATH change (identity + provenance, #9998/#9437/#9879),
   while this pin calls ``rrf_fusion`` directly on two DISTINCT ids carrying
   equal scores, so no dedup change can move it: what makes it XPASS is a
-  fusion-side remedy, i.e. the closed option D. The ruling's instruction for
+  fusion-side remedy. The first of those to fire is option D (CLOSED) — but ANY
+  fusion change that makes score-tied rows come out equal also XPASSes it, a
+  #4210 fusion-form change included, so the marker comes off deliberately in
+  whichever change lands. The ruling's instruction for
   the dedup change is therefore a DELIBERATE act, and it calls it *"[p]roposal,
   not a decision"*: delete this marker and replace the pin with one asserting
   **one claim, N sources** — a FOLLOW-UP that change must carry: the in-flight
