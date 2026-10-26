@@ -2557,6 +2557,15 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "the section gives no executable discriminator for `no_tenant` growth — "
         "an unbound capture is the one state that makes the growth the capture's"
     )
+    # ⛔ The two pins above are NOT enough on their own: they survive an
+    # inverted prohibition, because a section can say "the line carries **no**
+    # request identity" and "**Do** attribute that growth per request from the
+    # log" at the same time — self-contradictory, and green. Pin the ⛔ clause
+    # itself, which is the sentence that carries the ruling (#10071 review P2).
+    assert re.search(r"⛔ \*\*Do\s+not try to attribute", section), (
+        "the section does not forbid the impossible step it describes — "
+        "per-request attribution from a line that carries no request identity"
+    )
 
 
 def _guarded_append(name: str) -> str:
