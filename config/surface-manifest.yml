@@ -17,6 +17,18 @@
 # deliberate, reviewable act in the approving PR — so a re-cut over a grown surface
 # cannot be green by construction.
 #
+# RAISED 149 → 152 on 2026-10-26 by PR #10053 (#4282 Phase 2.2 — the four merges as
+# dispatchers). The three NEW public methods are `link_entities`, `update_knowledge`
+# and `delete_knowledge`, and every one of them is a row of the owner's 40
+# (`tortoise/__all__.py`, owner ruling 2026-09-21, approval record
+# `docs/product/canonical-mcp-tools.md` — unchanged by this raise). So the approved
+# list did NOT grow and the 140-name migration backlog did NOT grow: what grew is the
+# IMPLEMENTATION of three names the owner already approved, which is exactly what
+# #4282 Phase 2 is for. The alternative — land the dispatchers only once the narrow
+# methods they supersede are retired — would make this phase wait on Phase 3 and is
+# why the pin is raised HERE, explicitly, rather than silently by a re-cut (which
+# carries a pin forward by design and can never raise it).
+#
 # ⚠️ A re-cut emits ONLY this header, then the `yaml.safe_dump` of the derived document.
 # YAML dumps no comments, so any comment below this block is SILENTLY DROPPED. Keep
 # rationale here or in the docs, never in an ad-hoc comment in the body.
@@ -28,7 +40,7 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-cut_at_commit: a792ea1923134d9f4ac4a551b976e5f328763441
+cut_at_commit: 59362e29e563ef3659a710e9fbd59d1f524e9964
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -532,7 +544,7 @@ approval_pr: '4120'
 approval_date: '2026-09-18'
 counts:
   tools: 81
-  sdk_public_methods: 149
+  sdk_public_methods: 152
   retired: 18
   keyword_distribution:
     fetch: 14
@@ -547,7 +559,7 @@ counts:
     operate: 6
 high_water_counts:
   tools: 82
-  sdk_public_methods: 149
+  sdk_public_methods: 152
 retired:
 - name: tortoise_get
   use_instead: tortoise_get_entity(id, type=...)
@@ -3432,16 +3444,16 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.create_derivation.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
+  dependency: 'reached by no registered MCP tool; caller categories: engine'
   lifecycle: active
   used_by: tooling, docs
   recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
+  reason: 'no MCP tool binds it; callers: engine'
   recommended_family: null
   proposed: false
   exemption: false
   approval: null
-  class: no-caller-found
+  class: internal
 - name: sdk:create_direct_edge
   method: create_direct_edge
   approved: false
@@ -3741,6 +3753,29 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
+- name: sdk:delete_knowledge
+  method: delete_knowledge
+  approved: true
+  family: null
+  family_rank: null
+  served: sdk
+  sdk_method: null
+  group_source: null
+  keyword: null
+  keyword_rank: null
+  cluster: null
+  canonical: null
+  job: Public SDK method TortoiseSDK.delete_knowledge.
+  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
+  lifecycle: active
+  used_by: tooling, docs
+  recommendation: review
+  reason: no MCP tool binds it, and no caller outside tests was found
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: no-caller-found
 - name: sdk:delete_point
   method: delete_point
   approved: false
@@ -4616,6 +4651,29 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
+- name: sdk:link_entities
+  method: link_entities
+  approved: true
+  family: null
+  family_rank: null
+  served: sdk
+  sdk_method: null
+  group_source: null
+  keyword: null
+  keyword_rank: null
+  cluster: null
+  canonical: null
+  job: Public SDK method TortoiseSDK.link_entities.
+  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
+  lifecycle: active
+  used_by: tooling, docs
+  recommendation: review
+  reason: no MCP tool binds it, and no caller outside tests was found
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: no-caller-found
 - name: sdk:link_source_to_entity
   method: link_source_to_entity
   approved: false
@@ -6180,6 +6238,29 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
+- name: sdk:update_knowledge
+  method: update_knowledge
+  approved: true
+  family: null
+  family_rank: null
+  served: sdk
+  sdk_method: null
+  group_source: null
+  keyword: null
+  keyword_rank: null
+  cluster: null
+  canonical: null
+  job: Public SDK method TortoiseSDK.update_knowledge.
+  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
+  lifecycle: active
+  used_by: tooling, docs
+  recommendation: review
+  reason: no MCP tool binds it, and no caller outside tests was found
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: no-caller-found
 - name: sdk:update_memory_graph
   method: update_memory_graph
   approved: true
