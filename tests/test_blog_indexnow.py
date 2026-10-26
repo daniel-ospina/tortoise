@@ -1135,6 +1135,18 @@ def test_a_direct_publish_create_notifies(results) -> None:
     )
     assert submission["body"]["host"] == SITE.removeprefix("https://"), submission["body"]["host"]
 
+    # THROUGH THE SHARED PATH, not a bare submit: replacing the create arm's
+    # `notifyPublished` with `submitUrl` would leave the assertions above green
+    # while the state read, the stamp and the 24 h window silently disappeared —
+    # and create → unpublish → PATCH-republish would then submit twice.
+    assert {call["kind"] for call in res["stateCalls"]} == {"read", "stamp"}, (
+        "the create must go through notifyPublished: a state READ and a stamp WRITE — "
+        f"got {res['stateCalls']}"
+    )
+    assert res["stamp"], (
+        "the create must record the 24 h window, or the next publish of this row cannot be deduped"
+    )
+
     renamed = results["direct_publish_create_renamed_by_store"]
     assert renamed["statuses"] == [201], renamed["statuses"]
     assert [s["body"]["urlList"] for s in renamed["submissions"]] == [[f"{SITE}/blog/canonical-slug"]], (
