@@ -180,14 +180,16 @@ class _FakeCollectReport:
 
     nodeid = "tests/test_x.py"
 
-    def __init__(self, outcome: str, longrepr: object):
+    def __init__(self, outcome: str, longrepr: object,
+                 nodeid: str = "tests/test_x.py"):
         self.outcome = outcome
         self.longrepr = longrepr
+        self.nodeid = nodeid
 
 
-def _abort(reason: str) -> _FakeCollectReport:
+def _abort(reason: str, nodeid: str = "tests/test_x.py") -> _FakeCollectReport:
     return _FakeCollectReport(
-        "skipped", ("tests/test_x.py", 29, f"Skipped: {reason}"))
+        "skipped", (nodeid, 29, f"Skipped: {reason}"), nodeid=nodeid)
 
 
 @pytest.mark.parametrize(
@@ -207,9 +209,49 @@ def _abort(reason: str) -> _FakeCollectReport:
         # …and on an undeclared local run the historical exemption stands,
         # exactly as it does for the mark class and in CI.
         (_abort("docker-lane caps tests require TORTOISE_DB_URI"), {}, False),
-        # The STRUCTURAL arm: an abort naming no URI precondition is a vacancy
-        # in every lane (the #4221 class — 26 tests green for months).
+        # The STRUCTURAL arm: an abort naming no URI precondition is a vacancy on
+        # an UNDECLARED lane (the #4221 class — 26 tests green for months).
         (_abort("no fastapi on this interpreter"), {}, True),
+        # …but NOT on the lane that declared itself URI-less, because CI runs no
+        # skip matcher there at all: `--manifest-only` (python-ci.yml:3047-3052),
+        # "this lane's skips are the expected state (URI unset), so the
+        # docker-calibrated skip matchers would false-red every e2e module (24,
+        # measured)". These are the tests/e2e/* OPT-IN gates — not live-storage
+        # gates, which is why their reasons name no URI. Refusing them made
+        # `pytest tests/ -m embedded_only --collect-only` die with
+        # "Interrupted: 25 errors during collection", rc=2, and redded the
+        # required `test-d14-hosted-api` leg (which sets TORTOISE_TEST_CARVE_OUT).
+        (_abort("set RUN_DASHBOARD_E2E=1 against a deployed dashboard"),
+         {"TORTOISE_TEST_CARVE_OUT": "1"}, False),
+        (_abort("could not import 'sklearn': optional extra not installed"),
+         {"TORTOISE_TEST_CARVE_OUT": "1"}, False),
+        # SCOPE, not verdict: `tests/e2e/**` is not selectable ("e2e is exempt
+        # from `integrity()` (#1349) and is not selectable"), so no CI matcher
+        # is ever run against it. Its opt-in gates therefore stay skips in EVERY
+        # lane — including a lane that promised the URI, where the same reason
+        # on a tests/*.py module would be a violation.
+        (_abort("dashboard e2e: opt-in via RUN_DASHBOARD_E2E=1",
+                nodeid="tests/e2e/test_dashboard_billing.py"), {}, False),
+        (_abort("dashboard e2e: opt-in via RUN_DASHBOARD_E2E=1",
+                nodeid="tests/e2e/test_dashboard_billing.py"),
+         {"TORTOISE_TEST_EXPECT_URI": "1"}, False),
+        (_abort("ALLOW_PROD=1 required for https targets",
+                nodeid="tests/e2e/test_blog.py"), {}, False),
+        # SCOPE: pytest's own `importorskip` abort (reason `could not import
+        # '<mod>': <exc>`) is the optional-extra class, which stays a skip in a
+        # lane — the recorded reason the guard's third class is CI-only. It is
+        # exempt in every lane, because the lane's promise says nothing about
+        # whether an extra is installed.
+        (_abort("could not import 'redislite': no module named 'redislite'"),
+         {}, False),
+        (_abort("could not import 'psycopg2': no module named 'psycopg2'"),
+         {"TORTOISE_TEST_EXPECT_URI": "1"}, False),
+        # …and the exemption is pytest's SHAPE, not the phrase: a hand-written
+        # reason that merely MENTIONS an import is still a vacancy on a lane that
+        # promised the URI. Without this row a blanket "mentions import" test
+        # would silently widen the hole the structural arm closes (#4221).
+        (_abort("could not import the falkordb client: live storage required"),
+         {"TORTOISE_TEST_EXPECT_URI": "1"}, True),
         # Not a skip: a real collection ERROR already fails the run, and a
         # collected module must never be touched.
         (_FakeCollectReport("failed", "ImportError: boom"), {}, False),
@@ -227,7 +269,8 @@ def test_collection_verdict_table(report, env, violation, monkeypatch):
 
 
 def _run_pytest(*, carve_out: bool, expect_uri: bool = False,
-                paths: tuple[str, ...] = (LIVE_FILE,)
+                paths: tuple[str, ...] = (LIVE_FILE,),
+                extra_env: dict[str, str] | None = None
                 ) -> subprocess.CompletedProcess:
     """Run the live file in a CHILD pytest, so the hook runs as it really does.
 
@@ -248,6 +291,7 @@ def _run_pytest(*, carve_out: bool, expect_uri: bool = False,
         # The lane PROMISED the URI (#3592) — the CI docker lane's declaration,
         # which is the shape a whole-module abort is a contradiction in.
         env["TORTOISE_TEST_EXPECT_URI"] = "1"
+    env.update(extra_env or {})
     return subprocess.run(
         [sys.executable, "-m", "pytest", *paths, "-q", "-rs",
          "-p", "no:cacheprovider"],
@@ -308,3 +352,48 @@ def test_the_carve_out_lane_still_skips_by_design():
     assert proc.returncode == 0, proc.stdout[-3000:]
     assert "skipped" in proc.stdout
     assert "live storage is REQUIRED by this test" not in proc.stdout
+
+
+#: An opt-in e2e module: not selectable in the python matrix, and its abort is
+#: about `RUN_DASHBOARD_E2E`, not about storage.
+E2E_OPT_IN_FILE = "tests/e2e/test_dashboard_billing.py"
+
+
+def test_an_opt_in_e2e_module_stays_a_skip_in_the_documented_local_run():
+    """SCOPE: `tests/e2e/**` is not selectable, so it is not this gate's class.
+
+    `uv run pytest tests/ -v` collects it, and its opt-in gate aborts collection
+    BY DESIGN. Refusing it printed a collection ERROR where the pre-gate tree
+    printed `SKIPPED` — a false red on a module no CI matcher ever sees (e2e is
+    exempt from `integrity()` #1349 and no python-matrix leg collects it).
+    """
+    proc = _run_pytest(carve_out=False, paths=(E2E_OPT_IN_FILE,))
+    assert "live storage is REQUIRED by this MODULE" not in proc.stdout, \
+        proc.stdout[-3000:]
+    assert "RUN_DASHBOARD_E2E" in proc.stdout, proc.stdout[-3000:]
+    assert proc.returncode in (0, 5), proc.stdout[-3000:]
+
+
+def test_a_missing_optional_extra_is_not_a_live_storage_abort(tmp_path):
+    """SCOPE: pytest's `importorskip` abort is the optional-extra class.
+
+    A uv lane that dropped an extra (`AGENTS.md`: an explicit `--extra` silently
+    removes every other one) must keep working: the module-level abort is the
+    skip the repository promises to leave alone, so the gate may not turn it
+    into a collection ERROR. The module is made absent DETERMINISTICALLY — a stub
+    earlier on PYTHONPATH raises `ModuleNotFoundError`, the exact exception
+    `importorskip` catches — so the pin does not depend on what this host has.
+    """
+    shadow = tmp_path / "shadow"
+    shadow.mkdir()
+    (shadow / "redislite.py").write_text(
+        "raise ModuleNotFoundError(\"no module named 'redislite'\")\n",
+        encoding="utf-8")
+    existing = os.environ.get("PYTHONPATH", "")
+    proc = _run_pytest(
+        carve_out=False, paths=("tests/test_guard.py",),
+        extra_env={"PYTHONPATH": os.pathsep.join(
+            [str(shadow)] + ([existing] if existing else []))})
+    assert "live storage is REQUIRED by this MODULE" not in proc.stdout, \
+        proc.stdout[-3000:]
+    assert "could not import 'redislite'" in proc.stdout, proc.stdout[-3000:]

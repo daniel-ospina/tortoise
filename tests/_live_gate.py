@@ -58,20 +58,65 @@ THE LANE DECLARATION, and what stays a legitimate skip:
     skip, the embedded-lane "FalkorDBLite unavailable" precondition) stay
     exempt in every lane — that is the guard's own list, not a decision made here.
   * skips raised at RUNTIME never reach this gate (it reads marks), so an
-    optional extra (`pytest.importorskip`, a missing HF model, a platform guard)
-    is untouched by design.
+    optional extra imported inside a test or a fixture (`pytest.importorskip`
+    there, a missing HF model, a platform guard) is untouched by design.
 
 A WHOLE-MODULE ABORT IS A THIRD ENFORCEMENT POINT, one phase EARLIER. The
-`pytest.skip(..., allow_module_level=True)` gate in twelve `tests/*.py` files is
-decided during COLLECTION, so no item ever exists and the mark hook above cannot
-see it — pytest's `wrap_session` returns NO_TESTS_COLLECTED/OK for an all-skipped
-selection (#1436's class). CI reds it through the junitxml matcher's
+module-level `pytest.skip(..., allow_module_level=True)` gate in the
+`tests/*.py` live files — and pytest's own `pytest.importorskip(...)`, which
+raises the same whole-module skip — is decided during COLLECTION, so no item
+ever exists and the mark hook above cannot see it — pytest's `wrap_session`
+returns NO_TESTS_COLLECTED/OK for an all-skipped selection (#1436's class). CI reds it through the junitxml matcher's
 `is_collection_skip_violation`, so an in-process gate that ignored it would leave
 exactly the CI/lane asymmetry this module exists to remove. `collection_violation`
 applies that SAME guard function to pytest's `CollectReport`, from the same two
 halves the junit matcher reads (`_pytest/junitxml.py` writes the constant message
 "collection skipped" plus `str(report.longrepr)` as the detail), so the two
 enforcement points still cannot disagree.
+
+THE ARM'S SCOPE IS NOT ITS VERDICT, and three exemptions keep it inside the
+class it exists for. Each mirrors a decision recorded OUTSIDE this module — a
+verdict function cannot supply them, because they are statements about which
+skips this gate is about, not about whether a skip is a violation:
+
+  * a lane that DECLARED itself URI-less gets no verdict at all, because CI runs
+    no skip matcher on that lane: the URI-unset `test-d14-hosted-api` leg passes
+    `--manifest-only` (`python-ci.yml:3047-3052`) with its own reason — "this
+    lane's skips are the expected state (URI unset), so the docker-calibrated
+    skip matchers would false-red every e2e module (24, measured)". The lane
+    question is the same `lane_declaration()` the reason arm already uses, so
+    the two arms are exempted by one rule.
+  * `tests/e2e/**` is not selectable: "e2e is exempt from `integrity()` (#1349)
+    and is not selectable" (`tests/test_uri_requiring_selection.py`), and no
+    python-matrix leg collects it. Its twelve opt-in gates (`RUN_DASHBOARD_E2E`,
+    `RUN_LEGAL_E2E`, `ALLOW_PROD`, `RUN_HOSTED_E2E`) abort collection BY DESIGN
+    and name no URI because they are not live-storage gates at all. CI's matcher
+    never sees them; an in-process arm that did would red the documented local
+    run (`uv run pytest tests/ -v`) on evidence CI deliberately excludes.
+  * pytest's own `pytest.importorskip(...)` abort is the optional-extra class,
+    which "must remain a skip in a lane" (the same recorded reason the guard's
+    third class, `is_embedder_reason_violation`, is deliberately CI-only).
+    pytest builds that reason as `f"could not import {modname!r}: {exc}"`
+    (`_pytest/outcomes.py` in the pinned 9.1.1), so this arm — which sees the
+    detail the skip was raised with — can tell it from a live-storage abort,
+    where the junit matcher cannot. Applying the matcher's verdict here would
+    manufacture a false red the repository promises not to produce.
+
+DECLARED RESIDUALS of the collection arm, neither silently covered:
+  * the exemption above matches pytest's SHAPE for an absent optional extra,
+    not its cause. `importorskip(..., reason="…")` replaces that shape, so a
+    custom-reason abort still reaches the verdict; and an `importorskip` on a
+    module that IS live storage is exempted with the rest of the shape.
+    Narrowing further would need the ORIGIN of the skip, which pytest does not
+    report on a `CollectReport`.
+  * a live-storage skip raised from a test BODY or a fixture at RUNTIME is still
+    a plain skip here. The measured population is not "optional extras": e.g.
+    `tests/test_cross_lens.py:392` skips `live FalkorDB (localhost:1) not
+    reachable` and the run exits 0, while `is_falkor_reason_violation` calls the
+    same string a violation. The invariant this module delivers is therefore
+    scoped exactly as its enforcement points are — MARK-decided and
+    COLLECTION-decided skips — and the runtime class is the reason CI still
+    carries a post-hoc junit matcher.
 
 WHAT THIS GATE CANNOT SEE (declared, because a silence about it is
 indistinguishable from coverage). It applies the guard's REASON families, so it
@@ -92,6 +137,7 @@ no longer carries the extra.
 from __future__ import annotations
 
 import importlib.util
+import re
 from pathlib import Path
 from typing import Any
 
@@ -169,6 +215,26 @@ def pending_skip_reason(item: pytest.Item) -> str | None:
 #: not the guard's, and `tests/test_live_storage_fail_closed.py` pins it.
 _COLLECTION_SKIP_MESSAGE = "collection skipped"
 
+#: Subtrees whose whole-module aborts are NOT this gate's class: they are not
+#: selectable, so no CI skip matcher is ever run against them (#1349 in
+#: `tests/test_uri_requiring_selection.py`; `python-ci.yml:3047-3052` names the
+#: 24 opt-in e2e gates the matchers would false-red).
+_NON_SELECTABLE_PREFIXES = ("tests/e2e/",)
+
+#: pytest's own `pytest.importorskip(...)` reason — `could not import '<mod>':
+#: <exc>` (`_pytest/outcomes.py`, pinned 9.1.1). The quoted module name and the
+#: `: ` that introduces the exception keep this anchored to pytest's shape: a
+#: hand-written reason that merely MENTIONS an import is not exempt.
+_IMPORTORSKIP_DETAIL_RE = re.compile(
+    r"could not import (?P<q>['\"])[^'\"]+(?P=q): ")
+
+
+def _out_of_scope(nodeid: str) -> bool:
+    """True when this module is not part of the gate's class — see the module
+    docstring's scope paragraph."""
+    normalised = nodeid.replace("\\", "/")
+    return normalised.startswith(_NON_SELECTABLE_PREFIXES)
+
 
 def violation(item: pytest.Item) -> str | None:
     """The fail-closed message for `item`, or None when its skip is legitimate."""
@@ -196,18 +262,36 @@ def collection_violation(report: pytest.CollectReport) -> str | None:
     real reason. Passing them through `is_collection_skip_violation` keeps ONE
     policy for the question, so the in-process and CI verdicts cannot drift.
 
+    Three SCOPE exemptions run before the verdict — a declared URI-less lane
+    (mirroring CI's `--manifest-only`, `python-ci.yml:3047-3052`), a
+    non-selectable subtree (`tests/e2e/**`), and pytest's `importorskip` shape
+    (the optional-extra class that stays a skip in a lane). They are statements
+    about which skips this gate is about, not a second verdict; the module
+    docstring's scope paragraph is where each one is grounded.
+
     A report that is not a skip (a genuine collection ERROR, or a collected
     module) is never this class: an error already fails the run, and the guard
     keys on the structural skip signal.
     """
     if getattr(report, "outcome", None) != "skipped":
         return None
-    detail = str(getattr(report, "longrepr", "") or "")
-    if not _GUARD.is_collection_skip_violation(
-            _COLLECTION_SKIP_MESSAGE, detail, lane=lane_declaration()):
+    nodeid = str(getattr(report, "nodeid", "") or "")
+    if _out_of_scope(nodeid):
         return None
-    return _collection_message(str(getattr(report, "nodeid", "<unknown>")),
-                               detail)
+    lane = lane_declaration()
+    if lane is False:
+        # Declared URI-less: CI runs its skip matchers with `--manifest-only`
+        # here, so a verdict from this arm would be STRICTER than the policy it
+        # mirrors — a false red on every module-level opt-in gate.
+        return None
+    detail = str(getattr(report, "longrepr", "") or "")
+    if _IMPORTORSKIP_DETAIL_RE.search(detail):
+        # An absent optional extra: a legitimate skip in every lane.
+        return None
+    if not _GUARD.is_collection_skip_violation(
+            _COLLECTION_SKIP_MESSAGE, detail, lane=lane):
+        return None
+    return _collection_message(nodeid or "<unknown>", detail)
 
 
 def _message(nodeid: str, reason: str) -> str:
@@ -236,9 +320,9 @@ def _collection_message(nodeid: str, detail: str) -> str:
     return (
         "live storage is REQUIRED by this MODULE and this run could not provide "
         "one, so its whole module would SKIP — refusing that (#1436): pytest "
-        "decides `pytest.skip(..., allow_module_level=True)` during COLLECTION, "
-        "so no test item exists, no item-level hook and no session fixture ever "
-        "runs, and the run reports `N skipped` with rc=0.\n"
+        "decides a module-level skip during COLLECTION, so no test item exists, "
+        "no item-level hook and no session fixture ever runs, and the run "
+        "reports `N skipped` with rc=0.\n"
         f"  module: {nodeid}\n"
         f"  report: {detail}\n"
         "Give the run a database (a private throwaway container is the "
