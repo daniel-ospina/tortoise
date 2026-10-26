@@ -2029,23 +2029,84 @@ _STALE_UNMEASURED_PROVENANCE_RE = re.compile(
     r"|\bnot a full-file CI measurement\b",
     re.IGNORECASE)
 
-# The clause separators, and the note's leading `#<issue>` anchor (`#4387: `,
-# `#7818/#5362: `, `#4122 `) — kept when the clauses around it are cut, because
-# that anchor is what makes the surviving instruction findable.
+# The clause separators. Split only at BRACKET and backtick DEPTH 0 — see
+# :func:`_split_clauses` — so a claim inside `( … )` is cut together with its
+# parenthesis instead of leaving `startup);` behind as a dangling fragment.
 # A COMMA is deliberately NOT a clause boundary here: cutting one side of
 # "it takes the flat default, which this map forbids as a SHARD-LAYOUT input"
 # leaves the subordinate half stranded — the claim and its justification are
 # one clause and go together.
-_CLAUSE_TOKEN_RE = re.compile(r" — |; |\. ")
-# `_note_body` strips the note's leading `#`, so the anchor is matched WITHOUT one
-# and re-emitted WITH it (`#4387: `, `#7818/#5362: `).
-_LEADING_NOTE_REF_RE = re.compile(r"^\d+(?:/#?\d+)*(?::|\s)\s*")
+_CLAUSE_TOKENS: tuple[str, ...] = (" — ", "; ", ". ")
+
+# A clause that FORBIDS or DISCARDS a local reading is a DECISION, not a claim
+# about the value this row carries — so a repair must not cut it. Without this
+# exemption the provenance regex below matched the prohibition itself ("Do NOT
+# substitute a local timing (#3419/#3750: … a local reading does not model CI)")
+# and deleted the design decision, which is the opposite of the docstring's
+# "the row keeps … the reasoning that is still true" (#10026 fallout review, P1:
+# 6 rows lost a standing "Do NOT …" rule and 12 lost the `#4348` tag that way).
+_PROHIBITION_RE = re.compile(
+    r"\b(?:do|does|did|must|shall|should)\s+not\b|\bdon't\b"
+    r"|\bnever\s+(?:substitute|adopt|use|switch|hand-pick)\b"
+    r"|\bcannot\b|\bnot\s+to\s+(?:substitute|adopt|use)\b",
+    re.IGNORECASE)
+
+# The note's leading `#<issue>` anchor (`# #4387: `, `# #7818/#5362: `, `# #4122 `)
+# — kept when the clauses around it are cut, because that anchor is what makes
+# the surviving instruction findable. Matched against the RAW tail, `#` and all:
+# `_note_body` strips the marker, so a note that merely STARTS WITH A COUNT
+# ("34 tests on the embedded registry lane, locally measured 87.5s") would
+# otherwise be re-emitted as a fabricated `# #34:` citation
+# (#10026 fallout review, P2).
+_LEADING_NOTE_REF_RE = re.compile(r"^#\s*#(\d+(?:/#?\d+)*)(?::|\s)")
 
 
 def _is_stale_unmeasured_claim(text: str) -> bool:
     """Does this clause assert an UNMEASURED basis for the row's weight?"""
+    if _PROHIBITION_RE.search(text):
+        return False
     return bool(_STALE_FLAT_DEFAULT_CLAIM_RE.search(text)
                 or _STALE_UNMEASURED_PROVENANCE_RE.search(text))
+
+
+def _split_clauses(body: str) -> tuple[list[str], list[str]]:
+    """Split a note body on the clause tokens, at bracket/quote depth 0 only.
+
+    Returns `(clauses, separators)` where `separators[i]` is the token between
+    clause `i` and clause `i + 1`. Depth tracking is what keeps a parenthesised
+    reading whole: `(11.92s pytest session, 19.0s wall incl. startup)` is ONE
+    clause, whether or not it contains a `. ` or a `; `, so dropping it drops the
+    parenthesis with it. Backticked spans are treated the same way, because a
+    separator inside `` `…` `` is code, not prose.
+    """
+    parts: list[str] = []
+    seps: list[str] = []
+    start = 0
+    depth = 0
+    in_tick = False
+    i = 0
+    while i < len(body):
+        ch = body[i]
+        if ch == "`":
+            in_tick = not in_tick
+            i += 1
+            continue
+        if not in_tick:
+            if ch in "([{":
+                depth += 1
+            elif ch in ")]}":
+                depth = max(0, depth - 1)
+            elif depth == 0:
+                token = next((t for t in _CLAUSE_TOKENS if body.startswith(t, i)), None)
+                if token is not None:
+                    parts.append(body[start:i])
+                    seps.append(token)
+                    i += len(token)
+                    start = i
+                    continue
+        i += 1
+    parts.append(body[start:])
+    return parts, seps
 
 
 def _repair_adopted_note(tail: str) -> str:
@@ -2060,19 +2121,25 @@ def _repair_adopted_note(tail: str) -> str:
     review fixed on two other paths).
 
     A dropped clause takes its separator with it and the neighbours are joined by
-    `; `, so nothing is left reading `… ; — …`. Returns "" when nothing survives,
-    which the caller already renders as an absent tail.
+    `; `, so nothing is left reading `… ; — …`. Splitting is bracket-aware
+    (:func:`_split_clauses`), so a cut never leaves half a parenthesis behind.
+    Returns "" when nothing survives, which the caller already renders as an
+    absent tail.
     """
     body = _note_body(tail)
     if not _is_stale_unmeasured_claim(body):
         return tail
-    ref = _LEADING_NOTE_REF_RE.match(body)
+    ref = _LEADING_NOTE_REF_RE.match(tail.strip())
     ref_text = ""
     if ref:
-        ref_text = f"#{ref.group(0).strip()}"
-        body = body[ref.end():]
-    parts = _CLAUSE_TOKEN_RE.split(body)
-    seps = [m.group(0) for m in _CLAUSE_TOKEN_RE.finditer(body)]
+        ref_text = f"#{ref.group(1)}"
+        # `body` came from `_note_body`, which strips the leading `#` of BOTH the
+        # comment marker and the issue ref — so the anchor is matched there
+        # without its `#` and re-emitted WITH it (`#4387: `, `#7818/#5362: `).
+        marker = ref.group(1)
+        if body.startswith(marker):
+            body = body[len(marker):].lstrip(":").lstrip(" \t")
+    parts, seps = _split_clauses(body)
     kept: list[tuple[str, str]] = []   # (separator before this clause, clause)
     dropped = False
     for i, clause in enumerate(parts):
@@ -2172,6 +2239,24 @@ def _held_equal_pins(manifest_text: str) -> dict[str, str]:
             if isinstance(row, str) and isinstance(sibling, str)}
 
 
+def _committed_duration_values(lines: list[str],
+                               entries: dict[str, int]) -> dict[str, float]:
+    """The values the manifest ALREADY carries, keyed by row.
+
+    Needed by the HELD-EQUAL pin: a sweep that measures only ONE row of a pinned
+    pair must still be able to write the other from its committed value, or the
+    pair splits on that refresh (#10026 fallout review, P1). Read through the same
+    :data:`_DURATION_LINE_RE` the renderer rewrites with, so a row it cannot parse
+    is simply absent rather than guessed.
+    """
+    values: dict[str, float] = {}
+    for key, index in entries.items():
+        match = _DURATION_LINE_RE.match(lines[index])
+        if match is not None:
+            values[key] = float(match.group("value"))
+    return values
+
+
 def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
                               captured_at: str, *,
                               coverage: dict[str, tuple[int, int]] | None = None,
@@ -2259,9 +2344,27 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
     # The writer used to re-base each row from its OWN reading, which is how the
     # 2026-10-26 refresh wrote 21.2 and 2.2 for a pinned pair whose note says they
     # carry one weight; the pair takes the LARGER reading, per the pin's own note.
+    #
+    # BOTH rows are written, not just the one the pin names: raising one side to
+    # `max(...)` while leaving the other at its own (smaller) reading reproduces
+    # the exact 21.2-vs-2.2 divergence the pin exists to prevent the first time a
+    # sweep happens to measure the sibling as the larger of the two (#10026
+    # fallout review, P1). A row the sweep did not measure is written from its
+    # COMMITTED value, so a one-sided sweep cannot split the pair either.
+    pin_source: dict[str, str] = {}
+    committed = _committed_duration_values(lines, entries)
     for pinned, sibling in _held_equal_pins(manifest_text).items():
-        if pinned in resolved and sibling in resolved:
-            resolved[pinned] = max(resolved[pinned], resolved[sibling])
+        readings = {row: resolved.get(row, committed.get(row))
+                    for row in (pinned, sibling)}
+        available = [value for value in readings.values() if value is not None]
+        if not available:
+            continue
+        pair_value = max(available)
+        for row, reading in readings.items():
+            if reading is None:
+                continue
+            resolved[row] = pair_value
+            pin_source[row] = sibling if row == pinned else pinned
     # The coverage witness is keyed by MEASURED path (that is what the collector
     # supplies), and the rows are keyed by MANIFEST key — so it is put through the
     # SAME resolution, which is what makes it impossible for a witness to describe
@@ -2407,7 +2510,18 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
             # its `#2350` ref (caught by
             # tests/test_ci_timing.py::test_a_dated_refresh_claim_inside_a_rationale_loses_only_that_clause).
             tail = _repair_adopted_note(tail)
-            basis = f"{sample_label}; was {previous:.1f}"
+            # A pinned row's value came from its SIBLING's reading, so attributing
+            # this sample's label to it states a basis the sweep never produced
+            # (`test_mcp_rename_table.py` was not weighed by the run that weighed
+            # `test_bridge_table.py`). The map's own rule — "a row's comment is
+            # kept only while the value AND its stated basis are unchanged" —
+            # applies to the basis WRITTEN here too (#10026 fallout review, P2).
+            if key in pin_source:
+                basis = (f"held equal to `{pin_source[key]}` — the map's "
+                         f"`durations_held_equal` pin, which is not this row's own "
+                         f"reading; was {previous:.1f}")
+            else:
+                basis = f"{sample_label}; was {previous:.1f}"
             # A surviving DESIGN note is kept and the new basis is appended to it,
             # never substituted for it: notes like "Do NOT substitute a local
             # timing" or a #5275 recording are decisions, and a tool output does
