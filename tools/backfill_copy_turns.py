@@ -295,6 +295,7 @@ def _record_floor(dsn: str, org_id: str, graph_id: str) -> dict[str, dict]:
     restore the lowering write — the fail-open shape this whole phase is about.
     """
     from tortoise import record_projection, record_serve
+    from tortoise.record_projection import RecordProjectionError
     from tortoise.record_serve import RecordServeError
     from tortoise.record_writer import RecordWriteError
 
@@ -334,8 +335,21 @@ def _record_floor(dsn: str, org_id: str, graph_id: str) -> dict[str, dict]:
         # "install the 'postgres' extra" and not "RecordServeError". A DRIVER's
         # message can carry the host, and this module never echoes a DSN (see the
         # `--dsn-env` shape check in `main`).
+        #
+        # ⛔ `RecordProjectionError` IS IN THIS TUPLE, and it is the one that
+        # matters most. `scope_connection` is the call immediately above, and it
+        # raises that class (`record_projection.py:495`) — NOT a
+        # `RecordWriteError` and NOT a `RecordServeError` — for the two
+        # conditions an operator is most likely to hit: a tenant GUC that did not
+        # take, and a connection role that BYPASSES the policies. Reporting those
+        # as the bare class name told the operator the record's DATA could not be
+        # read while the actual message said to re-arm the DSN with the tenant
+        # role (the #9801 shape this whole function exists to refuse). Its text
+        # is DSN-free for the same reason the other two are: it names a GUC, a
+        # role posture, or a missing extra — never a host.
         detail = (str(exc)
-                  if isinstance(exc, (RecordWriteError, RecordServeError))
+                  if isinstance(exc, (RecordWriteError, RecordServeError,
+                                      RecordProjectionError))
                   else type(exc).__name__)
         raise CopyRefused(
             "the record's own counts could not be read, so a re-run cannot be "

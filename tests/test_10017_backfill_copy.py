@@ -663,24 +663,38 @@ def test_the_copy_writes_to_the_record_it_was_told_to(monkeypatch, tmp_path) -> 
 
 # ── the session read: a clipped page must not become empty provenance ─────
 
-class _ClippedGraph(_FakeGraph):
-    """A graph that CLIPS a non-paged read, as the engine silently does.
+class _PagedGraph(_FakeGraph):
+    """A graph whose ONLY non-aggregate read is a keyset page — and says so.
 
     FalkorDB truncates a non-aggregate read at its server-global
     ``RESULTSET_SIZE`` (10,000 default) with no error and no marker
-    (#4515/#4233). A keyset page carries ``$batch``; a bare ``RETURN`` does not,
-    and that is exactly the read that gets clipped.
+    (#4515/#4233). The immunity this phase relies on is therefore not a
+    slice-size test: it is that **no non-aggregate read is issued unpaged**, so
+    every read is bounded by ``$batch`` (the page size) rather than by the
+    server's ceiling. A bare ``RETURN`` is exactly the clippable shape, so an
+    un-paged non-aggregate read here is an ASSERTION FAILURE, not a fake result.
+
+    ⛔ This replaced a `clip` parameter that sliced the unpaged branch. That
+    branch was DEAD — every paged call passes params and every param-less call is
+    an aggregate — so `clip=0` and `clip=99` produced identical runs, and the test
+    advertised a ceiling case it never exercised. A fake that cannot fail the way
+    its docstring says is the same fabrication class as the `RecordWriter.connect`
+    double this file's `test_the_record_floor_reads_both_homes_for_the_tenant`
+    warns about. A genuinely TRUNCATED read is still refused, and is pinned by
+    `test_a_session_read_that_disagrees_with_the_server_count_refuses`.
     """
 
-    def __init__(self, sessions, turns, clip: int) -> None:
+    def __init__(self, sessions, turns) -> None:
         super().__init__(sessions, turns)
-        self.clip = clip
 
     def query(self, cypher: str, params: dict | None = None):
         if "count(" in cypher:
             return super().query(cypher, params)
         if params is None:
-            return _Res(self._sessions[: self.clip])   # the engine's ceiling
+            raise AssertionError(
+                "copy_phase issued a NON-AGGREGATE read with no params — that is "
+                "the shape FalkorDB clips silently at RESULTSET_SIZE (#4515), so "
+                "it must be paged, not faked: " + cypher.strip()[:120])
         # Keyset semantics, NOT a positional slice: the cursor is the last node's
         # INTERNAL id, not an index into this list.
         rows = self._turns if "CONTAINS" in cypher else self._sessions
@@ -695,19 +709,25 @@ def _three_sessions() -> list:
             (3, "s3", {"harness": "codex", "created_at": "2026-10-01T00:00:00Z"})]
 
 
-def test_a_clipped_session_read_cannot_strip_capture_provenance() -> None:
-    """Sessions past the engine's ceiling must still arrive WITH their properties.
+def test_a_paged_session_read_carries_every_sessions_provenance() -> None:
+    """Every session must arrive WITH its properties, however far down the pages.
 
-    A bare ``MATCH (s:Session) RETURN s.id, properties(s)`` is clipped silently,
-    and each clipped session would be filed with EMPTY provenance — no `harness`,
-    no `capture_lane`, and a `created_at` null the graph never had — while its
-    turns still counted as copied. That is the one loss this phase exists to
-    prevent, reported as success.
+    A bare ``MATCH (s:Session) RETURN s.id, properties(s)`` is clipped silently at
+    the server's ``RESULTSET_SIZE``, and each session past it would be filed with
+    EMPTY provenance — no `harness`, no `capture_lane`, and a `created_at` null
+    the graph never had — while its turns still counted as copied. That is the one
+    loss this phase exists to prevent, reported as success.
+
+    What pins it: the read is KEYSET-PAGED (`page_size=2` over 3 sessions, so `s3`
+    can only arrive on page 2) and `_PagedGraph` FAILS the test if any
+    non-aggregate read is issued unpaged — the clippable shape. Deleting
+    `properties(s)` from `_COPY_SESSIONS_PAGE_QUERY` makes this fail at
+    `recorded["s3"]["harness"]`.
     """
     turns = [(10, "s1_t0", {"id": "s1_t0", "pointKind": "event"}, ["s1"]),
              (11, "s2_t0", {"id": "s2_t0", "pointKind": "event"}, ["s2"]),
              (12, "s3_t0", {"id": "s3_t0", "pointKind": "event"}, ["s3"])]
-    graph = _ClippedGraph(_three_sessions(), turns, clip=2)
+    graph = _PagedGraph(_three_sessions(), turns)
     recorded: dict[str, dict] = {}
 
     def emit(sid, events) -> int:
@@ -920,15 +940,33 @@ def test_the_record_floor_reads_both_homes_for_the_tenant(monkeypatch) -> None:
 
 
 def test_an_unreadable_record_floor_is_a_refusal_not_a_blind_copy(monkeypatch) -> None:
-    """An unmeasured floor must not degrade to `{}` — that IS the lowering write."""
-    from tortoise import record_projection, record_serve
+    """An unmeasured floor must not degrade to `{}` — that IS the lowering write.
 
+    ⛔ The scope half raises the class `scope_connection` REALLY raises
+    (`RecordProjectionError`, `record_projection.py:495`) and asserts its TEXT
+    reaches the operator. It used to raise a bare `RuntimeError` — a class
+    production never raises there — so the harness supplied exactly the wrong
+    class and the handler's failure to QUOTE `RecordProjectionError` (it listed
+    only the writer/serve classes) was invisible: the operator got
+    `(RecordProjectionError)` and a pointer at the record's DATA, while the real
+    message said the connection's ROLE bypasses RLS and how to re-arm it. That is
+    the #9801 shape this function exists to refuse, mis-diagnosed by its
+    own refusal message.
+    """
+    from tortoise import record_projection, record_serve
+    from tortoise.record_projection import RecordProjectionError
+
+    # A DRIVER failure — any class outside the record's own seam. It refuses, and
+    # its message is NOT echoed: a driver's text can carry the host, and this
+    # module never prints a DSN.
     def _boom(dsn):
-        raise RuntimeError("connection refused")
+        raise RuntimeError("connection to postgresql://u:s3cret@db/r refused")
 
     monkeypatch.setattr(record_serve, "open_record", _boom)
-    with pytest.raises(copy_mod.CopyRefused, match="could not be read"):
+    with pytest.raises(copy_mod.CopyRefused, match="could not be read") as driver:
         copy_mod._record_floor("postgresql://u@db/r", "o", "gid")
+    assert "s3cret" not in str(driver.value)
+    assert "(RuntimeError)" in str(driver.value)
 
     # A scope that cannot be VERIFIED is the same refusal, not a zero-row floor:
     # the policies treat an unset GUC as "no rows", so reading on past a failed
@@ -937,13 +975,20 @@ def test_an_unreadable_record_floor_is_a_refusal_not_a_blind_copy(monkeypatch) -
         def close(self):
             pass
 
+    repair = ("the record's connection runs as a role that BYPASSES RLS — arm "
+              "the DSN with the tenant role")
+
     def _unscoped(conn, org_id):
-        raise RuntimeError("the record's scope could not be verified")
+        raise RecordProjectionError(repair)
 
     monkeypatch.setattr(record_serve, "open_record", lambda dsn: _Conn())
     monkeypatch.setattr(record_projection, "scope_connection", _unscoped)
-    with pytest.raises(copy_mod.CopyRefused, match="could not be read"):
+    with pytest.raises(copy_mod.CopyRefused, match="could not be read") as seam:
         copy_mod._record_floor("postgresql://u@db/r", "o", "gid")
+    # ⛔ The REPAIR must reach the operator. A refusal that names the wrong
+    # subsystem sends them to debug a database that is healthy.
+    assert repair in str(seam.value)
+    assert "(RecordProjectionError)" not in str(seam.value)
 
 
 def test_a_count_the_graph_cannot_vouch_for_is_never_written() -> None:
