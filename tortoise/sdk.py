@@ -14568,6 +14568,19 @@ class TortoiseSDK:
         # `_mark_dirty` below it cannot strand a landed promotion. The unguarded
         # arms still record BEFORE their writes (the outbox ordering above); the
         # payload is the same dict either way — one record shape per call.
+        #
+        # ⛔ AN ABSENT ID TAKES NO RECEIPT (#10079 review round 2, P2). This
+        # door returns `{}` for an id that does not exist — a documented
+        # contract (`this verb returns {} for a missing id`, asserted at
+        # tests/test_lifecycle_guards.py) — and that path writes NOTHING. Shaping
+        # still ran from the caller's props, so `_end_receipt` is non-None, and
+        # attaching it turned `{}` into truthy `{'valid_to_shaped': …}`: a caller
+        # checking `if not sdk.update_point(id, …)` to detect a missing id now
+        # silently passes, and the receipt reports a shaping that was never
+        # stored. Same class as the refused-fold branch above: a receipt may
+        # only report an end that reached the STORED record.
+        if not result:
+            return result
         return _with_end_receipt(result, _end_receipt)
 
     # §17.1 LANE (#9206): the APPLY-FIRST lane — DECLARED, with the order it

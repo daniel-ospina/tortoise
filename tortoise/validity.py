@@ -456,14 +456,26 @@ def read_caller_end(value: object, declared_precision: object = None,
                     f"this is a Unix epoch supplied as a STRING, which names no "
                     f"instant — pass the NUMBER {seconds} instead of a string",
                 ) from None
+            # Name THIS input's shape, not a menu of every shape: a refusal that
+            # lists both magnitudes tells a caller with 13 digits nothing that
+            # distinguishes their case, and it cannot be pinned by a test (the
+            # #10079 review round 2 P2 — the first version named both, so a
+            # swapped 13<->14 mapping stayed green).
+            ndigits = len(token.lstrip("-"))
+            if ndigits == 13:
+                shape = "that is a MILLISECOND epoch — divide by 1000 to get seconds"
+            elif ndigits == 14:
+                shape = ("that is usually a compact YYYYMMDDHHMMSS, which is not an "
+                         "epoch at all")
+            else:
+                shape = ("at that magnitude the number would not name the instant "
+                         "you meant")
             raise _end_refusal(
                 value,
-                f"this is a {len(token.lstrip('-'))}-digit numeric string, which "
-                "names no instant. It is not offered back as a number because at "
-                "that magnitude the number would not be the instant you meant: a "
-                "13-digit value is a MILLISECOND epoch (divide by 1000) and a "
-                "14-digit one is usually a compact YYYYMMDDHHMMSS, while the "
-                "field reads a NUMBER as SECONDS since 1970",
+                f"this is a {ndigits}-digit numeric string, which names no "
+                f"instant, and it is NOT offered back as a number: {shape} — while "
+                "the field reads a NUMBER as SECONDS since 1970, so following that "
+                "repair would store a confidently wrong instant",
             ) from None
     raise _end_refusal(
         value,

@@ -2323,8 +2323,17 @@ def test_epoch_as_string_refuses_without_prescribing_the_wrong_number(digits, sh
     msg = str(excinfo.value)
     # the number is NOT offered back as the repair ...
     assert f"pass the NUMBER {digits}" not in msg, msg
-    # ... and the shape that would have misled the caller is named instead
+    # ... and the repair names THIS input's own magnitude. ⛔ Asserting only
+    # `shape_word in msg` was vacuous (#10079 review round 2, P2): the message
+    # named both magnitudes, so the positive half passed for either input and a
+    # swapped 13<->14 mapping stayed green.
+    assert f"{len(digits)}-digit numeric string" in msg, msg
     assert shape_word in msg, msg
+    # the other magnitude's advice must NOT be the one given here
+    other = "YYYYMMDDHHMMSS" if len(digits) == 13 else "MILLISECOND"
+    assert other not in msg, (
+        f"the refusal for a {len(digits)}-digit input also names the {other} "
+        f"shape, so it cannot pin which applies: {msg}")
 
 
 def test_epoch_as_string_still_prescribes_the_number_when_it_is_the_true_repair():
@@ -2370,3 +2379,23 @@ def test_no_end_receipt_when_the_shaped_end_was_never_STORED(sdk):
     assert "valid_to_shaped" not in reply, (
         "a shaping receipt was emitted for an end that was never stored: "
         f"{reply.get('valid_to_shaped')!r}")
+
+
+def test_a_missing_id_takes_no_receipt_and_stays_empty(sdk):
+    """#10079 review round 2 P2 — the absent-id contract must survive shaping.
+
+    ``update_point`` returns ``{}`` for an id that does not exist, and that path
+    writes NOTHING. Shaping still ran from the caller's props, so attaching
+    ``valid_to_shaped`` turned the empty result into a truthy dict:
+    a caller's existence check (``if not sdk.update_point(id, ...)``) silently
+    passed, and the receipt reported a shaping that never reached the record.
+    """
+    missing = "no-such-point-9202"
+    # the non-shaping case pins the pre-existing contract, so a failure below
+    # cannot be blamed on the verb having changed shape generally
+    assert sdk.update_point(missing, validTo="2026-06-10") == {}
+
+    reply = sdk.update_point(missing, validTo="TBD")
+
+    assert reply == {}, f"an absent id returned a truthy reply: {reply!r}"
+    assert "valid_to_shaped" not in reply
