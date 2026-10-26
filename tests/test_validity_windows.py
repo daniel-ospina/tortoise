@@ -888,6 +888,29 @@ def test_a_start_naming_no_instant_leaves_the_window_open(sdk):
     )
 
 
+def _legacy_un_datable_end(sdk: TortoiseSDK, stored_end: str,
+                           content: str = "legacy row") -> dict:
+    """A row carrying a LITERAL un-datable end, written the PRE-2026-10-26 way.
+
+    Since the shaping ruling (#9202, 2026-10-26) the guarded doors cannot produce
+    this dialect: a caller end that declares no date is SHAPED into the canonical
+    form (no value + the declared marker) and echoed back. A legacy row therefore
+    exists only as a row written BEFORE the ruling, and the only way to make one
+    in a test is to write the property directly.
+
+    The READING assertions that use this fixture are unchanged on purpose: they
+    pin how such a row reads, and the ruling deliberately left the read path — and
+    every row written before it — alone. Both dialects must keep reading
+    ``end_state: "unknown"`` identically.
+    """
+    p = _make_point(sdk, content=content, validFrom="2024-01-01")
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$i}) SET n.validTo = $v",
+        params={"i": p["id"], "v": stored_end})
+    assert _props(sdk, p["id"])["validTo"] == stored_end, "fixture precondition"
+    return p
+
+
 @pytest.mark.parametrize("stored_end", ["TBD", ""],
                          ids=["text-that-is-not-an-instant", "empty-value"])
 def test_an_end_naming_no_instant_bounds_no_instant_even_for_an_unparseable_probe(
@@ -928,8 +951,9 @@ def test_an_end_naming_no_instant_bounds_no_instant_even_for_an_unparseable_prob
     Discriminating: on the unfixed code the ``"zzz"`` probe reports
     ``status="absent"`` for both shapes.
     """
-    p = _make_point(sdk, content="end recorded as un-datable",
-                    validFrom="2024-01-01", validTo=stored_end)
+    # The row is created the way a pre-ruling row exists (see the helper): the
+    # guarded door now SHAPES this value instead of storing it.
+    p = _legacy_un_datable_end(sdk, stored_end, content="end recorded as un-datable")
     assert _props(sdk, p["id"])["validTo"] == stored_end
 
     # A DATED probe — covered on both the fixed and the unfixed code.
@@ -999,9 +1023,12 @@ def test_an_un_datable_end_reads_unknown_and_fires_the_flags(sdk, stored_end):
     * the flags callers key on — ``end_state_unknown`` and
       ``indeterminate_end_ids`` — FIRE for this class, which they could not
       while the end read ``known``;
-    * the stored value is returned **verbatim**, so ``valid_to: "TBD"`` stays
-      distinguishable from ``valid_to: None`` (why option C's extra marker was
-      not needed);
+    * a PRE-RULING row's stored value is returned **verbatim**, so
+      ``valid_to: "TBD"`` stays distinguishable from ``valid_to: None`` (why
+      option C's extra marker was not needed) — the fixture writes the property
+      directly because the guarded door now SHAPES this value instead of storing
+      it, and the read path is deliberately unchanged for rows written before
+      that ruling;
     * coverage is UNCHANGED — the window still covers 2050, because a bound that
       names no instant bounds no instant (#9408). The fix must not buy its
       reading by hiding the point.
@@ -1021,11 +1048,14 @@ def test_an_un_datable_end_reads_unknown_and_fires_the_flags(sdk, stored_end):
     }
     assert end_state(stored_end, None) == "unknown"
 
-    p = _make_point(sdk, content=f"un-datable end {stored_end!r}",
-                    validFrom="2024-01-01", validTo=stored_end)
+    # A pre-ruling row (see the helper): the door now SHAPES a caller end that
+    # declares no date, so this dialect can only be written the way it was
+    # written BEFORE the ruling.
+    p = _legacy_un_datable_end(sdk, stored_end,
+                               content=f"un-datable end {stored_end!r}")
     assert _props(sdk, p["id"])["validTo"] == stored_end, (
-        "the write path stores the bound VERBATIM — a reading fix must never "
-        "rewrite or drop the value"
+        "a row written before the shaping ruling keeps its bound VERBATIM — the "
+        "read path must never rewrite or drop the value"
     )
 
     out = sdk.get_historical_knowledge(p["id"], "2050-01-01")
@@ -1070,8 +1100,9 @@ def test_the_two_un_datable_spellings_stay_distinguishable(sdk):
     Discriminating: on the unfixed head ``end_state`` differs between these two
     points (``known`` vs ``unknown``), which is the whole defect.
     """
-    stored = _make_point(sdk, content="stored junk end",
-                         validFrom="2024-01-01", validTo="TBD")
+    # The literal-end spelling is a PRE-RULING row (see the helper); the declared
+    # spelling is what the door itself now produces.
+    stored = _legacy_un_datable_end(sdk, "TBD", content="stored junk end")
     declared = sdk.create_point("statement", "declared un-datable end",
                                 validFrom="2024-01-01",
                                 validToPrecision="unknown")
@@ -1242,228 +1273,369 @@ def test_an_unorderable_valid_from_warns_at_the_write_boundary(sdk, caplog):
     )
 
 
-# ── #9202: the END side of the same write-door contract ─────────────────────
+# ── #9202: the END side of the write door — SHAPE or REFUSE ─────────────────
 #
 # The START half was ruled by the owner (#6140: "A and C (c should be a
-# warning)") — coverage reads an unorderable start as NO START RECORDED, and the
+# warning)"): coverage reads an unorderable start as NO START RECORDED, and the
 # write door WARNS. The END's *coverage* rule is the same and is already landed
-# (#9408, ONTOLOGY §4.7: a bound that names no instant is not a bound). The END's
-# *reported state* was #9202's OPEN owner question and was RULED on 2026-10-25:
-# option B, an end that names no instant reads `end_state: "unknown"` and the
-# reply's `end_state_unknown` / `indeterminate_end_ids` flags fire for it. What
-# the write-door test below covers is the other half: a caller can store a
-# garbage `validTo`, and the write door says so instead of staying silent while
-# the identical mistake on `validFrom` is announced. The warning changes no read
-# behaviour — it is the write door saying what the value means.
+# (#9408, ONTOLOGY §4.7: a bound that names no instant is not a bound), and the
+# END's *reported state* was RULED on 2026-10-25: option B, an end that names no
+# instant reads `end_state: "unknown"` and the reply's `end_state_unknown` /
+# `indeterminate_end_ids` flags fire for it.
+#
+# The write door moved on 2026-10-26 (owner ruling, #9202): what used to be
+# "stored verbatim, merely warned about" is now three outcomes, on the ONE
+# caller-bound gate (`sdk._refuse_inverted_point_window` → `validity.read_caller_end`):
+#
+#   accept — a real orderable instant, and representational variance
+#            (`2024-3-1`, `2024/03/01`), normalised SILENTLY;
+#   shape  — blank or a human uncertainty marker → the canonical un-datable form
+#            (no end value + `validToPrecision='unknown'`), with the caller's
+#            token ECHOED in the reply as `valid_to_shaped`;
+#   refuse — an attempted instant that fails, or text with no recoverable
+#            intent → `ValueError` naming the fault, the repair and the forms the
+#            field accepts.
+#
+# These tests are the RE-STATEMENT of the pre-2026-10-26 write-door pin, never a
+# deletion of it: that pin was the only thing that would catch a silent reversion
+# to verbatim storage, and the contract it guarded is exactly the contract this
+# ruling changed. Its rows are re-cut into the matrices below — shaping rows,
+# refusal rows, and the control rows that must stay untouched and SILENT.
+#
+# The change is READING-NEUTRAL. A shaped end stores no value, which `_covers`
+# skipped for the verbatim spelling too; every reading pin in this file stays
+# green and unmoved.
 
-#: The verdict matrix: the window start, the value, whether the write door must
-#: speak, and WHY. Every ``quiet`` row is a value that NAMES AN INSTANT to the
-#: ordering primitive ``_created_sort_key`` — the same measure ``_covers``,
-#: ``effective_precision`` and the inversion guard use — so it is a real bound
-#: and must stay quiet. Every ``warns`` row names no instant: it cannot bound
-#: the window above (it is not a comparison), so the operator is told rather
-#: than left to discover it from a reply that covers the year 2050. The start
-#: column exists so each window is ITSELF legal: ``validTo=0`` against a 2024
-#: start is an inverted window and is refused by #5359 before the warning
-#: question arises.
-_VALUE_NAMING_NO_INSTANT = [
-    ("2024-01-01", "2024-06-01", "quiet",
-     "a well-formed calendar date names an instant"),
-    ("2024-01-01", "2024-06-01T12:00:00+02:00", "quiet",
-     "a date-time with an explicit offset names an instant"),
-    ("2024-01-01", "2024-06-01T12:00:00", "quiet",
-     "a zone-less date-time still parses (read locally, #3982)"),
-    ("1970-01-01", 0, "quiet",
-     "numeric epoch 0 IS the 1970-01-01T00:00:00Z instant (#3985)"),
-    ("2024-01-01", 1719792000, "quiet",
-     "a numeric epoch names an instant — the mixed-format tolerance"),
-    ("2024-01-01", "", "warns",
-     "the empty value is the undated convention: it orders nothing"),
-    ("2024-01-01", "   ", "warns",
-     "whitespace has no digits and no instant"),
-    ("2024-01-01", "TBD", "warns",
-     "a text placeholder is not an instant"),
-    ("2024-01-01", "not-a-date", "warns",
-     "plain nonsense is not an instant"),
-    ("2024-01-01", "2026-02-30", "warns",
-     "an impossible calendar date is not a legitimate instant"),
-    ("2024-01-01", "1719792000", "warns",
-     "an epoch passed as a STRING is not read as an epoch — _created_sort_key "
-     "takes numbers as numbers, so this string names no instant"),
+#: The marker vocabulary the ruling names, plus the two blank spellings. Case-
+#: and whitespace-insensitive (`" tbd "` is a row), and ONLY these: `none` /
+#: `null` / `nil` are serialisation mistakes, so they live in the REFUSAL matrix
+#: below — absorb uncertainty, refuse mistakes (§7 trap 5).
+#:
+#: `(sent, why)` — every row must be stored as `sent` → (no end) + the declared
+#: `unknown` marker, never as itself and never as `open`.
+_END_UNCERTAINTY_MARKERS = [
+    ("TBD", "the most common placeholder"),
+    ("TBA", "announced-but-not-yet-dated"),
+    ("TBC", "to-be-confirmed"),
+    ("unknown", "the word the DECLARED marker already uses"),
+    (" tbd ", "case- and whitespace-insensitive"),
+    ("N/A", "the slash form, upper case"),
+    ("n/a", "the slash form, lower case"),
+    ("NA", "the bare form"),
+    ("-", "a single dash"),
+    ("--", "a double dash"),
+    ("—", "an em dash"),
+    ("?", "a question mark"),
+    ("", "the empty value — the codebase's undated convention"),
+    ("   ", "whitespace alone declares nothing"),
 ]
 
 
 @pytest.mark.parametrize(
-    ("valid_from", "stored_end", "verdict", "why"),
-    _VALUE_NAMING_NO_INSTANT,
-    ids=[repr(v) for _f, v, _a, _b in _VALUE_NAMING_NO_INSTANT],
+    ("sent", "why"),
+    _END_UNCERTAINTY_MARKERS,
+    ids=[repr(s) for s, _w in _END_UNCERTAINTY_MARKERS],
 )
-def test_an_unorderable_valid_to_warns_at_the_write_boundary(
-        sdk, caplog, valid_from, stored_end, verdict, why):
-    """#9202 (write-door half) — a caller ``validTo`` that names no instant warns.
+def test_a_caller_end_that_declares_no_date_is_shaped_and_echoed(
+        sdk, sent, why):
+    """#9202 (2026-10-26 ruling) — a no-date END is SHAPED, and the reply says so.
 
-    Measured on the unfixed head: ``create_point(..., validTo="TBD")`` is
-    stored with **no** warning from any logger, while
-    ``create_point(..., validFrom="TBD")`` warns — so the identical caller
-    mistake is announced on one end of the window and silent on the other. The
-    silent end is the more consequential one: the reply then reports
-    ``end_state: "known"`` and ``get_historical_knowledge`` answers
-    ``found`` about the year 2050, with no field distinguishing it from a dated
-    end (``tests/test_validity_windows.py``
-    ::``test_an_end_naming_no_instant_bounds_no_instant_even_for_an_unparseable_probe``).
+    Three things at once, because they are one contract:
 
-    What this pins is ONLY the warning:
-
-    * the value is still stored VERBATIM (a warning, never a refusal — the
-      #6140 ruling's shape, and a refusal here would reject writes accepted
-      today and leave every stored row unchanged anyway),
-    * the read still COVERS the instant (the bound names no instant, so it
-      bounds nothing — #9408), while its reported state is ``unknown`` under
-      #9202's 2026-10-25 owner ruling,
-    * the message names ``validTo`` and says the window is UNBOUNDED ABOVE — a
-      copy of the start's wording ("OPEN below") would misinform the operator,
-      so it is asserted against explicitly.
+    1. **The stored form is canonical** — no end value plus
+       `validToPrecision='unknown'`, not the caller's text. A stored `"TBD"` is
+       a value no reader can order; the canonical pair means the same thing and
+       every read path already understands it.
+    2. **The reply echoes the token** (`valid_to_shaped`) — the in-band receipt
+       that makes shaping defensible at all (§7 trap 1). Without it a real typo
+       merges into "the author did not know" with no trace.
+    3. **It reads `unknown`, never `open`** — the invariant the 2026-10-25
+       ruling pinned. A marker mapped to `open` would claim no end was asserted,
+       which is the fabricated-coverage hazard the vocabulary exists to prevent.
     """
-    import logging
+    from tortoise.validity import END_WRITE_OUTCOMES
 
-    with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
-        p = _make_point(sdk, content=f"end recorded as {stored_end!r}",
-                        validFrom=valid_from, validTo=stored_end)
-    hits = [r.getMessage() for r in caplog.records if "no instant" in r.getMessage()]
+    before = dict(END_WRITE_OUTCOMES)
+    p = _make_point(sdk, content=f"end declared as {sent!r}", why=why,
+                    validFrom="2024-01-01", validTo=sent)
 
-    if verdict == "quiet":
-        assert hits == [], (
-            f"{stored_end!r} names an instant ({why}), so the write door must "
-            f"be silent: {hits}"
+    stored = _props(sdk, p["id"])
+    assert stored.get("validTo") is None, (
+        f"validTo={sent!r} ({why}) must be stored as NO end value — the "
+        f"canonical un-datable form, not the caller's text: {stored}"
+    )
+    assert stored.get("validToPrecision") == "unknown", (
+        "the canonical un-datable end is no value PLUS the declared marker: "
+        f"{stored}"
+    )
+
+    receipt = p.get("valid_to_shaped")
+    assert receipt == {"sent": sent, "validTo": None,
+                       "validToPrecision": "unknown"}, (
+        "the write reply must ECHO the token it shaped — shaping without the "
+        f"receipt is the trap that makes the decision indefensible: {p.keys()}"
+    )
+
+    read = sdk.get_historical_knowledge(p["id"], "2050-01-01")
+    assert read["status"] == "found"
+    assert read["valid_point"]["end_state"] == "unknown", (
+        "a shaped end reads 'unknown' — NEVER 'open', which would claim no end "
+        f"was asserted: {read['valid_point']}"
+    )
+    assert read["end_state_unknown"] is True
+    assert read["indeterminate_end_ids"] == [p["id"]]
+    assert END_WRITE_OUTCOMES["shaped"] == before["shaped"] + 1, (
+        "the ruling requires shaping to be COUNTED — the count is the "
+        f"measurement: {before} -> {END_WRITE_OUTCOMES}"
+    )
+
+
+#: The refusal matrix: one row per NAMED fault. `match` is the phrase that makes
+#: the fault identifiable in the message (a refusal that does not say what is
+#: wrong cannot be repaired); the shared assertions below add the two things every
+#: refusal owes — the REPAIR and the accepted forms (§7 trap 2).
+_END_REFUSALS = [
+    ("2026-02-30", "has no day 30",
+     "an impossible calendar day: the intent (a day in Feb 2026) is clear, the "
+     "datum is not a day"),
+    ("2026-13-01", "month 13 is not a calendar month",
+     "month 13 — an attempted instant whose component is out of range"),
+    ("1719792000", "Unix epoch supplied as a STRING",
+     "an epoch as a string: _created_sort_key reads an epoch from a NUMBER, so "
+     "this string names no instant while the intent is unmistakable"),
+    ("not-a-date", "no date could be recovered",
+     "arbitrary prose with no recoverable intent (owner-confirmed as a refusal)"),
+    ("03/04/2024", "no date could be recovered",
+     "legible but AMBIGUOUS — day/month order — so choosing silently would be "
+     "betrayal dressed as competence (§0)"),
+    ("none", "no date could be recovered",
+     "a serialisation mistake, not human uncertainty: surfaced with the marker "
+     "vocabulary named, never absorbed (trap 5)"),
+    ("null", "no date could be recovered",
+     "the same serialisation mistake, spelled the other way"),
+]
+
+
+@pytest.mark.parametrize(
+    ("sent", "match", "why"),
+    _END_REFUSALS,
+    ids=[repr(s) for s, _m, _w in _END_REFUSALS],
+)
+def test_a_caller_end_that_attempts_an_instant_and_fails_is_refused(
+        sdk, sent, match, why):
+    """#9202 (2026-10-26 ruling) — an illegible attempted instant is REFUSED.
+
+    Refusing is the only route that fulfils the caller's actual intent. Shaping
+    it would store "the author did not know", when the author knew exactly — a
+    record fulfilling a DIFFERENT intent, which is the failure mode that looks
+    like success. And the caller can almost certainly supply the right value
+    next turn, which is why the message owes them the repair.
+    """
+    from tortoise.validity import END_WRITE_OUTCOMES
+
+    before = dict(END_WRITE_OUTCOMES)
+    with pytest.raises(ValueError, match=match):
+        _make_point(sdk, content=f"end attempted as {sent!r}", why=why,
+                    validFrom="2024-01-01", validTo=sent)
+
+    # EVERY refusal names the fault (above), the repair, and the accepted forms.
+    with pytest.raises(ValueError) as refused:
+        _make_point(sdk, content=f"again {sent!r}", validTo=sent)
+    message = str(refused.value)
+    assert "Pass an ISO-8601 instant" in message, (
+        f"a refusal without the REPAIR manufactures a retry loop: {message}"
+    )
+    assert "uncertainty marker" in message, (
+        "a refusal must list what the field DOES accept, including the marker "
+        f"vocabulary: {message}"
+    )
+    assert END_WRITE_OUTCOMES["refused"] == before["refused"] + 2, (
+        f"refusals must be COUNTED: {before} -> {END_WRITE_OUTCOMES}"
+    )
+
+
+def test_a_declared_granularity_beside_a_no_date_value_is_refused(sdk):
+    """#9202 — a concrete precision beside a marker is a CONTRADICTION, refused.
+
+    `validTo='TBD'` with `validToPrecision='day'` states two different things
+    about one bound. Shaping could overwrite the token and say nothing, which is
+    the silent substitution the whole door exists to prevent — so the pair is
+    refused and the caller picks one.
+    """
+    with pytest.raises(ValueError, match="declares NO date"):
+        _make_point(sdk, content="contradictory pair", validFrom="2024-01-01",
+                    validTo="TBD", validToPrecision="day")
+
+
+def test_a_real_instant_and_a_readable_variant_are_accepted_silently(sdk):
+    """#9202 — the CONTROL: what we DO understand is finished and not reported.
+
+    §0's first commitment: never make the caller do work the system could have
+    done. An orderable instant is stored exactly as sent (never re-spelled), a
+    format variant the read measure could not order (`2024-3-1`, `2024/03/01`)
+    is normalised to the canonical form because it names the SAME instant, and
+    neither says a word — no receipt, no shape count.
+
+    This is the row that keeps the shaping matrix from passing on a door that
+    shapes EVERYTHING: a `"friendly"` implementation that rewrote every value
+    would satisfy the matrix above and red only here.
+    """
+    from tortoise.validity import END_WRITE_OUTCOMES
+
+    before = dict(END_WRITE_OUTCOMES)
+
+    # A real instant is untouched — byte-identical, INCLUDING its spelling.
+    for sent in ("2024-06-01", "2024-06-01T12:00:00+02:00",
+                 "2024-06-01T12:00:00Z", 1719792000):
+        p = _make_point(sdk, content=f"real end {sent!r}", validFrom="2024-01-01",
+                        validTo=sent)
+        assert "valid_to_shaped" not in p, (
+            f"an orderable end {sent!r} must be SILENT: {p.get('valid_to_shaped')}"
         )
-        return
+        assert _props(sdk, p["id"]).get("validTo") == sent, (
+            f"{sent!r} names an instant, so it is stored exactly as sent"
+        )
+        assert sdk.get_historical_knowledge(
+            p["id"], "2024-05-01")["valid_point"]["end_state"] == "known"
 
-    assert len(hits) == 1, (
-        f"{stored_end!r} names no instant ({why}) and the write door said "
-        f"nothing — the caller has no signal that the window is unbounded "
-        f"above: {hits}"
+    # …and representational variance is normalised WITHOUT comment.
+    for sent, canonical in (("2024-3-1", "2024-03-01"),
+                            ("2024/03/01", "2024-03-01"),
+                            ("2024/3/1", "2024-03-01")):
+        p = _make_point(sdk, content=f"variant end {sent!r}",
+                        validFrom="2024-01-01", validTo=sent)
+        assert "valid_to_shaped" not in p, (
+            f"{sent!r} is the SAME instant spelled differently — normalise it "
+            "silently, do not report a change that did not happen"
+        )
+        assert _props(sdk, p["id"]).get("validTo") == canonical, (
+            f"{sent!r} must be stored as the read measure can order it: "
+            f"{_props(sdk, p['id']).get('validTo')!r}"
+        )
+
+    # An ABSENT end is the OPEN window — not a shaped one.
+    p = _make_point(sdk, content="no end at all", validFrom="2024-01-01")
+    assert "valid_to_shaped" not in p
+    assert sdk.get_historical_knowledge(
+        p["id"], "2050-01-01")["valid_point"]["end_state"] == "open"
+
+    assert before == END_WRITE_OUTCOMES, (
+        f"nothing was shaped or refused on this walk: {before} -> "
+        f"{END_WRITE_OUTCOMES}"
     )
-    assert "validTo" in hits[0], f"the warning must name the END: {hits[0]}"
-    assert "UNBOUNDED above" in hits[0], (
-        "the END warning must say the window is UNBOUNDED ABOVE — reusing the "
-        f"start's 'OPEN below' text would misinform the operator: {hits[0]}"
-    )
-
-    # A warning, NOT a refusal: the value is persisted exactly as given. The
-    # read covers the instant (the bound names no instant, so it bounds
-    # nothing) and reports the end as UNKNOWN — the 2026-10-25 ruling on #9202.
-    assert _props(sdk, p["id"])["validTo"] == stored_end
-    out = sdk.get_historical_knowledge(p["id"], "2050-01-01")
-    assert out["status"] == "found"
-    assert out["valid_point"]["end_state"] == "unknown", (
-        "an end that names no instant is an un-datable end (#9202, owner ruling "
-        f"2026-10-25): {out['valid_point']}"
-    )
-    assert out["end_state_unknown"] is True
-    assert out["indeterminate_end_ids"] == [p["id"]]
 
 
-def test_the_end_warning_is_scoped_like_the_start_warning(sdk, caplog):
-    """#9202 — one warning per write, on the UPDATE leg too, and never for a
-    bound the caller did not supply.
+def test_the_end_shaping_is_scoped_like_the_start_warning(sdk, caplog):
+    """#9202 — the UPDATE leg, the dedup re-entry, and the legacy row.
 
-    The three scoping rules are the start's, because they are properties of the
-    boundary rather than of the field (#6140): the caller's own value is what
-    warns, a value the point ALREADY carries is not being written, and a
-    dedup-hit create reaches the boundary twice for ONE write.
+    Three scoping rules, all properties of the boundary rather than of the field:
+
+    * an update that INTRODUCES a no-date end also shapes it, and echoes it;
+    * a dedup-hit create reaches the boundary TWICE for one write, and must
+      produce exactly ONE shaping (the create leg rewrites the props to the
+      canonical form, so the re-entrant update leg has nothing left to shape);
+    * a row written BEFORE this ruling is never re-validated: re-writing an
+      unrelated property on it leaves its literal end alone, and it keeps
+      reading `unknown` — the read path does not care which form a row carries.
     """
     import logging
 
-    def _end_hits():
-        return [r.getMessage() for r in caplog.records
-                if "no instant" in r.getMessage()]
-
-    # The UPDATE leg on its own: an update that INTRODUCES an unparseable end is
-    # the write, so it must speak. (Without this assertion the dedup
-    # suppression below could make the update leg silent and stay green.)
+    # The UPDATE leg on its own. (Without this, deleting the update path's
+    # shaping would leave the create-path assertions above green.)
     p = _make_point(sdk, content="end becomes undatable",
                     validFrom="2024-01-01", validTo="2024-02-01")
-    caplog.clear()
-    with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
-        sdk.update_point(p["id"], validTo="TBD")
-    hits = _end_hits()
-    assert len(hits) == 1, f"an update introducing a bad end must warn: {hits}"
-    assert "validTo" in hits[0]
-    # The remedy must be executable on the leg it is printed on: on an UPDATE,
-    # omitting `validTo` keeps the stored un-datable value, so the advice has to
-    # name the explicit clear (`_refuse_inconsistent_validity_precision` requires
-    # the effective end to be ABSENT beside `validToPrecision='unknown'`).
-    assert "validTo=None" in hits[0], (
-        "the update-leg remedy must say how to actually clear the end — "
-        f"omitting the key keeps the stored value: {hits[0]}"
+    out = sdk.update_point(p["id"], validTo="TBD")
+    assert out["valid_to_shaped"] == {"sent": "TBD", "validTo": None,
+                                     "validToPrecision": "unknown"}
+    assert _props(sdk, p["id"]).get("validTo") is None
+    assert _props(sdk, p["id"]).get("validToPrecision") == "unknown"
+
+    # Clearing the end of an already-canonical row changes nothing to report.
+    out = sdk.update_point(p["id"], validTo=None)
+    assert "valid_to_shaped" not in out, (
+        "there is no token to echo when the caller already declared nothing"
     )
 
-    # Re-writing the value it ALREADY carries introduces nothing — an unrelated
-    # update of a legacy point must not re-warn about a value nobody wrote.
+    # ONE shaping per write, on the dedup-hit path.
     caplog.clear()
-    with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
-        sdk.update_point(p["id"], validTo="TBD")
-    assert _end_hits() == [], "a re-write of the stored value must not re-warn"
-
-    # Clearing the end (validTo=None, the documented read of SET n += $props)
-    # is the OPEN window: legal, silent.
-    caplog.clear()
-    with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
-        sdk.update_point(p["id"], validTo=None)
-    assert _end_hits() == [], "clearing the end is legal and must stay silent"
-    assert sdk.get_historical_knowledge(p["id"], "2050-01-01")["valid_point"][
-        "end_state"] == "open", "a cleared end is the OPEN window"
-
-    # ONE warning per write for a dedup-hit create: the create leg speaks, the
-    # re-entrant update leg stays silent.
-    caplog.clear()
-    with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
-        first = _make_point(sdk, content="dedup bad end", validTo="TBD",
-                            dedup=True)
-    assert len(_end_hits()) == 1, (
-        f"a dedup-hit create must warn once, not twice: {_end_hits()}"
+    with caplog.at_level(logging.WARNING, logger="tortoise.validity"):
+        first = _make_point(sdk, content="dedup shaped end", validFrom="2024-01-01",
+                            validTo="TBD", dedup=True)
+    assert first["valid_to_shaped"]["sent"] == "TBD"
+    shaped_logs = [r for r in caplog.records if "declares no date" in r.getMessage()]
+    assert len(shaped_logs) == 1, (
+        "a dedup hit reaches the write boundary twice for ONE write — the "
+        f"create leg rewrites the value, so it must log once: {len(shaped_logs)}"
     )
     caplog.clear()
-    with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
-        second = _make_point(sdk, content="dedup bad end", validTo="TBD",
-                             dedup=True)
+    with caplog.at_level(logging.WARNING, logger="tortoise.validity"):
+        second = _make_point(sdk, content="dedup shaped end", validFrom="2024-01-01",
+                             validTo="TBD", dedup=True)
     assert second["id"] == first["id"], "the fixture must reach the dedup hit"
-    assert len(_end_hits()) == 1, (
-        "a dedup hit re-entered the write boundary with a value it already "
-        f"stored — it must warn once, not twice: {_end_hits()}"
+    assert second["valid_to_shaped"]["sent"] == "TBD", (
+        "the second call shapes the value IT was given, and says so"
     )
 
-    # ⚠️ The shape that is NOT silenced by the stored-value gate, and the only
-    # one that PINS the `_WARN_SUPPRESS` half of the fix: a dedup hit whose
-    # caller value DIFFERS from the stored end. The create leg speaks for the
-    # value it was given and the re-entrant update leg writes the same value, so
-    # only the suppression keeps it to one — without it this write emits TWO
-    # warnings. Measured: removing `repr(_vt)` from the frozenset in
-    # `sdk._WARN_SUPPRESS` leaves every assertion above green and reddens only
-    # this one. (The START arm carries the same row for the same reason:
-    # "deleting the update leg's warning would leave every assertion above
-    # green".)
-    caplog.clear()
-    with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
-        third = _make_point(sdk, content="dedup bad end", validTo="",
-                            dedup=True)
-    assert third["id"] == first["id"], "the fixture must reach the dedup hit"
-    assert _props(sdk, third["id"])["validTo"] == ""
-    assert len(_end_hits()) == 1, (
-        "a dedup hit that CHANGES the stored end to an unparseable one is ONE "
-        f"write and must warn once, not twice: {_end_hits()}"
+    # A LEGACY row: a literal un-datable end, written the pre-ruling way. It is
+    # never re-validated or migrated — and both dialects read identically.
+    legacy = _make_point(sdk, content="legacy verbatim end", validFrom="2024-01-01",
+                         validTo="2024-02-01")
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$i}) SET n.validTo = 'TBD'", params={"i": legacy["id"]})
+    assert _props(sdk, legacy["id"])["validTo"] == "TBD", "fixture precondition"
+    assert sdk.get_historical_knowledge(
+        legacy["id"], "2050-01-01")["valid_point"]["end_state"] == "unknown", (
+        "a row written before the shaping door keeps its literal end and keeps "
+        "reading 'unknown' — no backfill, no re-validation"
+    )
+    sdk.update_point(legacy["id"], content="unrelated edit")
+    assert _props(sdk, legacy["id"])["validTo"] == "TBD", (
+        "an unrelated update must not migrate a legacy row's end"
+    )
+    assert sdk.get_historical_knowledge(
+        legacy["id"], "2050-01-01")["valid_point"]["end_state"] == "unknown", (
+        "both dialects must read identically: the shaped form and the legacy "
+        "literal form are the same END_UNKNOWN evidence"
     )
 
-    # A caller writing only validFrom gets exactly ONE warning, and it names the
-    # START: the END's arm must never fire on a bound nobody supplied.
-    caplog.clear()
-    with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
-        _make_point(sdk, content="only a bad start", validFrom="TBD")
-    hits = [r.getMessage() for r in caplog.records
-            if "no instant" in r.getMessage()]
-    assert len(hits) == 1, f"one bad bound, one warning: {hits}"
-    assert "validFrom" in hits[0] and "validTo" not in hits[0], (
-        f"the warning must name the bound the caller wrote: {hits[0]}"
+
+def test_superseding_a_shaped_end_dates_it_without_leaving_the_marker(sdk):
+    """#9202 pre-flight — supersession does not CLOBBER a shaped end.
+
+    Supersession's contract is to stamp the predecessor's END with the
+    successor's resolved start (contiguous windows: the old fact stopped being
+    true when the new one became true), so a shaped end is legitimately DATEd by
+    it — that is the supersession doing its job, not a caller `validTo` write.
+
+    What must NOT happen is the inconsistent triple: a real `validTo` left
+    beside the stale `validToPrecision='unknown'` marker, which would make a
+    DATED end read `unknown` forever. And a caller who wants the end to stay
+    un-datable says so with `valid_to_precision='unknown'`.
+    """
+    predecessor = _make_point(sdk, content="shaped predecessor end",
+                              validFrom="2024-01-01", validTo="TBD")
+    successor = _make_point(sdk, content="successor", validFrom="2026-01-01")
+    sdk.supersede_point(predecessor["id"], successor["id"])
+
+    stored = _props(sdk, predecessor["id"])
+    assert stored.get("validTo") is not None, "supersession dates the predecessor"
+    assert stored.get("validToPrecision") is None, (
+        "the un-datable marker must be CLEARED when a real end is stamped — a "
+        f"dated end reading 'unknown' is the contradiction: {stored}"
+    )
+    assert sdk.get_historical_knowledge(
+        predecessor["id"], "2024-06-01")["valid_point"]["end_state"] == "known"
+
+    # …and the caller can keep it un-datable instead.
+    un_datable = _make_point(sdk, content="stays un-datable", validFrom="2024-01-01",
+                             validTo="unknown")
+    successor2 = _make_point(sdk, content="successor 2", validFrom="2026-01-01")
+    sdk.supersede_point(un_datable["id"], successor2["id"],
+                        valid_to_precision="unknown")
+    stored2 = _props(sdk, un_datable["id"])
+    assert stored2.get("validTo") is None and stored2.get(
+        "validToPrecision") == "unknown", (
+        f"valid_to_precision='unknown' keeps the end un-datable: {stored2}"
     )
 
 

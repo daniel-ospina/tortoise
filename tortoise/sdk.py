@@ -6816,8 +6816,78 @@ _TEMPORAL_RESTAMP_PROPS = frozenset({
 })
 
 
+def _shape_or_refuse_caller_end(props: dict) -> dict | None:
+    """#9202: read the CALLER's end for intent on the way in — shape or refuse.
+
+    Replaces the long write-boundary END warning (#6140/#9910, "stored verbatim,
+    merely warned about") with the two messages the 2026-10-26 ruling asks for:
+    a SHAPED value (blank or an uncertainty marker) is stored as the canonical
+    un-datable form and ECHOED back in the write reply, and an ILLEGIBLE
+    attempted instant (or text with no recoverable intent) is REFUSED naming the
+    fault and the repair. The decision itself, and its vocabulary, live in
+    ``validity.read_caller_end`` — this function only applies it to ``props``.
+
+    ⛔ NOT wired to ``validFrom``. The start keeps the #6140 warning: that ruling
+    named the START, and shaping it would re-open a reading it deliberately
+    pinned. Only the END moved, and only because the owner re-decided it here.
+
+    Mutates ``props`` in place — ``validTo`` absent (``None``, which ``SET n +=
+    $props`` removes) plus ``validToPrecision='unknown'`` — and returns the
+    in-band RECEIPT (``{"sent": <token>, "validTo": None,
+    "validToPrecision": "unknown"}``) for the door to merge into its reply, or
+    ``None`` when the value was accepted (nothing to report: an accepted instant
+    and a normalised format variant are both SILENT — §0's "complete it, don't
+    lecture", and §1's "normalised silently").
+
+    The receipt is not cosmetic: without it a real typo (``validTo="-"`` meant as
+    a dash between two dates) would merge into "the author did not know" with no
+    trace — §7 trap 1, the trap that makes shaping indefensible.
+
+    One home, no second gate: this runs INSIDE ``_refuse_inverted_point_window``,
+    the caller-bound boundary ``create_point`` / ``update_point`` already route
+    through, on the predicate every read path orders with
+    (``validity._names_an_instant``). A second "is this an instant" test is
+    exactly the #9201/#9244 defect class.
+    """
+    from tortoise.validity import (
+        PRECISION_UNKNOWN,
+        TO_PRECISION_PROP,
+        read_caller_end,
+    )
+    if "validTo" not in props:
+        return None
+    sent = props["validTo"]
+    stored, shaped = read_caller_end(sent, props.get(TO_PRECISION_PROP))
+    if shaped is None:
+        if stored != sent:
+            # Representational variance the read measure could not order
+            # (`2024-3-1`, `2024/03/01`) — the SAME instant, so it is written in
+            # the canonical form with no comment: finishing the caller's
+            # sentence, not changing it.
+            props["validTo"] = stored
+        return None
+    props["validTo"] = None
+    props[TO_PRECISION_PROP] = PRECISION_UNKNOWN
+    return {
+        "sent": shaped,
+        "validTo": None,
+        "validToPrecision": PRECISION_UNKNOWN,
+    }
+
+
+def _with_end_receipt(reply: dict, receipt: dict | None) -> dict:
+    """Merge the #9202 shaping RECEIPT into a write-door reply (in-band).
+
+    Returns ``reply`` unchanged when nothing was shaped, so a write that sent a
+    real instant comes back byte-identical to before this door learned to shape.
+    """
+    if not receipt:
+        return reply
+    return {**reply, "valid_to_shaped": receipt}
+
+
 def _refuse_inverted_point_window(g, props: dict, *,
-                                  point_id: str | None = None) -> None:
+                                  point_id: str | None = None) -> dict | None:
     """#5359: refuse an INVERTED validity window at a Point write boundary.
 
     ``create_point`` / ``update_point`` accept ``validFrom``/``validTo`` as
@@ -6853,33 +6923,32 @@ def _refuse_inverted_point_window(g, props: dict, *,
     ``SET n += $props`` removes the property, so the effective bound is
     ``None`` and the window is open-ended — hence the key-presence test rather
     than a truthiness test.
+
+    Since #9202 (owner ruling 2026-10-26) the CALLER's END is decided here too,
+    BEFORE the pair is validated: ``_shape_or_refuse_caller_end`` shapes a value
+    that declares no date and refuses one that attempts an instant and fails, so
+    every value this function then validates is either an orderable instant or
+    absent. The returned RECEIPT is the door's in-band echo of a shaped value.
     """
     if "validFrom" not in props and "validTo" not in props:
-        return
-    # #6140 option C, as the owner ruled it — a WARNING, not a refusal. A
-    # caller handing us a bound that names no instant (`""`, `"TBD"`) is told
-    # what that value MEANS, and the write proceeds: refusing would make a
-    # legacy point impossible to update or supersede until its window was
+        return None
+    # #9202: the end's decision PRECEDES the pair validation below, so the two
+    # never disagree about the value being written.
+    receipt = _shape_or_refuse_caller_end(props)
+    # #6140 option C, as the owner ruled it — a WARNING, not a refusal, for the
+    # START. A caller handing us a bound that names no instant (`""`, `"TBD"`)
+    # is told what that value MEANS, and the write proceeds: refusing would make
+    # a legacy point impossible to update or supersede until its window was
     # repaired. Only the CALLER's value warns — a bound merged in from the
     # stored opposite side is not being written, so
     # `commit_schema.validate_validity_window` (which sees only the merged pair)
     # deliberately stays silent.
     #
-    # ⚠️ BOTH ENDS (#9202). The ruling named the START, and the START was the
-    # only side wired — so `create_point(validFrom="TBD")` spoke while
-    # `create_point(validTo="TBD")` said nothing, and the silent one is the
-    # more consequential mistake: the reply then reported `end_state: "known"`
-    # and `get_historical_knowledge` answered `found` about the year 2050 with
-    # no field distinguishing it from a dated end. The COVERAGE rule for that
-    # value is settled and shared (ONTOLOGY §4.7: a bound that names no instant
-    # is not a bound — the #6140 start reading, extended to the end by #9408),
-    # the write door now says so on either side, and since the 2026-10-25 owner
-    # ruling (#9202, option B) the END's REPORTED STATE is `unknown` too —
-    # `validity.end_state` raises `END_UNKNOWN` for an end that names no
-    # instant, so the reply stops asserting the end is dated and the
-    # `end_state_unknown` / `indeterminate_end_ids` flags fire for it. The write
-    # door itself still changes nothing: the value is accepted and stored
-    # verbatim.
+    # ⚠️ The END arm that used to sit beside this one is GONE (#9202, owner
+    # ruling 2026-10-26): a caller end is now SHAPED or REFUSED above, so there
+    # is no third outcome left for a warning to describe. The START keeps its
+    # warning because #6140's ruling named the start and nothing has reversed
+    # that half.
     #
     # Warn ONCE per value per WRITE. Two re-entry shapes reach this function
     # for a single write: a dedup-hit `create_point` (create leg, then
@@ -6887,73 +6956,48 @@ def _refuse_inverted_point_window(g, props: dict, *,
     # create leg sets ``_WARN_SUPPRESS`` for the re-entry it causes, and the
     # update leg stays silent for a value the stored node already carries — an
     # unrelated update of a legacy point re-reads a value nobody is writing.
+    # (A SHAPED end needs none of that: the create leg rewrites ``props`` to
+    # absent + `unknown` before the dedup re-entry, so the update leg sees a
+    # value that declares nothing and shapes nothing — one receipt, one log
+    # line, by construction.)
     def _warn_unorderable_caller_bound(prop: str, bound: object) -> None:
-        """Say what a caller bound that names no instant MEANS, once per write.
+        """Say what a caller START that names no instant MEANS, once per write.
 
-        The gate is ``_created_sort_key`` — the very measure ``_covers``,
-        ``validity.effective_precision`` and the inversion guard order with, so
-        a warning cannot disagree with the read path about which values are
-        instants (``key[0] == 0``). No second notion of "parseable" is
-        introduced (#9201's rule), and the value is neither refused nor
-        rewritten (#6140's ruling: a warning, never a refusal).
+        The gate is ``validity._names_an_instant`` — the ONE home for "does this
+        value point at an instant?", the same measure ``_covers``,
+        ``effective_precision``, ``end_state``, the inversion guard and
+        ``_shape_or_refuse_caller_end`` all use — so this warning cannot disagree
+        with the read path about which values are instants, and no second notion
+        of "parseable" is introduced (#9201's rule). The value is neither
+        refused nor rewritten (#6140's ruling for the START: a warning, never a
+        refusal).
         """
-        if bound is None:
-            return
-        from tortoise.search_engine import _created_sort_key  # lazy — no cycle
-        if _created_sort_key(bound)[0] == 0:
+        from tortoise.validity import _names_an_instant
+        if bound is None or _names_an_instant(bound):
             return
         suppressed = _WARN_SUPPRESS.get()
         if suppressed is not None and repr(bound) in suppressed:
             return
-        if prop == "validTo":
-            # The END text must state the END's meaning. Reusing the start's
-            # "OPEN below" wording would tell the operator the opposite of what
-            # this value does (it bounds nothing ABOVE), which is worse than
-            # the silence it replaces.
-            #
-            # ⚠️ The remedy must name `validTo=None` for the UPDATE leg, which is
-            # where this warning also fires: `_refuse_inconsistent_validity_precision`
-            # resolves the pair an update will persist, so OMITTING `validTo` keeps
-            # the stored un-datable value and then refuses the declaration beside it
-            # (a `ValueError` where the caller was following this advice).
-            #
-            # The end's REPORTED STATE is the owner's, and it was ruled on
-            # 2026-10-25 (option B): such an end reads `unknown`. The warning
-            # says so, so the operator is not left guessing what the reply will
-            # call the value it just wrote.
-            _logger.warning(
-                "validTo %r names no instant — it bounds NOTHING, so the "
-                "window is UNBOUNDED above (ONTOLOGY §4.7, #9202). If the "
-                "end is known but un-datable, pass validToPrecision='unknown' "
-                "with NO validTo (on an update pass validTo=None explicitly — "
-                "omitting it keeps the stored value); otherwise pass an "
-                "ISO-8601 instant. The reply reports end_state='unknown' for "
-                "such an end either way (owner ruling 2026-10-25, #9202).",
-                bound,
-            )
-            return
         _logger.warning(
-            "validFrom %r names no instant — it means NO START WAS "
+            "%s %r names no instant — it means NO START WAS "
             "RECORDED, so the window is OPEN below (ONTOLOGY §4.7, "
             "#6140). Pass an ISO-8601 instant, or omit the property, to "
             "make the intent explicit.",
-            bound,
+            prop, bound,
         )
 
     from tortoise.commit_schema import validate_validity_window
     if point_id is None:
         _warn_unorderable_caller_bound("validFrom", props.get("validFrom"))
-        _warn_unorderable_caller_bound("validTo", props.get("validTo"))
         validate_validity_window(props.get("validFrom"), props.get("validTo"))
-        return
+        return receipt
     rows = g.query(
         "MATCH (n:Point {id:$id}) RETURN n.validFrom, n.validTo",
         params={"id": point_id},
     ).result_set
     if not rows:
-        return
+        return receipt
     warned_start = False
-    warned_end = False
     for stored_vf, stored_vt in rows:
         # ``get(key, default)`` uses the default only when the key is ABSENT,
         # so a key present with value None still clears the bound (matching
@@ -6963,14 +7007,8 @@ def _refuse_inverted_point_window(g, props: dict, *,
         if not warned_start and "validFrom" in props and props["validFrom"] != stored_vf:
             _warn_unorderable_caller_bound("validFrom", props["validFrom"])
             warned_start = True
-        # #9202: the END arm is gated exactly like the start's — the CALLER's own
-        # value, and only when it differs from what the node already carries (a
-        # duplicate-id fan-out must not re-warn per sibling; an unrelated update
-        # of a legacy point re-reads a value nobody is writing).
-        if not warned_end and "validTo" in props and props["validTo"] != stored_vt:
-            _warn_unorderable_caller_bound("validTo", props["validTo"])
-            warned_end = True
         validate_validity_window(effective_vf, effective_vt)
+    return receipt
 
 
 def _resolve_end_state(valid_to: object, valid_to_precision: object) -> str:
@@ -9447,7 +9485,9 @@ class TortoiseSDK:
         # validate_validity_window`, shared with `invalidate_point`'s #5358
         # guard and the read path's `_covers`) instead of re-implementing it.
         # No `point_id`: a fresh CREATE has no stored opposite bound to merge.
-        _refuse_inverted_point_window(self._get_proj().g, props)
+        # #9202: this call also DECIDES the caller's `validTo` (shape or refuse)
+        # and hands back the in-band receipt the reply echoes.
+        _end_receipt = _refuse_inverted_point_window(self._get_proj().g, props)
         # #2350 (E-prec): the per-end precision declaration is validated by the
         # same fresh-create rule (no stored opposite to merge).
         _refuse_inconsistent_validity_precision(self._get_proj().g, props)
@@ -9711,12 +9751,12 @@ class TortoiseSDK:
                         # defect measured at the #9964 review: the re-run of this
                         # very call returned `temporal_not_applied` ONLY, while
                         # its first run reported `kind_other_layer` too).
-                        return {
+                        return _with_end_receipt({
                             **self.get_point(pid),
                             **_merge_advisories(
                                 self._temporal_not_applied_advisory(pid),
                                 _kind_layer_advisory(_layer_note, pid)),
-                        }
+                        }, _end_receipt)
                 if _has_key:
                     # One read serves BOTH #6110 audits below.
                     _existing = self.get_point(pid)
@@ -9961,8 +10001,10 @@ class TortoiseSDK:
                         self.update_point(pid, **props)
                     finally:
                         _WARN_SUPPRESS.reset(_tok)
-                return {**self.get_point(pid),
-                        **_kind_layer_advisory(_layer_note, pid)}
+                return _with_end_receipt(
+                    {**self.get_point(pid),
+                     **_kind_layer_advisory(_layer_note, pid)},
+                    _end_receipt)
 
         # Issue #52 — warn when caller passes an explicit non-ULID id
         if explicit_id is not None:
@@ -10460,8 +10502,8 @@ class TortoiseSDK:
             _extra = dict(_merge_advisories(_provenance_notes, _layer_advice))
             if _source_change_notices:
                 _extra["source_change_notices"] = _source_change_notices
-            return {**_snapshot, **_extra}
-        return _snapshot
+            return _with_end_receipt({**_snapshot, **_extra}, _end_receipt)
+        return _with_end_receipt(_snapshot, _end_receipt)
 
     def create_or_update_point(self, kind: str, content: str, **props) -> dict:
         """Idempotent create/update — matches by content hash."""
@@ -13737,7 +13779,9 @@ class TortoiseSDK:
         # `update_point(id, validTo=EARLY)` on a future-`validFrom` point would
         # be checked as (None, EARLY) and pass, persisting the inversion. The
         # predicate itself is the ONE HOME, never a second copy.
-        _refuse_inverted_point_window(proj.g, props, point_id=id)
+        # #9202: this call also DECIDES the caller's `validTo` (shape or refuse)
+        # and hands back the in-band receipt the reply echoes.
+        _end_receipt = _refuse_inverted_point_window(proj.g, props, point_id=id)
         # #2350 (E-prec): precision is validated against the STORED pair after
         # the same merge, so a one-sided update cannot leave a marker beside a
         # bound it contradicts.
@@ -13923,7 +13967,7 @@ class TortoiseSDK:
             if _cur_status and _cur_status[0][0] == 'live':
                 if len(props) == 1:
                     # status-only: a true no-op — no write, no event.
-                    return self.get_point(id)
+                    return _with_end_receipt(self.get_point(id), _end_receipt)
                 # Other props still belong to the caller; drop only the
                 # already-satisfied status and let the non-status write path
                 # below apply them (never silently discard caller data).
@@ -14267,7 +14311,7 @@ class TortoiseSDK:
                     # through to the tail would run `_mark_dirty`, advancing
                     # the graph-wide EP epoch and persisting `ep_dirty` for a
                     # promote that matched nothing (#8854 review r9 P2).
-                    return self.get_point(id)
+                    return _with_end_receipt(self.get_point(id), _end_receipt)
                 # LANDED: record it HERE, before the tag sync and `_mark_dirty`
                 # below can strand it (#7951 2b — see `_record_promote`).
                 _record_promote()
@@ -14315,7 +14359,7 @@ class TortoiseSDK:
                     # #1088: see the :Object arm above — the same idempotent
                     # no-op, answered with no writes rather than through the
                     # tail's `_mark_dirty` EP advance.
-                    return self.get_point(id)
+                    return _with_end_receipt(self.get_point(id), _end_receipt)
                 # LANDED: see the `:Object` arm above — same commit point, same
                 # reason (#7951 2b).
                 _record_promote()
@@ -14501,7 +14545,7 @@ class TortoiseSDK:
         # `_mark_dirty` below it cannot strand a landed promotion. The unguarded
         # arms still record BEFORE their writes (the outbox ordering above); the
         # payload is the same dict either way — one record shape per call.
-        return result
+        return _with_end_receipt(result, _end_receipt)
 
     # §17.1 LANE (#9206): the APPLY-FIRST lane — DECLARED, with the order it
     # actually uses. #9207 reversed this door to the apply-first shape, so the

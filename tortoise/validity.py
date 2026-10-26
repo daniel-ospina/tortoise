@@ -24,9 +24,13 @@ the difference REPRESENTABLE and READABLE:
                       spellings, one meaning: the DECLARED marker
                       (``validToPrecision == "unknown"`` with NO ``validTo``),
                       or a STORED end that names no instant (``validTo =
-                      "TBD"`` / ``""`` / ``"2026-02-30"`` — #9202), which the
-                      write path stores verbatim. A date is never fabricated
-                      to fill the hole.
+                      "TBD"`` / ``""`` / ``"2026-02-30"`` — #9202). Since the
+                      2026-10-26 ruling the guarded write doors SHAPE a new
+                      caller end into the first spelling (``read_caller_end``)
+                      rather than storing the second, so the second survives
+                      only on rows written before it — which are never
+                      re-validated or migrated, and read identically. A date is
+                      never fabricated to fill the hole.
 
 Why the second spelling is ``END_UNKNOWN`` and not ``END_OPEN`` (#9202, owner
 ruling of 2026-10-25): an end column carrying a value is an ASSERTED end, so
@@ -54,6 +58,12 @@ names no instant: ``known`` -> ``unknown``, plus the flags it fires.
 """
 from __future__ import annotations
 
+import logging
+import re
+from datetime import date
+
+_logger = logging.getLogger(__name__)
+
 #: Concrete granularity a caller may DECLARE for a bound it supplies. The
 #: stored bound stays whatever the caller wrote (the vocabulary is metadata
 #: about the claim's precision, not a second date format — ``_created_sort_key``
@@ -75,6 +85,49 @@ END_STATES: tuple[str, ...] = (END_OPEN, END_KNOWN, END_UNKNOWN)
 #: Node property names (camelCase, matching ``validFrom``/``validTo``).
 FROM_PRECISION_PROP = "validFromPrecision"
 TO_PRECISION_PROP = "validToPrecision"
+
+#: #9202 (owner ruling, 2026-10-26): the vocabulary a caller may send for an end
+#: it cannot date. Case- and whitespace-insensitive, and ONLY these — ``none`` /
+#: ``null`` / ``nil`` are serialisation mistakes, not human uncertainty, so they
+#: are REFUSED with the vocabulary named rather than absorbed into it (§7 trap 5:
+#: absorb uncertainty, refuse mistakes).
+END_UNKNOWN_MARKERS: tuple[str, ...] = (
+    "tbd", "tba", "tbc", "unknown", "n/a", "na", "-", "--", "—", "?",
+)
+_END_UNKNOWN_MARKER_SET = frozenset(END_UNKNOWN_MARKERS)
+
+#: #9202: the MEASUREMENT. The ruling requires shape and refuse to be counted as
+#: well as logged, because its own test for a vocabulary that is still too narrow
+#: is "the same refusal recurring for the same caller shape" — and only a count
+#: can show that. Process-local (the log line carries the value for anything
+#: durable); read it with ``dict(END_WRITE_OUTCOMES)``.
+END_WRITE_OUTCOMES: dict[str, int] = {"shaped": 0, "refused": 0}
+
+#: A date the read measure CANNOT order but whose INTENT is unambiguous: year
+#: first, 1-2 digit month/day, ONE consistent separator. ``_created_sort_key``
+#: requires ``len(s) >= 10`` plus a ``-``/``T``, so ``2024-3-1`` (8 chars) and
+#: ``2024/03/01`` name no instant to it — representational variance, NORMALISED
+#: silently rather than refused (ONTOLOGY §4.7, #9202). A day/month-first form
+#: (``03/04/2024``) deliberately does NOT match: it parses both ways, so it is
+#: "legible but ambiguous" and belongs in the refuse column (§0).
+_DATE_VARIANT_RE = re.compile(
+    r"^(?P<year>\d{4})(?P<sep>[-/])(?P<month>\d{1,2})(?P=sep)(?P<day>\d{1,2})$"
+)
+
+#: An epoch supplied as a STRING. ``_created_sort_key`` reads an epoch from a
+#: NUMBER, never from a string, so this names no instant while its intent is
+#: unmistakable — #9202's named fault, refused with the number named as the fix.
+_EPOCH_AS_STRING_RE = re.compile(r"^-?\d{9,}$")
+
+#: The forms the field accepts, quoted into EVERY refusal: a refusal that does
+#: not name the repair manufactures a retry loop (§7 trap 2).
+_END_ACCEPTED_FORMS = (
+    "an ISO-8601 instant ('2026-02-28', '2026-02-28T12:00:00+00:00'), a "
+    "year-first date ('2024-3-1', '2024/03/01'), the NUMBER for a Unix epoch "
+    "(1719792000), an uncertainty marker ("
+    + ", ".join(END_UNKNOWN_MARKERS)
+    + ") or blank to say 'ended, un-datable', or None/omitted for an OPEN end"
+)
 
 
 def normalize_precision(value: object, *, field: str = "precision") -> str | None:
@@ -133,17 +186,17 @@ def effective_precision(bound: object, declared: object) -> str | None:
 
     A declared token ANNOTATES the bound, it cannot summon one (#9244): the
     declaration is reported only when the bound it annotates names an instant.
-    Presence is not precision (#9201): the write path stores
-    ``validFrom``/``validTo`` verbatim, so ``""``, ``"TBD"`` and ``"not-a-date"``
-    are all PRESENT values that ``_created_sort_key`` cannot order, and the
-    #6140 ruling makes an unparseable START mean *no start was recorded*. A
-    ``"day"`` claim about an absent datum is the defect #9201 records; a
-    ``"year"`` claim about it is the same defect one step further (#9244 — the
-    write boundary accepts a declaration on a PRESENT-but-unorderable bound, so
-    a read path reporting that declaration would state a granularity for a
-    start the ruling reads as never recorded, with no warning). Both the legacy
-    default AND the declared token therefore sit behind the SAME orderability
-    gate — the same ``_created_sort_key`` the read path orders with
+    Presence is not precision (#9201): a bound that names no instant — ``""``,
+    ``"TBD"``, ``"not-a-date"``, and every row written before the 2026-10-26
+    shaping ruling — is a PRESENT value that ``_created_sort_key`` cannot order,
+    and the #6140 ruling makes an unparseable START mean *no start was
+    recorded*. A ``"day"`` claim about an absent datum is the defect #9201
+    records; a ``"year"`` claim about it is the same defect one step further
+    (#9244 — the write boundary accepts a declaration on a PRESENT-but-orderable
+    bound, so a read path reporting that declaration would state a granularity
+    for a start the ruling reads as never recorded, with no warning). Both the
+    legacy default AND the declared token therefore sit behind the SAME
+    orderability gate — the same ``_created_sort_key`` the read path orders with
     (``key[0] == 0`` ⇒ a parseable instant), never a second notion of
     "parseable". A numeric epoch ``0`` (or ``False``) IS an instant —
     1970-01-01T00:00:00Z — so it keeps ``"day"``.
@@ -176,8 +229,8 @@ def end_state(valid_to: object, valid_to_precision: object) -> str:
     * the DECLARED marker — ``validToPrecision == "unknown"`` with no
       ``validTo`` (a caller saying so explicitly);
     * a STORED end that names no instant — ``validTo = "TBD"`` / ``""`` /
-      ``"2026-02-30"`` (#9202). The write path stores bounds verbatim, so such a
-      value is present in the record, and presence is not datability.
+      ``"2026-02-30"`` (#9202). Every row written before the 2026-10-26 shaping
+      ruling can carry one, and presence is not datability.
 
     Otherwise a PRESENT, ORDERABLE ``validTo`` is ``END_KNOWN`` and an ABSENT one
     is ``END_OPEN``.
@@ -197,10 +250,16 @@ def end_state(valid_to: object, valid_to_precision: object) -> str:
     read path's ONE presence convention is ``is not None``, and ``_covers``
     cannot exclude either shape, so both windows cover every later instant.
 
-    Neither the write door nor coverage moves with this reading: an un-datable
-    ``validTo`` is still ACCEPTED and stored verbatim (the warning stays a
-    warning, #9910; refusing it is explicitly not taken by the ruling), and it
-    still bounds no instant (#9408). Only the READING changes.
+    Neither coverage nor the READ of an existing row moves with this reading: an
+    un-datable ``validTo`` names no instant, so it still bounds nothing (#9408),
+    and a row that carries one is reported ``unknown`` exactly as it was a day
+    earlier. What the 2026-10-26 ruling DID move is the write door — a caller
+    value that declares no date is now SHAPED into the declared spelling rather
+    than stored verbatim (``read_caller_end``), and one that attempts an instant
+    and fails is REFUSED — so the second spelling is a legacy-row shape, not a
+    shape this door produces. Rows written before that ruling are never
+    re-validated or migrated: the read path does not care which form a row
+    carries, which is what keeps the two dialects byte-identical here.
 
     An explicitly declared concrete precision on an absent end is a
     contradiction and is refused by ``validate_validity_precision``, so it is
@@ -214,6 +273,145 @@ def end_state(valid_to: object, valid_to_precision: object) -> str:
     if not _names_an_instant(valid_to):
         return END_UNKNOWN
     return END_KNOWN
+
+
+def _end_refusal(value: object, fault: str) -> ValueError:
+    """Count, log and describe ONE refused caller end (#9202).
+
+    Every refusal names three things — the fault, the repair, and the forms the
+    field accepts — because a refusal that does not is a retry loop (§7 trap 2).
+    Returned (not raised) so the caller's ``raise ... from None`` keeps the
+    caller-facing traceback free of this module's internals.
+    """
+    END_WRITE_OUTCOMES["refused"] += 1
+    message = (
+        f"validTo {value!r} was refused: {fault}. Pass {_END_ACCEPTED_FORMS}. "
+        "The end is an authored belief about WHEN a fact stopped being true, so "
+        "it is not guessed (ONTOLOGY §4.7, #9202)."
+    )
+    _logger.warning("validTo refused at the write door: %s", message)
+    return ValueError(message)
+
+
+def read_caller_end(value: object, declared_precision: object = None,
+                    ) -> tuple[object, str | None]:
+    """#9202: read a caller's ``validTo`` for INTENT on the way in.
+
+    THE ONE HOME for the write door's accept / shape / refuse decision, so the
+    two guarded doors (``create_point``, ``update_point``) cannot disagree about
+    what a value means, and so no second notion of "is that an instant" appears
+    next to ``_names_an_instant`` — the measure every read path already orders
+    with. Returns ``(stored_value, shaped_token)``:
+
+    * ``shaped_token is None`` — write ``stored_value`` as the end. Either the
+      caller's value is a real orderable instant (returned UNTOUCHED: a stored
+      instant is never re-spelled), or it is representational variance the read
+      measure could not order (``2024-3-1``, ``2024/03/01``), normalised to the
+      ISO form **silently** — same instant, same meaning, nothing to report.
+    * ``shaped_token is not None`` — the value DECLARES NO DATE (blank, or one of
+      ``END_UNKNOWN_MARKERS``). The caller must store the canonical un-datable
+      form instead: no end value plus ``validToPrecision = "unknown"``, which
+      reads ``END_UNKNOWN`` — NEVER ``END_OPEN``. Mapping a marker to ``open``
+      would alter a reading the 2026-10-25 ruling pinned, i.e. smuggle a second
+      decision in as a side effect, so it is an invariant of this function that
+      every shaped token ends up ``unknown``.
+
+    Everything else RAISES ``ValueError`` naming the fault and the repair: an
+    attempted instant that fails (``2026-02-30``, month 13), an epoch supplied as
+    a STRING, or no recoverable intent (``"not-a-date"``, and with it any
+    day/month-first form such as ``03/04/2024`` — legible but ambiguous, so
+    choosing silently would be betrayal dressed as competence, §0).
+
+    ``declared_precision`` is the caller's own ``validToPrecision`` when it sent
+    one: a CONCRETE token beside a marker is a contradiction ("day" cannot
+    describe an end that declares no date) and is refused rather than silently
+    dropped — dropping it would be the un-announced substitution this whole
+    door exists to prevent.
+
+    Why shaping a marker is not leniency (§0): "ended, and I cannot say when" is
+    exactly what the caller said, so there is no better value they could supply —
+    the filled-in meaning and the caller's meaning are the SAME CLAIM. Filling in
+    is legitimate here and nowhere else.
+
+    Pre-existing rows are untouched by design: this runs only on a value a
+    caller supplies NOW, so a stored ``validTo = "TBD"`` keeps its literal end
+    and keeps reading ``END_UNKNOWN`` (``end_state``). No backfill, no
+    re-validation — a toaster that migrated rows would be a NEW decision.
+    """
+    if value is None:
+        return None, None          # absent = OPEN end, not an un-datable one
+    if _names_an_instant(value):
+        return value, None         # a real instant: accepted, never re-spelled
+    if isinstance(value, str):
+        token = value.strip()
+        if not token or token.lower() in _END_UNKNOWN_MARKER_SET:
+            _refuse_concrete_precision_beside_marker(value, declared_precision)
+            END_WRITE_OUTCOMES["shaped"] += 1
+            _logger.warning(
+                "validTo %r declares no date — stored as the canonical "
+                "UN-DATABLE end (no validTo + validToPrecision='unknown'), so "
+                "the record says 'ended, un-datable' instead of carrying text "
+                "no reader can order; the reply reports end_state='unknown' "
+                "(ONTOLOGY §4.7, #9202). Pass an ISO-8601 instant, the NUMBER "
+                "for an epoch, or None for an OPEN end, if that is what you "
+                "meant.",
+                value,
+            )
+            return None, value
+        match = _DATE_VARIANT_RE.match(token)
+        if match:
+            year, month, day = (int(match["year"]), int(match["month"]),
+                                int(match["day"]))
+            if not 1 <= month <= 12:
+                raise _end_refusal(
+                    value,
+                    f"month {month} is not a calendar month (a month runs "
+                    "01-12)",
+                ) from None
+            try:
+                return date(year, month, day).isoformat(), None
+            except ValueError:
+                raise _end_refusal(
+                    value,
+                    f"{year}-{month:02d} has no day {day}, so this is not a "
+                    "calendar day",
+                ) from None
+        if _EPOCH_AS_STRING_RE.match(token):
+            raise _end_refusal(
+                value,
+                f"this is a Unix epoch supplied as a STRING, which names no "
+                f"instant — pass the NUMBER {int(token)} instead of a string",
+            ) from None
+    raise _end_refusal(
+        value,
+        "no date could be recovered from it (an orderable date is read "
+        "year-first; a day/month-first form like '03/04/2024' parses both ways, "
+        "so it is refused rather than guessed)",
+    ) from None
+
+
+def _refuse_concrete_precision_beside_marker(value: object,
+                                             declared_precision: object) -> None:
+    """Refuse a concrete ``validToPrecision`` beside an end that declares no date.
+
+    ``validTo = "TBD"`` with ``validToPrecision = "day"`` states two different
+    things about one bound. Shaping could overwrite the token and say nothing,
+    which is precisely the silent substitution §0 forbids — so the pair is
+    refused and the caller picks one.
+    """
+    token = normalize_precision(declared_precision, field=TO_PRECISION_PROP)
+    if token is None or token == PRECISION_UNKNOWN:
+        return
+    END_WRITE_OUTCOMES["refused"] += 1
+    message = (
+        f"validTo {value!r} declares NO date, so {TO_PRECISION_PROP}={token!r} "
+        f"cannot describe it — the two disagree. Pass "
+        f"{TO_PRECISION_PROP}='{PRECISION_UNKNOWN}' with this value (the "
+        "canonical un-datable end), or a real date alongside the granularity "
+        f"you meant (ONTOLOGY §4.7, #9202)."
+    )
+    _logger.warning("%s", message)
+    raise ValueError(message)
 
 
 def validate_validity_precision(
