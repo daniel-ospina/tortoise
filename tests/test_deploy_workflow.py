@@ -2422,7 +2422,7 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     )
     assert presence, "the presence requirement does not enumerate its readings"
     for reading in ("record_write_failures", "record_non_journal_skips",
-                    "record_position_unproven", "journal_event"):
+                    "record_position_unproven", "journal_event", "point"):
         assert reading in presence.group(1), (
             f"the presence list omits {reading!r} — an armed deployment whose only "
             "signal is that reading is then indistinguishable from an inert one"
@@ -2545,14 +2545,14 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "can find (wrong password / paused project)"
     )
     # `no_tenant` is also the DESIGNED outcome for a credential that names no
-    # graph (`record_tenant_for` returns None for org-wide / session / legacy /
-    # OAuth keys; `hosted_api._bind_record_tenant` documents the seed and
-    # background-indexing surfaces the same way, #9188/#9192), and these counters
-    # are process-global — so an absolute "none at all for `no_tenant`" reds a
-    # healthy armed deployment on ordinary traffic and offers no legitimate
-    # remedy. The bar must bound that arm to the CAPTURE and **rule the
-    # per-request attribution out** (`record_writer` logs no request identity),
-    # keeping it a fail-and-fix for the capture's own writes.
+    # graph (`record_tenant_for` returns None for a SESSION/PAT or OAuth `oat_` key
+    # — neither carries a `default_graph_id` — and `hosted_api._bind_record_tenant`
+    # documents the seed and background-indexing runners as deliberately unbound,
+    # #9188/#9192/#10047), and these counters are process-global — so an absolute
+    # "none at all for `no_tenant`" reds a healthy armed deployment on ordinary
+    # traffic and offers no legitimate remedy. The bar must bound that arm to the
+    # CAPTURE and **rule the per-request attribution out** (`record_writer` logs no
+    # request identity), keeping it a fail-and-fix for the capture's own writes.
     assert re.search(r"BOUND to the proving capture, not to the process", flat), (
         "the `no_tenant` arm is absolute — it fails a healthy deployment on the "
         "unbound-credential `no_tenant` the code counts by design, and the only "
@@ -2560,7 +2560,8 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "#9192 cross-tenant hazard it forbids below"
     )
     # ⛔ NOT the bare token `process-global`: the section already says "env is
-    # process-global" about the #9192 env pair (line ~2960), so a bare-token arm
+    # process-global" about the #9192 env pair ("a process-global tenant on a
+    # multi-tenant process", below), so a bare-token arm
     # passed on the PRE-fix wording — a vacuous assertion, caught by the verifier
     # and re-anchored to this clause.
     assert re.search(r"These counters are \*\*process-global\*\*", flat), (
@@ -2576,15 +2577,35 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # a negative pin so the attribution instruction cannot come back beside the ⛔
     # prohibition below — a section that says both is green under a presence-only
     # ⛔ pin, which is the class this PR exists to close.
+    # ⛔ The list must NOT include an org-wide API key: since #10025 that key IS
+    # named (`resolve_api_key` puts the org's active `kind='default'` row id on the
+    # credential as `default_graph_id`, `record_tenant_for` returns it —
+    # `tortoise/hosted_api.py`, `tortoise/record_writer.py`), so listing it as
+    # DESIGNED residue lets an operator excuse real `no_tenant` growth that the only
+    # remaining designed sources (#10047's shapes) do not explain — a fail-open read
+    # of the very signal this section exists to expose (#10083 review P1). The
+    # control-plane-cannot-name-a-default-row case is the ONLY org-wide one, and the
+    # prose must say so.
+    assert re.search(r"An \*\*org-wide API KEY is NOT one of those sources\*\* since #10025", flat), (
+        "the ⚠️ list files org-wide API keys under the DESIGNED `no_tenant` sources, "
+        "which since #10025 is false — the key is named from `default_graph_id`"
+    )
+    assert not re.search(r"an org-wide / session", flat), (
+        "the ⚠️ list still reads an org-wide key as designed residue beside the "
+        "session / OAuth shapes, excusing real growth on a healthy deployment"
+    )
     assert re.search(
         r"So make the capture \*\*graph-bound\*\* — a graph-bound \*\*control-plane\*\* "
-        r"credential cannot land in `no_tenant`",
+        r"credential cannot land in `no_tenant` except when tenant resolution itself "
+        r"faults",
         flat,
     ), (
         "the section gives no way to make the capture's own `no_tenant` "
-        "impossible — a graph-bound control-plane credential is the discriminator"
+        "impossible — a graph-bound control-plane credential is the discriminator, "
+        "and dropping its fault exception restores the absolute that the fail-soft "
+        "resolver (#5148) contradicts"
     )
-    assert not re.search(r"attribute any `no_tenant` growth", flat), (
+    assert not re.search(r"attribute (?:any|a|each|the) `no_tenant` growth", flat), (
         "the section still tells the operator to attribute `no_tenant` growth per "
         "request — the step the ⛔ ruling below rules out"
     )
@@ -2666,6 +2687,41 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "it greps `the record write did not happen`, and the fault is a "
         "`tortoise.hosted_api` WARN under a different message"
     )
+    # ⛔ The ⚠️ list's count is EXHAUSTIVE and it now has three members: (a)
+    # `no_durable_journal`, (b) `position_unproven`, (c) the hosted_api
+    # tenant-resolution fault this PR's bound cites 147 lines below. A list labelled
+    # TWO while naming a third member is the same self-contradiction class as the
+    # rest of this PR, and `record_position_unproven` / `tenant resolution` appear
+    # elsewhere in the section too, so this pins the enumerated clause, not a token.
+    # Measured: reverting it to "TWO" left every other assertion green (#10083
+    # review P2).
+    assert re.search(r"THREE readings are not in this grep", flat), (
+        "recipe 1's exclusion list still says TWO readings while the `no_tenant` "
+        "bound names a third (the `tortoise.hosted_api` tenant-resolution fault), "
+        "so a reader takes an exhaustive enumeration that is not exhaustive"
+    )
+    assert re.search(r"\(c\) The `tortoise\.hosted_api` tenant-resolution fault", flat), (
+        "the exclusion list does not name the hosted_api fault among its members, "
+        "so the count and the members disagree"
+    )
+    assert re.search(r"is emitted by a \*\*different\s+module's\*\* logger", flat), (
+        "the list does not say WHY the fault escapes the grep (a different "
+        "module's logger), which is the fact that stops a reader from checking "
+        "recipe 1 and concluding 'no fault'"
+    )
+    # The evidence half of the third-disjunct fix: naming the working command is
+    # only half of it — the sentence must also say recipe 1 CANNOT show this, or an
+    # operator greps recipe 1, sees nothing and clears the capture (the fail-open
+    # the finding described). Measured: deleting just this clause left the suite
+    # green, i.e. the reading existed but was unpinned (#10083 review P2).
+    assert re.search(
+        r"\*\*recipe 1's grep does NOT match\*\* \(it greps "
+        r"`the record write did not happen`\)",
+        flat,
+    ), (
+        "the section names the working command but never says recipe 1 cannot "
+        "show the fault — the reader who checks recipe 1 first concludes 'no fault'",
+    )
     # ⛔ The two pins above are NOT enough on their own: they survive an
     # inverted prohibition, because a section can say "the line carries **no**
     # request identity" and "**Do** attribute that growth per request from the
@@ -2686,9 +2742,12 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     )
     # The section's closing RULING, which is what bounds the arm and is the reason it
     # declines the only lever it names: deleting it left every other pin green
-    # (#10083 review P2). The `fly.toml` assertions at ~:3147-3178 pin the CONFIG,
-    # not this prose, so without this the arm's remedy has no stated boundary — and
-    # the only remaining "fix" for an unbound capture is the #9192 hazard.
+    # (#10083 review P2). The config assertions live in
+    # `test_the_record_is_not_armed_single_tenant_on_the_hosted_app` (named, not
+    # cited by line — the ranges rot, as the sibling comment above already says),
+    # and they pin the CONFIG, not this prose, so without this the arm's remedy has
+    # no stated boundary — and the only remaining "fix" for an unbound capture is
+    # the #9192 hazard.
     assert re.search(r"The route is never `TORTOISE_RECORD_SINGLE_TENANT`", flat), (
         "the section no longer rules out the cross-tenant route, so the one "
         "remaining way to 'fix' an unbound capture is the #9192 hazard it forbids"

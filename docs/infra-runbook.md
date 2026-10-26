@@ -3202,7 +3202,7 @@ text, so do not grep the 9090 listener for a counter name.
 
 1. **The failure log line** — every WARN-level non-write is logged with its reason
    (`tortoise/record_writer.py`: `malformed_dsn` / `no_tenant` / `circuit_open` /
-   `write_failed`), and this needs no auth. ⚠️ **TWO readings are not in this
+   `write_failed`), and this needs no auth. ⚠️ **THREE readings are not in this
    grep.** (a) The `no_durable_journal` decline — logged at **DEBUG**, under a
    *different* prefix (`the record write was declined (no_durable_journal)`,
    `record_writer.py`), because it is the healthy M2 path and not a failure.
@@ -3215,6 +3215,13 @@ text, so do not grep the 9090 listener for a counter name.
    it repeats at most once per window, and it is exactly the line that item 2's
    `record_position_unproven` counter is counting — grepping only the
    `did not happen` prefix for it returns nothing.
+   (c) The `tortoise.hosted_api` tenant-resolution fault —
+   `could not resolve the record tenant for this request` (#5148's fail-soft
+   path, `hosted_api._resolve_record_tenant`) — is emitted by a **different
+   module's** logger, so it does not match this grep either. The refusal that
+   fault then produces (`the record write did not happen (no_tenant)`) IS in the
+   grep, but that is the growth, not the fault; read the fault itself with the
+   command in the ⚠️ `no_tenant` bound below.
    ⛔ **`no_journal` and `seam_unimportable` ARE in it**, so do not dismiss them
    as "the SDK, not the seam": `tortoise/sdk.py::_record_write_failure` emits the
    **identical** prefix (`the record write did not happen (%s)`) — an armed
@@ -3329,11 +3336,19 @@ why the two recipes above are the verification and the deploy status is not.
 
    ⚠️ **The `no_tenant` arm is BOUND to the proving capture, not to the process.**
    `no_tenant` is ALSO the designed outcome for a credential that names no graph
-   **the record can key on**:
-   an org-wide / session / legacy / OAuth key, the self-host registry lane
+   **the record can key on**: a SESSION / PAT or OAuth `oat_` key (it carries no
+   `default_graph_id` at all, #10047's scope), the self-host registry lane
    (`record_writer.record_tenant_for` returns `None` by design), and the
-   onboarding-seed and background-indexing surfaces (`hosted_api._bind_record_tenant`)
-   — all documented as the fail-closed direction (#9188/#9192), not a regression.
+   onboarding-seed and background-indexing runners (deliberately NOT bound — they
+   build their own SDK and never see the request's credential,
+   `hosted_api._bind_record_tenant`, #10047's scope) — all documented as the
+   fail-closed direction (#9188/#9192), not a regression.
+   ⚠️ An **org-wide API KEY is NOT one of those sources** since #10025:
+   `resolve_api_key` puts the org's active `kind='default'` row id on the
+   credential as `default_graph_id` and `record_tenant_for` names it, so an
+   org-wide key reaches `no_tenant` **only** when the control plane could name no
+   such row (absent, or the `default` sentinel). Counting org-wide keys as
+   designed residue would excuse real growth.
    These counters are **process-global**, so a before/after delta also covers
    whatever else the process served: ordinary traffic on a healthy armed
    deployment can grow `no_tenant` with nothing wrong. So make the capture
