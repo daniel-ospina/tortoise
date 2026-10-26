@@ -212,10 +212,12 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
 def test_g5_destructive_half_doc_guards_run_on_a_docs_only_diff():
     """#5333 review (P1): those guards must run on the DOCUMENT they pin.
 
-    Three guards in `tests/test_definite_description_backfill_5059.py` assert
+    Four guards in `tests/test_definite_description_backfill_5059.py` assert
     only against `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` §4.3's *G5's
     destructive half*: the load-bearing share, the `archived`-has-a-writer
-    claim, and the `_ALLOWED_TRANSITIONS` production-reader scan. The file was
+    claim (which forbids any rephrasing of the refuted absolute, not one
+    spelling of it), the `_ALLOWED_TRANSITIONS` production-reader scan, and the
+    recorded design decision itself. The file was
     registered in `core` alone — which is right for its module-level guards, and
     useless for these: `docs/` is in NON_PYTHON_PREFIXES and the document
     matches no SOURCE_PATTERNS entry, so a docs-only diff filters to

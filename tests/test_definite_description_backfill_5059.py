@@ -787,6 +787,27 @@ def test_the_doc_does_not_claim_archived_has_no_writer():
         "the passage again claims nothing writes `archived`. It is false: the "
         "generic unvalidated write path reaches it on an :Object (#5333)."
     )
+    # The CLAIM, not one spelling of it. The literal above was evaded once by a
+    # rephrasing — "until a relocation pass is authorised, nothing writes it at
+    # all" (lowercase, pronoun instead of the noun) — which satisfied the
+    # literal while carrying the same false absolute, inside the very
+    # paragraph the design-decision pin was meant to protect. Any remaining
+    # *unqualified* no-writer absolute is the same defect, so the guard reads
+    # the claim case-insensitively and requires the qualified form instead.
+    assert "nothing writes" not in section.lower(), (
+        "the passage asserts, in some spelling, that NOTHING writes — that is "
+        "the refuted absolute: `archived` IS reachable through the generic "
+        "unvalidated write path, so the population is UNMEASURED, not empty. "
+        "Qualify the claim to the writers this decision governs (a PASS) "
+        "instead of deleting the clause (#5333)."
+    )
+    assert "no pass writes it" in section.lower(), (
+        "the fold must still be stated as inert until authorised — the "
+        "QUALIFIED form ('no pass writes it') is what replaces the refuted "
+        "absolute. Without it the paragraph stops saying the fold does not "
+        "run today, and a lane reads the permitted form as a live "
+        "mechanism (#5333)."
+    )
     assert "UNMEASURED" in section, (
         "the passage must state that the number of existing `archived` Objects "
         "is UNMEASURED — enumerating it is a precondition of any relocation "
