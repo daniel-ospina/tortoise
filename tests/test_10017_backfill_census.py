@@ -277,7 +277,8 @@ def test_a_multi_wired_point_is_one_turn_and_survives_a_page_boundary(
     # the loop. A pair-per-row read would have needed three rows to say the same
     # thing — and would have lost the third to the keyset advance.
     point_pages = [q for q in graph.queries if "collect(s.id)" in q]
-    cursors = [p["cursor"] for q, p in zip(graph.queries, graph.params)
+    cursors = [p["cursor"] for q, p in zip(graph.queries, graph.params,
+                                           strict=True)
                if "collect(s.id)" in q]
     assert len(point_pages) == 3, graph.queries
     assert cursors == [0, 1, 2], cursors
@@ -455,7 +456,8 @@ def test_the_paged_reads_cover_every_row_across_pages(monkeypatch) -> None:
     # more than one page per row-bearing leg == the cursor actually advanced
     turn_pages = [q for q in graph.queries if "p.pointKind" in q]
     assert len(turn_pages) >= 2, graph.queries
-    cursors = [p["cursor"] for q, p in zip(graph.queries, graph.params)
+    cursors = [p["cursor"] for q, p in zip(graph.queries, graph.params,
+                                           strict=True)
                if "p.pointKind" in q]
     assert cursors == sorted(cursors) and len(set(cursors)) > 1, cursors
 
