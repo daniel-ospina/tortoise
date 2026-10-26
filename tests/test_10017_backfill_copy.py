@@ -325,3 +325,164 @@ def test_an_unproven_position_mid_segment_is_named_as_such(monkeypatch, tmp_path
     emit = copy_mod._journal_emit(_journal(tmp_path), "dsn", "org", "graph")
     with pytest.raises(copy_mod.CopyRefused, match="could not prove a position"):
         emit("s1", [{"a": 1}, {"b": 2}])
+
+
+# ── the DSN the copy was named, not merely "a writer" ─────────────────────
+
+def test_the_copy_writes_to_the_record_it_was_told_to(monkeypatch, tmp_path) -> None:
+    """The DSN VALUE must reach the seam, not just a non-None writer.
+
+    `RecordWriter(dsn=None)` resolves `TORTOISE_RECORD_DSN` on EVERY call, so a
+    bare `writer=None` ignores `--dsn-env`: the copy refuses "the record is not
+    armed" for a DSN it was given, or — when the default variable is ALSO set —
+    copies into a record nobody named, exit 0. This asserts the seam is handed
+    the operator's value (the sibling test above only pins that it is handed one).
+    """
+    import tortoise.log as log_mod
+    import tortoise.record_writer as rw
+
+    calls = []
+
+    class _Log:
+        def __init__(self, path):
+            self.i = 0
+
+        def append(self, event):
+            self.i += 1
+            return self.i
+
+    def _write(events, **kwargs):
+        calls.append(kwargs)
+        return _Write(_outcome().APPLIED, len(events), _Conn())
+
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://ambient:pw@db/other")
+    monkeypatch.setattr(log_mod, "EventLog", _Log)
+    monkeypatch.setattr(rw, "write_records", _write)
+    emit = copy_mod._journal_emit(
+        _journal(tmp_path), "postgresql://named:pw@db/record", "org", "graph")
+    emit("s1", [{"a": 1}])
+    assert calls[0]["writer"].dsn == "postgresql://named:pw@db/record"
+
+
+# ── the session read: a clipped page must not become empty provenance ─────
+
+class _ClippedGraph(_FakeGraph):
+    """A graph that CLIPS a non-paged read, as the engine silently does.
+
+    FalkorDB truncates a non-aggregate read at its server-global
+    ``RESULTSET_SIZE`` (10,000 default) with no error and no marker
+    (#4515/#4233). A keyset page carries ``$batch``; a bare ``RETURN`` does not,
+    and that is exactly the read that gets clipped.
+    """
+
+    def __init__(self, sessions, turns, clip: int) -> None:
+        super().__init__(sessions, turns)
+        self.clip = clip
+
+    def query(self, cypher: str, params: dict | None = None):
+        if "count(" in cypher:
+            return super().query(cypher, params)
+        if params is None:
+            return _Res(self._sessions[: self.clip])   # the engine's ceiling
+        # Keyset semantics, NOT a positional slice: the cursor is the last node's
+        # INTERNAL id, not an index into this list.
+        rows = self._turns if "CONTAINS" in cypher else self._sessions
+        cursor = int(params.get("cursor", 0))
+        batch = int(params.get("batch", 1000))
+        return _Res([r for r in rows if r[0] >= cursor][:batch])
+
+
+def _three_sessions() -> list:
+    return [(1, "s1", {"harness": "pi", "capture_lane": "sdk"}),
+            (2, "s2", {"harness": "claude", "capture_redactions": None}),
+            (3, "s3", {"harness": "codex", "created_at": "2026-10-01T00:00:00Z"})]
+
+
+def test_a_clipped_session_read_cannot_strip_capture_provenance() -> None:
+    """Sessions past the engine's ceiling must still arrive WITH their properties.
+
+    A bare ``MATCH (s:Session) RETURN s.id, properties(s)`` is clipped silently,
+    and each clipped session would be filed with EMPTY provenance — no `harness`,
+    no `capture_lane`, and a `created_at` null the graph never had — while its
+    turns still counted as copied. That is the one loss this phase exists to
+    prevent, reported as success.
+    """
+    turns = [(10, "s1_t0", {"id": "s1_t0", "pointKind": "event"}, ["s1"]),
+             (11, "s2_t0", {"id": "s2_t0", "pointKind": "event"}, ["s2"]),
+             (12, "s3_t0", {"id": "s3_t0", "pointKind": "event"}, ["s3"])]
+    graph = _ClippedGraph(_three_sessions(), turns, clip=2)
+    recorded: dict[str, dict] = {}
+
+    def emit(sid, events) -> int:
+        recorded[sid] = events[0]
+        return 1
+
+    stats = copy_mod.copy_phase(graph, emit, page_size=2, event_id=lambda: "E")
+    assert stats["sessions"] == 3 and stats["turns"] == 3
+    assert recorded["s3"]["harness"] == "codex"
+    assert recorded["s3"]["created_at"] == "2026-10-01T00:00:00Z"
+    assert recorded["s2"]["harness"] == "claude"
+    assert recorded["s2"]["capture_redactions"] is None
+
+
+class _Res:
+    def __init__(self, rows) -> None:
+        self.result_set = rows
+
+
+def test_a_session_read_that_disagrees_with_the_server_count_refuses() -> None:
+    """The census's own cross-check on the session leg: a paged read short of the
+    server's aggregate was TRUNCATED, and a truncated read here is provenance
+    loss — so it refuses instead of copying a session as if it had none."""
+    graph = _FakeGraph(_three_sessions()[:2], [])   # the read returns 2 …
+    real_query = graph.query
+
+    def query(cypher, params=None):
+        if "count(s" in cypher:
+            return _Res([(3,)])                     # … the server counts 3
+        return real_query(cypher, params)
+
+    graph.query = query
+    with pytest.raises(copy_mod.census.CensusError, match="TRUNCATED"):
+        copy_mod.copy_phase(graph, lambda sid, events: 1, page_size=5,
+                            event_id=lambda: "E")
+
+
+# ── the arguments: a pasted credential is never echoed ───────────────────
+
+@pytest.mark.parametrize("flag, value", [
+    ("--uri-env", "postgres://user:s3cret@db.example.com:6379/graph"),
+    ("--dsn-env", "postgresql://user:s3cret@db.example.com:5432/record"),
+])
+def test_a_pasted_uri_or_dsn_is_refused_without_being_echoed(
+        monkeypatch, flag, value) -> None:
+    """`--uri-env`/`--dsn-env` take an environment variable NAME.
+
+    They are the natural place to paste a URI or a DSN by mistake, so a "not set"
+    message must never print the value back: that puts a credential in the
+    console or a CI log — the leak the census's shape guard exists to stop
+    (#10031), reproduced here in the tool cloned from it.
+    """
+    monkeypatch.setenv("FALKORDB_CLOUD_URI", "bogus")
+    argv = ["--graph", "g", "--org-id", "o", "--graph-id", "gid",
+            "--journal", "j", flag, value]
+    with pytest.raises(SystemExit) as excinfo:
+        copy_mod.main(argv)
+    assert "s3cret" not in str(excinfo.value)
+
+
+def test_a_dry_run_needs_no_journal(monkeypatch) -> None:
+    """A dry run opens no journal, so a required `--journal` is a gate that can
+    never fire on the path it guards."""
+
+    class _ReachedConnect(RuntimeError):
+        pass
+
+    def _connect(uri):
+        raise _ReachedConnect
+
+    monkeypatch.setenv("FALKORDB_CLOUD_URI", "bogus")
+    monkeypatch.setattr(copy_mod.census, "_connect", _connect)
+    with pytest.raises(_ReachedConnect):
+        copy_mod.main(["--graph", "g", "--org-id", "o", "--graph-id", "gid",
+                       "--dry-run"])

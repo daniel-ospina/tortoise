@@ -345,15 +345,29 @@ def main(argv: list[str] | None = None) -> int:
                     help="the RECORD tenant's org — never inferred from a name")
     ap.add_argument("--graph-id", required=True,
                     help="the RECORD tenant's graph id — never inferred")
-    ap.add_argument("--journal", required=True,
+    ap.add_argument("--journal", required=False,
                     help="the GRAPH'S OWN journal (its seq space is per "
                          "(org_id, graph_id); a fresh file would collide with "
-                         "live history and leave the copy out of rebuild)")
+                         "live history and leave the copy out of rebuild). "
+                         "Required unless --dry-run, which opens no journal")
     ap.add_argument("--dsn-env", default="TORTOISE_RECORD_DSN")
     ap.add_argument("--dry-run", action="store_true",
                     help="measure and report, write nothing")
     ap.add_argument("--out", help="write the summary JSON here")
     args = ap.parse_args(argv)
+
+    # ⛔ The SHAPE of both env flags is checked BEFORE either is read, exactly as
+    # the census checks its own (#10031): ``--uri-env``/``--dsn-env`` are the
+    # natural place to paste a URI or a DSN by mistake, and the "not set"
+    # message below would otherwise echo the value verbatim — a credential in the
+    # console or a CI log. Rejected by shape; the VALUE is never echoed.
+    for flag, value in (("--uri-env", args.uri_env), ("--dsn-env", args.dsn_env)):
+        if not census._URI_ENV_NAME_RE.fullmatch(value):
+            raise SystemExit(
+                f"copy: {flag} takes the NAME of an environment variable "
+                "([A-Za-z_][A-Za-z0-9_]*), not the value itself. Refusing to "
+                "echo what was passed (a pasted URI/DSN carries a credential) "
+                "— export it and pass the variable name.")
 
     uri = os.environ.get(args.uri_env)
     if not uri:
@@ -362,6 +376,10 @@ def main(argv: list[str] | None = None) -> int:
     if not dsn and not args.dry_run:
         raise SystemExit(f"${args.dsn_env} is not set — refuse to copy into "
                          "nothing (use --dry-run to measure only)")
+    if args.journal is None and not args.dry_run:
+        raise SystemExit("--journal is required: the copy numbers its rows by "
+                         "the GRAPH'S OWN journal append, so a run without one "
+                         "files no positions (use --dry-run to measure only)")
 
     # `tortoise.ids.ulid` is the repo's ONE mint — `ulid` is not a dependency,
     # so `import ulid` made every non-dry-run invocation die before connecting.
@@ -373,7 +391,15 @@ def main(argv: list[str] | None = None) -> int:
 
     emit = (lambda sid, events: 0) if args.dry_run else _journal_emit(
         args.journal, dsn, args.org_id, args.graph_id)
-    stats = copy_phase(graph, emit, event_id=ulid)
+    try:
+        stats = copy_phase(graph, emit, event_id=ulid)
+    except census.CensusError as exc:
+        # A truncated read is a REFUSAL, not a crash: exit with the reason the
+        # census already states, so an operator (or a CI step) reads a verdict
+        # rather than a traceback.
+        raise SystemExit(str(exc)) from None
+    except CopyRefused as exc:
+        raise SystemExit(f"copy: {exc}") from None
     if args.dry_run:
         # A dry run proposes no positions; counting them as if it had made the
         # artifact indistinguishable from a real run's.
