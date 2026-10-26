@@ -3302,8 +3302,9 @@ So the bar has **two parts, and BOTH are required**:
    empty reading has more than one cause and does not say which; take the
    journaling capture above and read again before drawing a conclusion.
 2. **No unexpected failure.** *Then*: **no growth in a reason other than the
-   documented #9264 `write_failed` refusals, and none at all for `no_tenant` /
-   `malformed_dsn` / `circuit_open`.** ⚠️ **That `write_failed` exemption is
+   documented #9264 `write_failed` refusals, and none at all for `no_tenant`
+   (the capture's OWN — see the ⚠️ bound below) / `malformed_dsn` /
+   `circuit_open`.** ⚠️ **That `write_failed` exemption is
    BOUNDED**: it covers only the #9264 `DatatypeMismatch` refusals that recipe 1
    actually shows, and only until the R2 migration above is applied — afterwards
    **every** `write_failed` is unexpected — and a new `journal_event` / `point` row must still appear.
@@ -3335,12 +3336,16 @@ why the two recipes above are the verification and the deploy status is not.
    whatever else the process served: ordinary traffic on a healthy armed
    deployment can grow `no_tenant` with nothing wrong. So make the capture
    **graph-bound** — a graph-bound **control-plane** credential cannot land in
-   `no_tenant` (the self-host registry lane above is a graph-bound key that
-   resolves through no control plane, so its writes are counted there by
-   design) — and treat `no_tenant` growth as the residual it then is: it is a
-   fail-and-fix only when the capture ran **unbound**, or when item 1's row did
-   not appear. ⛔ **Do
-   not try to attribute that growth per request from the log.** The line an
+   `no_tenant` except when tenant resolution itself faults
+   (`hosted_api._resolve_record_tenant` is fail-soft, #5148: the fault is logged
+   as "could not resolve the record tenant" and that write then counts
+   `no_tenant`). The self-host registry lane above is the one graph-bound key
+   that resolves through no control plane, so its writes are counted there
+   **unless the process has declared the single-tenant pair** — see the #9192
+   cross-tenant note below for what that declaration may and may not cover.
+   Treat `no_tenant` growth as the residual it then is: it is a fail-and-fix
+   only when the capture ran **unbound**, or when item 1's row did not appear.
+   ⛔ **Do not try to attribute that growth per request from the log.** The line an
    unbound capture produces carries the env-pair diagnosis and **no** request
    identity and no record type — and `no_tenant` has a second emission, for a
    malformed CARRIED tenant, that echoes only that pair — so the log cannot tell
@@ -3349,7 +3354,7 @@ why the two recipes above are the verification and the deploy status is not.
    the exception text instead, and the SDK's `no_journal` line names the record
    type inside its exception text.)
    A bar that required per-request attribution would be unexecutable and would
-   red a healthy deployment on its default branch. The route is never
+   red a healthy deployment by default. The route is never
    `TORTOISE_RECORD_SINGLE_TENANT`, which the #9192 cross-tenant note below
    forbids.
 

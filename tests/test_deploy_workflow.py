@@ -2353,6 +2353,13 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     there, and neither may come back.
     """
     section = _record_arming_section()
+    # ⛔ The `no_tenant` pins below read a WHITESPACE-NORMALIZED copy (#10071 review
+    # F3). The repo declines to enforce hard wraps (`.markdownlint-cli2.jsonc`:
+    # `MD013: false`), so a reflow is an expected edit — and pinning the raw text
+    # made three of those four pins red on a refill that changed no word (measured:
+    # widths 76/78/82 red the `circuit_open`, `unbound` and `⛔ **Do` pins
+    # respectively). Pinning the flat text makes a pin measure the CLAIM.
+    flat = re.sub(r"\s+", " ", section)
     # No PRESCRIBED command block may read the route: the section may (and does)
     # QUOTE the broken recipe in prose to warn an operator off it, but a fenced
     # `bash` block is a command the operator is told to run.
@@ -2457,11 +2464,14 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "`no_tenant` reading passes on the #9264 baseline alone, which is the "
         "state this section exists to catch"
     )
-    assert re.search(
-        r"none at all for `no_tenant` /\s+`malformed_dsn` / `circuit_open`", section
-    ), (
-        "the bar no longer says the three always-fail reasons are a fail-and-fix, "
-        "so the state this section exists to catch reads as a pass"
+    # "The capture's OWN" is load-bearing: item 2 is the bar a reader sees first,
+    # and an unqualified "none at all for `no_tenant`" reds a healthy deployment on
+    # the ordinary unbound traffic the ⚠️ bound below excuses — the two statements
+    # would contradict each other inside one section (#10071 review F1).
+    assert re.search(r"none at all for `no_tenant` \(the capture's OWN", flat), (
+        "the bar reads absolute on `no_tenant` while the ⚠️ bound below says the "
+        "growth is a fail-and-fix only for an unbound capture — a reader who "
+        "stops at item 2 fails a healthy deployment on its default traffic"
     )
     # The #9264 `write_failed` exemption bound: without it the documented
     # R1-without-R2 state (writes nothing, counts only `write_failed`) satisfies
@@ -2517,8 +2527,9 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # background-indexing surfaces the same way, #9188/#9192), and these counters
     # are process-global — so an absolute "none at all for `no_tenant`" reds a
     # healthy armed deployment on ordinary traffic and offers no legitimate
-    # remedy. The bar must bound that arm to the CAPTURE and say how to attribute
-    # growth, while keeping it a fail-and-fix for the capture's own writes.
+    # remedy. The bar must bound that arm to the CAPTURE and **rule the
+    # per-request attribution out** (`record_writer` logs no request identity),
+    # keeping it a fail-and-fix for the capture's own writes.
     assert re.search(r"BOUND to the proving capture, not to the process", section), (
         "the `no_tenant` arm is absolute — it fails a healthy deployment on the "
         "unbound-credential `no_tenant` the code counts by design, and the only "
@@ -2547,7 +2558,7 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # the env-pair note — no request identity, no org/graph id, not even the
     # record type — so per-request attribution is impossible from the log and the
     # arm's only remaining branch reds a healthy deployment (#9585 review P2).
-    assert re.search(r"\*\*no\*\*\s+request\s+identity", section), (
+    assert re.search(r"\*\*no\*\* request identity", flat), (
         "the section claims the `no_tenant` log line can attribute growth to a "
         "request — it carries no request identity, and of the four "
         "`record_writer` reasons only `circuit_open` carries the record type, so "
@@ -2558,7 +2569,7 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # deleted and the claim stands on an assertion that no longer measures it
     # (#10071 review P2, verified: `circuit_open` logs `record.get("type")` at
     # record_writer.py:1184; `malformed_dsn` and `write_failed` log the exception).
-    assert re.search(r"`circuit_open` is the\s+only one that carries the record type", section), (
+    assert re.search(r"`circuit_open` is the only one that carries the record type", flat), (
         "the section gives no evidence for why the log cannot attribute growth — "
         "only `circuit_open` carries the record type, so a reader cannot check "
         "the claim it is asked to act on"
@@ -2566,19 +2577,34 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # ⛔ Pin the CLAUSE, not the token: `capture ran **unbound**` alone survives
     # both "it is **never** a fail-and-fix when the capture ran **unbound**" and
     # "fail-and-fix whether or not the capture ran **unbound**" — the arm inverted
-    # with the pin still green (#10071 review P1). `only when` is load-bearing.
-    assert re.search(r"fail-and-fix only\s+when the capture ran \*\*unbound\*\*", section), (
+    # with the pin still green (#10071 review P1). `only when` is load-bearing —
+    # and so is the DISJUNCTION: dropping `, or when item 1's row did not appear`
+    # leaves every other pin green while the paragraph stops covering the bound
+    # capture whose row never landed (#10071 review F2), so pin all three parts.
+    assert re.search(
+        r"fail-and-fix only when the capture ran \*\*unbound\*\*, or when item "
+        r"1's row did not appear",
+        flat,
+    ), (
         "the section gives no executable discriminator for `no_tenant` growth — "
-        "an unbound capture is the one state that makes the growth the capture's"
+        "an unbound capture is the one state that makes the growth the capture's, "
+        "and a bound capture whose item-1 row never appeared is the other"
     )
     # ⛔ The two pins above are NOT enough on their own: they survive an
     # inverted prohibition, because a section can say "the line carries **no**
     # request identity" and "**Do** attribute that growth per request from the
     # log" at the same time — self-contradictory, and green. Pin the ⛔ clause
     # itself, which is the sentence that carries the ruling (#10071 review P2).
-    assert re.search(r"⛔ \*\*Do\s+not try to attribute", section), (
+    # Anchored on the CLAUSE, with the ⛔ marker asserted separately: a stronger
+    # rewording ("⛔ **Never** try to attribute…") is the same ruling, and a pin
+    # that reds on it blames wording that weakened nothing (#10071 review F3).
+    assert re.search(r"Do not try to attribute that growth per request", flat), (
         "the section does not forbid the impossible step it describes — "
         "per-request attribution from a line that carries no request identity"
+    )
+    assert re.search(r"⛔", flat), (
+        "the ruling is unmarked — the ⛔ prefix is how this runbook flags a step "
+        "a reader must not act past"
     )
 
 
