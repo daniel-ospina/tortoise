@@ -2822,7 +2822,7 @@ def rrf_fusion(
     # IS option D, and it silently re-weights a production leg that carries no
     # score signal — ``structural`` scores every row a CONSTANT (1.0 / 0.5, above),
     # so on any hybrid text query its whole list becomes one tie group. The
-    # fusion FORM is #4210's own open ruling; the measured defect is closed by
+    # fusion FORM is #4210's own open ruling; the measured defect closes with
     # dedup identity + provenance accumulation (#9998, #9437, #9879), not here.
     #
     # If you conclude tie-averaging is the right answer, the route is a REOPEN in

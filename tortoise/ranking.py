@@ -101,9 +101,14 @@ DEFAULT_HALF_LIFE_DAYS = 30.0
 # therefore holds
 # on a SINGLE-LEG read (where both twins score identically and the boost is
 # the sole differentiator), and on a fused read only while the fused relevance
-# delta stays under the boost effect.  Sizing the boost, changing the fusion
-# tie semantics, or restating the promise is a product decision — tracked on
-# #7704, not decided here.
+# delta stays under the boost effect.  Sizing the boost stays a TUNING value (the
+# ruling: "the boost magnitude stays a tuning value, not the fix").  The ORDERING
+# option set — changing the fusion tie semantics (option D), restating the promise
+# (option B) — is NOT open here: #7704 OWNER RULING (2026-10-25, comment
+# 6402104535) closes options A / B / C / D as answers to this issue — "tie-averaged
+# ranks are not required once duplicate entries do not exist" — and the fusion
+# FORM remains #4210's own open ruling.  What closes the measured defect is dedup
+# identity + provenance accumulation, not a fusion change.
 #
 # AND THE RANKER'S POOL IS THE PAGE, NOT THE CORPUS (#7704, re-measured
 # 2026-10-15).  ``tortoise_fts_query`` truncates the fused candidate list to
