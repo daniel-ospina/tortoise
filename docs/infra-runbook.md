@@ -3334,11 +3334,24 @@ why the two recipes above are the verification and the deploy status is not.
    These counters are **process-global**, so a before/after delta also covers
    whatever else the process served: ordinary traffic on a healthy armed
    deployment can grow `no_tenant` with nothing wrong. So make the capture
-   **graph-bound** — its own writes cannot land in `no_tenant` — and attribute any
-   `no_tenant` growth inside the window to a specific request through recipe 1's
-   log line rather than to the capture. Growth with no log line to attribute it
-   to is a fail-and-fix; the route is never `TORTOISE_RECORD_SINGLE_TENANT`, which
-   the #9192 cross-tenant note below forbids.
+   **graph-bound** — a graph-bound **control-plane** credential cannot land in
+   `no_tenant` (the self-host registry lane above is a graph-bound key that
+   resolves through no control plane, so its writes are counted there by
+   design) — and treat `no_tenant` growth as the residual it then is: it is a
+   fail-and-fix only when the capture ran **unbound**, or when item 1's row did
+   not appear. ⛔ **Do
+   not try to attribute that growth per request from the log.** The line an
+   unbound capture produces carries the env-pair diagnosis and **no** request
+   identity and no record type — and `no_tenant` has a second emission, for a
+   malformed CARRIED tenant, that echoes only that pair — so the log cannot tell
+   two requests apart. (Of the four `record_writer` reasons, `circuit_open` is the
+   only one that carries the record type; `malformed_dsn` and `write_failed` carry
+   the exception text instead, and the SDK's `no_journal` line names the record
+   type inside its exception text.)
+   A bar that required per-request attribution would be unexecutable and would
+   red a healthy deployment on its default branch. The route is never
+   `TORTOISE_RECORD_SINGLE_TENANT`, which the #9192 cross-tenant note below
+   forbids.
 
 ⛔ **Do NOT put it in `fly.toml`'s `[env]`.** A DSN carries a password, so a
 versioned `[env]` entry is a committed credential; and a Fly **secret** shadows
