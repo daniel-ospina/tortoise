@@ -786,8 +786,16 @@ def read_record_view(conn: Any, *, org_id: str, graph_id: str,
     cur = _rp.scope_connection(conn, org_id)
     for label in labels:
         table = NODE_TABLES[label]
+        # #10017 R2: the tier is a COLUMN, not a reader's opinion. A turn row is
+        # `record_only` — §9.1 keeps raw turns outside the graph — and the cache
+        # must not materialise it, or `rebuild_from_record` would re-create the
+        # turn nodes the journal rebuild correctly skips: two rebuild routes,
+        # two different graphs. An "except turns" predicate here would be
+        # inherited by nobody; the next export or sibling projection reading
+        # this table would node-ify the row again.
+        tier = " AND cache_tier = 'graph'" if table == "point" else ""
         for row in _rows(cur, f"SELECT * FROM public.{table} "
-                              "WHERE org_id = %s AND graph_id = %s",
+                              "WHERE org_id = %s AND graph_id = %s" + tier,
                          (org_id, graph_id)):
             nodes.append(node_from_row(label, row))
     for row in _rows(cur, f"SELECT * FROM public.{RELATION_TABLE} "
