@@ -38,8 +38,8 @@ from tools.longmem_eval.ingest import (  # noqa: E402, RUF100
 )
 from tools.longmem_eval.judge import (  # noqa: E402, RUF100
     NEAR_MISS_GRADING, AnswerGrade, LLMJudge, MockJudge, OfficialJudgeModel,
-    _normalize_answer_text, _parse_judge_response, classify_answer,
-    get_anscheck_prompt, grade_label, is_abstention,
+    _normalize_answer_text, _parse_judge_response, build_judge,
+    classify_answer, get_anscheck_prompt, grade_label, is_abstention,
 )
 from tools.longmem_eval.reader import MockReader, build_reader  # noqa: E402, RUF100
 from tools.longmem_eval.evidence import mark_for_question  # noqa: E402, RUF100
@@ -134,8 +134,12 @@ def test_mini_pipeline_end_to_end_mock(tmp_path, monkeypatch):
     _require_embedder()
     instances = _mini()
     assert len(instances) == 5
+    # #8486: a judge on a NAMED endpoint must leave that endpoint in the report
+    # (the receipt must not be able to disagree with the judge that graded).
+    judge = MockJudge()
+    judge.provider = "deepseek"
     outcomes, report = run_evaluation(
-        instances, reader=MockReader(), judge=MockJudge(),
+        instances, reader=MockReader(), judge=judge,
         ks=(5, 10, 20), top_k=20, split="s", work_dir=str(tmp_path),
     )
     assert len(outcomes) == 5
@@ -181,6 +185,9 @@ def test_mini_pipeline_end_to_end_mock(tmp_path, monkeypatch):
     m = report["methodology"]
     assert m["reader_model"] == "mock-reader"
     assert m["judge_model"] == "mock-judge"
+    # #8486: the resolved judge endpoint rides the methodology (additive, like
+    # reader_provider) — the id alone cannot show WHICH endpoint graded.
+    assert m["judge_provider"] == "deepseek"
     assert m["extraction_approach"]
     assert m["git_sha"]
     assert m["run_at_utc"]
@@ -249,6 +256,9 @@ def test_outcomes_to_report_golden_shape():
         outcomes,
         reader_model="golden-reader",
         judge_model="golden-judge",
+        # #8486: the judge endpoint is a methodology field (additive) — pinned
+        # here so the forward from run.py cannot be dropped silently.
+        judge_provider="deepseek",
         ks=(5, 10, 20),
         top_k=20,
         split="s",
@@ -354,6 +364,7 @@ def test_outcomes_to_report_golden_shape():
     m = report["methodology"]
     assert m["reader_model"] == "golden-reader"
     assert m["judge_model"] == "golden-judge"
+    assert m["judge_provider"] == "deepseek"
     assert m["k_values"] == [5, 10, 20]
     assert m["top_k_context"] == 20
     # R1 (#1540) D7: knob provenance in the methodology
@@ -1766,6 +1777,99 @@ def test_official_judge_call_shape():
     assert req["temperature"] == 0
     assert req["max_tokens"] == 10
     assert "response_format" not in req  # no JSON mode
+    # #8486 (2026-10-25): the OFFICIAL judge's request carries no provider
+    # extras — a thinking-disable here would be a shape deviation on the one
+    # provider whose shape must be verbatim.
+    assert "thinking" not in req
+
+
+def test_judge_disables_thinking_on_a_reasoning_by_default_provider():
+    """A judge on a reasoning-by-default provider MUST disable thinking.
+
+    Measured 2026-10-25 against api.deepseek.com under this exact call shape
+    (max_tokens=10): both served ids returned ``content=''`` with
+    ``finish_reason='length'`` and the whole budget in hidden reasoning, while
+    the same request with ``thinking:{type:disabled}`` returned ``'yes'`` with
+    ``finish_reason='stop'`` and 1 completion token. The benchmark's label rule
+    is ``'yes' in response.lower()``, so an empty content grades every question
+    WRONG — a 0% accuracy that is a transport artifact, not a measurement.
+    """
+    m = OfficialJudgeModel(
+        id="deepseek-v4-pro", base_url="https://api.deepseek.com/v1",
+        api_key_env="DEEPSEEK_API_KEY")
+    req = m.build_request("Is the response correct?")
+    assert req["thinking"] == {"type": "disabled"}
+    # …and the official shape is otherwise untouched by the addition.
+    assert req["messages"] == [
+        {"role": "user", "content": "Is the response correct?"}]
+    assert (req["n"], req["temperature"], req["max_tokens"]) == (1, 0, 10)
+    assert "response_format" not in req
+
+
+def test_build_judge_endpoint_follows_the_named_provider(monkeypatch):
+    """A ``<provider>:<model>`` spec is AUTHORITATIVE for the judge endpoint.
+
+    #8486 (2026-10-25): the factory resolved the endpoint by PRIORITY, so on a
+    box holding an ``OPENROUTER_API_KEY`` a ``deepseek:deepseek-v4-pro`` spec
+    was served by OpenRouter (first in ``_PROVIDER_PRIORITY``) while the spec
+    and the receipt named DeepSeek — and ``OfficialJudgeModel`` read
+    ``disables_thinking`` off OpenRouter's key env, leaving the
+    empty-content → ``0.0000`` class this PR exists to prevent unguarded on
+    exactly the box that has both keys. Same endpoint-truth rule
+    ``build_reader`` already applies (M5 #1525).
+
+    This is the FACTORY path, which is the only one a run takes — the
+    direct-``OfficialJudgeModel`` test above cannot see the divergence.
+    """
+    for k in ("OPENAI_API_KEY", "GEMINI_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-test-key")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-test-key")
+    judge = build_judge("deepseek:deepseek-v4-pro")
+    # the recorded provider is the endpoint actually used, not the priority one
+    assert judge.provider == "deepseek"
+    m = judge._model
+    assert m.base_url == "https://api.deepseek.com/v1"
+    assert m.api_key_env == "DEEPSEEK_API_KEY"
+    # …so the thinking-disable is keyed to the provider that is really serving
+    assert m.disables_thinking is True
+    assert m.build_request("Is the response correct?")["thinking"] == {
+        "type": "disabled"}
+
+
+def test_build_judge_endpoint_reports_openrouter_when_the_spec_names_it(
+        monkeypatch):
+    """The converse pin: an ``openrouter:`` spec keeps its own endpoint (a
+    thinking-disable there would be a shape deviation on a provider that does
+    not reason by default) — so the fix cannot be 'always use DeepSeek'."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-test-key")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-test-key")
+    judge = build_judge("openrouter:openai/gpt-4o-2024-08-06")
+    assert judge.provider == "openrouter"
+    m = judge._model
+    assert m.base_url == "https://openrouter.ai/api/v1"
+    assert m.api_key_env == "OPENROUTER_API_KEY"
+    assert m.disables_thinking is False
+    assert "thinking" not in m.build_request("Is the response correct?")
+
+
+def test_build_judge_fails_closed_on_missing_keys(monkeypatch):
+    """Endpoint truth must not weaken the fail-closed posture (the branches
+    the ``named=`` fix reorders): NO key at all is a RuntimeError whatever the
+    spec names, and a named provider whose own key is missing is a ValueError
+    naming that key — never a silent fall-through to another provider."""
+    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
+              "GEMINI_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    with pytest.raises(RuntimeError, match="no LLM provider key configured"):
+        build_judge("deepseek:deepseek-v4-pro")
+    # another provider's key is set, but not the one the spec names
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-test-key")
+    with pytest.raises(ValueError, match="DEEPSEEK_API_KEY"):
+        build_judge("deepseek:deepseek-v4-pro")
+    # …and an unknown provider name is refused before any key logic
+    with pytest.raises(ValueError, match="unknown provider"):
+        build_judge("nosuchprovider:some-model")
 
 
 def test_llm_judge_sends_only_the_anscheck_prompt():
