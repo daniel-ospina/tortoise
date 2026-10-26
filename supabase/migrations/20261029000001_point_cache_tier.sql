@@ -62,6 +62,15 @@ ALTER TABLE public.point
 -- 3. The read this column exists for: a tenant's graph-tier points. Partial, so
 --    the `record_only` rows (the highest-volume rows in the table) do not cost
 --    the cache projection a scan.
+--
+-- ⚠️ THE READER'S SPELLING IS PART OF THIS INDEX. `cache_projection.
+--    read_record_view` filters `cache_tier = 'graph'` — NOT `<> 'record_only'` —
+--    because PostgreSQL uses a partial index only when the query's predicate
+--    IMPLIES the index predicate (measured on postgres:16: `= 'graph'` plans as
+--    `Index Scan using idx_point_graph_tier` with no filter; `<> 'record_only'`
+--    plans as `idx_point_scope` + `Filter: (cache_tier <> 'record_only')`).
+--    Re-spelling the reader's predicate to `<>` leaves this index unused and
+--    reads every row of the record's highest-volume table instead.
 CREATE INDEX IF NOT EXISTS idx_point_graph_tier
   ON public.point (org_id, graph_id, node_key)
   WHERE cache_tier = 'graph';
