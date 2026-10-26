@@ -47,13 +47,15 @@ class TestDeclaration:
             assert callable(handler), f"handler {spec.name}() was removed"
 
     def test_public_sdk_surface_is_unchanged(self):
-        """The SDK surface did not GROW: 147 public methods, as pinned today.
+        """The SDK surface did not GROW: 150 public methods, as pinned today.
 
         This used to read *"Only MCP tool NAMES are retired — every public SDK method
         stays"*, which #4282 phase 2 made false: `events_poll`/`restore_point_at`
-        (2.1) and the memory-graph four (2.3) are retired SDK methods, so the count
-        moves by design and this test is the pin on where it lands. A retirement is
-        an OWNER-APPROVED row in `docs/product/beta-sdk-surface.md` (gated by
+        (2.1) and the memory-graph four (2.3) are retired SDK methods, and phase 2.2
+        (#10053) implemented three approved-but-absent names, so the count
+        moves by design and this test is the pin on where it lands. A retirement or
+        an approved name gaining a `def` is an OWNER-APPROVED row in
+        `docs/product/beta-sdk-surface.md` (gated by
         `tests/test_sdk_retirement.py`), never this assertion.
         """
         from tortoise.sdk import TortoiseSDK

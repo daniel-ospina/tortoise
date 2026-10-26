@@ -164,10 +164,10 @@ def test_an_undated_retraction_is_still_clean_and_states_no_end(dated):
     """A retraction with no temporal field must not gain one — and must stay gate-clean.
 
     The reference fold writes `validTo` only "when the journal states it" (the same
-    `_usable_instant` gate both replay arms use), so the undated path is symmetric-absent
-    rather than a `None` on one side and a missing key on the other.
+    `_storable_bound` gate both replay arms use), so the undated path is
+    symmetric-absent rather than a `None` on one side and a missing key on the other.
     """
-    events, sdk, pid = dated
+    events, sdk, _pid = dated
     bare = sdk.create_point("statement", "a claim withdrawn with no date")["id"]
     sdk.retract_point(bare)
 
@@ -182,3 +182,50 @@ def test_an_undated_retraction_is_still_clean_and_states_no_end(dated):
     result = check_consistency(log_path, proj)
     named = {d["id"]: d["fields"] for d in result["divergent_points"]}
     assert result["divergence"] is None, named
+
+
+# ── 4. an END_UNKNOWN spelling is a STORED end, not a dropped one ──────────
+
+def test_an_end_unknown_spelling_survives_the_gate_and_the_rebuild(tmp_path):
+    """`validTo = ""` is a legal STORED END_UNKNOWN (#9202) — replay must keep it.
+
+    The producer writes EVERY non-None end verbatim (`retract_point`'s ``valid_to is not
+    None``), and ``""`` is one of the three END_UNKNOWN spellings `tortoise/validity.py`
+    records as stored verbatim (with ``"TBD"`` and an unorderable date). All three
+    replay/fold arms gated the bound on ``_usable_instant``, whose FALSY half exists for
+    ``updatedAt`` (an instant the fold substitutes a clock for) — so
+    ``update_knowledge(p, valid_until="")`` wrote the end live and DROPPED it on rebuild:
+    live ≠ rebuild, plus a reference-fold content divergence no replay could clear. The
+    bound's own gate (`_storable_bound`) keeps anything the store holds exactly.
+    """
+    events = tmp_path / "events"
+    events.mkdir()
+    sdk = TortoiseSDK(str(tmp_path / "end-unknown.db"),
+                      event_log_path=str(events / "events.jsonl"))
+    try:
+        pid = sdk.create_point("statement", "a claim that ended, undatable")["id"]
+        # The documented public door (row 22): retraction is a temporal FIELD.
+        sdk.update_knowledge(pid, valid_until="")
+
+        assert _node(sdk, pid)["validTo"] == "", (
+            "the producer stopped storing the caller's END_UNKNOWN spelling; this test's "
+            "premise is that live writes it (#9202)")
+
+        log_path = str(events / "events.jsonl")
+        proj = sdk._get_proj()
+        check_consistency(log_path, proj)  # adopt
+        result = check_consistency(log_path, proj)
+        named = {d["id"]: d["fields"] for d in result["divergent_points"]}
+        assert result["divergence"] is None, (
+            "the reference fold dropped an END_UNKNOWN end the graph holds: "
+            f"divergence={result['divergence']!r} named={named!r}")
+
+        _stamp(sdk, pid, "REPLAY-DID-NOT-RUN")
+        proj.rebuild_all(str(events), confirm_destructive=True)
+        after = _node(sdk, pid)
+        assert after["status"] == "retracted", after
+        assert after["validTo"] == "", (
+            "the replay dropped the END_UNKNOWN window end the live node holds — "
+            f"live≠rebuild: rebuilt={after.get('validTo')!r}")
+    finally:
+        sdk.close()

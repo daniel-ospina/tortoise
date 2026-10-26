@@ -13985,7 +13985,10 @@ class TortoiseSDK:
         calls that do record both — the same rule :meth:`link_entities` applies
         (#10053 review, P2). Compose them in the order the lifecycle allows: a
         property/window update FIRST, the terminal stamp SECOND (#7819 refuses a
-        temporal re-stamp on an already-terminal claim).
+        temporal re-stamp on an already-terminal claim). And the temporal field
+        names exactly ONE end: ``valid_until=`` and ``invalid_at=`` are two
+        spellings of the same ``validTo``, so two DIFFERENT values in one call are
+        a conflict and are refused as well, rather than one of them being dropped.
         """
         if annotation is not None:
             if not isinstance(annotation, dict):
@@ -14041,6 +14044,26 @@ class TortoiseSDK:
         # `update_knowledge(p, valid_until="2027-01-01")` retracted the point
         # immediately and stored no end at all, and the `corrected_by_id` arm
         # stamped `validTo = now` instead of the caller's instant (#4282).
+        #
+        # ⛔ TWO window ends are a CONFLICT, not a precedence (#10053 review, P2).
+        # The docstring states them as alternatives ("valid_until= **or**
+        # invalid_at=") and nothing enforced it: `update_knowledge(p,
+        # valid_until=A, invalid_at=B)` returned success having written B and
+        # dropped A — the same "a call that stored part of what it said"
+        # class this method refuses everywhere else (the annotation arm, the
+        # temporal-beside-props arm). Both values ARE recordable, so the refusal
+        # is about the CONFLICT, not about an arm that cannot carry it. Equal
+        # values agree and pass through.
+        if (valid_until is not None and invalid_at is not None
+                and valid_until != invalid_at):
+            raise ValueError(
+                f"update_knowledge: valid_until={valid_until!r} and "
+                f"invalid_at={invalid_at!r} name two different window ends for "
+                f"one claim, and this verb writes exactly one `validTo`. "
+                f"Refusing rather than returning success for a call that "
+                f"recorded only part of it: they are two spellings of the SAME "
+                f"field, so pass one (or two equal values), never a "
+                f"contradiction.")
         end = invalid_at if invalid_at is not None else valid_until
         if end is not None:
             # The temporal arm's writers (`retract_point` / `invalidate_point`)
@@ -15562,9 +15585,9 @@ class TortoiseSDK:
             except ValueError:
                 if door == "retract_point":
                     advice = (
-                        f"The window end is the caller's here, so pass a "
-                        f"valid_to that is not before it, or omit valid_to for "
-                        f"an undated tombstone.")
+                        "The window end is the caller's here, so pass a "
+                        "valid_to that is not before it, or omit valid_to for "
+                        "an undated tombstone.")
                 else:
                     advice = (
                         f"retract_point is the window-agnostic route (it does "
@@ -16640,7 +16663,9 @@ class TortoiseSDK:
         #
         # An UNDATED retraction passes no key at all, so its record stays
         # byte-identical to before: presence is ownership, and the folds' shared
-        # `_usable_instant` gate already treats "absent" and "null" alike.
+        # `_storable_bound` gate already treats "absent" and "null" alike (and
+        # keeps an END_UNKNOWN spelling such as `""`, which the INSTANT
+        # predicate `_usable_instant` would drop — #10053 review).
         _window = {} if valid_to is None else {"valid_to": valid_to}
         self._emit_event("PointRetracted", {"id": id, **_window},
                          id=id, recorded_ts=_now, **_window)

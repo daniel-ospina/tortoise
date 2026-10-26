@@ -91,6 +91,7 @@ from .projection.entities import (
     BELIEF_PROPS,
     _EntityHandlers,
     _is_persistable_prop_value,
+    _storable_bound,
     _store_holds_prop_value,
     _usable_instant,
     _writable_journalled_vector,
@@ -1420,10 +1421,15 @@ def _fold_journal(events: list[dict]) -> dict:
                 # writes the key onto the GRAPH. That is the #5048/#3817 class, one
                 # level down: not just "the field is excluded from comparison" but
                 # "the reference cannot state a field the graph is required to have".
-                # A `None`/corrupt value writes nothing, exactly as the two replay
-                # arms write no column for it, so the legacy ts-less/no-end path stays
-                # symmetric-absent.
-                if _usable_instant(ev.get("valid_to")):
+                # The gate is the BOUND's own (`_storable_bound`), not the INSTANT
+                # predicate `updatedAt` uses above: ``validTo = ""`` / `"TBD"` is a
+                # legal STORED END_UNKNOWN (#9202) that the producer writes, so the
+                # falsy half of `_usable_instant` would make this reference disagree
+                # with a faithful graph — the same divergence one spelling over
+                # (#10053 review). A `None`/unstorable value writes nothing, exactly
+                # as the two replay arms write no column for it, so the legacy
+                # ts-less/no-end path stays symmetric-absent.
+                if _storable_bound(ev.get("valid_to")):
                     entry["validTo"] = ev["valid_to"]
             elif t == "PointSuperseded":
                 entry["status"] = "superseded"

@@ -351,6 +351,31 @@ def test_a_temporal_field_with_a_successor_is_the_invalidate_arm(sdk):
     assert door == "invalidate_point" and args == ("p1", "p2")
 
 
+def test_two_different_window_ends_are_refused_not_resolved_by_precedence(sdk):
+    """`valid_until` and `invalid_at` are ONE field: two values are a conflict.
+
+    Before this refusal `update_knowledge(p, valid_until=A, invalid_at=B)`
+    returned success having written B and dropped A — the "a call that stored
+    only part of what it said" class this verb refuses everywhere else (the
+    annotation arm, the temporal-beside-props arm). Two ends are both
+    recordable, so the refusal is about the CONFLICT, not about an arm that
+    cannot carry it.
+    """
+    with pytest.raises(ValueError, match="two different window ends"):
+        sdk.update_knowledge("p1", valid_until="2026-01-01", invalid_at="2026-06-01")
+    assert sdk.calls == [], "a refused conflict must not fall through to a write"
+
+
+def test_two_equal_window_ends_are_one_field_and_pass_through(sdk):
+    """Agreement is not a conflict: the same instant spelled twice is one end."""
+    sdk.update_knowledge("p1", valid_until="2026-01-01", invalid_at="2026-01-01")
+    door, args, kwargs = sdk.calls[-1]
+    assert door == "retract_point" and args == ("p1",)
+    assert kwargs["valid_to"] == "2026-01-01", (
+        "an agreeing pair must reach the writer as the caller's instant, "
+        f"not be dropped: {kwargs!r}")
+
+
 def test_annotating_a_link_is_an_update_on_it(sdk):
     sdk.update_knowledge("op1", annotation={
         "bias": 0.1, "precision": 0.2, "consistency": 0.3, "directness": 0.4})

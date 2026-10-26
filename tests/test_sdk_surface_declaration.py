@@ -19,8 +19,8 @@ What each test is for, and why the naive version of it would prove nothing:
      by the declaration's content, not by the test's other machinery.
   4. **An approved method that does not exist fails, and is NAMED** — the mirror direction,
      with the same non-vacuity pattern. A gate tested in one direction permits the other.
-  5. **Today's state is RED, and pinned with the real numbers** (40 approved, 147 live, 138
-     off the surface, 30 approved-but-absent). This is the honest reading of #4282; it goes
+  5. **Today's state is RED, and pinned with the real numbers** (40 approved, 150 live, 138
+     off the surface, 27 approved-but-absent). This is the honest reading of #4282; it goes
      green when Phase 2 lands, not before — which is why the three live numbers carry an
      explicit "update this premise" note instead of being restated from the declaration.
   6. **The CONTRACT half is green and is the required-CI invariant** — the declaration is
