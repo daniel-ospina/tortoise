@@ -13,6 +13,7 @@ and a second copy of them in a test would be a second gate.
 from __future__ import annotations
 
 import datetime as dt
+import re
 import sys
 from pathlib import Path
 
@@ -223,7 +224,14 @@ def test_the_writers_precision_is_the_one_this_check_assumes() -> None:
     assert ci_manifest.VALUE_DECIMALS == 1, (
         "the validator's precision pin drifted from the writer's one-decimal "
         "render")
-    assert "  test_bridge_table.py: 1.2\n" in rendered, (
+    # The pin is on the RENDERED VALUE, not on the row's whole line: the writer
+    # keeps a surviving note on the row (`— ci-timing …; was 3.0`) when it
+    # re-bases one, so asserting `"  test_bridge_table.py: 1.2\n"` failed the
+    # moment that row acquired a note — a false red on a row the writer rendered
+    # exactly right (#10026 fallout). Anchored, so a second decimal place, a
+    # missing one, or a different value still fails.
+    assert re.search(r"^  test_bridge_table\.py: 1\.2(?:  # .*)?$",
+                     rendered, re.MULTILINE), (
         "the writer no longer renders one decimal place — VALUE_DECIMALS and "
         "the plausibility check must move with it")
 
