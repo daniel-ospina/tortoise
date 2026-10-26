@@ -1521,6 +1521,30 @@ class TestPointsCreate:
         credential instead of `None`. `_resolve_record_tenant` is stubbed so the
         assertion is about the call site, not about whether this host has
         Supabase configured.
+
+        ⛔ This test must leave the PROCESS-GLOBAL dream state exactly as it
+        found it (`_DREAM_QUEUES` / `_DREAM_RECORD_TENANTS` / `_DREAM_TASKS`) and
+        must not start a drain. Both were #10027 CI reds at `96f6d91a1` (job
+        121608127165):
+
+        * the first shape POPPED `_DREAM_TASKS[org]` and cancelled it. That dict
+          is shared by every test in the session, so the entry is usually a
+          PREVIOUS test's task whose loop is already closed — `Task.cancel()`
+          schedules a callback on that loop and raises `RuntimeError: Event loop
+          is closed`, out of this test's `finally`.
+        * calling the real `_enqueue_dream` with real roots SPAWNS
+          `_dream_worker` on this test's loop; the worker wakes after the
+          fixture has closed that loop and popped `TORTOISE_DB_PATH`, so its
+          `_make_sdk` re-mints the keepalive anchor for a path no later test
+          expects (#1950 class) and the session reads a stale, empty graph.
+
+        So the spy calls the real `_enqueue_dream` with `dirty_roots=[]` — its
+        documented no-op early return — which still proves the real signature
+        accepts what the route passes, while enqueuing nothing. The carry
+        itself (the queue key and `_DREAM_RECORD_TENANTS`) is pinned by
+        `test_9078_record_written_by_production_path.py::test_the_dream_drain_
+        carries_the_enqueueing_requests_tenant`, which runs on a loop of its own
+        and cancels its own tasks.
         """
         import tortoise.hosted_api as ha
 
@@ -1530,24 +1554,70 @@ class TestPointsCreate:
         app.dependency_overrides[get_current_org] = lambda: dict(
             TEST_TEAM, default_graph_id=row)
 
+        # What the SESSION already had, so this test can put it back: these are
+        # process globals shared with every other test in the run.
+        _preexisting = (dict(ha._DREAM_TASKS), dict(ha._DREAM_RECORD_TENANTS),
+                        dict(ha._DREAM_QUEUES))
+
+        # A PEER test's abandoned drain, in the exact shape CI had it: a task
+        # whose event loop is already CLOSED (a previous test's TestClient
+        # portal, torn down with the task still pending). `cancel()` on such a
+        # task schedules a callback on that dead loop and raises — the measured
+        # #10027 red, `RuntimeError: Event loop is closed`. Modelled rather than
+        # built from a real dead loop so the pin adds no `Task was destroyed but
+        # it is pending` / `coroutine was never awaited` noise of its own.
+        class _TaskOnAClosedLoop:
+            def cancel(self) -> None:
+                raise RuntimeError("Event loop is closed")
+
+            def done(self) -> bool:
+                return False
+
+            def cancelled(self) -> bool:
+                return False
+
+        stale_task = _TaskOnAClosedLoop()
+        ha._DREAM_TASKS[TEST_ORG_ID] = stale_task
+
+        before = (dict(ha._DREAM_TASKS), dict(ha._DREAM_RECORD_TENANTS),
+                  dict(ha._DREAM_QUEUES))
         seen: list[dict] = []
         real_enqueue = ha._enqueue_dream
 
         def _spy(org_id, dirty_roots, **kwargs):
             seen.append(kwargs)
-            return real_enqueue(org_id, dirty_roots, **kwargs)
+            # No-op path on purpose (see the docstring): the real function,
+            # the real kwargs, and NO drain spawned for this test to leak.
+            return real_enqueue(org_id, [], **kwargs)
 
         monkeypatch.setattr(ha, "_enqueue_dream", _spy)
         try:
             r = client.post("/v1/points",
                             json={"content": "org-wide dream tenant"})
             assert r.status_code == 200, r.text
+
+            after = (dict(ha._DREAM_TASKS), dict(ha._DREAM_RECORD_TENANTS),
+                     dict(ha._DREAM_QUEUES))
+            assert after == before, (
+                "the point-write route left PROCESS-GLOBAL dream state behind; "
+                "a later test in this session then drains it (or cancels a task "
+                "on a closed loop) — see #10027 CI reds: "
+                f"tasks/tenants/queues {before} -> {after}")
+            assert ha._DREAM_TASKS.get(TEST_ORG_ID) is stale_task, (
+                "a peer test's queued drain was dropped or replaced — "
+                f"{ha._DREAM_TASKS.get(TEST_ORG_ID)!r}")
+            assert not stale_task.cancelled(), (
+                "this test cancelled a task it did not create; on a closed "
+                "loop that raises `RuntimeError: Event loop is closed` "
+                "(#10027 CI red)")
         finally:
-            ha._DREAM_QUEUES.pop(TEST_ORG_ID, None)
-            ha._DREAM_RECORD_TENANTS.pop(TEST_ORG_ID, None)
-            task = ha._DREAM_TASKS.pop(TEST_ORG_ID, None)
-            if task is not None:
-                task.cancel()
+            # Put the session's own state back (in place — these mappings are
+            # module globals other tests hold references to).
+            for _mapping, _snapshot in zip(
+                    (ha._DREAM_TASKS, ha._DREAM_RECORD_TENANTS,
+                     ha._DREAM_QUEUES), _preexisting):
+                _mapping.clear()
+                _mapping.update(_snapshot)
 
         assert len(seen) == 1, seen
         # The org-wide key rides the ORG-KEYED drain, whose SDK
@@ -2965,11 +3035,37 @@ class TestListApiKeysSupabase:
 class TestDreamEndpoint:
     """POST /v1/dream — trigger EP stabilization (#85)."""
 
-    def test_dream_incremental(self, client):
+    def test_dream_incremental(self, client, monkeypatch):
         # #5049: `POST /v1/dream` is not exempt from the transport wait bound.
         # A 504 refusal is a non-answer (the handler may still complete), so the
         # verdict is INCONCLUSIVE — this was one of the four reds #8122 measured
         # as `assert 504 == 200` at a full-file run.
+        #
+        # ⛔ #10027 CI red: this used to dream an EMPTY per-test graph, which is
+        # not the incremental ("local") shape at all. With no dirty root to
+        # hydrate, the I1 router resolves `full`, and a graph with no anchors
+        # short-circuits to the empty-scan result (`{batches: 0,
+        # converged_all: True, scanned_count: 0}`) — no `converged`, no
+        # `iterations`. It only ever passed by reading a DIRTY graph left in a
+        # reused embedded anchor by an earlier test in the file, so the
+        # assertion measured ambient process state rather than this route's
+        # incremental contract (job 121608127165 measured the empty-scan body
+        # here). Seed the dirty root the mode router needs, on THIS test's
+        # graph: `credibility` is explicit because the fail-closed calibration
+        # gate (#344/#1157) demands an authored baseline before an EP surface
+        # runs. The write-triggered drain is stubbed out so nothing clears the
+        # flag between the write and the pass (its `_dream_worker` is a
+        # different subject, and starting one here leaks a task past this
+        # test's loop).
+        import tortoise.hosted_api as ha
+
+        async def _no_drain(org_id, key=None):  # pragma: no cover - never runs
+            return None
+
+        monkeypatch.setattr(ha, "_dream_worker", _no_drain)
+        w = client.post("/v1/points", json={"content": "incremental dream seed",
+                                            "credibility": "gold"})
+        assert w.status_code == 200, w.text
         r = require_answered(client.post("/v1/dream"),
                              what="POST /v1/dream answered")
         assert r.status_code == 200, r.text
