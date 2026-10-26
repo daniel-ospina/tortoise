@@ -124,9 +124,6 @@ response_fields:
     #9202). ABSENT (not null) when the window has no
     end at all, so the open shape stays distinguishable. Emitted with the same block as valid_from_precision and
     end_state'
-    cannot summon one — the same gate the start row records, applied to BOTH ends; null here does NOT change end_state,
-    which stays `known` for a dated-but-un-datable end, #9202). ABSENT (not null) when the window has no end at
-    all, so the open shape stays distinguishable. Emitted with the same block as valid_from_precision and end_state'
   unchanged_when_off: n/a — not flag-gated; absent when the point has no end, so an open-ended hit stays byte-identical
 - response: tortoise_search
   field: end_state
