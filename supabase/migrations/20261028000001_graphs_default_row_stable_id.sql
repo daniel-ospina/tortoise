@@ -113,6 +113,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_graphs_org_default_active
 -- refuses `kind='default'`, so such a row is not produced by any supported
 -- path; the guard is written so that if one exists anyway the org gets a real
 -- active row rather than silence.
+-- ⚠️ …but that last sentence was WRONG before §2b existed, and it is stated
+-- precisely here rather than deleted: for such a row the guard above still
+-- passes (it is not `active`), while the §1 index — `status <> 'deleted'` —
+-- still sees it. So the insert collides and `ON CONFLICT DO NOTHING` below
+-- skips the org: it gets NO active row and no failure. The row is not healed
+-- by this file; §2b names the org(s) in a WARNING so the state cannot pass
+-- unobserved, and the operator's remedy is in
+-- docs/ops/multi-graph-migration-runbook.md (correct the status, re-run — the
+-- file is idempotent).
 -- The second guard keeps the migration from fighting the live-name uniqueness
 -- index (`uq_graphs_org_name_active` on (org_id, name) WHERE status <>
 -- 'deleted'): an organization that already has a graph *named* 'default' keeps
@@ -159,6 +168,45 @@ SELECT 'g_' || substr(md5(random()::text || clock_timestamp()::text || o.id), 1,
 -- (`ensure_default_graph_row` adopts the winner on
 -- `uq_graphs_org_name_active`); this is its SQL counterpart.
 ON CONFLICT DO NOTHING;
+
+-- ── 2b. Name the organizations §2's guard cannot heal ──────────────────────
+-- The guards above test `status = 'active'`; the backstop index in §1 tests
+-- `status <> 'deleted'`. A `kind='default'` row that is NEITHER is therefore
+-- invisible to the guards and visible to the index: §2's insert collides on
+-- `uq_graphs_org_default_active`, `ON CONFLICT DO NOTHING` treats the collision
+-- as "the row I wanted", and the organization ends with NO active default row
+-- — the permanently unnamed (`no_tenant`) state this file exists to remove,
+-- arriving with a green migration. It is the one shape §2's guard comment got
+-- wrong before this block existed: it promised such an org "a real active row
+-- rather than silence", and the index this file adds is exactly what stops it.
+--
+-- No supported path produces that status (`graphs.status` is free text with no
+-- CHECK, but `soft_delete_graph` writes 'deleted' and refuses `kind='default'`),
+-- so this is a DRIFT REPORT, not a repair: this file cannot choose between
+-- tombstoning the operator's row and minting beside it, and guessing is the
+-- fail-open direction. It names the orgs instead, so the state is visible in
+-- the deploy log — a tenant that refuses every write must never be silent.
+DO $$
+DECLARE
+    stranded text;
+BEGIN
+    SELECT string_agg(s.org_id, ', ') INTO stranded
+      FROM (SELECT g.org_id
+              FROM public.graphs g
+             WHERE g.kind = 'default'
+               AND g.status NOT IN ('active', 'deleted')
+               AND NOT EXISTS (
+                    SELECT 1 FROM public.graphs a
+                     WHERE a.org_id = g.org_id
+                       AND a.kind = 'default'
+                       AND a.status = 'active')
+             GROUP BY g.org_id) s;
+    IF stranded IS NOT NULL THEN
+        RAISE WARNING
+            'default graphs row NOT minted for organization(s) %: a kind=''default'' row exists whose status is neither ''active'' nor ''deleted'', so uq_graphs_org_default_active blocks the backfill. Correct that row''s status (or tombstone it), then re-run this migration (idempotent) — until then the organization''s record refuses `no_tenant`.',
+            stranded;
+    END IF;
+END $$;
 
 -- ── 3. The storage key, re-asserted ────────────────────────────────────────
 -- A `kind='default'` row's namespace must BE the org's graph name. This is the

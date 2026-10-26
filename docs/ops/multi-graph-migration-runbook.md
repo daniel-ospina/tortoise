@@ -35,7 +35,12 @@ Consequences (E2E-5 exit gate):
 - **Two writes, one direction.** The backfill (`20261028000001`) is idempotent and
   safe to re-run — it is the **explicit healing path** if a mint ever failed at
   provisioning. Re-running it mints a row for any organization that lacks an
-  active `kind='default'` one.
+  active `kind='default'` one — **except** for the two blocked shapes in the
+  residual list below, where the mint collides on a unique index instead of
+  fighting it (it does not guess): a graph already *named* `default`, and a
+  `kind='default'` row whose status is neither `active` nor `deleted`. The
+  second is reported by the migration as a WARNING naming the org(s), so a
+  re-run that cannot heal an org says so rather than reporting a silent success. 
 
 - **A failed mint never fails the organization.** `ensure_default_graph_row`
   itself raises (a mint must not claim success for an unpersisted graph), but
@@ -57,11 +62,25 @@ Consequences (E2E-5 exit gate):
   healed the record keeps refusing that org `no_tenant` — fail-closed, and now
   logged, never silent.
 
-- **The one real residual:** an organization that already owns a graph *named*
-  `default` gets no second row — that would violate
-  `uq_graphs_org_name_active`. Its default graph then has no id, so the record
-  keeps refusing it `no_tenant` (fail-closed). Remediation: rename the
-  colliding graph, then re-run the migration.
+- **Two real residuals.** Both leave an organization with no id for its
+  default graph, so the record keeps refusing it `no_tenant` (fail-closed, and
+  it never files under a guessed tenant). Neither is produced by a supported
+  path; both are reported rather than healed.
+
+  1. **A graph already *named* `default`.** A second row would violate
+     `uq_graphs_org_name_active`. Remediation: rename the colliding graph, then
+     re-run the migration.
+  2. **A `kind='default'` row whose status is neither `active` nor `deleted`**
+     (e.g. `'archived'` — `graphs.status` is free text with no CHECK, and
+     `soft_delete_graph` only ever writes `'deleted'`). The backfill's guards
+     test `status='active'` while `uq_graphs_org_default_active` tests
+     `status <> 'deleted'`, so the insert collides and is skipped: the org gets
+     **no** active row, and the runtime self-heal cannot fix it either
+     (`ensure_default_graph_row`'s adopt arm requires `status='active'` and
+     re-raises otherwise). The migration emits a **WARNING naming the
+     organization(s)** — a tenant that refuses every write must not be silent.
+     Remediation: correct that row's status (or tombstone it), then re-run the
+     migration (idempotent).
 
 - **"The default row" is singular, and the database now says so.** Every reader
   takes the FIRST row (`default_graph_id_for`, `graph_metadata`,
