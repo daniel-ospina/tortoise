@@ -1152,12 +1152,15 @@ def capture_site(line: str) -> str | None:
 
 
 def test_every_pytest_log_tail_is_followed_by_the_reporter() -> None:
-    """EVERY `/tmp/*.log` capture in these workflows reports through the reporter.
+    """EVERY pytest-log capture in these workflows reports through the reporter.
 
-    Eight sites in the two workflows this guard NAMES (`ATTRIBUTION_WORKFLOWS` —
+    A capture is a `/tmp/*.log` literal OR the per-runner `"$PYTEST_LOG"` a hardened
+    leg writes through — the shape is the LOG CAPTURE, not the path, so both owe the
+    reporter. Eight sites in the two workflows this guard NAMES (`ATTRIBUTION_WORKFLOWS` —
     the scope is explicit, and its one known omission, ci.yml's `hosted-e2e` leg,
     is pinned by `test_the_uncovered_workflow_is_named_not_silently_dropped` and
-    #9300): 5 `pytest.log` tails in python-ci.yml, 1 `trackb.log` (the must-pass
+    #9300): 5 `pytest.log`-named tails in python-ci.yml (2 of them the per-runner
+    `"$PYTEST_LOG"`, not a `/tmp` literal), 1 `trackb.log` (the must-pass
     Track B member, whose log name does not contain "pytest" — it was the coverage
     gap a first cut missed), 1 `pmv-pytest.log` in post-merge-validation.yml, and 1
     `pytest-d14.log`, written through `| tee` rather than a tail (this file counts
@@ -1179,9 +1182,11 @@ def test_every_pytest_log_tail_is_followed_by_the_reporter() -> None:
                 f"{workflow.name}:{i + 1}: the `{target}` capture is not followed by the "
                 "reporter — this leg can silently omit its own failure set (#3470)"
             )
-    # The measured inventory is 8: five `/tmp/pytest.log` tails in python-ci.yml —
-    # `test`'s last-failed pre-phase (200), `test` (300), `test-slow` (300),
-    # `test-concurrency-falkor` (120) and `test-carve-out` (200) — plus `trackb.log`,
+    # The measured inventory is 8: five `pytest.log`-named tails in python-ci.yml —
+    # `test`'s last-failed pre-phase (200) and `test` (300) through the per-runner
+    # `"$PYTEST_LOG"` since #10028, then the three `/tmp/pytest.log` literals
+    # `test-slow` (300), `test-concurrency-falkor` (120) and `test-carve-out` (200) —
+    # plus `trackb.log`,
     # plus `pmv-pytest.log` in post-merge-validation.yml, plus `pytest-d14.log` written
     # through `| tee`. The floor used to be 6 against the 7 sites main's tail-only
     # counter measured — ONE below reality — so a single leg could be renamed out from

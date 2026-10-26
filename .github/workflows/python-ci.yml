@@ -1044,10 +1044,13 @@ jobs:
           # A watchdog kill on the self-hosted pool is a CLASS kill, not a test
           # verdict, and it currently costs a triage cycle to establish that:
           # 35 of the 52 red self-hosted legs across the last 39 Python CI runs
-          # ended in a watchdog kill (24 × rc137 + 11 × rc124), and the pool
-          # measures ~4x hosted per-test on the SAME nodeids (junit sum ratio
-          # 4.05x over 654 common testcases, arm64 `pi-runner-vm-3`, run
-          # 40238275534 vs hosted 40249711042). Stating the class up front, and
+          # ended in a watchdog kill (24 × rc137 + 11 × rc124), and per-test cost
+          # on the SAME nodeids splits by CLASS — arm64 legs 4.46x hosted (sum
+          # 4.05x), x64 cells 1.16x (sum 1.45x), over 654 common testcases across
+          # run 40238275534 vs hosted 40249711042. There is NO single pool-wide
+          # ratio, so the figures are named per class rather than as "~4x": the
+          # x64 cells are only ~1.2x and a blanket number would mispredict them.
+          # Stating the class up front, and
           # again on the kill banner, is what lets a reader (and the merge rail)
           # attribute the red without opening a 10k-line log.
           #
