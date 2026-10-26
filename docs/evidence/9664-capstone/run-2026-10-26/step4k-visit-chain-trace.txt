@@ -1,9 +1,11 @@
 # step 4 — the OAuth visit chain, as the browser itself recorded it
 #
 # PROVENANCE. Read-only extract of cmux's browser-history store,
-# ~/Library/Application Support/com.cmuxterm.app/browser_history.json — the history of the
-# persistent profile ("chatgpt-acceptance") that surface:1000030017 runs on. This is a STORE
-# read, not a screenshot: the screenshots step4e..step4j are the pixel evidence for the same
+# ~/Library/Application Support/com.cmuxterm.app/browser_history.json — the APP-LEVEL store that
+# records what its browser surfaces visit. It is not scoped to one profile: it holds 65 entries back
+# to 2026-08-09, most of them unrelated browsing, which makes the absence reported below a
+# whole-store absence rather than a within-one-profile one. This is a STORE read, not a screenshot:
+# the screenshots step4e..step4j are the pixel evidence for the same
 # minutes, and this file is the URL-level chain behind them. URLs are printed VERBATIM (no
 # truncation, nothing elided); timestamps are converted from the store's Apple-epoch field
 # `lastVisited`. Extracted 2026-10-26 for the #9664 capstone run; nothing was written to the store.

@@ -56,7 +56,7 @@ not a client-side default. **Smallest unblocking action:** re-dispatch this lane
 have the owner set that mode to `automation`); nothing in the product blocks it.
 
 Everything below is therefore **the run's own evidence, published** — plus, for step 4, one new
-URL-level trace (`step4k`) extracted read-only from the browser's own history store, which was
+URL-level trace (`step4k`) extracted read-only from cmux's app-level browser-history store, which was
 available without the socket.
 
 ## Per-step verdict
@@ -96,13 +96,15 @@ the ChatGPT **consent dialog renders** (`step4e`); the Tortoise **authorize page
 a sign-in (`step4f`, `step4h`); the Google round trip returns the authorization **code to
 `https://tortoise.premiselabs.co/?code=…`** — the marketing host, which ignores it (`step4i`); and the
 **ChatGPT connector callback `https://chatgpt.com/connector/oauth/xf4v1zmjo3-b` is never reached**
-(`step4k`, 0 matches across the profile's entire history). Afterwards the plugin state is unchanged
+(`step4k`, 0 matches across the whole store — 65 entries back to 2026-08-09, unrelated browsing
+included). Afterwards the plugin state is unchanged
 (`step4g`) and the dashboard reads *"No connection observed yet"* (`step4j`). Consent rendering was
 never the blocker; the **redirect target** is.
 
-`step4k` also carries the contrast that makes the diagnosis sharp: the *app's* own Google login in the
-same profile asks the provider for `redirect_to=https://app.premiselabs.co/auth/callback` and completes;
-the authorize page asks for `redirect_to=https://api.premiselabs.co/oauth/authorize?…` and does not.
+`step4k` also carries the contrast that makes the diagnosis sharp: the *app's* own Google login, from a
+cmux browser surface in the same minutes, asks the provider for
+`redirect_to=https://app.premiselabs.co/auth/callback` and completes; the authorize page asks for
+`redirect_to=https://api.premiselabs.co/oauth/authorize?…` and does not.
 
 ## Probe B — the four ugly cases, per case
 
