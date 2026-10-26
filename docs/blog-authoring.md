@@ -201,10 +201,11 @@ Google".
 **What fires it.** Two callers reach the same submission path — the agent API, and the console (which
 has four call sites across three user actions):
 
-1. **The agent API's publish transition** — `PATCH /blog/api/posts/:slug` (`api/posts/[[path]].ts`).
-   Two arms, both "the row became publicly readable": a `status: "published"` transition, and
-   `hold_for_review: false` on a row that is already `published` and held (which changes no status but
-   makes the URL stop answering 404).
+1. **The agent API**, in `api/posts/[[path]].ts`. Three arms, all "the row became publicly readable":
+   a `PATCH` with `status: "published"`; a `PATCH` with `hold_for_review: false` on a row that is
+   already `published` and held (no status change, but the URL stops answering 404); and a **`POST`
+   that is born `published`** — a create that lands a publicly readable row is a publish transition
+   like any other, so it submits. A `POST` that creates a **draft** submits nothing.
 2. **The console**, which writes status straight to Supabase with supabase-js and therefore never
    passes through the agent API. Every console write that can make a row publishable notifies, via
    `POST /blog/api/notify-publish { slug }` (#9803):
@@ -238,10 +239,6 @@ for it. The agent API and the console share `_shared/indexnow.ts`: one rule, bot
 **Never fired:**
 
 - writing a draft (from either caller);
-- **creating a post directly as `published` through the AGENT API** — `POST /blog/api/posts` with
-  `status: "published"` is a publish transition, but the notification belongs to the PATCH transition.
-  Publish a draft with PATCH if you want the submission. (The **editor's** create-and-publish does
-  notify — it goes through the endpoint above, which is why the bullet names the agent API.)
 - an edit that leaves the row as live as it already was — through **either** caller. The agent API
   refuses it in `becameLive` (unchanged `status` and `hold_for_review`), and since #9680 the editor
   refuses it with the same predicate: saving a live article, even via "Save & Republish", submits
