@@ -27,7 +27,7 @@ backfilled:
 
 | Mode | Default graph source | Notes |
 |---|---|---|
-| Supabase | `teams.graph_name` (derived id literal `'default'`; NO `graphs` row) | `graph_metadata`/`default_graph_id` derive it |
+| Supabase | `teams.graph_name` (namespace) + an active `kind='default'` `graphs` row carrying the **stable id** — minted per organization by `20261028000001` (#10025), so no organization is left without one | `graph_metadata` keeps the `'default'` sentinel in `graph_id` and adds `stable_id` beside it; the record tenant is read from that row, never derived from the name |
 | Registry | a `kind='default'` Graph node whose namespace IS the team namespace | created at team provisioning (pre-existing, #518 — predates the epic) |
 
 Consequences (E2E-5 exit gate):

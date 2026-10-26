@@ -576,9 +576,12 @@ def record_tenant_for_graph(plan: dict | None) -> tuple[str, str] | None:
     graph Y). That divergence is the same silent-wrong-target class this issue
     exists to close.
 
-    The DEFAULT graph is deliberately still None: it need not have a row, and
-    naming it is #9188's open question — the same deferral the credential path
-    makes.
+    The DEFAULT graph is deliberately still None HERE, but no longer because
+    it lacks a row: `20261028000001` mints an active `kind='default'` row per
+    organization, and the credential path (`resolve_api_key` →
+    `default_graph_id`) now names that tenant. This seam has not been wired to
+    it yet — closing that is #9188's open question, which is a deferral of
+    THIS lane only.
     """
     if plan is None or (plan.get("kind") or "") == "default":
         return None

@@ -1111,9 +1111,13 @@ def resolve_api_key(cp, token: str) -> dict | None:
         cp, org_id, graph_id, org_row.get("graph_name"))
     # #10025: an org-wide key's RECORD tenant is the org's default graph, whose
     # stable id is read from the control plane. Computed only when the
-    # credential named no graph — a graph-bound key already carries its own id,
-    # and one extra control-plane read must not ride that hot path. None (no
-    # row) keeps the record write REFUSED rather than filed under a guess.
+    # credential named no graph — a graph-bound key already carries its own id
+    # and needs nothing added. Note the cost honestly: the read is therefore
+    # paid on the COMMON path (every org-wide key — all 128 in production at
+    # the time of writing) and skipped only on the graph-bound one. It is a
+    # point read on `idx_graphs_org_id`, not a scan, and it buys the record's
+    # fail-closed tenant; None (no row) keeps the record write REFUSED rather
+    # than filed under a guess.
     default_graph_id = (None if graph_id
                         else default_graph_id_for(cp, org_id))
     return {
@@ -3863,9 +3867,16 @@ def graph_metadata(cp, org_id: str) -> list[dict]:
     default_name = "default"
     default_id = None
     try:
+        # #10025: `status` is filtered for the SAME reason
+        # `default_graph_id_for` filters it — a tombstoned row is not the
+        # default graph. Without this the two readers of "where is the default
+        # row" disagreed, and `stable_id` could name a `status='deleted'` id
+        # that the record FK accepts, so a caller following "file rows under
+        # stable_id" could file them under a deleted graph.
         drow = cp.query(
             "graphs", select=["recording", "name", "id"],
-            filters=[("org_id", "eq", org_id), ("kind", "eq", "default")],
+            filters=[("org_id", "eq", org_id), ("kind", "eq", "default"),
+                     ("status", "eq", "active")],
         )
         if drow:
             default_rec = drow[0].get("recording")
@@ -3935,10 +3946,17 @@ def insert_graph(cp, row: dict) -> None:
 
 def delete_graph_row(cp, org_id: str, graph_id: str) -> None:
     """Hard-delete a graphs row by (id, org) — the rollback path for a
-    failed mint (D11: no orphan graph). Never touches the default graph
-    (no row exists for it — it is derived from organizations.graph_name)."""
+    failed mint (D11: no orphan graph). Never touches the default graph.
+
+    #10025: the default graph now HAS a `kind='default'` row, so "it has no
+    row" is no longer what keeps this off it — the explicit `kind neq
+    'default'` filter below is. It matters: the record's layer tables FK
+    `(org_id, graph_id) -> public.graphs (org_id, id) ON DELETE CASCADE`, so a
+    hard delete of the default row would silently take that org's record rows
+    with it. A DELETE that matches nothing (the default) is a no-op."""
     cp.query("graphs", method="DELETE",
-             filters=[("id", "eq", graph_id), ("org_id", "eq", org_id)])
+             filters=[("id", "eq", graph_id), ("org_id", "eq", org_id),
+                      ("kind", "neq", "default")])
 
 
 def soft_delete_graph(cp, org_id: str, graph_id: str) -> bool:
@@ -4054,10 +4072,12 @@ def purge_graph_row(cp, org_id: str, graph_id: str, *, now: str,
 def set_graph_name(cp, org_id: str, graph_id: str, name: str) -> bool:
     """#2701: rename a graph's DISPLAY name on a graphs row.
 
-    Custom rows PATCH directly. The DEFAULT graph has NO row (derived from
-    ``teams.graph_name``) — a rename for graph 0 renames the kind='default'
-    display row when one exists (created by set_graph_recording / a prior
-    rename) or upserts a fresh one carrying the new name. The row's
+    Custom rows PATCH directly. The DEFAULT graph is renamed on its
+    `kind='default'` row — `20261028000001` mints one per organization (#10025)
+    — created on demand by set_graph_recording / a prior rename when it is
+    still absent. `#10025` keys that branch on the row's KIND, not on the
+    `"default"` sentinel, because the default graph now has a real id of its
+    own and renaming it by that id must take the same path. The row's
     namespace is NEVER touched by a rename — it is the org's data-plane
     storage key (teams.graph_name at upsert; graphs.namespace is text NOT
     NULL, 20260901000001). Returns True when the name was written against a
