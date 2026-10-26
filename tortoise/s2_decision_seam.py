@@ -97,9 +97,12 @@ BATCH_MAX = 40
 #: One round-trip budget. A hung write-path call is worse than a degraded one.
 TIMEOUT = 30.0
 
-#: Prompt versions. A version is part of every seam result (``stats["prompt"]``)
-#: and of every rejected-answer record, so an artifact can name the exact
-#: question wording that produced a classification. Bump on any wording change.
+#: Prompt versions. A version is part of every seam result — ``stats["prompt"]``
+#: from :func:`vet_verdicts` / :func:`classify_tail`, which the VET gate folds
+#: into its own ``stats["seam"]["prompt"]`` and the classifier keeps under
+#: ``stats["seam"]["prompt"]`` — and ``vet-v1`` is stamped into each rejected
+#: verdict's reason, so an artifact can name the exact question wording that
+#: produced a classification. Bump on any wording change.
 VET_PROMPT = "vet-v1"
 CLASSIFY_PROMPT = "classify-v1"
 
@@ -135,9 +138,9 @@ def seam_enabled() -> bool:
 
     Off is the production default and the reason is in :data:`ENV_FLAG`'s
     comment: this is a network call and a spend on the write path. Arming it is
-    the operator's act, and the run's own evidence (``stats["prompt"]`` /
-    ``stats["cost_usd"]`` on the classify stats, the seam rule ids in VET's
-    decisions) is what makes the effect measurable.
+    the operator's act, and the run's own evidence — ``stats["seam"]`` on both
+    sides (``prompt``, ``model``, ``cost_usd`` and, on VET, ``bands``), plus the
+    seam rule ids in VET's decisions — is what makes the effect measurable.
     """
     return is_truthy(os.environ.get(ENV_FLAG))
 
@@ -152,8 +155,8 @@ class Bands:
     "how likely is this a durable claim?", and what to *do* at 0.6 is a policy
     this repo has argued about (``#4899``, ``#2453``), not something a
     probability can settle. Written down here, overridable per call, and
-    recorded in ``stats["bands"]`` so a decision carries the band it was read
-    through.
+    recorded in ``stats["bands"]`` — folded into the gate's ``stats["seam"]`` —
+    so a decision carries the band it was read through.
 
     - ``keep_min`` — ``noul >= keep_min`` ⇒ ``KEEP``.
     - ``discard_max`` — ``noul < discard_max`` ⇒ *eligible* for ``DISCARD``,
@@ -553,12 +556,18 @@ def vet_arbiter(
 
     No ``batch`` verdict is returned: ``RENARRATE`` is §S2.2's once-only loop and
     is not this seam's to request.
+
+    The seam's own record rides back under ``seam`` so the spend and the bands
+    land in the artifact instead of dying at this boundary: an armed seam that
+    makes a billable call no stat can show is the inert-enforcer class, and
+    :func:`vet_gate.vet_candidates` folds the key into its ``stats`` additively
+    (its own counters stay its own).
     """
     def arbiter(candidates: list[dict], narrative: str) -> dict:
-        verdicts, _stats = vet_verdicts(
+        verdicts, stats = vet_verdicts(
             candidates, narrative, transport=transport, bands=bands,
             batch_size=batch_size, timeout=timeout)
-        return {"verdicts": verdicts, "batch": {}}
+        return {"verdicts": verdicts, "batch": {}, "seam": stats}
 
     return arbiter
 

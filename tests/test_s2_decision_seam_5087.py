@@ -211,5 +211,68 @@ def test_an_out_of_schema_answer_fails_closed_and_names_the_question(monkeypatch
         ("NOOP", seam.RULE_UNAVAILABLE)], "an unverified model's answer is no verdict"
 
 
+# ── 3. the seam's own record survives the boundary into the artifact ────────
+
+def test_the_seam_record_reaches_the_gate_stats():
+    """An armed seam is a network call and a SPEND on the write path, so the
+    record of it has to exist somewhere a human can read — otherwise the cost
+    gate sees $0 for a billable call, which is the inert-enforcer class one
+    layer out (it reports itself as measured and measures nothing).
+
+    Both fields asserted here are the ones the design record promises:
+    ``prompt`` (which question wording answered) and ``cost_usd`` / ``bands``
+    (what the answer was read through).
+
+    Mutant that reddens it: return ``{"verdicts": …, "batch": {}}`` from
+    ``seam.vet_arbiter`` — i.e. drop the ``seam`` key — or drop the fold in
+    ``vet_gate.vet_candidates``. Either leaves the spend recorded nowhere.
+    """
+    out = vet_gate.vet_candidates(
+        _vet_embed_list(),
+        arbiter=seam.vet_arbiter(transport=_transport({
+            "keep_c0": {"type": "noul", "noul": 0.93},
+            "atomic_c0": {"type": "score", "score": 3.0},
+            "keep_c1": {"type": "noul", "noul": 0.10},
+            "atomic_c1": {"type": "score", "score": 3.0},
+        })))
+    record = out["stats"]["seam"]
+    assert record["prompt"] == seam.VET_PROMPT
+    assert record["model"] == seam.MODEL
+    assert record["bands"] == {"keep_min": seam.DEFAULT_BANDS.keep_min,
+                               "discard_max": seam.DEFAULT_BANDS.discard_max,
+                               "atomic_min": seam.DEFAULT_BANDS.atomic_min}
+    assert record["cost_usd"] > 0.0, "the call's spend must be in the record"
+    assert record["by_outcome"] == {"KEEP": 1, "DISCARD": 1}
+    assert out["stats"]["by_outcome"] == record["by_outcome"], (
+        "the seam's own tally and the gate's must describe the same 2 candidates")
+
+
+# ── 4. a decider's reported spend cannot abort the fail-open pass ───────────
+
+def test_an_absurd_reported_cost_cannot_abort_the_classify_pass():
+    """``tail_decider`` accepts ANY callable, and the spend it reports is a JSON
+    number — a JSON int can be arbitrarily large, and ``float(10**400)`` raises
+    ``OverflowError``. That must degrade to "spend not counted", never escape
+    ``classify_items`` (documented *never raises*): one absurd number from one
+    batch would otherwise abort the whole pass instead of falling back to kNN.
+
+    Mutant that reddens it: accumulate ``float(cost)`` directly (drop the
+    ``_bounded_cost`` bound) — this raises ``OverflowError``.
+    """
+    clf = _classifier(lambda _rows: ({"i0": "core:workflow"}, {
+        "calls": 1, "cost_usd": 10 ** 400, "prompt": seam.CLASSIFY_PROMPT,
+        "unavailable": 1, "schema_rejects": ["kind_c0"],
+    }))
+    classified = clf.classify_items(
+        [{"id": "i0", "type": "entity", "text": "the plan workflow"}])
+    seam_stats = classified["stats"]["seam"]
+    assert classified["assignments"]["i0"]["kind"] == "core:workflow"
+    assert seam_stats["cost_usd"] == 0.0, "an unrepresentable spend is not counted"
+    assert seam_stats["prompt"] == seam.CLASSIFY_PROMPT, (
+        "the armed-but-unavailable state has to be readable from the artifact")
+    assert seam_stats["unavailable"] == 1
+    assert "kind_c0" in seam_stats["rejected"]
+
+
 if __name__ == "__main__":  # pragma: no cover
     sys.exit(pytest.main([__file__, "-q"]))

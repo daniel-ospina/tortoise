@@ -32,7 +32,7 @@ already existed and had no production caller.
 | part | what it is |
 |---|---|
 | **adapter** | `vet_verdicts` / `classify_tail` turn a candidate batch into **one round trip**: `state` (the narrative, plus one element per candidate) and a **map** of typed `questions`, answered in one response. The shape is copied from a working caller, never from prose — see §2. |
-| **prompt** | two versioned question sets, `vet-v1` (a `noul` *validity* question + a `score` *atomicity* question per candidate) and `classify-v1` (a `choice` per candidate over the kinds the kNN just offered). The version rides in every result (`stats["prompt"]`) and in every rejected-answer record. |
+| **prompt** | two versioned question sets, `vet-v1` (a `noul` *validity* question + a `score` *atomicity* question per candidate) and `classify-v1` (a `choice` per candidate over the kinds the kNN just offered). The version rides in every result — `stats["seam"]["prompt"]`, on both the VET gate's stats and the classifier's — and `vet-v1` is stamped into every rejected verdict's `reason`; on the classify side the rejection is the failing question name, under the same `prompt` key. |
 | **parser** | `_noul` / `_score` / `_choice` validate the answer *against the question that was asked*: the echoed `type`, a finite probability in `[0, 1]`, a score on the declared scale, a choice inside the offered set. A violation raises `SchemaViolation` **carrying the question name**; nothing downstream coerces a bad answer into a label. |
 
 ## 2. The request shape is copied from a caller, not from the documentation
@@ -63,7 +63,7 @@ model is not an answer.
   the hardcoded prompt + JSON parser that used to answer the low-margin tail.
 - **The verdict is the caller's.** The model returns a number; `vet_verdict` reads
   it through `Bands` — written down, argued in `#4899`/`#2453`, overridable per
-  call and recorded in `stats["bands"]`:
+  call and recorded in `stats["seam"]["bands"]`:
 
   | band | default | meaning |
   |---|---|---|
@@ -160,7 +160,8 @@ Derivation, so it can be re-checked rather than believed:
   tokenizer is not published, so read the token counts as **±15%**, and the
   dollars as an estimate of the same order — not a receipt. The first real call is
   what produces a receipt, and the seam records it: `usage.cost_usd` accumulates
-  into `stats["cost_usd"]` (and `stats["seam"]["cost_usd"]` on the classify stats),
+  into `stats["seam"]["cost_usd"]` on both sides (the VET gate's `stats` and the
+  classify stats),
   so the number becomes measured rather than derived the moment it is armed.
 - **Two questions per item is not free.** The `score` question's four-level
   `criteria` is repeated **per item**; that is the dominant term in `vet-v1`'s
@@ -170,15 +171,21 @@ Derivation, so it can be re-checked rather than believed:
   classify's 5,000 tail items = 125 round trips ≈ **\$0.32/month** — against the
   doc's `$0.72/month` estimate for the same tail, on the same order.
 
-## 8. The two tests, and the mutants that redden them
+## 8. The tests, and the mutants that redden them
 
-`tests/test_s2_decision_seam_5087.py` — two tests, because the seam prevents one
-defect class and a hundred shape-pinning assertions would not strengthen it.
+`tests/test_s2_decision_seam_5087.py` — two tests for the defect class the seam
+prevents (because a hundred shape-pinning assertions would not strengthen it),
+plus two for the record and the fail-open edge the first review cycle found. The
+first pair is the seam's contract; the second pair exists because *being right*
+and *being measurable* are different failures, and only one of them reddens a
+pure-logic test.
 
 | test | what it proves |
 |---|---|
 | `test_a_valid_typed_answer_produces_the_expected_verdict` | a real `noul`+`score` pair decides `KEEP`/`DISCARD` **through `vet_gate`**, and a real `choice` decides the kind **through `KindClassifier`**. The stub answers the kNN's **second** candidate, so the assertion is the model's answer and not the fast path's. |
 | `test_an_out_of_schema_answer_fails_closed_and_names_the_question` | a wrong primitive, a score off the declared scale, and a choice outside the offered set all produce **no verdict** — and the record names the question. The seam rejects the out-of-set choice **before** the classifier's own closed-vocab guard sees it (`closed_vocab_rejects == 0`), which is the difference between a validating seam and one that trusts whatever comes back. |
+| `test_the_seam_record_reaches_the_gate_stats` | arming the flag puts a billable call on the write path, so `prompt` / `model` / `bands` / `cost_usd` are asserted **in the gate's `stats["seam"]`** — the artifact a cost gate reads. An armed seam whose spend lands nowhere is measurable only in the vendor's console. |
+| `test_an_absurd_reported_cost_cannot_abort_the_classify_pass` | `tail_decider` accepts ANY callable and reports a JSON number, so `cost_usd = 10**400` must degrade to "spend not counted" and leave the pass fail-open — not raise `OverflowError` out of a method documented *never raises*. |
 
 Mutation-checked (each restores byte-identically — verified with `diff`):
 
@@ -188,6 +195,8 @@ Mutation-checked (each restores byte-identically — verified with `diff`):
 | `_score` drops its `0..hi` range check | ✅ `9.0` on a `0..3` scale licenses the discard |
 | `_choice` returns `answer.get("choice")` unvalidated | ✅ a minted `core:invented` reaches the classifier |
 | `classify_tail` assigns the offered top-1 instead of the model's choice | ✅ **both**: the kind assertion reads `core:plan` instead of `core:workflow`, and the out-of-set answer stops being rejected because nothing is validated |
+| `vet_arbiter` drops the `seam` key (or `vet_candidates` stops folding it) | ✅ the gate stats carry no `prompt`/`bands`/`cost_usd` |
+| the cost accumulator takes `float(cost)` unbounded | ✅ `OverflowError` escapes `classify_items` on `10**400` |
 
 ## 9. What this does NOT close
 

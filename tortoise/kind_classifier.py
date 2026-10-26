@@ -49,6 +49,7 @@ constants — frozen on the calibrate split before the A/B per the plan.
 from __future__ import annotations
 
 import json
+import math
 
 # ── D0-3-calibratable thresholds (frozen before the A/B) ───────────────────
 SIM_FLOOR = 0.30  # below top-1 similarity → unclassified terminal
@@ -72,6 +73,32 @@ def _default_encoder():
     from tortoise.kind_index import _DefaultEncoder
 
     return _DefaultEncoder()
+
+
+def _bounded_cost(value: object) -> float | None:
+    """A non-negative, FINITE spend from an injected decider, else ``None``.
+
+    ``tail_decider`` accepts ANY callable, and the value it reports is a JSON
+    number — a JSON int can be arbitrarily large, so ``float(10**400)`` raises
+    ``OverflowError``. That exception is not one of the ones this pass expects,
+    and it would escape a method documented as *never raises* (the whole
+    classify pass would abort for one batch instead of falling back to kNN).
+
+    So the bound lives here, where the untrusted value enters: ``bool`` is
+    rejected despite being an ``int`` subclass, a non-finite or unrepresentable
+    number is skipped (not counted as spend), and a negative is floored at 0.
+    Same rule the seam itself applies to the answer it parses — and the caller
+    owns the mechanics, not the model.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except (OverflowError, ValueError, TypeError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return max(0.0, number)
 
 
 def _sections_for(item_type: str) -> tuple[str, ...]:
@@ -546,7 +573,10 @@ class KindClassifier:
         produced the kind; the aggregate counters stay the classifier's
         (``assigned_llm`` means "assigned by the model tail", of either kind),
         and the seam's own spend/refusals ride in ``stats["seam"]`` — additive
-        keys only, the classify-later payload's convention.
+        keys only, the classify-later payload's convention. That record includes
+        ``prompt`` (which prompt version answered), ``unavailable`` (how many
+        batches the capability never answered, so an armed-but-keyless run is
+        distinguishable from "no item reached the tail") and ``schema_rejects``.
         """
         seam = stats.setdefault("seam", {"assignments": 0, "calls": 0,
                                          "cost_usd": 0.0, "rejected": []})
@@ -565,9 +595,15 @@ class KindClassifier:
             calls = seam_stats.get("calls")
             if isinstance(calls, int) and not isinstance(calls, bool):
                 seam["calls"] += calls
-            cost = seam_stats.get("cost_usd")
-            if isinstance(cost, (int, float)) and not isinstance(cost, bool):
-                seam["cost_usd"] += max(0.0, float(cost))
+            cost = _bounded_cost(seam_stats.get("cost_usd"))
+            if cost is not None:
+                seam["cost_usd"] += cost
+            prompt = seam_stats.get("prompt")
+            if isinstance(prompt, str) and prompt:
+                seam["prompt"] = prompt
+            unavailable = seam_stats.get("unavailable")
+            if isinstance(unavailable, int) and not isinstance(unavailable, bool):
+                seam["unavailable"] = seam.get("unavailable", 0) + unavailable
             rejected = seam_stats.get("schema_rejects")
             if isinstance(rejected, list):
                 # The seam's own refusals, naming the question that failed —

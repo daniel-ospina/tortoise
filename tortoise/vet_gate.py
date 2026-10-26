@@ -436,6 +436,12 @@ def vet_candidates(embed_list: object, *,
          "stats": {...},            # counts, for the session roll-up
          "warnings": [...]}
 
+    ``stats`` may carry a ``seam`` key: an arbiter that reports its own record
+    (spend, model, prompt version, bands — #5087's typed-decision seam) has it
+    folded in here, additively and under that one key, so the counters above stay
+    this gate's own. An arbiter that reports nothing simply has no such key — the
+    gate's FAIL-OPEN path must not require one.
+
     **Fail-open everywhere.** ``arbiter=None`` ⇒ every candidate ``KEEP``.
     An arbiter that raises ⇒ every candidate ``KEEP`` + a warning. A candidate
     the arbiter did not mention ⇒ ``KEEP``.
@@ -457,6 +463,7 @@ def vet_candidates(embed_list: object, *,
 
     batch = check_batch(embed_list, narrative)
     arbiter_batch: dict = {}
+    seam_stats: dict = {}
 
     # #4899 — the mechanical Level-2 predicate: identifier-only DISCARD.
     #
@@ -489,8 +496,12 @@ def vet_candidates(embed_list: object, *,
 
     if arbiter is not None and candidates:
         try:
-            verdicts, arbiter_batch = _parse_verdicts(
-                arbiter(candidates, str(narrative or "")))
+            payload = arbiter(candidates, str(narrative or ""))
+            verdicts, arbiter_batch = _parse_verdicts(payload)
+            if isinstance(payload, Mapping):
+                seam_record = payload.get("seam")
+                if isinstance(seam_record, Mapping) and seam_record:
+                    seam_stats = dict(seam_record)
         except Exception as e:
             # capture. Fail-open: every candidate keeps, and the failure is
             # recorded rather than swallowed.
@@ -547,6 +558,11 @@ def vet_candidates(embed_list: object, *,
             },
         },
     }
+    if seam_stats:
+        # #5087: the arbiter's own record (spend, model, prompt version, bands,
+        # per-question refusals) — present only when the arbiter reports one, so
+        # an arbiter-less run is byte-identical to before.
+        stats["seam"] = seam_stats
     return {"decisions": decisions, "batch": batch, "stats": stats,
             "warnings": warnings}
 

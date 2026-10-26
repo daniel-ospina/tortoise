@@ -10480,8 +10480,9 @@ def _s2_seam_armed() -> bool:
     never be consulted — an armed seam that no gate runs is the inert-enforcer
     failure class (it reports itself as protection and protects nothing). An
     operator who wants the classify half only is arming a spend either way, so
-    one flag is the honest shape; `stats["prompt"]` in the classify stats says
-    which half actually answered.
+    one flag is the honest shape; `stats["seam"]["prompt"]` says which half
+    actually answered (the classify stats' own `seam` record, and VET's through
+    the gate's `stats["seam"]`).
     """
     from tortoise import s2_decision_seam
 
