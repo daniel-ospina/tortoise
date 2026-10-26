@@ -599,8 +599,10 @@ def record_tenant_for(org: Mapping[str, Any] | None, *,
     rows under another graph.
 
     ``org`` is the dict an auth seam resolved: ``org_id``, plus the
-    credential's ``graph_id`` (``None`` for an org-wide key), plus — for an
-    org-wide key only, and only since #10025 — ``default_graph_id``.
+    credential's ``graph_id`` (``None`` for an org-wide credential), plus — for
+    an org-wide credential only, and only since #10025 — ``default_graph_id``,
+    stamped by that credential's own resolver (an API key, a hosted SESSION/JWT
+    and an OAuth ``oat_`` token all answer since #10046).
 
     ``None`` is returned — never a guess — for every shape this seam must NOT
     name:

@@ -2565,11 +2565,10 @@ def test_the_rest_data_lane_binds_the_resolved_tenant_onto_its_sdk(monkeypatch):
                           "default_graph_id": "g_default"})
     assert bound == [("org-a", "g_row"), ("org-a", "g_default")], bound
 
-    # A credential that carries NO such field stays refused: session/PAT
-    # (`_session_user_org` resolves `org_id` + tier only) and OAuth `oat_`
-    # (`resolve_oauth_access_token` never calls `resolve_api_key`). Naming those
-    # is #10047's scope, and until it is wired the write is refused `no_tenant`
-    # rather than filed under a tenant nobody named.
+    # A credential that carries NO such field stays refused. Since #10046 the
+    # RESOLVERS stamp it for every class (session/JWT and OAuth too), so a
+    # dict without it is a credential whose org had no nameable default row —
+    # the fail-closed direction, not a class left unwired.
     hosted_api._data_sdk({"org_id": "org-a"})
     assert bound == [("org-a", "g_row"), ("org-a", "g_default")], (
         f"a field-less request bound a tenant nobody named: {bound}")

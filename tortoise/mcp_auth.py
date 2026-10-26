@@ -88,12 +88,12 @@ def _record_tenant_scope(org: dict, *, control_plane_ids: bool):
     org-wide key opens the org's default graph) is named by
     :func:`tortoise.record_writer.record_tenant_for` from the credential's
     ``default_graph_id`` — the id of the org's active ``kind='default'``
-    ``public.graphs`` row, resolved by ``supabase_control.resolve_api_key``
-    (#10025; `20261028000001` mints that row per organization). That resolves
-    org-wide **API KEYS** (``tt_``/``tk_``); the OAuth family (``oat_``, see
-    :func:`tortoise.oauth.resolve_oauth_access_token`) carries no
-    ``default_graph_id`` yet and stays refused — #10047. When the control
-    plane cannot name it — no row, no field — the write is REFUSED and counted
+    ``public.graphs`` row, resolved by the credential's own resolver through
+    ``supabase_control.default_graph_id_for_credential`` (``resolve_api_key``
+    for a ``tt_``/``tk_`` key since #10025; ``hosted_api._session_user_org`` and
+    :func:`tortoise.oauth.resolve_oauth_access_token` since #10046; and
+    `20261028000001` mints that row per organization). When the control plane
+    cannot name it — no row, no field — the write is REFUSED and counted
     (``no_tenant``) instead. Nothing is guessed here: a guess is the
     cross-tenant write this whole seam exists to prevent.
 
@@ -604,25 +604,27 @@ def apply_graph_target(ref: str | None) -> dict | None:
 def record_tenant_for_graph(plan: dict | None) -> tuple[str, str] | None:
     """The record tenant a SELECTED custom graph implies, or None (#9340).
 
-    An org-wide credential (OAuth — the connection this feature exists for) has
-    no `graph_id` at resolution time, so `_record_tenant_scope` in
-    `OrgResolutionMiddleware` installs none and an armed record write is refused
-    `no_tenant`. A graph selected per call DOES carry a control-plane
-    `public.graphs` row — the very row the resolver just read — so the tenant is
-    nameable and must be carried, or the write lands in graph X while its record
-    row is refused (or, under a declared single-tenant env pair, filed under
-    graph Y). That divergence is the same silent-wrong-target class this issue
-    exists to close.
+    An org-wide credential has no `graph_id` at resolution time, so the
+    ambient scope names its DEFAULT graph — the credential's
+    `default_graph_id` since #10025 / #10046 — and nothing names a graph the
+    call SELECTS. A graph selected per call DOES carry a control-plane
+    `public.graphs` row — the very row the resolver just read — so the tenant
+    is nameable and must be carried, or the write lands in graph X while its
+    record row stays filed under the default (or, under a declared
+    single-tenant env pair, under graph Y). That divergence is the same
+    silent-wrong-target class this function exists to close.
 
     The DEFAULT graph is deliberately still None HERE, but no longer because
-    it lacks a row: `20261028000001` mints an active `kind='default'` row per
-    organization (and provisioning mints it forward, with an auth-time
-    self-heal), and the credential path (`resolve_api_key` →
-    `default_graph_id`) names that tenant on every lane that resolves the
-    request's own credential — MCP and hosted REST included. What is still
-    unwired is THIS seam and the credentials that carry no `default_graph_id`
-    at all: a SESSION/JWT credential and an OAuth `oat_` token. Closing that is
-    #10047's scope, and it is a deferral of those lanes only.
+    it lacks a row or because its credential cannot name it: `20261028000001`
+    mints an active `kind='default'` row per organization (provisioning mints
+    it forward, with an auth-time self-heal), and every credential resolver
+    stamps that row's id as `default_graph_id` — `resolve_api_key` since
+    #10025, `hosted_api._session_user_org` and
+    :func:`tortoise.oauth.resolve_oauth_access_token` since #10046. So a
+    DEFAULT selection does not need THIS seam to install anything: it enters
+    no scope, and the ambient scope `OrgResolutionMiddleware` already installed
+    from the credential names the same default graph. Wiring this branch
+    explicitly is #10047's scope — a deferral of this seam only.
     """
     if plan is None or (plan.get("kind") or "") == "default":
         return None
@@ -1425,13 +1427,13 @@ class OrgResolutionMiddleware(BaseHTTPMiddleware):
         # this lane since #10025: `resolve_api_key` puts the org's active
         # `kind='default'` row id on the credential as `default_graph_id`, and
         # `record_tenant_for` files the write under it — the same answer the
-        # hosted REST lane gives for that credential. ⚠️ The OAuth family
-        # (`oat_`, introspected by `tortoise.oauth.resolve_oauth_access_token`)
-        # is NOT covered: that resolver never calls `resolve_api_key` and puts
-        # no `default_graph_id` on the dict, so an OAuth write stays refused and
-        # counted (`no_tenant`). Wiring it is #10047's scope, named in that
-        # issue's own `mcp_auth.py` bullet — this lane carries whatever the
-        # resolver handed it and guesses nothing.
+        # hosted REST lane gives for that credential. Since #10046 the OAuth
+        # family (`oat_`, introspected by
+        # `tortoise.oauth.resolve_oauth_access_token`) and the hosted
+        # SESSION/JWT credential (`hosted_api._session_user_org`) answer the
+        # same way: both stamp `default_graph_id` from
+        # `supabase_control.default_graph_id_for_credential`, so this lane
+        # carries whatever the resolver handed it and still guesses nothing.
         #
         # It also stays REFUSED and counted (`no_tenant`) whenever the control
         # plane could not name that row (unset, tombstoned, unreadable), which
