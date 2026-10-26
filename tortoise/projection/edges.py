@@ -196,27 +196,44 @@ def resolve_structural_target(g, label: str, key: str, rel: str, *,
                               mint: bool = True):
     """Resolve the label-scoped structural target node by its replay key.
 
-    Create-if-missing semantics for the ``extractedFrom`` (Source) and
-    ``aboutSubject`` (Subject) arms: those stubs MERGE by key (the live wiring
-    precedent — _create_about_edges' fallback / _link_source). **The
-    ``aboutDocument`` Source arm is an EXCEPTION — it is RESOLVE-ONLY**: a miss
-    is logged and skipped, never minted, because a phantom Source would
-    silently mis-point the resurrected edge (adversarial class B1), and D10
-    §4.4 makes the document node a ``:Source``, so this is the one label whose
-    ``rel`` decides the policy. This resolver therefore does NOT
-    create-if-missing for every Source — read the branch, not the label. NEVER
-    auto-detect labels (Subject-first auto-detect would attach an aboutObject
-    descriptor to a same-name Subject node) and NEVER mint Point stubs by name
-    (an absent Point target => skip — absent Documents/Objects/Events return
-    None too; those entities are journaled by their own creation events, and an
-    absent one is an unjournaled-producer edge that dies at rebuild).
+    Create-if-missing semantics survive for ONE arm — ``extractedFrom``
+    (Source): it MERGEs the provenance stub by ``url`` exactly as the live
+    ``_link_source`` writes it, so replay reproduces a node the live graph
+    really has, and a Source's identity IS its ``url`` (ONTOLOGY §3.2 — nothing
+    is derived from a name). Every other arm resolves only:
 
-    ``mint=False`` (#8398 review P1-2) forbids the Subject/Source stub mint and
-    leaves pure resolution. A #8398 link whose live cascade RESOLVED an
-    existing node must not mint a replacement when that node is missing at
-    replay: live created nothing, so a minted stub would be a node the live
-    graph never had. The missing endpoint is then reported as a failed link
-    instead — the honest outcome for an unjournaled producer.
+    * **``aboutSubject`` (Subject) is RESOLVE-ONLY at this head (#3590).**
+      ``_mint_subject_stub`` keeps its historical name but no longer mints — it
+      calls ``resolve_fold_name(..., mention=True)``. The stub it used to MERGE
+      was a fold-time create keyed on a NAME whose id WAS the name; #3590
+      retires both halves (a fold-time mint is not replay-deterministic — two
+      holders of one name resolve arbitrarily, so ``rebuild != live`` by
+      construction — and an id may not be derived from a name). A bare about-name
+      that resolves to no single LIVE holder is RECORDED as an exempt
+      ``unfolded-mention`` and left unwired; the remedy is the producer's (D9:
+      register what you reference before referencing it).
+    * **``aboutDocument`` (Source) is RESOLVE-ONLY**, and for a sharper reason: a
+      miss is logged and skipped, never minted, because a phantom Source would
+      silently mis-point the resurrected edge (adversarial class B1). D10 §4.4
+      makes the document node a ``:Source``, so this is the ``rel`` that decides
+      the target-KIND contract — this resolver therefore does NOT
+      create-if-missing for every Source; read the branch, not the label.
+    * **every other label is RESOLVE-ONLY.** NEVER
+      auto-detect labels (Subject-first auto-detect would attach an aboutObject
+      descriptor to a same-name Subject node) and NEVER mint Point stubs by name
+      (an absent Point target => skip — absent Documents/Objects/Events return
+      None too; those entities are journaled by their own creation events, and an
+      absent one is an unjournaled-producer edge that dies at rebuild).
+
+    ``mint=False`` (#8398 review P1-2) forbids the remaining stub mint — the
+    ``extractedFrom`` Source one — and leaves pure resolution (``resolve_source_key``
+    instead, which only canonicalises the key). On the Subject arm the flag is
+    now inert: #3590 already made that arm resolve-only, so ``mint=False`` there is
+    the belt to its braces rather than a per-call policy. A #8398 link whose live
+    cascade RESOLVED an existing node must not mint a replacement when that node
+    is missing at replay: live created nothing, so a minted stub would be a node
+    the live graph never had. The missing endpoint is then reported as a failed
+    link instead — the honest outcome for an unjournaled producer.
 
     Returns {"internal": <FalkorDB internal node id>, "logical": <node.id>}
     or None. ``g`` is the projection graph handle (``self.g`` on
@@ -1479,6 +1496,17 @@ class _EdgeHandlers:
           every other label is resolve-only live, so minting one at replay would
           fabricate a node live never had.
 
+          ⚠️ **#3590 retires the construction this flag describes, so on the
+          Subject arm it no longer buys a CREATE.** ``_mint_subject_stub`` is
+          resolve-only at this head, so a journaled ``mint_if_absent: true``
+          now replays as a resolve (and an absent holder leaves the descriptor
+          unwired — recorded as an exempt ``unfolded-mention``) rather than as a
+          stub. The flag is kept, and still journaled as ``true`` on the
+          Subject-stub fallback below, because it is part of the RECORD shape
+          (``tests/test_8398_aboutobject_replay.py`` pins it) and because the
+          ``extractedFrom`` Source arm still honours it; read it as "the
+          construction was allowed to mint", not as "a mint will happen".
+
         ``target_internal_ids`` — the FalkorDB internal ids the LIVE write must
         address, so the journal and the write come from ONE resolution rather
         than two reads that could disagree. A LIST because a name — or a
@@ -1513,11 +1541,19 @@ class _EdgeHandlers:
             if link is not None:
                 return link, internals
         # Nothing matched — live defaults to a Subject stub (label-agnostic
-        # source). #2489: the mint is routed through the SHARED helper
-        # (_mint_subject_stub) so live wiring and rebuild replay mint
-        # byte-identical stubs (one create path). The stub's id IS its name
-        # (`ON CREATE SET s.id=$name`), which is why the name is a valid
-        # ``targets`` value here.
+        # source). #2489 routed that mint through the SHARED helper
+        # (_mint_subject_stub) so live wiring and rebuild replay produced
+        # byte-identical stubs (one create path). ⚠️ #3590: the helper is
+        # RESOLVE-ONLY now, so this fallback no longer creates the stub — the
+        # name is still journaled as the `targets` value and the live write
+        # resolves it, which means a name with no live holder wires nothing
+        # (rather than a node whose id was its name). The D9 remedy is the
+        # producer's: register what you reference.
+        #
+        # `mint_if_absent` stays True: it is the record's claim about the
+        # CONSTRUCTION this branch used to use, and the Source arm still honours
+        # it (`resolve_structural_target(mint=…)`); on the Subject arm the flag
+        # is now inert.
         from tortoise.projection import _log_identity_skip, _writable_id
         if not _writable_id(entity_name):
             _log_identity_skip("Subject stub", entity_name, "name (MERGE key)")
@@ -1686,8 +1722,10 @@ class _EdgeHandlers:
 
         ``target_internal`` is the id (or, for a name with several legal
         carriers, the ids) ``resolve_about_link`` resolved; ``None`` means the
-        live path must mint the ``:Subject`` stub first (the cascade's
-        fallback). Writing by the RESOLVED internal id — rather than
+        live path must RESOLVE the ``:Subject`` stub the cascade's fallback
+        named — #3590 made that helper resolve-only, so a name with no live
+        holder wires nothing and this method reports ``False`` (it used to mint
+        the stub first). Writing by the RESOLVED internal id — rather than
         re-matching the name inside the MERGE — is what makes the journaled link
         and the edge the same decision, with no second read that could answer
         differently. Every resolved id is written, so the live edge set is

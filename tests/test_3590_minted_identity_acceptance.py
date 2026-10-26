@@ -874,3 +874,93 @@ def test_a_lifecycle_event_on_a_terminal_only_object_is_a_recorded_no_op(
     assert _name_ids(proj, "Object", "Buried") == [buried], (
         "replay disagreed with the live pass on the buried target")
     assert _status_of(proj, "Object", buried) == "superseded"
+
+
+def test_the_event_api_door_is_the_recorded_producer_that_loses_its_mentions(
+        sdk, tmp_path: Path):
+    """#3590 round-5 review P1-3: the ONE door D9 did not reach is recorded.
+
+    The SDK's event door registers every name its record mentions (the test
+    above), but ``EventAPI.add_event`` does not, and it has a LIVE in-repo
+    caller: ``tortoise.ingest --capture-metadata`` writes ``sessionCaptured``
+    through it with ``subject="pi-agent"`` and
+    ``uses=[{"name": "tortoise-capture", "kind": "skill"}]``. Neither name is
+    registered, so the fold resolves them against no live holder and the
+    ``performs`` / ``uses`` edges are never wired — pre-#3590 they existed,
+    because the retired fold MERGEed a stub whose id WAS the name.
+
+    This is the acceptance pin for the REVIEWER'S SECOND OPTION, chosen on
+    purpose: registering at ``add_event`` would decide D1 ("may a bare mention
+    CREATE an entity?", still OPEN on #3590) in the minting direction, at the
+    door every legacy pipeline writes through. What is bought instead is that
+    the loss is **recorded, bounded and identical on both passes** — an EXEMPT
+    ``unfolded-mention`` naming the cause, not a silent drop behind a green run
+    (which is the class ``SHAPE_UNREGISTERED_REFERENCE`` exists to prevent).
+    The guarantee is stated in ``entity_identity.resolve_fold_name``'s docstring
+    and this test keeps that statement honest: when D1 is ruled and the
+    registration lands here, THIS test is the one that must change.
+
+    Mutations that must red this:
+      * classifying the miss as the NON-exempt shape (``refused_events`` below
+        goes non-empty — the green run would be the bug);
+      * dropping the exemption (``rebuild_all`` raises ``NonFoldedEventsError``);
+      * registering the mentions at ``add_event`` without ruling D1 (the
+        no-minted-entity and no-edge assertions below).
+    """
+    from tortoise.api import EventAPI
+    from tortoise.log import EventLog
+    from tortoise.projection.nonfolded import (
+        SHAPE_UNFOLDED_MENTION,
+        collect_non_folded,
+        refused_events,
+    )
+
+    client, events = sdk
+    proj = client._get_proj()
+    api = EventAPI(EventLog(str(events / "events.jsonl")),
+                   initiated_by="extractor", projection=proj)
+
+    # The producer's OWN call shape (`tortoise/ingest.py`, --capture-metadata).
+    with collect_non_folded() as entries:
+        api.add_event("ev-capture", "sessionCaptured",
+                      subject="pi-agent",
+                      object_name="source-abc", object_type="Document",
+                      uses=[{"name": "tortoise-capture", "kind": "skill"}])
+
+    shapes = [e.shape for e in entries]
+    assert shapes.count(SHAPE_UNFOLDED_MENTION) == 2, (
+        "expected the mentioned subject AND the uses[] name to be recorded as "
+        f"the bounded exemption; got {shapes}")
+    assert not refused_events(entries), (
+        "the recorded degradation was classified as a producer omission that "
+        f"fails the run: {[str(e) for e in entries]}")
+    assert all("no-live-holder" in str(e.detail) for e in entries), (
+        "the record does not say WHY it missed: "
+        f"{[str(e) for e in entries]}")
+
+    # The loss itself, stated exactly: nothing minted (a mention is not a
+    # create while D1 is open) and therefore no attribution edges.
+    assert _name_ids(proj, "Subject", "pi-agent") == [], (
+        "`add_event` minted an entity out of a mere mention — that is D1's "
+        "minting arm, adopted at a legacy door")
+    assert _name_ids(proj, "Object", "tortoise-capture") == [], (
+        "`add_event` minted the uses[] name")
+    for rel in ("performs", "uses"):
+        n = proj.g.query(
+            f"MATCH (e:Event {{eventId:'ev-capture'}})-[:{rel}]->() "
+            "RETURN count(*)", params={}).result_set
+        assert n[0][0] == 0, (
+            f"an edge `{rel}` appeared — if the door now registers its "
+            f"mentions, D1 has been ruled and this pin must be rewritten")
+
+    # …and the point of the exemption: the journal still REPLAYS (a mention
+    # miss is attribution, not an unregistered identity).
+    proj.rebuild_all(str(events), confirm_destructive=True)
+    assert _name_ids(proj, "Subject", "pi-agent") == []
+
+    # The documented guarantee names the producer it costs (P1-3's deliverable).
+    from tortoise.entity_identity import resolve_fold_name
+    doc = resolve_fold_name.__doc__ or ""
+    assert "capture-metadata" in doc and "ingest" in doc, (
+        "the exemption no longer names the live in-repo producer that keeps "
+        "losing these edges — the recorded guarantee was deleted")
