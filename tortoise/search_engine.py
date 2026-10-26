@@ -2701,7 +2701,6 @@ def rrf_fusion(
     weights: dict[str, float] | None = None,
     recency_weights: dict[str, float] | None = None,
     recency_boost: float = 0.0,
-    position_is_rank: bool = False,
 ) -> dict[str, float]:
     """Reciprocal Rank Fusion — combine multiple ranked lists.
 
@@ -2725,13 +2724,6 @@ def rrf_fusion(
             RRF(d) × (1 + recency_boost × weight(d)). Default 0.0 = off.
             When weights are None or boost is 0.0 the arithmetic is
             untouched → byte-identical output for all pre-R5 callers.
-        position_is_rank (#7704): True for a leg that carries NO score
-            signal, so its LIST POSITION is the rank (``temporal_leg``, which
-            fuses ``[(id, 0.0), …]`` by design — #2976). Default False: the
-            rank is derived from the leg's own SCORES with ties averaged, so
-            documents the leg scored identically receive the SAME fused
-            contribution instead of a relevance difference manufactured from
-            whatever broke the leg's tie (see the note below the loop).
 
     Returns:
         {id: combined_rrf_score} sorted by score descending
@@ -2782,74 +2774,72 @@ def rrf_fusion(
                     strategy_names[i], w,
                 )
                 w = 1.0
-        # Materialise ONCE: a leg may be a generator/iterator, and indexing an
-        # iterator then zipping the same iterator would return nothing — total,
-        # silent result loss (``tests/test_rrf_tie_rank_7704.py`` pins it).
-        rows = list(ranked)
-        if position_is_rank:
-            for rank, (pid, _score) in enumerate(rows):
-                rrf_score = w / (k + rank + 1)
-                scores[pid] = scores.get(pid, 0.0) + rrf_score
-            continue
-        pos = 0
-        n = len(rows)
-        while pos < n:
-            # A leg is ranked desc, so an equal score is always ADJACENT.
-            end = pos + 1
-            while end < n and rows[end][1] == rows[pos][1]:
-                end += 1
-            # RANK.AVG: the group occupies positions pos..end-1 and the leg
-            # gave no way to order within it, so it gets the MEAN of them.
-            # NaN never compares equal, so a NaN-scored row forms its own
-            # group and keeps its position — the pre-#7704 behaviour, which
-            # is the safe fallback for a leg whose scores carry no order.
-            rank = (pos + end - 1) / 2.0
+        for rank, (pid, _score) in enumerate(ranked):
             rrf_score = w / (k + rank + 1)
-            for j in range(pos, end):
-                pid = rows[j][0]
-                scores[pid] = scores.get(pid, 0.0) + rrf_score
-            pos = end
-    # #7704: the rank consumed above is the leg's own SCORE rank with ties
-    # AVERAGED, so identical evidence yields an identical fused contribution.
-    # It used to be the row's POSITION, which converted whatever broke the
-    # leg's tie into a fused RELEVANCE difference between documents the leg
-    # scored identically: two rows tied on every leg —
+            scores[pid] = scores.get(pid, 0.0) + rrf_score
+    # #7704 (MEASURED MECHANISM — a description, not a contract; read THE
+    # RULING at the end of this note before changing anything above): the rank
+    # consumed above is POSITIONAL, so a leg's own tie order becomes a fusion
+    # RELEVANCE difference between documents whose evidence is identical. Two
+    # rows tied on every leg —
     #
     #     rrf_fusion([[("b", 1.0), ("a", 1.0)], [("b", 1.0), ("a", 1.0)]],
     #                strategy_names=["fts", "vector"], weights={"vector": 1.5})
-    #     before -> {'b': 0.04098360655737705, 'a': 0.04032258064516129}  1.61% apart
-    #     now    -> {'a': 0.04065040650406504, 'b': 0.04065040650406504}  equal
+    #     -> {'b': 0.04098360655737705, 'a': 0.04032258064516129}
     #
-    # The tie is broken in the search legs by the leg's own secondary sort on
-    # its id field (#3019): ``url`` for source/document, ``eventId`` for
-    # events, and for points the node id — a ULID on the create paths
-    # (chronological) but ``pt_<sha256>`` on the extraction/commit paths
-    # (``commit_schema.point_content_id``), so the order is chronological for
-    # one population and content-hash for the other. Arbitrary-but-stable,
-    # never a relevance proxy — which is why it must not become one here.
-    # #3019 itself is untouched: the legs still sort ``score DESC, id ASC``
-    # and this function's output is still a pure function of the leg contents
-    # (averaged ranks + the ``(-score, id)`` total order kept below), so the
-    # determinism it bought is intact; what changes is that a TIED score no
-    # longer implies a winner.
+    # — land 1.61% apart, ordered by whatever broke the leg's tie. In the search
+    # legs that is the leg's secondary sort on its own id field (#3019):
+    # ``url`` for source/document, ``eventId`` for events, and for points the
+    # node id — a ULID on the create paths (chronological) but
+    # ``pt_<sha256>`` on the extraction/commit paths
+    # (``commit_schema.point_content_id``), so a tie's order is chronological
+    # for one population and content-hash for the other, and the two id spaces
+    # sort as blocks ('p' after the digits). Arbitrary-but-stable, never a
+    # relevance proxy. The single-leg path does not fuse (``sdk.py``'s
+    # ``len(raw_results) == 1`` shortcut), so the same two rows keep the SAME
+    # score there: the two paths disagree about identical evidence.
     #
-    # The product consequence: the W4-b contested boost (``W4_CONTESTED_BOOST``,
-    # #2102) is added AFTER fusion, so it could not outrank a difference fusion
-    # had invented — the contested twin ranked below its uncontested twin on
-    # the fused read. With the twins' fused relevance equal, the boost is the
-    # sole differentiator: measured on the E2E-1 twin fixture (dense leg live)
-    # the twin delta is -0.0175 (= the boost's final-score contribution) at
-    # ``limit`` 3, 4, 10 and 40, instead of +0.0014 … +0.4825. The boost's
-    # magnitude and the promise's wording are NOT decided here — that is the
-    # owner's (#7704); this only stops fusion manufacturing the gap it had to
-    # clear. Pinned by ``tests/test_rrf_tie_rank_7704.py`` (unit) and
-    # ``tests/test_ranking_w4b.py::test_integration_equal_evidence_twins_need_no_boost_magnitude``
-    # (end-to-end).
+    # This is the mechanism behind #7704's product symptom, but the symptom is
+    # NOT a property of the mechanism. The fused gap above only becomes a
+    # FINAL-score gap after ``GraphRanker`` min-max normalizes the PAGE, so
+    # whether the W4-b contested boost (``W4_CONTESTED_BOOST`` — 0.0175 of
+    # final score at ``graph_boost_weight`` 0.35) clears it is a function of the
+    # caller's ``limit``. Name the FIXTURE, because the answers differ: it does
+    # NOT clear on the 4-row E2E-1 twin fixture's pages (relevance gap 0.0189 >
+    # 0.0175), while on the recorded 404-point sweep it clears from ``limit``
+    # >= 40, where the contested twin ranks ABOVE its twin (delta -0.0041 —
+    # ``tortoise/ranking.py``). The full page-scoped accounting is the
+    # ``W4_CONTESTED_BOOST`` rationale in ``tortoise/ranking.py`` — do not
+    # re-derive it here, and do not read a single page's outcome as the
+    # mechanism's promise.
     #
-    # ``position_is_rank`` is the ONE escape hatch, and it is not a licence to
-    # reintroduce the gap: it exists for a leg that carries no score signal at
-    # all (``temporal_leg`` fuses ``[(id, 0.0), …]`` where the position IS the
-    # rank by design, #2976), whose arithmetic is byte-identical either way.
+    # ⛔ THE RULING (owner, 2026-10-25 — comment 6402104535 on #7704): the twin
+    # case is a DUPLICATION defect, not a ranking one, and "options A / B / C / D
+    # are CLOSED as answers to this issue — none is authorised here … tie-averaged
+    # ranks are not required once duplicate entries do not exist", with the armed
+    # pin "must not be used to justify tie-averaging (option D)". So do NOT
+    # implement tie-averaged ranks (RANK.AVG) on the strength of this note: that
+    # IS option D, and it silently re-weights a production leg that carries no
+    # score signal — ``structural`` scores every row a CONSTANT (1.0 / 0.5, above),
+    # so on any hybrid text query its whole list becomes one tie group. The
+    # fusion FORM is #4210's own open ruling; the measured defect is closed by
+    # dedup identity + provenance accumulation (#9998, #9437, #9879), not here.
+    #
+    # If you conclude tie-averaging is the right answer, the route is a REOPEN in
+    # #7704's own home — evidence in front of the owner, argued — never a quiet
+    # adoption. The recorded option set is the rationale on
+    # ``W4_CONTESTED_BOOST`` in ``tortoise/ranking.py``: read it there, not as a
+    # re-list here, because two of its members decide OTHER questions and are NOT
+    # #7704 choices — replacing rank-based fusion with score-based fusion is
+    # #4210's ruling, and tie-breaking on the contested signal reverses #3019's id
+    # tie-break, which ``temporal_leg`` consumes positionally (#2976).
+    #
+    # The equal-evidence invariant itself is pinned by
+    # ``tests/test_rrf_tie_rank_7704.py`` (``xfail(strict=True)``, ARMED until the
+    # duplication fix lands: re-enacting a remedy XPASSes and reds the suite, so
+    # the marker comes off deliberately — in the change that lands dedup, where
+    # the pin is replaced by one asserting the intended state); the measured
+    # magnitudes live on #7704. Do not read this comment as a decision either way.
     # R5 (#1544): optional recency multiplier — a multiplier, NOT an additive
     # constant: the RRF score range is ~0.01–0.05 (the SearchScores rrf
     # docstring), so an additive offset would swamp fusion entirely.

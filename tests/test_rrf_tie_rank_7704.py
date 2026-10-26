@@ -1,7 +1,7 @@
-"""#7704 — RRF must not turn a leg's TIE into a relevance difference (FIXED; pinned).
+"""#7704 — RRF turns a leg's TIE into a relevance difference (MEASURED; ruling OPEN).
 
-``rrf_fusion`` consumed the row's **position** (``1/(k + rank + 1)``), so when a
-leg scored two documents identically, the *leg's own* tie order became a fusion
+``rrf_fusion`` ranks **positionally** (``1/(k + rank + 1)``), so when a leg
+scores two documents identically, the *leg's own* tie order becomes a fusion
 **relevance** difference between documents whose evidence is identical. On the
 search legs that tie order is the leg's secondary sort on its own id field
 (#3019) — ``url`` for source/document, ``eventId`` for events, and for points
@@ -9,51 +9,90 @@ search legs that tie order is the leg's secondary sort on its own id field
 extraction/commit paths (``commit_schema.point_content_id``), where the order is
 content-hash and the two id spaces sort as blocks.
 
-Measured on ``origin/main`` before the fix (at ``248940bf1``; the same quantity
-the issue body measured at ``38c3b6ea5``)::
+Measured on ``origin/main`` at ``248940bf1`` (this file's red run; the same
+quantity the issue body measured at ``38c3b6ea5``)::
 
     rrf_fusion([[("b", 1.0), ("a", 1.0)], [("b", 1.0), ("a", 1.0)]],
                strategy_names=["fts", "vector"], weights={"vector": 1.5})
-    # BEFORE -> {'b': 0.04098360655737705, 'a': 0.04032258064516129}  1.61% apart
-    # NOW    -> {'a': 0.04065040650406504, 'b': 0.04065040650406504}  equal
+    # -> {'b': 0.04098360655737705, 'a': 0.04032258064516129}   1.61% apart
 
-and end-to-end on the W4-b twin fixture (embedded lane, dense leg LIVE), where
-the content-identical twins tie on **both** legs::
+and end-to-end on the W4-b twin fixture (embedded lane, dense leg LIVE,
+``HF_HUB_OFFLINE=1``), where the content-identical twins tie on **both** legs::
 
     fts 1.0 == 1.0 ; vector 0.4121811... == 0.4121811...   (tie on every leg)
-    BEFORE  fused rrf hot 0.03993856 vs calm 0.04058699  -> final 0.8936 vs 0.8950
-    NOW     fused rrf hot 0.04026016 == calm 0.04026016 -> final +0.0175 = the boost
+    fused rrf   hot 0.03993856  vs  calm 0.04058699        (id tie-break)
+    final       hot 0.8936      vs  calm 0.8950            calm first
 
-The fuse now ranks by the leg's own SCORE with ties AVERAGED (``RANK.AVG``), so
-identical evidence yields an identical fused contribution and the post-fusion
-W4-b contested boost (#2102) is the sole differentiator — it survives fusion
-because there is no longer a manufactured gap to clear. **The boost's magnitude,
-the clamp, and the #2102 E2E-1 wording are NOT touched here** (options 2a/2b/B on
-#7704 stay the owner's); neither is #3019 (the legs still sort
-``score DESC, id ASC`` and the fused output is still deterministic) nor #4210
-(this is still weighted RRF — no score-based fusion was adopted).
+so on every page this fixture exercised (``limit`` 3, 4, 10, 40) the contested
+twin loses to its uncontested twin because of the tie-break, not because of the
+contested signal. That is a page-scoped OUTCOME, not a property of the
+mechanism above: the fused gap becomes a final-score gap only through
+``GraphRanker``'s min-max normalization of the PAGE, so whether the boost
+clears it depends on the caller's ``limit`` (the page-scoped accounting is the
+``W4_CONTESTED_BOOST`` rationale in ``tortoise/ranking.py``; this file pins the
+fusion-level cause, not a page outcome). The **single-leg** path does not fuse
+(``sdk.py``'s ``len(raw_results) == 1`` shortcut), so tied rows keep the same
+score there — the two paths disagree about identical evidence.
 
-What the tests below hold:
+⛔ **What this file is, and is NOT.** The defect is measured; *what to do about
+it* is an OPEN owner ruling on #7704. The recorded option set is the rationale
+on ``W4_CONTESTED_BOOST`` (``tortoise/ranking.py``) — do not re-list it here:
+two of its members decide OTHER questions and are NOT #7704 choices, i.e.
+replacing rank-based fusion with score-based fusion is the OPEN OWNER RULING on
+#4210, and tie-breaking on the contested signal reverses #3019's id tie-break
+that ``temporal_leg`` consumes positionally (#2976). Nothing here decides any
+of it: the pin below is ``xfail(strict=True, raises=AssertionError)`` so the
+shipped behaviour is EXECUTABLE and cannot drift silently, while the suite stays
+green.
 
-* ``test_identical_leg_scores_must_not_produce_different_fused_scores`` — the
-  invariant. **Mutation that reds it: consume the position again**
-  (``position_is_rank=True``, or enumerate the leg) → 0.0409836 vs 0.0403226.
-* three guards the fix must not overshoot (a tie group does not displace a
-  lower-ranked row, a leg that DID rank the rows apart is respected, a generator
-  leg is not dropped) and one for the escape hatch itself
-  (``position_is_rank`` keeps a position list byte-identical).
+When the ruling lands, this file is the switch that forces the follow-through:
 
-⛔ ``position_is_rank`` is not a licence to reintroduce the gap: it exists for a
-leg that carries NO score signal, where position IS the rank — ``temporal_leg``
-fuses ``[(id, 0.0), …]`` by design (#2976) and its arithmetic is byte-identical
-either way. Two assertions elsewhere measured the pre-fix artifact and were
-re-derived with the fix, not relaxed: ``test_ranking_w4b.py``'s page-bound test
-(the level condition is now ZERO for equal-evidence twins, so the boost's
-magnitude and the clamp no longer gate it) and ``test_bm25_lexical_8488.py``'s
-read-path positional climb (which was the same phantom spread; the lexical
-SCORE assertion beside it is untouched).
+* **tie-averaged ranks (or any fix)** — the xfail test XPASSes, ``strict=True``
+  reds the build, and whoever lands the fix removes the marker. The three green
+  guards below then hold the fix to its invariants (a generator leg is not
+  swallowed, a leg that DID rank the rows apart is still respected, and a tie
+  group does not displace a row the legs ranked lower).
+
+  ⛔ **The blast radius is larger than this file — MEASURED, not guessed.** Run
+  against a rank-averaging prototype of ``rrf_fusion``, this area's suite reds in
+  exactly five places, one of which is a real contract and not a stale assertion:
+
+  * ``tests/test_temporal_leg_2976.py::test_empty_temporal_leg_leaves_rrf_order_byte_identical``,
+    ``::test_zero_weight_temporal_leg_is_a_no_op_on_membership_and_order`` and
+    ``::test_placement_head_is_the_counterfactual_and_tail_is_the_default`` —
+    ``temporal_leg`` fuses ``[(id, 0.0), …]`` and encodes rank by LIST POSITION
+    (#2976), so score-equality tie detection collapses that leg to one block and
+    the order falls through to the id sort. **The constraint, not just the red:**
+    a tie-averaged remedy MUST leave a leg's GIVEN order untouched when an equal
+    score means "position is the rank" — repair the temporal leg first, not after.
+  * ``tests/test_bm25_lexical_8488.py::TestReadPath::test_bm25_arm_lifts_the_record_in_the_shipped_read``
+    — its "strict rank improvement" is ENTIRELY the phantom spread among four
+    dense-tied rows (measured: with ties averaged the read's 2-slot climb goes
+    to zero — the target lands at the SAME index in both reads). The real BM25
+    gain survives in the lexical SCORE, which the following assertion in that
+    test already pins; re-derive the positional assertion, keep the score one.
+  * ``tests/test_ranking_w4b.py::test_integration_boost_requirement_is_bounded_by_the_page``
+    — its ``{0.0, 1.0}`` similarity span (contested twin at ``0``) assumes the id
+    tie-break hands the lower-ULID twin rank 0; with averaged ranks
+    ``_min_max_normalize`` returns the all-equal midpoint ``0.5`` for both.
+    NOTE: the first assertion to fail there is the BARE ``== {0.0, 1.0}`` check,
+    which carries no message at all; the "FIXTURE PREMISE BROKEN … regenerate the
+    fixture" text sits on the NEXT assertion and is never reached.
+
+  **Do not relax any of them.** Which of these the remedy diff actually RUNS
+  differs, and one of the three can miss it: ``test_temporal_leg_2976.py`` is
+  registered under the ``sdk`` surface only, so a
+  ``tortoise/search_engine.py``-only remedy diff (which selects ``core``) never
+  runs it — the temporal-leg reds then surface later, on an unrelated PR.
+  ``test_bm25_lexical_8488.py`` is registered under ``core`` AND ``carve_out``,
+  so it DOES run in the embedded carve-out leg of the same remedy PR, and its
+  red appears where the remedy can see it.
+* **accept-and-restate** — delete the xfail pin together with the #2102 E2E-1
+  restatement. Deleting it is a deliberate act, never a silent green.
 """
 from __future__ import annotations
+
+import pytest
 
 from tortoise.search_engine import rrf_fusion
 
@@ -63,12 +102,21 @@ _WEIGHTS = {"vector": 1.5}
 _STRATEGIES = ["fts", "vector"]
 
 
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason=(
+        "#7704: fusion gives two documents id-tied on EVERY leg different "
+        "relevance (1.61% apart) — the shipped behaviour is the defect; the "
+        "remedy is an OPEN owner ruling, so this reds again the moment a fix "
+        "lands (remove the marker then). See the module docstring."
+    ),
+)
 def test_identical_leg_scores_must_not_produce_different_fused_scores():
     """Two documents identical on EVERY leg ⇒ identical fused relevance.
 
-    Mutation: consume the leg position again (``position_is_rank=True``, or the
-    pre-fix ``enumerate()``) → THIS test reds with 0.0409836 vs 0.0403226, a
-    1.61% relative gap carrying zero evidence.
+    Mutation: enumerate() the leg positionally (what ships today) → this reds
+    with 0.0409836 vs 0.0403226, a 1.61% relative gap carrying zero evidence.
     """
     fused = rrf_fusion(
         [[("b", 1.0), ("a", 1.0)], [("b", 1.0), ("a", 1.0)]],
@@ -78,27 +126,6 @@ def test_identical_leg_scores_must_not_produce_different_fused_scores():
     assert fused["a"] == fused["b"], (
         "two rows the legs scored identically were given different fused "
         f"relevance: {fused}")
-
-
-def test_a_positional_leg_keeps_position_as_its_rank():
-    """``position_is_rank`` is the one escape hatch — and it must stay exact.
-
-    A leg that carries no score signal (``temporal_leg`` fuses ``[(id, 0.0),
-    …]``) means "the position is the rank" (#2976). Averaging that block would
-    flatten the whole leg to one rank and hand its order to the id sort, which
-    is the class of regression the temporal-leg suite guards; this is the unit
-    form, and the mutation that reds it is dropping the flag at the temporal
-    leg's call site (measured: ``test_temporal_leg_2976`` reds 3 tests then).
-    """
-    leg = [(pid, 0.0) for pid in ("p0", "p1", "p2")]
-    positional = rrf_fusion([leg], strategy_names=["temporal"],
-                            position_is_rank=True)
-    assert list(positional) == ["p0", "p1", "p2"], positional
-    assert positional["p0"] > positional["p1"] > positional["p2"], positional
-    # …and the default (no flag) is the equal-evidence invariant, which is why
-    # the flag has to be declared rather than inferred from constant scores.
-    tied = rrf_fusion([leg], strategy_names=["temporal"])
-    assert len(set(tied.values())) == 1, tied
 
 
 def test_a_tie_group_does_not_displace_a_document_the_legs_ranked_lower():

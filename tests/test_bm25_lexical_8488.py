@@ -419,19 +419,6 @@ class TestReadPath:
         Mutation: drop the ``raw_results["fts"] = _bm25_hits`` assignment (the
         lexical arm disabled) → both reads rank the record identically and this
         reds.
-
-        ⚠️ RE-DERIVED (#7704): this used to assert ``on_ids.index(target) <
-        off_ids.index(target)`` — a 2-slot climb. That climb was **entirely the
-        phantom spread among the four dense-AND-lexically tied topic rows**, not
-        the arm: the leg's ``ORDER BY score, id ASC`` tie-break used to become a
-        fused relevance difference between them, so the record's "climb" was it
-        interleaving into that spread. ``rrf_fusion`` now averages tied ranks
-        (#7704), the block is atomic, and the record lands at the SAME index in
-        both reads (measured: 4 and 4). The arm's real gain is measured where it
-        survives — the lexical SCORE it hands the fusion (the record's becomes
-        the strongest in the pool) and the fused relevance GAP it closes — and
-        the weight bound's effect is pinned by name instead of being left
-        implicit: the arm may not vault the dense block.
         """
         sdk, target = _e2e_sdk()
         monkeypatch.delenv("TORTOISE_BM25_LEXICAL", raising=False)
@@ -454,32 +441,14 @@ class TestReadPath:
                    for e in on_trace), (
             f"the lexical leg must be BM25-scored when the gate is on; "
             f"trace={on_trace}")
+        assert on_ids.index(target) < off_ids.index(target), (
+            "the BM25-scored lexical leg must rank the rare-token record "
+            f"better than the shipped scorer did; off={off_ids}, on={on_ids}")
         # The lexical SCORE the fusion consumed, not just the order.
         on_target = next(h for h in on if h["id"] == target)
         assert on_target["scores"]["fts"] > max(
             h["scores"]["fts"] for h in on if h["id"] != target), (
             f"the record must carry the strongest lexical score; {on_target}")
-
-        # …and the fused relevance it buys: the record's gap to the dense block
-        # must SHRINK. This is the arm's effect measured in fusion space, where
-        # #7704's tie-averaged ranks leave it visible (the phantom spread it
-        # used to be read off is gone).
-        def gap(res: list[dict]) -> float:
-            target_fused = next(h for h in res if h["id"] == target)["scores"]["rrf"]
-            return min(h["scores"]["rrf"] for h in res if h["id"] != target) - target_fused
-
-        assert gap(on) < gap(off), (
-            "the BM25-scored lexical leg must close the record's fused gap to "
-            f"the dense block: gate off {gap(off):.6f}, gate on {gap(on):.6f}")
-        # …and the weight BOUND holds: the arm re-ranks within the pool, it does
-        # not vault the dense leg's whole list (``LEXICAL_WEIGHT_MAX`` < the
-        # dense weight, #8488 — dropping the bound puts the record first and
-        # reds this).
-        dense_block = [i for i, hid in enumerate(on_ids) if hid != target]
-        assert on_ids.index(target) > min(dense_block), (
-            f"the arm must not put the record above the dense block — the "
-            f"lexical weight is bounded below the dense leg's (#8488); "
-            f"got {on_ids}")
         # One lexical SLOT, one tally entry — the arm re-scores, it does not
         # add a second lexical leg (#8488 review).
         assert off_fts_runs == 1, f"one lexical slot, one tally entry: {tally}"
