@@ -57,7 +57,7 @@ from tortoise.coverage_loop import (
 )
 
 from .env_truthy import env_flag  # #4097: the declared truthy contract
-from .validity import END_UNKNOWN, PRECISION_UNKNOWN  # #2350: the 3-state end
+from .validity import END_KNOWN, END_UNKNOWN, PRECISION_UNKNOWN  # #2350 end state
 
 #: token-count estimator (matches the reader-context alignment invariant):
 #: rough LLM token ≈ whitespace tokens, plus a 10% markup allowance for
@@ -902,6 +902,32 @@ _ROLE_PREFIX = re.compile(r"^\[(user|assistant|system|tool|unknown)\]\s+",
                              re.IGNORECASE)
 
 
+def _reader_bound(value: object) -> str:
+    """The reader-text spelling of one stored window bound — ``""`` if none.
+
+    ISO date strings are the ONLY spelling the reader context carries (see
+    ``_validity_marker``), and the write path stores bounds VERBATIM, so a
+    NUMERIC epoch reaches this projection with no reader spelling at all
+    (``validFrom=1735689600`` / ``validTo=1735689600`` are both storable —
+    ``validity._names_an_instant`` calls them instants, ``effective_precision``
+    reports ``"day"`` for them). How an epoch is WRITTEN and RENDERED is
+    #9741's OPEN contract question, so this function does not invent one: a
+    non-string bound reads as "no spelling", and the marker omits the clause
+    it would have fed — the same shape #9730 chose for a start that names no
+    instant (omit, never interpolate).
+
+    What it must never do again is what the call site did before: call
+    ``.strip()`` on the RAW value. That raised ``AttributeError`` on BOTH ends
+    (``valid_from`` at one line, ``valid_to`` at the next), so a single epoch
+    bound took the whole ``_render_block`` down instead of degrading one
+    marker — a read path acquiring a failure mode it never had. Nothing here
+    orders, parses or classifies: the end STATE is ``validity.end_state``'s
+    verdict, consumed by ``_end_state_is_unknown``, never re-derived from this
+    text.
+    """
+    return value.strip() if isinstance(value, str) else ""
+
+
 def _validity_marker(h: dict) -> str:
     """Validity-window marker text for one hit (E6 #1538, D7).
 
@@ -931,6 +957,13 @@ def _validity_marker(h: dict) -> str:
         ``validity.effective_precision`` reports no precision for it
         (#9201/#9244) — so ``[valid since TBD]`` asserted a bound the data
         denies.
+      - a NUMERIC bound (an epoch) has NO reader spelling (``_reader_bound``):
+        the window clause is OMITTED rather than invented, and the read path
+        does not raise. A numeric END whose state is ``END_KNOWN`` is the one
+        case that must not fall through to the open form: ``[valid since X]``
+        asserts the claim is STILL TRUE, and the state beside it says the
+        window CLOSED — the #2350 hazard, not a spelling question — so it
+        renders nothing too until #9741 settles how an epoch reads.
     ISO date strings (YYYY-MM-DD — the dataset/``when`` normalization): no
     full timestamps in the reader context; timestamps stay on the graph
     properties. The supersession markers (SUPERSEDED BY / SUPERSEDES) are
@@ -952,8 +985,8 @@ def _validity_marker(h: dict) -> str:
     # start here, "no start recorded" beside it), which is the cross-surface
     # drift ``window_read_fields`` passes the bounds RAW to prevent.
     raw_vf = h.get("valid_from")
-    vf = (raw_vf or "").strip()
-    vt = (h.get("valid_to") or "").strip()
+    vf = _reader_bound(raw_vf)
+    vt = _reader_bound(h.get("valid_to"))
     ex = (h.get("expired_at") or "").strip()
     if vf:
         # ISO date strings only — truncate full timestamps to YYYY-MM-DD.
@@ -991,6 +1024,18 @@ def _validity_marker(h: dict) -> str:
                 marks.append(f"[valid {lead}→ {vtd}; expired {exd}]")
             else:
                 marks.append(f"[valid {lead}→ {vtd}]")
+        elif _resolved_end_state(h) == END_KNOWN:
+            # The state says the window ENDED at a dated instant, but this
+            # bound has no reader spelling to print (a NUMERIC epoch — see
+            # ``_reader_bound``; on the wire a falsey bound's ``valid_to``
+            # does not even survive as display text). The open form below
+            # would relabel a CLOSED window as still-true, which is the exact
+            # fabricated-coverage hazard #2350 exists to prevent, so the
+            # clause is omitted — the shape #9730 already chose for a bound
+            # it cannot name. How an epoch should READ is #9741's open
+            # contract question; it is not invented here, and it is not
+            # answered by the renderer deciding the end again from presence.
+            pass
         else:
             # No start recorded and an OPEN end: ``[valid]`` still states the
             # open-end reading (still-true) without asserting a start, which
@@ -998,6 +1043,26 @@ def _validity_marker(h: dict) -> str:
             # would hide that a window was written at all.
             marks.append(f"[valid{since}]")
     return " ".join(marks)
+
+
+def _resolved_end_state(h: dict) -> str:
+    """The end state the validity layer RESOLVED for this hit, or ``""``.
+
+    Returns ``END_OPEN`` / ``END_KNOWN`` / ``END_UNKNOWN`` when the hit carries
+    a resolved state, and ``""`` when it carries none: a hand-built hit, or a
+    caller that never went through the read-projection home
+    ``validity.window_read_fields``. The fallback in that case is the DECLARED
+    precision token, which is the same vocabulary's own spelling of the state
+    and needs no parse to read — a resolved state, when present, alone decides,
+    because the token is that state's INPUT and preferring it could only
+    contradict the verdict already computed.
+    """
+    state = (h.get("end_state") or "").strip()
+    if state:
+        return state
+    if (h.get("valid_to_precision") or "") == PRECISION_UNKNOWN:
+        return END_UNKNOWN
+    return ""
 
 
 def _end_state_is_unknown(h: dict) -> bool:
@@ -1020,11 +1085,12 @@ def _end_state_is_unknown(h: dict) -> bool:
     parse to read. When the resolved state IS present it alone decides: the
     token is the state's input, so preferring it could only contradict the
     verdict already computed.
+
+    The state itself is read by :func:`_resolved_end_state` — one home, so the
+    ``END_UNKNOWN`` arm and the ``END_KNOWN`` (no reader spelling) arm of
+    ``_validity_marker`` cannot resolve the same hit differently.
     """
-    state = (h.get("end_state") or "").strip()
-    if state:
-        return state == END_UNKNOWN
-    return (h.get("valid_to_precision") or "") == PRECISION_UNKNOWN
+    return _resolved_end_state(h) == END_UNKNOWN
 
 
 def _bounds_an_instant(value: object) -> bool:
@@ -1049,20 +1115,29 @@ def _bounds_an_instant(value: object) -> bool:
     acquire a failure mode it never had). A numeric epoch ``0`` therefore IS an
     instant here too (1970-01-01T00:00:00Z).
 
-    ⚠️ This branch is unreachable from ``_validity_marker`` twice over, and the
-    second way is a KNOWN residual, not a guarantee (#9741): a TRUTHY numeric
-    raises ``AttributeError`` at ``(raw_vf or "").strip()``, while a FALSEY one
-    (``0`` / ``0.0`` / ``False``) short-circuits on that ``or ""`` — so an epoch-``0``
-    start renders NO marker at all while ``valid_from_precision`` reads ``"day"``
-    (epoch 0 IS an instant). That truthiness trap is the same one
+    ⚠️ This branch is unreachable from ``_validity_marker`` by construction,
+    and that is a KNOWN residual, not a guarantee (#9741). The marker projects
+    a bound with ``_reader_bound``, which yields no text at all for a numeric
+    bound, so the gate is never handed one: an epoch bound renders NO window
+    clause while ``effective_precision`` reads ``"day"`` for it (epoch 0 IS an
+    instant). That truthiness trap is the same one
     ``sdk._supersede_window_start`` records fixing; how a numeric bound is
     WRITTEN and RENDERED is #9741's contract question, not this gate's. The
     branch exists so that #9741 handing the raw bound through cannot turn the
     parity above into an ``OverflowError`` on the read path — when it lands, the
     marker starts consulting numerics and this docstring's scope widens back.
+
+    BOTH ends reach the residual (#9741 review P2). It was first recorded for
+    ``valid_from`` alone, but ``(h.get(...) or "").strip()`` raised the SAME
+    ``AttributeError`` on ``valid_to`` — a stored epoch end
+    (``validTo=1735689600``, ``end_state="known"``) took ``_render_block``
+    down, measured identically on the parent of this fix, i.e. not introduced
+    here. Both are now projected through one home, so neither raises and
+    neither is interpolated into reader text;
     ``tests/test_2350_validity_precision.py``
-    ::test_an_epoch_zero_start_renders_no_window_is_recorded pins the residual
-    so that change cannot pass silently.
+    ::test_an_epoch_zero_start_renders_no_window_is_recorded and
+    ::test_a_numeric_bound_never_raises_and_never_renders_a_date pin the
+    residual so this change cannot pass silently.
     """
     if isinstance(value, (int, float)):
         return True

@@ -754,6 +754,109 @@ def test_reader_marker_on_the_search_wire_states_an_undatable_end(lane):
         "[valid 2024-01-01 → 2024-06-01]"
 
 
+def test_a_numeric_bound_never_raises_and_never_renders_a_date(lane):
+    """#9741 review P2: a stored NUMERIC bound must not take the reader down.
+
+    ``raw = (h.get("valid_from") or "").strip()`` — and the identical line for
+    ``valid_to`` — raised ``AttributeError`` for a truthy epoch, and both bounds
+    are storable: ``create_point(validTo=1735689600)`` is accepted (the window
+    orders), and ``window_read_fields`` reports ``end_state: "known"``,
+    ``valid_to_precision: "day"`` for it. So one epoch end raised out of
+    ``_render_block`` — a read path acquiring a failure mode it never had —
+    instead of degrading one marker. Measured identically on the parent of this
+    fix, i.e. not introduced by it; the fix's own scope note had named only the
+    ``valid_from`` half.
+
+    The answer is now uniform and invents no spelling: an epoch has no reader
+    text yet (how it should READ is #9741's open contract question), so the
+    window clause is omitted. For a ``known`` end that omission is also the
+    FABRICATION half: the open form (``[valid since X]``) asserts the claim is
+    still true, and the state beside it says the window closed. Fails pre-fix
+    on every assertion here — the wire case raises, and the epoch-0 end read
+    ``[valid since 1960-01-01]``.
+    """
+    from tortoise.retrieval import _render_block, _validity_marker
+
+    sdk, _events = lane
+    epoch_end = sdk.create_point("statement", "epoch end",
+                                 validFrom="2024-01-01", validTo=1735689600)
+    epoch_zero_end = sdk.create_point("statement", "epoch-zero end",
+                                      validFrom="1960-01-01", validTo=0)
+    hits = {r["id"]: r for r in _scan(sdk)}
+    # non-vacuous: the epoch IS stored, and the state says the window is CLOSED.
+    assert hits[epoch_end["id"]]["valid_to"] == 1735689600
+    assert hits[epoch_end["id"]]["end_state"] == "known"
+    assert hits[epoch_zero_end["id"]]["end_state"] == "known"
+
+    for pid in (epoch_end["id"], epoch_zero_end["id"]):
+        marker = _validity_marker(hits[pid])
+        assert marker == "", marker
+        # the reader block renders at all (pre-fix this raised), and no epoch
+        # digit reaches the reader text.
+        assert "1735689600" not in _render_block(hits[pid])
+
+    # a truthy numeric START raised the same way, on the same raw projection.
+    assert _validity_marker({"valid_from": 1735689600,
+                             "end_state": "open"}) == ""
+
+    # CONTROL — a dated end is still rendered byte-identically, so the omission
+    # is about the missing SPELLING, not about ends being dropped.
+    dated = sdk.create_point("statement", "dated end",
+                             validFrom="2024-01-01", validTo="2024-06-01")
+    dated_hit = next(r for r in _scan(sdk) if r["id"] == dated["id"])
+    assert _validity_marker(dated_hit) == "[valid 2024-01-01 → 2024-06-01]"
+
+
+def test_both_spellings_of_an_undatable_end_render_the_same_marker(lane):
+    """#9741: the two DIALECTS of ``END_UNKNOWN`` must render identically.
+
+    ``END_UNKNOWN`` has two spellings (#9202, owner ruling 2026-10-25): the
+    DECLARED token ``validToPrecision="unknown"`` with no ``validTo``, and a
+    STORED ``validTo`` that names no instant. The second is what pre-#9202 data
+    and every public write hold: the write path stores the bound VERBATIM, so
+    ``validTo="TBD"`` sits in the graph with no precision property beside it at
+    all. The marker's defect (#9741) was that it printed that stored text as a
+    date while the state said ``unknown`` — so the pin has to be on the RAW row,
+    not only on a literal the renderer builds itself: a fix that consumed the
+    state for the DECLARED token but still re-derived the end from the presence
+    of a ``validTo`` would pass the declared half and print ``→ TBD`` here.
+
+    The legacy row is written by hand (the shape a pre-#9202 writer left), the
+    canonical one through the public write, and BOTH are read off the surface
+    the ask lane renders.
+    """
+    from tortoise.retrieval import _validity_marker
+
+    sdk, _events = lane
+
+    # (A) legacy: a stored junk end written BEFORE any shaping — verbatim, no
+    # precision property anywhere, exactly what the public write leaves behind.
+    legacy = sdk.create_point("statement", "pre-9202 junk end")
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n.validFrom = $vf, n.validTo = $vt",
+        params={"id": legacy["id"], "vf": "2024-01-01", "vt": "TBD"})
+    raw_props = _window_props(sdk, legacy["id"])
+    assert raw_props == {"validFrom": "2024-01-01", "validTo": "TBD",
+                        "validFromPrecision": None,
+                        "validToPrecision": None}
+
+    # (B) canonical: the declared marker on an ABSENT bound.
+    declared = sdk.create_point("statement", "declared unknown end",
+                                validFrom="2024-01-01",
+                                validToPrecision="unknown")
+
+    hits = {r["id"]: r for r in _scan(sdk)}
+    markers = {}
+    for label, pid in (("stored-junk", legacy["id"]),
+                       ("declared", declared["id"])):
+        # non-vacuous for both: the state the renderer consumes says unknown.
+        assert hits[pid]["end_state"] == "unknown", (label, hits[pid])
+        markers[label] = _validity_marker(hits[pid])
+    assert markers["stored-junk"] == markers["declared"], markers
+    assert markers["stored-junk"] == "[valid since 2024-01-01; end unknown]"
+    assert "TBD" not in markers["stored-junk"]
+
+
 def test_reader_marker_control_keeps_an_orderable_start_byte_identical():
     """#9730 control: the gate is the read path's OWN predicate
     (``_created_sort_key(value)[0] == 0``), so every bound that NAMES an
@@ -912,7 +1015,7 @@ def test_an_epoch_zero_start_renders_no_window_is_recorded():
     """#9730 P3: the ONE recorded residual of the parity claim — pinned so a
     future change cannot silently keep the docstring that says otherwise.
 
-    ``(raw_vf or "")`` drops a FALSEY numeric (``0``/``False``) before the gate
+    ``(raw_vf or "")`` dropped a FALSEY numeric (``0``/``False``) before the gate
     ever sees it, while ``validity.effective_precision(0, None)`` reads
     ``"day"`` (epoch 0 IS an instant). So for a stored epoch-0 start the marker
     renders no window at all and the precision beside it names one.
@@ -925,18 +1028,20 @@ def test_an_epoch_zero_start_renders_no_window_is_recorded():
     catch: if #9741 makes an epoch-0 start render a start clause, this test
     goes red and the fixer must also widen ``_bounds_an_instant``'s scoping
     paragraph.
+
+    #9741 review P2: the gate now never SEES a numeric bound at all —
+    ``_reader_bound`` gives a non-string bound no reader spelling, so a TRUTHY
+    numeric no longer raises ``AttributeError`` out of the read path and the
+    answer is uniform for both truthiness classes (that crash is pinned in
+    ``test_a_numeric_bound_never_raises_and_never_renders_a_date``).
     """
     from tortoise.retrieval import _validity_marker
     from tortoise.validity import effective_precision
 
-    for epoch_zero in (0, 0.0, False):
+    for epoch_zero in (0, 0.0, False, 1735689600):
         assert effective_precision(epoch_zero, None) == "day", epoch_zero
         assert _validity_marker({"valid_from": epoch_zero,
                                  "end_state": "open"}) == "", epoch_zero
-        # a TRUTHY numeric does not even get this far — it raises at
-        # ``.strip()`` (#9741), so neither surface renders a start today.
-        with pytest.raises(AttributeError):
-            _validity_marker({"valid_from": 1735689600, "end_state": "open"})
 
 
 def test_search_annotation_distinguishes_open_from_unknown(lane):
