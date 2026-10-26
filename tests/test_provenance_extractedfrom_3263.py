@@ -570,6 +570,147 @@ def test_a_fold_with_an_unhashed_ref_does_not_remove_the_carrier(prov):
         f"live={live!r} replayed={_render_row(proj, pid)!r}")
 
 
+def _point_added_records(events_dir, pid: str) -> list[dict]:
+    """Every ``PointAdded`` payload the journal holds for ``pid``, in order.
+
+    The fold's contract is about the RECORD it appends (a creating record that
+    re-emits an existing Point), and the graph cannot show whether that record
+    claims a false origin or a narrower provenance — so the pins read the
+    journal itself.
+    """
+    import json
+
+    out: list[dict] = []
+    journal = os.path.join(str(events_dir), "events.jsonl")
+    with open(journal) as fh:
+        for line in fh:
+            if not line.strip():
+                continue
+            rec = json.loads(line)
+            if (rec.get("type") == "PointAdded"
+                    and (rec.get("point") or {}).get("id") == pid):
+                out.append(rec["point"])
+    return out
+
+
+def test_a_fold_keeps_a_prop_only_ref_instead_of_erasing_it(prov, monkeypatch):
+    """A ref the NODE reports with no edge behind it is ADOPTED, not deleted.
+
+    ``update_point(extractedFrom=…)`` is a public door that sets the property
+    and wires NOTHING — it never calls ``_link_source``, and the replay does not
+    fold it either (#10018) — so a node can report provenance that no
+    ``:Source`` edge holds. The fold rebuilds the ref list from the EDGES
+    (#3263), which means an unrelated dedup hit used to DELETE that reported
+    ref: the silent-drop class this fold exists to end, one direction over, with
+    only an INFO line to show for it.
+
+    Frozen before (re-review P2): prop ``[one, ghost]`` → ``[one, two]`` — the
+    caller's ``ghost`` was gone from the property and had never been an edge.
+    """
+    sdk, events = prov
+    # A deterministic, in-process embedder: the assertions below are about
+    # provenance, and a real model load (unavailable offline) burns the whole
+    # per-test budget on a retry loop that has nothing to do with this pin.
+    from tortoise.embeddings import EMBEDDING_DIM
+
+    _dim = EMBEDDING_DIM if isinstance(EMBEDDING_DIM, int) else 384
+    monkeypatch.setattr(
+        "tortoise.embeddings.compute_embedding",
+        lambda text, max_tokens=512: [float(len(text))] + [0.25] * (_dim - 1))
+    proj = sdk._get_proj()
+    one = "https://example.com/one"
+    ghost = "https://example.com/ghost"
+    two = "https://example.com/two"
+    _seed_hashed_source(sdk, one, "hash-one")
+    _seed_hashed_source(sdk, two, "hash-two")
+
+    content = "a prop-only ref must survive the fold"
+    pid = sdk.create_point("statement", content, extractedFrom=one,
+                           dedup=True)["id"]
+    # The public door that leaves a prop-only ref: the property moves, and no
+    # edge moves with it.
+    sdk.update_point(pid, extractedFrom=[one, ghost])
+    assert _sources_of(proj, pid) == {one}, \
+        "premise: update_point wires no edge"
+    assert _prop_refs(proj, pid) == [one, ghost], \
+        f"premise: the property reports both refs: {_prop_refs(proj, pid)!r}"
+
+    sdk.create_point("statement", content, extractedFrom=two, dedup=True)
+    assert _sources_of(proj, pid) == {one, ghost, two}, (
+        "the fold ERASED (or left prop-only) a ref the node reported instead "
+        f"of adopting it: edges={_sources_of(proj, pid)!r}")
+    assert set(_prop_refs(proj, pid)) == {one, ghost, two}, (
+        f"the fold DROPPED the caller's prop-only ref: {_prop_refs(proj, pid)!r}")
+
+    live = _render_row(proj, pid)
+    assert live["sourceVersionTransit"] == [[one, "hash-one"],
+                                            [two, "hash-two"]], (
+        "the adopted ref carries no hash (honest-absent), and the HELD ref's "
+        f"read-version survives: {live['sourceVersionTransit']!r}")
+    proj.rebuild_all(str(events), confirm_destructive=True)
+    assert _render_row(proj, pid) == live, (
+        "the adopted edge is not replayable — replay(journal) != live: "
+        f"live={live!r} replayed={_render_row(proj, pid)!r}")
+
+
+def test_a_fold_claims_no_model_identity_for_the_vector_it_preserved(
+        prov, monkeypatch):
+    """The fold carries a vector it did NOT compute — so it attests NO origin.
+
+    The snapshot is re-emitted as a *creating* ``PointAdded``, and
+    ``stamp_journal_embedding`` attests the store's ACTIVE model identity on a
+    creating payload. The vector in the snapshot came from an EARLIER write, so
+    attesting the active identity records a FALSE ORIGIN — and because
+    ``_record_embedding_identity`` only warns when the record's identity
+    DIFFERS from the store's, a fold that stamped the active one makes every
+    later model change SILENT on that Point (R1's whole point,
+    ``docs/durability-posture.md``). ``embedding_preserved`` is the marker the
+    capture re-emit already uses for exactly this shape (#5004 round-3).
+
+    Frozen before (re-review P2): the fold's record carried
+    ``embedding_model='other/model-v9'`` for a vector embedder A computed.
+    """
+    from tortoise.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL
+
+    sdk, events = prov
+    dim = EMBEDDING_DIM if isinstance(EMBEDDING_DIM, int) else 384
+
+    def _embed(text: str, max_tokens: int = 512):
+        return [float(len(text))] + [0.25] * (dim - 1)
+
+    monkeypatch.setattr("tortoise.embeddings.compute_embedding", _embed)
+    one, two = "https://example.com/one", "https://example.com/two"
+    content = "the fold must not re-attest a vector it did not compute"
+    pid = sdk.create_point("statement", content, extractedFrom=one,
+                           dedup=True)["id"]
+
+    creating = _point_added_records(events, pid)[-1]
+    assert creating.get("embedding") is not None, \
+        "premise: the creating write journalued a vector"
+    assert creating.get("embedding_model") == EMBEDDING_MODEL, (
+        "premise: the creating record OWNS the attestation — it names the model "
+        f"that computed the vector: {creating.get('embedding_model')!r}")
+
+    # The store's active embedder is now a DIFFERENT model (a deliberate swap
+    # or a provider-side change). The fold encodes nothing; it re-emits the
+    # stored vector.
+    monkeypatch.setattr("tortoise.embeddings.EMBEDDING_MODEL", "other/model-v9")
+    sdk.create_point("statement", content, extractedFrom=two, dedup=True)
+
+    fold = _point_added_records(events, pid)[-1]
+    assert fold.get("embedding") == creating.get("embedding"), (
+        "R1: the re-emitted record must carry the vector AS WRITTEN, verbatim "
+        "— not one re-encoded under the active model")
+    assert fold.get("embedding_preserved") is True, (
+        "the fold re-emitted a vector it did not compute without marking it "
+        f"preserved: {sorted(fold)!r}")
+    assert "embedding_model" not in fold and "embedding_revision" not in fold, (
+        "the fold attested a PRESERVED vector to the ACTIVE model — a false "
+        "origin that makes the next model change silent: "
+        f"model={fold.get('embedding_model')!r} "
+        f"revision={fold.get('embedding_revision')!r}")
+
+
 def test_a_fold_whose_record_cannot_be_written_refuses_the_fold(prov,
                                                                monkeypatch):
     """§17.1 — NO record ⇒ NO fold.
@@ -615,6 +756,86 @@ def test_a_fold_whose_record_cannot_be_written_refuses_the_fold(prov,
         "MATCH (s:Source {url:$u}) RETURN s.url",
         params={"u": incoming}).result_set == [], \
         "a refused fold minted the incoming Source"
+
+
+def test_a_fold_reports_itself_ONCE_at_the_level_its_consumer_reads(
+        prov, caplog, monkeypatch):
+    """The fold's report is a WARNING carrying the prefix its consumer reads.
+
+    `integrations/cli-extraction/extract_turns.py` counts folds by
+    CLASSIFYING the SDK's ``create_point dedup hit on `` warning — its handler
+    is tuned to WARNING+, and it counts PIDS (``folded`` is one entry per
+    folding call, and ``len(folded)`` is compared against ``len(made)`` on the
+    all-fold exit path). Demoting that breadcrumb to INFO therefore made the
+    extraction lane silently count ZERO folds: the receipt lost
+    ``folded_onto_other_sources`` and
+    `tests/test_cli_extraction.py::
+    TestWriterContract::test_cross_source_fold_counted_and_all_fold_exits_zero`
+    reddened in CI on a PR that changed nothing it imports.
+
+    Frozen before: no WARNING record at all (the breadcrumb was INFO), so the
+    lane's ``_Collect`` handler never saw the fold. The ONE-record assertion is
+    the other half: the adopting fold below writes an extra INFO line about the
+    refs it adopted, and if that line also carried the prefix the lane would
+    count one call TWICE (``folded_onto_other_sources`` off by one, and the
+    all-fold path's ``len(folded) != len(made)`` tripwire misfiring).
+    """
+    from tortoise.embeddings import EMBEDDING_DIM
+
+    _dim = EMBEDDING_DIM if isinstance(EMBEDDING_DIM, int) else 384
+    monkeypatch.setattr(
+        "tortoise.embeddings.compute_embedding",
+        lambda text, max_tokens=512: [float(len(text))] + [0.25] * (_dim - 1))
+    sdk, _events = prov
+    proj = sdk._get_proj()
+    content = "the fold must report itself where its consumer reads"
+    one, ghost, two = (
+        "https://example.com/one", "https://example.com/ghost",
+        "https://example.com/two")
+    _seed_hashed_source(sdk, one, "hash-one")
+    first = sdk.create_point("statement", content, extractedFrom=one,
+                             dedup=True)
+
+    def _reports():
+        return [r for r in caplog.records
+                if r.name.startswith("tortoise.sdk")
+                and isinstance(r.msg, str)
+                and r.msg.startswith("create_point dedup hit on ")]
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+        second = sdk.create_point("statement", content, extractedFrom=two,
+                                  dedup=True)
+    assert second["id"] == first["id"], "guard: this must be a dedup hit"
+    folds = _reports()
+    assert len(folds) == 1, (
+        "the lane counts PIDS: one folding call must report ONCE (0 = the "
+        "breadcrumb was demoted below the level it reads, >1 = one call "
+        f"counted twice): {[r.getMessage() for r in folds]!r}")
+    assert folds[0].levelno == logging.WARNING, (
+        "the lane's handler is tuned to WARNING+; a lower level is invisible "
+        f"to it: {logging.getLevelName(folds[0].levelno)}")
+    assert folds[0].args and str(folds[0].args[0]) == first["id"], (
+        "the lane keys a fold on arg 0 being the surviving POINT id: "
+        f"{folds[0].args!r}")
+    assert "not applied" not in folds[0].getMessage(), (
+        "the ref WAS applied — reporting it as not-applied is the false "
+        "warning #7704 removes")
+
+    # An ADOPTING fold (a prop-only ref on the node) reports ONCE as well.
+    sdk.update_point(first["id"], extractedFrom=[one, ghost])
+    assert _prop_refs(proj, first["id"]) == [one, ghost], \
+        f"premise: the node reports a ref no edge holds: {_prop_refs(proj, first['id'])!r}"
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+        sdk.create_point("statement", content,
+                         extractedFrom="https://example.com/three",
+                         dedup=True)
+    adopting = _reports()
+    assert len(adopting) == 1, (
+        "an adopting fold must still report ONCE — the adoption note belongs "
+        "inside the report, not beside it as a second prefixed line: "
+        f"{[r.getMessage() for r in adopting]!r}")
 
 
 def test_repeated_dedup_hit_neither_duplicates_nor_rejournals(prov):

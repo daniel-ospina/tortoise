@@ -27970,6 +27970,23 @@ class TortoiseSDK:
         wrote. Refs with no recorded hash contribute NO pair (honest-absent,
         ``_valid_transit_pairs``' own rule).
 
+        **A PROP-ONLY ref is ADOPTED, never erased.** The ref list is rebuilt
+        from the edges (they are authoritative, #3263), but a ref the node
+        reports with no edge behind it still names evidence a caller supplied —
+        the shape ``update_point(extractedFrom=…)`` leaves, since that writer
+        sets the property and wires nothing (#10018). Dropping it would delete
+        reported provenance on an unrelated dedup hit; this fold WIRES it in the
+        same pass instead, so the property stops being a lie and the evidence
+        survives (`prop == edges` in both directions).
+
+        **The vector is PRESERVED, not re-attested.** The snapshot is re-emitted
+        as a *creating* ``PointAdded``, but its ``embedding`` was computed by an
+        earlier write — possibly under a different embedder — so the payload is
+        marked ``embedding_preserved`` (#5004 round-3, the capture re-emit's own
+        marker) and ``stamp_journal_embedding`` claims no model identity: a
+        re-attestation here would record a FALSE ORIGIN and make a model change
+        silent on replay (R1, ``docs/durability-posture.md``).
+
         Idempotent: called only with a non-empty `missing`, and every write
         below is a MERGE/SET of the refs it names.
         """
@@ -28031,13 +28048,38 @@ class TortoiseSDK:
         for _url in present:
             _spelling.setdefault(_url, _carried.get(_url, _url))
         accumulated = list(_spelling.values())
+        # A ref the NODE reports but no EDGE addresses — the shape
+        # `update_point(extractedFrom=…)` leaves behind: that writer sets the
+        # property and wires NOTHING (it is not replayed either, #10018).
+        # Rebuilding the ref list from the edges alone therefore DELETES the
+        # caller's reported provenance on an unrelated dedup hit, with only an
+        # INFO line to show for it — the silent-drop class this fold exists to
+        # end, one direction over. ADOPT it instead: it joins the ref list AND
+        # is wired in the same pass, so the property stops being a lie and no
+        # evidence is lost (`prop == edges` in BOTH directions, which is the
+        # invariant the pins assert). Repair, not deletion: the ruling's
+        # "one claim, N sources" wants the evidence kept.
+        _adopted_keys: set[str] = set()
+        _adopted: list[str] = []
+        for _key, _ref in _carried.items():
+            if _key in _spelling:
+                continue
+            _spelling[_key] = _ref
+            accumulated.append(_ref)
+            _adopted_keys.add(_key)
+            _adopted.append(_ref)
         for _ref in missing:
             _key = resolve_source_key(proj.g, _ref)
             if _key in _spelling:
                 continue
             _spelling[_key] = _ref
             accumulated.append(_ref)
-        versions = resolve_source_versions(proj.g, missing)
+        # Everything this write must WIRE: the adopted prop-only refs and the
+        # caller's new ones. `resolve_source_versions` is handed the same list,
+        # so an adopted ref's read-version is recorded on its edge exactly like
+        # a new ref's (one version map, one writer).
+        _to_wire = _adopted + list(missing)
+        versions = resolve_source_versions(proj.g, _to_wire)
         # Keep the pairs the Point already carries for refs it still holds —
         # decided on the EDGE identity, which is the only authoritative
         # statement that the ref is still held (#3263) — and re-key each to the
@@ -28047,7 +28089,11 @@ class TortoiseSDK:
         # spellings are the same string and this is a no-op. Add one pair per
         # new ref whose Source has a recorded (non-blank) version.
         prior = existing.get("sourceVersionTransit")
-        _edge_urls = set(present)
+        # HELD = the edges, plus the prop-only refs this write is adopting as
+        # edges below. A ref being wired in this same write is held in the state
+        # this record describes, so its recorded read-version must be kept (and
+        # re-keyed to the spelling the payload's ref list uses).
+        _edge_urls = set(present) | _adopted_keys
         pairs: list[list[str]] = []
         if isinstance(prior, list):
             for pair in prior:
@@ -28069,6 +28115,20 @@ class TortoiseSDK:
         pairs.extend([ref, h] for ref, h in new_pairs if ref not in _seen)
 
         snapshot = {**existing, "extractedFrom": accumulated}
+        # #5004 / R1 (re-review P2): this snapshot is re-emitted as a CREATING
+        # record (`_emit_event("PointAdded")`), and `stamp_journal_embedding`
+        # attests the ACTIVE model identity on a creating payload. The vector in
+        # `existing` was computed by an EARLIER write — possibly under a
+        # different embedder — so attesting the active identity here records a
+        # FALSE ORIGIN and makes a model change SILENT: `_record_embedding_identity`
+        # compares the record's identity against the store's and only warns on a
+        # MISMATCH, which a record stamped with the active identity can never be.
+        # `embedding_preserved` is the marker the capture re-emit already uses for
+        # exactly this shape (`_write_capture_turns`, #5004 round-3): the vector
+        # rides the record VERBATIM and no identity is claimed, so a genuine
+        # change still warns from the creating record that owns the attestation.
+        if existing.get("embedding") is not None:
+            snapshot["embedding_preserved"] = True
         if pairs:
             snapshot["sourceVersionTransit"] = pairs
         else:
@@ -28095,7 +28155,7 @@ class TortoiseSDK:
         # COMMITTED, so the ordering is journal-then-cache by construction.
         with _live_write_scope("create_point"):
             self._graph_write_with_retry(
-                lambda: proj._link_source(pid, missing,
+                lambda: proj._link_source(pid, _to_wire,
                                           source_versions=versions),
                 what="create_point dedup provenance edges",
             )
@@ -28106,9 +28166,12 @@ class TortoiseSDK:
             # this prop is a divergence — `consistency.py`, #5256) and a
             # `derived = replay(journal)` break on the ordinary document path
             # (any new Source with a recorded `contentHash`). `None` ⇒
-            # `SET … = NULL`, which REMOVES the property — exactly what a
-            # replayed `PointAdded` whose payload omits the carrier leaves
-            # behind, so live and replay agree in both directions.
+            # `SET … = NULL` REMOVES the property, while a replayed `PointAdded`
+            # whose payload OMITS the carrier RETAINS it (pass 1 appends the
+            # clause only when the payload carries one — `_upsert_point_props`;
+            # RFC-7386/omission-retained semantics, #7704 review). The two agree
+            # only for a Point that never had a carrier, which — after the
+            # identity-keyed retention above — is the ONLY way `pairs` empties.
             self._graph_write_with_retry(
                 lambda: proj.g.query(
                     "MATCH (n:Point {id:$id}) "
@@ -28118,10 +28181,29 @@ class TortoiseSDK:
                             "sv": pairs or None}),
                 what="create_point dedup provenance prop",
             )
-        _logger.info(
+        # ONE report per fold, and at WARNING. The LEVEL is a CONSUMER
+        # CONTRACT here, not a severity judgement: the extraction lane
+        # (`integrations/cli-extraction/extract_turns.py`) classifies exactly
+        # this prefix (``create_point dedup hit on ``) as a fold REPORT rather
+        # than write-path drift, and its handler is tuned to WARNING+ so an
+        # INFO-tuned container cannot be spammed by the SDK's chatty tiers. A
+        # fold demoted to INFO therefore stops being COUNTED
+        # (`folded_onto_other_sources`) and the lane's all-fold exit path never
+        # fires — the #7704 CI failure in `tests/test_cli_extraction.py`
+        # (`test_cross_source_fold_counted_and_all_fold_exits_zero`). ONE record
+        # per fold, deliberately: the lane counts PIDS, so a second line for the
+        # adopted refs below would count one call twice.
+        _adopted_note = (
+            f"; it also ADOPTED {len(_adopted)} prop-only ref(s) {_adopted!r} "
+            "that no :Source edge held — provenance the node reported and "
+            "`update_point` wires without linking (#10018), repaired rather "
+            "than erased"
+            if _adopted else ""
+        )
+        _logger.warning(
             "create_point dedup hit on %s: folded %d new extractedFrom ref(s) "
-            "%r onto the surviving Point — one claim, %d sources (#7704)",
-            pid, len(missing), missing, len(accumulated),
+            "%r onto the surviving Point — one claim, %d sources (#7704)%s",
+            pid, len(missing), missing, len(accumulated), _adopted_note,
         )
         return snapshot
 
