@@ -38,7 +38,7 @@ The lane dispatched to *close* step 4 and the ugly cases **could not drive the b
 **no new screenshots were taken for this publication** and steps 4 and probe B keep the state the run
 left them in. The reason is measured, not assumed:
 
-```
+```console
 $ cmux identify --json
 Error: ERROR: Access denied - only processes started inside cmux can connect
 
