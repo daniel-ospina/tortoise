@@ -17,12 +17,12 @@ the corrected reading:
    entry point … can drive all eight in one pass"* is an open question. It can:
    ``TortoiseSDK.capture_session`` → ``sdk._extract_session_v2``
    (``sdk.py:12389``, called at ``:11426``) →
-   ``extractor_v2.extract_session_v2`` (``extractor_v2.py:8356``) calls
-   ``_edus_from_conversation`` (S0, ``:8467``), ``run_s1`` (S1, ``:8500``),
-   ``run_s2`` (S2.1, ``:8524``), ``_run_vet_pass`` (S2.2, ``:8553``),
+   ``extractor_v2.extract_session_v2`` (``extractor_v2.py:8384``) calls
+   ``_edus_from_conversation`` (S0, ``:8495``), ``run_s1`` (S1, ``:8528``),
+   ``run_s2`` (S2.1, ``:8552``), ``_run_vet_pass`` (S2.2, ``:8581``),
    ``kind_classifier.classify_items``/``_apply_classify_kinds`` (S2.3,
-   ``:8569``), ``search_graph`` (S3, ``:8585``), ``run_s4`` (the gap filler,
-   ``:8606``), and ``execute_embed`` (S5+S6, ``:8805``). The SYMBOL is
+   ``:8597``), ``search_graph`` (S3, ``:8613``), ``run_s4`` (the gap filler,
+   ``:8634``), and ``execute_embed`` (S5+S6, ``:8833``). The SYMBOL is
    authoritative and the line is a convenience — the three FILE-NAMED cites
    above are resolved against the tree by the bundle's pin (the eight bare step
    cites are pinned only where the README's step table repeats the same
