@@ -518,6 +518,8 @@ The S1 narrative (the connected prose form of a captured session) is stored as *
 
 ⚠️ **The same rule applies to raw turns** (owner, 2026-09-23): *"the narrative is not something we're suggesting to store in the graph (same as raw) but store in supabase."* **Both of the two non-entity tiers live outside the graph.** The `Source` anchor is a **truth-layer record — Postgres-authoritative, not a cache entry (§3)** — and the heavy text sits behind it in the same store. **⚠️ "supabase" here means the DATABASE, not the object bucket — see the box above.**
 
+**✅ THE TURN HALF IS IMPLEMENTED AND MEASURED (#10000, 2026-10-26).** `tortoise/sdk.py`'s `_write_capture_turns` puts a capture's turns in the **record** whenever the record can hold them, and then writes **no turn node at all** — the graph keeps the `:Session` and its counters, and `get_session_detail` serves the transcript from the record. On a lane where the record is *not* armed (every deployment today) the graph write runs exactly as before, by design: the capability decides the store, so removing it unconditionally would write the transcript to no store. **Measured on the same corpus: a captured session cost the graph 322,063 bytes before the change and 32,032 bytes after — −90.0%, with 0 turn nodes and no node carrying a turn's text** — `docs/evidence/10000-turns-bytes/README.md` carries the figure, the method and its limits; the nodes already in live graphs are a separate, destructive removal (#10017).
+
 ### 9.2 A GitHub PR is an **`Object` + an `Event` + a `Source`** — never a `Source`-per-event (D2, decided)
 
 - the **PR** → an **`Object`** (a `WorkItem`)
