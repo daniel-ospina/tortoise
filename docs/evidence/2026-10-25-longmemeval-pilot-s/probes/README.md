@@ -73,7 +73,17 @@ cache-hit `0.0028` per 1M, verified `2026-09-03`; `deepseek-v4-pro` in `0.87` / 
 
 | lane | prompt | cache-hit | completion | USD |
 |---|---|---|---|---|
-| reader `deepseek-flash` | 437 253 | 60 928 | 2 330 | 0.05351 |
-| judge `deepseek-v4-pro` | 9 530 | 0 | 50 | 0.00838 |
-| preflight overhead | 122 | 0 | 57 | 0.00003 |
-| **total** | 446 972 | 60 928 | 2 447 | **0.06192** |
+| reader `deepseek-flash` | 437 253 | 60 928 | 2 330 | 0.0535085 |
+| judge `deepseek-v4-pro` | 9 530 | 0 | 50 | 0.0083781 |
+| preflight overhead — reader lane (`deepseek-flash`) | 122 | 0 | 57 | 0.0000330 |
+| preflight overhead — judge lane (`deepseek-v4-pro`) | 67 | 0 | 10 | 0.0000757 |
+| **total** | 446 972 | 60 928 | 2 447 | **0.0619953 ≈ $0.0620** |
+
+⚠️ The overhead row is **two** lanes (`usage.overhead.lanes`: reader `122/57` and judge `67/10`), which
+is what §3.3 of the parent document lists as `189/67`. An earlier version of this table priced only
+the reader lane ($0.00003) and totalled `0.06192`; that was low by the judge overhead lane
+($0.0000757). Note also that the report's OWN `usage.overhead.cost_usd` reads `7.6e-05` — it prices
+only the judge lane, because the reader lane is `priced: false` for the same reason as the reader body
+lane (the served id `deepseek-flash` is absent from `PRICING_MAP`), so a total recomputed from that
+field alone comes out `0.06196`, ~$0.00004 short. The rows above price every lane at its own model's
+rate and the total is the sum of the rows.

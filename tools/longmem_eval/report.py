@@ -888,6 +888,13 @@ def build_report(
     split: str,
     reader_model: str,
     judge_model: str,
+    # #8486 (2026-10-25): the endpoint that actually served the judge — recorded
+    # beside ``judge_model`` for the same reason ``reader_provider`` is: the id
+    # alone cannot show WHICH endpoint produced the labels, and a spec whose
+    # provider is not the endpoint that serves it is a substitution the receipt
+    # would otherwise carry invisibly (the factory now resolves the endpoint
+    # from the spec's own provider, one resolution feeding both).
+    judge_provider: str | None = None,
     extraction_approach: str,
     ingest_mode: str = "deterministic",
     # #8486: the run's MEASUREMENT POSTURE — the ingest mode + whether the
@@ -2511,6 +2518,9 @@ def build_report(
             "reader_system_prompt": reader_system_prompt,
             "reader_type_fragments": reader_type_fragments or {},
             "judge_model": judge_model,
+            # #8486: the judge's resolved endpoint (same disclosure the reader
+            # carries) — a provider substitution is visible in the report.
+            "judge_provider": judge_provider,
             "ingest_mode": ingest_mode,
             # #8486: ingest mode + belief-layer activation ALWAYS ride the
             # methodology — the disclosure every surface a number appears on

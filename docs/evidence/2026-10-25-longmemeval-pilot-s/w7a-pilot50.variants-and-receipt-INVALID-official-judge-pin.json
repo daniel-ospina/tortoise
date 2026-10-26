@@ -1,4 +1,5 @@
 {
+  "_WARNING": "INVALID RECEIPT ARTIFACT, NOT A PUBLICATION -- this pilot was graded by deepseek-v4-pro, NOT the official gpt-4o-2024-08-06 judge, therefore NOT comparable to the published LongMemEval-S figures which use gpt-4o-2024-08-06. The receipt below was produced by w7_publish on 4c63488, where the R12 defect stamped the constant OFFICIAL judge_pin (longmemeval-official-anscheck-gpt4o-2024-08-06-v1) and verdict=pass on a substituted-judge run (fixed on main by #9992). See README.md sections 5, 8.2 and 9.",
   "seal": {
     "seal_schema": "w7-answer-keys-v1",
     "n_questions": 500,

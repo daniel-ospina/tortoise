@@ -63,6 +63,7 @@ from tortoise.ingest import _PROVIDERS
 from tortoise.models import _emit_usage_sink
 
 from .reader import (
+    _PROVIDER_PRIORITY,
     THINKING_BY_DEFAULT_KEY_ENVS,
     _parse_model_spec,
     _resolve_provider,
@@ -651,8 +652,13 @@ def build_judge(spec: str | None = None, *, mock: bool = False) -> Judge:
         return VariantContainmentJudge()
     raw_spec = spec or os.environ.get("TORTOISE_LME_JUDGE_MODEL", "").strip() or DEFAULT_JUDGE_MODEL
     provider, model_id = _parse_model_spec(raw_spec)
-    resolved = _resolve_provider()
-    if resolved is None:
+    if provider is not None and provider not in _PROVIDERS:
+        raise ValueError(
+            f"unknown provider {provider!r} in {raw_spec!r}; "
+            f"known: {sorted(_PROVIDERS)}")
+    # Fail-closed no-key posture: NO configured provider key at all →
+    # RuntimeError, regardless of what the spec names (locked by tests).
+    if not any(os.environ.get(_PROVIDERS[p][1]) for p in _PROVIDER_PRIORITY):
         raise RuntimeError(
             "no LLM provider key configured for the LongMemEval judge "
             "(set OPENROUTER_API_KEY / OPENAI_API_KEY / DEEPSEEK_API_KEY / "
@@ -661,23 +667,27 @@ def build_judge(spec: str | None = None, *, mock: bool = False) -> Judge:
             "the spec there via "
             "TORTOISE_LME_JUDGE_MODEL=openrouter:openai/gpt-4o-2024-08-06. "
             "Or pass --mock for the offline mock judge.")
-    _resolved_provider, base_url, key_env = resolved
-    if provider is not None:
-        if provider not in _PROVIDERS:
-            raise ValueError(
-                f"unknown provider {provider!r} in {raw_spec!r}; "
-                f"known: {sorted(_PROVIDERS)}")
-        if not os.environ.get(_PROVIDERS[provider][1]):
-            hint = ("" if provider != "openai" else
-                    " — the SAME official model is served by OpenRouter; set "
-                    "TORTOISE_LME_JUDGE_MODEL=openrouter:openai/gpt-4o-2024-08-06 "
-                    "to run it with only OPENROUTER_API_KEY set")
-            raise ValueError(
-                f"model spec names provider {provider!r} but its key is not "
-                f"set ({_PROVIDERS[provider][1]}){hint}")
+    if provider is not None and not os.environ.get(_PROVIDERS[provider][1]):
+        hint = ("" if provider != "openai" else
+                " — the SAME official model is served by OpenRouter; set "
+                "TORTOISE_LME_JUDGE_MODEL=openrouter:openai/gpt-4o-2024-08-06 "
+                "to run it with only OPENROUTER_API_KEY set")
+        raise ValueError(
+            f"model spec names provider {provider!r} but its key is not "
+            f"set ({_PROVIDERS[provider][1]}){hint}")
+    # #8486 (2026-10-25) ENDPOINT TRUTH — the spec's named provider is
+    # AUTHORITATIVE for the endpoint, exactly as ``build_reader`` does (M5
+    # #1525). Resolving by PRIORITY here let a ``deepseek:`` spec be served by
+    # ``openrouter`` (first in ``_PROVIDER_PRIORITY``) on any box holding an
+    # ``OPENROUTER_API_KEY``, which (a) made the recorded provider disagree
+    # with the endpoint that produced the labels and (b) read
+    # ``disables_thinking`` off that OTHER endpoint's key env — re-opening the
+    # silent-starvation → fake-``0.0000`` class this transport exists to
+    # prevent, on the one box where both keys are present.
+    provider_name, base_url, key_env = _resolve_provider(named=provider)
     # Dedicated transport: the official judge call shape (no response_format,
     # no system message, max_tokens=10) — see OfficialJudgeModel.
     model = OfficialJudgeModel(
         id=model_id, base_url=base_url, api_key_env=key_env)
     return LLMJudge(model, model_id=model_id, model_spec=raw_spec,
-                    provider=_resolved_provider)
+                    provider=provider_name)

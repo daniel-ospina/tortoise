@@ -38,12 +38,15 @@ sha above.
 > | `recall_all@5` — single-session-preference gate row | 1.0000 (n=8) |
 > | per-question fraction @5 (labelled variant, NOT official) | 0.8867 |
 > | wall clock | **80 min 52 s** (4 851.69 s) |
-> | LLM spend | **$0.0619** measured by tokens; the runner's own `cost.usd` reads $0.008456 — see §8.3 |
+> | LLM spend | **$0.0620** measured by tokens; the runner's own `cost.usd` reads $0.008456 — see §8.3 |
 >
 > ⛔ **This is not a LongMemEval-S score and must never be published as one.** The official benchmark
 > grades with `gpt-4o-2024-08-06`; this box has no `OPENAI_API_KEY` and no `OPENROUTER_API_KEY`, so the
 > run was graded with DeepSeek. §6 is the comparability statement, and it is the reason this number is
 > usable as an *instrument reading* and not as a *competitive claim*.
+>
+> **Judge in one line, where a reader reads it:** `judge: deepseek-v4-pro`, **therefore NOT comparable
+> to the published figures, which use `gpt-4o-2024-08-06`.**
 
 ## 0. Why this document exists
 
@@ -185,17 +188,32 @@ strict binary judge most easily says "no".
 **0.3333** (n=9), knowledge-update 0.6250 (n=8), single-session-preference 1.0000 (n=8), full mix
 0.7800 (n=50). The gap between the all-or-nothing official binary and the per-question fraction is the
 point of the metric: **39 of 50 questions carry every answer session in the top 5** (0.78) while the
-11 that do not still average 0.8867 fractionally, and the multi-session row is where that gap is fatal
-(0.630 fraction vs **0.333** all-or-nothing).
+11 that do not are far from complete — they retrieve **0.4848** of their gold sessions on average
+(sum of their fractions `5.3333` / 11; their individual values are the rows with
+`recall_all_at_5 = 0` in `per-question-outcomes.tsv`), and the multi-session row is where that gap is
+fatal (0.630 fraction vs **0.333** all-or-nothing).
+
+The two means are different populations and must not be quoted for each other: **0.8867 is the mean
+over ALL 50** (§3.2 column, `sum(fraction)/50`), **0.4848 is the mean over the 11 imperfect ones**.
 
 ### 3.3 Cost, wall-clock, tokens
 
-| | reader | judge | overhead (preflight) | total |
+| | reader | judge | overhead (preflight, 2 lanes) | total |
 |---|---|---|---|---|
 | calls | 50 | 50 | 2 | 102 |
-| prompt tokens | 437 253 (60 928 cache-hit) | 9 530 | 189 | **446 972** |
-| completion tokens | 2 330 | 50 | 67 | **2 447** |
-| cost (computed, §8.3) | $0.05351 | $0.00838 | $0.00003 | **$0.06192** |
+| prompt tokens | 437 253 (60 928 cache-hit) | 9 530 | 189 (reader 122 + judge 67) | **446 972** |
+| completion tokens | 2 330 | 50 | 67 (reader 57 + judge 10) | **2 447** |
+| cost (computed, §8.3) | $0.0535085 | $0.0083781 | $0.0001087 (reader $0.0000330 + judge $0.0000757) | **$0.0619953 ≈ $0.0620** |
+
+**The token rows sum to the totals and the cost row does too** — recomputed from the report's exact
+token counts at the map's own DeepSeek rates (`tools/longmem_eval/costing.py`, version `2026-09-04`:
+flash-family in `0.14` / out `0.28` / cache-hit `0.0028` per 1M; `deepseek-v4-pro` in `0.87` / out
+`1.74`, flagged `ESTIMATED`):
+`0.0535085 + 0.0083781 + 0.0000330 + 0.0000757 = 0.0619953`. ⚠️ The report's OWN
+`usage.overhead.cost_usd` reads **`7.6e-05`**, which prices only the judge overhead lane — the reader
+overhead lane is `priced: false, reason: "unknown_model"` for the same reason as §8.3 — so anyone
+recomputing the total from that field alone lands on `$0.06196` and is ~$0.00004 short. The table above
+prices both lanes.
 
 | wall clock | value |
 |---|---|
@@ -257,6 +275,32 @@ everything else about the reader request is the official gen.py shape (system+us
 
 ⛔ **The silent-empty-answer *class* is NOT fixed — §8.1.**
 
+### 4.3 The judge's endpoint now follows the provider its spec NAMES (found in review)
+
+The two fixes above keyed the thinking-disable off the *resolved* endpoint's key. Review of this PR
+found that the judge resolved that endpoint **by priority** (`openrouter` first) rather than by the
+provider the spec names: on a box holding an `OPENROUTER_API_KEY`, a `judge: deepseek:deepseek-v4-pro`
+spec would have been **served by OpenRouter** while the run's receipt named DeepSeek, and
+`disables_thinking` would have been read off OpenRouter's key env — i.e. §4.1's unguarded gap would have
+re-opened on exactly the box that has both keys, silently.
+
+**Fixed here:** `build_judge` resolves with `_resolve_provider(named=provider)`, the same endpoint-truth
+rule `build_reader` already applies (M5 #1525), and pins it with a factory-level test (the
+direct-transport test could not see the divergence).
+
+⚠️ **This fix does not change any number in this document, and no figure here was re-measured.** The
+run was measured on a box with **only** `DEEPSEEK_API_KEY` set (`probes/README.md` fingerprint), where
+priority order and the named provider resolve to the *same* endpoint (`api.deepseek.com/v1`) — so the
+fix is a no-op for this run's arithmetic and a guard for every box that has an OpenRouter or OpenAI key
+as well. Re-running the 50-question pilot to demonstrate that would cost ~80 minutes of wall clock and
+another ~$0.062 for an identical result, so it was not re-run.
+
+The report also now records the resolved endpoint as `methodology.judge_provider` (additive, exactly
+like `reader_provider`), so the id and the endpoint cannot disagree in the artifact either. **The
+report this document quotes predates that field** — it was produced on `4c63488`, which recorded
+`judge_model: "deepseek-v4-pro"` and no provider; §2.2 states the endpoint from the run's own key
+provenance instead.
+
 ## 5. Anti-gaming: the receipt this run produced is WRONG on `main` — and why it is published here
 
 `w7_publish` on `main@4c63488` printed:
@@ -274,6 +318,10 @@ and wrote a receipt that says, about a run graded by DeepSeek:
 "run_status": "completed", "verdict": "pass", "receipt_valid": true
 ```
 
+⛔ **Read that block as a defect, not a result:** `judge: deepseek-v4-pro`, **therefore NOT comparable
+to the published figures, which use `gpt-4o-2024-08-06`** — and on the commit that produced it the
+receipt could not say so.
+
 On this base the pin is a **constant** (`w7_publish.py:572` passes `JUDGE_PIN`, declared at `:92`), so
 any substituted-judge run publishes under the OFFICIAL pin with `verdict: pass` and a clean receipt.
 `validate_receipt` reports `[]`. **R12 — the "judge is pinned and never substituted" rule — is
@@ -281,13 +329,22 @@ enforced nowhere on the publication door at this commit**, and this is its first
 demonstration rather than a synthetic one.
 
 **Why this receipt is committed at all:** as the artifact of that defect, not as a publication. It is
-the evidence that the door would have dressed this number as an official gpt-4o measurement.
+the evidence that the door would have dressed this number as an official gpt-4o measurement. The file
+name carries that verdict — `w7a-pilot50.variants-and-receipt-INVALID-official-judge-pin.json` — and
+its first key is a `_WARNING` saying the same thing, so neither a directory listing nor a reader who
+opens the JSON can mistake it for a publication (§9.1 has the one-line diff from `w7_publish`'s own
+output).
 
-**Not fixed here, deliberately:** PR **#9992** (worktree `.worktrees/…` / branch
-`fix/8486-judge-pin-derived`, unmerged, base `10e904d9f`) derives *both* the pin and the verdict from
-the judge the report records — an allow-list, `unpinned:<model>` for anything else, and only an
-official-pinned completed run may record `pass`. Re-implementing it here would duplicate another
-lane's work on the same rule, so this lane reports it and leaves #9992 to land.
+**Fixed on `main` while this run was in flight, not here:** PR **#9992** (`fix/8486-judge-pin-derived`)
+merges at `2026-10-25T23:09:35Z` as `84887a613` and derives *both* the pin and the verdict from the
+judge the report records — an allow-list, `unpinned:<model>` for anything else, and only an
+official-pinned completed run may record `pass` (`tools/longmem_eval/w7_publish.py::judge_pin_for` on
+`origin/main`). Re-implementing it here would duplicate another lane's work on the same rule, so this
+lane reports it and does not.
+
+The accurate present-tense statement is therefore about **historical artifacts, not `main`**: a receipt
+produced by `w7_publish` *before* `28560a662` cannot be distinguished from an official-judge receipt —
+which is why the one in this directory is named and marked INVALID rather than quietly re-pinned.
 
 ## 6. Comparability — what this number is, and is not
 
@@ -353,20 +410,25 @@ a set of pinned report tests — a scope of its own, not a rider on a measuremen
 
 ### 8.2 ⛔ The publication door stamps the OFFICIAL judge pin on a substituted judge (§5)
 
-Real, reproduced on this run, and **PR #9992 already implements the fix** — re-implementing it here
-would duplicate another lane's work. Blocking consequence: until #9992 lands, *any* receipt produced by
-`w7_publish` on `main` claims the official gpt-4o pin regardless of who graded.
+Real, reproduced on this run, and **fixed on `main` by PR #9992 (`84887a613`, merged
+`2026-10-25T23:09:35Z`, i.e. while this run was in flight)** — re-implementing it here would duplicate
+another lane's work, so this PR does not touch the rule. Precise scope of what remains: *any* receipt
+produced by `w7_publish` **before** `28560a662` claims the official gpt-4o pin regardless of who
+graded, which is a property of those historical artifacts, not of `main` today. The receipt in this
+directory is one of them, which is why it is named and marked INVALID.
 
 ### 8.3 The cost meter silently reports a partial total as the run total
 
-`usage.cost.usd` = **$0.008456** while the run actually spent **$0.0619**. The reader lane is priced at
+`usage.cost.usd` = **$0.008456** while the run actually spent **$0.0620**. The reader lane is priced at
 `usd: 0.0` with `priced: false, reason: "unknown_model"` because the served id `deepseek-flash` has no
 entry in `PRICING_MAP` (it carries the retired `deepseek-v4-flash`, which DeepSeek documents as still
 accepted and billed at the Flash price). So the field named `cost.usd` **excludes 87% of the spend**,
 and `priced: false` is the only signal. Not fixed here: adding the id to the pricing map is a
 versioned-rate assertion (the map's own discipline says an out-of-map lane is never guessed), and it
 belongs with a verification of the vendor's current rate card rather than inside a measurement lane.
-The arithmetic used instead is in `probes/README.md`.
+The arithmetic used instead is in `probes/README.md`. The same unpriced-model hole is why the report's
+`usage.overhead.cost_usd` (`7.6e-05`) counts only its judge lane (§3.3): pricing both overhead lanes
+gives $0.0620, not $0.06192.
 
 ### 8.4 `tools/run-with-eval-keys.sh` cannot be used on this box
 
@@ -398,9 +460,63 @@ anything but grep and it inflates the artifact size, which matters for a 500-que
 | file | what it is |
 |---|---|
 | `pilot50-summary.log` | verbatim stdout summary of the run (integrity, score, latency, methodology), extracted from the 8 MB log with the `create_point` warning lines removed |
-| `w7a-pilot50.variants-and-receipt.json` | `w7_publish` output: official-metric variants, per-category gate rows, answer-key seal and the receipt — **committed as evidence of §8.2**, not as a publication |
+| `per-question-outcomes.tsv` | the **50 per-question rows** every aggregate in this document is computed from — `judge_label` (33 `True`) and `session_recall_at_5` (39 rows at `1.000000`) — so `0.66`, `0.78`, `0.8867` and `0.4848` are recomputable from the repository alone (§9.2) |
+| `w7a-pilot50.variants-and-receipt-INVALID-official-judge-pin.json` | `w7_publish` output: official-metric variants, per-category gate rows, answer-key seal and the receipt — **committed as evidence of §5 / §8.2, NOT as a publication**. `judge: deepseek-v4-pro`, therefore **NOT comparable to the published figures, which use `gpt-4o-2024-08-06`**; the name and the `_WARNING` key say so inside the file too |
 | `probes/probe_judge_raw.py` | the judge-transport falsifier (both arms: default and `thinking:disabled`), runnable |
 | `probes/judge-call-shape-2026-10-25.log` | that probe's output — the §4.1 measurement |
 | `probes/probe_judge.py` | the label-level probe (4 sanity cases, 4 candidate models) |
 | `probes/build_pilot_slice.py` | the exact slice builder (committed selector, into a scratch dir) |
 | `probes/README.md` | how to reproduce each probe, and the key-provenance fingerprint |
+
+### 9.1 The INVALID receipt is `w7_publish`'s output plus exactly ONE line
+
+The artifact was renamed and marked, **not rewritten**. Its body is the tool's own output: dropping
+the single inserted `_WARNING` line reproduces the original file byte-for-byte, and that digest is
+what a fresh `w7_publish` run on this run's report produces (verified by re-running the committed tool):
+
+```bash
+cd docs/evidence/2026-10-25-longmemeval-pilot-s
+{ head -1 w7a-pilot50.variants-and-receipt-INVALID-official-judge-pin.json
+  tail -n +3 w7a-pilot50.variants-and-receipt-INVALID-official-judge-pin.json
+} | shasum -a 256
+# 7d9166553108d81988e2df561fcdcf45e415c665e8a4e172d19b2dd1bda1000a
+```
+
+Nothing inside `receipt` was edited — `judge_pin`, `verdict: "pass"` and `receipt_valid: true` are
+**the defect's real output**, kept as evidence (§5, §8.2), which is exactly why the marker is needed:
+`validate_receipt` on this file still returns `[]`.
+
+### 9.2 Re-deriving every aggregate from `per-question-outcomes.tsv`
+
+The runner's report (`pilot50.report.json`) lived in a scratch `/tmp` directory and is **not**
+committed; the per-question rows it produced are. The accuracy and retrieval figures in §3.1 and §3.2
+(and every per-type cell behind them) derive from those rows:
+
+```bash
+cd docs/evidence/2026-10-25-longmemeval-pilot-s
+python3 -c '
+import csv
+rows=[r for r in csv.DictReader((l for l in open("per-question-outcomes.tsv")
+                                if not l.startswith("#")), delimiter="\t")]
+fr=[float(r["session_recall_at_5"]) for r in rows]
+bad=[x for x in fr if x < 1.0]
+print("QA            ", sum(r["judge_label"]=="True" for r in rows), "/", len(rows))   # 33 / 50
+print("recall_all@5  ", sum(int(r["recall_all_at_5"]) for r in rows), "/", len(rows))  # 39 / 50
+print("mean over all ", round(sum(fr)/len(fr), 4))                                    # 0.8867
+print("n imperfect   ", len(bad), "mean", round(sum(bad)/len(bad), 4))                # 11 mean 0.4848
+'
+```
+
+That prints `33 / 50`, `39 / 50`, `0.8867`, `11 mean 0.4848` — the four figures the headline and §3.2
+quote, with **no dependence on the uncommitted report** and no hand arithmetic. The two means are over
+different populations: `0.8867` is over all 50 questions, `0.4848` over the 11 imperfect ones.
+
+One caveat about the TSV: `recall_all_at_5` is the *official* all-or-nothing binary — exactly `1` when
+`session_recall_at_5 == 1.000000` and `0` otherwise (0 mismatched rows in all 50) — while the fraction
+is the labelled per-question variant. That is why the two aggregate means differ: the official metric
+gives no credit to a partially-retrieved question, the fraction does. Verify the column agreement
+itself in one line:
+
+```bash
+python3 -c 'import csv; rows=[r for r in csv.DictReader((l for l in open("per-question-outcomes.tsv") if not l.startswith("#")), delimiter="\t")]; print(sum((float(r["session_recall_at_5"])==1.0)!=(r["recall_all_at_5"]=="1") for r in rows))'   # 0
+```

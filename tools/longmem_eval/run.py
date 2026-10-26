@@ -5454,6 +5454,10 @@ def run_evaluation(
         reader_type_fragments=type_fragments,
         judge_model=(judge.model_id if judge is not None
                      else "n/a (retrieval-only)"),
+        # #8486: the judge's resolved ENDPOINT (not just its model id) — the
+        # same disclosure the reader carries, so a provider substitution cannot
+        # ride the report invisibly.
+        judge_provider=getattr(judge, "provider", None) if judge else None,
         ks=ks,
         top_k=top_k,
         split=split,
@@ -5652,6 +5656,9 @@ def outcomes_to_report(
     reader_pinned: bool | None = None,
     reader_system_prompt: str = "",
     reader_type_fragments: dict[str, str] | None = None,
+    # #8486 (2026-10-25): the judge's resolved endpoint, threaded like
+    # ``reader_provider`` so the report carries what served the labels.
+    judge_provider: str | None = None,
     preflight: dict | None = None,
     # #1349 vector arm: forwarded to build_report — retriever routing +
     # injected model + mode ride the report methodology + provenance.
@@ -5880,6 +5887,7 @@ def outcomes_to_report(
         split=split,
         reader_model=reader_model,
         judge_model=judge_model,
+        judge_provider=judge_provider,
         # #1414 parity-leg producer: persist the methodology hashes (the
         # battery's unchanged-check compares these).
         reader_prompt_hash=_sha16(reader_prompt_source()),
