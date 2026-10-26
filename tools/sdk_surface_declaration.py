@@ -198,9 +198,29 @@ def measure_live() -> set[str]:
     }
 
 
+def resolve(name: str, live: set[str]) -> str:
+    """The declared name a row resolves to, or "" when it does not.
+
+    Row 1 of the approved table is written `Tortoise(...)` — the CONSTRUCTOR — while every
+    other row is a method on it. The declaration keeps the document's spelling, and the
+    attribute that must exist for that row is the class the caller constructs. This is
+    evidence-bearing, not a constant `True`: it returns `TortoiseSDK` only because the
+    class is importable, so a tree with no SDK fails the row like any other.
+    """
+    if name in live:
+        return name
+    if name == CONSTRUCTOR:
+        try:
+            from tortoise.sdk import TortoiseSDK
+        except Exception:  # pragma: no cover — measured_live() already refused first
+            return ""
+        return CONSTRUCTOR if callable(TortoiseSDK) else ""
+    return ""
+
+
 def resolves(name: str, live: set[str]) -> bool:
     """Does a declared name exist? The constructor's row resolves to the class itself."""
-    return name in live or name == CONSTRUCTOR
+    return bool(resolve(name, live))
 
 
 def problems(
@@ -229,11 +249,19 @@ def problems(
         if duplicates:
             found.append(f"{label} lists a name more than once: {duplicates[:8]}")
 
-    # 1. The declaration IS the owner's list. Both directions: a name added here is an
-    #    unapproved surface change; a name missing here is an approved method the
-    #    declaration has dropped.
+    # 1. The declaration IS the owner's list — including its ORDER. Both directions, and in
+    #    sequence: a name added here is an unapproved surface change, a name missing here is
+    #    an approved method the declaration has dropped, and a REORDER is not a surface
+    #    change but it makes the diff of the next real change unreadable, so it is refused
+    #    rather than shrugged at (measured on review: a swap of rows 3 and 4 was green while
+    #    the docstring claimed the declaration "cannot be reordered away from").
     declared_set = set(declared)
     doc_set = set(doc_names)
+    if declared_set == doc_set and list(declared) != list(doc_names):
+        found.append(
+            "the declaration lists the 40 approved methods in a different ORDER than "
+            f"{BETA_DOC.name} — restore the document's order (rows 1-40)"
+        )
     for name in sorted(declared_set - doc_set):
         found.append(
             f"{name}: declared in __all__ but NOT in {BETA_DOC.name} — the declaration "
@@ -266,20 +294,33 @@ def problems(
             "all — the gap list may only draw from __all__"
         )
 
-    # 3. The backlog is exactly `live − approved`, both directions. This is the rule that
-    #    makes an ADDITION nameable and forces the ledger to be decremented on a removal.
+    # 3. The backlog is a FROZEN RECORD of what existed OFF-target at the cut, and every live
+    #    method must be accounted for by it or by `__all__`.
+    #
+    #    NOT "OFF_SURFACE == live − approved". That equality looks tighter and is WEAKER: it
+    #    is satisfied by a SWAP (one name out of the class, one unapproved name in, the same
+    #    length), so a rename — precisely what requirement 4 says the gate must catch — was
+    #    invisible (measured on review: swapping `annotate_ask_hits` for a new method
+    #    returned []). Keeping the record FROZEN makes the swap visible, because the new
+    #    name is in neither set:
+    #
+    #        live − approved − OFF_SURFACE  ->  an ADDITION or a RENAME, named
+    #
+    #    and it also removes the hand edit a removal used to require: a method that leaves
+    #    the class stays in the record (that is what "was here at the cut" means), so the
+    #    migration direction needs no declaration edit at all.
     off_set = set(off_surface)
-    expected_off = live - declared_set
-    for name in sorted(expected_off - off_set):
+    for name in sorted(live - declared_set - off_set):
         found.append(
             f"{name}: PUBLIC on TortoiseSDK but on neither the approved surface nor the "
-            "off-surface backlog — an addition needs Daniel's approval BEFORE it lands "
-            "(AGENTS.md -> MCP/SDK Surface Approval)"
+            "frozen off-surface record — an addition or a rename needs Daniel's approval "
+            "BEFORE it lands (AGENTS.md -> MCP/SDK Surface Approval)"
         )
-    for name in sorted(off_set - expected_off):
+    overlap = sorted(off_set & declared_set)
+    if overlap:
         found.append(
-            f"{name}: listed in OFF_SURFACE but it is not a live off-surface method — "
-            "delete the entry (the backlog records what exists, and it may only shrink)"
+            f"{overlap[:8]}: listed in OFF_SURFACE AND on the approved surface — a method "
+            "is one or the other"
         )
 
     # 4. The pins. Both sets may only shrink, so neither can absorb the other's defect.
@@ -373,7 +414,7 @@ def cmd_show(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    argv = sys.argv if argv is None else argv
+    argv = sys.argv[1:] if argv is None else argv
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     for name, func in (("check", cmd_check), ("show", cmd_show)):
@@ -381,7 +422,7 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--declaration", default=None)
         p.add_argument("--doc", default=None)
         p.set_defaults(func=func)
-    args = parser.parse_args(argv[1:])
+    args = parser.parse_args(argv)
     return args.func(args)
 
 

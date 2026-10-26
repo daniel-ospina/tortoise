@@ -20,14 +20,22 @@ TWO SETS, AND WHY THE SECOND ONE EXISTS
     it is a change to the contract every agent and customer integration is built on, and it
     needs Daniel's approval FIRST (`AGENTS.md` -> "MCP/SDK Surface Approval").
 
-    `OFF_SURFACE` is the **removal backlog**: every public method that is live on
-    `TortoiseSDK` today and is *not* on the approved surface. It exists so that an
-    ADDITION is distinguishable from a method that was already here and is on its way out.
-    Without it, "there is a method I did not approve" and "there is a method the migration
-    has not reached yet" are the same observation, and the surface can grow freely while
-    the migration runs — which is exactly how 149 got here. Membership here is **not** an
-    approval and **not** a removal decision: it is a statement of what exists off-target,
-    frozen at cut time. It may only SHRINK.
+    `OFF_SURFACE` is the **frozen record** of what existed off-target at the cut: every
+    public method that was live on `TortoiseSDK` and is *not* on the approved surface. It
+    exists so that an ADDITION or a RENAME is distinguishable from a method that was
+    already here and is on its way out. Without it, "there is a method I did not approve"
+    and "there is a method the migration has not reached yet" are the same observation, and
+    the surface can grow freely while the migration runs — which is exactly how 149 got
+    here. Membership here is **not** an approval and **not** a removal decision: it is a
+    record of what was there.
+
+    A RECORD, DELIBERATELY NOT A MIRROR. It is not edited when a method is removed — the
+    gate accounts for the current surface as `OFF_SURFACE ∩ live`, so the migration
+    direction needs no declaration edit, and a name that leaves the class stays here as the
+    evidence that it was on the way out. The alternative (`OFF_SURFACE == live − approved`)
+    looks tighter and is WEAKER: a SWAP — one name out, one unapproved name in, same
+    length — satisfies it, so a rename was invisible. The high-water pin keeps the record
+    from absorbing a new method.
 
 THE MISREADING THIS FILE FORECLOSES
     A 40-name declaration alone would have to say "over target" forever and could not
@@ -120,8 +128,10 @@ APPROVED_PENDING = (
     "check_connection",
 )
 
-#: The removal backlog — live public methods that are NOT on the approved surface (see the
-#: module docstring). Frozen at cut time from the live surface; may only SHRINK.
+#: The frozen record of what existed OFF-target at the cut — public methods that were live
+#: on `TortoiseSDK` and are NOT on the approved surface (see the module docstring). NOT
+#: edited on a removal: the gate accounts for today's surface as `OFF_SURFACE & live`, and
+#: the pin below keeps the record from absorbing an addition.
 OFF_SURFACE = (
     "annotate_ask_hits",
     "annotate_operator",
@@ -265,9 +275,10 @@ OFF_SURFACE = (
     "volunteer_context",
 )
 
-#: HIGH-WATER PINS, NOT DERIVATIONS. Both sets may only shrink, so deleting an approved
-#: method (which must land in `APPROVED_PENDING`) or smuggling an addition into the backlog
-#: trips a pin. Raising either is a deliberate, reviewable act in an approving PR — never a
-#: side effect of a re-cut.
+#: HIGH-WATER PINS, NOT DERIVATIONS. `APPROVED_PENDING` may only shrink, so deleting an
+#: approved method (which must land there) trips its pin. `OFF_SURFACE` is a frozen record,
+#: so its pin stops it ABSORBING an addition — the one way a new method could otherwise pass.
+#: Raising either is a deliberate, reviewable act in an approving PR, never a side effect of
+#: a re-cut.
 PENDING_HIGH_WATER = 30
 OFF_SURFACE_HIGH_WATER = 140

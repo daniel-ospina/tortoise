@@ -40,7 +40,7 @@ WHAT `check` DOES NOT PROVE — APPROVAL IS NOT MACHINE-CARRIED
     `docs/product/beta-sdk-surface.md` is a separate question, answered against the live
     surface by `tools/surface-target-check.py`.
 
-    OVERRIDES: the frozen-snapshot-as-approval-baseline practice — a snapshot of the implementation cannot be the approved target; the target is read from docs/product/canonical-mcp-tools.md (owner, 26/40, re-confirmed 2026-10-10).
+    OVERRIDES: the frozen-snapshot-as-approval-baseline practice — a snapshot of the implementation cannot be the approved target; the target is read from docs/product/canonical-mcp-tools.md (owner, 27 MCP tools / 40 SDK methods; the SDK leg was re-confirmed 2026-10-10 and is declared in tortoise/__all__.py).
 
 THE BASELINE IS VERIFIED AGAINST THE CODE, NOT AGAINST ITSELF
     `check` re-derives the whole baseline with the SAME function `cut` writes
@@ -359,7 +359,7 @@ def _frontmatter(path: Path) -> dict:
 def read_approval(path: Path | None = None) -> dict:
     """The owner's approval — READ from `docs/product/canonical-mcp-tools.md`.
 
-    OVERRIDES: the frozen-snapshot-as-approval-baseline practice — a snapshot of the implementation cannot be the approved target; the target is read from docs/product/canonical-mcp-tools.md (owner, 26/40, re-confirmed 2026-10-10).
+    OVERRIDES: the frozen-snapshot-as-approval-baseline practice — a snapshot of the implementation cannot be the approved target; the target is read from docs/product/canonical-mcp-tools.md (owner, 27 MCP tools / 40 SDK methods; the SDK leg was re-confirmed 2026-10-10 and is declared in tortoise/__all__.py).
 
     The manifest used to carry `approval_status: pending-owner-approval` while the
     canonical list already recorded `approval_status: approved`, `approvedBy:
@@ -1091,7 +1091,67 @@ def _carried_high_water_counts(fallback: dict) -> dict:
     return out
 
 
-def build_doc(commit: str | None = None) -> dict:
+#: The row cells that record an OBSERVATION about the tree rather than deriving from it:
+#: `used_by` joins the telemetry log with the corpora ON THIS HOST, and `reason` is the prose
+#: derived from that join. A re-cut is supposed to re-derive the SURFACE; it is not supposed
+#: to re-observe usage, because the observation depends on evidence the cutting host may not
+#: have.
+OBSERVATION_ROW_KEYS = ("used_by", "reason")
+
+
+def _carried_observations(rows: list[dict], carry: bool) -> list[str]:
+    """Carry `used_by` / `reason` forward for rows whose NAME is unchanged.
+
+    WHY (#10034 review P1). On the host that cut this baseline, `skills/` (a machine-local
+    symlink into agent-infra) did not resolve and the telemetry log was a different file, so
+    `usage_index()` / `telemetry_tools()` observed LESS than the previous cut did. The
+    re-cut then rewrote ~100 rows of the owner's decision table: 58 rows flipped from
+    `agents, …` to `never called, …`, 49 `reason` cells changed to "not called over MCP",
+    and 21 lost `skill-docs` — while NO tool, registration or caller moved in the diff. The
+    owner reads this table to make keep/kill decisions, and `check` cannot see the damage:
+    both keys are in `NON_DERIVABLE_ROW_KEYS`, so the drift comparison ignores them.
+
+    The carried values are exactly as unverified as they were in the previous baseline —
+    nothing is invented. What changes is that a re-cut on a host without the evidence no
+    longer ASSERTS a new observation, which is the same reason `high_water_counts` is
+    carried rather than derived (a re-cut over a grown surface must not raise its own
+    ceiling). A deliberate re-observation passes `--allow-observation-rewrite`, which is a
+    reviewable act in its own PR instead of a side effect of cutting a manifest.
+
+    Returns the sorted names whose cells were carried, so `cut` can SAY so.
+    """
+    if not carry or not MANIFEST_FILE.exists():
+        return []
+    try:
+        previous = {
+            str(r.get("name")): r
+            for r in _read_manifest().get("rows") or []
+            if isinstance(r, dict) and r.get("name")
+        }
+    except SurfaceEvidenceUnreadable:
+        # An unreadable previous baseline is `cut`'s own refusal to make (it enumerates
+        # recorded approvals first). Do not silently rewrite observations either.
+        raise
+    carried: list[str] = []
+    for row in rows:
+        old_row = previous.get(str(row.get("name")))
+        if not old_row:
+            continue
+        moved = False
+        for key in OBSERVATION_ROW_KEYS:
+            if key in row and key in old_row and row[key] != old_row[key]:
+                row[key] = old_row[key]
+                moved = True
+        if moved:
+            carried.append(str(row.get("name")))
+    return sorted(carried)
+
+
+def build_doc(
+    commit: str | None = None,
+    carry_observations: bool = True,
+    carried_out: list[str] | None = None,
+) -> dict:
     """Derive the baseline from the declaration. THE single derivation.
 
     `cut` writes what this returns; `check` compares the committed artifact against it.
@@ -1471,6 +1531,14 @@ def build_doc(commit: str | None = None) -> dict:
         "retired": retired_out,
         "rows": tools_out + sdk_rows,
     }
+    # Carried, never re-observed: see `_carried_observations`. Reported OUT OF BAND
+    # (`carried_out`) rather than stored on the document: `check` compares the document
+    # against a fresh derivation key by key, so a private key here was a problem (measured),
+    # and teaching that comparison to ignore keys is the bypass the top-level `sneaky_key`
+    # finding already closed.
+    carried = _carried_observations(doc["rows"], carry_observations)
+    if carried_out is not None:
+        carried_out.extend(carried)
     return doc
 
 
@@ -1509,8 +1577,13 @@ def _recorded_approvals(doc: dict) -> list[tuple[str, str]]:
 
 
 def cmd_cut(args: argparse.Namespace) -> int:
+    carried: list[str] = []
     try:
-        doc = build_doc(args.commit)
+        doc = build_doc(
+            args.commit,
+            carry_observations=not getattr(args, "allow_observation_rewrite", False),
+            carried_out=carried,
+        )
     except SurfaceEvidenceUnreadable as exc:
         return _refuse(exc)
 
@@ -1548,7 +1621,9 @@ def cmd_cut(args: argparse.Namespace) -> int:
 
     MANIFEST_FILE.write_text(
         MANIFEST_HEADER
-        + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110, default_flow_style=False),
+        + yaml.safe_dump(
+            doc, sort_keys=False, allow_unicode=True, width=110, default_flow_style=False
+        ),
         encoding="utf-8",
     )
 
@@ -1571,6 +1646,13 @@ def cmd_cut(args: argparse.Namespace) -> int:
     print(f"  keyword distribution: {doc['counts']['keyword_distribution']}")
     print(f"  distinct declared bindings: "
           f"{len({r['sdk_method'] for r in doc['rows'] if r.get('sdk_method')})}")
+    if carried:
+        print(
+            f"  CARRIED `used_by`/`reason` forward on {len(carried)} row(s) whose name is "
+            "unchanged — the previous baseline's OBSERVATION is kept because a re-cut must "
+            "not re-assert usage it cannot observe on this host "
+            "(--allow-observation-rewrite re-observes deliberately)"
+        )
     if doomed:
         # Named, not summarised: the operator asked for this, and the rows are the loss.
         print(f"  DROPPED {len(doomed)} recorded approval(s) (--allow-approval-reset):")
@@ -2490,6 +2572,14 @@ def main() -> int:
         "--allow-approval-reset",
         action="store_true",
         help="permit dropping recorded per-row approvals (default: refuse and name every row)",
+    )
+    p_cut.add_argument(
+        "--allow-observation-rewrite",
+        action="store_true",
+        help=(
+            "re-observe `used_by`/`reason` instead of carrying the previous baseline's values "
+            "forward (default: carry — a re-cut must not assert usage it cannot observe)"
+        ),
     )
     p_cut.set_defaults(func=cmd_cut)
     sub.add_parser("render").set_defaults(func=cmd_render)

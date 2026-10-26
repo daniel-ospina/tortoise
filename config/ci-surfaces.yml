@@ -1829,6 +1829,7 @@ surfaces:
   # matches no named surface, so it falls back to `core` — but registering the
   # guard HERE is what makes the file selected for the guard's OWN later edits.
   - test_8864_shared_name_merge_key.py
+  - test_sdk_surface_declaration.py
   # #4643: the served-skill mirror's parity gate. The pin
   # (`config/served-skills-upstream.yml`) is a config/ path, and config/ falls
   # through to `core` — without this registration a pin-only change ran no
