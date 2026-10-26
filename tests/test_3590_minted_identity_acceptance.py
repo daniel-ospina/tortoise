@@ -627,17 +627,51 @@ def test_a_point_update_never_pays_an_unlabelled_id_scan(sdk, monkeypatch):
     monkeypatch.setattr(graph_cls, "query", _spy)
     client.update_entity(pt["id"], name="Shared")
 
-    unlabelled = [
-        s for s in seen
-        if s.lstrip().upper().startswith("MATCH (N)")
-        and "{ID:" in s.upper().replace(" ", "")
-        and ":OBJECT" not in s.upper() and ":SUBJECT" not in s.upper()
-    ]
+    unlabelled = [s for s in seen if _is_unlabelled_id_scan(s)]
     assert not unlabelled, (
         "the rename guard ran an UNLABELLED id probe — a whole-node scan with no "
         f"label to select an index from: {unlabelled}")
     assert _name_ids(proj, "Object", "Shared") == [live_id], (
-        "a Point update must not touch the Object that happens to share the name"))
+        "a Point update must not touch the Object that happens to share the name")
+
+
+def _is_unlabelled_id_scan(statement: str) -> bool:
+    """True for an id-anchored ``MATCH (n) …`` whose pattern carries NO label.
+
+    The pre-fix guard was literally
+    ``MATCH (n) WHERE n.id = $id AND (n:Object OR n:Subject) RETURN DISTINCT
+    labels(n)``: the label test sits in the WHERE clause, AFTER the pattern, so
+    no label-scoped index can serve it. The fixed form is
+    ``MATCH (n:Object {id:$id})`` / ``MATCH (n:Subject {id:$id})`` — the label is
+    in the pattern, where the planner can select an index.
+
+    Kept as a helper so the pin's own predicate is exercised by a test rather
+    than trusted: a filter that reads nothing (e.g. one searching for a brace
+    that the statement never spells) makes the assertion pass vacuously.
+    """
+    import re
+    return bool(re.search(r"MATCH\s*\(\s*[A-Za-z_]\w*\s*\)", statement, re.I)
+                and re.search(r"\.id\s*=\s*\$id", statement, re.I))
+
+
+def test_the_unlabelled_scan_predicate_tells_the_two_forms_apart():
+    """The pin above is only as good as its predicate — so pin the predicate.
+
+    A filter that matches NOTHING makes `assert not unlabelled` pass on any tree,
+    which is the vacuity class these pins exist to avoid. Measured while writing
+    it: the first version searched for a `{ID:` brace the old statement never
+    spells (`n.id = $id`), so it matched neither form.
+    """
+    pre_fix = ("MATCH (n) WHERE n.id = $id AND (n:Object OR n:Subject) "
+               "RETURN DISTINCT labels(n)")
+    fixed_object = "MATCH (n:Object {id:$id}) RETURN n.id LIMIT 1"
+    fixed_union = ("MATCH (n) WHERE n.id IN $vals OR n.url IN $vals "
+                   "RETURN n")
+    assert _is_unlabelled_id_scan(pre_fix), "the pre-fix probe must be caught"
+    assert not _is_unlabelled_id_scan(fixed_object), (
+        "a label-scoped probe must not be reported")
+    assert not _is_unlabelled_id_scan(fixed_union), (
+        "an id set-membership scan is not this pin's shape (no `.id = $id`)")
 
 
 def test_a_create_holds_the_per_name_mint_lock_across_its_write(sdk, monkeypatch):

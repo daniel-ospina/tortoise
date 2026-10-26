@@ -551,34 +551,40 @@ def test_direct_route_subject_object_endpoints_accepted(sdk):
     assert sdk.create_direct_edge("IMPL", sub, obj)["created"] is False
 
 
-def test_direct_route_terminal_entity_endpoint_rejected_phase1(sdk):
-    """#7925 (the guard the widening requires): a bundle-local `:Subject`/
-    `:Object` ref is merged BY NAME, so it can resolve onto an EXISTING terminal
-    node — and `create_direct_edge` refuses a terminal endpoint, which would be
-    a raise AFTER the bundle's earlier items committed. Measured before this
-    guard landed: the predecessor point item was left behind (partial
-    mutation). Phase 1 must catch it, so zero items commit and the error is a
-    BundleValidationError rather than a Phase2Error."""
+def test_a_bundle_ref_naming_a_terminal_holder_is_not_a_terminal_endpoint(sdk):
+    """#3590 review P1 (the FALSE BLOCK), at the bundle door.
+
+    This test used to assert that a bundle-local `:Subject` ref naming a
+    TERMINAL holder is refused in Phase 1 as "resolves to terminal Subject".
+    Under #3590 that endpoint does not resolve onto the terminal node at all:
+    `resolve_or_mint` probes LIVE holders, so the ref MINTS a fresh live
+    successor, the edge is legal, and the terminal incumbent is left alone. The
+    refusal named a mechanism the change removed.
+
+    The terminal-ENDPOINT refusal is still real — but only for an endpoint that
+    ADDRESSES the node by id, which is what
+    `test_phase1_and_the_primitive_agree_on_terminal_endpoints` drives.
+    """
     sub = sdk.create_subject("Alpha")["id"]
     sdk.create_object("Beta")
     sdk.update_entity(sub, status="superseded")
     bundle = {
-        "points": [{"ref": "pX", "kind": "statement",
-                    "content": "must-not-commit"}],
         "entities": [{"ref": "s", "type": "subject", "name": "Alpha"},
                      {"ref": "o", "type": "object", "name": "Beta"}],
         "connections": [{"from": "s", "to": "o", "operator": "IMPL"}],
     }
-    viols = sdk._validate_bundle(bundle)
-    msgs = [v["message"] for v in viols]
-    assert any("resolves to terminal Subject" in m and sub in m
-               for m in msgs), msgs
-    with pytest.raises(BundleValidationError, match="resolves to terminal Subject"):
-        sdk.ingest(bundle)
-    # ZERO mutation — the point item never committed (#2062/#2971 class)
-    assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
-                       "RETURN count(n)") == 0
-    assert _count(sdk, "MATCH ()-[r:IMPL]->(:Object) RETURN count(r)") == 0
+    assert sdk._validate_bundle(bundle) == []
+    assert sdk.ingest(bundle)["created"]["connections"] == 1
+    # Two Alphas now: the superseded incarnation and the minted successor. The
+    # edge is on the successor.
+    assert _count(sdk, "MATCH (s:Subject {name:'Alpha'}) RETURN count(s)") == 2
+    assert sdk._get_proj().g.query(
+        "MATCH (s:Subject {name:'Alpha'})-[:IMPL]->(:Object {name:'Beta'}) "
+        "RETURN s.status").result_set == [["live"]]
+    # The terminal incarnation carries no edge: the write addressed the minted
+    # live node, which is the whole point of the fix.
+    assert _count(sdk, "MATCH (s:Subject {status:'superseded'})-[:IMPL]->() "
+                       "RETURN count(s)") == 0
 
 
 def test_direct_route_entity_declared_terminal_status_rejected_phase1(sdk):
@@ -1952,6 +1958,11 @@ def test_shared_name_declared_terminal_status_is_refused_in_phase1(sdk):
     terminal node AND the earlier point item committed — the #2062
     partial-mutation class this gate exists to close.
     """
+    # ⛔ #3590: a name 2+ LIVE entities hold is a name the CREATE DOOR refuses,
+    # so the bundle cannot be performed at all — that refusal is what Phase 1
+    # must report (a declared status never gets as far as being stored). The
+    # "declared status applies at MINT" arm below covers the shape that DOES
+    # mint (a name no live entity holds).
     for i in (1, 2):
         sdk._get_proj().g.query(
             f"CREATE (:Object {{id:'decoy-{i}', name:'Acme', status:'live'}})")
@@ -1965,12 +1976,37 @@ def test_shared_name_declared_terminal_status_is_refused_in_phase1(sdk):
         "connections": [{"from": "a", "to": "b", "operator": "IMPL"}],
     }
     msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
+    assert any("2 LIVE entities hold" in m for m in msgs), msgs
+    with pytest.raises(BundleValidationError, match="LIVE entities hold"):
+        sdk.ingest(bundle)
+    assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
+                       "RETURN count(n)") == 0
+
+
+def test_a_declared_terminal_status_on_a_name_nothing_holds_is_refused(sdk):
+    """The MINT arm: a name no live entity holds, item declares a terminal status.
+
+    This is the shape where the declaration really IS stored (the create mints,
+    so `status` is written ON CREATE), and `create_direct_edge` then raises on a
+    born-terminal endpoint — after the earlier items committed. Phase 1 must
+    refuse it (#7925).
+    """
+    bundle = {
+        "points": [{"kind": "statement", "content": "must-not-commit"}],
+        "entities": [
+            {"ref": "a", "type": "object", "name": "Fresh",
+             "status": "retracted"},
+            {"ref": "b", "type": "object", "name": "Beta"},
+        ],
+        "connections": [{"from": "a", "to": "b", "operator": "IMPL"}],
+    }
+    msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
     assert any("terminal status" in m for m in msgs), msgs
-    assert any("shared name" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError):
         sdk.ingest(bundle)
     assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
                        "RETURN count(n)") == 0
+    assert _count(sdk, "MATCH (o:Object {name:'Fresh'}) RETURN count(o)") == 0
 
 
 def test_shared_name_terminal_holder_does_not_over_reject(sdk):
@@ -1994,10 +2030,14 @@ def test_shared_name_terminal_holder_does_not_over_reject(sdk):
     assert sdk._validate_bundle(bundle) == []
     created = sdk.ingest(bundle)
     assert created["created"]["connections"] == 1
-    # The endpoint is the freshly minted node, not the terminal holder.
-    assert _count(sdk, "MATCH (o:Object {name:'Acme'}) RETURN count(o)") == 3
-    assert _count(sdk, "MATCH (:Object {name:'Acme'})-[:IMPL]->(:Object "
-                       "{name:'Beta'}) RETURN count(*)") == 1
+    # ⛔ ONE live holder left after the #3590 change: the item RESOLVES to it
+    # (the idempotent re-mention) instead of minting a third carrier — the
+    # pre-fix expectation of 3 came from the retired canonical id.
+    assert _count(sdk, "MATCH (o:Object {name:'Acme'}) RETURN count(o)") == 2
+    # The edge lands on the LIVE holder, never on the terminal one.
+    assert sdk._get_proj().g.query(
+        "MATCH (o:Object {name:'Acme'})-[:IMPL]->(:Object {name:'Beta'}) "
+        "RETURN o.status").result_set == [["live"]]
 
 
 def test_single_carrier_declared_terminal_status_is_still_dropped(sdk):
@@ -2018,15 +2058,22 @@ def test_single_carrier_declared_terminal_status_is_still_dropped(sdk):
         "MATCH (o:Object {name:'Solo'}) RETURN o.status").result_set == [["live"]]
 
 
-# ── shared name whose CANONICAL carrier exists (#7925 review round 6) ────────
+# ── shared name: the axis cases, under the MINTED-ID model (#3590) ──────────
 #
-# The guard reads the axes of the node the WRITE lands on. Since #8864/#8902 the
-# fold keys its merge on the record's own `id` once a name has 2+ carriers, and
-# every ingest entity item's id IS `ids.entity_name_id(label, name)` — so with
-# 2+ carriers the item still LANDS on a carrier holding that canonical id
-# (ON MATCH); it mints only when no carrier holds it. Branching on the carrier
-# count alone therefore failed OPEN here (Phase 1 `[]`, then Phase2Error with
-# the earlier point committed) and OVER-REJECTED the declared-status direction.
+# The guard reads the axes of the node the WRITE lands on, and under #3590 that
+# node is decided by `entity_identity.resolve_or_mint`:
+#
+#   * 0 LIVE carriers  -> the item MINTS a fresh id (a terminal carrier does not
+#                         block: it is a different incarnation, R5);
+#   * 1 LIVE carrier   -> the item RESOLVES to it, so THAT node's axes decide;
+#   * 2+ LIVE carriers -> the create REFUSES (`AmbiguousEntityName`), and the
+#                         guard refuses the bundle in Phase 1 for the same
+#                         reason (see the `ambiguous` arm in `_validate_bundle`).
+#
+# ⛔ The pre-#3590 cluster here was built on `ids.entity_name_id(label, name)`:
+# "with 2+ carriers the item still lands on the carrier holding the canonical
+# id". That id no longer exists, so those fixtures now describe the 2+ LIVE
+# case — which is a Phase-1 refusal, not a merge.
 
 
 def _canonical(label: str, name: str) -> str:
@@ -2042,34 +2089,48 @@ def _canonical(label: str, name: str) -> str:
 
 
 def _two_carriers(sdk, canonical_status: str | None = "live", **extra) -> None:
-    """2 carriers: one holding the canonical id, one decoy."""
+    """ONE carrier named Acme, with `canonical_status` and ``extra`` props.
+
+    The helper kept its name so the axis cases read unchanged, but under #3590
+    there is no second "decoy": a name held by 2+ LIVE carriers is a Phase-1
+    refusal (the create may not pick one), which is a different finding from the
+    axis cases these fixtures exercise. ONE live carrier is the shape where the
+    item RESOLVES, so the target's axes are what the guard must read.
+    """
     props = "" if canonical_status is None else f", status:'{canonical_status}'"
     for k, v in extra.items():
         props += f", {k}:{v}"
     sdk._get_proj().g.query(
         f"CREATE (:Object {{id:'{_canonical('Object', 'Acme')}', "
         f"name:'Acme'{props}}})")
-    sdk._get_proj().g.query(
-        "CREATE (:Object {id:'decoy-1', name:'Acme', status:'live'})")
 
 
-def test_shared_name_canonical_carrier_terminal_status_is_refused(sdk):
-    """A terminal CANONICAL carrier is the merge target — refuse it in Phase 1."""
+def test_a_terminal_only_carrier_does_not_block_a_by_name_create(sdk):
+    """#3590 review P1 (the FALSE BLOCK): a terminal holder is not the endpoint.
+
+    `resolve_or_mint` probes LIVE holders, so a name whose only carrier is
+    terminal MINTS a fresh live node — the edge is legal and the bundle must
+    pass. Reading the axes off an any-status probe refused this bundle as
+    "resolves to terminal Object … (by name)", a mechanism #3590 removed, and it
+    named an endpoint the write never addresses.
+    """
     _two_carriers(sdk, "superseded")
     bundle = {
-        "points": [{"kind": "statement", "content": "must-not-commit"}],
         "entities": [
             {"ref": "a", "type": "object", "name": "Acme"},
             {"ref": "b", "type": "object", "name": "Beta"},
         ],
         "connections": [{"from": "a", "to": "b", "operator": "IMPL"}],
     }
-    msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
-    assert any("terminal Object" in m for m in msgs), msgs
-    with pytest.raises(BundleValidationError):
-        sdk.ingest(bundle)
-    assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
-                       "RETURN count(n)") == 0
+    assert sdk._validate_bundle(bundle) == []
+    assert sdk.ingest(bundle)["created"]["connections"] == 1
+    # Two Acme nodes: the terminal incumbent and the freshly minted successor.
+    assert _count(sdk, "MATCH (o:Object {name:'Acme'}) RETURN count(o)") == 2
+    live_edge = sdk._get_proj().g.query(
+        "MATCH (o:Object {name:'Acme'})-[:IMPL]->(:Object {name:'Beta'}) "
+        "RETURN o.status").result_set
+    assert live_edge == [["live"]], (
+        "the edge must land on the MINTED live node, never on the terminal one")
 
 
 def test_shared_name_canonical_carrier_operator_is_refused(sdk):
@@ -2159,16 +2220,20 @@ def test_shared_name_distinct_nodes_are_not_a_self_edge(sdk):
 
 
 def test_first_same_name_item_declaring_array_is_refused(sdk):
-    """The FIRST item naming a name CREATES the node, so its array is stored."""
-    for i in (1, 2):
-        sdk._get_proj().g.query(
-            f"CREATE (:Object {{id:'decoy-{i}', name:'Acme', status:'live'}})")
+    """The FIRST item naming a name CREATES the node, so its array is stored.
+
+    ⛔ #3590: "first item" means a name with ZERO live carriers (the create
+    mints). Two pre-existing LIVE carriers used to be the fixture here, but that
+    shape is now refused earlier and for a different reason — the by-name create
+    may not pick one of them (`AmbiguousEntityName`), so the array would never be
+    stored at all.
+    """
     bundle = {
         "points": [{"kind": "statement", "content": "must-not-commit"}],
         "entities": [
             {"ref": "a", "type": "object", "name": "Acme",
              "status": ["retracted"]},
-            {"ref": "b", "type": "object", "name": "Acme"},
+            {"ref": "b", "type": "object", "name": "Beta"},
         ],
         "connections": [{"from": "a", "to": "b", "operator": "IMPL"}],
     }
@@ -2183,14 +2248,13 @@ def test_first_same_name_item_declaring_array_is_refused(sdk):
 def test_second_same_name_item_declaring_array_is_dropped(sdk):
     """A LATER same-name item does not create a node, so its status is dropped.
 
-    Every ingest entity item's id is `entity_name_id(label, name)`, so the second
-    item lands on the node the first one created and `status` is written
-    `ON CREATE` only. Refusing the declaration rejected a bundle the writer
-    performs (measured at the writer: one node, status `live`, array not stored).
+    ⛔ #3590: BOTH same-name items now land on the single LIVE carrier (the
+    idempotent re-mention), and `status` is written `ON CREATE` only, so the
+    later item's array never reaches the node. Refusing the declaration rejected
+    a bundle the writer performs (measured at the writer: one node, status
+    `live`, array not stored).
     """
-    for i in (1, 2):
-        sdk._get_proj().g.query(
-            f"CREATE (:Object {{id:'decoy-{i}', name:'Acme', status:'live'}})")
+    _two_carriers(sdk)
     bundle = {
         "entities": [
             {"ref": "a", "type": "object", "name": "Acme"},
@@ -2202,7 +2266,7 @@ def test_second_same_name_item_declaring_array_is_dropped(sdk):
     }
     assert sdk._validate_bundle(bundle) == []
     assert sdk.ingest(bundle)["created"]["connections"] == 1
-    assert _count(sdk, "MATCH (o:Object {name:'Acme'}) RETURN count(o)") == 3
+    assert _count(sdk, "MATCH (o:Object {name:'Acme'}) RETURN count(o)") == 1
     assert sdk._get_proj().g.query(
         "MATCH (o:Object {id:$id}) RETURN o.status",
         params={"id": _canonical("Object", "Acme")},
@@ -2212,16 +2276,13 @@ def test_second_same_name_item_declaring_array_is_dropped(sdk):
 def test_two_bundle_refs_to_one_shared_name_are_a_self_edge(sdk):
     """Under a shared name two bundle refs are STILL one node — a self-edge.
 
-    Every ingest entity item writes `entity_name_id(label, name)`, so the first
-    item creates that node (even when 2+ carriers hold the name, because the fold
-    then keys on the id) and the second lands on it. Comparing names says nothing
-    here; comparing LANDING IDs does. Skipping the check on the carrier count
-    failed open: Phase 1 returned `[]` and step 4 raised
-    `source_id and target_id must differ` with the earlier point committed.
+    ⛔ #3590: the first item MINTS the name (zero live carriers), and the second
+    RESOLVES to the node the first one created — so the two refs are one
+    endpoint. Skipping the check failed open: Phase 1 returned `[]` and step 4
+    raised `source_id and target_id must differ` with the earlier point
+    committed. (Two PRE-EXISTING live carriers are no longer this fixture: that
+    shape is refused earlier as an ambiguous by-name create.)
     """
-    for i in (1, 2):
-        sdk._get_proj().g.query(
-            f"CREATE (:Object {{id:'decoy-{i}', name:'Acme', status:'live'}})")
     bundle = {
         "points": [{"kind": "statement", "content": "must-not-commit"}],
         "entities": [
@@ -2305,31 +2366,44 @@ def test_non_canonical_single_carrier_self_edge_is_refused(sdk):
                        "RETURN count(n)") == 0
 
 
-def test_bare_name_subject_stub_is_the_same_endpoint_as_the_bundle_ref(sdk):
-    """`aboutSubject="Gamma"` mints a `:Subject {id:'Gamma'}` stub — a third id
-    spelling. The bundle item adopts it (name merge) and re-registers it under the
-    canonical id, so an endpoint naming the stub's id is the same node."""
+def test_a_bare_name_is_not_an_endpoint_address(sdk):
+    """⛔ #3590 RETIRED the name-as-address stub this test was built on.
+
+    `aboutSubject="Gamma"` used to mint a `:Subject {id:'Gamma'}` stub — a
+    name-shaped id — so a connection endpoint could name it. Two things removed
+    that: the D9 registration duty makes the event door mint an OPAQUE id for
+    the name (so `:Subject {id:'Gamma'}` no longer exists), and the fold never
+    mints at all. An endpoint must therefore address a node by its `id`; a bare
+    name is an external endpoint that does not exist, and Phase 1 says so
+    instead of step 4 raising mid-write.
+    """
     sdk.create_event("meeting", "other", aboutSubject="Gamma")
+    # The registered Subject carries a MINTED id, never the name.
+    registered = sdk._get_proj().g.query(
+        "MATCH (s:Subject {name:'Gamma'}) RETURN s.id").result_set
+    assert len(registered) == 1 and registered[0][0] != "Gamma", registered
     bundle = {
         "points": [{"kind": "statement", "content": "must-not-commit"}],
         "entities": [{"ref": "g", "type": "subject", "name": "Gamma"}],
         "connections": [{"from": "g", "to": "Gamma", "operator": "IMPL"}],
     }
     msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
-    assert any("address the same endpoint" in m for m in msgs), msgs
+    assert any("does not exist" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError):
         sdk.ingest(bundle)
     assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
                        "RETURN count(n)") == 0
 
 
-def test_endpoint_naming_a_renamed_carrier_is_refused(sdk):
-    """An endpoint that names the PRE-write id of an adopted carrier is dead by step 4.
+def test_an_endpoint_naming_a_legacy_carrier_stays_valid(sdk):
+    """⛔ #3590 RETIRED the re-addressing this test was built on.
 
-    The bundle item naming the holder merges onto it and the fold rewrites its id to
-    `entity_name_id(label, name)`, so a connection endpoint still carrying the old id
-    raises `Phase2Error … does not exist` after the earlier items committed. One
-    connection is enough — no self-edge pair is required.
+    The guard's "re-addresses to" arm existed because step 3 REWROTE a holder's
+    id to `entity_name_id(label, name)`, killing every endpoint that still named
+    the pre-write id. With an opaque minted id there is no canonical spelling to
+    move to: the bundle item RESOLVES to the carrier's own id, the node keeps it,
+    and an endpoint naming it is exactly right. The arm is gone (the code keeps
+    an empty `_renamed` map as the ASSERTED property), so the bundle performs.
     """
     sdk._get_proj().g.query(
         "CREATE (:Object {id:'legacy-ulid-1', name:'Acme', status:'live'})")
@@ -2343,15 +2417,13 @@ def test_endpoint_naming_a_renamed_carrier_is_refused(sdk):
                 "entities": [{"ref": "a", "type": "object", "name": "Acme"}],
                 "connections": [{"from": frm, "to": to, **route}],
             }
-            msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
-            assert any("re-addresses to" in m for m in msgs), (route, frm, msgs)
-            with pytest.raises(BundleValidationError):
-                sdk.ingest(bundle)
-    assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
-                       "RETURN count(n)") == 0
-    # the carrier was never renamed and no edge was written
+            assert sdk._validate_bundle(bundle) == [], (route, frm)
+    # the carrier keeps its id and the writes land
     assert _count(sdk, "MATCH (o:Object {id:'legacy-ulid-1'}) "
                        "RETURN count(o)") == 1
+    assert _count(sdk, "MATCH (o:Object {name:'Acme'}) RETURN count(o)") == 1, (
+        "the item resolved to the legacy carrier instead of minting a second "
+        "entity of the same name")
 
 
 def test_same_id_string_on_two_labels_is_not_a_self_edge(sdk):

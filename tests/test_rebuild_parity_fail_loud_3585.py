@@ -455,23 +455,65 @@ class TestReferenceFoldMirrorsTheWriters:
         assert buried == {"evt-flat", "evt-nested"}, r["divergent_entities"]
 
     def test_second_registration_of_one_name_is_not_a_divergence(self, env):
-        """FAILS IF: the entity leg keys Object/Subject by id ONLY.
+        """FAILS IF: a re-registration of one name is reported as a burial.
 
-        The graph MERGEs those labels by NAME, so the same name registered
-        twice under different ids is ONE node carrying the LAST id. An id-only
-        key reported the older id `absent-from-graph` and reddened a CORRECTLY
-        replayed graph.
+        ⛔ THE PREMISE MOVED WITH #3590. This test used to justify itself with
+        *"the graph MERGEs those labels by NAME, so the same name registered
+        twice under different ids is ONE node carrying the LAST id"* — which is
+        why the presence leg resolved a missing id BY NAME. The writers now key
+        the MERGE on `id` (`merge_key = "id"`), so the two registrations are TWO
+        nodes, each carrying its own id, and the id-keyed comparison finds both
+        PRESENT. The verdict is unchanged; the mechanism is not, and a lane that
+        read the old docstring would "restore" the name fallback.
         REACHABLE: a second `ObjectRegistered` for the same name (the
-        `EventAPI.add_object` shape mints a fresh id per call)."""
+        `EventAPI.add_object` shape journals a fresh id per call)."""
         sdk, events = env
-        sdk.create_entity("object", name="SAME", objectKind="k")
+        first = sdk.create_entity("object", name="SAME", objectKind="k")
         _raw(events, type="ObjectRegistered", id="obj-second", name="SAME",
              objectKind="k", status="live")
         proj = sdk._get_proj()
         proj.rebuild_all(str(events), confirm_destructive=True)
+        # Fixture: the replay really did produce two id-keyed carriers of the
+        # one name (the pre-#3590 graph would have collapsed them).
+        assert {o[0] for o in _objects(proj)} == {
+            first["node"]["id"], "obj-second"}, _objects(proj)
         r = check_consistency(str(events / "events.jsonl"), proj)
         assert r["divergent_entity_count"] == 0, r["divergent_entities"]
         assert r["ok"] is True, r["divergence"]
+
+    def test_a_same_name_impostor_cannot_hide_a_buried_entity(self, env):
+        """FAILS IF: presence resolves a journal id BY NAME.
+
+        #3590 review P2. The presence leg used to fall back
+        `{(label, name): view}` when a journal id was absent from the graph, on
+        the premise that the graph merges these labels by name. That premise is
+        retired (the writers MERGE on `id`), so a same-name node under ANOTHER id
+        is a DIFFERENT incarnation — and the fallback compared ITS status, found
+        it equal, and reported the burial CLEAN: a false PASS on exactly the
+        "faithful node buried, an impostor of the same name survives" shape this
+        file's own `:Event` leg calls out as *"the one failure mode this file
+        must never produce"*.
+        REACHABLE: a partially restored / adopted legacy graph (#8607's own
+        scenario), or a connector node whose registration was never journaled:
+        the journal names id `A`, the graph carries only `B` with the same name.
+        """
+        sdk, events = env
+        sdk.create_entity("object", name="IMPOSTOR", objectKind="k")
+        _raw(events, type="ObjectRegistered", id="obj-buried", name="IMPOSTOR",
+             objectKind="k", status="live")
+        proj = sdk._get_proj()
+        proj.rebuild_all(str(events), confirm_destructive=True)
+        # The burial: the journal's `obj-buried` is gone, a same-name node with
+        # ANOTHER id survives. Pre-fix this state read CLEAN.
+        proj.g.query("MATCH (o:Object {id:'obj-buried'}) DETACH DELETE o")
+        assert {o[0] for o in _objects(proj)}, (
+            "fixture: the same-name impostor must still be in the graph")
+        r = check_consistency(str(events / "events.jsonl"), proj)
+        buried = {d["id"] for d in r["divergent_entities"]
+                  if d["label"] == "Object" and d["field"] == "presence"}
+        assert buried == {"obj-buried"}, (
+            "a buried entity was hidden behind a same-name impostor — presence "
+            f"resolved by name instead of by id: {r['divergent_entities']}")
 
     def test_the_ambiguity_exclusion_is_reported(self, env):
         """FAILS IF: an ambiguous name-only supersede is silently skipped.

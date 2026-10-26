@@ -19630,7 +19630,8 @@ class TortoiseSDK:
     ) -> tuple[bool, str | None, str | None, str | None, int, bool,
                str | None]:
         """``(exists_by_name, terminal_holder_id, operator_holder_id,
-        unevaluable_status_holder_id, carrier_count, merges, target_id)`` for a
+        unevaluable_status_holder_id, live_carrier_count, merges, target_id)``
+        for a
         bundle-local entity ref (#7925) — the entity sibling of
         :meth:`_find_terminal_dedup_hit`, and it exists for the same reason:
         the bundle-local endpoint guard has to resolve the endpoint the WRITER
@@ -19667,10 +19668,12 @@ class TortoiseSDK:
             "resolves to terminal … (by name)", which is not the endpoint the
             write produces.
 
-        So ``carrier_count`` stays the TOTAL carrier count (the born-terminal
-        arm reads it as "something holds this name"), while
-        ``merges``/``target_id``/the three axes come from the LIVE carriers
-        alone — exactly the predicate the create uses.
+        So ``live_carrier_count`` is the number of LIVE, id-carrying carriers —
+        the SAME population the create probes, so `> 1` is exactly the shape the
+        create REFUSES and a caller can decide from this one field. (It used to
+        be the TOTAL carrier count, which made "two terminal carriers"
+        indistinguishable from "two live ones" — the first mints legally, the
+        second cannot be written at all.)
 
         Reading the axes from "any carrier" or from "none of them" both fail:
         the first over-rejects (another carrier's terminal status is not the
@@ -19686,7 +19689,8 @@ class TortoiseSDK:
         name onto the node that exists and its ``ON MATCH`` clause rewrites the
         stored ``id`` to the canonical one. Anything predicting the endpoint the
         write addresses must therefore use ``target_id`` when it is set. Callers
-        must branch on ``merges`` rather than on ``carrier_count``.
+        must branch on ``merges`` and ``live_carrier_count`` rather than on
+        ``exists_by_name``.
 
         ``operator_holder_id`` is the same test on the OTHER axis (#7925 review
         round 3): an operator-shaped merge target is not a connection endpoint
@@ -19728,12 +19732,12 @@ class TortoiseSDK:
         # canonical id" answer existed only because the id was a function of
         # the name).
         if len(live) > 1:
-            return True, None, None, None, len(rows), False, None
+            return True, None, None, None, len(live), False, None
         if not live:
             # ZERO live carriers: the item MINTS a fresh live node. Its declared
             # status is the one stored, so no HOLDER axis applies (a terminal
             # carrier's stored status is not the endpoint the edge addresses).
-            return True, None, None, None, len(rows), False, None
+            return True, None, None, None, 0, False, None
         target = live[0]
         # All three axes in ONE pass (#7925 review round 4 — an early return per
         # axis made a holder that matched two of them report only the first, so
@@ -19751,7 +19755,7 @@ class TortoiseSDK:
             None,
             _holder_id if _op else None,
             _holder_id if _status_is_stored_unhashable(_status) else None,
-            len(rows),
+            1,
             True,
             _holder_id,
         )
@@ -20096,9 +20100,31 @@ class TortoiseSDK:
                     # (an unguarded `in set()` here raised TypeError straight
                     # out of `_validate_bundle` — review round 4).
                     continue
-                (_existing, _hit, _op, _bad, _carriers, _merges,
+                (_existing, _hit, _op, _bad, _live, _merges,
                  _target) = _name_holders(_elabel, _name)
                 _key = (_elabel, _name)
+                # ⛔ #3590: 2+ LIVE carriers is a name the CREATE DOOR refuses
+                # (`AmbiguousEntityName` — route-then-refuse) and this bundle
+                # cannot dodge that: the item names the entity BY NAME, so there
+                # is no id for it to mint on. Left to step 3 it raises AFTER the
+                # earlier bundle items committed — the partial-write class this
+                # whole guard exists to close (#7925, measured:
+                # `AmbiguousEntityName: Object 'Acme' resolves to 2 live
+                # carriers` out of `ingest`). Refuse it in Phase 1.
+                #
+                # TOTAL carriers is deliberately not the test: two TERMINAL
+                # carriers leave zero live holders, so the create legally mints
+                # past them (a terminal holder is a different incarnation, R5).
+                if _live > 1:
+                    violations.append({
+                        "section": "entities", "index": i,
+                        "message": f"ingest: entities[{i}] names the {_elabel} "
+                                   f"{_name!r}, which {_live} LIVE entities "
+                                   f"hold — a by-name create may not pick one "
+                                   f"(route-then-refuse, #3590); address it "
+                                   f"by id or resolve the duplicate first",
+                    })
+                    continue
                 # MERGES (exactly one LIVE carrier holds the name — #3590
                 # retired the derived "canonical id" this used to name) or not
                 # the first naming item (the first one creates it) ⇒ this write
@@ -20481,22 +20507,39 @@ class TortoiseSDK:
                         item, _item_flatten_depth(item, section))
                     exists, hit, bad_status = False, None, None
                     name_merge = False
+                    ambiguous = False
                     if elabel in ("Subject", "Object") \
                             and isinstance(name, str) and name:
-                        (exists, hit, _, bad_status, _carriers, merges,
+                        (exists, hit, _, bad_status, _live, merges,
                          _target) = _name_holders(elabel, name)
+                        if _live > 1:
+                            # Same refusal as the entity arm (#3590): the
+                            # endpoint names a doubly-held entity, so step 3
+                            # raises before step 4 could run. Flagged rather
+                            # than `continue`d — `continue` here would skip the
+                            # OTHER endpoints of this same connection, silently
+                            # dropping their findings.
+                            ambiguous = True
+                            violations.append({
+                                "section": "connections", "index": i,
+                                "message": f"ingest: connections[{i}] "
+                                           f"bundle-local endpoint {v!r} "
+                                           f"names the {elabel} {name!r}, "
+                                           f"which {_live} LIVE entities "
+                                           f"hold — a by-name create may not "
+                                           f"pick one (route-then-refuse, "
+                                           f"#3590)",
+                            })
                         # #8864/#8902: the fold keys the merge on NAME while the
-                        # name has ONE carrier, and on the record's own `id` once
-                        # it has 2+. Every ingest entity item's id IS
+                        # name has ONE LIVE carrier. `merges` is that answer and
+                        # the axes above are the merge target's — so a merge
+                        # reads the target's operator/unevaluable axes, while a
+                        # mint keeps its own declared status. (Pre-#3590 this
+                        # also said "every ingest item's id IS
                         # `ids.entity_name_id(label, name)`, so with 2+ carriers
-                        # the item still LANDS on a carrier holding that
-                        # canonical id (ON MATCH) and only MINTS when none does.
-                        # `merges` is that answer and the axes above are the
-                        # merge target's — so a merge reads the target's
-                        # terminal/unevaluable axes, while a mint keeps its own
-                        # declared status. Branching on the carrier count instead
-                        # fails open on the first case and over-rejects on the
-                        # second (both measured).
+                        # it still lands on the canonical id": that id does not
+                        # exist any more — 2+ LIVE carriers is the `ambiguous`
+                        # refusal above.)
                         name_merge = merges
                         # The operator axis is settled by the label gate above
                         # (`tainted_by_bundle`), and the `outdated` flag
@@ -20505,7 +20548,12 @@ class TortoiseSDK:
                         # decides the status the mint carries.
                         declared = name_outcomes.get(
                             (elabel, name), (None, False, False, None))[0]
-                    if bad_status is not None:
+                    if ambiguous:
+                        # One diagnosis for one defect: the ambiguity is already
+                        # reported, and every axis below is read from a merge
+                        # target that does not exist.
+                        pass
+                    elif bad_status is not None:
                         # #7925 review P2: the merge lands this ref on a node
                         # whose stored `status` is an array, which
                         # `create_direct_edge`'s frozenset test cannot
