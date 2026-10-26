@@ -2337,6 +2337,71 @@ def test_the_committed_manifest_header_is_exactly_what_cut_re_emits():
     )
 
 
+def test_the_overrides_marker_names_the_same_target_in_every_copy():
+    """#10044 review F4: the marker's durable homes must not drift from the artifact copy.
+
+    `MANIFEST_HEADER` is what a reader of `config/surface-manifest.yml` sees; the module
+    docstrings are "the durable homes" — the copy a maintainer actually opens. This PR
+    updated the header to name BOTH targets (the 27-MCP-tool document AND the declared SDK
+    surface in `tortoise/__all__.py`) and left both docstring copies on the old single-target
+    text, still quoting `26/40` — so the same file told two different stories about where the
+    SDK target comes from, and the stale one was the copy a lane reads before adopting a
+    vendor's default, which is the exact failure the `OVERRIDES:` marker exists to prevent.
+
+    Compared on the marker's TEXT with whitespace flattened (the docstring copies are
+    wrapped, the header copy is one line), so a reworded-but-equal copy passes and only a
+    divergent one reds. RED on the pre-fix tree: 3 copies, 2 distinct texts, the odd ones
+    out carrying `26/40`.
+    """
+    sm = _load_manifest_tool()
+    source = (ROOT / "tools" / "surface_manifest.py").read_text(encoding="utf-8")
+    flat = " ".join(source.split())
+    start = "OVERRIDES: the frozen-snapshot-as-approval-baseline practice"
+    end = "never from a count beside them."
+    copies, idx = [], flat.find(start)
+    while idx >= 0:
+        stop = flat.find(end, idx)
+        assert stop >= 0, "an OVERRIDES copy was truncated before its reason clause"
+        copies.append(flat[idx:stop + len(end)])
+        idx = flat.find(start, idx + 1)
+    assert len(copies) == 3, (
+        f"expected the artifact copy (MANIFEST_HEADER) plus both durable homes, found "
+        f"{len(copies)} OVERRIDES copies in tools/surface_manifest.py"
+    )
+    assert len(set(copies)) == 1, (
+        "the OVERRIDES marker names different targets in different copies of the same file "
+        "— a lane reading the docstring copy (the one a maintainer opens) is told a target "
+        "the artifact copy contradicts:\n\n" + "\n\n".join(sorted(set(copies)))
+    )
+    assert "26/40" not in copies[0], (
+        "the marker still quotes the superseded `26/40` target: the MCP target is 27 tools "
+        "and the SDK target is the declared 40 in tortoise/__all__.py"
+    )
+    assert copies[0] in " ".join(MANIFEST.read_text(encoding="utf-8").split())
+
+
+def test_the_approved_flag_is_DERIVED_so_a_recut_cannot_refuse():
+    """#10044 review F3(b): the header must name the mechanism that actually refuses.
+
+    The old header claimed an unapproved addition reds "the `approved` flag on a re-cut
+    row". It cannot: `approved` is a DERIVED row key, so `build_doc` computes it, `cmd_cut`
+    writes `build_doc()` verbatim, and property 12 then compares two identical derived
+    values — green by construction. What refuses is the `high_water_counts` growth pin,
+    enforced independently by the BASE-REF-pinned `tools/surface-guard.py`. This pins the
+    premise the corrected header states, so the comment cannot quietly become false again.
+    """
+    sm = _load_manifest_tool()
+    assert "approved" not in sm.NON_DERIVABLE_ROW_KEYS, (
+        "`approved` is now classified non-derivable — the MANIFEST_HEADER's sentence "
+        "('`approved` is a DERIVED row key') is false and must be rewritten with the reason"
+    )
+    assert "high_water_counts" in sm.NON_DERIVABLE_DOC_KEYS, (
+        "the growth pin is no longer carried rather than re-derived — the header's "
+        "statement that `high_water_counts` is the mechanism that reds an unapproved "
+        "addition no longer holds"
+    )
+
+
 def test_the_committed_manifest_carries_the_DERIVED_approval():
     """#8144: the flip has landed, so the committed copy carries the owner's approval.
 

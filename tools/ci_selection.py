@@ -193,8 +193,15 @@ SLOW_LEG_SETUP_ALLOWANCE_MIN = 2.0
 # The rule is the empirically-validated headroom, not a fresh guess: the 30m
 # budget was hit by a ~30m shard (factor ~1.0 too tight — #798), and 55m for a
 # ~30m shard (factor 1.8) has held since. 2.0 is that factor with a small
-# margin. The FLOOR is 2.9× the largest single fast file (`310.7 s`), so the
-# watchdog can never kill a shard below the #6133 floor.
+# margin. The FLOOR clears the largest single fast file with headroom, so the
+# watchdog can never kill a shard below the #6133 floor: it was 2.9× the then
+# largest file (`310.7 s`), and the 2026-10-26 durations refresh (#10026) raised
+# the largest fast file to `test_calibration.py` at `390.0 s` — 17 min keeps
+# 2.62×, above the 2.5× the `test-slow` proof pins
+# (`test_ci_selection.py::test_watchdog_is_per_shard_and_scales_with_the_shard`,
+# which DERIVES the largest file from this manifest rather than trusting this
+# comment). A refresh that pushes the largest file past ~408 s reds that test on
+# purpose: the floor is a derivation, not a preference.
 #
 # ⛔ 1.8 IS NO LONGER ACCEPTED (#6145). The CEILING can clamp a budget BELOW
 # `WATCHDOG_HEADROOM`, and `watchdog_headroom_issues` now REDS that state —
@@ -205,7 +212,7 @@ SLOW_LEG_SETUP_ALLOWANCE_MIN = 2.0
 # stays 55m so the worst-case leg stays inside the job's outer
 # `timeout-minutes` — the invariant REFUSES rather than widening it.
 WATCHDOG_HEADROOM = 2.0
-WATCHDOG_FLOOR_MIN = 15
+WATCHDOG_FLOOR_MIN = 17
 WATCHDOG_CEILING_MIN = 55
 
 # bash/heredoc-safe newline (the pi bash wrapper mangles raw \n in heredocs)
@@ -1038,6 +1045,19 @@ SOURCE_PATTERNS = {
             # repo's deliberate docs-PR policy; the required `docs` job runs
             # `tools/sdk_surface.py --check` on every PR instead (#4454).
             "tools/sdk_surface.py",
+            # #10044 review F1: `tools/sdk_surface_declaration.py` is the APPROVED-surface
+            # gate (the owner's 40 in `tortoise/__all__.py` vs the owner's document, and
+            # vs the live `TortoiseSDK`). Its proofs include the WIRING proof — that the
+            # required `surface-guard` job actually calls it — and they lived in
+            # `test_sdk_surface_declaration.py`, registered in `api` AND `core` but
+            # unreachable, because `tools/` is in NON_PYTHON_PREFIXES: a gate-only diff
+            # selected NO surface (`surfaces: []`, `full: false`) and the required job
+            # then executed the PR's own edited gate with zero of its tests having run.
+            # Same silent-drop class (#1349/#3332/#3616) as the generators above, and the
+            # one bypass the residual-bypass paragraph in `tools/surface_manifest.py`
+            # does not cover. `test_sdk_surface_declaration.py` is already in `api`, so
+            # this entry is what makes the registration bite.
+            "tools/sdk_surface_declaration.py",
             # #5373: `tools/registry_integrity.py` is the fail-closed validator
             # paired with `merge=union` on the two config registries, and
             # `test_registry_integrity.py` (dual-registered in `api` AND `core`)
