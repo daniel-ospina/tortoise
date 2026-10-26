@@ -2814,7 +2814,7 @@ def rrf_fusion(
     # mechanism's promise.
     #
     # ⛔ THE RULING (owner, 2026-10-25 — comment 6402104535 on #7704): the twin
-    # case is a DUPLICATION defect, not a ranking one, and "[O]ptions A / B / C / D
+    # case is a DUPLICATION defect, not a ranking one, and "Options A / B / C / D
     # are CLOSED as answers to this issue — none is authorised here … tie-averaged
     # ranks are not required once duplicate entries do not exist", with the armed
     # pin "must not be used to justify tie-averaging (option D)". So do NOT

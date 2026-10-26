@@ -37,12 +37,12 @@ score there — the two paths disagree about identical evidence.
 ⛔ **What this file is, and is NOT.** The defect is measured; *what to do about
 it* is **RULED, not open** — #7704 OWNER RULING (2026-10-25, comment
 `6402104535`): the twin case is a **duplication defect, not a ranking-semantics
-one**, and *"[O]ptions A / B / C / D are CLOSED as answers to this issue — none is
+one**, and *"Options A / B / C / D are CLOSED as answers to this issue — none is
 authorised here … tie-averaged ranks are not required once duplicate entries do
 not exist"*. So this file does **not** wait on a decision about ordering, and
 the pin **must not be used to justify tie-averaging (option D)**. What closes
 the measured defect is **dedup identity + provenance accumulation** (#9998,
-#9437, #9879), and the ruling's own proposal — *proposal, not a decision*, in
+#9437, #9879), and the ruling's own proposal — *"[p]roposal, not a decision"*, in
 its words — is to delete this pin **in that same change** and replace it with
 one asserting the intended state: **one claim, N sources**. The recorded option
 set is the rationale on ``W4_CONTESTED_BOOST`` (``tortoise/ranking.py``) — do not
@@ -65,13 +65,15 @@ The pin stays ARMED, and it reds on the WRONG follow-through first:
   while this pin calls ``rrf_fusion`` directly on two DISTINCT ids carrying
   equal scores, so no dedup change can move it: what makes it XPASS is a
   fusion-side remedy, i.e. the closed option D. The ruling's instruction for
-  the dedup change is therefore a DELIBERATE act, and it calls it *"proposal,
+  the dedup change is therefore a DELIBERATE act, and it calls it *"[p]roposal,
   not a decision"*: delete this marker and replace the pin with one asserting
-  **one claim, N sources**. Whether the #2102 E2E-1 indicator's wording is
-  restated alongside it is **not** decided by the ruling — its point 5 reads
-  "The #2102 E2E-1 indicator's wording is NOT re-specified by this ruling. No
-  hard rule is to be written in its place" — so treat any restatement as a
-  separate, still-open question. Never a silent green.
+  **one claim, N sources** — a FOLLOW-UP that change must carry: the in-flight
+  #10010 does not touch this file, so #7704 remains the tracker for it. Whether
+  the #2102 E2E-1 indicator's wording is restated alongside it is **not**
+  decided by the ruling — its point 5 reads "The #2102 E2E-1 indicator's wording
+  is NOT re-specified by this ruling. No hard rule is to be written in its
+  place" — so a restatement needs its own decision elsewhere and is not
+  authorised here. Never a silent green.
 
 The three green guards below hold ANY change here to its invariants (a
 generator leg is not swallowed, a leg that DID rank the rows apart is still
@@ -134,9 +136,11 @@ _STRATEGIES = ["fts", "vector"]
         "ruling 2026-10-25, comment 6402104535), NOT tie-averaged ranks "
         "(option D is CLOSED). It XPASSes on a FUSION-side remedy — option D "
         "first — and dedup never reaches it (a write-path change over two "
-        "DISTINCT ids). It stays armed until the dedup change, which deletes "
-        "this marker and replaces the pin with one asserting one claim, N "
-        "sources. See the docstring."
+        "DISTINCT ids). It stays armed until the dedup change, where the "
+        "ruling's proposal is to delete this marker and replace the pin with "
+        "one asserting one claim, N sources — a FOLLOW-UP that change must "
+        "carry (#7704 tracks it; #10010 does not touch this file). See the "
+        "docstring."
     ),
 )
 def test_identical_leg_scores_must_not_produce_different_fused_scores():
