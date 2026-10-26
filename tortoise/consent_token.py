@@ -151,7 +151,9 @@ _REUSED_KEY_ENVS = ("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SERVICE_KEY", "SUPABA
 #: BYTES (43–64 characters encoded). So `"passwordpasswordpasswordpassword"` clears this floor and
 #: is still ~2^19 guesses. It refuses words and short strings, which is the mistake worth catching;
 #: it cannot tell you the key is strong — that is the operator's job (§8).
-_MIN_SECRET_CHARS = 32
+#: Minimum length in UTF-8 BYTES (a 256-bit key is the usual floor for an HMAC-SHA256 key). Measured
+#: in bytes, not characters: 20 multi-byte characters is a >32-byte key and must not be refused.
+_MIN_SECRET_BYTES = 32
 
 
 def consent_token_secret_problem() -> str | None:
@@ -173,9 +175,13 @@ def consent_token_secret_problem() -> str | None:
         if secret == os.environ.get(name, "").strip():
             return (f"{_SECRET_ENV} is also {name} — §2.3 requires a DEDICATED secret, so the "
                     "arm is treated as unprovisioned rather than trusting a reused key")
-    if len(secret) < _MIN_SECRET_CHARS:
-        return (f"{_SECRET_ENV} is {len(secret)} characters — a key shorter than "
-                f"{_MIN_SECRET_CHARS} is guessable, so the arm is treated as unprovisioned")
+    try:
+        length = len(secret.encode("utf-8"))
+    except UnicodeEncodeError:      # a lone surrogate in the env value: not a key we can sign with
+        return f"{_SECRET_ENV} is not encodable as UTF-8, so it cannot be an HMAC key"
+    if length < _MIN_SECRET_BYTES:
+        return (f"{_SECRET_ENV} is {length} bytes — a key shorter than {_MIN_SECRET_BYTES} bytes "
+                "is guessable, so the arm is treated as unprovisioned")
     return None
 
 
@@ -554,13 +560,27 @@ async def consume_consent_jti(jti: str, expires_at: float) -> None:
         first_use = await consent_jti_store().consume(jti, expires_at)
     except OAuthError:
         raise
+    except JtiStoreUnavailable as exc:
+        # The DOCUMENTED exception a step-1 store raises to say WHY it cannot answer ("the register
+        # is full", "the ticket table is unreachable"). Its message is operator-facing by contract
+        # and carries no driver internals, so it is passed through — losing it would leave the
+        # 503 with no remedy.
+        raise _unavailable(str(exc)) from exc
     except Exception as exc:
         # ANY store failure is "cannot answer", not an internal error: whatever step 1 installs
         # (D1, HTTP) raises its own exception types, and none of them may surface as a 500 after
         # the nonce has been spent. `JtiStoreUnavailable` is the documented one; this is the
         # fail-closed catch-all around it, so the module's "never a 500" claim is true by
         # construction rather than by enumeration.
-        raise _unavailable(f"the consent jti store could not answer: {exc}") from exc
+        #
+        # ⛔ THE DETAIL GOES TO THE LOG, NEVER INTO THE BODY. `configure_consent_jti_store()` accepts
+        # any object (a D1/HTTP client per §2.3), so `str(exc)` can carry an upstream URL, a query
+        # string, a request id or a schema detail — and this 503 is triggerable by one unauthenticated
+        # POST. That is the no-detail convention `_oauth_unconverted_failure` states for this endpoint
+        # family (#3026); an earlier version echoed the text here.
+        logger.warning("consent jti store could not answer (%s): %s",
+                       type(exc).__name__, exc, exc_info=True)
+        raise _unavailable("the consent jti store is unavailable") from exc
     if not first_use:
         raise _refuse("it has already been redeemed (single-use, §2.2)")
 

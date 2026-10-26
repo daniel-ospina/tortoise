@@ -1980,6 +1980,11 @@ def test_a_store_that_cannot_answer_is_a_typed_503_and_never_a_500(bridge_client
         assert r.status_code == 503, r.text
         assert r.json()["error"] == "temporarily_unavailable", r.text
         assert mint_spy == [], "a store that cannot answer must not mint"
+        # ⛔ #3026's no-detail rule: the store is an arbitrary object (§2.3), so its message can
+        # carry an upstream URL, a query string or a schema detail, and this 503 is triggerable by
+        # one unauthenticated POST. The detail belongs in the log, not the body.
+        assert "ticket table" not in r.text, r.text
+        assert "_StoreBlewUp" not in r.text, r.text
     finally:
         reset_consent_jti_store()
 
@@ -2072,6 +2077,34 @@ def test_a_guessably_short_secret_is_not_a_provisioned_arm(monkeypatch) -> None:
     monkeypatch.setenv("CONSENT_TOKEN_SECRET", _TEST_SECRET)
     assert consent_token_secret() == _TEST_SECRET
     assert consent_token_secret_problem() is None
+
+
+def test_a_short_secret_turns_the_arm_off_end_to_end(bridge_client, mint_spy, bearer_ok,
+                                                    monkeypatch) -> None:
+    """§2.3 — a guessable key is a forged-`sub` oracle, so it is UNPROVISIONED, end to end.
+
+    Tokens are SIGNED, not encrypted: one legitimate token (any account holder can get one) is a
+    complete known-plaintext HMAC pair, so a low-entropy key is brute-forceable OFFLINE and the
+    attacker then mints `{"sub": <any user_id>}` — `sub` is the only identity input on this arm,
+    so that is account takeover. The unit test next door covers the predicate; this covers what a
+    caller actually sees: a typed 503, no mint, and the bearer path still working.
+    """
+    monkeypatch.setenv("CONSENT_TOKEN_SECRET", "x")
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+    token = _signed(_claim_set(bind), secret="x")
+
+    r = _post_token(tc, token, bind)
+    assert r.status_code == 503, r.text
+    assert r.json()["error"] == "temporarily_unavailable", r.text
+    assert "bytes" in r.json()["error_description"], r.text
+    assert mint_spy == [], "a guessable key must not mint"
+
+    # …and the arm being off must not take the bearer path with it.
+    ok = _post_bearer(tc, bind)
+    assert ok.status_code == 200, ok.text
 
 
 def test_a_token_without_a_kid_is_refused(bridge_client, mint_spy, bearer_refuses) -> None:
@@ -2421,6 +2454,40 @@ def test_the_register_outlives_the_tokens_last_valid_instant() -> None:
     assert asyncio.run(store.consume("boundary-jti", expires_at)) is True
     assert asyncio.run(store.consume("boundary-jti", expires_at)) is False, (
         "the jti was pruned at the very instant the token is still valid, so it could be replayed")
+
+
+def test_no_module_in_the_package_mints_a_consent_token() -> None:
+    """§2.3 / §9 step 3 — the mint belongs on the SESSION origin (a BFF route), never here.
+
+    `mint_consent_token` exists as the reference inverse so the wire format has two checkable
+    sides. Shipping it from a Python route would let the service that VERIFIES the assertion also
+    MINT it, which is exactly the split §2.3 exists to preserve (the mint must run where the
+    session cookie is). That rule was prose in a docstring — and a docstring cannot fail — so it is
+    executed here. An AST scan, not a grep: a comment or a log line naming the function is not a
+    false positive, and an alias or attribute call is not a false negative.
+    """
+    import ast
+
+    offenders: list[str] = []
+    for path in sorted((REPO / "tortoise").rglob("*.py")):
+        if path.name == "consent_token.py":
+            continue                      # the reference implementation itself
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            hit = (
+                (isinstance(node, ast.ImportFrom)
+                 and any(a.name == "mint_consent_token" for a in node.names))
+                or (isinstance(node, ast.Import)
+                    and any("mint_consent_token" in a.name for a in node.names))
+                or (isinstance(node, ast.Attribute) and node.attr == "mint_consent_token")
+                or (isinstance(node, ast.Name) and node.id == "mint_consent_token")
+            )
+            if hit:
+                offenders.append(f"{path.relative_to(REPO)}:{node.lineno}")
+
+    assert offenders == [], (
+        "a consent token may only be minted on the session origin (§2.3/§9 step 3) — this package "
+        f"must not mint one: {offenders}")
 
 
 def test_the_contract_in_the_code_is_the_contract_in_the_spec() -> None:

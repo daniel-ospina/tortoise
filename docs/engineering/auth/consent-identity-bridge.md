@@ -361,5 +361,6 @@ old cookie is the "strictly worse than not starting" state.
   is filed and unbuilt. **The consent screen can still be made to say "Claude" by anyone who registers that
   name.**
 - **The `jti` store mechanism** (§2.3) — preferred shape recorded; not chosen by an owner.
-- **#3529** — 4 of the 7 declared threat classes still have no test (the consent token adds an 8th surface
-  with no adversarial test yet, because it does not exist yet).
+- **#3529** — 4 of the 7 declared threat classes still have no test. The consent token's own surface is
+  no longer one of them: as of §9 step 2 it exists and carries its adversarial rows
+  (`tests/test_oauth_consent_bridge.py`), so the remaining count is the 7 declared classes only.
