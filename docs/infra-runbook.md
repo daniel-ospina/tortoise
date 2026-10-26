@@ -260,12 +260,27 @@ downtime so far.
    against it) plus the separate `org_{org_id}_{gid}` namespace. Do not
    describe the hosted lane as having the per-graph ACL layer — it does not.
 
-   **So the credential in `FALKORDB_CLOUD_URI` must satisfy the app's DATA path
-   only.** The console's **`Write`** preset already covers it — its ACL string
-   contains `+GRAPH.QUERY +GRAPH.RO_QUERY +GRAPH.EXPLAIN +GRAPH.PROFILE
-   +GRAPH.LIST +GRAPH.DELETE +GRAPH.COPY +PING` (plus the key verbs `DEL` /
-   `RESTORE` / `RENAME` need) — so `Write` is sufficient and `Admin` is **not**
-   needed. What it does **not** need:
+   **So the credential in `FALKORDB_CLOUD_URI` must cover the app's DATA path —
+   and one measurement: `GRAPH.MEMORY USAGE`.** The console's **`Write`** preset
+   covers the data path — `+GRAPH.QUERY +GRAPH.RO_QUERY +GRAPH.EXPLAIN
+   +GRAPH.PROFILE +GRAPH.LIST +GRAPH.DELETE +GRAPH.COPY +PING` (plus the key
+   verbs `DEL` / `RESTORE` / `RENAME` need). It does **not** cover the per-org
+   storage meter (`tortoise/graph_storage.py`, driven by the backup sweep): the
+   vendor makes `GRAPH.MEMORY` **Admin-only**, so on the `Write` preset every
+   org's `graph_storage_mb` reads `0.0` — permanently and silently, because a
+   failed measurement records nothing and the read side maps an absent row to
+   zero (`metering._zero_view`). That figure is the MB overage input (#5331,
+   #4495), so a quiet zero is not harmless.
+
+   ⛔ **Neither preset is right here.** `Write` alone zeroes the storage meter
+   (above); `Admin` fixes it but hands a production data-plane credential
+   `+FLUSHALL +GRAPH.CONFIG +MEMORY +MONITOR +SLOWLOG +BGREWRITEAOF` to buy the
+   one grant it needs. Send a **custom ACL: the `Write` string plus
+   `+GRAPH.MEMORY`** — the API takes a raw ACL string (`POST …/users`; there is
+   no preset field). That is the minimum that runs the data path, the restore
+   path and the storage meter.
+
+   It does **not** need:
 
    - `+ACL` — the one grant the platform refuses; requiring it is what broke
      graph creation.
@@ -280,24 +295,23 @@ downtime so far.
      gate). `+MODULE|LIST` exists only in the `Admin` preset, which would hand a
      production data-plane credential `+FLUSHALL +GRAPH.CONFIG +MEMORY
      +MONITOR +SLOWLOG` — a larger blast radius than the conservative barrier.
-     Stay on `Write`.
+     Leave it out of the custom ACL.
 
-   A hand-written ACL narrower than `Write` must still include **`+GRAPH.COPY`
-   — it is in `Write`, and it is the easiest one to drop from a hand-written
-   "query-only" ACL.** Restore/drill swaps issue it on this lane
-   (`hosted_backup.restore_backup`), so an ACL that looks complete for query
-   traffic but omits it turns every restore into a failure.
+   Two grants are easy to drop from a hand-written "query-only" ACL, and both
+   fail LATE: **`+GRAPH.COPY`** (restore/drill swaps issue it on this lane —
+   `hosted_backup.restore_backup`), and **`+GRAPH.MEMORY`** (the storage meter,
+   which fails soft and therefore fails SILENTLY).
 
    **Self-hosted is unchanged** (#8617 ruling 2). `TORTOISE_ACL_LAYER` unset
    (the default, `strict`) still creates the per-graph user on every graph
    mint, and *there* the **app** credential genuinely needs:
 
    - the whole data-plane command set (the same one the Cloud bullet lists,
-     including `+GRAPH.COPY`) — **not** `_GRAPH_COMMANDS`, which is the
-     allowlist granted to each per-graph **tenant** user (`+GRAPH.QUERY
-     +GRAPH.RO_QUERY +PING`). Reading that constant as the app's requirement is
-     how a self-hosted credential ends up unable to run `GRAPH.LIST`,
-     `GRAPH.DELETE` or the restore path;
+     including `+GRAPH.COPY`) **plus `+GRAPH.MEMORY`** for the storage meter —
+     **not** `_GRAPH_COMMANDS`, which is the allowlist granted to each
+     per-graph **tenant** user (`+GRAPH.QUERY +GRAPH.RO_QUERY +PING`). Reading
+     that constant as the app's requirement is how a self-hosted credential ends
+     up unable to run `GRAPH.LIST`, `GRAPH.DELETE` or the restore path;
    - **`+ACL`** — to create and rotate per-graph users at all;
    - `+MODULE|LIST` is *optional*: without it the ACL probe reports
      `probe_denied` (an under-privileged credential, recorded, never a

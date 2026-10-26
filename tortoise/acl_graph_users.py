@@ -135,11 +135,14 @@ class FalkorProbe(StrEnum):
 # credential fault (`probe_denied`, `setuser_denied`) or an INCIDENT
 # (`layer_down`, `probe_unreadable`). One number cannot say which.
 #
-# ⚠️ Only ``no_uri`` / ``no_graph_module`` / ``layer_down`` populate the
-# reconcile report's ``absent_reasons`` histogram — that histogram decomposes
-# the ``absent`` STATUS, while ``declared_off`` / the two denied reasons are
-# counted in their own fields (`absent_by_design`, `denied`). Do not document
-# all six as histogram keys.
+# There are SEVEN, and they do not all land in the same place. Only
+# ``no_uri`` / ``no_graph_module`` / ``layer_down`` populate the reconcile
+# report's ``absent_reasons`` histogram — that histogram decomposes the
+# ``absent`` STATUS. ``declared_off`` is counted in ``absent_by_design``, and
+# ``probe_denied`` / ``setuser_denied`` in ``denied``. ``probe_unreadable``
+# exists so a probe state with no mapping is a visible fault, never a boundary.
+# Do not document all seven as histogram keys (round-2 review: the docs and
+# this comment disagreed on the count).
 REASON_DECLARED_OFF = "declared_off"
 REASON_NO_URI = "no_uri"
 REASON_NO_GRAPH_MODULE = "no_graph_module"

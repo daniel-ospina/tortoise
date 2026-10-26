@@ -165,6 +165,28 @@ def test_every_absence_names_its_own_reason(monkeypatch):
             == acl.REASON_DECLARED_OFF)
 
 
+def test_a_probe_state_with_no_mapping_is_a_fault_not_a_boundary(monkeypatch):
+    """Round-2 review, proven by mutation: the fail-safe arm was unpinned —
+    reverting it to `no_graph_module` (or repointing its detail at "bare redis")
+    left the suite green.
+
+    The arm exists because the NEXT probe state cannot be allowed to inherit
+    "bare redis, nothing to protect": reporting an unclassifiable state as a
+    deployment boundary is precisely the failure this whole change ends. A
+    sentinel object stands in for that future state.
+    """
+    monkeypatch.setenv(acl.ACL_LAYER_ENV, "strict")
+    monkeypatch.setattr(acl, "_admin_client", lambda: _Client(module=[]))
+    monkeypatch.setattr(acl, "_falkordb_present",
+                        lambda client: "some-state-added-later")
+
+    r = acl.create_acl_user("g_future", "team_x")
+    assert r.status is acl.AclStatus.ABSENT, r.status
+    assert r.reason == acl.REASON_PROBE_UNREADABLE, r.reason
+    assert "unrecognised" in r.detail, r.detail
+    assert "bare redis" not in r.detail, r.detail
+
+
 def test_the_absence_is_announced_once_per_REASON_not_once_per_status(
         monkeypatch, caplog):
     """#10093: the announcement was keyed by STATUS, so the first `absent` in a
