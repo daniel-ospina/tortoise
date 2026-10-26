@@ -28,6 +28,7 @@ import pytest
 from tortoise.record_writer import record_tenant_for
 from tortoise.supabase_control import (
     default_graph_id_for,
+    delete_graph_row,
     graph_metadata,
     set_graph_name,
 )
@@ -54,10 +55,16 @@ class _FakeCP:
         for col, op, val in (filters or []):
             if op == "eq":
                 rows = [r for r in rows if r.get(col) == val]
+            elif op == "neq":
+                rows = [r for r in rows if r.get(col) != val]
             elif op == "is":
                 rows = [r for r in rows if r.get(col) is val]
         if method == "GET":
             return [dict(r) for r in rows]
+        if method == "DELETE":
+            self.tables[table] = [r for r in self.tables.get(table, [])
+                                  if r not in rows]
+            return None
         if method == "PATCH":
             for r in rows:
                 r.update(json_body or {})
@@ -128,6 +135,16 @@ def test_a_tombstoned_default_row_is_not_a_tenant() -> None:
     assert default_graph_id_for(cp, "org-1") is None
 
 
+def test_another_orgs_default_row_never_names_this_orgs_tenant() -> None:
+    """The read is scoped by `org_id` — a peer's row must be invisible."""
+    cp = _FakeCP(tables={"graphs": [
+        {"id": "g_peer_org_default", "org_id": "org-2", "kind": "default",
+         "status": "active"},
+    ]})
+    assert default_graph_id_for(cp, "org-1") is None
+    assert default_graph_id_for(cp, "org-2") == "g_peer_org_default"
+
+
 def test_default_graph_id_is_none_without_a_row_or_on_a_read_failure() -> None:
     """No row and an unreadable table are the SAME answer: refuse."""
     assert default_graph_id_for(_FakeCP(tables={"graphs": []}), "org-1") is None
@@ -165,6 +182,26 @@ def test_a_custom_graphs_stable_id_is_its_row_id() -> None:
     assert custom["stable_id"] == "g_custom"
 
 
+def test_a_tombstoned_row_is_not_the_metadata_stable_id() -> None:
+    """The SAME predicate `default_graph_id_for` applies.
+
+    `stable_id` is documented as "the only field a caller may file record rows
+    under", and the record FK accepts a tombstoned id — so a tombstoned row
+    offered here would be a contract the code did not keep. The two readers of
+    "where is the default row" must give one answer.
+    """
+    cp = _FakeCP(tables={
+        "organizations": [{"id": "org-1", "graph_name": "team_org-1"}],
+        "graphs": [{"id": DEFAULT_ROW_ID, "org_id": "org-1", "name": "old",
+                    "kind": "default", "namespace": "team_org-1",
+                    "status": "deleted", "recording": None}],
+    })
+    rows = graph_metadata(cp, "org-1")
+    assert rows[0]["stable_id"] is None
+    assert rows[0]["name"] == "default"  # tombstoned display name not revived
+    assert default_graph_id_for(cp, "org-1") is None  # one answer, not two
+
+
 # ── 4. Rename is a label: identity and storage key never move ───────────────
 
 def test_renaming_the_default_by_its_real_id_never_touches_the_namespace() -> None:
@@ -197,3 +234,25 @@ def test_renaming_a_custom_graph_patches_only_its_name() -> None:
     row = cp.tables["graphs"][0]
     assert (row["name"], row["id"], row["namespace"]) == (
         "new", "g_custom", "team_org-1_g_custom")
+
+
+# ── 5. The mint ROLLBACK cannot hard-delete the default row ─────────────────
+
+def test_a_failed_mint_cannot_hard_delete_the_default_graph() -> None:
+    """`delete_graph_row` is the mint rollback. The record's layer tables FK
+    `(org_id, graph_id) -> public.graphs (org_id, id) ON DELETE CASCADE`, so a
+    hard delete of the default row would take that org's record rows with it.
+    Before #10025 "it has no row" kept this off the default graph; now an
+    explicit `kind neq 'default'` filter must."""
+    cp = _FakeCP(tables={"graphs": [
+        {"id": DEFAULT_ROW_ID, "org_id": "org-1", "kind": "default",
+         "status": "active"},
+        {"id": "g_minted", "org_id": "org-1", "kind": "custom",
+         "status": "active"},
+    ]})
+    delete_graph_row(cp, "org-1", DEFAULT_ROW_ID)
+    assert sorted(r["id"] for r in cp.tables["graphs"]) == [
+        DEFAULT_ROW_ID, "g_minted"]  # the default row was NOT touched
+    # ...and the rollback still works on the row it exists for
+    delete_graph_row(cp, "org-1", "g_minted")
+    assert [r["id"] for r in cp.tables["graphs"]] == [DEFAULT_ROW_ID]

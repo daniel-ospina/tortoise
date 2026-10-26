@@ -190,6 +190,43 @@ class TestResolveApiKey:
         # (refused as `no_tenant`) rather than falling back to a guess.
         assert team["default_graph_id"] is None
 
+    def test_an_org_wide_key_carries_its_default_graph_id(self, fake):
+        """#10025 indicator (b) through the REAL resolver — not a hand-built dict.
+
+        Pins the WIRING, which the graph-identity suite cannot: that suite
+        feeds `record_tenant_for` a credential it constructed, so deleting the
+        `"default_graph_id": default_graph_id` line, replacing it with a
+        constant None, or folding it into `graph_id` would all have stayed
+        green there. This asserts the field is on the resolved credential and
+        that `graph_id` stays None — the widening the resolver comment forbids
+        (a non-None `graph_id` means "this key is bound to that graph").
+        """
+        fake.seed("api_keys", [_key_row()])
+        fake.seed("graphs", [
+            {"id": "g_default_free", "org_id": "team-free-001",
+             "name": "default", "kind": "default", "status": "active",
+             "namespace": "team_team-free-001"},
+        ])
+        team = resolve_api_key(fake, TOKEN)
+        assert team["default_graph_id"] == "g_default_free"
+        assert team["graph_id"] is None
+
+    def test_a_graph_bound_key_does_not_gain_a_default_graph_id(self, fake):
+        """The default must never displace, or shadow, a credential's own graph."""
+        fake.seed("api_keys", [_key_row(graph_id="g_bound")])
+        fake.seed("graphs", [
+            {"id": "g_bound", "org_id": "team-free-001", "name": "bound",
+             "kind": "custom", "status": "active",
+             "namespace": "team_free_bound"},
+            {"id": "g_default_free", "org_id": "team-free-001",
+             "name": "default", "kind": "default", "status": "active",
+             "namespace": "team_team-free-001"},
+        ])
+        team = resolve_api_key(fake, TOKEN)
+        assert team["graph_id"] == "g_bound"
+        assert team["graph_namespace"] == "team_free_bound"
+        assert team["default_graph_id"] is None
+
     def test_long_lived_key_resolves_via_org_memberships(self, fake):
         """Long-lived (provisioned) key with no api_keys row → membership path."""
         fake.seed("org_memberships", [_membership_row()])

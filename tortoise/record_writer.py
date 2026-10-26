@@ -599,8 +599,8 @@ def record_tenant_for(org: Mapping[str, Any] | None, *,
     rows under another graph.
 
     ``org`` is the dict an auth seam resolved (``org_id`` + the credential's
-    ``graph_id``). ``None`` is returned — never a guess — for the two shapes
-    this seam must NOT name:
+    ``graph_id``). ``None`` is returned — never a guess — for every shape this
+    seam must NOT name:
 
     * ``control_plane_ids`` is False. It is the caller's statement that the
       resolution did not come from the control plane (``is_supabase_enabled()``
@@ -614,13 +614,14 @@ def record_tenant_for(org: Mapping[str, Any] | None, *,
       recording deployment into ``write_failed`` on every write with a cause
       nobody could attribute.
     * the credential named no graph (org-wide key, session/JWT auth). The
-      tenant is then the org's **default graph**, and it is named only from a
-      value the control plane resolved and put on the credential dict
-      (``default_graph_id`` — read from the org's ``kind='default'``
-      ``public.graphs`` row, #10025). Still never a guess: no row, no field, or
-      a field of the wrong type all return ``None``, keeping the write REFUSED
-      and counted (``no_tenant``) — the fail-closed direction — rather than
-      filing the row under a tenant nobody chose.
+      tenant is then the org's **default graph**. It IS nameable since #10025,
+      but only from a value the control plane resolved and put on the
+      credential dict —
+      ``default_graph_id``, read from the org's active ``kind='default'``
+      ``public.graphs`` row. Still on the credential, never derived here: no
+      row, no field, or a field of the wrong type all return ``None``, keeping
+      the write REFUSED and counted (``no_tenant``) — the fail-closed
+      direction — rather than filing the row under a tenant nobody chose.
 
     ⛔ This is not a fallback chain and must not grow into one: it reads the
     credential the caller already resolved, and nothing else. The env pair is a

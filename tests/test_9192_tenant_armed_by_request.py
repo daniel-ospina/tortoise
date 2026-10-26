@@ -44,11 +44,13 @@ WHAT IS NOT HERE, NAMED SO THE ABSENCE IS VISIBLE.
 * The REST/hosted lane's installer is **#9188**, not this file. It cannot be a
   one-line wrap there: an org-wide/session-authenticated request carries no
   `graph_id` (`hosted_api._session_user_org` resolves `org_id` + tier only), and
-  the record's layer tables key on `public.graphs.id`, which the org's DEFAULT
-  graph need not have a row for (`supabase_control.delete_graph_row`: *"no row
-  exists for the default graph"*). Resolving that is #9188's scope. The
-  org-wide **MCP** credential is pinned here as the same refusal, so the
-  default-graph question cannot be closed by guessing a tenant id in this layer.
+  the record's layer tables key on `public.graphs.id`. Since #10025 the org's
+  DEFAULT graph does have that row — minted per organization by
+  `20261028000001`, and named on the credential as `default_graph_id` — but the
+  REST/middleware seam here is not yet wired to it, so the org-wide **MCP**
+  credential is pinned in this file as the same refusal. Closing the seam is
+  #9188's scope, and the default-graph question cannot be closed by guessing a
+  tenant id in this layer.
 * The cross-tenant pin at the FOLD (`tests/test_record_projection.py`) is
   #9214's and stays; this file adds the caller-level leg above it.
 """

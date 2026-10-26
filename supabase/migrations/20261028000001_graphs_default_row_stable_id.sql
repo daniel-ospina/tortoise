@@ -3,7 +3,9 @@
 -- Until this migration the default graph was SYNTHETIC: `graph_metadata`
 -- emitted `{"graph_id": "default", ...}` (the literal string, not an id) and
 -- `delete_graph_row`'s docstring said so outright — *"no row exists for it —
--- it is derived from organizations.graph_name"*. A `kind='default'` row
+-- it is derived from organizations.graph_name"* (that sentence is now false and
+-- has been corrected by this change; it is quoted here as the state that
+-- produced the measurement). A `kind='default'` row
 -- existed only as a side effect of `set_graph_recording` or a rename, so live
 -- production had **1 row across 80 organizations**.
 --
@@ -37,6 +39,15 @@
 
 -- ── 1. One `kind='default'` row per organization that lacks one ────────────
 -- Idempotent by the NOT EXISTS guard: re-running inserts nothing.
+-- The existence guard tests `status <> 'deleted'`, matching BOTH the live-name
+-- index's own predicate below and `default_graph_id_for`, which names a tenant
+-- only from an ACTIVE row. A status-blind guard would count a tombstoned
+-- default row as "present" and insert nothing, leaving that organization
+-- permanently unnamed (`no_tenant` for ever) while this migration reported
+-- success — the fail-closed reading that is indistinguishable from "nothing to
+-- do". Since `soft_delete_graph` refuses `kind='default'`, such a row is not
+-- produced by any supported path; the guard is written so that if one exists
+-- anyway the org gets a real active row rather than silence.
 -- The second guard keeps the migration from fighting the live-name uniqueness
 -- index (`uq_graphs_org_name_active` on (org_id, name) WHERE status <>
 -- 'deleted'): an organization that already has a graph *named* 'default' keeps
@@ -55,7 +66,8 @@ SELECT 'g_' || substr(md5(random()::text || clock_timestamp()::text || o.id), 1,
  WHERE o.graph_name IS NOT NULL
    AND NOT EXISTS (
         SELECT 1 FROM public.graphs g
-         WHERE g.org_id = o.id AND g.kind = 'default')
+         WHERE g.org_id = o.id AND g.kind = 'default'
+           AND g.status <> 'deleted')
    AND NOT EXISTS (
         SELECT 1 FROM public.graphs g2
          WHERE g2.org_id = o.id AND g2.name = 'default'
