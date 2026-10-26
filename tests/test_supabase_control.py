@@ -180,7 +180,15 @@ class TestResolveApiKey:
         assert team["created_by"] == "user-1"
         assert team["key_prefix"] == TOKEN[:10]
         # exact-match index: only the api_keys table is consulted, no scans
-        assert fake.query_count == 2  # api_keys + teams
+        # (#10025 adds ONE read: this key is org-wide, so its record tenant is
+        # the org's default-graph ROW. It is a point read on idx_graphs_org_id,
+        # not a scan — the property this pin protects is "no scans", and it
+        # still holds. Paid once per request, on the same path that already
+        # builds the SDK for that request.)
+        assert fake.query_count == 3  # api_keys + teams + graphs (default row)
+        # No default row in this fixture ⇒ the record tenant stays UNNAMED
+        # (refused as `no_tenant`) rather than falling back to a guess.
+        assert team["default_graph_id"] is None
 
     def test_long_lived_key_resolves_via_org_memberships(self, fake):
         """Long-lived (provisioned) key with no api_keys row → membership path."""
@@ -2206,7 +2214,11 @@ class TestTask8Helpers:
             "graph_id": "default", "org_id": "team-free-001",
             "name": "default", "kind": "default",
             "namespace": "team_team-free-001", "status": "active",
-            "recording": None}]  # recording key present both modes (#2110)
+            "recording": None,
+            # #10025: additive — the default graph's STABLE row id, None when
+            # no `kind='default'` row exists yet (`graph_id` keeps the
+            # historical sentinel every existing consumer compares against).
+            "stable_id": None}]  # recording key present both modes (#2110)
         assert graph_metadata(fake, "no-such-team") == []
         assert graph_metadata(fake, "team-free-001")[0]["graph_id"] == "default"
 

@@ -1109,6 +1109,13 @@ def resolve_api_key(cp, token: str) -> dict | None:
     # = teams.graph_name (in _ORG_BASE_SELECT). Fail-soft on drift.
     graph_namespace = _graph_namespace_for(
         cp, org_id, graph_id, org_row.get("graph_name"))
+    # #10025: an org-wide key's RECORD tenant is the org's default graph, whose
+    # stable id is read from the control plane. Computed only when the
+    # credential named no graph — a graph-bound key already carries its own id,
+    # and one extra control-plane read must not ride that hot path. None (no
+    # row) keeps the record write REFUSED rather than filed under a guess.
+    default_graph_id = (None if graph_id
+                        else default_graph_id_for(cp, org_id))
     return {
         "org_id": org_id,
         "key_id": key_id,
@@ -1154,6 +1161,11 @@ def resolve_api_key(cp, token: str) -> dict | None:
         # (fail-soft None on drift); org-wide (graph_id NULL) → the default
         # graph = teams.graph_name (in _ORG_BASE_SELECT).
         "graph_id": graph_id,
+        # #10025: the default graph's stable id, for the RECORD tenant only.
+        # Deliberately NOT folded into `graph_id`: downstream authorization
+        # treats a non-None `graph_id` as "this key is bound to that graph",
+        # and an org-wide key must never widen into a graph binding.
+        "default_graph_id": default_graph_id,
         "graph_namespace": graph_namespace,
         "scopes": scopes,
         "legacy_full_access": legacy_full_access,
@@ -1185,6 +1197,38 @@ def _graph_namespace_for(cp, org_id: str, graph_id: str | None,
             "(fail-closed; migration 20260901000001 applied?): %s", e)
         return None
     return rows[0]["namespace"] if rows else None
+
+
+def default_graph_id_for(cp, org_id: str) -> str | None:
+    """The org's DEFAULT graph's stable id (#10025), or None (fail-closed).
+
+    The default graph is the organization's own graph, but until #10025 it had
+    **no row** in ``public.graphs``: its identity was the literal string
+    ``"default"`` (see :func:`graph_metadata`), which is not an id, so the
+    record's ``(org_id, graph_id) -> public.graphs`` foreign key could not name
+    it. Both lanes then answered the SAME org-wide credential differently —
+    :func:`_graph_namespace_for` resolved its namespace happily,
+    :func:`tortoise.record_writer.record_tenant_for` refused it as
+    ``no_tenant`` — and an armed deployment wrote nothing while reading green
+    (the health counters are a DECLINE channel only).
+
+    The id is **READ** from the control plane, never derived from the name and
+    never a constant: a rename cannot change it (owner ruling, 2026-10-26 — the
+    id is identity, the name is a user-editable label), and an absent row still
+    returns None so the record keeps refusing rather than guessing.
+    """
+    try:
+        rows = cp.query(
+            "graphs", select=["id"],
+            filters=[("org_id", "eq", org_id), ("kind", "eq", "default"),
+                     ("status", "eq", "active")],
+        )
+    except Exception as e:
+        _logger.warning(
+            "graphs default-row read failed — the record tenant stays unnamed "
+            "(fail-closed; migration 20261028000001 applied?): %s", e)
+        return None
+    return rows[0]["id"] if rows else None
 
 
 def update_last_used(cp, key_id: str) -> None:
@@ -3817,19 +3861,30 @@ def graph_metadata(cp, org_id: str) -> list[dict]:
     # cosmetic, the namespace is the data-plane storage key.
     default_rec = None
     default_name = "default"
+    default_id = None
     try:
         drow = cp.query(
-            "graphs", select=["recording", "name"],
+            "graphs", select=["recording", "name", "id"],
             filters=[("org_id", "eq", org_id), ("kind", "eq", "default")],
         )
         if drow:
             default_rec = drow[0].get("recording")
+            default_id = drow[0].get("id")
             if drow[0].get("name"):
                 default_name = drow[0]["name"]
     except Exception:
         default_rec = None  # one migration behind → no default row support
     default = {
+        # `graph_id` KEEPS the historical "default" sentinel. It is compared
+        # literally (`graph_id == "default"`) by the default-graph delete
+        # guard, the backup sweep, the SDK and the dashboard, so changing it
+        # here would silently un-recognise the default graph in all of them.
         "graph_id": "default",
+        # #10025: the default graph's STABLE id, when its row exists
+        # (migration 20261028000001 mints one per org). ADDITIVE, and the only
+        # field a caller may file record rows under; None = "no row yet", so a
+        # consumer must fall back to refusing, never to `graph_id`.
+        "stable_id": default_id,
         "org_id": org_id,
         "name": default_name,
         "kind": "default",
@@ -3855,6 +3910,10 @@ def graph_metadata(cp, org_id: str) -> list[dict]:
     for r in custom:
         out.append({
             "graph_id": r["id"],
+            # #10025: for a custom graph the stable id IS its row id — the same
+            # value `graph_id` carries. Present so callers can read ONE field
+            # regardless of kind.
+            "stable_id": r["id"],
             "org_id": r["org_id"],
             "name": r["name"],
             "kind": r.get("kind", "custom"),
@@ -4008,19 +4067,26 @@ def set_graph_name(cp, org_id: str, graph_id: str, name: str) -> bool:
     caller's pre-check (409), mirroring create-graph's pre-check-then-
     insert contract."""
     if graph_id != "default":
+        # #10025: the branch is keyed on the row's KIND, not on the sentinel
+        # id — the default graph now HAS a real id, and renaming it by that id
+        # must still take the default path below (which refuses to touch the
+        # namespace). A row that is not the default PATCHes its name directly.
         rows = cp.query(
-            "graphs", select=["id"],
+            "graphs", select=["id", "kind"],
             filters=[("id", "eq", graph_id), ("org_id", "eq", org_id),
                      ("status", "eq", "active")],
         )
         if not rows:
             return False
-        cp.query(
-            "graphs", method="PATCH",
-            filters=[("id", "eq", graph_id), ("org_id", "eq", org_id)],
-            json_body={"name": name},
-        )
-        return True
+        if rows[0].get("kind") != "default":
+            cp.query(
+                "graphs", method="PATCH",
+                filters=[("id", "eq", graph_id), ("org_id", "eq", org_id)],
+                json_body={"name": name},
+            )
+            return True
+        # kind == 'default' → fall through: the default path resolves the row
+        # by (org_id, kind) and never writes `namespace`.
     # Default graph: rename the existing kind='default' display row, else
     # upsert one (namespace = the ORG graph name — never the display name).
     rows = cp.query(
