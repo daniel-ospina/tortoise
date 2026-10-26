@@ -209,9 +209,37 @@ class TestReMentionJournalsEveryRegistration:
 
     def test_remention_after_fold_keeps_the_fold_and_does_not_resurrect(
             self, tmp_path):
-        """A superseded name re-mentioned: no status reset live, and no
-        resurrect on rebuild (the re-mention's registration line MERGEs onto the
-        existing node instead of creating a second one)."""
+        """A superseded name re-mentioned: the fold survives live AND on replay.
+
+        #3590 round-5 review F4. The retired form of this pin claimed the
+        re-mention "resolves to the SAME id, so it appends a registration line
+        that MERGEs onto the existing node instead of creating a second one".
+        That is the PRE-#3590 contract and the code no longer does it:
+        ``entity_identity.resolve_or_mint`` resolves through
+        ``live_name_holder_ids(..., live_only=True)``, and its own docstring
+        rules that *"A terminal holder does not block a create: it is a
+        different incarnation"* — re-using the folded id would be id reuse (R5).
+        So the re-mention MINTS a second, LIVE Object carrying the same name;
+        same-name coexistence is what D2 legalises, and the #1350 clobber
+        invariant is that the FOLDED incarnation stays folded.
+
+        The retired assertions read a 2-row result in UNSPECIFIED order
+        (``rows[0][0] == 'superseded'``), so they passed only while the
+        terminal row happened to come back first. MEASURED at the review head:
+        the pre-rebuild read returns ``[superseded, live]`` and the POST-rebuild
+        read returns ``[live, superseded]``, so the pin was RED on the tree it
+        was committed to (``1 failed, 20 passed``). It is restated over the
+        ``(id, status, supersededBy)`` SET, which is order-free and pins more,
+        not less — the fold survives replay AND the twin carries a DIFFERENT id
+        (no id reuse).
+
+        Mutations that must red this:
+          * a clobber (the re-mention resetting superseded->live) — the statuses
+            collapse to ``{"live"}``;
+          * id reuse (the re-mention adopting the folded id) — one row, not two;
+          * a replay that resurrects the folded incarnation — the superseded row
+            is gone after ``rebuild_all``.
+        """
         events = tmp_path / "events"
         events.mkdir()
         sdk = TortoiseSDK(str(tmp_path / "t4.db"),
@@ -222,29 +250,51 @@ class TestReMentionJournalsEveryRegistration:
                               objectKind="core:strategy", is_episodic=False)
             sdk.create_entity("object", "strategy-A",
                               objectKind="core:strategy", is_episodic=False)
+            seeded = _object_row(proj, "strategy-A", "id", "status")
+            assert len(seeded) == 1, seeded
+            folded_id = seeded[0][0]
             from tortoise.commit_ops import apply_supersessions
             assert apply_supersessions(
                 proj, sdk,
                 [{"superseded": "strategy-A", "supersedes_by": "strategy-B",
                   "evidence": "fold"}],
                 session_id="s1") == 1
-            # re-mention the SUPERSEDED name (post-#3590: resolves to the SAME
-            # id, so it appends a registration line that MERGEs onto the
-            # existing node — it must not clear the fold)
+            # re-mention the SUPERSEDED name: D2/R5 mint a NEW incarnation, and
+            # the fold on the old one must not be cleared (#1350 clobber guard).
             sdk.create_entity("object", "strategy-A",
                               objectKind="core:strategy", is_episodic=False)
-            rows = _object_row(proj, "strategy-A", "status")
-            assert rows and rows[0][0] == "superseded", (
-                "re-mention must not reset superseded (#1350 clobber guard)")
+            rows = _object_row(proj, "strategy-A", "id", "status",
+                               "supersededBy")
+            assert len(rows) == 2, (
+                "a re-mention of a terminal name must mint ONE new incarnation "
+                f"(D2/R5), leaving the folded one in place; got {rows}")
+            by_status = {r[1]: r for r in rows}
+            assert set(by_status) == {"superseded", "live"}, (
+                "the re-mention reset the fold — #1350 clobber guard: "
+                f"{rows}")
+            assert by_status["superseded"][0] == folded_id, (
+                f"the folded incarnation changed id: {rows} vs {folded_id}")
+            assert by_status["superseded"][2] == "strategy-B", rows
+            twin_id = by_status["live"][0]
+            assert twin_id != folded_id, (
+                f"R5 forbids id reuse; the re-mention adopted {folded_id}: {rows}")
             journal = _journaled(sdk, events)
             assert len(_name_ors(journal, "strategy-A")) == 2, (
                 "re-mention of a superseded Object journals a duplicate "
                 "registration, but must not add a fold or a reset")
             proj.rebuild_all(str(events), confirm_destructive=True)
-            rows = _object_row(proj, "strategy-A", "status", "supersededBy")
-            assert rows and rows[0][0] == "superseded", (
-                "no resurrect on rebuild")
-            assert rows[0][1] == "strategy-B", rows[0]
+            rebuilt = _object_row(proj, "strategy-A", "id", "status",
+                                  "supersededBy")
+            assert len(rebuilt) == 2, (
+                "replay must reproduce BOTH incarnations — a re-mention after "
+                f"a fold is not a no-op; got {rebuilt}")
+            rebuilt_by_status = {r[1]: r for r in rebuilt}
+            assert rebuilt_by_status.get("superseded") == by_status["superseded"], (
+                "no resurrect on rebuild — the folded incarnation must replay "
+                f"byte-identically; live={rows} rebuilt={rebuilt}")
+            assert rebuilt_by_status.get("live") == by_status["live"], (
+                "the live incarnation must replay with the same id: "
+                f"live={rows} rebuilt={rebuilt}")
         finally:
             sdk.close()
 
