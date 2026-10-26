@@ -624,7 +624,9 @@ def record_tenant_for_graph(plan: dict | None) -> tuple[str, str] | None:
     DEFAULT selection does not need THIS seam to install anything: it enters
     no scope, and the ambient scope `OrgResolutionMiddleware` already installed
     from the credential names the same default graph. Wiring this branch
-    explicitly is #10047's scope — a deferral of this seam only.
+    explicitly is #10047's scope — a deferral of this seam only; the lanes that
+    build their own SDK and write the org DEFAULT graph are #10047 too, and they
+    are named there rather than here.
     """
     if plan is None or (plan.get("kind") or "") == "default":
         return None

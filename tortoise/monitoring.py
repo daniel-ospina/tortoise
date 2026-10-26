@@ -1365,8 +1365,9 @@ def record_record_write_failure(reason: str) -> None:
       ``supabase_control.default_graph_id_for_credential`` — so a refusal on
       those lanes is NOT a credential-class fact: it means that row could not be
       named (missing, tombstoned, another org's, unreadable) or the tenant read
-      was lost. Heal the row, then re-check; the seed/background runners that
-      never see a request credential are #10047's separate residue. A deployment
+      was lost. Heal the row, then re-check. The seed/background runners that
+      never see a request credential carry theirs from
+      ``hosted_api._bind_default_graph_record_tenant`` since #10047. A deployment
       that serves exactly ONE graph may instead set
       ``TORTOISE_RECORD_ORG_ID``/``_GRAPH_ID`` **and**
       ``TORTOISE_RECORD_SINGLE_TENANT=1``. The pair alone is IGNORED (a

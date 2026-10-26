@@ -2534,9 +2534,10 @@ def test_the_rest_data_lane_binds_the_resolved_tenant_onto_its_sdk(monkeypatch):
     ⚠️ NOT covered here, and deliberately: the onboarding/starter seed runners
     open the org's DEFAULT graph by construction (`_make_sdk(namespace=org_id)`,
     not this resolver). Binding them to a graph-bound key's id would file their
-    rows under a graph they never wrote; naming the default-graph tenant for
-    those runners is #10047's scope (the org's `kind='default'` row now exists —
-    these lanes are not wired to it yet).
+    rows under a graph they never wrote; they name the default-graph tenant at
+    their OWN construction site since #10047, through this same
+    `record_tenant_for` answer (`hosted_api._bind_default_graph_record_tenant`),
+    and `tests/test_10047_record_every_lane.py` proves it per lane.
     """
     from tortoise import hosted_api, supabase_control
 
