@@ -41,10 +41,12 @@ left nodes the record can never hold:
 * ``0``  accepted nodes copied; every anomaly class is either zero or
   copied-and-reported.
 * ``1``  the tool cannot START: an environment variable it was pointed at is not
-  set, a flag received a pasted URI/DSN, `--journal` is missing on a run that
-  would write, or argparse rejected the invocation. This is why `main` uses
-  ``_UsageParser``: argparse's default is ``2``, which would make a typo
-  indistinguishable from a refusal.
+  set, a flag received a pasted URI/DSN, the ``--journal`` FLAG is missing on a
+  run that would write, or argparse rejected the invocation. This is why `main`
+  uses ``_UsageParser``: argparse's default is ``2``, which would make a typo
+  indistinguishable from a refusal. A ``--journal`` that was GIVEN but does not
+  name an existing, non-empty file is not this case — the tool started and
+  refused to guess, so it is ``2`` (below).
 * ``2``  REFUSED. Either a BLOCKING anomaly class is nonzero (``off_shape``,
   ``orphan``, ``session_mismatch``, ``duplicate_index`` — no key the record can
   store), or the copy stopped on a write it could not prove: a truncated read, an
@@ -53,12 +55,15 @@ left nodes the record can never hold:
   throws (the driver's own ``psycopg2.Error`` — a connection that died on the
   commit round trip), or the record seam itself raising
   (``RecordWriteError``/``RecordConnectError`` — unreachable, refusing, or
-  rolling back at session N of M).
+  rolling back at session N of M), or a ``--journal`` that does not name an
+  existing, non-empty file (positions are per ``(org_id, graph_id)``; a fresh
+  file would collide with live history and be swallowed by ``ON CONFLICT``).
   A blocking class is reported IN the artifact (the copy ran, so the JSON says
   what did land), and so is a refusal that lands part of the copy (a write whose
   position could not be proven at session N of M — the artifact carries the
   sessions that completed). A refusal raised before the loop (a duplicate turn
-  key, a truncated read) writes no artifact, because nothing was copied.
+  key, a truncated read, a ``--journal`` that is not this graph's journal)
+  writes no artifact, because nothing was copied.
 
 Honest bounds, stated rather than implied:
 
