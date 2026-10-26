@@ -180,14 +180,23 @@ class TestResolveApiKey:
         assert team["created_by"] == "user-1"
         assert team["key_prefix"] == TOKEN[:10]
         # exact-match index: only the api_keys table is consulted, no scans
-        # (#10025 adds ONE read: this key is org-wide, so its record tenant is
-        # the org's default-graph ROW. It is a point read on idx_graphs_org_id,
-        # not a scan — the property this pin protects is "no scans", and it
-        # still holds. Paid once per request, on the same path that already
-        # builds the SDK for that request.)
-        assert fake.query_count == 3  # api_keys + teams + graphs (default row)
-        # No default row in this fixture ⇒ the record tenant stays UNNAMED
-        # (refused as `no_tenant`) rather than falling back to a guess.
+        # (#10025 adds ONE read on the HIT path: this key is org-wide, so its
+        # record tenant is the org's default-graph ROW. It is a point read on
+        # idx_graphs_org_id, not a scan — the property this pin protects is
+        # "no scans", and it still holds. Paid once per request, on the same
+        # path that already builds the SDK for that request.)
+        #
+        # 6 rather than 3 on THIS fixture because it is the MISS path: this
+        # FREE_TEAM row has no `graph_name`, so the resolver's self-heal
+        # (#10025 review F1 — `resolve_api_key` mints the row when
+        # `default_graph_id_for` finds none, which is what keeps a missed
+        # provisioning mint from being permanent) runs the mint's three guard
+        # reads and then declines to write a row that would carry no namespace.
+        # The HIT path is 3 — api_keys + organizations + the one graphs point
+        # read — i.e. no fixed cost is added by the self-heal.
+        assert fake.query_count == 6  # api_keys + org + graphs + 3 self-heal guards
+        # The mint is a no-op here (no `graph_name`), so the record tenant stays
+        # UNNAMED (refused as `no_tenant`) rather than falling back to a guess.
         assert team["default_graph_id"] is None
 
     def test_an_org_wide_key_carries_its_default_graph_id(self, fake):

@@ -2824,9 +2824,10 @@ def _enqueue_dream(org_id: str, dirty_roots: list[str],
     ``record_tenant`` (#9188) is the Postgres record's tenant for THAT graph,
     resolved by the enqueueing request from its own credential. The drain can
     only open a graph, not a tenant, so this is where the answer has to be
-    carried across the queue. ``None`` (an org-wide/session credential, which
-    names no graph) records nothing and the drain's writes are refused
-    `no_tenant` — the default-graph question, not a guess.
+    carried across the queue. ``None`` (a SESSION/JWT or OAuth ``oat_``
+    credential — post-#10025 an org-wide API KEY names the default graph, so it
+    is NOT this case) records nothing and the drain's writes are refused
+    `no_tenant` — a named refusal, not a guess.
     """
     if not dirty_roots:
         return
@@ -6877,11 +6878,16 @@ def _bind_record_tenant(sdk: TortoiseSDK, org: dict) -> None:
     because that drain opens its own SDK. Routes that write the org's DEFAULT
     graph by construction (the onboarding/starter seed runners) are NOT bound,
     and neither are the background indexing jobs: naming the default graph's
-    record tenant for THOSE runners is #10047's scope (the org now has the row
-    and the id; these lanes are not wired to it yet) — and binding them to a
-    graph-bound key's id would file their rows under a graph they never wrote.
-    (Both seed surfaces reject a graph-bound credential outright, so the
-    residue there is a counted ``no_tenant``, never a misfiled row.)
+    record tenant for THOSE runners is #10047's scope — not because the default
+    graph lacks an id (it has one since #10025, and an org-wide API KEY names it
+    through ``_data_sdk`` below), but because those runners build their own SDK
+    (``_make_sdk(namespace=org_id)``) and never see the request's credential.
+    The same is true of the SESSION/JWT and OAuth ``oat_`` credentials, which
+    carry no ``default_graph_id`` at all. Binding a runner to a graph-bound
+    key's id would file its rows under a graph it never wrote, so the residue
+    there is a counted ``no_tenant``, never a misfiled row. (Both seed surfaces
+    reject a graph-bound credential outright, so that residue cannot even be
+    reached from them.)
 
     Fail-soft and DELIBERATELY so: a record-binding fault must not fail the
     request (#5148's rule — the record is a derived, replayable store, and this
@@ -6910,10 +6916,11 @@ def _bind_dream_record_tenant(sdk: TortoiseSDK, key: str) -> None:
     an armed hosted deployment refuses every dream-emitted record `no_tenant`
     for a graph whose credential named it.
 
-    Silent by design when the key carries no tenant: that is an
-    org-wide/session write, whose graph is the DEFAULT one and whose record
-    tenant is #10047's scope on this lane — not something this helper may
-    guess.
+    Silent by design when the key carries no tenant: that is a SESSION/JWT or
+    OAuth ``oat_`` write — credentials that carry no ``default_graph_id``
+    (#10047) — so the tenant is not something this helper may guess. An
+    org-wide API KEY is NOT this case: since #10025 it names the default graph,
+    and the enqueue carried that tenant here.
     """
     tenant = _DREAM_RECORD_TENANTS.get(key)
     if tenant is None:
@@ -6955,10 +6962,18 @@ def _data_sdk(org: dict) -> TortoiseSDK:
     declaration — so the Postgres record files the write under the same graph
     the data went to. It is carried by value because this lane resolves the
     tenant at this depth (inside the offload, for the capture path) and its
-    auth seam holds no `with` to hang an ambient scope on. The default-graph
-    half is deliberately NOT bound (no `public.graphs` row is guaranteed);
-    naming it is a control-plane decision, and until it is made the write is
-    refused `no_tenant` rather than filed under a tenant nobody chose.
+    auth seam holds no `with` to hang an ambient scope on.
+
+    ⚠️ WHAT THE ORG-WIDE HALF ACTUALLY DOES, on the credential that reaches
+    here. An org-wide **API KEY** (``tt_``/``tk_``, ``graph_id`` None) DOES get
+    a tenant bound since #10025: ``resolve_api_key`` puts the org's active
+    ``kind='default'`` row id on the credential as ``default_graph_id``, and
+    ``record_tenant_for`` names it — measured, not assumed. What stays unbound
+    is the shape that carries no such field: a SESSION/PAT credential
+    (``_session_user_org`` resolves `org_id` + tier only) and an OAuth ``oat_``
+    token (``tortoise.oauth.resolve_oauth_access_token`` never calls
+    ``resolve_api_key``). Those are #10047's scope, and for them the write is
+    refused ``no_tenant`` rather than filed under a tenant nobody chose.
     """
     # #2600: bind the actor through the ONE helper — CONDITIONAL (only when the
     # dict carries a gated actor; never erase a value the auth seams set).
@@ -21983,11 +21998,15 @@ async def delete_graph(graph_id: str, org_id: str,
     from tortoise.supabase_control import (
         graph_key_ids as sb_graph_key_ids,
     )
-    # Default-graph guard: the Supabase derived id is the literal
-    # 'default' (no row exists — derived from organizations.graph_name); the
-    # registry kind='default' node carries a random gid. Guard BOTH: the
-    # literal id (mode-agnostic callers may use either) AND a kind lookup
-    # (else registry default → 404, P1 review note).
+    # Default-graph guard. The Supabase ``graph_id`` a caller may hold for the
+    # default graph is the literal sentinel 'default' (still what
+    # ``graph_metadata`` emits in that field, so existing callers may pass it);
+    # the registry kind='default' node carries a random gid. ⚠️ Since #10025 a
+    # `kind='default'` `public.graphs` row DOES exist (one per organization, so
+    # the record's FK can name it) and it has a REAL id — so "no row exists" is
+    # no longer what protects it, exactly as on `supabase_control.delete_graph_row`.
+    # Guard BOTH: the literal id (mode-agnostic callers may use either) AND the
+    # kind lookup (else registry default → 404, P1 review note).
     if graph_id == "default":
         raise HTTPException(status_code=403,
                             detail="Cannot delete the default graph")

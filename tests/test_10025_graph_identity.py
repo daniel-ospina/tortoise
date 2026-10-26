@@ -41,10 +41,17 @@ DEFAULT_ROW_ID = "g_0123456789abcdef"
 
 
 class _FakeCP:
-    """The narrow slice of the control-plane client these seams use."""
+    """The narrow slice of the control-plane client these seams use.
+
+    ``fail`` is keyed by TABLE (every method fails) or by ``(table, method)``
+    (only that verb fails) — the narrow arm exists so a test can exercise a
+    failure in the INSERT while the reads that guard it succeed (#10025 review
+    F4: a table-wide failure was satisfied by `ensure_default_graph_row`'s
+    first read, so the insert the test named never ran).
+    """
 
     def __init__(self, tables: dict[str, list[dict]] | None = None,
-                 fail: dict[str, str] | None = None) -> None:
+                 fail: dict[object, str] | None = None) -> None:
         self.tables = {k: [dict(r) for r in v]
                        for k, v in (tables or {}).items()}
         self.fail = fail or {}
@@ -53,8 +60,11 @@ class _FakeCP:
     def query(self, table: str, method: str = "GET", filters=None,
               select=None, json_body=None, order=None):
         self.queries.append((table, method, filters))
-        if table in self.fail:
-            raise RuntimeError(self.fail[table])
+        failure = self.fail.get((table, method))
+        if failure is None:
+            failure = self.fail.get(table)
+        if failure is not None:
+            raise RuntimeError(failure)
         rows = self.tables.get(table, [])
         for col, op, val in (filters or []):
             if op == "eq":
@@ -270,15 +280,18 @@ def test_a_failed_mint_cannot_hard_delete_the_default_graph() -> None:
     assert [r["id"] for r in cp.tables["graphs"]] == [DEFAULT_ROW_ID]
 
 
-# ── 5b. A rename targets the row the CALLER NAMED, not a re-resolved one ────
+# ── 5b. A rename targets the ACTIVE default row, never a re-resolved `rows[0]` ─
 #
-# A tombstoned `kind='default'` row and an active one are a LEGAL pair: the
-# partial unique index is on `(org_id, name) WHERE status <> 'deleted'`, and
-# `20261028000001`'s guard mints a second row precisely when the only default
-# row is not active. PostgreSQL returns the two in unspecified order, so a
-# status-blind re-read that PATCHes `rows[0]` can write a row the caller never
-# named and still return True — the API reports success, the visible rename
-# never happens.
+# A tombstoned `kind='default'` row and an active one CAN coexist — the partial
+# unique index is on `(org_id, name) WHERE status <> 'deleted'`, so the index
+# does not forbid it and `20261028000001`'s `status = 'active'` guard mints a
+# second row when the only row it can see is not active. ⚠️ No SUPPORTED path
+# produces the tombstone: `soft_delete_graph` refuses `kind='default'`, which is
+# why the migration treats the shape as defensive rather than normal. It is
+# reachable by raw SQL / ops, and that is enough: PostgreSQL returns the two in
+# unspecified order, so a status-blind re-read that PATCHes `rows[0]` can write
+# the row the caller did not resolve and still return True — the API reports
+# success and the visible rename never happens.
 
 def _tombstoned_plus_active_default() -> _FakeCP:
     return _FakeCP(tables={
@@ -296,11 +309,46 @@ def _tombstoned_plus_active_default() -> _FakeCP:
     })
 
 
+def test_renaming_the_default_by_the_sentinel_never_patches_a_tombstone() -> None:
+    """RED ON THE PRE-FIX CODE.
+
+    The sentinel `"default"` is not an id, so this is the ONE path that must
+    resolve the row — and the pre-fix resolution re-read
+    `(org_id, kind='default')` with NO status filter and PATCHed `rows[0]`,
+    which the fixture puts the TOMBSTONE in. So the pre-fix code renamed a row
+    nobody resolved, returned True, and left the visible (active) default still
+    named `main`. ⚠️ Driving this by the row's REAL id does NOT discriminate:
+    that path queries by `(id, org, status='active')` on both sides, so a
+    real-id rename is byte-identical before and after the change (pinned by
+    `test_renaming_the_default_by_its_real_id_never_touches_the_namespace`,
+    which is behaviour coverage, not a regression pin).
+
+    MEASURED (#10025 review F2, re-verified in this lane): both arms driven
+    against three baselines — `main`'s `set_graph_name` ⇒ sentinel FAILED,
+    real-id PASSED; the PR's first commit `9bbbe6397` (which introduced the
+    `kind` branch but left the sentinel re-read status-blind) ⇒ both FAILED;
+    this head ⇒ both PASSED. So THIS arm is the regression pin and the real-id
+    arm is not.
+    """
+    cp = _tombstoned_plus_active_default()
+    assert set_graph_name(cp, "org-1", "default", "renamed") is True
+    rows = {r["id"]: r for r in cp.tables["graphs"]}
+    assert rows[DEFAULT_ROW_ID]["name"] == "renamed"      # the ACTIVE row
+    assert rows["g_tombstone"]["name"] == "old"           # untouched
+    assert rows[DEFAULT_ROW_ID]["namespace"] == "team_org-1"
+
+
 def test_renaming_the_default_by_its_id_never_patches_a_tombstone() -> None:
-    """RED ON THE PRE-FIX CODE: the default fall-through re-read
-    `(org_id, kind='default')` with NO status filter and PATCHed
-    `rows[0]["id"]`, so a rename that named the ACTIVE row could land on the
-    tombstone and return True."""
+    """The REAL-id arm of the same fixture: the caller named a row, so the
+    PATCH targets that id and the tombstone is untouched.
+
+    Behaviour coverage, NOT a regression pin — see the sentinel test above for
+    the arm that actually reds pre-fix. Measured: this arm PASSES on `main`'s
+    pre-fix `set_graph_name` (the real-id path queried by
+    `(id, org, status='active')` and PATCHed that id on both sides), so it
+    cannot distinguish the fix. It still reds on `9bbbe6397`, where the new
+    `kind` branch fell through to the status-blind sentinel re-read.
+    """
     cp = _tombstoned_plus_active_default()
     assert set_graph_name(cp, "org-1", DEFAULT_ROW_ID, "renamed") is True
     rows = {r["id"]: r for r in cp.tables["graphs"]}
@@ -411,9 +459,125 @@ def test_the_mint_does_not_fight_a_graph_already_named_default() -> None:
 def test_a_failed_mint_raises_rather_than_claiming_success() -> None:
     """`insert_graph`'s contract, kept: a mint must not claim success for an
     unpersisted graph. A swallowed failure here IS the silent `no_tenant`
-    state — an org nobody can name, with nothing in any log to say so."""
+    state — an org nobody can name, with nothing in any log to say so.
+
+    ⚠️ The failure is keyed on the POST specifically, so the two reads that
+    guard the insert SUCCEED and the insert is genuinely reached — a
+    table-wide `fail` would be satisfied by the first read and would stay green
+    against an `ensure_default_graph_row` that caught and swallowed only the
+    insert (#10025 review F4).
+    """
     cp = _FakeCP(tables={"organizations": [
         {"id": "org-1", "graph_name": "team_org-1"}]},
-        fail={"graphs": "relation does not exist"})
+        fail={("graphs", "POST"): "insert failed"})
     with pytest.raises(RuntimeError):
         ensure_default_graph_row(cp, "org-1", "team_org-1")
+    # The witness that the insert was reached, not just the guard read.
+    assert ("graphs", "POST", None) in cp.queries, (
+        f"the insert was never attempted: {cp.queries}")
+    assert not cp.tables.get("graphs"), "a failed mint wrote a row anyway"
+
+
+def test_the_provisioning_wrappers_survive_a_failed_mint() -> None:
+    """#10025 review F1: the mint is BEST-EFFORT at the provisioning seams.
+
+    Their RPC has already committed, and every caller reads a raise as "nothing
+    was provisioned" and compensates destructively (`/v1/register` deletes the
+    data-plane graph, agent signup loses the only copy of the plaintext key,
+    and the retry is then refused). So a failed mint must NOT raise out of
+    them — the org is provisioned, the row is logged missing, and the org's
+    next API-key request self-heals it.
+
+    Driven through the REAL wrappers with a control plane whose `graphs` table
+    is unreadable, so the raise would come from the mint and nowhere else.
+    """
+    from tests.fake_control_plane import FakeControlPlane
+
+    class _NoGraphsCP(FakeControlPlane):
+        """The provision RPC works; the `graphs` table does not."""
+
+        def query(self, table, *a, **kw):  # type: ignore[override]
+            if table == "graphs":
+                raise RuntimeError("graphs unreadable")
+            return super().query(table, *a, **kw)
+
+    for wrapper in (provision_org, provision_org_with_token):
+        cp = _NoGraphsCP()
+        extra = {"p_signup_token_hash": "sha256:token-hash"} \
+            if wrapper is provision_org_with_token else {}
+        # Must NOT raise: the org is provisioned, only the default row is not.
+        wrapper(cp, **_provision_params("org-f1"), **extra)
+        assert default_graph_id_for(cp, "org-f1") is None, (
+            "the unreadable table answered a tenant")
+
+
+def test_a_missed_mint_is_healed_by_the_next_api_key_resolution() -> None:
+    """#10025 review F1: the self-heal, so the unnamed state is not PERMANENT.
+
+    Without it a missed mint is forever: `20261028000001` only backfills orgs
+    that existed when it ran, and a retry of the provisioning request 409s
+    (`uq_member_identity_active`). Here the org has an org-wide key and NO
+    `kind='default'` row — the resolver must mint the row and name the
+    credential with it in the SAME resolution. Driven through the real
+    `resolve_api_key`, so deleting the self-heal call reds this.
+    """
+    from tests.fake_control_plane import FakeControlPlane
+    from tortoise.auth import lookup_hash
+    from tortoise.supabase_control import resolve_api_key
+
+    key = "tt_selfheal0123456789"
+    cp = FakeControlPlane({
+        "organizations": [{"id": "org-1", "name": "One", "tier": "free",
+                           "graph_name": "org_org-1"}],
+        "api_keys": [],
+        "graphs": [],
+    })
+    cp.seed("api_keys", [{
+        "id": "key-1", "org_id": "org-1", "lookup_hash": lookup_hash(key),
+        "key_prefix": key[:10], "created_via": "bootstrap",
+        "created_by": "user-1", "expires_at": None, "revoked_at": None,
+    }])
+
+    resolved = resolve_api_key(cp, key)
+
+    minted = _default_rows(cp)
+    assert len(minted) == 1, f"the self-heal minted {len(minted)} rows"
+    assert minted[0]["namespace"] == "org_org-1"
+    assert resolved["default_graph_id"] == minted[0]["id"]
+    assert resolved["graph_id"] is None
+    # Idempotent: the next request re-reads the row and mints nothing new.
+    assert resolve_api_key(cp, key)["default_graph_id"] == minted[0]["id"]
+    assert len(_default_rows(cp)) == 1
+
+
+def test_an_unreadable_control_plane_still_refuses_a_tenant() -> None:
+    """The self-heal's failure direction: a mint it cannot perform leaves the
+    credential UNNAMED (`no_tenant`), never filed under a guess — and it never
+    fails the auth that carried it."""
+    from tests.fake_control_plane import FakeControlPlane
+    from tortoise.auth import lookup_hash
+    from tortoise.supabase_control import resolve_api_key
+
+    class _NoGraphsCP(FakeControlPlane):
+        def query(self, table, *a, **kw):  # type: ignore[override]
+            if table == "graphs":
+                raise RuntimeError("graphs unreadable")
+            return super().query(table, *a, **kw)
+
+    key = "tt_selfheal0123456789"
+    cp = _NoGraphsCP({
+        "organizations": [{"id": "org-1", "name": "One", "tier": "free",
+                           "graph_name": "org_org-1"}],
+        "api_keys": [],
+        "graphs": [],
+    })
+    cp.seed("api_keys", [{
+        "id": "key-1", "org_id": "org-1", "lookup_hash": lookup_hash(key),
+        "key_prefix": key[:10], "created_via": "bootstrap",
+        "created_by": "user-1", "expires_at": None, "revoked_at": None,
+    }])
+
+    resolved = resolve_api_key(cp, key)   # must not raise
+    assert resolved["default_graph_id"] is None
+    assert record_tenant_for(
+        resolved, control_plane_ids=True) is None

@@ -1118,8 +1118,29 @@ def resolve_api_key(cp, token: str) -> dict | None:
     # point read on `idx_graphs_org_id`, not a scan, and it buys the record's
     # fail-closed tenant; None (no row) keeps the record write REFUSED rather
     # than filed under a guess.
-    default_graph_id = (None if graph_id
-                        else default_graph_id_for(cp, org_id))
+    if graph_id:
+        default_graph_id = None
+    else:
+        default_graph_id = default_graph_id_for(cp, org_id)
+        if default_graph_id is None:
+            # #10025 review F1: SELF-HEAL the forward half. `20261028000001`
+            # only backfills orgs that existed when it ran, and provisioning's
+            # mint is best-effort (a raise there would cost an account — see
+            # `_mint_default_graph_row_best_effort`), so without this the org
+            # would stay unnamed FOREVER: every record write refused
+            # `no_tenant` while `/health` reads armed and green, and a retry of
+            # the provisioning request cannot fix it (it 409s). Minting here
+            # makes that window one request long.
+            #
+            # Safe to WRITE on an auth path: this runs only on the miss, the
+            # mint is idempotent and convergent (a concurrent request loses on
+            # `uq_graphs_org_name_active` and adopts the winner's row), and it
+            # can never fail the request — `record_tenant_for` still refuses
+            # rather than guesses. Same posture as `update_last_used` below
+            # ("a telemetry write must NEVER gate authentication").
+            default_graph_id = _mint_default_graph_row_best_effort(
+                cp, org_id, org_row.get("graph_name"),
+                context="api-key auth self-heal")
     return {
         "org_id": org_id,
         "key_id": key_id,
@@ -3076,14 +3097,31 @@ def provision_org(cp, *, prior_org_ids: list[str] | None = None,
     """
     cp.rpc("provision_team", params)
 
-    # #10025: the FORWARD half of the default-row materialization. Ahead of the
-    # best-effort hooks below on purpose — those are allowed to fail silently
-    # and self-heal, this one is not (a missing row is the permanent
-    # `no_tenant` refusal). Covers every provision_org caller, because they all
-    # come through here.
+    # #10025: the FORWARD half of the default-row materialization. Covers every
+    # provision_org caller, because they all come through here.
+    #
+    # ⛔ BEST-EFFORT, and that is a correctness requirement rather than
+    # politeness (#10025 review F1). The RPC above COMMITTED org + membership +
+    # api_keys in one transaction, while every caller reads a raise from this
+    # function as "nothing was provisioned" and compensates destructively:
+    # `/v1/register` deletes the data-plane graph it just created, agent signup
+    # drops the ONLY copy of the plaintext key, and both then refuse a retry
+    # (`409 already_registered` / the token is gone). A transient error on the
+    # `graphs` read here would therefore cost an account. The mint cannot be
+    # moved ahead of the RPC either: `graphs.org_id` (named `team_id` when the
+    # table was created, renamed by `20260915000001`) is
+    # `NOT NULL REFERENCES public.teams(id)` (20260901000001), so the org row
+    # it names does not exist until the RPC commits.
+    #
+    # The row is not silently skipped when this fails — the helper logs it, and
+    # the org's next API-key request self-heals it (see `resolve_api_key`), so
+    # `provision_org`'s documented "raise ⇒ nothing committed" contract holds
+    # and the unnamed-record state is transient rather than permanent.
     if params.get("p_org_id"):
-        ensure_default_graph_row(cp, str(params["p_org_id"]),
-                                 params.get("p_graph_name"))  # type: ignore[arg-type]
+        _mint_default_graph_row_best_effort(
+            cp, str(params["p_org_id"]),
+            params.get("p_graph_name"),  # type: ignore[arg-type]
+            context="provision_org")
 
     # #318 (multi-tenant pack isolation): post-RPC starter-pack activation.
     # The RPC transaction is Supabase-only; pack install-state lives in the
@@ -3143,10 +3181,16 @@ def provision_org_with_token(cp, **params: object) -> None:
 
     # #10025: the FORWARD half of the default-row materialization — the signup
     # lane mints an organization like any other, so it must come out with the
-    # same `kind='default'` row (see ensure_default_graph_row).
+    # same `kind='default'` row (see ensure_default_graph_row). Best-effort for
+    # the same reason as `provision_org` above, and it is sharpest HERE: this
+    # lane's `api_key` plaintext and signup token exist only in the response
+    # that a raise would replace with a 500, so the agent would never be able to
+    # authenticate to the org it just created.
     if params.get("p_org_id"):
-        ensure_default_graph_row(cp, str(params["p_org_id"]),
-                                 params.get("p_graph_name"))  # type: ignore[arg-type]
+        _mint_default_graph_row_best_effort(
+            cp, str(params["p_org_id"]),
+            params.get("p_graph_name"),  # type: ignore[arg-type]
+            context="provision_org_with_token")
 
     # #2001 (W5): NEW post-RPC hook (agent_signup lane) — the signup path
     # has no eager TeamMeta statement, so the node is initialized here via
@@ -3989,12 +4033,37 @@ def ensure_default_graph_row(cp, org_id: str,
     otherwise exactly one row is inserted, with the migration's shape
     (``namespace`` = the org's storage key, ``recording`` NULL).
 
-    ⛔ RAISES on a failed insert, deliberately. :func:`insert_graph`'s contract
-    is "a mint must not claim success for an unpersisted graph", and a
-    swallowed failure here reproduces the silent state this closes: an org
-    whose record refuses every write with no signal anywhere. Provisioning's
-    RPC has already committed, so the surface is a 500 on create; re-running
-    ``20261028000001`` (idempotent) is the healing path — documented in
+    ⚠️ Those guards are read-then-write, so they are idempotent SEQUENTIALLY
+    only. Two concurrent calls for one org — a client retry, or provisioning
+    racing an operator re-run of ``20261028000001`` — can both pass them and
+    both insert; the loser collides on ``uq_graphs_org_name_active`` and then
+    ADOPTS the winner's row (the convergent arm below, the same one
+    :func:`set_graph_name` uses) rather than 500ing a request whose org is
+    fine. A collision with any OTHER graph is impossible here: the name-
+    collision guard above already returned ``None`` for it.
+
+    ⛔ RAISES on a failed insert, deliberately — that is THIS function's
+    contract, and :func:`insert_graph`'s: a mint must not claim success for an
+    unpersisted graph.
+
+    ⚠️ Which is why the two PROVISIONING callers wrap it
+    (:func:`_mint_default_graph_row_best_effort`) instead of letting it
+    propagate. Raising out of ``provision_org`` is not free there: its RPC has
+    already committed, while every caller treats a raise as "nothing was
+    provisioned" and compensates destructively (the data-plane graph is
+    deleted, an agent-signup key is lost, and the retry is refused). The mint
+    cannot simply run BEFORE the RPC either: ``graphs.org_id`` (created as
+    ``team_id``, renamed by ``20260915000001``) is
+    ``NOT NULL REFERENCES public.teams(id)`` (``20260901000001``), so the org
+    row it names does not exist until the RPC commits.
+
+    ⛔ SO HOW DOES A MISSED MINT GET HEALED? Three ways, none of them
+    operator-only: (1) the failure is logged at ERROR by the wrapper, naming
+    the org and the residual state; (2) the org's next API-key request
+    self-heals it — :func:`resolve_api_key` calls this function when
+    :func:`default_graph_id_for` finds no row, so the unnamed window closes on
+    first use rather than lasting forever; (3) re-running ``20261028000001``
+    or re-provisioning (both idempotent) heals it explicitly — documented in
     ``docs/ops/multi-graph-migration-runbook.md``.
     """
     rows = cp.query(
@@ -4012,6 +4081,19 @@ def ensure_default_graph_row(cp, org_id: str,
                 filters=[("org_id", "eq", org_id),
                          ("name", "eq", "default"),
                          ("status", "neq", "deleted")]):
+        # A live graph is already NAMED 'default' — see the docstring. This is
+        # the migration's documented residual, and it is a PERMANENT one for
+        # this org: no other path mints the row, `default_graph_id_for` keeps
+        # returning None, and every record write for the org is refused
+        # `no_tenant` while `/health` reads armed and green. The residual is
+        # documented, but its OCCURRENCE must not be invisible too — the
+        # operator's fix is to rename the colliding graph and re-run
+        # `20261028000001`.
+        _logger.warning(
+            "default graph row NOT minted for org %s: a live graph is already "
+            "named 'default' (name collision); the org's record writes will "
+            "be refused `no_tenant` until that graph is renamed and "
+            "20261028000001 is re-run", org_id)
         return None  # a live graph is already NAMED 'default' — see docstring
     if not isinstance(graph_name, str) or not graph_name:
         tro = cp.query("organizations", select=["graph_name"],
@@ -4019,19 +4101,84 @@ def ensure_default_graph_row(cp, org_id: str,
         graph_name = tro[0].get("graph_name") if tro else None
     if not isinstance(graph_name, str) or not graph_name:
         # The migration guards `o.graph_name IS NOT NULL` for the same reason:
-        # a default row with no namespace would point at no data plane.
+        # a default row with no namespace would point at no data plane. Also
+        # permanent for this org unless the org row is repaired — so say so.
+        _logger.warning(
+            "default graph row NOT minted for org %s: organizations.graph_name "
+            "is empty, so the row would have no data-plane namespace; the "
+            "org's record writes will be refused `no_tenant`", org_id)
         return None
     graph_id = f"g_{_uuid.uuid4().hex[:16]}"
-    insert_graph(cp, {
-        "id": graph_id,
-        "org_id": org_id,
-        "name": "default",
-        "kind": "default",
-        "namespace": graph_name,
-        "status": "active",
-        "recording": None,
-    })
+    try:
+        insert_graph(cp, {
+            "id": graph_id,
+            "org_id": org_id,
+            "name": "default",
+            "kind": "default",
+            "namespace": graph_name,
+            "status": "active",
+            "recording": None,
+        })
+    except Exception as insert_error:
+        # Convergent upsert (the same arm `set_graph_name` uses below): the
+        # guards above are read-then-write, so a CONCURRENT mint for the same
+        # org — a client retry, or provisioning racing an operator re-run of
+        # `20261028000001` — sees no row, inserts, and loses on
+        # `uq_graphs_org_name_active`. That is not an unpersisted graph: the
+        # winner's row is exactly the one this call was trying to create, so
+        # adopt it rather than turning a replay-safe mint into a provisioning
+        # 500. Any OTHER insert failure still raises (`insert_graph`'s
+        # contract: a mint must not claim success for an unpersisted graph).
+        try:
+            rows = cp.query(
+                "graphs", select=["id", "status"],
+                filters=[("org_id", "eq", org_id), ("kind", "eq", "default"),
+                         ("name", "eq", "default"),
+                         ("status", "neq", "deleted")],
+            )
+        except Exception:
+            # The adopt read failed too. Re-raise the INSERT error, not this
+            # one — the insert is the failure under investigation, and the
+            # read is a recovery attempt whose own fault must not mask it.
+            _logger.warning(
+                "the adopt read after a failed default-graph insert also "
+                "failed for org %s — re-raising the INSERT error",
+                org_id, exc_info=True)
+            raise insert_error from None
+        for row in rows or []:
+            if (row.get("status") or "active") == "active" and row.get("id"):
+                return row["id"]
+        raise
     return graph_id
+
+
+def _mint_default_graph_row_best_effort(cp, org_id: str,
+                                       graph_name: str | None = None, *,
+                                       context: str) -> str | None:
+    """Ensure the org's default row, never failing the caller (#10025 F1).
+
+    The seam that must SURVIVE an unreadable control plane: both provisioning
+    wrappers (their RPC has committed, and their callers compensate
+    destructively on a raise) and the API-key auth self-heal (auth must not
+    fail because a control-plane write did). Returns the row's id, or ``None``
+    when the mint could not be done — which leaves the record write REFUSED
+    ``no_tenant`` (the documented fail-closed direction), never filed under a
+    guessed tenant.
+
+    ⛔ The failure is logged at ERROR, naming the org, because the opposite
+    failure is the one #10025 exists to close: an org whose record refuses
+    every write with no signal anywhere.
+    """
+    try:
+        return ensure_default_graph_row(cp, org_id, graph_name)
+    except Exception:
+        _logger.error(
+            "default graphs row NOT minted for org %s (%s): the org's record "
+            "writes stay refused `no_tenant` until its next API-key request "
+            "self-heals it, or 20261028000001 is re-run (idempotent) — the "
+            "caller itself SUCCEEDED and must not be failed for this",
+            org_id, context, exc_info=True)
+        return None
 
 
 def delete_graph_row(cp, org_id: str, graph_id: str) -> None:
@@ -4198,14 +4345,15 @@ def set_graph_name(cp, org_id: str, graph_id: str, name: str) -> bool:
         # kind == 'default' → fall through: the default path renames THIS row and
         # never writes `namespace`. The caller NAMED a row above (and it is
         # known to be this org's ACTIVE default), so the PATCH targets THAT id —
-        # never a re-resolved `rows[0]`. Two `kind='default'` rows are legal
-        # (the partial unique index is on `(org_id, name)`, so a tombstoned one
-        # and an active one coexist after `20261028000001`'s guard mints a
-        # second, and a tombstone plus an ACTIVE row with an older name is
-        # equally reachable), and a fresh read returns them in unspecified
-        # order: a re-resolve could PATCH the row the caller did NOT name and
-        # still return True, so the API reports success and the visible rename
-        # never happens.
+        # never a re-resolved `rows[0]`. ⚠️ Two `kind='default'` rows are
+        # POSSIBLE (a tombstone beside an active one), but only defensively: the
+        # partial unique index is on `(org_id, name)` so it does not forbid the
+        # pair, yet `soft_delete_graph` refuses `kind='default'`, so no
+        # supported path produces the tombstone — which is why the migration
+        # treats the shape as defensive too. It is still reachable by raw SQL /
+        # ops, and a fresh read returns the two in unspecified order, so a
+        # re-resolve could PATCH the row nobody resolved, still return True, and
+        # leave the visible rename unapplied.
         named_default_row_id: str | None = graph_id
     else:
         named_default_row_id = None
@@ -4213,9 +4361,10 @@ def set_graph_name(cp, org_id: str, graph_id: str, name: str) -> bool:
         # that MUST resolve the row.
     # Default graph: rename the existing ACTIVE kind='default' display row,
     # else upsert one (namespace = the ORG graph name — never the display
-    # name). The `status` filter is load-bearing: `20261028000001` can leave an
-    # org with a tombstoned default row AND a minted active one (the unique
-    # index is partial on `status <> 'deleted'`, so both are legal), and
+    # name). The `status` filter is load-bearing: a tombstoned default row
+    # beside an active one is POSSIBLE (defensively — `soft_delete_graph`
+    # refuses `kind='default'`, so no supported path mints the tombstone, but
+    # `20261028000001`'s guard would mint a second row if one existed), and
     # `graph_metadata`/`default_graph_id_for` read ACTIVE only — PATCHing
     # `rows[0]` blind would accept the rename (True, HTTP 200) and then never
     # show it.

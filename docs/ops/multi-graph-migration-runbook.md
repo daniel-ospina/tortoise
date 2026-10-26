@@ -33,10 +33,29 @@ backfilled:
 Consequences (E2E-5 exit gate):
 
 - **Two writes, one direction.** The backfill (`20261028000001`) is idempotent and
-  safe to re-run — it is the **healing path** if a mint ever failed at
-  provisioning (the provisioning hook raises rather than swallowing, so a failed
-  mint is a 500 on create, never a silently unnamed org). Re-running it mints a
-  row for any organization that lacks an active `kind='default'` one.
+  safe to re-run — it is the **explicit healing path** if a mint ever failed at
+  provisioning. Re-running it mints a row for any organization that lacks an
+  active `kind='default'` one.
+
+- **A failed mint never fails the organization.** `ensure_default_graph_row`
+  itself raises (a mint must not claim success for an unpersisted graph), but
+  both provisioning wrappers call it through
+  `supabase_control._mint_default_graph_row_best_effort`, which logs at ERROR and
+  returns `None`. Raising out of `provision_org` would be worse than the missing
+  row: its RPC has already committed org + membership + api_keys, while every
+  caller reads a raise as "nothing was provisioned" and compensates
+  destructively — `/v1/register` deletes the data-plane graph, agent signup
+  loses the only copy of the plaintext key, and the retry is then refused
+  (`409 already_registered`). The mint cannot run before the RPC either:
+  `graphs.team_id` is `NOT NULL REFERENCES public.teams(id)`, so the org row it
+  names does not exist until the RPC commits.
+
+- **A missed mint heals itself on first use.** `resolve_api_key` calls the mint
+  when `default_graph_id_for` finds no row for an org-wide key, so the unnamed
+  window is one request long rather than permanent (and the migration re-run
+  above stays available for an org that never authenticates). Until it is
+  healed the record keeps refusing that org `no_tenant` — fail-closed, and now
+  logged, never silent.
 
 - **The one real residual:** an organization that already owns a graph *named*
   `default` gets no second row — that would violate
