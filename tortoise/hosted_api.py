@@ -6520,6 +6520,7 @@ async def _session_user_org(request: Request, user: dict) -> dict:
         _ORG_ADDITIVE_IMPORT_TIER,
         _QUOTA_SELECT,
         _orgs_row_fail_soft,
+        default_graph_id_for_credential,
     )
     row = await _cp_offload(
         lambda: _orgs_row_fail_soft(
@@ -6601,6 +6602,28 @@ async def _session_user_org(request: Request, user: dict) -> dict:
         # the flag for enforcement — only the UI renders from it.
         "dashboard_key_login": row.get("dashboard_key_login") is not False,
     }
+    # #10046: the RECORD tenant for a SESSION/JWT credential. This lane never
+    # goes through `resolve_api_key`, so nothing else on it puts the org's
+    # default-graph row id on the dict — and `record_tenant_for` (the one
+    # declaration both transports call) names an org-wide credential ONLY from
+    # `default_graph_id`. Without this stamp every armed write on this lane is
+    # refused `no_tenant` while the data lands in the default graph
+    # (`_data_sdk` opens `namespace=org_id`): a whole credential class invisible
+    # to the record, silently. Resolved through the SAME home the API-key lane
+    # uses — `default_graph_id_for_credential`, which is
+    # `default_graph_id_for` plus the on-miss mint — never a second notion of
+    # "which graph is this".
+    #
+    # Fail-soft and never gating the request (#5148's rule, and the resolver's
+    # own contract): a `None` here is a NAMED refusal counted `no_tenant`, not
+    # a guess, and it is the direction to prefer over failing a signed-in
+    # request. `best_effort=True` keeps an offload hiccup from turning a
+    # record-tenant lookup into a 503 on ~33 session endpoints.
+    org["default_graph_id"] = await _cp_offload(
+        lambda: default_graph_id_for_credential(
+            cp, org_id, row.get("graph_name"),
+            context="session auth self-heal"),
+        op="default_graph_row", best_effort=True)
     # #1913: post-auth abuse evaluation — the session-JWT lane was the
     # abuse-blind hole (key lanes call _abuse_post_auth in get_current_org /
     # _get_current_org_supabase; session-driven REST calls never recorded an
@@ -6932,10 +6955,17 @@ def _bind_record_tenant(sdk: TortoiseSDK, org: dict) -> None:
     construction site (#10047), from the SAME ``public.graphs`` default row and
     through the SAME ``record_tenant_for`` answer this function asks for.
     Binding a runner to a graph-bound key's id would file its rows under a
-    graph it never wrote, so that is never what that helper does. What is still
-    unbound is the SESSION/JWT and OAuth ``oat_`` credential class, which
-    carries no ``default_graph_id`` on the dict this function reads — a
-    RESOLUTION gap at the credential (#10046), not a missing carrier here.
+    graph it never wrote, so that is never what that helper does.
+
+    What this function DOES cover, since #10046, is the credential class that
+    used to fall through it: a SESSION/JWT and an OAuth ``oat_`` credential now
+    carry ``default_graph_id`` too — stamped by ``_session_user_org`` and
+    ``oauth.resolve_oauth_access_token`` from the same
+    ``default_graph_id_for_credential`` home — so ``record_tenant_for`` names
+    the org's default graph for them instead of refusing ``no_tenant``. The
+    residue that remains is a credential whose org has NO nameable default row
+    (absent, tombstoned, another org's, unreadable): those are still refused,
+    which is the fail-closed direction, not a class left unwired.
 
     Fail-soft and DELIBERATELY so: a record-binding fault must not fail the
     request (#5148's rule — the record is a derived, replayable store, and this
@@ -7036,11 +7066,13 @@ def _bind_dream_record_tenant(sdk: TortoiseSDK, key: str) -> None:
     an armed hosted deployment refuses every dream-emitted record `no_tenant`
     for a graph whose credential named it.
 
-    Silent by design when the key carries no tenant: that is a SESSION/JWT or
-    OAuth ``oat_`` write — credentials that carry no ``default_graph_id``
-    (#10046) — so the tenant is not something this helper may guess. An
-    org-wide API KEY is NOT this case: since #10025 it names the default graph,
-    and the enqueue carried that tenant here.
+    Silent by design when the key carries no tenant: the request's credential
+    never named one (an unreadable control plane, or an org whose default row
+    does not exist — #10046's resolvers stamp ``default_graph_id`` for a
+    SESSION/JWT and an OAuth ``oat_`` credential too, so "no tenant" no longer
+    means "this credential class"), and that is not something this helper may
+    guess. An org-wide API KEY is NOT this case: since #10025 it names the
+    default graph, and the enqueue carried that tenant here.
     """
     tenant = _DREAM_RECORD_TENANTS.get(key)
     if tenant is None:
@@ -7085,16 +7117,19 @@ def _data_sdk(org: dict) -> TortoiseSDK:
     auth seam holds no `with` to hang an ambient scope on.
 
     ⚠️ WHAT THE ORG-WIDE HALF ACTUALLY DOES, on the credential that reaches
-    here. An org-wide **API KEY** (``tt_``/``tk_``, ``graph_id`` None) DOES get
-    a tenant bound since #10025: ``resolve_api_key`` puts the org's active
+    here. An org-wide **API KEY** (``tt_``/``tk_``, ``graph_id`` None) gets a
+    tenant bound since #10025: ``resolve_api_key`` puts the org's active
     ``kind='default'`` row id on the credential as ``default_graph_id``, and
-    ``record_tenant_for`` names it — measured, not assumed. What stays unbound
-    is the shape that carries no such field: a SESSION/PAT credential
-    (``_session_user_org`` resolves `org_id` + tier only) and an OAuth ``oat_``
-    token (``tortoise.oauth.resolve_oauth_access_token`` never calls
-    ``resolve_api_key``). Those are #10046's scope (a RESOLUTION gap at the
-    credential, not a missing carrier in this module), and for them the write
-    is refused ``no_tenant`` rather than filed under a tenant nobody chose.
+    ``record_tenant_for`` names it — measured, not assumed. Since #10046 the
+    OTHER org-wide credential classes answer identically, through the same
+    field and the same resolver: ``_session_user_org`` (SESSION/JWT) and
+    ``tortoise.oauth.resolve_oauth_access_token`` (``oat_``) both stamp
+    ``default_graph_id`` from ``default_graph_id_for_credential``. What that
+    leaves unbound is not a credential class at all: it is a runner that never
+    sees a request credential — the seed runners and background indexing jobs,
+    bound at their own construction site (#10047) — and a credential whose org
+    has no nameable default row; for those the write is refused ``no_tenant``
+    rather than filed under a tenant nobody chose.
     """
     # #2600: bind the actor through the ONE helper — CONDITIONAL (only when the
     # dict carries a gated actor; never erase a value the auth seams set).

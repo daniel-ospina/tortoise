@@ -2066,6 +2066,20 @@ def resolve_oauth_access_token(cp, token: str) -> dict | None:
     if org is None:
         return None
     org = _quota_fields(cp, org)
+    # #10046: the RECORD tenant for an OAuth credential. This resolver is the
+    # OAuth half of the MCP auth boundary and — like a SESSION/JWT credential —
+    # it never goes through `resolve_api_key`, so nothing put the org's
+    # default-graph row id on the dict and `record_tenant_for` (the one
+    # declaration both transports call) refused every armed write `no_tenant`
+    # for the whole `oat_` class. The row is resolved through the SAME home the
+    # API-key lane uses (`default_graph_id_for_credential`), so the three
+    # credential classes cannot name different defaults; a `None` here stays a
+    # NAMED refusal counted `no_tenant`, never a guess, and the lookup/mint is
+    # contract-bound never to fail this caller.
+    from tortoise.supabase_control import default_graph_id_for_credential
+
+    org["default_graph_id"] = default_graph_id_for_credential(
+        cp, row["org_id"], context="oauth auth self-heal")
     # #2600: the resolved dict carries the RAW actor fields (the token row's
     # user_id/client_id) so consuming seams (mcp_auth middleware / REST DI)
     # can alias the canonical `actor_user_id` — additive, transport-agnostic
