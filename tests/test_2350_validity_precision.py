@@ -692,9 +692,12 @@ def test_reader_marker_states_an_undatable_end_as_unknown(stored_end, _why):
 
     Both spellings of that one state now render the ONE form #2350 defined for
     it, and the stored text does not reach the reader at all. Discriminating:
-    the ``==`` assertion below fails on the unfixed head for all five truthy
-    spellings (``[valid 2024-01-01 → <raw>]``); the two that are falsey already
-    routed to the ``end unknown`` arm and are kept so the class stays covered.
+    the ``==`` assertion below fails on the unfixed head for the four spellings
+    that survive the renderer's ``.strip()`` — ``TBD``, ``not-a-date``,
+    ``2026-02-30``, ``1719792000`` (``[valid 2024-01-01 → <raw>]``, the pre-fix
+    shape); the two that are falsey once trimmed (``""`` and ``"   "``)
+    already routed to the ``end unknown`` arm and are kept so the class stays
+    covered.
     """
     from tortoise.retrieval import _validity_marker
     from tortoise.validity import window_read_fields
