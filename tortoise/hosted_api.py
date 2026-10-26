@@ -18232,6 +18232,16 @@ async def _session_turns(org: dict, session_id: str, proj) -> list[dict]:
     the graph otherwise, and `[]` only when BOTH are empty (a genuinely
     empty session). A duplicate is recoverable; a blanked transcript is not.
 
+    ⛔ AND A **PARTIAL** ANSWER IS RECONCILED, NOT PREFERRED (#10024 review, P1).
+    Truthiness draws the line at EMPTY, which leaves the mixed store the write
+    repair itself creates unhandled: a two-turn capture whose second record write
+    was refused leaves the record answering `[t0]`, and returning that skipped the
+    graph turn the repair had just written — a silently SHORTENED transcript. Both
+    stores are read and `record_serve.reconcile_turn_answers` completes the answer
+    (the record wins on an id both hold; the graph supplies only what the record
+    did not answer with), logging the disagreement. The extra graph query is the
+    same one the empty path already ran, and it goes away with #10017's purge.
+
     The record read is SCOPED — `record_serve.read_session_turns` owns
     open → tenant scope → read → close. An unscoped read under the production
     app role returns zero rows, which is exactly the absence the record's own
@@ -18243,7 +18253,9 @@ async def _session_turns(org: dict, session_id: str, proj) -> list[dict]:
     the suite precisely because nothing exercised the read.
     """
     turns: list[dict] = []
+    record_served: list[dict] = []
     record_turns: list | None = None
+    from tortoise import record_serve
     #: 'unarmed' (never consulted) · 'record' (answered with turns) ·
     #: 'empty' (answered, no turn) · 'unanswered' (raised).
     record_answer = "unarmed"
@@ -18264,7 +18276,7 @@ async def _session_turns(org: dict, session_id: str, proj) -> list[dict]:
                 "copy for this request", session_id, exc_info=True)
     if record_turns:
         for _t in record_turns:
-            turns.append({
+            record_served.append({
                 "id": _t.turn_id,
                 # The record stores the framed text and the speaker separately,
                 # so the SAME inverse gives the same role/body the graph arm
@@ -18274,14 +18286,23 @@ async def _session_turns(org: dict, session_id: str, proj) -> list[dict]:
                 "content": _t.body,
                 "created_at": _t.created_at,
             })
-        return turns
-    # Turn points (events) — ordered by turn index embedded in the id
+    # Turn points (events) — ordered by turn index embedded in the id.
+    #
+    # ⛔ READ EVEN WHEN THE RECORD ANSWERED (#10024 review, P1). A non-empty
+    # record answer is not necessarily a COMPLETE one: the write repair in
+    # `sdk._write_capture_turns` puts a turn the record refused into the graph, so
+    # the record can answer `[t0]` for a two-turn session. Skipping the graph on
+    # truthiness served that as a silently SHORTENED transcript — the mirror of
+    # the blanked one this read was fixed for. `reconcile_turn_answers` completes
+    # a partial answer and the count is logged, so the disagreement is measurable
+    # until #10017 purges the transitional graph copy.
     turn_rows = await asyncio.to_thread(
         lambda: proj.g.query(
             "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
             "RETURN t.id, t.content, t.createdAt ORDER BY t.id",
             params={"sid": session_id},
         ).result_set)
+    graph_turns: list[dict] = []
     for tr in turn_rows:
         tid = tr[0]
         content = tr[1] or ""
@@ -18291,13 +18312,23 @@ async def _session_turns(org: dict, session_id: str, proj) -> list[dict]:
         # have ONE definition — a client comparing a stored turn against a
         # served detail depends on the two agreeing (#4675).
         role, body = _capture_turn_role_text(content)
-        turns.append({
+        graph_turns.append({
             "id": tid,
             "role": role,
             "content": body,
             "created_at": created_at,
         })
-    if record_answer == "empty" and turns:
+    turns, graph_only = record_serve.reconcile_turn_answers(
+        record_served, graph_turns)
+    if record_served and graph_only:
+        # The record answered SHORT and the graph completed it. INFO, not a
+        # warning, for the same arming-migration reason as the empty branch —
+        # but said out loud, because this is the mixed store the repair creates.
+        _logger.info(
+            "session %s: the record answered %d turn(s) and the graph held %d "
+            "more — the transcript was served from BOTH stores (%d turn(s) "
+            "total)", session_id, len(record_served), graph_only, len(turns))
+    elif record_answer == "empty" and turns:
         # The armed record holds no turn for a session the graph still has: the
         # pre-arming population, or a capture whose record write was refused.
         # INFO, not a warning — this is the arming migration in progress, and
@@ -20698,7 +20729,7 @@ async def _graph_quota_gate(org: dict) -> None:
     a silent pass (#686). No 80% warn band in v1 (Gate #2 — unreachable
     at free=1/solo=2, dormant until a finite pro/org cap exists).
 
-    Known mode divergence (review #2b arch, recorded): sdk.graph_count's
+    Known mode divergence (review #2b arch, recorded): sdk._graph_count's
     Supabase branch drift-swallows to 1 (default-only) on ANY read error
     — C1's pre-C1-schema compat — so this 500 branch is registry-mode
     reachable but Supabase-lane dormant during a degraded control plane
@@ -20713,7 +20744,7 @@ async def _graph_quota_gate(org: dict) -> None:
     if max_graphs is None:
         return  # unlimited (pro/org)
     try:
-        count = _make_sdk(namespace="registry").graph_count(org["id"])
+        count = _make_sdk(namespace="registry")._graph_count(org["id"])
     except Exception as e:
         _logger.error("graph count failed (fail-closed #686): team=%s error=%s",
                       org["id"], e)
@@ -20836,7 +20867,7 @@ def _provision_graph(org: dict, name: str,
         max_graphs = limits.get("max_graphs")
         if max_graphs is not None:
             try:
-                after = sdk.graph_count(org["id"])
+                after = sdk._graph_count(org["id"])
             except Exception as e:
                 _logger.error(
                     "post-insert re-count failed (fail-closed #686): "

@@ -2453,6 +2453,25 @@ def _capture_turn_id(session_id: str, index: int, turn_offset: int = 0) -> str:
     return f"{session_id}_t{index + turn_offset}"
 
 
+def _resolve_read_tenant(own: Any, ambient: Any) -> tuple[str | None, str | None]:
+    """The tenant a RECORD READ is filed under — or ``(None, None)``.
+
+    The READ-side half of the tenant precedence the write door applies
+    (`record_writer.record_tenant`): this SDK's own binding (the graph it writes
+    to) wins, else the ambient scope, else the single-tenant env pair.
+
+    ⛔ It validates the SHAPE and nothing else. Deciding a read from
+    `record_writer.live_write_verdict` was #10024 review P2: two of that door's
+    arms (`no_durable_journal`, `circuit_open`) describe WRITE eligibility, so a
+    journal-less SDK — a supported shape — and a lane whose last write failed
+    both fell through to the graph, which an armed session does not have.
+    """
+    candidate = own if own is not None else (ambient() if ambient else None)
+    if (isinstance(candidate, tuple) and len(candidate) == 2
+            and all(isinstance(part, str) and part for part in candidate)):
+        return candidate
+    return None, None
+
 def _capture_turn_ids(proj, session_id: str) -> list[str]:
     """Every turn-Point id currently ``CONTAINS``-wired to ``session_id``.
 
@@ -2760,13 +2779,22 @@ def _write_capture_turns(
     # NOT landed — the repair may then write a turn that is also in the record,
     # which is a duplicate, and a duplicate is recoverable where a lost turn is
     # not.
-    _record_outcomes: list[bool] = []
+    #
+    # ⛔ KEYED BY THE TURN, NEVER POSITIONAL (#10024 review, P1). The observer
+    # is NOT called for every turn — `_emit_event` returns before the record leg
+    # when the journal append raises — so an appending list would SHIFT LEFT:
+    # with the append failing for turn 0 and succeeding for 1..n, a positional
+    # list reads `[True, True]` and turn 0 (`_missed` would name index 2) is
+    # never repaired while a landed turn is re-written as a duplicate, and the
+    # warning names the wrong count. A dict keyed by the turn's own index
+    # expresses the contract above exactly: absent == NOT landed.
+    _record_outcomes: dict[int, bool] = {}
 
-    def _observe_record_write(write: Any) -> None:
+    def _observe_record_write(write: Any, _i: int) -> None:
         # `statements > 0` — not `is not None` — because a record the fold
         # ACCEPTED but projected to nothing (`NoRecordEffect`) leaves `point`
         # with no row, which is the same absence from the read side's view.
-        _record_outcomes.append(
+        _record_outcomes[_i] = (
             write is not None and getattr(write, "statements", 0) > 0)
 
     for i, _turn in enumerate(windowed):
@@ -2820,7 +2848,11 @@ def _write_capture_turns(
             # for THIS turn. Only asked for when the record is the store — an
             # unarmed capture has no record decision to observe.
             record_write_observer=(
-                _observe_record_write if _record_holds_turns else None),
+                # The turn index rides the closure (`_i=i`): the observer is
+                # called with the write alone, and the OUTCOME must be filed
+                # under the turn it belongs to.
+                (lambda _w, _i=i: _observe_record_write(_w, _i))
+                if _record_holds_turns else None),
         )
 
     # #10011 review P0 (half 2): the repair. Every turn the record did NOT take
@@ -2841,7 +2873,7 @@ def _write_capture_turns(
     # for the current window and its stale ids, and nothing else.
     if _record_holds_turns:
         _missed = [i for i in range(len(turn_rows))
-                   if i >= len(_record_outcomes) or not _record_outcomes[i]]
+                   if not _record_outcomes.get(i, False)]
         if _missed:
             _logger.warning(
                 "capture of session %s: the record did not take %d of %d "
@@ -33459,8 +33491,19 @@ class TortoiseSDK:
             })
         return out
 
-    def graph_count(self, org_id: str) -> int:
+    def _graph_count(self, org_id: str) -> int:
         """Graph count for an org — the quota meter's source (C1 #2110).
+
+        ⛔ INTERNAL SINCE 2026-10-25 — NOT on the public SDK surface. Owner ruling
+        on #4282: the question is the SERVER's (the plan-limit check), not a
+        customer's. A customer asking "how many graphs do I have?" lists them,
+        and the number comes back with that list — which is what the comparables
+        do (Mem0 returns a count alongside the entity list). No customer calls
+        this, so it is not a name the product promises. Underscore-prefixed so
+        the AST-derived public surface (`tools/sdk_surface.py`) excludes it; the
+        deleted-graph rule below is unchanged and is what makes deleting a graph
+        free a plan slot. Do NOT re-publicise it without Daniel's approval
+        (AGENTS.md → MCP/SDK Surface Approval).
 
         Supabase mode: 1 (the default graph — always present, derived from
         teams.graph_name) + count(custom active). Deleted rows excluded
@@ -33605,8 +33648,9 @@ class TortoiseSDK:
         — treated as unknown, exactly as both setters it replaces did. (The
         tombstone FILTER lives on the readers: ``hosted_api.list_graphs`` skips
         ``status='deleted'`` rows, while ``list_memory_graphs`` returns them in
-        the selfhost registry lane — which is why ``graph_count`` was not folded
-        into it. In the Supabase lane that reader filters to active already.)
+        the selfhost registry lane — which is why the count is not derived from
+        this list (the quota meter is ``_graph_count``, an internal function, and it
+        excludes tombstones). In the Supabase lane that reader filters to active already.)
 
         Returns True when the node was found (the requested fields written),
         False on an unknown graph — callers map that to 404. At least one of
@@ -33710,14 +33754,6 @@ class TortoiseSDK:
             params={"id": org_id},
         ).result_set
         return rows[0][0] if rows else None
-
-    def org_list(self) -> list[dict]:
-        """List all orgs."""
-        reg = self._get_registry()
-        rows = reg.query(
-            "MATCH (t:Team) RETURN properties(t) ORDER BY t.createdAt"
-        ).result_set
-        return [r[0] for r in rows]
 
     def org_update(self, org_id: str, **fields) -> dict:
         """Update mutable org fields."""
@@ -37289,29 +37325,42 @@ class TortoiseSDK:
         answered with nothing" and "the record did not answer" all return it, so
         every one of them makes the caller read the graph. That is the safe
         direction — a duplicate is recoverable, a blanked transcript is not. The
-        three "did not answer" cases are logged so the reason is not invisible.
-        """
-        from tortoise.record_writer import RecordWriteError, live_write_verdict
+        "did not answer" cases are logged so the reason is not invisible.
 
-        log = self._get_event_log()
-        if log is None or not getattr(log, "durable", True):
+        ⛔ THE DECISION IS READ FROM READ FACTS — the DSN and the tenant — never
+        from `live_write_verdict` (#10024 review, P2). That door's arms describe
+        WRITE eligibility, and two of them are wrong for a read: `no_durable_journal`
+        refuses a journal-less SDK, which is a SUPPORTED shape (`tortoise/config.py`;
+        #4240) whose transcripts are perfectly readable from the record, and
+        `circuit_open` silences reads for 60 s after one failed WRITE. Either one
+        made this door fall through to the graph — where an armed session has no
+        turn node — i.e. the blank-transcript defect this method exists to remove,
+        in the configuration the hosted door serves correctly.
+        """
+        from tortoise.record_writer import RecordWriteError, record_dsn, record_tenant
+
+        try:
+            if record_dsn() is None:
+                return ()
+        except RecordWriteError as exc:
+            _logger.warning(
+                "session %s: the record DSN is misconfigured, so its turns are "
+                "read from the graph: %s", session_id, exc)
             return ()
         # The record's tenant is this SDK's OWN binding (the graph this object
         # writes to) unless the ambient scope names one — the same precedence
         # the live write door applies, so the read cannot be filed under a
-        # tenant the write did not use. `durable=True` because the journal half
-        # was ANSWERED above; the arms that matter here are the arming, the
-        # tenant and the breaker, and taking them from the door's own verdict is
-        # what keeps this read from trying a record the write has declared
-        # unusable.
-        verdict = live_write_verdict(
-            True, getattr(self, "_record_tenant", None))
-        if verdict.reason is not None or verdict.tenant is None:
+        # tenant the write did not use.
+        org_id, graph_id = _resolve_read_tenant(
+            getattr(self, "_record_tenant", None), record_tenant)
+        if org_id is None:
+            _logger.info(
+                "session %s: no record tenant is bound, so its turns are read "
+                "from the graph", session_id)
             return ()
         try:
             from tortoise.record_serve import read_session_turns
 
-            org_id, graph_id = verdict.tenant
             return tuple(read_session_turns(org_id=org_id, graph_id=graph_id,
                                             session_id=session_id))
         except RecordWriteError as exc:
@@ -37385,8 +37434,20 @@ class TortoiseSDK:
         # ANSWERS with turns, the graph otherwise (unarmed, nothing captured yet
         # under the armed record, or a record that did not answer) — so an empty
         # answer can never be served as an empty transcript while the graph still
-        # holds one. The graph query is skipped when the record answered, which
-        # is also what makes an armed read one query cheaper, not one dearer.
+        # holds one.
+        #
+        # ⛔ BOTH STORES ARE READ AND RECONCILED (#10024 review, P1) — not
+        # "record when truthy, graph otherwise". A non-empty record answer can be
+        # SHORT: `_write_capture_turns` writes every turn the record refused into
+        # the graph, so the record can answer `[t0]` for a two-turn session, and
+        # skipping the graph on truthiness served that as a silently shortened
+        # transcript — the mirror of the blanked one.
+        # `record_serve.reconcile_turn_answers` completes the answer (the record
+        # wins on an id both store; the graph supplies only the ids it did not
+        # answer with), which is the same rule the hosted twin applies, so the two
+        # doors keep serving one transcript.
+        from tortoise.record_serve import reconcile_turn_answers
+
         turn_points = []
         for _t in self._record_turns_for(session_id):
             role, body = _capture_turn_role_text(_t.content)
@@ -37396,17 +37457,28 @@ class TortoiseSDK:
                 "content": _t.body,
                 "created_at": _t.created_at,
             })
-        if not turn_points:
-            for tr in proj.g.query(
-                "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
-                "RETURN t.id, t.content, t.createdAt ORDER BY t.id",
-                params={"sid": session_id},
-            ).result_set:
-                role, body = _capture_turn_role_text(tr[1] or "")
-                turn_points.append({
-                    "id": tr[0], "role": role, "content": body,
-                    "created_at": tr[2],
-                })
+        _graph_turns: list[dict] = []
+        for tr in proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
+            "RETURN t.id, t.content, t.createdAt ORDER BY t.id",
+            params={"sid": session_id},
+        ).result_set:
+            role, body = _capture_turn_role_text(tr[1] or "")
+            _graph_turns.append({
+                "id": tr[0], "role": role, "content": body,
+                "created_at": tr[2],
+            })
+        turn_points, _graph_only = reconcile_turn_answers(
+            turn_points, _graph_turns)
+        if turn_points and _graph_only:
+            # The mixed store the write repair creates: the record answered
+            # short and the graph completed it. Said out loud for the same
+            # reason the hosted twin logs it.
+            _logger.info(
+                "session %s: the record answered %d turn(s) and the graph held "
+                "%d more — the transcript was served from BOTH stores (%d "
+                "turn(s) total)", session_id,
+                len(turn_points) - _graph_only, _graph_only, len(turn_points))
         ext_rows = proj.g.query(
             "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
             "WHERE (p.pointKind IS NULL OR p.pointKind <> 'event') "

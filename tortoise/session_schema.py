@@ -359,10 +359,15 @@ SESSION_WRITERS: tuple[SessionWriter, ...] = (
             "rebuild cannot disagree with the graph it is rebuilding; a "
             "journal with no `SessionRecorded` (pre-#3664, or a journal-less "
             "lane) restores only the `_link_session` stub. `turn_max_index` "
-            "(#10000) is a plain `SET`, like `turn_count`: it is the id-space "
-            "high-water mark the stale-turn sweep reads once the turns live in "
-            "the record, so a journal-only rebuild that dropped it would let a "
-            "shorter re-capture keep serving turns the session no longer owns."),
+            "(#10000) is folded MONOTONICALLY — `CASE WHEN s.turn_max_index IS "
+            "NULL OR s.turn_max_index < $v THEN $v ELSE s.turn_max_index END`, "
+            "the same clause the live sink writes (`sdk._write_session_and_turns`), "
+            "because it is the id-space high-water mark the stale-turn sweep "
+            "reads once the turns live in the record: only ever moving UP means a "
+            "shorter re-capture can never lower it, and a journal-only rebuild "
+            "cannot disagree with the graph it is rebuilding (#10024 review P2). "
+            "It is NOT `turn_count`'s rule: the count is a WINDOW LENGTH and is "
+            "latest-wins (a plain `SET`) on both sides."),
     ),
     SessionWriter(
         key="tortoise/projection/entities.py::_link_session",

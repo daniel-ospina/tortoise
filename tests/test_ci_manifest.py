@@ -223,9 +223,24 @@ def test_the_writers_precision_is_the_one_this_check_assumes() -> None:
     assert ci_manifest.VALUE_DECIMALS == 1, (
         "the validator's precision pin drifted from the writer's one-decimal "
         "render")
-    assert "  test_bridge_table.py: 1.2\n" in rendered, (
-        "the writer no longer renders one decimal place — VALUE_DECIMALS and "
-        "the plausibility check must move with it")
+    # Read the row's VALUE FIELD, not "`1.2` followed by a newline": the writer
+    # legitimately appends its basis note to a row it re-derives (`: 1.2  #
+    # ci-timing …; was 3.0`), so an end-of-line probe tests whether the row
+    # carries a comment — not the precision this test exists to pin. Measured
+    # 2026-10-26: the #10026 refresh added that suffix to `test_bridge_table.py`
+    # and this assertion redded a writer that was still rendering one decimal
+    # place. Asserting the whole field equal to `1.2` keeps the pin strict:
+    # a three-decimal `1.235` fails it just as an end-of-line probe would.
+    # (`fix/mainred-ci-surfaces` reached the same conclusion with an anchored
+    # regex; this field-reading form landed on main first, so it is the one that
+    # survives the merge — both pin the VALUE, which is the point.)
+    prefix = "  test_bridge_table.py: "
+    rows = [ln for ln in rendered.splitlines() if ln.startswith(prefix)]
+    assert rows, "the writer no longer renders the row at all"
+    rendered_value = rows[0][len(prefix):].split()[0]
+    assert rendered_value == "1.2", (
+        f"the writer renders {rendered_value!r}, not one decimal place — "
+        "VALUE_DECIMALS and the plausibility check must move with it")
 
 
 def test_a_weight_with_finer_precision_than_the_writer_is_red() -> None:

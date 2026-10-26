@@ -147,6 +147,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -653,6 +654,60 @@ def read_session_turns(*, org_id: str, graph_id: str, session_id: str,
         # the read transaction that carried the transaction-local tenant GUC.
         with contextlib.suppress(Exception):
             conn.close()
+
+
+def reconcile_turn_answers(record_turns: list[dict],
+                          graph_turns: list[dict]) -> tuple[list[dict], int]:
+    """Complete a PARTIAL record answer from the graph (#10024 review, P1).
+
+    ⛔ THE TRANSITIONAL HALF OF #10000, ONE STEP FURTHER THAN "EMPTY ≠
+    UNANSWERED". Deciding the store on the TRUTHINESS of the record's answer is
+    right for an EMPTY answer and wrong for a SHORT one: the write repair in
+    ``sdk._write_capture_turns`` puts every turn the record did NOT take into the
+    graph, so a capture of two turns whose second record write was refused leaves
+    the record answering ``[t0]`` — truthy — and a reader that then skipped the
+    graph served a ONE-turn transcript for a session whose ``turn_count`` is 2,
+    with no line saying a turn was dropped. The mirror of the blanked transcript
+    the P0 was filed for, and the case the external check rules out: Cassandra's
+    read repair, on disagreeing replicas, *"performs a read repair … The most
+    up-to-date data is returned to the client"* — it does not serve one
+    replica's answer as authoritative while another holds data.
+    (``https://cassandra.apache.org/doc/latest/cassandra/managing/operating/read_repair.html``.)
+
+    The RECORD WINS on an id both stores hold — §2.0 makes Postgres the system of
+    record and the graph a derived cache, so a disagreeing copy is the cache's
+    staleness, never the record's. The graph only CONTRIBUTES the ids the record
+    did not answer with, and only until #10017 purges the graph copy.
+
+    Ordering: the record's answer is already in turn order and the graph arm's is
+    the query's own order, so neither is re-sorted unless BOTH contribute — then
+    the merged list is ordered by the turn index the ids carry (the same rule
+    ``record_read._turn_index`` states), so a turn recovered from the graph sits
+    where the transcript says it belongs instead of at the end.
+
+    Returns ``(merged, graph_only_count)``; the count is what lets a caller log
+    the DISAGREEMENT rather than serving the merge silently.
+    """
+    record_ids = {t.get("id") for t in record_turns}
+    graph_only = [t for t in graph_turns if t.get("id") not in record_ids]
+    merged = list(record_turns) + graph_only
+    if record_turns and graph_only:
+        merged.sort(key=_turn_index_sort_key)
+    return merged, len(graph_only)
+
+
+def _turn_index_sort_key(turn: dict) -> tuple[int, int, str]:
+    """Order a merged answer by the turn index its id carries (#3551's rule).
+
+    A key that does not follow ``{session}_t{index}`` sorts LAST and keeps its
+    relative order — the merge must not invent an order for an id it cannot read,
+    and one malformed id must not reorder the rest.
+    """
+    turn_id = turn.get("id") or ""
+    match = re.search(r"_t([0-9]+)$", turn_id)
+    if match is None:
+        return (1, 0, turn_id)
+    return (0, int(match.group(1)), turn_id)
 
 
 def _rows(cur: Any, sql: str, params: tuple) -> list[dict[str, Any]]:

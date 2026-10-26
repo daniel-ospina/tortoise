@@ -444,13 +444,57 @@ GRAPH_ROWS = [("s_t0", "[user] hello", "2026-10-25T00:00:00+00:00"),
 
 
 def test_an_armed_record_that_answers_serves_the_record(monkeypatch):
+    """The record's answer is the transcript's SOURCE — but it is COMPLETED.
+
+    ⛔ A NON-EMPTY ANSWER IS NOT NECESSARILY A COMPLETE ONE (#10024 review, P1).
+    The write repair puts every turn the record refused into the graph, so the
+    record can answer `[s_t0]` for a session the graph also holds `s_t1` for. The
+    pre-fix shape returned on truthiness and served a ONE-turn transcript for a
+    two-turn session, with no line saying a turn had been dropped.
+
+    So the assertion is BOTH halves: the record's answer is served (its framed
+    text un-framed, its role from the speaker column) AND the turn only the graph
+    holds completes it. The graph cannot override a record row: on `s_t0` the
+    record's `hello` wins over the graph's row, which is the §2.0 rule (Postgres
+    is the record, the graph a derived cache).
+    """
     turns, proj = _hosted_turns(
         monkeypatch, record=[_turn("s_t0", "[user] hello")],
         graph_rows=GRAPH_ROWS)
-    assert [t["id"] for t in turns] == ["s_t0"], (
-        "the record answered, so the graph copy is the fallback — not the source")
+    assert [t["id"] for t in turns] == ["s_t0", "s_t1"], (
+        "the record answered with one of the session's two turns and the graph "
+        "turn the write repair landed was dropped from the transcript")
     assert turns[0]["content"] == "hello", "the framed text must be un-framed"
-    assert proj.g.queries == [], "the graph was read although the record answered"
+    assert proj.g.queries, (
+        "the graph must be asked even when the record answers — a short answer "
+        "is indistinguishable from an empty one without it")
+
+
+def test_a_complete_record_answer_is_not_duplicated_by_the_graph(monkeypatch):
+    """The other half of reconciliation: the graph copy of a turn the record ALSO
+    holds must not be served twice (a duplicated turn is a corrupted transcript)."""
+    turns, _proj = _hosted_turns(
+        monkeypatch, record=[_turn("s_t0", "[user] hello"),
+                             _turn("s_t1", "[assistant] hi")],
+        graph_rows=GRAPH_ROWS)
+    assert [t["id"] for t in turns] == ["s_t0", "s_t1"], (
+        f"the merge duplicated a turn both stores hold: {[t['id'] for t in turns]}")
+    assert [t["content"] for t in turns] == ["hello", "hi"]
+
+
+def test_a_graph_turn_recovered_into_a_partial_answer_keeps_turn_order(monkeypatch):
+    """A recovered turn belongs where the index says, not tacked on the end.
+
+    The record refused the FIRST turn of the window, so the graph holds `s_t0`
+    and the record `s_t1`. Appending the graph's answer would serve the
+    transcript backwards.
+    """
+    turns, _proj = _hosted_turns(
+        monkeypatch, record=[_turn("s_t1", "[assistant] hi")],
+        graph_rows=[GRAPH_ROWS[0]])
+    assert [t["id"] for t in turns] == ["s_t0", "s_t1"], (
+        "the turn recovered from the graph was served out of turn order")
+    assert [t["content"] for t in turns] == ["hello", "hi"]
 
 
 def test_an_empty_record_answer_is_not_an_empty_transcript(monkeypatch):
@@ -561,3 +605,138 @@ def test_the_session_recorded_fold_carries_turn_max_index(sdk, monkeypatch):
     assert rows[0][1] == 3, (
         "the fold dropped turn_max_index, so a journal-only rebuild loses the "
         "id-space high-water mark the sweep bounds itself by")
+
+    # ⛔ AND IT IS MONOTONIC (#10024 review, P2). The live sink writes a
+    # `CASE WHEN … < $tmi` max — "an append must not lower it" — while the fold
+    # wrote a plain `SET`, so the LAST event won over the MAX: capture(4 turns →
+    # 3) then capture(2 → 1) left live at 3 and a rebuild at 1, and the #1920
+    # sweep bounds itself by this mark. The observed value is what is asserted,
+    # not the clause: fold the shorter capture and read the node back.
+    proj._fold_session_recorded({
+        "type": "SessionRecorded", "id": "fold-session",
+        "created_at": "2026-10-25T00:00:01+00:00",
+        "turn_count": 2, "turn_max_index": 1,
+    })
+    rows = proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.turn_count, s.turn_max_index",
+        params={"sid": "fold-session"}).result_set
+    assert rows[0][1] == 3, (
+        "a shorter re-capture LOWERED the rebuilt high-water mark to "
+        f"{rows[0][1]} — live stays at 3, so `derived = replay(journal)` is false "
+        "for the property the stale-turn sweep bounds itself by, and the rebuilt "
+        "node under-sweeps ids it no longer owns")
+    assert rows[0][0] == 2, (
+        "`turn_count` is a WINDOW LENGTH and stays latest-wins — the monotone "
+        "clause above must not be applied to it")
+
+
+def test_a_journal_append_that_raises_repairs_the_turn_it_never_reported(
+        sdk, monkeypatch):
+    """⛔ THE OUTCOME LIST IS KEYED BY TURN, NOT POSITIONAL (#10024 review, P1).
+
+    `_emit_event` returns BEFORE the record leg when the journal append raises
+    (documented, non-fatal: ENOSPC), so the write observer is simply never called
+    for that turn. A positional list then SHIFTS LEFT: with the append failing for
+    turn 0 and succeeding for turn 1, the outcomes read `[True]` — turn 0 (which
+    reached NO store) looks landed and is never repaired, and turn 1 (landed) is
+    re-written to the graph as a duplicate.
+
+    The pin is the ARTIFACT: the graph must hold the turn whose append raised, and
+    only that one.
+    """
+    from tortoise import record_writer
+
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    sdk._bind_record_tenant("org-10024", "graph-10024")
+    handed = _counting_record_seam(monkeypatch)
+
+    log = sdk._get_event_log()
+    real_append = log.append
+    raises = {"left": 1}
+
+    def _append(event):
+        point = event.get("point") or {}
+        if (event.get("type") == "PointAdded" and point.get("is_episodic")
+                and raises["left"]):
+            raises["left"] -= 1
+            raise OSError(28, "No space left on device")
+        return real_append(event)
+
+    monkeypatch.setattr(log, "append", _append, raising=False)
+    proj = sdk._get_proj()
+    _capture(sdk, "eno-session", [{"role": "user", "content": "a"},
+                                  {"role": "assistant", "content": "b"}])
+    assert raises["left"] == 0, "the seam never raised — the leg proves nothing"
+    recorded = [r["point"]["id"] for r in handed
+                if r.get("type") == "PointAdded"
+                and (r.get("point") or {}).get("is_episodic")]
+    assert recorded == ["eno-session_t1"], (
+        f"the record was handed {recorded} — the turn whose journal append "
+        "raised must never reach the record")
+    assert sorted(sdk_mod._capture_turn_ids(proj, "eno-session")) == [
+        "eno-session_t0"], (
+        "the repair named the WRONG turn: the outcome list shifted left, so "
+        "turn 0 (in NO store) was skipped and the landed turn 1 was duplicated "
+        f"into the graph ({sorted(sdk_mod._capture_turn_ids(proj, 'eno-session'))})")
+
+
+def test_the_sdk_read_answers_from_the_record_with_no_journal(monkeypatch, tmp_path):
+    """⛔ THE CONFIGURATION THE HOSTED DOOR SERVES AND THE SDK DID NOT
+    (#10024 review, P2).
+
+    `_record_turns_for` decided the read with `live_write_verdict`, whose arms
+    describe WRITE eligibility: `no_durable_journal` refused a journal-less SDK —
+    a SUPPORTED shape (`tortoise/config.py`; #4240) — and `circuit_open` silenced
+    reads for 60 s after one failed WRITE. Either one fell through to the graph,
+    where an armed session has NO turn node, so `get_session` reported
+    `turn_points: []` for a transcript that exists while `GET /v1/sessions/{id}`
+    served it.
+    """
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    monkeypatch.delenv("TORTOISE_EVENT_LOG_BASE_DIR", raising=False)
+    from tortoise import record_writer
+    from tortoise.sdk import TortoiseSDK
+
+    bare = TortoiseSDK(db_path=str(tmp_path / "bare.db"))  # NO event_log_path
+    assert bare._get_event_log() is None, (
+        "this leg is only about a journal-less SDK — the fixture must have none")
+    bare._bind_record_tenant("org-bare", "graph-bare")
+    # The lane's last WRITE failed, so the live door's breaker is open: a READ
+    # must not inherit that verdict.
+    monkeypatch.setattr(record_writer, "_breaker_open_until",
+                        float("inf"), raising=False)
+    monkeypatch.setattr(record_serve, "read_session_turns",
+                        lambda **kw: (_turn("bare-sess_t0", "[user] hello"),))
+    proj = bare._get_proj()
+    proj.g.query(
+        "MERGE (s:Session {id:$sid}) SET s.created_at=$now, s.turn_count=1",
+        params={"sid": "bare-sess", "now": "2026-10-25T00:00:00+00:00"})
+    detail = bare._read_captured_session(proj, "bare-sess")
+    assert [t["id"] for t in detail["turn_points"]] == ["bare-sess_t0"], (
+        "a journal-less SDK with an armed record served an EMPTY transcript for "
+        "a session the record holds — the read was decided by write eligibility")
+
+
+def test_the_sdk_read_completes_a_partial_record_answer(sdk, monkeypatch):
+    """The SDK twin of the hosted reconciliation: a SHORT record answer is
+    completed from the graph instead of served as the whole transcript."""
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    sdk._bind_record_tenant("org-sdk2", "graph-sdk2")
+    monkeypatch.setattr(record_serve, "read_session_turns",
+                        lambda **kw: (_turn("sdk-part_t1", "[assistant] hi"),))
+    proj = sdk._get_proj()
+    proj.g.query(
+        "MERGE (s:Session {id:$sid}) SET s.created_at=$now, s.turn_count=2",
+        params={"sid": "sdk-part", "now": "2026-10-25T00:00:00+00:00"})
+    for i, text in ((0, "[user] hello"), (1, "[assistant] hi")):
+        proj.g.query(
+            "MATCH (s:Session {id:$sid}) MERGE (t:Point {id:$tid}) "
+            "SET t.pointKind='event', t.is_episodic=true, t.content=$c, "
+            "t.createdAt=$now MERGE (s)-[:CONTAINS]->(t)",
+            params={"sid": "sdk-part", "tid": f"sdk-part_t{i}", "c": text,
+                    "now": "2026-10-25T00:00:0%d+00:00" % i})
+    detail = sdk._read_captured_session(proj, "sdk-part")
+    assert [t["id"] for t in detail["turn_points"]] == [
+        "sdk-part_t0", "sdk-part_t1"], (
+        "the record answered with one of the session's two turns and the graph "
+        f"turn was dropped: {[t['id'] for t in detail['turn_points']]}")

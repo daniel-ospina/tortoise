@@ -2882,6 +2882,34 @@ def test_retype_snapshot_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_backfill_graph_turns_tool_change_selects_core_not_tier1():
+    # #10017 review P1: tools/backfill_graph_turns.py is the pre-delete turn
+    # census — the artifact `verify` compares the record against before an
+    # IRREVERSIBLE delete — and it owns tests/test_10017_backfill_census.py,
+    # registered `core`.
+    #
+    # `tools/` is a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row
+    # matches the tool, so a census-only diff came back with `changed == []` and
+    # took the docs-only early return: `select()` returned NO surface, so the
+    # file's own suite (and BOTH of its repo guards — the #8118 read bound in
+    # tests/test_bounded_raw_clients_3065.py and the #5128 interpreter guard in
+    # tests/test_entry_point_python_guard.py) never ran on the PR editing the
+    # census. Registering the test under `core` does not help: a name in a
+    # surface's test_files only runs when that surface is ALREADY selected.
+    #
+    # Measured before the CORE_ALSO entry: `--changed-files
+    # tools/backfill_graph_turns.py` -> surfaces=[], full=False, and
+    # test_10017_backfill_census.py absent from the 68 selected files. Same
+    # #1349/#3332/#3616 silent-drop class as tools/graph_census.py and
+    # tools/queue_conflict_census.py above; CORE_ALSO (not TOOL_CARVEOUTS)
+    # because the suite is hermetic (a fake graph + a fake client, no DB).
+    # Mutation check: removing the CORE_ALSO entry fails assert 2 below.
+    r = _sel(["tools/backfill_graph_turns.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_10017_backfill_census.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
 def test_graph_census_tool_change_selects_core_not_tier1():
     # #8882 review P1: tools/graph_census.py is the CLI for the measured census
     # and owns tests/test_graph_census_8882.py, registered `core`.
@@ -4901,7 +4929,14 @@ def test_watchdog_is_per_shard_and_scales_with_the_shard():
     )
     small = shard_watchdog_minutes(6.81 * 60)     # a 6.81-min shard at S=9
     old_two = shard_watchdog_minutes(30.62 * 60)  # a 30.62-min shard at S=2
-    assert small == WATCHDOG_FLOOR_MIN == 15, small
+    # The FLOOR is a DERIVED value, not a taste: 2.9× the largest single fast file
+    # (the derivation `tools/ci_selection.py`'s constant block states). It was 15
+    # while the largest was 310.7 s; the 2026-10-26 sweep measured
+    # `test_calibration.py` at 390.0 s, so 15 no longer clears the 2.5× asserted
+    # below and the floor moved to the value its own derivation requires —
+    # ceil(390.0 × 2.9 / 60) = 19. The pin stays a pin: it names the number the
+    # derivation produced, so the NEXT move has to be argued here too.
+    assert small == WATCHDOG_FLOOR_MIN == 19, small
     assert small < old_two, "the smaller shard must not inherit the old budget"
     assert old_two == WATCHDOG_CEILING_MIN == 55
     # the floor must clear the #6133 floor (the largest single fast file) with
@@ -5478,6 +5513,88 @@ def test_flat_default_claim_check_is_not_vacuous():
     assert _durations_rows_claiming_the_flat_default(legitimate, durations) == []
 
 
+_DURATIONS_TOP_KEY_RE = re.compile(r"^[a-z_]+:\s*$")
+
+
+def _durations_row_comments(text: str):
+    """`(key, joined comment)` for every row of the `durations` map, wraps joined.
+
+    A row's comment is the tail after its value PLUS its indented `#` continuation
+    lines. The map's long notes are wrapped across lines, so reading only the row
+    line both misses damage that sits on a continuation line and reads a pair that
+    wraps as unbalanced. Continuations are unambiguous here: the block carries no
+    standalone comment line (`durations:` is followed by rows and wrap lines only).
+    """
+    out = []
+    lines = text.splitlines()
+    try:
+        start = next(i for i, ln in enumerate(lines) if ln.strip() == "durations:")
+    except StopIteration:  # pragma: no cover — the map always declares the block
+        return out
+    end = next((i for i in range(start + 1, len(lines))
+                if _DURATIONS_TOP_KEY_RE.match(lines[i])), len(lines))
+    current = None
+    for i in range(start + 1, end):
+        m = _DURATIONS_ROW_RE.match(lines[i])
+        if m is not None:
+            current = [m.group("key"), [m.group("tail")]]
+            out.append(current)
+            continue
+        stripped = lines[i].strip()
+        if current is not None and stripped.startswith("#"):
+            current[1].append(stripped.lstrip("#"))
+        elif stripped:
+            current = None
+    return [(key, " ".join(chunks)) for key, chunks in out]
+
+
+def _durations_rows_with_unbalanced_parens(text: str):
+    """Rows whose note carries a `(` or `)` whose partner is nowhere in the note."""
+    return [(key, note.strip()) for key, note in _durations_row_comments(text)
+            if note.count("(") != note.count(")")]
+
+
+def test_no_durations_row_keeps_half_a_parenthesis():
+    """#10055 review (P3): a clause cut may not orphan a parenthesis.
+
+    `tools/ci_timing.py`'s clause cutters drop a stale clause whole; when that
+    clause carried one half of a paren pair the survivor kept the other half, e.g.
+    `test_url_keyed_source_write_4649.py` -> `#4649: 169.5s wall for the whole file)`
+    and `test_7951_enforce_atomic_write.py` -> `#7951: … 7.39s wall (measured at the
+    rebase head — ci-timing …` with no closer. Measured on the refresh head: 18 rows
+    against 2 on main. Every surviving claim is still TRUE (that is why this is P3
+    and not a behaviour defect), but a dangling half reads as a typo and hides that
+    a sentence was cut — this map treats a damaged note as a defect, not cosmetics.
+    """
+    text = cs.MANIFEST.read_text(encoding="utf-8")
+    offenders = _durations_rows_with_unbalanced_parens(text)
+    assert offenders == [], (
+        "a durations row's note keeps half a parenthesis — a clause was cut without "
+        f"its partner (#10055 review, P3): {[k for k, _ in offenders]}. Drop the "
+        "orphaned half (`tools/ci_timing._balance_cut_parens` does this on every cut).")
+
+
+def test_the_paren_guard_is_not_vacuous():
+    """The guard above must bite on a cut casualty and stay quiet on its siblings."""
+    stale = (
+        "durations:\n"
+        "  test_a.py: 4.3  # #4649: 169.5s wall for the whole file); the floor "
+        "fails by construction.\n"
+        "  test_b.py: 7.4  # #7951: 19 tests, 7.39s wall (measured at the rebase head "
+        "— ci-timing junit 2026-10-26; was 7.4\n"
+        "surfaces: []\n")
+    legitimate = (
+        "durations:\n"
+        "  test_c.py: 1.0  # a note with no parens at all.\n"
+        "  test_d.py: 2.0  # says (a balanced thing) and nothing else.\n"
+        "  test_e.py: 3.0  # a pair that WRAPS across lines (opened here\n"
+        "      # and closed on the continuation line).\n"
+        "surfaces: []\n")
+    assert [k for k, _ in _durations_rows_with_unbalanced_parens(stale)] == [
+        "test_a.py", "test_b.py"]
+    assert _durations_rows_with_unbalanced_parens(legitimate) == []
+
+
 def test_2818_new_file_row_carries_the_flat_default_until_a_sweep_collects_it():
     """#9003 review (P2): a NEW file's first weight is the flat default, not a local timing.
 
@@ -5618,7 +5735,18 @@ def test_expect_uri_gated_iff_uri():
     guard = next(s for s in steps
                  if s.get("name", "").startswith("Skip-fail guard"))
     assert '-s "${RUNNER_TEMP:-/tmp}/pytest-files"' in guard["run"]
-    assert "--manifest /tmp/expected-nodeids.txt" in guard["run"]
+    # ⛔ THE GUARD MUST READ THE MANIFEST THE MANIFEST STEP WROTE — the PATH is not
+    # the contract, the PAIRING is (2026-10-25). Both now ride the job's
+    # `$PYTEST_MANIFEST` (= `${{ runner.temp }}/expected-nodeids.txt`) instead of the
+    # global `/tmp/expected-nodeids.txt`: on a self-hosted runner several jobs share
+    # ONE `/tmp`, so a fixed name let this guard compare against ANOTHER job's
+    # manifest and red on a mismatch belonging to no test it ran (#7815). Asserting
+    # the literal would re-open that clobber; asserting the pairing is what keeps
+    # the guard honest once the path is per-runner.
+    assert "--manifest \"$PYTEST_MANIFEST\"" in guard["run"]
+    assert (
+        '--output "$PYTEST_MANIFEST"' in manifest["run"]
+    ), "the manifest step and the skip-fail guard must share ONE path variable"
     # The canary producer is gated to half b + post-merge (cycle-5 P1-7
     # option (b): exactly ONE leg writes, no last-writer-wins clobber).
     # #4367: the nightly schedule trigger was removed, so post-merge is
@@ -7145,12 +7273,21 @@ def _extract_pytest_marker(run_script: str) -> str:
     module form is never a marker — the unquoted fallback skips 'pytest'.
 
     #6142: the `test` job now has a SECOND pytest invocation — the last-failed
-    pre-phase, whose junit is /tmp/junit-lf.xml. Scanning the whole script
-    silently retargets this pin to the pre-phase (the same class of bug fixed
-    in tests/test_skip_guard.py), so the pre-phase line is dropped and the
-    search stays on the canonical gating invocation."""
+    pre-phase. Scanning the whole script silently retargets this pin to the
+    pre-phase (the same class of bug fixed in tests/test_skip_guard.py), so the
+    pre-phase line is dropped and the search stays on the canonical gating
+    invocation.
+
+    #10028: the exclusion is spelled on the PRE-PHASE's own junit indirection,
+    not on a `/tmp/...` literal — `--junitxml="$PYTEST_JUNIT_LF"`. The retired
+    literal appears nowhere any more, so leaving it here silently dropped
+    NOTHING and the search fell through to the pre-phase (both markers happened
+    to be identical, so the pin stayed green while no longer discriminating).
+    Filtering on the LF token drops exactly the pre-phase: `"$PYTEST_JUNIT"` is
+    not a substring of `"$PYTEST_JUNIT_LF"`."""
     searchable = "\n".join(
-        ln for ln in run_script.splitlines() if "junit-lf.xml" not in ln)
+        ln for ln in run_script.splitlines()
+        if '"$PYTEST_JUNIT_LF"' not in ln)
     quoted = _re.search(r"-m '([^']+)'", searchable)
     if quoted:
         return quoted.group(1)
@@ -10466,6 +10603,22 @@ def test_lane_stash_guard_runs_on_a_tools_only_change():
     assert r["full"] is False, r
     assert r["surfaces"] == ["core"], r
     assert "test_lane_stash.py" in r["test_files"], r
+
+
+def test_turn_parity_census_guard_runs_on_a_tools_only_change():
+    # #10017: `tests/test_10017_turn_parity_census.py` (registered `core`)
+    # pins the refusal arms of `tools/turn_parity_census.py` — the purge gate
+    # for the pre-#10000 turn nodes. `tools/` is a flat NON_PYTHON_PREFIXES
+    # entry and the tool matches no SOURCE_PATTERNS row, so before the
+    # CORE_ALSO entry a census-only diff was filtered out BEFORE the
+    # "not matched -> core" fallback: the gate's own refusal pins never ran
+    # on the file they hold (the #1349/#3332/#3616 silent-drop class).
+    # Mutation check: removing the CORE_ALSO entry fails the arm below
+    # (surfaces == [] and the guard absent from test_files).
+    r = _sel(["tools/turn_parity_census.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert "test_10017_turn_parity_census.py" in r["test_files"], r
 
 
 def test_journal_growth_guard_runs_on_a_tool_or_probe_change():

@@ -34,7 +34,7 @@ class _FakeGraph:
     def __init__(self, edges):
         self._edges = edges
 
-    def query(self, statement, params=None):  # signature parity
+    def query(self, statement, params=None):  # signature parity (params is unused)
         return _QueryResult([[self._edges]])
 
 
@@ -45,7 +45,7 @@ class _FakeProj:
         self.node = node
         self.g = _FakeGraph(edges)
 
-    def _resolve_entity(self, id_val, *, by_id=True, by_eventId=True, by_url=True):
+    def _resolve_entity(self, id_val, *, by_id=True, by_eventId=True, by_url=True):  # camelCase parity with the real SDK signature
         if self.node is None:
             return []
         return [self.node]

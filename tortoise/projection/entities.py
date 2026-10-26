@@ -2782,13 +2782,37 @@ class _EntityHandlers:
         if _src and _annotator_value_ok(_src):
             sets.append("s.source=coalesce(s.source, $v_source)")
             params["v_source"] = _src
-        for prop in ("turn_count", "turn_max_index", "harness", "entity_links_attempted",
+        for prop in ("turn_count", "harness", "entity_links_attempted",
                      "entity_links_created", "capture_ok",
                      "capture_extractor", "capture_redactions"):
             val = ev.get(prop)
             if val is not None and _annotator_value_ok(val):
                 sets.append(f"s.{prop}=$v_{prop}")
                 params[f"v_{prop}"] = val
+        # #10000: the id-space high-water mark is MONOTONIC in the live sink and
+        # must be monotonic here too (#10024 review, P2).
+        #
+        # `sdk._write_session_and_turns` writes it as
+        # `CASE WHEN s.turn_max_index IS NULL OR s.turn_max_index < $tmi THEN $tmi
+        # ELSE s.turn_max_index END` — "an append must not lower it" — while
+        # `SessionRecorded` carries THIS capture's `turn_offset + turn_count - 1`.
+        # A plain `SET` (the generic loop above) therefore lets the LAST event win
+        # over the MAX: `capture(4 turns → 3)` then `capture(2 → 1)` leaves the
+        # live node at 3 and a journal-only rebuild at 1, so `derived =
+        # replay(journal)` is FALSE for the property the #1920 stale-turn sweep
+        # bounds itself by (`coalesce(s.turn_max_index, s.turn_count, 0)`) and the
+        # rebuilt node under-sweeps ids it no longer owns.
+        #
+        # `turn_count` is the ASYMMETRY, and it is deliberate: it is a WINDOW
+        # LENGTH, so latest-wins is correct on both sides and it stays in the
+        # plain-`SET` loop above.
+        _turn_max_index = ev.get("turn_max_index")
+        if _turn_max_index is not None and _annotator_value_ok(_turn_max_index):
+            sets.append(
+                "s.turn_max_index=CASE WHEN s.turn_max_index IS NULL "
+                "OR s.turn_max_index < $v_turn_max_index "
+                "THEN $v_turn_max_index ELSE s.turn_max_index END")
+            params["v_turn_max_index"] = _turn_max_index
         # #9206 (review P1): the two ATTRIBUTION props the same session MERGE
         # writes. Set-if-absent on BOTH sides (the live clause is a `coalesce`),
         # so a later producer cannot relabel the machine/model that captured the
