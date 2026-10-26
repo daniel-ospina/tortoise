@@ -1613,9 +1613,13 @@ class TestPointsCreate:
         finally:
             # Put the session's own state back (in place — these mappings are
             # module globals other tests hold references to).
+            # `strict=True`: `_preexisting` is built from the same three
+            # mappings, so a length mismatch is a bug in THIS test's snapshot,
+            # not a state both sides are allowed to disagree on — truncation
+            # here would silently leave one global unrestored (B905).
             for _mapping, _snapshot in zip(
                     (ha._DREAM_TASKS, ha._DREAM_RECORD_TENANTS,
-                     ha._DREAM_QUEUES), _preexisting):
+                     ha._DREAM_QUEUES), _preexisting, strict=True):
                 _mapping.clear()
                 _mapping.update(_snapshot)
 
