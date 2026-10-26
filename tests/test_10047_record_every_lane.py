@@ -26,6 +26,7 @@ one starts to, the test fails loudly instead of silently passing with no bind.
 from __future__ import annotations
 
 import asyncio
+from typing import ClassVar
 
 import pytest
 
@@ -83,7 +84,12 @@ class _QuietSDK(_RecordingSDK):
 
 
 class _Res:
-    result_set: list = []
+    # ClassVar, not a plain mutable default: this empty result set is a
+    # deliberately SHARED "no rows" placeholder — every `_Res` instance is
+    # identical and nothing ever mutates it — so the shared state RUF012 warns
+    # about cannot occur. Annotating it says so instead of moving it to
+    # `__init__`, which would imply per-instance state that does not exist.
+    result_set: ClassVar[list] = []
 
 
 class _FakeProj:

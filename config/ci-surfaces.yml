@@ -984,6 +984,24 @@ surfaces:
   # `hosted_api.py`/`supabase_control.py`-only change, the #2938 silent-drop
   # class this comment exists to prevent.
   - test_10025_graph_identity.py
+  # #10047 (the #10025 residual): the five lambdas that build their OWN SDK —
+  # the onboarding/starter seed runners and the three background index jobs —
+  # install the org's DEFAULT-graph record tenant via
+  # `_bind_default_graph_record_tenant`. DUAL-REGISTERED (`api` + `core`), for
+  # exactly the reason stated directly above for its `test_10025` sibling: the
+  # file drives `tortoise/hosted_api.py` and `tortoise/supabase_control.py`
+  # (`default_graph_id_for`), BOTH exact `SOURCE_PATTERNS["api"]` entries, so an
+  # api-only diff selects `api` + `onboarding` and REPLACES the `core` fallback
+  # — measured on this entry's absence: `--changed-files
+  # tortoise/hosted_api.py` -> surfaces=['api','onboarding'] with this file
+  # ABSENT, and `--changed-files tortoise/supabase_control.py` -> ['api'] with
+  # it ABSENT too. The `core` arm is load-bearing for the other input,
+  # `tortoise/record_writer.py` (`record_tenant_for`, the seam the tenant must
+  # reach), which matches no SOURCE_PATTERNS row and so takes the `core`
+  # fallback. Dropping either arm is the #2938/#3154 silent-drop class this
+  # comment exists to prevent. DB-free: a fake control plane and a recording
+  # fake SDK, no graph writes, no server.
+  - test_10047_record_every_lane.py
   # #3554: the `:Session` write-schema declaration (tortoise/session_schema.py)
   # and its writer inventory + D9 retrofit instrument
   # (tools/session_retrofit_audit.py). DUAL-REGISTERED (`api` + `core`), same
@@ -3186,6 +3204,7 @@ surfaces:
   - test_write_session_and_turns_3551.py  # #3551: the shared _write_session_and_turns primitive (Session MERGE + turn store); dual: api
   - test_10000_turns_record_only.py  # #10000: record-vs-graph turn store + turn_max_index sweep; dual: api
   - test_10025_graph_identity.py  # #10025: graph id vs user-editable name; default-graph record tenant; dual: api
+  - test_10047_record_every_lane.py  # #10047: the seed runners + background index jobs install the DEFAULT-graph tenant; dual: api (core is load-bearing for record_writer.py, which matches no SOURCE_PATTERN)
   - test_10017_backfill_census.py  # #10017: the pre-delete turn census is per-session — core ONLY (the census drives a raw falkordb client, never the hosted API, so unlike the 3551/10000 rows above it has no api leg)
   # #3554: the `:Session` write-schema declaration + its writer inventory/D9
   # retrofit instrument; dual: api (the inventory predicate scans hosted_api.py).
