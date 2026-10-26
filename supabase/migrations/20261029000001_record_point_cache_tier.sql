@@ -29,10 +29,13 @@
 ALTER TABLE public.point
   ADD COLUMN IF NOT EXISTS cache_tier text NOT NULL DEFAULT 'graph';
 
+-- ONE statement, as `20261014000001` does and for the same reason: a per-
+-- statement apply that stops between a DROP and its ADD leaves the table with NO
+-- tier refusal at all (an `ALTER` batch is atomic only as a whole), and here it
+-- would also mean two ACCESS EXCLUSIVE acquisitions on the record's
+-- highest-volume table instead of one.
 ALTER TABLE public.point
-  DROP CONSTRAINT IF EXISTS chk_point_cache_tier;
-
-ALTER TABLE public.point
+  DROP CONSTRAINT IF EXISTS chk_point_cache_tier,
   ADD CONSTRAINT chk_point_cache_tier
   CHECK (cache_tier IN ('graph', 'record_only'));
 
@@ -63,10 +66,13 @@ UPDATE public.point
    SET props = props - 'cache_tier'
  WHERE props ? 'cache_tier';
 
+-- ONE statement again, and here the gap is worse than redundant work: between
+-- the two halves the table accepts `content_hash`, `ep_alpha`, `c_cal` … while
+-- `refused_props_names()` goes on reporting them refused from the FILES — and a
+-- concurrent write landing in that window makes the re-ADD validate and abort
+-- with the very error this file's backfill exists to prevent.
 ALTER TABLE public.point
-  DROP CONSTRAINT IF EXISTS chk_point_props_no_derived;
-
-ALTER TABLE public.point
+  DROP CONSTRAINT IF EXISTS chk_point_props_no_derived,
   ADD CONSTRAINT chk_point_props_no_derived
   CHECK (NOT (props ?| ARRAY[
     '_graph_id', '_nid', 'baseline_set', 'c_cal', 'cache_tier', 'confidence',

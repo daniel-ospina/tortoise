@@ -755,6 +755,40 @@ if (missingSuites.length > 0) {
   process.exit(1);
 }
 
+// ── #10017: the cache-tier backfill is SURGICAL, and the column defaults ──
+// The seed above carries `cache_tier` (the reserved name, which this migration
+// must remove from the tail) AND `kept` (a property it must NOT touch). Asserting
+// only "the migration applied" would pass for `SET props = '{}'` — which wipes
+// every other property of every affected row on every tenant.
+//
+// ⛔ And it runs BEFORE the suites, like the #4216 and #9881 legs: it seeds a
+// half-built tenant (org + graph + one point, no default graph, no memberships),
+// so a future suite that scans organizations would pick it up and report the
+// failure against the wrong file.
+{
+  const t = await db.query(`SELECT props, cache_tier FROM public.point
+     WHERE org_id = '10017-cache-tier-org' AND node_key = 'cache-tier-poison'`);
+  const row = t.rows[0];
+  if (!row) {
+    console.error('✗ #10017: the seeded row is gone — this check verified nothing');
+    process.exit(1);
+  }
+  if (JSON.stringify(row.props) !== JSON.stringify({ kept: 'yes' })) {
+    console.error('✗ #10017: the backfill removed more than the reserved name '
+      + `(props = ${JSON.stringify(row.props)}) — it destroys real properties`);
+    process.exit(1);
+  }
+  if (row.cache_tier !== 'graph') {
+    console.error('✗ #10017: the stripped row did not land the DEFAULT graph tier '
+      + `(got ${JSON.stringify(row.cache_tier)}) — a tail value was promoted`);
+    process.exit(1);
+  }
+  await db.exec(`DELETE FROM public.organizations
+                  WHERE id = '10017-cache-tier-org'`);
+  console.log('✓ #10017: the tier backfill strips ONLY the reserved name (its '
+    + 'control property survives) and the column lands the default graph tier');
+}
+
 for (const suite of suites) {
   const sql = readFileSync(`${TESTS_DIR}/${suite}`, 'utf8');
   console.log(`\nRunning test suite ${suite}...`);
@@ -858,35 +892,6 @@ try {
   console.log('✓ 0011: duplicate org name rejected (unique index active)');
 } finally {
   await db.exec(`DELETE FROM public.organizations WHERE id IN ('dup-a', 'dup-b');`);
-}
-
-// ── #10017: the cache-tier backfill is SURGICAL, and the column defaults ──
-// The seed above carries `cache_tier` (the reserved name, which this migration
-// must remove from the tail) AND `kept` (a property it must NOT touch). Asserting
-// only "the migration applied" would pass for `SET props = '{}'` — which wipes
-// every other property of every affected row on every tenant.
-{
-  const t = await db.query(`SELECT props, cache_tier FROM public.point
-     WHERE org_id = '10017-cache-tier-org' AND node_key = 'cache-tier-poison'`);
-  const row = t.rows[0];
-  if (!row) {
-    console.error('✗ #10017: the seeded row is gone — this check verified nothing');
-    process.exit(1);
-  }
-  if (JSON.stringify(row.props) !== JSON.stringify({ kept: 'yes' })) {
-    console.error('✗ #10017: the backfill removed more than the reserved name '
-      + `(props = ${JSON.stringify(row.props)}) — it destroys real properties`);
-    process.exit(1);
-  }
-  if (row.cache_tier !== 'graph') {
-    console.error('✗ #10017: the stripped row did not land the DEFAULT graph tier '
-      + `(got ${JSON.stringify(row.cache_tier)}) — a tail value was promoted`);
-    process.exit(1);
-  }
-  await db.exec(`DELETE FROM public.organizations
-                  WHERE id = '10017-cache-tier-org'`);
-  console.log('✓ #10017: the tier backfill strips ONLY the reserved name (its '
-    + 'control property survives) and the column lands the default graph tier');
 }
 
 // ── Post-verification spot checks (independent of the test files) ──

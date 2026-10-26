@@ -71,7 +71,13 @@ def test_an_entity_mutation_cannot_carry_the_tier() -> None:
         assert statements, f"{label}: no mutation emitted, so this proves nothing"
         for st in statements:
             assert "cache_tier" not in st.sql, (label, st.sql)
-            assert "record_only" not in st.params, (label, st.sql, st.params)
+            # ⛔ SUBSTRING, not tuple-element membership: for Object/Subject the
+            # tier rides inside ONE jsonb param, so `"record_only" not in
+            # st.params` never fires and the leg would be vacuous.
+            assert not any("cache_tier" in str(p) for p in st.params), (
+                label, st.sql, st.params)
+            assert not any("record_only" in str(p) for p in st.params), (
+                label, st.sql, st.params)
 
 
 # ── the read half
@@ -140,8 +146,13 @@ def test_a_tiered_turns_edge_is_not_planned_either(monkeypatch) -> None:
     assert relation_sql, "the relation read is missing"
     # Scoped to POINT endpoints, not to every key: another label may legally
     # carry the same key string (node_identity is keyed by label too).
-    assert "src_label = 'Point' AND src_key IN" in relation_sql[0]
-    assert "tgt_label = 'Point' AND tgt_key IN" in relation_sql[0]
+    # ⛔ The `NOT` is the assertion. Without it this test passes on the INVERTED
+    # predicate — which keeps ONLY the edges incident to a record-only point, so
+    # `rebuild_from_record` drops every real edge while `relations_not_written`
+    # reports clean (its denominator is the view's own count) — total, silent
+    # loss with a clean operator signal.
+    assert "NOT (src_label = 'Point' AND src_key IN" in relation_sql[0]
+    assert "NOT (tgt_label = 'Point' AND tgt_key IN" in relation_sql[0]
     # …and the exclusion is of the record-only keys, not of every key.
     assert "cache_tier <> 'graph'" in relation_sql[0]
 
