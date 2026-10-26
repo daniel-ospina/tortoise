@@ -1498,8 +1498,8 @@ def test_the_spec_names_the_behavioural_guard_for_all_four_properties() -> None:
 # contract in §2.1 is small enough to state independently.
 # ═══════════════════════════════════════════════════════════════════════════
 
-#: Long enough to be a key: the arm refuses a secret shorter than 32 characters (a guessable
-#: HMAC key is the same forgery oracle as a reused one), so a fixture secret must clear that floor.
+#: Long enough to be a key: the arm refuses a secret shorter than 32 UTF-8 BYTES (a guessable HMAC
+#: key is the same forgery oracle as a reused one), so a fixture secret must clear that floor.
 _TEST_SECRET = "consent-token-secret-for-tests-0123456789"
 #: §2.1 — the session origin, "the minting authority". A token from anywhere else is the `iss`
 #: failure §2.2 names, so the look-alike below is a real shape, not a placeholder.
