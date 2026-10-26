@@ -59,7 +59,11 @@ if _server_uri_set():
     _HAS_FALKORDB = False
     for _attempt in range(5):
         _probe = acl._admin_client()
-        if _probe is not None and acl._falkordb_present(_probe):
+        # #8617: the probe is TRI-state (present/absent/denied) — a plain
+        # truthiness test would read every state as available (all enum members
+        # are truthy), which is the silent-green this gate exists to prevent.
+        if (_probe is not None
+                and acl._falkordb_present(_probe) is acl.FalkorProbe.PRESENT):
             _HAS_FALKORDB = True
             break
         _time.sleep(2)
@@ -141,9 +145,9 @@ def test_create_user_exact_permissions(acl_env):
     key."""
     tid, gid, ns = acl_env["tid"], acl_env["gid"], acl_env["ns"]
     cred = acl.create_acl_user(gid, tid)
-    assert cred is not None
-    assert cred["username"] == f"tenant_{gid}"
-    assert cred["graph"] == ns  # exact namespace
+    assert cred.status is acl.AclStatus.PROVISIONED, cred
+    assert cred.username == f"tenant_{gid}"
+    assert cred.graph == ns  # exact namespace
     try:
         cfg = acl.acl_user_config(gid)
         assert cfg is not None
@@ -168,12 +172,12 @@ def test_credential_stored_server_side(acl_env):
     try:
         got = acl.credential_for_graph(tid, gid)
         assert got is not None
-        assert got["username"] == cred["username"]
-        assert got["password"] == cred["password"]
+        assert got["username"] == cred.username
+        assert got["password"] == cred.password
         assert got["graph"] == ns
         # Re-create is idempotent — stored password reused (no churn).
         again = acl.create_acl_user(gid, tid)
-        assert again["password"] == cred["password"]
+        assert again.password == cred.password
     finally:
         acl.drop_acl_user(gid)
 
@@ -191,7 +195,7 @@ def test_cross_graph_noperm(acl_env):
         c = redis_py.Redis(
             host=urlparse(os.environ["TORTOISE_DB_URI"]).hostname,
             port=urlparse(os.environ["TORTOISE_DB_URI"]).port or _live_utils.docker_port(),
-            username=cred["username"], password=cred["password"],
+            username=cred.username, password=cred.password,
             decode_responses=True, socket_timeout=5,
         )
         # Own graph → OK.
@@ -244,7 +248,7 @@ def test_upsert_heals_drift_exact_state(acl_env):
         assert "+@all" in cfg["commands"]  # drift present
         # Upsert (same stored password) → exact state restored.
         again = acl.create_acl_user(gid, tid)
-        assert again["password"] == cred["password"]
+        assert again.password == cred.password
         cfg = acl.acl_user_config(gid)
         cmds = set(cfg["commands"])
         assert "+@all" not in cmds
@@ -372,7 +376,7 @@ def test_store_miss_rotate_invalidates_old_secret(acl_env, monkeypatch):
     assert _user_exists_on(client, f"tenant_{gid}")
     # Next create: fresh password + resetpass (old one invalidated).
     cred2 = acl.create_acl_user(gid, tid)
-    assert cred2["password"] != cred1["password"]
+    assert cred2.password != cred1.password
     # Old password no longer authenticates.
     from urllib.parse import urlparse as _up
 
@@ -380,12 +384,12 @@ def test_store_miss_rotate_invalidates_old_secret(acl_env, monkeypatch):
     uri = _up(os.environ["TORTOISE_DB_URI"])
     with pytest.raises((redis_py.AuthenticationError, redis_py.ResponseError)):
         redis_py.Redis(host=uri.hostname, port=uri.port or _live_utils.docker_port(),
-                       username=f"tenant_{gid}", password=cred1["password"],
+                       username=f"tenant_{gid}", password=cred1.password,
                        decode_responses=True, socket_timeout=5,
                        ).execute_command("PING")
     # New password authenticates.
     redis_py.Redis(host=uri.hostname, port=uri.port or _live_utils.docker_port(),
-                   username=f"tenant_{gid}", password=cred2["password"],
+                   username=f"tenant_{gid}", password=cred2.password,
                    decode_responses=True,
                    ).execute_command("PING")
 

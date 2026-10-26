@@ -43,6 +43,35 @@ C5, documented).
   when the server IS reachable but SETUSER errors (a real recipe/perm
   failure) — a down ACL layer is never a SPOF (epic §5.5: app spine
   authoritative).
+
+  > **⚠️ SUPERSEDED IN PART — #8617 (owner decision, 2026-10-26): the hosted
+  > (FalkorDB Cloud) half of D3 does not hold.** D3 assumed the server this
+  > admin client reaches can manage ACL users in BOTH lanes. It cannot on
+  > FalkorDB Cloud: no credential the app may hold carries `+ACL` ("No preset
+  > grants `+ACL`"; `ACL` is not in the allowed-commands list), so the SETUSER
+  > there is a permanent permission refusal, every hosted graph mint rolled
+  > back, and the Scope line's premise ("the direct-ACL path IS the seam both
+  > modes share") is false for the managed-Cloud lane.
+  >
+  > What replaces it, per the ruling: the hosted lane **declares** the layer
+  > unavailable (`TORTOISE_ACL_LAYER=off`, `fly.toml`), `create_acl_user()`
+  > reports `absent_by_design` without a server call, the mint proceeds, and
+  > the hosted reconcile reports `absent_by_design` / `denied` / `absent` /
+  > `provisioned` as distinct counters. A permission refusal is
+  > `AclLayerDenied` — deliberately NOT an `AclLayerError`, so no rollback arm
+  > can catch it. Self-hosted (and the docker test lane) keeps D3 and D6
+  > exactly as written; `strict` remains the default and the self-hosted
+  > recipe is unchanged.
+  >
+  > **OVERRIDES:** #2113 indicator (5) — "ACL creation failure rolls back the
+  > mint" — **as applied to the managed-Cloud lane**: it is unsatisfiable
+  > there, so the hosted mint proceeds and the absent second line is
+  > **recorded and reported, never fabricated**.
+  >
+  > **Not decided here** (its own decision, not a side-effect of #8617):
+  > whether to ever want a database-level second lock per graph on Cloud. That
+  > would need the account-level management API (a bearer token + one call per
+  > graph), not this admin client.
 - **D4 (credential storage):** generated 32-hex password stored server-side
   with the graph: registry mode → Graph node props `acl_user`/`acl_pass`
   (SET on the minted node). Supabase mode → NO row columns in C4 (the hosted

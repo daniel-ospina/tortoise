@@ -362,6 +362,52 @@ def test_validator_refuses_pass_for_a_non_official_judge():
     assert validate_receipt(dict(base, verdict="inconclusive")) == []
 
 
+def test_retrieval_only_run_records_partial_not_failed(tmp_path):
+    """#8486 F4. A CLEAN retrieval-only run — ``integrity.valid == true``,
+    every question retrieved, the reader/judge never invoked by design — was
+    stamped ``run_status: failed`` because the status required
+    ``accuracy is not None``. A valid measurement was therefore
+    unrecordable as what it is.
+
+    The three statuses must stay distinguishable: ``completed`` claims a QA
+    accuracy, ``failed`` disowns the artifact, and a retrieval-only run is
+    neither — it measured the OFFICIAL retrieval metric and no QA number.
+    """
+    from tools.longmem_eval.w7_publish import _main
+    report = {
+        "outcomes": [_outcome("q1", 1.0), _outcome("q2", 0.0)],
+        "retrieval": {"session_recall@k": {"5": 0.5},
+                      "retrieval_by_category": {"population": {
+                          "reader_ran": False}}},
+        "methodology": {"judge_model": "n/a (retrieval-only)",
+                        "judge_rubric_id_hash": "hash",
+                        "reader_model_spec": "",
+                        "reader_pinned": None, "ingest_mode": "deterministic",
+                        "retrieval_only": True,
+                        "run_at_utc": "2026-10-25T00:00:00Z",
+                        "measurement_posture": _posture("deterministic"),
+                        "dataset_semantics_audit": {"verdict": "trusted"}},
+        "integrity": {"valid": True}, "accuracy": None,
+        "split": "s", "updated_at_utc": "2026-10-25T00:00:00Z",
+    }
+    rp = tmp_path / "report.json"
+    rp.write_text(json.dumps(report), encoding="utf-8")
+    ds = tmp_path / "data.json"
+    ds.write_text(json.dumps(
+        [{"question_id": "q1", "answer": "a",
+          "answer_session_ids": ["s1"]}]), encoding="utf-8")
+    out = tmp_path / "artifact.json"
+    _main(["--report", str(rp), "--dataset", str(ds), "--commit", "abc123",
+           "--corpus-hash", "sha256:" + "0" * 64, "--cost-usd", "0.0",
+           "--out", str(out)])
+    receipt = json.loads(out.read_text(encoding="utf-8"))["receipt"]
+    assert receipt["run_status"] == "partial"
+    # a partial run carries the retrieval number and never a 'pass'
+    assert receipt["metrics"]["official_recall_all@5"] == 0.5
+    assert receipt["verdict"] == "inconclusive"
+    assert any("retrieval-only" in n for n in receipt["notes"])
+
+
 @pytest.mark.parametrize("run_status", ["failed", "skipped"])
 def test_hand_built_non_completed_receipt_cannot_claim_the_official_pin(
         run_status):

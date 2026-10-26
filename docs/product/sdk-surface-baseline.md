@@ -14,16 +14,16 @@
 | measured | count |
 |---|---|
 | approved methods (the target) | 40 |
-| live public methods on `TortoiseSDK` | 147 |
-| approved and implemented (row 1 `Tortoise(...)` resolves to the `TortoiseSDK` class) | 10 |
-| approved but not implemented yet | 30 |
+| live public methods on `TortoiseSDK` | 150 |
+| approved and implemented (row 1 `Tortoise(...)` resolves to the `TortoiseSDK` class) | 13 |
+| approved but not implemented yet | 27 |
 | live and NOT approved (migration backlog) | 138 |
 
 Row 1 of the owner's table is `Tortoise(...)` — the class a caller constructs. It resolves
 to `TortoiseSDK` (the only constructible entry point); it is not a method on it.
 
 `docs/product/beta-sdk-surface.md` states "only four of the 40 exist in the current SDK".
-That sentence is STALE: nine exist, plus the constructor. It is recorded here rather than
+That sentence is STALE: 12 exist, plus the constructor. It is recorded here rather than
 edited there, because the approved document is the owner's ruling and this baseline is not
 the place to amend it (#10044).
 
@@ -38,13 +38,11 @@ Phase 2 implements them.
 - `check_connection`
 - `create_key`
 - `create_memory_graph`
-- `delete_knowledge`
 - `delete_memory_graph`
 - `explore_connections`
 - `get_organisation_account`
 - `graph_overview`
 - `index_sources_from_directory`
-- `link_entities`
 - `list_keys`
 - `list_knowledge`
 - `list_members`
@@ -59,7 +57,6 @@ Phase 2 implements them.
 - `revoke_key`
 - `search_knowledge`
 - `supersede_knowledge`
-- `update_knowledge`
 - `write_knowledge_batch`
 - `write_question`
 

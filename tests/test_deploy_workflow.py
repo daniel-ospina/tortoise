@@ -2605,6 +2605,34 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "and dropping its fault exception restores the absolute that the fail-soft "
         "resolver (#5148) contradicts"
     )
+    # ⛔ `graph-bound` alone is NOT the discriminator, and the assertion above is
+    # satisfied by the FALSE claim. The control plane is. A graph-bound SELF-HOST
+    # registry credential carries a Falkor `g_<hex>` node id, `record_tenant_for`
+    # returns None for it by design (`control_plane_ids` is False for the
+    # self-host resolver — record_writer.py:648-649), and no `public.graphs` row
+    # exists to file it under — so "a graph-bound credential
+    # cannot land in `no_tenant`" is false, and the paragraph above it lists that
+    # very lane as a designed `no_tenant` producer. Measured (#10071 review P2):
+    # restoring that absolute wording — and separately deleting the counter-example
+    # — left the suite at `99 passed`. The qualifier and the lane that proves it
+    # are the claim, so pin both. The `control-plane` qualifier is pinned by the
+    # assertion above; this is the COUNTER-EXAMPLE half, which had no pin of its
+    # own — merged in from `origin/main`, whose single pattern anchored both halves
+    # on the pre-#10083 wording of the sentence (`… cannot land in `no_tenant` (the
+    # self-host registry lane above is a graph-bound key that resolves through no
+    # control plane …`), which this PR's tighter bound rewrote.
+    assert re.search(
+        r"The self-host registry lane above is the one graph-bound key that "
+        r"resolves through no control plane",
+        flat,
+    ), (
+        "the `no_tenant` bound is stated as an absolute again — a graph-bound "
+        "self-host registry credential is REFUSED and counted `no_tenant` by design "
+        "(`record_tenant_for` returns None for it, and it can never satisfy the "
+        "`public.graphs` FK), so the section tells an operator to read a designed "
+        "outcome as a fault; the counter-example that makes the qualifier "
+        "checkable is missing or unravelled"
+    )
     assert not re.search(r"attribute (?:any|a|each|the) `no_tenant` growth", flat), (
         "the section still tells the operator to attribute `no_tenant` growth per "
         "request — the step the ⛔ ruling below rules out"
@@ -2646,6 +2674,9 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # WARN; `malformed_dsn` and `write_failed` log the exception. Line numbers are
     # deliberately not cited — they rot, and the earlier attempt cited the
     # `no_durable_journal` DEBUG message at that line instead, #10083 review P2).
+    # (`origin/main` re-pointed this same citation at record_writer.py:1218 while
+    # this branch removed the citation instead; the removal supersedes the
+    # re-point, so no line is named here and the correction cannot rot again).
     assert re.search(r"`circuit_open` is the only one that carries the record type", flat), (
         "the section gives no evidence for why the log cannot attribute growth — "
         "only `circuit_open` carries the record type, so a reader cannot check "

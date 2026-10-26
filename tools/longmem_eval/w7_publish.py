@@ -80,7 +80,7 @@ from . import measurement_posture
 
 #: Receipt schema keys mandated by plan §6.6 (same vocabulary as the
 #: W2/W3 harness receipts).
-RUN_STATUS_VALUES = ("completed", "failed", "skipped")
+RUN_STATUS_VALUES = ("completed", "partial", "failed", "skipped")
 VERDICT_VALUES = ("pass", "regression", "inconclusive")
 FAILURE_ORIGIN_VALUES = (None, "config_mismatch", "hash_mismatch",
                          "runner_error", "gate_regression")
@@ -155,6 +155,36 @@ def _fraction_at_k(outcome: dict, k: int | str) -> float | None:
         return None
     v = sr.get(str(k))
     return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+#: The reader identity a retrieval-only report records (``run.py`` renders
+#: these when the reader/judge were never built — #8486 F3).
+RETRIEVAL_ONLY_MODEL = "n/a (retrieval-only)"
+
+
+def _reports_retrieval_only(methodology: dict, retrieval: dict) -> bool:
+    """Did this report come from a run that never invoked a reader/judge?
+
+    Read from the report's OWN record, never inferred from ``accuracy is
+    None`` alone: an accuracy of None is also what a run whose every question
+    failed produces, and that run is ``failed``, not ``partial``. Three
+    independent signals, any one of which is sufficient (they are written by
+    ``run.py`` from the same ``retrieval_only`` flag):
+    ``methodology.retrieval_only`` (written from the #1349 arm block),
+    ``methodology.reader_model == "n/a (retrieval-only)"`` (what ``run.py``
+    renders when no reader was built — #8486 F3), and
+    ``retrieval.retrieval_by_category.population.reader_ran is False``.
+    """
+    if methodology.get("retrieval_only") is True:
+        return True
+    if str(methodology.get("reader_model", "")).strip() \
+            == RETRIEVAL_ONLY_MODEL:
+        return True
+    by_category = (retrieval or {}).get("retrieval_by_category") \
+        if isinstance(retrieval, dict) else None
+    population = (by_category or {}).get("population") \
+        if isinstance(by_category, dict) else None
+    return isinstance(population, dict) and population.get("reader_ran") is False
 
 
 def binary_projections(fraction: float) -> tuple[float, float]:
@@ -644,8 +674,20 @@ def _main(argv: list[str] | None = None) -> None:
     integrity = report.get("integrity") or {}
     judge_model = methodology.get("judge_model", "")
     judge_pin = judge_pin_for(judge_model)
-    run_status = ("completed" if integrity.get("valid") is True
+    # #8486 F4: the status must say what the run ACTUALLY did. ``accuracy is
+    # None`` used to force ``failed``, so a clean retrieval-only run —
+    # ``integrity.valid == true``, every question retrieved, reader/judge never
+    # invoked by design — was recorded as a failure and could not be published
+    # as what it is. A retrieval-only run carries the OFFICIAL retrieval metric
+    # and no QA number, so it is ``partial`` (its own status), never
+    # ``completed`` (which would claim an accuracy) and never ``failed`` (which
+    # would disown a measurement that is valid).
+    retrieval_only = _reports_retrieval_only(methodology, retrieval)
+    run_status = ("completed"
+                  if integrity.get("valid") is True
                   and report.get("accuracy") is not None
+                  else "partial"
+                  if integrity.get("valid") is True and retrieval_only
                   else "failed")
     # #8486 (R12): the verdict is derived from the SAME identity as the pin, so
     # the receipt is self-consistent rather than merely refused later. A
@@ -683,7 +725,14 @@ def _main(argv: list[str] | None = None) -> None:
         failure_origin=None,
         cost_usd=args.cost_usd,
         metrics=metrics,
-        notes=[],
+        # #8486 F4: a ``partial`` receipt says WHICH measurement it carries -
+        # a reader here (reading ``partial`` as "half the questions failed"
+        # would be a different claim entirely).
+        notes=(["retrieval-only run: the official retrieval metric was "
+                "measured and QA accuracy was NOT (the reader/judge never "
+                "ran by design) — run_status 'partial', never 'failed' and "
+                "never 'completed'"]
+               if run_status == "partial" else []),
         resolved_config={
             "split": report.get("split"),
             "ingest_mode": methodology.get("ingest_mode"),

@@ -119,8 +119,11 @@ SINGLE-TENANT deployment. On this tree it EXISTS — the carrier landed in #9231
   hosted REST lane carries the SAME pair by value rather than through this
   `ContextVar` — `hosted_api._data_sdk` → `sdk._bind_record_tenant` — which is
   the seam its `TortoiseSDK` reads. Unwired still: a SESSION/JWT credential and
-  an OAuth `oat_` token (neither carries a `default_graph_id`) and the
-  seed/index runners that build their own SDK — #10047.
+  an OAuth `oat_` token, neither of which carries a `default_graph_id` (#10046).
+  The lanes that build their OWN SDK — the background indexing jobs and the
+  seed runners — are wired since #10047
+  (`hosted_api._bind_default_graph_record_tenant`, same `record_tenant_for`
+  answer, org default graph by construction).
 * **The arming gate.** `record_tenant()` reads the `ContextVar` first and
   consults the env pair ONLY when the deployment declared itself single-tenant
   (`record_writer.single_tenant_declared()` → `TORTOISE_RECORD_SINGLE_TENANT`,
@@ -781,8 +784,19 @@ RECORD_MUTATIONS: dict[str, Mutation] = {
     "PointRetracted": Mutation(
         NodePatch(Node("point", "Point", "id"), key_from="id",
                   literals=(("status", "retracted"),),
-                  from_payload=frozenset()),
-        note="tombstone — the node is KEPT (the hard delete is EntityMutated)",
+                  from_payload=frozenset({"valid_to"})),
+        note="tombstone — the node is KEPT (the hard delete is EntityMutated). "
+             "#4282: `valid_to` rides the payload when the retraction named a "
+             "WINDOW END (the `valid_until`/`invalid_at` field on "
+             "`update_knowledge`, beta row 22) — the caller's instant is the "
+             "datum, so the record carries it and the fold replays it verbatim "
+             "instead of a rebuild losing it; the DECLARATION half is pinned by "
+             "`tests/test_4282_phase2_merges.py`, and the PARITY half (the "
+             "producer really puts the key on the record, the rebuild really "
+             "restores it, and the durability gate stays clean) by "
+             "`tests/test_4282_dated_retraction_durability.py` — a declared "
+             "`from_payload` on a record that never carries the key is exactly "
+             "the vacuous shape that file exists to prevent",
     ),
     "PointSuperseded": Mutation(
         NodePatch(Node("point", "Point", "id"), key_from="id",
