@@ -2761,6 +2761,9 @@ surfaces:
   # `--integrity` would pass — which is the case issue #4617 covers for its own
   # (dual-registered) file, not this one.
   - test_dry_run_preview.py
+  # #9660: the delete tool's preview-then-confirm protocol — it drives
+  # `mcp_server.tortoise_delete` and the registry entry, both `core`.
+  - test_deletion_confirmation.py
   - test_cmux_dispatch.py
   - test_embed_metering.py   # #4488: the tally/middleware/hook + the registry-lane writer/reader (dual with `api`/`eval`)
   - test_retrieval_metering.py   # #4489: the tally/middleware/hook + the registry-lane writer/reader (dual with `api`)
@@ -8375,6 +8378,7 @@ durations:
   test_contact_form.py: 2.0  # unmeasured
   test_contact_rate_limit_behaviour.py: 2.0  # unmeasured
   test_dry_run_preview.py: 2.0  # unmeasured
+  test_deletion_confirmation.py: 2.0  # unmeasured
   test_tmpdir_hygiene.py: 2.0  # unmeasured
   test_tmpdir_sweep.py: 2.0  # unmeasured
   test_reaper_ownership.py: 2.0  # unmeasured

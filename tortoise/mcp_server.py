@@ -20,6 +20,8 @@ from fastmcp.exceptions import (AuthorizationError, FastMCPError, ToolError,
 from fastmcp.tools import ToolResult
 from pydantic import ValidationError as PydanticValidationError
 from tortoise.auth import is_dev_mode as _is_dev_mode
+from tortoise.deletion import ConfirmationExpired, ConfirmationInvalid  # #9660
+from tortoise import deletion as _deletion  # #9660 preview-then-confirm
 from tortoise.config import is_db_uri as _is_db_uri
 from tortoise.sdk import (TortoiseSDK, INGEST_GRANULARITIES,
                           INGEST_PROMOTION_POLICIES, _first_non_draft_status,
@@ -4043,16 +4045,56 @@ def tortoise_update(id: str, props: Any = None) -> dict:
                  id, **(props or {}))
 
 
-def tortoise_delete(id: str, dry_run: bool = False) -> dict:
-    """Delete a Point or entity by id. DESTRUCTIVE — requires human confirmation.
+def tortoise_delete(id: str, dry_run: bool = False,
+                    confirmation: str | None = None) -> dict:
+    """Delete one item by id — a Point, a relation (operators are Points), a Source,
+    an Object, a Subject, or an Event. DESTRUCTIVE and PERMANENT: cannot be undone.
 
-    dry_run=True previews the blast radius — which node resolves, and every
-    edge that would go with it — and changes nothing; dry_run=False
-    (default) deletes.
+    Preview, then confirm (#9660, owner ruling 2026-10-25). The FIRST call —
+    ``dry_run=True``, or simply no ``confirmation`` — CHANGES NOTHING: it reports
+    which node resolves and every edge that would go with it, and returns a
+    short-lived ``confirmation`` token bound to this id. Call again with
+    ``confirmation=<token>`` to delete. An invalid, foreign, or expired token
+    RAISES and destroys nothing — it never falls through to a delete.
+
+    Why a token and not a ``confirm=True`` flag: an assistant can set a flag in
+    the same breath as the call, which leaves nothing between a misread
+    instruction and a destroyed claim. When the item is wrong rather than
+    unwanted, supersede it or retract it instead.
     """
-    if dry_run:
-        return _safe(_preview_delete, _get_org_sdk(), id)
-    result = _safe(_get_org_sdk().delete, id)
+    sdk = _get_org_sdk()
+    # Read the declared binding HERE, on every path (#3904): the confirmation
+    # protocol means the default path returns before the write, so a read that
+    # lived only in the delete branch would leave `sdk_method="delete"` declared
+    # but never consumed on the call an agent actually makes first.
+    delete = sdk.delete
+    if confirmation is None or dry_run:
+        preview = _safe(_preview_delete, sdk, id)
+        if isinstance(preview, _SafeError):
+            return preview
+        target = preview.get("target") or {}
+        kind = target.get("label") or ""
+        try:
+            edges = int(preview.get("edges_removed") or 0)
+        except (TypeError, ValueError):
+            edges = -1
+        token = _deletion.issue(id, kind=kind)
+        receipt = _deletion.receipt(target=id, kind=kind, edges=edges, token=token)
+        # The existing preview already resolves nodes/edges for a person to read;
+        # keep it rather than describing the blast radius a second time.
+        # Same `dry_run: True` marker the other five preview tools return, so a
+        # caller treats every preview the same way (tests/test_dry_run_preview.py
+        # pins it for all six).
+        receipt["dry_run"] = True
+        receipt["found"] = preview.get("found", False)
+        receipt["target"] = target or {"id": id, "label": None}
+        receipt["nodes_removed"] = preview.get("nodes_removed", 0)
+        receipt["edges_removed"] = preview.get("edges_removed", 0)
+        receipt["nodes"] = preview.get("nodes", [])
+        receipt["edges"] = preview.get("edges", [])
+        return receipt
+    _deletion.verify(confirmation, target=id)
+    result = _safe(delete, id)
     if isinstance(result, _SafeError):
         return result
     return {"deleted": bool(result), "id": id}
