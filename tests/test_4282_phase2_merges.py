@@ -480,6 +480,43 @@ def test_operator_true_on_a_relation_with_no_mechanism_is_refused():
         TortoiseSDK.link_entities(inst, "related", "p1", "p2", operator=True)
 
 
+def test_operator_false_on_a_relation_that_has_a_mechanism_is_refused(sdk):
+    """#10053 review (P3): `operator=False` was accepted and ignored.
+
+    The meaning-bearing arm sent EVERY `_EPISTEMIC_RELATION_MEANINGS` relation
+    into `create_operator`, and read `operator` for the first time BELOW it —
+    so `False`, the one spelling a caller would use to FORBID the carrying
+    operator, built the operator anyway: no error, no warning, on the one
+    family where the neighbouring IMPL/NAND arm HONOURS `False`
+    (`operator is not True` -> `create_direct_edge`). One keyword, two
+    meanings, and the caller could not tell which one it got.
+
+    Refused rather than quietly overruled because the relation decides its own
+    storage: `docs/product/beta-sdk-surface.md` row 19 — "An epistemic relation
+    builds an operator, anything else a plain edge — the caller does not
+    choose" — and ONTOLOGY §8 gives the meaning its mechanism.
+    """
+    for relation in sorted(TortoiseSDK._EPISTEMIC_RELATION_MEANINGS):
+        with pytest.raises(ValueError, match="carries the MEANING"):
+            sdk.link_entities(relation, "p1", "p2", operator=False)
+    assert sdk.calls == [], "a refusal must not fall through to a write"
+
+
+def test_operator_false_still_means_a_plain_edge_where_no_meaning_decides(sdk):
+    """The CONTRAST for the refusal above: IMPL/NAND has two legitimate storages.
+
+    Without this, "refuse `operator=False`" would be a rule a later lane could
+    extend to the whole surface and silently remove the plain-edge storage from
+    the one relation that legitimately has it (`operator is not True` ->
+    `create_direct_edge`).
+    """
+    for relation in ("IMPL", "NAND"):
+        sdk.link_entities(relation, "p1", "p2", operator=False)
+        door, _args, _kwargs = sdk.calls[-1]
+        assert door == "create_direct_edge", (
+            f"{relation} + operator=False must stay a PLAIN edge, got {door}")
+
+
 # ── 5. no arm may accept a parameter it cannot RECORD ────────────────────────
 
 

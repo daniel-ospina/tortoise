@@ -2481,6 +2481,21 @@ surfaces:
   # DB or network of its own, and a `tortoise/projection/`-only change selects
   # this surface.
   - test_5048_retract_instant_recorded.py
+  # #10053 review (P2): the DURABILITY half of #4282 phase 2.2 — a dated
+  # retraction's window end must survive `derived = replay(journal)`. Registered
+  # HERE as well as on `sdk`, because its three replay/reference arms live in
+  # modules NO `SOURCE_PATTERNS` row claims — `tortoise/consistency.py`'s
+  # reference fold, `tortoise/record_projection.py`'s carrier,
+  # `tortoise/projection/entities.py`'s `_retract` — so each falls through to
+  # the plain `tortoise/` arm and selects `core` ALONE. With the `sdk` row only
+  # (what #10053 first shipped) those three diffs could not reach the file:
+  # measured `select(["tortoise/consistency.py"], "pull_request", m)` ->
+  # `surfaces=['core']`, the suite ABSENT from `test_files`. That is the
+  # #1349/#2938 silent-drop class: a follow-up reverting one arm of the
+  # invariant would change nothing that runs. Same home and same reason as
+  # `test_5048_retract_instant_recorded.py` above: it builds its own embedded
+  # `TortoiseSDK` (`tmp_path` db + journal), so it needs no server.
+  - test_4282_dated_retraction_durability.py
   - test_4716_capture_operator_ref_remap.py
   - test_6131_operator_mutation_vocabulary.py
   - test_comove_dispatch_3627.py
@@ -5607,14 +5622,19 @@ surfaces:
   # `tests/**/test_*.py` reds the required `manifest-integrity` job
   # (`tools/ci_selection.py --integrity`) — which is what PR #10053 shipped.
   - test_4282_phase2_merges.py
-  # #10053 review (P1): the DURABILITY half of the same phase — a dated retraction's
-  # window end must survive `derived = replay(journal)`. It constructs its own embedded
-  # `TortoiseSDK` (`tmp_path` db + journal), so it needs no server and belongs on
-  # `core` for the same reason as `test_5048_retract_instant_recorded.py` beside it:
-  # a `tortoise/consistency.py`-only change falls back to `core` (no SOURCE_PATTERNS
-  # row), and `tortoise/sdk.py` is in SHARED_MODULES (full matrix), so both halves of
-  # the invariant select this file. The sibling routing file above is graph-free by
-  # design; splitting them keeps that property and still covers the pair.
+  # #10053 review (P1): the DURABILITY half of the same phase — a dated
+  # retraction's window end must survive `derived = replay(journal)`. MULTI-
+  # REGISTERED (see its `core` row beside `test_5048_retract_instant_recorded.py`),
+  # and each row is load-bearing for a DIFFERENT subject:
+  #   * `core` — the three replay/reference modules no `SOURCE_PATTERNS` row
+  #     claims (`consistency.py`, `record_projection.py`,
+  #     `projection/entities.py`) select `core` alone, and a lone `sdk` row is
+  #     ABSENT from those `test_files` (measured).
+  #   * `sdk` — the SDK subject: the producers this half pins are
+  #     `link_entities` / `update_knowledge`, and a non-full `sdk` selection is
+  #     reachable without `tortoise/sdk.py` itself touching the diff.
+  # The sibling routing file above is graph-free by design; splitting them keeps
+  # that property and still covers the pair.
   - test_4282_dated_retraction_durability.py
   # #9122 (§17.1 raw `:Event` writers): MULTI-REGISTERED on `api`, `core` and
   # `sdk`, and each row is load-bearing for a DIFFERENT subject — verified by

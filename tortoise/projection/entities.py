@@ -557,9 +557,17 @@ def _storable_bound(val) -> bool:
     surrogate string, a value an engine would clamp) states no bound rather than
     aborting a replay that has already wiped the graph. ``None`` is "the record
     states no end", which is symmetric-absent with the producer, which writes no
-    column for it. The producer writes every OTHER non-None value and would fail
-    loudly at the parameter boundary, so the two predicates agree on every value
-    a write can land.
+    column for it. The producer writes every OTHER non-None value, and for one
+    this store cannot hold it DEFERS to the same bar instead of writing it — the
+    #7369 degradation drops the unstorable ``valid_to`` to null before dispatch
+    (with a warning) — so the two predicates agree on every value a write can
+    land. ⛔ Measured, not assumed (#10053 review's UNVERIFIED item):
+    ``update_knowledge(p, valid_until="a\\x00b")`` left LIVE ``validTo=None``,
+    ``rebuild_all`` left ``None``, and `check_consistency` answered
+    ``divergence=None`` — the producer does NOT raise at the parameter boundary,
+    it degrades; the agreement is what this predicate relies on, and
+    `tests/test_4282_dated_retraction_durability.py`
+    ::test_an_end_the_store_cannot_hold_exactly_never_becomes_a_divergence pins it.
     """
     return val is not None and _store_holds_prop_value(val)
 

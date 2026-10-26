@@ -229,3 +229,53 @@ def test_an_end_unknown_spelling_survives_the_gate_and_the_rebuild(tmp_path):
             f"live≠rebuild: rebuilt={after.get('validTo')!r}")
     finally:
         sdk.close()
+
+
+# ── 5. an UNSTORABLE end is symmetric-absent on BOTH sides ─────────────────
+
+def test_an_end_the_store_cannot_hold_exactly_never_becomes_a_divergence(tmp_path):
+    """#10053 review's UNVERIFIED item, SETTLED BY EXECUTION: it cannot.
+
+    The producer's gate is ``valid_to is not None`` (`sdk.py`) while all three
+    folds gate on `_storable_bound`, which ALSO requires
+    `_store_holds_prop_value` — so the open question was whether a value the
+    store cannot hold exactly (a NUL-bearing string, a map, an INT64-clamped
+    int) could be written LIVE and dropped on REPLAY, i.e. the very live≠rebuild
+    divergence this file exists to forbid.
+
+    Measured, this test's own probe: it CANNOT, because the WRITE path defers to
+    the same bar — the #7369 degradation drops the unstorable `valid_to` to null
+    before dispatch (with a warning) instead of writing it. So BOTH sides hold no
+    end, which is symmetric-absent, and the gate stays clean.
+
+    The assertion is therefore on the AGREEMENT (live == replay == absent), not
+    on the value: a future producer that starts writing the raw string would red
+    this with `live≠replay` rather than silently reintroducing the divergence.
+    """
+    events = tmp_path / "events"
+    events.mkdir()
+    sdk = TortoiseSDK(str(tmp_path / "unstorable.db"),
+                      event_log_path=str(events / "events.jsonl"))
+    try:
+        pid = sdk.create_point("statement", "a claim ending at an unholdable instant")["id"]
+        sdk.update_knowledge(pid, valid_until="a\x00b")
+
+        live = _node(sdk, pid)
+        log_path = str(events / "events.jsonl")
+        proj = sdk._get_proj()
+        check_consistency(log_path, proj)  # adopt
+
+        proj.rebuild_all(str(events), confirm_destructive=True)
+        rebuilt = _node(sdk, pid)
+        assert rebuilt["status"] == "retracted", rebuilt
+        assert live.get("validTo") == rebuilt.get("validTo"), (
+            "an end the store cannot hold exactly was written LIVE and dropped on "
+            f"REPLAY — live={live.get('validTo')!r} rebuilt={rebuilt.get('validTo')!r}")
+
+        result = check_consistency(log_path, proj)
+        named = {d["id"]: d["fields"] for d in result["divergent_points"]}
+        assert result["divergence"] is None, (
+            "an unstorable window end became a reference-fold divergence: "
+            f"divergence={result['divergence']!r} named={named!r}")
+    finally:
+        sdk.close()

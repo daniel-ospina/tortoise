@@ -13790,6 +13790,13 @@ class TortoiseSDK:
         must be able to say so. ``None`` (the default) means "decide from the
         relation"; it is not a third mode.
 
+        On a relation that carries a MEANING (``supports``, ``refutes``,
+        ``mutuallySupportive``, ``mutuallyExclusive``) the MECHANISM decides the
+        storage, so ``operator=False`` is REFUSED there rather than overruled —
+        the caller does not choose (``beta-sdk-surface.md`` row 19, ONTOLOGY §8).
+        ``True`` is accepted and changes nothing: the meaning already requires
+        the carrying operator.
+
         ⛔ **A parameter an arm cannot RECORD is refused, never dropped.** The
         five writers take different parameter sets, so a keyword this signature
         accepts may mean nothing to the arm that fires. Silently accepting it
@@ -13909,6 +13916,29 @@ class TortoiseSDK:
         meaning = self._EPISTEMIC_RELATION_MEANINGS.get(upper)
         if meaning is not None:
             from tortoise.pack_registry import SEMANTICS_MECHANISMS
+
+            # #10053 review (P3): `operator` used to be read for the first time
+            # BELOW this arm, so `False` — the one spelling a caller would use
+            # to FORBID the carrying operator — was accepted here and ignored:
+            # the arm built the operator anyway, with no error and no warning,
+            # on the single family where the neighbouring IMPL/NAND arm HONOURS
+            # `False`. Same-keyword-two-meanings is the class `_dispatch` below
+            # exists to refuse, so it is refused here too rather than left to a
+            # docstring that says what the code does not do.
+            if operator is False:
+                raise ValueError(
+                    f"link_entities: relation {rel!r} carries the MEANING "
+                    f"{meaning!r}, and an epistemic relation ALWAYS needs its "
+                    f"carrying operator "
+                    f"(pack_registry.SEMANTICS_MECHANISMS -> "
+                    f"{SEMANTICS_MECHANISMS[meaning]!r}) — `operator=False` "
+                    f"asks for a plain edge, which would mint an epistemic "
+                    f"edge with no mechanism to carry it. The RELATION chooses "
+                    f"its storage, not the caller (beta-sdk-surface.md row 19, "
+                    f"ONTOLOGY §8). Drop `operator` — `None` means 'decide "
+                    f"from the relation' — or use a structural relation if a "
+                    f"plain edge is what you actually want."
+                )
 
             return _dispatch(
                 "create_operator",
