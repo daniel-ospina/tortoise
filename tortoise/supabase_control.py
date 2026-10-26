@@ -4397,12 +4397,14 @@ def set_graph_name(cp, org_id: str, graph_id: str, name: str) -> bool:
         # kind == 'default' → fall through: the default path renames THIS row and
         # never writes `namespace`. The caller NAMED a row above (and it is
         # known to be this org's ACTIVE default), so the PATCH targets THAT id —
-        # never a re-resolved `rows[0]`. ⚠️ Two `kind='default'` rows are
-        # POSSIBLE (a tombstone beside an active one), but only defensively: the
-        # partial unique index is on `(org_id, name)` so it does not forbid the
-        # pair, yet `soft_delete_graph` refuses `kind='default'`, so no
-        # supported path produces the tombstone — which is why the migration
-        # treats the shape as defensive too. It is still reachable by raw SQL /
+        # never a re-resolved `rows[0]`. ⚠️ A tombstoned `kind='default'` row
+        # beside an active one is POSSIBLE (defensively: `soft_delete_graph`
+        # refuses `kind='default'`, so no supported path produces the
+        # tombstone), and `20261028000001`'s `uq_graphs_org_default_active`
+        # (`(org_id) WHERE kind='default' AND status <> 'deleted'`) makes TWO
+        # LIVE rows impossible — a second live row now collides there instead
+        # of silently existing, and this function's insert arm below converges
+        # onto the winner. The tombstone pair is still reachable by raw SQL /
         # ops, and a fresh read returns the two in unspecified order, so a
         # re-resolve could PATCH the row nobody resolved, still return True, and
         # leave the visible rename unapplied.
@@ -4419,7 +4421,9 @@ def set_graph_name(cp, org_id: str, graph_id: str, name: str) -> bool:
     # `20261028000001`'s guard would mint a second row if one existed), and
     # `graph_metadata`/`default_graph_id_for` read ACTIVE only — PATCHing
     # `rows[0]` blind would accept the rename (True, HTTP 200) and then never
-    # show it.
+    # show it. Two LIVE rows are not possible: `uq_graphs_org_default_active`
+    # (same migration) covers `status <> 'deleted'`, and the insert arm below
+    # already treats a collision as "someone else won" and PATCHes the winner.
     if named_default_row_id is None:
         rows = cp.query(
             "graphs", select=["id", "namespace"],

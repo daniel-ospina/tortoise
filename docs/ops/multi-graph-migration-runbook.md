@@ -63,6 +63,25 @@ Consequences (E2E-5 exit gate):
   keeps refusing it `no_tenant` (fail-closed). Remediation: rename the
   colliding graph, then re-run the migration.
 
+- **"The default row" is singular, and the database now says so.** Every reader
+  takes the FIRST row (`default_graph_id_for`, `graph_metadata`,
+  `set_graph_name`/`set_graph_recording`), and until #10025 nothing enforced
+  that: `uq_graphs_org_name_active` is on `(org_id, name)`, while
+  `set_graph_name` inserts the user's CHOSEN name and the backfill/mint insert
+  `'default'` — different names, so two *live* `kind='default'` rows for one org
+  were legal and reachable from two ordinary supported paths committing
+  concurrently. `20261028000001` adds
+  `uq_graphs_org_default_active ON public.graphs (org_id) WHERE kind = 'default'
+  AND status <> 'deleted'` as the backstop: a second live row now collides
+  (both the resolver's self-heal and `set_graph_name`'s insert arm already
+  converge onto the winner), and a **tombstone beside an active row stays
+  legal** — the defensive shape the code's readers are written around.
+  ⚠️ If the migration aborts, its own pre-check named the offending org(s):
+  that database already carried two live default rows, which no supported path
+  produces. Resolve them first (`UPDATE public.graphs SET status = 'deleted'
+  WHERE ...` on all but the row `default_graph_id_for` names), then re-run — the
+  file is one transaction, so nothing was half-applied.
+
 - **No data move** — tenant points/sessions never touch the registry
   migration; the default graph's namespace is unchanged.
 - **No key rotation** — every pre-epic key is `graph_id NULL` +
@@ -78,6 +97,29 @@ Consequences (E2E-5 exit gate):
   "there is no per-graph key for the default graph").
 
 ## 2. Migration mechanics (Supabase lane)
+
+`20261028000001_graphs_default_row_stable_id.sql` (#10025) — the default
+row's id, and the invariant its readers assume:
+
+```sql
+-- fail-closed pre-check: name the org(s) that already carry two live default
+-- rows, then stop the whole file (Supabase applies a migration in ONE
+-- transaction, so a raise mid-file leaves nothing half-applied)
+DO $$ … RAISE EXCEPTION '… organization(s) % already carry more than one
+        live kind='default' graphs row' … $$;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_graphs_org_default_active
+    ON public.graphs (org_id) WHERE kind = 'default' AND status <> 'deleted';
+INSERT INTO public.graphs (id, org_id, name, kind, namespace, status, recording)
+SELECT … FROM public.organizations o WHERE … NOT EXISTS (…) …
+ON CONFLICT DO NOTHING;   -- a concurrent writer's row IS the row we wanted
+```
+
+The index is built BEFORE the backfill, so the backfill's conflict arm is
+arbitrated by it too (Graphs held 1 row in production, so the non-concurrent
+build is instant; `CREATE INDEX CONCURRENTLY` cannot run inside the single
+transaction Supabase applies a migration file in — which is the property the
+`ON CONFLICT` safety relies on). Both halves are executed against real
+Postgres by `supabase/tests/20261028000001_graphs_default_row_stable_id.sql`.
 
 `supabase/migrations/20260901000001_graphs_and_key_scopes.sql` is
 **pure-additive**:

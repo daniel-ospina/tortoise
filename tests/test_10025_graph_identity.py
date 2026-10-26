@@ -641,3 +641,71 @@ def test_a_mint_that_cannot_succeed_is_not_retried_on_every_request() -> None:
                         "name": "default", "kind": "default",
                         "status": "active", "namespace": "org_org-1"}])
     assert resolve_api_key(cp, key)["default_graph_id"] == "g_healed"
+
+
+# ── The migration's two structural guarantees (#10025 review, at-head) ──────
+# Both live in SCHEMA, so `supabase/tests/20261028000001_graphs_default_row_
+# stable_id.sql` is where they are EXECUTED against real Postgres (PGlite). The
+# two pins below are the complement that SQL cannot express: the suite replays
+# the backfill itself, so it stays green if the MIGRATION FILE loses the clause
+# it is replaying. Static by necessity, and honest about it — it asserts on the
+# statement Postgres will actually run, with comments stripped so prose cannot
+# satisfy it.
+
+_MIGRATION = ("supabase/migrations/"
+              "20261028000001_graphs_default_row_stable_id.sql")
+
+
+def _migration_sql() -> str:
+    """The migration's SQL with `--` comments removed (code only)."""
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent.parent / _MIGRATION
+    assert path.exists(), f"the migration is missing: {path}"
+    return "\n".join(
+        line.split("--")[0] for line in path.read_text(encoding="utf-8").splitlines())
+
+
+def test_the_migration_states_the_one_live_default_row_invariant() -> None:
+    """Two LIVE `kind='default'` rows for one org are what makes every singular
+    reader (`rows[0]`) ambiguous, and they were LEGAL: `uq_graphs_org_name_active`
+    is on `(org_id, name)`, and `set_graph_name` inserts the user's chosen name
+    while the backfill/mint insert 'default'. These two ordinary paths can commit
+    concurrently and neither name-collides, so the pair is reachable — one org's
+    record rows then split across two `graph_id`s, and `stable_id`/the displayed
+    default name flicker per request. The index is the backstop; `status <>
+    'deleted'` keeps the defensive tombstone-beside-active shape legal.
+    """
+    sql = _migration_sql()
+    marker = "CREATE UNIQUE INDEX IF NOT EXISTS uq_graphs_org_default_active"
+    assert marker in sql, (
+        "the migration does not create the one-live-default-row backstop")
+    index = sql.split(marker, 1)[1].split(";", 1)[0]
+    assert "(org_id)" in index, f"the index is not keyed on the org: {index!r}"
+    assert "kind = 'default'" in index, (
+        f"the index is not scoped to default rows: {index!r}")
+    assert "status <> 'deleted'" in index, (
+        f"the index is not scoped to live rows: {index!r}")
+
+
+def test_the_backfill_survives_a_concurrent_writer() -> None:
+    """The backfill's guards are a READ-THEN-WRITE. `set_graph_recording`'s
+    upsert and the auth/provisioning mint insert exactly `(org_id, name=
+    'default', kind='default', status='active')` for exactly the orgs this
+    statement targets, so one commit landing between its snapshot and its index
+    insertion raises a unique violation — and Supabase applies a migration file
+    in ONE transaction, so that aborts the backfill for EVERY org.
+
+    A conflict here IS the row this migration wanted to exist, so it must be
+    skipped rather than raised. Untargeted on purpose (Postgres: `DO NOTHING`
+    without a `conflict_target` "conflicts with all usable constraints (and
+    unique indexes) are handled") — a target would pin one index and let the
+    other raise. The Python mint models the same race one layer up.
+    """
+    sql = _migration_sql()
+    backfill = sql.split("INSERT INTO public.graphs", 1)[1].split(";", 1)[0]
+    assert "ON CONFLICT DO NOTHING" in backfill, (
+        "the backfill raises on a concurrent insert — a live writer's row "
+        "would abort the whole migration transaction, for every org")
+    assert "NOT EXISTS" in backfill, (
+        "the backfill lost its existence guard — it is no longer idempotent")

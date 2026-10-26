@@ -194,6 +194,11 @@ class TestResolveApiKey:
         # reads and then declines to write a row that would carry no namespace.
         # The HIT path is 3 — api_keys + organizations + the one graphs point
         # read — i.e. no fixed cost is added by the self-heal.
+        # Deterministic because `conftest._fresh_default_row_mint_window`
+        # (autouse) clears the process-global retry window: without it this pin
+        # depends on whether an EARLIER suite already marked `team-free-001` in
+        # it, which `tests/test_auth_flip.py` does inside a `verify-cutover` run
+        # (`flip-gate`, run 40315422548).
         assert fake.query_count == 6  # api_keys + org + graphs + 3 self-heal guards
         # The mint is a no-op here (no `graph_name`), so the record tenant stays
         # UNNAMED (refused as `no_tenant`) rather than falling back to a guess.

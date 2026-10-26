@@ -8094,8 +8094,10 @@ class TestGraphLifecycle:
         (graph_id = the default node's real gid — minted pre-#2112 guard
         or via a raw control-plane write) exists. Pre-fix the registry lane
         surfaced such nodes as a count on the default row (the capstone
-        "1") while the supabase lane structurally cannot (api_keys.graph_id
-        REFERENCES graphs(id); 'default' is a DERIVED id, never a row id) —
+        "1") while the supabase lane refuses such a bind (api_keys.graph_id
+        REFERENCES graphs(id), and since #10025 the default row HAS a real
+        g_<16hex> id a key column COULD reference — the `kind != 'default'`
+        guard in `_ensure_graph_exists` is what refuses it, not the schema) —
         the two lanes disagreed about the same cell.
 
         Manageability half: the bound-default key stays LISTABLE and

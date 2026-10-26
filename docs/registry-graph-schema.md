@@ -145,7 +145,12 @@ Default-graph semantics (the no-migration contract):
   tables FK to `public.graphs.id` and needed the default graph to have a real,
   immutable id — its NAME is a user-editable label and identifies nothing. That
   row holds no graph data: its only data-plane field is `namespace`, the org's
-  storage key.
+  storage key. The row is **singular by database constraint**, not by
+  convention: `uq_graphs_org_default_active` (`(org_id)` WHERE `kind='default'
+  AND status <> 'deleted'`) — added by the same migration, because every
+  consumer takes `rows[0]` and two live default rows would split one org's
+  record rows across two ids. A tombstoned default row beside the active one
+  stays legal (the defensive shape the readers filter for).
 - **No per-graph keys (epic #2083 C7 follow-up, #2306):** the default graph
   is NOT key-bindable in either lane — graph-bound mints 404 on the
   kind='default' node/row (`_ensure_graph_exists`). Consequently the

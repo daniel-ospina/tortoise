@@ -676,6 +676,16 @@ const suites = [
   // named here never runs, and "the suite exists" is then mistaken for "the suite
   // passes". Add the entry in the same commit as the file.
   '20261013000002_oauth_mint_rpcs.sql',  // #3025
+  // #10025 — the default graph's stable-id row, and the ONE-live-default-row
+  // invariant the singular `rows[0]` readers rely on: the partial unique index
+  // is executed (a second live row is rejected, a tombstone beside an active one
+  // is still legal) and the backfill's `ON CONFLICT DO NOTHING` is replayed
+  // against a state the read guards cannot see, which is the shape that aborted
+  // the whole migration transaction. NOTE: this list is EXPLICIT, not a glob — a
+  // suite file that is not named here never runs, and "the suite exists" is then
+  // mistaken for "the suite passes". Add the entry in the same commit as the
+  // file.
+  '20261028000001_graphs_default_row_stable_id.sql',  // #10025
   // #4492 — the Postgres storage footprint + per-org analytics row growth,
   // driven against the REAL SQL functions. NOTE: this list is EXPLICIT, not a
   // glob — a suite file that is not named here never runs, and "the suite
