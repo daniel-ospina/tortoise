@@ -114,7 +114,7 @@ discard**, and a rejected answer can never become a kind.
 
 ## 6. Arming it
 
-```
+```bash
 TORTOISE_S2_DECISION_SEAM=1   # unset/0 = off (the production state)
 JEV_API_KEY=...               # $JEV_API_KEY, else the repo-root .env
 ```
@@ -138,17 +138,24 @@ the price per input token, which is derived twice and agrees with itself.
 
 | shape | request (measured, this module) | tokens (cl100k proxy) | cost |
 |---|---|---|---|
-| `vet-v1`, **40 items** / 80 questions, 500-word narrative | 39,484 B | 9,265 | **$0.0039** → **$0.000097/item** |
-| `classify-v1`, **40 tail items** / 40 questions, top-5 kinds offered | 23,292 B | 6,112 | **$0.0026** → **$0.000064/item** |
+| `vet-v1`, **40 items** / 80 questions, 500-word narrative | 39,484 B | 9,265 | **\$0.0039** → **\$0.000097/item** |
+| `classify-v1`, **40 tail items** / 40 questions, top-5 kinds offered | 23,292 B | 6,112 | **\$0.0026** → **\$0.000064/item** |
 
 Derivation, so it can be re-checked rather than believed:
 
-- **The price.** The vendor's documented example bills **$0.000026 for 62 input
-  tokens** ⇒ `4.19e-7 $/token`. Independently, a 100-row usage ledger retained from
-  this machine's 2026-09-24 consolidation pass fits `cost = 4.20e-7 · input_tokens`
-  with a **maximum absolute error of $0.000001** across all 100 rows (output tokens
-  contribute ≈ 0 — the fit's coefficient is `-2.6e-10`, i.e. within noise). Both
-  agree at **≈ $0.42 per 1M input tokens**, input-only.
+- **The price.** The vendor's documented example bills **\$0.000026 for 62 input
+  tokens** ⇒ `4.19e-7 $/token`. Independently, a 100-row usage ledger retained
+  from this machine's 2026-09-24 consolidation pass fits
+  `cost = 4.20e-7 · input_tokens` with a **maximum absolute error of \$0.000001**
+  across all 100 rows (output tokens contribute ≈ 0 — the fit's coefficient is
+  `-2.6e-10`, i.e. within noise). Both agree at **≈ \$0.42 per 1M input tokens**,
+  input-only.
+
+  The `\$` escapes are load-bearing, not decoration: two unescaped dollar signs in
+  one paragraph — `\$0.000026` above and the `$` inside the `$/token` code span —
+  form a math delimiter pair, which re-pairs the backticks around them and makes
+  the REQUIRED `docs` check red (`MD038`: one space inside a "code span" that was
+  never intended as one).
 - **The tokens.** `cl100k_base` over the exact serialized payload. The upstream
   tokenizer is not published, so read the token counts as **±15%**, and the
   dollars as an estimate of the same order — not a receipt. The first real call is
@@ -160,7 +167,7 @@ Derivation, so it can be re-checked rather than believed:
   request, and it is why this row costs more per item than the architecture doc's
   recorded `$0.000144/item at 1 question`.
 - **A month, by arithmetic** (§4.2's own projection: 25k items, ~20% tail):
-  classify's 5,000 tail items = 125 round trips ≈ **$0.32/month** — against the
+  classify's 5,000 tail items = 125 round trips ≈ **\$0.32/month** — against the
   doc's `$0.72/month` estimate for the same tail, on the same order.
 
 ## 8. The two tests, and the mutants that redden them
