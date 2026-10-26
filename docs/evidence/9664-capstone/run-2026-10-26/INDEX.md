@@ -1,5 +1,5 @@
 ---
-title: "#9664 capstone — the RUN: 13 steps through the real ChatGPT UI, two blockers named"
+title: "#9664 capstone — the RUN: every step through the real ChatGPT UI, two blockers named"
 type: evidence
 domain: platform
 doc_status: live
@@ -25,6 +25,11 @@ substitutes for them."* This is that artifact.
 * **Actions** were clicks / typing / `Enter` through `cmux browser`. `eval` was used to **read** state
   only (text, selectors, box geometry); the read-only selector resolver it used is kept as `sel.js`.
   No described action was performed by script.
+* **Scope of what was measured:** steps **0–10** (with step 2 measured as **2a** and **2b** separately)
+  plus **probe A** and **probe B** — 14 rows in the table below, each with its own artifacts. The
+  directory holds **69 files**: 66 artifacts the run produced (54 screenshots, 10 raw traces, the
+  `eval` selector resolver, and the pasted onboarding document), the run's own index kept verbatim as
+  `INDEX-original.md`, this index, and the one trace added at publication (`step4k`).
 * Timestamps are in the filenames (`YYYYMMDD-HHMMSS`, local UTC-05).
 
 ## What this lane could NOT do — the instrument went away, stated precisely
@@ -61,7 +66,7 @@ available without the socket.
 | 0 | **PASS** — owner logged in | `step0-logged-out-20261026-125130.png`, `step0-logged-out-pane-visible-…125450.png`, `step0-state-change-…125538.png`, `step0-logged-in-plus-…125551.png` |
 | 1 | **PASS** — `team-named` complete | `step1a-tortoise-auth-page-…125614.png`, `step1b-tortoise-login-tab-…125624.png`, `step1-org-overview-…125908.png`, `step1-settings-…125922.png`; `step7-graphs-and-step5-onboarding-state.txt` (`completed_steps` contains `team-named`) |
 | 2a | **FAIL — known bug, fix in flight** — graph creation refused, FalkorDB ACL → **#8617** | `step2e-graph-create-FAILED-acl-…130137.png`, `step2f-graph-create-retry-acl-…130154.png`; `step2e-graph-create-failed-error.txt` (*"Per-graph ACL provisioning failed — the FalkorDB ACL layer rejected the graph user"*) |
-| 2b | **PASS** — packs narrow → persist → `configured` pinned | `step2g-…130201.png` … `step2o-packs-final-restored-persisted-…130351.png` (9 frames, incl. reload + restore); `step2g-packs-before.txt` (*"This graph has never been configured"*), `step2k-packs-after-save.txt` (`Marketing … Off`, *"Saved — new extraction on this graph uses the set above"*) |
+| 2b | **PASS** — packs narrow → persist → `configured` pinned | `step2g-…130201.png` … `step2o-packs-final-restored-persisted-…130351.png` (8 frames, incl. reload + restore); `step2g-packs-before.txt` (*"This graph has never been configured"*), `step2k-packs-after-save.txt` (`Marketing … Off`, *"Saved — new extraction on this graph uses the set above"*). `step2n` carries the run's own label "anomaly": on re-open the rows are **re-ordered alphabetically** while the saved set is unchanged — the set is what this step asserts, so 2b still passes; the sort itself is not adjudicated here. |
 | 3 | **PASS as corrected** — there is no ChatGPT dashboard card; the docs page is the door | `step3a-setup-guide-after-run-…131734.png`, `step3b/docs-chatgpt-section-…`, `step3c-docs-chatgpt-scrolled-…`, `step3d-docs-chatgpt-section-…`; `step3a-settings-setup-guide.txt` |
 | 4 | **BLOCKED — `#10088`** (product defect, 3 stacked; the code is delivered to the marketing host) | `step4a-plugins-installed`, `step4b`, `step4c`, `step4d`, `step4e-connect-consent-dialog-…131902.png` (consent renders), `step4f-oauth-authorize-page-asks-signin-…131924.png`, `step4g-plugin-state-unchanged-…131936.png`, `step4h-authorize-page-awaiting-owner-signin-…133950.png`, `step4i-oauth-code-landed-on-marketing-site-…135207.png`, `step4j-authorize-page-old-signin-design-…135207.png` (dashboard: *"No connection observed yet"*); **`step4k-visit-chain-trace.txt`** |
 | 5 | **PASS as corrected** — nothing closes at token issue | `step6e-full-trace.txt` (`connection-written` → *"Not applicable to ChatGPT"*); `step7-graphs-and-step5-onboarding-state.txt` |
