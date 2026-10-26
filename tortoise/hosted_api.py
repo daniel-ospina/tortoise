@@ -6925,18 +6925,17 @@ def _bind_record_tenant(sdk: TortoiseSDK, org: dict) -> None:
     tenancy resolver — and the dream drain it enqueues carries the same answer
     across the queue (``_DREAM_RECORD_TENANTS`` / ``_bind_dream_record_tenant``),
     because that drain opens its own SDK. Routes that write the org's DEFAULT
-    graph by construction (the onboarding/starter seed runners) are NOT bound,
-    and neither are the background indexing jobs: naming the default graph's
-    record tenant for THOSE runners is #10047's scope — not because the default
-    graph lacks an id (it has one since #10025, and an org-wide API KEY names it
-    through ``_data_sdk`` below), but because those runners build their own SDK
-    (``_make_sdk(namespace=org_id)``) and never see the request's credential.
-    The same is true of the SESSION/JWT and OAuth ``oat_`` credentials, which
-    carry no ``default_graph_id`` at all. Binding a runner to a graph-bound
-    key's id would file its rows under a graph it never wrote, so the residue
-    there is a counted ``no_tenant``, never a misfiled row. (Both seed surfaces
-    reject a graph-bound credential outright, so that residue cannot even be
-    reached from them.)
+    graph by construction — the onboarding/starter seed runners and the
+    background indexing jobs — build their own SDK
+    (``_make_sdk(namespace=org_id)``) and never see the request's credential,
+    so they are bound by :func:`_bind_default_graph_record_tenant` at their own
+    construction site (#10047), from the SAME ``public.graphs`` default row and
+    through the SAME ``record_tenant_for`` answer this function asks for.
+    Binding a runner to a graph-bound key's id would file its rows under a
+    graph it never wrote, so that is never what that helper does. What is still
+    unbound is the SESSION/JWT and OAuth ``oat_`` credential class, which
+    carries no ``default_graph_id`` on the dict this function reads — a
+    RESOLUTION gap at the credential (#10046), not a missing carrier here.
 
     Fail-soft and DELIBERATELY so: a record-binding fault must not fail the
     request (#5148's rule — the record is a derived, replayable store, and this
@@ -6954,6 +6953,78 @@ def _bind_record_tenant(sdk: TortoiseSDK, org: dict) -> None:
                         exc_info=True)
 
 
+def _bind_default_graph_record_tenant(sdk: TortoiseSDK,
+                                      org_id: str) -> None:
+    """Bind the ORG'S DEFAULT GRAPH as this lane's record tenant (#10047).
+
+    For the lanes that build their OWN SDK — the two background indexing jobs,
+    the index-completion relink, and the two seed runners. Their auth is either
+    a detached ``asyncio`` task (the jobs keep only ``org_id``) or a plain
+    ``org_id`` parameter (the runners), so NONE of them holds the credential
+    dict ``_data_sdk`` resolves a tenant from; they open
+    ``_make_sdk(namespace=org_id)`` and every record they emit was refused
+    ``no_tenant`` no matter which credential started them.
+
+    What they DO share is the graph they write: ``namespace=org_id`` is the
+    org's DEFAULT graph, BY CONSTRUCTION — these lanes cannot be pointed at a
+    custom graph (adding that is a tenancy change, not a record fix). So the
+    tenant they need is exactly the one #10025 made nameable:
+    ``default_graph_id_for``'s active ``kind='default'`` ``public.graphs`` id.
+    Never a graph-bound key's id — that is a different graph from the one the
+    lane opens, and binding it would file the rows under a graph the write
+    never touched (the #9188 N3 hazard).
+
+    ONE chokepoint, no second write path: the id is put on a credential-shaped
+    dict and handed to :func:`_bind_record_tenant`, so the answer still comes
+    from :func:`tortoise.record_writer.record_tenant_for` — the same function
+    the request lane and the MCP lane ask — and it is still installed by
+    ``sdk._bind_record_tenant`` (the by-value carrier
+    ``write_live_record(tenant=...)`` reads). Nothing here decides a tenant;
+    this helper only supplies the field these lanes could not carry.
+
+    FAIL-CLOSED, and the refusal is the countable one (#9192 / #8447). If the
+    control plane cannot name a default row — absent, tombstoned, unreadable,
+    or this is the self-host registry lane where ``public.graphs`` does not
+    exist — nothing is bound and the write is refused ``no_tenant`` by
+    ``record_writer.write_live_record``, which COUNTS it on
+    ``monitoring.record_write_failures``. The lane must not look like it
+    installed a tenant it could not name: there is no guess, no constant and no
+    ``"default"`` sentinel here (that sentinel is refused by
+    ``record_tenant_for``, and ``default_graph_id_for`` never returns it).
+
+    COST, stated rather than assumed: one control-plane point read
+    (``idx_graphs_org_id``, no scan) per lane run — once per indexing job, once
+    per seed — issued where the lane builds its SDK. It is the same class of
+    call each of these lanes already makes inline on the same path
+    (``_github_token_enc`` / ``_get_onboarding_state`` for the jobs), it is not
+    per-request, and it cannot fail the lane: an unreadable control plane logs
+    and leaves the write refused, which is the direction #5148 requires.
+    """
+    try:
+        from tortoise.supabase_control import (
+            default_graph_id_for,
+            get_control_plane,
+            is_supabase_enabled,
+        )
+        # The SELF-HOST lane has no control plane and no `public.graphs` row to
+        # read: `record_tenant_for` refuses its ids anyway (they are Falkor
+        # `:Graph` node ids the record's FK cannot satisfy), so do not pay a
+        # control-plane call to learn that.
+        if not is_supabase_enabled():
+            return
+        default_graph_id = default_graph_id_for(get_control_plane(), org_id)
+    except Exception:
+        _logger.warning(
+            "could not resolve the DEFAULT-graph record tenant for org %s — "
+            "its record writes stay refused no_tenant",
+            org_id, exc_info=True)
+        return
+    if not default_graph_id:
+        return
+    _bind_record_tenant(sdk, {"org_id": org_id, "graph_id": None,
+                              "default_graph_id": default_graph_id})
+
+
 def _bind_dream_record_tenant(sdk: TortoiseSDK, key: str) -> None:
     """Bind the tenant the ENQUEUEING request named to the drain's own SDK.
 
@@ -6967,7 +7038,7 @@ def _bind_dream_record_tenant(sdk: TortoiseSDK, key: str) -> None:
 
     Silent by design when the key carries no tenant: that is a SESSION/JWT or
     OAuth ``oat_`` write — credentials that carry no ``default_graph_id``
-    (#10047) — so the tenant is not something this helper may guess. An
+    (#10046) — so the tenant is not something this helper may guess. An
     org-wide API KEY is NOT this case: since #10025 it names the default graph,
     and the enqueue carried that tenant here.
     """
@@ -7021,8 +7092,9 @@ def _data_sdk(org: dict) -> TortoiseSDK:
     is the shape that carries no such field: a SESSION/PAT credential
     (``_session_user_org`` resolves `org_id` + tier only) and an OAuth ``oat_``
     token (``tortoise.oauth.resolve_oauth_access_token`` never calls
-    ``resolve_api_key``). Those are #10047's scope, and for them the write is
-    refused ``no_tenant`` rather than filed under a tenant nobody chose.
+    ``resolve_api_key``). Those are #10046's scope (a RESOLUTION gap at the
+    credential, not a missing carrier in this module), and for them the write
+    is refused ``no_tenant`` rather than filed under a tenant nobody chose.
     """
     # #2600: bind the actor through the ONE helper — CONDITIONAL (only when the
     # dict carries a gated actor; never erase a value the auth seams set).
@@ -32133,6 +32205,11 @@ def _run_onboarding_seed(org_id: str, *, org_name: str | None = None,
                 "person_name_source": person_source}
 
     sdk = _make_sdk(namespace=org_id)
+    # #10047: this runner writes the org's DEFAULT graph (`namespace=org_id`)
+    # and holds no credential dict, so name that graph's record tenant here —
+    # through the one chokepoint — or every Subject/edge it files is refused
+    # `no_tenant` while the seed reports success.
+    _bind_default_graph_record_tenant(sdk, org_id)
     try:
         surface = _OrgSeedSurface(sdk)
         try:
@@ -32305,6 +32382,9 @@ def _run_starter_seed(org_id: str, *, org_name: str | None = None,
         person_user_id = None
     include_person = person is not None
     sdk = _make_sdk(namespace=org_id)
+    # #10047: the starter seed writes the org's DEFAULT graph by construction —
+    # bind that graph's record tenant (see _bind_default_graph_record_tenant).
+    _bind_default_graph_record_tenant(sdk, org_id)
     try:
         proj = sdk._get_proj()
         surface = _OrgSeedSurface(sdk)
@@ -35970,6 +36050,11 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
     terminal_error: str | None = None
     try:
         org_sdk = _make_sdk(namespace=org_id)
+        # #10047: the walk is a DETACHED task carrying only `org_id`, so it
+        # cannot see the credential that started it; it opens the org's DEFAULT
+        # graph, so that graph's record tenant is the answer for every Object /
+        # Event / `-closed` row it mints.
+        _bind_default_graph_record_tenant(org_sdk, org_id)
 
         # #1844: the index job writes zero non-episodic :Point nodes, so it never
         # trips the POINT arm of the "points" resource.
@@ -36229,6 +36314,10 @@ def _relink_sessions_after_index(org_id: str) -> None:
         # ``EntityLinked`` (JSONL-only, absent from ``_GRAPH_EVENT_TYPES``), so
         # the edges stay live-only — the documented unconfigured-lane bound.
         _link_sdk = _make_sdk(namespace=org_id)
+        # #10047: the relink pass emits `EntityLinked` through THIS SDK on the
+        # org's DEFAULT graph — the tenant must ride it, or the edges it
+        # journals are refused `no_tenant`.
+        _bind_default_graph_record_tenant(_link_sdk, org_id)
         proj = _link_sdk._get_proj()
         rows = proj.g.query(
             "MATCH (s:Session)-[:CONTAINS]->(t:Point) "
@@ -36448,6 +36537,10 @@ async def _run_docs_indexing(job_id: str, org_id: str, org: str,
               "repos_total": 0, "errors": [], "quota_hit": False}
     try:
         org_sdk = _make_sdk(namespace=org_id)
+        # #10047: same detached-task reason as `_run_indexing` — the docs walk
+        # writes the org's DEFAULT graph and carries no credential to resolve a
+        # tenant from.
+        _bind_default_graph_record_tenant(org_sdk, org_id)
 
         # ── Documents gate (Task 9): the docs job gates on the DOCUMENTS
         # resource — the points gate is vacuous for docs (index_directory
