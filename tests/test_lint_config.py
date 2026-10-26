@@ -11,6 +11,8 @@ Pure stdlib (tomllib) — no ruff/mypy required to run.
 """
 from __future__ import annotations
 
+import shutil
+import subprocess
 import tomllib
 from pathlib import Path
 
@@ -19,6 +21,8 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 PYPROJECT = REPO / "pyproject.toml"
 BASELINE_DOC = REPO / "docs" / "lint-baseline-1503.md"
+#: The #4282 1.1 approved-surface declaration — a DATA module, exempt from two codes.
+DECLARATION_PATH = "tortoise/__all__.py"
 
 
 @pytest.fixture(scope="module")
@@ -77,3 +81,94 @@ def test_mypy_baseline_disabled_codes_documented(pyproject: dict) -> None:
             f"mypy baseline code {code} missing from docs/lint-baseline-1503.md "
             "— every disabled code must be documented with its count"
         )
+
+
+# ── The declaration module's exemption (#10056) ───────────────────────────────
+#
+# `tortoise/__all__.py` is a data declaration module (#4282 1.1 / #10034): its 40 names are
+# CLASS MEMBERS of `TortoiseSDK`, deliberately not module-level bindings, listed in the
+# owner-approved order of `docs/product/beta-sdk-surface.md` rows 1-40. So F822 (undefined
+# name in `__all__`) can never be satisfied by an import, and RUF022 (unsorted `__all__`)
+# asks for exactly the reordering the declaration must not make. The exemption is
+# therefore legitimate — but only if it stays SCOPED to that one path, and only while the
+# file is otherwise clean. Both halves are pinned here, because either one silently
+# reverts to a red `agent-infra-ci / lint` on every PR (the cost measured in #10056/#9896).
+
+
+def test_the_declaration_module_exemption_is_declared_and_scoped(pyproject: dict) -> None:
+    """Exactly `tortoise/__all__.py` is exempt from exactly F822 + RUF022 (#10056)."""
+    lint = pyproject["tool"]["ruff"]["lint"]
+    exempt = lint.get("per-file-ignores") or {}
+    assert exempt.get(DECLARATION_PATH) == ["F822", "RUF022"], (
+        "the approved-surface declaration needs a per-file exemption for F822 + RUF022 "
+        "(#10056): the names are class members, not module bindings, and the order is the "
+        f"owner's document order. Found: {exempt.get(DECLARATION_PATH)!r}"
+    )
+    assert list(exempt) == [DECLARATION_PATH], (
+        "the exemption must stay scoped to the one declaration path — a second entry is a "
+        f"rule switched off for a real module: {sorted(exempt)}"
+    )
+    for code in ("F822", "RUF022"):
+        assert code not in lint["ignore"], (
+            f"{code} must NOT be in [tool.ruff.lint].ignore — disabling it tree-wide is how "
+            "the #4282 declaration's exemption turns into a blanket blind spot"
+        )
+
+
+def _ruff() -> str:
+    """The ruff binary CI uses (pinned in the dev group), or a skip."""
+    pinned = REPO / ".venv" / "bin" / "ruff"
+    if pinned.exists():
+        return str(pinned)
+    found = shutil.which("ruff")
+    if not found:
+        pytest.skip("ruff is not installed in this environment")
+    return found
+
+
+def test_the_declaration_module_is_otherwise_clean_under_the_repo_lint() -> None:
+    """The exemption is only honest while the FILE has no other ruff error.
+
+    This is the `agent-infra-ci / lint` command's own rule set applied to the real path:
+    before #10056 the run reported 41 errors here (40 × F822 + 1 × RUF022), which reddened
+    every PR in the repo.
+    """
+    proc = subprocess.run(
+        [_ruff(), "check", "--no-cache", DECLARATION_PATH],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, (
+        f"{DECLARATION_PATH} must be ruff-clean under the exemption; got "
+        f"rc={proc.returncode}:\n{proc.stdout}{proc.stderr}"
+    )
+
+
+def test_f822_and_ruf022_still_fire_for_every_other_module() -> None:
+    """Scoped, not switched off: both codes still red a probe at any other path."""
+    probe = (
+        "def aaa() -> None: ...\n"
+        "def zzz() -> None: ...\n"
+        '__all__ = ("zzz", "aaa", "undefined_on_purpose")\n'
+    )
+    proc = subprocess.run(
+        [
+            _ruff(),
+            "check",
+            "--no-cache",
+            "--config",
+            str(PYPROJECT),
+            "--stdin-filename",
+            "tortoise/_exemption_scope_probe.py",
+            "-",
+        ],
+        cwd=REPO,
+        input=probe,
+        capture_output=True,
+        text=True,
+    )
+    output = proc.stdout + proc.stderr
+    assert proc.returncode == 1, f"the probe should fail; got rc={proc.returncode}: {output}"
+    assert "F822" in output, f"F822 was switched off tree-wide: {output}"
+    assert "RUF022" in output, f"RUF022 was switched off tree-wide: {output}"

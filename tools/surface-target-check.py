@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
 """The surface TARGET compliance check (#4185).
 
-OVERRIDES: the frozen-snapshot-as-approval-baseline practice — a snapshot of the implementation cannot be the approved target; the target is read from the two product docs — the MCP target from docs/product/canonical-mcp-tools.md (cross-checked in docs/product/beta-sdk-surface.md), the SDK target from docs/product/beta-sdk-surface.md — so no count appears here and this file cannot drift from them.
+OVERRIDES: the frozen-snapshot-as-approval-baseline practice — a snapshot of the implementation cannot be the approved target; the target is read from the declared surface — the MCP target from docs/product/canonical-mcp-tools.md (cross-checked in docs/product/beta-sdk-surface.md), the SDK target from the DECLARATION `tortoise/__all__.py` (cross-checked against docs/product/beta-sdk-surface.md's own count) — so no count appears here and this file cannot drift from them.
+
+#10034: the SDK leg is read from the declaration, not from a number parsed out of prose.
+    The two used to be measured on different axes — the target from a regex over a
+    document, the live set from `dir(TortoiseSDK)` — so "40" and "149" were numbers from
+    two different instruments, and neither could see a method that was added. The
+    declaration is the same axis the live set is measured on (class members of
+    `TortoiseSDK`), and `tools/sdk_surface_declaration.py` is the gate that holds it.
 
 WHY THIS IS NOT tools/surface-guard.py
     `surface-guard.py` answers "does the live declaration MATCH THE FROZEN BASELINE?"
@@ -136,12 +143,20 @@ def _numbers(patterns, text: str) -> set[int]:
     return found
 
 
-def read_targets(canonical: Path | None = None, beta: Path | None = None) -> dict:
-    """The owner-approved target, READ from the two product docs.
+def read_targets(
+    canonical: Path | None = None,
+    beta: Path | None = None,
+    declaration: Path | None = None,
+) -> dict:
+    """The owner-approved target, READ from the declaration and the two product docs.
 
     Returns `{"mcp": int, "sdk": int, "approval": dict, "sources": dict}`. Refuses
-    (raises `TargetUnreadable`) when the docs do not carry a single unambiguous
+    (raises `TargetUnreadable`) when the evidence does not carry a single unambiguous
     number for each leg, or when the canonical doc does not record an approval.
+
+    `declaration` is the SDK leg's source (`tortoise/__all__.py`) and defaults to the real
+    one; it is a parameter so a test can exercise the refusal when it disagrees with the
+    approved document, which is the property #10034 added.
     """
     canonical = Path(canonical or CANONICAL_DOC)
     beta = Path(beta or BETA_DOC)
@@ -171,9 +186,9 @@ def read_targets(canonical: Path | None = None, beta: Path | None = None) -> dic
             f"approvedBy={approval['principal']!r} / approval_pr={approval['pr']!r} — an "
             "approval record must carry a principal and a PR."
         )
-    # The BETA doc is the sole source of the SDK target, so it must be an approved record too.
-    # It records a principal and a date but no PR (unlike the canonical doc), so the test is
-    # `approved` + a named principal — NOT `approval_pr`.
+    # The BETA doc is the sole source of the SDK target's APPROVAL, so it must be an approved
+    # record too. It records a principal and a date but no PR (unlike the canonical doc), so
+    # the test is `approved` + a named principal — NOT `approval_pr`.
     beta_approval = _frontmatter(beta)
     if (
         str(beta_approval.get("approval_status") or "") != "approved"
@@ -213,17 +228,39 @@ def read_targets(canonical: Path | None = None, beta: Path | None = None) -> dic
             f"(found {sorted(mcp_numbers)}). A target this tool cannot read "
             "unambiguously must not be guessed."
         )
+    # THE SDK TARGET IS THE DECLARATION (#10034), and the doc's own count is the CROSS-CHECK.
+    # Reading it from the doc alone made the target a number parsed out of prose while the
+    # live leg was a `dir()` walk — two instruments answering one question. The declaration
+    # (`tortoise/__all__.py`) names the approved methods, so both legs are class-member sets.
+    # A declaration that disagrees with the approved document is REFUSED rather than
+    # preferred: neither reading is allowed to overrule the other silently.
+    from tools.sdk_surface_declaration import (
+        DeclarationUnreadable,
+        load_declaration,
+    )
+
+    try:
+        declared = load_declaration(declaration)
+    except DeclarationUnreadable as exc:
+        raise TargetUnreadable(str(exc)) from exc
     sdk_numbers = _numbers(_SDK_PATTERNS, _read(beta))
     if len(sdk_numbers) != 1:
         raise TargetUnreadable(
             f"{beta} does not yield exactly one SDK target (found {sorted(sdk_numbers)})."
         )
+    doc_sdk = next(iter(sdk_numbers))
+    if len(declared["__all__"]) != doc_sdk:
+        raise TargetUnreadable(
+            f"the declaration {declared['path']} names {len(declared['__all__'])} approved "
+            f"methods but {beta.name} states {doc_sdk} — the declaration and the owner's "
+            "document disagree on the SDK target, so neither can be used."
+        )
 
     return {
         "mcp": next(iter(mcp_numbers)),
-        "sdk": next(iter(sdk_numbers)),
+        "sdk": len(declared["__all__"]),
         "approval": approval,
-        "sources": {"mcp": canonical, "sdk": beta},
+        "sources": {"mcp": canonical, "sdk": declared["path"]},
     }
 
 
@@ -250,10 +287,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--canonical-doc", default=str(CANONICAL_DOC))
     parser.add_argument("--beta-doc", default=str(BETA_DOC))
+    parser.add_argument("--declaration", default=None)
     args = parser.parse_args(argv[1:])
 
     try:
-        targets = read_targets(args.canonical_doc, args.beta_doc)
+        targets = read_targets(args.canonical_doc, args.beta_doc, args.declaration)
         live = live_surface()
     except TargetUnreadable as exc:
         print(f"::error::{exc}")

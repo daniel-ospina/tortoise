@@ -1101,7 +1101,17 @@ def test_incomplete_marker_becomes_a_named_attributable_failure(tmp_path: Path) 
 #: `tail -n 300 <log>` AND `tail -25 <log>` — the flag is spelled both ways in these
 #: workflows, so match the SHAPE, not one spelling. Anchored (`^tail`), so a comment
 #: that merely mentions the spelling cannot be counted as a site.
+#:
+#: ⛔ A LEG'S LOG MAY BE A PER-RUNNER PATH, NOT A `/tmp` LITERAL (2026-10-25). The
+#: `test` job writes through `$PYTEST_LOG` (= `${{ runner.temp }}/pytest.log`) because a
+#: `/tmp/pytest.log` literal is SHARED between concurrent jobs on a self-hosted runner,
+#: which made the kill's own counts and tail describe another shard. The capture is the
+#: same capture (and owes the same reporter call), so the SITE is matched on either
+#: spelling — the alternative was a guard that reports "a leg was dropped" when a path
+#: was hardened, which is exactly the false signal this floor must not emit.
 _TAIL_SITE_RE = re.compile(r"^tail\s+-n?\s*\d+\s+(\S+)$")
+#: The per-runner indirection a hardened job writes through, as it appears in a `tail`.
+_RUNNER_TEMP_LOG = "\"$PYTEST_LOG\""
 #: A leg may persist its output through `| tee /tmp/x.log` instead of a tail; both are
 #: "this leg keeps a log", so both owe the reporter a call. This one has to SEARCH a
 #: longer command line (the capture sits mid-pipeline, followed by `|| rc=$?`), so it
@@ -1130,18 +1140,27 @@ def capture_site(line: str) -> str | None:
     if match is None:
         return None
     target = match.group(1)
+    if target == _RUNNER_TEMP_LOG:
+        # A per-runner path: the leg still owes the reporter a call, and the
+        # window assertion below compares this same token (the call is
+        # `--log "$PYTEST_LOG"`), so the pairing is checked exactly as it is for
+        # a literal `/tmp/*.log`.
+        return target
     if not (target.startswith("/tmp/") and target.endswith(".log")):
         return None
     return target
 
 
 def test_every_pytest_log_tail_is_followed_by_the_reporter() -> None:
-    """EVERY `/tmp/*.log` capture in these workflows reports through the reporter.
+    """EVERY pytest-log capture in these workflows reports through the reporter.
 
-    Eight sites in the two workflows this guard NAMES (`ATTRIBUTION_WORKFLOWS` —
+    A capture is a `/tmp/*.log` literal OR the per-runner `"$PYTEST_LOG"` a hardened
+    leg writes through — the shape is the LOG CAPTURE, not the path, so both owe the
+    reporter. Eight sites in the two workflows this guard NAMES (`ATTRIBUTION_WORKFLOWS` —
     the scope is explicit, and its one known omission, ci.yml's `hosted-e2e` leg,
     is pinned by `test_the_uncovered_workflow_is_named_not_silently_dropped` and
-    #9300): 5 `pytest.log` tails in python-ci.yml, 1 `trackb.log` (the must-pass
+    #9300): 5 `pytest.log`-named tails in python-ci.yml (2 of them the per-runner
+    `"$PYTEST_LOG"`, not a `/tmp` literal), 1 `trackb.log` (the must-pass
     Track B member, whose log name does not contain "pytest" — it was the coverage
     gap a first cut missed), 1 `pmv-pytest.log` in post-merge-validation.yml, and 1
     `pytest-d14.log`, written through `| tee` rather than a tail (this file counts
@@ -1163,9 +1182,11 @@ def test_every_pytest_log_tail_is_followed_by_the_reporter() -> None:
                 f"{workflow.name}:{i + 1}: the `{target}` capture is not followed by the "
                 "reporter — this leg can silently omit its own failure set (#3470)"
             )
-    # The measured inventory is 8: five `/tmp/pytest.log` tails in python-ci.yml —
-    # `test`'s last-failed pre-phase (200), `test` (300), `test-slow` (300),
-    # `test-concurrency-falkor` (120) and `test-carve-out` (200) — plus `trackb.log`,
+    # The measured inventory is 8: five `pytest.log`-named tails in python-ci.yml —
+    # `test`'s last-failed pre-phase (200) and `test` (300) through the per-runner
+    # `"$PYTEST_LOG"` since #10028, then the three `/tmp/pytest.log` literals
+    # `test-slow` (300), `test-concurrency-falkor` (120) and `test-carve-out` (200) —
+    # plus `trackb.log`,
     # plus `pmv-pytest.log` in post-merge-validation.yml, plus `pytest-d14.log` written
     # through `| tee`. The floor used to be 6 against the 7 sites main's tail-only
     # counter measured — ONE below reality — so a single leg could be renamed out from

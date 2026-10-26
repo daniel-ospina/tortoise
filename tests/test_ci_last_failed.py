@@ -37,8 +37,15 @@ NARROWING = (
     "--setup-only", "--setup-plan", "--fixtures",
 )
 
-FULL_JUNIT = "/tmp/junit.xml"
-PRE_JUNIT = "/tmp/junit-lf.xml"
+# The canonical GATING junit and the pre-phase's junit, as they are SPELLED in
+# the workflow. Since #10028 neither path is a `/tmp` literal: both go through
+# the per-job indirection (`--junitxml="$PYTEST_JUNIT"` for the gating run,
+# `--junitxml="$PYTEST_JUNIT_LF"` for the pre-phase), so the identifiers below
+# are the WHOLE flag+value token, closing quote included. That quote is load-
+# bearing: `FULL_JUNIT` must NOT substring-match the pre-phase line, and
+# `"$PYTEST_JUNIT"` does not appear inside `"$PYTEST_JUNIT_LF"`.
+FULL_JUNIT = '--junitxml="$PYTEST_JUNIT"'
+PRE_JUNIT = '--junitxml="$PYTEST_JUNIT_LF"'
 
 
 def _test_job_steps():
@@ -98,10 +105,19 @@ def _run_prune(code: str, tmp_path, keys: dict, log_text: str):
     cache.write_text(json.dumps(keys))
     log = tmp_path / "pytest.log"
     log.write_text(log_text)
+    # The payload no longer names the log path literally: since #10028 it reads
+    # `os.environ["PYTEST_LOG"]`, so the fixture must substitute THAT expression.
+    # The assert is the floor, not decoration: in CI `PYTEST_LOG` IS set, so an
+    # unsubstituted payload would silently prune the runner's REAL log and these
+    # tests would pass while asserting about a file no fixture wrote.
+    assert 'os.environ["PYTEST_LOG"]' in code, (
+        "the prune payload no longer reads os.environ['PYTEST_LOG']; this "
+        "fixture's substitution is stale, so the pin below would read the "
+        "real job log and test nothing:\n" + code)
+    payload = (code.replace(".pytest_cache/v/cache/lastfailed", str(cache))
+                   .replace('os.environ["PYTEST_LOG"]', json.dumps(str(log))))
     out = subprocess.run(
-        ["python3", "-c",
-         code.replace(".pytest_cache/v/cache/lastfailed", str(cache))
-             .replace("/tmp/pytest.log", str(log))],
+        ["python3", "-c", payload],
         capture_output=True, text=True, check=True).stdout
     return out, (json.loads(cache.read_text()) if cache.exists() else None)
 
