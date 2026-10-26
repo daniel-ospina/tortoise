@@ -20,7 +20,6 @@ from fastmcp.exceptions import (AuthorizationError, FastMCPError, ToolError,
 from fastmcp.tools import ToolResult
 from pydantic import ValidationError as PydanticValidationError
 from tortoise.auth import is_dev_mode as _is_dev_mode
-from tortoise.deletion import ConfirmationExpired, ConfirmationInvalid  # #9660
 from tortoise import deletion as _deletion  # #9660 preview-then-confirm
 from tortoise.config import is_db_uri as _is_db_uri
 from tortoise.sdk import (TortoiseSDK, INGEST_GRANULARITIES,

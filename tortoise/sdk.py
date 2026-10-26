@@ -7049,15 +7049,18 @@ def _refuse_inverted_point_window(g, props: dict, *,
     # ⚠️ BOTH ENDS (#9202). The ruling named the START, and the START was the
     # only side wired — so `create_point(validFrom="TBD")` spoke while
     # `create_point(validTo="TBD")` said nothing, and the silent one is the
-    # more consequential mistake: the reply then reports `end_state: "known"`
-    # and `get_historical_knowledge` answers `found` about the year 2050 with no
-    # field distinguishing it from a dated end. The COVERAGE rule for that value
-    # is settled and shared (ONTOLOGY §4.7: a bound that names no instant is not
-    # a bound — the #6140 start reading, extended to the end by #9408), and the
-    # write door now says so on either side. The end's REPORTED STATE
-    # (`known` vs `unknown`) is #9202's OWNER decision and is deliberately NOT
-    # touched here: this warning changes no read, which is why it is safe to
-    # ship ahead of that ruling.
+    # more consequential mistake: the reply then reported `end_state: "known"`
+    # and `get_historical_knowledge` answered `found` about the year 2050 with
+    # no field distinguishing it from a dated end. The COVERAGE rule for that
+    # value is settled and shared (ONTOLOGY §4.7: a bound that names no instant
+    # is not a bound — the #6140 start reading, extended to the end by #9408),
+    # the write door now says so on either side, and since the 2026-10-25 owner
+    # ruling (#9202, option B) the END's REPORTED STATE is `unknown` too —
+    # `validity.end_state` raises `END_UNKNOWN` for an end that names no
+    # instant, so the reply stops asserting the end is dated and the
+    # `end_state_unknown` / `indeterminate_end_ids` flags fire for it. The write
+    # door itself still changes nothing: the value is accepted and stored
+    # verbatim.
     #
     # Warn ONCE per value per WRITE. Two re-entry shapes reach this function
     # for a single write: a dedup-hit `create_point` (create leg, then
@@ -7095,17 +7098,18 @@ def _refuse_inverted_point_window(g, props: dict, *,
             # the stored un-datable value and then refuses the declaration beside it
             # (a `ValueError` where the caller was following this advice).
             #
-            # The end's REPORTED STATE is deliberately not asserted here: it is
-            # #9202's pending owner decision, and a warning that recited today's
-            # `known` would be stale the moment the ruling lands.
+            # The end's REPORTED STATE is the owner's, and it was ruled on
+            # 2026-10-25 (option B): such an end reads `unknown`. The warning
+            # says so, so the operator is not left guessing what the reply will
+            # call the value it just wrote.
             _logger.warning(
                 "validTo %r names no instant — it bounds NOTHING, so the "
                 "window is UNBOUNDED above (ONTOLOGY §4.7, #9202). If the "
                 "end is known but un-datable, pass validToPrecision='unknown' "
                 "with NO validTo (on an update pass validTo=None explicitly — "
                 "omitting it keeps the stored value); otherwise pass an "
-                "ISO-8601 instant. What the reply should call such an end is "
-                "#9202's pending owner decision.",
+                "ISO-8601 instant. The reply reports end_state='unknown' for "
+                "such an end either way (owner ruling 2026-10-25, #9202).",
                 bound,
             )
             return
@@ -32179,18 +32183,21 @@ class TortoiseSDK:
         carries a window (``chain``, ``valid_point``, ``candidates``,
         ``nearest``) also carries ``valid_from_precision``,
         ``valid_to_precision`` and ``end_state`` (``open`` | ``known`` |
-        ``unknown``). A window whose end is marked un-datable
-        (``validToPrecision == "unknown"``, no ``validTo``) is an ENDED window
-        — but because no instant is attested, ``_covers`` cannot exclude it and
-        the reply would otherwise read exactly like a still-true one, so the
-        top level also carries ``end_state_unknown: true`` and
+        ``unknown``). An un-datable end has TWO spellings and one meaning —
+        the caller-declared marker (``validToPrecision == "unknown"``, no
+        ``validTo``) or a STORED end that names no instant (``validTo =
+        "TBD"`` / ``""`` / ``"2026-02-30"``, #9202) — and both are ENDED
+        windows: because no instant is attested, ``_covers`` cannot exclude
+        them and the reply would otherwise read exactly like a still-true one,
+        so the top level also carries ``end_state_unknown: true`` and
         ``indeterminate_end_ids`` whenever a COVERING candidate has an unknown
         end. Read ``end_state_unknown`` before treating a ``found`` reply as
         attestation that the claim was true at ``at_date``: it says the window
         may have ended before then, and this read cannot tell. Legacy windows
         carry no precision property, so their replies are unchanged
         (``end_state`` is ``open``/``known`` and no unknown markers are
-        emitted).
+        emitted) — unless the legacy window carries an un-datable ``validTo``,
+        which is exactly the case #9202 closes.
         """
         from .search_engine import _created_sort_key
         from .validity import END_UNKNOWN, window_read_fields
@@ -32273,17 +32280,14 @@ class TortoiseSDK:
               unorderable bound ... names no instant, so a refusal would rest
               on a lexicographic accident rather than a comparison"*.
 
-              What is deliberately NOT symmetric is the REPORTED STATE, and
-              that is #2350's 3-state contract: ``validity.end_state`` raises
-              ``END_UNKNOWN`` only for a ``validToPrecision == "unknown"``
-              declaration on an ABSENT end, so a present-but-unparseable
-              ``validTo`` still reads ``end_state: "known"`` — i.e. the reply
-              keeps asserting the claim's end is DATED while the window covers
-              every instant. #6140 ruled on the START only; whether the END's
-              state should instead read ``unknown`` / ``open`` is #9202's OWNER
-              DECISION and this fix does not pre-empt it: the coverage gate
-              changes which instants match, never what the end is called.
-              Pinned by
+              What the coverage gate does not decide is the REPORTED STATE:
+              it changes which instants match, never what the end is called.
+              That is ``validity.end_state``'s job, and since #9202's owner
+              ruling (2026-10-25, option B) an end that names no instant is
+              ``END_UNKNOWN`` — the same state a declared
+              ``validToPrecision="unknown"`` produces — so this entry appears
+              in ``indeterminate_end_ids`` and the reply carries
+              ``end_state_unknown: true``. Pinned by
               ``test_an_end_naming_no_instant_bounds_no_instant_even_for_an_unparseable_probe``
               in ``tests/test_validity_windows.py``.
             """
