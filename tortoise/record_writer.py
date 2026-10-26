@@ -614,13 +614,13 @@ def record_tenant_for(org: Mapping[str, Any] | None, *,
       recording deployment into ``write_failed`` on every write with a cause
       nobody could attribute.
     * the credential named no graph (org-wide key, session/JWT auth). The
-      default graph **need not have a** ``public.graphs`` row
-      (``supabase_control.delete_graph_row``: *"no row exists for the default
-      graph"* — it is derived from ``organizations.graph_name``), so naming it
-      is a control-plane decision (#9188's open question), not a constant this
-      function may invent. Omitting it keeps the write REFUSED and counted
-      (``no_tenant``) — the fail-closed direction — rather than filing the row
-      under a tenant nobody chose.
+      tenant is then the org's **default graph**, and it is named only from a
+      value the control plane resolved and put on the credential dict
+      (``default_graph_id`` — read from the org's ``kind='default'``
+      ``public.graphs`` row, #10025). Still never a guess: no row, no field, or
+      a field of the wrong type all return ``None``, keeping the write REFUSED
+      and counted (``no_tenant``) — the fail-closed direction — rather than
+      filing the row under a tenant nobody chose.
 
     ⛔ This is not a fallback chain and must not grow into one: it reads the
     credential the caller already resolved, and nothing else. The env pair is a
@@ -629,10 +629,18 @@ def record_tenant_for(org: Mapping[str, Any] | None, *,
     if not control_plane_ids or not isinstance(org, Mapping):
         return None
     org_id = org.get("org_id")
+    if not (isinstance(org_id, str) and org_id):
+        return None
     graph_id = org.get("graph_id")
-    if (isinstance(org_id, str) and org_id
-            and isinstance(graph_id, str) and graph_id):
+    if isinstance(graph_id, str) and graph_id:
         return (org_id, graph_id)
+    # The org-wide case (#10025): the default graph's id, READ from the
+    # control-plane row the resolver put on this dict — never derived from its
+    # name and never a constant, so a rename cannot move a write to another
+    # tenant, and an org whose default row does not exist keeps refusing.
+    default_graph_id = org.get("default_graph_id")
+    if isinstance(default_graph_id, str) and default_graph_id:
+        return (org_id, default_graph_id)
     return None
 
 
