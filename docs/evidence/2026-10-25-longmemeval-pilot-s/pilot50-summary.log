@@ -1,0 +1,41 @@
+================================================================
+LongMemEval s — 50 questions
+── integrity ──
+valid: True  (threshold 0.0; n_attempted 50, n_valid 50, n_invalid 0, n_failed 0, invalid_rate 0.0)
+error census: no errors
+  check: python >= 3.12 guard enforced at run entry
+  check: dataset loaded and recall-semantics audited
+  check: dataset semantics audit present (publication gate)
+  check: checkpoint fingerprint matched (no stale resume)
+  check: per-question error census computed
+── extraction health ──
+status: healthy  (healthy 50 / degraded 0, degraded_fraction 0.0 >= threshold 0.25; min_points 100)
+  healthy   accuracy 0.66 (n=50)
+  degraded  accuracy n/a (n=0)
+── score ──
+overall accuracy:        0.66
+task-averaged accuracy:  0.6597
+abstention accuracy:     0.0 (n=0)
+  Information Extraction       0.72 (n=25)
+  Knowledge Updates            0.625 (n=8)
+  Multi-Session Reasoning      0.4444 (n=9)
+  Temporal Reasoning           0.75 (n=8)
+retrieval recall@k (session / turn):
+  k=5   session 0.8867   turn 0.4943   evidence 0.4943
+  k=10  session 0.925   turn 0.6283   evidence 0.6283
+  k=20  session 0.9617   turn 0.7933   evidence 0.7933
+context tokens mean:     5927.9
+latency (ms) retrieval/reader/judge/ingest/total:
+  retrieval            {'mean_ms': 881.88, 'p50_ms': 498.98, 'p95_ms': 2265.77}
+  reader               {'mean_ms': 1486.56, 'p50_ms': 1470.6, 'p95_ms': 1924.35}
+  judge                {'mean_ms': 1209.4, 'p50_ms': 1205.86, 'p95_ms': 1521.0}
+  ingest               {'mean_ms': 375492.79, 'p50_ms': 294255.71, 'p95_ms': 717865.37}
+  total_per_question   {'mean_ms': 379942.29, 'p50_ms': 298314.25, 'p95_ms': 726599.6}
+methodology: reader=deepseek-flash judge=deepseek-v4-pro extraction=deterministic session ingestion: episodic turn points (point…
+pre-flight gate:           ok — 4 checks passed
+================================================================
+
+report saved to: /tmp/8486/run/pilot50.report.json
+real 4851.69
+user 1877.91
+sys 322.32
