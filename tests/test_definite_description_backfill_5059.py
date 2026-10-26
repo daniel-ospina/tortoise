@@ -850,6 +850,39 @@ def test_the_doc_does_not_claim_archived_has_no_writer():
         "is UNMEASURED — enumerating it is a precondition of any relocation "
         "pass (#5333)."
     )
+    # The OTHER half of the same claim, and the one `_ABSENT_WRITER_CLAIM`
+    # cannot enumerate (#10069 review, fourth round): the target paragraph
+    # read *"No first-class producer or lifecycle transition writes
+    # `archived`"*. That is FALSE — a pack-declared status fold IS a
+    # lifecycle transition, and `status_folds.py` validates a fold's status
+    # only against the DECLARING kind's `statuses` ("a kind that declares a
+    # lifecycle OWNS its state"), so a pack declaring `archived` writes it.
+    # It is also self-contradicting: the same subsection says the population
+    # `may have been` placed `by a pack-declared status fold`. The absolute
+    # carries none of the guard's spellings ("transition writes"), so it is
+    # pinned the other way round — by the QUALIFIER's presence, scoped to the
+    # one paragraph that owns it: drop either half and this reds.
+    target_lines = [
+        line for line in section.splitlines()
+        if line.startswith("**The target, if a relocation is ever authorised")
+    ]
+    assert len(target_lines) == 1, (
+        "the target paragraph ('The target, if a relocation is ever "
+        f"authorised …') is gone or duplicated ({len(target_lines)} found) — "
+        "the passage stating what a relocation writes has no home (#5333)."
+    )
+    target = target_lines[0].lower()
+    assert "core-shipped" in target and "pack-declared status fold" in target, (
+        "the target paragraph's no-writer claim must be SCOPED to core-shipped "
+        "producers AND name the pack-fold exception in the same paragraph. "
+        "Unqualified ('no first-class producer or lifecycle transition "
+        "writes `archived`') it is refuted by `_fold_object_status`, which "
+        "writes whatever status the declaring kind's vocabulary names — so a "
+        "lane enumerating the already-`archived` population (a stated "
+        "precondition of any relocation) would leave pack folds out of the "
+        "scan and undercount a population this passage calls UNMEASURED "
+        "(#10069 review P2)."
+    )
     lowered = section.lower()
     assert "_allowed_transitions" in lowered, (
         "the passage must name the map it cites (`_ALLOWED_TRANSITIONS`) so the "
