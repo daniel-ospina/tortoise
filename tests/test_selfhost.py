@@ -31,6 +31,27 @@ def _client_for_env(monkeypatch, tmp_path, **env):
     if "TORTOISE_DB_PATH" not in env:
         monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "selfhost.db"))
 
+    # #3396 at FILE scope: `monitoring._probe_worker()` is a process-global,
+    # ONE-SLOT worker that survives this module's reload (and is NOT reachable
+    # from `selfhost`'s own caches), and a probe abandoned by an EARLIER test in
+    # the same xdist worker keeps that slot occupied until its own socket call
+    # returns (`monitoring.py`: "holds the single shared ``_probe_worker`` slot
+    # while it does"; a thread cannot be cancelled, only abandoned).
+    #
+    # Measured, not hypothetical — CI job 121608127319 at 96f6d91a1:
+    # ``TestHealth::test_health_liveness`` never became healthy in 40 s and
+    # ``test_health_ready_embedded`` returned 503, both with the snapshot
+    # ``{'ok': False, 'observed': False, 'error': 'probe sdk acquisition did not
+    # start within 2.0s'}`` — the never-STARTED spelling, i.e. every refresh was
+    # SUBMITTED and never picked up. It is order-dependent, not a product
+    # defect: the whole file passes in a fresh process (11.8 s). Dropping the
+    # worker here gives each test a slot it does not have to share with an
+    # abandoned probe, which is the same remedy ``test_hosted_api.py``'s autouse
+    # fixture applies for the same class (#7555).
+    from tortoise import monitoring as mon
+
+    mon._reset_probe_worker()
+
     import importlib
 
     importlib.reload(selfhost)
@@ -399,6 +420,45 @@ class TestHealth:
             r = tc.get("/health/ready")
             assert r.status_code == 200
             assert r.json()["status"] == "ready"
+
+    def test_a_wedged_probe_worker_from_an_earlier_test_is_not_inherited(
+            self, monkeypatch, tmp_path):
+        """#3396 at FILE scope: the shared probe slot must not be inherited.
+
+        A probe abandoned by a previous test in this xdist worker holds the
+        process-global one-slot ``monitoring._probe_worker()`` until its own
+        socket call returns, so a daemon built afterwards reports
+        ``probe sdk acquisition did not start within 2.0s`` for every refresh
+        and never becomes healthy (CI job 121608127319). This pins the remedy:
+        ``_client_for_env`` drops the occupied worker, so the health verdict
+        this test's daemon reads is its OWN probe's, not an ambient one.
+
+        Deterministic by construction — it wedges the slot itself instead of
+        relying on whatever an earlier file happened to leave behind.
+        """
+        import threading
+
+        import tortoise.monitoring as mon
+        from tortoise import selfhost
+
+        started, release = threading.Event(), threading.Event()
+
+        def _block():
+            started.set()
+            release.wait(60)
+
+        occupied = mon._probe_worker()
+        occupied.submit(_block)
+        assert started.wait(30), "the shared probe worker never ran the blocker"
+        try:
+            tc = _client_for_env(monkeypatch, tmp_path, TORTOISE_API_KEY="k")
+            with tc:
+                assert mon._probe_worker() is not occupied, (
+                    "the occupied probe worker was inherited — a probe "
+                    "submitted here would never start (#3396)")
+                _wait_for_probe(selfhost)
+        finally:
+            release.set()
 
 
 class TestMCPHandshake:

@@ -1359,9 +1359,11 @@ def record_record_write_failure(reason: str) -> None:
       in ``record_writer.use_record_tenant(...)`` — the MCP tenant lane does it
       per request, and the hosted REST lane binds the same resolution onto the
       SDK it opens (#9188), so a refusal on EITHER of those lanes means the
-      credential named no graph (use a graph-bound key; an org-wide key or a
-      session token opens the default graph, whose record tenant is #9188's open
-      control-plane question); a deployment that serves exactly ONE graph may
+      credential named no graph (use a graph-bound key; an org-wide **API KEY**
+      — `tt_`/`tk_` — IS named from `default_graph_id` since #10025, while a
+      SESSION token on the hosted REST lane and an OAuth `oat_` connector stay
+      #10047's open scope); a
+      deployment that serves exactly ONE graph may
       instead set ``TORTOISE_RECORD_ORG_ID``/``_GRAPH_ID`` **and**
       ``TORTOISE_RECORD_SINGLE_TENANT=1``. The pair alone is IGNORED (a
       process-global tenant on a multi-tenant process files every tenant's rows

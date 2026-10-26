@@ -2539,15 +2539,16 @@ def test_the_rest_data_lane_binds_the_resolved_tenant_onto_its_sdk(monkeypatch):
     So it is the one place the REST lane can hand the record a tenant, and it
     must do it from the SAME credential dict that chose the graph — otherwise
     the record and the graph disagree. Measured through the public seam it
-    calls: the returned SDK carries the pair, and carries NOTHING for the two
-    shapes that must stay refused.
+    calls: the returned SDK carries the pair for a graph-bound key AND for an
+    org-wide one whose control plane named its default row, and carries NOTHING
+    for the shapes that must stay refused.
 
     ⚠️ NOT covered here, and deliberately: the onboarding/starter seed runners
     open the org's DEFAULT graph by construction (`_make_sdk(namespace=org_id)`,
-    not this resolver). The default graph need not have a `public.graphs` row,
-    so binding them to a graph-bound key's id would file their rows under a
-    graph they never wrote; naming the default-graph tenant is the open
-    control-plane decision on #9188.
+    not this resolver). Binding them to a graph-bound key's id would file their
+    rows under a graph they never wrote; naming the default-graph tenant for
+    those runners is #10047's scope (the org's `kind='default'` row now exists —
+    these lanes are not wired to it yet).
     """
     from tortoise import hosted_api, supabase_control
 
@@ -2567,18 +2568,29 @@ def test_the_rest_data_lane_binds_the_resolved_tenant_onto_its_sdk(monkeypatch):
     hosted_api._data_sdk(dict(graph_bound))
     assert bound == [("org-a", "g_row")], bound
 
-    # Default graph (org-wide key / session auth): no graphs row is guaranteed,
-    # so nothing is bound and the write stays refused `no_tenant`. This is the
-    # control-plane decision #9188 escalated, NOT an oversight.
+    # Org-wide API KEY (`tt_`/`tk_`): `resolve_api_key` puts the org's ACTIVE
+    # `kind='default'` row id on the credential as `default_graph_id`, so this
+    # resolver DOES name the tenant. Pinned rather than described: a regression
+    # that dropped the field would otherwise leave the write refused and look
+    # exactly like the documented deferral below.
+    hosted_api._data_sdk({"org_id": "org-a", "graph_id": None,
+                          "default_graph_id": "g_default"})
+    assert bound == [("org-a", "g_row"), ("org-a", "g_default")], bound
+
+    # A credential that carries NO such field stays refused: session/PAT
+    # (`_session_user_org` resolves `org_id` + tier only) and OAuth `oat_`
+    # (`resolve_oauth_access_token` never calls `resolve_api_key`). Naming those
+    # is #10047's scope, and until it is wired the write is refused `no_tenant`
+    # rather than filed under a tenant nobody named.
     hosted_api._data_sdk({"org_id": "org-a"})
-    assert bound == [("org-a", "g_row")], (
-        f"a default-graph request bound a tenant nobody named: {bound}")
+    assert bound == [("org-a", "g_row"), ("org-a", "g_default")], (
+        f"a field-less request bound a tenant nobody named: {bound}")
 
     # The self-host registry lane's ids are not `public.graphs` ids.
     monkeypatch.setattr(supabase_control, "is_supabase_enabled", lambda: False)
     hosted_api._data_sdk({"org_id": "org-a", "graph_id": "g_hex",
                           "graph_namespace": "org_org-a_g_hex"})
-    assert bound == [("org-a", "g_row")], (
+    assert bound == [("org-a", "g_row"), ("org-a", "g_default")], (
         f"a registry `g_<hex>` id was bound as a record tenant: {bound}")
 
 
