@@ -21,6 +21,8 @@ and would break cache projection for every tenant.
 from __future__ import annotations
 
 from tortoise import cache_projection as cp
+from tortoise import record_projection as rp
+from tortoise.projection.entities import _EntityHandlers
 from tortoise.record_projection import _RECORD_ONLY_KEYS, refused_props_names, table_columns
 
 # ── the schema half ────────────────────────────────────────────────────────
@@ -36,26 +38,46 @@ def test_the_tier_is_refused_as_a_props_key() -> None:
 
 
 def test_the_tier_never_reaches_a_node_as_a_property() -> None:
-    """The RECORD half is the schema refusal (test above). This is the GRAPH
-    half: the fold's strip set, so a `PointAdded` carrying the tier cannot set a
-    node property a journal replay never writes.
+    """The RECORD half is the schema refusal (test above); the GRAPH half is the
+    fold's strip set, so a `PointAdded` carrying the tier cannot set a node
+    property a journal replay never writes.
+
+    ⛔ Both halves are asserted, because BOTH are deletable in silence: removing
+    the `_META_KEYS` entry reds nothing anywhere else in the suite (measured),
+    and the record strip is checked below by its own leg.
 
     ⛔ Which is also why the tier CANNOT be set through an event payload — it is
     stripped before the insert, so the row lands the DEFAULT `graph`. Step 7
     must write it as its own column statement; a test that assumed otherwise
     would pass here and materialise turns in production."""
-    assert "cache_tier" in _RECORD_ONLY_KEYS
+    assert "cache_tier" in _EntityHandlers._META_KEYS, "the GRAPH half is gone"
+    assert "cache_tier" in _RECORD_ONLY_KEYS, "the RECORD half is gone"
+
+
+def test_an_entity_mutation_cannot_carry_the_tier() -> None:
+    """`EntityMutated` is the arm where the tier lands in a COLUMN, not a tail.
+
+    `_split_properties` checks a `drop` name BEFORE `column in cols`, so this
+    drop is the only thing standing between a `state` map and
+    `UPDATE public.point SET cache_tier = 'record_only'` — which flips a REAL
+    graph point to record-only, so `read_record_view` stops projecting it and a
+    record-sourced rebuild LOSES the node. Deleted, that reds nothing (measured).
+    """
+    for label in ("Point", "Object"):
+        record = {"type": "EntityMutated", "ts": "T", "id": "n1", "label": label,
+                  "op": "restatus",
+                  "state": {"status": "retracted", "cache_tier": "record_only"}}
+        statements = rp.mutations_for(record, org_id="o", graph_id="g")
+        assert statements, f"{label}: no mutation emitted, so this proves nothing"
+        for st in statements:
+            assert "cache_tier" not in st.sql, (label, st.sql)
+            assert "record_only" not in st.params, (label, st.sql, st.params)
 
 
 # ── the read half
 # `read_record_view` reads NODE tables and (now) the relation table. The fake
 # keys on the MAIN table so the relation query's `public.point` SUBQUERY — the
 # record-only key set — is not mistaken for a node read.
-
-class _Cur:
-    def execute(self, sql, params=None):
-        pass
-
 
 def _read_view(monkeypatch, point_rows, labels=("Point",)):
     sqls: list[str] = []

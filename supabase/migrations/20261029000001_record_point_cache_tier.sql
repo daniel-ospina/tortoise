@@ -45,8 +45,13 @@ COMMENT ON COLUMN public.point.cache_tier IS
 -- 2. Refuse it as a `props` key — a forward re-declaration of the SAME
 --    constraint (append-only history: the CREATE TABLE is not edited), carrying
 --    the full set, since this REPLACES the table's refusal rather than adding to
---    it at the SQL level. The set is read from the live parser
---    (`refused_props_names()`) so it cannot drift from what the code believes.
+--    it at the SQL level. The list below was CUT FROM `refused_props_names()`;
+--    nothing re-derives it at apply time, and it cannot be derived: the SQL
+--    REPLACES while the parser UNIONS, so the two can drift in one direction —
+--    the parser keeps reporting a name the database stopped refusing. The pin in
+--    `tests/test_10017_cache_tier.py` (which now unions EVERY earlier
+--    re-declaration, not just the CREATE) is what keeps it honest. Do not read
+--    this list as self-maintaining.
 -- The ADD below VALIDATES existing rows. Before this migration `cache_tier` was
 -- not a column, not in `_META_KEYS` and not refused, so a caller-supplied prop
 -- of that name went into the props tail — and a single such row aborts the whole
