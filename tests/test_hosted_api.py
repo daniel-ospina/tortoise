@@ -1504,6 +1504,62 @@ class TestPointsCreate:
         assert calls[0][1] == [r.json()["id"]], \
             "the created point must be the enqueued dirty root"
 
+    def test_create_point_carries_the_org_wide_default_tenant_to_the_dream(
+            self, client, monkeypatch):
+        """#10025 review F2: an ORG-WIDE key's dream records are NAMED, not refused.
+
+        The dream pass opens its own SDK, so the enqueueing request has to carry
+        the record tenant across the queue. The call site gated that carry on
+        `graph_namespace`, i.e. on `org["graph_id"]` — and an org-wide API KEY
+        (the shape the issue measured on all 128 production keys) has none, so
+        nothing was carried and every `ConfidenceChanged` the pass emitted was
+        refused `no_tenant`, silently, while two docstrings claimed otherwise.
+
+        Route level on purpose: the resolver's own shape table is pinned in
+        `test_10025_graph_identity.py`; this pins the WIRE — that the point-write
+        handler hands the resolved tenant to `_enqueue_dream` for the org-wide
+        credential instead of `None`. `_resolve_record_tenant` is stubbed so the
+        assertion is about the call site, not about whether this host has
+        Supabase configured.
+        """
+        import tortoise.hosted_api as ha
+
+        row = "g_0123456789abcdef"
+        monkeypatch.setattr(ha, "_resolve_record_tenant",
+                            lambda org: (org["org_id"], row))
+        app.dependency_overrides[get_current_org] = lambda: dict(
+            TEST_TEAM, default_graph_id=row)
+
+        seen: list[dict] = []
+        real_enqueue = ha._enqueue_dream
+
+        def _spy(org_id, dirty_roots, **kwargs):
+            seen.append(kwargs)
+            return real_enqueue(org_id, dirty_roots, **kwargs)
+
+        monkeypatch.setattr(ha, "_enqueue_dream", _spy)
+        try:
+            r = client.post("/v1/points",
+                            json={"content": "org-wide dream tenant"})
+            assert r.status_code == 200, r.text
+        finally:
+            ha._DREAM_QUEUES.pop(TEST_ORG_ID, None)
+            ha._DREAM_RECORD_TENANTS.pop(TEST_ORG_ID, None)
+            task = ha._DREAM_TASKS.pop(TEST_ORG_ID, None)
+            if task is not None:
+                task.cancel()
+
+        assert len(seen) == 1, seen
+        # The org-wide key rides the ORG-KEYED drain, whose SDK
+        # (`_open_sdk` → `_make_sdk(namespace=org_id)`) opens the same graph
+        # `_data_sdk` opened for this request — so carrying the default tenant
+        # names the graph the pass actually writes.
+        assert seen[0].get("graph_namespace") is None, seen[0]
+        assert seen[0].get("record_tenant") == (TEST_ORG_ID, row), (
+            "an org-wide API key's dream pass is left unnamed, so every record "
+            "it emits is refused `no_tenant` on the default graph #10025 gave "
+            f"an id: {seen[0]}")
+
     def test_create_point_with_explicit_kind(self, client):
         r = client.post(
             "/v1/points", json={"content": "a decision", "kind": "decision"}

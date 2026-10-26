@@ -6844,6 +6844,55 @@ def _resolve_record_tenant(org: dict) -> tuple[str, str] | None:
         return None
 
 
+def _dream_record_tenant(org: dict,
+                         graph_namespace: str | None) -> tuple[str, str] | None:
+    """The record tenant the DREAM DRAIN must carry for THIS request, or ``None``.
+
+    The dream pass is the REST lane's SECOND writer: `_enqueue_dream` carries
+    the answer across the queue and `_bind_dream_record_tenant` puts it on the
+    SDK the drain opens. Without it every record that pass emits
+    (``ConfidenceChanged``) is refused ``no_tenant`` on the very graph whose
+    credential named it, while the request's own writes are filed correctly —
+    an armed lane refusing silently, which is the class #10025 exists to close.
+
+    ⚠️ This USED to gate the carry on `graph_namespace` alone, i.e. on
+    `org["graph_id"]`: an org-wide API KEY has no ``graph_id``, so its tenant
+    was never carried and its dream records stayed refused while two docstrings
+    claimed the opposite. That gate also over-refused the very shape it was
+    written for. The rule is not "only graph-bound credentials carry a
+    tenant" — it is **the tenant must name the graph the drain opens**, and the
+    two branches of the drain are:
+
+    * ``graph_namespace`` set → the drain opens THAT custom graph
+      (``_open_sdk`` → ``_make_sdk(graph_name=gns)``), and the credential's own
+      answer names it (a present ``graph_id`` answers or refuses — see
+      :func:`tortoise.record_writer.record_tenant_for`);
+    * ``graph_namespace`` None → the drain opens the ORG-WIDE graph
+      (``_open_sdk`` → ``_make_sdk(namespace=org_id)``), which is BYTE-IDENTICAL
+      to what `_data_sdk` opens for the same credential on this very request
+      (`_make_sdk(namespace=org_id)`) — so an org-wide API KEY's
+      ``default_graph_id`` names exactly the graph the pass will write. That is
+      #10025's whole premise, and the REST request lane already files its rows
+      that way (`_bind_record_tenant`, reached from `_data_sdk`).
+
+    The ONE shape that must NOT carry a tenant is a **graph-bound credential
+    with a falsy namespace**: `graph_namespace` is then None, so the enqueue
+    lands on the ORG-WIDE key whose drain opens the default graph, while the
+    credential's tenant would name the custom graph the request meant to write
+    — filing the pass's rows under a graph it never touched (the #9188 N3
+    hazard). `_data_sdk` refuses that org first with 403 GRAPH_NOT_FOUND, so it
+    is latent rather than live; refusing the carry keeps it that way.
+
+    Fail-soft for the same reason its sibling is (#5148's rule): the record is
+    a derived, replayable store, and a resolution fault must never fail the
+    request about to write. ``None`` is a NAMED refusal counted ``no_tenant``
+    (#9192), never a guess.
+    """
+    if org.get("graph_id") and not graph_namespace:
+        return None
+    return _resolve_record_tenant(org)
+
+
 def _bind_record_tenant(sdk: TortoiseSDK, org: dict) -> None:
     """Hand the record the SAME tenant this request's data write goes to (#9188).
 
@@ -9593,13 +9642,15 @@ async def create_point(body: CreatePointRequest, request: Request, org: dict = D
     # custom-graph key's write must drain the custom graph, never the org
     # default (sdk is the _data_sdk-resolved graph).
     #
-    # #9188 review N3: the namespace and the record tenant come from ONE value,
-    # because they must name the same graph. Gating the tenant on
-    # `org["graph_id"]` alone would let a graph-bound credential with a falsy
-    # namespace land its tenant on the ORG-WIDE key — whose drain opens the
-    # DEFAULT graph — i.e. file the pass's rows under a graph it never wrote.
-    # (`_data_sdk` refuses that org first with 403 GRAPH_NOT_FOUND, so it is
-    # latent rather than live; tying the two arguments keeps it that way.)
+    # `_dream_record_tenant` keeps that tie: a graph-bound credential whose
+    # namespace is falsy is the one shape whose tenant is refused, because the
+    # enqueue then falls back to the ORG-WIDE key (default graph) while its
+    # tenant would name the custom graph. An org-wide API KEY is NOT that
+    # shape — its drain opens `_make_sdk(namespace=org_id)`, the same graph
+    # `_data_sdk` opened for this request, so #10025's `default_graph_id` names
+    # it and the carry is correct rather than a guess.
+    # (`_data_sdk` refuses the falsy-namespace org first with 403
+    # GRAPH_NOT_FOUND, so that shape is latent rather than live.)
     _dream_ns = (org.get("graph_namespace") if org.get("graph_id") else None)
     _enqueue_dream(org["org_id"], list(sdk._dirty_roots),
                    # graph-bound key → ITS custom graph; org-wide/session →
@@ -9612,8 +9663,7 @@ async def create_point(body: CreatePointRequest, request: Request, org: dict = D
                    # drain knows it (`_open_sdk` opens a namespace, not a
                    # tenant), and an armed lane otherwise refuses every
                    # dream-emitted record `no_tenant`.
-                   record_tenant=(_resolve_record_tenant(org)
-                                  if _dream_ns else None))
+                   record_tenant=_dream_record_tenant(org, _dream_ns))
     # Log audit event
     await _async_audit(
         request, org["org_id"], "point_create",

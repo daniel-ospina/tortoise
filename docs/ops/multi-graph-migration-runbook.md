@@ -40,7 +40,7 @@ Consequences (E2E-5 exit gate):
   fighting it (it does not guess): a graph already *named* `default`, and a
   `kind='default'` row whose status is neither `active` nor `deleted`. The
   second is reported by the migration as a WARNING naming the org(s), so a
-  re-run that cannot heal an org says so rather than reporting a silent success. 
+  re-run that cannot heal an org says so rather than reporting a silent success.
 
 - **A failed mint never fails the organization.** `ensure_default_graph_row`
   itself raises (a mint must not claim success for an unpersisted graph), but

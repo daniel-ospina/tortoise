@@ -4607,13 +4607,17 @@ def count_graph_keys(cp, org_id: str, graph_id: str) -> int:
     """Active (non-revoked) api_keys bound to a graph — the key_count
     source for GET /v1/graphs (surface 5).
 
-    #2306: only ever called with a CUSTOM graph's row id. The default row's
-    id is the DERIVED literal 'default' (never a graphs.id — api_keys.graph_id
-    REFERENCES graphs(id)), so this seam can never match a default-row count
-    and the list short-circuits kind='default' rows to 0 before reaching it.
+    #2306: only ever called with a CUSTOM graph's row id, so this seam can
+    never match a default-row count and the list short-circuits kind='default'
+    rows to 0 before reaching it. The REASON that short-circuit is still
+    correct after #10025 — when the default row gained a real `graphs.id`
+    instead of the old DERIVED literal 'default' — is not the FK alone: keys
+    are REFUSED a binding to the default graph at admission
+    (`_ensure_graph_exists` refuses `kind == 'default'`), so `api_keys.graph_id`
+    can never hold that row's id and no key row can be counted against it.
     Org-wide rows (graph_id NULL) are the keys that RESOLVE to the default
     graph; they are counted nowhere on a graph row (managed on the API-Keys
-    tab) — do NOT special-case 'default' here to count them. #2481: revoked tombstones are
+    tab) — do NOT special-case it here to count them. #2481: revoked tombstones are
     excluded — they never consume the org's max_api_keys budget."""
     rows = cp.query(
         "api_keys", select=["id"],

@@ -812,3 +812,100 @@ def test_the_adopt_arm_does_not_adopt_a_tombstone() -> None:
                                  'constraint "uq_graphs_org_name_active"'})
     with pytest.raises(RuntimeError):
         ensure_default_graph_row(cp, "org-adopt-tomb", "org_org-adopt-tomb")
+
+
+# ── The dream drain's carried tenant (#10025 review F2) ──────────────────────
+# The dream pass is the REST lane's SECOND writer: `_enqueue_dream` carries the
+# request's tenant across the queue and `_bind_dream_record_tenant` binds it to
+# the SDK the drain opens. The call site used to gate the carry on
+# `graph_namespace`, i.e. on `org["graph_id"]` — so an ORG-WIDE API KEY (the
+# credential shape the issue measured on all 128 production keys) carried
+# nothing and every `ConfidenceChanged` that pass emitted was refused
+# `no_tenant`, while two docstrings this PR rewrote asserted the opposite.
+# The rule that replaces the gate is "the tenant must name the graph the drain
+# opens" — and for an org-wide credential that is the default graph, which is
+# byte-identical to the graph `_data_sdk` opens for the same request.
+
+
+def _dream_tenant_or_skip(org, graph_namespace):
+    from tortoise import hosted_api
+
+    return hosted_api._dream_record_tenant(org, graph_namespace)
+
+
+@pytest.fixture
+def _control_plane_ids(monkeypatch):
+    """Arm the control-plane id source `record_tenant_for` requires.
+
+    `_resolve_record_tenant` asks `is_supabase_enabled()` on the hosted lane; a
+    local run has no Supabase configured, and without this every shape would
+    answer `None` for the wrong reason — so the assertions below would pass on a
+    resolver that was never asked. Imported inside the seam, hence patched on
+    the module attribute.
+    """
+    from tortoise import supabase_control as sc
+
+    monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+    return True
+
+
+def test_an_org_wide_key_carries_its_default_tenant_to_the_dream_drain(
+        _control_plane_ids) -> None:
+    """The credential the issue measured (all 128 were org-wide) names the
+    default graph, and its dream records must be filed under it.
+
+    RED before the fix: the call site passed `record_tenant=... if _dream_ns
+    else None`, and `_dream_ns` is None for every org-wide key, so this returned
+    None and the drain stayed refused `no_tenant`.
+    """
+    org = {"org_id": "org-wide", "graph_id": None,
+           "default_graph_id": DEFAULT_ROW_ID}
+
+    assert _dream_tenant_or_skip(org, None) == ("org-wide", DEFAULT_ROW_ID)
+
+
+def test_a_session_or_oauth_credential_still_carries_no_tenant(
+        _control_plane_ids) -> None:
+    """Unbound is the right answer for a shape that names no default graph.
+
+    A SESSION/PAT or OAuth `oat_` credential carries no `default_graph_id`
+    (#10047), so the refusal is NAMED (`no_tenant`) rather than a guess — and
+    the wiring above must not have turned that refusal into a wildcard.
+    """
+    assert _dream_tenant_or_skip({"org_id": "org-session", "graph_id": None},
+                                 None) is None
+    # The `"default"` SENTINEL is not an id (the org-list payload carries it),
+    # so it is refused too rather than filed under a graph the record's FK
+    # cannot name.
+    assert _dream_tenant_or_skip({"org_id": "org-sentinel",
+                                  "graph_id": None,
+                                  "default_graph_id": "default"}, None) is None
+
+
+def test_a_graph_bound_key_carries_its_own_graph_tenant(
+        _control_plane_ids) -> None:
+    """The arm that already worked stays working, and it answers with ITS graph
+    — never the org's default."""
+    org = {"org_id": "org-bound", "graph_id": "g_custom",
+           "graph_namespace": "org_org-bound_g_custom",
+           "default_graph_id": DEFAULT_ROW_ID}
+
+    assert _dream_tenant_or_skip(org, "org_org-bound_g_custom") == (
+        "org-bound", "g_custom")
+
+
+def test_a_graph_bound_key_with_a_falsy_namespace_carries_no_tenant(
+        _control_plane_ids) -> None:
+    """The #9188 N3 hazard: this is the ONE shape that must stay refused.
+
+    With a falsy namespace the enqueue falls back to the ORG-WIDE key, whose
+    drain opens the DEFAULT graph — while the credential's tenant names the
+    custom graph the request meant to write. Carrying it would file the pass's
+    rows under a graph it never touched. (`_data_sdk` refuses the org first with
+    403 GRAPH_NOT_FOUND, so this is latent rather than live; the guard keeps it
+    that way, and is therefore asserted rather than assumed.)
+    """
+    for falsy in ("", None):
+        org = {"org_id": "org-falsy", "graph_id": "g_custom",
+               "graph_namespace": falsy, "default_graph_id": DEFAULT_ROW_ID}
+        assert _dream_tenant_or_skip(org, None) is None, falsy
