@@ -26,10 +26,26 @@ writes nothing, prints the number of turns it "copied", and exits 0 — the exac
 silent-success shape that would let a delete step run against an empty record.
 
 Population: identical to the census — an id of ``<session_id>_t<ascii digits>``
-wired by ``CONTAINS`` to that same session. Anything the rule cannot place is
-REPORTED under its own class and NOT copied: an unkeyable node filed into the
-record is a row nothing can compare against, and an ambiguously-owned one would
-be readable under a session it does not belong to.
+wired by ``CONTAINS`` to a session. Anything the rule cannot place is REPORTED
+under its own class and NOT copied: an unkeyable node filed into the record is a
+row nothing can compare against. A point wired to SEVERAL sessions is copied
+under the session its id derives (which is what the census counts), and
+reported, because ``tools/turn_parity_census.py`` fails any session that has a
+graph turn and no record row — a node this phase refused to copy would fail that
+gate permanently, with no way to satisfy it.
+
+Honest bounds, stated rather than implied:
+
+* Memory: turn payloads (embeddings included) are materialised for the whole
+graph before the emit loop, so peak cost scales with the tenant — hundreds of
+MB at the largest production graph (6,432 turns), not a constant.
+* Not atomic across sessions: one record connection per session means a
+  per-session transaction, which is the right re-runnable boundary but is NOT a
+  single atomic copy. An interrupted run leaves earlier sessions copied.
+* The graph's own journal is the graph's REPLAY source. Appending ``PointAdded``
+  to it means a later ``rebuild()`` re-creates the turns this migration deletes
+  from the graph. That is a design consequence recorded on #10017, not a
+  side effect to be discovered later.
 """
 
 from __future__ import annotations
@@ -61,7 +77,15 @@ _COPY_TURNS_PAGE_QUERY = (
 #: it can still come from. A null `capture_redactions` is a MEANINGFUL value
 #: ("no secret was ever redacted", #4911) — dropping the key would make the
 #: record unable to falsify that reading.
-_COPY_SESSIONS_QUERY = "MATCH (s:Session) RETURN s.id, properties(s)"
+#: PAGED for the same reason every other read here is: `RESULTSET_SIZE`
+#: truncates a non-aggregate read silently, so an unpaged session read would
+#: drop provenance on a large tenant and stop reporting `created_at_absent`
+#: (the `sid in sessions` test would simply be false).
+_COPY_SESSIONS_PAGE_QUERY = (
+    "MATCH (s:Session) WHERE id(s) >= $cursor "
+    "RETURN id(s), s.id, properties(s) "
+    "ORDER BY id(s) LIMIT $batch"
+)
 
 #: Session properties the record stores as COLUMNS. Anything else rides in
 #: `props` (the record's own split does that in `_split_properties`), so this
@@ -92,6 +116,10 @@ def classify_copy(rows) -> tuple[dict, dict]:
         "session_mismatch": [], "duplicate_index": [],
         "not_point_kind_event": [],
     }
+    # `orphan` cannot occur through this phase's read (it starts at
+    # `(s:Session)-[:CONTAINS]->`), but the class is kept and reported with its
+    # zero so the artifact can tell "0 orphans" from "not measured". The
+    # census's own `orphan_turn_ids` is where an unwired turn is counted.
     for _internal_id, pid, props, sids in rows:
         props = dict(props or {})
         pid = "" if pid is None else str(pid)
@@ -106,8 +134,11 @@ def classify_copy(rows) -> tuple[dict, dict]:
             anomalies["orphan"].append(pid)
             continue
         if len(sids) > 1:
+            # COPIED under the derived session and reported: the census counts
+            # this point as that session's turn, and the parity gate fails any
+            # session holding a graph turn with no record row — refusing to
+            # copy it would fail that gate forever, with nothing able to fix it.
             anomalies["cross_wired"].append({"id": pid, "sessions": sorted(sids)})
-            continue
         if sids[0] != derived:
             anomalies["session_mismatch"].append(
                 {"id": pid, "wired_session": sids[0], "derived_session": derived})
@@ -171,8 +202,12 @@ def copy_phase(graph, emit, *, page_size: int | None = None, event_id) -> dict:
     """
     if page_size is None:
         page_size = census._PAGE_SIZE
-    sessions = {str(sid): dict(props or {}) for sid, props in
-                graph.query(_COPY_SESSIONS_QUERY).result_set}
+    session_rows = list(census._paged_rows(graph, _COPY_SESSIONS_PAGE_QUERY,
+                                           page_size))
+    census._cross_check(":Session", len(session_rows),
+                        census._count(graph, census._SESSIONS_COUNT_QUERY)[0])
+    sessions = {str(sid): dict(props or {})
+                for _internal, sid, props in session_rows}
     rows = list(census._paged_rows(graph, _COPY_TURNS_PAGE_QUERY, page_size))
     census._cross_check("copy turn", len(rows),
                         census._count(graph, census._TURNS_COUNT_QUERY)[1])
@@ -181,7 +216,9 @@ def copy_phase(graph, emit, *, page_size: int | None = None, event_id) -> dict:
     stats = {
         "sessions": 0, "turns": 0, "positioned": 0, "empty_sessions": 0,
         "created_at_absent": [],
-        "anomalies": {k: len(v) for k, v in anomalies.items() if v},
+        # EVERY class, zeros included: a subset cannot distinguish "0" from
+        # "not measured", which is how a silent gap reads as a clean result.
+        "anomalies": {k: len(v) for k, v in anomalies.items()},
     }
     # EVERY session, not just the ones with turns: a session with none still has
     # provenance, and a delete step that touches Session nodes would lose it
@@ -215,13 +252,36 @@ def _journal_emit(journal_path: str, dsn: str, org_id: str, graph_id: str):
     landed rather than returning a position for a write that was rolled back.
     """
     from tortoise.log import EventLog
-    from tortoise.record_writer import RecordWriteOutcome, write_records
+    from tortoise.record_writer import RecordWriteOutcome, RecordWriter, write_records
+
+    # The journal must already EXIST: `EventLog` on a mistyped or fresh path
+    # ordinals from 1, and `journal_event` absorbs the collision with
+    # `ON CONFLICT DO NOTHING` — so every position row would be silently
+    # discarded while the record came to believe the real journal's seqs were
+    # consumed. Fail closed instead of guessing which file is the graph's.
+    journal = Path(journal_path)
+    if not journal.is_file() or journal.stat().st_size == 0:
+        raise CopyRefused(
+            f"{journal_path}: not an existing, non-empty journal — positions are "
+            "per (org_id, graph_id), and a fresh file would collide with live "
+            "history and be swallowed by ON CONFLICT")
 
     log = EventLog(journal_path)
+    # The DSN is passed EXPLICITLY. It used to be accepted and dropped, so a
+    # non-default `--dsn-env` wrote into whatever `TORTOISE_RECORD_DSN` named —
+    # a different database, exit 0.
+    writer = RecordWriter(dsn=dsn)
 
     def emit(session_id: str, events: list[dict]):
         positions = [log.append(event) for event in events]
         first = positions[0] if positions else None
+        if None in positions and first is not None:
+            # A None mid-segment is an UNPROVEN position (#9190), not an
+            # interleaved writer — the remedy is different, so the message is.
+            raise CopyRefused(
+                f"{session_id}: the journal could not prove a position for every "
+                "event; filing the rest would number them against someone "
+                "else's records")
         if first is not None and positions != list(range(first, first + len(positions))):
             # `write_records` numbers ONE CONTIGUOUS segment, and the appends
             # take the journal lock one at a time — a concurrent live writer
@@ -236,7 +296,7 @@ def _journal_emit(journal_path: str, dsn: str, org_id: str, graph_id: str):
             # No proven position ⇒ the row must NOT be filed with an invented
             # one (#9190): `position=False` leaves it unwritten instead.
             position=first is not None, first_seq=first if first is not None else 1,
-            conn=None, writer=None)
+            conn=None, writer=writer)
         write = _commit_or_refuse(write, RecordWriteOutcome, session_id)
         return first
 
@@ -292,7 +352,9 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"${args.dsn_env} is not set — refuse to copy into "
                          "nothing (use --dry-run to measure only)")
 
-    import ulid as _ulid
+    # `tortoise.ids.ulid` is the repo's ONE mint — `ulid` is not a dependency,
+    # so `import ulid` made every non-dry-run invocation die before connecting.
+    from tortoise.ids import ulid
 
     db, shown = census._connect(uri)
     census._assert_graph_exists(db, args.graph)
@@ -300,7 +362,7 @@ def main(argv: list[str] | None = None) -> int:
 
     emit = (lambda sid, events: 0) if args.dry_run else _journal_emit(
         args.journal, dsn, args.org_id, args.graph_id)
-    stats = copy_phase(graph, emit, event_id=lambda: str(_ulid.ULID()))
+    stats = copy_phase(graph, emit, event_id=ulid)
     stats["graph"] = shown
     stats["dry_run"] = args.dry_run
     if args.out:

@@ -46,7 +46,10 @@ def test_classify_refuses_every_unplaceable_node_by_its_own_class() -> None:
         (4, "s1_t2", {"id": "s1_t2"}, ["s2"]),                    # wired elsewhere
     ]
     by_session, anomalies = copy_mod.classify_copy(rows)
-    assert by_session == {}          # none of them is copyable
+    # A CROSS-WIRED node IS copied, under the session its id derives: the census
+    # counts it as that session's turn, and the parity gate fails a session whose
+    # graph turn has no record row — refusing it would fail that gate forever.
+    assert list(by_session) == ["s1"] and list(by_session["s1"]) == [1]
     assert anomalies["off_shape"] == ["not-a-turn"]
     assert anomalies["orphan"] == ["s1_t0"]
     assert anomalies["cross_wired"] == [{"id": "s1_t1", "sessions": ["s1", "s2"]}]
@@ -167,7 +170,7 @@ def test_a_commit_failure_still_closes_the_connection() -> None:
 
 # ── the journal position ───────────────────────────────────────────────────
 
-def _patch_journal(monkeypatch, positions):
+def _patch_journal(monkeypatch, positions, tmp_path=None):
     import tortoise.log as log_mod
     import tortoise.record_writer as rw
 
@@ -188,29 +191,118 @@ def _patch_journal(monkeypatch, positions):
 
     monkeypatch.setattr(log_mod, "EventLog", _Log)
     monkeypatch.setattr(rw, "write_records", _write)
+    monkeypatch.setattr(rw, "RecordWriter", lambda **kwargs: "writer")
     return calls
 
 
-def test_contiguous_positions_anchor_the_rows_at_the_first_one(monkeypatch) -> None:
+def _journal(tmp_path) -> str:
+    """The journal must EXIST and be non-empty — a fresh path is refused."""
+    path = tmp_path / "graph.jsonl"
+    path.write_text("{}\n")
+    return str(path)
+
+
+def test_contiguous_positions_anchor_the_rows_at_the_first_one(monkeypatch, tmp_path) -> None:
     calls = _patch_journal(monkeypatch, [7, 8, 9])
-    emit = copy_mod._journal_emit("/tmp/j.jsonl", "dsn", "org", "graph")
+    emit = copy_mod._journal_emit(_journal(tmp_path), "dsn", "org", "graph")
     assert emit("s1", [{"a": 1}, {"b": 2}, {"c": 3}]) == 7
-    assert calls[0][1] == {"org_id": "org", "graph_id": "graph",
-                           "position": True, "first_seq": 7,
-                           "conn": None, "writer": None}
+    kwargs = calls[0][1]
+    assert kwargs["position"] is True and kwargs["first_seq"] == 7
+    # The DSN must reach the seam EXPLICITLY: it was accepted and dropped once,
+    # so a non-default --dsn-env wrote into whatever TORTOISE_RECORD_DSN named.
+    assert kwargs["writer"] is not None and kwargs["conn"] is None
 
 
-def test_an_interleaved_journal_is_refused_not_misnumbered(monkeypatch) -> None:
+def test_an_interleaved_journal_is_refused_not_misnumbered(monkeypatch, tmp_path) -> None:
     _patch_journal(monkeypatch, [7, 9])   # a live writer took 8
-    emit = copy_mod._journal_emit("/tmp/j.jsonl", "dsn", "org", "graph")
+    emit = copy_mod._journal_emit(_journal(tmp_path), "dsn", "org", "graph")
     with pytest.raises(copy_mod.CopyRefused, match="not contiguous"):
         emit("s1", [{"a": 1}, {"b": 2}])
 
 
-def test_an_unproven_position_files_no_row_rather_than_fabricating_one(monkeypatch) -> None:
+def test_an_unproven_position_files_no_row_rather_than_fabricating_one(monkeypatch, tmp_path) -> None:
     """`EventLog.append` returns None when it cannot prove a position; inventing
     `1` would collide with a later replay's numbering (#9190)."""
     calls = _patch_journal(monkeypatch, [None])
-    emit = copy_mod._journal_emit("/tmp/j.jsonl", "dsn", "org", "graph")
+    emit = copy_mod._journal_emit(_journal(tmp_path), "dsn", "org", "graph")
     assert emit("s1", [{"a": 1}]) is None
     assert calls[0][1]["position"] is False and calls[0][1]["first_seq"] == 1
+
+
+# ── copy_phase: the loop the P0 lived in ──────────────────────────────────
+
+class _FakeGraph:
+    """Paging-aware: honours `$cursor`/`$batch` and answers the count legs."""
+
+    def __init__(self, sessions, turns) -> None:
+        self._sessions, self._turns = list(sessions), list(turns)
+
+    def query(self, cypher: str, params: dict | None = None):
+        params = params or {}
+
+        class _R:
+            def __init__(self, rows) -> None:
+                self.result_set = rows
+
+        if "count(p)" in cypher:
+            return _R([(len(self._turns), len(self._turns))])
+        if "count(s" in cypher:
+            return _R([(len(self._sessions),)])
+        rows = self._turns if "CONTAINS" in cypher else self._sessions
+        cursor, batch = int(params.get("cursor", 0)), int(params.get("batch", 1000))
+        return _R(rows[cursor:cursor + batch])
+
+
+def test_copy_emits_the_empty_session_too_and_counts_what_landed() -> None:
+    """A session with no turns still has provenance; an emit that returns None
+    (no provable position) must not be counted as positioned."""
+    graph = _FakeGraph(
+        sessions=[(1, "s1", {"created_at": "2026-10-20T00:00:00Z"}),
+                  (2, "s2", {})],                     # s2: zero turns, no created_at
+        turns=[(1, "s1_t0", {"id": "s1_t0", "pointKind": "event"}, ["s1"])])
+    sent = {}
+    stats = copy_mod.copy_phase(
+        graph, lambda sid, evs: sent.setdefault(sid, evs) and 1,
+        event_id=lambda: "E")
+    assert sorted(sent) == ["s1", "s2"]           # the empty session is filed
+    assert [e["type"] for e in sent["s2"]] == ["SessionRecorded"]
+    assert sent["s2"][0]["turn_count"] == 0 and sent["s2"][0]["created_at"] is None
+    assert stats["sessions"] == 2 and stats["turns"] == 1
+    assert stats["empty_sessions"] == 1
+    assert stats["created_at_absent"] == ["s2"]
+    # Every class is reported, zeros included: a subset cannot tell "0" from
+    # "not measured", which is how a silent gap reads as a clean result.
+    assert stats["anomalies"]["orphan"] == 0
+    assert set(stats["anomalies"]) >= {"off_shape", "orphan", "cross_wired"}
+
+
+def test_a_failed_session_write_aborts_the_copy_instead_of_being_counted() -> None:
+    graph = _FakeGraph(
+        sessions=[(1, "s1", {}), (2, "s2", {})],
+        turns=[(1, "s1_t0", {"id": "s1_t0"}, ["s1"]),
+               (2, "s2_t0", {"id": "s2_t0"}, ["s2"])])
+    seen = []
+
+    def emit(sid, events):
+        seen.append(sid)
+        if sid == "s2":
+            raise copy_mod.CopyRefused("record not armed")
+        return 5
+
+    with pytest.raises(copy_mod.CopyRefused, match="not armed"):
+        copy_mod.copy_phase(graph, emit, event_id=lambda: "E")
+    assert seen == ["s1", "s2"]    # it stops; it does not swallow and finish
+
+
+def test_a_fresh_journal_path_is_refused_not_numbered_from_one(tmp_path) -> None:
+    with pytest.raises(copy_mod.CopyRefused, match="non-empty journal"):
+        copy_mod._journal_emit(str(tmp_path / "new.jsonl"), "dsn", "org", "g")
+
+
+def test_an_unproven_position_mid_segment_is_named_as_such(monkeypatch, tmp_path) -> None:
+    """`[7, None]` is an unproven position (#9190), not an interleaved writer —
+    different cause, different remedy, so a different message."""
+    _patch_journal(monkeypatch, [7, None])
+    emit = copy_mod._journal_emit(_journal(tmp_path), "dsn", "org", "graph")
+    with pytest.raises(copy_mod.CopyRefused, match="could not prove a position"):
+        emit("s1", [{"a": 1}, {"b": 2}])
