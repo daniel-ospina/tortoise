@@ -303,6 +303,40 @@ def test_the_connect_bound_is_passed_once_per_call(monkeypatch):
     assert 1.5 in seen, f"connect bound not applied: {seen}"
 
 
+def _patch_docker_only(monkeypatch, fake):
+    """Install `fake` as `subprocess.run` FOR THE DOCKER PROBE ONLY.
+
+    `e.subprocess` IS the `subprocess` module, so a plain
+    `monkeypatch.setattr(e.subprocess, "run", fake)` replaces `subprocess.run`
+    PROCESS-WIDE: a fake that records or answers every call also captures every
+    OTHER shell-out in this interpreter. `tortoise/embedded_reaper.py:1051` is
+    one — `_run_text(["ps", "-o", "lstart=", "-p", <pid>], timeout=2,
+    env={**os.environ, "LC_ALL": "C"})`, reached from `_process_start_time` —
+    and its shape is exactly what the record showed when `test (c)` reded on PR
+    #10016 with the probe itself correct:
+
+        E  AssertionError: {'capture_output': True, 'text': True, 'timeout': 2,
+           'env': {'SHELL': '/bin/bash', ...}}
+        E  assert 2 == 3.0
+
+    The probe DID pass its bound (3.0); the reaper's `ps` overwrote the record
+    with its own 2s bound. Dispatching on the command keeps every non-docker
+    caller on the real implementation, so a red here always names the probe and
+    a green can never be produced by an unrelated caller.
+    """
+    import subprocess as sp
+
+    real = sp.run
+
+    def dispatch(*a, **kw):
+        cmd = a[0] if a else kw.get("cmd")
+        if isinstance(cmd, (list, tuple)) and list(cmd[:1]) == ["docker"]:
+            return fake(*a, **kw)
+        return real(*a, **kw)
+
+    monkeypatch.setattr(e.subprocess, "run", dispatch)
+
+
 def test_probe_engine_treats_a_slow_answer_as_wedged(monkeypatch):
     """(a) FAILS if the subprocess timeout is not applied — without it this
     call blocks for the full kill interval when the control plane is wedged,
@@ -322,9 +356,42 @@ def test_probe_engine_treats_a_slow_answer_as_wedged(monkeypatch):
         assert kwargs.get("timeout"), "probe_engine must pass a bound to docker"
         raise sp.TimeoutExpired(cmd="docker version", timeout=kwargs["timeout"])
 
-    monkeypatch.setattr(e.subprocess, "run", boom)
+    _patch_docker_only(monkeypatch, boom)
     result = e.probe_engine(3.0)
     assert result["status"] == e.ENGINE_WEDGED
+    assert seen["timeout"] == 3.0, seen
+
+
+def test_an_unrelated_shell_out_cannot_overwrite_the_recorded_bound(monkeypatch):
+    """(a) FAILS if the fake installed for the probe captures EVERY
+    `subprocess.run` in this process. That is what reded `test (c)` on PR #10016
+    while the code under test was correct: `embedded_reaper._process_start_time`
+    shells out through `_run_text(..., timeout=2, env={...})`, and the assertion
+    read THAT call's bound (2) instead of the probe's (3.0) — a false RED on a
+    green tree, on a required check that no change to the probe could green.
+    (b) Reachable: the reaper's call, made from the same interpreter while the
+    probe runs; reproduced here deterministically (no threads, no sleeps) by
+    making the same call shape between the probe and the assertion.
+    """
+    import subprocess as sp
+
+    seen = {}
+
+    def boom(*_a, **kwargs):
+        seen.update(kwargs)
+        assert kwargs.get("timeout"), "probe_engine must pass a bound to docker"
+        raise sp.TimeoutExpired(cmd="docker version", timeout=kwargs["timeout"])
+
+    _patch_docker_only(monkeypatch, boom)
+    assert e.probe_engine(3.0)["status"] == e.ENGINE_WEDGED
+    assert seen["timeout"] == 3.0, seen
+
+    # The reaper's call shape (embedded_reaper.py:1051) in the parts that
+    # matter: a NON-docker command, `timeout=2`, an `env`. Pre-fix this
+    # overwrote `seen` with 2 and reded the assertion below.
+    sp.run([sys.executable, "-c", "pass"], capture_output=True, text=True,
+           timeout=2, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
+
     assert seen["timeout"] == 3.0, seen
 
 
@@ -342,7 +409,7 @@ def test_probe_engine_reports_a_nonzero_rc_as_daemon_down(monkeypatch):
         stdout = ""
         stderr = "Cannot connect to the Docker daemon"
 
-    monkeypatch.setattr(e.subprocess, "run", lambda *a, **k: Proc())
+    _patch_docker_only(monkeypatch, lambda *a, **k: Proc())
     result = e.probe_engine(3.0)
     assert result["status"] == e.ENGINE_DAEMON_DOWN
     assert result["status"] != e.ENGINE_WEDGED
@@ -357,7 +424,7 @@ def test_probe_engine_reports_a_missing_cli_as_absent_not_wedged(monkeypatch):
     def boom(*_a, **_k):
         raise FileNotFoundError("docker")
 
-    monkeypatch.setattr(e.subprocess, "run", boom)
+    _patch_docker_only(monkeypatch, boom)
     monkeypatch.setattr(e, "docker_socket", lambda: None)
     assert e.probe_engine(3.0)["status"] == e.ENGINE_ABSENT
 
@@ -374,7 +441,7 @@ def test_a_missing_cli_with_a_live_socket_is_unmeasured_not_absent(monkeypatch):
     def boom(*_a, **_k):
         raise FileNotFoundError("docker")
 
-    monkeypatch.setattr(e.subprocess, "run", boom)
+    _patch_docker_only(monkeypatch, boom)
     monkeypatch.setattr(e, "docker_socket", lambda: Path("/var/run/docker.sock"))
     result = e.probe_engine(3.0)
     assert result["status"] == e.ENGINE_UNMEASURED
@@ -465,7 +532,7 @@ def test_the_graph_down_prose_matches_the_engine_state(monkeypatch, capsys):
     def no_cli(*_a, **_k):
         raise FileNotFoundError("docker")
 
-    monkeypatch.setattr(e.subprocess, "run", no_cli)
+    _patch_docker_only(monkeypatch, no_cli)
     monkeypatch.setattr(e, "docker_socket", lambda: Path("/var/run/docker.sock"))
     e.main(["--port", str(port), "--timeout", "1"])
     out = capsys.readouterr().out
@@ -482,7 +549,7 @@ def test_the_graph_down_prose_matches_the_engine_state(monkeypatch, capsys):
         stdout = ""
         stderr = "Cannot connect to the Docker daemon"
 
-    monkeypatch.setattr(e.subprocess, "run", lambda *a, **k: Proc())
+    _patch_docker_only(monkeypatch, lambda *a, **k: Proc())
     e.main(["--port", str(port), "--timeout", "1"])
     out = capsys.readouterr().out
     assert "fail fast" in out, out

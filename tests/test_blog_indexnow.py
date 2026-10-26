@@ -165,7 +165,11 @@ for (const c of cases) {
       if (method === 'POST') {
         const body = JSON.parse(String(init.body));
         Object.assign(row, body);
-        return Response.json([{ id: row.id, slug: row.slug || slug }]);
+        // The store is the authority on the row's identity: it may normalise the
+        // slug, and the notification must use what the STORE returned. `createdSlug`
+        // lets a case make the two differ, so a url built from the request cannot
+        // pass unnoticed.
+        return Response.json([{ id: row.id, slug: c.createdSlug || row.slug || slug }]);
       }
       if (method === 'PATCH') {
         const body = JSON.parse(String(init.body));
@@ -336,13 +340,27 @@ CASES: dict[str, dict] = {
     # submitted": it must skip, and it must log (the module's "every read is
     # logged" contract, and the only way the runbook's grep can see it).
     "state_no_row": {"status": "draft", "stateNoRow": True, "steps": [{"status": "published"}]},
-    # ── the create path (deliberately NOT instrumented) ───────────────────
-    # `POST /blog/api/posts` with status=published publishes immediately, and it
-    # does NOT notify: #9680 names the PATCH transition as the trigger. Pinned so
-    # the disclosed gap cannot silently become an instrumented path (or silently
-    # stay one) without a test changing alongside it.
+    # ── the create path (#9803 ruling: "became live" is the trigger, not "a PATCH
+    # did it") ──────────────────────────────────────────────────────────────
+    # `POST /blog/api/posts` with status=published lands a publicly readable row,
+    # so it notifies. #9680 had left it un-instrumented; the owner reversed that,
+    # and the reversal is recorded on #9680 with an OVERRIDES line. Both directions
+    # stay pinned: remove the create's notification and the case below reds; make a
+    # create notify regardless of status and `draft_create` reds.
     "direct_publish_create": {
         "post": {"title": "Created published", "body": "body text", "slug": "indexnow-slug", "status": "published"},
+    },
+    # The store may normalise the slug on insert; the notification must use the
+    # identity the STORE returned, not the request body it was given.
+    "direct_publish_create_renamed_by_store": {
+        "createdSlug": "canonical-slug",
+        "post": {"title": "Created published", "body": "body text", "slug": "indexnow-slug", "status": "published"},
+    },
+    # The other half of that pair: a DRAFT create makes nothing public, so it must
+    # submit nothing. Together the two cases pin "the trigger is the row being
+    # live", not "a create happened".
+    "draft_create": {
+        "post": {"title": "Created draft", "body": "body text", "slug": "indexnow-slug", "status": "draft"},
     },
 }
 
@@ -1085,20 +1103,47 @@ def test_a_failed_submission_still_burns_the_window(results) -> None:
     assert res["stamp"], "the attempt must be recorded even when it failed"
 
 
-# ── The create path is NOT instrumented (a disclosed gap, pinned) ─────────
-def test_a_direct_publish_create_does_not_notify(results) -> None:
-    """``POST`` with ``status: "published"`` publishes but submits nothing.
+# ── The create path IS instrumented (#9803: "became live" is the trigger) ──
+def test_a_direct_publish_create_notifies(results) -> None:
+    """``POST`` with ``status: "published"`` puts a row live, so it submits.
 
-    #9680 names the PATCH transition as the trigger, so this is deliberate — and
-    it is disclosed in ``docs/blog-authoring.md`` rather than left implicit. The
-    case exists so the gap cannot change in EITHER direction without a test
-    changing with it: instrument the create path and this reds; drop the doc line
-    and the doc test reds.
+    #9680 put the trigger on the PATCH alone, which left one write that makes a
+    page publicly readable and submitted nothing — a disclosed gap, deliberately
+    pinned at the time. #9803's ruling is that the trigger is "the post became
+    live", whichever write did it, so this case now asserts the opposite: the
+    create submits exactly once, and a draft create still submits nothing
+    (``draft_create``).
+
+    Both directions stay pinned: remove the notification from the create handler
+    and this reds; make a draft create notify and ``draft_create`` reds.
     """
     res = results["direct_publish_create"]
     assert res["statuses"] == [201], f"the create itself must still succeed: {res['statuses']}"
-    assert res["submissions"] == [], (
-        f"the create path must not notify (#9680 names the PATCH transition) — got "
-        f"{_submitted_urls(res)}. If this is now intended, wire it deliberately and "
-        "update this test and the doc together"
+    assert len(res["submissions"]) == 1, (
+        "a create born published is a publish transition and must submit ONCE — got "
+        f"{len(res['submissions'])}: {_submitted_urls(res)}"
+    )
+
+    submission = res["submissions"][0]
+    assert submission["url"] == ENDPOINT, (
+        f"the submission must go to the IndexNow endpoint, not {submission['url']}"
+    )
+    assert submission["body"]["urlList"] == [f"{SITE}/blog/indexnow-slug"], (
+        "the create must submit the CANONICAL url — /blog/<the row's slug> — got "
+        f"{submission['body']['urlList']}. A request-derived slug or a wrong path "
+        "passes a bare count assertion"
+    )
+    assert submission["body"]["host"] == SITE.removeprefix("https://"), submission["body"]["host"]
+
+    renamed = results["direct_publish_create_renamed_by_store"]
+    assert renamed["statuses"] == [201], renamed["statuses"]
+    assert [s["body"]["urlList"] for s in renamed["submissions"]] == [[f"{SITE}/blog/canonical-slug"]], (
+        "the submitted url must come from the row the STORE returned, not the "
+        f"request slug: {[s['body']['urlList'] for s in renamed['submissions']]}"
+    )
+
+    draft = results["draft_create"]
+    assert draft["statuses"] == [201], draft["statuses"]
+    assert draft["submissions"] == [], (
+        f"a draft create makes nothing public and must submit nothing — got {_submitted_urls(draft)}"
     )

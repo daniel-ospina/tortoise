@@ -91,6 +91,54 @@ FAILURE_ORIGIN_VALUES = (None, "config_mismatch", "hash_mismatch",
 #: report's ``judge_rubric_id_hash``.
 JUDGE_PIN = "longmemeval-official-anscheck-gpt4o-2024-08-06-v1"
 
+#: The pin a MOCK-graded run carries. The pin is DERIVED from the judge the
+#: report records (``judge_pin_for``), never passed in independently, so a
+#: receipt cannot carry the official pin while a stub graded the answers.
+MOCK_JUDGE_PIN = "longmemeval-mock-judge"
+
+#: The official judge MODEL id (the transport serving it is a routing detail:
+#: ``openrouter:openai/gpt-4o-2024-08-06`` is the same judge).
+OFFICIAL_JUDGE_MODEL_ID = "gpt-4o-2024-08-06"
+
+
+def _judge_model_id(spec: Any) -> str:
+    """``provider:model`` → ``model``; a bare id is its own model id."""
+    return str(spec or "").strip().split(":", 1)[-1]
+
+
+def judge_pin_for(judge_model: Any) -> str:
+    """The pin belonging to the judge identity a report RECORDS — an
+    ALLOW-LIST, never a default.
+
+    ``JUDGE_PIN`` used to be minted for every run, so a report graded by
+    ``mock-judge`` — zero network, zero cost, ``run.py --mock`` — produced a
+    receipt carrying the OFFICIAL pin with ``receipt_valid: True`` and
+    ``verdict: pass`` (measured at #8486). The same shape covers the tempting
+    substitution this issue's thread keeps returning to (grade the graded run
+    with a cheaper model): a substituted judge recorded as its own model id
+    was published under the official pin. R12 forbids substituting the judge in
+    the official number, so the pin has to travel with the judge that actually
+    graded: the official pin belongs to the OFFICIAL MODEL, a stub gets the
+    mock pin, and everything else records ``unpinned:<model>``.
+
+    Same allow-list SHAPE as ``measure_ask_distilled.judge_pin_for`` (which
+    closed the same hole for the ask-exit measurement) — deliberately NOT the
+    same strings, so do not read "mirrors" into it: that one keys on the judge
+    SPEC (only the literal ``mock`` is its stub, and a routed non-official spec
+    records ``unpinned:<spec>``), this one keys on the MODEL id (``mock`` and
+    ``mock-judge`` are both stubs, and a routed non-official spec records
+    ``unpinned:<model>``).
+    """
+    model = _judge_model_id(judge_model)
+    if not model:
+        return "unpinned:<unrecorded>"
+    if model in ("mock", "mock-judge"):
+        return MOCK_JUDGE_PIN
+    if model == OFFICIAL_JUDGE_MODEL_ID or model.endswith(
+            "/" + OFFICIAL_JUDGE_MODEL_ID):
+        return JUDGE_PIN
+    return f"unpinned:{model}"
+
 
 # ── official metric derivation ─────────────────────────────────────────────
 
@@ -498,6 +546,47 @@ def validate_receipt(receipt: dict) -> list[str]:
                 receipt.get("corpus_hash") or "").startswith("sha256:"):
             issues.append(
                 "receipt.corpus_hash: expected a sha256:… corpus hash")
+    # #8486 (R12): the pin must belong to the judge the report records. A
+    # pin/model pair that cannot both be true is how a stub-graded or
+    # substituted-judge run is published under the OFFICIAL pin — the receipt
+    # is the artifact J7 audits, so this is checked there.
+    #
+    # Checked on EVERY receipt the auditor can read, never only a completed
+    # one: ``failed`` and ``skipped`` are legal ``run_status`` values, so a
+    # clause scoped to ``completed`` validated nothing in the other two — a
+    # hand-built receipt simply declared itself failed and kept the OFFICIAL
+    # pin for a stub-graded run (``validate_receipt`` returned ``[]``;
+    # measured at 885e6f372). A receipt that publishes measurements is read by
+    # J7 whatever status it claims, and the status is a field in the same
+    # hand-built object, so it cannot be the fence around the claim.
+    recorded_judge = receipt.get("judge_model")
+    expected_pin = judge_pin_for(recorded_judge)
+    recorded_pin = receipt.get("judge_pin")
+    if isinstance(recorded_pin, str) and recorded_pin.strip() \
+            and recorded_pin != expected_pin:
+        issues.append(
+            f"receipt.judge_pin: {recorded_pin!r} does not belong to the "
+            f"judge the report records ({recorded_judge!r} — expected "
+            f"{expected_pin!r}) (#8486)")
+    # The official pin is the licence to publish a comparable number; a run
+    # graded by anything else may record its result, never a 'pass'. Both
+    # predicates of the documented claim — "only an official-pinned COMPLETED
+    # run records verdict: pass" — are enforced here, on every status: the pin
+    # half below, the completion half first (a failed/skipped receipt that
+    # reads 'pass' asserts a result the run cannot back, whichever judge
+    # graded it).
+    if receipt.get("verdict") == "pass":
+        if receipt.get("run_status") != "completed":
+            issues.append(
+                f"receipt.verdict: a {receipt.get('run_status')!r} run cannot "
+                "publish 'pass' — only a completed run carries a verdict, and "
+                "a failed/skipped receipt records 'inconclusive' (#8486)")
+        if expected_pin != JUDGE_PIN:
+            issues.append(
+                "receipt.verdict: a run graded by "
+                f"{recorded_judge!r} (pin {expected_pin!r}) cannot publish "
+                "'pass' — R12 forbids substituting the judge in the official "
+                "number (#8486)")
     return issues
 
 
@@ -553,10 +642,21 @@ def _main(argv: list[str] | None = None) -> None:
                    ingest_mode=methodology.get("ingest_mode", "")))
     seal = seal_answer_keys(instances)
     integrity = report.get("integrity") or {}
+    judge_model = methodology.get("judge_model", "")
+    judge_pin = judge_pin_for(judge_model)
     run_status = ("completed" if integrity.get("valid") is True
                   and report.get("accuracy") is not None
                   else "failed")
-    verdict = "pass" if run_status == "completed" else "inconclusive"
+    # #8486 (R12): the verdict is derived from the SAME identity as the pin, so
+    # the receipt is self-consistent rather than merely refused later. A
+    # completed run graded by a stub or a substituted model records
+    # ``inconclusive`` — a consumer that reads ``verdict`` alone (the field R12
+    # is about, cited by ``docs/benchmarks/w7a-comparison-rows-for-2106.md``)
+    # can no longer read 'pass' off a run that cannot back the official number.
+    # ``validate_receipt`` keeps its clause as defence in depth for receipts
+    # that are HAND-BUILT rather than derived here.
+    verdict = ("pass" if run_status == "completed" and judge_pin == JUDGE_PIN
+               else "inconclusive")
     metrics = {f"official_recall_all@{k}": rows[f"official_recall_all@{k}"]["value"]
                for k in ("5",)}
     # #2516 (C1): the sealed receipt carries the per-category official rows
@@ -569,8 +669,10 @@ def _main(argv: list[str] | None = None) -> None:
              or (methodology.get("run_at_utc") or ""),
         commit=args.commit,
         corpus_hash=args.corpus_hash,
-        judge_pin=JUDGE_PIN,
-        judge_model=methodology.get("judge_model", ""),
+        # #8486: DERIVED from the judge the report recorded — never the
+        # constant (a mock/substituted judge must not mint the official pin).
+        judge_pin=judge_pin,
+        judge_model=judge_model,
         judge_rubric_id_hash=methodology.get("judge_rubric_id_hash", ""),
         reader_model_spec=methodology.get("reader_model_spec", ""),
         reader_pinned=bool(methodology.get("reader_pinned")),

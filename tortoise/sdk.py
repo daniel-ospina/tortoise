@@ -2421,6 +2421,17 @@ _TURN_WRITE_CYPHER = (
 )
 
 
+# #10000: §9.1/D1 places the raw transcript in Postgres — "not in the graph, not
+# a `Document`, not a `Point`". The per-turn `PointAdded` records this writer
+# emits ARE that Postgres write (the projection folds them into `public.point`
+# with `is_episodic = true`), so when the record can hold the turns the graph
+# keeps only the Session's redaction count: one node write, no rows, no
+# `CONTAINS` edges.
+_SESSION_REDACTIONS_CYPHER = (
+    "MATCH (s:Session {id:$sid}) SET s.capture_redactions=$redactions"
+)
+
+
 def _capture_turn_id(session_id: str, index: int, turn_offset: int = 0) -> str:
     """The deterministic per-turn Point id: ``{session_id}_t{index + offset}``.
 
@@ -2491,8 +2502,9 @@ def _write_capture_turns(
     session_existed: bool = True,
     texts_and_counts: tuple[list[str], dict[str, int]] | None = None,
     turn_offset: int = 0,
+    prior_turn_max_index: int = -1,
 ) -> int:
-    """Write a capture's episodic turn stream — ONE batched statement (#3086).
+    """Write a capture's episodic turn stream — to the RECORD when it can hold it (#10000).
 
     The ONE turn store, called by ``_write_session_and_turns`` — which BOTH
     capture lanes call: ``TortoiseSDK.capture_session`` (sync, no loop to free)
@@ -2628,69 +2640,60 @@ def _write_capture_turns(
     # `session_id`, so a re-issue targets the same node), the CONTAINS edge is
     # a MERGE, and `status`/`createdAt` use `coalesce` — a re-issued statement
     # can neither duplicate a turn nor demote or re-stamp a stored one.
-    rows = sdk._graph_write_with_retry(
-        lambda: proj.g.query(
-            _TURN_WRITE_CYPHER,
-            params={"turns": turn_rows, "sid": session_id, "now": now,
-                    "redactions": redacted_total},
-        ),
-        what="capture turn batch write",
-    ).result_set
-    stored = {r[0]: (r[1], r[2], r[3]) for r in (rows or [])}
+    # #10000: WHICH STORE holds the turns is a CAPABILITY question, never a
+    # policy flag. The per-turn `PointAdded` records below are gated on a
+    # configured journal (`sdk._get_event_log()`), and the record is armed only
+    # with `TORTOISE_RECORD_DSN`; if either is absent the graph is the only store
+    # that can hold the turns, so this writer keeps both paths and selects by
+    # what is actually available. Removing the graph write unconditionally would
+    # write the transcript to NO store on an unarmed deployment — silent loss of
+    # the capture's whole point.
+    from tortoise.record_writer import record_dsn as _record_dsn
+    _record_holds_turns = (sdk._get_event_log() is not None
+                           and _record_dsn() is not None)
+    if _record_holds_turns:
+        sdk._graph_write_with_retry(
+            lambda: proj.g.query(
+                _SESSION_REDACTIONS_CYPHER,
+                params={"sid": session_id, "redactions": redacted_total},
+            ),
+            what="capture session redaction count",
+        )
+        # No graph read-back: the record holds createdAt/status/embedding, and the
+        # value this writer records next IS the stored value. #5004's
+        # preserved-vector branch cannot be reached from here — there is no node
+        # whose prior vector could have been preserved.
+        stored: dict[str, tuple] = {}
+    else:
+        _rows = sdk._graph_write_with_retry(
+            lambda: proj.g.query(
+                _TURN_WRITE_CYPHER,
+                params={"turns": turn_rows, "sid": session_id, "now": now,
+                        "redactions": redacted_total},
+            ),
+            what="capture turn batch write",
+        ).result_set
+        stored = {r[0]: (r[1], r[2], r[3]) for r in (_rows or [])}
 
-    # #1920: a SHORTER re-capture must DELETE the prior capture's turns beyond
-    # the new window. The write above MERGEs ``{session_id}_t{i}`` per index,
-    # so without this the higher-index turn Points stay on the graph AND
-    # ``CONTAINS``-wired to the Session while ``s.turn_count`` is overwritten
-    # with the new length — the stored count and the ``CONTAINS`` walk then
-    # disagree, and the residue is reachable from the session it no longer
-    # belongs to. Read the candidates FIRST and delete exactly that list: a
-    # ``NOT t.id IN $keep`` predicate re-evaluated at delete time could sweep
-    # turns a concurrent capture of this same session_id wrote in between.
+    # #1920, re-homed by #10000: a SHORTER re-capture must remove the previous
+    # capture's turns beyond the new window, or the stored transcript keeps rows
+    # the session no longer holds. The candidates come from the ID SPACE — the
+    # high-water mark read before the MERGE moves it — not from a node walk,
+    # because after #10000 the turns are not graph nodes to walk
+    # (``_capture_turn_ids`` would return nothing and the surplus rows would keep
+    # being served). A non-zero ``turn_offset`` is an APPEND, so only ids at or
+    # beyond ``turn_offset + len(window)`` are stale.
     stale: list[str] = []
     if session_existed:
-        keep = {row["id"] for row in turn_rows}
-        # #3551: offset-aware. Only ids at or beyond the window this write just
-        # MERGEd are stale; a non-zero ``turn_offset`` is an APPEND, and every
-        # id BELOW it belongs to a prior window that must never be swept. At
-        # the capture lanes' offset 0 the ``_first_live`` bound is a NO-OP for
-        # every id this writer MINTS (a decimal index below the window is in
-        # ``keep`` by construction), so for those ids the sweep is #1920's
-        # "everything not kept". It is NOT #1920 exactly, on two counts:
-        # (i) ``_capture_turn_ids`` now guards with ``isdecimal()``, so a
-        # turn-shaped id whose suffix is not a decimal integer (``<sid>_t²``)
-        # — which #1920's ``isdigit()`` guard admitted and swept — is
-        # deliberately left in place (see that function's docstring, and
-        # ``test_non_int_parseable_suffix_does_not_break_capture``, which pins
-        # the residue); and (ii) the ``_first_live`` bound retains a
-        # non-canonical DECIMAL suffix (``<sid>_t01``) whose value is
-        # numerically below the window, which #1920's sweep would have deleted.
-        # (ii) is the bound, not the guard: it is present even with
-        # ``isdigit()`` restored.
-        _prefix = f"{session_id}_t"
         _first_live = turn_offset + len(turn_rows)
-        # The parse is DEFENDED, not assumed total: ``_capture_turn_ids``'s
-        # ``isdecimal()`` guard cannot imply ``int()``-parseable (the 4300-digit
-        # conversion limit), so an id we cannot place is RETAINED — never
-        # deleted where we cannot place it — and the sweep can never raise.
-        stale = []
-        for _tid in _capture_turn_ids(proj, session_id):
-            if _tid in keep:
-                continue
-            try:
-                _index = int(_tid[len(_prefix):])
-            except ValueError:
-                continue
-            if _index >= _first_live:
-                stale.append(_tid)
-        if stale:
-            # #7405 (audit G8): the stale-turn sweep is a write too. The abort
-            # here used to leave the higher-index turns CONTAINS-wired to the
-            # Session while `s.turn_count` reported the new, shorter length —
-            # the stored count and the CONTAINS walk disagreeing, i.e. turns
-            # the session no longer owns still reachable from it. Idempotent:
-            # the delete is keyed by an EXPLICIT id list read BEFORE it, so a
-            # re-issue carries the same list and a no-op for ids already gone.
+        if prior_turn_max_index >= _first_live:
+            stale = [_capture_turn_id(session_id, _i)
+                     for _i in range(_first_live, prior_turn_max_index + 1)]
+        # Which store the removal targets is the same capability question as the
+        # write above: with the record holding the turns there is no node to
+        # delete, and the record delete is the `PointRetracted` +
+        # `EntityMutated` pair emitted below (folded as a hard delete).
+        if stale and not _record_holds_turns:
             sdk._graph_write_with_retry(
                 lambda: proj.g.query(
                     "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
@@ -2887,12 +2890,25 @@ def _write_session_and_turns(
     # is the byte-identical text the pre-refactor lanes emitted; the conditional
     # clauses mirror the #1727 harness rule and the #2600 actor rule.
     merge_sets = ["s.created_at=coalesce(s.created_at, $now)",
-                  "s.turn_count=$tc", "s.is_episodic=true"]
+                  "s.turn_count=$tc", "s.is_episodic=true",
+                  # #10000: `turn_count` is a WINDOW LENGTH (``len(turns)``), not
+                  # a max id index — an APPEND at ``turn_offset=2`` writes
+                  # ``_t2``/``_t3`` while the count reads 2. The stale-turn sweep
+                  # needs the ID SPACE, so the high-water mark is stored beside
+                  # the count and only ever moves UP (an append must not lower it).
+                  "s.turn_max_index=CASE WHEN s.turn_max_index IS NULL "
+                  "OR s.turn_max_index < $tmi THEN $tmi ELSE s.turn_max_index END"]
     merge_params: dict[str, Any] = {"sid": session_id, "now": now,
-                                    "tc": turn_count}
+                                    "tc": turn_count,
+                                    "tmi": turn_offset + turn_count - 1}
     session_record: dict[str, Any] = {
         "id": session_id, "created_at": now,
         "turn_count": turn_count, "is_episodic": True,
+        # #10000: the id-space high-water mark rides the SAME record as the count,
+        # so a record-sourced rebuild restores the property the stale-turn sweep
+        # reads (a replay that dropped it would leave the sweep unable to see a
+        # surplus it must remove).
+        "turn_max_index": turn_offset + turn_count - 1,
     }
     if harness:
         merge_sets.append("s.harness=$harness")
@@ -3045,6 +3061,26 @@ def _write_session_and_turns(
     # `proj` argument is the caller's projection and every caller in-tree passes
     # `sdk._get_proj()`, so the two are the same object and the graph-existence
     # discriminator probes the graph this write targets.
+    # #10000: the MERGE below moves `s.turn_max_index`, so the PREVIOUS
+    # high-water mark must be read first — it is the only source of the #1920
+    # stale-turn range now that the turns are record rows rather than graph rows
+    # to walk. Read only on a re-capture: a fresh capture has no prior Session and
+    # therefore no stale turn, so the fresh-capture hot path keeps its exact query
+    # count (#3086).
+    prior_turn_max_index = -1
+    if session_existed:
+        try:
+            _prior = proj.g.query(
+                "MATCH (s:Session {id:$sid}) RETURN "
+                "coalesce(s.turn_max_index, s.turn_count, 0)",
+                params={"sid": session_id}).result_set
+            prior_turn_max_index = int(_prior[0][0]) if _prior else -1
+        except Exception:
+            # Fail toward deleting NOTHING rather than toward a bad range: a
+            # failed read leaves the mark at -1, which sweeps no id — the same
+            # conservative direction the turn-id parse guard takes ("never
+            # delete where we cannot place it").
+            prior_turn_max_index = -1
     sdk._graph_write_with_retry(
         lambda: proj.g.query(
             f"MERGE (s:Session {{id:$sid}}) SET {', '.join(merge_sets)}",
@@ -3075,6 +3111,7 @@ def _write_session_and_turns(
     redacted_total = _write_capture_turns(
         proj, sdk, session_id, turns, now=now, turn_embs=turn_embs,
         session_existed=session_existed, turn_offset=turn_offset,
+        prior_turn_max_index=prior_turn_max_index,
         texts_and_counts=(turn_texts, redaction_counts))
     return {
         "turn_count": turn_count,
@@ -6831,15 +6868,18 @@ def _refuse_inverted_point_window(g, props: dict, *,
     # ⚠️ BOTH ENDS (#9202). The ruling named the START, and the START was the
     # only side wired — so `create_point(validFrom="TBD")` spoke while
     # `create_point(validTo="TBD")` said nothing, and the silent one is the
-    # more consequential mistake: the reply then reports `end_state: "known"`
-    # and `get_historical_knowledge` answers `found` about the year 2050 with no
-    # field distinguishing it from a dated end. The COVERAGE rule for that value
-    # is settled and shared (ONTOLOGY §4.7: a bound that names no instant is not
-    # a bound — the #6140 start reading, extended to the end by #9408), and the
-    # write door now says so on either side. The end's REPORTED STATE
-    # (`known` vs `unknown`) is #9202's OWNER decision and is deliberately NOT
-    # touched here: this warning changes no read, which is why it is safe to
-    # ship ahead of that ruling.
+    # more consequential mistake: the reply then reported `end_state: "known"`
+    # and `get_historical_knowledge` answered `found` about the year 2050 with
+    # no field distinguishing it from a dated end. The COVERAGE rule for that
+    # value is settled and shared (ONTOLOGY §4.7: a bound that names no instant
+    # is not a bound — the #6140 start reading, extended to the end by #9408),
+    # the write door now says so on either side, and since the 2026-10-25 owner
+    # ruling (#9202, option B) the END's REPORTED STATE is `unknown` too —
+    # `validity.end_state` raises `END_UNKNOWN` for an end that names no
+    # instant, so the reply stops asserting the end is dated and the
+    # `end_state_unknown` / `indeterminate_end_ids` flags fire for it. The write
+    # door itself still changes nothing: the value is accepted and stored
+    # verbatim.
     #
     # Warn ONCE per value per WRITE. Two re-entry shapes reach this function
     # for a single write: a dedup-hit `create_point` (create leg, then
@@ -6877,17 +6917,18 @@ def _refuse_inverted_point_window(g, props: dict, *,
             # the stored un-datable value and then refuses the declaration beside it
             # (a `ValueError` where the caller was following this advice).
             #
-            # The end's REPORTED STATE is deliberately not asserted here: it is
-            # #9202's pending owner decision, and a warning that recited today's
-            # `known` would be stale the moment the ruling lands.
+            # The end's REPORTED STATE is the owner's, and it was ruled on
+            # 2026-10-25 (option B): such an end reads `unknown`. The warning
+            # says so, so the operator is not left guessing what the reply will
+            # call the value it just wrote.
             _logger.warning(
                 "validTo %r names no instant — it bounds NOTHING, so the "
                 "window is UNBOUNDED above (ONTOLOGY §4.7, #9202). If the "
                 "end is known but un-datable, pass validToPrecision='unknown' "
                 "with NO validTo (on an update pass validTo=None explicitly — "
                 "omitting it keeps the stored value); otherwise pass an "
-                "ISO-8601 instant. What the reply should call such an end is "
-                "#9202's pending owner decision.",
+                "ISO-8601 instant. The reply reports end_state='unknown' for "
+                "such an end either way (owner ruling 2026-10-25, #9202).",
                 bound,
             )
             return
@@ -31935,18 +31976,21 @@ class TortoiseSDK:
         carries a window (``chain``, ``valid_point``, ``candidates``,
         ``nearest``) also carries ``valid_from_precision``,
         ``valid_to_precision`` and ``end_state`` (``open`` | ``known`` |
-        ``unknown``). A window whose end is marked un-datable
-        (``validToPrecision == "unknown"``, no ``validTo``) is an ENDED window
-        — but because no instant is attested, ``_covers`` cannot exclude it and
-        the reply would otherwise read exactly like a still-true one, so the
-        top level also carries ``end_state_unknown: true`` and
+        ``unknown``). An un-datable end has TWO spellings and one meaning —
+        the caller-declared marker (``validToPrecision == "unknown"``, no
+        ``validTo``) or a STORED end that names no instant (``validTo =
+        "TBD"`` / ``""`` / ``"2026-02-30"``, #9202) — and both are ENDED
+        windows: because no instant is attested, ``_covers`` cannot exclude
+        them and the reply would otherwise read exactly like a still-true one,
+        so the top level also carries ``end_state_unknown: true`` and
         ``indeterminate_end_ids`` whenever a COVERING candidate has an unknown
         end. Read ``end_state_unknown`` before treating a ``found`` reply as
         attestation that the claim was true at ``at_date``: it says the window
         may have ended before then, and this read cannot tell. Legacy windows
         carry no precision property, so their replies are unchanged
         (``end_state`` is ``open``/``known`` and no unknown markers are
-        emitted).
+        emitted) — unless the legacy window carries an un-datable ``validTo``,
+        which is exactly the case #9202 closes.
         """
         from .search_engine import _created_sort_key
         from .validity import END_UNKNOWN, window_read_fields
@@ -32029,17 +32073,14 @@ class TortoiseSDK:
               unorderable bound ... names no instant, so a refusal would rest
               on a lexicographic accident rather than a comparison"*.
 
-              What is deliberately NOT symmetric is the REPORTED STATE, and
-              that is #2350's 3-state contract: ``validity.end_state`` raises
-              ``END_UNKNOWN`` only for a ``validToPrecision == "unknown"``
-              declaration on an ABSENT end, so a present-but-unparseable
-              ``validTo`` still reads ``end_state: "known"`` — i.e. the reply
-              keeps asserting the claim's end is DATED while the window covers
-              every instant. #6140 ruled on the START only; whether the END's
-              state should instead read ``unknown`` / ``open`` is #9202's OWNER
-              DECISION and this fix does not pre-empt it: the coverage gate
-              changes which instants match, never what the end is called.
-              Pinned by
+              What the coverage gate does not decide is the REPORTED STATE:
+              it changes which instants match, never what the end is called.
+              That is ``validity.end_state``'s job, and since #9202's owner
+              ruling (2026-10-25, option B) an end that names no instant is
+              ``END_UNKNOWN`` — the same state a declared
+              ``validToPrecision="unknown"`` produces — so this entry appears
+              in ``indeterminate_end_ids`` and the reply carries
+              ``end_state_unknown: true``. Pinned by
               ``test_an_end_naming_no_instant_bounds_no_instant_even_for_an_unparseable_probe``
               in ``tests/test_validity_windows.py``.
             """

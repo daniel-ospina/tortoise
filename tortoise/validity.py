@@ -17,12 +17,25 @@ class this epic adopts from deeplethe/utopia (#2349). The 3-state end makes
 the difference REPRESENTABLE and READABLE:
 
   * ``END_OPEN``    — no end is asserted: ``validTo`` absent, no precision.
-  * ``END_KNOWN``   — the end is dated: ``validTo`` present (precision
-                      year/month/day; a legacy bare-ISO bound reads as ``day``
-                      with no migration — ``effective_precision``).
-  * ``END_UNKNOWN`` — the window ENDED, but at a time we cannot pin:
-                      ``validToPrecision == "unknown"`` and NO ``validTo``.
-                      A date is never fabricated to fill the hole.
+  * ``END_KNOWN``   — the end is dated: ``validTo`` present AND orderable
+                      (precision year/month/day; a legacy bare-ISO bound reads
+                      as ``day`` with no migration — ``effective_precision``).
+  * ``END_UNKNOWN`` — the window ENDED, but at a time we cannot pin. TWO
+                      spellings, one meaning: the DECLARED marker
+                      (``validToPrecision == "unknown"`` with NO ``validTo``),
+                      or a STORED end that names no instant (``validTo =
+                      "TBD"`` / ``""`` / ``"2026-02-30"`` — #9202), which the
+                      write path stores verbatim. A date is never fabricated
+                      to fill the hole.
+
+Why the second spelling is ``END_UNKNOWN`` and not ``END_OPEN`` (#9202, owner
+ruling of 2026-10-25): an end column carrying a value is an ASSERTED end, so
+"no end was recorded" is a claim the record contradicts; and reading it as
+still-true is exactly the fabricated-coverage hazard this vocabulary exists to
+prevent (#2349/#2350). ``END_OPEN`` therefore stays reserved for a bound that
+is ABSENT, and BOTH un-datable spellings fire the reply-level
+``end_state_unknown`` / ``indeterminate_end_ids`` flags, so a caller is told
+the window cannot be excluded rather than being told it is still true.
 
 The three-state is END-ONLY. ``validFromPrecision`` may not be ``"unknown"``:
 a window with no datable start is not a window, and the 3-state vocabulary
@@ -35,7 +48,9 @@ bounds — and no precision (declared token or not) for a present bound that
 names no instant (#9201 on the undeclared default, #9244 on the declared
 token: a declaration ANNOTATES a bound, it cannot summon one; the #6140 ruling
 reads an unparseable START as "no start was recorded") — and ``end_state``
-reports ``END_OPEN`` for its open end, byte-identical reads, no migration.
+reports ``END_OPEN`` for its open end, byte-identical reads.
+The ONE reading #9202 changes for already-persisted data is a STORED end that
+names no instant: ``known`` -> ``unknown``, plus the flags it fires.
 """
 from __future__ import annotations
 
@@ -88,6 +103,31 @@ def normalize_precision(value: object, *, field: str = "precision") -> str | Non
     return token
 
 
+def _names_an_instant(bound: object) -> bool:
+    """``True`` iff ``bound`` ORDERS on the measure the read path orders with.
+
+    ONE home for "does this stored value point at an instant?", shared by the two
+    halves of the same read block — ``effective_precision`` (#9201: a bound that
+    names no instant gets no granularity) and ``end_state`` (#9202: an end that
+    names no instant is ``END_UNKNOWN``, not ``END_KNOWN``). Keeping them on one
+    predicate is why the emitted triple cannot contradict itself: a ``validTo``
+    of ``"TBD"`` cannot report ``valid_to_precision: null`` beside
+    ``end_state: "known"`` ("the end is dated") any more.
+
+    The measure is ``search_engine._created_sort_key``, imported lazily (no
+    import cycle) — never a second notion of "parseable". A NUMERIC bound
+    (``int``/``float``, and so ``bool``) is an instant without consulting it: an
+    integer too large for ``float()`` would otherwise raise ``OverflowError`` out
+    of a read path, and ``nan``/``inf`` keep their pre-#9201 reading (#9201
+    review P3). ``retrieval._bounds_an_instant`` is the render-side twin of this
+    predicate (same measure, plus a falsey short-circuit for the marker).
+    """
+    if isinstance(bound, (int, float)):
+        return True
+    from .search_engine import _created_sort_key  # lazy — no import cycle
+    return _created_sort_key(bound)[0] == 0
+
+
 def effective_precision(bound: object, declared: object) -> str | None:
     """The precision a READ path should report for ``bound``.
 
@@ -116,19 +156,13 @@ def effective_precision(bound: object, declared: object) -> str | None:
     (``validate_validity_precision``), so reading it back as the caller
     declared it is not a lie about a stored instant.
 
-    A NUMERIC bound (``int``/``float``) short-circuits before
-    ``_created_sort_key`` runs: it always names an instant, and an integer too
-    large for ``float()`` would otherwise raise ``OverflowError`` from the
-    ordering primitive — a read path must not acquire a failure mode it never
-    had (#9201 review P3). ``nan``/``inf`` keep the pre-#9201 reading too.
+    A NUMERIC bound (``int``/``float``) names an instant without consulting the
+    ordering primitive — see ``_names_an_instant`` (#9201 review P3).
     """
     declared_token = normalize_precision(declared, field="precision")
     if bound is None:
         return declared_token
-    if isinstance(bound, (int, float)):
-        return declared_token or "day"
-    from .search_engine import _created_sort_key  # lazy — no import cycle
-    if _created_sort_key(bound)[0] != 0:
+    if not _names_an_instant(bound):
         return None
     return declared_token or "day"
 
@@ -136,8 +170,38 @@ def effective_precision(bound: object, declared: object) -> str | None:
 def end_state(valid_to: object, valid_to_precision: object) -> str:
     """The 3-state end of a window — ``END_OPEN`` | ``END_KNOWN`` | ``END_UNKNOWN``.
 
-    ``END_UNKNOWN`` when the end is explicitly marked un-datable; otherwise a
-    PRESENT ``validTo`` is ``END_KNOWN`` and an absent one is ``END_OPEN``.
+    ``END_UNKNOWN`` has TWO spellings with one meaning ("the window ended, but at
+    an instant we cannot name"):
+
+    * the DECLARED marker — ``validToPrecision == "unknown"`` with no
+      ``validTo`` (a caller saying so explicitly);
+    * a STORED end that names no instant — ``validTo = "TBD"`` / ``""`` /
+      ``"2026-02-30"`` (#9202). The write path stores bounds verbatim, so such a
+      value is present in the record, and presence is not datability.
+
+    Otherwise a PRESENT, ORDERABLE ``validTo`` is ``END_KNOWN`` and an ABSENT one
+    is ``END_OPEN``.
+
+    Why a stored un-datable end is ``unknown`` — and not ``known`` or ``open``
+    (#9202, owner ruling 2026-10-25, option B):
+
+    * ``known`` claims the end is DATED — and since #9201 the same block reports
+      ``valid_to_precision: None`` for that very value, so ``known`` contradicts
+      its own triple. ``END_KNOWN`` now requires datability, not presence.
+    * ``open`` claims NO END WAS ASSERTED — false: the column holds a value the
+      author put there, and reading it as still-true is the fabricated-coverage
+      anti-pattern this module's headline names (#2349/#2350). ``open`` stays
+      reserved for an ABSENT bound, so the open/un-datable distinction survives.
+
+    ``""`` is treated like any other un-datable value rather than as absent: the
+    read path's ONE presence convention is ``is not None``, and ``_covers``
+    cannot exclude either shape, so both windows cover every later instant.
+
+    Neither the write door nor coverage moves with this reading: an un-datable
+    ``validTo`` is still ACCEPTED and stored verbatim (the warning stays a
+    warning, #9910; refusing it is explicitly not taken by the ruling), and it
+    still bounds no instant (#9408). Only the READING changes.
+
     An explicitly declared concrete precision on an absent end is a
     contradiction and is refused by ``validate_validity_precision``, so it is
     not silently resolved here.
@@ -145,9 +209,11 @@ def end_state(valid_to: object, valid_to_precision: object) -> str:
     token = normalize_precision(valid_to_precision, field=TO_PRECISION_PROP)
     if token == PRECISION_UNKNOWN:
         return END_UNKNOWN
-    if valid_to is not None:
-        return END_KNOWN
-    return END_OPEN
+    if valid_to is None:
+        return END_OPEN
+    if not _names_an_instant(valid_to):
+        return END_UNKNOWN
+    return END_KNOWN
 
 
 def validate_validity_precision(
@@ -237,10 +303,11 @@ def window_read_fields(
     The block ALWAYS carries the three keys: a present-but-unorderable bound
     yields ``None`` for its precision — declared token or not (#9201, #9244) —
     and the key is still emitted, so no consumer has to distinguish "no
-    precision" from "this surface did not report it". This holds on BOTH ends —
-    a present-but-unorderable ``validTo`` reports ``valid_to_precision: None``
-    while ``end_state`` stays ``known`` (whether an un-datable END should
-    report ``END_UNKNOWN`` is #9202's owner decision, not this read fix).
+    precision" from "this surface did not report it". This holds on BOTH ends,
+    and the triple never contradicts itself: a present-but-unorderable
+    ``validTo`` reports ``valid_to_precision: None`` beside ``end_state:
+    "unknown"`` (#9202 — the end is not dated, so it is neither ``known`` nor
+    ``open``; see ``end_state``).
     """
     return {
         "valid_from_precision": effective_precision(valid_from, valid_from_precision),

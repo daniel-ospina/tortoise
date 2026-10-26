@@ -134,6 +134,38 @@ removed or renamed; the served schema, parameters and bindings are unchanged** �
 description text, and hence that row's `job` and the baseline's `cut_at_commit`, change.
 status: approved · principal: daniel-ospina · PR #9582 · date: 2026-10-22.
 
+**Amended 2026-10-25** (owner ruling, recorded on **#9660**; the owner's words in the thread were
+*"confirmation step"*, and on fragmentation: *"every agent that ever connects the mcp has to read the list of
+tools on every single session = multiplying cache costs"*): **permanent deletion gains a preview-then-confirm
+protocol, and it stays ONE tool.** No tool is added, removed, or renamed; `tortoise_delete` (registry id
+`surface.delete`) keeps `sdk_method="delete"` and gains one optional parameter:
+
+- **The FIRST call changes nothing.** With `dry_run=True` — or with no `confirmation` at all — the call
+  resolves the target, reports every edge that would go with it, and returns a short-lived `confirmation`
+  token (`tortoise/deletion.py`, ten-minute default) plus the plain-language summary. `deleted` is `False`.
+- **The second call carries the token** (`confirmation=<token>`) and performs the delete, then calls
+  `TortoiseSDK.delete`, so every kind keeps its own path: a Point, a relation (operators are Points), a
+  Source, an Object, a Subject, an Event. **Whole graphs are not covered** — the dashboard deletes those.
+- **A token is bound to one id and expires.** An invalid, foreign, or expired token RAISES and destroys
+  nothing; it never degrades into a bare delete, which is what makes the protocol more than advice. Binding
+  it to the id is what stops consent from drifting onto a different object between the preview and the write.
+- **Why a token, not a `confirm=True` flag** (the owner's reason for the ruling): an assistant can set a flag
+  in the same breath as the call, so a flag leaves nothing between a misread instruction and a destroyed
+  claim.
+- **Why not a family of per-kind delete tools** (the owner's reason, quoted above): the tool list is re-read
+  by every connecting agent every session, so each extra tool is a cost every customer pays forever. This
+  document's `delete_knowledge` row (18) is therefore **executed by keeping the single entry and widening
+  what it deletes** — the absorbed names stay retired-forward entries, not new siblings.
+- **Permission compatibility, inert today:** `tortoise.deletion.CAPABILITY = "knowledge:delete"` names the
+  capability a later permission system can key on, and the entry keeps the single `risk="destructive"`
+  declaration from which every client hint is derived. Nothing enforces the capability yet, by design — it
+  exists so "deletion requires an administrator" has a stable key to attach to later.
+- **The old description had drifted:** it promised a `dry_run` preview that the tool did have, but described
+  the tool as deleting by default with no confirmation at all — so the promise was in prose only. The
+  behaviour now matches the warning, and `tests/test_deletion_confirmation.py` pins the protocol while
+  `tests/test_dry_run_preview.py` re-pins the one tool whose DEFAULT path is now a preview.
+status: approved · principal: daniel-ospina · issue #9660 · date: 2026-10-25.
+
 ## Principle: reads and writes never share a tool
 
 On the customer-grantable surface, a tool is either **read** or **write** — never both, so
