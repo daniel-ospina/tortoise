@@ -18262,9 +18262,26 @@ def _record_unavailable() -> HTTPException:
     nothing to protect and nothing to serve.
 
     Same envelope as :func:`_graph_unavailable` on this route (``503`` +
-    ``error_code``) rather than a new one: a client already treats that body as
-    retryable, and this refusal is transient in the same way (a read retry is
-    safe — the off-loaded unit is a CONSTRUCTION).
+    ``error_code``) rather than a new one, because on this route that body is
+    already the shape for "the data plane could not answer": it is body-only
+    today — **no client maps it yet** (that function's own docstring says so),
+    and the agents/SDKs that consume this lane treat any 5xx as retryable. The
+    ENVELOPE is borrowed from there; its TRANSIENCE argument is NOT.
+
+    ⛔ The two doors fail in different units. ``_graph_unavailable``'s unit is an
+    offloaded SDK construction that may never have run ("a submission that never
+    ran did NO work"); the unit here is a synchronous record connect plus SQL
+    read on a worker thread, which DID run and did fail. What makes a retry safe
+    here is only that this is a ``GET`` — a SAFE method (RFC 9110 §9.2.1) — so a
+    retry can never re-apply work, whatever the cause was.
+
+    ⚠️ And the cause is NOT always transient. The ``except Exception`` above
+    cannot tell an outage from a PERMANENT record failure — an RLS denial, a
+    missing migration, a query defect — so those surface to the caller as this
+    same retryable body. That is a known limit of the arm, stated rather than
+    papered over; the distinction IS recoverable from the log, where the
+    fail-soft arm records the exception class and its traceback
+    (``exc_info=True``).
 
     ⚠️ Deliberately NOT a response field. A new key on the session-detail
     projection (`SESSION_DETAIL_FIELDS`) would widen a public wire surface, which
