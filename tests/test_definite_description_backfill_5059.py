@@ -913,3 +913,60 @@ def test_the_reader_scan_ignores_a_mention_that_is_not_a_read(tmp_path):
         "a comment/docstring naming the map was counted as a definition or a "
         f"read ({definitions}, {reads}) — prose is not a consultation (#5333)."
     )
+
+
+# ── the DESIGN DECISION is recorded, not open — and authorises nothing ──────
+
+
+def test_the_design_decision_is_recorded_add_only_never_delete():
+    """§4.3's relocation subsection must carry the decision, all of it.
+
+    Recorded 2026-10-26 against #5333's design half. The decision has four
+    load-bearing clauses, and a passage that drops ANY of them re-opens a
+    question the recorded chain has already answered (``#5059``'s options and
+    recommendation; §2.4 row 3's never-delete rule; D7's appended-Event
+    lifecycle; the 2026-10-24 capstone's real-subject-matter finding):
+
+    1. **add-only** — after COMMIT no pass may remove, archive or withdraw a
+       committed row, and a field write only by an appended lifecycle Event;
+    2. **never a physical delete** — the only deletion trigger is GDPR /
+       retention (Option C is closed on the recorded *never* recommendation);
+    3. **the reconstruction invariant** — the fold's event stream is the
+       reconstruction source; reversal is a journaled status write back;
+    4. **no authorisation** — whether a relocation may ever RUN stays the
+       owner's (task 1); the passage must not read as a licence to build one.
+
+    The failure this pin prevents: a docs-only edit that softens or deletes
+    one clause (most plausibly the never-delete one, which reads as
+    inconvenient next to a "clean up the graph" ask) merging green because
+    the module-level guards never re-read the passage (#4309 silent-drop
+    class). Non-vacuous by construction: every assertion names the exact
+    phrase the decision paragraph carries.
+    """
+    section = _g5_destructive_half()
+    assert "The design decision" in section, (
+        "the design decision paragraph is gone from §4.3's relocation "
+        "subsection — G5's destructive half again reads as an open question "
+        "(#5333)."
+    )
+    lowered = section.lower()
+    assert "no pass may remove" in lowered, (
+        "the add-only clause is gone: after COMMIT no pass may remove, "
+        "archive or withdraw a committed row (#5333)."
+    )
+    assert "only deletion trigger is gdpr / retention" in lowered, (
+        "the never-delete rule is gone or softened — nothing is ever deleted "
+        "on supersession; the only deletion trigger is GDPR / retention "
+        "(§2.4 row 3, #5333)."
+    )
+    assert "reconstruction source" in lowered and "reversal is a journaled status write back" in lowered, (
+        "the reconstruction invariant is gone — the fold's event stream is "
+        "the reconstruction source, and reversal must stay a journaled "
+        "status write back (#5333)."
+    )
+    assert "authorises nothing" in lowered and "task 1" in lowered, (
+        "the decision paragraph must keep stating that it AUTHORISES "
+        "NOTHING and that the authorisation (task 1) remains the owner's — "
+        "a recorded design answer is not a licence to build the pass "
+        "(#5333)."
+    )

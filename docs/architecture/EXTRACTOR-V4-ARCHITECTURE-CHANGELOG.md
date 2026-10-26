@@ -973,3 +973,5 @@ code rather than to their notes: the degraded S3 render still instructing *"assu
 **What this does NOT do.** No mechanism was implemented — recording the absences is the output. `sufficiency_router`
 (`#5009`) and `state_value_carve_out` (`#9775`) stay `not-implemented`, so `#5064`'s Target 3 (the attached symptoms
 stop reproducing) is still open; the substrate half is done and should not be redone.
+
+- **2026-10-26 — §4.3's *G5's destructive half* now carries the DESIGN decision (`#5333`): a pass may only add (plus an evidence-preserving D12 MERGE), a physical delete is foreclosed to everything but GDPR/retention, and removal-from-recall is a journaled lifecycle fold alone — the fold's event stream stays the reconstruction source. The AUTHORISATION to ever run a relocation (task 1) remains the owner's; nothing is authorised. Pinned by `test_definite_description_backfill_5059.py::test_the_design_decision_is_recorded_add_only_never_delete`.**
