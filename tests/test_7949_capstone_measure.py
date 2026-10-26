@@ -1167,6 +1167,8 @@ _BUNDLE_DOCS = (
     ("probes/capstone_run.py",
      _REPO / "docs/evidence/7949-capstone/probes/capstone_run.py"),
     ("docs/00_index.md", _REPO / "docs/00_index.md"),
+    ("docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md",
+     _REPO / "docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md"),
 )
 
 _BUNDLE_SOURCES = {
@@ -1184,6 +1186,16 @@ _BUNDLE_SOURCES = {
 # `test_the_index_sweep_keeps_to_the_row_that_names_this_bundle` holds it there.
 _BUNDLE_ROW_FILTER = {
     "docs/00_index.md": re.compile(r"#7949"),
+    # `EXTRACTOR-V4-ARCHITECTURE.md` is the shared design doc for the whole
+    # extractor, and it carries 15 cites into `sdk.py` / `edges.py` /
+    # `extractor_v2.py` that belong to other epics (so most name no phrase in
+    # `_BUNDLE_RULES` and would land in `unmatched`). Only the S2.1 FINDING row
+    # this bundle owns is swept — the row that carries the `run_s2(...)` call.
+    # Without this entry the doc was swept by NOTHING: its D3 cite was
+    # re-derived from `:7776` to `:7804`, a comment about the source-turn map,
+    # and no gate read it (a false PASS — the sweep reported OK over a number
+    # that was never the call).
+    "docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md": re.compile(r"run_s2\("),
 }
 
 
@@ -1275,6 +1287,15 @@ _BUNDLE_RULES = (
      ("contains", '"vet": {"enabled"')),
     ("the extractor entry point", "extractor_v2",
      ("extract_session_v2",), ("def extract_session_v2(",), "def", None),
+    # The S2.1 FINDING in `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md`: the
+    # call that hands extraction the raw alongside the story. A RANGE, because
+    # the claim is the ARGUMENTS — `edus=edus` sits one line below the call and
+    # the block closes on `core_only=classify_later)`, so a cite that lands on
+    # a neighbouring comment carries neither anchor and reds.
+    ("the S2 call that hands extraction the raw alongside the story",
+     "extractor_v2", ("run_s2(model, story, master",),
+     ("run_s2(model, story, master,", "edus=edus,"), "span",
+     ("contains", "core_only=classify_later)")),
 )
 
 
@@ -1420,8 +1441,20 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     """Every live `file.py:line` cite that names its file → the code it names there.
 
     Covers all three sources the bundle prints numbers for (`sdk.py`, `edges.py`,
-    `extractor_v2.py`) across `README.md`, both probes, and the `docs/00_index.md`
-    row that is the bundle's entry point — 44 cites at this head.
+    `extractor_v2.py`) across `README.md`, both probes, the `docs/00_index.md` row
+    that is the bundle's entry point, and the `docs/architecture/
+    EXTRACTOR-V4-ARCHITECTURE.md` S2.1 FINDING row this bundle owns — 45 cites at
+    this head.
+
+    The architecture doc was the LAST unread one, and it hid a false PASS: its D3
+    cite (`run_s2(...)` passing `edus=edus`) was re-derived onto `:7804` — a
+    comment about the source-turn map — while no leg read that file at all, so the
+    sweep reported OK over a number that was never the call. It is row-scoped like
+    `docs/00_index.md` (the array of 15 cites it carries into these three sources
+    belongs to other epics) and `the S2 call that hands extraction the raw
+    alongside the story` pins the call as a RANGE, because the claim is the
+    ARGUMENTS: `edus=edus,` is one line below the call and the block closes on
+    `core_only=classify_later)`.
 
     Non-vacuity: re-staling a LIVE cite reds this test (measured: putting
     `00_index.md`'s fold cite back to `12401` reds it). The RED COUNT is a
