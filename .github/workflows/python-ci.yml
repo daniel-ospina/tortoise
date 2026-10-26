@@ -653,12 +653,13 @@ jobs:
     # ⛔ NOT AS A JOB-LEVEL `env:` BLOCK. `runner` is not an available context
     # at `jobs.<job_id>.env` (the allowlist there is github, needs, strategy,
     # matrix, vars, secrets, inputs), so `${{ runner.temp }}` is rejected by
-    # actionlint on all six lines — and an unsupported expression is worse than
-    # a red, because it does not stop the job: it resolves EMPTY, which turns
-    # every path back into a ROOT-LEVEL `/pytest.log` and silently restores the
-    # exact host-global collision this change removes. The paths are therefore
-    # resolved in the FIRST step of the job below, from `$RUNNER_TEMP` (the
-    # shell's alias of the same value, which IS available in a step), and
+    # actionlint on all six lines. The consequence is NOT a mis-pathed
+    # artifact — it is #6253's case: GitHub refuses the WHOLE file, so the run
+    # has ZERO jobs and zero check-runs, and the required `python-ci-gate` is
+    # ABSENT rather than red on that head (measured on this PR's own earlier
+    # head: runs 40273900256 / 40274365152, `total_count: 0`). The paths are
+    # therefore resolved in the FIRST step of the job below, from `$RUNNER_TEMP`
+    # (the shell's alias of the same value, which IS available in a step), and
     # published to every later step through `$GITHUB_ENV`: shell steps read
     # `$PYTEST_LOG`, the quoted heredocs read `os.environ[...]` (a quoted
     # heredoc does not expand), and the `upload-artifact` `path:` lists use
