@@ -46,11 +46,14 @@ step                         capability unavailable (no key / 429 /      answer 
 ===========================  =========================================  ==========================================
 **S2.2 VET**                 **no verdict** for the candidate — it keeps    **no verdict**, and the failing
                              whatever the gate already decided           question is NAMED in
-                             (mechanical DISCARD included); the failure  ``batch["seam"]["degraded"]``
-                             is counted in ``batch["seam"]``
+                             (mechanical DISCARD included); the failure  ``stats["seam"]["degraded"]``, both in
+                             is counted in ``stats["seam"]``             this step's own stats and in the gate's
+                                                                         (``result["vet"][*]["stats"]["seam"]``)
 **S2.3 CLASSIFY**            no assignment → the caller's kNN top-1       same; the kind is never minted and
-                             fallback, the design's named mechanical      the assignment is left to the kNN path
-                             fast path
+                             fallback, the design's named mechanical      the failing question is NAMED in
+                             fast path; the failure is counted in         ``stats["seam"]["degraded"]`` too, so
+                             ``stats["seam"]``                            the ITEMS an outage left unassigned
+                                                                         are readable, not just the count
 ===========================  =========================================  ==========================================
 
 **A degraded VET says nothing, and that is the only safe word.** An earlier
@@ -61,7 +64,9 @@ shape of this module emitted a ``NOOP`` for each degraded candidate; that is a
 keeping what a working predicate had dropped, and erasing the rule id that
 explains it. Omitting the verdict instead leaves every candidate exactly where
 the gate put it, and the failure is recorded once, by name, in
-``batch["seam"]``. Nothing in this module can emit ``DISCARD`` without a
+``stats["seam"]`` — the gate's ``stats``, which is what reaches the artifact as
+``result["vet"][*]["stats"]["seam"]``. Nothing in this module can emit
+``DISCARD`` without a
 parsed, in-schema, in-band answer — *a wrong keep is noise; a wrong drop is
 memory loss* (§S2.2).
 
@@ -491,8 +496,10 @@ def vet_verdicts(
     something ``vet_gate`` applies over the mechanical ``#4899`` pass, so a
     degraded ``NOOP`` would rescind an identifier-only DISCARD. The failure is
     recorded instead in ``stats["degraded"]`` (item id → what went wrong, with
-    the failing question named), which :func:`vet_arbiter` carries out to
-    ``batch["seam"]``.
+    the failing question named), which :func:`vet_arbiter` carries out under
+    ``seam`` and :func:`vet_gate.vet_candidates` folds into the GATE's
+    ``stats`` — the artifact path is ``result["vet"][*]["stats"]["seam"]``, not
+    a ``batch`` key (the arbiter returns an empty ``batch``: no ``RENARRATE``).
     """
     stats: dict = {
         "prompt": VET_PROMPT,
@@ -618,6 +625,13 @@ def classify_tail(
     **no** assignment on purpose — the caller then applies its own declared
     fallback (kNN top-1), which is the design's mechanical path. Nothing here can
     return a kind that was not offered.
+
+    An item the seam could not assign from a **parsed, in-schema** answer is
+    named in ``stats["degraded"]`` (item id → what went wrong, with the failing
+    question named), which is the same shape S2.2's :func:`vet_verdicts` records
+    for the same two failures. A count alone cannot answer *"which items did the
+    outage leave to the kNN?"* — the audit question an armed run exists to
+    answer — so the map is per item, not a tally.
     """
     assignments: dict[str, str] = {}
     stats: dict = {
@@ -628,6 +642,7 @@ def classify_tail(
         "cost_usd": 0.0,
         "unavailable": 0,
         "schema_rejects": [],
+        "degraded": {},
         "skipped_no_offer": 0,
     }
     desc = dict(descriptions or {})
@@ -657,8 +672,14 @@ def classify_tail(
         payload = {"model": MODEL, "state": state, "questions": questions}
         try:
             answers, usage = _decide(payload, transport=transport, timeout=timeout)
-        except Unavailable:
+        except Unavailable as exc:
+            # The chunk degrades together (its answers do not exist), so no item
+            # in it is assigned — and each one is NAMED, so the artifact can say
+            # which items this outage left to the caller's kNN fallback.
             stats["unavailable"] += 1
+            for iid, _text, _offered in chunk:
+                stats["degraded"][iid] = (
+                    f"{RULE_UNAVAILABLE} {CLASSIFY_PROMPT} ({exc})")
             continue
         stats["calls"] += 1
         _add_cost(stats, usage)
@@ -667,6 +688,8 @@ def classify_tail(
                 assignments[iid] = _choice(answers, f"kind_c{pos}", offered)
             except SchemaViolation as exc:
                 stats["schema_rejects"].append(exc.question)
+                stats["degraded"][iid] = (
+                    f"{RULE_SCHEMA_REJECT} {CLASSIFY_PROMPT} {exc}")
                 continue
     return assignments, stats
 

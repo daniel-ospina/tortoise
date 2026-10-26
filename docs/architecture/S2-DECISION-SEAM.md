@@ -115,8 +115,15 @@ Each is a **recorded decision**, not an omission:
 
 | step | capability unavailable (no key, 429, timeout, 5xx, pin mismatch) | answer unparseable / out of schema |
 |---|---|---|
-| **S2.2** | **no verdict** for the candidate — it keeps whatever the gate already decided (the mechanical `#4899` `DISCARD` included); the failure is counted in `result["vet"][*]["batch"]["seam"]` (`unavailable`, `degraded`) | **no verdict**, and the **failing question is named** in `batch["seam"]["degraded"][item]` / `["schema_rejects"]` |
+| **S2.2** | **no verdict** for the candidate — it keeps whatever the gate already decided (the mechanical `#4899` `DISCARD` included); the failure is counted in `result["vet"][*]["stats"]["seam"]` (`unavailable`, `degraded`) — the gate's own `stats`, not a `batch` key (the arbiter returns an empty `batch`: no `RENARRATE`) | **no verdict**, and the **failing question is named** in `stats["seam"]["degraded"][item]` / `["schema_rejects"]` |
 | **S2.3** | no assignment → the caller's **kNN top-1** fallback (the design's named mechanical fast path), counted in `stats["seam"]["unavailable"]` | same; the kind is never minted, `stats["seam"]["rejected"]` names the question |
+
+Both rows carry a **per-item** `stats["seam"]["degraded"]` map (item id → what
+went wrong, with the failing question named), on both sides — so *which* items an
+outage left unassigned is readable, not just *how many*. Where the two records
+land in the run: `result["vet"][*]["stats"]["seam"]` for S2.2 (the gate's own
+`stats`; the arbiter returns an empty `batch`, so there is no `batch["seam"]`)
+and `result["classify_later"]["s2"]["seam"]` for S2.3.
 
 One line of code: a failed chunk produces **no verdict** / no assignment — never a
 label. One line of doc: the table above. **A Jev outage can never become a discard**,
@@ -201,10 +208,11 @@ Derivation, so it can be re-checked rather than believed:
 
 ## 8. The tests, and the mutants that redden them
 
-`tests/test_s2_decision_seam_5087.py` — two tests for the defect class the seam
-prevents (because a hundred shape-pinning assertions would not strengthen it),
-plus two for the record and the fail-open edge the first review cycle found. The
-first pair is the seam's contract; the second pair exists because *being right*
+`tests/test_s2_decision_seam_5087.py` — five tests. Two for the defect class the
+seam prevents (because a hundred shape-pinning assertions would not strengthen
+it), two for the record and the fail-open edge the first review cycle found, and
+one for the per-item degradation map the operator reads on a degraded armed run.
+The first pair is the seam's contract; the last three exist because *being right*
 and *being measurable* are different failures, and only one of them reddens a
 pure-logic test.
 
@@ -212,6 +220,9 @@ pure-logic test.
 |---|---|
 | `test_a_valid_typed_answer_produces_the_expected_verdict` | a real `noul`+`score` pair decides `KEEP`/`DISCARD` **through `vet_gate`**, and a real `choice` decides the kind **through `KindClassifier`**. The stub answers the kNN's **second** candidate, so the assertion is the model's answer and not the fast path's. |
 | `test_an_out_of_schema_answer_fails_closed_and_names_the_question` | a wrong primitive, a score off the declared scale, and a choice outside the offered set all produce **no verdict** — and the record names the question. The seam rejects the out-of-set choice **before** the classifier's own closed-vocab guard sees it (`closed_vocab_rejects == 0`), which is the difference between a validating seam and one that trusts whatever comes back. It also holds the **composition floor**: an armed seam whose transport raises leaves the mechanical `#4899` `DISCARD` standing (§5). |
+| `test_the_seam_record_reaches_the_gate_stats` | the seam's spend, pin, prompt version and bands survive the boundary into the gate's own `stats` — the record §7 says a cost gate reads. |
+| `test_an_absurd_reported_cost_cannot_abort_the_classify_pass` | an unrepresentable JSON number from an injected decider degrades to "spend not counted" instead of escaping a pass documented as never-raising. |
+| `test_a_degraded_call_names_the_items_it_left_unassigned` | on **both** steps, a failed call or a refused answer names *which* items it left unassigned, with the failing question — and the record is on `stats["seam"]`, never a `batch` key, which is the path §5 sends the operator to. |
 
 Mutation-checked (each restores byte-identically — verified with `diff`):
 
@@ -221,10 +232,12 @@ Mutation-checked (each restores byte-identically — verified with `diff`):
 | `_score` drops its `0..hi` range check | ✅ `9.0` on a `0..3` scale licenses the discard |
 | `_choice` returns `answer.get("choice")` unvalidated | ✅ a minted `core:invented` reaches the classifier |
 | a degraded item emits a `NOOP` **verdict** instead of no verdict | ✅ the armed-seam composition assertion reads `KEEP`/`vet.fail_open` where `DISCARD`/`value.identifier_only.hash` is required |
-| `vet_arbiter` drops its stats again (`"batch": {}`) | ✅ **both**: the record assertions find no `batch["seam"]` |
+| `vet_arbiter` drops its stats again (`"batch": {}` and no `seam` key) | ✅ **both**: the record assertions find no `stats["seam"]` |
 | the classify record loses its `prompt` | ✅ the prompt-version assertion reads `None` |
 | `classify_tail` assigns the offered top-1 instead of the model's choice | ✅ **both**: the kind assertion reads `core:plan` instead of `core:workflow`, and the out-of-set answer stops being rejected because nothing is validated |
 | `vet_arbiter` drops the `seam` key (or `vet_candidates` stops folding it) | ✅ the gate stats carry no `prompt`/`bands`/`cost_usd` |
+| `classify_tail` records the failure as a COUNT only (drops its per-item `stats["degraded"]` writes) | ✅ the per-item assertions read an empty map on both S2.3 failure modes |
+| the seam's record is returned under `batch` (`{"verdicts": …, "batch": {"seam": stats}}`) | ✅ four tests: `stats["seam"]` is absent, which is exactly what a reader of a `batch["seam"]` path would find |
 | the cost accumulator takes `float(cost)` unbounded | ✅ `OverflowError` escapes `classify_items` on `10**400` |
 
 ## 9. What this does NOT close

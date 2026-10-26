@@ -1,4 +1,4 @@
-"""S2.2/S2.3 typed-decision seam (#5087) — four discriminating tests.
+"""S2.2/S2.3 typed-decision seam (#5087) — five discriminating tests.
 
 **Why the first two.** This seam exists to prevent one defect class: *an answer
 that does not fit the schema is trusted anyway*. Both are either "a valid typed
@@ -9,12 +9,14 @@ byte layout is a test that cannot fail for a reason we care about — the one
 request-shape assertion kept is the ``questions`` **map** (``#7866``): the
 documented array form 400s, so that line is the 400 trap, not decoration.
 
-**Why the other two.** Being right and being *measurable* are different
+**Why the other three.** Being right and being *measurable* are different
 failures, and only one of them reddens a pure-logic test. Arming the seam puts a
 billable call on the write path, so the record of it is asserted where a cost
-gate reads (``vet_gate``'s ``stats["seam"]``), and an injected decider's
+gate reads (``vet_gate``'s ``stats["seam"]``), an injected decider's
 unrepresentable spend is asserted not to abort a pass documented as
-never-raising. Neither was reachable from the first two tests.
+never-raising, and the per-item degradation map is asserted where the design
+record tells an operator to read it. None of the three was reachable from the
+first two tests.
 
 **Every test here is mutation-checked**, and the mutant is named in its
 docstring. A test that cannot be made red by breaking the guard it claims to
@@ -324,6 +326,71 @@ def test_an_absurd_reported_cost_cannot_abort_the_classify_pass():
         "seam enforces but the classify artifact used to drop")
     assert seam_stats["unavailable"] == 1
     assert "kind_c0" in seam_stats["rejected"]
+
+
+# ── 5. a degraded call names WHICH items it left unassigned ────────────────
+
+def test_a_degraded_call_names_the_items_it_left_unassigned(monkeypatch):
+    """The design record tells an operator on a degraded armed run to read
+    *which* items degraded (``stats["seam"]["degraded"][item]``), not just how
+    many — *"a count alone answers the wrong question"*. S2.2 recorded that map
+    from the start; S2.3 counted the failure only, so on a half-armed run the
+    classify artifact could say "1 batch unavailable" and never which items the
+    outage left to the kNN. Both of the seam's S2.3 failure modes now name the
+    item and the failing question, and the record is asserted on BOTH halves at
+    the path the doc cites: ``stats["seam"]``, never a ``batch`` key.
+
+    Mutants that redden it, each one line:
+      * drop the per-item ``stats["degraded"]`` write in ``classify_tail``'s
+        ``except Unavailable`` (the count-only shape) — the first ``assert``
+        reads an empty map;
+      * drop the ``schema_rejects`` arm's write — the second reads an empty map;
+      * return the arbiter's record under ``batch`` instead of ``seam``
+        (``{"verdicts": …, "batch": {"seam": stats}}``) — ``out["stats"]``
+        then carries no ``seam``, which is the prose-vs-artifact mismatch the
+        design record's §5 path exists to prevent.
+    """
+    def _down(_payload):
+        raise seam.Unavailable("http 429")
+
+    offered = [("i0", "the plan workflow", ["core:plan", "core:workflow"])]
+    assignments, down_stats = seam.classify_tail(offered, transport=_down)
+    assert assignments == {}
+    assert down_stats["unavailable"] == 1
+    assert set(down_stats["degraded"]) == {"i0"}, (
+        f"the item the outage left unassigned must be NAMED, got {down_stats['degraded']!r}")
+    assert seam.RULE_UNAVAILABLE in down_stats["degraded"]["i0"]
+    assert "429" in down_stats["degraded"]["i0"]
+
+    # …and a refused answer is recorded the same way, with the question named.
+    _kept, rejected = seam.classify_tail(
+        offered,
+        transport=_transport({"kind_c0": {"type": "choice", "choice": "core:invented"}}))
+    assert seam.RULE_SCHEMA_REJECT in rejected["degraded"]["i0"]
+    assert "kind_c0" in rejected["degraded"]["i0"], (
+        "the failing question belongs in the per-item record, not only in the tally")
+
+    # The artifact half, classification: the item keeps the caller's kNN top-1
+    # and the seam record says which item degraded.
+    classified = _classifier(seam.classify_decider(transport=_down)).classify_items(
+        [{"id": "i0", "type": "entity", "text": "the plan workflow"}])
+    assert classified["assignments"]["i0"]["mode"] == "knn"
+    assert "i0" in classified["stats"]["seam"]["degraded"]
+
+    # The artifact half, VET — and the PATH, which is the point: ``batch`` is
+    # ``vet_gate``'s own coverage record plus any arbiter BATCH verdict, and the
+    # arbiter returns an empty ``batch`` (no ``RENARRATE``), so a record written
+    # under ``batch["seam"]`` would be invisible to the operator §5 sends there.
+    out = vet_gate.vet_candidates(_vet_embed_list(), arbiter=seam.vet_arbiter(
+        transport=_down))
+    assert set(out["batch"]) == {"by_section", "candidates", "coverage_ratio",
+                                 "coverage_suspect", "narrative_statements"}, (
+        f"``batch`` is the gate's coverage record — got {sorted(out['batch'])!r}")
+    assert "seam" not in out["batch"], (
+        "the seam's record does not live under ``batch``: the arbiter returns an "
+        "empty batch, so a reader sent there finds nothing on a degraded run")
+    assert out["stats"]["seam"]["degraded"], (
+        "the gate's ``stats`` carry the per-item record")
 
 
 if __name__ == "__main__":  # pragma: no cover

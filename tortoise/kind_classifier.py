@@ -577,11 +577,13 @@ class KindClassifier:
         ``prompt`` (which prompt version answered), ``model`` (the pin that
         answered), ``unavailable`` (how many batches the capability never
         answered, so an armed-but-keyless run is distinguishable from "no item
-        reached the tail"), ``items``, ``degraded`` (per item, what went wrong)
-        and ``rejected`` (the failing question names — the seam reports them as
-        ``schema_rejects``, re-keyed here to the name the two gates' record
-        uses). "Endpoint down" and "nothing was offered" would otherwise be the
-        same reading.
+        reached the tail"), ``items``, ``degraded`` (per item: which items the
+        seam could not assign from a parsed, in-schema answer, and the failing
+        question — the same per-item shape S2.2 records, copied from the seam's
+        own ``degraded`` key rather than re-derived) and ``rejected`` (the
+        failing question names — the seam reports them as ``schema_rejects``,
+        re-keyed here to the name the two gates' record uses). "Endpoint down"
+        and "nothing was offered" would otherwise be the same reading.
 
         The seam re-chunks at its own :data:`s2_decision_seam.BATCH_MAX` (40,
         the validated shape), so a classifier batch of up to 50 can become two

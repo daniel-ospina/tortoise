@@ -1026,12 +1026,27 @@ was unreadable for the half that spends more. `vet_candidates` now folds the arb
 into its `stats["seam"]` (additive; its counters stay its own), so the spend, the bands and the
 degraded items reach `result["vet"][*]["stats"]["seam"]`.
 
-**Tests:** four, and each is mutation-checked (`tests/test_s2_decision_seam_5087.py`): a valid typed
+**Tests:** four at round 1 — **five** at this head (see the round-2 note below) — and each is
+mutation-checked (`tests/test_s2_decision_seam_5087.py`): a valid typed
 answer decides through the REAL `vet_gate` and the REAL `KindClassifier`; an out-of-schema answer
 (wrong primitive / `9.0` on a 0–3 scale / a choice outside the offered set) produces no verdict and
 names its question; the seam's own record (`prompt`/`model`/`bands`/`cost_usd`) reaches the gate's
 stats; and an injected decider's unrepresentable spend cannot abort the fail-open classify pass.
-**Nine** mutants each redden at least one of them and restore byte-identically — including
+**Nine** mutants at round 1 — **eleven** at this head — each reddening at least one of them and
+restoring byte-identically — including
 `_noul`'s coercion of a missing probability to `0.0` (which turns a `choice` answer into a
 confident **DISCARD**), the rejected `NOOP`-on-degradation shape, and `vet_arbiter` dropping its
 stats again.
+
+**Round 2 — two claims beside the code that the code contradicted, both fixed.** (1) §5 and §8 of
+`S2-DECISION-SEAM.md`, plus four docstrings in `s2_decision_seam.py`, sent a reader to
+`batch["seam"]`. The record is on the GATE's `stats` (`stats["seam"]`), so the real artifact path
+is `result["vet"][*]["stats"]["seam"]` — which §7 and this changelog already said. §5 is the
+section an operator reads on a degraded armed run, and the arbiter returns an empty `batch` (no
+`RENARRATE`), so following it landed on nothing and read as "the seam recorded nothing", the exact
+failure the record exists to prevent. (2) `KindClassifier._decide_tail_seam`'s docstring advertised
+a per-item `degraded` map that S2.3 never produced (a count only), so *which* items an outage left
+to the kNN was unanswerable on a half-armed run; `classify_tail` now records it — item id → reason,
+failing question named, the same per-item shape S2.2 records. A fifth test
+(`test_a_degraded_call_names_the_items_it_left_unassigned`) pins both halves **and** the path: the
+record is asserted at `stats["seam"]` and asserted absent from `batch`.
