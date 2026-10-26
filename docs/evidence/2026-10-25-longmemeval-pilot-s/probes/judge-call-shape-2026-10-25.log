@@ -1,0 +1,34 @@
+
+=== deepseek:deepseek-flash extra=- OK
+  content: ''
+  reasoning: 'We need answer yes/no only. Model contains correct'
+  finish: length
+  usage: {"prompt_tokens": 153, "completion_tokens": 10, "total_tokens": 163, "prompt_tokens_details": {"cached_tokens": 0}, "completion_tokens_details": {"reasoning_tokens": 10}, "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 153}
+
+=== deepseek:deepseek-v4-pro extra=- OK
+  content: ''
+  reasoning: 'We need answer yes/no. Need check if model'
+  finish: length
+  usage: {"prompt_tokens": 206, "completion_tokens": 10, "total_tokens": 216, "prompt_tokens_details": {"cached_tokens": 128}, "completion_tokens_details": {"reasoning_tokens": 10}, "prompt_cache_hit_tokens": 128, "prompt_cache_miss_tokens": 78}
+
+=== deepseek:deepseek-flash extra={'thinking': {'type': 'disabled'}} OK
+  content: 'yes'
+  reasoning: None
+  finish: stop
+  usage: {"prompt_tokens": 127, "completion_tokens": 1, "total_tokens": 128, "prompt_tokens_details": {"cached_tokens": 0}, "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 127}
+
+=== deepseek:deepseek-v4-pro extra={'thinking': {'type': 'disabled'}} OK
+  content: 'yes'
+  reasoning: None
+  finish: stop
+  usage: {"prompt_tokens": 127, "completion_tokens": 1, "total_tokens": 128, "prompt_tokens_details": {"cached_tokens": 0}, "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 127}
+
+=== gemini:gemini-2.5-flash-lite extra=- HTTP 404
+  [{
+  "error": {
+    "code": 404,
+    "message": "This model models/gemini-2.5-flash-lite is no longer available to new users. Please update your code to use models/gemini-3.5-flash-lite for the latest features and improvements. We recommend you to use the Interactions API (https://ai.google.dev/gemini-api/docs/get-started).",
+    "status": "NOT_FOUND"
+  }
+}
+]
