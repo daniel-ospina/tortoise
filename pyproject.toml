@@ -271,6 +271,26 @@ select = ["E", "F", "B", "UP", "I", "SIM", "RUF"]
 #            comment/string surface (Latin-1 quotes); low signal.
 ignore = ["E501", "RUF001", "RUF002", "RUF003"]
 
+[tool.ruff.lint.per-file-ignores]
+# `tortoise/__all__.py` is a DECLARATION data module, not an export list (#10034/#4282 1.1).
+# Its `__all__` names are **class members of `TortoiseSDK`**, never module-level bindings —
+# the module docstring's "WHY A MODULE AND NOT THE PACKAGE `__all__`" is the record, and
+# `tests/test_sdk_surface_declaration.py` pins it (`importing it as `tortoise.__all__`
+# would break `from tortoise import *`). So both remaining findings are structural, not
+# defects:
+#   F822   undefined name in `__all__` — the names have no module binding BY DESIGN. Ruff
+#          documents `lint.per-file-ignores` as the mechanism for exactly this case
+#          (astral-sh/ruff `undefined-export`: "users that rely on implicit exports should
+#          disable this rule … via `lint.per-file-ignores`").
+#   RUF022 `__all__` is not sorted — the list is transcribed VERBATIM from
+#          `docs/product/beta-sdk-surface.md` rows 1-40, and the order is load-bearing:
+#          `tests/test_sdk_surface_declaration.py::test_the_declaration_carries_the_owners_40_methods`
+#          asserts `list(__all__) == list(doc_names)`. Sorting it would silently reorder an
+#          owner ruling to satisfy a style rule (ruff's own docs note the iteration order
+#          can be read elsewhere).
+# Scoped to this one path: F822/RUF022 stay ACTIVE for every real module in the tree.
+"tortoise/__all__.py" = ["F822", "RUF022"]
+
 [tool.mypy]
 python_version = "3.12"
 # Agent-infra python-ci convention (templates/.github/workflows/python-ci.yml):
