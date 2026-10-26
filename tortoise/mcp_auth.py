@@ -85,11 +85,17 @@ def _record_tenant_scope(org: dict, *, control_plane_ids: bool):
     no write door has to remember it.
 
     A credential that resolves NO named graph (session / legacy / OAuth: an
-    org-wide key opens the org's default graph) yields the no-op: the write is
-    then REFUSED and counted rather than attributed to a graph id this layer
-    does not know. Naming the default-graph tenant is #9188's (the record keys
-    on `public.graphs.id`; the default graph need not have a row), and a guess
-    here is the cross-tenant write this whole seam exists to prevent.
+    org-wide key opens the org's default graph) is named by
+    :func:`tortoise.record_writer.record_tenant_for` from the credential's
+    ``default_graph_id`` — the id of the org's active ``kind='default'``
+    ``public.graphs`` row, resolved by ``supabase_control.resolve_api_key``
+    (#10025; `20261028000001` mints that row per organization). That resolves
+    org-wide **API KEYS** (``tt_``/``tk_``); the OAuth family (``oat_``, see
+    :func:`tortoise.oauth.resolve_oauth_access_token`) carries no
+    ``default_graph_id`` yet and stays refused — #10047. When the control
+    plane cannot name it — no row, no field — the write is REFUSED and counted
+    (``no_tenant``) instead. Nothing is guessed here: a guess is the
+    cross-tenant write this whole seam exists to prevent.
 
     ⚠️ ``control_plane_ids`` IS NOT DECORATION — it is the id-space precondition,
     and the caller passes whether the resolution came from the control plane
@@ -344,9 +350,23 @@ def _retarget_refusal(requested: str) -> GraphTargetError:
 
 
 def _describe_graph(row: dict) -> str:
-    """One graph as a caller can act on it: `name (graph_id)`."""
+    """One graph as a caller can act on it: `name (graph_id)`.
+
+    Every refusal the resolver raises routes its reachable set through here, so
+    this is the ONE place that tells a caller what to pass instead. When the
+    #10025 `stable_id` differs from `graph_id` it is therefore part of the hint:
+    the default row carries the `"default"` SENTINEL in `graph_id` — explicitly
+    not an id — and its `stable_id` is the only real id it has, so a hint shaped
+    `name (graph_id)` named nothing that identifies that row while the id it
+    omitted is exactly the value `graph_metadata` / `GET /v1/graphs` hand out
+    (and now a value this resolver accepts). A custom row's two ids are the same
+    string, so its hint stays the single short form.
+    """
     gid = row.get("graph_id")
     name = row.get("name") or gid
+    stable_id = row.get("stable_id")
+    if stable_id and stable_id != gid:
+        return f"{name!r} (id {stable_id}, graph_id {gid!r})"
     return f"{name!r} ({gid})"
 
 
@@ -403,6 +423,15 @@ def resolve_graph_target(org_id: str, ref: str, *,
     the caller cannot detect — the failure class this feature is most likely
     to cause.
 
+    Both spellings of a row's id are accepted, because a caller may have read
+    either one off another surface: `graph_id` (the storage/registry id — and,
+    for the DEFAULT row, the `"default"` SENTINEL) and `stable_id` (#10025's
+    identity field). For the default graph `stable_id` is the ONLY real id, so
+    without it the value `graph_metadata`/`GET /v1/graphs` calls a graph's
+    identity was REFUSED here while the sentinel — explicitly not an id —
+    resolved: a dual-surface caller (list over REST, write over MCP, the shape
+    this repo's own agents take) could not use the id it had just been handed.
+
     Raises :class:`GraphTargetError` for anything that is not exactly one
     reachable graph: unknown id/name, a name matching several, a graph that is
     soft-deleted (absent from the reachable set), and a graph belonging to
@@ -430,6 +459,15 @@ def resolve_graph_target(org_id: str, ref: str, *,
     # 1. id — exact, and allowed to win over a name that happens to collide.
     for row in reachable:
         if ref == row.get("graph_id"):
+            return row
+    # 1b. the #10025 identity id, matched over the SAME `reachable` set — the
+    #     workspace + tombstone filters above are exactly what keeps this from
+    #     becoming an IDOR: a foreign or soft-deleted row's stable id is not in
+    #     the list, so it stays indistinguishable from unknown. The default
+    #     row carries the sentinel in `graph_id`, so `stable_id` is the only
+    #     field that can name it by id at all.
+    for row in reachable:
+        if row.get("stable_id") and ref == row["stable_id"]:
             return row
     # 2. namespace — the storage spelling `list_memory_graphs` returns, so a caller
     #    that read it from `tortoise_list_graphs` can pass it straight back.
@@ -576,9 +614,15 @@ def record_tenant_for_graph(plan: dict | None) -> tuple[str, str] | None:
     graph Y). That divergence is the same silent-wrong-target class this issue
     exists to close.
 
-    The DEFAULT graph is deliberately still None: it need not have a row, and
-    naming it is #9188's open question — the same deferral the credential path
-    makes.
+    The DEFAULT graph is deliberately still None HERE, but no longer because
+    it lacks a row: `20261028000001` mints an active `kind='default'` row per
+    organization (and provisioning mints it forward, with an auth-time
+    self-heal), and the credential path (`resolve_api_key` →
+    `default_graph_id`) names that tenant on every lane that resolves the
+    request's own credential — MCP and hosted REST included. What is still
+    unwired is THIS seam and the credentials that carry no `default_graph_id`
+    at all: a SESSION/JWT credential and an OAuth `oat_` token. Closing that is
+    #10047's scope, and it is a deferral of those lanes only.
     """
     if plan is None or (plan.get("kind") or "") == "default":
         return None
@@ -1369,21 +1413,30 @@ class OrgResolutionMiddleware(BaseHTTPMiddleware):
         #
         # It is a SCOPE, not a bare set: a `with` cannot leak this request's
         # tenant into the next request served on the same connection, and it
-        # nests. It is installed ONLY when the resolution produced a
-        # CONTROL-PLANE graph id (`is_supabase_enabled()` — the same predicate
-        # that chose the resolver two blocks up, so a cache hit is covered too):
-        # the record's layer tables FK to `public.graphs`, and the self-host
-        # registry lane's `g_<hex>` Falkor ids have no row there, so installing
-        # one would displace a declared single-tenant pair with an id the FK
-        # cannot satisfy (`write_failed`, cause unattributable). And
-        # deliberately conditional on a NAMED graph: an
-        # org-wide credential (session / legacy / OAuth, `graph_id` None) has no
-        # record tenant, so the armed write is REFUSED and counted (`no_tenant`)
-        # rather than filed under the org's default graph, which the record
-        # cannot name (its layer tables key on `public.graphs.id`, and the
-        # default graph need not have a row). Renaming the default-graph tenant
-        # is #9188's; guessing it here is exactly the cross-tenant write #9192
-        # exists to stop.
+        # nests. It is installed for a CONTROL-PLANE resolution only
+        # (`is_supabase_enabled()` — the same predicate that chose the resolver
+        # two blocks up, so a cache hit is covered too): the record's layer
+        # tables FK to `public.graphs`, and the self-host registry lane's
+        # `g_<hex>` Falkor ids have no row there, so installing one would
+        # displace a declared single-tenant pair with an id the FK cannot
+        # satisfy (`write_failed`, cause unattributable).
+        #
+        # An ORG-WIDE **API KEY** (`tt_`/`tk_`, `graph_id` None) IS named on
+        # this lane since #10025: `resolve_api_key` puts the org's active
+        # `kind='default'` row id on the credential as `default_graph_id`, and
+        # `record_tenant_for` files the write under it — the same answer the
+        # hosted REST lane gives for that credential. ⚠️ The OAuth family
+        # (`oat_`, introspected by `tortoise.oauth.resolve_oauth_access_token`)
+        # is NOT covered: that resolver never calls `resolve_api_key` and puts
+        # no `default_graph_id` on the dict, so an OAuth write stays refused and
+        # counted (`no_tenant`). Wiring it is #10047's scope, named in that
+        # issue's own `mcp_auth.py` bullet — this lane carries whatever the
+        # resolver handed it and guesses nothing.
+        #
+        # It also stays REFUSED and counted (`no_tenant`) whenever the control
+        # plane could not name that row (unset, tombstoned, unreadable), which
+        # is the fail-closed direction. Guessing it here is exactly the
+        # cross-tenant write #9192 exists to stop.
         from tortoise.supabase_control import is_supabase_enabled
 
         tenant_scope = _record_tenant_scope(
