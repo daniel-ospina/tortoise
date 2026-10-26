@@ -199,6 +199,15 @@ def test_provision_org_forwards_prior_org_ids_without_reaching_the_rpc(monkeypat
             captured["fn"] = fn
             captured["body"] = body
 
+        def query(self, table, *, select=None, filters=None, method="GET",
+                  json_body=None, order=None, limit=None):
+            # #10025: provisioning now also READS and MINTS the org's
+            # `kind='default'` graphs row (ensure_default_graph_row), so a
+            # control-plane double needs the query seam. This double exists to
+            # pin the RPC BODY, so the graphs I/O is inert here — the mint's
+            # own behaviour is pinned in tests/test_10025_graph_identity.py.
+            return [] if method == "GET" else None
+
     monkeypatch.setattr(sc, "_ensure_onboarding_node_after_provision",
                         lambda cp, org_id, params, **kw:
                         hook_calls.append((org_id, params, kw)))

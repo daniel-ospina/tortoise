@@ -629,6 +629,37 @@ def _fresh_commit_ingest_budget():
     _reset_commit_ingest_budget_for_tests()
 
 
+@pytest.fixture(autouse=True)
+def _fresh_default_row_mint_window():
+    """#10025: start every test with an empty per-org default-row mint window.
+
+    ``supabase_control._DEFAULT_ROW_MINT_RETRY`` is PROCESS state keyed by
+    ``org_id`` (a 300 s window, so the API-key auth path does not re-attempt
+    and re-log a mint that is PERMANENT for that org on every request). That is
+    correct in production — one process, many orgs — and a hidden coupling
+    between TESTS otherwise: the suite authenticates as a handful of shared
+    orgs, so one test's un-healable mint suppresses the next test's attempt.
+
+    Measured, not hypothetical (``CI`` ``flip-gate``, run 40315422548):
+    ``tests/test_supabase_control.py::TestResolveApiKey::
+    test_session_key_resolves_via_api_keys`` pins the MISS path's exact read
+    count, and ``tests/test_auth_flip.py`` resolves a ``team-free-001`` key
+    whose org has no ``graph_name`` (so its mint is a deliberate no-op that
+    marks the window). ``.github/scripts/verify-cutover`` runs those two files
+    in ONE pytest invocation, auth-flip first, so the pin read 3 instead of 6
+    and the whole pre-deploy gate failed — a suite that passes file-by-file and
+    reds the gate.
+
+    Same rationale as ``_fresh_commit_ingest_budget`` above: reset the window,
+    do not change the window. A test that proves the suppression itself calls
+    twice within its own body, where the reset has already happened.
+    """
+    from tortoise.supabase_control import _DEFAULT_ROW_MINT_RETRY
+    _DEFAULT_ROW_MINT_RETRY.clear()
+    yield
+    _DEFAULT_ROW_MINT_RETRY.clear()
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _fresh_capture_spool():
     """#3963: start every pytest SESSION with a fresh capture spool.

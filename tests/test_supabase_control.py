@@ -180,7 +180,66 @@ class TestResolveApiKey:
         assert team["created_by"] == "user-1"
         assert team["key_prefix"] == TOKEN[:10]
         # exact-match index: only the api_keys table is consulted, no scans
-        assert fake.query_count == 2  # api_keys + teams
+        # (#10025 adds ONE read on the HIT path: this key is org-wide, so its
+        # record tenant is the org's default-graph ROW. It is a point read on
+        # idx_graphs_org_id, not a scan — the property this pin protects is
+        # "no scans", and it still holds. Paid once per request, on the same
+        # path that already builds the SDK for that request.)
+        #
+        # 6 rather than 3 on THIS fixture because it is the MISS path: this
+        # FREE_TEAM row has no `graph_name`, so the resolver's self-heal
+        # (#10025 review F1 — `resolve_api_key` mints the row when
+        # `default_graph_id_for` finds none, which is what keeps a missed
+        # provisioning mint from being permanent) runs the mint's three guard
+        # reads and then declines to write a row that would carry no namespace.
+        # The HIT path is 3 — api_keys + organizations + the one graphs point
+        # read — i.e. no fixed cost is added by the self-heal.
+        # Deterministic because `conftest._fresh_default_row_mint_window`
+        # (autouse) clears the process-global retry window: without it this pin
+        # depends on whether an EARLIER suite already marked `team-free-001` in
+        # it, which `tests/test_auth_flip.py` does inside a `verify-cutover` run
+        # (`flip-gate`, run 40315422548).
+        assert fake.query_count == 6  # api_keys + org + graphs + 3 self-heal guards
+        # The mint is a no-op here (no `graph_name`), so the record tenant stays
+        # UNNAMED (refused as `no_tenant`) rather than falling back to a guess.
+        assert team["default_graph_id"] is None
+
+    def test_an_org_wide_key_carries_its_default_graph_id(self, fake):
+        """#10025 indicator (b) through the REAL resolver — not a hand-built dict.
+
+        Pins the WIRING, which the graph-identity suite cannot: that suite
+        feeds `record_tenant_for` a credential it constructed, so deleting the
+        `"default_graph_id": default_graph_id` line, replacing it with a
+        constant None, or folding it into `graph_id` would all have stayed
+        green there. This asserts the field is on the resolved credential and
+        that `graph_id` stays None — the widening the resolver comment forbids
+        (a non-None `graph_id` means "this key is bound to that graph").
+        """
+        fake.seed("api_keys", [_key_row()])
+        fake.seed("graphs", [
+            {"id": "g_default_free", "org_id": "team-free-001",
+             "name": "default", "kind": "default", "status": "active",
+             "namespace": "team_team-free-001"},
+        ])
+        team = resolve_api_key(fake, TOKEN)
+        assert team["default_graph_id"] == "g_default_free"
+        assert team["graph_id"] is None
+
+    def test_a_graph_bound_key_does_not_gain_a_default_graph_id(self, fake):
+        """The default must never displace, or shadow, a credential's own graph."""
+        fake.seed("api_keys", [_key_row(graph_id="g_bound")])
+        fake.seed("graphs", [
+            {"id": "g_bound", "org_id": "team-free-001", "name": "bound",
+             "kind": "custom", "status": "active",
+             "namespace": "team_free_bound"},
+            {"id": "g_default_free", "org_id": "team-free-001",
+             "name": "default", "kind": "default", "status": "active",
+             "namespace": "team_team-free-001"},
+        ])
+        team = resolve_api_key(fake, TOKEN)
+        assert team["graph_id"] == "g_bound"
+        assert team["graph_namespace"] == "team_free_bound"
+        assert team["default_graph_id"] is None
 
     def test_long_lived_key_resolves_via_org_memberships(self, fake):
         """Long-lived (provisioned) key with no api_keys row → membership path."""
@@ -2206,7 +2265,11 @@ class TestTask8Helpers:
             "graph_id": "default", "org_id": "team-free-001",
             "name": "default", "kind": "default",
             "namespace": "team_team-free-001", "status": "active",
-            "recording": None}]  # recording key present both modes (#2110)
+            "recording": None,
+            # #10025: additive — the default graph's STABLE row id, None when
+            # no `kind='default'` row exists yet (`graph_id` keeps the
+            # historical sentinel every existing consumer compares against).
+            "stable_id": None}]  # recording key present both modes (#2110)
         assert graph_metadata(fake, "no-such-team") == []
         assert graph_metadata(fake, "team-free-001")[0]["graph_id"] == "default"
 
@@ -3066,17 +3129,25 @@ class TestGraphLifecycleSeam:
                              "g_c2test00000004") == ["k1", "k2"]  # cascade all
 
     def test_count_graph_keys_literal_default_never_matches(self, fake):
-        """#2306 (supabase structural half of the lane-consistency pin): the
-        default row's key_count is 0 BY CONSTRUCTION — the keys that resolve
-        to the default graph are the TEAM-WIDE rows (graph_id NULL, managed
-        on the API-Keys tab), and api_keys.graph_id REFERENCES graphs(id)
-        with the default row's id being the DERIVED literal 'default' (never
-        a graphs.id), so no api_keys row can reference it. count_graph_keys
-        for 'default' stays 0 with team-wide keys present; even a real
-        kind='default' graphs row (recording-override upsert — its own g_ id)
-        with a raw-bound key is invisible to the literal 'default' count. The
-        list seam (#2306) additionally short-circuits default-kind rows to 0
-        before any lane count runs."""
+        """#2306 (supabase half of the lane-consistency pin): the default row's
+        key_count is 0 BY CONSTRUCTION — the keys that resolve to the default
+        graph are the TEAM-WIDE rows (graph_id NULL, managed on the API-Keys
+        tab). The pin holds for a stronger reason than it used to: before
+        #10025 the supabase default had no `graphs` row at all (its id was the
+        derived literal 'default', never a graphs.id), so
+        `api_keys.graph_id REFERENCES graphs(id)` refused any binding; #10025
+        mints a `kind='default'` row with a REAL `g_<16hex>` id, so the FK now
+        accepts one and the schema no longer refuses anything. What refuses it
+        is ADMISSION — `_ensure_graph_exists`'s `kind != 'default'` guard
+        (`hosted_api.py`, the `ok = ... and row.get("kind") != "default"` arm)
+        — so no key reaches the default row through any route. ⛔ Do not relax
+        that guard on the strength of the FK: after #10025 it is the only thing
+        refusing the binding. count_graph_keys for 'default' stays 0 with
+        team-wide keys present; even a real kind='default' graphs row
+        (recording-override upsert — its own g_ id) with a raw-bound key is
+        invisible to the literal 'default' count. The list seam (#2306)
+        additionally short-circuits default-kind rows to 0 before any lane
+        count runs."""
         self._seed_team(fake)
         fake.seed("api_keys", [
             {"id": "tw1", "org_id": "team-c2-001", "lookup_hash": "h1",
@@ -3085,9 +3156,12 @@ class TestGraphLifecycleSeam:
              "graph_id": None, "revoked_at": None},
         ])
         assert count_graph_keys(fake, "team-c2-001", "default") == 0
-        # A kind='default' graphs row exists only after a recording-override
-        # upsert (set_graph_recording); it carries its OWN g_ id, and any
-        # api_keys row bound to it references THAT id (FK), never 'default'.
+        # A kind='default' graphs row exists after a recording-override
+        # upsert (set_graph_recording) and, since #10025, is minted on demand
+        # for every org; it carries its OWN g_ id, and any api_keys row bound
+        # to it references THAT id, never 'default' (nothing in the schema
+        # refuses such a raw write any more — only admission does; see the
+        # docstring. This pin is about the COUNT, not the binding).
         insert_graph(fake, {
             "id": "g_defrow0000001", "org_id": "team-c2-001",
             "name": "default", "kind": "default",
