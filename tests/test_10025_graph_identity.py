@@ -115,6 +115,21 @@ def test_graph_bound_key_still_names_its_own_graph() -> None:
     {"org_id": "org-1", "graph_id": None, "default_graph_id": ""},
     {"org_id": "org-1", "graph_id": None, "default_graph_id": 17},  # wrong type
     {"graph_id": None, "default_graph_id": DEFAULT_ROW_ID},    # no org
+    # A PRESENT but unusable `graph_id` refuses — it must never fall through to
+    # the org default, which would WIDEN a graph-bound credential into an
+    # org-wide one (the invariant `_graph_namespace_for` states in words).
+    # Pinned WITH a valid `default_graph_id` present, because that is the only
+    # shape that can tell the two behaviours apart: without it, an
+    # implementation that fell through would return ``None`` too and the pin
+    # would be silent.
+    {"org_id": "org-1", "graph_id": "", "default_graph_id": DEFAULT_ROW_ID},
+    {"org_id": "org-1", "graph_id": 17, "default_graph_id": DEFAULT_ROW_ID},
+    # The `"default"` SENTINEL is not a `public.graphs.id` (`g_<16hex>`), so
+    # filing under it would produce a row the record's FK rejects. The shape is
+    # reachable in production: the org-list payload's `default_graph_id` carries
+    # exactly this sentinel (`hosted_api`'s graphs listing), so the refusal here
+    # is load-bearing rather than theoretical.
+    {"org_id": "org-1", "graph_id": None, "default_graph_id": "default"},
 ])
 def test_an_unnameable_tenant_still_refuses(credential: dict) -> None:
     """Fail-closed: no usable row ⇒ None ⇒ `no_tenant`, never a guess."""
