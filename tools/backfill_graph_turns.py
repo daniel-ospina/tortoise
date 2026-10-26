@@ -111,48 +111,99 @@ def _connect(uri: str):
     ), f"{u.scheme}://{u.hostname}:{u.port or 6379}"
 
 
+def _int_or_none(value):
+    """``int(value)`` or ``None`` — never a bare raise.
+
+    Two traps live here, both documented by the readers this file follows:
+    a graph property may be a string, and a digit run may exceed CPython's
+    integer-conversion limit (``sdk._capture_turn_ids`` records the same one).
+    A single malformed row must not abort a census of a production graph.
+    """
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _empty_bucket() -> dict:
+    return {"turns": 0, "chars": 0, "embedded": 0, "indexes_seen": 0,
+            "first_index": None, "first_key": None,
+            "last_index": None, "last_key": None,
+            "non_turn_members": 0, "turns_not_point_kind_event": 0}
+
+
 def census(graph, graph_name: str) -> dict:
-    """Per-session turn census for ONE graph. Reads only."""
+    """Per-session turn census for ONE graph. Reads only.
+
+    A "turn" here is a ``:Point`` wired ``[:CONTAINS]`` to a ``:Session`` whose
+    id keys as THAT session's turn (``<session_id>_t<ascii digits>``) — the same
+    identity the record rebuilds from. Everything else attached to the session
+    is reported apart, never folded into ``turns``.
+    """
+    # `turn_max_index` is the ID-SPACE high-water mark the writer records beside
+    # the window length (`sdk.py`, post-#10000: "`turn_count` is a WINDOW LENGTH,
+    # not a max id index"), so the census can report the two declared numbers
+    # separately from the two measured ones. `created_at` is deliberately not
+    # read: nothing here consumes it.
     sessions = graph.query(
-        "MATCH (s:Session) RETURN s.id, s.turn_count, s.created_at"
+        "MATCH (s:Session) RETURN s.id, s.turn_count, s.turn_max_index"
     ).result_set
 
     # One pass over the turns: their id IS the key (`<session>_t<index>`), and
     # the `CONTAINS` edge is the session linkage the record copy will carry.
+    # `pointKind` rides along because the product's turn readers disagree about
+    # it (`sdk._capture_turn_ids` and `session_schema.audit_session_retrofit`
+    # require `pointKind = 'event'`; the record's own turn read does not): this
+    # census keeps the id-shape definition — which is what the record keys on —
+    # and MEASURES the divergence instead of silently picking one.
     rows = graph.query(
         "MATCH (s:Session)-[:CONTAINS]->(p:Point) "
         "WHERE p.is_episodic = true "
         "RETURN s.id, p.id, size(coalesce(p.content,'')), "
-        "       (p.embedding IS NOT NULL) "
+        "       (p.embedding IS NOT NULL), p.pointKind "
         "ORDER BY s.id, p.id"
     ).result_set
 
     per_session: dict[str, dict] = {}
-    non_turn_ids: list[str] = []
-    for sid, pid, chars, has_emb in rows:
+    off_shape: list[str] = []
+    other_session: list[str] = []
+    for sid, pid, chars, has_emb, kind in rows:
         sid = str(sid)
-        parsed = _TURN_ID_RE.match(pid or "")
-        own = parsed is not None and parsed.group("session") == sid
-        bucket = per_session.setdefault(sid, {
-            "turns": 0, "chars": 0, "embedded": 0, "indexes_seen": 0,
-            "first_key": None, "last_key": None, "non_turn_members": 0})
-        if not own:
-            # An off-shape id cannot be keyed into the record at all, and a
-            # POINT attached here under ANOTHER session's turn id is not this
-            # session's turn — neither would be rebuilt by the copy. Counting
-            # either as a turn is exactly how a session that lost turns reads
-            # as complete, which is the failure this census exists to catch.
+        pid = "" if pid is None else str(pid)
+        parsed = _TURN_ID_RE.match(pid)
+        index = _int_or_none(parsed.group("index")) if parsed is not None else None
+        bucket = per_session.setdefault(sid, _empty_bucket())
+        if parsed is None or index is None:
+            # An off-shape id (or an index CPython cannot convert) cannot be
+            # keyed into the record at all — a copy-blocking finding, distinct
+            # from the one below.
             bucket["non_turn_members"] += 1
-            non_turn_ids.append(pid)
+            off_shape.append(pid)
+            continue
+        if parsed.group("session") != sid:
+            # A well-formed turn id belonging to a DIFFERENT session, wired
+            # here. It IS on the shape; it simply is not this session's turn,
+            # and the copy would rebuild it under its own session.
+            bucket["non_turn_members"] += 1
+            other_session.append(pid)
             continue
         bucket["turns"] += 1
-        bucket["chars"] += int(chars or 0)
+        bucket["chars"] += _int_or_none(chars) or 0
         bucket["embedded"] += 1 if has_emb else 0
-        bucket["indexes_seen"] = max(bucket["indexes_seen"],
-                                     int(parsed.group("index")))
-        if bucket["first_key"] is None:
+        if kind != "event":
+            bucket["turns_not_point_kind_event"] += 1
+        bucket["indexes_seen"] = max(bucket["indexes_seen"], index)
+        # `first_key`/`last_key` are the ids at the LOWEST/HIGHEST INDEX, not the
+        # lexicographically-first/last id (`s1_t9` sorts after `s1_t10`, so the
+        # ordering the query returns is not the id order).
+        if bucket["first_index"] is None or index < bucket["first_index"]:
+            bucket["first_index"] = index
             bucket["first_key"] = pid
-        bucket["last_key"] = pid
+        if bucket["last_index"] is None or index > bucket["last_index"]:
+            bucket["last_index"] = index
+            bucket["last_key"] = pid
 
     # Turns with NO session edge would be copied under no session — that is a
     # silent orphan line in the parity check, so the ids are MEASURED, not
@@ -163,18 +214,17 @@ def census(graph, graph_name: str) -> dict:
         "AND NOT (:Session)-[:CONTAINS]->(p) RETURN p.id ORDER BY p.id"
     ).result_set]
 
-    declared = {str(sid): (int(tc) if tc is not None else None)
-                for sid, tc, _ in sessions}
+    declared = {str(sid): _int_or_none(tc) for sid, tc, _ in sessions}
+    declared_max = {str(sid): _int_or_none(tmi) for sid, _, tmi in sessions}
 
     # Counted BEFORE declared-only sessions are folded in, so a declared session
     # with no turns cannot inflate "sessions with turns" — and by the TURN count,
     # not by bucket existence, because a session holding only non-turn members
     # has a bucket and zero turns.
-    sessions_with_turns = sum(1 for b in per_session.values()
-                             if b["turns"] > 0)
+    everywhere = set(declared) | set(per_session)
+    sessions_with_turns = sum(1 for b in per_session.values() if b["turns"] > 0)
     sessions_without_turns = sorted(
-        s for s in (set(declared) | set(per_session))
-        if per_session.get(s, {}).get("turns", 0) == 0)
+        s for s in everywhere if per_session.get(s, {}).get("turns", 0) == 0)
 
     # Every declared session carries BOTH numbers into the artifact, including
     # one with no turns at all — that is the "872 of 873" case, and `verify`
@@ -183,36 +233,56 @@ def census(graph, graph_name: str) -> dict:
         # setdefault, never assignment: a session that has a bucket because it
         # holds NON-turn members must keep that count — overwriting it here is
         # how a real finding would be erased by the very step that reports it.
-        per_session.setdefault(sid, {
-            "turns": 0, "chars": 0, "embedded": 0, "indexes_seen": 0,
-            "first_key": None, "last_key": None, "non_turn_members": 0})
+        per_session.setdefault(sid, _empty_bucket())
     for sid, bucket in per_session.items():
         bucket["declared"] = declared.get(sid)
+        bucket["declared_max_index"] = declared_max.get(sid)
+        # `turn_count` is a WINDOW LENGTH; the indices are the ID SPACE. A
+        # session whose ids run 0,1,5,6 has 4 turns and a hole, and only the
+        # second number can show it.
+        bucket["id_space_hole"] = (
+            bucket["turns"] > 0
+            and bucket["indexes_seen"] + 1 != bucket["turns"])
 
-    # A session whose declared turn_count disagrees with the number of turn
-    # points attached to it is a source-side inconsistency: the copy must not
-    # "fix" it silently, so it is reported here and the parity check compares
-    # against BOTH numbers. Driven by the UNION of declared and attached — a
-    # session that declares turns and holds none is the worst case of this
-    # class, not an absent one.
+    # NO CAUSE IS NAMED HERE. A disagreement between the declared window length
+    # and the attached turns is a MEASUREMENT; on a journal+record deployment
+    # (`sdk._record_holds_turns`) the writer sets `turn_count` and deliberately
+    # puts no turns in the graph, which is a correct state that looks identical
+    # to a loss. Attributing it to "legacy captures without turn_count
+    # following" would be a cause this census never measured — `verify` decides,
+    # and it has both numbers for every session.
     count_mismatch = {
         sid: {"declared": declared[sid],
-              "attached": per_session.get(sid, {}).get("turns", 0)}
-        for sid in sorted(set(declared) | set(per_session))
+              "attached": per_session.get(sid, {}).get("turns", 0),
+              "declared_max_index": declared_max.get(sid),
+              "max_index_seen": per_session.get(sid, {}).get("indexes_seen")}
+        for sid in sorted(everywhere)
         if declared.get(sid) is not None
         and declared[sid] != per_session.get(sid, {}).get("turns", 0)
     }
+    declared_and_empty = sorted(
+        s for s in sessions_without_turns
+        if (declared.get(s) or 0) > 0)
+    id_space_holes = sorted(
+        s for s, b in per_session.items() if b["id_space_hole"])
 
     totals = {
         "sessions_with_turns": sessions_with_turns,
         "sessions_declared": len(declared),
         "sessions_without_turns": len(sessions_without_turns),
+        "sessions_declared_and_empty": len(declared_and_empty),
+        "sessions_in_count_mismatch": len(count_mismatch),
+        "sessions_with_id_space_holes": len(id_space_holes),
         "turns": sum(b["turns"] for b in per_session.values()),
         "chars": sum(b["chars"] for b in per_session.values()),
         "embedded": sum(b["embedded"] for b in per_session.values()),
+        "turns_not_point_kind_event": sum(
+            b["turns_not_point_kind_event"] for b in per_session.values()),
+        "non_turn_members": sum(b["non_turn_members"]
+                                for b in per_session.values()),
         "orphan_turns": len(orphan_ids),
-        "turn_ids_not_in_key_shape": len(non_turn_ids),
-        "sessions_in_count_mismatch": len(count_mismatch),
+        "turn_ids_off_shape": len(off_shape),
+        "turn_ids_of_another_session": len(other_session),
     }
     return {
         "graph": graph_name,
@@ -220,8 +290,11 @@ def census(graph, graph_name: str) -> dict:
         "count_mismatch": count_mismatch,
         "per_session": per_session,
         "sessions_without_turns": sessions_without_turns,
+        "sessions_declared_and_empty": declared_and_empty,
+        "sessions_with_id_space_holes": id_space_holes,
         "orphan_turn_ids": orphan_ids,
-        "turn_ids_not_in_key_shape": non_turn_ids,
+        "turn_ids_off_shape": off_shape,
+        "turn_ids_of_another_session": other_session,
     }
 
 
@@ -231,7 +304,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--graph", required=True,
                     help="the graph NAME (e.g. team_<org_id>) — not an id")
     ap.add_argument("--uri-env", default="FALKORDB_CLOUD_URI",
-                    help="environment variable holding the graph URI")
+                    help="the NAME of the environment variable holding the "
+                         "graph URI (default FALKORDB_CLOUD_URI) — never the URI")
     ap.add_argument("--out", help="write the census JSON here")
     ap.add_argument("--create-if-missing", action="store_true",
                     help="accept that a census of a non-existent graph CREATES "
@@ -239,8 +313,19 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     uri = os.environ.get(args.uri_env)
+    if "://" in args.uri_env:
+        # ⛔ The VALUE is never interpolated: `--uri-env` is the natural place to
+        # paste a URI by mistake, and echoing it would print the password this
+        # file promises never to print. Name the mistake, not the value.
+        raise SystemExit(
+            "census: --uri-env takes the NAME of an environment variable, not "
+            "the URI itself. Refusing to echo what was passed (a URI carries a "
+            "credential) — export it and pass the variable name, e.g. "
+            "FALKORDB_CLOUD_URI.")
     if not uri:
-        raise SystemExit(f"census: ${args.uri_env} is not set")
+        raise SystemExit(
+            f"census: ${args.uri_env} is not set — export the graph URI in that "
+            "variable (its value is never echoed).")
     db, shown = _connect(uri)
     _assert_graph_exists(db, args.graph, args.create_if_missing)
     graph = db.select_graph(args.graph)
@@ -264,15 +349,20 @@ def main(argv: list[str] | None = None) -> int:
     print(f"turns         : {t['turns']}  ({t['chars']:,} chars, "
           f"{t['embedded']} embedded)")
     print(f"orphan turns  : {t['orphan_turns']}   "
-          f"ids off the '<session>_t<i>' shape: {t['turn_ids_not_in_key_shape']}")
+          f"ids off the '<session>_t<i>' shape: {t['turn_ids_off_shape']}   "
+          f"turn ids of another session: {t['turn_ids_of_another_session']}")
     print(f"count mismatch: {t['sessions_in_count_mismatch']} session(s) whose "
-          f"declared turn_count != attached turn points")
-    if t["sessions_without_turns"]:
-        print(f"  incl. {t['sessions_without_turns']} session(s) that declare "
-              "turns and hold none")
+          f"declared turn_count != attached turns (cause NOT measured)   "
+          f"[{t['sessions_declared_and_empty']} declare turns and hold none]")
+    print(f"id-space holes: {t['sessions_with_id_space_holes']} session(s) "
+          f"whose max turn index + 1 != attached turns")
+    print(f"non-'event'    : {t['turns_not_point_kind_event']} keyed turn(s) "
+          f"whose pointKind is not 'event' (the product readers do not count those)")
     if t["sessions_in_count_mismatch"]:
         for sid, d in list(report["count_mismatch"].items())[:5]:
-            print(f"   {sid}: declared={d['declared']} attached={d['attached']}")
+            print(f"   {sid}: declared={d['declared']} attached={d['attached']}"
+                  f"  declared_max_index={d['declared_max_index']}"
+                  f" max_index_seen={d['max_index_seen']}")
     if args.out:
         with open(args.out, "w", encoding="utf-8") as fh:
             json.dump(report, fh, indent=2, sort_keys=True)
