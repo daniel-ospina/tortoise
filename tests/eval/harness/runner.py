@@ -10,9 +10,30 @@ Replays the committed Cat-34-style corpus through the REAL product seams:
 * **recall path** — continuity READER sessions query the pair's graph with
   the REAL ``recall_state``; the surfaced content grades the reader cell.
 * **reflex decision seam** — the graded seam for the know_to_ask / push
-  suites.  The W4 delivery issue builds the graded reflex on this seam; the
-  initial runner ships a NULL reflex (never injects) and publishes the
-  HONEST first numbers (fix-wave protocol) with the failure class named.
+  suites.  ``config.reflex`` selects the lane: ``graded`` replays every user
+  turn through the REAL ``tortoise.volunteer.decide`` reflex (the product's
+  own decision layer, real hybrid search) after an **EP warm-start** on the
+  graded cell, and grades the injected pointers in the harness vocabulary;
+  ``null`` never injects (the honest pre-W4 baseline, kept for debug runs
+  and for the record of the first numbers).  #8125 flipped the default to
+  ``graded`` — the standing kta / false-fire bars are only live under a
+  graded-reflex baseline, so a null-reflex lane made them permanently
+  inactive.
+
+### EP warm-start (issue #8125)
+
+A captured cell carries NO persisted prior in the deterministic echo lane:
+``_promote_and_dream`` no-ops when the extractor minted no claim/operator,
+so every point reads the Beta(1,1) neutral 0.5 and the reflex's 0.7 EP gate
+can never pass — the named under-fire class of the first graded measurement
+(4 of 4 know-to-ask turns missed at ``d1f2d345c``).  ``ep_warm_start`` gives
+the graded cell the epistemic state the product write path builds: the
+canonical #2199 ``system-default`` starting belief (Beta(3,1)) on every live
+belief point that has no persisted prior, then the REAL EP pass
+(``sdk.dream(mode="full")``) so operator structure propagates.  It is
+applied to the GRADED cells only (a null-reflex lane injects nothing, so
+there is nothing for a posterior to decide) and it never overwrites a
+persisted prior.
 
 Cells: each session replays into a hermetic per-run graph keyed by its
 CELL (team name for the isolation suite, the continuity pair's writer id,
@@ -57,6 +78,20 @@ FAILURE_ORIGIN_VALUES = frozenset(
 )
 
 REPLAY_HARNESS = "pi"  # the seam's store shape for role/content conversations
+
+# Reflex lanes (``config.reflex``).  ``graded`` = the real decision layer
+# (tortoise.volunteer.decide) over an EP-warmed cell; ``null`` = never
+# injects (the honest pre-#8125 baseline).
+REFLEX_NULL = "null"
+REFLEX_GRADED = "graded"
+REFLEX_VALUES = frozenset({REFLEX_NULL, REFLEX_GRADED})
+
+# The reflex's EP gate (tortoise.volunteer defaults) — the product bar the
+# graded replay decides on.  Pinned here so a corpus replay states the exact
+# gate it graded against instead of inheriting whatever the product default
+# happens to be on the day.
+REFLEX_MIN_CONFIDENCE = 0.7
+REFLEX_MAX_POINTERS = 3
 
 
 class RunError(Exception):
@@ -341,6 +376,158 @@ def cell_points(sdk) -> list[dict]:
     return points
 
 
+# ── The graded reflex lane (issue #8125) ──────────────────────────────
+
+#: Live belief points that carry content are the reflex's candidate pool
+#: (structural/operator rows never fire — the volunteer pipeline's own
+#: EXCLUDED_POOL_KINDS contract).  The warm-start seeds exactly the rows the
+#: pipeline could decide on, and never a draft turn echo.
+_WARM_START_CANDIDATE_CYPHER = (
+    "MATCH (p:Point) "
+    "WHERE (p.is_operator IS NULL OR p.is_operator = false) "
+    "AND p.status = 'live' "
+    "AND coalesce(p.baseline_set, false) = false "
+    "AND p.posterior_alpha IS NULL "
+    "AND p.content IS NOT NULL AND p.content <> '' "
+    "RETURN p.id"
+)
+
+
+def ep_warm_start(sdk, *, log: list[str] | None = None) -> dict:
+    """EP warm-start on a GRADED cell (issue #8125 — the named under-fire fix).
+
+    The deterministic echo lane's capture mints no claim/operator, so
+    ``_promote_and_dream`` no-ops and every point keeps the Beta(1,1) neutral
+    0.5 posterior mean — below the reflex's 0.7 EP gate, so the reflex can
+    never fire (measured 4 of 4 know-to-ask turns missed at ``d1f2d345c``).
+    This restores the epistemic state the PRODUCT write path builds:
+
+    1. **starting belief** — the canonical #2199 ``system-default`` prior
+       (``credibility_prior(DECIDE_DEFAULT_CREDIBILITY)`` = Beta(3,1)) on
+       every live belief point that has NO persisted prior.  A declared
+       baseline is a documented prior-only state (``ep_measurement_state``:
+       ``baseline``), read at its PRIOR mean by the gate — it is not a
+       fabricated measurement, and it never overwrites a real one (the
+       Cypher excludes ``baseline_set`` rows and persisted posteriors).
+    2. **the real EP pass** — ``sdk.dream(mode="full")``, so any operator
+       structure the lane DID mint propagates.  On an operator-less echo
+       cell this is a scan (``scanned_count``), not a no-op-by-accident:
+       the pass still runs and is reported.
+
+    Returns a disclosure dict (seeded count + the dream result keys) that the
+    run's notes/receipt carry — the warm-start is a protocol step, never a
+    silent graph mutation.
+    """
+    log = log if log is not None else []
+    # Lazy (the harness package is imported by hermetic schema tests that must
+    # not pay the SDK import chain).
+    from tortoise.source_credibility import credibility_prior
+
+    proj = sdk._get_proj()
+    rows = proj.g.query(_WARM_START_CANDIDATE_CYPHER).result_set
+    alpha, beta = credibility_prior("medium")
+    seeded = 0
+    for (pid,) in rows:
+        sdk.set_point_baseline(pid, alpha, beta, source="system-default")
+        seeded += 1
+    dreamed = sdk.dream(mode="full", require_calibration=False,
+                        warm_start=True)
+    disclosure = {
+        "seeded": seeded,
+        "prior": f"system-default Beta({alpha:g},{beta:g})",
+        "dream_mode": dreamed.get("mode"),
+        "dream_affected": dreamed.get("total_affected"),
+        "dream_scanned": dreamed.get("scanned_count"),
+        "dream_converged": dreamed.get("converged_all"),
+    }
+    log.append(
+        f"EP warm-start: {seeded} live belief point(s) seeded with the "
+        f"#2199 {disclosure['prior']} starting belief; EP pass "
+        f"mode={disclosure['dream_mode']} "
+        f"affected={disclosure['dream_affected']} "
+        f"scanned={disclosure['dream_scanned']}"
+    )
+    return disclosure
+
+
+def replay_reflex(sdk, turns: list[dict], *, log: list[str] | None = None
+                  ) -> dict[int, list[str]]:
+    """Replay the turn window through the REAL reflex → injected pointers.
+
+    One ``volunteer.decide`` call per USER turn with the window so far (the
+    product's own per-turn shape), carrying the canonical prior-context block
+    forward so cross-turn re-mention suppression is exercised exactly as in
+    the product.  Returns the harness's ``injected`` vocabulary:
+    ``{fixture-turn-index: [point ids]}``.
+    """
+    log = log if log is not None else []
+    from tortoise.volunteer import build_block, decide
+
+    proj = sdk._get_proj()
+    window: list[dict] = []
+    prior_context: str | None = None
+    injected: dict[int, list[str]] = {}
+    for index, turn in enumerate(turns, start=1):
+        window.append(turn)
+        if turn.get("role") != "user":
+            continue
+        decision = decide(
+            proj, window, prior_context=prior_context,
+            min_confidence=REFLEX_MIN_CONFIDENCE,
+            max_pointers=REFLEX_MAX_POINTERS,
+            _search_fn=sdk.tortoise_fts_query,
+        )
+        if not decision["fire"]:
+            continue
+        injected[index] = list(decision["pointer_ids"])
+        prior_context = build_block(
+            decision["pointers"],
+            [{"label": p["label"], "band": "medium"}
+             for p in decision["pointers"]],
+        )
+    log.append(
+        f"graded reflex: fired on {len(injected)} turn(s) "
+        f"(min_confidence={REFLEX_MIN_CONFIDENCE}, "
+        f"max_pointers={REFLEX_MAX_POINTERS})"
+    )
+    return injected
+
+
+def push_gold_grounding(gold: dict, points: list[dict]) -> dict:
+    """Can this push session's gold express POINTER IDENTITY on the graph?
+
+    ``grade_push`` scores precision/recall over gold pointer ids, so the gold
+    must be able to name a real point.  A gold entry is graph-grounded when
+    it is a mapping with a content ``anchor`` that resolves to a point in the
+    cell, or a bare id that IS a point id in the cell.  The committed push
+    gold carries the SYMBOLIC ids the corpus was written with
+    (``pt_lumen_boundary`` …) — no point in any cell can ever mint them, so
+    today the push suite grades fire/no-fire but not pointer identity.
+
+    This is computed, never configured: the push precision floor activates on
+    its own the moment the gold carries a resolvable anchor, and until then a
+    0.000 push precision is disclosed as NOT EVALUABLE instead of reading as
+    a quality regression the reflex could never have avoided.
+    """
+    point_ids = {p.get("id") for p in points if p.get("id")}
+    contents = [
+        (p.get("content") or "").lower() for p in points if p.get("content")
+    ]
+    total = 0
+    grounded = 0
+    for entry in gold.get("per_turn", []):
+        for pointer in entry.get("pointers") or []:
+            total += 1
+            if isinstance(pointer, dict):
+                anchor = (pointer.get("anchor") or "").strip().lower()
+                if anchor and any(anchor in content for content in contents):
+                    grounded += 1
+            elif isinstance(pointer, str) and pointer in point_ids:
+                grounded += 1
+    return {"grounded": grounded, "total": total,
+            "evaluable": bool(total) and grounded == total}
+
+
 # ── Per-session replay + grade ─────────────────────────────────────────────
 
 def replay_and_grade(
@@ -351,13 +538,15 @@ def replay_and_grade(
     *,
     workdir: Path,
     log: list[str] | None = None,
-    null_reflex: bool = True,
+    reflex: str = REFLEX_NULL,
 ) -> dict:
     """Replay ONE session through the real seams and grade it.
 
     Returns the session result dict consumed by schema.aggregate_metrics.
     ``sdk`` is the cell's SDK (the caller opened it — cell routing is the
-    caller's job so pair/team sharing works).
+    caller's job so pair/team sharing works).  ``reflex`` selects the
+    know_to_ask / push lane: ``graded`` warms the cell's EP state and replays
+    the REAL ``volunteer.decide`` reflex; ``null`` injects nothing.
     """
     log = log if log is not None else []
     suite = gold.get("suite")
@@ -375,20 +564,34 @@ def replay_and_grade(
             f"(errors={capture.get('errors')})"
         )
     if suite in ("know_to_ask", "push"):
-        # The graded seam is the W4 reflex.  The null reflex injects
-        # nothing — the honest baseline; W4 re-blesses when it lands.
+        # Reflex lane.  ``graded`` = the REAL decision layer over an
+        # EP-warmed cell (#8125); ``null`` injects nothing (the honest
+        # pre-W4 baseline, retained for debug runs and for the record of
+        # the first numbers).
         injected: dict[int, list[str]] = {}
-        if null_reflex:
+        warm_start: dict | None = None
+        if reflex == REFLEX_GRADED:
+            warm_start = ep_warm_start(sdk, log=log)
+            injected = replay_reflex(sdk, conversation, log=log)
+        else:
             log.append(
                 f"{session_id}: null reflex — no pointers injected "
-                "(graded seam lands with the W4 reflex delivery)"
+                "(debug lane; the graded reflex is the default)"
             )
         if suite == "know_to_ask":
             result = grading.grade_kta(session_id, gold, injected)
-            result["capture_ok"] = True
-            return result
-        result = grading.grade_push(session_id, gold, injected)
+        else:
+            result = grading.grade_push(session_id, gold, injected)
+            # Disclosed per session: can this gold express pointer identity
+            # at all?  (see push_gold_grounding — computed, never assumed)
+            result["push_gold_grounding"] = push_gold_grounding(
+                gold, cell_points(sdk)
+            )
         result["capture_ok"] = True
+        result["reflex"] = reflex
+        result["injected"] = {str(k): v for k, v in injected.items()}
+        if warm_start is not None:
+            result["ep_warm_start"] = warm_start
         return result
     if suite == "write_back":
         points = snapshot_points(sdk, session_id)
@@ -465,7 +668,7 @@ def run_benchmark(
     run_id: str | None = None,
     notes: list[str] | None = None,
     log: list[str] | None = None,
-    null_reflex: bool = True,
+    reflex: str | None = None,
     config: dict | None = None,
     progress=None,
 ) -> dict:
@@ -473,6 +676,11 @@ def run_benchmark(
 
     ``progress`` is an optional file-like for per-session progress lines
     (the llm product lane is slow; a silent run is undiagnosable).
+
+    ``reflex`` overrides ``config.reflex`` (``null`` | ``graded``) — the
+    graded lane (#8125) warms each graded cell's EP state and replays the
+    REAL ``volunteer.decide`` reflex; the resolved value is what the run's
+    config snapshot and the committed baseline compare on.
 
     Returns the run report (receipt-ready)::
 
@@ -498,6 +706,20 @@ def run_benchmark(
         )
     resolved_config = dict(corpus.BASELINE_CONFIG)
     resolved_config.pop("extractor_posture", None)  # env owns the posture
+    if reflex is not None:
+        if reflex not in REFLEX_VALUES:
+            # Fail closed BEFORE any graph work: an unknown lane string must
+            # never silently take the default lane (a typo'd "grade" would
+            # publish a null-reflex number under a graded label).
+            return _failed_report(
+                run_id, _now_iso(), _git_head(),
+                corpus.compute_fixtures_hash(root), resolved_config,
+                origin="runner_error",
+                detail=f"unknown reflex lane {reflex!r} (expected one of "
+                       f"{sorted(REFLEX_VALUES)})",
+                log=log,
+            )
+        resolved_config["reflex"] = reflex
     if config is not None:
         config_posture = config.get("extractor_posture")
         if config_posture is not None and config_posture != env_posture:
@@ -614,7 +836,8 @@ def run_benchmark(
             try:
                 result = replay_and_grade(
                     session_id, fixture, gold, cell_sdk,
-                    workdir=workdir, log=log, null_reflex=null_reflex,
+                    workdir=workdir, log=log,
+                    reflex=resolved_config["reflex"],
                 )
                 result["cell"] = key
                 session_results.append(result)
@@ -752,18 +975,69 @@ def run_benchmark(
             for k, v in metrics.items()
         })
     )
-    if null_reflex:
+    if resolved_config["reflex"] == REFLEX_NULL:
         notes.append(
             "no-reflex: know_to_ask/push graded on the NULL reflex (nothing "
             "injected) — the kta failure / push precision numbers are the "
-            "honest pre-W4 baseline; the standing kta/false-fire/push bars "
-            "activate when a baseline is published with config.reflex=graded"
+            "honest pre-graded-reflex baseline; the standing kta/false-fire/"
+            "push bars activate when a baseline is published with "
+            "config.reflex=graded"
+        )
+    else:
+        warm_starts = [r["ep_warm_start"] for r in session_results
+                       if r.get("ep_warm_start")]
+        notes.append(
+            "graded-reflex: know_to_ask/push replayed through the REAL "
+            f"volunteer.decide reflex (min_confidence={REFLEX_MIN_CONFIDENCE}, "
+            f"max_pointers={REFLEX_MAX_POINTERS}) on EP-warmed cells; the "
+            "standing kta / false-fire / push bars are LIVE under this "
+            "baseline's config.reflex=graded (issue #8125)"
+        )
+        if warm_starts:
+            notes.append(
+                "EP warm-start: "
+                + "; ".join(
+                    f"{r['session_id']} seeded={r['ep_warm_start']['seeded']} "
+                    f"prior={r['ep_warm_start']['prior']}"
+                    for r in session_results if r.get("ep_warm_start")
+                )
+                + " — without it the cells carry no persisted prior and the "
+                "0.7 EP gate reads the Beta(1,1) neutral 0.5 (the named "
+                "under-fire class)"
+            )
+    # Push pointer identity: the gold must be able to NAME a real point for
+    # ``grade_push``'s precision/recall to mean anything.  On the committed
+    # corpus it names the symbolic ids the fixtures were authored with, so
+    # precision is not EVALUABLE — disclosed here (and in the receipt) and
+    # gated accordingly, never silently read as a quality regression.
+    push_grounding = [
+        r["push_gold_grounding"] for r in session_results
+        if r.get("push_gold_grounding")
+    ]
+    push_grounded = bool(push_grounding) and all(
+        g["evaluable"] for g in push_grounding
+    )
+    ungrounded = [r["session_id"] for r in session_results
+                  if r.get("push_gold_grounding")
+                  and not r["push_gold_grounding"]["evaluable"]]
+    if ungrounded:
+        notes.append(
+            "push pointer identity NOT EVALUABLE: gold pointer ids resolve to "
+            f"no point in the replay cell for {ungrounded} — the gold names "
+            "the symbolic ids the fixtures were authored with "
+            "(pt_lumen_boundary…), which no cell can mint. The push "
+            "precision/recall numbers record honestly, and the standing push "
+            "precision floor is not applied to this run (a floor whose "
+            "signal does not exist cannot regress) — it activates "
+            "automatically once the gold carries a resolvable content anchor "
+            "(fix-wave: #9081)"
         )
     verdict = schema.compare_run(
         metrics, baseline,
         resolved_config=resolved_config,
         run_fixtures_hash=fixtures_hash,
         run_judge_pin=JUDGE_PIN,
+        push_grounded=push_grounded,
     )
     failure_origin = None
     if verdict == schema.VERDICT_REGRESSION:
@@ -810,6 +1084,16 @@ def run_benchmark(
         "cost_usd": round(total_cost, 6),
         "metrics": metrics,
         "session_results": session_results,
+        "reflex_gate": {
+            "reflex": resolved_config["reflex"],
+            "min_confidence": REFLEX_MIN_CONFIDENCE,
+            "max_pointers": REFLEX_MAX_POINTERS,
+            "push_pointer_identity_evaluable": push_grounded,
+            "push_bar_applied": bool(
+                resolved_config["reflex"] == REFLEX_GRADED and push_grounded
+            ),
+            "kta_bar_applied": resolved_config["reflex"] == REFLEX_GRADED,
+        },
         "notes": notes,
         "log": log,
     }
@@ -862,6 +1146,7 @@ def build_receipt(report: dict, *, justification: str | None = None) -> dict:
         "resolved_config": report.get("resolved_config"),
         "cost_usd": report.get("cost_usd"),
         "metrics": report.get("metrics"),
+        "reflex_gate": report.get("reflex_gate"),
         "justification": justification,
         "session_results": [
             {
@@ -877,6 +1162,14 @@ def build_receipt(report: dict, *, justification: str | None = None) -> dict:
                 "continuity": r.get("continuity"),
                 "isolation": r.get("isolation"),
                 "memory_point_count": r.get("memory_point_count"),
+                # #8125: the graded lane's own evidence — which reflex ran,
+                # what it injected per turn, and the EP warm-start that made
+                # the decision possible.  An auditor must be able to re-read
+                # the decision, not just the aggregate.
+                "reflex": r.get("reflex"),
+                "injected": r.get("injected"),
+                "ep_warm_start": r.get("ep_warm_start"),
+                "push_gold_grounding": r.get("push_gold_grounding"),
             }
             for r in report.get("session_results", [])
         ],
@@ -938,6 +1231,28 @@ def validate_receipt(receipt: dict) -> list[str]:
         issues.append("receipt.session_results: expected a list")
     if not isinstance(receipt.get("resolved_config"), dict):
         issues.append("receipt.resolved_config: expected an object")
+    # #8125: the reflex gate block states which standing bars the run applied
+    # (and why a bar was not applicable) — a publish artifact must say so,
+    # never leave a reader inferring it from the metric values.
+    gate = receipt.get("reflex_gate")
+    if gate is not None:
+        if not isinstance(gate, dict):
+            issues.append("receipt.reflex_gate: expected an object or null")
+        else:
+            if gate.get("reflex") not in REFLEX_VALUES:
+                issues.append(
+                    f"receipt.reflex_gate.reflex: unexpected {gate.get('reflex')!r}"
+                )
+            for key in ("push_pointer_identity_evaluable", "push_bar_applied",
+                        "kta_bar_applied"):
+                if not isinstance(gate.get(key), bool):
+                    issues.append(f"receipt.reflex_gate.{key}: expected a boolean")
+            if gate.get("push_bar_applied") and not gate.get(
+                    "push_pointer_identity_evaluable"):
+                issues.append(
+                    "receipt.reflex_gate: push precision floor claimed applied "
+                    "while the gold is not graph-grounded"
+                )
     if isinstance(receipt.get("cost_usd"), bool) or not isinstance(
         receipt.get("cost_usd"), (int, float)
     ):
@@ -956,7 +1271,8 @@ def _write_json(path: Path, doc: dict) -> None:
 
 
 def _bless_main(root: Path, posture: str, justification: str, run_id: str | None,
-                corpus_bless: bool, protocol_bless: bool, notes: list[str]) -> int:
+                corpus_bless: bool, protocol_bless: bool, notes: list[str],
+                reflex: str | None = None) -> int:
     """--bless: run (if needed) then bless the run's metrics into the
     posture's committed baseline."""
     baseline_path = corpus.baseline_path(root, posture=posture)
@@ -969,7 +1285,7 @@ def _bless_main(root: Path, posture: str, justification: str, run_id: str | None
     last_log: list[str] = []
     for attempt in range(1, 4):
         report = run_benchmark(root=root, run_id=run_id, notes=notes,
-                               progress=sys.stderr)
+                               reflex=reflex, progress=sys.stderr)
         last_log = report.get("log", [])
         if report["run_status"] == "completed":
             break
@@ -997,6 +1313,19 @@ def _bless_main(root: Path, posture: str, justification: str, run_id: str | None
         failure_classes = []
         if report.get("resolved_config", {}).get("reflex") == "null":
             failure_classes.append("no-reflex")
+        gate = report.get("reflex_gate") or {}
+        if (report.get("resolved_config", {}).get("reflex") == "graded"
+                and not gate.get("push_pointer_identity_evaluable")):
+            # The graded measurement's own finding, named at publish time
+            # (fix-wave protocol): the push suite grades fire/no-fire, but
+            # pointer IDENTITY is ungradeable on the committed gold, so the
+            # push precision floor is not applied to this run.
+            failure_classes.append(
+                "push-identity-not-evaluable: gold pointer ids are symbolic "
+                "and resolve to no cell point — grade_push precision/recall "
+                "record honestly, the push precision floor is not applied "
+                "(fix-wave: the gold needs content anchors)"
+            )
         failure_classes.extend(
             line for line in report.get("log", [])
             if "raised" in line or "capture ok=False" in line
@@ -1053,7 +1382,8 @@ def _main(argv: list[str] | None = None) -> int:
         run_config = None
         if "--full" in args:
             run_config = {"mode": "full"}  # include the pinned holdout
-        report = run_benchmark(progress=progress, config=run_config)
+        report = run_benchmark(progress=progress, config=run_config,
+                               reflex=_arg_value(args, "--reflex"))
         print(
             f"run {report['run_id']}: status={report['run_status']} "
             f"verdict={report['verdict']} origin={report['failure_origin']}"
@@ -1093,6 +1423,7 @@ def _main(argv: list[str] | None = None) -> int:
             corpus_bless="--bless-corpus" in args,
             protocol_bless="--bless-protocol" in args,
             notes=["blessed via CLI"],
+            reflex=_arg_value(args, "--reflex"),
         )
     print(__doc__)
     return 0
