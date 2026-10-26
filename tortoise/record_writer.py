@@ -63,11 +63,16 @@ with `.status` giving the recorded term from `tortoise/status_vocabulary.py`
 ONE vocabulary: the seam consumes the recorded terms through that module's own
 `classify(...)`, it does not mint a fifth one. A caller distinguishes
 not-armed from success with `write.applied`, and from a *failure* because a
-failure raises.
+failure raises. On the LIVE door, where a failure may not raise (decision 3,
+OVERRIDES below), the refusal is a RETURNED value instead — `REFUSED` plus
+`refusal` — so "nothing was written" is never a value the caller cannot tell
+from "off by policy" (#8447).
 
 A configured-but-MALFORMED DSN is not "unarmed" — it raises. Silently reading a
 typo as "not configured" is the failure mode this whole seam exists to prevent,
-wearing a passing test. The error carries an 8-hex fingerprint of the value, not
+wearing a passing test. (The LIVE door catches that raise, because it cannot
+raise at all — it REPORTS it as `REFUSED` / `malformed_dsn`; what it must never
+do is read as "not configured".) The error carries an 8-hex fingerprint of the value, not
 the value (#2903/#2796: a malformed DSN is still secret material).
 
 **3. Armed but unreachable ⇒ the write FAILS (`RecordWriteError`).** Not a
@@ -90,6 +95,13 @@ counts ``write_failed``/``circuit_open`` and warns instead, which keeps the
 ``degraded`` vs ``unconfigured`` distinction on the counter surface rather than
 the exception surface. `write_records`/`RecordWriter.write` — the path a caller
 with an open transaction uses — still FAILS exactly as this decision says.
+
+⛔ It also RETURNS the refusal (`RecordWriteOutcome.REFUSED` + `refusal`,
+#8447). Counting alone was not a report: the counter is read by `/health` and
+`monitoring.metrics()`, not by the producer that made the write, so a refused
+record write came back as the SAME ``None`` an UNARMED deployment returns and
+nothing on the caller's side could tell them apart. This adds no exception and
+no new response shape — the failure still does not raise here, it reports.
 
 **4. Per-record vs batch ⇒ ONE batch per call.** Forced by the position, not
 preferred. `replay_plan` numbers records by their index in the batch, so one
@@ -346,7 +358,7 @@ class RecordConnectError(RecordWriteError):
 
 
 class RecordWriteOutcome(StrEnum):
-    """What the seam did — two values, because a failure does not return.
+    """What the seam did.
 
     ``APPLIED``    the plan was materialized and every statement executed on
                    the caller's connection. The seam has NOT committed.
@@ -356,16 +368,32 @@ class RecordWriteOutcome(StrEnum):
                    recorded term :data:`status_vocabulary.STATUS_UNCONFIGURED`;
                    read that term off :attr:`RecordWrite.status` rather than
                    comparing this value to a status word.
+    ``REFUSED``    the record IS armed and this call did not write (a refused
+                   tenant, an open breaker, a declined scratch journal, a
+                   malformed DSN, a failed statement). Added for the LIVE door
+                   (#8447), which may not raise (#5148) and used to return
+                   ``None`` — the value that means NOT_ARMED — so a caller could
+                   not tell "off by policy" from "refused"; read why off
+                   :attr:`RecordWrite.refusal`.
     """
 
     APPLIED = "applied"
     NOT_ARMED = "not-armed"
+    REFUSED = "refused"
 
 
 @dataclass(frozen=True)
 class RecordWrite:
     """What a call to :meth:`RecordWriter.write` consumed. A report, never a
-    substitute for the failure — a failed write raises instead of returning."""
+    substitute for the failure — a failed write raises instead of returning.
+
+    ⛔ THE LIVE DOOR REPORTS ITS REFUSALS IN THIS TYPE (#8447).
+    :func:`write_live_record` runs after the caller's journal append is the
+    commit point, so it may not raise (#5148) — but it may not return ``None``
+    either, because that is this module's spelling for *not armed: nothing was
+    attempted, off by policy*. An ARMED write that did not happen comes back as
+    ``outcome=REFUSED``, ``applied is False``, and ``refusal`` naming which
+    counter term it was, so ``None`` means exactly one thing on that door."""
 
     outcome: RecordWriteOutcome
     #: Journal records handed to the seam (0 for a not-armed call).
@@ -386,14 +414,24 @@ class RecordWrite:
     #: (theirs to close) or the call was not armed. When set, the caller owns the
     #: transaction: this seam never commits and never rolls back.
     connection: Any | None = field(default=None, repr=False)
+    #: WHY an ARMED call did not write — one of the tokens
+    #: ``monitoring.metrics()["record_write_failures"]`` / ``["record_non_journal_skips"]``
+    #: is counted under (``malformed_dsn``, ``no_durable_journal``, ``no_tenant``,
+    #: ``circuit_open``, ``write_failed``), else ``None``. The SAME vocabulary as
+    #: the counters on purpose (#8447): a caller that reports the refusal and an
+    #: operator reading the metric are naming one thing, and a second word list
+    #: is a second thing to drift.
+    refusal: str | None = None
 
     @property
     def applied(self) -> bool:
         """Did the record actually get written on this call?
 
         The one check a caller needs. ``False`` means *nothing was written* —
-        it is not an error (an unarmed deployment is a supported state), but a
-        caller that needs the record to exist must not read it as success.
+        for ``NOT_ARMED`` it is not an error (an unarmed deployment is a
+        supported state), for ``REFUSED`` it IS one (the record was armed and
+        this call did not write — read :attr:`refusal`), but either way a caller
+        that needs the record to exist must not read ``False`` as success.
         """
         return self.outcome is RecordWriteOutcome.APPLIED
 
@@ -407,6 +445,11 @@ class RecordWrite:
         """
         if self.outcome is RecordWriteOutcome.NOT_ARMED:
             return status_vocabulary.classify(configured=False, reached=False)
+        if self.outcome is RecordWriteOutcome.REFUSED:
+            # ARMED and not written: configured, not reached ⇒ `degraded`.
+            # Never `available` — a refusal that reads as the healthy term is
+            # exactly the #8447 shape (`APPLIED` is the only `available` here).
+            return status_vocabulary.classify(configured=True, reached=False)
         # APPLIED ⇒ `available` BY CONSTRUCTION, not from an observation: the
         # classifier's rule is `hits is None or hits > 0` → available, so no
         # statement count this call could supply would move the term. Passing
@@ -1054,15 +1097,23 @@ def write_live_record(record: Mapping[str, Any], *,
     check, so an UNARMED deployment stays byte-identical (no counter, no log
     line) on this lane too.
 
-    Returns ``None`` when the record is not armed (no DSN): nothing was
+    Returns ``None`` ONLY when the record is not armed (no DSN): nothing was
     attempted, no connection, no plan — the unarmed deployment is
     byte-identical to the pre-record one (§2.0's sequence). Otherwise it
-    returns the write, and a FAILURE never raises: it is counted
+    returns a :class:`RecordWrite` — ``APPLIED``, or ``REFUSED`` when an ARMED
+    call did not write, with ``refusal`` naming which counter term it was — and
+    a FAILURE never raises: it is counted
     (``monitoring.metrics()["record_write_failures"]``) and logged, because the
     journal already holds the record and a question about the derived record
     must not fail a write that persisted. ``replay`` heals the gap. That
     contract is enforced, not just intended: every counter call goes through
     :func:`_count_write_failure`, which suppresses its own failures.
+
+    ⛔ THE REFUSAL IS RETURNED, NOT ONLY COUNTED (#8447). Every arm below that
+    refuses an ARMED write used to ``return None`` — the same value the unarmed
+    path returns — so the producer holding it could not tell "off by policy"
+    from "refused, nothing stored", and the only signal was a counter the
+    producer does not read. `None` now means exactly one thing on this door.
 
     The RETURNED WATERMARK describes journal POSITIONS, so a write with no
     proven ordinal consumed none: it reports ``last_seq == first_seq - 1``, this
@@ -1168,7 +1219,8 @@ def write_live_record(record: Mapping[str, Any], *,
     except RecordWriteError as exc:
         _count_write_failure("malformed_dsn")
         _logger.warning("the record write did not happen (malformed_dsn): %s", exc)
-        return None
+        return RecordWrite(outcome=RecordWriteOutcome.REFUSED,
+                           refusal="malformed_dsn")
     if not armed:
         return None
     if not durable:
@@ -1182,7 +1234,8 @@ def write_live_record(record: Mapping[str, Any], *,
             "is armed but this log is a scratch buffer, not a journal, so no "
             "replay could reproduce the row: %s", record.get("type"),
         )
-        return None
+        return RecordWrite(outcome=RecordWriteOutcome.REFUSED,
+                           refusal="no_durable_journal")
     tenant = tenant if tenant is not None else record_tenant()
     if tenant is not None and not (
             isinstance(tenant, tuple) and len(tenant) == 2
@@ -1196,7 +1249,8 @@ def write_live_record(record: Mapping[str, Any], *,
             "was not a (org_id, graph_id) pair of non-empty strings: %r",
             tenant,
         )
-        return None
+        return RecordWrite(outcome=RecordWriteOutcome.REFUSED,
+                           refusal="no_tenant")
     if tenant is None:
         _count_write_failure("no_tenant")
         _logger.warning(
@@ -1204,7 +1258,8 @@ def write_live_record(record: Mapping[str, Any], *,
             "but no tenant could be named for this write.%s",
             _refused_tenant_env_note(),
         )
-        return None
+        return RecordWrite(outcome=RecordWriteOutcome.REFUSED,
+                           refusal="no_tenant")
     org_id, graph_id = tenant
     if _breaker_is_open():
         # A recent connect FAILED. Refuse locally: the journal already holds the
@@ -1217,7 +1272,8 @@ def write_live_record(record: Mapping[str, Any], *,
             "without a socket: %s", LIVE_WRITE_BREAKER_SECONDS,
             record.get("type"),
         )
-        return None
+        return RecordWrite(outcome=RecordWriteOutcome.REFUSED,
+                           refusal="circuit_open")
     connection: Any | None = None
     if seq is None:
         # A DURABLE journal whose append could not prove the record's position
@@ -1255,7 +1311,8 @@ def write_live_record(record: Mapping[str, Any], *,
             "the record write did not happen (write_failed) — the journal has "
             "the record and a replay heals the record: %s", exc,
         )
-        return None
+        return RecordWrite(outcome=RecordWriteOutcome.REFUSED,
+                           refusal="write_failed")
     finally:
         if connection is not None:
             # Close AFTER the commit so an armed deployment does not leak one

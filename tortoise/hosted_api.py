@@ -18244,6 +18244,44 @@ def _actor_display_map(actor_ids: list[str], org_id: str) -> dict:
     return {uid: email_of[uid] for uid in actor_ids if uid in email_of}
 
 
+def _record_unavailable() -> HTTPException:
+    """#8447: fail-CLOSED 503 when the RECORD holds the transcript and did not answer.
+
+    On an armed deployment the turns are RECORD rows (the per-turn `PointAdded`
+    records, #10000/#10011) and the graph keeps only the Session's counters — so
+    when the record read FAILS, the fail-soft fallback below has nothing to fall
+    back to: it answers zero turn nodes, which is byte-identical to a session
+    that has no turns. Serving that as ``200 {"turn_points": []}`` is the shape
+    #8447 forbids — a refusal rendered as a legitimate empty answer, with the
+    only signal in a WARNING the caller never reads.
+
+    The arm that fails soft to the graph KEEPS failing soft, and #1591 is not
+    repealed: a graph copy that exists is still served byte-identically, because
+    it protects a transcript that is really there. This body is for the case
+    that arm cannot cover — the fallback yielded no turns at all, so there is
+    nothing to protect and nothing to serve.
+
+    Same envelope as :func:`_graph_unavailable` on this route (``503`` +
+    ``error_code``) rather than a new one: a client already treats that body as
+    retryable, and this refusal is transient in the same way (a read retry is
+    safe — the off-loaded unit is a CONSTRUCTION).
+
+    ⚠️ Deliberately NOT a response field. A new key on the session-detail
+    projection (`SESSION_DETAIL_FIELDS`) would widen a public wire surface, which
+    is an owner approval and not a lane decision; an explicit error is the
+    narrowest visible shape available (#8447: "an explicit error, or a reply
+    field that says so").
+    """
+    return HTTPException(
+        status_code=503,
+        detail={
+            "error_code": "record_unavailable",
+            "message": "The record holds this session's transcript and cannot "
+                       "answer right now — retry in a moment.",
+        },
+    )
+
+
 def _record_holds_turns() -> bool:
     """#10000: does the RECORD hold captured turns (rather than the graph)?
 
@@ -18366,6 +18404,7 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     # makes the pre-arming deployment byte-identical.
     turns = []
     _record_turns = None
+    _record_read_failed = False
     if _record_holds_turns():
         try:
             def _read_record_turns():
@@ -18382,6 +18421,7 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
             # transcript the cache still holds. This fallback is the transitional
             # half of #10000 and disappears with the graph-side purge step.
             _record_turns = None
+            _record_read_failed = True
             _logger.warning(
                 "session %s turns read from the record failed — serving the graph "
                 "copy for this request", session_id, exc_info=True)
@@ -18420,6 +18460,17 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
                 "content": body,
                 "created_at": created_at,
             })
+
+    # ⛔ #8447: THE FAIL-SOFT ARM MUST NOT ANSWER WHAT IT COULD NOT READ. The
+    # record was the store holding these turns and it did not answer; the graph
+    # fallback above therefore carries EITHER the pre-arming copy (serve it,
+    # unchanged — #1591 keeps failing soft) OR nothing at all. Nothing is not an
+    # empty transcript: the two are indistinguishable to the caller, and on an
+    # armed deployment an empty graph copy is the NORMAL state (#10000 writes no
+    # turn nodes), so `turns: []` here would claim a captured session had no
+    # turns. Refuse visibly instead — see `_record_unavailable`.
+    if _record_read_failed and not turns:
+        raise _record_unavailable()
 
     # Extracted points (#822: same non-turn filter as the count — M2 LLM
     # Points are untyped, reported as "statement" like the capture response).

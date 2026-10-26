@@ -4174,6 +4174,84 @@ class TestSessionDetail:
         assert "content" in ep
         assert "kind" in ep
 
+    def test_detail_refuses_visibly_when_the_record_cannot_answer(
+            self, client, monkeypatch):
+        """#8447: an unreadable RECORD must not serve `turns: []` as an answer.
+
+        Instance 2 of the issue, in the shape it has at this tree: on an armed
+        deployment the turns are RECORD rows (#10000/#10011) and the graph holds
+        only the Session's counters — so when the record read fails, the
+        fail-soft fallback has no graph copy to serve and `turns: []` is
+        indistinguishable from a session with no turns. That is the refusal
+        rendered as a legitimate empty answer, with its only signal in a WARNING
+        the caller never reads.
+
+        Measured precondition: the graph carries NO turn node for this session
+        while the record does — which is exactly the state an armed capture
+        leaves (#10000/#10011 keep the transcript in the RECORD and write only
+        the Session's counters to the graph). The fixture's patched SDK init
+        drops `event_log_path`, so the capture below lands in the graph and that
+        copy is then removed — the precondition is ASSERTED, not assumed.
+
+        Mutation: drop the `raise _record_unavailable()` (serve the graph-only
+        `turns: []` with 200) — this test reds on the status code.
+        """
+        sid = "detail-record-refusal"
+        r = client.post("/v1/sessions", json={
+            "conversation": [
+                {"role": "user", "content": "We decided to use FalkorDB."},
+                {"role": "assistant", "content": "Noted."},
+            ],
+            "session_id": sid,
+        })
+        assert r.status_code == 200, r.text
+        assert r.json()["turns"] == 2, r.json()
+
+        import tortoise.hosted_api as ha
+
+        # The record is ARMED (the read door's own predicate) and the graph holds
+        # only the Session's counters — the armed shape, asserted.
+        monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+        proj = ha._make_sdk(namespace=TEST_ORG_ID)._get_proj()
+        proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
+            "DETACH DELETE t", params={"sid": sid})
+        left = proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
+            "RETURN count(t)", params={"sid": sid}).result_set
+        assert left[0][0] == 0, left
+
+        def _down(*_a, **_k):
+            raise RuntimeError("the record is unreachable")
+
+        monkeypatch.setattr(ha, "_open_record", _down)
+        r = client.get(f"/v1/sessions/{sid}")
+        assert r.status_code == 503, (
+            "the record held this session's transcript and could not answer, "
+            f"and the read served 200 {r.json().get('turn_points')!r} instead: "
+            f"{r.text[:300]}")
+        assert r.json()["detail"]["error_code"] == "record_unavailable", r.json()
+
+        # The SAME request is byte-identical where the record CAN answer: the
+        # refusal fires only when the caller would otherwise be told "no turns".
+        from tortoise.record_read import Turn
+
+        class _Conn:
+            def close(self):
+                pass
+
+        monkeypatch.setattr(ha, "_open_record", lambda: _Conn())
+        monkeypatch.setattr(ha._record_read, "_turns", lambda *_a, **_k: [
+            Turn(turn_id=f"{sid}_t0", index=0,
+                 content="[user] We decided to use FalkorDB.",
+                 speaker="user", created_at="2026-10-25T00:00:00+00:00"),
+            Turn(turn_id=f"{sid}_t1", index=1, content="[assistant] Noted.",
+                 speaker="assistant", created_at="2026-10-25T00:00:01+00:00"),
+        ])
+        ok = client.get(f"/v1/sessions/{sid}")
+        assert ok.status_code == 200, ok.text
+        assert len(ok.json()["turn_points"]) == 2, ok.json()["turn_points"]
+
     def test_detail_exposes_the_session_source_node(self, client):
         """#3809: the detail carries the session's graph Source node
         (``session:<id>``, sourceKind ``agentSession``) so
