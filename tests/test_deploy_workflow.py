@@ -2472,7 +2472,7 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # qualifier left the other two always-fail reasons deletable with nothing red
     # (#10083 review F2).
     assert re.search(
-        r"none at all for `no_tenant` \(the capture's OWN[^)]*\) / "
+        r"none at all for `no_tenant` \(the capture's OWN — see the ⚠️ bound below\) / "
         r"`malformed_dsn` / `circuit_open`",
         flat,
     ), (
@@ -2537,7 +2537,7 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # remedy. The bar must bound that arm to the CAPTURE and **rule the
     # per-request attribution out** (`record_writer` logs no request identity),
     # keeping it a fail-and-fix for the capture's own writes.
-    assert re.search(r"BOUND to the proving capture, not to the process", section), (
+    assert re.search(r"BOUND to the proving capture, not to the process", flat), (
         "the `no_tenant` arm is absolute — it fails a healthy deployment on the "
         "unbound-credential `no_tenant` the code counts by design, and the only "
         "lever the section offers (`TORTOISE_RECORD_SINGLE_TENANT`) is the "
@@ -2547,13 +2547,28 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # process-global" about the #9192 env pair (line ~2960), so a bare-token arm
     # passed on the PRE-fix wording — a vacuous assertion, caught by the verifier
     # and re-anchored to this clause.
-    assert re.search(r"These counters are \*\*process-global\*\*", section), (
+    assert re.search(r"These counters are \*\*process-global\*\*", flat), (
         "the section does not say the counters are process-global, so a "
         "before/after delta reads as if it measured only the capture"
     )
-    assert re.search(r"graph-bound", section), (
+    # ⛔ NOT the bare token `graph-bound`: the section contains that word in the
+    # SELF-HOST registry lane's sentence ("the one graph-bound key that resolves
+    # through no control plane"), so the token was satisfied by a sentence about a
+    # different lane while the executable REMEDY could be replaced by main's
+    # impossible "attribute … through recipe 1's log line" and stay green
+    # (#10083 review P1, measured on two variants). Pin the remedy CLAUSE, and keep
+    # a negative pin so the attribution instruction cannot come back beside it.
+    assert re.search(
+        r"So make the capture \*\*graph-bound\*\* — a graph-bound \*\*control-plane\*\* "
+        r"credential cannot land in `no_tenant`",
+        flat,
+    ), (
         "the section gives no way to make the capture's own `no_tenant` "
-        "impossible — a graph-bound credential is the discriminator"
+        "impossible — a graph-bound control-plane credential is the discriminator"
+    )
+    assert not re.search(r"attribute any `no_tenant` growth", flat), (
+        "the section still tells the operator to attribute `no_tenant` growth "
+        "per request — the step the ⛔ ruling below rules out"
     )
     assert re.search(r"record_tenant_for|_bind_record_tenant", section), (
         "the bounded arm names no counting site, so a reader cannot check the "
@@ -2574,8 +2589,10 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # The message above states the EVIDENCE for the impossibility (which reasons
     # carry what), so pin the evidence too — otherwise the parenthetical can be
     # deleted and the claim stands on an assertion that no longer measures it
-    # (#10071 review P2, verified: `circuit_open` logs `record.get("type")` at
-    # record_writer.py:1184; `malformed_dsn` and `write_failed` log the exception).
+    # (#10071 review P2, verified: `circuit_open` logs `record.get("type")` in its
+    # WARN; `malformed_dsn` and `write_failed` log the exception. Line numbers are
+    # deliberately not cited — they rot, and the earlier attempt cited the
+    # `no_durable_journal` DEBUG message at that line instead, #10083 review P2).
     assert re.search(r"`circuit_open` is the only one that carries the record type", flat), (
         "the section gives no evidence for why the log cannot attribute growth — "
         "only `circuit_open` carries the record type, so a reader cannot check "
@@ -2601,6 +2618,20 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "item-1 row never appeared is the second case, and a failed tenant "
         "resolution is the third"
     )
+    # The third disjunct must name a command that actually FINDS the fault. Recipe
+    # 1 greps `the record write did not happen`, and the fault is emitted by
+    # `tortoise.hosted_api`'s own logger as "could not resolve the record tenant",
+    # so it never matches — a reader who greps recipe 1, sees nothing, and clears
+    # the capture would pass a fail-open (#10083 review P1).
+    assert re.search(r"grep \"could not resolve the record tenant\"", flat), (
+        "the fault disjunct names no command that surfaces the fault, so the "
+        "operator is sent to a grep that cannot match it"
+    )
+    assert not re.search(r"recipe\s+1\s+logs", flat), (
+        "the section claims recipe 1's grep shows the tenant-resolution fault — "
+        "it greps `the record write did not happen`, and the fault is logged by "
+        "`tortoise.hosted_api` under a different message"
+    )
     # ⛔ The two pins above are NOT enough on their own: they survive an
     # inverted prohibition, because a section can say "the line carries **no**
     # request identity" and "**Do** attribute that growth per request from the
@@ -2618,6 +2649,13 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     ), (
         "the section does not forbid the impossible step it describes — "
         "per-request attribution from a line that carries no request identity"
+    )
+    # The section's closing RULING, which is what keeps the arm from being "fixed"
+    # with the cross-tenant hazard: deleting it left every other pin green
+    # (#10083 review P2). The `fly.toml` test at ~3131 pins the CONFIG, not prose.
+    assert re.search(r"The route is never `TORTOISE_RECORD_SINGLE_TENANT`", flat), (
+        "the section no longer forbids the cross-tenant route, so the only "
+        "remaining 'fix' for an unbound capture is the #9192 hazard"
     )
 
 
